@@ -1647,6 +1647,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // U25 part 7 (spec 7): New team… from a project, and its sessions with
     // their team role, machine, branch and status.
     connect(m_projectsPage,&ProjectsDialog::newTeamRequested,this,[this](const QString &){m_pages->setCurrentIndex(0);showNewTeam();});
+    // N23: the Sessions block lists the newest rows; the rest open here.
+    connect(m_projectsPage,&ProjectsDialog::projectSessionsRequested,this,[this](const QString &project){
+        m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_projectFilters = {project}; m_search->clear(); showSessionList();
+    });
     m_projectsPage->setSessionsProvider([this](const QString &project){
         QList<ProjectsDialog::ProjectSession> rows;
         for(const auto &entry:m_entries){
@@ -1654,13 +1658,21 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             const auto &s=entry.session;
             ProjectsDialog::ProjectSession row;
             row.host=entry.host;row.name=s.name;row.agent=s.cmd;row.machine=entry.machine;row.branch=s.gitBranch;
-            row.title=s.tag.isEmpty()?s.name:s.tag;
+            row.title=s.tag.isEmpty()?s.name:s.tag;row.cwd=s.canonicalCwd.isEmpty()?s.cwd:s.canonicalCwd;row.created=s.created;
             if(m_teams)if(const auto *team=[&]()->const Teams::Team *{for(const auto &t:m_teams->teams())if(t.memberOfSession(entry.host,s.name))return &t;return nullptr;}()){
                 row.team=team->id;const auto *member=team->memberOfSession(entry.host,s.name);row.role=team->roleOf(member->id);
+                // Its own worktree or clone goes with the team (the lead and a
+                // shared member work in the project's folder).
+                row.teamFolder=!member->lead&&(member->folder=="worktree"||member->folder=="clone");
             }
-            const bool attention=!s.attentionId.isEmpty();
-            row.status=!entry.online?tr("Offline"):s.state=="paused"?tr("Paused"):attention?tr("Needs input"):s.phase=="working"?tr("Working"):s.unreadReply?tr("New reply"):tr("Ready");
-            row.tone=attention||s.unreadReply?QStringLiteral("warn"):s.phase=="working"?QStringLiteral("active"):QStringLiteral("muted");
+            // N21: the session list's status (CLAUDE.md status contract): an
+            // idle agent with live jobs is Background, a tool call or a
+            // compaction is not Ready. A reply to read shows once the work
+            // is done; native work and attention come first.
+            const bool working=SessionPresentation::working(s,entry.online);
+            const bool reply=entry.online&&!working&&!s.needsAction()&&s.visibleUnreadReply(entry.online);
+            row.status=reply?tr("New reply"):SessionPresentation::status(s,entry.online);
+            row.tone=entry.online&&(s.needsAction()||reply)?QStringLiteral("warn"):working?QStringLiteral("active"):QStringLiteral("muted");
             rows<<row;
         }
         return rows;

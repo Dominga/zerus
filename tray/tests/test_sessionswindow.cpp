@@ -500,6 +500,7 @@ private slots:
     void projectOrderAndDefaultBadge();
     void projectsEmbeddedAndRemote();
     void projectColorsApplyOrCancel();
+    void projectSessionBadgesFollowTheStatusContract();
     void legacyProjectsMigrateWithBackupAndLocalFolders();
     void batchActionsAndReturnToSessions();
     void searchResultKeepsItsSessionAndSnapshot();
@@ -13021,8 +13022,19 @@ void TestSessionsWindow::projectFolderActionsKeepTargets()
     table->customContextMenuRequested(table->visualItemRect(table->item(0,0)).center());
     menu=page->findChild<QMenu *>("projectFolderMenu");QVERIFY(menu);
     menu->findChild<QAction *>("contextOpenProjectFolder")->trigger();QCOMPARE(files.urls.size(),2);
-    page->selectProject(second);menu->findChild<QAction *>("contextRemoveProjectFolder")->trigger();
-    QSignalSpy launches(page,&ProjectsDialog::newSessionRequested);menu->findChild<QAction *>("contextNewProjectFolderSession")->trigger();QCOMPARE(launches.size(),0);delete menu.data();
+    page->selectProject(second);
+    // N25: Remove folder asks first; the question names the menu's project.
+    // The question closes the menu, which deletes itself: its New session…
+    // is kept to try on the removed folder afterwards.
+    QPointer<QAction> launch=menu->findChild<QAction *>("contextNewProjectFolderSession");launch->setParent(page);
+    bool askedRemove=false;
+    QTimer::singleShot(0,page,[&]{
+        auto *confirm=page->findChild<QMessageBox *>("removeProjectFolderConfirm");QVERIFY(confirm);askedRemove=true;
+        QVERIFY(confirm->text().contains(QStringLiteral("from First?")));
+        confirm->findChild<QPushButton *>("removeProjectFolderConfirmButton")->click();
+    });
+    menu->findChild<QAction *>("contextRemoveProjectFolder")->trigger();QVERIFY(askedRemove);delete menu.data();
+    QSignalSpy launches(page,&ProjectsDialog::newSessionRequested);launch->trigger();QCOMPARE(launches.size(),0);delete launch.data();
     const SessionOrganization saved(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
     QCOMPARE(saved.group(first)->folders.size(),2);QCOMPARE(saved.group(second)->folders.size(),1);QVERIFY(QDir(path).exists());
     table->customContextMenuRequested(QPoint(5,table->viewport()->height()-5));
@@ -13098,6 +13110,60 @@ void TestSessionsWindow::localWindowsFolderFilterIgnoresCase()
     local.metrics["platform"]="linux";state.setLocal(local,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
     page->folderSessionsRequested({},"c:/work/repo",true);QVERIFY(keys().isEmpty());QCOMPARE(all(),0);
     QVERIFY(clear->toolTip().startsWith("c:/work/repo\n"));
+}
+
+// N21 (#386): the Projects page's Sessions badge is the session list's status
+// (SessionPresentation::status, the CLAUDE.md status contract): a tool call
+// and a compaction are not Ready, an idle agent with live jobs is Background,
+// Stopped and Agent exited say so, and a reply to read waits until the work
+// is done. "Show all in Sessions" opens the list on the project.
+void TestSessionsWindow::projectSessionBadgesFollowTheStatusContract()
+{
+    const auto restore=qScopeGuard([]{QSettings().remove("workspace/organization");});
+    SessionOrganization model;const auto id=model.createGroup("Status contract");model.setDefaultProject(id);
+    model.markImported("arch");model.markImported("mac");
+    QSettings().setValue("workspace/organization",QJsonDocument(model.toJson()).toJson(QJsonDocument::Compact));
+    auto state=fleet();auto local=state.local();
+    const auto base=local.sessions[1]; // kimi/docs/research: tracked and idle
+    const auto make=[&](const QString &tag){auto s=base;s.name="kimi/docs/"+tag;s.tag=tag;return s;};
+    auto tool=make("tool");tool.activity="busy";tool.phase="tool";tool.currentTool="Bash";
+    auto compacting=make("compacting");compacting.activity="busy";compacting.phase="compacting";
+    auto background=make("background");background.backgroundProcesses=1;
+    auto stopped=make("stopped");stopped.state="stopped";
+    auto exited=make("exited");exited.processState="exited";
+    auto ready=make("ready");
+    auto reply=make("reply");reply.unreadReply=true;reply.replyId="reply-1";reply.conversationId="conversation-1";
+    auto busyReply=make("busy-reply");busyReply.activity="busy";busyReply.phase="working";busyReply.unreadReply=true;busyReply.replyId="reply-2";busyReply.conversationId="conversation-2";
+    auto input=make("input");input.activity="waiting";input.phase="input";input.attentionId="question-1";
+    local.sessions={tool,compacting,background,stopped,exited,ready,reply,busyReply,input};
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program());window.setFleet(state);window.resize(1300,900);window.show();window.showProjects();
+    auto *page=window.findChild<ProjectsDialog *>("projectsPage");QVERIFY(page);page->selectProject(id);
+    window.setFleet(state);
+    auto *table=page->findChild<QTableWidget *>("projectSessions");QVERIFY(table);
+    const auto badge=[&](const QString &tag){
+        for(int row=0;row<table->rowCount();++row)if(table->item(row,0)->data(Qt::UserRole).toString()=="kimi/docs/"+tag)
+            return table->item(row,3)->text()+'|'+table->item(row,3)->data(Qt::UserRole+1).toString();
+        return QString();
+    };
+    QTRY_COMPARE(badge("tool"),QString("Using a tool|active"));
+    QCOMPARE(badge("compacting"),QString("Compacting|active"));
+    QCOMPARE(badge("background"),QString("Background|active"));
+    QCOMPARE(badge("stopped"),QString("Stopped|muted"));
+    QCOMPARE(badge("exited"),QString("Agent exited|muted"));
+    QCOMPARE(badge("ready"),QString("Ready|muted"));
+    QCOMPARE(badge("reply"),QString("New reply|warn"));
+    QCOMPARE(badge("busy-reply"),QString("Working|active"));
+    QCOMPARE(badge("input"),QString("Needs input|warn"));
+    // A poll: the compaction ended, the page follows (N22).
+    local.sessions[1].activity="idle";local.sessions[1].phase="idle";state.setLocal(local,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
+    QTRY_COMPARE(badge("compacting"),QString("Ready|muted"));
+    // The whole project in Sessions.
+    emit page->projectSessionsRequested(id);
+    auto *list=window.findChild<SessionList *>("sessionList");QVERIFY(list);QTRY_VERIFY(list->isVisible());
+    QStringList keys;for(int i=0;i<list->count();++i){const auto key=list->item(i)->data(SessionRoles::Key).toString();if(!key.isEmpty())keys<<key;}
+    QVERIFY(keys.contains("\nkimi/docs/tool"));
+    QCOMPARE(window.findChild<ProjectFilter *>("projectFilterChips")->selection(),QSet<QString>{id});
 }
 
 void TestSessionsWindow::projectColorsApplyOrCancel()

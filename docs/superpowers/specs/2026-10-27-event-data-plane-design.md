@@ -299,9 +299,12 @@ on a 250 ms pulse:
   62 `capture-pane` per listing on arch). Bindings are replaced by rename;
   temporary `.hgs-*` files are ignored. Measured on arch: the watcher used
   12.9 % of a core with whole listings on every change and 6.1 % after.
-- **Processes**: hook-recorded shell jobs (the binding stamp) plus one `ps`
-  work sample every 2 s per subscribed session. The full snapshot, which
-  re-reads the transcript tail, runs at most every 10 s.
+- **Processes** (zerus-604d.15): the `processes` and `process_work` of
+  `hgs inspect NAME`, read on two worker threads when the session's catalog
+  row changes (its binding records shell jobs and hooks) and at least every
+  10 s, at most every 2 s per session; `state` only when changed apart from
+  sampling times. This replaces the clients' `inspect` poll for the selected
+  session's processes (every 30 s on the desktop, through SSH for a peer).
 - **Git**: stats of `HEAD`, `index`, the current branch ref, its upstream's
   tracking ref, `packed-refs`, `FETCH_HEAD` and the reftable list in the git
   directory and common directory of each subscribed path, on the pulse.

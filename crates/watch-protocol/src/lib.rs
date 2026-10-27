@@ -31,6 +31,8 @@ pub const HEARTBEAT_MS: u64 = 10_000;
 pub const ACTIVITY_SUBSCRIPTIONS: usize = 16;
 /// Concurrent git subscriptions (checkout folders) per stream.
 pub const GIT_SUBSCRIPTIONS: usize = 64;
+/// Concurrent processes subscriptions (sessions) per stream.
+pub const PROCESSES_SUBSCRIPTIONS: usize = 16;
 /// The most events an Activity tail or tail snapshot carries.
 pub const ACTIVITY_TAIL: usize = 100;
 /// The most journal rows one Activity read returns.
@@ -49,6 +51,9 @@ pub mod topic {
     /// One checkout folder's `hgs git-status --json` object, keyed by the
     /// folder as subscribed.
     pub const GIT: &str = "git";
+    /// One session's `processes` and `process_work`, as `hgs inspect`
+    /// reports them, keyed like Activity.
+    pub const PROCESSES: &str = "processes";
 }
 
 /// Why a catalog key was removed. Clients treat an unknown reason as unknown.
@@ -121,6 +126,9 @@ pub struct Limits {
     /// 0 from a server without the git topic.
     #[serde(default)]
     pub git_subscriptions: usize,
+    /// 0 from a server without the processes topic.
+    #[serde(default)]
+    pub processes_subscriptions: usize,
 }
 
 impl Default for Limits {
@@ -133,6 +141,7 @@ impl Default for Limits {
             activity_read: ACTIVITY_READ,
             control_line_bytes: CONTROL_LINE_BYTES,
             git_subscriptions: GIT_SUBSCRIPTIONS,
+            processes_subscriptions: PROCESSES_SUBSCRIPTIONS,
         }
     }
 }
@@ -260,8 +269,8 @@ pub enum Control {
     Ping(Ping),
 }
 
-/// A topic and its key. Activity takes `session`, git takes `path` (an
-/// absolute folder); later topics take `project` (tasks).
+/// A topic and its key. Activity and processes take `session`, git takes
+/// `path` (an absolute folder); later topics take `project` (tasks).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Subscription {
     pub topic: String,
@@ -642,6 +651,8 @@ mod tests {
             "queue_bytes":4194304,"activity_tail":100,"activity_read":200,"control_line_bytes":65536}))
         .unwrap();
         assert_eq!(older.git_subscriptions, 0);
+        assert_eq!(older.processes_subscriptions, 0);
+        assert_eq!(Limits::default().processes_subscriptions, PROCESSES_SUBSCRIPTIONS);
     }
 
     #[test]

@@ -32,6 +32,21 @@ pub(crate) fn inspect(name: &str, after: i64) -> Result<Value> {
     journal::inspection(name, after, None, false)
 }
 
+/// What `hgs inspect NAME` reports about a session's processes: `processes`,
+/// `process_work` and the `run_id` they belong to.
+pub(crate) fn processes(name: &str) -> Result<Value> {
+    local_sessions()?;
+    let inspection = if opencode::exists(name) {
+        opencode::inspect(name, None)?
+    } else if dsh::exists(name) {
+        dsh::inspect_processes(name)?
+    } else {
+        // No journal row is newer than i64::MAX: the summary without events.
+        journal::inspection(name, i64::MAX, None, true)?
+    };
+    Ok(json!({"run_id": inspection["run_id"], "processes": inspection["processes"], "process_work": inspection["process_work"]}))
+}
+
 /// A read-only connection to the Activity journal, once it exists. It never
 /// creates the file or its schema, and holds no lock between statements.
 pub(crate) fn journal() -> Option<Connection> {

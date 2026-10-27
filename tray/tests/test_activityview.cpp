@@ -203,6 +203,7 @@ private slots:
     void cacheKeepalivesReadAsOneQuietLine();
     void whiteWhTranscriptReadsFlat();
     void preparedWorkerLifetimeFollowsDocuments();
+    void renderWorkersRunAtTheGuiPriority();
     void longUpdatesKeepQueuedEditorInputResponsive();
     void richReplyScrollingKeepsQueuedInputResponsive();
     void tableReplyScrollingKeepsQueuedInputResponsive_data();
@@ -449,6 +450,23 @@ void TestActivityView::preparedWorkerLifetimeFollowsDocuments()
     }
     delete view;
     QTRY_COMPARE_WITH_TIMEOUT(workers().size(), 0, 15000);
+}
+
+// #523: the render worker runs at the GUI's priority. A below-normal worker
+// got almost no CPU while normal-priority work (the agents' builds and tests)
+// filled the cores, so Activity never finished rendering under load.
+void TestActivityView::renderWorkersRunAtTheGuiPriority()
+{
+    const auto workers = [] { return qApp->findChildren<QThread *>("activityRenderWorker"); };
+    ActivityView view; view.resize(900, 500); view.show(); view.setSessionKey("priority");
+    settle(view);
+    const int passes = view.renderPasses();
+    view.setActivity({}, history(20));
+    QTRY_VERIFY(view.renderPasses() > passes);
+    settle(view);
+    // The committed document keeps its worker alive, so it can be read here.
+    QTRY_VERIFY(!workers().isEmpty());
+    for (auto *worker : workers()) QVERIFY2(worker->priority() >= QThread::NormalPriority, qPrintable(QString::number(worker->priority())));
 }
 
 void TestActivityView::longUpdatesKeepQueuedEditorInputResponsive()

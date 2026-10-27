@@ -947,6 +947,22 @@ answered; a denial cannot carry an explanation.
   the one-line `icacls` fix for the owner instead of a failing sandbox. The
   member never repairs ACLs itself. Owner: yes.
 
+- **U35. A second message to a working agent is not refused (owner,
+  2026-10-27, screenshot).** The team's coordinator composer often refuses a
+  message with "hgs: previous input has not been confirmed by the agent;
+  inspect Terminal before sending again". The guard in src/state/input.rs
+  holds every send until any native event arrives after the previous one
+  (`input_pending_at` against `last_event_at`), so a lead that thinks for a
+  minute without a tool call blocks the owner, and the error names a
+  Terminal the team view does not show. The owner's second message is
+  queued instead: hgs keeps it (bounded, in order, with its request id) and
+  delivers it once the agent confirms the previous input, the composer says
+  "queued until the lead takes your previous message" with Cancel; the
+  refusal stays only where it protects a real terminal state (a dialog, an
+  unknown prompt) and then offers Open terminal. The coordinator's quick-ask
+  chips ("Summarize status", "Re-plan remaining work" and the planning and
+  stuck pairs) are removed. Owner: yes.
+
 ## Phases 37-40 (replanned 2026-10-27)
 
 Phase 36 closed without its own build: its review findings and the build go to

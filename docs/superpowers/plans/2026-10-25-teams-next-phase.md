@@ -964,6 +964,65 @@ answered; a denial cannot carry an explanation.
   chips ("Summarize status", "Re-plan remaining work" and the planning and
   stuck pairs) are removed. Owner: yes.
 
+- **U36. Review and test inside each task's pipeline (owner, 2026-10-28).**
+  Today a task goes InProgress, Submitted, then the lead (or the member's
+  sub-lead, `reviewer_of`) accepts or rejects it; review and QA are separate
+  tasks at the end of a phase that read the whole integration, so findings
+  arrive late, in one batch, and the lead relays each of them. A task now
+  carries a pipeline: an ordered list of stages after the implementer's
+  report, each with its kind and who does it.
+  - **Stages.** `review` (a member reads the attempt's change against the
+    task's criteria), `test` (a member runs the task's suites and scenarios,
+    takes the criteria's shots) and `accept` (the lead, the sub-lead of
+    spec 5.6, or `auto`). A stage names a role (the first free member with
+    it takes the stage, rebalancing like tasks) or a pinned member; the
+    implementer never takes its own task's stage. New task statuses
+    `in_review` and `in_test` sit between Submitted and Accepted; the Board
+    shows them as columns (with U33's widths), Android and the shared
+    fixtures follow. Owner direction for this status change: yes.
+  - **Verdicts.** A stage member reports with `hgs team report` and a
+    verdict: `pass` moves the task to its next stage, `return` sends the
+    findings to the implementer as a new attempt with them attached,
+    without the lead. After a preset's maximum rounds (default 3) the task
+    goes to the lead with every round's findings. The lead and the owner
+    can still accept, reject, skip a stage or send the task back at any
+    stage, each with a reason; the feed records who did it.
+  - **Where a stage works.** The stage works in the task's own folder: the
+    implementer's worktree or clone, or the shared folder when the members
+    work in one folder without worktrees (a common case, not an exception).
+    Zerus gives the stage member that path and the permissions its stage
+    needs there: review reads, test also builds and writes only build
+    output and its own temporary folder; nothing else outside its own
+    folder. What changed comes from the attempt: its commits (B4) when the
+    folder is a Git checkout, otherwise the report's changed-file list and
+    the files' state at the report. While a task is in a stage that needs
+    its files on disk (test), its folder is held: the implementer's next
+    task in that folder waits and its card says "folder held by the test
+    of #N". A preset may instead test on a detached checkout of the
+    attempt's commits, which frees the implementer and costs one build.
+    In a shared folder other members keep working; the stage hand-off says
+    which files are the task's.
+  - **Presets.** The team catalog gains pipelines: named presets ("Code:
+    review, test, lead", "Docs: review, auto", "Check: lead", "None") with
+    their stages, maximum rounds and folder rule. A template names its
+    default pipeline and a role may name its own (a docs role uses Docs);
+    the plan and `edit-draft` can set a task's pipeline; the task keeps a
+    snapshot of it when it is assigned, so a later catalog edit does not
+    change a running task.
+  - **Team designer.** The catalog editor (Team designer page and Settings >
+    Teams) gets a Pipelines tab next to Roles, Templates and Routing:
+    the presets list, a stage editor (kind, role or member, folder rule,
+    rounds, final acceptance), the default per template and per role, the
+    designer's proposals with their keep or reject plates, and Try it on a
+    sample task. Manual edits stay local until Save, like the other tabs.
+  - **Load.** A stage queue per member is visible on the Board and in the
+    member's card; a second member with the stage's role takes waiting
+    stages. Test stages run only the suites of the files the task changed
+    (U28 rule 18); the full suites stay one pass in the lead's integration,
+    and a phase's own review and QA tasks become a short smoke check of
+    the integrated build.
+  Owner: yes, with the Pipelines tab and the task's folder for stages.
+
 ## Phases 37-40 (replanned 2026-10-27)
 
 Phase 36 closed without its own build: its review findings and the build go to
@@ -987,6 +1046,19 @@ phase 37. Lanes are balanced by volume and cost (U28 rule 9), not by count.
   and their weight-based health warnings, U27 visual lanes, U29 adding a task
   to a running phase, U30 six session states (server, desktop, Android), U31
   work ahead; build.
+
+## Phases 41-42 (planned 2026-10-28)
+
+- **41 Test stability, upstream merge and the PR draft**: the five recurring
+  test failure groups fixed at their cause, a new baseline, the upstream
+  ufna/zerus main merged into the fork, and the pull request prepared (no
+  push without the owner's word).
+- **42 Task pipelines: review and test inside each task (U36)**: a mock-up
+  first (the Pipelines tab, the new Board columns, the stage chips), then the
+  server model and CLI, stage delivery in the task's folder, the Pipelines
+  tab, the Board and task views, Android, the lead protocol and docs;
+  integration, review, QA and the build. It starts after the upstream merge
+  (#528) so the merge does not also carry this work.
 
 ## Order of work (proposal)
 

@@ -153,6 +153,7 @@ private slots:
     void aDraftTeamReadsItsRevisionUnseenFieldsAndGoal();
     void proposalsSwapsLimitsAndHostsRead();
     void feedLinesSpeakOfStartsQuestionsAndHolds();
+    void feedLinesSpeakOfRosterChanges();
     void aRunningTeamIsStuckWhenNothingCanMove();
     void feedLinesAndChains();
     void feedLinesSpeakOfPhasesAndTheEndOfThePlan();
@@ -1169,6 +1170,23 @@ void TestTeams::feedLinesSpeakOfStartsQuestionsAndHolds()
     QCOMPARE(line("released", QJsonObject{{"by", "Lead"}, {"task", 3}}).text, QStringLiteral("Released #3 Held retry"));
     QCOMPARE(line("report_replaced", QJsonObject{{"task", 2}, {"attempt", 1}}).text,
              QStringLiteral("Replaced the captured reply · #2 Address form · attempt 1"));
+}
+
+void TestTeams::feedLinesSpeakOfRosterChanges()
+{
+    const auto team = parse(deliveryTeam());
+    const auto line = [&](const char *kind, const QJsonObject &detail) {
+        return feedLine(team, QJsonObject{{"at", 1}, {"seq", 1}, {"kind", kind}, {"detail", detail}});
+    };
+    // U32: a member added on the owner's word carries the quote and who added it.
+    const auto added = line("member_added", QJsonObject{{"by", "Lead on your word"}, {"member", "Backend"},
+        {"owner_word", "может еще одного дипсик бэкендера добавим?"}});
+    QCOMPARE(added.text, QStringLiteral("Added Backend by Lead on your word: “может еще одного дипсик бэкендера добавим?”"));
+    QCOMPARE(added.by, QStringLiteral("Lead on your word"));
+    QCOMPARE(line("member_added", QJsonObject{{"by", "You"}, {"member", "Tester"}}).text, QStringLiteral("Added Tester by You"));
+    // The raised cap names the old and the new count.
+    QCOMPARE(line("max_members_raised", QJsonObject{{"old", 6}, {"new", 7}}).text,
+             QStringLiteral("Raised the member cap 6 → 7 on your word"));
 }
 
 void TestTeams::aRunningTeamIsStuckWhenNothingCanMove()

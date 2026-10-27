@@ -3183,9 +3183,32 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             }
             ensure!(team.members.iter().all(|m| m.id != member.id), "Member id {} is used", member.id);
             let active = team.members.iter().filter(|m| m.state != MemberState::Removed).count();
-            ensure!(active < team.settings.max_members, "The team already has its {} members", team.settings.max_members);
             let id = member.id.clone();
             let role = member.role.clone();
+            // U32: the lead adds on the owner's verified word even at a full
+            // cap: the cap grows by exactly the count the sentence names, within
+            // the tree's session budget, in this same change.
+            let on_word = input["roster_word"].as_bool() == Some(true)
+                && matches!(actor, Actor::Member(lead) if *lead == team.lead)
+                && input["owner_word_event"].is_i64();
+            let quote = input["owner_word_checked"]["text"].as_str().unwrap_or_default();
+            if active >= team.settings.max_members {
+                ensure!(on_word, "The team already has its {} members", team.settings.max_members);
+                let old = team.settings.max_members;
+                let count = input["owner_word_count"].as_u64().unwrap_or(1).max(1) as usize;
+                let new = old.saturating_add(count);
+                let budget = input["tree_sessions"].as_u64().map(|budget| budget as usize).unwrap_or(team.settings.tree_sessions as usize);
+                ensure!(new <= budget, "The whole tree runs at most {budget} sessions; the team keeps {old} members");
+                team.settings.max_members = new;
+                events.push(Event::new(
+                    "max_members_raised",
+                    json!({"old":old,"new":new,"member":role,"by":"Lead on your word","owner_word":quote}),
+                ));
+            }
+            if on_word {
+                // U32: the roster says how the member joined.
+                member.added = Some(json!({"by":"Lead on your word","owner_word":quote,"at":now()}));
+            }
             let profile = member.permissions_profile.clone();
             let adopted = member.session.as_ref().map(|session| session.name.clone());
             team.members.push(member);
@@ -3210,12 +3233,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             if profile_rank(&profile) > profile_rank("write") {
                 team.profile_widening.push(json!({"member":id,"from":"write","to":profile}));
             }
-            let by = if input["roster_word"].as_bool() == Some(true) {
-        format!("{} on your word", actor.label(team))
-    } else {
-        actor.label(team)
-    };
-    let quote = input["owner_word_checked"]["text"].as_str().unwrap_or_default();
+            let by = if on_word { format!("{} on your word", actor.label(team)) } else { actor.label(team) };
             events.push(Event::new("member_added", json!({"by":by,"member":role,"owner_word":quote})));
             // F8: the existing session is adopted, not launched (L2).
             if let Some(session) = adopted {
@@ -3279,7 +3297,8 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         }
         _ => bail!("Unknown team operation {op}"),
     }?;
-    // U26: a verified owner word is spent on the change it authorized.
+    // U26/U32: a verified owner word is spent on the one change it authorized,
+    // so a second add on the same sentence needs a new word.
     if let Some(event) = input["owner_word_event"].as_i64() {
         let change = input["owner_word_change"].as_str().unwrap_or("this change");
         team.record_owner_word(event, change);

@@ -95,7 +95,7 @@ fn bytes(value: &Value) -> Vec<u8> {
 pub fn routed(command: &str, args: &[String]) -> Option<bool> {
     let json = args.iter().any(|arg| arg == "--json");
     match command {
-        "ls" | "archives" | "inspect" | "worktrees" | "git-status" | "dirs" | "project" | "analytics" => Some(false),
+        "ls" | "archives" | "inspect" | "worktrees" | "git-status" | "git-diff" | "dirs" | "project" | "analytics" => Some(false),
         "account" if matches!(args.first().map(String::as_str), Some("ls" | "inspect")) => Some(false),
         "terminal" | "send" | "settings" | "effort" | "history" if json => Some(true),
         _ => None,

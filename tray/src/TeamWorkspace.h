@@ -122,6 +122,10 @@ private:
     // #465 N18: a graph view takes back the owner's half-made link and
     // selected edge, and reports their changes, per team.
     void keepGraphEdit(TeamUi::TaskView *view, const QString &team);
+    // U33: the narrowest readable Board column (two-line cards); wider windows
+    // share their room. Five fit the Board of a 1600 px workspace.
+    static constexpr int BoardColumnWidth = 200;
+    static void readableColumn(QWidget *column);
     QWidget *boardColumns(const Teams::Team &team, const QList<int> &ids, int phase);
     QWidget *layerRows(const Teams::Team &team, const QList<int> &ids);
     // The tasks with a problem and the tone each shows.

@@ -887,6 +887,7 @@ answered; a denial cannot carry an explanation.
   unknown or offline jobs never make a session wait. Desktop, Android, the shared fixtures and
   the docs (CLAUDE.md and AGENTS.md included) change together. Owner: yes.
 
+  Addition (owner, 2026-10-27): a seventh state, Build. A build or long test a session starts through Zerus (hgs team run templates, or hgs run for any session) is tracked by Zerus and shows Build with its label, command and time, right after Working; an idle agent with a Zerus build running is never Cooling or Cold, and its reply badge waits. Other unbudgeted background jobs stay services (dev servers, watchers, MCP). Agents start builds through Zerus so the owner does not ping a session that is still working. While a session is in Build, the desktop keeps its context warm with a keepalive every 30 minutes until the build ends.
 - **U31. Work ahead (owner, 2026-10-27).** In phase 37 the DeepSeek
   backends finished while the Claude members still worked the heavy GUI
   fixes, and they had nothing to take: the next phase was not approved. A

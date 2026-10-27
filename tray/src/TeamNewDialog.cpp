@@ -70,6 +70,9 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     form->addRow(tr("Goal"), m_goal);
     auto *folderRow = new QHBoxLayout;
     m_folder = new QLineEdit(folder); m_folder->setObjectName("teamNewFolder");
+    // QA #347: the folder the dialog opens with is given, not being typed: a
+    // non-Git one forces the policy to Shared at once (the note says why).
+    m_folderCommitted = !folder.isEmpty();
     auto *browse = new QPushButton(tr("Browse…")); browse->setAutoDefault(false);
     connect(browse, &QPushButton::clicked, this, [this] {
         const auto dir = QFileDialog::getExistingDirectory(this, tr("Team folder"), m_folder->text());
@@ -320,7 +323,9 @@ void TeamNewDialog::validate()
              && m_folderPolicy->currentData().toString() != QStringLiteral("shared"))
         m_worktrees->setChecked(true);
     // B6: without a Git folder only a shared folder makes sense; the worktree
-    // entry is greyed out and the note says why.
+    // entry is greyed out and the note says why. QA #347: a folder that is not
+    // a Git repository shows Shared, fixed, with the reason - also for the
+    // folder the dialog opened with, not only after the field lost focus.
     if (m_folderPolicy) {
         if (auto *model = qobject_cast<QStandardItemModel *>(m_folderPolicy->model()))
             if (auto *item = model->item(m_folderPolicy->findData(QStringLiteral("worktree"))))
@@ -333,6 +338,10 @@ void TeamNewDialog::validate()
             m_worktrees->setChecked(false);
             m_forcedShared = true;
         }
+        const bool sharedOnly = !folder.isEmpty() && !git && m_folderCommitted;
+        m_folderPolicy->setEnabled(!sharedOnly);
+        m_folderPolicy->setToolTip(sharedOnly ? tr("Folder is not a Git repository: every member works in this folder, so the policy is shared.")
+                                              : tr("Auto lets the lead choose the folder each member works in"));
     }
     m_gitNote->setVisible(!folder.isEmpty() && !git);
     m_gitNote->setText(tr("Folder is not a Git repository — members will share one folder."));

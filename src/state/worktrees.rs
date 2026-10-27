@@ -392,6 +392,24 @@ fn inherited_upstream(read: &dyn Fn(&[&str]) -> Result<String>, base: &str) -> O
     Some((remote, merge))
 }
 
+/// U34: a DeepSeek member's sandbox needs full control of the folder it
+/// confines: on Windows its write grant needs WRITE_DAC and WRITE_OWNER, which
+/// a folder on a second drive does not inherit. Only the folder this call
+/// created is changed, and a failure is a member error, never a silent skip.
+/// Other systems have nothing to grant.
+#[cfg(windows)]
+fn grant_for_sandbox(folder: &Path) -> Result<()> {
+    crate::platform::grant_full_control(folder).map_err(|error| {
+        format!(
+            "The folder was created, but Zerus could not give this user full control of it, which the DeepSeek sandbox needs: {error}"
+        )
+    })
+}
+#[cfg(not(windows))]
+fn grant_for_sandbox(_: &Path) -> Result<()> {
+    Ok(())
+}
+
 fn create(args: &[String]) -> Result<Value> {
     let mobile = args.iter().any(|value| value == "--mobile");
     let _signals = mobile.then(MobileSignals::install);
@@ -523,6 +541,7 @@ fn create(args: &[String]) -> Result<Value> {
         if String::from_utf8_lossy(&actual_branch).trim_end_matches('\n') != reference {
             return Err("Clone creation could not be confirmed. Inspect the destination before retrying.".into());
         }
+        grant_for_sandbox(&destination)?;
         let upstream = upstream.map(|(remote, merge)| format!("{remote}/{}", merge.strip_prefix("refs/heads/").unwrap_or(&merge)));
         return Ok(json!({"status":"created", "path":destination, "branch":branch, "base":base, "head":head,
             "upstream":upstream, "clone":true, "request_id":options.get("--request-id"),
@@ -565,6 +584,7 @@ fn create(args: &[String]) -> Result<Value> {
                 .into(),
         );
     }
+    grant_for_sandbox(&destination)?;
     // Best effort: the checkout exists either way, and a missing upstream only
     // leaves publication unverified. Never keep half of the tracking pair.
     let upstream = upstream.filter(|(remote, merge)| {

@@ -1,5 +1,8 @@
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack } from "solid-js";
 import { AgentGlyph, AGENT_LABEL, Icon } from "../../lib/icons";
+import { UsageMeters, type UsageIndicator } from "../../components/UsageMeter";
+import { accountWindows, usageTooltip } from "../../lib/usage";
+import { prefs } from "../../screens/settings/store";
 import { accounts, machines } from "../../mock/data";
 import { LAUNCH_AGENTS, accountIdentity, catalogFor, extraAccounts } from "../../mock/setup-extra";
 import type { Account, AgentKind, Machine } from "../../mock/types";
@@ -407,10 +410,16 @@ function NewSessionForm() {
               <For each={rows()}>
                 {(a) => (
                   <li role="option" aria-selected={row() === a.id} classList={{ on: row() === a.id }} onClick={() => setRow(a.id)}>
-                    <span class="ns-acc-ico" style={{ color: `var(--z-agent-${a.agent})` }}><AgentGlyph agent={a.agent} size={16} /></span>
+                    {/* AccountChoice::Delegate: a two-line provider logo, the account name in bold, then its meters. */}
+                    <span class="ns-acc-logo" style={{ color: `var(--z-agent-${a.agent})` }} title={AGENT_LABEL[a.agent]}><AgentGlyph agent={a.agent} size={26} /></span>
                     <span class="col grow">
-                      <span class="ell"><b>{AGENT_LABEL[a.agent]}</b> <span class="muted">{accountName(a)}</span></span>
-                      <span class={`ns-usage tabular ${usageTone(a)}`}>{usageSummary(a)}</span>
+                      <span class="ell"><b>{accountName(a) === "Account n/a" ? `${AGENT_LABEL[a.agent]} account` : accountName(a)}</b></span>
+                      {/* The status-footer meters, compact and without the provider badge (AccountChoice::Delegate). */}
+                      <Show when={accountWindows(a).length} fallback={<span class={`ns-usage tabular ${usageTone(a)}`}>{usageSummary(a)}</span>}>
+                        <span class="ns-meters" title={usageTooltip(AGENT_LABEL[a.agent], accountName(a), accountWindows(a))}>
+                          <UsageMeters windows={accountWindows(a)} compact indicator={prefs.usageIndicator as UsageIndicator} />
+                        </span>
+                      </Show>
                     </span>
                     <Show when={row() === a.id}><Icon name="check" size={14} class="accent" /></Show>
                   </li>
@@ -418,7 +427,7 @@ function NewSessionForm() {
               </For>
               <Show when={!accountsLoading() && host()}>
                 <li role="option" aria-selected={row() === "shell"} classList={{ on: row() === "shell" }} onClick={() => setRow("shell")}>
-                  <span class="ns-acc-ico"><Icon name="terminal" size={16} /></span>
+                  <span class="ns-acc-logo muted"><Icon name="terminal" size={26} /></span>
                   <span class="col grow">
                     <b>{windowsHost() ? "Run PowerShell" : "Run shell"}</b>
                     <span class="ns-usage">Interactive terminal session</span>

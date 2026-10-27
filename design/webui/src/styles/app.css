@@ -22,8 +22,22 @@
   .page { min-width: 0; min-height: 0; overflow: hidden; display: flex; }
   .statusbar { grid-column: 2; display: flex; align-items: center; gap: 14px; height: 28px; white-space: nowrap; overflow: hidden; padding: 0 12px; border-top: 1px solid var(--z-color-divider); background: var(--z-color-pane); font-size: var(--fs-xs); color: var(--z-color-muted); }
   .statusbar .sb-usage { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 6px; border-radius: var(--z-radius-sm); color: var(--z-color-muted); }
-  .statusbar .sb-usage:hover { background: var(--z-color-hover); color: var(--z-color-text); }
-  .statusbar .sb-account { max-width: 160px; font-size: var(--fs-xs); }
+  .statusbar .sb-usage:hover, .statusbar .sb-usage:focus-visible { background: var(--z-list-usage-hover); color: var(--z-color-text); }
+  /* Limit meters (AccountUsage::Button): 11 px text in the pace colour; see UsageMeter.tsx. */
+  .usage-meters { display: inline-flex; align-items: center; height: 22px; font-size: 11px; color: var(--z-list-muted); white-space: nowrap; }
+  .um-window { display: inline-flex; align-items: center; height: 22px; }
+  .um-window + .um-window { margin-left: 16px; }
+  .usage-meters.compact .um-window + .um-window { margin-left: 10px; }
+  .um-bar { flex: none; display: block; }
+  .um-bar .um-track { fill: var(--z-list-usage-track); }
+  .um-bar .um-elapsed { fill: var(--z-list-usage-elapsed); }
+  .um-bar .um-marker { fill: var(--z-list-usage-marker); }
+  .um-text { margin-left: 6px; color: var(--z-list-muted); }
+  .um-skeleton { display: inline-block; margin-left: 6px; width: 48px; height: 8px; border-radius: 3px; background: var(--z-list-usage-skeleton); }
+  .usage-meters.compact .um-skeleton { width: 40px; }
+  .um-countdown { display: inline-flex; align-items: center; gap: 2px; margin-left: 5px; min-width: 34px; color: var(--z-list-muted); }
+  .um-countdown svg { fill: none; stroke: currentColor; stroke-linejoin: round; }
+  .um-summary { color: var(--z-list-muted); }
   .meter { position: relative; width: 34px; height: 4px; border-radius: 2px; background: var(--z-color-border); overflow: hidden; }
   .meter > i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--z-color-accent); transition: width var(--z-motion-slow) var(--ease); }
   .meter.warn > i { background: var(--z-color-warn); }

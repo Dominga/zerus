@@ -185,6 +185,29 @@
   .cmp-resize:hover .cmp-grip, .cmp-resize:focus-visible .cmp-grip { width: 52px; background: var(--z-color-accent); }
   .cmp-resize.dragging .cmp-grip { width: 52px; background: var(--z-color-accent); transition: none; }
   .tchip:disabled { opacity: .45; cursor: default; }
+  .tchip.on { color: var(--z-color-text); background: var(--z-color-segment-on); }
+  /* Attachments list (MessageComposer attachmentsPopover): rows with a 30×22
+     thumbnail, "[Image #1] name" over its size, and a separate remove button;
+     the 320 px preview sits beside the list. */
+  .att-anchor { display: contents; }
+  .att-pop { position: fixed; z-index: 60; width: 360px; padding: 8px; border-radius: 10px; border: 1px solid var(--z-color-border); background: var(--z-color-raised); box-shadow: var(--z-shadow-popover); display: flex; flex-direction: column; gap: 2px; animation: rise var(--z-motion-base) var(--ease) both; }
+  .att-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 2px 6px 6px; font-size: var(--fs-xs); }
+  .att-row { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 4px 4px 4px 6px; border-radius: 6px; cursor: pointer; outline: none; }
+  .att-row:hover, .att-row:focus-visible { background: var(--z-color-hover); }
+  .att-row:focus-visible { box-shadow: inset 0 0 0 1px var(--z-color-accent); }
+  .att-thumb { flex: none; width: 30px; height: 22px; border-radius: 3px; overflow: hidden; display: grid; place-items: center; background: var(--z-color-tile); color: var(--z-color-muted); }
+  .att-thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .att-text { flex: 1; min-width: 0; display: flex; flex-direction: column; font-size: 11px; line-height: 1.35; color: var(--z-color-text); }
+  .att-ref { color: var(--z-color-muted); }
+  .att-remove { flex: none; width: 24px; height: 24px; color: var(--z-color-muted); }
+  .att-remove:hover, .att-remove:focus-visible { color: var(--z-color-danger); background: var(--z-color-danger-bg); }
+  .att-removed { display: flex; align-items: center; gap: 8px; padding: 4px 4px 2px 6px; font-size: var(--fs-xs); color: var(--z-color-muted); }
+  .att-empty { padding: 6px; font-size: var(--fs-xs); }
+  .att-preview { position: absolute; left: calc(100% + 8px); bottom: 0; width: 320px; padding: 6px; border-radius: 10px; border: 1px solid var(--z-color-border); background: var(--z-color-raised); box-shadow: var(--z-shadow-popover); pointer-events: none; animation: fadeIn var(--z-motion-fast) both; }
+  .att-pop.flip .att-preview { left: auto; right: calc(100% + 8px); }
+  .att-preview img { display: block; width: 100%; height: auto; max-height: 240px; object-fit: contain; border-radius: 6px; }
+  .att-preview pre { margin: 0; max-height: 200px; overflow: hidden; padding: 8px 10px; border-radius: 6px; background: var(--z-color-code-bg); font-size: 11px; line-height: 1.45; white-space: pre-wrap; color: var(--z-color-text-2); }
+  .att-preview-cap { display: flex; gap: 8px; justify-content: space-between; padding: 6px 2px 0; font-size: var(--fs-xs); }
   /* Fixed slots: the record chip keeps one width for Voice, Video and Stop (0:07), so
      switching the mode or starting a recording never moves the other chips. */
   .tchip.rec-slot { width: 96px; justify-content: flex-start; }

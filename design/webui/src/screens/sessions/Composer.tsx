@@ -2,6 +2,7 @@ import { Show, createSignal } from "solid-js";
 import { Icon } from "../../lib/icons";
 import { selected, toast, setDialog, contentScale } from "../../state";
 import { accounts } from "../../mock/data";
+import { AttachmentsChip, SEED_ATTACHMENTS, type DraftAttachment } from "./Attachments";
 
 // Composer structure from MessageComposer: resize handle, a 34px toolbar
 // (leading: attachments, voice, voice mode, latest, mark as read, compaction;
@@ -67,7 +68,7 @@ export function Composer() {
   const s = () => selected();
   const [text, setText] = createSignal("");
   const [recording, setRecording] = createSignal(false);
-  const [attached, setAttached] = createSignal(1);
+  const [attachments, setAttachments] = createSignal<DraftAttachment[]>(SEED_ATTACHMENTS);
   const account = () => accounts.find((a) => a.id === s()?.account);
   const working = () => s()?.status === "working";
   const offline = () => s()?.status === "offline";
@@ -81,9 +82,8 @@ export function Composer() {
     <div class="composer" classList={{ disabled: offline() }}>
       <ResizeHandle />
       <div class="cmp-toolbar">
-        <Show when={attached()}>
-          <button class="tchip" onClick={() => setAttached(0)} title="Attachments: preview, open or remove"><Icon name="paperclip" size={13} />{attached()} attached</button>
-        </Show>
+        <AttachmentsChip items={attachments()} onRemove={(id) => setAttachments(attachments().filter((a) => a.id !== id))}
+          onRestore={(item, index) => { const next = [...attachments()]; next.splice(index, 0, item); setAttachments(next); }} />
         <button class="tchip rec-slot" classList={{ rec: recording() }} onClick={() => setRecording(!recording())}
           title={recording() ? "Stop recording (Space / Esc)" : videoMode() ? "Click to start a video recording." : "Click to start a voice recording."}>
           <Icon name={recording() ? "square" : videoMode() ? "video" : "mic"} size={13} />{recording() ? "Stop (0:07)" : videoMode() ? "Video" : "Voice"}

@@ -255,6 +255,7 @@
   .ns-accounts li:hover { background: var(--z-color-hover); }
   .ns-accounts li.on { background: var(--z-color-row-selected); }
   .ns-accounts li b { font-weight: 600; }
+  .ns-acc-logo { display: grid; place-items: center; width: 34px; height: 34px; flex: none; }
   .ns-acc-ico { display: grid; place-items: center; width: 26px; height: 26px; flex: none; border-radius: var(--z-radius-md); background: var(--z-color-hover); color: var(--z-color-muted); }
   .ns-usage { font-size: var(--fs-xs); color: var(--z-color-muted); white-space: pre; }
   .ns-usage.warn { color: var(--z-color-warn); }
@@ -402,3 +403,4 @@
   .su-spin, .su-progress.su-indet > i { animation: none; }
   .ocm-pop, .su-popover, .pc-sw { transition: none; }
 }
+.ns-meters { display: block; margin-left: -4px; height: 22px; }

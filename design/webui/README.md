@@ -46,6 +46,9 @@ The Zerus Dark and Light palettes come from the Qt sources
 (`SessionsWindow::applyTheme`, `IdentityBadges::paintRow`, `ActivityView`,
 `MessageComposer`); fonts, radii and motion follow the prototype's base style.
 `src/screens/sessions/organize.ts` holds bulk selection and drag-and-drop
-placement, after `tray/src/SessionList.cpp`. The
+placement, after `tray/src/SessionList.cpp`.
+`src/lib/usage.ts` and `src/components/UsageMeter.tsx` port the limit pace and
+meters of `tray/src/AccountUsage.h`; `src/screens/sessions/Attachments.tsx` is
+the composer's attachment list. The
 dashed MOCK UP button in the rail, its popover and the dashed outcome switches in
 some dialogs are review aids, not product UI.

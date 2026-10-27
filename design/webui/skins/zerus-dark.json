@@ -135,7 +135,15 @@
       "mark-neutral": "#ffffff",
       "mark-attention": "#ffda76",
       "filter-attention": "#f0c77b",
-      "filter-active": "#c4a6ed"
+      "filter-active": "#c4a6ed",
+      "usage-normal": "#72cdb2",
+      "usage-warning": "#f0a35b",
+      "usage-critical": "#f07878",
+      "usage-track": "#36434e",
+      "usage-elapsed": "#8395a5",
+      "usage-marker": "#e3eaf0",
+      "usage-skeleton": "#2b3740",
+      "usage-hover": "#27313b"
     },
     "entity": {
       "fill-mix": 22,

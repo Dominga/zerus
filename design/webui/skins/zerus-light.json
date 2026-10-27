@@ -128,7 +128,15 @@
       "mark-neutral": "{color.accent}",
       "mark-attention": "#a66000",
       "filter-attention": "#885400",
-      "filter-active": "#7650a5"
+      "filter-active": "#7650a5",
+      "usage-normal": "#237a62",
+      "usage-warning": "#bd6519",
+      "usage-critical": "#ce3d47",
+      "usage-track": "#d7e0e6",
+      "usage-elapsed": "#7f90a1",
+      "usage-marker": "#2b3946",
+      "usage-skeleton": "#e3e8ed",
+      "usage-hover": "#e8edf3"
     },
     "entity": {
       "fill-mix": 17,

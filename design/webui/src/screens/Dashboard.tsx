@@ -9,6 +9,9 @@ import {
   setProjectFilter,
 } from "../state";
 import { AgentBadge, MachineBadge, SessionCard } from "./sessions/SessionCard";
+import { UsageMeters, type UsageIndicator } from "../components/UsageMeter";
+import { accountWindows } from "../lib/usage";
+import { prefs } from "./settings/store";
 import "../styles/setup.css";
 
 // Overview (DashboardPage.cpp, FleetState.*): summary tiles, machine cards,
@@ -96,7 +99,7 @@ function MachineCard(props: { m: Machine; refreshedAt: number }) {
 }
 
 // Accounts are grouped by verified identity, never added up across machines.
-interface AccountGroup { key: string; label: string; agent: Account["agent"]; machines: string[]; identity: string; installed: boolean; fiveHour: number; week: number; plan: string }
+interface AccountGroup { key: string; label: string; agent: Account["agent"]; machines: string[]; identity: string; installed: boolean; fiveHour: number; week: number; plan: string; account: Account }
 
 function accountGroups(): AccountGroup[] {
   const all = [...accounts, ...extraAccounts] as (Account & { installed?: boolean })[];
@@ -111,7 +114,7 @@ function accountGroups(): AccountGroup[] {
     if (g) { if (!g.machines.includes(a.machine)) g.machines.push(a.machine); continue; }
     groups.set(key, {
       key, label: a.label === "Native account" ? AGENT_NAME[a.agent] : a.label, agent: a.agent, machines: [a.machine], installed,
-      identity: !installed ? "Agent not installed" : a.plan ? `${who} / ${a.plan}` : who, fiveHour: a.fiveHour, week: a.week, plan: a.plan,
+      identity: !installed ? "Agent not installed" : a.plan ? `${who} / ${a.plan}` : who, fiveHour: a.fiveHour, week: a.week, plan: a.plan, account: a,
     });
   }
   return [...groups.values()];
@@ -136,8 +139,7 @@ function AccountCard(props: { g: AccountGroup }) {
         <Show when={props.g.installed}>
           <span class="ov-ausage tabular">
             <Show when={limited()} fallback={<span class="dim">{props.g.plan === "API" ? "Balance: 18.40 USD" : "limits n/a"}</span>}>
-              <span class="meter" classList={{ warn: props.g.fiveHour >= 70, danger: props.g.fiveHour >= 90 }}><i style={{ width: `${props.g.fiveHour}%` }} /></span>5h {props.g.fiveHour}%
-              <span class="meter" classList={{ warn: props.g.week >= 70, danger: props.g.week >= 90 }}><i style={{ width: `${props.g.week}%` }} /></span>7d {props.g.week}%
+              <UsageMeters windows={accountWindows(props.g.account)} compact indicator={prefs.usageIndicator as UsageIndicator} />
             </Show>
           </span>
         </Show>

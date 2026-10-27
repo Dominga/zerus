@@ -111,6 +111,11 @@ export interface Account {
   fiveHour: number;
   week: number;
   resetIn: string;
+  /** Minutes until the 5 h and 7 d windows reset (pace and countdown). */
+  fiveHourResetMin?: number;
+  /** The provider reports only the weekly window. */
+  weekOnly?: boolean;
+  weekResetMin?: number;
   sessions: number;
   signedIn: boolean;
 }

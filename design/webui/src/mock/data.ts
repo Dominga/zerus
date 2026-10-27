@@ -77,11 +77,11 @@ export const archived: Session[] = [
 ];
 
 export const accounts: Account[] = [
-  { id: "acc-claude-ws", label: "Aurora engineering", agent: "claude", machine: "workstation", plan: "Max", fiveHour: 34, week: 18, resetIn: "2 h 10 min", sessions: 6, signedIn: true },
-  { id: "acc-codex-ws", label: "Aurora engineering", agent: "codex", machine: "workstation", plan: "Pro", fiveHour: 52, week: 31, resetIn: "1 h 05 min", sessions: 2, signedIn: true },
-  { id: "acc-codex-mac", label: "Release review", agent: "codex", machine: "macbook", plan: "Pro", fiveHour: 43, week: 25, resetIn: "3 h 40 min", sessions: 2, signedIn: true },
-  { id: "acc-claude-mac", label: "Release review", agent: "claude", machine: "macbook", plan: "Max", fiveHour: 12, week: 9, resetIn: "4 h 30 min", sessions: 2, signedIn: true },
-  { id: "acc-kimi-ws", label: "Research", agent: "kimi", machine: "workstation", plan: "Moderato", fiveHour: 61, week: 39, resetIn: "52 min", sessions: 1, signedIn: true },
+  { id: "acc-claude-ws", label: "Aurora engineering", agent: "claude", machine: "workstation", plan: "Max", fiveHour: 34, week: 18, resetIn: "2 h 10 min", sessions: 6, fiveHourResetMin: 130, weekResetMin: 5880, signedIn: true },
+  { id: "acc-codex-ws", label: "Aurora engineering", agent: "codex", machine: "workstation", plan: "Pro", fiveHour: 52, week: 31, resetIn: "1 h 05 min", sessions: 2, fiveHourResetMin: 65, weekResetMin: 4300, signedIn: true },
+  { id: "acc-codex-mac", label: "Release review", agent: "codex", machine: "macbook", plan: "Pro", fiveHour: 0, week: 94, resetIn: "3 h 40 min", sessions: 2, weekOnly: true, fiveHourResetMin: 220, weekResetMin: 6500, signedIn: true },
+  { id: "acc-claude-mac", label: "Release review", agent: "claude", machine: "macbook", plan: "Max", fiveHour: 12, week: 9, resetIn: "4 h 30 min", sessions: 2, fiveHourResetMin: 270, weekResetMin: 8000, signedIn: true },
+  { id: "acc-kimi-ws", label: "Research", agent: "kimi", machine: "workstation", plan: "Moderato", fiveHour: 61, week: 39, resetIn: "52 min", sessions: 1, fiveHourResetMin: 52, weekResetMin: 3000, signedIn: true },
   { id: "acc-ds-b1", label: "DeepSeek workspace", agent: "deepseek", machine: "build-01", plan: "API", fiveHour: 0, week: 0, resetIn: "-", sessions: 2, signedIn: true },
   { id: "acc-oc-ws", label: "Local models", agent: "opencode", machine: "workstation", plan: "Local", fiveHour: 0, week: 0, resetIn: "-", sessions: 1, signedIn: false },
 ];

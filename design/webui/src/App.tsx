@@ -17,6 +17,9 @@ const AccountsScreen = lazy(() => import("./screens/Accounts").then((m) => ({ de
 const SettingsScreen = lazy(() => import("./screens/Settings").then((m) => ({ default: m.SettingsScreen })));
 import { AGENT_LABEL, Icon } from "./lib/icons";
 import { AgentBadge } from "./screens/sessions/SessionCard";
+import { UsageMeters, type UsageIndicator } from "./components/UsageMeter";
+import { accountWindows, usageTooltip } from "./lib/usage";
+import { prefs } from "./screens/settings/store";
 import { skinList, skin, setSkin, applySkin } from "./skin/runtime";
 import { setSection } from "./screens/settings/store";
 import {
@@ -42,13 +45,11 @@ function StatusBar() {
         <button class="chip-accent warn-chip" onClick={() => { setSection("updates"); setPage("settings"); }} title="macOS limits background priority for this login item">Fix login item</button>
       </Show>
       <span class="grow" />
-      <Show when={acc() && acc()!.fiveHour > 0}>
-        <button class="sb-usage" title={`${acc()!.label} · ${AGENT_LABEL[acc()!.agent]}: 5-hour and weekly limits; at the current pace the limit runs out in about 3 h`} onClick={() => setPage("accounts")}>
-          {/* Account name, then the account type (provider badge), then the meters. */}
-          <span class="sb-account ell">{acc()!.label}</span>
+      <Show when={accountWindows(acc()).length > 0}>
+        <button class="sb-usage" title={usageTooltip(AGENT_LABEL[acc()!.agent], acc()!.label, accountWindows(acc()))} onClick={() => setPage("accounts")}>
+          {/* As in Qt (sessionUsageStrip): the provider badge, then one meter per window. */}
           <AgentBadge agent={acc()!.agent} />
-          <span class="meter" classList={{ warn: acc()!.fiveHour > 50 }}><i style={{ width: `${acc()!.fiveHour}%` }} /></span><span class="tabular">5h {acc()!.fiveHour}%</span>
-          <span class="meter"><i style={{ width: `${acc()!.week}%` }} /></span><span class="tabular">7d {acc()!.week}%</span>
+          <UsageMeters windows={accountWindows(acc())} loading={demoState() === "loading"} indicator={prefs.usageIndicator as UsageIndicator} />
         </button>
         <button class="icon-btn small" title="Refresh usage"><Icon name="refresh-cw" size={12} /></button>
       </Show>

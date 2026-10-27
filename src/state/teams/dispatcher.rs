@@ -308,6 +308,30 @@ fn session_of<'a>(member: &Member, seen: &'a [Seen]) -> Option<&'a Seen> {
     seen.iter().find(|s| s.host == session.host && s.name == session.name)
 }
 
+/// N7: whether this tick may decide anything from the member's session being
+/// absent - only when its computer answered the listing. A member with no
+/// session yet, or a tick with no listing information, is not held back.
+fn host_listed(team: &Team, attempt: &Attempt, listed: Option<&BTreeSet<String>>) -> bool {
+    let Some(listed) = listed else { return true };
+    team.member(&attempt.member)
+        .and_then(|member| member.session.as_ref())
+        .is_none_or(|session| listed.contains(&session.host))
+}
+
+/// N7: the computers whose listing this tick answered. A peer that failed
+/// appears with `ok: false` and no sessions; only the first machine is local
+/// (`seen` names it with an empty host).
+fn listed_hosts(listing: &Value) -> BTreeSet<String> {
+    let mut hosts = BTreeSet::new();
+    for (index, machine) in listing.as_array().into_iter().flatten().enumerate() {
+        if machine["ok"] == false {
+            continue;
+        }
+        hosts.insert(if index == 0 { String::new() } else { machine["host"].as_str().unwrap_or_default().to_owned() });
+    }
+    hosts
+}
+
 /// A session quiet enough for its ended turn to become the attempt's report
 /// (A2): idle, no question, input or approval, and no Background work.
 fn capture_open(found: &Seen) -> bool {
@@ -324,8 +348,16 @@ fn same_turn(attempt: &Attempt, ended: f64, found: &Seen) -> bool {
 }
 
 /// What to do for one team now. Pure, so the rules are tested without
-/// processes.
+/// processes; the tick passes the computers whose listing answered (N7).
+#[cfg(test)]
 pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
+    steps_with(team, seen, now, None)
+}
+
+/// The dispatcher's decision for one team. `listed` names the computers whose
+/// session listing answered this tick; a member whose computer did not answer is
+/// not decided on absence (N7). None means every member is taken from `seen`.
+pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&BTreeSet<String>>) -> Vec<Step> {
     let mut steps = Vec::new();
     let planning = team.status == TeamStatus::Planning && matches!(team.brief, Notice::Pending | Notice::Sending);
     let active = matches!(team.status, TeamStatus::Running | TeamStatus::Paused);
@@ -447,6 +479,12 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
             continue;
         }
         if attempt.state == AttemptState::Delivered {
+            // N7: a member whose computer did not answer this tick is not
+            // evidence that it stopped; decide nothing about its attempt until
+            // its listing answers again.
+            if !host_listed(team, attempt, listed) {
+                continue;
+            }
             let found = team.member(&attempt.member).and_then(|m| session_of(m, seen));
             let delivered = attempt.delivered_at.unwrap_or(attempt.sent_at);
             // A1: an attempt that shows the member working really started.
@@ -477,7 +515,10 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
                     if capture_open(found) && attempt.open_question().is_none() {
                         if let Some(at) = replied {
                             steps.push(Step::TurnEnded { task: task.id, at, reply: found.reply_id.clone() });
-                        } else if attempt.started_at.is_some() && now - delivered >= team.settings.report_timeout_seconds as f64 {
+                        } else if !attempt.no_report
+                            && attempt.started_at.is_some()
+                            && now - delivered >= team.settings.report_timeout_seconds as f64
+                        {
                             // A2: the session is quiet but the listing carries no
                             // reply mark for the turn (its replies were never read),
                             // so no turn end could be recorded. After the timeout the
@@ -528,8 +569,12 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
                     // stopped or was renamed) and no turn end was recorded. After
                     // the timeout the attempt is decided as for a session that went
                     // away: its last reply is captured from the session's record,
-                    // or it shows No report (U20).
-                    if attempt.started_at.is_some() && now - delivered >= team.settings.report_timeout_seconds as f64 {
+                    // or it shows No report (U20). N7: only while its computer is
+                    // listed - an absent listing is not a stopped session.
+                    if !attempt.no_report
+                        && attempt.started_at.is_some()
+                        && now - delivered >= team.settings.report_timeout_seconds as f64
+                    {
                         steps.push(Step::NoReport { task: task.id });
                     }
                 }
@@ -1456,13 +1501,34 @@ pub(crate) fn last_reply(session: &SessionRef) -> anyhow::Result<String> {
     Ok(last_reply_of(session, "")?.unwrap_or_default())
 }
 
+/// One `hgs inspect` record of a member's session, at most 45 s. Tests replace
+/// it with a record of their own, so the capture rules run without a CLI.
+fn inspect_reply(session: &SessionRef) -> anyhow::Result<Value> {
+    #[cfg(test)]
+    if let Some(record) = INSPECTED.with(|record| record.borrow().clone()) {
+        return Ok(record);
+    }
+    let output = hgs(&session.host, &["inspect", &session.name, "--skip-processes"], None, Duration::from_secs(45))?;
+    anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+    serde_json::from_slice(&output.stdout).context("invalid inspect output")
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's `hgs inspect` record for this thread, instead of a real call.
+    static INSPECTED: std::cell::RefCell<Option<Value>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn inspect_override(record: Option<Value>) {
+    INSPECTED.with(|slot| *slot.borrow_mut() = record);
+}
+
 /// The last reply, but only when it is still the reply whose id is `expected`:
 /// a newer turn started, so this is not that turn's report (A2). `None` means
 /// the session moved on; an error means it has no reply or cannot be read.
 pub(crate) fn last_reply_of(session: &SessionRef, expected: &str) -> anyhow::Result<Option<String>> {
-    let output = hgs(&session.host, &["inspect", &session.name, "--skip-processes"], None, Duration::from_secs(45))?;
-    anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
-    let record: Value = serde_json::from_slice(&output.stdout).context("invalid inspect output")?;
+    let record = inspect_reply(session)?;
     if !expected.is_empty() {
         let found = record["reply_id"].as_str().unwrap_or_default();
         if !found.is_empty() && found != expected {
@@ -1472,6 +1538,22 @@ pub(crate) fn last_reply_of(session: &SessionRef, expected: &str) -> anyhow::Res
     let text = reply_text(&record);
     anyhow::ensure!(!text.is_empty(), "The member's session has no reply yet");
     Ok(Some(text))
+}
+
+/// N6: the session's last reply, but only when it was written after `since` -
+/// the moment this attempt was delivered. Without a recorded turn identity the
+/// time is the only proof the reply belongs to this attempt: an earlier
+/// attempt's, or an earlier task's, last message is not this attempt's report.
+/// None means there is no newer reply (or no time to prove one).
+pub(crate) fn last_reply_after(session: &SessionRef, since: f64) -> anyhow::Result<Option<String>> {
+    let record = inspect_reply(session)?;
+    let at = record["reply_at"].as_f64().unwrap_or(0.0);
+    let written_after_delivery = at.is_finite() && at > since;
+    if !written_after_delivery {
+        return Ok(None);
+    }
+    let text = reply_text(&record);
+    Ok((!text.is_empty()).then_some(text))
 }
 
 /// The last reply's text in an `hgs inspect` record.
@@ -3170,38 +3252,40 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 if attempt.turn_ended_at.is_none() {
                     // A2/U20: no turn end reached the listing (a quiet session whose
                     // replies were never marked), so there is no recorded reply to
-                    // compare with; the session's last reply is the outcome of the
-                    // attempt all the same, and no earlier gate saw it.
-                    if let Ok(Some(reply)) = last_reply_of(&session, "") {
+                    // compare with. N6: only a reply written after this attempt was
+                    // delivered is its outcome; the session's older last message (an
+                    // earlier attempt's report, another task's) is not.
+                    if let Ok(Some(reply)) = last_reply_after(&session, attempt.delivered_at.unwrap_or(attempt.sent_at)) {
                         if capture_quiet(store, &team.id, *task, &reply).is_ok() {
                             return Ok(());
                         }
                     }
-                }
-                match last_reply_of(&session, &attempt.turn_reply) {
-                    Ok(Some(reply)) => {
-                        if capture_report(store, &team.id, *task, &reply, &attempt.turn_reply).is_ok() {
+                } else {
+                    match last_reply_of(&session, &attempt.turn_reply) {
+                        Ok(Some(reply)) => {
+                            if capture_report(store, &team.id, *task, &reply, &attempt.turn_reply).is_ok() {
+                                return Ok(());
+                            }
+                        }
+                        Ok(None) => {
+                            // A newer reply: the turn ended again, so record that one
+                            // (A2). The next tick captures it once its timeout passed.
+                            change(store, &team.id, |team, _| {
+                                if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
+                                    if attempt.state == AttemptState::Delivered {
+                                        attempt.turn_ended_at = None;
+                                        attempt.turn_reply.clear();
+                                        attempt.no_report = false;
+                                        attempt.report_ready_at = None;
+                                        attempt.blocked_since = None;
+                                    }
+                                }
+                                Ok(())
+                            })?;
                             return Ok(());
                         }
+                        Err(_) => {}
                     }
-                    Ok(None) => {
-                        // A newer reply: the turn ended again, so record that one
-                        // (A2). The next tick captures it once its timeout passed.
-                        change(store, &team.id, |team, _| {
-                            if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
-                                if attempt.state == AttemptState::Delivered {
-                                    attempt.turn_ended_at = None;
-                                    attempt.turn_reply.clear();
-                                    attempt.no_report = false;
-                                    attempt.report_ready_at = None;
-                                    attempt.blocked_since = None;
-                                }
-                            }
-                            Ok(())
-                        })?;
-                        return Ok(());
-                    }
-                    Err(_) => {}
                 }
             }
             change(store, &team.id, |team, events| {
@@ -3274,7 +3358,9 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
         None => return Ok(true),
     };
     anyhow::ensure!(output.status.success(), "hgs ls failed: {}", String::from_utf8_lossy(&output.stderr).trim());
-    let sessions = seen(&serde_json::from_slice(&output.stdout).context("invalid hgs ls output")?);
+    let listing: Value = serde_json::from_slice(&output.stdout).context("invalid hgs ls output")?;
+    let sessions = seen(&listing);
+    let listed = listed_hosts(&listing);
     for team in &teams {
         if let Err(error) = take_outbox(store, team, &sessions) {
             eprintln!("hgs team worker: {}: outbox: {error}", team.name);
@@ -3282,7 +3368,7 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     }
     let teams: Vec<Team> = teams.iter().filter_map(|t| store.load(&t.id).ok().flatten()).collect();
     for team in &teams {
-        for step in steps(team, &sessions, now()) {
+        for step in steps_with(team, &sessions, now(), Some(&listed)) {
             if let Err(error) = run_step(store, team, &step, host) {
                 eprintln!("hgs team worker: {}: {step:?}: {error}", team.name);
             }
@@ -5086,6 +5172,120 @@ mod tests {
         let seen = vec![session("claude/x/lead", "r0", true)];
         let late = steps(&t, &seen, 10.0 + timeout + 1.0);
         assert!(late.contains(&Step::NoReport { task: 1 }), "{late:?}");
+    }
+
+    /// N6: one NoReport step with a given `hgs inspect` record.
+    fn capture_with(reply: Value) -> (tempfile::TempDir, Store, String, u32) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt {
+            n: 1,
+            id: "A1".into(),
+            member: "dev".into(),
+            state: AttemptState::Delivered,
+            sent_at: 10.0,
+            delivered_at: Some(10.0),
+            started_at: Some(11.0),
+            ..Default::default()
+        });
+        task.status = TaskStatus::InProgress;
+        let id = task.id;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        inspect_override(Some(reply));
+        run_step(&mut store, &t, &Step::NoReport { task: id }, "").unwrap();
+        inspect_override(None);
+        (dir, store, t.id, id)
+    }
+
+    #[test]
+    fn a_quiet_capture_takes_only_a_reply_newer_than_the_delivery() {
+        // N6: after a rejection the session's last message is still attempt 1's
+        // report (or another task's); without a turn identity only a reply
+        // written after this attempt was delivered is its own.
+        let (_dir, store, team_id, task) = capture_with(json!({"reply_id":"old","reply_at":5.0,"last_message":"attempt 1's report"}));
+        let saved = store.load(&team_id).unwrap().unwrap();
+        let attempt = saved.task(task).unwrap().attempts.last().unwrap();
+        assert!(attempt.report.is_none(), "an older reply was captured: {:?}", attempt.report);
+        assert!(attempt.no_report);
+        assert_eq!(attempt.state, AttemptState::Delivered);
+        // A reply written after the delivery is this attempt's report.
+        let (_dir, store, team_id, task) = capture_with(json!({"reply_id":"new","reply_at":20.0,"last_message":"Done: checked"}));
+        let saved = store.load(&team_id).unwrap().unwrap();
+        let attempt = saved.task(task).unwrap().attempts.last().unwrap();
+        let report = attempt.report.as_ref().unwrap();
+        assert!(report.captured && report.text.contains("Done: checked"), "{report:?}");
+        assert_eq!(attempt.state, AttemptState::Reported);
+        // No time at all: not proven to be this attempt's.
+        let (_dir, store, team_id, task) = capture_with(json!({"reply_id":"none","last_message":"who knows"}));
+        let saved = store.load(&team_id).unwrap().unwrap();
+        assert!(saved.task(task).unwrap().attempts.last().unwrap().report.is_none());
+    }
+
+    #[test]
+    fn a_no_report_attempt_is_not_decided_again() {
+        // N7: after a failed capture the guard stops a repeated `hgs inspect` on
+        // every tick, in both NoReport branches.
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt {
+            n: 1,
+            id: "A1".into(),
+            member: "dev".into(),
+            state: AttemptState::Delivered,
+            sent_at: 10.0,
+            delivered_at: Some(10.0),
+            started_at: Some(11.0),
+            no_report: true,
+            ..Default::default()
+        });
+        task.status = TaskStatus::InProgress;
+        let id = task.id;
+        let timeout = t.settings.report_timeout_seconds as f64;
+        let at = 10.0 + timeout + 1.0;
+        // No reply mark in the listing: the (None, Some) branch.
+        assert!(!steps(&t, &[session("codex/x/dev", "r1", true)], at).iter().any(|step| matches!(step, Step::NoReport { .. })));
+        // No session in the listing: the (None, None) branch.
+        assert!(!steps(&t, &[], at).iter().any(|step| matches!(step, Step::NoReport { .. })));
+        // Without the flag the same states decide it once.
+        t.task_mut(id).unwrap().attempts.last_mut().unwrap().no_report = false;
+        assert!(steps(&t, &[session("codex/x/dev", "r1", true)], at).iter().any(|step| matches!(step, Step::NoReport { .. })));
+        assert!(steps(&t, &[], at).iter().any(|step| matches!(step, Step::NoReport { .. })));
+    }
+
+    #[test]
+    fn a_computer_that_did_not_list_is_not_a_stopped_member() {
+        // N7: a remote host whose listing failed decides nothing; its session is
+        // not "gone" and the lead is not told it stopped.
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt {
+            n: 1,
+            id: "A1".into(),
+            member: "dev".into(),
+            state: AttemptState::Delivered,
+            sent_at: 10.0,
+            delivered_at: Some(10.0),
+            started_at: Some(11.0),
+            ..Default::default()
+        });
+        task.status = TaskStatus::InProgress;
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().session.as_mut().unwrap().host = "msi".into();
+        let timeout = t.settings.report_timeout_seconds as f64;
+        let at = 10.0 + timeout + 1.0;
+        let local_only: BTreeSet<String> = [String::new()].into_iter().collect();
+        let found = steps_with(&t, &[], at, Some(&local_only));
+        assert!(!found.iter().any(|step| matches!(step, Step::NoReport { .. } | Step::StartLate { .. })), "{found:?}");
+        // Its host answers and the session is really not there: decided.
+        let both: BTreeSet<String> = [String::new(), "msi".to_owned()].into_iter().collect();
+        assert!(steps_with(&t, &[], at, Some(&both)).iter().any(|step| matches!(step, Step::NoReport { .. })));
+        // A local member whose session is gone is decided as before.
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().session.as_mut().unwrap().host.clear();
+        assert!(steps_with(&t, &[], at, Some(&local_only)).iter().any(|step| matches!(step, Step::NoReport { .. })));
     }
 
     #[test]

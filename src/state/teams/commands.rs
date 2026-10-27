@@ -1640,6 +1640,20 @@ fn read_only(error: &anyhow::Error) -> bool {
         .any(|sign| text.contains(sign))
 }
 
+/// N5: where a member's sandboxed write queues - the folder the worker reads a
+/// member's outbox from: the member's own folder as the team records it, never
+/// this process's directory. A member that ran `cd tray` and then reports would
+/// otherwise leave the request in `tray/.zerus-team/outbox`, where the worker
+/// never looks.
+fn member_outbox_folder(team: &Team, member: &Member) -> anyhow::Result<std::path::PathBuf> {
+    match super::dispatcher::member_folder_path(team, member) {
+        Ok(folder) if !folder.is_empty() => Ok(std::path::PathBuf::from(folder)),
+        // A team without a folder has no member folder either; the session's own
+        // directory is all there is.
+        _ => std::env::current_dir().context("The member has no folder to queue in"),
+    }
+}
+
 /// U20: a member in a sandbox may not write the team store, but it writes its
 /// own folder. The report, ask or commit waits there as `<request_id>.json` for
 /// the worker, which applies it with the same identity checks (folder + attempt
@@ -1651,7 +1665,8 @@ fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         bail!("Only a member queues this request; a sandbox does not block the lead");
     };
     let request_id = text(input, "request_id").to_owned();
-    let folder = std::env::current_dir().context("The member has no folder to queue in")?;
+    let member = team.member(&member_id).context("Unknown member")?;
+    let folder = member_outbox_folder(&team, member)?;
     let request = json!({"op":op, "request_id":request_id, "team":team.id, "member":member_id,
         "attempt":text(input, "attempt"), "input":input});
     let path = super::outbox::push(&folder, &request)?;
@@ -1995,7 +2010,14 @@ const RUN_WAIT_SECONDS: f64 = 90.0;
 /// the folder is the answer and never queues the run again; the wait is short,
 /// and asking again with the same request_id reads the result.
 fn team_run(input: &Value, wait: bool) -> anyhow::Result<Value> {
-    let folder = std::env::current_dir().context("The member has no folder to run in")?;
+    // N5: queue where the worker reads - the member's own folder, never this
+    // process's directory.
+    let store = Store::open(false)?;
+    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    let Actor::Member(member_id) = actor(&team, "run", input)? else {
+        bail!("Only a member runs a template; the lead runs commands itself")
+    };
+    let folder = member_outbox_folder(&team, team.member(&member_id).context("Unknown member")?)?;
     team_run_in(&folder, input, wait, RUN_WAIT_SECONDS)
 }
 
@@ -2614,6 +2636,47 @@ mod tests {
             let done = json!({"status":"ran","request_id":request,"exit":0,"tail":"done"});
             super::super::outbox::settle(&folder, &json!({"request_id":request}), &done).unwrap();
             assert_eq!(super::team_run_in(&folder, &input(request), false, 0.1).unwrap()["tail"], "done");
+        });
+        crate::state::teams::templates::settings_override(None);
+    }
+
+    /// N5: a sandboxed write queues in the member's own folder, never in the
+    /// process's directory: a member that ran `cd tray` before reporting would
+    /// otherwise queue where the worker never looks.
+    #[test]
+    fn a_sandboxed_write_queues_in_the_members_folder_not_the_process_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        crate::state::teams::templates::settings_override(Some(dir.path().join("templates.json")));
+        crate::state::with_test_state_root(dir.path(), || {
+            super::set_test_caller_identities(Some((Some("conv-dev".into()), None, None)));
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            team.folder = project.display().to_string();
+            let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            member.session = Some(SessionRef { name: "dsh/x/dev".into(), run_id: "r1".into(), conversation_id: "conv-dev".into(), ..Default::default() });
+            let attempt = team.task(1).unwrap().open_attempt().unwrap().id.clone();
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
+            let member_folder = std::path::PathBuf::from(
+                super::super::dispatcher::member_folder_path(&team, team.member("dev").unwrap()).unwrap(),
+            );
+            assert_eq!(member_folder, project);
+            let report = "22222222-2222-4222-8222-222222222222";
+            let input = json!({"request_id":report,"team":id,"attempt":attempt,"text":"Done and checked"});
+            let value = super::queue_write("report", &input, false).unwrap();
+            assert_eq!(value["status"], "queued", "{value}");
+            assert!(super::super::outbox::request_path(&member_folder, report).exists(), "the report queued outside the member's folder");
+            let run = "33333333-3333-4333-8333-333333333333";
+            let input = json!({"request_id":run,"team":id,"attempt":attempt,"template":"cargo-test","args":{"filter":"teams"}});
+            let value = super::team_run(&input, false).unwrap();
+            assert_eq!(value["status"], "queued", "{value}");
+            assert!(super::super::outbox::request_path(&member_folder, run).exists(), "the run queued outside the member's folder");
+            // Not in the directory this test process happens to run in.
+            let here = std::env::current_dir().unwrap();
+            assert!(!super::super::outbox::request_path(&here, report).exists());
+            assert!(!super::super::outbox::request_path(&here, run).exists());
         });
         crate::state::teams::templates::settings_override(None);
     }

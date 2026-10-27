@@ -282,7 +282,7 @@ Team parse(const QJsonObject &v)
     }
     for (const auto &folder : v.value("settings").toObject().value("evidence_folders").toArray())
         team.evidenceFolders.append(folder.toString());
-    team.revision = v.value("revision").toInteger(); team.created = v.value("created").toDouble(); team.updated = v.value("updated").toDouble();
+    team.revision = v.value("revision").toInteger(); team.phaseNumbersRevision = v.value("phase_numbers_revision").toInteger(); team.created = v.value("created").toDouble(); team.updated = v.value("updated").toDouble();
     const auto settings = v.value("settings").toObject();
     team.allHard = settings.value("all_hard").toBool();
     team.reportTimeout = settings.value("report_timeout_seconds").toInt(120);
@@ -684,7 +684,8 @@ Team parse(const QJsonObject &v)
         attention.kind = str(entry, "kind"); attention.task = entry.value("task").toInt();
         attention.member = str(entry, "member"); attention.since = entry.value("since").toDouble();
         attention.minutes = entry.value("minutes").toInt();
-        attention.summary = str(entry, "summary");
+        attention.summary = str(entry, "summary"); attention.command = str(entry, "command");
+        attention.phase = entry.value("phase").toInt(); attention.count = entry.value("count").toInt();
         team.attention.append(attention);
     }
     // F13: the plan's approval records the owner's sentence.
@@ -1411,14 +1412,27 @@ Role parseRole(const QJsonObject &v)
     r.permissionsProfile = str(v, "permissions_profile");   // B5: read, write, build, commit, network
     r.canMessage = str(v, "can_message"); r.dangerous = v.value("dangerous").toBool();
     for (const auto &tag : v.value("tags").toArray()) r.tags.append(tag.toString());
+    r.raw = v;
     return r;
+}
+
+namespace {
+// The known fields over the item's own object.
+QJsonObject over(QJsonObject raw, const QJsonObject &known)
+{
+    for (auto it = known.begin(); it != known.end(); ++it) raw.insert(it.key(), it.value());
+    return raw;
+}
 }
 
 QJsonObject Role::json() const
 {
-    return {{"id", id}, {"name", name}, {"color", color}, {"prompt", prompt}, {"agent", agent}, {"account", account},
+    auto o = over(raw, {{"id", id}, {"name", name}, {"color", color}, {"prompt", prompt}, {"agent", agent}, {"account", account},
             {"model", model}, {"effort", effort}, {"permissions", permissions}, {"computer", computer}, {"folder", folder},
-            {"can_message", canMessage}, {"dangerous", dangerous}, {"tags", QJsonArray::fromStringList(tags)}};
+            {"can_message", canMessage}, {"dangerous", dangerous}, {"tags", QJsonArray::fromStringList(tags)}});
+    if (!permissionsProfile.isEmpty()) o.insert("permissions_profile", permissionsProfile);
+    else o.remove("permissions_profile");
+    return o;
 }
 
 Template parseTemplate(const QJsonObject &v)
@@ -1429,33 +1443,48 @@ Template parseTemplate(const QJsonObject &v)
     t.maxMembers = v.value("max_members").toInt(6);
     for (const auto &seat : v.value("roster").toArray()) {
         const auto o = seat.toObject();
-        t.roster.append({str(o, "role"), o.value("count").toInt(1), o.value("optional").toBool()});
+        t.roster.append({str(o, "role"), o.value("count").toInt(1), o.value("optional").toBool(), o});
     }
     for (const auto &task : v.value("tasks").toArray()) {
         const auto o = task.toObject();
-        SkeletonTask k{str(o, "title"), str(o, "role"), {}};
+        SkeletonTask k{str(o, "title"), str(o, "role"), {}, o};
         for (const auto &d : o.value("deps").toArray()) k.deps.append(d.toInt());
         t.tasks.append(k);
     }
+    t.raw = v;
     return t;
 }
 
 QJsonObject Template::json() const
 {
     QJsonArray seats, skeleton;
-    for (const auto &s : roster) seats.append(QJsonObject{{"role", s.role}, {"count", s.count}, {"optional", s.optional}});
+    for (const auto &s : roster) seats.append(over(s.raw, {{"role", s.role}, {"count", s.count}, {"optional", s.optional}}));
     for (const auto &k : tasks) {
         QJsonArray deps; for (int d : k.deps) deps.append(d);
-        skeleton.append(QJsonObject{{"title", k.title}, {"role", k.role}, {"deps", deps}});
+        skeleton.append(over(k.raw, {{"title", k.title}, {"role", k.role}, {"deps", deps}}));
     }
-    return {{"id", id}, {"name", name}, {"description", description}, {"lead_protocol", leadProtocol}, {"roster", seats},
+    return over(raw, {{"id", id}, {"name", name}, {"description", description}, {"lead_protocol", leadProtocol}, {"roster", seats},
             {"tasks", skeleton}, {"planning", planning}, {"approval", approval}, {"phase_approval", phaseApproval},
-            {"max_members", maxMembers}};
+            {"max_members", maxMembers}});
 }
 
-Rule parseRule(const QJsonObject &v) { return {str(v, "id"), str(v, "when"), str(v, "template"), str(v, "approval")}; }
+// U25: `use` is a template id or "+role" and comes before `template`; the
+// editor shows a template rule's template either way.
+Rule parseRule(const QJsonObject &v)
+{
+    const auto use = str(v, "use");
+    return {str(v, "id"), str(v, "when"), !use.isEmpty() && !use.startsWith('+') ? use : str(v, "template"), str(v, "approval"), v};
+}
 
-QJsonObject Rule::json() const { return {{"id", id}, {"when", when}, {"template", templateId}, {"approval", approval}}; }
+// A "+role" rule keeps its use (validate reads use before template); a
+// template rule that came with use takes the edited template there too.
+QJsonObject Rule::json() const
+{
+    auto o = over(raw, {{"id", id}, {"when", when}, {"template", templateId}, {"approval", approval}});
+    const auto use = str(raw, "use");
+    if (!use.isEmpty() && !use.startsWith('+')) o.insert("use", templateId);
+    return o;
+}
 
 const Role *Catalog::role(const QString &id) const
 {

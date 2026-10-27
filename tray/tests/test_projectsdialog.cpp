@@ -25,6 +25,9 @@
 #include <QLineEdit>
 #include <functional>
 #include <QTimer>
+#include <QPointer>
+#include <QMessageBox>
+#include <QElapsedTimer>
 
 class TestProjectsDialog : public QObject {
     Q_OBJECT
@@ -32,6 +35,9 @@ private slots:
     void projectConnectionsGuideExplainsMissingCatalogsWithoutJoining();
     void cloneAddsFolderWithoutLaunchingSession();
     void projectPageHasHeaderAndCollapsibleBlocks();
+    void folderKindsFollowTheFleetAndTheTeams();
+    void projectSessionsFollowTheFleetWhileShown();
+    void projectSessionRowsAreBounded();
     void worktreeOverviewIsVisibleWithoutSelectingAProjectFolder();
     void projectColorChangesRequireApply_data();
     void projectColorChangesRequireApply();
@@ -112,7 +118,8 @@ void TestProjectsDialog::projectPageHasHeaderAndCollapsibleBlocks()
         chips.insert(table->item(row,2)->text(),table->item(row,0)->data(Qt::UserRole+1).toBool());
     }
     QCOMPARE(kinds.value("/work/orbit"),QString("Main checkout"));
-    QCOMPARE(kinds.value("/work/orbit-team-528aebfe-backend"),QString("Worktree · team/528aebfe/backend"));
+    // No session runs there: worktree or clone is the member agent's choice.
+    QCOMPARE(kinds.value("/work/orbit-team-528aebfe-backend"),QString("Team folder · team/528aebfe/backend"));
     QCOMPARE(kinds.value("/srv/orbit"),QString("Clone"));
     QVERIFY(chips.value("/work/orbit-team-528aebfe-backend"));QVERIFY(!chips.value("/work/orbit"));
     // The blocks with their counts.
@@ -127,10 +134,10 @@ void TestProjectsDialog::projectPageHasHeaderAndCollapsibleBlocks()
     QCOMPARE(sessions->item(1,1)->text(),QString("workstation"));QCOMPARE(sessions->item(1,2)->text(),QString("team/528aebfe/backend"));
     QCOMPARE(sessions->item(1,3)->text(),QString("Needs input"));QCOMPARE(sessions->item(1,3)->data(Qt::UserRole+1).toString(),QString("warn"));
     // A team member's worktree goes with its team.
-    for(int row=0;row<table->rowCount();++row)if(table->item(row,3)->text().startsWith("Worktree"))table->setCurrentCell(row,0);
+    for(int row=0;row<table->rowCount();++row)if(table->item(row,3)->text().startsWith("Team folder"))table->setCurrentCell(row,0);
     dialog.findChild<QPushButton *>("removeProjectFolder")->click();
     QCOMPARE(projects.group(project)->folders.size(),3);
-    QCOMPARE(dialog.findChild<QLabel *>("projectsStatus")->text(),QString("Team worktrees are removed with the team"));
+    QCOMPARE(dialog.findChild<QLabel *>("projectsStatus")->text(),QString("Team folders are removed with the team"));
     // New team… asks for this project; New session… is the primary action.
     dialog.findChild<QPushButton *>("projectNewTeam")->click();
     QCOMPARE(newTeam.size(),1);QCOMPARE(newTeam.first().first().toString(),project);
@@ -139,10 +146,188 @@ void TestProjectsDialog::projectPageHasHeaderAndCollapsibleBlocks()
     PageShots::shot(dialog,true,"ux-7-projects-dark");
     PageShots::shot(dialog,false,"ux-7-projects-light");
     // A block folds to its header and remembers it.
-    folders->findChild<QPushButton *>("collapsibleHeader")->click();
+    auto *foldersCard=dialog.findChild<QWidget *>("projectFoldersCard"),*sessionsCard=dialog.findChild<QWidget *>("projectSessionsCard");
+    auto *foldersHeader=folders->findChild<QPushButton *>("collapsibleHeader");
+    QVERIFY(foldersCard->height()>300);
+    foldersHeader->click();
     QVERIFY(!folders->findChild<QWidget *>("collapsibleBody")->isVisible());
+    // QA #399 (3): the page lays out again - the card shrinks to its header,
+    // which stays at its top, and the Sessions card follows right under it.
+    QTRY_VERIFY2(foldersCard->height()<=foldersHeader->height()+40,qPrintable(QString::number(foldersCard->height())));
+    QVERIFY(foldersHeader->mapTo(foldersCard,QPoint()).y()<=20);
+    QVERIFY(sessionsCard->y()>foldersCard->geometry().bottom());QVERIFY(sessionsCard->y()-foldersCard->geometry().bottom()<=20);
     PageShots::shot(dialog,true,"ux-7-projects-collapsed-dark");
-    folders->findChild<QPushButton *>("collapsibleHeader")->click();
+    PageShots::shot(dialog,false,"ux-7-projects-collapsed-light");
+    foldersHeader->click();
+    QTRY_VERIFY(foldersCard->height()>300);
+}
+
+namespace {
+SessionInfo folderSession(const QString &name,const QString &cwd,const QString &root,const QString &branch,bool worktree)
+{
+    SessionInfo s;s.name=name;s.cwd=cwd;s.gitRoot=root;s.gitBranch=branch;s.gitWorktree=worktree;return s;
+}
+QString folderKindAt(QTableWidget *table,const QString &path,bool *team=nullptr)
+{
+    for(int row=0;row<table->rowCount();++row)if(table->item(row,2)->text()==path){
+        if(team)*team=table->item(row,0)->data(Qt::UserRole+1).toBool();
+        return table->item(row,3)->text();
+    }
+    return {};
+}
+void selectFolder(QTableWidget *table,const QString &path)
+{
+    for(int row=0;row<table->rowCount();++row)if(table->item(row,2)->text()==path)table->setCurrentCell(row,0);
+}
+}
+
+// N24 (#386): a folder without Git is a Folder; a team member's own folder is
+// known by its generated path or by the member session running there, never
+// by its branch, so a team clone keeps its chip and a person's own worktree
+// on a "team/..." branch can be removed. N25: Remove folder asks first.
+void TestProjectsDialog::folderKindsFollowTheFleetAndTheTeams()
+{
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
+    QCoreApplication::setOrganizationName("hgs-project-kinds-test");QCoreApplication::setApplicationName("projects");QSettings().clear();
+    HgsClient client("/nonexistent/hgs");SessionOrganization projects;const auto project=projects.createGroup("Orbit");projects.markImported("workstation");
+    for(const auto &path:{"/work/orbit","/work/notes","/work/orbit-team-528aebfe-dsh","/work/orbit-mine","/work/orbit-member","/srv/orbit"})
+        projects.addFolder(project,"workstation",path);
+    BoxState ws;ws.host="workstation";ws.ok=true;ws.metrics=QJsonObject{{"platform","linux"}};
+    ws.sessions={folderSession("claude/orbit/main","/work/orbit/src","/work/orbit","main",false),
+                 folderSession("claude/notes/todo","/work/notes",{},{},false),
+                 folderSession("dsh/orbit/dsh","/work/orbit-team-528aebfe-dsh","/work/orbit-team-528aebfe-dsh","team/528aebfe/dsh",false),
+                 folderSession("codex/orbit/mine","/work/orbit-mine","/work/orbit-mine","team/experiment",true),
+                 folderSession("claude/orbit/qa","/work/orbit-member","/work/orbit-member","team/528aebfe/qa",true)};
+    FleetState fleet;fleet.setLocal(ws,1);
+    ProjectsDialog dialog(&client,nullptr,true,&projects);
+    dialog.setSessionsProvider([](const QString &){
+        ProjectsDialog::ProjectSession member{"", "claude/orbit/qa", "qa", "claude", "QA", "workstation", "team/528aebfe/qa", "Working", "active", "team-1", "/work/orbit-member"};
+        member.teamFolder=true;
+        return QList<ProjectsDialog::ProjectSession>{member};
+    });
+    dialog.setFleet(fleet);dialog.resize(1400,1000);dialog.selectProject(project);dialog.show();
+    auto *table=dialog.findChild<QTableWidget *>("projectFolders");QCOMPARE(table->rowCount(),6);
+    bool team=true;
+    QCOMPARE(folderKindAt(table,"/work/orbit",&team),QString("Main checkout · main"));QVERIFY(!team);
+    QCOMPARE(folderKindAt(table,"/work/notes",&team),QString("Folder"));QVERIFY(!team);
+    QCOMPARE(folderKindAt(table,"/work/orbit-team-528aebfe-dsh",&team),QString("Clone · team/528aebfe/dsh"));QVERIFY(team);
+    QCOMPARE(folderKindAt(table,"/work/orbit-mine",&team),QString("Worktree · team/experiment"));QVERIFY(!team);
+    QCOMPARE(folderKindAt(table,"/work/orbit-member",&team),QString("Worktree · team/528aebfe/qa"));QVERIFY(team);
+    QCOMPARE(folderKindAt(table,"/srv/orbit",&team),QString("Clone"));QVERIFY(!team);
+    PageShots::shot(dialog,true,"ux-7-projects-kinds-dark");
+    // The team clone goes with its team, running session or not.
+    selectFolder(table,"/work/orbit-team-528aebfe-dsh");
+    dialog.findChild<QPushButton *>("removeProjectFolder")->click();
+    QCOMPARE(projects.group(project)->folders.size(),6);
+    QCOMPARE(dialog.findChild<QLabel *>("projectsStatus")->text(),QString("Team folders are removed with the team"));
+    // A person's own worktree on a "team/..." branch: Remove folder asks;
+    // Cancel keeps it, Remove folder removes it (the files stay).
+    const auto answer=[&](bool remove,bool *asked){
+        QTimer::singleShot(0,&dialog,[&dialog,remove,asked]{
+            auto *confirm=dialog.findChild<QMessageBox *>("removeProjectFolderConfirm");QVERIFY(confirm);*asked=true;
+            QCOMPARE(confirm->windowTitle(),QString("Remove folder?"));
+            QVERIFY(confirm->text().contains("Files stay on disk."));QVERIFY(confirm->text().contains("/work/orbit-mine"));
+            if(remove)confirm->findChild<QPushButton *>("removeProjectFolderConfirmButton")->click();
+            else confirm->button(QMessageBox::Cancel)->click();
+        });
+    };
+    bool asked=false;
+    selectFolder(table,"/work/orbit-mine");answer(false,&asked);
+    dialog.findChild<QPushButton *>("removeProjectFolder")->click();
+    QVERIFY(asked);QCOMPARE(projects.group(project)->folders.size(),6);
+    // The folder menu asks the same question.
+    asked=false;selectFolder(table,"/work/orbit-mine");answer(false,&asked);
+    emit table->customContextMenuRequested(table->visualItemRect(table->currentItem()).center());
+    QPointer<QMenu> menu=dialog.findChild<QMenu *>("projectFolderMenu");QVERIFY(menu);
+    menu->findChild<QAction *>("contextRemoveProjectFolder")->trigger();delete menu.data();
+    QVERIFY(asked);QCOMPARE(projects.group(project)->folders.size(),6);
+    asked=false;selectFolder(table,"/work/orbit-mine");answer(true,&asked);
+    dialog.findChild<QPushButton *>("removeProjectFolder")->click();
+    QVERIFY(asked);QCOMPARE(projects.group(project)->folders.size(),5);
+    QVERIFY(folderKindAt(table,"/work/orbit-mine").isEmpty());
+}
+
+// N22 (#386): while the page shows, a fleet poll refreshes the Sessions rows
+// and the folder kinds in place (the folder selection stays), at most once a
+// second; a hidden page waits until it shows again.
+void TestProjectsDialog::projectSessionsFollowTheFleetWhileShown()
+{
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
+    QCoreApplication::setOrganizationName("hgs-project-live-test");QCoreApplication::setApplicationName("projects");QSettings().clear();
+    HgsClient client("/nonexistent/hgs");SessionOrganization projects;const auto project=projects.createGroup("Orbit");projects.markImported("workstation");
+    projects.addFolder(project,"workstation","/work/orbit");projects.addFolder(project,"workstation","/srv/orbit");
+    BoxState ws;ws.host="workstation";ws.ok=true;ws.metrics=QJsonObject{{"platform","linux"}};
+    ws.sessions={folderSession("claude/orbit/main","/work/orbit","/work/orbit","main",false)};
+    FleetState fleet;fleet.setLocal(ws,1);
+    QList<ProjectsDialog::ProjectSession> rows{{"", "claude/orbit/main", "main", "claude", "", "workstation", "main", "Working", "active", ""}};
+    int asked=0;
+    ProjectsDialog dialog(&client,nullptr,true,&projects);
+    dialog.setSessionsProvider([&](const QString &){++asked;return rows;});
+    dialog.setFleet(fleet);dialog.resize(1400,1000);dialog.selectProject(project);dialog.show();
+    auto *sessions=dialog.findChild<QTableWidget *>("projectSessions");auto *folders=dialog.findChild<QTableWidget *>("projectFolders");
+    QCOMPARE(sessions->rowCount(),1);QCOMPARE(sessions->item(0,3)->text(),QString("Working"));
+    QCOMPARE(folderKindAt(folders,"/work/orbit"),QString("Main checkout · main"));
+    selectFolder(folders,"/srv/orbit");
+    // The session finished, a new one started, the branch moved on.
+    rows[0].status="Ready";rows[0].tone="muted";
+    rows<<ProjectsDialog::ProjectSession{"", "codex/orbit/api", "api", "codex", "", "workstation", "feat/api", "Working", "active", "", {}, false, 10};
+    ws.sessions[0].gitBranch="release/2.5";fleet.setLocal(ws,2);
+    QTest::qWait(1100);const int before=asked;
+    for(int poll=0;poll<5;++poll)dialog.setFleet(fleet);
+    QTRY_COMPARE(sessions->rowCount(),2);
+    QCOMPARE(sessions->item(0,0)->data(Qt::UserRole).toString(),QString("codex/orbit/api"));
+    QCOMPARE(sessions->item(1,3)->text(),QString("Ready"));
+    QCOMPARE(folderKindAt(folders,"/work/orbit"),QString("Main checkout · release/2.5"));
+    QCOMPARE(folders->item(folders->currentRow(),2)->text(),QString("/srv/orbit"));
+    // Five polls, one refresh.
+    QTest::qWait(1200);QCOMPARE(asked,before+1);
+    // Hidden, the page skips the polls; shown again, it catches up.
+    dialog.hide();rows.removeFirst();dialog.setFleet(fleet);QTest::qWait(1200);
+    QCOMPARE(sessions->rowCount(),2);QCOMPARE(asked,before+1);
+    dialog.show();
+    QCOMPARE(sessions->rowCount(),1);QCOMPARE(sessions->item(0,0)->data(Qt::UserRole).toString(),QString("codex/orbit/api"));
+}
+
+// N23 (#386): the Sessions block lists the 50 newest sessions and opens the
+// rest in Sessions; the folder kinds take one pass over a machine's sessions,
+// so 40 folders on a machine with 10 000 sessions show at once.
+void TestProjectsDialog::projectSessionRowsAreBounded()
+{
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
+    QCoreApplication::setOrganizationName("hgs-project-bounded-test");QCoreApplication::setApplicationName("projects");QSettings().clear();
+    HgsClient client("/nonexistent/hgs");SessionOrganization projects;const auto project=projects.createGroup("Orbit");projects.markImported("workstation");
+    for(int i=0;i<40;++i)projects.addFolder(project,"workstation",QStringLiteral("/work/folder-%1").arg(i));
+    BoxState ws;ws.host="workstation";ws.ok=true;ws.metrics=QJsonObject{{"platform","linux"}};
+    for(int i=0;i<10000;++i)ws.sessions<<folderSession(QStringLiteral("codex/orbit/s%1").arg(i),QStringLiteral("/work/session-%1/./src/..").arg(i),QStringLiteral("/work/session-%1").arg(i),"main",false);
+    ws.sessions<<folderSession("codex/orbit/last","/work/folder-39","/work/folder-39","feat/last",false);
+    FleetState fleet;fleet.setLocal(ws,1);
+    QList<ProjectsDialog::ProjectSession> rows;
+    for(int i=0;i<120;++i)rows<<ProjectsDialog::ProjectSession{"", QStringLiteral("codex/orbit/s%1").arg(i), QStringLiteral("s%1").arg(i), "codex", "", "workstation", "main", "Ready", "muted", "", {}, false, i};
+    ProjectsDialog dialog(&client,nullptr,true,&projects);
+    dialog.setSessionsProvider([&rows](const QString &){return rows;});
+    dialog.setFleet(fleet);dialog.resize(1400,1000);
+    QElapsedTimer timer;timer.start();
+    dialog.selectProject(project);dialog.setTheme(true);
+    QVERIFY2(timer.elapsed()<2000,qPrintable(QString::number(timer.elapsed())));
+    auto *folders=dialog.findChild<QTableWidget *>("projectFolders");QCOMPARE(folders->rowCount(),40);
+    QCOMPARE(folderKindAt(folders,"/work/folder-39"),QString("Clone · feat/last"));
+    QCOMPARE(folderKindAt(folders,"/work/folder-0"),QString("Main checkout"));
+    dialog.show();
+    auto *sessions=dialog.findChild<QTableWidget *>("projectSessions");
+    QCOMPARE(sessions->rowCount(),ProjectsDialog::kSessionRows);
+    QCOMPARE(sessions->item(0,0)->data(Qt::UserRole).toString(),QString("codex/orbit/s119"));
+    QCOMPARE(sessions->item(49,0)->data(Qt::UserRole).toString(),QString("codex/orbit/s70"));
+    QCOMPARE(dialog.findChild<QLabel *>("projectSummary")->text(),QString("120 sessions · 0 in teams · 0 teams"));
+    auto *all=dialog.findChild<QPushButton *>("projectAllSessions");QVERIFY(all->isVisible());
+    QCOMPARE(all->text(),QString("Show all 120 in Sessions"));
+    QSignalSpy requested(&dialog,&ProjectsDialog::projectSessionsRequested);all->click();
+    QCOMPARE(requested.size(),1);QCOMPARE(requested.first().first().toString(),project);
+    // Fewer than 50: every row, no link.
+    rows.resize(3);dialog.selectProject(project);
+    QCOMPARE(sessions->rowCount(),3);QVERIFY(!all->isVisible());
 }
 
 void TestProjectsDialog::cloneAddsFolderWithoutLaunchingSession()

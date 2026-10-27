@@ -271,6 +271,8 @@ struct Team {
     // D1: settings.evidence_folders, where report evidence may be previewed.
     QStringList evidenceFolders;
     qint64 revision = 0;
+    // F11: the revision that last renumbered draft phases or tasks.
+    qint64 phaseNumbersRevision = 0;
     double created = 0, updated = 0;
     bool allHard = false;
     int reportTimeout = 120;
@@ -339,8 +341,9 @@ struct Team {
     const PhaseSummary *phaseSummaryOf(int n) const;
     const Health *phaseHealthOf(int n) const;
     // C4: the undecided reports on the owner's attention list.
-    // N17: an item without a task (a replan) says what it is in `summary`.
-    struct Attention { QString kind, member, summary; int task = 0, minutes = 0; double since = 0; };
+    // U18/N7: `summary` is the server's sentence (member and what waits),
+    // `command` the hgs command that answers it.
+    struct Attention { QString kind, member, summary, command; int task = 0, minutes = 0, phase = 0, count = 0; double since = 0; };
     QList<Attention> attention;
     // D2: findings_* from status (open items and the deferred list).
     QList<TeamFinding> findings;
@@ -560,24 +563,30 @@ QList<int> memberQueue(const Team &team, const QString &member);
 
 // The team catalog (`hgs team catalog get`): roles, templates, routing rules
 // and the designer's draft of proposed changes.
+// N1 (#379): every catalog item keeps the object it was read from (`raw`);
+// json() writes the fields the desktop edits over it, so a Save or an Export
+// carries the fields it does not know (a role's about, prompt_order, notes...,
+// a template's work and phases, a skeleton task's phase, a rule's use).
 struct Role {
     QString id, name, color, prompt, agent, account, model, effort, permissions, computer, folder, canMessage;
     QString permissionsProfile;   // B5: read, write, build, commit or network
     QStringList tags;
     bool dangerous = false;
+    QJsonObject raw;
     QJsonObject json() const;
 };
-struct Seat { QString role; int count = 1; bool optional = false; };
-struct SkeletonTask { QString title, role; QList<int> deps; };
+struct Seat { QString role; int count = 1; bool optional = false; QJsonObject raw; };
+struct SkeletonTask { QString title, role; QList<int> deps; QJsonObject raw; };
 struct Template {
     QString id, name, description, leadProtocol, planning, approval;
     QString phaseApproval;     // "" = same as the plan's approval
     QList<Seat> roster;
     QList<SkeletonTask> tasks;
     int maxMembers = 6;
+    QJsonObject raw;
     QJsonObject json() const;
 };
-struct Rule { QString id, when, templateId, approval; QJsonObject json() const; };
+struct Rule { QString id, when, templateId, approval; QJsonObject raw; QJsonObject json() const; };
 struct Proposal { QString id, kind, action, target, title, reason, state; QJsonObject value; double at = 0; };
 struct Catalog {
     qint64 version = 0;

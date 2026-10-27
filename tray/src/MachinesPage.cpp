@@ -383,6 +383,16 @@ void MachinesPage::renderRows() {
     const auto selected=m_new?QStringLiteral("@new"):m_selected;
     for (int i = 0; i < m_list->count(); ++i) if (m_list->item(i)->data(Qt::UserRole).toString() == selected) m_list->setCurrentRow(i);
     m_summary->setText(savedCount == 1 ? tr("%1 connected, 1 machine").arg(online) : tr("%1 connected, %2 machines").arg(online).arg(savedCount));
+    // N20: a fleet poll, an appearance click or a cancelled switch rebuilds
+    // the rows; the edits are still unsaved.
+    markUnsaved();
+}
+void MachinesPage::markUnsaved() {
+    for (int i = 0; i < m_list->count(); ++i) {
+        auto *item = m_list->item(i);
+        const bool dot = !m_new && m_dirty && item->data(Qt::UserRole).toString() == m_selected;
+        if (item->data(Qt::UserRole + 1).toBool() != dot) item->setData(Qt::UserRole + 1, dot);
+    }
 }
 void MachinesPage::loadSelection() {
     m_loading = true; QJsonObject row;
@@ -476,11 +486,7 @@ void MachinesPage::updateControls() {
     }
     // The amber dot beside a machine with unsaved edits; the refresh icon
     // turns while the list loads.
-    for (int i = 0; i < m_list->count(); ++i) {
-        auto *item = m_list->item(i);
-        const bool dot = !m_new && m_dirty && item->data(Qt::UserRole).toString() == m_selected;
-        if (item->data(Qt::UserRole + 1).toBool() != dot) item->setData(Qt::UserRole + 1, dot);
-    }
+    markUnsaved();
     PageCards::spin(m_refresh, m_request && m_operation == "ls");
     bool hasInheritedOverride = false;
     for (const auto &value : m_data.value("machines").toArray()) {

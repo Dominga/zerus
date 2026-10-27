@@ -929,6 +929,40 @@ answered; a denial cannot carry an explanation.
   horizontal position is kept across renders and polls like the vertical
   one. Graph and Layers keep their behaviour. Owner: yes.
 
+- **U34. A DeepSeek member's new worktree is ready for its sandbox (owner,
+  2026-10-27).** backend, backend2, qa and backend4 each started with every
+  command failing: `SetNamedSecurityInfoW failed (Win32 5): grantWrite(<worktree>)`.
+  The DeepSeek sandbox needs WRITE_DAC and WRITE_OWNER on the folder it
+  confines. A folder on a second drive (D:\Tools) inherits the drive's
+  default ACL: Authenticated Users Modify, no explicit right for the user, so
+  the owner has WRITE_DAC but not WRITE_OWNER and the provisioning fails;
+  under C:\Users\<user> the profile's explicit FullControl hides it. Each
+  time the member asked to run its ACL repair script and the owner fixed the
+  folder by hand. Zerus creates these worktrees itself (dispatcher.rs
+  `git worktree add`), so on Windows it grants the signed-in user an
+  explicit inheritable FullControl ACE on the folder it just created, before
+  the member starts; for a folder it did not create (a direct folder, an
+  existing worktree) a DeepSeek session start checks the effective rights
+  and, when they are missing, the session and the lead's inbox say so with
+  the one-line `icacls` fix for the owner instead of a failing sandbox. The
+  member never repairs ACLs itself. Owner: yes.
+
+- **U35. A second message to a working agent is not refused (owner,
+  2026-10-27, screenshot).** The team's coordinator composer often refuses a
+  message with "hgs: previous input has not been confirmed by the agent;
+  inspect Terminal before sending again". The guard in src/state/input.rs
+  holds every send until any native event arrives after the previous one
+  (`input_pending_at` against `last_event_at`), so a lead that thinks for a
+  minute without a tool call blocks the owner, and the error names a
+  Terminal the team view does not show. The owner's second message is
+  queued instead: hgs keeps it (bounded, in order, with its request id) and
+  delivers it once the agent confirms the previous input, the composer says
+  "queued until the lead takes your previous message" with Cancel; the
+  refusal stays only where it protects a real terminal state (a dialog, an
+  unknown prompt) and then offers Open terminal. The coordinator's quick-ask
+  chips ("Summarize status", "Re-plan remaining work" and the planning and
+  stuck pairs) are removed. Owner: yes.
+
 ## Phases 37-40 (replanned 2026-10-27)
 
 Phase 36 closed without its own build: its review findings and the build go to

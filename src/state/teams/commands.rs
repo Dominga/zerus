@@ -646,6 +646,7 @@ fn draft_start(input: &Value) -> anyhow::Result<Value> {
         caller_record().is_some(),
         nonempty_env("DSH_SESSION_ID").is_some(),
         nonempty_env("HGS_SESSION").is_some(),
+        nonempty_env("HGS_RUN_ID").is_some(),
     )?;
     let mut store = Store::open(true)?;
     let mut lead = input["lead"].clone();
@@ -673,13 +674,19 @@ fn expected_revision(op: &str, input: &Value) -> Option<u64> {
     }
 }
 
+/// U12/N4: one owner check for every path that can act as the owner. An agent
+/// session carries DSH_SESSION_ID, HGS_SESSION or HGS_RUN_ID and is refused.
+fn owner_caller(input: &Value, record: bool, dsh: bool, env: bool, run: bool) -> anyhow::Result<()> {
+    ensure!(!record && !dsh && !env && !run, "An agent session cannot act as the owner");
+    ensure!(text(input, "by") == "human", "Add \"by\":\"human\" to act as yourself");
+    Ok(())
+}
+
 /// C2: an operation before any team exists is yours: from a process outside
 /// every session, saying so.
-fn owner_without_team(input: &Value, record: bool, dsh: bool, env: bool) -> anyhow::Result<()> {
-    ensure!(!record && !dsh, "Only you start a draft team, not an agent session");
-    ensure!(!env, "Zerus could not verify the calling session");
-    ensure!(text(input, "by") == "human", "Add \"by\":\"human\" to start a draft as yourself");
-    Ok(())
+fn owner_without_team(input: &Value, record: bool, dsh: bool, env: bool, run: bool) -> anyhow::Result<()> {
+    owner_caller(input, record, dsh, env, run)
+        .context("Only you start a draft team, not an agent session")
 }
 
 fn draft_start_in(store: &mut Store, request: &str, input: &Value, lead: Value) -> anyhow::Result<Value> {
@@ -749,14 +756,21 @@ fn next_goal_as(store: &mut Store, request: &str, input: &Value, caller: &Actor)
     }
     let old = store.load(text(input, "team"))?.context("Unknown team")?;
     ensure!(old.status == TeamStatus::Done, "Only a done team starts the next goal");
-    let accepted = old.proposals.iter().any(|proposal| {
-        proposal["kind"] == "next-goal" && proposal["state"] == "accepted"
+    // N12: one next goal per done team, and the lead takes the accepted
+    // proposal's goal rather than a new one.
+    ensure!(old.next.is_empty(), "The next goal was already started for this team");
+    let accepted_goal = old.proposals.iter().find_map(|proposal| {
+        (proposal["kind"] == "next-goal" && proposal["state"] == "accepted")
+            .then(|| proposal["goal"].as_str().unwrap_or_default().trim().to_owned())
     });
     ensure!(
-        matches!(caller, Actor::Human) || (matches!(caller, Actor::Member(member) if *member == old.lead) && accepted),
+        matches!(caller, Actor::Human) || (matches!(caller, Actor::Member(member) if *member == old.lead) && accepted_goal.is_some()),
         "Only you, or the lead with an accepted next-goal proposal, start the next goal"
     );
-    let goal = text(input, "goal").trim().to_owned();
+    let goal = match caller {
+        Actor::Human => text(input, "goal").trim().to_owned(),
+        _ => accepted_goal.unwrap_or_default(),
+    };
     ensure!(!goal.is_empty(), "A next goal needs its goal");
     ensure!(goal.chars().count() <= 4000, "A goal has at most 4000 characters");
     let name = text(input, "name").trim().to_owned();
@@ -891,6 +905,15 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         Ok(Value::Null)
     })?;
     Ok(json!({"status":"accepted","proposal":id,"kind":kind,"result":result}))
+}
+
+/// N8: a sub-team's create input cannot set an owner-only setting.
+fn strip_subteam_owner_settings(settings: &mut Value) {
+    if let Some(object) = settings.as_object_mut() {
+        for key in ops::OWNER_SETTINGS {
+            object.remove(key);
+        }
+    }
 }
 
 /// Who creates a sub-team for a parent task (section 9.1): the assignee's own
@@ -1048,6 +1071,13 @@ fn parent_create(input: &Value, filled: &mut Value) -> anyhow::Result<Option<(St
     if text(filled, "project").is_empty() {
         filled["project"] = json!(parent.project.clone());
     }
+    // N8: a sub-team's create input cannot carry an owner-only setting; the
+    // parent's sub-team approval is inherited and the plan stays review.
+    if filled["settings"].is_object() {
+        let mut settings = filled["settings"].clone();
+        strip_subteam_owner_settings(&mut settings);
+        filled["settings"] = settings;
+    }
     // Section 9.3: a sub-team inherits who approves its plan unless the
     // request says otherwise.
     if filled["settings"].is_null() {
@@ -1083,8 +1113,14 @@ fn create(input: &Value) -> anyhow::Result<Value> {
                 lead["agent"] = json!(record["agent"]);
             }
         } else {
-            ensure!(nonempty_env("HGS_SESSION").is_none(), "Zerus could not verify the calling session");
-            ensure!(text(input, "by") == "human", "Run this from the lead's session, or add \"by\":\"human\" to act as yourself");
+            owner_caller(
+                input,
+                false,
+                nonempty_env("DSH_SESSION_ID").is_some(),
+                nonempty_env("HGS_SESSION").is_some(),
+                nonempty_env("HGS_RUN_ID").is_some(),
+            )
+            .context("Run this from the lead's session, or add \"by\":\"human\" to act as yourself")?;
         }
     }
     let (team, events) = ops::create(&uuid::Uuid::new_v4().to_string(), &filled)?;
@@ -1640,6 +1676,20 @@ fn read_only(error: &anyhow::Error) -> bool {
         .any(|sign| text.contains(sign))
 }
 
+/// N5: where a member's sandboxed write queues - the folder the worker reads a
+/// member's outbox from: the member's own folder as the team records it, never
+/// this process's directory. A member that ran `cd tray` and then reports would
+/// otherwise leave the request in `tray/.zerus-team/outbox`, where the worker
+/// never looks.
+fn member_outbox_folder(team: &Team, member: &Member) -> anyhow::Result<std::path::PathBuf> {
+    match super::dispatcher::member_folder_path(team, member) {
+        Ok(folder) if !folder.is_empty() => Ok(std::path::PathBuf::from(folder)),
+        // A team without a folder has no member folder either; the session's own
+        // directory is all there is.
+        _ => std::env::current_dir().context("The member has no folder to queue in"),
+    }
+}
+
 /// U20: a member in a sandbox may not write the team store, but it writes its
 /// own folder. The report, ask or commit waits there as `<request_id>.json` for
 /// the worker, which applies it with the same identity checks (folder + attempt
@@ -1651,7 +1701,8 @@ fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         bail!("Only a member queues this request; a sandbox does not block the lead");
     };
     let request_id = text(input, "request_id").to_owned();
-    let folder = std::env::current_dir().context("The member has no folder to queue in")?;
+    let member = team.member(&member_id).context("Unknown member")?;
+    let folder = member_outbox_folder(&team, member)?;
     let request = json!({"op":op, "request_id":request_id, "team":team.id, "member":member_id,
         "attempt":text(input, "attempt"), "input":input});
     let path = super::outbox::push(&folder, &request)?;
@@ -1754,20 +1805,20 @@ fn roster_word_names(team: &Team, op: &str, input: &Value) -> Vec<String> {
         "add-member" => {
             let member = &input["member"];
             let id = text(member, "id");
-            if id.is_empty() { Vec::new() } else { vec![id.to_owned()] }
+            if id.is_empty() { Vec::new() } else { vec!["add".to_owned(), id.to_owned()] }
         }
         "remove-member" => {
             let id = text(input, "member");
-            if id.is_empty() { Vec::new() } else { vec![id.to_owned()] }
+            if id.is_empty() { Vec::new() } else { vec!["remove".to_owned(), id.to_owned()] }
         }
         "swap-member" => {
             let id = text(input, "member");
-            if id.is_empty() { Vec::new() } else { vec![id.to_owned()] }
+            if id.is_empty() { Vec::new() } else { vec!["swap".to_owned(), id.to_owned()] }
         }
         "settings" => {
             let cap = input["settings"]["max_members"].as_u64();
             match cap {
-                Some(cap) if cap as usize != team.settings.max_members => vec![cap.to_string()],
+                Some(cap) if cap as usize != team.settings.max_members => vec!["max".to_owned(), cap.to_string()],
                 _ => Vec::new(),
             }
         }
@@ -1799,7 +1850,12 @@ fn check_roster_word(
     }
     let word = verify(team, input, &needed, super::super::now())
         .context("The lead changes the roster only on your word; without it, propose the change (F8)")?;
+    if let Some(used) = team.owner_word_used(word.event) {
+        bail!("That word was already used for {used}; ask the owner again");
+    }
     filled["owner_word_checked"] = serde_json::to_value(&word)?;
+    filled["owner_word_event"] = json!(word.event);
+    filled["owner_word_change"] = json!("the roster change");
     filled["roster_word"] = Value::Bool(true);
     Ok(())
 }
@@ -1985,11 +2041,28 @@ fn route_reply_down(store: &mut Store, parent_id: &str, input: &Value) -> anyhow
     .map(|_| ())
 }
 
+/// N4: how long `hgs team run --wait` waits by default: a short poll a member's
+/// shell can afford, never the template's whole bound (up to an hour).
+const RUN_WAIT_SECONDS: f64 = 90.0;
+
 /// U21: a member asks Zerus to run one built-in command template. Zerus runs it
-/// outside the member's sandbox (the worker is not confined), so the request
-/// goes through the U20 outbox in the member's own folder; the member waits for
-/// the exit code and the output tail.
-fn team_run(input: &Value, _wait: bool) -> anyhow::Result<Value> {
+/// outside the member's sandbox (a detached runner, C1), so the request goes
+/// through the U20 outbox in the member's own folder. N4: an answer already in
+/// the folder is the answer and never queues the run again; the wait is short,
+/// and asking again with the same request_id reads the result.
+fn team_run(input: &Value, wait: bool) -> anyhow::Result<Value> {
+    // N5: queue where the worker reads - the member's own folder, never this
+    // process's directory.
+    let store = Store::open(false)?;
+    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    let Actor::Member(member_id) = actor(&team, "run", input)? else {
+        bail!("Only a member runs a template; the lead runs commands itself")
+    };
+    let folder = member_outbox_folder(&team, team.member(&member_id).context("Unknown member")?)?;
+    team_run_in(&folder, input, wait, RUN_WAIT_SECONDS)
+}
+
+fn team_run_in(folder: &std::path::Path, input: &Value, wait: bool, wait_seconds: f64) -> anyhow::Result<Value> {
     let request_id = text(input, "request_id").to_owned();
     ensure!(canonical_uuid(&request_id), "A canonical request_id is required");
     let store = Store::open(false)?;
@@ -1999,25 +2072,58 @@ fn team_run(input: &Value, _wait: bool) -> anyhow::Result<Value> {
     };
     ensure!(member_id != team.lead, "The lead runs commands itself");
     let attempt_id = text(input, "attempt").to_owned();
-    let task = team
+    let attempt = team
         .tasks
         .iter()
         .find(|task| task.open_attempt().is_some_and(|attempt| attempt.id == attempt_id && attempt.member == member_id));
-    let Some(task) = task else { bail!("attempt {attempt_id} does not run for this member") };
-    let folder = std::env::current_dir().context("The member has no folder to run in")?;
+    let Some(task) = attempt else { bail!("attempt {attempt_id} does not run for this member") };
+    // N4: an outcome already there answers at once; the same request never runs twice.
+    if let Some(result) = super::outbox::result(folder, &request_id) {
+        return Ok(result);
+    }
+    if super::outbox::running(folder, &request_id).is_some() {
+        return Ok(if wait {
+            super::outbox::wait(folder, &request_id, wait_seconds).unwrap_or_else(|| running_note(&request_id))
+        } else {
+            running_note(&request_id)
+        });
+    }
+    if let Some(queued) = super::outbox::request(folder, &request_id) {
+        // A push of the same id is already queued: answer its state, do not push
+        // a second file (the member retried because the first call did not wait).
+        ensure!(
+            queued["template"] == input["template"] && queued["args"] == input["args"],
+            "request_id {request_id} is already used by another run; use a new UUID"
+        );
+        return Ok(json!({
+            "status":"queued", "request_id":request_id,
+            "path":super::outbox::request_path(folder, &request_id).to_string_lossy(),
+            "note":"This run is already queued; ask again with the same request_id (or --wait) to read its result."
+        }));
+    }
     // Validate here too: a bad template never reaches the worker's queue.
     let template = text(input, "template").to_owned();
-    super::templates::plan(&template, &input["args"], &folder)?;
+    super::templates::plan(&template, &input["args"], folder)?;
     let request = json!({"op":"run","request_id":request_id,"team":team.id,"member":member_id,"attempt":attempt_id,
         "template":template,"args":input["args"].clone(),"task":task.id,"input":input});
-    let path = super::outbox::push(&folder, &request)?;
-    let bounded = super::templates::timeout_for(&template);
+    let path = super::outbox::push(folder, &request)?;
     let queued = json!({
         "status":"queued", "request_id":request_id, "path":path.to_string_lossy(),
-        "note":"Zerus runs the template outside your sandbox; the result waits in your folder."
+        "note":"Zerus runs the template outside your sandbox; ask again with the same request_id (or --wait) to read the exit code."
     });
-    // The run's own bound plus the worker's poll: a long build is not cut short.
-    Ok(super::outbox::wait(&folder, &request_id, bounded as f64 + 30.0).unwrap_or(queued))
+    if !wait {
+        return Ok(queued);
+    }
+    Ok(super::outbox::wait(folder, &request_id, wait_seconds).unwrap_or_else(|| json!({
+        "status":"running", "request_id":request_id,
+        "note":"The run has not finished yet; ask again with the same request_id to read its exit code."
+    })))
+}
+
+/// N4: the answer while a runner still holds the claim.
+fn running_note(request_id: &str) -> Value {
+    json!({"status":"running","request_id":request_id,
+        "note":"Zerus is running it; ask again with the same request_id to read the exit code."})
 }
 
 /// U21: the built-in set, the owner's additions and the global off switch.
@@ -2172,6 +2278,8 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // check below fills it, from the lead's own session.
             if let Some(object) = filled.as_object_mut() {
                 object.remove("owner_word_checked");
+                object.remove("owner_word_event");
+                object.remove("owner_word_change");
                 object.remove("roster_word");
             }
             if op == "use-last-reply" && text(input, "attempt").is_empty() {
@@ -2228,7 +2336,12 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                         .filter(|word| word.is_object())
                         .context("The lead approves only on the owner's word: pass \"owner_word\" with the owner's sentence")?;
                     let verified = super::owner_word::verify(&team, word, super::super::now())?;
+                    if let Some(used) = team.owner_word_used(verified.event) {
+                        bail!("That word was already used for {used}; ask the owner again");
+                    }
                     filled["owner_word_checked"] = serde_json::to_value(&verified)?;
+                    filled["owner_word_event"] = json!(verified.event);
+                    filled["owner_word_change"] = json!(if op == "approve" { "the plan approval" } else { "the phase approval" });
                 }
             }
             // U26: a lead changes the roster (or max_members) only on the
@@ -2294,6 +2407,11 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     if args.len() == 2 && args[0] == "worker" && args[1] == "--stop" {
         return super::dispatcher::stop_worker();
     }
+    // C1: the detached runner of one claimed template run; the worker starts it,
+    // hands it the request on standard input and never waits for a command.
+    if args.len() == 2 && args[0] == "worker" && args[1] == "--run" {
+        return super::dispatcher::worker_run();
+    }
     // H2: `--json` reads stdin; `--json-file PATH` reads the same request from
     // a file (PowerShell 5.1 turns Cyrillic in a pipe into "?").
     let mut args = args.to_vec();
@@ -2332,8 +2450,20 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
         return Err("A JSON object is required".into());
     }
     let result = if catalog {
-        // The designer proposes from its session; only you decide and apply.
-        let human = caller_record().is_none() && nonempty_env("HGS_SESSION").is_none() && text(&input, "by") == "human";
+        // N4: the catalog's owner path applies the same agent-session rule.
+        let human = if text(&input, "by") == "human" {
+            owner_caller(
+                &input,
+                caller_record().is_some(),
+                nonempty_env("DSH_SESSION_ID").is_some(),
+                nonempty_env("HGS_SESSION").is_some(),
+                nonempty_env("HGS_RUN_ID").is_some(),
+            )
+            .map_err(|error| error.to_string())?;
+            true
+        } else {
+            false
+        };
         super::catalog::run(&operation, &input, human)
     } else {
         run(&operation, &input, wait)
@@ -2828,6 +2958,97 @@ mod tests {
         });
     }
 
+    /// N4/F1: `hgs team run` answers from the member's folder: a result already
+    /// there never queues the run again, the wait is short, and the same
+    /// request_id reads the outcome instead of running the command twice.
+    #[test]
+    fn a_run_answers_without_queueing_it_twice_and_waits_briefly() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("work");
+        std::fs::create_dir_all(&folder).unwrap();
+        crate::state::teams::templates::settings_override(Some(dir.path().join("templates.json")));
+        crate::state::with_test_state_root(dir.path(), || {
+            super::set_test_caller_identities(Some((Some("conv-dev".into()), None, None)));
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            team.folder = folder.display().to_string();
+            let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            member.session = Some(SessionRef { name: "dsh/x/dev".into(), run_id: "r1".into(), conversation_id: "conv-dev".into(), ..Default::default() });
+            let attempt = team.task(1).unwrap().open_attempt().unwrap().id.clone();
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            let input = |request: &str| json!({"request_id":request,"team":id,"attempt":attempt,"template":"cargo-test","args":{"filter":"teams"}});
+            // An answer already in the folder is the answer: no push, no wait.
+            let request = "22222222-2222-4222-8222-222222222222";
+            std::fs::create_dir_all(super::super::outbox::dir(&folder)).unwrap();
+            let answer = json!({"status":"ran","request_id":request,"exit":0,"tail":"old"});
+            std::fs::write(super::super::outbox::result_path(&folder, request), serde_json::to_vec(&answer).unwrap()).unwrap();
+            let value = super::team_run_in(&folder, &input(request), false, 0.1).unwrap();
+            assert_eq!((value["status"].as_str(), value["tail"].as_str()), (Some("ran"), Some("old")));
+            assert!(!super::super::outbox::request_path(&folder, request).exists(), "the result queued the run again");
+            // A short wait, not the template's 1800 s.
+            let request = "33333333-3333-4333-8333-333333333333";
+            let started = std::time::Instant::now();
+            let value = super::team_run_in(&folder, &input(request), true, 0.2).unwrap();
+            assert!(started.elapsed() < std::time::Duration::from_secs(10), "the wait took {:?}", started.elapsed());
+            assert_eq!(value["status"], "running", "{value}");
+            assert!(super::super::outbox::request(&folder, request).is_some(), "the queued request left");
+            // Asking again with the same id reads the queue; another run cannot reuse it.
+            let value = super::team_run_in(&folder, &input(request), false, 0.1).unwrap();
+            assert_eq!(value["status"], "queued", "{value}");
+            let mut other = input(request);
+            other["template"] = json!("cargo-clippy");
+            let error = super::team_run_in(&folder, &other, false, 0.1).unwrap_err().to_string();
+            assert!(error.contains("already used by another run"), "{error}");
+            // A result written later comes back without a wait.
+            let done = json!({"status":"ran","request_id":request,"exit":0,"tail":"done"});
+            super::super::outbox::settle(&folder, &json!({"request_id":request}), &done).unwrap();
+            assert_eq!(super::team_run_in(&folder, &input(request), false, 0.1).unwrap()["tail"], "done");
+        });
+        crate::state::teams::templates::settings_override(None);
+    }
+
+    /// N5: a sandboxed write queues in the member's own folder, never in the
+    /// process's directory: a member that ran `cd tray` before reporting would
+    /// otherwise queue where the worker never looks.
+    #[test]
+    fn a_sandboxed_write_queues_in_the_members_folder_not_the_process_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        crate::state::teams::templates::settings_override(Some(dir.path().join("templates.json")));
+        crate::state::with_test_state_root(dir.path(), || {
+            super::set_test_caller_identities(Some((Some("conv-dev".into()), None, None)));
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            team.folder = project.display().to_string();
+            let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            member.session = Some(SessionRef { name: "dsh/x/dev".into(), run_id: "r1".into(), conversation_id: "conv-dev".into(), ..Default::default() });
+            let attempt = team.task(1).unwrap().open_attempt().unwrap().id.clone();
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
+            let member_folder = std::path::PathBuf::from(
+                super::super::dispatcher::member_folder_path(&team, team.member("dev").unwrap()).unwrap(),
+            );
+            assert_eq!(member_folder, project);
+            let report = "22222222-2222-4222-8222-222222222222";
+            let input = json!({"request_id":report,"team":id,"attempt":attempt,"text":"Done and checked"});
+            let value = super::queue_write("report", &input, false).unwrap();
+            assert_eq!(value["status"], "queued", "{value}");
+            assert!(super::super::outbox::request_path(&member_folder, report).exists(), "the report queued outside the member's folder");
+            let run = "33333333-3333-4333-8333-333333333333";
+            let input = json!({"request_id":run,"team":id,"attempt":attempt,"template":"cargo-test","args":{"filter":"teams"}});
+            let value = super::team_run(&input, false).unwrap();
+            assert_eq!(value["status"], "queued", "{value}");
+            assert!(super::super::outbox::request_path(&member_folder, run).exists(), "the run queued outside the member's folder");
+            // Not in the directory this test process happens to run in.
+            let here = std::env::current_dir().unwrap();
+            assert!(!super::super::outbox::request_path(&here, report).exists());
+            assert!(!super::super::outbox::request_path(&here, run).exists());
+        });
+        crate::state::teams::templates::settings_override(None);
+    }
+
     #[test]
     fn findings_pages_are_stable_with_a_before_cursor() {
         use crate::state::teams::model::{Finding, Team};
@@ -2987,6 +3208,52 @@ mod tests {
     }
 
     #[test]
+    fn one_owner_word_is_spent_on_one_roster_change() {
+        use rusqlite::Connection;
+        let now = crate::state::now();
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);").unwrap();
+        for (seq, text) in [(1, "Please remove dev from the roster"), (2, "Please remove dev from the roster again")] {
+            db.execute("INSERT INTO events(seq,name,conversation,payload) VALUES (?1,'claude/x/lead','c1',?2)",
+                rusqlite::params![seq, json!({"type":"UserPromptSubmit","at":now - 60.0,"agent_id":"","detail":text}).to_string()]).unwrap();
+        }
+        let mut team = Team { id: "t".into(), name: "T".into(), lead: "lead".into(), status: TeamStatus::Running, ..Default::default() };
+        team.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
+        let caller = Actor::Member("lead".into());
+        let verify = |_: &Team, input: &Value, needed: &[String], now: f64| {
+            super::super::owner_word::verify_roster_in(&db, "claude/x/lead", "c1", input["owner_word"]["text"].as_str().unwrap_or_default(), needed, now)
+        };
+        let base = json!({"member":"dev"});
+        let mut first = base.clone();
+        first["owner_word"] = json!({"text":"Please remove dev from the roster"});
+        let input = first.clone();
+        super::check_roster_word(&team, "remove-member", &input, &mut first, &caller, verify).unwrap();
+        // The operation spends the event on the team.
+        let event = first["owner_word_event"].as_i64().unwrap();
+        team.record_owner_word(event, "the roster change");
+        let mut second = base.clone();
+        second["owner_word"] = json!({"text":"Please remove dev from the roster"});
+        let input = second.clone();
+        let error = super::check_roster_word(&team, "remove-member", &input, &mut second, &caller, verify).unwrap_err().to_string();
+        assert!(error.contains("already used"), "{error}");
+        // A new sentence works.
+        let mut third = base.clone();
+        third["owner_word"] = json!({"text":"Please remove dev from the roster again"});
+        let input = third.clone();
+        super::check_roster_word(&team, "remove-member", &input, &mut third, &caller, verify).unwrap();
+    }
+
+    #[test]
+    fn a_subteam_create_input_cannot_set_owner_settings() {
+        let mut settings = json!({"auto_accept":true,"max_members":99,"tree_depth":8,"subteam_approval":"owner","report_timeout_seconds":90});
+        super::strip_subteam_owner_settings(&mut settings);
+        for key in ["auto_accept", "max_members", "tree_depth", "subteam_approval"] {
+            assert!(settings.get(key).is_none(), "{key} survived");
+        }
+        assert_eq!(settings["report_timeout_seconds"], 90);
+    }
+
+    #[test]
     fn a_lead_starts_the_next_goal_only_after_an_accepted_proposal() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
@@ -3011,11 +3278,24 @@ mod tests {
         let value = super::next_goal_as(
             &mut store,
             "99999999-9999-4999-8999-999999999999",
-            &json!({"request_id":"99999999-9999-4999-8999-999999999999","team":"done2","goal":"two"}),
+            &json!({"request_id":"99999999-9999-4999-8999-999999999999","team":"done2","goal":"other"}),
             &Actor::Member("lead".into()),
         )
         .unwrap();
         assert_eq!(value["status"], "planned");
+        // N12: the accepted proposal's goal is used, and the done team cannot
+        // start a second next goal.
+        let next = store.load(value["team"].as_str().unwrap()).unwrap().unwrap();
+        assert_eq!(next.goal, "two");
+        let error = super::next_goal_as(
+            &mut store,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            &json!({"request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","team":"done2","goal":"three"}),
+            &Actor::Member("lead".into()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("already started"), "{error}");
     }
 
     #[test]
@@ -4156,11 +4436,11 @@ mod tests {
     fn only_the_owner_outside_every_session_starts_a_draft() {
         // C2: no team exists yet to prove a member by.
         let owner = json!({"by":"human"});
-        owner_without_team(&owner, false, false, false).unwrap();
-        for (record, dsh, env) in [(true, false, false), (false, true, false), (false, false, true)] {
-            assert!(owner_without_team(&owner, record, dsh, env).is_err(), "{record} {dsh} {env}");
+        owner_without_team(&owner, false, false, false, false).unwrap();
+        for (record, dsh, env, run) in [(true, false, false, false), (false, true, false, false), (false, false, true, false), (false, false, false, true)] {
+            assert!(owner_without_team(&owner, record, dsh, env, run).is_err(), "{record} {dsh} {env} {run}");
         }
-        assert!(owner_without_team(&json!({}), false, false, false).is_err());
+        assert!(owner_without_team(&json!({}), false, false, false, false).is_err());
     }
 
     #[test]

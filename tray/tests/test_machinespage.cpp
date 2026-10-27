@@ -32,6 +32,7 @@ class TestMachinesPage : public QObject {
 private slots:
     void init();
     void unsavedEditsGateActionsAndTheLabelHasSwatches();
+    void unsavedDotSurvivesRowRebuilds();
     void removalRequiresExplicitConfirmationOfSameConnection_data();
     void removalRequiresExplicitConfirmationOfSameConnection();
     void localReadOnlyAndNewProfileCannotOverwrite();
@@ -496,6 +497,46 @@ void TestMachinesPage::unsavedEditsGateActionsAndTheLabelHasSwatches()
     QVERIFY(notice->isVisible());
     PageShots::shot(page, true, "ux-7-machines-new-draft-dark");
     PageShots::shot(page, false, "ux-7-machines-new-draft-light");
+}
+
+// N20 (#386): every rebuild of the rows keeps the amber dot while the edits
+// stay unsaved - a fleet poll, a swatch, Bright, Soft, Automatic and a
+// cancelled switch to another machine.
+void TestMachinesPage::unsavedDotSurvivesRowRebuilds()
+{
+    MachinesPage page(FakeCli::program(m_script)); start(page); page.resize(1200, 900); page.show();
+    auto *list = widget<QListWidget>(page, "machineProfiles");
+    list->setCurrentRow(1);
+    const QString machine = list->currentItem()->data(Qt::UserRole).toString();
+    QTRY_VERIFY(widget<QLineEdit>(page, "machineHostname")->isEnabled());
+    const auto dot = [&] {
+        for (int i = 0; i < list->count(); ++i)
+            if (list->item(i)->data(Qt::UserRole).toString() == machine) return list->item(i)->data(Qt::UserRole + 1).toBool();
+        return false;
+    };
+    const auto dots = [&] { int n = 0; for (int i = 0; i < list->count(); ++i) n += list->item(i)->data(Qt::UserRole + 1).toBool(); return n; };
+    widget<QLineEdit>(page, "machineHostname")->setText("10.0.4.21");
+    QVERIFY(dot());
+    // A fleet poll rebuilds the rows.
+    BoxState local; local.host = "arch"; local.ok = true; FleetState fleet; fleet.setLocal(local, 1); page.setFleet(fleet);
+    QVERIFY(dot()); QCOMPARE(dots(), 1);
+    // The label's swatch, Bright, Soft and Automatic.
+    page.findChildren<QPushButton *>("machineSwatch").at(3)->click(); QVERIFY(dot());
+    widget<QPushButton>(page, "machineLabelBright")->click(); QVERIFY(dot());
+    widget<QPushButton>(page, "machineLabelSoft")->click(); QVERIFY(dot());
+    widget<QPushButton>(page, "resetMachineColor")->click(); QVERIFY(dot());
+    // Another machine, then Cancel on the prompt: still the same edits.
+    bool asked = false;
+    QTimer::singleShot(0, &page, [&] {
+        auto *dialog = page.findChild<QMessageBox *>("unsavedMachineDialog"); QVERIFY(dialog);
+        asked = true; dialog->button(QMessageBox::Cancel)->click();
+    });
+    list->setCurrentRow(0);
+    QVERIFY(asked);
+    QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(), machine);
+    QVERIFY(dot()); QCOMPARE(dots(), 1);
+    QCOMPARE(widget<QLineEdit>(page, "machineHostname")->text(), QString("10.0.4.21"));
+    QVERIFY(widget<QLabel>(page, "machineUnsavedNotice")->isVisible());
 }
 
 void TestMachinesPage::preview()

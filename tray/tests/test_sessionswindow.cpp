@@ -260,6 +260,8 @@ private slots:
     void teamLeftoverStopAsksTheRealAction();
     void readmeScreenshots();
     void leadSessionHeaderCarriesTheTeam();
+    void teamAttentionReachesTheNotifications();
+    void designerSessionDropsTheTeamHeader();
     void groupsPersistFilterAndRevealAttention();
     void rebuildKeepsProjectOrderAtScale_data();
     void rebuildKeepsProjectOrderAtScale();
@@ -500,6 +502,7 @@ private slots:
     void projectOrderAndDefaultBadge();
     void projectsEmbeddedAndRemote();
     void projectColorsApplyOrCancel();
+    void projectSessionBadgesFollowTheStatusContract();
     void legacyProjectsMigrateWithBackupAndLocalFolders();
     void batchActionsAndReturnToSessions();
     void searchResultKeepsItsSessionAndSnapshot();
@@ -1686,6 +1689,81 @@ void TestSessionsWindow::readmeScreenshots()
 // the chips; a member's header does not, and the Team tab has no name bar.
 // The compact composer's row under the field has three zones, the centre one
 // centred under the field. ZERUS_TEAM_SHOTS=<dir> keeps both, dark and light.
+// N7 (#364, U18): a team's attention item reaches the desktop notifications
+// once (TrayAgent posts teamAttentionRaised to its AttentionNotifier), is
+// withdrawn when it is gone, and its click opens the team.
+void TestSessionsWindow::teamAttentionReachesTheNotifications()
+{
+    const QStringList keys{"workspace/organization", "workspace/inspectorVisible", "teams/attentionNotified"};
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) QSettings().remove(key); });
+    QSettings().remove("teams/attentionNotified");
+    QSettings().setValue("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
+    const double now = QDateTime::currentSecsSinceEpoch();
+    const auto plain = ReadmeShots::fleet(now);
+    auto team = ReadmeShots::team(now);
+    team["attention"] = QJsonArray{QJsonObject{{"kind", "permission"}, {"member", "Backend"}, {"since", now - 1800}, {"minutes", 30},
+        {"summary", "Backend waits for your answer: Bash cargo test -p payments"},
+        {"command", R"({"request_id":"<new request id>","team":"team-checkout","member":"backend"} | hgs team answer --json)"}}};
+    QJsonObject data{{"inspect", ReadmeShots::conversations(plain, now)}, {"accounts", ReadmeShots::accounts(now)}, {"team", team},
+                     {"feed", ReadmeShots::feed(now)}, {"catalog", ReadmeShots::catalog()}, {"organization", ReadmeShots::organization()}};
+    const QString fixture = m_dir->filePath("hgs-team-attention");
+    QVERIFY(FakeCli::install(fixture, ReadmeShots::program));
+    QVERIFY(FakeCli::replace(fixture + ".json", QJsonDocument(data).toJson(QJsonDocument::Compact)));
+    SessionsWindow window(FakeCli::program(fixture)); window.resize(1440, 900); window.setFleet(plain);
+    QSignalSpy raised(&window, &SessionsWindow::teamAttentionRaised), cleared(&window, &SessionsWindow::teamAttentionCleared);
+    window.show();
+    auto *controller = window.findChild<TeamController *>(); QVERIFY(controller);
+    QTRY_COMPARE_WITH_TIMEOUT(raised.size(), 1, 10000);
+    QCOMPARE(raised[0][1].toString(), QStringLiteral("Team Checkout v2 needs you"));
+    QCOMPARE(raised[0][2].toString(), QStringLiteral("Backend waits for your answer: Bash cargo test -p payments · 30 min"));
+    QVERIFY(raised[0][0].toString().startsWith(QStringLiteral("zerus-team-attention:team-checkout:permission:Backend:")));
+    // Later polls: the same item, no second notification.
+    for (int poll = 0; poll < 3; ++poll) { controller->refresh(); QTest::qWait(300); }
+    QCOMPARE(raised.size(), 1); QCOMPARE(cleared.size(), 0);
+    // A click opens the team.
+    window.showTeamAttention(raised[0][0].toString());
+    QTRY_VERIFY(window.findChild<QWidget *>("teamWorkspace") && window.findChild<QWidget *>("teamWorkspace")->isVisible());
+    // Answered: the notification is withdrawn.
+    team.remove("attention"); data["team"] = team;
+    QVERIFY(FakeCli::replace(fixture + ".json", QJsonDocument(data).toJson(QJsonDocument::Compact)));
+    QTRY_VERIFY_WITH_TIMEOUT(([&] { controller->refresh(); return cleared.size() == 1; })(), 10000);
+    QCOMPARE(cleared[0][0].toString(), raised[0][0].toString());
+    QCOMPARE(raised.size(), 1);
+}
+
+// N12 (#382): from the lead's session (its team's pill, Pause and Stop in the
+// header) to the Team designer's session: no team header and no team action
+// stays behind to act on that team.
+void TestSessionsWindow::designerSessionDropsTheTeamHeader()
+{
+    const QStringList keys{"workspace/skin", "workspace/organization", "workspace/inspectorVisible", "teams/attentionNotified"};
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) QSettings().remove(key); sessionCardTileInset() = 0; });
+    QSettings().setValue("workspace/skin", "whitewh");
+    QSettings().setValue("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
+    QSettings().setValue("workspace/inspectorVisible", false);
+    const double now = QDateTime::currentSecsSinceEpoch();
+    QTemporaryDir git; QVERIFY(git.isValid()); QVERIFY(QDir(git.path()).mkdir(".git"));
+    const auto fleet = ReadmeShots::fleet(now, git.path());
+    const QJsonObject data{{"inspect", ReadmeShots::conversations(fleet, now)}, {"accounts", ReadmeShots::accounts(now)}, {"team", ReadmeShots::team(now)},
+                           {"feed", ReadmeShots::feed(now)}, {"catalog", ReadmeShots::catalog()}, {"organization", ReadmeShots::organization()}};
+    const QString fixture = m_dir->filePath("hgs-designer-header");
+    QVERIFY(FakeCli::install(fixture, ReadmeShots::program));
+    QVERIFY(FakeCli::replace(fixture + ".json", QJsonDocument(data).toJson(QJsonDocument::Compact)));
+    SessionsWindow window(FakeCli::program(fixture)); window.resize(1440, 900); window.setFleet(fleet); window.show();
+    auto *controller = window.findChild<TeamController *>(); QVERIFY(controller);
+    QTRY_COMPARE_WITH_TIMEOUT(controller->teams().size(), 1, 10000);
+    auto *details = window.findChild<QWidget *>("sessionDetailPanel"); QVERIFY(details);
+    const auto shown = [details](const char *name) { auto *w = details->findChild<QWidget *>(name); return w && w->isVisible(); };
+    window.showSession({}, "claude/orbit/checkout");
+    QTRY_VERIFY_WITH_TIMEOUT(shown("teamHeaderStatus") && shown("teamWorkspacePause"), 10000);
+    window.showSession({}, "claude/team-designer/team-designer");
+    QTRY_VERIFY(!shown("teamHeaderStatus"));
+    QVERIFY(!shown("teamWorkspacePause")); QVERIFY(!shown("teamWorkspaceStop"));
+    // And back: the lead's header returns.
+    window.showSession({}, "claude/orbit/checkout");
+    QTRY_VERIFY(shown("teamHeaderStatus") && shown("teamWorkspacePause"));
+}
+
 void TestSessionsWindow::leadSessionHeaderCarriesTheTeam()
 {
     const QStringList keys{"workspace/skin", "workspace/theme", "workspace/organization", "workspace/inspectorVisible", "workspace/collapsedTeams"};
@@ -13021,8 +13099,19 @@ void TestSessionsWindow::projectFolderActionsKeepTargets()
     table->customContextMenuRequested(table->visualItemRect(table->item(0,0)).center());
     menu=page->findChild<QMenu *>("projectFolderMenu");QVERIFY(menu);
     menu->findChild<QAction *>("contextOpenProjectFolder")->trigger();QCOMPARE(files.urls.size(),2);
-    page->selectProject(second);menu->findChild<QAction *>("contextRemoveProjectFolder")->trigger();
-    QSignalSpy launches(page,&ProjectsDialog::newSessionRequested);menu->findChild<QAction *>("contextNewProjectFolderSession")->trigger();QCOMPARE(launches.size(),0);delete menu.data();
+    page->selectProject(second);
+    // N25: Remove folder asks first; the question names the menu's project.
+    // The question closes the menu, which deletes itself: its New session…
+    // is kept to try on the removed folder afterwards.
+    QPointer<QAction> launch=menu->findChild<QAction *>("contextNewProjectFolderSession");launch->setParent(page);
+    bool askedRemove=false;
+    QTimer::singleShot(0,page,[&]{
+        auto *confirm=page->findChild<QMessageBox *>("removeProjectFolderConfirm");QVERIFY(confirm);askedRemove=true;
+        QVERIFY(confirm->text().contains(QStringLiteral("from First?")));
+        confirm->findChild<QPushButton *>("removeProjectFolderConfirmButton")->click();
+    });
+    menu->findChild<QAction *>("contextRemoveProjectFolder")->trigger();QVERIFY(askedRemove);delete menu.data();
+    QSignalSpy launches(page,&ProjectsDialog::newSessionRequested);launch->trigger();QCOMPARE(launches.size(),0);delete launch.data();
     const SessionOrganization saved(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
     QCOMPARE(saved.group(first)->folders.size(),2);QCOMPARE(saved.group(second)->folders.size(),1);QVERIFY(QDir(path).exists());
     table->customContextMenuRequested(QPoint(5,table->viewport()->height()-5));
@@ -13098,6 +13187,60 @@ void TestSessionsWindow::localWindowsFolderFilterIgnoresCase()
     local.metrics["platform"]="linux";state.setLocal(local,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
     page->folderSessionsRequested({},"c:/work/repo",true);QVERIFY(keys().isEmpty());QCOMPARE(all(),0);
     QVERIFY(clear->toolTip().startsWith("c:/work/repo\n"));
+}
+
+// N21 (#386): the Projects page's Sessions badge is the session list's status
+// (SessionPresentation::status, the CLAUDE.md status contract): a tool call
+// and a compaction are not Ready, an idle agent with live jobs is Background,
+// Stopped and Agent exited say so, and a reply to read waits until the work
+// is done. "Show all in Sessions" opens the list on the project.
+void TestSessionsWindow::projectSessionBadgesFollowTheStatusContract()
+{
+    const auto restore=qScopeGuard([]{QSettings().remove("workspace/organization");});
+    SessionOrganization model;const auto id=model.createGroup("Status contract");model.setDefaultProject(id);
+    model.markImported("arch");model.markImported("mac");
+    QSettings().setValue("workspace/organization",QJsonDocument(model.toJson()).toJson(QJsonDocument::Compact));
+    auto state=fleet();auto local=state.local();
+    const auto base=local.sessions[1]; // kimi/docs/research: tracked and idle
+    const auto make=[&](const QString &tag){auto s=base;s.name="kimi/docs/"+tag;s.tag=tag;return s;};
+    auto tool=make("tool");tool.activity="busy";tool.phase="tool";tool.currentTool="Bash";
+    auto compacting=make("compacting");compacting.activity="busy";compacting.phase="compacting";
+    auto background=make("background");background.backgroundProcesses=1;
+    auto stopped=make("stopped");stopped.state="stopped";
+    auto exited=make("exited");exited.processState="exited";
+    auto ready=make("ready");
+    auto reply=make("reply");reply.unreadReply=true;reply.replyId="reply-1";reply.conversationId="conversation-1";
+    auto busyReply=make("busy-reply");busyReply.activity="busy";busyReply.phase="working";busyReply.unreadReply=true;busyReply.replyId="reply-2";busyReply.conversationId="conversation-2";
+    auto input=make("input");input.activity="waiting";input.phase="input";input.attentionId="question-1";
+    local.sessions={tool,compacting,background,stopped,exited,ready,reply,busyReply,input};
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program());window.setFleet(state);window.resize(1300,900);window.show();window.showProjects();
+    auto *page=window.findChild<ProjectsDialog *>("projectsPage");QVERIFY(page);page->selectProject(id);
+    window.setFleet(state);
+    auto *table=page->findChild<QTableWidget *>("projectSessions");QVERIFY(table);
+    const auto badge=[&](const QString &tag){
+        for(int row=0;row<table->rowCount();++row)if(table->item(row,0)->data(Qt::UserRole).toString()=="kimi/docs/"+tag)
+            return table->item(row,3)->text()+'|'+table->item(row,3)->data(Qt::UserRole+1).toString();
+        return QString();
+    };
+    QTRY_COMPARE(badge("tool"),QString("Using a tool|active"));
+    QCOMPARE(badge("compacting"),QString("Compacting|active"));
+    QCOMPARE(badge("background"),QString("Background|active"));
+    QCOMPARE(badge("stopped"),QString("Stopped|muted"));
+    QCOMPARE(badge("exited"),QString("Agent exited|muted"));
+    QCOMPARE(badge("ready"),QString("Ready|muted"));
+    QCOMPARE(badge("reply"),QString("New reply|warn"));
+    QCOMPARE(badge("busy-reply"),QString("Working|active"));
+    QCOMPARE(badge("input"),QString("Needs input|warn"));
+    // A poll: the compaction ended, the page follows (N22).
+    local.sessions[1].activity="idle";local.sessions[1].phase="idle";state.setLocal(local,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
+    QTRY_COMPARE(badge("compacting"),QString("Ready|muted"));
+    // The whole project in Sessions.
+    emit page->projectSessionsRequested(id);
+    auto *list=window.findChild<SessionList *>("sessionList");QVERIFY(list);QTRY_VERIFY(list->isVisible());
+    QStringList keys;for(int i=0;i<list->count();++i){const auto key=list->item(i)->data(SessionRoles::Key).toString();if(!key.isEmpty())keys<<key;}
+    QVERIFY(keys.contains("\nkimi/docs/tool"));
+    QCOMPARE(window.findChild<ProjectFilter *>("projectFilterChips")->selection(),QSet<QString>{id});
 }
 
 void TestSessionsWindow::projectColorsApplyOrCancel()

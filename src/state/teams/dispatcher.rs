@@ -360,8 +360,11 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
 pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&BTreeSet<String>>) -> Vec<Step> {
     let mut steps = Vec::new();
     let planning = team.status == TeamStatus::Planning && matches!(team.brief, Notice::Pending | Notice::Sending);
+    // N6: a draft team starts its lead and gives it the draft brief, then it
+    // waits for the owner to create it.
+    let drafting = team.status == TeamStatus::Draft && matches!(team.brief, Notice::Pending | Notice::Sending);
     let active = matches!(team.status, TeamStatus::Running | TeamStatus::Paused);
-    if !active && !planning {
+    if !active && !planning && !drafting {
         return steps;
     }
     let mut launching = BTreeSet::new();
@@ -448,13 +451,12 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         }
     }
     // H6: a swapped lead is briefed once, also while the team runs.
-    let briefing = matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused)
-        && matches!(team.brief, Notice::Pending | Notice::Sending);
+    let briefing = (active || planning || drafting) && matches!(team.brief, Notice::Pending | Notice::Sending);
     if briefing {
         // A desktop team starts only its lead, then briefs it once.
         if let Some(lead) = team.member(&team.lead) {
             if lead.session.is_none() {
-                if planning
+                if (planning || drafting)
                     && lead.launch_id.is_empty()
                     && lead.error.is_empty()
                     && launching.insert(lead.id.clone())
@@ -465,7 +467,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 steps.push(if lead.needs_settings() { Step::Settings { member: lead.id.clone() } } else { Step::Brief });
             }
         }
-        if planning {
+        if planning || drafting {
             return steps;
         }
     }
@@ -1212,6 +1214,16 @@ fn git_continuation(folder: &str, since: f64) -> String {
 /// goal, the members and tasks proposed so far, and how to plan. A lead
 /// swapped into a running team gets the short brief (H6).
 pub(crate) fn brief_text(team: &Team) -> String {
+    // N6: a draft's lead gets the draft brief once: the protocol, the designer
+    // guide and the draft id; nothing runs before the owner creates the team.
+    if team.status == TeamStatus::Draft {
+        return format!(
+            "[Zerus team \u{b7} from: You \u{b7} draft]\nYou lead the draft team {} ({}). Read the built-in lead protocol \
+             (hgs guide team-lead) and hgs guide designer. The owner and you edit the draft with hgs team draft --json \
+             (get or update); nothing runs until the owner creates the team.\n",
+            team.name, team.id
+        );
+    }
     if matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
         return format!(
             "[Zerus team \u{b7} from: Zerus \u{b7} brief]\nYou are now the lead of the team {} ({}). \
@@ -3345,7 +3357,9 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
         .into_iter()
         .filter(|team| {
             matches!(team.status, TeamStatus::Running | TeamStatus::Paused)
-                || (team.status == TeamStatus::Planning && matches!(team.brief, Notice::Pending | Notice::Sending))
+                // N6: a draft still starting (or briefing) its lead is ticked too.
+                || (matches!(team.status, TeamStatus::Planning | TeamStatus::Draft)
+                    && matches!(team.brief, Notice::Pending | Notice::Sending))
         })
         .collect();
     if teams.is_empty() {
@@ -5159,6 +5173,39 @@ mod tests {
         assert!(!waiting.iter().any(|step| matches!(step, Step::NoReport { .. })), "{waiting:?}");
         let late = steps(&t, &[seen], 10.0 + timeout + 1.0);
         assert!(late.contains(&Step::NoReport { task: 1 }), "{late:?}");
+    }
+
+    #[test]
+    fn a_draft_starts_and_briefs_its_lead() {
+        // N6: a draft team launches its lead in the team's folder and gives it
+        // the draft brief once (spec 3); no plan work is handed out before the
+        // owner creates the team.
+        let mut t = Team {
+            id: "d1".into(),
+            name: "New team".into(),
+            folder: "D:/work/shop".into(),
+            status: TeamStatus::Draft,
+            lead: "lead".into(),
+            brief: Notice::Pending,
+            draft: Some(Draft { revision: 1, ..Default::default() }),
+            ..Default::default()
+        };
+        t.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
+        t.tasks.push(Task { id: 1, title: "Drafted".into(), assignee: "lead".into(), status: TaskStatus::Draft, ..Default::default() });
+        let found = steps(&t, &[], 100.0);
+        assert!(found.contains(&Step::Launch { member: "lead".into() }), "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::HandOut { .. })), "{found:?}");
+        // Launched and free: the draft brief, once.
+        t.members[0].launch_id = "L".into();
+        t.members[0].session = Some(SessionRef { name: "claude/x/lead".into(), run_id: "r1".into(), ..Default::default() });
+        let free = session("claude/x/lead", "r1", true);
+        assert!(steps(&t, &[free], 100.0).contains(&Step::Brief));
+        let brief = brief_text(&t);
+        assert!(brief.contains("hgs guide designer") && brief.contains("d1"), "{brief}");
+        assert!(!brief.contains("Plan the work"), "the draft brief is not the planning brief: {brief}");
+        // A created team is Planning with its planning brief, not a draft brief.
+        t.status = TeamStatus::Planning;
+        assert!(brief_text(&t).contains("Plan the work"), "{}", brief_text(&t));
     }
 
     #[test]

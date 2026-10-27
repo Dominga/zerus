@@ -101,6 +101,8 @@
 #include <QSettings>
 #include <QShortcut>
 #include <QSplitter>
+#include <QSplitterHandle>
+#include <QMouseEvent>
 #include <QStackedWidget>
 #include <QStyledItemDelegate>
 #include <QStyle>
@@ -1473,6 +1475,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_inspector,&QTabWidget::currentChanged,this,[this]{updateWorktrees();});
     inspectorLayout->addWidget(m_inspector);
     m_workSplitter->addWidget(m_inspectorPanel);
+    m_workSplitter->installEventFilter(this);
+    m_workSplitter->handle(1)->installEventFilter(this);
+    m_workSplitter->handle(1)->setToolTip(tr("Drag to resize the side panel. Double-click to reset its width."));
     m_workSplitter->setStretchFactor(0, 1); m_workSplitter->setStretchFactor(1, 0);
     m_inspectorToggle = new QPushButton; m_inspectorToggle->setObjectName("toggleInspector");
     m_inspectorToggle->setProperty("glyph", "inspector"); m_inspectorToggle->setCheckable(true);
@@ -1488,7 +1493,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if (!m_inspectorPanel->isHidden()) { m_inspectorWidth = m_inspectorPanel->width(); QSettings().setValue("workspace/inspectorWidth", m_inspectorWidth); }
     });
     m_inspector->setCurrentIndex(qBound(0, settings.value("workspace/inspectorTab", 0).toInt(), m_inspector->count() - 1));
-    m_inspectorWidth = qBound(240, settings.value("workspace/inspectorWidth", 290).toInt(), 600);
+    bool widthValid = false;
+    const int savedWidth = settings.value("workspace/inspectorWidth", DefaultInspectorWidth).toInt(&widthValid);
+    m_inspectorWidth = widthValid && savedWidth > 0 ? qBound(240, savedWidth, QWIDGETSIZE_MAX) : DefaultInspectorWidth;
     m_inspectorPanel->hide();
     if (settings.value("workspace/inspectorVisible", false).toBool())
         QTimer::singleShot(0, this, [this] { setInspectorVisible(true); });
@@ -2273,11 +2280,11 @@ void SessionsWindow::updateInspectorMinimum()
             +m_detailTabs->minimumWidth()+header);
     }
     setMinimumWidth(minimum);
+    applyInspectorWidth();
 }
 
 void SessionsWindow::setInspectorVisible(bool visible)
 {
-    if (!visible && !m_inspectorPanel->isHidden()) m_inspectorWidth = m_inspectorPanel->width();
     // One control follows the right edge, rather than offering two hide actions.
     const bool restoreFocus = m_inspectorToggle->hasFocus();
     const bool keyboardFocus = m_inspectorToggle->property("keyboardFocus").toBool();
@@ -2299,14 +2306,22 @@ void SessionsWindow::setInspectorVisible(bool visible)
         // QTabWidget's own minimum width can ignore its full header in document
         // mode. Give the splitter an explicit minimum including the corner button.
         m_inspectorPanel->setMinimumWidth(qMax(240,m_inspector->tabBar()->sizeHint().width()+m_inspectorToggle->sizeHint().width()+32));
-        const int available = m_workSplitter->width() - m_workSplitter->handleWidth();
-        const int side = qBound(240, m_inspectorWidth, qMax(240, available - 280));
-        m_workSplitter->setSizes({qMax(280, available - side), side});
+        applyInspectorWidth();
     }
     updateInspectorMinimum();
     QSettings settings; settings.setValue("workspace/inspectorVisible", visible);
     settings.setValue("workspace/inspectorWidth", m_inspectorWidth);
     updateWorktrees();
+}
+
+void SessionsWindow::applyInspectorWidth()
+{
+    if (!m_inspectorPanel || m_inspectorPanel->isHidden()) return;
+    const int available = m_workSplitter->width() - m_workSplitter->handleWidth();
+    const int minimum = m_inspectorPanel->minimumWidth();
+    const int side = qBound(minimum, m_inspectorWidth, qMax(minimum, available - m_detailTabs->minimumWidth()));
+    if (m_workSplitter->sizes().value(1) != side)
+        m_workSplitter->setSizes({qMax(m_detailTabs->minimumWidth(), available - side), side});
 }
 
 void SessionsWindow::saveSessionRowPreferences()
@@ -5876,6 +5891,16 @@ void SessionsWindow::showEvent(QShowEvent *event)
 }
 bool SessionsWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    if (m_workSplitter && watched == m_workSplitter->handle(1) && event->type() == QEvent::MouseButtonDblClick
+        && static_cast<QMouseEvent *>(event)->button() == Qt::LeftButton) {
+        m_inspectorWidth = DefaultInspectorWidth;
+        QSettings().setValue("workspace/inspectorWidth", m_inspectorWidth);
+        applyInspectorWidth(); return true;
+    }
+    if (watched == m_workSplitter && event->type() == QEvent::Resize && !m_inspectorWidthPending) {
+        m_inspectorWidthPending = true;
+        QTimer::singleShot(0, this, [this] { m_inspectorWidthPending = false; applyInspectorWidth(); });
+    }
     if(m_inspector && watched==m_inspector->tabBar()
         && (event->type()==QEvent::FontChange || event->type()==QEvent::StyleChange || event->type()==QEvent::LayoutRequest || event->type()==QEvent::Resize)) {
         QTimer::singleShot(0,this,&SessionsWindow::updateInspectorMinimum);

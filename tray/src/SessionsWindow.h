@@ -325,6 +325,7 @@ private:
     void renderQuestion(const Entry &entry, int navigation = 0);
     void setInspectorVisible(bool visible);
     void updateInspectorMinimum();
+    void applyInspectorWidth();
     // Keyboard commands of the Window scope (Shortcuts.h), implemented in
     // SessionsWindowShortcuts.cpp. Every command's action stays enabled; a
     // command with nothing to do does nothing or shows a notice.
@@ -542,7 +543,9 @@ private:
     QSplitter *m_workSplitter = nullptr;
     QPushButton *m_inspectorToggle = nullptr;
     QWidget *m_inspectorCorner = nullptr;
-    int m_inspectorWidth = 290;
+    static constexpr int DefaultInspectorWidth = 400;
+    int m_inspectorWidth = DefaultInspectorWidth;
+    bool m_inspectorWidthPending = false;
     struct PendingMessage { QString key, runId, conversationId; };
     QHash<quint64, PendingMessage> m_pendingMessages;
     QHash<QString, QJsonArray> m_localMessages;

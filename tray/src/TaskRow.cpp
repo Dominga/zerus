@@ -66,6 +66,7 @@ private:
 };
 
 QColor TaskColors::stage(const QString &stage) const {
+    if (stage == QLatin1String("current")) return accent;
     if (stage == QLatin1String("review")) return warn;
     if (stage == QLatin1String("active")) return accent;
     if (stage == QLatin1String("todo")) return blue;
@@ -212,6 +213,7 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
         tail << QStringLiteral("accepted ") + QDateTime::fromMSecsSinceEpoch(task.stageAt).toString(QStringLiteral("d MMM"));
     if (!task.author.isEmpty())
         tail << QStringLiteral("<span style='color:%1'>filed by %2</span>").arg(colors.violet.name(), TaskBoard::sessionLabel(task.authorHost, task.author).toHtmlEscaped());
+    if (state.showStage) meta.prepend(QStringLiteral("<span style='color:%1'>%2</span>").arg(stage.name(), TaskBoard::stageLabel(task.stage).toHtmlEscaped()));
     m_meta->setText(meta.join(QStringLiteral("&nbsp;&nbsp;")));
     m_tail->setText(tail.join(QStringLiteral("&nbsp;&nbsp;")));
     for (auto *label : {m_meta, m_tail}) setWorkspaceStyle(label, QStringLiteral("color:%1;font-size:11px;").arg(colors.muted.name()));

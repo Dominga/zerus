@@ -94,9 +94,9 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
     connect(m_newTitle, &QLineEdit::returnPressed, this, &TaskInspector::createCard);
     m_filters = new QWidget; auto *filters = new QHBoxLayout(m_filters);
     filters->setContentsMargins(0, 0, 0, 0); filters->setSpacing(4);
-    for (const auto &stage : TaskBoard::stages()) {
+    for (const auto &stage : TaskBoard::filters()) {
         auto *tile = new TaskTile(stage, m_filters); m_tiles.insert(stage, tile); filters->addWidget(tile, 1);
-        tile->setAcceptDrops(true); tile->installEventFilter(this);
+        tile->setAcceptDrops(stage != QLatin1String("current")); tile->installEventFilter(this);
         connect(tile, &QAbstractButton::clicked, this, [this, stage] {
             if (m_stage != stage && !canLeaveDetails()) return;
             if (m_stage != stage) { m_stage = stage; m_showOlder = false; if (!m_detached) { closeInlineDetails(); m_selected.clear(); m_detail = {}; ++m_generation; } }
@@ -420,7 +420,7 @@ void TaskInspector::selectTask(const QString &uuid) {
     if (m_selected != uuid && !canLeaveDetails()) return;
     const auto board = m_board->displayBoard();
     for (const auto &task : board.tasks) if (task.uuid == uuid) {
-        m_stage = task.stage;
+        if (m_stage != QLatin1String("current") || !TaskBoard::matchesFilter(task.stage, m_stage)) m_stage = task.stage;
         if (!TaskBoard::keptFor(task, m_host, m_session, m_sessionId)) m_board->setOnlyThisSession(false);
         if (task.stage == QLatin1String("done") && QDateTime::currentMSecsSinceEpoch() - task.stageAt > TaskBoard::RecentDoneMs) m_showOlder = true;
         break;
@@ -438,13 +438,13 @@ void TaskInspector::refresh() {
     const auto board = m_board->displayBoard(); const auto colors = TaskColors::of(m_dark);
     const TaskBoard::View view{m_host, m_session, m_board->onlyThisSession(), QDateTime::currentMSecsSinceEpoch(), m_sessionId};
     if (m_stage.isEmpty() && !board.projectId.isEmpty()) {
-        m_stage = m_board->selectedStage();
+        m_stage = board.count("current", view) ? QStringLiteral("current") : m_board->selectedStage();
         if (!board.count(m_stage, view)) for (const auto &stage : TaskBoard::stages())
             if (board.count(stage, view)) { m_stage = stage; break; }
     }
     // Follow a selected task's recorded stage change while keeping its details open.
-    for (const auto &task : board.tasks) if (task.uuid == m_selected && !m_detached) m_stage = task.stage;
-    for (const auto &stage : TaskBoard::stages()) {
+    for (const auto &task : board.tasks) if (task.uuid == m_selected && !m_detached && !TaskBoard::matchesFilter(task.stage, m_stage)) m_stage = task.stage;
+    for (const auto &stage : TaskBoard::filters()) {
         auto *tile = m_tiles.value(stage); tile->setColors(colors); tile->setCount(board.count(stage, view)); tile->setChecked(stage == m_stage);
     }
     auto rows = board.rows(m_stage, view);
@@ -468,7 +468,8 @@ void TaskInspector::refresh() {
             connect(row, &TaskRow::actionRequested, this, [this, row](TaskAction action) { m_board->actOnTask(row->task(), action); });
             connect(row, &TaskRow::dragStarted, this, [this, row](const QPoint &hotSpot) { m_board->dragTask(row, hotSpot); });
         }
-        row->setTask(task, m_board->rowState(task), colors, view.now);
+        auto state = m_board->rowState(task); state.showStage = m_stage == QLatin1String("current");
+        row->setTask(task, state, colors, view.now);
         row->setProperty("expanded", task.uuid == m_selected);
         m_cards->removeWidget(row); m_cards->insertWidget(index++, row); row->show(); keep.insert(task.uuid);
         if (task.uuid == m_selected) selectedShown = true;
@@ -500,15 +501,15 @@ void TaskInspector::updateFilters() {
     for (auto *tile : std::as_const(m_tiles)) tile->setCompact(m_filters->width() < required);
 }
 
-QList<TaskRow *> TaskInspector::shownRows() const {
+QList<TaskRow *> TaskInspector::shownRows(const QString &stage) const {
     QList<TaskRow *> rows;
     for (int i = 0; i < m_cards->count(); ++i)
-        if (auto *row = qobject_cast<TaskRow *>(m_cards->itemAt(i)->widget()); row && !row->isHidden()) rows << row;
+        if (auto *row = qobject_cast<TaskRow *>(m_cards->itemAt(i)->widget()); row && !row->isHidden() && (stage.isEmpty() || row->task().stage == stage)) rows << row;
     return rows;
 }
 
-int TaskInspector::dropGap(const QString &uuid, const QPoint &point) const {
-    const auto rows = shownRows(); int gap = rows.size(), from = -1;
+int TaskInspector::dropGap(const QString &uuid, const QPoint &point, const QString &stage) const {
+    const auto rows = shownRows(stage); int gap = rows.size(), from = -1;
     for (int i = 0; i < rows.size(); ++i) {
         if (rows[i]->task().uuid == uuid) from = i;
         if (gap == rows.size() && point.y() < rows[i]->y() + rows[i]->height() / 2) gap = i;
@@ -517,10 +518,11 @@ int TaskInspector::dropGap(const QString &uuid, const QPoint &point) const {
 }
 
 void TaskInspector::followDrag(const TaskDrag &drag, const QPoint &point) {
-    const auto rows = shownRows();
-    if (!m_board->canReorderTask(drag, m_stage) || rows.isEmpty()) { endListDrag(); return; }
+    const auto stage = m_stage == QLatin1String("current") ? drag.stage : QString();
+    const auto rows = shownRows(stage);
+    if (!TaskBoard::matchesFilter(drag.stage, m_stage) || !m_board->canReorderTask(drag, drag.stage) || rows.isEmpty()) { endListDrag(); return; }
     m_drag = drag; m_dragAt = m_listPage->mapTo(m_scroll->viewport(), point); m_overList = true;
-    const int gap = dropGap(drag.uuid, point);
+    const int gap = dropGap(drag.uuid, point, stage);
     if (gap < 0) m_dropLine->hide();
     else {
         const auto *edge = gap < rows.size() ? rows[gap] : rows.last();
@@ -560,11 +562,12 @@ bool TaskInspector::eventFilter(QObject *watched, QEvent *event) {
         return QWidget::eventFilter(watched, event);
     if (watched == m_listPage) {
         if (type == QEvent::DragLeave) { endListDrag(); return true; }
-        auto *drop = static_cast<QDropEvent *>(event); const auto drag = TaskDrag::from(drop->mimeData()); const auto rows = shownRows();
-        if (!drag || rows.isEmpty() || !m_board->canReorderTask(*drag, m_stage)) { endListDrag(); drop->ignore(); return true; }
+        auto *drop = static_cast<QDropEvent *>(event); const auto drag = TaskDrag::from(drop->mimeData());
+        const auto stage = m_stage == QLatin1String("current") && drag ? drag->stage : QString(); const auto rows = shownRows(stage);
+        if (!drag || rows.isEmpty() || !TaskBoard::matchesFilter(drag->stage, m_stage) || !m_board->canReorderTask(*drag, drag->stage)) { endListDrag(); drop->ignore(); return true; }
         drop->setDropAction(Qt::MoveAction); drop->accept();
         if (type == QEvent::Drop) {
-            const int gap = dropGap(drag->uuid, drop->position().toPoint()); endListDrag();
+            const int gap = dropGap(drag->uuid, drop->position().toPoint(), stage); endListDrag();
             if (gap >= 0) m_board->reorderTask(*drag, gap < rows.size() ? rows[gap]->task().uuid : rows.last()->task().uuid, gap < rows.size());
         } else followDrag(*drag, drop->position().toPoint());
         return true;

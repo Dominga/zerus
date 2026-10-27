@@ -70,8 +70,8 @@ private:
     void publishDetail(QJsonObject task);
     void publishJournal(const QString &key, const QJsonArray &entries, bool followLatest);
     bool selectionPending() const;
-    QList<TaskRow *> shownRows() const;
-    int dropGap(const QString &uuid, const QPoint &point) const;
+    QList<TaskRow *> shownRows(const QString &stage = {}) const;
+    int dropGap(const QString &uuid, const QPoint &point, const QString &stage = {}) const;
     void followDrag(const TaskDrag &drag, const QPoint &point);
     void endListDrag();
     QJsonObject labels(QJsonObject task) const;

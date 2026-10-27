@@ -68,6 +68,8 @@ void TestTaskBoard::rowsFollowEachStageOrder() {
     QCOMPARE(ids(b.rows("done", all)), QStringList({"T-d1", "T-d2"}));
     QCOMPARE(ids(b.rows("done", all, true)), QStringList({"T-d3"}));
     QCOMPARE(b.count("done", all), 2); QCOMPARE(b.count("active", all), 1);
+    QCOMPARE(ids(b.rows("current", all)), QStringList({"T-r2", "T-r1", "T-a1"}));
+    QCOMPARE(b.count("current", all), b.count("review", all) + b.count("active", all));
 }
 
 void TestTaskBoard::theOpenSessionsTasksAndTheFilter() {
@@ -84,6 +86,7 @@ void TestTaskBoard::theOpenSessionsTasksAndTheFilter() {
     QCOMPARE(b.count("backlog", only), 0);
     // Queue numbers stay project-wide while others are hidden.
     QCOMPARE(b.rows("todo", only).at(1).queue, 2);
+    QCOMPARE(b.count("current", only), b.count("review", only) + b.count("active", only));
 }
 
 void TestTaskBoard::actionsFollowTheStage() {
@@ -95,6 +98,8 @@ void TestTaskBoard::actionsFollowTheStage() {
     QCOMPARE(TaskBoard::actions("done"), QList<A>({A::Rename, A::BackToTodo}));
     QCOMPARE(TaskBoard::stages(), QStringList({"review", "active", "todo", "backlog", "done"}));
     QCOMPARE(TaskBoard::stageLabel("active"), QString("In progress"));
+    QCOMPARE(TaskBoard::filters().first(), QString("current")); QCOMPARE(TaskBoard::stageLabel("current"), QString("Active"));
+    QVERIFY(TaskBoard::actions("current").isEmpty());
     QCOMPARE(TaskBoard::actionLabel(A::Top), QString("Move to the top of To do"));
 }
 

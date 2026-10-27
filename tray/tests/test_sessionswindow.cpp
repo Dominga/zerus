@@ -30,6 +30,8 @@
 #include <QMenu>
 #include <QStackedWidget>
 #include <QSplitter>
+#include <QSplitterHandle>
+#include <QMouseEvent>
 #include <QScrollBar>
 #include <QListWidget>
 #include "GoToDialog.h"
@@ -355,6 +357,7 @@ private slots:
     void sessionRowsHaveNoHoverPopup();
     void subagentGroupsAndUnavailableActivity();
     void inspectorPreservesWorkspaceAndReportsTasks();
+    void inspectorWidthSurvivesResizeHideAndRestartAndResetsOnDoubleClick();
     void taskExecutorStartsOnlyThroughTheLaunchDialog();
     void restoredTaskLaunchDeliveryIsReservedAndNeverReplayed_data();
     void restoredTaskLaunchDeliveryIsReservedAndNeverReplayed();
@@ -6797,6 +6800,41 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
     const auto inspectorPreview=qEnvironmentVariable("HGS_INSPECTOR_PREVIEW");if(!inspectorPreview.isEmpty())QVERIFY(reopened.grab().save(inspectorPreview));
     reopened.showSession({}, "kimi/docs/research"); QTest::qWait(50);
     QVERIFY(!reopened.findChild<QTextBrowser *>("subagents")->toPlainText().contains("Implement right panel"));
+}
+
+void TestSessionsWindow::inspectorWidthSurvivesResizeHideAndRestartAndResetsOnDoubleClick()
+{
+    QSettings().remove("workspace");
+    int preferred = 0;
+    {
+        SessionsWindow window(program()); keepDetailsPollsOut(window); window.setFleet(fleet()); window.resize(1840, 900); window.show();
+        auto *toggle = window.findChild<QPushButton *>("toggleInspector");
+        auto *panel = window.findChild<QFrame *>("sessionInspectorPanel");
+        auto *splitter = window.findChild<QSplitter *>("sessionWorkSplitter");
+        toggle->click(); QTRY_VERIFY(panel->isVisible());
+        auto *handle = splitter->handle(1); QVERIFY(handle);
+        const auto from = handle->rect().center();
+        const auto destination = splitter->mapToGlobal(QPoint(splitter->width() - 760, handle->height() / 2));
+        QTest::mousePress(handle, Qt::LeftButton, {}, from);
+        QMouseEvent move(QEvent::MouseMove, QPointF(handle->mapFromGlobal(destination)), QPointF(destination), Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(handle, &move);
+        QTest::mouseRelease(handle, Qt::LeftButton, {}, handle->mapFromGlobal(destination));
+        QTRY_VERIFY(panel->width() > 600);
+        preferred = panel->width(); QTRY_COMPARE(QSettings().value("workspace/inspectorWidth").toInt(), preferred);
+        window.resize(1100, 900); QTRY_VERIFY(panel->width() < preferred);
+        QCOMPARE(QSettings().value("workspace/inspectorWidth").toInt(), preferred);
+        toggle->click(); toggle->click(); QTest::qWait(30);
+        QCOMPARE(QSettings().value("workspace/inspectorWidth").toInt(), preferred);
+        window.resize(1840, 900); QTRY_COMPARE(panel->width(), preferred);
+        toggle->click(); toggle->click(); QTRY_COMPARE(panel->width(), preferred);
+        window.close();
+    }
+    SessionsWindow restored(program()); keepDetailsPollsOut(restored); restored.setFleet(fleet()); restored.resize(1840, 900); restored.show();
+    auto *panel = restored.findChild<QFrame *>("sessionInspectorPanel"); auto *splitter = restored.findChild<QSplitter *>("sessionWorkSplitter");
+    QTRY_VERIFY(panel->isVisible()); QTRY_COMPARE(panel->width(), preferred);
+    auto *handle = splitter->handle(1); QTest::mouseDClick(handle, Qt::LeftButton); QTest::mouseRelease(handle, Qt::LeftButton);
+    QTRY_COMPARE(QSettings().value("workspace/inspectorWidth").toInt(), 400);
+    QTRY_COMPARE(panel->width(), qMax(400, panel->minimumWidth()));
 }
 
 void TestSessionsWindow::detailsPollingPreservesReadingPosition()

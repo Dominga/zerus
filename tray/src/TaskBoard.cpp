@@ -66,7 +66,7 @@ QList<TaskItem> TaskBoard::rows(const QString &stage, const View &view, bool old
     QList<TaskItem> out;
     const bool done = stage == QLatin1String("done");
     for (const auto &t : tasks) {
-        if (t.stage != stage || (view.only && !keptFor(t, view.host, view.session, view.id))) continue;
+        if (!matchesFilter(t.stage, stage) || (view.only && !keptFor(t, view.host, view.session, view.id))) continue;
         if (done && (view.now - t.stageAt > RecentDoneMs) != older) continue;
         out << t;
     }
@@ -78,6 +78,15 @@ const QStringList &TaskBoard::stages() {
     return order;
 }
 
+const QStringList &TaskBoard::filters() {
+    static const QStringList order = QStringList{"current"} + stages();
+    return order;
+}
+
+bool TaskBoard::matchesFilter(const QString &stage, const QString &filter) {
+    return filter == QLatin1String("current") ? stage == QLatin1String("active") || stage == QLatin1String("review") : stage == filter;
+}
+
 QString TaskBoard::sessionLabel(const QString &host, const QString &name) {
     QString label = name.section(QLatin1Char('/'), 2);
     if (label.isEmpty()) label = name.section(QLatin1Char('/'), 1, 1);
@@ -86,6 +95,7 @@ QString TaskBoard::sessionLabel(const QString &host, const QString &name) {
 }
 
 QString TaskBoard::stageLabel(const QString &stage) {
+    if (stage == QLatin1String("current")) return QObject::tr("Active");
     if (stage == QLatin1String("review")) return QObject::tr("In review");
     if (stage == QLatin1String("active")) return QObject::tr("In progress");
     if (stage == QLatin1String("todo")) return QObject::tr("To do");
@@ -95,6 +105,7 @@ QString TaskBoard::stageLabel(const QString &stage) {
 
 // A stage's icon is the icon of the action that moves a task there.
 QString TaskBoard::stageIcon(const QString &stage) {
+    if (stage == QLatin1String("current")) return QStringLiteral("task-list");
     if (stage == QLatin1String("review")) return QStringLiteral("task-inbox");
     if (stage == QLatin1String("active")) return QStringLiteral("play");
     if (stage == QLatin1String("todo")) return QStringLiteral("task-list");

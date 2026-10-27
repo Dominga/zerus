@@ -851,3 +851,17 @@ recovers the previous comment read-only, then receives its own request identity.
 This removes technical recovery prerequisites from ordinary commenting while
 preserving the rule against replaying unknown native input. Verified submissions
 still follow the existing reopen and exact execution guards.
+
+## Owner follow-up: retained inspector width and Active filter (2026-10-27)
+
+The preferred inspector width is private desktop state, saved from an explicit
+divider drag. Window constraints and temporary hiding never replace that choice.
+Restore the preference after expansion and application restart without the old
+600-pixel restoration cap. Double-clicking the divider stores the 400-logical-
+pixel default, clamped for the actual available space and header minimum.
+
+The first board filter, Active, is the union of Review and In progress. Keep
+individual stage filters and each card's own stage label, workflow actions and
+persisted order. Selecting either kind of card keeps the combined filter. Drag
+ordering in this view changes rank only within the dragged card's existing
+stage; the aggregate tile is not a workflow drop target.

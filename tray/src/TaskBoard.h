@@ -52,6 +52,8 @@ public:
     int count(const QString &stage, const View &view) const { return int(rows(stage, view).size()); }
 
     static const QStringList &stages();   // the tiles' order
+    static const QStringList &filters(); // Active union first, then individual stages
+    static bool matchesFilter(const QString &stage, const QString &filter);
     static QString stageLabel(const QString &stage);
     // A session as the session list names it, then the computer it runs on.
     static QString sessionLabel(const QString &host, const QString &name);

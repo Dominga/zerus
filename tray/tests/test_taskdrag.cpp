@@ -94,6 +94,7 @@ private slots:
     void inspectorReordersQueuesAndPreservesDragLifetime();
     void inspectorScrollsAndRejectsInvalidDrops();
     void everyStagePersistsOrderInBothBoardSurfaces();
+    void combinedActiveFilterReordersWithoutChangingWorkflowStages();
     void taskContextMenuUsesTheSameGuardedActions();
     void theOtherListsTileTakesADroppedTask();
     void toDoRowsAreReorderedByDropping();
@@ -216,6 +217,22 @@ void TestTaskDrag::everyStagePersistsOrderInBothBoardSurfaces() {
         QTRY_VERIFY(card(2)->y() < card(3)->y());
         for (const auto &call : FakeTasksCli::calls(dir.path())) QVERIFY(call.value(1) == "list" || call.value(1) == "move");
     }
+}
+
+void TestTaskDrag::combinedActiveFilterReordersWithoutChangingWorkflowStages() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "review"), FakeTasksCli::task(2, "review"), FakeTasksCli::task(3, "active"), FakeTasksCli::task(4, "active")}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client); TaskInspector inspector(&client, &board);
+    inspector.resize(500, 760); inspector.show(); board.setContext("project-1", "orchard", "", "codex/api", "key", sessions()); inspector.setContext("project-1", "", "codex/api", sessions());
+    QTRY_COMPARE(inspector.displayedCount(), 4); QCOMPARE(inspector.selectedStage(), QString("current"));
+    auto *page = inspector.findChild<QWidget *>("taskInspectorCards");
+    const auto card = [&](int n) { return inspector.findChild<TaskRow *>(QString("taskInspectorRow:T-%1").arg(n, 6, 10, QLatin1Char('0'))); };
+    QVERIFY(drop(page, TaskDrag::of("project-1", item(2, "review")), card(1)->mapTo(page, QPoint(60, 2))));
+    QTRY_VERIFY(card(2)->y() < card(1)->y());
+    QVERIFY(drop(page, TaskDrag::of("project-1", item(4, "active")), card(3)->mapTo(page, QPoint(60, 2))));
+    QTRY_VERIFY(card(4)->y() < card(3)->y());
+    for (const auto &call : FakeTasksCli::calls(dir.path())) QVERIFY(call.value(1) == "list" || call.value(1) == "move");
+    QCOMPARE(card(1)->task().stage, QString("review")); QCOMPARE(card(3)->task().stage, QString("active"));
+    QVERIFY(!drop(inspector.findChild<QWidget *>("taskTile:current"), todo(1)));
 }
 
 void TestTaskDrag::inspectorScrollsAndRejectsInvalidDrops() {

@@ -2587,13 +2587,18 @@ There is no MCP server; sessions without bypassed permissions are not covered
 (Claude Code asks first, Codex's sandbox blocks the task store and SSH).
 
 In the desktop, the right **Tasks** inspector is the project board. There is no
-Task Board tab beside Activity. Stage tiles (In review, In progress, To do,
-Backlog, Done) filter one list; the funnel keeps this session's tasks and Any
+Task Board tab beside Activity. The first filter, **Active**, combines In review
+and In progress without changing either workflow stage. Individual stage tiles
+(In review, In progress, To do, Backlog, Done) remain available; the funnel keeps
+this session's tasks and Any
 session tasks it can take, and the gear opens project settings. Narrow filters
 keep icons and counts; wider filters include captions. The plus replaces the
 count label with a title field in the same header: Enter creates the named card
 and opens its description for editing. Escape closes the field and keeps its
-local draft. Adding a card does not move the filters or list viewport.
+local draft. Adding a card does not move the filters or list viewport. The chosen
+side-panel width is local and survives hiding, resizing and application restart.
+Double-click its divider to reset to 400 logical pixels, subject to available
+space and the panel header minimum.
 
 Clicking a card opens the reusable central **Task View**, preserving the Activity
 conversation and its input draft. Click the task heading to rename it in place,

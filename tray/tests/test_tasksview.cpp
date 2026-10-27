@@ -67,6 +67,7 @@ private slots:
     void taskDocumentAndDiscussionUseActivityComposition();
     void taskTitleRenamesInPlaceAndKeepsRefusedEdits();
     void newCommentRecoversPreviousWithoutResending();
+    void firstActiveFilterCombinesReviewAndWorkWithoutChangingSelection();
     void init() { ComposerDraftStore::flushWrites(); QDir(ComposerDraftStore::directory()).removeRecursively(); QSettings().remove("tasks"); }
     void tilesCountAndChooseTheFirstStage();
     void rowsShowTheQueueAndTheOpenSessionsTasks();
@@ -183,6 +184,22 @@ void TestTasksView::newCommentRecoversPreviousWithoutResending() {
     QCOMPARE(id(messages[0]), id(messages[1])); QVERIFY(id(messages[2]) != id(messages[0])); QVERIFY(!messages[2].contains("--recover-only"));
     auto *discussion = inspector.findChild<QTextBrowser *>("taskInspectorDetail");
     QTRY_VERIFY(discussion->toPlainText().contains("Previous comment with a lost response")); QVERIFY(discussion->toPlainText().contains("A new ordinary comment"));
+}
+
+void TestTasksView::firstActiveFilterCombinesReviewAndWorkWithoutChangingSelection() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "review"), FakeTasksCli::task(2, "active"), FakeTasksCli::task(3, "todo")}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client);
+    TaskInspector inspector(&client, &board); inspector.resize(700, 850); inspector.show();
+    board.setContext("project-1", "orchard", "", "codex/api", "key", sessions()); inspector.setContext("project-1", "", "codex/api", sessions());
+    auto *filter = inspector.findChild<QAbstractButton *>("taskTile:current"); QVERIFY(filter);
+    QTRY_COMPARE(filter->property("count").toInt(), 2); QVERIFY(filter->isChecked()); QCOMPARE(inspector.displayedCount(), 2);
+    auto *review = inspector.findChild<TaskRow *>("taskInspectorRow:T-000001"); auto *work = inspector.findChild<TaskRow *>("taskInspectorRow:T-000002");
+    QVERIFY(review && work); QVERIFY(review->findChild<QLabel *>("taskMeta")->text().contains("In review")); QVERIFY(work->findChild<QLabel *>("taskMeta")->text().contains("In progress"));
+    inspector.selectTask("uuid-1"); QTRY_COMPARE(inspector.selectedTask(), QString("uuid-1")); QCOMPARE(inspector.selectedStage(), QString("current")); QCOMPARE(inspector.displayedCount(), 2);
+    QVERIFY(review->findChild<QToolButton *>("taskAction:accept")->property("blockedReason").toString().isEmpty());
+    QVERIFY(!work->findChild<QToolButton *>("taskAction:pause")->property("blockedReason").toString().isEmpty());
+    inspector.findChild<QAbstractButton *>("taskTile:review")->click(); QCOMPARE(inspector.displayedCount(), 1);
+    filter->click(); QCOMPARE(inspector.displayedCount(), 2);
 }
 
 void TestTasksView::taskDocumentAndDiscussionUseActivityComposition() {
@@ -371,7 +388,7 @@ void TestTasksView::inspectorShowsReportsAndBoundsItsTaskList() {
     TaskInspector inspector(&client, &board); inspector.resize(400, 700); inspector.show();
     board.setContext("project-1", "orchard", "", "codex/api", "key", sessions());
     inspector.setContext("project-1", "", "codex/api", sessions());
-    QTRY_COMPARE(inspector.displayedCount(), 1);
+    QTRY_COMPARE(inspector.displayedCount(), 2);
     inspector.selectTask("uuid-1");
     auto *detail = inspector.findChild<QTextBrowser *>("taskInspectorDetail");
     QTRY_VERIFY(detail->toPlainText().contains("Keep <script> literal"));
@@ -516,8 +533,8 @@ void TestTasksView::inspectorKeepsSelectionInAFixedLowerPane() {
     TaskInspector inspector(&client, &board); inspector.resize(380, 760); inspector.show();
     board.setContext("project-1", "orchard", "", "codex/api", "key", sessions());
     inspector.setContext("project-1", "", "codex/api", sessions());
-    QTRY_COMPARE(inspector.displayedCount(), 2);
     auto *todo = inspector.findChild<QAbstractButton *>("taskTile:todo");
+    QTRY_COMPARE(inspector.displayedCount(), 1); todo->click(); QTRY_COMPARE(inspector.displayedCount(), 2);
     QVERIFY(todo->property("compact").toBool()); QCOMPARE(todo->property("count").toInt(), 2);
     auto *first = inspector.findChild<TaskRow *>("taskInspectorRow:T-000001");
     auto *second = inspector.findChild<TaskRow *>("taskInspectorRow:T-000002"); QVERIFY(first && second);

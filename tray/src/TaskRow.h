@@ -25,6 +25,7 @@ struct TaskRowState {
     int statusKind = 0;              // and its SessionStatusBadge::Kind
     QHash<int, QString> blocked;     // TaskAction → why it is unavailable now
     QString anyNow;                  // To do and Backlog: the session an Any task goes to now
+    bool showStage = false;          // mixed-stage filter: retain each card's workflow label
 };
 
 // One task in the list: a fixed-height header with the meta on the left and the

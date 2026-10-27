@@ -1218,17 +1218,33 @@ QWidget *TeamWorkspace::board(const Team &team)
         return col;
     };
     const auto makeRow = [&](const QList<int> &ids, int phase) -> QWidget * {
-        auto *rowBox = new QWidget; auto *h = new QHBoxLayout(rowBox);
+        auto *rowBox = new QWidget; rowBox->setObjectName("teamBoardRow"); auto *h = new QHBoxLayout(rowBox);
         h->setContentsMargins(12, 4, 12, 8); h->setSpacing(8);
         for (const auto &[key, name] : QList<std::pair<QString, QString>>{{"pending", tr("Pending")}, {"active", tr("Active")}, {"problems", tr("Problems")},
-                                                                         {"submitted", tr("Submitted")}, {"decided", tr("Decided")}, {"accepted", tr("Accepted")}})
-            h->addWidget(makeColumn(key, name, ids, phase), 1);
+                                                                         {"submitted", tr("Submitted")}, {"decided", tr("Decided")}, {"accepted", tr("Accepted")}}) {
+            // Decided only when a task is there, as on the phases' Board.
+            if (key == "decided" && std::none_of(team.tasks.cbegin(), team.tasks.cend(), [&](const Task &task) {
+                    return column(task, problemTasks.contains(task.id)) == "decided"; })) continue;
+            auto *column = makeColumn(key, name, ids, phase);
+            readableColumn(column);
+            h->addWidget(column, 1);
+        }
         return rowBox;
     };
     if (groups.isEmpty()) {
-        auto *w = makeRow([&] { QList<int> ids; for (const auto &task : team.tasks) ids.append(task.id); return ids; }(), 0);
-        w->setObjectName("teamWorkspaceBoard");
-        return w;
+        // U33: columns keep their readable width; a narrow window scrolls the
+        // whole board sideways (each column still scrolls its own cards).
+        auto *row = makeRow([&] { QList<int> ids; for (const auto &task : team.tasks) ids.append(task.id); return ids; }(), 0);
+        auto *area = new QScrollArea; area->setObjectName("teamWorkspaceBoard");
+        area->setWidgetResizable(true); area->setFrameShape(QFrame::NoFrame);
+        area->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        area->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        area->setStyleSheet(QStringLiteral("QScrollArea#teamWorkspaceBoard{background:transparent;} QScrollArea#teamWorkspaceBoard > QWidget > QWidget#teamBoardRow{background:transparent;}")
+                            + workspaceScrollbars(m_dark));
+        area->viewport()->setAutoFillBackground(false);
+        area->setWidget(row);
+        keepScroll(area, QStringLiteral("board/row/") + m_focus);
+        return area;
     }
     // Phases stack: a header each, its board columns under an open one and
     // nothing but the header under a collapsed one.
@@ -1378,7 +1394,12 @@ QWidget *TeamWorkspace::phaseColumn(const Team &team)
     area->setObjectName(m_view == "board" ? "teamWorkspaceBoard" : m_view == "layers" ? "teamWorkspaceLayers" : "teamWorkspacePhases");
     area->setProperty("view", m_view);
     area->setWidgetResizable(true); area->setFrameShape(QFrame::NoFrame);
-    area->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    // U33: the Board's columns keep their readable width, so a narrow window
+    // scrolls every phase sideways together (one page, the thin bar of spec
+    // 1.2); Graph and Layers fit the column as before.
+    const bool boardView = m_view == "board";
+    area->setHorizontalScrollBarPolicy(boardView ? Qt::ScrollBarAsNeeded : Qt::ScrollBarAlwaysOff);
+    if (boardView) area->setStyleSheet(workspaceScrollbars(m_dark));
     area->viewport()->setAutoFillBackground(true);
     QPalette p = area->viewport()->palette(); p.setColor(QPalette::Window, c.surface); area->viewport()->setPalette(p);
     auto *content = new QWidget; content->setObjectName("teamPhaseScrolls");
@@ -1692,9 +1713,11 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
     auto *h = new QHBoxLayout(box); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(6);
     QList<std::pair<QString, QString>> columns{{"pending", tr("Pending")}, {"active", tr("Active")}, {"problems", tr("Problems")},
                                                {"submitted", tr("Submitted")}, {"accepted", tr("Accepted")}};
-    // A rejected or cancelled task never sits under Accepted (QA): its own column, when there is one.
+    // A rejected or cancelled task never sits under Accepted (QA): its own
+    // column, when the team has one. U33: every phase shows the same columns,
+    // so they line up from phase to phase.
     bool decided = false;
-    for (int id : ids) if (const auto *task = team.task(id)) decided = decided || column(*task, problemsByTask.contains(id)) == "decided";
+    for (const auto &task : team.tasks) decided = decided || column(task, problemsByTask.contains(task.id)) == "decided";
     if (decided) columns.append({"decided", tr("Decided")});
     for (const auto &[key, name] : columns) {
         auto *col = new QFrame; col->setObjectName("teamBoardColumn"); col->setProperty("column", key); col->setProperty("phase", phase);
@@ -1754,10 +1777,20 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
         const bool problems = key == "problems" && !shown.isEmpty();
         col->setStyleSheet(QStringLiteral("QFrame#teamBoardColumn{background:%1;border:1px solid %2;border-radius:10px;}")
                                .arg(shown.isEmpty() ? QStringLiteral("transparent") : c.bg.name(),
-                                    problems ? alpha(c.danger, .55).name(QColor::HexArgb) : shown.isEmpty() ? alpha(c.cardBorder, .6).name(QColor::HexArgb) : c.cardBorder.name()));
+                                          problems ? alpha(c.danger, .55).name(QColor::HexArgb) : shown.isEmpty() ? alpha(c.cardBorder, .6).name(QColor::HexArgb) : c.cardBorder.name()));
+        readableColumn(col);
         h->addWidget(col, 1);
     }
     return box;
+}
+
+// U33: a board column is never narrower than a readable card (two lines,
+// eliding only beyond that) and never sized by its cards, so the columns stay
+// equal and still when a task moves; wider windows share the room.
+void TeamWorkspace::readableColumn(QWidget *column)
+{
+    column->setMinimumWidth(BoardColumnWidth);
+    column->setSizePolicy(QSizePolicy::Ignored, column->sizePolicy().verticalPolicy());
 }
 
 QWidget *TeamWorkspace::layerRows(const Team &team, const QList<int> &ids)

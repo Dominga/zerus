@@ -863,6 +863,21 @@ void TestSessionsWindow::agentTeamsGroupTheirSessions()
     designerNav->click();
     QTRY_VERIFY(window.findChild<QWidget *>("teamDesignerPage") && window.findChild<QWidget *>("teamDesignerPage")->isVisible());
     QVERIFY(designerNav->isChecked());
+    // U25 part 9 (spec 11.2): Settings > Teams holds the same catalog widget
+    // with Open Team designer; the designer's page holds it without.
+    auto *designerPage = window.findChild<QWidget *>("teamDesignerPage");
+    QCOMPARE(designerPage->findChildren<QWidget *>("teamCatalogEditor").size(), 1);
+    QVERIFY(designerPage->findChild<QPushButton *>("teamCatalogAskDesigner")->isHidden());
+    QWidget *settingsCatalog = nullptr;
+    for (auto *w : window.findChildren<QWidget *>("teamCatalogEditor")) if (!designerPage->isAncestorOf(w)) settingsCatalog = w;
+    QVERIFY(settingsCatalog);
+    auto *openDesigner = settingsCatalog->findChild<QPushButton *>("teamCatalogAskDesigner");
+    QCOMPARE(openDesigner->text(), QStringLiteral("Open Team designer"));
+    QVERIFY(!openDesigner->isHidden());
+    window.showSession({}, loner);
+    QTRY_VERIFY(!designerPage->isVisible());
+    openDesigner->click();
+    QTRY_VERIFY(designerPage->isVisible());
     // Team views show the agents' own logos: DeepSeek in its blue, and Kimi's
     // letter in the text color it is given.
     const auto painted = [](const QIcon &icon, const std::function<bool(const QColor &)> &match) {

@@ -576,21 +576,34 @@ struct Role {
     QString permissionsProfile;   // B5: read, write, build, commit or network
     QStringList tags;
     bool dangerous = false;
+    // U25 (spec 11.3, 12): the editable role. `message` is lead, some or team
+    // (can_message keeps lead or team for older readers); `danger` holds the
+    // five allowed actions (push, deploy, del, pkgs, net); the prompt blocks
+    // go in `promptOrder` (rules, role, protocol, task and note keys), the
+    // ones switched off in `promptOff`, a note's text in `notes`.
+    QString about, icon, message, joins, protocolExtra, taskTemplate;
+    QStringList machines, messageTo, promptOrder, promptOff;
+    QJsonObject danger;
+    QMap<QString, QString> notes;
     QJsonObject raw;
     QJsonObject json() const;
 };
 struct Seat { QString role; int count = 1; bool optional = false; QJsonObject raw; };
-struct SkeletonTask { QString title, role; QList<int> deps; QJsonObject raw; };
+struct SkeletonTask { QString title, role; QList<int> deps; QJsonObject raw; int phase = 1; };
 struct Template {
     QString id, name, description, leadProtocol, planning, approval;
     QString phaseApproval;     // "" = same as the plan's approval
     QList<Seat> roster;
     QList<SkeletonTask> tasks;
     int maxMembers = 6;
+    QString work;      // U25: worktree, clone, same or cloud ("" = worktree)
+    QString phases;    // U25: same, owner or lead (new phases)
     QJsonObject raw;
     QJsonObject json() const;
 };
-struct Rule { QString id, when, templateId, approval; QJsonObject raw; QJsonObject json() const; };
+// U25: `use` is a template id or "+role" (adds a member and keeps looking);
+// empty uses templateId. An empty approval is the template's own.
+struct Rule { QString id, when, templateId, approval; QJsonObject raw; QString use; QJsonObject json() const; };
 struct Proposal { QString id, kind, action, target, title, reason, state; QJsonObject value; double at = 0; };
 struct Catalog {
     qint64 version = 0;

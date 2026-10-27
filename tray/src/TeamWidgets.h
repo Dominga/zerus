@@ -668,6 +668,44 @@ public:
     // G4: one entry per layer inside a phase band, with the small "L2 · 3"
     // label rect and the count; the paint draws its stripe and label from this.
     struct BandLayer { int phase = 0, layer = 0, count = 0; QRectF rect; };
+    // Owner, 2026-10-28: a layer is not always one column. A layer with many
+    // tasks wraps into columns of at most `rows` tasks: as tall as the
+    // tallest other layer, at least WrapRows, and about the square root of
+    // twice its size, so 13 tasks beside layers of 1-2 take 3 columns of 5.
+    // `start` is the first column of the layer: a later layer moves right by
+    // the extra columns of the earlier ones.
+    struct LayerSpread { int start = 0, span = 1, rows = 1, count = 0; };
+    static constexpr int WrapRows = 6;
+    static QMap<int, LayerSpread> layerColumns(const QMap<int, int> &counts)
+    {
+        int tallest = 0, second = 0;
+        for (int count : counts) {
+            if (count > tallest) { second = tallest; tallest = count; }
+            else second = qMax(second, count);
+        }
+        const int cap = qMax(WrapRows, qMax(second, int(std::ceil(std::sqrt(2.0 * tallest)))));
+        QMap<int, LayerSpread> spreads;
+        int extra = 0;
+        for (auto it = counts.cbegin(); it != counts.cend(); ++it) {
+            LayerSpread spread;
+            spread.count = it.value();
+            spread.span = qMax(1, (it.value() + cap - 1) / cap);
+            spread.rows = qMax(1, (it.value() + spread.span - 1) / spread.span);
+            spread.start = it.key() + extra;
+            extra += spread.span - 1;
+            spreads.insert(it.key(), spread);
+        }
+        return spreads;
+    }
+    // The columns a group of tasks takes on screen, from each task's layer.
+    static int wideColumns(const QMap<int, int> &layerOfTask)
+    {
+        QMap<int, int> counts;
+        for (int layer : layerOfTask) ++counts[layer];
+        int columns = 1;
+        for (const auto &spread : layerColumns(counts)) columns = qMax(columns, spread.start + spread.span);
+        return columns;
+    }
     QList<BandLayer> bandLayers() const { return m_bandLayers; }
     // Wide: the graph's own size at zoom 1.
     QSizeF natural() const
@@ -676,26 +714,24 @@ public:
             double wide = BandMin;
             int tall = 8;
             for (const auto &band : bands) {
-                QMap<int, int> lines;
-                for (int id : band.tasks) if (const Node *node = nodeOf(id)) ++lines[node->layer];
                 int rows = 0;
-                for (int count : lines) rows = qMax(rows, count);
+                for (const auto &spread : layerColumns(layerCounts(band.tasks))) rows = qMax(rows, spread.rows);
                 wide = qMax(wide, double(bandWidth(band)));
                 tall += BandHead + (band.collapsed ? 0 : bandBody(rows)) + BandGap;
             }
             return {wide + 8, double(tall + 2)};
         }
-        QMap<int, int> column;
-        for (const auto &n : nodes) ++column[n.layer];
-        int layers = 0, tall = 0;
-        for (auto it = column.cbegin(); it != column.cend(); ++it) { layers = qMax(layers, it.key() + 1); tall = qMax(tall, it.value()); }
-        return {double(WideX + (qMax(1, layers) - 1) * WideStep + WideW + 16), double(WideTop + (qMax(1, tall) - 1) * WideRow + WideH + WideUnder)};
+        QList<int> all;
+        for (const auto &n : nodes) all.append(n.id);
+        int columns = 0, tall = 0;
+        for (const auto &spread : layerColumns(layerCounts(all))) { columns = qMax(columns, spread.start + spread.span); tall = qMax(tall, spread.rows); }
+        return {double(WideX + (qMax(1, columns) - 1) * WideStep + WideW + 16), double(WideTop + (qMax(1, tall) - 1) * WideRow + WideH + WideUnder)};
     }
     void layout()
     {
         m_rects.clear(); m_bandRects.clear(); m_summaries.clear(); m_bandBackgrounds.clear(); m_listLayers.clear(); m_bandLayers.clear();
         m_approve.clear(); m_discard.clear(); m_moveUp.clear(); m_moveDown.clear();
-        m_routes.clear(); m_groupOf.clear(); m_groups.clear();
+        m_routes.clear(); m_groupOf.clear(); m_groups.clear(); m_columnOf.clear();
         // G3: inside a layer (and inside a phase band) a task other tasks depend
         // on comes first, in the existing order; a dead-end task — nothing
         // depends on it — sinks to the bottom of its column.
@@ -748,10 +784,9 @@ public:
                 const double width = qMax(size.width() - 8, viewW > 0 ? viewW - 16 : 0.0);
                 double y = 4;
                 for (const auto &band : bands) {
-                    QMap<int, int> counts;
-                    for (int id : band.tasks) if (const Node *node = nodeOf(id)) ++counts[node->layer];
+                    const auto spreads = layerColumns(layerCounts(band.tasks));
                     int rows = 0;
-                    for (int count : counts) rows = qMax(rows, count);
+                    for (const auto &spread : spreads) rows = qMax(rows, spread.rows);
                     const double body = band.collapsed ? 0 : bandBody(rows);
                     m_bandRects.insert(band.n, QRectF(8, y, width, BandHead - 4));
                     m_bandBackgrounds.append(QRectF(0, y - 4, width + 16, BandHead + body + 6));
@@ -764,28 +799,26 @@ public:
                         placeWide(band.tasks, WideX, y + BandTop + WidePad);
                         // G4: each layer inside the band keeps its stripe and
                         // small label above the band's tasks.
-                        for (auto it = counts.cbegin(); it != counts.cend(); ++it) {
-                            const double left = qMax(0.0, WideX + it.key() * WideStep - (WideStep - WideW) / 2.0);
-                            const double w = qMin(double(WideStep), width - left + 8);
+                        for (auto it = spreads.cbegin(); it != spreads.cend(); ++it) {
+                            const double left = qMax(0.0, WideX + it->start * WideStep - (WideStep - WideW) / 2.0);
+                            const double w = qMin(double(it->span * WideStep), width - left + 8);
                             if (w <= 4) continue;
-                            BandLayer layer; layer.phase = band.n; layer.layer = it.key(); layer.count = it.value();
+                            BandLayer layer; layer.phase = band.n; layer.layer = it.key(); layer.count = it->count;
                             layer.rect = QRectF(left, y + BandHead, w, BandTop - BandHead);
                             m_bandLayers.append(layer);
                         }
                     }
                     y += BandHead + body + BandGap;
                 }
-                m_layers = 0;
+                m_spreads.clear();
                 const double finalW = qMax(size.width(), viewW);
                 const double finalH = qMax(qMax(double(y), size.height()), viewH);
                 setFixedSize(int(finalW * zoom), int(finalH * zoom));
             } else {
                 QList<int> all;
-                for (const auto &n : nodes) { all.append(n.id); ++column[n.layer]; }
+                for (const auto &n : nodes) all.append(n.id);
                 placeWide(all, m_ox + WideX, m_oy + WideTop);
-                int layers = 0;
-                for (auto it = column.cbegin(); it != column.cend(); ++it) layers = qMax(layers, it.key() + 1);
-                m_layers = layers;
+                m_spreads = layerColumns(layerCounts(all));
                 setFixedSize(int(qMax(size.width(), viewW) * zoom), int(qMax(size.height(), viewH) * zoom));
             }
             routeAll();
@@ -855,9 +888,15 @@ protected:
     // Wide: a band is as wide as its own layers, and at least one header.
     int bandWidth(const PhaseBand &band) const
     {
-        int layers = 0;
-        for (int id : band.tasks) if (const Node *node = nodeOf(id)) layers = qMax(layers, node->layer + 1);
-        return qMax(BandMin, WideX + (qMax(1, layers) - 1) * WideStep + WideW + 16);
+        int columns = 0;
+        for (const auto &spread : layerColumns(layerCounts(band.tasks))) columns = qMax(columns, spread.start + spread.span);
+        return qMax(BandMin, WideX + (qMax(1, columns) - 1) * WideStep + WideW + 16);
+    }
+    QMap<int, int> layerCounts(const QList<int> &ids) const
+    {
+        QMap<int, int> counts;
+        for (int id : ids) if (const Node *node = nodeOf(id)) ++counts[node->layer];
+        return counts;
     }
     // Wide: an open band's height under its header for `rows` rows.
     static double bandBody(int rows) { return (BandTop - BandHead) + WidePad + (qMax(1, rows) - 1) * WideRow + WideH + WideUnder; }
@@ -867,15 +906,23 @@ protected:
     {
         QMap<int, QList<int>> columns;
         for (int id : ids) if (const Node *node = nodeOf(id)) columns[node->layer].append(id);
+        const auto spreads = layerColumns(layerCounts(ids));
         int tallest = 1;
-        for (const auto &column : columns) tallest = qMax(tallest, int(column.size()));
+        for (const auto &spread : spreads) tallest = qMax(tallest, spread.rows);
         const int group = m_groups.size();
-        for (auto it = columns.cbegin(); it != columns.cend(); ++it)
+        for (auto it = columns.cbegin(); it != columns.cend(); ++it) {
+            const LayerSpread spread = spreads.value(it.key());
             for (int i = 0; i < it.value().size(); ++i) {
-                const double y = top + i * WideRow + (tallest - it.value().size()) * WideRow / 2.0;
-                m_rects.insert(it.value().at(i), QRectF(left + it.key() * WideStep, y, WideW, WideH));
+                // A wrapped layer fills its columns top to bottom; each column
+                // centers on the tallest, the last one may be shorter.
+                const int column = i / spread.rows, row = i % spread.rows;
+                const int inColumn = qMin(spread.rows, int(it.value().size()) - column * spread.rows);
+                const double y = top + row * WideRow + (tallest - inColumn) * WideRow / 2.0;
+                m_rects.insert(it.value().at(i), QRectF(left + (spread.start + column) * WideStep, y, WideW, WideH));
                 m_groupOf.insert(it.value().at(i), group);
+                m_columnOf.insert(it.value().at(i), spread.start + column);
             }
+        }
         const double bottom = top + (tallest - 1) * WideRow + WideH;
         m_groups.append({top, bottom});
         return bottom;
@@ -900,10 +947,9 @@ protected:
         // #465 N19: the lookups are built once per routing, not once per
         // edge and candidate: each task's layer, each group's columns of
         // (top, bottom) by layer, and each group's corridor candidates.
-        QHash<int, int> layers;
-        layers.reserve(nodes.size());
-        for (const auto &node : nodes) if (!layers.contains(node.id)) layers.insert(node.id, node.layer);
-        const auto layerOf = [&](int id) { return layers.value(id, 0); };
+        // Routes follow the columns on screen: the columns of a wrapped layer
+        // are crossed like layers, through the corridors between their rows.
+        const auto layerOf = [&](int id) { return m_columnOf.value(id, 0); };
         QHash<int, QMap<int, QList<QPair<double, double>>>> columns;
         QHash<int, QList<double>> corridors;
         for (auto it = m_groupOf.cbegin(); it != m_groupOf.cend(); ++it) {
@@ -1281,12 +1327,13 @@ protected:
                 // The phase headers name the bands; each band draws its own layer
                 // labels and stripes above.
             } else if (m_mode == Wide) {
-                QMap<int, int> counts; for (const auto &n : nodes) ++counts[n.layer];
-                for (int l = 0; l < m_layers; ++l) {
-                    if (l % 2) p.fillRect(QRectF(m_ox + 4 + l * WideStep, 0, WideStep, height() / zoom), alpha(m_c.fg, .025));
+                for (auto it = m_spreads.cbegin(); it != m_spreads.cend(); ++it) {
+                    const int l = it.key();
+                    const double x = m_ox + 4 + it->start * WideStep, w = it->span * WideStep;
+                    if (l % 2) p.fillRect(QRectF(x, 0, w, height() / zoom), alpha(m_c.fg, .025));
                     QFont caps = small; caps.setWeight(QFont::DemiBold); caps.setLetterSpacing(QFont::AbsoluteSpacing, .6); p.setFont(caps);
-                    p.drawText(QRectF(m_ox + 12 + l * WideStep, 6, WideStep, 18), Qt::AlignLeft | Qt::AlignVCenter,
-                               QCoreApplication::translate("TeamPanel", "LAYER %1 · %2").arg(l + 1).arg(counts.value(l)));
+                    p.drawText(QRectF(x + 8, 6, w, 18), Qt::AlignLeft | Qt::AlignVCenter,
+                               QCoreApplication::translate("TeamPanel", "LAYER %1 · %2").arg(l + 1).arg(it->count));
                 }
             } else {
                 QSet<int> labelled;
@@ -1580,7 +1627,7 @@ private:
     void reportEdit() { if (editChanged) editChanged(m_connectFrom, m_edge); }
     Colors m_c;
     Mode m_mode;
-    int m_hover = 0, m_dragFrom = 0, m_layers = 0, m_connectFrom = 0;
+    int m_hover = 0, m_dragFrom = 0, m_connectFrom = 0;
     bool m_keep = false;
     int m_keepFrom = 0;
     QPair<int, int> m_keepEdge{0, 0};
@@ -1590,6 +1637,8 @@ private:
     // each group's node top and bottom; the timer of the working dots.
     QMap<QPair<int, int>, Route> m_routes;
     QMap<int, int> m_groupOf;
+    QHash<int, int> m_columnOf;          // Wide: a task's column on screen
+    QMap<int, LayerSpread> m_spreads;    // Wide, one group: each layer's columns
     QList<QPair<double, double>> m_groups;
     QTimer m_dots;
     QPair<int, int> m_edge{0, 0};

@@ -201,7 +201,10 @@ QJsonObject labelTeam()
   {"id":6,"title":"Queued","assignee":"backend","status":"pending"},
   {"id":7,"title":"Still a draft","assignee":"backend","status":"draft"},
   {"id":8,"title":"Done","assignee":"backend","status":"accepted"},
-  {"id":9,"title":"Offline problem","assignee":"blocked","status":"in_progress","attempts":[{"n":2,"id":"a9","member":"blocked","state":"delivered","started_at":1600}]}],
+  {"id":9,"title":"Offline problem","assignee":"blocked","status":"in_progress","attempts":[{"n":2,"id":"a9","member":"blocked","state":"delivered","started_at":1600}]},
+  {"id":10,"title":"Handed over","assignee":"lead","status":"in_progress","attempts":[{"n":1,"id":"a10","member":"lead","state":"delivered","delivered_at":1700}]},
+  {"id":11,"title":"Turn ended","assignee":"lead","status":"in_progress","attempts":[{"n":1,"id":"a11","member":"lead","state":"delivered","started_at":1800,"turn_ended_at":1900}]},
+  {"id":12,"title":"Not needed","assignee":"lead","status":"cancelled"}],
  "layers":{"1":0,"2":1,"3":1,"4":2,"5":2,"6":3,"7":3,"8":4,"9":1}})").object();
 }
 
@@ -674,6 +677,7 @@ private slots:
     void graphRoutesEdgesAroundNodes();
     void graphEdgesAreEditedByHandleAndSelection();
     void graphRoutingStaysFastForTheLargestPlan();
+    void aTallLayerWrapsIntoColumns();
     void graphNodesInTwoLinesWithDraftEdits();
     void graphNodesCarryTheActivityLabel();
     void subLeadsAreATreeInMembersAndTheInspector();
@@ -685,6 +689,7 @@ private slots:
     void boardScrollsInsteadOfSqueezingColumns();
     void planningBoardScrollsInsteadOfSqueezingColumns();
     void catalogRoleEditorEditsEveryField();
+    void catalogRoleListGrowsToItsRows();
     void catalogTemplateEditorRosterSkeletonAndChecks();
     void catalogRoutingEditsAndTriesAGoal();
     void catalogHeaderRevertDraftAndBanners();
@@ -699,6 +704,7 @@ private slots:
     void leadHeaderFollowsTheTeamState();
     void leadHeaderShots();
     void phaseScrollsInEveryView();
+    void aNarrowToolbarKeepsOnlyItsIcons();
     void phaseScrollDecisions();
     void sideListsAndMemberTasks();
 private:
@@ -2730,7 +2736,10 @@ void TestTeamsUi::leadLoadViewsShowInTheDesktop()
              qPrintable(phaseAction(&workspace, 3, "teamPhaseAccept")->toolTip()));
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceMemberServices"));
     QVERIFY(workspace.findChild<QWidget *>("teamWorkspaceMemberBudget"));
-    QVERIFY(workspace.findChild<QFrame *>("teamAttentionStrip"));
+    // Owner, 2026-10-28: the attention list is the first group of the side
+    // column, not a strip over the canvas.
+    QVERIFY(workspace.findChild<QWidget *>("teamAttentionStrip"));
+    QVERIFY(workspace.findChild<QWidget *>("teamWorkspaceSide")->isAncestorOf(workspace.findChild<QWidget *>("teamAttentionStrip")));
     shot(&workspace, "lead-load-workspace");
     // The light halves of the lead-load views: card, plan and workspace.
     card.setTask(parsed, 2, live, false);
@@ -4032,6 +4041,51 @@ void TestTeamsUi::graphRoutingStaysFastForTheLargestPlan()
     }
 }
 
+// Owner, 2026-10-28: a layer is not always one column. Phase 39's plan, 13
+// tasks into one integration, then review and QA, then the build: the first
+// layer wraps into 3 columns of at most 5, the next layers move right of
+// them, and no edge crosses a node on its way.
+void TestTeamsUi::aTallLayerWrapsIntoColumns()
+{
+    QCOMPARE(TeamUi::TaskView::layerColumns({{0, 13}, {1, 1}, {2, 2}, {3, 1}}).value(0).span, 3);
+    QCOMPARE(TeamUi::TaskView::layerColumns({{0, 13}, {1, 1}, {2, 2}, {3, 1}}).value(1).start, 3);
+    QCOMPARE(TeamUi::TaskView::layerColumns({{0, 6}, {1, 1}}).value(0).span, 1);
+    QCOMPARE(TeamUi::TaskView::layerColumns({{0, 20}, {1, 20}}).value(0).span, 1);
+    TeamUi::TaskView view(TeamUi::colorsFor(true), TeamUi::TaskView::Wide);
+    const auto node = [](int id, int layer) {
+        TeamUi::TaskView::Node n; n.id = id; n.layer = layer; n.title = QStringLiteral("Task %1").arg(id); n.role = "Backend";
+        n.tone = TeamUi::colorsFor(true).muted; n.roleTone = TeamUi::roleColor(n.role, true); n.kind = "accepted"; n.agent = "claude";
+        return n;
+    };
+    for (int id = 1; id <= 13; ++id) view.nodes.append(node(id, 0));
+    view.nodes.append(node(14, 1)); view.nodes.append(node(15, 2)); view.nodes.append(node(16, 2)); view.nodes.append(node(17, 3));
+    for (int id = 1; id <= 13; ++id) view.edges[14].append(id);
+    view.edges[15] = {14}; view.edges[16] = {14}; view.edges[17] = {15, 16};
+    view.area = QSize(1400, 700);
+    view.layout();
+    QSet<double> firstColumns;
+    QMap<double, int> perColumn;
+    for (int id = 1; id <= 13; ++id) { firstColumns.insert(view.nodeRect(id).left()); ++perColumn[view.nodeRect(id).left()]; }
+    QCOMPARE(firstColumns.size(), 3);
+    for (int count : perColumn) QVERIFY(count <= 5);
+    double right = 0;
+    for (int id = 1; id <= 13; ++id) right = qMax(right, view.nodeRect(id).right());
+    QVERIFY(view.nodeRect(14).left() > right);
+    QVERIFY(view.nodeRect(15).left() > view.nodeRect(14).right());
+    for (auto it = view.edges.cbegin(); it != view.edges.cend(); ++it) for (int dep : it.value()) {
+        QVERIFY(view.routed(dep, it.key()));
+        const auto route = view.route(dep, it.key()).points;
+        for (const auto &other : view.nodes) {
+            if (other.id == dep || other.id == it.key()) continue;
+            const QRectF box = view.nodeRect(other.id).adjusted(1, 1, -1, -1);
+            for (int i = 1; i < route.size(); ++i)
+                QVERIFY2(!QRectF(route.at(i - 1), route.at(i)).normalized().adjusted(-.01, -.01, .01, .01).intersects(box),
+                         qPrintable(QStringLiteral("#%1 -> #%2 crosses #%3").arg(dep).arg(it.key()).arg(other.id)));
+        }
+    }
+    view.resize(view.size()); shot(&view, "graph-wrapped-layer");
+}
+
 void TestTeamsUi::graphEdgesAreEditedByHandleAndSelection()
 {
     TeamUi::TaskView view(TeamUi::colorsFor(true), TeamUi::TaskView::Wide);
@@ -4228,7 +4282,8 @@ void TestTeamsUi::graphNodesCarryTheActivityLabel()
     TeamPanel panel(&controller);
     TeamWorkspace workspace(&controller, &panel);
     // #9's member is offline: its problem text must win over the label.
-    const LiveLookup live = [](const Member &m) { Live l; l.known = true; if (m.id == "blocked") l.offline = true; return l; };
+    // Backend's agent runs; the lead's does not.
+    const LiveLookup live = [](const Member &m) { Live l; l.known = true; if (m.id == "blocked") l.offline = true; l.working = m.id == "backend"; return l; };
     panel.setLive(live); workspace.setLive(live);
     darkPalette(); workspace.setTheme(true);
     workspace.resize(1300, 820); workspace.show();
@@ -4239,11 +4294,15 @@ void TestTeamsUi::graphNodesCarryTheActivityLabel()
     TeamUi::TaskView *graph = nullptr;
     QTRY_VERIFY(([&] { graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); return graph && graph->nodeRect(1).width() > 0; })());
     const auto node = [&](int id) { for (const auto &n : graph->nodes) if (n.id == id) return n; return TeamUi::TaskView::Node{}; };
-    // Each rule of the owner's addition: Submitted, attempt 2, nothing on the
-    // first attempt, Held, a sub-team, and nothing for Pending, Draft, Accepted.
+    // Each rule of the owner's addition: Submitted, attempt 2, Held, a
+    // sub-team, and nothing for Pending, Draft, Accepted. Owner, 2026-10-28:
+    // work in progress says where it is - working, starting or idle.
     QCOMPARE(node(1).activity, QStringLiteral("review"));
-    QCOMPARE(node(2).activity, QStringLiteral("attempt 2"));
-    QVERIFY(node(3).activity.isEmpty());
+    QCOMPARE(node(2).activity, QStringLiteral("attempt 2 · working"));
+    QCOMPARE(node(3).activity, QStringLiteral("working"));
+    QCOMPARE(node(10).activity, QStringLiteral("starting"));
+    QCOMPARE(node(11).activity, QStringLiteral("idle"));
+    QCOMPARE(node(12).activity, QStringLiteral("cancelled"));
     QCOMPARE(node(4).activity, QStringLiteral("held"));
     QCOMPARE(node(5).activity, QStringLiteral("sub-team 1/2"));
     QVERIFY(node(6).activity.isEmpty());
@@ -4270,7 +4329,8 @@ void TestTeamsUi::graphNodesCarryTheActivityLabel()
         return QStringLiteral("?");
     };
     QCOMPARE(card(1), QStringLiteral("review"));
-    QCOMPARE(card(2), QStringLiteral("attempt 2"));
+    QCOMPARE(card(2), QStringLiteral("attempt 2 · working"));
+    QCOMPARE(card(3), QStringLiteral("working"));
     QCOMPARE(card(4), QStringLiteral("held"));
     QVERIFY(card(6).isEmpty());
     QVERIFY(card(9).isEmpty());
@@ -4493,6 +4553,35 @@ void TestTeamsUi::designerPageStartsOrOpensTheDesigner()
 // and Backspace remove), another agent with its first model, computers,
 // the five permissions, folder, who it may message, when it joins, the five
 // dangerous actions and the prompt blocks with include and up/down.
+// Owner, 2026-10-28: the role list runs down the whole column; it scrolled
+// after five rows (a Maximum policy held it at the default size hint) with
+// the column empty below "+ Role".
+void TestTeamsUi::catalogRoleListGrowsToItsRows()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    // Settings > Teams: the editor sits in a scrolling page at its size hint.
+    QScrollArea page; page.setWidgetResizable(true);
+    auto *editorWidget = new TeamCatalogEditor(&controller);
+    auto &editor = *editorWidget;
+    page.setWidget(editorWidget);
+    page.resize(1180, 900); page.show();
+    auto *roles = editor.findChild<QListWidget *>("teamCatalogRoles");
+    QTRY_COMPARE(roles->count(), 3);
+    auto *add = editor.findChild<QPushButton *>("teamCatalogAdd");
+    for (int i = 0; i < 11; ++i) add->click();
+    QTRY_COMPARE(roles->count(), 14);
+    int rows = 0;
+    for (int i = 0; i < roles->count(); ++i) rows += roles->visualItemRect(roles->item(i)).height();
+    QTRY_VERIFY2(roles->viewport()->height() >= rows, qPrintable(QStringLiteral("%1 px for %2 px of rows").arg(roles->viewport()->height()).arg(rows)));
+    QCOMPARE(roles->verticalScrollBar()->maximum(), 0);
+    // "+ Role" stays right under the last row.
+    QVERIFY(add->geometry().top() - roles->geometry().bottom() < 16);
+    shot(&page, "catalog-role-list-14-dark");
+}
+
 void TestTeamsUi::catalogRoleEditorEditsEveryField()
 {
     QSettings().setValue("workspace/skin", "whitewh");
@@ -6331,6 +6420,50 @@ Live prototypeLive(const Member &member)
 // U25 (spec 5.1, 5.3, 5.5): every phase a collapsible scroll in Graph, Board
 // and Layers, with its number, status badge, accepted/tasks bar, proposed by or
 // health, the lead's note and the owner's actions in its header.
+// Owner, 2026-10-28: on a small screen the workspace toolbar keeps its icons
+// and drops their words (Graph / Board / Layers, All / Active / Problems,
+// Auto-accept drafts, Expand all); the words come back when it fits again
+// and stay in the tooltips and accessible names.
+void TestTeamsUi::aNarrowToolbarKeepsOnlyItsIcons()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    setTeam(prototypeTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(prototypeLive);
+    darkPalette(); workspace.setTheme(true);
+    workspace.resize(1440, 900); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceFilter"));
+    const auto segment = [&](const char *group, const char *value) -> QPushButton * {
+        for (auto *b : workspace.findChild<QWidget *>(group)->findChildren<QPushButton *>()) if (b->property("segment") == value) return b;
+        return nullptr;
+    };
+    QTRY_COMPARE(segment("teamWorkspaceView", "graph")->text(), QStringLiteral("Graph"));
+    QCOMPARE(segment("teamWorkspaceFilter", "problems")->text(), QStringLiteral("Problems"));
+    QVERIFY(segment("teamWorkspaceFilter", "problems")->icon().isNull());
+    auto *split = workspace.findChild<QSplitter *>("teamWorkspaceSplit");
+    QVERIFY(split);
+    split->setSizes({430, 1010});
+    QTRY_VERIFY(segment("teamWorkspaceView", "graph")->text().isEmpty());
+    QVERIFY(!segment("teamWorkspaceView", "graph")->icon().isNull());
+    QCOMPARE(segment("teamWorkspaceView", "graph")->toolTip(), QStringLiteral("Graph"));
+    QCOMPARE(segment("teamWorkspaceView", "graph")->accessibleName(), QStringLiteral("Graph"));
+    QVERIFY(segment("teamWorkspaceFilter", "problems")->text().isEmpty());
+    QVERIFY(!segment("teamWorkspaceFilter", "problems")->icon().isNull());
+    if (auto *expand = workspace.findChild<QPushButton *>("teamWorkspaceExpandAll")) QVERIFY(expand->text().isEmpty());
+    // A render rebuilds the toolbar: look it up each time.
+    const auto bar = [&] { return workspace.findChild<QWidget *>("teamWorkspaceToolbar"); };
+    QTest::qWait(200); shot(bar(), "team-toolbar-narrow-dark");
+    QTRY_VERIFY2(bar()->sizeHint().width() <= bar()->width() + 1, qPrintable(QStringLiteral("%1 px for a %2 px row").arg(bar()->sizeHint().width()).arg(bar()->width())));
+    split->setSizes({1100, 340});
+    QTRY_COMPARE(segment("teamWorkspaceView", "graph")->text(), QStringLiteral("Graph"));
+    QTRY_COMPARE(segment("teamWorkspaceFilter", "problems")->text(), QStringLiteral("Problems"));
+    QSettings().remove("workspace/skin");
+}
+
 void TestTeamsUi::phaseScrollsInEveryView()
 {
     QSettings().setValue("workspace/skin", "whitewh");

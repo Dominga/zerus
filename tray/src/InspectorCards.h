@@ -104,29 +104,30 @@ public:
     {
         const auto &skin = WorkspaceSkin::active();
         const auto t = [&skin, dark](const char *name) { return WorkspaceSkin::color(skin, dark, QString::fromLatin1(name)).name(); };
-        // .ibody2 / .icard / .ihd of the prototype.
+        // .ibody2 / .icard / .ihd of the prototype. The column has no backdrop
+        // of its own: the cards sit on the session panel's surface.
         setStyleSheet(QStringLiteral(
-            "QScrollArea#sessionInspector{background:%1;border:0;}"
-            "QWidget#inspectorColumn{background:%1;}"
-            "QFrame#inspectorCard{background:%2;border:1px solid %3;border-radius:12px;}"
+            "QScrollArea#sessionInspector,QScrollArea#sessionInspector>QWidget#qt_scrollarea_viewport,"
+            "QWidget#inspectorColumn{background:transparent;border:0;}"
+            "QFrame#inspectorCard{background:%1;border:1px solid %2;border-radius:12px;}"
             "QFrame#inspectorCard QLabel{background:transparent;}"
-            "QLabel#inspectorCardValue{color:%4;font-size:12px;}"
+            "QLabel#inspectorCardValue{color:%3;font-size:12px;}"
             "QFrame#inspectorCard QLabel#collapsibleTitle{font-size:12.5px;font-weight:600;}"
             // .irow: the Environment rows, the key row's mono ID, dim keys.
-            "QFrame#inspectorCard QLabel#inspectorEnvValue,QFrame#inspectorCard QLabel#keepCacheWarmLabel{color:%5;font-size:12px;}"
-            "QFrame#inspectorCard QLabel#inspectorEnvKey,QFrame#inspectorCard QLabel#keepCacheWarmLimit{color:%4;font-size:12px;}"
-            "QFrame#inspectorCard QLabel#detailsIdentityValue{color:%5;font-family:monospace;font-size:11.5px;}"
-            "QFrame#inspectorCard QLabel#inspectorContextUsed{color:%6;font-size:12.5px;font-weight:600;}"
-            "QFrame#inspectorCard QLabel#inspectorContextTokens{color:%4;font-family:monospace;font-size:12px;}"
-            "QFrame#inspectorCard QLabel#inspectorContextLeft,QFrame#inspectorCard QLabel#inspectorChangesEmpty{color:%4;font-size:11px;}"
-            "QFrame#inspectorCard QLabel#inspectorChangePath{color:%5;font-family:monospace;font-size:11.5px;}"
+            "QFrame#inspectorCard QLabel#inspectorEnvValue,QFrame#inspectorCard QLabel#keepCacheWarmLabel{color:%4;font-size:12px;}"
+            "QFrame#inspectorCard QLabel#inspectorEnvKey,QFrame#inspectorCard QLabel#keepCacheWarmLimit{color:%3;font-size:12px;}"
+            "QFrame#inspectorCard QLabel#detailsIdentityValue{color:%4;font-family:monospace;font-size:11.5px;}"
+            "QFrame#inspectorCard QLabel#inspectorContextUsed{color:%5;font-size:12.5px;font-weight:600;}"
+            "QFrame#inspectorCard QLabel#inspectorContextTokens{color:%3;font-family:monospace;font-size:12px;}"
+            "QFrame#inspectorCard QLabel#inspectorContextLeft,QFrame#inspectorCard QLabel#inspectorChangesEmpty{color:%3;font-size:11px;}"
+            "QFrame#inspectorCard QLabel#inspectorChangePath{color:%4;font-family:monospace;font-size:11.5px;}"
             "QFrame#inspectorCard QTextBrowser{background:transparent;border:0;}"
             // A panel inside a card (Team) draws on the card, not the window.
             "QFrame#inspectorCard QScrollArea,QFrame#inspectorCard QScrollArea>QWidget>QWidget{background:transparent;border:0;}"
             // The prototype's switch: a pill, the accent when on.
-            "QCheckBox#keepCacheWarm::indicator{width:30px;height:18px;border-radius:9px;background:%7;border:1px solid %3;}"
-            "QCheckBox#keepCacheWarm::indicator:checked{background:%8;border-color:%8;}")
-            .arg(t("bg"), t("card"), t("cardBorder"), t("dim"), t("text2"), t("fg"), t("border"), t("accent")));
+            "QCheckBox#keepCacheWarm::indicator{width:30px;height:18px;border-radius:9px;background:%6;border:1px solid %2;}"
+            "QCheckBox#keepCacheWarm::indicator:checked{background:%7;border-color:%7;}")
+            .arg(t("card"), t("cardBorder"), t("dim"), t("text2"), t("fg"), t("border"), t("accent")));
         for (auto &entry : m_cards) entry.block->setDark(dark);
     }
 

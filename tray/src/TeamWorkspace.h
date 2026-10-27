@@ -87,7 +87,7 @@ private:
     QWidget *swappedList(const Teams::Team &team);
     // F7/F8: opens another team in this workspace (previous, next, a new one).
     void openOtherTeam(const QString &team);
-    QWidget *attentionStrip(const Teams::Team &team);
+    void attentionRows(const Teams::Team &team, QVBoxLayout *into);
     // N7: Answer on a permission item: the member's Allow / Deny box, or its
     // command on the clipboard when this hgs sends no box.
     void answerAttention(const QString &teamId, const QString &member, const QString &command);
@@ -151,7 +151,7 @@ private:
     QList<Computer> m_computers;
     QString m_team, m_view = QStringLiteral("graph"), m_filter = QStringLiteral("all"), m_focus;
     QString m_error;
-    bool m_dark = true, m_pending = false, m_feedOpen = false, m_fit = true;
+    bool m_dark = true, m_pending = false, m_feedOpen = false, m_inboxOpen = false, m_fit = true;
     // G9: one phase decision is in flight at a time; a second click on a header
     // before the answer arrives sends nothing. After an answer, that phase stays
     // decided until the team's revision moves (the store has taken the

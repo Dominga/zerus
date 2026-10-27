@@ -23,9 +23,11 @@
 #include <QMenu>
 #include <QPlainTextEdit>
 #include <QRadioButton>
+#include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
+#include <QShowEvent>
 #include <QSplitter>
 #include <QStyle>
 #include <QTimer>
@@ -161,6 +163,8 @@ void TeamWorkspace::setTheme(bool dark)
     const Colors c = colorsFor(dark);
     setStyleSheet(teamSheet(c) + QStringLiteral(
         "QWidget#teamWorkspace{background:%1;}"
+        "QScrollArea#teamWorkspaceMembers,QScrollArea#teamWorkspaceMembers>QWidget#qt_scrollarea_viewport,"
+        "QWidget#teamWorkspaceSide,QWidget#teamSideLists{background:%1;border:0;}"
         "QSplitter#teamWorkspaceSplit::handle{background:%2;margin:0 3px;}"
         "QSplitter#teamWorkspaceSplit::handle:hover{background:%4;}"
         "QSplitter#teamWorkspaceSideSplit::handle{background:%2;margin:2px 40px;border-radius:1px;}"
@@ -285,9 +289,8 @@ void TeamWorkspace::render()
         if (!team->widenings.isEmpty()) tv->addWidget(wideningStrip(*team));
         // F8: the lead's open membership proposals.
         if (auto *proposals = proposalsStrip(*team)) tv->addWidget(proposals);
-        // C2/C4: the lead's inbox and the owner's attention list.
-        if (const auto &items = m_teams->inbox(); !items.isEmpty()) tv->addWidget(inboxStrip(*team, items));
-        if (!team->attention.isEmpty()) tv->addWidget(attentionStrip(*team));
+        // C4: the owner's attention list is the first group of the side
+        // column; the lead's inbox (C2) is a drawer under the canvas.
         if (!m_error.isEmpty()) tv->addWidget(errorStrip());
         // U25 (spec 5.7): Needs your answer, Team stuck and Plan problems are
         // collapsed lists at the top of the right column now.
@@ -298,6 +301,7 @@ void TeamWorkspace::render()
         auto *lv = new QVBoxLayout(left); lv->setContentsMargins(0, 0, 0, 0); lv->setSpacing(0);
         lv->addWidget(toolbar(*team));
         lv->addWidget(canvas(*team), 1);
+        if (const auto &items = m_teams->inbox(); !items.isEmpty()) lv->addWidget(inboxStrip(*team, items));
         lv->addWidget(feed(*team));
         if (m_left) { m_leftHost->removeWidget(m_left); retire(m_left); }
         m_leftHost->addWidget(left); left->show(); m_left = left;
@@ -798,47 +802,60 @@ void TeamWorkspace::movePhase(const Team &team, int phase, int to, const QString
 
 QWidget *TeamWorkspace::inboxStrip(const Team &team, const QList<InboxItem> &items)
 {
+    // Owner, 2026-10-28: the lead's inbox is a drawer at the bottom like the
+    // feed, not a strip over the canvas. Folded, its header names the count
+    // and the oldest item; open, every item, oldest first.
     const Colors c = colorsFor(m_dark);
-    auto *strip = new QFrame; strip->setObjectName("teamInboxStrip"); strip->setMinimumHeight(30);
-    strip->setStyleSheet(QStringLiteral("QFrame#teamInboxStrip{background:%1;border-bottom:1px solid %2;}")
-                             .arg(alpha(c.accent, .10).name(QColor::HexArgb), alpha(c.accent, .45).name(QColor::HexArgb)));
-    auto *v = new QVBoxLayout(strip); v->setContentsMargins(12, 5, 12, 5); v->setSpacing(2);
+    auto *strip = new QFrame; strip->setObjectName("teamInboxStrip");
+    strip->setStyleSheet(QStringLiteral("QFrame#teamInboxStrip{border-top:1px solid %1;}").arg(c.border.name()));
+    auto *v = new QVBoxLayout(strip); v->setContentsMargins(12, 4, 12, 6); v->setSpacing(2);
+    const auto kindOf = [](const InboxItem &item) {
+        return item.kind == "report" ? tr("report") : item.kind == "question" ? tr("question")
+             : item.kind == "permission" ? tr("permission") : item.kind == "lead_task" ? tr("lead task")
+             : item.kind == "stalled" ? tr("stalled") : item.kind == "budget" ? tr("budget") : item.kind;
+    };
     auto *head = row(6);
+    auto *toggle = new QToolButton; toggle->setIcon(workspaceIcon(m_inboxOpen ? "chevron-down" : "chevron-right", c.fg)); toggle->setAutoRaise(true);
+    toggle->setObjectName("teamInboxToggle");
+    QObject::connect(toggle, &QToolButton::clicked, this, [this] { m_inboxOpen = !m_inboxOpen; scheduleRender(); });
+    head->addWidget(toggle);
     head->addWidget(label(tr("Inbox"), c.fg, 12, true, "teamInboxTitle"));
-    head->addWidget(label(items.size() == 1 ? tr("1 for the lead") : tr("%1 for the lead").arg(items.size()), c.muted, 11));
-    head->addStretch();
+    head->addWidget(label(items.size() == 1 ? tr("1 for the lead") : tr("%1 for the lead").arg(items.size()), c.accent, 11));
+    if (!m_inboxOpen) {
+        const auto &first = items.first();
+        auto *latest = elided(QStringLiteral("· %1 %2%3 %4").arg(kindOf(first), first.member,
+                                  first.task > 0 ? QStringLiteral(" #%1").arg(first.task) : QString(), first.summary), c.text3, 11);
+        latest->setObjectName("teamInboxSummary");
+        latest->setToolTip(first.command);
+        head->addWidget(latest, 1);
+    } else head->addStretch();
     v->addLayout(head);
+    if (!m_inboxOpen) return strip;
     // C2: oldest first, the command that answers it in the tooltip.
-    int shown = 0;
+    auto *rows = new QWidget; auto *rv = new QVBoxLayout(rows); rv->setContentsMargins(0, 0, 0, 0); rv->setSpacing(2);
     for (const auto &item : items) {
-        if (shown == 5) break;
-        const QString kind = item.kind == "report" ? tr("report") : item.kind == "question" ? tr("question")
-                          : item.kind == "permission" ? tr("permission") : item.kind == "lead_task" ? tr("lead task")
-                          : item.kind == "stalled" ? tr("stalled") : item.kind == "budget" ? tr("budget") : item.kind;
         auto *line = row(6);
-        line->addWidget(new Pill(kind, item.kind == "report" ? c.warn : c.accent));
+        line->addWidget(new Pill(kindOf(item), item.kind == "report" ? c.warn : c.accent));
         line->addWidget(label(item.member, c.text2, 11));
         if (item.task > 0) line->addWidget(label(QStringLiteral("#%1").arg(item.task), c.muted, 11));
         auto *summary = elided(item.summary, c.fg, 11);
         summary->setObjectName("teamInboxSummary");
         summary->setToolTip(item.command);
         line->addWidget(summary, 1);
-        v->addLayout(line);
-        ++shown;
+        rv->addLayout(line);
     }
-    if (items.size() > shown) v->addWidget(label(tr("+%1 more").arg(items.size() - shown), c.muted, 10));
+    rv->addStretch();
+    auto *scroll = new QScrollArea; scroll->setWidget(rows); scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setFixedHeight(qMin(170, int(items.size()) * 24 + 6));
+    keepScroll(scroll, QStringLiteral("inbox"));
+    v->addWidget(scroll);
     Q_UNUSED(team);
     return strip;
 }
 
-QWidget *TeamWorkspace::attentionStrip(const Team &team)
+void TeamWorkspace::attentionRows(const Team &team, QVBoxLayout *v)
 {
     const Colors c = colorsFor(m_dark);
-    auto *strip = new QFrame; strip->setObjectName("teamAttentionStrip"); strip->setMinimumHeight(26);
-    strip->setStyleSheet(QStringLiteral("QFrame#teamAttentionStrip{background:%1;}")
-                             .arg(alpha(c.warn, .12).name(QColor::HexArgb)));
-    auto *v = new QVBoxLayout(strip); v->setContentsMargins(12, 4, 12, 4); v->setSpacing(3);
-    v->addWidget(label(tr("Needs your attention"), c.warn, 11, true, "teamAttentionTitle"));
     // N7 (U18): one line per item - the member, what waits and its age - and
     // Answer on a permission the lead left unanswered.
     int shown = 0;
@@ -847,7 +864,7 @@ QWidget *TeamWorkspace::attentionStrip(const Team &team)
         ++shown;
         const QString line = TeamAttentionNotices::what(item) + QStringLiteral(" · ") + TeamAttentionNotices::age(item);
         auto *r = row(6);
-        auto *text = elided(line, c.text2, 11);
+        auto *text = elided(line, c.text2, 12);
         text->setObjectName("teamAttentionLine"); text->setProperty("kind", item.kind);
         text->setToolTip(item.command.isEmpty() ? line : line + QLatin1Char('\n') + item.command);
         r->addWidget(text, 1);
@@ -863,7 +880,6 @@ QWidget *TeamWorkspace::attentionStrip(const Team &team)
         v->addLayout(r);
     }
     if (team.attention.size() > shown) v->addWidget(label(tr("+%1 more").arg(team.attention.size() - shown), c.muted, 10));
-    return strip;
 }
 
 void TeamWorkspace::answerAttention(const QString &teamId, const QString &member, const QString &command)
@@ -910,10 +926,53 @@ const Teams::Team *TeamWorkspace::currentTeam(const QString &id) const
     return m_teams->team(id);
 }
 
+// Owner, 2026-10-28: on a narrow window the workspace toolbar keeps its icons
+// and drops their words. A button marked "compactText" shows its text only
+// while the whole row fits, its "compactIcon" only while it does not, and a
+// label marked "compactHide" hides; the words move to the tooltips.
+class ToolbarRow : public QWidget {
+public:
+    using QWidget::QWidget;
+    bool compact() const { return m_compact; }
+protected:
+    void resizeEvent(QResizeEvent *event) override { QWidget::resizeEvent(event); refit(); }
+    void showEvent(QShowEvent *event) override { QWidget::showEvent(event); refit(); }
+private:
+    void refit()
+    {
+        if (!m_compact) m_full = sizeHint().width();
+        const bool compact = width() < m_full;
+        if (compact == m_compact) return;
+        m_compact = compact;
+        // Icon-only buttons take their icon's width, not the style's text
+        // minimum, and the row draws its groups closer together.
+        if (auto *row = qobject_cast<QHBoxLayout *>(layout())) {
+            row->setSpacing(compact ? 4 : 8);
+            row->setContentsMargins(compact ? 6 : 12, 8, compact ? 6 : 12, 6);
+        }
+        for (auto *b : findChildren<QPushButton *>()) {
+            const QString text = b->property("compactText").toString();
+            const bool zoom = b->objectName() == "teamWorkspaceZoomOut" || b->objectName() == "teamWorkspaceZoomIn";
+            if (zoom) { if (compact) b->setFixedWidth(30); else { b->setMinimumWidth(0); b->setMaximumWidth(QWIDGETSIZE_MAX); } }
+            if (text.isEmpty()) continue;
+            if (compact) b->setFixedWidth(b->iconSize().width() + 16);
+            else { b->setMinimumWidth(0); b->setMaximumWidth(QWIDGETSIZE_MAX); }
+            b->setText(compact ? QString() : text);
+            if (b->toolTip().isEmpty() || b->toolTip() == text) b->setToolTip(compact ? text : QString());
+            const QIcon icon = b->property("compactIcon").value<QIcon>();
+            if (!icon.isNull()) b->setIcon(compact ? icon : QIcon());
+        }
+        for (auto *l : findChildren<QLabel *>()) if (l->property("compactHide").toBool()) l->setVisible(!compact);
+    }
+    bool m_compact = false;
+    int m_full = 0;
+};
+
 QWidget *TeamWorkspace::toolbar(const Team &team)
 {
     const Colors c = colorsFor(m_dark);
-    auto *bar = new QWidget; bar->setObjectName("teamWorkspaceToolbar");
+    auto *bar = new ToolbarRow; bar->setObjectName("teamWorkspaceToolbar");
+    bar->setMinimumWidth(0); bar->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     auto *h = new QHBoxLayout(bar); h->setContentsMargins(12, 8, 12, 6); h->setSpacing(8);
     // U25 (spec 5.1): Graph / Board / Layers with their icons and names.
     auto *views = segmented({{"graph", tr("Graph")}, {"board", tr("Board")}, {"layers", tr("Layers")}}, m_view, "teamWorkspaceView",
@@ -921,7 +980,7 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
     for (auto *b : views->findChildren<QPushButton *>()) {
         const QString value = b->property("segment").toString();
         b->setIcon(workspaceIcon(QStringLiteral("view-") + value, b->isChecked() ? c.accent : c.text2)); b->setIconSize(QSize(13, 13));
-        b->setAccessibleName(b->text());
+        b->setAccessibleName(b->text()); b->setProperty("compactText", b->text());
     }
     h->addWidget(views);
     const bool planning = team.status == "planning";
@@ -931,13 +990,20 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         h->addWidget(task);
         if (m_view == "graph") {
             auto *hint = elided(tr("Drag from a node's right edge onto a task to connect them"), c.dim, 11);
-            hint->setObjectName("teamWorkspaceHint"); h->addWidget(hint, 1);
+            hint->setObjectName("teamWorkspaceHint"); hint->setProperty("compactHide", true); h->addWidget(hint, 1);
         }
     } else if (m_view != "board") {
         // The board's columns already sort tasks by state; the graph dims and
         // the layers hide what the filter leaves out.
-        h->addWidget(segmented({{"all", tr("All")}, {"active", tr("Active")}, {"problems", tr("Problems")}}, m_filter, "teamWorkspaceFilter",
-                               [this](const QString &value) { m_filter = value; scheduleRender(); }));
+        auto *filter = segmented({{"all", tr("All")}, {"active", tr("Active")}, {"problems", tr("Problems")}}, m_filter, "teamWorkspaceFilter",
+                                 [this](const QString &value) { m_filter = value; scheduleRender(); });
+        for (auto *b : filter->findChildren<QPushButton *>()) {
+            const QString value = b->property("segment").toString();
+            b->setAccessibleName(b->text()); b->setProperty("compactText", b->text()); b->setIconSize(QSize(13, 13));
+            b->setProperty("compactIcon", QVariant::fromValue(workspaceIcon(value == "problems" ? QStringLiteral("attention") : value,
+                                                                              b->isChecked() ? c.accent : c.text2)));
+        }
+        h->addWidget(filter);
     }
     if (!m_focus.isEmpty()) {
         auto *chip = button(tr("Member: %1  ×").arg(team.roleOf(m_focus)), "teamWorkspaceFocus"); chip->setProperty("chip", true);
@@ -969,12 +1035,14 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         autoSwitch->setEnabled(settingsOpen(team));
         QObject::connect(autoSwitch, &QAbstractButton::clicked, this, [this, id = team.id](bool on) { if (const auto *t = currentTeam(id)) setAutoAccept(*t, on); });
         h->addWidget(autoSwitch);
-        h->addWidget(label(tr("Auto-accept drafts"), c.text3, 11));
+        auto *autoLabel = label(tr("Auto-accept drafts"), c.text3, 11); autoLabel->setProperty("compactHide", true);
+        h->addWidget(autoLabel);
     }
     if (!groups.isEmpty()) {
         bool allOpen = true;
         for (const auto &group : groups) allOpen = allOpen && m_panel->phaseOpen(team, group);
         auto *expand = button(allOpen ? tr("Collapse all") : tr("Expand all"), "teamWorkspaceExpandAll"); expand->setProperty("ghost", true);
+        expand->setProperty("compactText", expand->text()); expand->setAccessibleName(expand->text());
         expand->setIcon(workspaceIcon(allOpen ? "chevron-down" : "chevron-right", c.text2)); expand->setIconSize(QSize(11, 11));
         QObject::connect(expand, &QPushButton::clicked, this, [this, id = team.id, open = !allOpen] {
             const auto *current = currentTeam(id);
@@ -992,6 +1060,8 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         // "Fit" until the owner zooms, then the zoom itself; a click fits again.
         auto *fit = button(m_zoomManual ? QStringLiteral("%1%").arg(int(std::round(m_zoom * 100))) : tr("Fit"), "teamWorkspaceFit");
         QObject::connect(fit, &QPushButton::clicked, this, [this] { m_fit = true; m_zoomManual = false; scheduleRender(); });
+        fit->setProperty("compactText", fit->text()); fit->setAccessibleName(fit->text()); fit->setIconSize(QSize(12, 12));
+        fit->setProperty("compactIcon", QVariant::fromValue(workspaceIcon(QStringLiteral("reset"), c.text2)));
         auto *in = button(QStringLiteral("+"), "teamWorkspaceZoomIn"); QObject::connect(in, &QPushButton::clicked, this, [=] { zoomTo(m_zoom + .1); });
         fit->setToolTip(tr("Zoom %1% · click to fit").arg(int(std::round(m_zoom * 100))));
         zh->addWidget(out); zh->addWidget(fit); zh->addWidget(in);
@@ -1062,8 +1132,7 @@ QWidget *TeamWorkspace::canvas(const Team &team)
     keepScroll(area, QStringLiteral("canvas/") + m_view);
     area->setWidget(view);
     area->setWidgetResizable(m_view != "graph");
-    area->viewport()->setAutoFillBackground(true);
-    QPalette p = area->viewport()->palette(); p.setColor(QPalette::Window, c.surface); area->viewport()->setPalette(p);
+    area->setStyleSheet(QStringLiteral("QScrollArea#teamWorkspaceCanvas,QScrollArea#teamWorkspaceCanvas>QWidget#qt_scrollarea_viewport{background:%1;border:0;}").arg(c.surface.name()));
     if (m_view == "graph") {
         // Opened or Fit: the graph fits the canvas, clamped to 0.8–1.15 (below
         // that it scrolls), and centers; the layer bands fill its height.
@@ -1084,17 +1153,27 @@ QWidget *TeamWorkspace::canvas(const Team &team)
 // U25 part 5 (owner, 2026-10-27): the small activity label a graph node, board
 // card and layers row carry right of the role chip and model tile: what happens
 // now. A problem text wins over it (the callers check that first); Pending,
-// Draft and Accepted say nothing - their icon and border say it.
-static QString activityLabel(const Teams::Task &task)
+// Draft and Accepted say nothing - their icon and border say it. Owner,
+// 2026-10-28: a task in work always says where its work is - starting (handed
+// over, not begun), working (its agent runs) or idle (the turn ended and the
+// report has not come) - with "attempt N" first from the second attempt.
+static QString activityLabel(const Teams::Task &task, const Teams::Live &live = {})
 {
     if (task.status == QLatin1String("submitted")) return TeamWorkspace::tr("review");
-    if (task.status == QLatin1String("in_progress")) {
-        const int n = task.last() ? task.last()->n : 0;
-        if (n > 1) return TeamWorkspace::tr("attempt %1").arg(n);
-    }
-    if (task.held) return TeamWorkspace::tr("held");
+    // Owner, 2026-10-28: a cancelled task says so; its icon alone was missed.
+    if (task.status == QLatin1String("cancelled")) return TeamWorkspace::tr("cancelled");
     if (task.subteam.known && !task.subteam.team.isEmpty())
         return TeamWorkspace::tr("sub-team %1/%2").arg(task.subteam.done).arg(task.subteam.total);
+    if (task.status == QLatin1String("in_progress")) {
+        const auto *attempt = task.last();
+        const int n = attempt ? attempt->n : 0;
+        const QString state = !attempt ? QString()
+                            : attempt->startedAt <= 0 && attempt->turnEndedAt <= 0 && !live.working ? TeamWorkspace::tr("starting")
+                            : live.working ? TeamWorkspace::tr("working") : TeamWorkspace::tr("idle");
+        if (n > 1) return state.isEmpty() ? TeamWorkspace::tr("attempt %1").arg(n) : TeamWorkspace::tr("attempt %1 · %2").arg(n).arg(state);
+        if (!state.isEmpty()) return state;
+    }
+    if (task.held) return TeamWorkspace::tr("held");
     return QString();
 }
 
@@ -1137,7 +1216,7 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
         if (unassigned) { node.error = true; node.problemText = tr("No assignee"); node.tone = c.danger; }
         else if (node.problem) node.problemText = problemText.value(id);
         // The owner's activity label; a problem text wins over it.
-        if (!unassigned && !node.problem) node.activity = activityLabel(*task);
+        if (!unassigned && !node.problem) node.activity = activityLabel(*task, assignee ? live(*assignee) : Live{});
         // Spec 1.4: the dots under the model tile while its agent really runs
         // this task.
         node.working = assignee && task->status == "in_progress" && !node.problem && assignee->state != "paused"
@@ -1208,7 +1287,8 @@ QWidget *TeamWorkspace::board(const Team &team)
             if (const auto *m = team.member(task.assignee)) { auto *i = new QLabel; i->setPixmap(agentLogo(m->agent, c.text3).pixmap(14, 14)); r->addWidget(i); }
             // The same small activity label as the graph (a problem text wins).
             if (!problemTasks.contains(task.id)) {
-                const QString activity = activityLabel(task);
+                const auto *member = team.member(task.assignee);
+                const QString activity = activityLabel(task, member ? live(*member) : Live{});
                 if (!activity.isEmpty()) {
                     auto *a = label(activity, c.text3, 11); a->setObjectName("teamBoardActivity"); r->addWidget(a);
                 }
@@ -1425,9 +1505,10 @@ QWidget *TeamWorkspace::phaseColumn(const Team &team)
     // 1.2); Graph and Layers fit the column as before.
     const bool boardView = m_view == "board";
     area->setHorizontalScrollBarPolicy(boardView ? Qt::ScrollBarAsNeeded : Qt::ScrollBarAlwaysOff);
-    if (boardView) area->setStyleSheet(workspaceScrollbars(m_dark));
-    area->viewport()->setAutoFillBackground(true);
-    QPalette p = area->viewport()->palette(); p.setColor(QPalette::Window, c.surface); area->viewport()->setPalette(p);
+    // The column is the window's surface: a palette alone loses to the
+    // window's style sheet, which leaves Qt's default grey around the phases.
+    area->setStyleSheet(QStringLiteral("QScrollArea#%1,QScrollArea#%1>QWidget#qt_scrollarea_viewport,QWidget#teamPhaseScrolls{background:%2;border:0;}")
+                            .arg(area->objectName(), c.surface.name()) + (boardView ? workspaceScrollbars(m_dark) : QString()));
     auto *content = new QWidget; content->setObjectName("teamPhaseScrolls");
     auto *v = new QVBoxLayout(content); v->setContentsMargins(12, 4, 12, 8); v->setSpacing(8);
     const auto groups = phaseGroups(team);
@@ -1437,9 +1518,8 @@ QWidget *TeamWorkspace::phaseColumn(const Team &team)
         double zoom = 1.15;
         for (const auto &group : groups) {
             if (!m_panel->phaseOpen(team, group)) continue;
-            int layers = 1;
-            for (int layer : phaseLayers(team, group.tasks)) layers = qMax(layers, layer + 1);
-            zoom = qMin(zoom, room / (12.0 + layers * 236.0));
+            const int columns = TaskView::wideColumns(phaseLayers(team, group.tasks));
+            zoom = qMin(zoom, room / (12.0 + columns * 236.0));
         }
         m_zoom = qBound(0.8, zoom, 1.15); m_fit = false;
     }
@@ -1493,9 +1573,14 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
     auto *badge = new PhaseBadge(phaseStateBadge(state), tone, kind, state == "draft" || state == "planned");
     badge->setObjectName("teamPhaseBadge"); badge->setProperty("state", state);
     h->addWidget(badge);
-    int accepted = 0;
-    for (int id : group.tasks) if (const auto *task = team.task(id); task && task->status == "accepted") ++accepted;
-    auto *bar = new PhaseBar(c, accepted, int(group.tasks.size()), state == "done" ? c.accentMuted : c.accent);
+    // A cancelled task is not work the phase still owes: a Done phase with one
+    // cancelled task reads 7/7, not 7/8 (owner, 2026-10-28).
+    int accepted = 0, owed = 0;
+    for (int id : group.tasks) if (const auto *task = team.task(id); task && task->status != "cancelled") {
+        ++owed;
+        if (task->status == "accepted") ++accepted;
+    }
+    auto *bar = new PhaseBar(c, accepted, owed, state == "done" ? c.accentMuted : c.accent);
     bar->setObjectName("teamPhaseProgress");
     // The bar and the proposed-by or health line give way first on a narrow column.
     auto *info = new FitRow(9); info->setObjectName("teamPhaseInfo"); info->setAttribute(Qt::WA_TransparentForMouseEvents);
@@ -1895,6 +1980,18 @@ QWidget *TeamWorkspace::sideLists(const Team &team, const QString &status)
         auto *go = button(action, name); QObject::connect(go, &QPushButton::clicked, this, run); h->addWidget(go);
         into->addWidget(r);
     };
+    // 0. Needs your attention (owner, 2026-10-28): what the lead left to the
+    // owner, open by default, before the answers.
+    if (!team.attention.isEmpty()) {
+        auto *block = new CollapsibleBlock(QStringLiteral("team/attention"), tr("Needs your attention"), true);
+        block->setObjectName("teamAttentionStrip");
+        attentionRows(team, block->body());
+        block->setNote(QString::number(team.attention.size()));
+        if (auto *note = block->findChild<QLabel *>("collapsibleNote"))
+            note->setStyleSheet(QStringLiteral("QLabel#collapsibleNote{background:%1;color:%2;border-radius:8px;padding:0 6px;font-size:11px;font-weight:700;}")
+                                    .arg(c.warn.name(), c.dark ? QStringLiteral("#1b1300") : QStringLiteral("#ffffff")));
+        group(block, c.warn);
+    }
     // 1. Needs your answer: questions in sessions, team questions, and a phase draft.
     {
         auto *block = new CollapsibleBlock(QStringLiteral("team/needs"), tr("Needs your answer"), false);

@@ -10,6 +10,7 @@
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPaintEvent>
 #include <QScrollBar>
 #include <algorithm>
@@ -433,6 +434,21 @@ void TerminalScreen::paintEvent(QPaintEvent *event) {
                      Padding + m_cursor.row * m_cellHeight + m_ascent,
                      m_preedit);
   }
+  // The terminal is a rounded box on the session panel, like the panel's
+  // other blocks: its corners show the panel's colour.
+  if (m_cornerColor.isValid()) {
+    const QRectF box(viewport()->rect());
+    QPainterPath corners;
+    corners.addRect(box);
+    QPainterPath inside;
+    inside.addRoundedRect(box, CornerRadius, CornerRadius);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.fillPath(corners.subtracted(inside), m_cornerColor);
+  }
+}
+void TerminalScreen::setCornerColor(const QColor &color) {
+  m_cornerColor = color;
+  viewport()->update();
 }
 VTermModifier TerminalScreen::modifiers(Qt::KeyboardModifiers mods) {
   int result = VTERM_MOD_NONE;

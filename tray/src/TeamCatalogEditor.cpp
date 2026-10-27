@@ -369,6 +369,22 @@ TeamCatalogEditor::Route TeamCatalogEditor::route(const Teams::Catalog &catalog,
     return found;
 }
 
+// The role and template lists ask for the height of their rows: Settings >
+// Teams lays the editor out at its size hint inside a scrolling page, where
+// QListWidget's default hint (about five rows) cut the list short with the
+// column empty below "+ Role" (owner, 2026-10-28). A short column still
+// shrinks the list, which then scrolls.
+class RowsList : public QListWidget {
+public:
+    int rowsHeight = 0;
+    QSize sizeHint() const override
+    {
+        QSize size = QListWidget::sizeHint();
+        if (rowsHeight > 0) size.setHeight(rowsHeight);
+        return size;
+    }
+};
+
 TeamCatalogEditor::TeamCatalogEditor(TeamController *teams, QWidget *parent) : QWidget(parent), m_teams(teams)
 {
     setObjectName("teamCatalogEditor");
@@ -413,18 +429,20 @@ TeamCatalogEditor::TeamCatalogEditor(TeamController *teams, QWidget *parent) : Q
     m_left = new QWidget; m_left->setObjectName("teamCatalogListColumn"); m_left->setFixedWidth(listWidth);
     auto *lv = new QVBoxLayout(m_left); lv->setContentsMargins(0, 0, 0, 0); lv->setSpacing(4);
     const auto makeList = [this](const char *name) {
-        auto *list = new QListWidget; list->setObjectName(name);
+        auto *list = new RowsList; list->setObjectName(name);
         list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         list->setFrameShape(QFrame::NoFrame); list->setSpacing(1);
-        // As tall as its rows, "+ Role" right under them; a short window scrolls it.
-        list->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+        // As tall as its rows up to the full column, "+ Role" right under
+        // them; only a column shorter than the rows scrolls the list. A
+        // Maximum policy held it at the widget's default hint (about five rows).
+        list->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
         list->setMinimumHeight(rowHeight);
         connect(list, &QListWidget::currentRowChanged, this, [this] { rebuildEditor(); });
         return list;
     };
     m_roles = makeList("teamCatalogRoles"); m_templates = makeList("teamCatalogTemplates");
     m_add = button(tr("+ Role"), "teamCatalogAdd"); m_add->setProperty("ghost", true);
-    lv->addWidget(m_roles); lv->addWidget(m_templates); lv->addWidget(m_add, 0, Qt::AlignLeft); lv->addStretch();
+    lv->addWidget(m_roles, 1); lv->addWidget(m_templates, 1); lv->addWidget(m_add, 0, Qt::AlignLeft); lv->addStretch();
     connect(m_add, &QPushButton::clicked, this, [this] {
         if (m_tab == Tab::Roles) {
             Role r; r.name = tr("New role"); r.id = slug(r.name);
@@ -760,6 +778,7 @@ void TeamCatalogEditor::rebuildLists()
         }
         list->setCurrentRow(list->count() ? row : -1);
         list->setMaximumHeight(qMax(rowHeight, height + 2));
+        if (auto *rows = dynamic_cast<RowsList *>(list)) { rows->rowsHeight = qMax(rowHeight, height + 2); rows->updateGeometry(); }
     };
     fill(m_roles, "role"); fill(m_templates, "template");
     m_roles->setVisible(m_tab == Tab::Roles); m_templates->setVisible(m_tab == Tab::Templates);

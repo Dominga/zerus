@@ -134,6 +134,27 @@ pub(crate) fn items(team: &Team) -> Vec<Item> {
             detail: proposal["note"].as_str().unwrap_or_default().to_owned(),
         });
     }
+    // U25: a phase the owner sent back is a review item: the comment and the
+    // command that returns the reworked phase to the owner as a draft.
+    for phase in team.phases.iter().filter(|phase| phase.state == PhaseState::Rejected) {
+        let Some(rejection) = &phase.rejection else { continue };
+        items.push(Item {
+            kind: "phase_rejected",
+            key: format!("phase_rejected:{}:{}", phase.n, rejection.at),
+            task: None,
+            member: "owner".into(),
+            since: rejection.at,
+            summary: summary(&format!("The owner sent {} back: {}", phase_name(phase), rejection.comment)),
+            command: format!(
+                "{} | hgs team rework-phase --json",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"phase":phase.n,"note":"..."})
+            ),
+            detail: format!(
+                "Change the draft with edit-draft (or extend \"phase\":{}), then rework-phase returns it to the owner.\n{}",
+                phase.n, rejection.comment
+            ),
+        });
+    }
     for task in &team.tasks {
         // A report to decide (C2).
         if task.status == TaskStatus::Submitted {
@@ -434,10 +455,35 @@ pub(crate) fn mark_told(told: &mut Vec<String>, named: &[Item], open: &std::coll
 
 /// The reports the owner's attention list shows: undecided for at least
 /// `remind_owner_minutes` (C4); 0 turns the list off.
+/// "Phase N" or "Phase N · Title", as the feed and the prototype name it.
+fn phase_name(phase: &Phase) -> String {
+    if phase.title.is_empty() {
+        format!("Phase {}", phase.n)
+    } else {
+        format!("Phase {} \u{b7} {}", phase.n, phase.title)
+    }
+}
+
 pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
-    let minutes = team.settings.remind_owner_minutes;
-    if minutes == 0 || !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
+    if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
         return Vec::new();
+    }
+    // U25: the next draft waits for the owner's Accept ("Needs your answer"),
+    // whatever the report reminder says; a draft behind it waits for it.
+    let mut drafts: Vec<&Phase> = team.phases.iter().filter(|phase| phase.state.is_draft()).collect();
+    drafts.sort_by_key(|phase| (phase.order(), phase.n));
+    let phase_items: Vec<Value> = drafts
+        .first()
+        .filter(|phase| phase.state == PhaseState::Draft)
+        .map(|phase| {
+            json!({"kind":"phase_draft","phase":phase.n,"since":phase.added_at,
+                "summary":format!("{} \u{2014} draft waits for your Accept", phase_name(phase))})
+        })
+        .into_iter()
+        .collect();
+    let minutes = team.settings.remind_owner_minutes;
+    if minutes == 0 {
+        return phase_items;
     }
     let mut out: Vec<Value> = team
         .tasks
@@ -462,6 +508,7 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
         out.push(json!({"kind":"findings","count":deferred.len(),"since":latest,
             "summary":format!("{} findings deferred", deferred.len())}));
     }
+    out.extend(phase_items);
     out.sort_by(|a, b| a["since"].as_f64().unwrap_or_default().total_cmp(&b["since"].as_f64().unwrap_or_default()));
     out
 }

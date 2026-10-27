@@ -268,3 +268,43 @@ Follows the existing skin and `design/agent-teams` prototypes; no new visual lan
   bounds and report choice; old JSON loads; `request_id` retry returns the first receipt.
 - Qt: model parsing (new and old JSON), controller payloads, grouping and collapse (no widgets for collapsed), draft
   phase buttons and confirmation, waiting chip and Finish, pin mark, activity plaques.
+
+## Owner's phase model (U25, server)
+
+The owner's design (`SPEC.md` 5.2 of the UI handoff) names five phase states. The server stores two new record
+states and derives the rest; the old `approved`, `draft` and `discarded` keep their meaning.
+
+- `PhaseState` gains `rejected` (the owner sent the draft back; its tasks stay Draft and are not handed out) and
+  `queued` (accepted while an earlier phase still has open tasks; its tasks are Pending but not ready, as behind a
+  barrier). A rejected phase counts as a draft for numbering, editing (`edit-draft`, `extend` with `"phase"`,
+  `move-phase`, `discard-phase` by the lead), `stop` and `finish`; a queued one counts as accepted.
+- Phase records gain `note` (shown under the phase header) and `rejection {comment, by, at, reworked_at?}`; both
+  are skipped when empty. `Settings.auto_accept: bool` (skipped when false) is an owner setting: the lead's
+  `settings` change of it is refused ("Only you change the team's auto_accept").
+- `approve-phase` keeps its checks (F12: every earlier phase accepted; no errors naming its tasks) and receipt, and
+  adds `"phase_state":"running"|"queued"` (the `phase_approved` event carries `state`). The phase runs at once when
+  every earlier phase is finished, else it is `queued`. After every operation a queued phase whose earlier work is
+  all finished becomes `approved` (event `phase_started {phase,title,tasks}`), and an accepted phase whose tasks all
+  ended records `phase_done {phase,title}` once. Urgent phases and `phase_approval: auto` extends are unchanged.
+- `hgs team reject-phase --json` `{"request_id","team","phase","comment"}` (owner, or the parent lead of a sub-team):
+  a `draft` becomes `rejected`; the comment is required, at most 2,000 characters. Receipt
+  `{"status":"phase_rejected","phase":N}`, event `phase_rejected {by,phase,title,comment}`. Approving it is refused
+  ("Phase N was sent back to the lead; undo the send-back or wait for the rework").
+- `hgs team undo-reject-phase --json` `{"request_id","team","phase"}` (same actors): only while `rejected` and not
+  yet reworked; the phase is a `draft` again without the comment. Event `phase_reject_undone`.
+- The lead's inbox shows a rejected phase as item `phase_rejected` (member `owner`, the comment, the command
+  `rework-phase`). `hgs team rework-phase --json` `{"request_id","team","phase","note"?}` (lead or owner): the phase
+  is a `draft` again with `note` = `Reworked after your comment: "<comment>"` (typographic quotes; the lead's own
+  note follows after ` · `). Event `phase_reworked`.
+- Auto-accept: while the team is Running or Paused and `auto_accept` is on, every operation (the `settings` change
+  that turns it on included) accepts the drafts in display order as `approve-phase` would, by `Auto`, until the first
+  one that cannot be accepted (an earlier draft, a plan error, a send-back). Event `phase_auto_accepted
+  {phase,title,tasks,state}`. A rejected phase is never auto-accepted. In Planning nothing is auto-accepted; after
+  Approve & Run the roadmap drafts are.
+- Status: `phase_summary[].state` is `planned` (team in Planning), `draft`, `rejected`, `queued`, `running` or `done`
+  (the G9 `status` stays as it was; a queued phase shows `approved`). A queued phase's `waiting.text` is
+  `Starts after phase N`. `stuck_scope` lists the open tasks of running phases: only these can make the team Stuck;
+  a draft, a send-back or a queued phase never does. `pending_phase` stays the first plain draft.
+- `attention` (status and `team list`) gets `{"kind":"phase_draft","phase","since","summary":"Phase N · Title —
+  draft waits for your Accept"}` for the first draft in order, whatever `remind_owner_minutes` says.
+- The `team list` phase rows carry `note` and `rejection`; the list adds `stuck_scope` and `auto_accept`.

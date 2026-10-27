@@ -10,10 +10,11 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
-    "plan", "extend", "edit-draft", "move-phase", "approve-phase", "discard-phase", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
+    "plan", "extend", "edit-draft", "move-phase", "approve-phase", "discard-phase", "reject-phase", "undo-reject-phase",
+    "rework-phase", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
     "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "reassign", "take-over", "cancel",
     "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "pause-member", "resume-member", "remove-member", "settings", "finding",
     "draft", "propose",
@@ -161,6 +162,8 @@ fn starts_worker(op: &str) -> bool {
     matches!(
         op,
         "approve" | "resume" | "extend" | "approve-phase" | "ask" | "reply" | "release" | "expect" | "swap-member"
+            // U25: auto-accept may take a draft on enabling or after a rework.
+            | "settings" | "rework-phase"
     )
 }
 
@@ -318,6 +321,8 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
     value["ready"] = json!(plan::ready(team));
     value["waiting_for_lead"] = json!(waiting_for_lead(team));
     value["pending_phase"] = json!(pending_phase(team));
+    // U25: only the running phases' open tasks can make the team Stuck.
+    value["stuck_scope"] = json!(plan::stuck_scope(team));
     // C5: the plan approval view lists every check command with its expected
     // exit code, so the owner sees what will run and where.
     value["checks"] = json!(team
@@ -387,7 +392,7 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
             let Some((previous, _)) = numbers.into_iter().filter(|(_, order)| *order < target).max_by_key(|(_, order)| *order) else {
                 continue;
             };
-            let drafted = team.phases.iter().any(|other| other.n == previous && other.state == PhaseState::Draft);
+            let drafted = team.phases.iter().any(|other| other.n == previous && other.state.is_draft());
             let open: Vec<u32> =
                 team.tasks.iter().filter(|task| task.phase == previous && !task.status.finished()).map(|task| task.id).collect();
             if drafted {
@@ -409,7 +414,8 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
     // finished; it says which one still holds it.
     if let Some(phases) = value["phases"].as_array_mut() {
         for (phase, value) in team.phases.iter().zip(phases) {
-            if phase.state != PhaseState::Approved || !phase.barrier {
+            let queued = phase.state == PhaseState::Queued;
+            if !(queued || phase.state == PhaseState::Approved && phase.barrier) {
                 continue;
             }
             let target = phase.order();
@@ -424,8 +430,10 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
             let Some(previous) = open.iter().map(|id| team.task(*id).map(|task| task.phase).unwrap_or(1)).min() else {
                 continue;
             };
+            // U25: an accepted phase queued behind a running one.
+            let text = if queued { format!("Starts after phase {previous}") } else { format!("Starts when phase {previous} is finished") };
             value["waiting"] = json!({
-                "text":format!("Starts when phase {previous} is finished"),
+                "text":text,
                 "phase":previous,
                 "open":open
             });
@@ -550,7 +558,8 @@ fn summary(team: &Team) -> Value {
     let phases: Vec<Value> = team
         .phases
         .iter()
-        .map(|p| json!({"n":p.n,"order":p.order,"title":p.title,"barrier":p.barrier,"state":p.state,"tasks":p.tasks}))
+        .map(|p| json!({"n":p.n,"order":p.order,"title":p.title,"barrier":p.barrier,"state":p.state,"tasks":p.tasks,
+            "note":p.note,"rejection":p.rejection}))
         .collect();
     json!({
         "id":team.id,"name":team.name,"status":team.status,"project":team.project,"folder":team.folder,
@@ -558,6 +567,7 @@ fn summary(team: &Team) -> Value {
         "accepted":count(TaskStatus::Accepted),"submitted":count(TaskStatus::Submitted),
         "revision":team.revision,"updated":team.updated,
         "waiting_for_lead":waiting_for_lead(team),"pending_phase":pending_phase(team),
+        "stuck_scope":plan::stuck_scope(team),"auto_accept":team.settings.auto_accept,
         // C4: the owner's attention list, also from the polled team list.
         "attention":super::inbox::attention(team, super::super::now()),
     })
@@ -1961,7 +1971,7 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             }
             // C6: a sub-team's plan and phases are decided by the parent lead,
             // whose session is proven in the parent team, not in this one.
-            let parent_lead = matches!(op, "approve" | "approve-phase" | "discard-phase") && {
+            let parent_lead = matches!(op, "approve" | "approve-phase" | "discard-phase" | "reject-phase" | "undo-reject-phase") && {
                 let team = store.load(team_id)?.context("Unknown team")?;
                 parent_lead_calls(&store, &team)?
             };
@@ -2405,6 +2415,70 @@ mod tests {
             assert!(MUTATIONS.contains(&op), "{op} is not a mutation");
             assert!(USAGE.contains(op), "{op} is not in the usage");
         }
+    }
+
+    #[test]
+    fn status_shows_the_owners_phase_states_and_the_stuck_scope() {
+        // U25: Build runs, Polish was sent back, Ship waits for the owner.
+        let task = |id: u32, phase: u32, status: TaskStatus| Task { id, phase, status, title: format!("T{id}"), assignee: "lead".into(), ..Default::default() };
+        let mut team = Team {
+            id: "t".into(),
+            name: "T".into(),
+            lead: "lead".into(),
+            status: TeamStatus::Running,
+            tasks: vec![task(1, 1, TaskStatus::Accepted), task(2, 2, TaskStatus::Pending), task(3, 3, TaskStatus::Draft), task(4, 4, TaskStatus::Pending)],
+            phases: vec![
+                Phase { n: 2, title: "Build".into(), state: PhaseState::Approved, tasks: vec![2], ..Default::default() },
+                Phase {
+                    n: 3,
+                    title: "Polish".into(),
+                    state: PhaseState::Rejected,
+                    tasks: vec![3],
+                    rejection: Some(PhaseRejection { comment: "Smaller".into(), by: "You".into(), at: 5.0, reworked_at: None }),
+                    ..Default::default()
+                },
+                Phase { n: 4, title: "Ship".into(), state: PhaseState::Queued, tasks: vec![4], ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let value = view_with(&team, &[], None);
+        let states: Vec<&str> = value["phase_summary"].as_array().unwrap().iter().map(|phase| phase["state"].as_str().unwrap()).collect();
+        assert_eq!(states, vec!["done", "running", "rejected", "queued"]);
+        assert_eq!(value["phases"][1]["state"], "rejected");
+        assert_eq!(value["phases"][1]["rejection"]["comment"], "Smaller");
+        assert_eq!(value["phases"][2]["waiting"]["text"], "Starts after phase 2");
+        // Only the running phase can make the team Stuck.
+        assert_eq!(value["stuck_scope"], json!([2]));
+        // A sent-back draft waits for the lead, not the owner.
+        assert!(value["pending_phase"].is_null());
+        assert_eq!(value["attention"], json!([]));
+        // Reworked, the draft waits for the owner's Accept.
+        team.phases[1].state = PhaseState::Draft;
+        let value = view_with(&team, &[], None);
+        assert_eq!(value["attention"][0]["kind"], "phase_draft");
+        assert_eq!(value["attention"][0]["summary"], "Phase 3 \u{b7} Polish \u{2014} draft waits for your Accept");
+        // Even with the report reminder off, and the team list carries it too.
+        team.settings.remind_owner_minutes = 0;
+        team.settings.auto_accept = true;
+        let listed = summary(&team);
+        assert_eq!(listed["attention"][0]["phase"], 3);
+        assert_eq!((listed["stuck_scope"].clone(), listed["auto_accept"].clone()), (json!([2]), json!(true)));
+        assert_eq!(listed["phases"][1]["state"], "draft");
+        // While planning every phase is in the plan.
+        team.status = TeamStatus::Planning;
+        let planned = plan::phase_summary(&team);
+        assert!(planned.iter().all(|phase| phase["state"] == "planned"));
+    }
+
+    #[test]
+    fn the_send_back_commands_are_mutations_that_may_start_work() {
+        for op in ["reject-phase", "undo-reject-phase", "rework-phase"] {
+            assert!(MUTATIONS.contains(&op), "{op} is not a mutation");
+            assert!(USAGE.contains(op), "{op} is not in the usage");
+        }
+        // Auto-accept may take a draft on enabling or after a rework.
+        assert!(starts_worker("settings") && starts_worker("rework-phase"));
+        assert!(!starts_worker("reject-phase") && !starts_worker("undo-reject-phase"));
     }
 
     #[test]

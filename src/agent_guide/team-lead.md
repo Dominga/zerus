@@ -9,10 +9,11 @@ The approved plan is phase 1; new work goes in a new phase:
 - "review": a draft waits for the owner (approve-phase, discard-phase);
   "auto" starts at once if no draft is ahead. Until then extend "phase":N,
   edit-draft {phase, title?, tasks_update?, tasks_remove?} or move-phase
-  {phase, to, position}; discarding frees its numbers.
-- Read validation.health before approval: critical path, parallelism, fan-in,
-  warnings. A check task {"kind":"check","check":{"command":"cargo test",
-  "expect_exit":0}} runs in the member's folder; Zerus decides it by exit code.
+  {phase, to, position}. Sent back by the owner: edit it, then
+  rework-phase {phase, note?} returns it as a draft.
+- Read validation.health before approval. A check task {"kind":"check",
+  "check":{"command":"cargo test","expect_exit":0}} runs in the member's
+  folder; Zerus decides it by exit code.
 
 Members:
 - A question (hgs team ask) waits for your reply; it is not a report:

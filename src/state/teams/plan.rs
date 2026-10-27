@@ -197,7 +197,8 @@ pub(crate) fn dispatch_order(team: &Team, ready: Vec<u32>) -> Vec<u32> {
 /// task starts only once every task of a lower phase is finished.
 pub(crate) fn barrier_blockers(team: &Team, task: &Task) -> Vec<u32> {
     let Some(phase) = team.phases.iter().find(|phase| phase.n == task.phase) else { return Vec::new() };
-    if !phase.barrier {
+    // U25: a phase accepted while an earlier one runs queues behind it.
+    if !phase.barrier && phase.state != PhaseState::Queued {
         return Vec::new();
     }
     let target = phase.order();
@@ -509,6 +510,7 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
     phases.sort_by_key(|(n, order)| (*order, *n));
     phases.dedup_by_key(|(n, _)| *n);
     let paused = team.status == super::model::TeamStatus::Paused;
+    let planning = team.status == super::model::TeamStatus::Planning;
     phases
         .into_iter()
         .map(|(n, _)| {
@@ -518,8 +520,15 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
             let done = tasks.len() - open;
             let blocked = record.is_some_and(|phase| phase.barrier)
                 && team.tasks.iter().any(|task| task.phase < n && !task.status.finished());
-            let approved = n == 1 || record.is_some_and(|phase| phase.state == PhaseState::Approved);
-            let status = if !approved || record.is_some_and(|phase| phase.state == PhaseState::Draft) {
+            // U25: a queued phase waits for every earlier phase, barrier or not.
+            let queued = record.is_some_and(|phase| phase.state == PhaseState::Queued) && {
+                let target = record.map_or(n, |phase| phase.order());
+                let order_of = |m: u32| team.phases.iter().find(|phase| phase.n == m).map_or(m, |phase| phase.order());
+                team.tasks.iter().any(|task| task.phase != n && order_of(task.phase) < target && !task.status.finished())
+            };
+            let blocked = blocked || queued;
+            let approved = n == 1 || record.is_some_and(|phase| phase.state.is_accepted());
+            let status = if !approved || record.is_some_and(|phase| phase.state.is_draft()) {
                 "draft"
             } else if open == 0 {
                 "done"
@@ -529,6 +538,21 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
                 "paused"
             } else {
                 "in_work"
+            };
+            // U25: the owner's phase model - draft, rejected (sent back),
+            // queued, running, done; every phase is "planned" while planning.
+            let state = if planning {
+                "planned"
+            } else if record.is_some_and(|phase| phase.state == PhaseState::Rejected) {
+                "rejected"
+            } else if status == "draft" {
+                "draft"
+            } else if status == "done" {
+                "done"
+            } else if blocked {
+                "queued"
+            } else {
+                "running"
             };
             let health = phase_health(team, n);
             // A phase with no open tasks has nothing to schedule: no line.
@@ -548,6 +572,7 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
                 "n": n,
                 "title": record.map(|phase| phase.title.clone()).filter(|title| !title.is_empty()).unwrap_or_else(|| if n == 1 { "Phase 1".into() } else { format!("Phase {n}") }),
                 "status": status,
+                "state": state,
                 "done": done,
                 "total": tasks.len(),
                 "barrier": record.is_some_and(|phase| phase.barrier),
@@ -556,10 +581,26 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
         })
         .collect()
 }
+
+/// U25: the open tasks of the running phases, the only ones that can make a
+/// team Stuck: a draft, a phase sent back or a queued phase never does.
+pub(crate) fn stuck_scope(team: &Team) -> Vec<u32> {
+    let running: BTreeSet<u32> = phase_summary(team)
+        .iter()
+        .filter(|phase| phase["state"] == "running")
+        .filter_map(|phase| phase["n"].as_u64().map(|n| n as u32))
+        .collect();
+    team.tasks
+        .iter()
+        .filter(|task| running.contains(&task.phase) && !task.status.finished())
+        .map(|task| task.id)
+        .collect()
+}
+
 /// Whether a phase is waiting for the owner's approval (U9): phase 1 is
 /// approved with the plan, a later phase only by its own record.
 fn phase_draft(team: &Team, n: u32) -> bool {
-    n > 1 && team.phases.iter().find(|phase| phase.n == n).is_none_or(|phase| phase.state == PhaseState::Draft)
+    n > 1 && team.phases.iter().find(|phase| phase.n == n).is_none_or(|phase| phase.state.is_draft())
 }
 
 /// U9: every open task waits for the owner: it is in a draft phase, or in an
@@ -577,11 +618,12 @@ pub(crate) fn waiting_for_owner(team: &Team) -> bool {
         let Some(phase) = team.phases.iter().find(|phase| phase.n == task.phase) else {
             return false;
         };
-        if phase.state == PhaseState::Draft {
+        // U25: a draft sent back waits for the lead's rework, not for members.
+        if phase.state.is_draft() {
             return true;
         }
-        phase.state == PhaseState::Approved
-            && phase.barrier
+        phase.state.is_accepted()
+            && (phase.barrier || phase.state == PhaseState::Queued)
             && team
                 .tasks
                 .iter()

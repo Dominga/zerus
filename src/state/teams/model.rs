@@ -113,6 +113,10 @@ pub(crate) struct Settings {
     /// Who approves a sub-team's plan and phases (section 9.3).
     #[serde(default, skip_serializing_if = "subteam_approval_is_default")]
     pub subteam_approval: SubteamApproval,
+    /// U25: draft phases without errors are accepted at once, also the ones
+    /// waiting when the owner turns it on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_accept: bool,
 }
 
 fn default_max_members() -> usize {
@@ -180,6 +184,7 @@ impl Default for Settings {
             tree_depth: default_tree_depth(),
             tree_sessions: default_tree_sessions(),
             subteam_approval: SubteamApproval::default(),
+            auto_accept: false,
         }
     }
 }
@@ -895,6 +900,37 @@ pub(crate) enum PhaseState {
     Approved,
     /// The owner discarded it; its ids stay used.
     Discarded,
+    /// U25: the owner sent the draft back with a comment; the lead reworks it
+    /// into a draft again. Its tasks are not handed out.
+    Rejected,
+    /// U25: accepted while an earlier phase still runs; it starts (becomes
+    /// approved) once every earlier phase is finished.
+    Queued,
+}
+
+impl PhaseState {
+    /// A draft or a draft sent back: not accepted yet, still editable by the
+    /// lead, numbered with the drafts.
+    pub(crate) fn is_draft(self) -> bool {
+        matches!(self, Self::Draft | Self::Rejected)
+    }
+    /// Accepted: running, finished or queued behind an earlier phase.
+    pub(crate) fn is_accepted(self) -> bool {
+        matches!(self, Self::Approved | Self::Queued)
+    }
+}
+
+/// U25: the owner's send-back of a draft phase.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PhaseRejection {
+    pub comment: String,
+    #[serde(default)]
+    pub by: String,
+    #[serde(default)]
+    pub at: f64,
+    /// When the lead reworked the phase back into a draft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reworked_at: Option<f64>,
 }
 
 /// One phase appended to the plan after the approved one. Phase 1 is implicit
@@ -942,6 +978,13 @@ pub(crate) struct Phase {
     /// rejected the sub-team's report.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reason: String,
+    /// U25: the note shown under the phase header, such as "Reworked after
+    /// your comment: ...".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    /// U25: the owner's latest send-back; kept after the rework for the note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection: Option<PhaseRejection>,
 }
 
 impl Phase {

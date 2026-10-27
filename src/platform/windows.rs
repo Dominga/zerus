@@ -43,6 +43,7 @@ use windows_sys::{
             Authorization::{
                 GetNamedSecurityInfoW, GetSecurityInfo, SetEntriesInAclW, SetNamedSecurityInfoW,
                 EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN,
+                TRUSTEE_W,
             },
             GetAce, GetLengthSid, GetTokenInformation, IsWellKnownSid, TokenUser,
             SUB_CONTAINERS_AND_OBJECTS_INHERIT, WinBuiltinAdministratorsSid, WinCreatorOwnerRightsSid,
@@ -54,10 +55,10 @@ use windows_sys::{
             CreateFileW, GetFileInformationByHandle, GetFileType, BY_HANDLE_FILE_INFORMATION,
             FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
             FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_OVERLAPPED,
-            FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+            FILE_ALL_ACCESS,
             FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE,
             FILE_TYPE_CHAR, FILE_TYPE_DISK, FILE_TYPE_PIPE, FILE_WRITE_ATTRIBUTES, OPEN_EXISTING,
-            PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND, READ_CONTROL, DELETE, WRITE_DAC, WRITE_OWNER,
+            PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
         },
         System::{
             Console::{
@@ -89,6 +90,13 @@ use windows_sys::{
         },
         UI::Shell::CommandLineToArgvW,
     },
+};
+
+/// The ACL bits the test that makes a Modify-only folder needs; the program
+/// itself only ever grants FullControl.
+#[cfg(test)]
+use windows_sys::Win32::Storage::FileSystem::{
+    DELETE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
 };
 
 /// The locale and the console code page stay as they are: Rust writes Unicode to
@@ -935,13 +943,17 @@ fn can_open_with(path: &Path, access: u32) -> io::Result<bool> {
 /// are kept; inheritance carries the entry to new files.
 pub fn grant_full_control(path: &Path) -> io::Result<()> {
     let sid = process::current_user().ok_or_else(|| io::Error::other("this user's identity is unavailable"))?;
-    let mut access = EXPLICIT_ACCESS_W::default();
-    access.grfAccessPermissions = FILE_ALL_ACCESS;
-    access.grfAccessMode = GRANT_ACCESS;
-    access.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
-    access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
-    access.Trustee.TrusteeType = TRUSTEE_IS_UNKNOWN;
-    access.Trustee.ptstrName = sid.as_ptr() as *mut u16;
+    let access = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: FILE_ALL_ACCESS,
+        grfAccessMode: GRANT_ACCESS,
+        grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+        Trustee: TRUSTEE_W {
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_UNKNOWN,
+            ptstrName: sid.as_ptr() as *mut u16,
+            ..Default::default()
+        },
+    };
     let wide = wide_path(path);
     let mut old: *mut ACL = std::ptr::null_mut();
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
@@ -1042,13 +1054,17 @@ impl Drop for Acl {
 #[cfg(test)]
 fn set_modify_only(path: &Path) -> io::Result<()> {
     let sid = process::current_user().ok_or_else(|| io::Error::other("this user's identity is unavailable"))?;
-    let mut access = EXPLICIT_ACCESS_W::default();
-    access.grfAccessPermissions = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
-    access.grfAccessMode = GRANT_ACCESS;
-    access.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
-    access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
-    access.Trustee.TrusteeType = TRUSTEE_IS_UNKNOWN;
-    access.Trustee.ptstrName = sid.as_ptr() as *mut u16;
+    let access = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE,
+        grfAccessMode: GRANT_ACCESS,
+        grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+        Trustee: TRUSTEE_W {
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_UNKNOWN,
+            ptstrName: sid.as_ptr() as *mut u16,
+            ..Default::default()
+        },
+    };
     let mut acl: *mut ACL = std::ptr::null_mut();
     let code = unsafe { SetEntriesInAclW(1, &access, std::ptr::null(), &mut acl) };
     if code != ERROR_SUCCESS {

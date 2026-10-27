@@ -201,7 +201,7 @@ function Review() {
 
       <main class="rv-main">
         <section class="rv-hero">
-          <div class="eyebrow parts"><span>Ревью дизайна</span><span>раунд 9</span><span>27 октября 2026</span><span>только мокап с выдуманными данными</span></div>
+          <div class="eyebrow parts"><span>Ревью дизайна</span><span>раунд 9</span><span class="rv-badge st-mock">утверждён 27 октября 2026</span><span>только мокап с выдуманными данными</span></div>
           <h1>Веб-интерфейс Zerus на Tauri 2 со скинами</h1>
           <p class="lead">
             Это кликабельный мокап на том же стеке, который я предлагаю для настоящего клиента. Он покрывает все основные экраны,
@@ -537,7 +537,7 @@ function Review() {
         <section id="decisions">
           <h2>Что нужно решить вам</h2>
           <ol class="rv-rules">
-            <li><b>Утверждаете ли дизайн девятого раунда?</b> Или что ещё поправить. Это единственный открытый вопрос.</li>
+            <li><b>Дизайн девятого раунда.</b> Утверждён: «да, дизайн утвержден, давай фигачить». Эта страница и мокап остаются эталоном для реализации. <span class="rv-badge st-mock">решено 27 октября</span></li>
             <li><b>Анимация логотипа.</b> «Раскрутка»: два оборота с разгоном с места и мягкой остановкой. <span class="rv-badge st-mock">решено 27 октября</span></li>
             <li><b>120 Гц на маке.</b> Фикс через настройку WebKit в Tauri 2 с критерием выше; если он не проходит или исчезает — Chromium на маке (CEF, когда выйдет из альфы, иначе Electron). <span class="rv-badge st-mock">решено 27 октября</span></li>
             <li><b>Linux-рантайм.</b> Начинаем на системном WebKitGTK и замеряем на Arch с KDE; CEF (Tauri 3) — запасной путь. <span class="rv-badge st-mock">решено 27 октября</span></li>

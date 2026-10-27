@@ -1,9 +1,9 @@
 # Tauri Web Desktop Client Design
 
-Tracking epic: `zerus-5wmh`. Status: **draft**. The owner reviews the clickable
-design mockup (`design/webui/`) first; no client implementation starts before
-that design is approved. This document records the architecture the mockup
-assumes, so review feedback can change it before code exists.
+Tracking epic: `zerus-5wmh`. Status: **design approved** (round 9, 2026-10-27:
+«да, дизайн утвержден, давай фигачить»). The clickable mockup in
+`design/webui/` and its review page are the approved visual reference;
+implementation follows this document and its plan.
 
 ## Goal
 
@@ -13,7 +13,7 @@ priorities, 2026-10-27: fast, smooth, GPU-composited rendering, and a skin syste
 from day one.
 
 The client consumes the event data plane designed in
-`2026-10-27-event-data-plane-design.md` (branch `work-ba0ed9fd`). The data plane
+`2026-10-27-event-data-plane-design.md` (`hgs watch`, ABI watch-v1, now on main). The data plane
 fixes the visible lag; this client fixes rendering, motion and how quickly new
 design work reaches the product.
 
@@ -390,11 +390,9 @@ integrations move with the screen that needs them. The Qt client stays the
 working client until the new one covers the parity checklist; installers keep
 installing Qt until the owner switches the default.
 
-## Open questions for the owner
+## Decisions
 
-1. Approve the round 9 design, or what to change. This is the only open question.
-
-Decided on 2026-10-27: the WebKit preference fix on macOS with the criteria
+The round 9 design was approved on 2026-10-27. Also decided on 2026-10-27: the WebKit preference fix on macOS with the criteria
 above, falling back to Chromium on macOS (CEF once beta, otherwise Electron);
 WebKitGTK first on Linux with CEF as the fallback; user-imported skins in v1;
 the two-turn spin-up for the Zerus mark.

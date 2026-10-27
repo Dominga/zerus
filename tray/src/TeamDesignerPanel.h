@@ -21,6 +21,6 @@ private:
     QWidget *proposalCard(const Teams::Proposal &proposal);
     TeamController *m_teams;
     QScrollArea *m_scroll;
-    QString m_kind = QStringLiteral("role"), m_notice;
+    QString m_kind = QStringLiteral("role");
     bool m_dark = true;
 };

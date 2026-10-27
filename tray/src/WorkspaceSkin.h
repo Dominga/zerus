@@ -156,6 +156,8 @@ inline const QList<std::tuple<const char *, const char *, const char *>> &design
         {"text2", "#c4cad1", "#2c3a47"}, {"text3", "#aab1ba", "#415060"}, {"muted", "#9aa3ad", "#5d6b7c"},
         {"label", "#8f97a2", "#647181"}, {"dim", "#7b8590", "#6f7b88"}, {"tile", "#0f1318", "#eef2f5"},
         {"page", "#0e1115", "#e4e9ee"}, {"bubble", "#1f3a31", "#e0f0e9"}, {"bubbleBorder", "#2f5a4a", "#9fd3bd"},
+        // The session card's background-commands chip (`.gchip.bg`), one colour in both themes.
+        {"bgChip", "#6fa8ff", "#6fa8ff"},
         {"roleLead", "#b79cff", "#6f4fd8"}, {"roleArchitect", "#8e9bff", "#3d4bc4"}, {"roleBackend", "#6fa8ff", "#2f66c9"},
         {"roleFrontend", "#f08bb4", "#b83a72"}, {"roleTester", "#56c8e0", "#137f95"}, {"roleReviewer", "#d9b38c", "#8a5a2b"},
         {"roleIntegrator", "#a3b1c6", "#4d5d75"}, {"roleResearcher", "#b9d36b", "#5f7a12"}, {"roleSecurity", "#e48de0", "#a2349c"},

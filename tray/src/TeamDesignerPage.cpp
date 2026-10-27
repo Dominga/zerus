@@ -77,6 +77,10 @@ TeamDesignerPage::TeamDesignerPage(TeamController *teams, QWidget *parent) : QWi
     m_draftApply = button(QString(), "teamDesignerApplyKept", true);
     dh->addWidget(draftMark); dh->addWidget(m_draftText, 1); dh->addWidget(m_draftDiscard); dh->addWidget(m_draftApply);
     av->addWidget(m_draftBar);
+    // U15: a refused Apply or Discard, under the bar until it succeeds.
+    m_draftError = new QLabel; m_draftError->setObjectName("teamDesignerDraftError"); m_draftError->setWordWrap(true);
+    m_draftError->setTextFormat(Qt::PlainText); m_draftError->hide();
+    av->addWidget(m_draftError);
     m_chat = new TeamConversation(teams->client());
     // U16: the designer's questions and permission requests are answered here.
     m_chat->setQuestionsShown(true);
@@ -266,6 +270,10 @@ void TeamDesignerPage::renderDraftBar()
     for (const auto &p : catalog.proposals) { kept += p.state == "kept"; undecided += p.state == "proposed"; }
     const bool stale = catalog.draftBase != catalog.version;
     m_draftBar->setVisible(!catalog.proposals.isEmpty());
+    const QString error = m_teams->draftError();
+    m_draftError->setText(error.isEmpty() ? QString() : QStringLiteral("⚠ ") + error);
+    m_draftError->setStyleSheet(QStringLiteral("QLabel{color:%1;font-size:11px;}").arg(colorsFor(m_dark).danger.name()));
+    m_draftError->setVisible(!error.isEmpty());
     m_draftText->setText(tr("based on v%1 · %2 of %3 kept · %4 undecided").arg(catalog.draftBase).arg(kept).arg(catalog.proposals.size()).arg(undecided));
     m_draftText->setToolTip(m_draftText->text());
     m_draftApply->setText(QStringLiteral("✓ ") + (kept == 1 ? tr("Apply 1 change") : tr("Apply %1 changes").arg(kept)));
@@ -281,9 +289,8 @@ void TeamDesignerPage::renderProposals()
     const int scroll = m_proposals->verticalScrollBar()->value();
     auto *content = new QWidget; content->setObjectName("teamDesignerProposalList");
     auto *v = new QVBoxLayout(content); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(8);
-    const auto decide = [this](const QString &id, const QString &decision) {
-        m_teams->call(QStringLiteral("catalog decide"), {{"proposal", id}, {"decision", decision}}, [this](bool, const QJsonObject &, const QString &) { m_teams->refreshCatalog(); });
-    };
+    // U15: decisions go through the controller, with or without a designer session.
+    const auto decide = [this](const QString &id, const QString &decision) { m_teams->decideProposal(id, decision); };
     if (!m_closed.isEmpty()) {
         auto *bar = row(6); bar->addStretch();
         auto *reopen = button(tr("Show closed"), "teamDesignerShowClosed"); reopen->setProperty("ghost", true);
@@ -330,6 +337,8 @@ void TeamDesignerPage::renderProposals()
         show->setStyleSheet(QStringLiteral("QPushButton{padding:2px 0;color:%1;}").arg(c.fg.name()));
         QObject::connect(show, &QPushButton::clicked, this, [this, id = p.id] { m_editor->showProposal(id); });
         cv->addWidget(show, 0, Qt::AlignLeft);
+        // A refused decision stays with its proposal until a decision lands.
+        if (const auto error = m_teams->proposalError(p.id); !error.isEmpty()) cv->addWidget(refusal(error, c, "teamProposalError"));
         if (rejected) card->setStyleSheet(QStringLiteral("QFrame#teamDesignerProposal{background:transparent;}"));
         v->addWidget(card);
     }

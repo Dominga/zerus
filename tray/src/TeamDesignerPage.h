@@ -55,7 +55,7 @@ private:
     QSplitter *m_split;
     QScrollArea *m_proposals;
     QWidget *m_draftBar;
-    QLabel *m_draftText;
+    QLabel *m_draftError = nullptr, *m_draftText;
     QPushButton *m_draftApply, *m_draftDiscard;
     // Decided proposals closed in the list; Apply still writes the kept ones.
     QSet<QString> m_closed;

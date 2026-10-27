@@ -232,11 +232,13 @@ void TeamConversation::useDesignerLayout(QWidget *intro, QWidget *above)
     QObject::connect(m_input, &QPlainTextEdit::textChanged, this, [this] { updateSend(); });
     QObject::connect(m_input->document()->documentLayout(), &QAbstractTextDocumentLayout::documentSizeChanged, this, [this] { fitInput(); });
     // Rebuild the column: [space] intro, the messages, above, the composer [space].
-    v->removeWidget(m_view); if (oldBottom) { v->removeWidget(oldBottom); oldBottom->hide(); }
+    v->removeWidget(m_view); v->removeWidget(m_question); if (oldBottom) { v->removeWidget(oldBottom); oldBottom->hide(); }
     v->addStretch(1);
     if (m_intro) v->addWidget(m_intro);
     v->addWidget(m_view);
     if (m_above) v->addWidget(m_above);
+    // U16: a pending question takes the composer's place here too.
+    v->addWidget(m_question);
     v->addWidget(m_bottom);
     v->addStretch(1);
     m_view->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
@@ -313,7 +315,7 @@ void TeamConversation::fitDesigner()
     if (m_name.isEmpty()) { m_view->hide(); return; }
     auto *v = static_cast<QVBoxLayout *>(layout());
     int others = v->contentsMargins().top() + v->contentsMargins().bottom();
-    for (auto *w : {m_intro, m_above, m_bottom}) if (w && !w->isHidden()) others += w->sizeHint().height() + v->spacing();
+    for (auto *w : {m_intro, m_above, static_cast<QWidget *>(m_question), m_bottom}) if (w && !w->isHidden()) others += w->sizeHint().height() + v->spacing();
     const int available = qMax(80, height() - others);
     const int content = text ? int(text->document()->size().height()) + 24 : available;
     m_view->setFixedHeight(qBound(80, content, available));
@@ -446,7 +448,9 @@ QJsonObject questionIdentity(const QJsonObject &question)
 // newest first, in the order the owner steps through them.
 void TeamConversation::renderQuestion(int navigation)
 {
-    if (!m_questionsShown || m_name.isEmpty()) { m_question->hide(); m_composerRow->show(); return; }
+    // The designer's composer is its card and row (#488), the others' the row.
+    QWidget *composer = m_designer ? m_bottom : m_composerRow;
+    if (!m_questionsShown || m_name.isEmpty()) { m_question->hide(); composer->show(); fitDesigner(); return; }
     const QString key = sessionKey();
     QJsonObject question;
     QList<QJsonObject> optional;
@@ -481,7 +485,8 @@ void TeamConversation::renderQuestion(int navigation)
     m_question->setQuestion(key, question, pending);
     m_question->setQueueNavigation(index, int(optional.size()));
     m_question->setVisible(available);
-    m_composerRow->setVisible(!available || question.value("optional").toBool());
+    composer->setVisible(!available || question.value("optional").toBool());
+    fitDesigner();
     QString reason;
     if (question.value("run_id") != m_details.value("run_id") || question.value("conversation_id") != m_details.value("conversation_id"))
         reason = tr("Refresh the pending question before answering.");

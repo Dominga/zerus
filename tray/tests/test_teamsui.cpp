@@ -680,6 +680,7 @@ private slots:
     void aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog();
     void designerPageStartsOrOpensTheDesigner();
     void addedLateTaskIsOutOfScopeEverywhere();
+    void planningRulesAreEditedSavedResetAndProposed();
     void draftIsDecidedWithoutADesignerSession();
     void designerQuestionIsAnsweredInTheWindow();
     void catalogEditorMarksManualEdits();
@@ -5181,6 +5182,128 @@ void TestTeamsUi::addedLateTaskIsOutOfScopeEverywhere()
              QStringLiteral("Asked to add 1 task to running phase 2 · waits for your confirmation"));
     QCOMPARE(line("phase_tasks_added", {{"phase", 2}, {"tasks", QJsonArray{7, 8}}}),
              QStringLiteral("Added #7, #8 to running phase 2 · outside its original scope"));
+}
+
+// U28: the catalog's Planning rules tab: edit with the unsaved-changes
+// state, Save and Revert, Reset to built-in after a confirmation (a save
+// without the rules, which hgs fills with its own), and a designer proposal
+// shown as CHANGED with Keep / Reject / Undo and its line diff.
+void TestTeamsUi::planningRulesAreEditedSavedResetAndProposed()
+{
+    const QString rules = QStringLiteral("(1) At most 20-25 tasks per phase, each ending with an install-ready build.\n"
+                                         "(2) Checkpoints on demand.\n(3) Balance every lane by volume and cost.");
+    auto fixture = catalog();
+    auto data = fixture["catalog"].toObject(); data["planning_rules"] = rules; fixture["catalog"] = data;
+    fixture["draft"] = QJsonObject{{"base", 3}, {"proposals", QJsonArray()}};
+    QVERIFY(FakeCli::replace(script() + ".catalog", QJsonDocument(fixture).toJson(QJsonDocument::Compact)));
+    // The model keeps the rules for every save; an older hgs sends none.
+    QCOMPARE(parseCatalog(fixture).json()["planning_rules"].toString(), rules);
+    QVERIFY(!parseCatalog(catalog()).json().contains("planning_rules"));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamCatalogEditor editor(&controller);
+    QStringList asked;
+    editor.confirm = [&](const QString &name, const QString &, const QString &, const QString &) { asked << name; return true; };
+    editor.resize(1000, 760); editor.show();
+    QTRY_COMPARE(editor.findChild<QListWidget *>("teamCatalogRoles")->count(), 3);
+    const auto tab = [&](const char *segment) {
+        for (auto *b : editor.findChild<QWidget *>("teamCatalogTabs")->findChildren<QPushButton *>()) if (b->property("segment") == segment) { b->click(); return true; }
+        return false;
+    };
+    QVERIFY(tab("rules"));
+    auto *text = editor.findChild<QPlainTextEdit *>("teamPlanningRules");
+    QTRY_VERIFY(text && text->isVisible());
+    QCOMPARE(text->toPlainText(), rules);
+    QVERIFY(!editor.findChild<QListWidget *>("teamCatalogRoles")->isVisible());
+    auto *save = editor.findChild<QPushButton *>("teamCatalogSave");
+    auto *reset = editor.findChild<QPushButton *>("teamPlanningRulesReset");
+    QVERIFY(!save->isEnabled() && reset->isEnabled());
+    const auto status = [&] { return editor.findChild<QLabel *>("teamCatalogStatus")->text(); };
+    shot(&editor, "ux-u28-rules-dark");
+    lightPalette(); editor.setDark(false); QTRY_VERIFY(editor.findChild<QPlainTextEdit *>("teamPlanningRules"));
+    lightShot(&editor, "ux-u28-rules-light");
+    darkPalette(); editor.setDark(true);
+    // Edit by hand: one unsaved change; Reset waits for Save or Revert.
+    text = editor.findChild<QPlainTextEdit *>("teamPlanningRules");
+    text->setPlainText(rules + "\n(4) QA never implements tasks.");
+    QTRY_VERIFY(status().contains("1 unsaved change"));
+    QVERIFY(save->isEnabled());
+    editor.findChild<QPushButton *>("teamCatalogRevert")->click();
+    QCOMPARE(asked.last(), QStringLiteral("teamCatalogRevertConfirm"));
+    QTRY_COMPARE(editor.findChild<QPlainTextEdit *>("teamPlanningRules")->toPlainText(), rules);
+    QVERIFY(!status().contains("unsaved") && !save->isEnabled());
+    text = editor.findChild<QPlainTextEdit *>("teamPlanningRules");
+    text->setPlainText(rules + "\n(4) QA never implements tasks.");
+    QTRY_VERIFY(!editor.findChild<QPushButton *>("teamPlanningRulesReset") || !editor.findChild<QPushButton *>("teamPlanningRulesReset")->isEnabled()
+                || status().contains("unsaved"));
+    save->click();
+    QTRY_COMPARE(calls(script(), "catalog set").size(), 1);
+    const auto saved = calls(script(), "catalog set").first();
+    QCOMPARE(saved["version"].toInt(), 3);
+    QCOMPARE(saved["catalog"].toObject()["planning_rules"].toString(), rules + "\n(4) QA never implements tasks.");
+    QCOMPARE(saved["catalog"].toObject()["roles"].toArray().size(), 3);   // the rest of the catalog goes with them
+    // Reset to built-in: confirmed, then a save without the rules.
+    controller.refreshCatalog();
+    QTRY_VERIFY(([&] { auto *r = editor.findChild<QPushButton *>("teamPlanningRulesReset"); return r && r->isEnabled(); })());
+    editor.findChild<QPushButton *>("teamPlanningRulesReset")->click();
+    QCOMPARE(asked.last(), QStringLiteral("teamPlanningRulesResetConfirm"));
+    QTRY_COMPARE(calls(script(), "catalog set").size(), 2);
+    const auto resetCall = calls(script(), "catalog set").last();
+    QVERIFY(!resetCall["catalog"].toObject().contains("planning_rules"));
+    QCOMPARE(resetCall["version"].toInt(), 3);
+    QCOMPARE(resetCall["catalog"].toObject()["roles"].toArray().size(), 3);
+    // A cancelled reset changes nothing.
+    TeamCatalogEditor cancelled(&controller);
+    cancelled.confirm = [](const QString &, const QString &, const QString &, const QString &) { return false; };
+    cancelled.resize(1000, 760); cancelled.show();
+    for (auto *b : cancelled.findChild<QWidget *>("teamCatalogTabs")->findChildren<QPushButton *>()) if (b->property("segment") == "rules") b->click();
+    QTRY_VERIFY(cancelled.findChild<QPushButton *>("teamPlanningRulesReset"));
+    cancelled.findChild<QPushButton *>("teamPlanningRulesReset")->click();
+    QTest::qWait(200);
+    QCOMPARE(calls(script(), "catalog set").size(), 2);
+    cancelled.hide();
+    // A designer proposal on the rules: CHANGED, Keep / Reject, the line diff.
+    const QString proposed = QStringLiteral("(1) At most 20 tasks per phase, each ending with an install-ready build.\n"
+                                            "(2) Checkpoints on demand.\n(3) Balance every lane by volume and cost.\n(4) QA never implements tasks.");
+    fixture["draft"] = QJsonObject{{"base", 3}, {"proposals", QJsonArray{QJsonObject{
+        {"id", "pr1"}, {"kind", "planning_rules"}, {"action", "change"}, {"target", "planning_rules"}, {"title", "Planning rules: 20 tasks, QA rule"},
+        {"reason", "Phase 38 ran 27 tasks"}, {"value", proposed}, {"state", "proposed"}}}}};
+    QVERIFY(FakeCli::replace(script() + ".catalog", QJsonDocument(fixture).toJson(QJsonDocument::Compact)));
+    TeamCatalogEditor draft(&controller);
+    draft.setShowDraft(true);
+    draft.resize(1000, 760); draft.show();
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalog().proposals.size() == 1);
+    QCOMPARE(controller.catalog().proposals.first().text, proposed);
+    QCOMPARE(withProposals(controller.catalog(), true).planningRules, proposed);
+    QTRY_VERIFY(([&] { for (auto *b : draft.findChild<QWidget *>("teamCatalogTabs")->findChildren<QPushButton *>())
+                           if (b->property("segment") == "rules") return b->text().contains("1"); return false; })());
+    draft.showProposal("pr1");
+    QTRY_VERIFY(draft.findChild<QFrame *>("teamProposalPlate"));
+    QVERIFY(!draft.findChild<QPlainTextEdit *>("teamPlanningRules"));   // the draft shows the diff, not the editor
+    QVERIFY(!draft.findChild<QPushButton *>("teamPlanningRulesReset")->isVisible());
+    const auto lines = [&](const char *name) { QStringList found; for (auto *l : draft.findChildren<QLabel *>(name)) found << l->text(); return found; };
+    QCOMPARE(lines("teamPlanningRulesRemoved"), QStringList{"(1) At most 20-25 tasks per phase, each ending with an install-ready build."});
+    QCOMPARE(lines("teamPlanningRulesAdded"), (QStringList{"(1) At most 20 tasks per phase, each ending with an install-ready build.", "(4) QA never implements tasks."}));
+    QCOMPARE(lines("teamPlanningRulesSame").size(), 2);
+    shot(&draft, "ux-u28-rules-proposal-dark");
+    lightPalette(); draft.setDark(false); QTRY_VERIFY(draft.findChild<QFrame *>("teamProposalPlate"));
+    lightShot(&draft, "ux-u28-rules-proposal-light");
+    darkPalette(); draft.setDark(true);
+    QTRY_VERIFY(draft.findChild<QPushButton *>("teamProposalKeep"));
+    draft.findChild<QPushButton *>("teamProposalKeep")->click();
+    QTRY_COMPARE(calls(script(), "catalog decide").size(), 1);
+    QCOMPARE(calls(script(), "catalog decide").first()["proposal"].toString(), QStringLiteral("pr1"));
+    QCOMPARE(calls(script(), "catalog decide").first()["decision"].toString(), QStringLiteral("keep"));
+    // Kept: Undo; then Reject.
+    QTRY_VERIFY(draft.findChild<QPushButton *>("teamProposalUndo"));
+    draft.findChild<QPushButton *>("teamProposalUndo")->click();
+    QTRY_COMPARE(calls(script(), "catalog decide").size(), 2);
+    QCOMPARE(calls(script(), "catalog decide").last()["decision"].toString(), QStringLiteral("undo"));
+    QTRY_VERIFY(draft.findChild<QPushButton *>("teamProposalReject"));
+    draft.findChild<QPushButton *>("teamProposalReject")->click();
+    QTRY_COMPARE(calls(script(), "catalog decide").size(), 3);
+    QCOMPARE(calls(script(), "catalog decide").last()["decision"].toString(), QStringLiteral("reject"));
 }
 
 void TestTeamsUi::catalogEditorMarksManualEdits()

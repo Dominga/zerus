@@ -1581,7 +1581,10 @@ QJsonObject Catalog::json() const
     for (const auto &x : roles) r.append(x.json());
     for (const auto &x : templates) t.append(x.json());
     for (const auto &x : routing) u.append(x.json());
-    return {{"version", version}, {"roles", r}, {"templates", t}, {"routing", u}};
+    QJsonObject out{{"version", version}, {"roles", r}, {"templates", t}, {"routing", u}};
+    // U28: a save keeps the rules; leaving them out would reset them.
+    if (planningRulesKnown) out.insert("planning_rules", planningRules);
+    return out;
 }
 
 QHash<QString, QString> &catalogRoleColors()
@@ -1617,12 +1620,15 @@ Catalog parseCatalog(const QJsonObject &get)
     for (const auto &v : catalog.value("roles").toArray()) c.roles.append(parseRole(v.toObject()));
     for (const auto &v : catalog.value("templates").toArray()) c.templates.append(parseTemplate(v.toObject()));
     for (const auto &v : catalog.value("routing").toArray()) c.routing.append(parseRule(v.toObject()));
+    c.planningRulesKnown = catalog.value("planning_rules").isString();
+    c.planningRules = catalog.value("planning_rules").toString();
     const auto draft = get.value("draft").toObject();
     c.draftBase = draft.value("base").toInteger();
     for (const auto &v : draft.value("proposals").toArray()) {
         const auto o = v.toObject();
         c.proposals.append({str(o, "id"), str(o, "kind"), str(o, "action"), str(o, "target"), str(o, "title"), str(o, "reason"),
-                            o.value("state").toString(QStringLiteral("proposed")), o.value("value").toObject(), o.value("at").toDouble()});
+                            o.value("state").toString(QStringLiteral("proposed")), o.value("value").toObject(), o.value("at").toDouble(),
+                            o.value("value").isString() ? o.value("value").toString() : QString()});
     }
     return c;
 }
@@ -1643,6 +1649,7 @@ Catalog withProposals(const Catalog &catalog, bool includeUndecided)
         if (p.kind == "role") apply(c.roles, parseRole(p.value));
         else if (p.kind == "template") apply(c.templates, parseTemplate(p.value));
         else if (p.kind == "rule") apply(c.routing, parseRule(p.value));
+        else if (p.kind == "planning_rules" && !remove) { c.planningRules = p.text; c.planningRulesKnown = true; }
     }
     return c;
 }

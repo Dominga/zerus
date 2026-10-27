@@ -59,13 +59,16 @@ public:
 private:
     struct Account { QString id, provider, label; bool signedIn = true; };
     void fillAccounts(QComboBox *box, const Teams::Role &role) const;
-    enum class Tab { Roles, Templates, Routing };
+    enum class Tab { Roles, Templates, Routing, Rules };
     bool draftMode() const;
     void load();
     void rebuildLists();
     void rebuildEditor();
     void updateHeader();
     void setTab(Tab tab);
+    // U28: the lead's planning rules: the text, or a proposal's line diff.
+    QWidget *planningRulesEditor();
+    void resetPlanningRules();
     void selectTemplate(const QString &id);
     QWidget *roleEditor(int index);
     QWidget *templateEditor(int index);

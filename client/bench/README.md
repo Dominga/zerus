@@ -110,6 +110,132 @@ engine's cost, not a display.
    (a window capture of at least 117.6 changed frames per second) needs a screen
    recording and is outside this panel.
 
+## WebKitGTK display rate on Linux
+
+Beads `zerus-5wmh.14`. On arch (KDE Plasma 6.7.5 on Wayland, NVIDIA RTX 3090 Ti
+with the open nvidia-drm 615.78.08 and `modeset=Y`, two outputs at 144 Hz and
+scale 1, webkit2gtk-4.1 2.54.1) requestAnimationFrame, CSS `transform` and `left`
+animations and list scrolling run at 16.04 to 16.06 ms
+(`results/arch-kde-webkitgtk-harness-2026-10-28.json`, medians), in the harness and
+in the Tauri client. Qt on the same desktop follows the 144 Hz outputs. The
+interval is WebKit's fallback timer, not a display: a 60 Hz vblank gives 16.67 ms.
+
+### How WebKitGTK paces rendering
+
+File and line references are to the `webkitgtk-2.54.1.tar.xz` release
+(sha256 `ea0bbb02dbdbc596874a4e7ad35b66645b3e0a232bd0e4081de5ed92eb0a397d`). In `Source/WebKit/UIProcess/` unless the path says otherwise.
+
+- The UI process (the Tauri app itself) runs one `DisplayLink` per display. The web
+  process asks for its callbacks over IPC (`Source/WebKit/WebProcess/WebPage/WebDisplayRefreshMonitor.cpp:78-84`),
+  and rAF, animations and scroll updates run when they fire.
+- `glib/DisplayLinkGLib.cpp:35-65` builds the link from `DisplayVBlankMonitor::create(displayID)`
+  and takes that monitor's refresh rate as the display's nominal rate.
+- `glib/DisplayVBlankMonitor.cpp:48-70`. It returns the timer when the display ID is 0 or
+  `WEBKIT_FORCE_VBLANK_TIMER` is set and not `0`. Otherwise it tries the DRM monitor.
+  When that fails, it logs `Failed to create DRM vblank monitor, falling back to timer`
+  (line 67) and returns the timer.
+- `glib/DisplayVBlankMonitorTimer.cpp:40-49`. The timer's rate is `FullSpeedFramesPerSecond`
+  = 60 (`Source/WebCore/platform/graphics/AnimationFrameRate.h:56`), and each tick is
+  `sleep_for(milliseconds(1000 / 60))`, 16 ms. That is the 16.06 ms we measured.
+- `glib/DisplayVBlankMonitorDRM.cpp`. `create` (209-243) takes the GdkMonitor of the
+  display. `findDrmNodeWithCrtc` (170-198) then opens every DRM primary node with
+  `O_RDWR`. For GTK, `findCrtc` (51-105) accepts only a connector that is connected
+  and has an `encoder_id` and modes (line 67). Its `mmWidth` and `mmHeight` must also
+  equal `gdk_monitor_get_width_mm` and `gdk_monitor_get_height_mm` (line 72). The CRTC
+  index comes from the encoder's `crtc_id` (88-95). The refresh rate is
+  `gdk_monitor_get_refresh_rate() / 1000` (92, 242). One `drmWaitVBlank` must then
+  succeed (232-240). After that, the `VBlankMonitor` thread waits for one vblank per frame
+  (`glib/DisplayVBlankMonitorThreaded.cpp:53-80`). WebKit's main branch (2026-10-28) has
+  the same lookup.
+- GTK 3 on Wayland sets the GdkMonitor's physical size from `wl_output.geometry`
+  (`gdk/wayland/gdkscreen-wayland.c:1730-1735` in GTK 3.24.52) and its refresh rate from
+  `wl_output.mode` (1797). XWayland should take its RandR output sizes from `wl_output`
+  too, so X11 is expected to fail the same way (the runner's `xwayland` configuration checks it).
+- No environment variable selects the DRM monitor or sets the timer's rate.
+  `WEBKIT_DISPLAY_REFRESH_THROTTLE_FPS` only lowers the rate to a factor of the
+  monitor's rate (`glib/DisplayLinkGLib.cpp:49-64`).
+- With working vblanks there is still a cap. `PreferPageRenderingUpdatesNear60FPSEnabled`
+  is on by default everywhere except visionOS
+  (`Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml:6816-6831`); it is the same
+  preference the macOS client turns off. `Source/WebCore/page/Page.cpp:2773` and
+  `Source/WebCore/platform/graphics/AnimationFrameRate.cpp:35-45,60` turn 144 into 72
+  (integer ratio 144 / 60 = 2). `DisplayLink.cpp:207-214` with
+  `Source/WebCore/platform/graphics/DisplayUpdate.cpp:35-43` then fires every second
+  vblank, 13.89 ms. GTK can turn it off per web view with `webkit_settings_set_feature_enabled`
+  (`API/glib/WebKitSettings.cpp:4234-4240`, since 2.42). The feature identifier is
+  `PreferPageRenderingUpdatesNear60FPS`, without `Enabled`.
+- Logging. `WEBKIT_DEBUG=DisplayLink WEBKIT_DEBUG_OUTPUT=stderr` prints the release logs
+  above. Channels are off unless `WEBKIT_DEBUG` names them
+  (`Source/WTF/wtf/unix/LoggingUnix.cpp:36-50`). Output goes to the journal when
+  `/run/systemd/journal/socket` exists (`Source/WTF/wtf/Assertions.cpp:500-517`). The
+  debug-only `LOG_WITH_STREAM` lines, such as the nominal rate, are not in release
+  builds. The installed library has the DRM monitor: it links libdrm, and its strings
+  hold the messages from `DisplayVBlankMonitorDRM.cpp:214, 226, 238`.
+- Error text. libdrm returns -1 and sets `errno`, so WebKit's
+  `drmWaitVBlank failed: %s` with `strerror(-ret)` always reads "Operation not
+  permitted" (line 238). The thread likewise treats every failure as `-EPERM` (259-264).
+  Read the real error from the probe below.
+
+### This machine
+
+WebKit's checks in order, with what `webkitgtk-drm-probe.py` and the system show:
+
+| Check | Result here |
+|---|---|
+| a connector of the GdkMonitor's size (`findCrtc`, line 72) | fails. KWin reports 597x336 and 797x334 mm (`wl_output`, also `kscreen-doctor` `sizeMM`). The kernel connectors DP-2 and DP-3 report 600x340 and 800x330 mm, in whole centimetres. WebKit logs `no drm node with CRTC found` (226), and this alone gives the 16.06 ms timer |
+| `drmWaitVBlank` (232-240) | fails. nvidia-drm's module parameter `vblank` is `N`, its default ("Enable drm vblank notification support"), and every CRTC answers `EOPNOTSUPP`. KWin paces with page-flip events and does not need it |
+| connector routing for a non-master client (`encoder_id`, line 67) | unknown. While the session was locked and the outputs were in DPMS standby, no connector had a CRTC: `encoder_id` 0, atomic `CRTC_ID` 0. It needs a probe with the displays on |
+| near-60 preference | would give 72 Hz once vblanks work |
+
+`/dev/dri` has only `card1` (the NVIDIA GPU, PCI 01:00.0). The AMD Raphael iGPU
+(11:00.0) has no DRM driver bound and drives no output, so it offers no path. Ranked:
+
+1. Timer fallback because no connector has the GdkMonitor's size. The source and the
+   device facts show it. Under Xvfb, WebKit logs the same fallback lines (226, 67);
+   the runner's `debug-log` configuration checks them on the display.
+2. A size fix alone is not enough: nvidia-drm without `vblank=1` fails `drmWaitVBlank`,
+   so WebKit still uses the timer.
+3. With both fixed, the near-60 preference halves 144 Hz to 72 Hz unless the web view
+   turns it off.
+4. Unlikely: the compositor or the GTK frame clock. Qt follows 144 Hz on the same
+   desktop, and WebKit drives rAF from its own vblank thread, not from frame callbacks.
+
+So WebKitGTK 2.54.1 cannot reach 144 Hz here by configuration alone. It needs all of:
+`nvidia_drm.vblank=1` (a kernel module option, the owner's decision, active after a
+reboot); a connector lookup that matches (a WebKit fix, or the shim for the
+experiment); connector routing visible to the app; and
+`PreferPageRenderingUpdatesNear60FPS` off in the client's web view. On drivers with
+DRM vblank support (amdgpu, i915), only the size match and the preference remain, and
+the size match depends on the monitor's EDID.
+
+### The experiments runner
+
+Only after the owner has been warned. It opens the harness window once per
+configuration, about 8 s each, and stops when the session is locked or a display
+sleeps:
+
+```sh
+(cd client && npm ci && npx vite build --config bench/harness/vite.config.ts)
+client/bench/webkitgtk-vblank-experiments.sh --hz 144
+```
+
+First it prints the window-less DRM probe
+(`python3 client/bench/webkitgtk-drm-probe.py --compositor`: connector sizes,
+`encoder_id`, atomic `CRTC_ID`, `drmWaitVBlank` on every CRTC, the compositor's sizes,
+the nvidia-drm parameters). It then prints one line per configuration: the mean and
+median rAF interval, a verdict, the GdkMonitor's size and refresh rate, and WebKit's
+vblank log lines. JSON results and logs go to a temporary directory. `--only NAME,...`
+picks configurations, and `--xvfb` checks the script on a private Xvfb (no desktop).
+
+| Configuration | Expected here (nvidia-drm `vblank=N`) |
+|---|---|
+| `default`, `debug-log` | 16.06 ms; log lines 226 and 67 |
+| `near60-off` | 16.06 ms: the timer ignores the preference |
+| `mm-shim` (`webkitgtk-monitor-mm-shim.c` preloaded, GDK reports the kernel's sizes) | 16.06 ms. The log moves to 238 (`drmWaitVBlank failed`) when routing is visible, or stays at 226 when it is not. With `vblank=1`: 13.89 ms |
+| `mm-shim-near60-off` | 16.06 ms. With `vblank=1` and visible routing: 6.94 ms |
+| `xwayland` | as `default` |
+| `force-timer` | 16.06 ms without log lines (the control) |
+
 ## The Qt comparison
 
 ### The existing method

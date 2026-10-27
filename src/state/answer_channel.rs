@@ -530,6 +530,13 @@ extern "C" fn terminate(_: libc::c_int) {
 /// printed before emitted.json. An offer this worker had not claimed lets
 /// `hgs answer` use the screen; a claimed one stays with the channel and is
 /// reported uncertain, never sent again.
+/// U19 (3): Claude's decision for a subagent call that its group's answer on
+/// another card already decided.
+fn group_answer(record: &Value, tool_use: &str) -> Option<Value> {
+    let decided = subagents_confirm::decided(string(record, "conversation_id"), tool_use)?;
+    claude_approval::channel::decision(&json!({"decision":decided})).ok()
+}
+
 pub(super) fn run() -> Result<i32> {
     let _ = wait();
     Ok(0)
@@ -611,6 +618,14 @@ fn wait() -> Result<()> {
                 return Ok(());
             }
         }
+        // U19 (3): a subagent call whose group was answered on another card
+        // takes that answer, without a card of its own.
+        if let Some(output) = matches!(kind, Kind::Approval).then(|| group_answer(&record, &tool)).flatten() {
+            write(&dir, EMITTED, &json!({"request_id":"subagent-group","at":now()}))?;
+            println!("{output}");
+            close(&dir, "decided with its group");
+            return Ok(());
+        }
         let ready = || current.as_ref().is_some_and(waits);
         if let Some(offer) = take_offer(kind, &dir, ready)? {
             // The question must still be the bound one when its answer goes out.
@@ -642,6 +657,26 @@ mod tests {
     }
     fn card() -> Value {
         json!({"question_id":"tool:toolu_1","question_hash":"hash-1","tool_call_id":"toolu_1"})
+    }
+
+    /// U19 (3): the waiting hook of a grouped subagent call answers with the
+    /// decision its group took on the first card, allow or deny.
+    #[test]
+    fn a_grouped_subagent_call_takes_its_groups_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let record = record();
+            subagents_confirm::group_add("conversation-1", "toolu_1", &json!({"subagent_type":"Explore"}));
+            subagents_confirm::group_add("conversation-1", "toolu_2", &json!({"subagent_type":"general"}));
+            assert!(group_answer(&record, "toolu_2").is_none(), "undecided: it waits for its card");
+            subagents_confirm::decide("conversation-1", &["toolu_1".into(), "toolu_2".into()], true);
+            assert_eq!(group_answer(&record, "toolu_2").unwrap()["hookSpecificOutput"]["decision"], json!({"behavior":"allow"}));
+            subagents_confirm::group_reset("conversation-1");
+            subagents_confirm::group_add("conversation-1", "toolu_3", &json!({"subagent_type":"Explore"}));
+            subagents_confirm::decide("conversation-1", &["toolu_3".into()], false);
+            assert_eq!(group_answer(&record, "toolu_3").unwrap()["hookSpecificOutput"]["decision"]["behavior"], "deny");
+            assert!(group_answer(&record, "toolu_other").is_none());
+        });
     }
 
     #[test]

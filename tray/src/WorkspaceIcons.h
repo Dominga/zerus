@@ -42,6 +42,12 @@ inline const char *prototypeIconPath(const QString &name)
         {"mute", "M8.7 4.3A6 6 0 0 1 18 11v4M6 11v5l-2 2h12M10 20a2 2 0 0 0 4 0M3 3l18 18"},
         // The lead's session header and the composer row (spec 3, 4).
         {"clock", "M4 13a8 8 0 1 0 16 0a8 8 0 1 0 -16 0ZM12 9v4l2.5 2M10 2h4"},
+        // U25 part 6: the inspector's Environment rows (the prototype's key,
+        // pc, sparkle and bolt).
+        {"key", "M4 15a4 4 0 1 0 8 0a4 4 0 1 0 -8 0ZM10.8 12.2L20 3M17 6l2.5 2.5M14.5 8.5L17 11"},
+        {"monitor", "M4.5 4h15a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1 -1.5 1.5h-15a1.5 1.5 0 0 1 -1.5 -1.5v-9a1.5 1.5 0 0 1 1.5 -1.5ZM8 20h8M12 16v4"},
+        {"asterisk", "M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6L5.6 18.4"},
+        {"bolt", "M13 3L5 14h6l-1 7 8-11h-6z"},
         {"arrow-left", "M10 6l-6 6 6 6M4 12h16"},
         {"check-circle", "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0ZM8 12.5l2.8 2.8L16.5 9"},
         {"archive", "M4 4h16a1 1 0 0 1 1 1v3a1 1 0 0 1 -1 1h-16a1 1 0 0 1 -1 -1v-3a1 1 0 0 1 1 -1ZM5 9v10h14V9M10 13h4"},

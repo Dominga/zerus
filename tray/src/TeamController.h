@@ -62,6 +62,15 @@ public:
     void setWatchCatalog(bool watch) { m_watchCatalog = watch; if (watch) refreshCatalog(); }
     // The Team designer page polls the catalog too, apart from the Team tab.
     void setWatchCatalogPage(bool watch) { m_watchCatalogPage = watch; if (watch) refreshCatalog(); }
+    // U15: the owner keeps, rejects or undoes a proposal and applies or
+    // discards the draft whatever the designer session's state. A refusal
+    // stays next to its proposal (or the draft) until that action succeeds,
+    // and the draft is read again either way.
+    void decideProposal(const QString &proposal, const QString &decision, const Reply &done = {});
+    void applyDraft(const Reply &done = {});
+    void discardDraft(const Reply &done = {});
+    QString proposalError(const QString &proposal) const { return m_proposalErrors.value(proposal); }
+    QString draftError() const { return m_draftError; }
     bool available() const { return m_available; }
     HgsClient *client() const { return m_client; }
     static void setPollInterval(int milliseconds);
@@ -75,6 +84,7 @@ private:
     void received(quint64 request, const QString &operation, const QJsonObject &result);
     void failed(quint64 request, const QString &operation, const QString &error);
     void readWatched();
+    void draftCall(const QString &operation, const Reply &done);
     HgsClient *m_client;
     QTimer m_poll;
     bool m_active = false, m_available = false;
@@ -95,4 +105,8 @@ private:
     QMap<quint64, Reply> m_calls;
     Teams::Catalog m_catalog;
     bool m_catalogReady = false, m_watchCatalog = false, m_watchCatalogPage = false, m_catalogInFlight = false;
+    // Only the newest catalog read is shown: an older one may land after it.
+    quint64 m_catalogRead = 0;
+    QHash<QString, QString> m_proposalErrors;
+    QString m_draftError;
 };

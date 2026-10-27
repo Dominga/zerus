@@ -47,6 +47,9 @@
 #include <QClipboard>
 #include "TeamController.h"
 #include "TeamDesignerPage.h"
+#include "TeamConversation.h"
+#include "QuestionCard.h"
+#include "ActivityView.h"
 #include "TeamDesignerPanel.h"
 #include "TeamModel.h"
 #include "TeamNewDialog.h"
@@ -176,6 +179,30 @@ QJsonObject graphTeam()
  "layers":{"1":0,"2":1,"3":1,"4":1,"5":2,"6":3,"7":5,"8":2,"9":4},"cycle":[],"ready":[],
  "validation":{"errors":[],"warnings":[]}})").object();
     return t;
+}
+
+// U25 part 5 (owner, 2026-10-27): one task per activity-label rule, plus a
+// problem that must win over the label.
+QJsonObject labelTeam()
+{
+    return QJsonDocument::fromJson(R"({
+ "id":"team-1","name":"Labels","status":"running","project":"Checkout","folder":"/work/labels","lead":"lead",
+ "revision":5,"created":1000,"updated":5000,"settings":{},"layers":{},"cycle":[],"ready":[],"validation":{"errors":[],"warnings":[]},
+ "members":[
+  {"id":"lead","role":"Lead","agent":"claude","state":"active","session":{"host":"","name":"claude/labels/lead"}},
+  {"id":"backend","role":"Backend","agent":"dsh","state":"active","session":{"host":"","name":"dsh/labels/backend"}},
+  {"id":"blocked","role":"Tester","agent":"codex","state":"active","session":{"host":"","name":"codex/labels/blocked"}}],
+ "tasks":[
+  {"id":1,"title":"Review me","assignee":"backend","status":"submitted","attempts":[{"n":1,"id":"a1","member":"backend","state":"reported"}]},
+  {"id":2,"title":"Second try","assignee":"backend","status":"in_progress","attempts":[{"n":2,"id":"a2","member":"backend","state":"delivered","started_at":1200}]},
+  {"id":3,"title":"First try","assignee":"backend","status":"in_progress","attempts":[{"n":1,"id":"a3","member":"backend","state":"delivered","started_at":1300}]},
+  {"id":4,"title":"Held back","assignee":"backend","status":"pending","hold":{"by":"Lead","at":1400,"reason":"ask first"}},
+  {"id":5,"title":"Delegated","assignee":"backend","status":"in_progress","subteam":{"team":"team-2","done":1,"total":2},"attempts":[{"n":1,"id":"a5","member":"backend","state":"delivered","started_at":1500}]},
+  {"id":6,"title":"Queued","assignee":"backend","status":"pending"},
+  {"id":7,"title":"Still a draft","assignee":"backend","status":"draft"},
+  {"id":8,"title":"Done","assignee":"backend","status":"accepted"},
+  {"id":9,"title":"Offline problem","assignee":"blocked","status":"in_progress","attempts":[{"n":2,"id":"a9","member":"blocked","state":"delivered","started_at":1600}]}],
+ "layers":{"1":0,"2":1,"3":1,"4":2,"5":2,"6":3,"7":3,"8":4,"9":1}})").object();
 }
 
 // A running team with two phases appended: phase 1 is finished (it starts
@@ -595,6 +622,7 @@ private slots:
     void attemptStatesShowPhaseIcons();
     void taskCardAnswersQuestionsAndHolds();
     void memberQueueListsCurrentAndReturned();
+    void permissionAnswersFoldToOneLineAndOpenToFive();
     void planningEditsSendTheWholePlan();
     void newTeamStartsTheLeadWithTheTemplate();
     void catalogEditorSavesTheNextVersion();
@@ -647,10 +675,19 @@ private slots:
     void graphEdgesAreEditedByHandleAndSelection();
     void graphRoutingStaysFastForTheLargestPlan();
     void graphNodesInTwoLinesWithDraftEdits();
+    void graphNodesCarryTheActivityLabel();
     void subLeadsAreATreeInMembersAndTheInspector();
     void aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog();
     void designerPageStartsOrOpensTheDesigner();
+    void draftIsDecidedWithoutADesignerSession();
+    void designerQuestionIsAnsweredInTheWindow();
     void catalogEditorMarksManualEdits();
+    void boardScrollsInsteadOfSqueezingColumns();
+    void planningBoardScrollsInsteadOfSqueezingColumns();
+    void catalogRoleEditorEditsEveryField();
+    void catalogTemplateEditorRosterSkeletonAndChecks();
+    void catalogRoutingEditsAndTriesAGoal();
+    void catalogHeaderRevertDraftAndBanners();
     void boardColumnsKeepTheirScroll();
     void skinTokensMatchThePrototype();
     void rolePaletteReadsTheCatalog();
@@ -699,6 +736,29 @@ elif a[:2]==['team','status']:
  sys.stdout.write(open(__file__+'.status').read())
 elif a[:2]==['team','events']:sys.stdout.write(open(__file__+'.feed').read())
 elif a[:3]==['team','catalog','get']:sys.stdout.write(open(__file__+'.catalog').read())
+elif a[:3]==['team','catalog','decide'] or a[:3]==['team','catalog','apply']:
+ # U15: decisions and Apply change the draft as hgs does; `.refuse` refuses one.
+ import os
+ if a[2]=='decide' and os.path.exists(__file__+'.refuse'):print(open(__file__+'.refuse').read(),file=sys.stderr);sys.exit(1)
+ if a[2]=='apply' and os.path.exists(__file__+'.refuseapply'):print(open(__file__+'.refuseapply').read(),file=sys.stderr);sys.exit(1)
+ c=json.load(open(__file__+'.catalog'));draft=c['draft']
+ if a[2]=='decide':
+  for p in draft['proposals']:
+   if p['id']==body.get('proposal'):p['state']={'keep':'kept','reject':'rejected','undo':'proposed'}[body.get('decision')]
+  out={'status':'decided','proposal':body.get('proposal')}
+ else:
+  kept=[p for p in draft['proposals'] if p['state']=='kept']
+  for p in kept:
+   roles=[r for r in c['catalog']['roles'] if r['id']!=p['target']]
+   c['catalog']['roles']=roles+([p['value']] if p['action']!='remove' else [])
+  c['catalog']['version']+=1;c['draft']={'base':0,'proposals':[]}
+  out={'status':'applied','version':c['catalog']['version'],'changes':len(kept)}
+ open(__file__+'.catalog.new','w').write(json.dumps(c))
+ import time
+ for _ in range(100):
+  try:os.replace(__file__+'.catalog.new',__file__+'.catalog');break
+  except PermissionError:time.sleep(.05)   # Windows: a read holds the file
+ print(json.dumps(out))
 elif a[:2]==['team','approve-phase'] and body.get('phase')==9:
  print('hgs: Phase 9 is not waiting for approval',file=sys.stderr);sys.exit(1)
 elif a[:2]==['team','create']:print(json.dumps({'status':'created','team':'team-new','request_id':body.get('request_id')}))
@@ -727,6 +787,10 @@ void TestTeamsUi::init()
     QFile::remove(script() + ".calls");
     QFile::remove(script() + ".draftrev");
     QFile::remove(script() + ".statushold");
+    QFile::remove(script() + ".refuse");
+    QFile::remove(script() + ".refuseapply");
+    // Decisions and Apply change the fake catalog: each test starts from the fixture.
+    QVERIFY(FakeCli::replace(script() + ".catalog", QJsonDocument(catalog()).toJson(QJsonDocument::Compact)));
     setTeam(team());
 }
 
@@ -1167,6 +1231,131 @@ void TestTeamsUi::memberQueueListsCurrentAndReturned()
     shot(&panel, "delivery-queue-420");
 }
 
+void TestTeamsUi::permissionAnswersFoldToOneLineAndOpenToFive()
+{
+    // U17: a member with 20 stored answers shows one summary line; opening it
+    // lists the newest five, one row each, with the long deny reason on one
+    // line and its whole text in the tooltip; the choice is kept per team.
+    const QString longReason = QStringLiteral(
+        "This command would rewrite the build directory outside the worktree, and the lead asked to keep the cache for the next phase of the plan. ")
+        + QStringLiteral("The cache is shared with the backend member and removing it would cost another full build. ")
+        + QStringLiteral("Deny it and ask the lead to add a narrower command.");
+    auto t = team();
+    auto members = t["members"].toArray();
+    auto backend = members[1].toObject();
+    QJsonArray answers;
+    for (int i = 0; i < 20; ++i) {
+        const bool denied = i >= 18;   // the newest two are the denials
+        answers.append(QJsonObject{{"question_id", QStringLiteral("q%1").arg(i)},
+                                   {"decision", denied ? "deny" : "allow"},
+                                   {"by", i % 2 ? "lead" : "owner"},
+                                   {"at", 1700.0 + i},
+                                   {"reason", denied ? longReason : QString()},
+                                   {"tool", "Bash"},
+                                   {"command", denied ? QStringLiteral("rm -rf build") : QStringLiteral("cargo test --locked")}});
+    }
+    backend["permission_answers"] = answers;
+    members[1] = backend;
+    t["members"] = members;
+    // The task card's attempt carries its own answers (the newest last).
+    auto tasks = t["tasks"].toArray();
+    auto first = tasks[0].toObject();
+    first["attempts"] = QJsonArray{QJsonObject{{"n", 1}, {"id", "a1"}, {"member", "backend"}, {"state", "reported"},
+                                               {"sent_at", 1600.0},
+                                               {"permissions", QJsonArray{
+                                                    QJsonObject{{"question_id", "q4"}, {"decision", "allow"}, {"by", "lead"}, {"at", 1702.0},
+                                                                {"tool", "Bash"}, {"command", "cargo test --locked"}},
+                                                    QJsonObject{{"question_id", "q5"}, {"decision", "deny"}, {"by", "owner"}, {"at", 1703.0},
+                                                                {"reason", longReason}, {"tool", "Bash"}, {"command", "rm -rf build"}}}}}};
+    tasks[0] = first;
+    t["tasks"] = tasks;
+    setTeam(t);
+    QSettings().remove("ui/expanded/teamPermissions/team-1/backend");
+    QSettings().remove("ui/expanded/taskPermissions/team-1/1/1");
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    panel.setLive(live);
+    workspace.setLive(live);
+    workspace.resize(1300, 900);
+    workspace.show();
+    controller.refresh();
+    workspace.showTeam("team-1");
+    const auto card = [&workspace]() -> QFrame * {
+        for (auto *frame : workspace.findChildren<QFrame *>("teamWorkspaceMember"))
+            if (frame->property("teamMember") == "backend") return frame;
+        return nullptr;
+    };
+    QTRY_VERIFY(card() && card()->findChild<QToolButton *>("teamMemberPermissionsToggle"));
+    // Collapsed: one line, no rows.
+    auto *toggle = card()->findChild<QToolButton *>("teamMemberPermissionsToggle");
+    QVERIFY2(toggle->text().contains(QStringLiteral("18 allowed · 2 denied")), qPrintable(toggle->text()));
+    QVERIFY2(toggle->text().contains(QStringLiteral("last:")), qPrintable(toggle->text()));
+    QVERIFY(!card()->findChild<QWidget *>("teamMemberPermissions"));
+    QCOMPARE(card()->findChildren<QWidget *>("teamPermissionAnswerRow").size(), 0);
+    workspace.render();
+    QTest::qWait(150);
+    shot(&workspace, "u17-permissions-collapsed-dark");
+    lightPalette();
+    workspace.setTheme(false);
+    workspace.render();
+    QTest::qWait(250);
+    shot(&workspace, "u17-permissions-collapsed-light");
+    darkPalette();
+    workspace.setTheme(true);
+    workspace.render();
+    QTest::qWait(150);
+    // Expanded: the newest five, each one row, and "+15 more".
+    card()->findChild<QToolButton *>("teamMemberPermissionsToggle")->click();
+    QTRY_VERIFY(card() && card()->findChild<QWidget *>("teamMemberPermissions"));
+    auto *list = card()->findChild<QWidget *>("teamMemberPermissions");
+    QCOMPARE(list->findChildren<QWidget *>("teamPermissionAnswerRow").size(), 5);
+    auto *more = list->findChild<QLabel *>("teamPermissionMore");
+    QVERIFY(more && more->text() == QStringLiteral("+15 more"));
+    QVERIFY(list->findChildren<QLabel *>("teamPermissionDecision").first()->text().contains(QStringLiteral("Denied")));
+    // The newest is a denial by the lead, so the summary's last answer says so.
+    QVERIFY2(card()->findChild<QToolButton *>("teamMemberPermissionsToggle")->text().contains(QStringLiteral("last: denied by the lead")),
+             qPrintable(card()->findChild<QToolButton *>("teamMemberPermissionsToggle")->text()));
+    // The long deny reason is one line (an ElidingLabel) with its whole text in
+    // the tooltip, and so is the command.
+    auto *reason = list->findChild<QLabel *>("teamPermissionReason");
+    QVERIFY(reason);
+    QCOMPARE(reason->text(), longReason);
+    QCOMPARE(reason->toolTip(), longReason);
+    QVERIFY(reason->sizePolicy().horizontalPolicy() == QSizePolicy::Ignored);
+    auto *command = list->findChild<QLabel *>("teamPermissionCommand");
+    QVERIFY(command && command->toolTip() == QStringLiteral("rm -rf build"));
+    workspace.render();
+    QTest::qWait(150);
+    shot(&workspace, "u17-permissions-expanded-dark");
+    lightPalette();
+    workspace.setTheme(false);
+    workspace.render();
+    QTest::qWait(250);
+    shot(&workspace, "u17-permissions-expanded-light");
+    darkPalette();
+    workspace.setTheme(true);
+    workspace.render();
+    QTest::qWait(150);
+    // The choice is remembered for the team: a re-render keeps it open.
+    workspace.render();
+    QTest::qWait(100);
+    QTRY_VERIFY(card() && card()->findChild<QWidget *>("teamMemberPermissions"));
+    // The task card shows the same for its attempt, opened to all of its answers.
+    TeamTaskCard taskCard;
+    taskCard.setTask(parse(t), 1, live, true);
+    QTRY_VERIFY(taskCard.findChild<QToolButton *>("teamTaskPermissionsToggle"));
+    auto *taskToggle = taskCard.findChild<QToolButton *>("teamTaskPermissionsToggle");
+    QVERIFY2(taskToggle->text().contains(QStringLiteral("1 allowed · 1 denied")), qPrintable(taskToggle->text()));
+    QVERIFY(!taskCard.findChild<QWidget *>("teamTaskPermissions"));
+    taskCard.findChild<QToolButton *>("teamTaskPermissionsToggle")->click();
+    QTRY_VERIFY(taskCard.findChild<QWidget *>("teamTaskPermissions"));
+    auto *taskList = taskCard.findChild<QWidget *>("teamTaskPermissions");
+    QCOMPARE(taskList->findChildren<QWidget *>("teamPermissionAnswerRow").size(), 2);
+    QVERIFY(taskList->findChild<QLabel *>("teamPermissionReason"));
+}
+
 void TestTeamsUi::planningEditsSendTheWholePlan()
 {
     setTeam(team("planning"));
@@ -1385,10 +1574,13 @@ void TestTeamsUi::catalogRoleChoosesAccountModelAndComputer()
     editor.setSources(&client, {{"devbox", "devbox", true}, {"laptop", "laptop", false}});
     editor.resize(900, 700); editor.show();
     QTRY_COMPARE(editor.findChild<QListWidget *>("teamCatalogRoles")->count(), 3);
-    // The lead runs Claude: its accounts on this computer, its models, the computers.
+    // The lead runs Claude: its accounts on this computer, its models, the
+    // computers (U25: "+ computer" adds a chip; none is Any computer).
     auto *computer = editor.findChild<QComboBox *>("teamRoleComputer"); QVERIFY(computer);
-    QCOMPARE(computer->count(), 3); QCOMPARE(computer->currentData().toString(), QString());
-    QVERIFY(computer->itemText(2).contains("offline"));
+    QCOMPARE(computer->count(), 4); QCOMPARE(computer->currentData().toString(), QString());
+    QCOMPARE(computer->itemData(1).toString(), QStringLiteral("any"));
+    QVERIFY(computer->itemText(3).contains("offline"));
+    QVERIFY(editor.findChild<QLabel *>("teamRoleAnyComputer"));
     auto *model = editor.findChild<QComboBox *>("teamRoleModel"); QVERIFY(model && model->isEditable());
     QVERIFY(model->findText("opus") >= 0); QCOMPARE(model->currentText(), QString());
     QTRY_COMPARE(editor.findChild<QComboBox *>("teamRoleAccount")->count(), 3);
@@ -1396,15 +1588,24 @@ void TestTeamsUi::catalogRoleChoosesAccountModelAndComputer()
     QVERIFY(account->itemText(account->findData("work")).contains("signed out"));
     account->setCurrentIndex(account->findData("native-claude")); emit account->activated(account->currentIndex());
     model->setCurrentIndex(model->findText("sonnet")); emit model->activated(model->currentIndex());
-    computer->setCurrentIndex(1); emit computer->activated(1);
+    computer->setCurrentIndex(2); emit computer->activated(2);
     // Accounts belong to a computer: another one clears the choice.
     auto *rebuilt = editor.findChild<QComboBox *>("teamRoleAccount");
     QTRY_VERIFY(rebuilt && rebuilt != account); QCOMPARE(rebuilt->currentData().toString(), QString());
+    // The chip with ×, and the offline one struck through.
+    QCOMPARE(editor.findChildren<QPushButton *>("teamRoleMachine").size(), 1);
+    QVERIFY(!editor.findChild<QLabel *>("teamRoleAnyComputer"));
+    auto *more = editor.findChild<QComboBox *>("teamRoleComputer");
+    more->setCurrentIndex(3); emit more->activated(3);
+    QTRY_COMPARE(editor.findChildren<QPushButton *>("teamRoleMachine").size(), 2);
+    for (auto *chip : editor.findChildren<QPushButton *>("teamRoleMachine"))
+        QCOMPARE(chip->font().strikeOut(), chip->property("machine").toString() == QStringLiteral("laptop"));
     editor.findChild<QPushButton *>("teamCatalogSave")->click();
     QTRY_COMPARE(calls(script(), "catalog set").size(), 1);
     const auto lead = calls(script(), "catalog set").first()["catalog"].toObject()["roles"].toArray()[0].toObject();
     QCOMPARE(lead["model"].toString(), QStringLiteral("sonnet"));
     QCOMPARE(lead["computer"].toString(), QStringLiteral("devbox"));
+    QCOMPARE(lead["machines"].toArray(), (QJsonArray{"devbox", "laptop"}));
     QCOMPARE(lead.value("account").toString(), QString());
 }
 
@@ -1480,7 +1681,8 @@ void TestTeamsUi::workspaceShowsGraphBoardAndFocus()
     for (auto *b : views->findChildren<QPushButton *>()) if (b->property("segment") == "board") { b->click(); break; }
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBoard"));
     QCOMPARE(workspace.findChildren<QFrame *>("teamBoardCard").size(), 5);
-    // Role and state share a line on a wide card and wrap on a narrow one.
+    // Role and state share a line. U33: a narrow window no longer squeezes
+    // the card until they wrap; the Board scrolls sideways instead.
     {
         // Reads the first card afresh: a resize may render the board again.
         const auto oneLine = [&workspace] {
@@ -1491,7 +1693,8 @@ void TestTeamsUi::workspaceShowsGraphBoardAndFocus()
         };
         const QSize before = workspace.size();
         workspace.resize(700, before.height());
-        QTRY_COMPARE(oneLine(), 0);
+        QTRY_COMPARE(oneLine(), 1);
+        QTRY_VERIFY(workspace.findChild<QScrollArea *>("teamWorkspaceBoard")->horizontalScrollBar()->isVisible());
         workspace.resize(1800, before.height());
         QTRY_COMPARE(oneLine(), 1);
         workspace.resize(before);
@@ -2329,7 +2532,11 @@ void TestTeamsUi::followUpsShowThePermissionAnswerAndPlanFixes()
     QCOMPARE(native["question_id"].toString(), QStringLiteral("approval"));
     QCOMPARE(native["selected_option_ids"].toArray()[0].toString(), QStringLiteral("2"));
     QCOMPARE(native["text"].toString(), QStringLiteral("not this command"));
-    QVERIFY(workspace.findChild<QLabel *>("teamMemberPermissionAnswered"));
+    // U17: the stored answer folds to one summary line on the member card.
+    auto *answerSummary = workspace.findChild<QToolButton *>("teamMemberPermissionsToggle");
+    QVERIFY(answerSummary);
+    QVERIFY2(answerSummary->text().contains(QStringLiteral("1 denied")), qPrintable(answerSummary->text()));
+    QVERIFY(!workspace.findChild<QLabel *>("teamMemberPermissionAnswered"));
     shot(&workspace, "permission-answer-claude");
     // A DeepSeek card: its own question id and allow/deny native ids.
     members = team["members"].toArray(); backend = members[1].toObject();
@@ -2598,12 +2805,23 @@ void TestTeamsUi::permissionCardsAndGraphOrder()
     auto *deny = card.findChild<QPushButton *>("teamPermissionDeny");
     QVERIFY(!allow && !deny);
     QVERIFY(card.findChild<QLabel *>("teamPermissionWhere"));
-    // Who answered: the deny names the owner and its reason, the allow the lead.
-    const auto answered = card.findChildren<QLabel *>("teamPermissionAnswered");
+    // U17: the answers fold behind one summary line; opening it lists the newest
+    // first, the deny reason on one line with its whole text in the tooltip.
+    auto *permissions = card.findChild<QToolButton *>("teamTaskPermissionsToggle");
+    QVERIFY(permissions);
+    QVERIFY2(permissions->text().contains(QStringLiteral("1 allowed · 1 denied")), qPrintable(permissions->text()));
+    QVERIFY(permissions->text().contains(QStringLiteral("last: allowed by the lead")));
+    QVERIFY(!card.findChild<QWidget *>("teamTaskPermissions"));
+    permissions->click();
+    QTRY_VERIFY(card.findChild<QWidget *>("teamTaskPermissions"));
+    const auto answered = card.findChild<QWidget *>("teamTaskPermissions")->findChildren<QWidget *>("teamPermissionAnswerRow");
     QCOMPARE(answered.size(), 2);
-    QVERIFY(answered[0]->text().contains(QStringLiteral("Denied by you")));
-    QVERIFY(answered[0]->text().contains(QStringLiteral("That kills every ninja on the machine")));
-    QVERIFY(answered[1]->text().contains(QStringLiteral("Allowed by the lead")));
+    QVERIFY(answered[0]->findChild<QLabel *>("teamPermissionDecision")->text().contains(QStringLiteral("Allowed by the lead")));
+    QVERIFY(answered[1]->findChild<QLabel *>("teamPermissionDecision")->text().contains(QStringLiteral("Denied by you")));
+    auto *deniedReason = answered[1]->findChild<QLabel *>("teamPermissionReason");
+    QVERIFY(deniedReason);
+    QCOMPARE(deniedReason->text(), QStringLiteral("That kills every ninja on the machine"));
+    QCOMPARE(deniedReason->toolTip(), QStringLiteral("That kills every ninja on the machine"));
     shot(&card, "permission-card-dark");
     lightPalette();
     card.setTask(parsed, 17, live, false);
@@ -3271,6 +3489,16 @@ void TestTeamsUi::embeddedNewTeamIsLedByTheSession()
     QVERIFY(tab.findChild<QLineEdit *>("teamNewFolder")->isReadOnly());
     QCOMPARE(tab.draftId(), QStringLiteral("draft-1"));
     QVERIFY(tab.findChild<QPushButton *>("teamNewDiscard")->isVisible());
+    // QA #347: a folder that is not a Git repository has one folder for every
+    // member; the draft shows the policy as Shared, fixed, with the reason.
+    {
+        auto *policy = tab.findChild<QComboBox *>("teamNewFolderPolicy");
+        QVERIFY(policy);
+        QCOMPARE(policy->currentData().toString(), QStringLiteral("shared"));
+        QVERIFY(!policy->isEnabled());
+        QVERIFY2(policy->toolTip().contains(QStringLiteral("every member works in this folder")), qPrintable(policy->toolTip()));
+        QVERIFY(tab.findChild<QLabel *>("teamNewGitNote")->isVisible());
+    }
     // The lead edits the draft: the form follows and marks what it changed.
     setTeam(draftTeam(path));
     QTRY_COMPARE(tab.findChild<QPlainTextEdit *>("teamNewGoal")->toPlainText(), QStringLiteral("Redesign checkout: address form and tests"));
@@ -3992,6 +4220,70 @@ void TestTeamsUi::graphNodesInTwoLinesWithDraftEdits()
     lightShot(&workspace, "ux-5-graph-light");
 }
 
+void TestTeamsUi::graphNodesCarryTheActivityLabel()
+{
+    setTeam(labelTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    // #9's member is offline: its problem text must win over the label.
+    const LiveLookup live = [](const Member &m) { Live l; l.known = true; if (m.id == "blocked") l.offline = true; return l; };
+    panel.setLive(live); workspace.setLive(live);
+    darkPalette(); workspace.setTheme(true);
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    TeamUi::TaskView *graph = nullptr;
+    QTRY_VERIFY(([&] { graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); return graph && graph->nodeRect(1).width() > 0; })());
+    const auto node = [&](int id) { for (const auto &n : graph->nodes) if (n.id == id) return n; return TeamUi::TaskView::Node{}; };
+    // Each rule of the owner's addition: Submitted, attempt 2, nothing on the
+    // first attempt, Held, a sub-team, and nothing for Pending, Draft, Accepted.
+    QCOMPARE(node(1).activity, QStringLiteral("review"));
+    QCOMPARE(node(2).activity, QStringLiteral("attempt 2"));
+    QVERIFY(node(3).activity.isEmpty());
+    QCOMPARE(node(4).activity, QStringLiteral("held"));
+    QCOMPARE(node(5).activity, QStringLiteral("sub-team 1/2"));
+    QVERIFY(node(6).activity.isEmpty());
+    QVERIFY(node(7).activity.isEmpty());
+    QVERIFY(node(8).activity.isEmpty());
+    // A problem text wins; the label stays empty.
+    QVERIFY(node(9).problem);
+    QVERIFY(!node(9).problemText.isEmpty());
+    QVERIFY(node(9).activity.isEmpty());
+    shot(&workspace, "ux-5-graph-label-dark");
+    workspace.setTheme(false);
+    lightShot(&workspace, "ux-5-graph-label-light");
+    darkPalette(); workspace.setTheme(true);
+    // The same label on Board cards, right of the role chip and model tile.
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
+        if (b->property("segment") == "board") { b->click(); break; }
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBoard"));
+    const auto card = [&](int id) {
+        for (auto *frame : workspace.findChildren<QFrame *>("teamBoardCard"))
+            if (frame->property("task").toInt() == id) {
+                auto *a = frame->findChild<QLabel *>("teamBoardActivity");
+                return a ? a->text() : QString();
+            }
+        return QStringLiteral("?");
+    };
+    QCOMPARE(card(1), QStringLiteral("review"));
+    QCOMPARE(card(2), QStringLiteral("attempt 2"));
+    QCOMPARE(card(4), QStringLiteral("held"));
+    QVERIFY(card(6).isEmpty());
+    QVERIFY(card(9).isEmpty());
+    // The same label on Layers rows: the list view carries it on its nodes.
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
+        if (b->property("segment") == "layers") { b->click(); break; }
+    TeamUi::TaskView *layers = nullptr;
+    QTRY_VERIFY(([&] { layers = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceLayers")); return layers != nullptr; })());
+    const auto layerLabel = [&](int id) { for (const auto &n : layers->nodes) if (n.id == id) return n.activity; return QStringLiteral("?"); };
+    QCOMPARE(layerLabel(1), QStringLiteral("review"));
+    QCOMPARE(layerLabel(4), QStringLiteral("held"));
+}
+
 // #380 attempt 2: the member's "…" menu and the swap dialog run their own
 // event loops. A poll that changes the team arrives under each: the menu, the
 // button that opened it and the open dialog stay alive, and the views catch
@@ -4062,56 +4354,701 @@ void TestTeamsUi::aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog()
     dialog->close();
 }
 
+// U25 part 9 (spec 11.1): the Team designer's chat. Before the first message
+// the intro and the composer stand in the middle (no example chips); the
+// field grows from 2 to 8 lines; the first message starts the designer with
+// the agent, model and effort of the model menu, and a failed start keeps the
+// text. Running: the proposals and the DRAFT bar right above the composer,
+// Show in catalog, Apply from the bar, decided cards close and come back.
 void TestTeamsUi::designerPageStartsOrOpensTheDesigner()
 {
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
     TeamDesignerPage page(&controller);
     QString running; QString startedIn, startedGoal; QString opened;
     page.designerSession = [&] { return running; };
-    QJsonObject startedAgent;
-    page.startDesigner = [&](const QString &folder, const QString &goal, const QJsonObject &agent) { startedIn = folder; startedGoal = goal; startedAgent = agent; };
+    QJsonObject startedAgent; int starts = 0;
+    page.startDesigner = [&](const QString &folder, const QString &goal, const QJsonObject &agent) { startedIn = folder; startedGoal = goal; startedAgent = agent; ++starts; };
     page.openDesigner = [&](const QString &name) { opened = name; };
     page.confirm = [](const QString &, const QString &, const QString &, const QString &) { return true; };
     page.setContext("/work/checkout", "checkout");
-    page.resize(1600, 900); page.show();
+    page.resize(1440, 900); page.show();
     QTRY_VERIFY(controller.catalogReady());   // the page reads the catalog while shown
-    // Not started: the empty state asks what is needed.
-    auto *start = page.findChild<QPushButton *>("teamDesignerStart");
-    QVERIFY(start->isVisible());
+    // Not started: the intro and the composer in the middle, no example chips.
+    auto *intro = page.findChild<QWidget *>("teamDesignerEmpty"); QVERIFY(intro && intro->isVisible());
+    QVERIFY(page.findChildren<QPushButton *>("teamDesignerExample").isEmpty());
     QVERIFY(!page.findChild<QPushButton *>("teamDesignerOpen")->isVisible());
     QVERIFY(page.findChild<QLabel *>("teamDesignerReads")->text().contains("checkout"));
-    page.findChild<QPlainTextEdit *>("teamDesignerGoal")->setPlainText("A security reviewer");
-    shot(&page, "d1-not-started");
-    start->click();
-    QCOMPARE(startedIn, QStringLiteral("/work/checkout")); QCOMPARE(startedGoal, QStringLiteral("A security reviewer"));
-    QCOMPARE(startedAgent["agent"].toString(), QStringLiteral("claude"));
-    QCOMPARE(startedAgent["model"].toString(), QStringLiteral("opus"));
+    auto *chat = page.findChild<QWidget *>("teamConversation");
+    auto *composer = page.findChild<QWidget *>("teamDesignerComposer");
+    auto *card = page.findChild<QFrame *>("teamDesignerComposerCard"); QVERIFY(card && card->isVisible());
+    const auto gaps = [&] {
+        const int top = intro->mapTo(chat, QPoint(0, 0)).y();
+        const int bottom = chat->height() - composer->mapTo(chat, QPoint(0, composer->height())).y();
+        return std::pair{top, bottom};
+    };
+    QTRY_VERIFY(gaps().first > 100 && qAbs(gaps().first - gaps().second) <= 24);
+    // The session's row: attach, the context and the model with its effort.
+    auto *model = page.findChild<QPushButton *>("teamDesignerModel"); QVERIFY(model && model->isVisible());
+    QVERIFY2(model->text().startsWith("opus high"), qPrintable(model->text()));
+    QVERIFY(page.findChild<QPushButton *>("teamConversationAttach")->isVisible());
+    QVERIFY(page.findChild<QWidget *>("teamDesignerComposerRow")->isVisible());
+    auto *input = page.findChild<QPlainTextEdit *>("teamConversationInput");
+    auto *send = page.findChild<QPushButton *>("teamConversationSend");
+    QVERIFY(input->isEnabled() && !send->property("primary").toBool());
+    // The field grows with its text from 2 to 8 lines, then scrolls.
+    const int two = input->height();
+    input->setPlainText("A security reviewer\nfor payments\nand\na quick team");
+    QTRY_VERIFY(input->height() > two);
+    input->setPlainText(QStringLiteral("line\n").repeated(12));
+    QTRY_COMPARE(input->verticalScrollBarPolicy(), Qt::ScrollBarAsNeeded);
+    const int eight = input->height();
+    input->setPlainText(QStringLiteral("line\n").repeated(20)); QTest::qWait(50);
+    QCOMPARE(input->height(), eight);
+    input->setPlainText("Payments code needs a security look. And I want a quick team for small bugs.");
+    QTRY_VERIFY(send->property("primary").toBool());
+    QTRY_COMPARE(input->height(), two);
+    shot(&page, "ux-9-designer-start-dark");
+    page.setDark(false); lightShot(&page, "ux-9-designer-start-light"); darkPalette(); page.setDark(true);
+    // Another agent and model from the menu.
+    model->click();
+    QMenu *menu = nullptr;
+    QTRY_VERIFY((menu = page.findChild<QMenu *>("teamDesignerModelMenu")));
+    for (auto *action : menu->actions()) if (action->text() == "gpt-5.5-codex") { action->trigger(); break; }
+    menu->close();
+    QTRY_VERIFY(model->text().startsWith("gpt-5.5-codex high"));
+    send->click();
+    QCOMPARE(starts, 1);
+    QCOMPARE(startedIn, QStringLiteral("/work/checkout"));
+    QCOMPARE(startedGoal, QStringLiteral("Payments code needs a security look. And I want a quick team for small bugs."));
+    QCOMPARE(startedAgent["agent"].toString(), QStringLiteral("codex"));
+    QCOMPARE(startedAgent["model"].toString(), QStringLiteral("gpt-5.5-codex"));
     QCOMPARE(startedAgent["effort"].toString(), QStringLiteral("high"));
-    // Running: its conversation, the proposals and the draft with a diff.
+    QVERIFY(!send->isEnabled()); QCOMPARE(send->text(), QStringLiteral("Starting…"));
+    send->click(); QCOMPARE(starts, 1);   // once
+    // A failed start keeps the text and says why.
+    page.startFailed("codex is not signed in");
+    auto *status = page.findChild<QLabel *>("teamConversationStatus");
+    QTRY_VERIFY(status->isVisible()); QVERIFY(status->text().contains("codex is not signed in"));
+    QVERIFY(send->isEnabled()); QVERIFY(input->toPlainText().startsWith("Payments code"));
+    send->click(); QCOMPARE(starts, 2);   // sent again; the session's arrival clears it
+    // Running: its conversation, the proposals and the draft over the catalog.
     running = "claude/checkout/team-designer";
     page.refresh();
-    QVERIFY(page.findChild<QWidget *>("teamConversation")->isVisible());
+    QTRY_VERIFY(!intro->isVisible());
+    QCOMPARE(input->toPlainText(), QString());
+    QVERIFY(!model->isEnabled());
     QTRY_COMPARE(page.findChildren<QFrame *>("teamDesignerProposal").size(), 2);
+    auto *bar = page.findChild<QFrame *>("teamDesignerDraftBar"); QVERIFY(bar->isVisible());
+    QVERIFY(page.findChild<QLabel *>("teamDesignerDraftText")->text().contains("based on v3 · 1 of 2 kept · 1 undecided"));
+    // The DRAFT bar stands right above the composer.
+    QTRY_VERIFY(bar->mapTo(chat, QPoint(0, bar->height())).y() <= card->mapTo(chat, QPoint(0, 0)).y());
+    QVERIFY(card->mapTo(chat, QPoint(0, 0)).y() - bar->mapTo(chat, QPoint(0, bar->height())).y() < 40);
+    // A short conversation stays centred with the composer; a long one fills
+    // the column and the composer keeps to the bottom.
+    const auto events = [](int count) {
+        QJsonArray list;
+        for (int i = 1; i <= count; ++i)
+            list.append(QJsonObject{{"seq", i}, {"at", 1791018000 + i}, {"type", i % 2 ? "UserPromptSubmit" : "Stop"},
+                                    {"detail", QStringLiteral("Message %1 about the security reviewer and a quick team for small bugs.").arg(i)}});
+        return list;
+    };
+    const auto feed = [&](int count) {
+        emit client.inspectionReady(QString(), running, QJsonObject{{"run_id", "r1"}, {"conversation_id", "c1"}, {"events", events(count)},
+                                                                    {"cursor", count}, {"replace_events", true}}, QString());
+    };
+    const auto below = [&] { return chat->height() - composer->mapTo(chat, QPoint(0, composer->height())).y(); };
+    QTRY_VERIFY_WITH_TIMEOUT(([&] { feed(2); return below() > 60; })(), 20000);
+    QTRY_VERIFY2_WITH_TIMEOUT(([&] { feed(30); return below() < 12; })(), qPrintable(QStringLiteral("below %1, chat %2, view %3").arg(below()).arg(chat->height()).arg(chat->findChild<QWidget *>("teamConversationActivity")->height())), 20000);
+    shot(&page, "ux-9-designer-working-dark");
     QCOMPARE(page.findChild<QLabel *>("teamCatalogTitle")->text(), QStringLiteral("Draft catalog"));
     QVERIFY(page.findChild<QLabel *>("teamCatalogStatus")->text().contains("1 of 2 kept"));
     page.findChildren<QPushButton *>("teamProposalShow").first()->click();   // p1: the Tester role
     auto *roles = page.findChild<QListWidget *>("teamCatalogRoles");
     QCOMPARE(roles->currentItem()->data(Qt::UserRole).toString(), QStringLiteral("tester"));
     QCOMPARE(roles->count(), 4);   // + the proposed Security role
-    shot(&page, "d1-draft-partly-decided");
+    QVERIFY(page.findChild<QFrame *>("teamProposalPlate"));
+    shot(&page, "ux-9-designer-draft-dark");
+    page.setDark(false); lightShot(&page, "ux-9-designer-draft-light"); darkPalette(); page.setDark(true);
     page.findChild<QPushButton *>("teamDesignerOpen")->click(); QCOMPARE(opened, running);
     QVERIFY(page.findChild<QPushButton *>("teamDesignerApply")->isEnabled());
-    // A decided card closes and comes back; Apply stands with the proposals.
+    // A decided card closes and comes back; Apply stands in the DRAFT bar.
     QCOMPARE(page.findChildren<QPushButton *>("teamProposalClose").size(), 1);   // p2 is kept
     page.findChild<QPushButton *>("teamProposalClose")->click();
     QTRY_COMPARE(page.findChildren<QFrame *>("teamDesignerProposal").size(), 1);
     page.findChild<QPushButton *>("teamDesignerShowClosed")->click();
     QTRY_COMPARE(page.findChildren<QFrame *>("teamDesignerProposal").size(), 2);
     auto *apply = page.findChild<QPushButton *>("teamDesignerApplyKept");
-    QVERIFY(apply && apply->isVisible() && apply->isEnabled()); QCOMPARE(apply->text(), QStringLiteral("Apply 1 change"));
+    QVERIFY(apply && apply->isVisible() && apply->isEnabled()); QCOMPARE(apply->text(), QStringLiteral("✓ Apply 1 change"));
     apply->click();
     QTRY_COMPARE(calls(script(), "catalog apply").size(), 1);
+    page.findChild<QPushButton *>("teamDesignerDraftDiscard")->click();
+    QTRY_COMPARE(calls(script(), "catalog discard").size(), 1);
+}
+
+// U25 part 9 (spec 11.3): every field of a role is edited in place: name,
+// about, the palette's 16 colors and 10 icons, skills as chips (Enter adds, ×
+// and Backspace remove), another agent with its first model, computers,
+// the five permissions, folder, who it may message, when it joins, the five
+// dangerous actions and the prompt blocks with include and up/down.
+void TestTeamsUi::catalogRoleEditorEditsEveryField()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamCatalogEditor editor(&controller);
+    editor.projectRules = [] { return QStringLiteral("1. Use pnpm for web and cargo for services.\n2. Never log card numbers."); };
+    editor.setSources(&client, {{"devbox", "devbox", true}});
+    editor.resize(1180, 1500); editor.show();
+    auto *roles = editor.findChild<QListWidget *>("teamCatalogRoles");
+    QTRY_COMPARE(roles->count(), 3);
+    roles->setCurrentRow(1);   // Backend
+    QTRY_COMPARE(editor.findChild<QLineEdit *>("teamRoleName")->text(), QStringLiteral("Backend"));
+    const auto segment = [&](const char *name, const char *value) {
+        for (auto *b : editor.findChild<QWidget *>(name)->findChildren<QPushButton *>()) if (b->property("segment") == value) { b->click(); return; }
+        QFAIL(value);
+    };
+    auto *about = editor.findChild<QLineEdit *>("teamRoleAbout"); about->setText("Server code"); emit about->editingFinished();
+    // Icon / color: the palette's 16 colors and its 10 icons.
+    QCOMPARE(editor.findChildren<QPushButton *>("teamRoleSwatch").size(), 16);
+    QCOMPARE(editor.findChildren<QPushButton *>("teamRoleIcon").size(), 10);
+    for (auto *b : editor.findChildren<QPushButton *>("teamRoleSwatch")) if (b->property("swatch") == "security") { b->click(); break; }
+    QTRY_VERIFY(editor.findChildren<QPushButton *>("teamRoleIcon").size() == 10);
+    for (auto *b : editor.findChildren<QPushButton *>("teamRoleIcon")) if (b->property("roleIcon") == "backend") { b->click(); break; }
+    QTRY_VERIFY(std::any_of(editor.findChildren<QPushButton *>("teamRoleIcon").cbegin(), editor.findChildren<QPushButton *>("teamRoleIcon").cend(),
+                            [](QPushButton *b) { return b->property("roleIcon") == "backend" && b->isChecked(); }));
+    // Specialization: Enter adds a chip, Backspace in the empty field drops the last, × any.
+    for (const char *skill : {"Rust", "Postgres", "REST"}) {
+        auto *field = editor.findChild<QLineEdit *>("teamRoleTags"); QVERIFY(field);
+        field->setText(skill); emit field->returnPressed();
+    }
+    QTRY_COMPARE(editor.findChildren<QPushButton *>("teamRoleTag").size(), 3);
+    QTest::keyClick(editor.findChild<QLineEdit *>("teamRoleTags"), Qt::Key_Backspace);
+    QTRY_COMPARE(editor.findChildren<QPushButton *>("teamRoleTag").size(), 2);
+    editor.findChildren<QPushButton *>("teamRoleTag").first()->click();   // Rust
+    QTRY_COMPARE(editor.findChildren<QPushButton *>("teamRoleTag").size(), 1);
+    // Default agent: another agent takes its first model and the default account.
+    auto *agent = editor.findChild<QComboBox *>("teamRoleAgent");
+    agent->setCurrentIndex(agent->findData("claude")); emit agent->activated(agent->currentIndex());
+    QTRY_COMPARE(editor.findChild<QComboBox *>("teamRoleModel")->currentText(), QStringLiteral("opus"));
+    QCOMPARE(editor.findChild<QComboBox *>("teamRoleAccount")->currentData().toString(), QString());
+    // Permissions: five; Bypass says what it does.
+    auto *permissions = editor.findChild<QComboBox *>("teamRolePermissions");
+    QCOMPARE(permissions->count(), 5);
+    permissions->setCurrentIndex(permissions->findData("bypass")); emit permissions->activated(permissions->currentIndex());
+    QTRY_VERIFY(editor.findChild<QLabel *>("teamRoleBypassNote"));
+    QCOMPARE(editor.findChild<QLabel *>("teamRoleBypassNote")->text(), QStringLiteral("Runs every tool without asking"));
+    permissions = editor.findChild<QComboBox *>("teamRolePermissions");
+    permissions->setCurrentIndex(permissions->findData("read_only")); emit permissions->activated(permissions->currentIndex());
+    QTRY_VERIFY(!editor.findChild<QLabel *>("teamRoleBypassNote"));
+    segment("teamRoleFolder", "shared");
+    // Can message: the lead and selected roles, chips with ×.
+    segment("teamRoleMessage", "some");
+    QTRY_VERIFY(editor.findChild<QComboBox *>("teamRoleMessageAdd"));
+    auto *to = editor.findChild<QComboBox *>("teamRoleMessageAdd");
+    to->setCurrentIndex(to->findData("tester")); emit to->activated(to->currentIndex());
+    QTRY_COMPARE(editor.findChildren<QPushButton *>("teamRoleMessageTo").size(), 1);
+    auto *joins = editor.findChild<QLineEdit *>("teamRoleJoins"); joins->setText("services/payments/** **/auth/**"); emit joins->editingFinished();
+    // Dangerous actions: five switches and their count.
+    QCOMPARE(editor.findChildren<QCheckBox *>("teamRoleDanger").size(), 5);
+    QVERIFY(editor.findChild<QLabel *>("teamRoleDangerSummary")->text().startsWith("0 of 5 allowed"));
+    for (auto *check : editor.findChildren<QCheckBox *>("teamRoleDanger")) if (check->property("danger") == "pkgs") { check->click(); break; }
+    QTRY_VERIFY(editor.findChild<QLabel *>("teamRoleDangerSummary")->text().startsWith("1 of 5 allowed"));
+    // Prompt order: project rules, the role's prompt, the team protocol, the task.
+    const auto blocks = [&] { QStringList keys; for (auto *b : editor.findChildren<QFrame *>("teamPromptBlock")) keys << b->property("block").toString(); return keys; };
+    const auto block = [&](const QString &key) -> QFrame * { for (auto *b : editor.findChildren<QFrame *>("teamPromptBlock")) if (b->property("block") == key) return b; return nullptr; };
+    QCOMPARE(blocks(), (QStringList{"rules", "role", "protocol", "task"}));
+    QVERIFY(editor.findChild<QLabel *>("teamPromptRules")->text().contains("Use pnpm"));
+    QCOMPARE(editor.findChild<QPlainTextEdit *>("teamRolePrompt")->toPlainText(), QStringLiteral("Build the API."));
+    QVERIFY(!editor.findChild<QPlainTextEdit *>("teamRoleTaskTemplate")->toPlainText().isEmpty());
+    editor.findChild<QPlainTextEdit *>("teamRoleProtocol")->setPlainText("Report each endpoint you change.");
+    editor.findChild<QPlainTextEdit *>("teamRoleTaskTemplate")->setPlainText("#{id} {title}\n{description}\nAcceptance:\n{criteria}");
+    block("rules")->findChild<QCheckBox *>("teamPromptInclude")->click();
+    QTRY_VERIFY(block("rules") && !block("rules")->findChild<QCheckBox *>("teamPromptInclude")->isChecked());
+    QVERIFY(block("role")->findChild<QToolButton *>("teamPromptUp")->isEnabled());
+    QVERIFY(!block("rules")->findChild<QToolButton *>("teamPromptUp")->isEnabled());
+    block("task")->findChild<QToolButton *>("teamPromptUp")->click();
+    QTRY_COMPARE(blocks(), (QStringList{"rules", "role", "task", "protocol"}));
+    editor.findChild<QPushButton *>("teamPromptAddBlock")->click();
+    QTRY_COMPARE(blocks().size(), 5);
+    editor.findChild<QPlainTextEdit *>("teamPromptNote")->setPlainText("Ask before a migration.");
+    // Used in: the template that seats it.
+    QCOMPARE(editor.findChildren<QPushButton *>("teamRoleUsedIn").size(), 1);
+    QVERIFY(editor.findChild<QLabel *>("teamCatalogStatus")->text().contains("1 unsaved change"));
+    shot(&editor, "ux-9-role-editor-dark");
+    editor.setDark(false); lightShot(&editor, "ux-9-role-editor-light"); darkPalette(); editor.setDark(true);
+    editor.findChild<QPushButton *>("teamCatalogSave")->click();
+    QTRY_COMPARE_WITH_TIMEOUT(calls(script(), "catalog set").size(), 1, 20000);
+    const auto backend = calls(script(), "catalog set").first()["catalog"].toObject()["roles"].toArray()[1].toObject();
+    QCOMPARE(backend["about"].toString(), QStringLiteral("Server code"));
+    QCOMPARE(backend["color"].toString(), QStringLiteral("security"));
+    QCOMPARE(backend["icon"].toString(), QStringLiteral("r_backend"));
+    QCOMPARE(backend["skills"].toArray(), (QJsonArray{"Postgres"}));
+    QCOMPARE(backend["tags"].toArray(), (QJsonArray{"Postgres"}));
+    QCOMPARE(backend["agent"].toString(), QStringLiteral("claude"));
+    QCOMPARE(backend["model"].toString(), QStringLiteral("opus"));
+    QCOMPARE(backend["permissions"].toString(), QString());
+    QCOMPARE(backend["permissions_profile"].toString(), QStringLiteral("read"));
+    QCOMPARE(backend["folder"].toString(), QStringLiteral("shared"));
+    QCOMPARE(backend["message"].toString(), QStringLiteral("some"));
+    QCOMPARE(backend["can_message"].toString(), QStringLiteral("lead"));
+    QCOMPARE(backend["message_to"].toArray(), (QJsonArray{"tester"}));
+    QCOMPARE(backend["joins"].toString(), QStringLiteral("services/payments/** **/auth/**"));
+    const auto danger = backend["danger"].toObject();
+    QVERIFY(danger["pkgs"].toBool()); QVERIFY(!danger["push"].toBool()); QCOMPARE(danger.size(), 5);
+    QVERIFY(backend["dangerous"].toBool());
+    QCOMPARE(backend["prompt_order"].toArray(), (QJsonArray{"rules", "role", "task", "protocol", "note1"}));
+    QCOMPARE(backend["prompt_off"].toArray(), (QJsonArray{"rules"}));
+    QCOMPARE(backend["notes"].toObject()["note1"].toString(), QStringLiteral("Ask before a migration."));
+    QCOMPARE(backend["protocol_extra"].toString(), QStringLiteral("Report each endpoint you change."));
+    QCOMPARE(backend["task_template"].toString(), QStringLiteral("#{id} {title}\n{description}\nAcceptance:\n{criteria}"));
+    // The Used in chip opens its template.
+    QTRY_VERIFY(editor.findChild<QPushButton *>("teamRoleUsedIn"));
+    editor.findChild<QPushButton *>("teamRoleUsedIn")->click();
+    QTRY_VERIFY(editor.findChild<QWidget *>("teamTemplateEditor"));
+    QCOMPARE(editor.findChild<QLineEdit *>("teamTemplateName")->text(), QStringLiteral("Feature delivery"));
+}
+
+// U25 part 9 (spec 11.4): a template's roster counts with "only if needed",
+// work mode with its warning, the task skeleton with phases, planning,
+// approval, new phases, max members, the checks, and the folding blocks.
+void TestTeamsUi::catalogTemplateEditorRosterSkeletonAndChecks()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto keys = {CollapsibleBlock::settingsKey("catalog-roster"), CollapsibleBlock::settingsKey("catalog-skeleton"), QStringLiteral("ui/catalogHideUnusedRoles")};
+    for (const auto &key : keys) QSettings().remove(key);
+    const auto restore = qScopeGuard([keys] { QSettings().remove("workspace/skin"); for (const auto &key : keys) QSettings().remove(key); darkPalette(); });
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamCatalogEditor editor(&controller);
+    editor.resize(1180, 1100); editor.show();
+    QTRY_COMPARE(editor.findChild<QListWidget *>("teamCatalogRoles")->count(), 3);
+    const auto segment = [&](const char *name, const char *value) {
+        for (auto *b : editor.findChild<QWidget *>(name)->findChildren<QPushButton *>()) if (b->property("segment") == value) { b->click(); return; }
+        QFAIL(value);
+    };
+    segment("teamCatalogTabs", "templates");
+    auto *templates = editor.findChild<QListWidget *>("teamCatalogTemplates");
+    QTRY_COMPARE(templates->count(), 1);
+    templates->setCurrentRow(0);
+    QTRY_VERIFY(editor.findChild<QWidget *>("teamTemplateEditor"));
+    // The list: name, then members · tasks · work.
+    QCOMPARE(templates->itemWidget(templates->item(0))->findChild<QLabel *>("teamTemplateMeta")->text(), QStringLiteral("2 members · 3 tasks · worktree per member"));
+    QVERIFY(editor.findChild<QLabel *>("teamTemplateUsedBy")->text().contains("manual pick only"));
+    const auto stepper = [&](const QString &role) -> QWidget * {
+        for (auto *w : editor.findChildren<QWidget *>("teamTemplateSeatCount")) if (w->property("role") == role) return w;
+        return nullptr;
+    };
+    const auto value = [](QWidget *w) { return w->findChild<QLabel *>("teamStepperValue")->text().toInt(); };
+    const auto issues = [&] { QStringList all; for (auto *l : editor.findChildren<QLabel *>("teamTemplateIssue")) all << l->text(); return all.join('\n'); };
+    // Roster: the lead, then a count and "only if needed" for every other role.
+    QCOMPARE(editor.findChildren<QWidget *>("teamTemplateSeatCount").size(), 2);
+    QCOMPARE(value(stepper("backend")), 1);
+    stepper("backend")->findChild<QPushButton *>("teamStepperPlus")->click();
+    QTRY_COMPARE(value(stepper("backend")), 2);
+    for (auto *check : editor.findChildren<QCheckBox *>("teamTemplateSeatOptional")) if (check->property("role") == "tester") { check->click(); break; }
+    QTRY_COMPARE(editor.findChild<QLabel *>("teamTemplateRosterSummary")->text(), QStringLiteral("2 members + 1 only if needed · 2 roles"));
+    // A role out of the roster: its only-if-needed is off, and a task of it is flagged.
+    stepper("tester")->findChild<QPushButton *>("teamStepperMinus")->click();
+    QTRY_COMPARE(value(stepper("tester")), 0);
+    for (auto *check : editor.findChildren<QCheckBox *>("teamTemplateSeatOptional")) if (check->property("role") == "tester") QVERIFY(!check->isEnabled());
+    QTRY_VERIFY(issues().contains("#3 uses Tester, which is not in the roster"));
+    stepper("tester")->findChild<QPushButton *>("teamStepperPlus")->click();
+    QTRY_COMPARE(value(stepper("tester")), 1);
+    for (auto *check : editor.findChildren<QCheckBox *>("teamTemplateSeatOptional")) if (check->property("role") == "tester" && !check->isChecked()) { check->click(); break; }
+    QTRY_VERIFY(!issues().contains("not in the roster"));
+    // Work in: Same folder with writers warns.
+    segment("teamTemplateWork", "same");
+    QTRY_VERIFY(editor.findChild<QLabel *>("teamTemplateWorkWarning"));
+    // Max members 3: Lead + roster is 4.
+    for (int i = 0; i < 3; ++i) { QTRY_VERIFY(editor.findChild<QWidget *>("teamTemplateMax")); editor.findChild<QWidget *>("teamTemplateMax")->findChild<QPushButton *>("teamStepperMinus")->click(); }
+    QTRY_COMPARE(value(editor.findChild<QWidget *>("teamTemplateMax")), 3);
+    QTRY_VERIFY(issues().contains("Lead + roster = 4 > max members 3"));
+    // Task skeleton: a phase, an "after" that points forward, + Task.
+    auto *phase = editor.findChildren<QComboBox *>("teamTemplateTaskPhase").at(2);
+    phase->setCurrentIndex(phase->findData("2")); emit phase->activated(phase->currentIndex());
+    QTRY_COMPARE(editor.findChildren<QComboBox *>("teamTemplateTaskPhase").at(2)->currentData().toString(), QStringLiteral("2"));
+    auto *after = editor.findChildren<QLineEdit *>("teamTemplateTaskAfter").at(1);
+    after->setText("1, 5"); emit after->editingFinished();
+    QTRY_VERIFY(issues().contains("#2: “after 1, 5” must point to an earlier task"));
+    editor.findChild<QPushButton *>("teamTemplateAddTask")->click();
+    QTRY_COMPARE(editor.findChildren<QLineEdit *>("teamTemplateTaskTitle").size(), 4);
+    segment("teamTemplatePhaseApproval", "review");
+    shot(&editor, "ux-9-templates-issues-dark");
+    editor.setDark(false); lightShot(&editor, "ux-9-templates-issues-light"); darkPalette(); editor.setDark(true);
+    // Hide the unused roles: none here.
+    QCOMPARE(editor.findChild<QPushButton *>("teamTemplateUnusedToggle")->text(), QStringLiteral("Hide unused roles (0)"));
+    editor.findChild<QPushButton *>("teamTemplateUnusedToggle")->click();
+    QTRY_COMPARE(editor.findChild<QPushButton *>("teamTemplateUnusedToggle")->text(), QStringLiteral("Show all catalog roles (2)"));
+    editor.findChild<QPushButton *>("teamTemplateUnusedToggle")->click();
+    // Roster and Task skeleton fold into summaries, remembered.
+    editor.findChild<QPushButton *>("teamTemplateRosterToggle")->click();
+    QTRY_VERIFY(editor.findChildren<QWidget *>("teamTemplateSeatCount").isEmpty());
+    QCOMPARE(QSettings().value(CollapsibleBlock::settingsKey("catalog-roster")).toBool(), false);
+    QCOMPARE(editor.findChild<QLabel *>("teamTemplateRosterSummary")->text(), QStringLiteral("2 members + 1 only if needed · 2 roles"));
+    editor.findChild<QPushButton *>("teamTemplateSkeletonToggle")->click();
+    QTRY_VERIFY(editor.findChild<QLabel *>("teamTemplateSkeletonSummary"));
+    QCOMPARE(editor.findChild<QLabel *>("teamTemplateSkeletonSummary")->text(), QStringLiteral("4 tasks in 2 phases: Plan → Build → Test → New task"));
+    shot(&editor, "ux-9-templates-folded-dark");
+    editor.setDark(false); lightShot(&editor, "ux-9-templates-folded-light"); darkPalette(); editor.setDark(true);
+    editor.findChild<QPushButton *>("teamTemplateRosterToggle")->click();
+    editor.findChild<QPushButton *>("teamTemplateSkeletonToggle")->click();
+    QTRY_COMPARE(editor.findChildren<QWidget *>("teamTemplateSeatCount").size(), 2);
+    segment("teamTemplateWork", "worktree");
+    QTRY_VERIFY(!editor.findChild<QLabel *>("teamTemplateWorkWarning"));
+    shot(&editor, "ux-9-templates-dark");
+    editor.setDark(false); lightShot(&editor, "ux-9-templates-light"); darkPalette(); editor.setDark(true);
+    editor.findChild<QPushButton *>("teamCatalogSave")->click();
+    QTRY_COMPARE_WITH_TIMEOUT(calls(script(), "catalog set").size(), 1, 20000);
+    const auto feature = calls(script(), "catalog set").first()["catalog"].toObject()["templates"].toArray()[0].toObject();
+    const auto seats = feature["roster"].toArray();
+    QCOMPARE(seats.size(), 2);
+    for (const auto &seat : seats) {
+        const auto o = seat.toObject();
+        if (o["role"] == "backend") { QCOMPARE(o["count"].toInt(), 2); QVERIFY(!o["optional"].toBool()); }
+        else { QCOMPARE(o["role"].toString(), QStringLiteral("tester")); QCOMPARE(o["count"].toInt(), 1); QVERIFY(o["optional"].toBool()); }
+    }
+    QCOMPARE(feature["work"].toString(), QStringLiteral("worktree"));
+    QCOMPARE(feature["max_members"].toInt(), 3);
+    QCOMPARE(feature["phase_approval"].toString(), QStringLiteral("review"));
+    QCOMPARE(feature["phases"].toString(), QStringLiteral("owner"));
+    const auto tasks = feature["tasks"].toArray();
+    QCOMPARE(tasks.size(), 4);
+    QCOMPARE(tasks[2].toObject()["phase"].toInt(), 2);
+    QCOMPARE(tasks[1].toObject()["deps"].toArray(), (QJsonArray{0}));   // "5" points forward and is left out
+    QCOMPARE(tasks[3].toObject()["title"].toString(), QStringLiteral("New task"));
+}
+
+// U25 part 9 (spec 11.5): routing rules are edited in place - order, words,
+// Use (a template or "+ role"), approval - and Try it names the template, the
+// rule, the added roles, approval and work mode, with the roster as chips.
+void TestTeamsUi::catalogRoutingEditsAndTriesAGoal()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    // The prototype's matching, as the server's route: "+ role" rules add and
+    // keep looking, "everything else" always matches, stop words never do.
+    auto c = parseCatalog(catalog());
+    Rule add; add.id = "tests"; add.when = "tests"; add.use = "+tester";
+    Rule all; all.id = "all"; all.when = "everything else"; all.templateId = "feature"; all.approval = "auto";
+    c.routing = {add, all};
+    auto found = TeamCatalogEditor::route(c, "Add tests for checkout");
+    QCOMPARE(found.rule, 1); QCOMPARE(found.templateId, QStringLiteral("feature"));
+    QCOMPARE(found.added, QStringList{"tester"}); QCOMPARE(found.approval, QStringLiteral("auto"));
+    Rule words; words.id = "words"; words.when = "the and for"; words.templateId = "feature";
+    c.routing = {words};
+    found = TeamCatalogEditor::route(c, "the and for");
+    QCOMPARE(found.rule, -1); QCOMPARE(found.templateId, QStringLiteral("feature"));   // the first template, no rule
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamCatalogEditor editor(&controller);
+    editor.resize(1180, 760); editor.show();
+    QTRY_COMPARE(editor.findChild<QListWidget *>("teamCatalogRoles")->count(), 3);
+    for (auto *b : editor.findChild<QWidget *>("teamCatalogTabs")->findChildren<QPushButton *>()) if (b->property("segment") == "routing") { b->click(); break; }
+    QTRY_VERIFY(editor.findChild<QWidget *>("teamRoutingEditor"));
+    QVERIFY(!editor.findChild<QWidget *>("teamCatalogListColumn")->isVisible());
+    for (int i = 0; i < 3; ++i) { QTRY_VERIFY(editor.findChild<QPushButton *>("teamRoutingAdd")); editor.findChild<QPushButton *>("teamRoutingAdd")->click(); }
+    QTRY_COMPARE(editor.findChildren<QLineEdit *>("teamRuleWhen").size(), 3);
+    editor.findChildren<QToolButton *>("teamRuleDelete").at(2)->click();
+    QTRY_COMPARE(editor.findChildren<QLineEdit *>("teamRuleWhen").size(), 2);
+    const auto when = [&](int i) { return editor.findChildren<QLineEdit *>("teamRuleWhen").at(i); };
+    when(0)->setText("tests"); emit when(0)->editingFinished();
+    when(1)->setText("everything else"); emit when(1)->editingFinished();
+    // Use: a template or "+ role (add member)".
+    auto *use = editor.findChildren<QComboBox *>("teamRuleTemplate").at(0);
+    QCOMPARE(use->count(), 3);
+    QCOMPARE(use->itemText(use->findData("+tester")), QStringLiteral("+ Tester (add member)"));
+    use->setCurrentIndex(use->findData("+tester")); emit use->activated(use->currentIndex());
+    QTRY_COMPARE(editor.findChildren<QComboBox *>("teamRuleTemplate").at(0)->currentData().toString(), QStringLiteral("+tester"));
+    auto *approval = editor.findChildren<QComboBox *>("teamRuleApproval").at(1);
+    QCOMPARE(approval->count(), 3);
+    approval->setCurrentIndex(approval->findData("auto")); emit approval->activated(approval->currentIndex());
+    approval = editor.findChildren<QComboBox *>("teamRuleApproval").at(0);
+    approval->setCurrentIndex(approval->findData("")); emit approval->activated(approval->currentIndex());
+    // Order: down, then up again.
+    QVERIFY(!editor.findChildren<QToolButton *>("teamRuleUp").at(0)->isEnabled());
+    editor.findChildren<QToolButton *>("teamRuleDown").at(0)->click();
+    QTRY_COMPARE(when(0)->text(), QStringLiteral("everything else"));
+    editor.findChildren<QToolButton *>("teamRuleUp").at(1)->click();
+    QTRY_COMPARE(when(0)->text(), QStringLiteral("tests"));
+    // Try it.
+    auto *goal = editor.findChild<QLineEdit *>("teamRoutingTry");
+    goal->setText("Add tests for checkout");
+    const QString result = editor.findChild<QLabel *>("teamRoutingResult")->text();
+    for (const char *part : {"Feature delivery", "rule 2", "(+ Tester)", "Run when the plan is valid", "Worktree per member"})
+        QVERIFY2(result.contains(part), qPrintable(result));
+    QCOMPARE(editor.findChild<QWidget *>("teamRoutingRoster")->findChildren<QWidget *>("teamRoleChip").size(), 4);   // Lead, Backend, Tester, + Tester
+    shot(&editor, "ux-9-routing-dark");
+    editor.setDark(false); QTRY_VERIFY(editor.findChild<QLineEdit *>("teamRoutingTry")->text() == "Add tests for checkout");
+    lightShot(&editor, "ux-9-routing-light"); darkPalette(); editor.setDark(true);
+    editor.findChild<QPushButton *>("teamCatalogSave")->click();
+    QTRY_COMPARE_WITH_TIMEOUT(calls(script(), "catalog set").size(), 1, 20000);
+    const auto rules = calls(script(), "catalog set").first()["catalog"].toObject()["routing"].toArray();
+    QCOMPARE(rules.size(), 2);
+    QCOMPARE(rules[0].toObject()["when"].toString(), QStringLiteral("tests"));
+    QCOMPARE(rules[0].toObject()["use"].toString(), QStringLiteral("+tester"));
+    QCOMPARE(rules[0].toObject()["approval"].toString(), QString());
+    QCOMPARE(rules[1].toObject()["when"].toString(), QStringLiteral("everything else"));
+    QCOMPARE(rules[1].toObject()["template"].toString(), QStringLiteral("feature"));
+    QCOMPARE(rules[1].toObject()["approval"].toString(), QStringLiteral("auto"));
+}
+
+// U25 part 9 (spec 11.2): the catalog's header. By hand: Open Team designer,
+// the unsaved count, Revert with its question, the working designer's banner.
+// The designer's draft: its counts, Discard and Apply, counters on the tabs,
+// marks in the list, the proposal plate over a read-only editor, and the
+// out-of-date banner with Ask designer to redo.
+void TestTeamsUi::catalogHeaderRevertDraftAndBanners()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([this] {
+        QSettings().remove("workspace/skin"); darkPalette();
+        QFile c(script() + ".catalog"); if (c.open(QIODevice::WriteOnly)) c.write(QJsonDocument(catalog()).toJson(QJsonDocument::Compact));
+    });
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamCatalogEditor settings(&controller);
+    settings.setDesignerButton(true);
+    bool asked = false; settings.askDesigner = [&] { asked = true; };
+    bool answer = false; QString question;
+    settings.confirm = [&](const QString &name, const QString &, const QString &text, const QString &) { question = name + ':' + text; return answer; };
+    settings.resize(1180, 820); settings.show();
+    auto *roles = settings.findChild<QListWidget *>("teamCatalogRoles");
+    QTRY_COMPARE(roles->count(), 3);
+    QCOMPARE(settings.findChild<QLabel *>("teamCatalogTitle")->text(), QStringLiteral("Team catalog"));
+    QVERIFY(settings.findChild<QLabel *>("teamCatalogStatus")->text().contains("v3"));
+    for (const char *name : {"teamCatalogAskDesigner", "teamCatalogImport", "teamCatalogExport", "teamCatalogRevert", "teamCatalogSave"})
+        QVERIFY2(settings.findChild<QPushButton *>(name)->isVisible(), name);
+    QVERIFY(!settings.findChild<QPushButton *>("teamCatalogRevert")->isEnabled() && !settings.findChild<QPushButton *>("teamCatalogSave")->isEnabled());
+    settings.findChild<QPushButton *>("teamCatalogAskDesigner")->click(); QVERIFY(asked);
+    shot(&settings, "ux-9-settings-teams-dark");
+    settings.setDark(false); lightShot(&settings, "ux-9-settings-teams-light"); darkPalette(); settings.setDark(true);
+    roles->setCurrentRow(1);
+    auto *name = settings.findChild<QLineEdit *>("teamRoleName"); name->setText("Backend API"); emit name->editingFinished();
+    QTRY_VERIFY(settings.findChild<QLabel *>("teamCatalogStatus")->text().contains("● 1 unsaved change"));
+    QVERIFY(settings.findChild<QPushButton *>("teamCatalogRevert")->isEnabled() && settings.findChild<QPushButton *>("teamCatalogSave")->isEnabled());
+    shot(&settings, "ux-9-catalog-dirty-dark");
+    settings.setDark(false); lightShot(&settings, "ux-9-catalog-dirty-light"); darkPalette(); settings.setDark(true);
+    // Revert asks first.
+    settings.findChild<QPushButton *>("teamCatalogRevert")->click();
+    QCOMPARE(question, QStringLiteral("teamCatalogRevertConfirm:Drop 1 unsaved change?"));
+    QCOMPARE(settings.findChild<QLineEdit *>("teamRoleName")->text(), QStringLiteral("Backend API"));
+    answer = true;
+    settings.findChild<QPushButton *>("teamCatalogRevert")->click();
+    QTRY_COMPARE(settings.findChild<QLineEdit *>("teamRoleName")->text(), QStringLiteral("Backend"));
+    QVERIFY(!settings.findChild<QPushButton *>("teamCatalogSave")->isEnabled());
+    // While the designer works, its banner says what a manual save does.
+    settings.setDesignerWorking(true);
+    QTRY_VERIFY(settings.findChild<QFrame *>("teamCatalogBanner")->isVisible());
+    QCOMPARE(settings.findChild<QLabel *>("teamCatalogBannerTitle")->text(), QStringLiteral("The designer is working"));
+    shot(&settings, "ux-9-catalog-designer-working-dark");
+    settings.setDesignerWorking(false);
+    QTRY_VERIFY(!settings.findChild<QFrame *>("teamCatalogBanner")->isVisible());
+    // The designer's draft: read only, decided on plates.
+    TeamCatalogEditor draft(&controller);
+    draft.setShowDraft(true);
+    draft.confirm = [](const QString &, const QString &, const QString &, const QString &) { return true; };
+    qint64 redo = 0; draft.askRedo = [&](qint64 version) { redo = version; };
+    draft.resize(1180, 1100); draft.show();
+    QTRY_COMPARE(draft.findChild<QLabel *>("teamCatalogTitle")->text(), QStringLiteral("Draft catalog"));
+    QVERIFY(draft.findChild<QLabel *>("teamCatalogStatus")->text().contains("based on v3 · 1 of 2 kept · 1 undecided"));
+    for (const char *name : {"teamCatalogImport", "teamCatalogExport", "teamCatalogRevert", "teamCatalogSave"})
+        QVERIFY2(!draft.findChild<QPushButton *>(name)->isVisible(), name);
+    QVERIFY(draft.findChild<QPushButton *>("teamDesignerDiscard")->isVisible());
+    QCOMPARE(draft.findChild<QPushButton *>("teamDesignerApply")->text(), QStringLiteral("✓ Apply 1 change"));
+    QVERIFY(draft.findChild<QPushButton *>("teamDesignerApply")->isEnabled());
+    QCOMPARE(draft.findChild<QWidget *>("teamCatalogTabs")->findChildren<QPushButton *>().first()->text(), QStringLiteral("Roles   2"));
+    QVERIFY(draft.findChild<QLabel *>("teamCatalogLegend")->isVisible());
+    auto *list = draft.findChild<QListWidget *>("teamCatalogRoles");
+    QCOMPARE(list->count(), 4);
+    QMap<QString, QString> marks;
+    for (int i = 0; i < list->count(); ++i)
+        if (auto *mark = list->itemWidget(list->item(i))->findChild<QLabel *>("teamCatalogMark")) marks.insert(list->item(i)->data(Qt::UserRole).toString(), mark->text());
+    QCOMPARE(marks, (QMap<QString, QString>{{"tester", "CHANGED"}, {"security", "NEW · kept"}}));
+    QVERIFY(!draft.findChild<QPushButton *>("teamCatalogAdd")->isVisible());
+    list->setCurrentRow(2);   // tester
+    QTRY_VERIFY(draft.findChild<QFrame *>("teamProposalPlate"));
+    QVERIFY(!draft.findChild<QWidget *>("teamRoleEditor")->isEnabled());
+    QCOMPARE(draft.findChild<QComboBox *>("teamRoleAgent")->currentData().toString(), QStringLiteral("claude"));   // the proposal's
+    shot(&draft, "ux-9-draft-role-dark");
+    draft.setDark(false); lightShot(&draft, "ux-9-draft-role-light"); darkPalette(); draft.setDark(true);
+    QTRY_VERIFY(draft.findChild<QPushButton *>("teamProposalKeep"));
+    draft.findChild<QPushButton *>("teamProposalKeep")->click();
+    QTRY_COMPARE(calls(script(), "catalog decide").size(), 1);
+    QCOMPARE(calls(script(), "catalog decide").first()["proposal"].toString(), QStringLiteral("p1"));
+    QCOMPARE(calls(script(), "catalog decide").first()["decision"].toString(), QStringLiteral("keep"));
+    // The catalog moved on after the draft: Apply is off; redo or discard.
+    auto moved = catalog(); auto inner = moved["catalog"].toObject(); inner["version"] = 4; moved["catalog"] = inner;
+    { QFile c(script() + ".catalog"); QVERIFY(c.open(QIODevice::WriteOnly)); c.write(QJsonDocument(moved).toJson(QJsonDocument::Compact)); }
+    controller.refreshCatalog();
+    QTRY_COMPARE(draft.findChild<QLabel *>("teamCatalogBannerTitle")->text(), QStringLiteral("Draft is out of date — Apply is off"));
+    QVERIFY(draft.findChild<QFrame *>("teamCatalogBanner")->isVisible());
+    QVERIFY(!draft.findChild<QPushButton *>("teamDesignerApply")->isEnabled());
+    shot(&draft, "ux-9-draft-stale-dark");
+    draft.setDark(false); lightShot(&draft, "ux-9-draft-stale-light"); darkPalette(); draft.setDark(true);
+    draft.findChild<QPushButton *>("teamCatalogRedo")->click(); QCOMPARE(redo, 4);
+    draft.findChild<QPushButton *>("teamCatalogBannerDiscard")->click();
+    QTRY_COMPARE(calls(script(), "catalog discard").size(), 1);
+}
+
+// U16: the Team designer's own session waits at Claude's folder trust. The
+// window shows its recorded activity and the question as the session view's
+// card, in place of the composer; answering it there sends the native answer
+// with the question's id, hash and run, and the card goes once it is answered.
+void TestTeamsUi::designerQuestionIsAnsweredInTheWindow()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString program = dir.filePath("hgs");
+    QVERIFY(FakeCli::install(program, R"PY(#!/usr/bin/env python3
+import json,os,sys
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a=a[1:]
+here=__file__
+h='a'*64
+if a[:1]==['answer']:
+ body=json.load(sys.stdin)
+ open(here+'.answers','a').write(json.dumps({'name':a[1],'body':body})+'\n')
+ open(here+'.answered','w').write('1')
+ print(json.dumps({'status':'answered','request_id':body['request_id'],'name':a[1],'question_id':body['question_id'],
+  'question_hash':body['expected_question_hash'],'run_id':body['expected_run_id'],'conversation_id':body['expected_conversation_id']}))
+elif a[:1]==['inspect']:
+ q={'question_id':'claude-trust:'+h,'question_hash':h,'source':'claude_folder_trust','answer_transport':'claude_tui',
+    'run_id':'run-1','conversation_id':None,'can_answer':True,'created_at':1791018100,
+    'questions':[{'id':'trust','question':'Do you trust the files in this folder?','body':'/zerus/team-designer','allow_other':False,
+                  'options':[{'id':'trust_0','label':'Yes, proceed'},{'id':'trust_1','label':'No, exit'}]}]}
+ print(json.dumps({'name':a[1],'run_id':'run-1','conversation_id':None,'runtime_state':'live','process_state':'running','cursor':1,
+  'events':[{'seq':1,'at':1791018101,'type':'UserPromptSubmit','detail':'Design a security reviewer for payment code.'}],
+  'pending_questions':[] if os.path.exists(here+'.answered') else [q]}))
+else:print('{}')
+)PY"));
+    TeamConversation::setPollInterval(100);
+    const auto restore = qScopeGuard([] { TeamConversation::setPollInterval(2000); });
+    HgsClient client(FakeCli::program(program));
+    TeamController controller(&client);
+    TeamDesignerPage page(&controller);
+    // Its own name each run: the card keeps answered drafts by session.
+    const QString designer = "claude/checkout/team-designer-" + QUuid::createUuid().toString(QUuid::Id128).left(8);
+    bool waiting = true;
+    page.designerSession = [&] { return designer; };
+    page.designerLive = [&] { Teams::Live live; live.known = true; live.attention = waiting; return live; };
+    page.setContext("/work/checkout", "checkout");
+    page.resize(1400, 860); page.show();
+    auto *card = page.findChild<QuestionCard *>("teamConversationQuestion");
+    QVERIFY(card); card->setReviewDelayForTests(0);
+    auto *input = page.findChild<QPlainTextEdit *>("teamConversationInput");
+    // The question replaces the composer; the recorded activity stays above it.
+    QTRY_VERIFY(card->isVisible());
+    QVERIFY(!input->isVisible());
+    QCOMPARE(page.findChild<QLabel *>("teamDesignerAgentStatus")->text(), QStringLiteral("Needs your answer"));
+    // The Activity render is slow on a loaded machine.
+    QTRY_VERIFY_WITH_TIMEOUT(page.findChild<QTextBrowser *>("teamConversationText")->toPlainText().contains("Design a security reviewer"), 20000);
+    QCOMPARE(card->findChild<QLabel *>("questionPrompt")->text(), QStringLiteral("Do you trust the files in this folder?"));
+    // Each shot after the Activity has drawn its theme.
+    auto *activity = static_cast<ActivityView *>(page.findChild<QWidget *>("teamConversationActivity"));
+    QTRY_VERIFY_WITH_TIMEOUT(!activity->renderPending(), 20000);
+    shot(&page, "u16-designer-question-dark");
+    lightPalette(); page.setDark(false);
+    QTRY_VERIFY_WITH_TIMEOUT(!activity->renderPending(), 20000);
+    lightShot(&page, "u16-designer-question-light"); darkPalette(); page.setDark(true);
+    // Answered here: the native answer names the very question it answers.
+    QAbstractButton *yes = nullptr;
+    for (auto *option : card->findChildren<QAbstractButton *>("questionOption"))
+        if (option->property("optionId").toString() == "trust_0") yes = option;
+    QVERIFY(yes); yes->click();
+    auto *submit = card->findChild<QPushButton *>("submitQuestionAnswer");
+    QTRY_VERIFY(submit->isVisible() && submit->isEnabled());
+    submit->click();
+    QTRY_VERIFY(QFile::exists(program + ".answers"));
+    QFile log(program + ".answers"); QVERIFY(log.open(QIODevice::ReadOnly));
+    const auto lines = log.readAll().split('\n');
+    QCOMPARE(lines.size() - (lines.last().isEmpty() ? 1 : 0), 1);
+    const auto answer = QJsonDocument::fromJson(lines.first()).object();
+    QCOMPARE(answer["name"].toString(), designer);
+    const auto body = answer["body"].toObject();
+    QCOMPARE(body["question_id"].toString(), QStringLiteral("claude-trust:") + QString(64, 'a'));
+    QCOMPARE(body["expected_question_hash"].toString(), QString(64, 'a'));
+    QCOMPARE(body["expected_run_id"].toString(), QStringLiteral("run-1"));
+    QCOMPARE(body["expected_conversation_id"].toString(), QString());
+    const auto chosen = body["answers"].toArray().first().toObject();
+    QCOMPARE(chosen["question_id"].toString(), QStringLiteral("trust"));
+    QVERIFY2(QJsonDocument(chosen).toJson().contains("trust_0"), QJsonDocument(chosen).toJson().constData());
+    // Once the session no longer asks, the composer is back and nothing is sent again.
+    waiting = false;
+    QTRY_VERIFY(!card->isVisible());
+    QTRY_VERIFY(input->isVisible());
+    QTest::qWait(300);
+    log.seek(0); QCOMPARE(log.readAll().count('\n'), 1);
+}
+
+// U15: with no designer session the draft is still decided, from the
+// proposals list and from the catalog, and applied; a refused decision shows
+// its error next to the proposal in every view of the draft.
+void TestTeamsUi::draftIsDecidedWithoutADesignerSession()
+{
+    auto fixture = catalog();
+    auto draft = fixture["draft"].toObject(); auto proposals = draft["proposals"].toArray();
+    auto second = proposals[1].toObject(); second["state"] = "proposed"; proposals[1] = second;
+    draft["proposals"] = proposals; fixture["draft"] = draft;
+    QVERIFY(FakeCli::replace(script() + ".catalog", QJsonDocument(fixture).toJson(QJsonDocument::Compact)));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamDesignerPage page(&controller);
+    page.designerSession = [] { return QString(); };   // stopped or never started
+    page.confirm = [](const QString &, const QString &, const QString &, const QString &) { return true; };
+    page.setContext("/work/checkout", "checkout");
+    page.resize(1600, 900); page.show();
+    TeamDesignerPanel panel(&controller);
+    panel.resize(560, 900); panel.show();
+    QTRY_COMPARE(page.findChildren<QFrame *>("teamDesignerProposal").size(), 2);
+    QVERIFY(page.findChild<QWidget *>("teamDesignerEmpty")->isVisible());      // not started
+    QVERIFY(page.findChild<QScrollArea *>("teamDesignerProposals")->isVisible());
+    QVERIFY(page.findChild<QFrame *>("teamDesignerDraftBar")->isVisible());
+    const auto card = [&page](int n) { return page.findChildren<QFrame *>("teamDesignerProposal").value(n); };
+    // A refused decision: its error under the proposal, the draft unchanged.
+    QVERIFY(FakeCli::replace(script() + ".refuse", "hgs: The catalog draft is locked by another change"));
+    card(0)->findChild<QPushButton *>("teamProposalKeep")->click();
+    QTRY_VERIFY(card(0) && card(0)->findChild<QLabel *>("teamProposalError"));
+    QVERIFY(card(0)->findChild<QLabel *>("teamProposalError")->text().contains("locked by another change"));
+    QVERIFY(!card(1)->findChild<QLabel *>("teamProposalError"));
+    QCOMPARE(controller.catalog().proposals[0].state, QStringLiteral("proposed"));
+    QTRY_VERIFY(panel.findChild<QLabel *>("teamProposalError"));
+    QVERIFY(panel.findChild<QLabel *>("teamProposalError")->text().contains("locked by another change"));
+    shot(&page, "u15-decide-refused");
+    // Two proposals kept: p1 in the list, p2 in the catalog's draft card.
+    QFile::remove(script() + ".refuse");
+    card(0)->findChild<QPushButton *>("teamProposalKeep")->click();
+    QTRY_COMPARE(controller.catalog().proposals[0].state, QStringLiteral("kept"));
+    QTRY_VERIFY(!page.findChild<QLabel *>("teamProposalError"));
+    QVERIFY(!panel.findChild<QLabel *>("teamProposalError"));
+    page.editor()->showProposal("p2");
+    QTRY_VERIFY(page.editor()->findChild<QPushButton *>("teamProposalKeep"));
+    page.editor()->findChild<QPushButton *>("teamProposalKeep")->click();
+    QTRY_COMPARE(controller.catalog().proposals[1].state, QStringLiteral("kept"));
+    auto *apply = page.findChild<QPushButton *>("teamDesignerApplyKept");
+    QTRY_VERIFY(apply && apply->isEnabled() && apply->text().contains(QStringLiteral("Apply 2 changes")));
+    shot(&page, "u15-two-kept-no-session");
+    // A refused Apply: its error under the DRAFT bar, the draft kept.
+    QVERIFY(FakeCli::replace(script() + ".refuseapply", "hgs: The catalog changed (now v5); refresh and try again"));
+    apply->click();
+    auto *draftError = page.findChild<QLabel *>("teamDesignerDraftError");
+    QTRY_VERIFY(draftError && draftError->isVisible());
+    QVERIFY(draftError->text().contains("The catalog changed (now v5)"));
+    QCOMPARE(controller.catalog().version, 3);
+    shot(&page, "u15-apply-refused");
+    QFile::remove(script() + ".refuseapply");
+    apply = page.findChild<QPushButton *>("teamDesignerApplyKept");
+    apply->click();
+    QTRY_COMPARE(controller.catalog().version, 4);   // v3 + 1
+    QCOMPARE(calls(script(), "catalog apply").size(), 2);
+    QCOMPARE(calls(script(), "catalog decide").size(), 3);
+    QVERIFY(controller.catalog().proposals.isEmpty());
+    QTRY_VERIFY(!page.findChild<QLabel *>("teamDesignerDraftError")->isVisible());
+    QVERIFY(!page.findChild<QScrollArea *>("teamDesignerProposals")->isVisible());
+    QVERIFY(controller.catalog().role("security"));
+    QCOMPARE(controller.catalog().role("tester")->agent, QStringLiteral("claude"));
 }
 
 void TestTeamsUi::catalogEditorMarksManualEdits()
@@ -5781,6 +6718,130 @@ void TestTeamsUi::sideListsAndMemberTasks()
     if (!qEnvironmentVariable("ZERUS_TEAM_SHOTS").isEmpty()) lightShot(&workspace, "ux-4-planning-light");
     darkPalette();
     QSettings().remove("workspace/skin");
+}
+
+// U33: the Board scrolls sideways instead of squeezing its columns. At 700 px
+// every column keeps its readable width and the thin bar shows; the columns of
+// two open phases share their x positions; the horizontal place survives a
+// poll with a new revision and a phase collapsed; at 1600 px there is no bar.
+// Graph and Layers keep their columns without a horizontal bar.
+void TestTeamsUi::boardScrollsInsteadOfSqueezingColumns()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    setTeam(prototypeTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(prototypeLive);
+    workspace.resize(700, 900); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamPhaseScrolls"));
+    const auto view = [&](const char *segment) {
+        for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>()) if (b->property("segment") == segment) { b->click(); return; }
+    };
+    // Graph and Layers fit the column: no horizontal bar on their page.
+    QCOMPARE(workspace.findChild<QScrollArea *>("teamWorkspacePhases")->horizontalScrollBarPolicy(), Qt::ScrollBarAlwaysOff);
+    view("layers");
+    QTRY_VERIFY(workspace.findChild<QScrollArea *>("teamWorkspaceLayers"));
+    QCOMPARE(workspace.findChild<QScrollArea *>("teamWorkspaceLayers")->horizontalScrollBarPolicy(), Qt::ScrollBarAlwaysOff);
+    view("board");
+    const auto area = [&] { return workspace.findChild<QScrollArea *>("teamWorkspaceBoard"); };
+    QTRY_VERIFY(area() && !area()->findChildren<QFrame *>("teamBoardColumn").isEmpty());
+    QCOMPARE(area()->horizontalScrollBarPolicy(), Qt::ScrollBarAsNeeded);
+    if (auto *all = workspace.findChild<QPushButton *>("teamWorkspaceExpandAll"); all->text() == QStringLiteral("Expand all")) all->click();
+    const auto columns = [&] { return area()->findChildren<QFrame *>("teamBoardColumn"); };
+    const auto phasesOpen = [&] { QSet<int> open; for (auto *col : columns()) open.insert(col->property("phase").toInt()); return open.size(); };
+    QTRY_VERIFY(phasesOpen() >= 2);
+    // Narrow: every column keeps its readable width; the bar scrolls the Board.
+    const auto readable = [&] {
+        for (auto *col : columns()) if (col->width() < 200) return false;
+        return true;
+    };
+    QTRY_VERIFY(readable());
+    QTRY_VERIFY(area()->horizontalScrollBar()->isVisible() && area()->horizontalScrollBar()->maximum() > 0);
+    // The columns of every open phase line up: the same set at the same x.
+    const auto positions = [&] {
+        QMap<int, QList<int>> xs;
+        for (auto *col : columns()) xs[col->property("phase").toInt()] << col->mapTo(area()->widget(), QPoint(0, 0)).x();
+        for (auto &list : xs) std::sort(list.begin(), list.end());
+        return xs;
+    };
+    const auto xs = positions();
+    QVERIFY(xs.size() >= 2);
+    for (const auto &list : xs) QCOMPARE(list, xs.first());
+    // The horizontal place survives a poll with a new revision and a phase collapsed.
+    area()->horizontalScrollBar()->setValue(120);
+    QCOMPARE(area()->horizontalScrollBar()->value(), 120);
+    auto *before = area();
+    auto next = prototypeTeam(); next["revision"] = 21; setTeam(next);
+    controller.refresh();
+    QTRY_VERIFY(area() && area() != before);
+    QTRY_COMPARE(area()->horizontalScrollBar()->value(), 120);
+    shot(&workspace, "u33-board-narrow-dark");
+    QFrame *firstOpen = nullptr;
+    for (auto *frame : area()->findChildren<QFrame *>("teamPhaseScroll")) if (frame->findChild<QWidget *>("teamPhaseBody")) { firstOpen = frame; break; }
+    QVERIFY(firstOpen);
+    const int collapsed = firstOpen->property("phase").toInt();
+    before = area();
+    firstOpen->findChild<QToolButton *>("teamPhaseToggle")->click();
+    QTRY_VERIFY(area() && area() != before);
+    QTRY_VERIFY(!positions().contains(collapsed));
+    QTRY_COMPARE(area()->horizontalScrollBar()->value(), 120);
+    firstOpen = nullptr;
+    for (auto *frame : area()->findChildren<QFrame *>("teamPhaseScroll")) if (frame->property("phase").toInt() == collapsed) firstOpen = frame;
+    firstOpen->findChild<QToolButton *>("teamPhaseToggle")->click();
+    QTRY_VERIFY(positions().contains(collapsed));
+    workspace.setTheme(false);
+    lightShot(&workspace, "u33-board-narrow-light");
+    // Wide: the columns share the room, no bar.
+    workspace.resize(1600, 900);
+    QTRY_VERIFY2(!area()->horizontalScrollBar()->isVisible(), qPrintable(QStringLiteral("viewport %1, content min %2, columns %3")
+        .arg(area()->viewport()->width()).arg(area()->widget()->minimumSizeHint().width()).arg(columns().size())));
+    QVERIFY(readable());
+    QSet<int> widths; for (auto *col : columns()) widths.insert(col->width());
+    QVERIFY2(widths.size() <= 2, "the columns share the width");   // integer rounding at most
+    lightShot(&workspace, "u33-board-wide-light");
+    darkPalette(); workspace.setTheme(true);
+    QTRY_VERIFY(area() && !area()->horizontalScrollBar()->isVisible());
+    shot(&workspace, "u33-board-wide-dark");
+}
+
+// U33: the planning team's Board (no phases) gets the same: readable columns
+// and one horizontal scroll at 700 px, none at 1600 px, the place kept.
+void TestTeamsUi::planningBoardScrollsInsteadOfSqueezingColumns()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    auto planning = team(); planning["status"] = "planning";
+    setTeam(planning);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(700, 800); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY_WITH_TIMEOUT(workspace.findChild<QWidget *>("teamWorkspaceView"), 20000);
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>()) if (b->property("segment") == "board") { b->click(); break; }
+    const auto area = [&] { return workspace.findChild<QScrollArea *>("teamWorkspaceBoard"); };
+    QTRY_VERIFY(area() && area()->findChildren<QScrollArea *>("teamBoardColumn").size() == 5);   // no Decided task, no Decided column
+    const auto readable = [&] {
+        for (auto *col : area()->findChildren<QScrollArea *>("teamBoardColumn")) if (col->width() < 200) return false;
+        return true;
+    };
+    QTRY_VERIFY(readable());
+    QTRY_VERIFY(area()->horizontalScrollBar()->isVisible());
+    area()->horizontalScrollBar()->setValue(90);
+    auto *before = area();
+    auto next = planning; next["revision"] = planning["revision"].toInt() + 1; setTeam(next);
+    controller.refresh();
+    QTRY_VERIFY(area() && area() != before);
+    QTRY_COMPARE(area()->horizontalScrollBar()->value(), 90);
+    workspace.resize(1600, 800);
+    QTRY_VERIFY(!area()->horizontalScrollBar()->isVisible());
+    QVERIFY(readable());
 }
 
 #include "test_teamsui.moc"

@@ -2,6 +2,7 @@
 #include "CachedText.h"
 #include "SessionStatusBadge.h"
 #include "MachineAppearance.h"
+#include "WorkspaceSkin.h"
 #include <QFontMetrics>
 #include <QFontMetricsF>
 #include <QLabel>
@@ -68,7 +69,8 @@ inline QColor attentionColor(bool dark, bool error = false) {
     return QColor(error ? (dark ? "#ffabb6" : "#a32238") : (dark ? "#ffda76" : "#805000"));
 }
 inline QColor emphasisColor(bool dark, RowEmphasis emphasis) {
-    return emphasis == Muted ? SessionStatusBadge::mutedTone(dark)
+    // U25 (spec 2.3): a muted session that needs attention has a `dim` edge.
+    return emphasis == Muted ? WorkspaceSkin::color(WorkspaceSkin::active(), dark, QStringLiteral("dim"))
         : emphasis == Draft ? SessionStatusBadge::edge(SessionStatusBadge::Draft, dark) : attentionColor(dark, emphasis == Error);
 }
 // The edge mark of an actionable, unread or draft row.

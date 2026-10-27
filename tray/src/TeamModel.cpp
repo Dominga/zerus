@@ -350,6 +350,7 @@ Team parse(const QJsonObject &v)
             PermissionAnswer answer;
             answer.questionId = str(a, "question_id"); answer.decision = str(a, "decision");
             answer.by = str(a, "by"); answer.reason = str(a, "reason"); answer.at = a.value("at").toDouble();
+            answer.tool = str(a, "tool"); answer.command = str(a, "command");
             if (!answer.decision.isEmpty()) member.permissionAnswers.append(answer);
         }
         if (m.value("budget").isObject()) {
@@ -521,6 +522,9 @@ Team parse(const QJsonObject &v)
                 answer.decision = str(item, "decision");
                 answer.by = str(item, "by");
                 answer.reason = str(item, "reason");
+                // U17: the tool and command the agent asked about.
+                answer.tool = str(item, "tool");
+                answer.command = str(item, "command");
                 answer.at = item.value("at").toDouble();
                 attempt.permissions.append(answer);
             }
@@ -1407,6 +1411,15 @@ FeedLine feedLine(const Team &team, const QJsonObject &event)
     else if (k == "relaunch") t = tr("Start %1 again").arg(d.value("member").toString());
     else if (k == "member_paused") t = tr("Paused %1").arg(d.value("member").toString());
     else if (k == "member_resumed") t = tr("Resumed %1").arg(d.value("member").toString());
+    else if (k == "member_added") {
+        // U32: the roster says how the member joined, with the owner's quote.
+        const QString by = d.value("by").toString();
+        const QString word = d.value("owner_word").toString();
+        t = word.isEmpty() ? tr("Added %1 by %2").arg(d.value("member").toString(), by)
+                           : tr("Added %1 by %2: “%3”").arg(d.value("member").toString(), by, word);
+        line.by = by;
+    }
+    else if (k == "max_members_raised") t = tr("Raised the member cap %1 → %2 on your word").arg(d.value("old").toInt()).arg(d.value("new").toInt());
     else if (k == "member_removed") t = tr("Removed %1 from the team").arg(d.value("member").toString());
     else t = k;
     return line;
@@ -1422,6 +1435,15 @@ Role parseRole(const QJsonObject &v)
     r.permissionsProfile = str(v, "permissions_profile");   // B5: read, write, build, commit, network
     r.canMessage = str(v, "can_message"); r.dangerous = v.value("dangerous").toBool();
     for (const auto &tag : v.value("tags").toArray()) r.tags.append(tag.toString());
+    // U25: skills are the specialization of a newer catalog.
+    if (r.tags.isEmpty()) for (const auto &tag : v.value("skills").toArray()) r.tags.append(tag.toString());
+    r.about = str(v, "about"); r.icon = str(v, "icon"); r.message = str(v, "message"); r.joins = str(v, "joins");
+    r.protocolExtra = str(v, "protocol_extra"); r.taskTemplate = str(v, "task_template");
+    const auto list = [&v](const char *key) { QStringList out; for (const auto &x : v.value(QLatin1String(key)).toArray()) out.append(x.toString()); return out; };
+    r.machines = list("machines"); r.messageTo = list("message_to"); r.promptOrder = list("prompt_order"); r.promptOff = list("prompt_off");
+    r.danger = v.value("danger").toObject();
+    const auto notes = v.value("notes").toObject();
+    for (auto it = notes.begin(); it != notes.end(); ++it) r.notes.insert(it.key(), it.value().toString());
     r.raw = v;
     return r;
 }
@@ -1442,6 +1464,22 @@ QJsonObject Role::json() const
             {"can_message", canMessage}, {"dangerous", dangerous}, {"tags", QJsonArray::fromStringList(tags)}});
     if (!permissionsProfile.isEmpty()) o.insert("permissions_profile", permissionsProfile);
     else o.remove("permissions_profile");
+    // U25: a field is written when it has a value or came with the role, so
+    // an older catalog gains no empty fields.
+    const auto put = [&o, this](const char *key, const QJsonValue &value, bool empty) {
+        if (!empty || raw.contains(QLatin1String(key))) o.insert(QLatin1String(key), value);
+    };
+    put("skills", QJsonArray::fromStringList(tags), tags.isEmpty());
+    put("about", about, about.isEmpty()); put("icon", icon, icon.isEmpty()); put("message", message, message.isEmpty());
+    put("joins", joins, joins.isEmpty()); put("protocol_extra", protocolExtra, protocolExtra.isEmpty());
+    put("task_template", taskTemplate, taskTemplate.isEmpty());
+    put("machines", QJsonArray::fromStringList(machines), machines.isEmpty());
+    put("message_to", QJsonArray::fromStringList(messageTo), messageTo.isEmpty());
+    put("prompt_order", QJsonArray::fromStringList(promptOrder), promptOrder.isEmpty());
+    put("prompt_off", QJsonArray::fromStringList(promptOff), promptOff.isEmpty());
+    put("danger", danger, danger.isEmpty());
+    QJsonObject noteValues; for (auto it = notes.cbegin(); it != notes.cend(); ++it) noteValues.insert(it.key(), it.value());
+    put("notes", noteValues, notes.isEmpty());
     return o;
 }
 
@@ -1451,13 +1489,14 @@ Template parseTemplate(const QJsonObject &v)
     t.id = str(v, "id"); t.name = str(v, "name"); t.description = str(v, "description"); t.leadProtocol = str(v, "lead_protocol");
     t.planning = str(v, "planning"); t.approval = str(v, "approval"); t.phaseApproval = str(v, "phase_approval");
     t.maxMembers = v.value("max_members").toInt(6);
+    t.work = str(v, "work"); t.phases = str(v, "phases");
     for (const auto &seat : v.value("roster").toArray()) {
         const auto o = seat.toObject();
         t.roster.append({str(o, "role"), o.value("count").toInt(1), o.value("optional").toBool(), o});
     }
     for (const auto &task : v.value("tasks").toArray()) {
         const auto o = task.toObject();
-        SkeletonTask k{str(o, "title"), str(o, "role"), {}, o};
+        SkeletonTask k{str(o, "title"), str(o, "role"), {}, o, qMax(1, o.value("phase").toInt(1))};
         for (const auto &d : o.value("deps").toArray()) k.deps.append(d.toInt());
         t.tasks.append(k);
     }
@@ -1471,11 +1510,14 @@ QJsonObject Template::json() const
     for (const auto &s : roster) seats.append(over(s.raw, {{"role", s.role}, {"count", s.count}, {"optional", s.optional}}));
     for (const auto &k : tasks) {
         QJsonArray deps; for (int d : k.deps) deps.append(d);
-        skeleton.append(over(k.raw, {{"title", k.title}, {"role", k.role}, {"deps", deps}}));
+        skeleton.append(over(k.raw, {{"title", k.title}, {"role", k.role}, {"deps", deps}, {"phase", k.phase}}));
     }
-    return over(raw, {{"id", id}, {"name", name}, {"description", description}, {"lead_protocol", leadProtocol}, {"roster", seats},
+    auto o = over(raw, {{"id", id}, {"name", name}, {"description", description}, {"lead_protocol", leadProtocol}, {"roster", seats},
             {"tasks", skeleton}, {"planning", planning}, {"approval", approval}, {"phase_approval", phaseApproval},
             {"max_members", maxMembers}});
+    if (!work.isEmpty() || raw.contains("work")) o.insert("work", work);
+    if (!phases.isEmpty() || raw.contains("phases")) o.insert("phases", phases);
+    return o;
 }
 
 // U25: `use` is a template id or "+role" and comes before `template`; the
@@ -1483,16 +1525,17 @@ QJsonObject Template::json() const
 Rule parseRule(const QJsonObject &v)
 {
     const auto use = str(v, "use");
-    return {str(v, "id"), str(v, "when"), !use.isEmpty() && !use.startsWith('+') ? use : str(v, "template"), str(v, "approval"), v};
+    return {str(v, "id"), str(v, "when"), !use.isEmpty() && !use.startsWith('+') ? use : str(v, "template"), str(v, "approval"), v, use};
 }
 
 // A "+role" rule keeps its use (validate reads use before template); a
 // template rule that came with use takes the edited template there too.
 QJsonObject Rule::json() const
 {
-    auto o = over(raw, {{"id", id}, {"when", when}, {"template", templateId}, {"approval", approval}});
-    const auto use = str(raw, "use");
-    if (!use.isEmpty() && !use.startsWith('+')) o.insert("use", templateId);
+    const bool adds = use.startsWith('+');
+    auto o = over(raw, {{"id", id}, {"when", when}, {"template", adds ? str(raw, "template") : templateId}, {"approval", approval}});
+    if (adds) o.insert("use", use);
+    else if (!use.isEmpty() || raw.contains("use")) o.insert("use", templateId);
     return o;
 }
 

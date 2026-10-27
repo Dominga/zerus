@@ -52,9 +52,29 @@ When it is on, Claude's `PreToolUse` hook answers an `Agent`/`Task` call with
 `permissionDecision: "ask"` and a reason naming the subagent type, its model
 (the tool input, else the definition in `.claude/agents/<type>.md`, else
 "inherits <session model>"), its effort when known and the description.
-Subagent calls of one turn are grouped as "Start N subagents: ...". Automatic
-tool approvals never answer this request; a team member's request reaches its
-lead like any other permission request. Agents without a pre-tool subagent
+Subagent calls of one turn are grouped as "Start N subagents: ...".
+
+The ask becomes Claude's permission request, and the approval channel (the
+waiting `PermissionRequest` hook) turns it into a card for that exact tool use:
+"Subagents" with every open call of the group, a one-time Yes or No and a
+denial with your message. Claude's broader choices stay in Terminal. The
+answer goes back to that tool use through the hook, and it decides every call
+the card showed: the other calls' waiting hooks, and later `PreToolUse` calls
+of the group, take the same allow or deny without a card of their own. A new
+call joining the group changes the card, so an answer never covers a call it
+did not show. Without the waiting hook (an older Claude Code, or the shell
+hook form on Windows), the card is answered with the panel's keys and only its
+own call is decided.
+
+Automatic tool approvals never answer a subagent card: the approval journal
+refuses any card marked `subagent_confirmation` or for the `Agent`/`Task`
+tool. A team member's card reaches its lead like any other permission
+request: the lead's inbox item names the member, each subagent's type, model
+and task, and the lead answers it with `hgs team answer` (rating it as any
+permission: what the task needs, or ask the owner). The owner's own session
+still asks the owner; with the setting off nothing is asked, recorded or
+grouped. In Claude's print mode nobody can answer, so the call goes ahead and
+the session note says the ask was skipped. Agents without a pre-tool subagent
 approval are not blocked; their status says the confirmation is not supported.
 
 ## CLI sessions
@@ -1097,6 +1117,24 @@ keeps or rejects.
 
 Claude's start-up trust stays manual for every other folder. No other agent
 (Codex, DeepSeek, Kimi, OpenCode) gets folder trust or rules from Zerus.
+
+### The team roster on the owner's word
+
+The lead changes a team's roster only on the owner's explicit word: a sentence
+the owner typed in the lead's own session, at most 30 minutes old. For
+`add-member` the sentence must name what is added — the member's role or its
+agent/model, in English or Russian ("backend"/"бэкенд", "frontend"/"фронт",
+"qa", "reviewer"/"ревьюер", "expert"/"эксперт"; "DeepSeek"/"дипсик"/"dsh",
+"Claude"/"клод", "Opus"/"опус", "Codex"/"кодекс", "Kimi"/"кими") — not the
+generated id. The sentence says how many members it adds; one is the default.
+
+When the add would exceed `max_members`, the same word raises the cap by
+exactly the count the sentence names, within the tree's session budget, in the
+same change, and the feed names the old and the new cap. One verified prompt
+covers one add per count it names: the same sentence cannot add a second
+member. `remove-member` and `swap-member` still need the member's id in the
+sentence, and a separate lead `settings` cap change still names the new cap.
+The team's roster and feed say "Added by Lead on your word" with the quote.
 
 <a id="activity"></a>
 
@@ -3273,6 +3311,16 @@ Windows Error Reporting restarts the app with the same settings in the backgroun
 (`--background`, never `--sessions`): a window that opens by itself after a crash
 would be a surprise.
 
+**DeepSeek members' folders.** A DeepSeek session's sandbox needs full control
+(WRITE_DAC and WRITE_OWNER) of the folder it confines. When Zerus creates a
+member's worktree or clone it adds this user's explicit, inheritable FullControl
+entry to that new folder, so the sandbox starts there. A folder Zerus did not
+create (a direct, existing or custom folder) is checked first: when a right is
+missing the session does not start, and the member's error — shown in the Lead's
+inbox — says `the DeepSeek sandbox needs full control of <folder>` with the
+one-line fix `icacls "<folder>" /grant *<SID>:(OI)(CI)F`. A member never repairs
+ACLs itself: it reports the exact error to the Lead.
+
 **Updates.** The portable zip has no installer or self-update. Stable releases
 after 0.42.2 and nightly releases carry the same tested zip. A portable
 installation starts on the stable channel; choose Nightly to hear about nightly
@@ -3584,6 +3632,21 @@ read-only `ls-remote` result. `changed` and `missing` do not imply synchronizati
 a local tracking ref counts as absent (`changed` while the remote branch exists)
 only when its lookup completes without finding it. A failed or timed-out upstream
 or tracking ref lookup leaves `remote_state: unknown`.
+
+A checkout with changes also carries `changes` for the inspector's Changes card:
+`{"added":A,"deleted":D,"tracked_files":N,"untracked_files":U,"truncated":bool,
+"files":[{"path":"src/a.rs","added":12,"deleted":3},...]}`. The counts compare
+the work tree and index with HEAD (`git diff --numstat`); a binary file has null
+counts and an untracked file is listed with `"untracked":true` and null counts.
+At most 50 files are listed (paths clipped to 300 characters); the totals cover
+every tracked change.
+
+`hgs [@host] git-diff --path /absolute/checkout --json` returns that diff as
+text: `{"state":"ok","path":...,"diff":"...","truncated":bool,"bytes":N}`, at
+most 256 KiB of it (`truncated` and the full `bytes` say when it is cut). Both
+commands run Git directly, without a shell or external diff or text converters,
+and never write the checkout, its index or its configuration. A diff over the
+1 MiB Git output cap answers `"state":"too_large"`.
 
 Subagent count fields distinguish active, completed, total, completeness and
 source; unknown totals are null. Up to six active/unreviewed previews accompany

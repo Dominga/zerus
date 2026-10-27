@@ -1150,6 +1150,7 @@ pub(crate) fn hand_off_text_with(
          Your task and attempt again: {current} | hgs {at}team current --json\n\
          Report once at the end: hgs {at}team report --json, with JSON on stdin:\n  {report}\n\
          A progress line is not a report; a question is not a report.\n\
+         Never repair file permissions or ACLs yourself; report the exact error to {boss} with the folder and the command.\n\
          Summarize what changed, where, and how you checked it. If you cannot run that command, end your turn with \
          the report as your last message: Zerus gives it to {boss}. A blocker goes to {boss} too: ask it, not the owner.",
         ask = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."}),
@@ -1764,6 +1765,18 @@ pub(crate) fn fake_output(code: i32, stdout: &str, stderr: &str) -> Output {
     #[cfg(windows)]
     let status = std::os::windows::process::ExitStatusExt::from_raw(code as u32);
     Output { status, stdout: stdout.as_bytes().to_vec(), stderr: stderr.as_bytes().to_vec() }
+}
+
+#[cfg(test)]
+/// A member's subagent card as the approval channel builds it (U19).
+pub(crate) fn subagent_card() -> Value {
+    json!({"question_id":"claude-approval:subagents","question_hash":"h".repeat(64),"tool_call_id":"toolu_one",
+        "source":"claude_tool_approval","approval":true,"can_answer":true,"approval_choices":true,"answer_transport":"claude_hook",
+        "panel_verified":false,"subagent_confirmation":true,"subagent_calls":["toolu_one","toolu_two"],"run_id":"r1","conversation_id":"c",
+        "questions":[{"id":"approval","header":"Subagents",
+            "question":"Start 2 subagents: Explore (model haiku): Find the callers; general (model inherits claude-opus-4-6): Write the fix",
+            "body":"Start 2 subagents: ...","allow_other":true,"other_label":"Tell Claude what to do instead",
+            "options":[{"id":"1","label":"Yes","scope":"once"},{"id":"2","label":"No","scope":"once"}]}]})
 }
 
 /// The ceiling this test thread's git reads use; call it at the start of a test
@@ -4909,6 +4922,38 @@ mod tests {
             assert_eq!(overrides[0].2, json!({"name":"codex/x/dev","run_id":"r1","on":true}));
             assert_eq!(overrides[1].2["on"], false);
         });
+    }
+
+
+    /// U19 (2): a team member's subagent card reaches its lead like any
+    /// permission request: the inbox item names the member, the subagents,
+    /// their models and tasks.
+    #[test]
+    fn a_members_subagent_request_reaches_the_lead() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let t = team();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let card = subagent_card();
+        let inspected = json!({"pending_questions":[card.clone()]}).to_string();
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], _| {
+            assert_eq!(args.first().copied(), Some("inspect"));
+            Ok(fake_output(0, &inspected, ""))
+        })));
+        let result = sync_permission(&mut store, &t, "dev");
+        set_fake_hgs(None);
+        result.unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let pending = saved.member("dev").unwrap().pending.clone().unwrap();
+        assert_eq!(pending.question_id, card["question_id"].as_str().unwrap());
+        let item = inbox::items(&saved).into_iter().find(|item| item.kind == "permission").unwrap();
+        assert_eq!(item.member, "Backend");
+        assert!(
+            item.summary.contains("Subagents: Start 2 subagents: Explore (model haiku): Find the callers; general (model inherits claude-opus-4-6): Write the fix"),
+            "{}",
+            item.summary
+        );
+        assert!(item.command.contains("hgs team answer"), "{}", item.command);
     }
 
     #[test]

@@ -1,3 +1,5 @@
+#include "SettingsJson.h"
+#include "JsonParse.h"
 #include "ArchiveBrowser.h"
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
@@ -306,11 +308,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_expandedSessions = QSet<QString>(expanded.begin(), expanded.end());
     m_sessionRowPreferences = SessionRowPreferences(settings.value("workspace/collapsedSessionRows").toByteArray());
     m_savedOrganization = settings.value("workspace/organization").toByteArray();
-    const auto savedProjects = QJsonDocument::fromJson(m_savedOrganization).object();
+    const auto savedProjects = SettingsJson::object("workspace/organization");
     if (!savedProjects.isEmpty() && !savedProjects.contains("projects") && !settings.contains("workspace/organizationBeforeProjects"))
         settings.setValue("workspace/organizationBeforeProjects", m_savedOrganization);
     m_organization = SessionOrganization(savedProjects);
-    m_pendingLaunches = QJsonDocument::fromJson(settings.value("workspace/pendingLaunches").toByteArray()).object();
+    m_pendingLaunches = SettingsJson::object("workspace/pendingLaunches");
     m_creations=new SessionCreationController(m_client.executable(),this);
     if (!settings.value("sessions/geometry").toByteArray().isEmpty()) restoreGeometry(settings.value("sessions/geometry").toByteArray());
     auto *root = new QHBoxLayout(this); root->setContentsMargins(0, 0, 0, 0); root->setSpacing(0);
@@ -1406,7 +1408,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_inspector->addTab(m_children, tr("Plan && agents")); m_inspector->addTab(detailsPage, tr("Details"));
     m_inspector->addTab(m_worktrees, tr("Worktrees"));
     const auto taskLaunchBytes = settings.value("tasks/pendingExecutorLaunches").toByteArray();
-    const auto taskLaunchDoc = taskLaunchBytes.size() <= 65536 ? QJsonDocument::fromJson(taskLaunchBytes) : QJsonDocument();
+    const auto taskLaunchDoc = taskLaunchBytes.size() <= 65536 ? JsonParse::local(taskLaunchBytes) : QJsonDocument();
     m_taskLaunches = taskLaunchDoc.object();
     bool validLaunches = taskLaunchBytes.isEmpty() || taskLaunchDoc.isObject();
     if (m_taskLaunches.size() > 16) validLaunches = false;
@@ -2498,6 +2500,7 @@ void SessionsWindow::saveOrganization()
     const auto data = QJsonDocument(m_organization.toJson()).toJson(QJsonDocument::Compact);
     if (data == m_savedOrganization) return;
     QSettings settings; settings.setValue("workspace/organization", data); settings.sync();
+    SettingsJson::remember("workspace/organization", data, QJsonDocument(m_organization.toJson()));
     if (settings.status() == QSettings::NoError) m_savedOrganization = data;
     else showNotice(tr("Could not save the session layout. Check the settings file permissions."), true);
 }
@@ -2687,7 +2690,7 @@ void SessionsWindow::setFleet(const FleetState &fleet) {
     if (auto *launch=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget()); launch && launch->parentWidget()==this) launch->setFleet(fleet);
     m_settingsPage->setLocalSessions(fleet.local().localSessions, LocalSessionHost::canEnable(fleet.local())); m_settingsPage->setPeers(fleet.peerNames());
     m_settingsPage->setMobileGateway(fleet.local().localSessions||MachinePlatform::of(fleet.local().metrics,true)==MachinePlatform::Style::Windows);
-    m_fleet = fleet; m_fleet.setAttentionMarks(QJsonDocument::fromJson(QSettings().value("attention/sessionMarks").toByteArray()).object()); m_fleet.setPendingReads(ReadMarkStore::load()); reconcileTerminations();m_usageStore->setFleet(fleet); m_accountsPage->setFleet(fleet); updateDashboard(); m_projectsPage->setFleet(fleet); m_machinesPage->setFleet(fleet); if (isVisible()) rebuild(); applyQueuedModelSettings();
+    m_fleet = fleet; m_fleet.setAttentionMarks(SettingsJson::object("attention/sessionMarks")); m_fleet.setPendingReads(ReadMarkStore::load()); reconcileTerminations();m_usageStore->setFleet(fleet); m_accountsPage->setFleet(fleet); updateDashboard(); m_projectsPage->setFleet(fleet); m_machinesPage->setFleet(fleet); if (isVisible()) rebuild(); applyQueuedModelSettings();
     updateConnectionStatus();
     if (!m_nativeLaunchToOpen.isEmpty()) {
         for (const auto &entry : m_entries) if (entry.session.launchId==m_nativeLaunchToOpen) {

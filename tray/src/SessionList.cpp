@@ -1,3 +1,4 @@
+#include "JsonParse.h"
 #include "SessionList.h"
 #include "SessionCardDelegate.h"
 #include <QApplication>
@@ -455,7 +456,7 @@ QMimeData *SessionList::mimeData(const QList<QListWidgetItem *> &items) const
 bool SessionList::validDrop(const QMimeData *mime) const
 {
     if (!mime->hasFormat(Mime)) return false;
-    const auto data = QJsonDocument::fromJson(mime->data(Mime)).object();
+    const auto data = JsonParse::localObject(mime->data(Mime));
     if (data.value("token").toString() != m_token || data.value("id").toString().isEmpty()) return false;
     const int role = data.value("group").toBool() ? SessionRoles::Group : SessionRoles::Identity;
     for (int row = 0; row < count(); ++row) if (item(row)->data(role).toString() == data.value("id").toString()) return true;
@@ -540,7 +541,7 @@ void SessionList::dragMoveEvent(QDragMoveEvent *e)
     if (!validDrop(e->mimeData())) { e->ignore(); return; }
     // Retain Qt's edge auto-scroll; the base drop mutation is deliberately unused.
     QListWidget::dragMoveEvent(e);
-    const auto target = placement(e->position().toPoint(), QJsonDocument::fromJson(e->mimeData()->data(Mime)).object().value("group").toBool());
+    const auto target = placement(e->position().toPoint(), JsonParse::localObject(e->mimeData()->data(Mime)).value("group").toBool());
     m_indicator = target.indicator; m_onGroup = target.onGroup; viewport()->update();
     e->setDropAction(Qt::MoveAction); e->accept();
 }
@@ -562,7 +563,7 @@ void SessionList::dropEvent(QDropEvent *e)
         return;
     }
     if (!validDrop(e->mimeData())) { e->ignore(); return; }
-    const auto data = QJsonDocument::fromJson(e->mimeData()->data(Mime)).object();
+    const auto data = JsonParse::localObject(e->mimeData()->data(Mime));
     const auto target = placement(e->position().toPoint(), data.value("group").toBool());
     m_indicator = {}; viewport()->update();
     if (data.value("group").toBool()) emit groupMoved(data.value("id").toString(), target.before);

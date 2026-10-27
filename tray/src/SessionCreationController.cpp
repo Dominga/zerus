@@ -1,3 +1,4 @@
+#include "JsonParse.h"
 #include "SessionCreationController.h"
 #include "MachinePlatform.h"
 #include <QCoreApplication>
@@ -67,9 +68,8 @@ SessionCreationController::SessionCreationController(const QString &hgs,QObject 
         if(file.exists()){
             if(!file.open(QIODevice::ReadOnly)||file.size()>JournalLimit)error=tr("Could not read the creation journal. Existing requests are kept.");
             else{
-                QJsonParseError parse;const auto document=QJsonDocument::fromJson(file.readAll(),&parse);
-                saved=document.object();
-                if(parse.error!=QJsonParseError::NoError||saved.value("schema")!=1||!saved.value("operations").isObject()
+                QString parse;saved=JsonParse::object(file.readAll(),&parse);
+                if(!parse.isEmpty()||saved.value("schema")!=1||!saved.value("operations").isObject()
                     ||saved.value("operations").toObject().size()>128)error=tr("Unsupported creation journal. Existing requests are kept.");
             }
         }
@@ -243,7 +243,7 @@ void SessionCreationController::persist(const QString &id,std::function<void()> 
             QSettings settings;settings.setValue("workspace/launchOpenTerminal",choices.value("terminal").toBool());
             settings.setValue("workspace/launchAgent",choices.value("cmd").toString());
             if(!choices.value("account").toString().isEmpty()){
-                auto accounts=QJsonDocument::fromJson(settings.value("workspace/launchAccounts").toByteArray()).object();
+                auto accounts=JsonParse::object(settings.value("workspace/launchAccounts").toByteArray());
                 auto machine=accounts[choices.value("host").toString()].toObject();machine[choices.value("cmd").toString()]=choices.value("account");
                 accounts[choices.value("host").toString()]=machine;settings.setValue("workspace/launchAccounts",QJsonDocument(accounts).toJson(QJsonDocument::Compact));
             }

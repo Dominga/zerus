@@ -1,3 +1,4 @@
+#include "JsonParse.h"
 #include "AccountFilter.h"
 #include "ScopeFilterWidgets.h"
 #include "WorkspaceIcons.h"
@@ -27,7 +28,7 @@ QString AccountFilter::caption(const SessionAccounts::Account &account) const {
     })) {
         QStringList profiles;
         for (const auto &binding : account.bindings) {
-            const auto fields = QJsonDocument::fromJson(binding.toUtf8()).array();
+            const auto fields = JsonParse::localArray(binding.toUtf8());
             if (fields.size() != 4) continue;
             const auto host = fields[0].toString(), profile = fields[3].toString();
             profiles.append((host.isEmpty() ? tr("This computer") : host) + " / " + (profile.isEmpty() ? tr("Not recorded") : profile));

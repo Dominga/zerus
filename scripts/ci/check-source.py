@@ -21,6 +21,27 @@ CHILD_PROCESS_EXEMPT = {
     "tray/src/WindowsTerminalBackend.cpp": "the app links it only on Windows, where inheritStdioOnly() does nothing",
 }
 CHILD_PROCESS_SOURCES = re.compile(r"tray/src/.+\.(?:cpp|h|mm)")
+# The desktop parses JSON only through tray/src/JsonParse.h, which reports a
+# parse on the GUI thread. JsonParse::local() is the exception for small values
+# the tray wrote itself; these files may call it this many times. Owner
+# decision, 2026-10-27: the list only shrinks and is empty at the end of M2
+# (zerus-604d.2).
+JSON_PARSER = "tray/src/JsonParse.cpp"
+LOCAL_JSON_CALLS = {
+    "tray/src/AccountFilter.cpp": 1,       # binding keys the filter built
+    "tray/src/AttentionTracker.cpp": 1,    # notification tokens the tray encoded
+    "tray/src/ComposerDraftStore.cpp": 1,  # question draft identities
+    "tray/src/QuestionReply.h": 1,         # the user's own answers in a prompt; M2 prepares them with the row
+    "tray/src/RelayConfiguration.h": 1,    # private connector configuration, at most 64 KiB
+    "tray/src/SessionList.cpp": 3,         # drag data the list wrote
+    "tray/src/SessionsWindow.cpp": 1,      # pending task launches, at most 64 KiB
+    "tray/src/SettingsJson.cpp": 1,        # a changed QSettings value before warm() parsed it
+    "tray/src/TaskDrag.h": 1,              # drag data the board wrote
+    "tray/src/UpdateController.cpp": 3,    # the saved update catalog and installer record
+    "tray/src/WorktreesDialog.cpp": 1,     # review keys the dialog built
+}
+JSON_DECODER = re.compile(r"\b(?:QJsonDocument\s*::\s*fromJson|QCborValue\s*::\s*fromCbor)\b")
+LOCAL_JSON = re.compile(r"\bJsonParse\s*::\s*local(?:Object|Array)?\s*\(")
 SEE_CHILD_PROCESS = "(tray/src/ChildProcess.h)"
 LEXEME = re.compile(r"//|/\*|[\"']")
 LITERAL = {'"': re.compile(r'"(?:\\.|[^"\\\n])*"?'), "'": re.compile(r"'(?:\\.|[^'\\\n])*'?")}
@@ -249,6 +270,24 @@ def child_process_findings(files):
     return [f"{name}:{line}: {reason} {SEE_CHILD_PROCESS}." for name, line, reason in sorted(problems)]
 
 
+def json_parse_findings(files):
+    """"file:line: reason" for JSON parsed outside JsonParse.h or local() calls beyond LOCAL_JSON_CALLS."""
+    problems = []
+    for name, text in sorted(files.items()):
+        code = code_only(text)
+        if name != JSON_PARSER:
+            for match in JSON_DECODER.finditer(code):
+                line = code.count("\n", 0, match.start()) + 1
+                problems.append(f"{name}:{line}: parse JSON with JsonParse (tray/src/JsonParse.h), off the GUI thread")
+        calls = len(LOCAL_JSON.findall(code))
+        allowed = LOCAL_JSON_CALLS.get(name, 0)
+        if calls > allowed:
+            problems.append(f"{name}: {calls} JsonParse::local() calls, {allowed} allowed; parse off the GUI thread instead")
+        elif calls < allowed:
+            problems.append(f"{name}: lower LOCAL_JSON_CALLS to {calls} in scripts/ci/check-source.py")
+    return problems
+
+
 def main():
     paths = subprocess.check_output(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=ROOT).decode().split("\0")
     # First, so that a desktop child the unit tests would also find shows only its findings.
@@ -257,6 +296,10 @@ def main():
     if stale := sorted(set(CHILD_PROCESS_EXEMPT) - set(sources)):
         raise SystemExit(f"Remove the child process exemption of missing {', '.join(stale)}.")
     if problems := child_process_findings(sources):
+        raise SystemExit("\n".join(problems))
+    if stale := sorted(set(LOCAL_JSON_CALLS) - set(sources)):
+        raise SystemExit(f"Remove the local JSON allowance of missing {', '.join(stale)}.")
+    if problems := json_parse_findings(sources):
         raise SystemExit("\n".join(problems))
     subprocess.run([sys.executable, "-m", "unittest", "discover", "-q", "-s", "tests", "-p", "test_source_*.py"], cwd=ROOT, check=True)
     subprocess.run([sys.executable, str(ROOT / "scripts/check-source-privacy.py")], check=True)
@@ -316,7 +359,7 @@ def main():
             ast.parse(path.read_text(), filename=name)
         elif path.read_bytes().split(b"\n", 1)[0].startswith((b"#!/bin/sh", b"#!/usr/bin/env bash")) or path.name in {"PKGBUILD", "PKGBUILD.in"}:
             subprocess.run(["bash", "-n", str(path)], check=True)
-    print("Source syntax, privacy, child process and release version checks passed.")
+    print("Source syntax, privacy, child process, JSON parsing and release version checks passed.")
 
 
 if __name__ == "__main__":

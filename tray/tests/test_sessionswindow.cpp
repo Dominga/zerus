@@ -108,6 +108,7 @@
 #include "LaunchWarnings.h"
 #include "LocalSessionHost.h"
 #include "ProcessRunner.h"
+#include "SettingsJson.h"
 #include "SessionCreationController.h"
 #include "ProcessSettings.h"
 #include "QuestionNotificationSettings.h"
@@ -1894,6 +1895,11 @@ void TestSessionsWindow::rebuildKeepsProjectOrderAtScale()
         {"sessions", storedOrder ? QJsonArray::fromStringList(ordered) : QJsonArray{}}}}}});
     organization.markImported(box.host);
     QSettings().setValue("workspace/organization", QJsonDocument(organization.toJson()).toJson(QJsonDocument::Compact));
+    // As at desktop startup (TrayAgent), the large saved layout is parsed off the GUI thread first.
+    QObject warming; bool warmed = false;
+    SettingsJson::warm(&warming, {QStringLiteral("workspace/organization")});
+    ProcessRunner::post(&warming, [] { return true; }, [&warmed](bool) { warmed = true; });
+    QTRY_VERIFY(warmed);
     FleetState state; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(program()); keepDetailsPollsOut(window); window.show();
     QElapsedTimer elapsed; elapsed.start(); window.setFleet(state);

@@ -31,6 +31,9 @@ class TestProcessRunner : public QObject {
 private slots:
     void cleanup() { ProcessRunner::setLaunchObserver({}); }
     void launchesOnWorkerAndReportsOnOwnerThread();
+    void preparesOnPreparationThreadAndAppliesOnOwnerThread();
+    void preparedAndPlainResultsKeepCompletionOrder();
+    void destroyedOwnerDropsPreparedValue();
     void capturesOutputErrorAndExitCode();
     void capsCombinedOutputWhileDraining();
     void outputCapKillsOnlyTheDirectChild();
@@ -183,6 +186,57 @@ void TestProcessRunner::launchesOnWorkerAndReportsOnOwnerThread()
     QCOMPARE(result.exitStatus, QProcess::NormalExit);
     QCOMPARE(result.exitCode, 0);
     QCOMPARE(result.standardOutput, QByteArray("hello"));
+}
+
+void TestProcessRunner::preparesOnPreparationThreadAndAppliesOnOwnerThread()
+{
+    QObject owner; std::atomic<QThread *> prepareThread{nullptr}; QThread *applyThread = nullptr;
+    int applied = 0; QByteArray value;
+    ProcessRunner::run(child(QStringLiteral("printf hello"), {"out", "hello"}), &owner,
+        [&prepareThread](ProcessRunner::Result result) {
+            prepareThread = QThread::currentThread();
+            return ProcessRunner::isPreparationThread() ? result.standardOutput.toUpper() : QByteArray();
+        },
+        [&](QByteArray prepared) { ++applied; applyThread = QThread::currentThread(); value = prepared; });
+    QTRY_COMPARE(applied, 1);
+    QCOMPARE(prepareThread.load(), ProcessRunner::preparationThread());
+    QVERIFY(prepareThread.load() != QThread::currentThread());
+    QVERIFY(prepareThread.load() != ProcessRunner::workerThread());
+    QVERIFY(!ProcessRunner::isPreparationThread());
+    QCOMPARE(applyThread, QThread::currentThread());
+    QCOMPARE(value, QByteArray("HELLO"));
+}
+
+void TestProcessRunner::preparedAndPlainResultsKeepCompletionOrder()
+{
+    // The first child finishes first but prepares slowly. The second, plain
+    // result still reaches its owner after it: one serial thread passes both.
+    QObject owner; QStringList order;
+    ProcessRunner::run(child(QStringLiteral("printf first"), {"out", "first"}), &owner,
+        [](ProcessRunner::Result result) { QThread::msleep(400); return result.standardOutput; },
+        [&order](QByteArray prepared) { order << QString::fromLatin1(prepared); });
+    ProcessRunner::run(child(QStringLiteral("sleep 0.1; printf second"), {"sleep", "0.1", "out", "second"}), &owner,
+        [&order](const ProcessRunner::Result &result) { order << QString::fromLatin1(result.standardOutput); });
+    QTRY_COMPARE(order.size(), 2);
+    QCOMPARE(order, QStringList({QStringLiteral("first"), QStringLiteral("second")}));
+}
+
+void TestProcessRunner::destroyedOwnerDropsPreparedValue()
+{
+    auto owner = std::make_unique<QObject>(); std::atomic<bool> preparing{false}, release{false}, prepared{false};
+    int applied = 0;
+    ProcessRunner::run(child(QStringLiteral("printf done"), {"out", "done"}), owner.get(),
+        [&](ProcessRunner::Result result) {
+            preparing = true;
+            while (!release) QThread::msleep(5);
+            prepared = true; return result.standardOutput;
+        },
+        [&applied](QByteArray) { ++applied; });
+    QTRY_VERIFY(preparing.load());
+    owner.reset(); release = true;
+    QTRY_VERIFY(prepared.load());
+    QTest::qWait(200);
+    QCOMPARE(applied, 0);
 }
 
 void TestProcessRunner::capturesOutputErrorAndExitCode()

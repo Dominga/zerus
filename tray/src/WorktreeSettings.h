@@ -1,4 +1,5 @@
 #pragma once
+#include "JsonParse.h"
 #include "ProcessRunner.h"
 #include <QCheckBox>
 #include <QComboBox>
@@ -67,9 +68,10 @@ private:
         ProcessRunner::run(command({"--help"}),this,[this,action,policy](const ProcessRunner::Result &probe){
             if(!success(probe)||!probe.standardOutput.contains("worktree-maintenance-v1")){fail(tr("This computer is unavailable or needs an updated hgs CLI for cleanup settings."));return;}
             auto r=command({"worktrees","policy",action,"--json"});if(action=="set")r.input=QJsonDocument(policy).toJson(QJsonDocument::Compact);
-            ProcessRunner::run(std::move(r),this,[this,action](const ProcessRunner::Result &result){
-                if(!success(result)){fail(action=="set"?tr("Save was not confirmed. Refresh before changing settings again."):tr("Could not read cleanup settings."));return;}
-                const auto object=QJsonDocument::fromJson(result.standardOutput).object();const auto p=object.value("policy").toObject();
+            ProcessRunner::run(std::move(r),this,[](ProcessRunner::Result result){return std::make_pair(success(result),success(result)?JsonParse::object(result.standardOutput):QJsonObject());},
+                               [this,action](const std::pair<bool,QJsonObject> &reply){
+                if(!reply.first){fail(action=="set"?tr("Save was not confirmed. Refresh before changing settings again."):tr("Could not read cleanup settings."));return;}
+                const auto &object=reply.second;const auto p=object.value("policy").toObject();
                 bool valid=object.value("schema").toInt()==1&&p.value("version").toInt()==1&&p.value("revision").isDouble()&&p.value("grace_hours").toInt()>=1&&p.value("grace_hours").toInt()<=8760;
                 for(const auto *key:{"enabled","after_session","unused_integrated","missing"})valid=valid&&p.value(QLatin1String(key)).isBool();
                 if(!valid){fail(tr("Computer returned invalid cleanup settings."));return;}

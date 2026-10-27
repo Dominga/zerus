@@ -1,4 +1,6 @@
 #pragma once
+#include "ProcessRunner.h"
+#include "JsonParse.h"
 #include "ChildProcess.h"
 #include "RelayConfiguration.h"
 #include <QApplication>
@@ -266,9 +268,13 @@ private:
         for(const auto &key:{"HGS_SESSION","HGS_RUN_ID","HGS_EXPECTED_ID","HGS_AGENT","HGS_HOST_PANE","HGS_HOST_SESSION","TMUX","TMUX_PANE"})environment.remove(QLatin1String(key));
         p->setProcessEnvironment(environment);p->setProcessChannelMode(QProcess::SeparateChannels);
         auto *deadline=new QTimer(p);deadline->setSingleShot(true);auto output=std::make_shared<QByteArray>();
-        auto finish=[this,p,deadline,output,action,payload,done](bool success){
-            if(process!=p)return;deadline->stop();process=nullptr;
-            const auto bytes=*output+p->readAllStandardOutput();const auto doc=QJsonDocument::fromJson(bytes);const auto result=doc.object();
+        auto finishing=std::make_shared<bool>(false);
+        auto finish=[this,p,deadline,output,action,payload,done,finishing](bool success){
+            if(process!=p||*finishing)return;*finishing=true;deadline->stop();
+            const auto bytes=*output+p->readAllStandardOutput();
+            // The reply is parsed off the GUI thread; this request stays current until then.
+            ProcessRunner::post(this,[bytes]{return JsonParse::parse(bytes);},[this,p,action,payload,done,success,bytes](const QJsonDocument &doc){
+            process=nullptr;const auto result=doc.object();
             if(!success||!doc.isObject()||bytes.size()>65536||!confirmed(action,result,payload)){
                 enrollmentPoll->stop();
                 continueEnrollment=false;
@@ -290,7 +296,7 @@ private:
                 }
                 else if(done)done(result);
             }
-            p->deleteLater();
+            p->deleteLater();});
         };
         connect(deadline,&QTimer::timeout,p,[p]{p->kill();});
         connect(p,&QProcess::readyReadStandardOutput,p,[p,output]{*output+=p->readAllStandardOutput();if(output->size()>65536)p->kill();});

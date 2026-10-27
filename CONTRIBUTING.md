@@ -70,6 +70,8 @@ stable release, and raising them is routine maintenance. Run
 The replica crate has its own lockfile: run
 `cargo +1.99.1 test --locked --manifest-path crates/replica/Cargo.toml`; its
 golden vectors must keep decoding, and `ZERUS_BLESS=1` only adds new ones.
+The event stream's frame crate has one too: run
+`cargo +1.99.1 test --locked --manifest-path crates/watch-protocol/Cargo.toml --target-dir target/watch-protocol`.
 
 On Linux, the three worktree modules run through `scripts/ci/worktree-tests.py`
 in a fresh PID/mount namespace, including their live process blockers and private
@@ -109,6 +111,16 @@ parameter there, in the function that creates it (for a member, a constructor of
 class) and before it starts.
 `CHILD_PROCESS_EXEMPT` in the script names the files that may start children
 otherwise, each with its reason.
+
+The desktop parses JSON only through [JsonParse.h](tray/src/JsonParse.h), off
+the GUI thread: `hgs` output in a `ProcessRunner` prepare step, other data
+through `ProcessRunner::post` or an existing worker, and QSettings values
+through `SettingsJson`. `check-source.py` rejects `QJsonDocument::fromJson` in
+`tray/src` outside `JsonParse.cpp`, and lists the files that may still call
+`JsonParse::local()` on the GUI thread and how often; that list only shrinks.
+Every Qt suite runs with `ZERUS_GUI_THREAD_CHECKS=fatal`, so a parse on the GUI
+thread aborts the test with its call site. A GUI suite that checks a parser
+directly calls it through `offGuiThread()` (`tray/tests/support/OffGuiThread.h`).
 
 A change to tmux or `ps` call sites must keep Unix behaviour unchanged: compare a
 [tmux census](docs/ci-and-aur.md#unix-tmux-census) of the branch with one of main.

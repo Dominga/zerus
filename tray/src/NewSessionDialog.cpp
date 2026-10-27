@@ -1,3 +1,4 @@
+#include "SettingsJson.h"
 #include "NewSessionDialog.h"
 #include "RepositoryClone.h"
 #include "WorkspaceIcons.h"
@@ -470,7 +471,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
         m_creationCatalog["worktrees"]=entries;m_verifiedWorktrees[host()+'\n'+path]=m_creationCatalog;
         m_autoPreferred=false;selectPath(path);launch(path,m_creationFolder);
     });
-    setGroups(SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object()),project);
+    setGroups(SessionOrganization(SettingsJson::object("workspace/organization")),project);
 }
 void NewSessionDialog::reject(){if(!m_creation&&(!m_repository||!m_repository->cloning())){m_cloneLaunchPending=false;if(m_repository)m_repository->cancelCheck();QDialog::reject();}}
 QString NewSessionDialog::host() const {return m_machine->currentData().toString();}
@@ -845,7 +846,7 @@ void NewSessionDialog::launch(const QString &target,const QString &addFolder)
     // The next dialog starts with this agent and, per machine and agent, this account.
     settings.setValue("workspace/launchAgent",agent());
     if(const auto selectedAccount=account();!selectedAccount.isEmpty()){
-        auto accounts=QJsonDocument::fromJson(settings.value("workspace/launchAccounts").toByteArray()).object();
+        auto accounts=SettingsJson::object("workspace/launchAccounts");
         auto machine=accounts.value(host()).toObject();machine[agent()]=selectedAccount;accounts[host()]=machine;
         settings.setValue("workspace/launchAccounts",QJsonDocument(accounts).toJson(QJsonDocument::Compact));
     }
@@ -893,7 +894,7 @@ void NewSessionDialog::updateAccounts()
         }
         m_accountGroups=AccountCatalog::group(localProfiles);
     }
-    const auto remembered=QJsonDocument::fromJson(QSettings().value("workspace/launchAccounts").toByteArray()).object().value(host()).toObject();
+    const auto remembered=SettingsJson::object("workspace/launchAccounts").value(host()).toObject();
     const auto current=m_account->currentItem()?m_account->currentItem()->data(ProfileRole).toJsonObject():QJsonObject();
     const auto currentId=current["host"].toString()==host()&&current["provider"]==m_preferredAgent?current["id"].toString():QString();
     QList<QJsonObject> profiles;QList<QJsonArray> members;
@@ -918,7 +919,7 @@ void NewSessionDialog::updateAccounts()
     const bool dark=m_account->property("hgsDark").toBool();
     const QColor iconColor(dark?"#a1adbb":"#647386");
     int defaultIndex=-1,lastIndex=-1,explicitIndex=-1,currentIndex=-1;
-    const auto lastAccount=QJsonDocument::fromJson(QSettings().value("workspace/launchAccounts").toByteArray()).object()
+    const auto lastAccount=SettingsJson::object("workspace/launchAccounts")
         .value(host()).toObject().value(m_preferredAgent).toString();
     for(int row=0;row<profiles.size();++row){
         const auto profile=profiles[row];const auto provider=profile["provider"].toString(),id=profile["id"].toString();

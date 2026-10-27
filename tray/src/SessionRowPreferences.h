@@ -1,7 +1,7 @@
 #pragma once
 
 #include "HgsClient.h"
-#include <QCryptographicHash>
+#include "IdentityHash.h"
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QSet>
@@ -21,7 +21,7 @@ public:
         const QJsonArray identity = session.conversationId.isEmpty() || fallback
             ? QJsonArray{host, session.cmd, session.archiveId, session.name, session.created}
             : QJsonArray{host, session.cmd, session.archiveId, session.conversationId};
-        return QCryptographicHash::hash(QJsonDocument(identity).toJson(QJsonDocument::Compact), QCryptographicHash::Sha256);
+        return IdentityHash::sha256(QJsonDocument(identity).toJson(QJsonDocument::Compact));
     }
     bool collapsed(const QString &host, const SessionInfo &session) const {
         return m_collapsed.contains(key(host, session));

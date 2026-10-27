@@ -1,4 +1,5 @@
 #pragma once
+#include "JsonParse.h"
 #include "ComposerDraftStore.h"
 #include <QCryptographicHash>
 #include <QDir>
@@ -23,7 +24,7 @@ inline Request read(const QString &file) {
     const QFileInfo info(file); QFile input(file);
     if (info.isSymLink() || !info.isFile() || info.size() > 32 * 1024 * 1024 || !input.open(QIODevice::ReadOnly))
         return {{}, QObject::tr("The original message recovery snapshot is unavailable. This check sent nothing.")};
-    const auto record = QJsonDocument::fromJson(input.readAll()).object();
+    const auto record = JsonParse::parse(input.readAll()).object();
     if (QUuid(record.value("id").toString()).isNull() || !record.value("intent").isObject())
         return {{}, QObject::tr("The message recovery snapshot is invalid. Nothing was submitted.")};
     return {record, {}};

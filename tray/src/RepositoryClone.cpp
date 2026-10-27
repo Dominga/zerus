@@ -1,3 +1,4 @@
+#include "SettingsJson.h"
 #include "RepositoryClone.h"
 #include "HgsClient.h"
 #include <QJsonArray>
@@ -29,7 +30,7 @@ RepositoryClone::RepositoryClone(HgsClient *client,const QString &host,MachinePl
 {
     connect(m_client,&HgsClient::repositoryFinished,this,&RepositoryClone::finish);
     m_parent=QSettings().value(settingsKey()+"/parent","~").toString();
-    const auto saved=QJsonDocument::fromJson(QSettings().value(settingsKey()+"/pending").toByteArray()).object();
+    const auto saved=SettingsJson::object(settingsKey()+"/pending");
     if(!saved.isEmpty()){
         m_url=saved["url"].toString();m_parent=saved["parent"].toString();m_name=saved["name"].toString();
         m_token=saved["request_id"].toString();m_expected=saved["path"].toString();m_uncertain=true;

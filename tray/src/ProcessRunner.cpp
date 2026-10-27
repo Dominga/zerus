@@ -281,13 +281,16 @@ struct Job {
     QTimer *timer = nullptr;
     bool reported = false;
     Result result;
+    std::function<Prepared(Result)> prepare;
 };
 
 struct Pending {
     QPointer<QObject> owner;
-    std::function<void(const Result &)> done;
+    std::function<void(Prepared)> apply;
     QMetaObject::Connection destroyed;
 };
+
+std::atomic<QThread *> s_preparationThread{nullptr};
 
 class Runner {
 public:
@@ -297,18 +300,38 @@ public:
         m_worker = new QObject; m_worker->moveToThread(&m_thread);
         QObject::connect(&m_thread, &QThread::finished, m_worker, &QObject::deleteLater);
         m_thread.start();
+        // One serial thread keeps results in the order their children finished.
+        m_prepareThread.setObjectName(QStringLiteral("hgs-prepare"));
+        m_preparer = new QObject; m_preparer->moveToThread(&m_prepareThread);
+        QObject::connect(&m_prepareThread, &QThread::finished, m_preparer, &QObject::deleteLater);
+        s_preparationThread = &m_prepareThread;
+        m_prepareThread.start();
     }
-    void run(Request request, QObject *owner, std::function<void(const Result &)> done)
+    void run(Request request, QObject *owner, std::function<Prepared(Result)> prepare, std::function<void(Prepared)> apply)
     {
         const quint64 id = ++m_next;
-        Pending pending{owner, std::move(done), {}};
+        Pending pending{owner, std::move(apply), {}};
         // Owner destruction kills the child synchronously, as the old per-object
         // QProcess children did, so fixtures and sockets are not used afterwards.
         pending.destroyed = QObject::connect(owner, &QObject::destroyed, &m_front, [this, id] { cancel(id); },
                                              Qt::DirectConnection);
         m_pending.insert(id, std::move(pending));
-        QMetaObject::invokeMethod(m_worker, [this, id, request = std::move(request)]() mutable { start(id, std::move(request)); },
-                                  Qt::QueuedConnection);
+        QMetaObject::invokeMethod(m_worker, [this, id, request = std::move(request), prepare = std::move(prepare)]() mutable {
+            start(id, std::move(request), std::move(prepare));
+        }, Qt::QueuedConnection);
+    }
+    void post(QObject *owner, std::function<Prepared()> prepare, std::function<void(Prepared)> apply)
+    {
+        const quint64 id = ++m_next;
+        Pending pending{owner, std::move(apply), {}};
+        pending.destroyed = QObject::connect(owner, &QObject::destroyed, &m_front, [this, id] { m_pending.remove(id); },
+                                             Qt::DirectConnection);
+        m_pending.insert(id, std::move(pending));
+        QMetaObject::invokeMethod(m_preparer, [this, id, prepare = std::move(prepare)]() mutable {
+            Prepared value = prepare();
+            QMetaObject::invokeMethod(&m_front, [this, id, value = std::move(value)]() mutable { deliver(id, std::move(value)); },
+                                      Qt::QueuedConnection);
+        }, Qt::QueuedConnection);
     }
     void stop()
     {
@@ -321,14 +344,18 @@ public:
             qDeleteAll(m_jobs); m_jobs.clear();
         }, Qt::BlockingQueuedConnection);
         m_thread.quit(); m_thread.wait();
+        // Preparations already queued only compute values; nothing applies them.
+        m_prepareThread.quit(); m_prepareThread.wait();
+        s_preparationThread = nullptr;
     }
     QThread *thread() { return &m_thread; }
+    QThread *preparationThread() { return &m_prepareThread; }
     void setObserver(std::function<void()> observer) { QMutexLocker lock(&m_observerMutex); m_observer = std::move(observer); }
 
 private:
-    void start(quint64 id, Request request)   // worker thread
+    void start(quint64 id, Request request, std::function<Prepared(Result)> prepare)   // worker thread
     {
-        auto *job = new Job; m_jobs.insert(id, job);
+        auto *job = new Job; m_jobs.insert(id, job); job->prepare = std::move(prepare);
         auto *process = job->process = new Child(m_worker);
         process->setProgram(request.program); process->setArguments(request.arguments);
         if (request.environment) process->setProcessEnvironment(*request.environment);
@@ -411,7 +438,11 @@ private:
         if (job->reported) return;
         job->reported = true;
         Result result = outcome == Result::TimedOut ? Result{} : job->result; result.outcome = outcome;
-        QMetaObject::invokeMethod(&m_front, [this, id, result = std::move(result)] { deliver(id, result); }, Qt::QueuedConnection);
+        QMetaObject::invokeMethod(m_preparer, [this, id, prepare = std::move(job->prepare), result = std::move(result)]() mutable {
+            Prepared value = prepare(std::move(result));
+            QMetaObject::invokeMethod(&m_front, [this, id, value = std::move(value)]() mutable { deliver(id, std::move(value)); },
+                                      Qt::QueuedConnection);
+        }, Qt::QueuedConnection);
     }
     void finish(quint64 id, Job *job)   // worker thread
     {
@@ -428,13 +459,13 @@ private:
         if (process->state() != QProcess::NotRunning) { process->kill(); process->waitForFinished(1000); }
         delete process;
     }
-    void deliver(quint64 id, const Result &result)   // application thread
+    void deliver(quint64 id, Prepared value)   // application thread
     {
         auto it = m_pending.find(id);
         if (it == m_pending.end()) return;
         Pending pending = std::move(*it); m_pending.erase(it);
         QObject::disconnect(pending.destroyed);
-        if (pending.owner) pending.done(result);
+        if (pending.owner) pending.apply(std::move(value));
     }
     void cancel(quint64 id)   // application thread, while the owner is destroyed
     {
@@ -446,8 +477,8 @@ private:
         }, Qt::BlockingQueuedConnection);
     }
 
-    QThread m_thread;
-    QObject *m_worker = nullptr;
+    QThread m_thread, m_prepareThread;
+    QObject *m_worker = nullptr, *m_preparer = nullptr;
     QObject m_front;   // receives results on the application thread
     QHash<quint64, Pending> m_pending;
     QHash<quint64, Job *> m_jobs;
@@ -479,12 +510,26 @@ Runner *runner()
 
 }
 
-void run(Request request, QObject *owner, std::function<void(const Result &)> done)
+void runPrepared(Request request, QObject *owner, std::function<Prepared(Result)> prepare, std::function<void(Prepared)> apply)
 {
     Q_ASSERT(owner && owner->thread() == QThread::currentThread());
     // After the application's post routines nothing can receive a result.
-    if (auto *instance = runner()) instance->run(std::move(request), owner, std::move(done));
+    if (auto *instance = runner()) instance->run(std::move(request), owner, std::move(prepare), std::move(apply));
 }
+
+void run(Request request, QObject *owner, std::function<void(const Result &)> done)
+{
+    runPrepared(std::move(request), owner, [](Result result) -> Prepared { return std::make_shared<Result>(std::move(result)); },
+                [done = std::move(done)](Prepared value) { done(*std::static_pointer_cast<Result>(value)); });
+}
+
+void postPrepared(QObject *owner, std::function<Prepared()> prepare, std::function<void(Prepared)> apply)
+{
+    Q_ASSERT(owner && owner->thread() == QThread::currentThread());
+    if (auto *instance = runner()) instance->post(owner, std::move(prepare), std::move(apply));
+}
+
+bool isPreparationThread() { return QThread::currentThread() == s_preparationThread.load(); }
 
 #ifdef Q_OS_MACOS
 const char *launchBackend() { return "posix_spawn"; }
@@ -493,6 +538,7 @@ const char *launchBackend() { return "QProcess"; }
 #endif
 
 QThread *workerThread() { auto *instance = runner(); return instance ? instance->thread() : nullptr; }
+QThread *preparationThread() { auto *instance = runner(); return instance ? instance->preparationThread() : nullptr; }
 
 void setLaunchObserver(std::function<void()> observer) { if (auto *instance = runner()) instance->setObserver(std::move(observer)); }
 

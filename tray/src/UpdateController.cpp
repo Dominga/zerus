@@ -1,4 +1,6 @@
 #include "UpdateController.h"
+#include "JsonParse.h"
+#include "ProcessRunner.h"
 #include "ChildProcess.h"
 #include <QCoreApplication>
 #include <QDateTime>
@@ -85,8 +87,8 @@ QHash<QString,QString> bundleValues(const QString &path){
 DesktopUpdateFeed parseDev(const QByteArray &data){
     DesktopUpdateFeed result;
     if(data.size()>256*1024)return result;
-    QJsonParseError error;auto doc=QJsonDocument::fromJson(data,&error);
-    if(error.error!=QJsonParseError::NoError||!doc.isObject())return result;
+    QString error;auto doc=JsonParse::local(data,&error);
+    if(!error.isEmpty()||!doc.isObject())return result;
     auto raw=doc.object();
     if(!integer(raw["schemaVersion"],2,2)||raw["product"]!="zerus"||raw["platform"]!="desktop"||raw["channel"]!="dev"||raw["channelTag"]!="dev"||raw.contains("sourceDirty")||!integer(raw["buildId"],1,9007199254740991LL)||!integer(raw["buildNumber"],1,9007199254740991LL))return result;
     auto id=raw["buildId"].toInteger();auto commit=raw["sourceCommit"].toString();auto version=raw["versionName"].toString();
@@ -172,7 +174,7 @@ DesktopUpdateFeed UpdateController::parseFeed(const QByteArray &data,const QStri
     if(channel=="dev")return parseDev(data);
     DesktopUpdateFeed result;
     if(data.size()>256*1024||!(channel=="stable"||channel=="nightly"))return result;
-    QJsonParseError error;auto doc=QJsonDocument::fromJson(data,&error);if(error.error!=QJsonParseError::NoError||!doc.isObject())return result;
+    QString error;auto doc=JsonParse::local(data,&error);if(!error.isEmpty()||!doc.isObject())return result;
     auto raw=doc.object();
     if(!integer(raw["schemaVersion"],1,1)||raw["product"]!="zerus"||raw["platform"]!="desktop"||raw["channel"]!=channel||raw.contains("sourceDirty")||!integer(raw["releaseId"],1,9007199254740991LL))return result;
     QString version=raw["versionName"].toString(),release=raw["releaseUrl"].toString();
@@ -308,8 +310,8 @@ QString UpdateController::wingetPackage(const QString &executable){
 }
 bool UpdateController::installerRecord(const QByteArray &data){
     if(data.isEmpty()||data.size()>installerRecordLimit)return false;
-    QJsonParseError error;const auto document=QJsonDocument::fromJson(data,&error);
-    if(error.error!=QJsonParseError::NoError||!document.isObject())return false;
+    QString error;const auto document=JsonParse::local(data,&error);
+    if(!error.isEmpty()||!document.isObject())return false;
     const auto record=document.object();
     return integer(record["schema"],1,1)&&record["kind"]=="installer"&&record["product"]=="Zerus";
 }
@@ -591,12 +593,17 @@ void UpdateController::startCheck(bool automatic){
     auto *manager=m_fetch?nullptr:new QNetworkAccessManager(this);QNetworkRequest request(QUrl("https://zerus.dev/updates/"+QString(selected=="dev"?"v2":"v1")+"/desktop/"+selected+".json"));request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,QNetworkRequest::ManualRedirectPolicy);request.setTransferTimeout(10000);
     auto *reply=m_fetch?m_fetch(request):manager->get(request);m_activeReply=reply;auto data=std::make_shared<QByteArray>();auto oversized=std::make_shared<bool>(false);auto *timer=new QTimer(reply);timer->setSingleShot(true);connect(timer,&QTimer::timeout,reply,&QNetworkReply::abort);timer->start(10000);
     connect(reply,&QNetworkReply::readyRead,this,[reply,data,oversized]{auto bytes=reply->readAll();if(data->size()+bytes.size()>256*1024){*oversized=true;reply->abort();}else *data+=bytes;});
-    connect(reply,&QNetworkReply::finished,this,[this,reply,manager,timer,data,oversized,generation,selected]{timer->stop();if(generation==m_checkGeneration){
-        m_busy=false;m_activeReply=nullptr;bool mayNotify=!m_automaticInFlight||automaticChecks();m_automaticInFlight=false;DesktopUpdateFeed verified;if(!*oversized&&reply->error()==QNetworkReply::NoError&&reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()==200)verified=parseFeed(*data,selected);
+    connect(reply,&QNetworkReply::finished,this,[this,reply,manager,timer,data,oversized,generation,selected]{timer->stop();
+        // The downloaded catalog is parsed off the GUI thread (ProcessRunner.h).
+        const bool fetched=generation==m_checkGeneration&&!*oversized&&reply->error()==QNetworkReply::NoError&&reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()==200;
+        if(generation==m_checkGeneration)m_activeReply=nullptr;
+        reply->deleteLater();if(manager)manager->deleteLater();
+        ProcessRunner::post(this,[fetched,bytes=*data,selected]{return fetched?parseFeed(bytes,selected):DesktopUpdateFeed{};},[this,data,generation,selected](const DesktopUpdateFeed &verified){if(generation==m_checkGeneration){
+        m_busy=false;m_activeReply=nullptr;bool mayNotify=!m_automaticInFlight||automaticChecks();m_automaticInFlight=false;
         if(verified.valid){m_freshForNotification=mayNotify;m_cached=false;m_available=false;m_feed=verified;m_lastSuccess=QDateTime::currentSecsSinceEpoch();QSettings settings;settings.setValue("updates/catalog/"+selected,*data);settings.setValue("updates/lastSuccess/"+selected,m_lastSuccess);m_notice="Last successful check: "+QDateTime::fromSecsSinceEpoch(m_lastSuccess).toString(Qt::ISODate)+".";}
         else {m_error=tr("Check failed. Try again later.");m_cached=m_feed.valid;m_notice=m_feed.valid?"Update check failed. Showing the last verified catalog ("+QDateTime::fromSecsSinceEpoch(m_lastSuccess).toString(Qt::ISODate)+").":"Update check failed or the catalog was invalid. Try again later.";}
         present(m_feed.valid?comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false):QString());emit changed();compare();
-    }reply->deleteLater();if(manager)manager->deleteLater();});
+    }});});
 }
 void UpdateController::completeComparison(bool newer,const QString &message){
     m_available=newer;present(message);emit changed();

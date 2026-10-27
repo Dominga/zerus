@@ -1,3 +1,4 @@
+#include "JsonParse.h"
 #include "AttentionTracker.h"
 #include "SessionPresentation.h"
 #include "SessionNotifications.h"
@@ -269,7 +270,7 @@ void AttentionTracker::deliveryFailed(const QString &token, qint64 now)
 QJsonObject AttentionTracker::target(const QString &token)
 {
     if (token.size() > 8192) return {};
-    const auto result = QJsonDocument::fromJson(QByteArray::fromBase64(token.toLatin1(), QByteArray::Base64UrlEncoding)).object();
+    const auto result = JsonParse::localObject(QByteArray::fromBase64(token.toLatin1(), QByteArray::Base64UrlEncoding));
     if (!result.value("host").isString() || result.value("name").toString().isEmpty()
         || result.value("notice").toString().isEmpty()) return {};
     return result;

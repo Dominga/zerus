@@ -1,3 +1,4 @@
+#include "JsonParse.h"
 #include "ComposerDraftStore.h"
 
 #include <QCryptographicHash>
@@ -138,9 +139,13 @@ void ComposerDraftStore::saveAsync(const QString &key, const ComposerDraft &draf
         owner, std::move(done));
 }
 
+// The blocking fixture API reads on the writer thread too, after every queued
+// write, so no draft file is parsed on the GUI thread.
 ComposerDraft ComposerDraftStore::load(const QString &key) const
 {
-    flushWrites(); return loadDirect(key);
+    const auto store = *this; ComposerDraft draft;
+    DraftWrites::instance()->sync([&] { draft = store.loadDirect(key); return WriteResult{true, {}}; });
+    return draft;
 }
 
 ComposerDraft ComposerDraftStore::loadDirect(const QString &key) const
@@ -152,9 +157,9 @@ ComposerDraft ComposerDraftStore::loadDirect(const QString &key) const
         draft.storageError = QObject::tr("Could not restore this draft completely. Saved files have been kept locally.");
     };
     if (!file.open(QIODevice::ReadOnly)) { invalid(); return draft; }
-    QJsonParseError error;
-    const auto object = QJsonDocument::fromJson(file.readAll(), &error).object();
-    if (error.error != QJsonParseError::NoError || object.value("version").toInt() != 1 || object.value("key").toString() != key) {
+    QString error;
+    const auto object = JsonParse::parse(file.readAll(), &error).object();
+    if (!error.isEmpty() || object.value("version").toInt() != 1 || object.value("key").toString() != key) {
         invalid(); return draft;
     }
     draft.text = object.value("text").toString();
@@ -218,7 +223,9 @@ bool ComposerDraftStore::saveDirect(const QString &key, ComposerDraft &draft) co
 
 QStringList ComposerDraftStore::keys() const
 {
-    flushWrites(); auto result = indexDirect().keys(); result.sort(); return result;
+    const auto store = *this; QStringList result;
+    DraftWrites::instance()->sync([&] { result = store.indexDirect().keys(); return WriteResult{true, {}}; });
+    result.sort(); return result;
 }
 
 QHash<QString, ComposerDraftSummary> ComposerDraftStore::indexDirect() const
@@ -227,7 +234,7 @@ QHash<QString, ComposerDraftSummary> ComposerDraftStore::indexDirect() const
     for (const auto &name : QDir(root()).entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
         QFile file(root() + '/' + name + "/draft.json");
         if (!file.open(QIODevice::ReadOnly)) continue;
-        const auto object = QJsonDocument::fromJson(file.readAll()).object();
+        const auto object = JsonParse::parse(file.readAll()).object();
         const auto key = object.value("key").toString();
         const auto text = object.value("text").toString();
         const auto attachments = object.value("attachments").toArray();
@@ -260,7 +267,7 @@ ComposerDraftOwner ComposerDraftStore::owner(const QString &key)
     }
     if (key.startsWith(Question)) {
         // A question identity is a compact JSON array, so it holds no line break.
-        const auto identity = QJsonDocument::fromJson(key.mid(Question.size()).section('\n', 0, 0).toUtf8()).array();
+        const auto identity = JsonParse::localArray(key.mid(Question.size()).section('\n', 0, 0).toUtf8());
         auto result = owner(identity.at(0).toString());
         if (result.kind != ComposerDraftOwner::Kind::Unknown) { result.kind = ComposerDraftOwner::Kind::Question; return result; }
     }
@@ -328,11 +335,11 @@ void ComposerDraftStore::renameAsync(const QString &oldKey, const QString &newKe
 
 QString ComposerDraftStore::label(const QString &key) const
 {
-    flushWrites();
-    QFile file(folder(key) + "/draft.json");
-    if (file.open(QIODevice::ReadOnly)) {
-        const auto label = QJsonDocument::fromJson(file.readAll()).object().value("label").toString();
-        if (!label.isEmpty()) return label;
-    }
-    return QString(key).replace('\n', " / ");
+    const auto path = folder(key) + "/draft.json"; QString label;
+    DraftWrites::instance()->sync([&] {
+        QFile file(path);
+        if (file.open(QIODevice::ReadOnly)) label = JsonParse::parse(file.readAll()).object().value("label").toString();
+        return WriteResult{true, {}};
+    });
+    return label.isEmpty() ? QString(key).replace('\n', " / ") : label;
 }

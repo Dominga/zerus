@@ -1023,6 +1023,49 @@ answered; a denial cannot carry an explanation.
     the integrated build.
   Owner: yes, with the Pipelines tab and the task's folder for stages.
 
+- **U37. How long a task has worked, on its node (owner, 2026-10-28).**
+  A graph node, a Board card and a Layers row show the task's working time
+  in small text right after its activity label (U25 part 5), in the same
+  color and size: while it works, the time since the current attempt
+  started, ticking once a minute ("12m", "1h 05m"); once it is done, the
+  sum of its attempts' working spans and, with U36, its stage spans. Time
+  waiting for dependencies, a free member or the lead is not counted. The
+  tooltip breaks it down per attempt and stage, with the waits named
+  separately. Status gives every task a `timing` object computed on the
+  server (worked seconds, running since, waits), so the desktop, Android
+  and the profile of U38 read one number. One timer for the whole view,
+  no render per node. Owner: yes.
+
+- **U38. A pipeline profile after the work (owner, 2026-10-28).** When a
+  task, a phase or the plan is done, the owner and the lead see where the
+  time and the tokens went and what was lost.
+  - **Spans.** Each task's timeline is a list of spans computed from its
+    attempts and events: waiting for dependencies, waiting for a free
+    member, delivery and the start delay (A1), work, blocked on a question
+    or a permission (who answered, how long), Background and Build (U30),
+    waiting for the lead's decision, each U36 stage and round, rework
+    (rejected attempts and returned rounds), a held folder, no report or a
+    stop. Past phases get the same spans from the timestamps attempts
+    already keep; what was never recorded shows as unknown, never guessed.
+  - **Tokens.** Each attempt and stage gets the tokens and cost its member's
+    session spent inside the span (the native accounting of usage.rs and
+    the analytics measures `tokens`, `cost`, `work_ms`), per provider and
+    model; a provider without counters shows unknown.
+  - **Losses.** `hgs team profile` (a phase, a task or the plan; JSON,
+    bounded pages) ranks the losses by time and by tokens: rework and its
+    share of the task's tokens, waits on the lead, permission waits, idle
+    members while tasks were open, blocked chains, long test runs, merges
+    and conflicts; the planned critical path against the real one; per
+    member, role and model the utilization and tokens per accepted task.
+  - **Profile view.** The team workspace gains Profile beside Graph, Board
+    and Layers: a timeline per member lane with the spans colored by kind,
+    the real critical path marked, the top losses as a list linked to
+    their tasks and spans, a tokens bar per task, and a compare of two
+    phases. The Graph and Board can overlay the profile as a heat tint.
+  - **Use.** The lead's phase report names the phase's top three losses,
+    and planning (U28) reads the per-role numbers when it weighs lanes.
+  Owner: yes.
+
 ## Phases 37-40 (replanned 2026-10-27)
 
 Phase 36 closed without its own build: its review findings and the build go to
@@ -1047,7 +1090,7 @@ phase 37. Lanes are balanced by volume and cost (U28 rule 9), not by count.
   to a running phase, U30 six session states (server, desktop, Android), U31
   work ahead; build.
 
-## Phases 41-42 (planned 2026-10-28)
+## Phases 41-43 (planned 2026-10-28)
 
 - **41 Test stability, upstream merge and the PR draft**: the five recurring
   test failure groups fixed at their cause, a new baseline, the upstream
@@ -1058,7 +1101,12 @@ phase 37. Lanes are balanced by volume and cost (U28 rule 9), not by count.
   server model and CLI, stage delivery in the task's folder, the Pipelines
   tab, the Board and task views, Android, the lead protocol and docs;
   integration, review, QA and the build. It starts after the upstream merge
-  (#528) so the merge does not also carry this work.
+  (#528) so the merge does not also carry this work. With it, each task's
+  working time on its node (U37).
+- **43 The pipeline profile (U38)**: a mock-up first, then the spans and
+  their tokens on the server, `hgs team profile` with the ranked losses,
+  the Profile view and the heat overlay, the lead protocol and docs;
+  integration, review, QA and the build.
 
 ## Order of work (proposal)
 

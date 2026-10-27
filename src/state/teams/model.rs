@@ -108,6 +108,10 @@ pub(crate) struct Settings {
     /// shared automatic-recovery policy is off.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub resume_after_limits: bool,
+    /// N19 (spec 7, 12): folders whose images and HTML the desktop previews
+    /// as report evidence, besides the team and member folders.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_folders: Vec<String>,
     /// Hierarchy (section 9.2), set on the master team: how deep sub-teams may
     /// go below it and how many sessions the whole tree may run.
     #[serde(default = "default_tree_depth", skip_serializing_if = "tree_depth_is_default")]
@@ -191,6 +195,7 @@ impl Default for Settings {
             background_red_minutes: default_background_red(),
             worktrees_forbidden: false,
             resume_after_limits: false,
+            evidence_folders: Vec::new(),
             tree_depth: default_tree_depth(),
             tree_sessions: default_tree_sessions(),
             subteam_approval: SubteamApproval::default(),
@@ -335,6 +340,10 @@ pub(crate) struct Member {
     /// H1: Zerus asked the recovery service to wait for this member's reset.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub limit_resume: bool,
+    /// N29: the session that request names, so a swap or the end of the
+    /// episode withdraws it for that session, not for the next one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_session: Option<SessionRef>,
     /// H6: a swapped member's new session starts even before its next task.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub launch_after_swap: bool,
@@ -712,6 +721,26 @@ pub(crate) struct Finding {
     pub at: f64,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    /// N17: the owner's replan proposal, kept with the finding it answers.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub proposal: String,
+    /// N18: the draft phase a `fix_phase` finding is marked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<u32>,
+}
+
+impl Finding {
+    /// N18: still to be dealt with - open, reopened, urgent, or waiting in a
+    /// replan or a draft phase. These block a finish when critical and count
+    /// as open in the summary.
+    pub(crate) fn unresolved(&self) -> bool {
+        matches!(self.state.as_str(), "open" | "reopened" | "urgent" | "replan" | "fix_phase")
+    }
+
+    /// N14: fixed and dropped findings are closed for good.
+    pub(crate) fn closed(&self) -> bool {
+        matches!(self.state.as_str(), "fixed" | "dropped")
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]

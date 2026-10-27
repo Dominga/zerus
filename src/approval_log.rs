@@ -26,7 +26,7 @@ fn input() -> Result<Value> {
     if bytes.len() as u64 > MAX_INPUT {
         return Err(bad("Automatic approval data exceeds 128 KiB"));
     }
-    let payload: Value = serde_json::from_slice(&bytes).map_err(bad)?;
+    let payload: Value = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(bad)?;
     if !payload.is_object() {
         return Err(bad("Approval journal input must be a JSON object"));
     }

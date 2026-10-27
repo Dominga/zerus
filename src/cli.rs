@@ -71,6 +71,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] processes <session> --output ID | --stop ID --run RUN --conversation ID [--generation ID]
        hgs [@host] send <session> --json   submit message/attachments from JSON stdin
        hgs [@host] recovery action --scoped-json exact waiting-job control
+       hgs [@host] recovery team-override   a team's reset wait for one session (JSON stdin)
        hgs [@host] history <session> --json bounded exact public history
        hgs [@host] history-projection <session> --json retired and refreshed history rows
        hgs [@host] graph snapshot --json   bounded saved relationship metadata (partial coverage)

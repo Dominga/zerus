@@ -194,7 +194,8 @@ pub(crate) fn forward_send(route: &str, args: &[String], origin: Value) -> crate
     }
     // The ledger digest and the receiving send's request identity both cover
     // the exact text delivered.
-    let input = enveloped(input);
+    // N34: a BOM is dropped before the envelope and the ledger digest.
+    let input = enveloped(crate::state::without_bom(&input).to_vec());
     let reservation = match reserve(&origin, route, &args[0], &input) {
         Ok(value) => Some(value),
         Err(_) => {

@@ -451,6 +451,9 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
             let drafted = team.phases.iter().any(|other| other.n == previous && other.state.is_draft());
             let open: Vec<u32> =
                 team.tasks.iter().filter(|task| task.phase == previous && !task.status.finished()).map(|task| task.id).collect();
+            // N40 (spec 2.6): behind an approved phase a draft can be approved
+            // now (F12), whatever that phase still runs; only a draft before
+            // it holds it.
             if drafted {
                 value["waiting"] = json!({
                     "text":"Waiting for the previous phase to be approved",
@@ -584,7 +587,7 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
     let open = |severity: &str| {
         team.findings
             .iter()
-            .filter(|finding| finding.severity == severity && matches!(finding.state.as_str(), "open" | "reopened" | "urgent"))
+            .filter(|finding| finding.severity == severity && finding.unresolved())
             .count()
     };
     let deferred = team.findings.iter().filter(|finding| finding.state == "deferred").count();
@@ -937,6 +940,8 @@ fn added_sessions(team: &Team, op: &str, filled: &Value) -> usize {
         "swap-member" => usize::from(
             filled["session"].is_object() && team.member(text(filled, "member")).is_none_or(|member| member.session.is_none()),
         ),
+        // N26: a plan can add a whole roster before any session exists.
+        "plan" => filled["members"].as_array().map_or(0, Vec::len),
         _ => 0,
     }
 }
@@ -1174,6 +1179,8 @@ fn parent_create(input: &Value, filled: &mut Value) -> anyhow::Result<Option<(St
         .context("The parent task number is required")?;
     let task = parent.task(number).context("Unknown parent task")?;
     ensure!(!task.status.finished(), "The parent task is already decided");
+    // N25: one sub-team per parent task; a second create must not overwrite it.
+    ensure!(task.subteam.is_none(), "The parent task already has a sub-team");
     let member = parent
         .member(&task.assignee)
         .with_context(|| format!("The parent task #{} has no assignee", task.id))?
@@ -1227,11 +1234,37 @@ fn parent_create(input: &Value, filled: &mut Value) -> anyhow::Result<Option<(St
     Ok(Some((parent.id.clone(), task.id)))
 }
 
+/// N25: a create whose child landed but whose parent update failed is repaired
+/// on the replay: the reserved child id is already the request id.
+fn repair_parent_link(child_id: &str, input: &Value) -> anyhow::Result<()> {
+    let Some(parent_id) = input["parent"]["team"].as_str() else { return Ok(()) };
+    let Some(number) = input["parent"]["task"].as_u64().and_then(|n| u32::try_from(n).ok()) else { return Ok(()) };
+    let mut store = Store::open(true)?;
+    if store.load(child_id)?.is_none() {
+        return Ok(());
+    }
+    store.mutate(None, parent_id, None, |parent, events| {
+        if let Some(task) = parent.tasks.iter_mut().find(|task| task.id == number) {
+            task.subteam = Some(child_id.to_owned());
+        }
+        if !parent.children.iter().any(|id| id == child_id) {
+            parent.children.push(child_id.to_owned());
+        }
+        events.push(Event::new("subteam_repaired", json!({"team":child_id,"task":number})));
+        Ok(Value::Null)
+    })?;
+    Ok(())
+}
+
 fn create(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id");
     ensure!(canonical_uuid(request), "A canonical request_id is required");
-    // A replay returns the first receipt before validating the parent again.
+    // A replay returns the first receipt; a parent link is repaired first
+    // (N25: the child may exist from a create whose parent mutate failed).
     if let Some(receipt) = Store::open(false)?.receipt(request, input)? {
+        if input["parent"].is_object() {
+            repair_parent_link(request, input)?;
+        }
         return Ok(receipt);
     }
     let mut filled = input.clone();
@@ -1258,7 +1291,28 @@ fn create(input: &Value) -> anyhow::Result<Value> {
             .context("Run this from the lead's session, or add \"by\":\"human\" to act as yourself")?;
         }
     }
-    let (team, events) = ops::create(&uuid::Uuid::new_v4().to_string(), &filled)?;
+    let (team, events) = {
+        let mut child_id = uuid::Uuid::new_v4().to_string();
+        if let Some((parent_id, task)) = &parent_link {
+            // N25: reserve the parent link before the child exists. The request
+            // id is the child id, so a retry after a failed create reuses it;
+            // a different concurrent create sees the reservation and is refused.
+            child_id = request.to_owned();
+            let mut store = Store::open(true)?;
+            let pid = parent_id.clone();
+            let number = *task;
+            store.mutate(None, &pid, None, |parent, events| {
+                let parent_task = parent.tasks.iter_mut().find(|candidate| candidate.id == number).context("The parent task is missing")?;
+                match &parent_task.subteam {
+                    Some(existing) if existing != &child_id => bail!("The parent task already has a sub-team"),
+                    _ => parent_task.subteam = Some(child_id.clone()),
+                }
+                events.push(Event::new("subteam_reserved", json!({"team":child_id,"task":number})));
+                Ok(Value::Null)
+            })?;
+        }
+        ops::create(&child_id, &filled)?
+    };
     // Section 9.2: depth, children and tree sessions are checked at create.
     if let Some((parent_id, _)) = &parent_link {
         let store = Store::open(false)?;
@@ -1802,6 +1856,9 @@ fn adopt_existing_sessions(store: &Store, request: &str, input: &Value, op: &str
         let teams = store.active_teams(ACTIVE_TEAMS)?;
         let adopted = adopted_session(&team, &with_session, &teams, &sessions)?;
         filled["session"] = serde_json::to_value(&adopted.session)?;
+        // N32: the adopted session's own folder, as for a new member's.
+        filled["directory"] = json!(adopted.directory);
+        filled["folder"] = serde_json::to_value(if adopted.worktree { MemberFolder::Worktree } else { MemberFolder::Shared })?;
     }
     Ok(())
 }
@@ -2117,6 +2174,11 @@ fn escalate(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id");
     ensure!(canonical_uuid(request), "A canonical request_id is required");
     let mut store = Store::open(true)?;
+    // N28: a replay returns the first receipt instead of duplicating the
+    // parent question.
+    if let Some(receipt) = store.receipt(request, input)? {
+        return Ok(receipt);
+    }
     let team = store.load(text(input, "team"))?.context("Unknown team")?;
     let link = team.parent.clone().context("Only a sub-team escalates a question")?;
     let by = actor(&team, "escalate", input)?;
@@ -2150,9 +2212,10 @@ fn escalate(input: &Value) -> anyhow::Result<Value> {
         }
     };
     let parent_question = ops::forward_question(&team, &question);
+    ensure!(question.forwarded.is_empty(), "This question was already escalated");
     let child_name = team.name.clone();
     let child_id = team.id.clone();
-    store.mutate(None, &child_id, None, |team, events| {
+    store.mutate(Some((request, input)), &child_id, None, |team, events| {
         for task in &mut team.tasks {
             for attempt in &mut task.attempts {
                 for question in &mut attempt.questions {
@@ -2166,7 +2229,22 @@ fn escalate(input: &Value) -> anyhow::Result<Value> {
         Ok(Value::Null)
     })?;
     let _ = child_name;
-    forward_to_parent(&mut store, &team, &parent_question, question_id, &question.text, &link)?;
+    if let Err(error) = forward_to_parent(&mut store, &team, &parent_question, question_id, &question.text, &link) {
+        // N28: a failure upstream must not leave the child marked forwarded.
+        let _ = store.mutate(None, &child_id, None, |team, _| {
+            for task in &mut team.tasks {
+                for attempt in &mut task.attempts {
+                    for question in &mut attempt.questions {
+                        if question.forwarded == parent_question {
+                            question.forwarded.clear();
+                        }
+                    }
+                }
+            }
+            Ok(Value::Null)
+        });
+        return Err(error);
+    }
     Ok(json!({"status":"escalated","team":child_id,"question":parent_question,"parent":link.team}))
 }
 
@@ -2466,7 +2544,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // Section 9.2: a change that can bind a new session keeps the whole
             // tree within its master's budget (extend binds none, and is
             // checked for a tree already over it).
-            if matches!(op, "add-member" | "swap-member" | "extend") {
+            if matches!(op, "plan" | "approve" | "add-member" | "swap-member" | "extend") {
                 let team = store.load(team_id)?.context("Unknown team")?;
                 // Bounded: ancestors by id and children by id; a flat team
                 // reads nothing beyond the team itself.
@@ -3239,6 +3317,316 @@ mod tests {
         });
     }
 
+    // ---- #480: the phase 35 review's findings through the real entry point
+    // (commands::run on a private store), as the owner, the lead and members.
+
+    /// A running team: the lead (a dsh session, so a test can act as it),
+    /// dev and qa; #1 handed to dev, #2 to qa; phase 2 is a draft.
+    fn review_team() -> (Team, String, String) {
+        use crate::state::teams::model::{Attempt, AttemptState, TaskStatus};
+        let (mut team, _) = ops::create(
+            "rv",
+            &json!({"name":"Review","lead":{"id":"lead","agent":"dsh",
+                "session":{"name":"dsh/x/lead","run_id":"r0","conversation_id":"lead-conversation"}}}),
+        )
+        .unwrap();
+        let mut events = Vec::new();
+        ops::apply(
+            &mut team,
+            "plan",
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"},{"id":"qa","role":"Tester","agent":"kimi"}],
+                "phases":[{"n":2,"title":"Polish"}],
+                "tasks":[{"id":1,"title":"API","assignee":"dev"},{"id":2,"title":"Tests","assignee":"qa"},
+                    {"id":3,"title":"Docs","assignee":"dev","phase":2}]}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        ops::apply(&mut team, "approve", &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        let mut attempts = Vec::new();
+        for id in [1u32, 2] {
+            let task = team.task_mut(id).unwrap();
+            let attempt = format!("00000000-0000-4000-8000-00000000010{id}");
+            task.attempts.push(Attempt { n: 1, id: attempt.clone(), member: task.assignee.clone(), state: AttemptState::Delivered, ..Default::default() });
+            task.status = TaskStatus::InProgress;
+            attempts.push(attempt);
+        }
+        (team, attempts[0].clone(), attempts[1].clone())
+    }
+
+    fn with_review_team<T>(team: &Team, body: impl FnOnce() -> T) -> T {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            Store::open(true).unwrap().create(&uuid::Uuid::new_v4().to_string(), &json!({}), team.clone(), vec![]).unwrap();
+            body()
+        })
+    }
+
+    /// One command, with a fresh request id, as the owner unless the input
+    /// names an attempt (a member) or the lead acts.
+    fn call(op: &str, mut input: Value) -> anyhow::Result<Value> {
+        input["request_id"] = json!(uuid::Uuid::new_v4().to_string());
+        input["team"] = json!("rv");
+        run(op, &input, false)
+    }
+
+    fn as_lead<T>(body: impl FnOnce() -> T) -> T {
+        set_test_caller_identities(Some((Some("lead-conversation".into()), None, None)));
+        let result = body();
+        set_test_caller_identities(Some((None, None, None)));
+        result
+    }
+
+    fn stored() -> Team {
+        Store::open(false).unwrap().load("rv").unwrap().unwrap()
+    }
+
+    fn finding(severity: &str, title: &str) -> Value {
+        json!({"severity":severity,"title":title,"scenario":"two saves at once","task":1})
+    }
+
+    #[test]
+    fn a_bad_finding_is_refused_with_the_report_not_at_accept() {
+        // N13: "high" is no severity: the member hears it at once, and the
+        // corrected report is accepted.
+        let (team, attempt, _) = review_team();
+        with_review_team(&team, || {
+            let error = call("report", json!({"task":1,"attempt":attempt,"text":"Done",
+                "report":{"summary":"Done","findings":[finding("high","Lost write")]}}))
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("A finding is critical, normal or later"), "{error}");
+            assert_eq!(stored().task(1).unwrap().attempts[0].report, None);
+            let error = call("report", json!({"task":1,"attempt":attempt,"text":"Done",
+                "report":{"summary":"Done","findings":[{"severity":"normal","title":"No scenario"}]}}))
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("A finding needs its scenario"), "{error}");
+            call("report", json!({"task":1,"attempt":attempt,"text":"Done",
+                "report":{"summary":"Done","findings":[finding("critical","Lost write")]}}))
+            .unwrap();
+            call("accept", json!({"task":1,"by":"human"})).unwrap();
+            let team = stored();
+            assert_eq!(team.findings.len(), 1);
+            assert_eq!(team.findings[0].severity, "critical");
+        });
+    }
+
+    #[test]
+    fn fixed_and_dropped_findings_leave_room_under_the_cap() {
+        // N14: 1000 closed findings no longer block the next accept; the
+        // oldest closed ones make room and the store stays at 1000.
+        use crate::state::teams::model::Finding;
+        let (mut team, attempt, _) = review_team();
+        for n in 1..=1000 {
+            team.findings.push(Finding { id: format!("f{n}"), severity: "normal".into(), title: format!("F{n}"), scenario: "s".into(),
+                state: if n % 2 == 0 { "fixed".into() } else { "dropped".into() }, ..Default::default() });
+        }
+        team.findings_seq = 1000;
+        with_review_team(&team, || {
+            call("report", json!({"task":1,"attempt":attempt,"text":"Done",
+                "report":{"summary":"Done","findings":[finding("normal","New"),finding("later","Later")]}}))
+            .unwrap();
+            call("accept", json!({"task":1,"by":"human"})).unwrap();
+            let team = stored();
+            assert_eq!(team.findings.len(), 1000);
+            assert_eq!(team.findings.last().unwrap().id, "f1002");
+            assert!(!team.findings.iter().any(|finding| finding.id == "f1" || finding.id == "f2"));
+        });
+        // Live findings still count: 1000 open ones leave no room.
+        let (mut team, attempt, _) = review_team();
+        for n in 1..=1000 {
+            team.findings.push(Finding { id: format!("f{n}"), severity: "normal".into(), title: format!("F{n}"), scenario: "s".into(),
+                state: "open".into(), ..Default::default() });
+        }
+        with_review_team(&team, || {
+            call("report", json!({"task":1,"attempt":attempt,"text":"Done","report":{"summary":"Done","findings":[finding("normal","New")]}}))
+                .unwrap();
+            let error = call("accept", json!({"task":1,"by":"human"})).unwrap_err().to_string();
+            assert!(error.contains("at most 1000 findings that are not fixed or dropped"), "{error}");
+        });
+    }
+
+    #[test]
+    fn the_owners_accept_after_the_leads_files_the_findings_once() {
+        // N15
+        let (team, attempt, _) = review_team();
+        with_review_team(&team, || {
+            call("report", json!({"task":1,"attempt":attempt,"text":"Done",
+                "report":{"summary":"Done","findings":[finding("normal","Slow"),finding("critical","Lost write")]}}))
+            .unwrap();
+            as_lead(|| call("accept", json!({"task":1}))).unwrap();
+            assert_eq!(stored().findings.len(), 2);
+            call("accept", json!({"task":1,"by":"human"})).unwrap();
+            let team = stored();
+            assert_eq!(team.findings.len(), 2, "{:?}", team.findings);
+            assert_eq!(team.task(1).unwrap().decided_by, Some(crate::state::teams::model::Decider::Human));
+        });
+    }
+
+    #[test]
+    fn a_replan_keeps_its_proposal_and_fix_phase_its_phase() {
+        // N17, N18
+        let (team, attempt, _) = review_team();
+        with_review_team(&team, || {
+            call("report", json!({"task":1,"attempt":attempt,"text":"Done",
+                "report":{"summary":"Done","findings":[finding("critical","Lost write"),finding("normal","Slow")]}}))
+            .unwrap();
+            call("accept", json!({"task":1,"by":"human"})).unwrap();
+            // A critical finding is not parked in a draft phase.
+            let error = call("finding", json!({"finding":"f1","action":"fix_phase","phase":2,"by":"human"})).unwrap_err().to_string();
+            assert!(error.contains("Only a normal finding"), "{error}");
+            call("finding", json!({"finding":"f2","action":"fix_phase","phase":2,"by":"human"})).unwrap();
+            call("finding", json!({"finding":"f1","action":"replan","proposal":"Split the save into two steps","by":"human"})).unwrap();
+            let team = stored();
+            assert_eq!(team.findings[1].phase, Some(2));
+            assert_eq!(team.findings[0].proposal, "Split the save into two steps");
+            // Status shows both, and a replanned critical finding is still open.
+            let status = run("status", &json!({"team":"rv"}), false).unwrap();
+            let items = status["findings"]["items"].as_array().unwrap();
+            let f1 = items.iter().find(|item| item["id"] == "f1").unwrap();
+            assert_eq!(f1["proposal"], "Split the save into two steps");
+            assert_eq!(items.iter().find(|item| item["id"] == "f2").unwrap()["phase"], 2);
+            assert_eq!(status["findings_summary"]["open"]["critical"], 1);
+            assert_eq!(status["findings_summary"]["open"]["normal"], 1);
+            // The team waits paused, and the owner's attention names the proposal.
+            assert_eq!(status["status"], "paused");
+            let replan = status["attention"].as_array().unwrap().iter().find(|item| item["kind"] == "replan").cloned();
+            assert_eq!(replan.as_ref().map(|item| item["proposal"].clone()), Some(json!("Split the save into two steps")), "{}", status["attention"]);
+        });
+    }
+
+    #[test]
+    fn a_finding_in_a_replan_or_a_draft_phase_still_blocks_the_finish() {
+        // N18: replan and fix_phase are not resolved.
+        use crate::state::teams::model::{Finding, TaskStatus};
+        for state in ["replan", "fix_phase"] {
+            let (mut team, _, _) = review_team();
+            for task in &mut team.tasks {
+                task.status = if task.phase == 1 { TaskStatus::Accepted } else { TaskStatus::Cancelled };
+            }
+            team.findings.push(Finding { id: "f1".into(), severity: "critical".into(), title: "Lost write".into(), scenario: "s".into(),
+                state: state.into(), ..Default::default() });
+            with_review_team(&team, || {
+                let error = call("finish", json!({"summary":"Done","by":"human"})).unwrap_err().to_string();
+                assert!(error.contains("A critical finding is open"), "{state}: {error}");
+            });
+        }
+    }
+
+    #[test]
+    fn evidence_folders_are_a_setting_status_carries() {
+        // N19
+        let (team, _, _) = review_team();
+        with_review_team(&team, || {
+            call("settings", json!({"settings":{"evidence_folders":["shots","D:/Tools/zerus-team-phases/shots-v2"]},"by":"human"})).unwrap();
+            assert_eq!(stored().settings.evidence_folders, vec!["shots".to_owned(), "D:/Tools/zerus-team-phases/shots-v2".to_owned()]);
+            let status = run("status", &json!({"team":"rv"}), false).unwrap();
+            assert_eq!(status["settings"]["evidence_folders"][1], "D:/Tools/zerus-team-phases/shots-v2");
+            let error = call("settings", json!({"settings":{"evidence_folders":["  "]},"by":"human"})).unwrap_err().to_string();
+            assert!(error.contains("An evidence folder"), "{error}");
+        });
+    }
+
+    #[test]
+    fn a_finished_team_takes_no_reopen() {
+        // N20: reopen, urgent, replan and fix_phase need a running team;
+        // closing a finding still works.
+        use crate::state::teams::model::{Finding, TaskStatus, TeamStatus};
+        let (mut team, _, _) = review_team();
+        for task in &mut team.tasks {
+            task.status = TaskStatus::Accepted;
+        }
+        team.status = TeamStatus::Done;
+        team.findings.push(Finding { id: "f1".into(), severity: "normal".into(), title: "Slow".into(), scenario: "s".into(), task: Some(1),
+            state: "open".into(), ..Default::default() });
+        with_review_team(&team, || {
+            for action in [json!({"action":"reopen"}), json!({"action":"replan","proposal":"x"}), json!({"action":"fix_phase","phase":2})] {
+                let mut input = action.clone();
+                input["finding"] = json!("f1");
+                input["by"] = json!("human");
+                let error = call("finding", input).unwrap_err().to_string();
+                assert!(error.contains("need a running or paused team"), "{action}: {error}");
+            }
+            assert_eq!(stored().task(1).unwrap().status, TaskStatus::Accepted);
+            call("finding", json!({"finding":"f1","action":"fixed","by":"human"})).unwrap();
+            assert_eq!(stored().findings[0].state, "fixed");
+        });
+    }
+
+    #[test]
+    fn a_removed_or_paused_member_is_not_swapped() {
+        // N31
+        use crate::state::teams::model::MemberState;
+        let (mut team, _, _) = review_team();
+        team.members.iter_mut().find(|member| member.id == "qa").unwrap().state = MemberState::Removed;
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().state = MemberState::Paused;
+        with_review_team(&team, || {
+            let error = call("swap-member", json!({"member":"qa","agent":"claude","by":"human"})).unwrap_err().to_string();
+            assert!(error.contains("This member was removed"), "{error}");
+            let error = call("swap-member", json!({"member":"dev","agent":"claude","by":"human"})).unwrap_err().to_string();
+            assert!(error.contains("Resume dev before swapping it"), "{error}");
+            let team = stored();
+            assert_eq!(team.member("qa").unwrap().state, MemberState::Removed);
+            assert!(!team.member("qa").unwrap().launch_after_swap);
+            assert_eq!(team.member("dev").unwrap().state, MemberState::Paused);
+        });
+    }
+
+    #[test]
+    fn a_swap_to_an_existing_session_takes_its_folder() {
+        // N32: the adopted session's folder replaces the member's worktree.
+        use crate::state::teams::model::MemberFolder;
+        let (mut team, _, _) = review_team();
+        let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.folder = MemberFolder::Worktree;
+        dev.directory = "/work/repo-team-rv-dev".into();
+        let mut events = Vec::new();
+        ops::apply(
+            &mut team,
+            "swap-member",
+            &json!({"member":"dev","session":{"name":"codex/x/other","run_id":"r9","conversation_id":"c9"},
+                "directory":"/work/other-checkout","folder":"shared"}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        let dev = team.member("dev").unwrap();
+        assert_eq!(dev.directory, "/work/other-checkout");
+        assert_eq!(dev.folder, MemberFolder::Shared);
+        assert_eq!(dev.session.as_ref().unwrap().name, "codex/x/other");
+    }
+
+    #[test]
+    fn a_draft_behind_an_approved_running_phase_does_not_wait() {
+        // N40 (spec 2.6): phase 1 still runs, phase 2 can be approved now.
+        let (team, _, _) = review_team();
+        with_review_team(&team, || {
+            let status = run("status", &json!({"team":"rv"}), false).unwrap();
+            let phase = status["phases"].as_array().unwrap().iter().find(|phase| phase["n"] == 2).unwrap().clone();
+            // #515: it says it can run alongside, not that it waits.
+            assert_eq!(phase["waiting"]["alongside"], true, "{phase}");
+            assert_eq!(phase["waiting"]["text"], "Can run alongside phase 1", "{phase}");
+            call("approve-phase", json!({"phase":2,"by":"human"})).unwrap();
+        });
+    }
+
+    #[test]
+    fn a_planning_team_has_no_phase_in_work() {
+        // N41 (spec 10.2): before Approve & Run every phase waits for you.
+        let (mut team, _) = ops::create("rv", &json!({"name":"Review","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        ops::apply(&mut team, "plan", &json!({"tasks":[{"id":1,"title":"A","assignee":"lead"}]}), &Actor::Human, &BTreeSet::new(), &mut Vec::new())
+            .unwrap();
+        with_review_team(&team, || {
+            let status = run("status", &json!({"team":"rv"}), false).unwrap();
+            let first = status["phase_summary"].as_array().unwrap().iter().find(|phase| phase["n"] == 1).unwrap().clone();
+            assert_eq!(first["status"], "draft", "{first}");
+            assert_eq!(first["state"], "planned");
+        });
+    }
+
     #[test]
     fn findings_pages_are_stable_with_a_before_cursor() {
         use crate::state::teams::model::{Finding, Team};
@@ -3545,6 +3933,124 @@ mod tests {
     }
 
     #[test]
+    fn phase35_findings_work_through_run() {
+        let _env = crate::state::ENV_LOCK.lock().unwrap();
+        let old = ["HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID"].map(|key| (key, std::env::var(key).ok()));
+        for key in ["HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID"] { std::env::remove_var(key); }
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            super::set_test_caller_identities(Some((None, None, None)));
+            let mut store = Store::open(true).unwrap();
+            let req = |n: u8| format!("00000000-0000-4000-8000-0000000000{n:02}");
+            let mut parent = Team { id: "p".into(), name: "Parent".into(), lead: "lead".into(), status: TeamStatus::Running,
+                settings: Settings { tree_sessions: 16, ..Default::default() }, ..Default::default() };
+            parent.tasks.push(Task { id: 1, title: "Delegated".into(), assignee: "dev".into(), status: TaskStatus::InProgress,
+                subteam: Some("c".into()), ..Default::default() });
+            parent.tasks[0].attempts.push(Attempt { n: 1, id: "pa".into(), member: "dev".into(), state: AttemptState::Delivered,
+                questions: vec![Question { id: "pq".into(), text: "Which DB?".into(), at: 1.0, forwarded: "q1".into(), ..Default::default() }], ..Default::default() });
+            let mut child = Team { id: "c".into(), name: "Child".into(), lead: "dev".into(), status: TeamStatus::Running,
+                parent: Some(Parent { team: "p".into(), task: 1, lead: "lead".into(), member: "dev".into() }), ..Default::default() };
+            child.tasks.push(Task { id: 1, title: "Work".into(), assignee: "dev".into(), status: TaskStatus::Accepted, ..Default::default() });
+            child.tasks[0].attempts.push(Attempt { n: 1, id: "ca".into(), member: "dev".into(), state: AttemptState::Reported,
+                report: Some(Report { text: "Done".into(), at: 1.0, ..Default::default() }),
+                questions: vec![Question { id: "q1".into(), text: "Which DB?".into(), at: 1.0, forwarded: "pq".into(), ..Default::default() }], ..Default::default() });
+            store.create(&req(1), &json!({}), parent.clone(), Vec::new()).unwrap();
+            store.create(&req(2), &json!({}), child.clone(), Vec::new()).unwrap();
+
+            // N21: the parent's answer leaves the child question Pending.
+            super::run("reply", &json!({"request_id":req(3),"team":"p","task":1,"question":"pq","text":"Postgres","by":"human"}), false).unwrap();
+            let saved = store.load("c").unwrap().unwrap();
+            let question = &saved.tasks[0].attempts[0].questions[0];
+            assert_eq!((question.answer.as_str(), question.notice), ("Postgres", Notice::Pending));
+
+            // N22/N23: finish files a Reported attempt the parent inbox lists,
+            // and a replay adds no second one.
+            let finish = json!({"request_id":req(4),"team":"c","summary":"Sub done","by":"human"});
+            super::run("finish", &finish, false).unwrap();
+            let parent_now = store.load("p").unwrap().unwrap();
+            let attempt = parent_now.tasks[0].attempts.last().unwrap();
+            assert_eq!(attempt.state, AttemptState::Reported);
+            let inbox = super::run("inbox", &json!({"team":"p","by":"human"}), false).unwrap();
+            assert!(inbox["items"].as_array().unwrap().iter().any(|item| item["task"] == 1), "{inbox}");
+            let count = parent_now.tasks[0].attempts.len();
+            super::run("finish", &finish, false).unwrap();
+            assert_eq!(store.load("p").unwrap().unwrap().tasks[0].attempts.len(), count);
+
+            // N24: a reject does not reopen a Stopped sub-team.
+            let mut stopped = store.load("c").unwrap().unwrap();
+            stopped.status = TeamStatus::Stopped;
+            store.mutate(None, "c", None, |team, _| { *team = stopped; Ok(Value::Null) }).unwrap();
+            let _ = super::run("reject", &json!({"request_id":req(5),"team":"p","task":1,"reason":"Rework","by":"human"}), false);
+            assert_eq!(store.load("c").unwrap().unwrap().status, TeamStatus::Stopped);
+
+            // N25: a second create on the same parent task is refused; a
+            // replay after the parent link was lost repairs it.
+            let mut parent2 = Team { id: "p2".into(), name: "Parent2".into(), lead: "dev".into(), status: TeamStatus::Running,
+                settings: Settings { tree_sessions: 16, ..Default::default() }, ..Default::default() };
+            parent2.members.push(Member { id: "dev".into(), role: "Lead".into(), agent: "codex".into(),
+                session: Some(SessionRef { name: "codex/x/dev".into(), run_id: "r0".into(), ..Default::default() }), ..Default::default() });
+            parent2.tasks.push(Task { id: 2, title: "Delegated".into(), assignee: "dev".into(), status: TaskStatus::InProgress, ..Default::default() });
+            store.create(&req(6), &json!({}), parent2.clone(), Vec::new()).unwrap();
+            let create = json!({"request_id":req(7),"team":"p2","name":"Sub","by":"human",
+                "parent":{"team":"p2","task":2},"lead":{"id":"dev","agent":"codex","role":"Lead"}});
+            super::run("create", &create, false).unwrap();
+            let second = super::run("create", &json!({"request_id":req(8),"team":"p2","name":"Other","by":"human",
+                "parent":{"team":"p2","task":2},"lead":{"id":"dev","agent":"codex","role":"Lead"}}), false);
+            assert!(second.unwrap_err().to_string().contains("already has a sub-team"));
+            let child_id = store.load("p2").unwrap().unwrap().tasks[0].subteam.clone().unwrap();
+            store.mutate(None, "p2", None, |team, _| { team.tasks[0].subteam = None; Ok(Value::Null) }).unwrap();
+            super::run("create", &create, false).unwrap();
+            assert_eq!(store.load("p2").unwrap().unwrap().tasks[0].subteam.as_deref(), Some(child_id.as_str()));
+
+            // N26: a 20-member plan under a 16-session budget is refused.
+            let mut sub = Team { id: "c3".into(), name: "Sub3".into(), lead: "lead".into(), status: TeamStatus::Planning,
+                settings: Settings { tree_sessions: 16, ..Default::default() },
+                parent: Some(Parent { team: "p2".into(), task: 2, lead: "dev".into(), member: "dev".into() }), ..Default::default() };
+            sub.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "codex".into(), ..Default::default() });
+            store.create(&req(9), &json!({}), sub, Vec::new()).unwrap();
+            let members: Vec<Value> = (1..=20).map(|n| json!({"id":format!("m{n}"),"role":"Dev","agent":"codex"})).collect();
+            let error = super::run("plan", &json!({"request_id":req(10),"team":"c3","by":"human","members":members}), false)
+                .unwrap_err().to_string();
+            assert!(error.contains("at most 16 sessions"), "{error}");
+
+            // N28: a replay returns the first receipt; a failed upstream
+            // forward clears the child's forwarded mark.
+            let mut p3 = Team { id: "p3".into(), name: "Parent3".into(), lead: "dev".into(), status: TeamStatus::Running, ..Default::default() };
+            p3.members.push(Member { id: "dev".into(), role: "Lead".into(), agent: "codex".into(),
+                session: Some(SessionRef { name: "codex/x/dev".into(), run_id: "r0".into(), ..Default::default() }), ..Default::default() });
+            p3.tasks.push(Task { id: 3, title: "Delegated".into(), assignee: "dev".into(), status: TaskStatus::InProgress,
+                subteam: Some("c4".into()), ..Default::default() });
+            p3.tasks[0].attempts.push(Attempt { n: 1, id: "p3a".into(), member: "dev".into(), state: AttemptState::Delivered,
+                questions: vec![Question { id: "pq4".into(), text: "Q".into(), at: 1.0, forwarded: "q9".into(), ..Default::default() }], ..Default::default() });
+            let mut c4 = Team { id: "c4".into(), name: "Child4".into(), lead: "dev".into(), status: TeamStatus::Running,
+                parent: Some(Parent { team: "p3".into(), task: 3, lead: "dev".into(), member: "dev".into() }), ..Default::default() };
+            c4.tasks.push(Task { id: 1, title: "W".into(), assignee: "dev".into(), status: TaskStatus::InProgress, ..Default::default() });
+            c4.tasks[0].attempts.push(Attempt { n: 1, id: "c4a".into(), member: "dev".into(), state: AttemptState::Delivered,
+                questions: vec![Question { id: "q9".into(), text: "Q".into(), at: 1.0, ..Default::default() }], ..Default::default() });
+            store.create(&req(11), &json!({}), p3, Vec::new()).unwrap();
+            store.create(&req(12), &json!({}), c4, Vec::new()).unwrap();
+            let escalate = json!({"request_id":req(13),"team":"c4","question":"q9","by":"human"});
+            super::run("escalate", &escalate, false).unwrap();
+            let count = store.load("p3").unwrap().unwrap().tasks[0].attempts[0].questions.len();
+            super::run("escalate", &escalate, false).unwrap();
+            assert_eq!(store.load("p3").unwrap().unwrap().tasks[0].attempts[0].questions.len(), count, "a replay does not duplicate");
+            let mut stopped_parent = store.load("p3").unwrap().unwrap();
+            stopped_parent.tasks[0].status = TaskStatus::Accepted;
+            store.mutate(None, "p3", None, |team, _| { *team = stopped_parent; Ok(Value::Null) }).unwrap();
+            let mut c5 = store.load("c4").unwrap().unwrap();
+            c5.tasks[0].attempts[0].questions.push(Question { id: "q10".into(), text: "Q2".into(), at: 2.0, ..Default::default() });
+            store.mutate(None, "c4", None, |team, _| { *team = c5; Ok(Value::Null) }).unwrap();
+            let _ = super::run("escalate", &json!({"request_id":req(14),"team":"c4","question":"q10","by":"human"}), false);
+            let child = store.load("c4").unwrap().unwrap();
+            assert!(child.tasks[0].attempts[0].questions.iter().find(|q| q.id == "q10").unwrap().forwarded.is_empty());
+            super::set_test_caller_identities(None);
+            for (key, value) in old {
+                match value { Some(value) => std::env::set_var(key, value), None => std::env::remove_var(key) }
+            }
+        });
+    }
+
+    #[test]
     fn the_tree_changes_work_through_the_command_helpers() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
@@ -3636,6 +4142,62 @@ mod tests {
         for part in ["Permission request from dev", "Bash", "cargo test --locked", "from the tool input", "Reason: Run the tests", "claude-approval:x", "\"h\"", "hgs team answer --json", "\"team\":\"child\""] {
             assert!(question.text.contains(part), "{part} missing in {}", question.text);
         }
+    }
+
+    /// N34 (spec 6.2): PowerShell 5.1 pipes JSON with a UTF-8 BOM. Every
+    /// reader that parses JSON from stdin drops it: here through the shared
+    /// helper, and below by reading each reader's source, so a new reader
+    /// that forgets it fails this test.
+    #[test]
+    fn every_stdin_json_reader_drops_a_bom() {
+        let bom = |text: &str| [&[0xEF, 0xBB, 0xBF][..], text.as_bytes()].concat();
+        assert_eq!(crate::state::without_bom(&bom("{\"a\":1}")), b"{\"a\":1}");
+        assert_eq!(crate::state::without_bom(b"{}"), b"{}");
+        let parsed: Value = serde_json::from_slice(crate::state::without_bom(&bom("{\"text\":\"hi\"}"))).unwrap();
+        assert_eq!(parsed["text"], "hi");
+        assert!(serde_json::from_slice::<Value>(&bom("{}")).is_err(), "serde refuses a BOM, which is the bug");
+        // Streams and framed protocols that never parse JSON from stdin.
+        let streams = ["peer_channel.rs", "screen/mod.rs", "platform/windows.rs", "cli.rs"];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = vec![root.clone()];
+        let mut missing = Vec::new();
+        let mut readers = 0;
+        while let Some(path) = files.pop() {
+            if path.is_dir() {
+                files.extend(std::fs::read_dir(&path).unwrap().flatten().map(|entry| entry.path()));
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let relative = path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+            if streams.contains(&relative.as_str()) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            for (at, line) in lines.iter().enumerate() {
+                if !line.contains("stdin()") || line.contains("Stdio::") || line.contains("is_terminal") || line.trim_start().starts_with("//") {
+                    continue;
+                }
+                let window = lines[at..(at + 12).min(lines.len())].join("\n");
+                if !(window.contains("from_slice") || window.contains("parse(") || window.contains("submit(") || window.contains("import(")
+                    || window.contains("enveloped("))
+                {
+                    continue;
+                }
+                readers += 1;
+                if !(window.contains("without_bom") || window.contains("json_request") || window.contains("submit(")) {
+                    missing.push(format!("{relative}:{}", at + 1));
+                }
+            }
+        }
+        assert!(readers >= 25, "only {readers} readers found");
+        assert!(missing.is_empty(), "stdin JSON readers that keep a BOM: {missing:?}");
+        // `send` strips it inside submit, before its digest.
+        let input = std::fs::read_to_string(root.join("state/input.rs")).unwrap();
+        let submit = input.find("pub(super) fn submit(").unwrap();
+        assert!(input[submit..submit + 400].contains("without_bom(input)"));
     }
 
     #[test]

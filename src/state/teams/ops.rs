@@ -149,6 +149,12 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
     // Section 9.2: the tree bounds are set on the master.
     ensure!((1..=8).contains(&settings.tree_depth), "A tree goes 1 to 8 levels below its master");
     ensure!((1..=200).contains(&settings.tree_sessions), "A tree runs 1 to 200 sessions");
+    // N19: a short list of folder paths; Zerus does not read them.
+    ensure!(settings.evidence_folders.len() <= 20, "A team lists at most 20 evidence folders");
+    for folder in &settings.evidence_folders {
+        ensure!(!folder.trim().is_empty() && folder.chars().count() <= 1000, "An evidence folder is a path of 1 to 1000 characters");
+        ensure!(!folder.chars().any(char::is_control), "An evidence folder has no control characters");
+    }
     Ok(())
 }
 
@@ -1469,10 +1475,7 @@ fn finish(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     ensure!(open == 0, "{open} task(s) are not decided: decide or cancel them first");
     // D2: a critical finding that is still open blocks a finish; the owner may
     // force it.
-    let critical = team
-        .findings
-        .iter()
-        .any(|finding| finding.severity == "critical" && matches!(finding.state.as_str(), "open" | "reopened" | "urgent"));
+    let critical = team.findings.iter().any(|finding| finding.severity == "critical" && finding.unresolved());
     // C16: only the owner forces a finish over an open critical finding.
     let force = input["force"].as_bool() == Some(true) && matches!(actor, Actor::Human);
     ensure!(
@@ -1495,7 +1498,7 @@ fn finish(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     let open_findings: Vec<&Finding> = team
         .findings
         .iter()
-        .filter(|finding| matches!(finding.state.as_str(), "open" | "reopened" | "urgent" | "deferred"))
+        .filter(|finding| finding.unresolved() || finding.state == "deferred")
         .collect();
     let listed: Vec<Value> = open_findings
         .iter()
@@ -1516,6 +1519,13 @@ pub(crate) fn file_subteam_report(child: &Team, parent: &mut Team) -> anyhow::Re
     ensure!(!task.status.finished(), "The parent task is already decided");
     let member = if link.member.is_empty() { task.assignee.clone() } else { link.member.clone() };
     let text: String = format!("[Sub-team {} {}] {}", child.id, child.name, summary).chars().take(4000).collect();
+    // N23: a replayed finish (or a second call after the report landed) files
+    // no second report.
+    if task.attempts.iter().any(|attempt| {
+        attempt.report.as_ref().is_some_and(|report| report.text.starts_with(&format!("[Sub-team {} ", child.id)))
+    }) {
+        return Ok(task.id);
+    }
     let n = task.attempts.len() as u32 + 1;
     task.attempts.push(Attempt {
         n,
@@ -1523,7 +1533,9 @@ pub(crate) fn file_subteam_report(child: &Team, parent: &mut Team) -> anyhow::Re
         member,
         sent_at: now(),
         delivered_at: Some(now()),
-        state: AttemptState::Delivered,
+        // N22: a filed sub-team report is a report waiting for the parent lead,
+        // not an open delivery.
+        state: AttemptState::Reported,
         report: Some(Report { text, at: now(), ..Default::default() }),
         ..Default::default()
     });
@@ -1535,7 +1547,8 @@ pub(crate) fn file_subteam_report(child: &Team, parent: &mut Team) -> anyhow::Re
 /// that carries the reason for its lead.
 pub(crate) fn reopen_subteam(child: &mut Team, reason: &str) -> anyhow::Result<u32> {
     ensure!(child.parent.is_some(), "The team is not a sub-team");
-    ensure!(matches!(child.status, TeamStatus::Done | TeamStatus::Stopped), "The sub-team is not finished");
+    // N24: only a finished sub-team reopens; a stopped one stays stopped.
+    ensure!(child.status == TeamStatus::Done, "The sub-team is not finished");
     let n = child
         .phases
         .iter()
@@ -1573,6 +1586,8 @@ pub(crate) fn answer_forwarded(child: &mut Team, parent_question: &str, answer: 
                     question.answer = answer.to_owned();
                     question.answered_at = Some(now());
                     question.by = "Lead".into();
+                    // N21: the dispatcher delivers a Pending answer to the member.
+                    question.notice = Notice::Pending;
                     return true;
                 }
             }
@@ -1688,7 +1703,37 @@ fn structured_report(team: &Team, id: u32, report: &Value) -> anyhow::Result<Val
     }
     let findings = report["findings"].as_array();
     ensure!(!findings.is_some_and(|findings| findings.len() > 100), "A report lists at most 100 findings");
+    // N13: a finding is checked when the report arrives, so a bad one is
+    // refused to the member, never at accept, where it would block the task.
+    for finding in findings.into_iter().flatten() {
+        checked_finding(team, finding)?;
+    }
     Ok(report.clone())
+}
+
+/// One finding of a report: its severity, title, scenario, file and task.
+struct CheckedFinding {
+    severity: String,
+    title: String,
+    scenario: String,
+    file: String,
+    task: Option<u32>,
+}
+
+fn checked_finding(team: &Team, finding: &Value) -> anyhow::Result<CheckedFinding> {
+    ensure!(finding.is_object(), "A finding is an object");
+    let severity = finding["severity"].as_str().unwrap_or("normal").to_owned();
+    ensure!(["critical", "normal", "later"].contains(&severity.as_str()), "A finding is critical, normal or later");
+    let title = clean(finding["title"].as_str().unwrap_or_default().trim(), 200, "A finding title")?;
+    ensure!(!title.is_empty(), "A finding needs a title");
+    let scenario = clean(finding["scenario"].as_str().unwrap_or_default().trim(), 2000, "A finding scenario")?;
+    ensure!(!scenario.is_empty(), "A finding needs its scenario");
+    let file = clean(finding["file"].as_str().unwrap_or_default().trim(), 500, "A finding file")?;
+    let task = finding["task"].as_u64().map(|n| n as u32);
+    if let Some(task) = task {
+        ensure!(team.task(task).is_some(), "A finding names unknown task #{task}");
+    }
+    Ok(CheckedFinding { severity, title, scenario, file, task })
 }
 
 fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
@@ -1919,7 +1964,11 @@ fn swap_member(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<E
     );
     let id = text(input, "member").to_owned();
     ensure!(!id.is_empty(), "A member id is required");
-    ensure!(team.member(&id).is_some(), "Unknown member {id}");
+    let state = team.member(&id).map(|member| member.state).with_context(|| format!("Unknown member {id}"))?;
+    // N31: a removed member stays removed (and outside max_members); a
+    // paused one is resumed first, so a swap never lifts its pause.
+    ensure!(state != MemberState::Removed, "This member was removed");
+    ensure!(state != MemberState::Paused, "Resume {id} before swapping it");
     let session: Option<SessionRef> = match input.get("session") {
         Some(value) if value.is_object() => Some(serde_json::from_value(value.clone()).context("Invalid session")?),
         _ => None,
@@ -1966,6 +2015,14 @@ fn swap_member(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<E
                 changed.push(key);
             }
         }
+        // N32: an adopted session works in its own folder; the continuation
+        // and the folder checks follow it there.
+        if let (Some(_), Some(directory)) = (&session, input["directory"].as_str().filter(|directory| !directory.is_empty())) {
+            member.directory = directory.to_owned();
+            if let Ok(folder) = serde_json::from_value::<MemberFolder>(input["folder"].clone()) {
+                member.folder = folder;
+            }
+        }
         member.session = session;
         member.launch_after_swap = member.session.is_none();
         member.state = if member.session.is_some() { MemberState::Active } else { MemberState::NotCreated };
@@ -1975,8 +2032,9 @@ fn swap_member(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<E
         member.settings_applied = false;
         member.pending = None;
         member.permission = None;
+        // N29: `limit_resume` and `limit_session` stay: the dispatcher's next
+        // pass withdraws the recovery request for the old session by name.
         member.limited = None;
-        member.limit_resume = false;
     }
     let agent = team.member(&id).map(|member| member.agent.clone()).unwrap_or_default();
     let to = team.member(&id).and_then(|member| member.session.as_ref()).map(|session| session.name.clone()).unwrap_or_default();
@@ -2041,30 +2099,47 @@ pub(crate) fn depth_of(team: &Team, all: &[Team]) -> u32 {
 
 /// The sessions a team binds (its lead included), without removed members.
 pub(crate) fn session_count(team: &Team) -> usize {
-    team.members.iter().filter(|member| member.state != MemberState::Removed && member.session.is_some()).count()
+    // N26: a planned member without a session still gets launched, so it binds
+    // a session in the tree budget.
+    team.members.iter().filter(|member| member.state != MemberState::Removed).count()
 }
 
-/// The sessions the whole tree rooted at `master` binds.
+/// The sessions the whole tree rooted at `master` binds. A shared sub-lead
+/// session counts once, and finished teams no longer bind sessions (N26).
 pub(crate) fn tree_session_count(master: &Team, all: &[Team]) -> usize {
     let mut seen = BTreeSet::new();
+    let mut sessions = BTreeSet::new();
     let mut queue = vec![master.id.clone()];
-    let mut total = 0;
     while let Some(id) = queue.pop() {
         if !seen.insert(id.clone()) {
             continue;
         }
         if let Some(team) = all.iter().find(|team| team.id == id) {
-            total += session_count(team);
+            if !matches!(team.status, TeamStatus::Done | TeamStatus::Stopped | TeamStatus::Archived) {
+                for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
+                    let key = member.session.as_ref().map_or_else(
+                        || format!("member:{}:{}", team.id, member.id),
+                        |session| format!("session:{}:{}", session.host, session.name),
+                    );
+                    sessions.insert(key);
+                }
+            }
             queue.extend(team.children.iter().cloned());
         }
     }
     // Parent links are the truth even if a children list was not kept.
     for team in all.iter().filter(|team| !seen.contains(&team.id)) {
-        if root_of(team, all).id == master.id {
-            total += session_count(team);
+        if root_of(team, all).id == master.id && !matches!(team.status, TeamStatus::Done | TeamStatus::Stopped | TeamStatus::Archived) {
+            for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
+                let key = member.session.as_ref().map_or_else(
+                    || format!("member:{}:{}", team.id, member.id),
+                    |session| format!("session:{}:{}", session.host, session.name),
+                );
+                sessions.insert(key);
+            }
         }
     }
-    total
+    sessions.len()
 }
 
 /// Section 9.2: a sub-team may be created only within the master's depth, its
@@ -2252,21 +2327,27 @@ fn release(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
 
 /// D2: files a report's findings; later ones are deferred at once.
 fn file_findings(team: &mut Team, from: u32, report: &Value, by: &str) -> anyhow::Result<(usize, usize)> {
-    let findings = report["findings"].as_array().cloned().unwrap_or_default();
-    ensure!(team.findings.len() + findings.len() <= 1000, "A team keeps at most 1000 findings");
+    // N13: checked when the report came; one stored before that check is
+    // filed without its bad findings rather than blocking the accept.
+    let findings: Vec<(CheckedFinding, Option<u32>)> = report["findings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|finding| checked_finding(team, finding).ok().map(|checked| (checked, finding["line"].as_u64().map(|line| line as u32))))
+        .collect();
+    // N14: the cap counts the findings still in play; the oldest closed ones
+    // (fixed, dropped) make room, so the store stays bounded.
+    const KEPT: usize = 1000;
+    let live = team.findings.iter().filter(|finding| !finding.closed()).count();
+    ensure!(live + findings.len() <= KEPT, "A team keeps at most {KEPT} findings that are not fixed or dropped");
+    while team.findings.len() + findings.len() > KEPT {
+        let Some(oldest) = team.findings.iter().position(Finding::closed) else { break };
+        team.findings.remove(oldest);
+    }
     let mut deferred = 0usize;
-    for finding in &findings {
-        let severity = finding["severity"].as_str().unwrap_or("normal").to_owned();
-        ensure!(["critical", "normal", "later"].contains(&severity.as_str()), "A finding is critical, normal or later");
-        let title = clean(finding["title"].as_str().unwrap_or_default().trim(), 200, "A finding title")?;
-        ensure!(!title.is_empty(), "A finding needs a title");
-        let scenario = clean(finding["scenario"].as_str().unwrap_or_default().trim(), 2000, "A finding scenario")?;
-        ensure!(!scenario.is_empty(), "A finding needs its scenario");
-        let file = clean(finding["file"].as_str().unwrap_or_default().trim(), 500, "A finding file")?;
-        let task = finding["task"].as_u64().map(|n| n as u32);
-        if let Some(task) = task {
-            ensure!(team.task(task).is_some(), "A finding names unknown task #{task}");
-        }
+    for (finding, line) in &findings {
+        let CheckedFinding { severity, title, scenario, file, task } = finding;
+        let (severity, title, scenario, file, task) = (severity.clone(), title.clone(), scenario.clone(), file.clone(), *task);
         let state = if severity == "later" {
             deferred += 1;
             "deferred"
@@ -2280,13 +2361,15 @@ fn file_findings(team: &mut Team, from: u32, report: &Value, by: &str) -> anyhow
             severity,
             title,
             file,
-            line: finding["line"].as_u64().map(|line| line as u32),
+            line: *line,
             scenario,
             task,
             state: state.into(),
             by: by.into(),
             at: now(),
             note: String::new(),
+            proposal: String::new(),
+            phase: None,
         });
     }
     Ok((findings.len(), deferred))
@@ -2301,6 +2384,17 @@ fn finding(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Str
     let action = text(input, "action").to_owned();
     let note = clean(text(input, "note").trim(), 2000, "A finding note")?;
     let severity = team.findings[at].severity.clone();
+    // N20: an action that gives the team work again needs a team that still
+    // runs; closing or deferring is bookkeeping and works on a finished team.
+    if matches!(action.as_str(), "reopen" | "urgent" | "replan" | "fix_phase") {
+        ensure!(
+            matches!(team.status, TeamStatus::Running | TeamStatus::Paused),
+            "The team is {}: reopen, urgent, replan and fix_phase need a running or paused team",
+            serde_json::to_value(team.status)?.as_str().unwrap_or_default()
+        );
+    }
+    let mut proposal = String::new();
+    let mut phase = None;
     let state = match action.as_str() {
         "reopen" => {
             let task_id = input["task"].as_u64().map(|n| n as u32).or(team.findings[at].task).context("A reopen names its task")?;
@@ -2334,18 +2428,19 @@ fn finding(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Str
         }
         "replan" => {
             ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
-            let proposal = clean(text(input, "proposal").trim(), 4000, "A proposal")?;
+            proposal = clean(text(input, "proposal").trim(), 4000, "A proposal")?;
             ensure!(!proposal.is_empty(), "A replan carries the owner's proposal");
             team.status = TeamStatus::Paused;
             events.push(Event::new("replan_proposed", json!({"by":actor.label(team),"finding":id,"proposal":proposal})));
             "replan"
         }
         "fix_phase" => {
-            let phase = input["phase"].as_u64().context("fix_phase names its phase")? as u32;
-            ensure!(
-                team.phases.iter().any(|found| found.n == phase && found.state.is_draft()),
-                "Phase {phase} is not a draft"
-            );
+            // N18 (spec 8): a normal finding goes to a draft phase; a critical
+            // one is reopened, made urgent or replanned.
+            ensure!(severity == "normal", "Only a normal finding is marked for a draft phase");
+            let n = input["phase"].as_u64().context("fix_phase names its phase")? as u32;
+            ensure!(team.phases.iter().any(|found| found.n == n && found.state.is_draft()), "Phase {n} is not a draft");
+            phase = Some(n);
             "fix_phase"
         }
         "defer" => {
@@ -2359,7 +2454,11 @@ fn finding(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Str
     team.findings[at].state = state.into();
     team.findings[at].by = actor.label(team);
     team.findings[at].note = note;
-    events.push(Event::new("finding_action", json!({"finding":id,"action":action,"state":state})));
+    // N17, N18: the proposal and the phase stay on the finding for status,
+    // the inbox and the desktop.
+    team.findings[at].proposal = proposal;
+    team.findings[at].phase = phase;
+    events.push(Event::new("finding_action", json!({"finding":id,"action":action,"state":state,"phase":phase})));
     Ok(json!({"status":action,"finding":id,"state":state}))
 }
 
@@ -2689,6 +2788,9 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
         ensure!(task.status == TaskStatus::Submitted, "Task #{id} has no report to decide");
     }
     let n = task.attempts.iter().rev().find(|a| a.state == AttemptState::Reported).map(|a| a.n);
+    // N15: the lead's accept filed this report's findings already; the
+    // owner's accept over it does not file them again.
+    let filed_before = task.status == TaskStatus::Accepted && task.decided_by == Some(Decider::Lead);
     if accept {
         revoke(task, "accepted without this attempt");
         task.status = TaskStatus::Accepted;
@@ -2707,7 +2809,7 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     let title = task.title.clone();
     // D2: accepting the report files its findings; later ones are deferred and
     // the owner hears about them once.
-    if accept {
+    if accept && !filed_before {
         let structured = team
             .task(id)
             .and_then(|task| task.attempts.iter().find(|attempt| Some(attempt.n) == n))
@@ -5876,6 +5978,12 @@ mod tests {
         let report = parent_task.attempts.last().unwrap().report.as_ref().unwrap();
         assert!(report.text.contains("[Sub-team child Child]") && report.text.contains("Sub work is done"), "{}", report.text);
         assert_eq!(parent_task.attempts.last().unwrap().member, "dev");
+        // N22: the filed report waits for the parent lead; it is not open.
+        assert_eq!(parent_task.attempts.last().unwrap().state, AttemptState::Reported);
+        // N23: a replay files no second report.
+        let before = parent_task.attempts.len();
+        file_subteam_report(&child, &mut parent).unwrap();
+        assert_eq!(parent.task(1).unwrap().attempts.len(), before);
         // Section 9.5: the rejection reopens the sub-team with a Rework draft
         // that carries the reason for its lead.
         let phase = reopen_subteam(&mut child, "Fix the migration").unwrap();
@@ -5883,6 +5991,9 @@ mod tests {
         assert!(child.finish.is_none());
         let draft = child.phases.iter().find(|p| p.n == phase).unwrap();
         assert_eq!((draft.title.as_str(), draft.reason.as_str(), draft.state), ("Rework", "Fix the migration", PhaseState::Draft));
+        // N24: a stopped sub-team stays stopped on a reject.
+        child.status = TeamStatus::Stopped;
+        assert!(reopen_subteam(&mut child, "again").is_err());
         // A flat team cannot be reopened.
         assert!(reopen_subteam(&mut Team::default(), "x").is_err());
     }
@@ -5902,6 +6013,8 @@ mod tests {
         let question = &child.tasks[0].attempts[0].questions[0];
         assert_eq!((question.answer.as_str(), question.by.as_str()), ("Postgres", "Lead"));
         assert!(question.answered_at.is_some());
+        // N21: the answer is pending for the member's dispatcher.
+        assert_eq!(question.notice, Notice::Pending);
         assert!(!answer_forwarded(&mut child, &forwarded, "again"));
         // Section 9.7: a task with a sub-team asks how to treat it.
         let mut task = Task { id: 1, title: "Work".into(), assignee: "dev".into(), ..Default::default() };

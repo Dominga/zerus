@@ -4,7 +4,13 @@ The catalog holds roles, templates and routing rules that New team uses. You
 only propose: the owner keeps or rejects each proposal, then applies the kept
 ones as the next catalog version. Change no project file.
 
-Read it:  echo '{}' | hgs team catalog get --json
+Zerus runs you in its own private folder. A Claude session gets exactly the
+calls below, the guides and read-only file tools, and that folder is trusted,
+so there is no start-up prompt; other agents ask as usual. Send JSON on stdin
+with a heredoc, not through echo: a pipe starts with another command and would
+ask.
+
+Read it:  hgs team catalog get --json <<< '{}'
   catalog.roles[]: id, name, color, prompt, tags, agent, account, model,
     effort, permissions, computer, folder (worktree|shared|read_only),
     can_message (lead|team), dangerous
@@ -19,9 +25,9 @@ Propose (whole objects; ids use letters, digits, - and _):
   {"proposals":[{"kind":"role","action":"add","target":"security",
     "title":"New role: Security reviewer","reason":"payments code",
     "value":{"id":"security","name":"Security","agent":"claude",...}}]}
-  | hgs team catalog propose --json
+  hgs team catalog propose --json   (the JSON above on stdin)
   kind is role, template or rule; action add, change (the whole new object)
   or remove (no value). Explain each change in reason, in one or two lines.
   Check every role prompt against the team goal and the built-in protocol and
   name each correction in "notes":[{"role","change","why"}] (at most 20).
-Check a goal's template: {"goal":"..."} | hgs team catalog route --json
+Check a goal's template: hgs team catalog route --json <<< '{"goal":"..."}'

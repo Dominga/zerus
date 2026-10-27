@@ -52,7 +52,10 @@ pub struct ProjectStore {
 }
 
 fn private_options() -> OpenOptions {
+    #[cfg(unix)]
     let mut options = OpenOptions::new();
+    #[cfg(not(unix))]
+    let options = OpenOptions::new();
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     options

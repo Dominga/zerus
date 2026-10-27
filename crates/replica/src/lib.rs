@@ -21,7 +21,8 @@ pub use error::{Error, ErrorKind, Result};
 pub use project::{ProjectDoc, Settings};
 pub use render::{cancel_message, task_dispatch_content, task_prompt, Tools};
 pub use schema::{
-    Actor, LogEntry, TaskDelivery, SessionKey, Stage, Target, TaskView, TaskWorker, MAX_DOCUMENT, MAX_TEXT, SCHEMA,
+    Actor, LogEntry, SessionKey, Stage, Target, TaskDelivery, TaskView, TaskWorker, MAX_DOCUMENT,
+    MAX_TEXT, SCHEMA,
 };
 pub use store::{Damaged, Position, ProjectStore};
 pub use sync::{Document, DonePage, DoneRow, Imported, Inventory, Update, Version};

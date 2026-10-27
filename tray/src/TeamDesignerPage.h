@@ -33,6 +33,8 @@ public:
     // agent: {"agent", "model", "effort"} of the designer's session.
     std::function<void(const QString &folder, const QString &goal, const QJsonObject &agent)> startDesigner;
     std::function<void(const QString &session)> openDesigner;
+    // U35: the designer's terminal, when a send meets a dialog or draft.
+    std::function<void(const QString &host, const QString &session)> openTerminal;
     std::function<bool(const QString &name, const QString &title, const QString &text, const QString &action)> confirm;
     // After the session list or the catalog changes.
     void refresh();

@@ -44,6 +44,7 @@
 #include "SessionLeadPanel.h"
 #include "SessionLeads.h"
 #include "WorkingLine.h"
+#include "HeldInputBar.h"
 #include "MediaViewer.h"
 #include "NewSessionDialog.h"
 #include "ActivityView.h"
@@ -1093,6 +1094,22 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     // WhiteWh fork: what the selected session is doing, above the message field.
     m_workingLine = new WorkingLine; inputColumn->addWidget(m_workingLine);
+    // U35: messages hgs holds until the agent takes the previous one, above the field.
+    m_heldBar = new HeldInputBar; m_heldBar->setObjectName("sessionHeldInputs"); inputColumn->addWidget(m_heldBar);
+    m_heldBar->cancel = [this](const QString &id, const QString &text) {
+        const auto *entry = selected(); if (!entry) return;
+        m_heldCancels.insert(m_client.requestCancelHeld(entry->host, entry->session.name, id), {entry->key, text});
+    };
+    connect(&m_client, &HgsClient::heldCancelFinished, this, [this](quint64 request, const QString &, const QString &, bool ok, const QJsonObject &receipt, const QString &error) {
+        if (!m_heldCancels.contains(request)) return;
+        const auto [key, text] = m_heldCancels.take(request);
+        if (!ok) { m_heldBar->cancelFinished(receipt.value("request_id").toString()); showNotice(error, true); inspect(); return; }
+        auto &held = m_justHeld[key];
+        for (int i = int(held.size()); i-- > 0;) if (held[i].toObject().value("request_id") == receipt.value("request_id")) held.removeAt(i);
+        // The cancelled text comes back to an empty composer.
+        if (key == m_selectedKey && m_composer->editor()->toPlainText().trimmed().isEmpty()) m_composer->editor()->setPlainText(text);
+        if (key == m_selectedKey) { renderHeld(); inspect(); }
+    });
     inputColumn->addWidget(m_composer);
     connect(m_composer, &MessageComposer::sessionRefreshRequested, this, [this](const QString &key) {
         if (key != m_selectedKey) return;
@@ -1532,6 +1549,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // The team workspace: the Team tab next to Activity, shown while a team is.
     m_teamWorkspace=new TeamWorkspace(m_teams,m_teamPanel,this);
     m_teamWorkspace->openSession=m_teamPanel->openSession;
+    m_teamWorkspace->openTerminal=[this](const QString &host,const QString &name){openSessionTerminal(host,name);};
     m_teamWorkspace->sendMessage=m_teamPanel->sendMessage;
     m_teamWorkspace->openTeamTab=[this]{setInspectorVisible(true);m_inspector->setCurrentWidget(m_teamPanel);};
     m_teamWorkspace->setLive([this](const Teams::Member &member){return teamLive(member);});
@@ -4102,6 +4120,17 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
     const auto previousProcesses=m_details.value("processes");
     const bool sameRun=m_details.value("run_id")==data.value("run_id") && m_details.value("host_generation")==data.value("host_generation");
     m_details = data; m_inspectError.clear();
+    // U35: a message just queued shows until a read lists it or a second read does not.
+    if (auto held = m_justHeld.find(entry->key); held != m_justHeld.end()) {
+        QSet<QString> listed;
+        for (const auto &value : data.value("held_inputs").toArray()) listed.insert(value.toObject().value("request_id").toString());
+        for (int i = int(held->size()); i-- > 0;) {
+            auto item = (*held)[i].toObject();
+            item["reads"] = item.value("reads").toInt() + 1;
+            if (listed.contains(item.value("request_id").toString()) || item.value("reads").toInt() >= 2) held->removeAt(i);
+            else (*held)[i] = item;
+        }
+    }
     if(!ProcessSettings::enabled())m_details.remove("processes");
     else if(!data.contains("processes") && sameRun && previousProcesses.isObject())m_details["processes"]=previousProcesses;
     else if(!data.contains("processes"))m_processPollAge.invalidate();
@@ -4206,6 +4235,32 @@ void SessionsWindow::updateWorkingLine(const Entry *entry)
     }
     m_workingLine->setColors(QColor(m_accent), QColor(m_fg), QColor(m_muted));
     m_workingLine->setWorking(working, text, m_details.value("turn_started").toDouble());
+    renderHeld();
+}
+
+// U35: what hgs holds for the selected session, and what was just queued there.
+// A just-queued message shows until a read lists it or two reads after it do not.
+void SessionsWindow::renderHeld()
+{
+    if (!m_heldBar) return;
+    const auto *entry = selected();
+    QJsonArray held = entry ? m_details.value("held_inputs").toArray() : QJsonArray();
+    QSet<QString> listed;
+    for (const auto &value : held) listed.insert(value.toObject().value("request_id").toString());
+    if (entry)
+        for (const auto &value : m_justHeld.value(m_selectedKey))
+            if (!listed.contains(value.toObject().value("request_id").toString())) held.append(value);
+    m_heldBar->setColors(QColor(m_fg), QColor(m_muted), QColor(m_border), QColor(m_surface));
+    m_heldBar->setHeld(held, entry ? IdentityBadges::providerName(entry->session.cmd) : QString());
+}
+
+void SessionsWindow::openSessionTerminal(const QString &host, const QString &name)
+{
+    showSession(host, name);
+    const auto *entry = selected();
+    if (!entry || entry->host != host || entry->session.name != name) return;
+    if (entry->session.cmd == "dsh") { showNativeUi(*entry); return; }
+    m_detailTabs->setCurrentWidget(m_terminal); m_terminal->connectSession();
 }
 
 QList<TeamCatalogEditor::Computer> SessionsWindow::teamComputers() const
@@ -5582,7 +5637,9 @@ void SessionsWindow::deliverMessage(const QString &key, const QString &host, con
                 }
                 // WhiteWh fork: the project's iron rules travel ahead of the text; the
                 // draft, retries and the local copy keep the text alone.
-                const quint64 request = m_client.requestSendMessage(host, name, IronRules::wrap(IronRules::rules(projectOfKey(key)), text), attachments, runId, conversationId, {}, compactionId);
+                // U35: an hgs that holds messages keeps this one until the agent takes the previous.
+                const bool hold = key == m_selectedKey && m_details.value("input_hold_supported").toBool();
+                const quint64 request = m_client.requestSendMessage(host, name, IronRules::wrap(IronRules::rules(projectOfKey(key)), text), attachments, runId, conversationId, {}, compactionId, hold);
                 m_pendingMessages.insert(request, {key, runId, conversationId});
                 if (m_push && m_push->key == key && !m_push->request && m_push->text == text) {
                     m_push->request = request; m_push->run = runId; m_push->conversation = conversationId;
@@ -5615,6 +5672,15 @@ void SessionsWindow::finishMessage(quint64 request, bool ok, const QJsonObject &
     m_composer->deliveryFinished(pending.key, ok, detail, uncertain);
     pushSendFinished(request, ok, uncertain);
     auto &messages = m_localMessages[pending.key];
+    // U35: a held message shows in the queued line, not as a sent card.
+    if (ok && receipt.value("status") == "queued") {
+        for (qsizetype i = 0; i < messages.size(); ++i)
+            if (messages.at(i).toObject().value("id").toString() == QString::number(request)) { messages.removeAt(i); break; }
+        m_justHeld[pending.key].append(QJsonObject{{"request_id", receipt.value("request_id")}, {"text", receipt.value("text")}});
+        if (pending.key == m_selectedKey) { renderHeld(); renderDetails(); inspect(); }
+        emit refreshRequested();
+        return;
+    }
     for (qsizetype i = 0; i < messages.size(); ++i) {
         auto message = messages.at(i).toObject();
         if (message.value("id").toString() != QString::number(request)) continue;
@@ -6888,6 +6954,7 @@ void SessionsWindow::showTeamDesigner()
         m_teamDesignerPage->designerLive=[this]{Teams::Member member;member.session=teamDesignerSession();return teamLive(member);};
         m_teamDesignerPage->startDesigner=[this](const QString &folder,const QString &goal,const QJsonObject &agent){startTeamDesigner(folder,goal,agent);};
         m_teamDesignerPage->openDesigner=[this](const QString &name){showSession({},name);setInspectorVisible(true);m_inspector->setCurrentWidget(m_teamPanel);};
+        m_teamDesignerPage->openTerminal=[this](const QString &host,const QString &name){openSessionTerminal(host,name);};
         m_teamDesignerPage->confirm=[this](const QString &name,const QString &title,const QString &text,const QString &action){return m_teamPanel->confirm(name,title,text,action);};
         m_teamDesignerPageIndex=m_pages->addWidget(m_teamDesignerPage);
     }

@@ -1,6 +1,7 @@
 #include "TeamConversation.h"
 #include "ActivityView.h"
 #include "CacheStatus.h"
+#include "HeldInputBar.h"
 #include "HgsClient.h"
 #include "QuestionCard.h"
 #include "TeamWidgets.h"
@@ -49,13 +50,24 @@ TeamConversation::TeamConversation(HgsClient *client, QWidget *parent) : QWidget
     // U16: a pending question takes the composer's place, as in the session view.
     m_question = new QuestionCard; m_question->setObjectName("teamConversationQuestion"); m_question->hide();
     v->addWidget(m_question);
+    // U35: the owner's messages hgs holds until the agent takes the previous one.
+    m_held = new HeldInputBar; m_held->setObjectName("teamConversationHeld");
+    v->addWidget(m_held);
+    m_held->cancel = [this](const QString &id, const QString &text) {
+        m_cancels.insert(m_client->requestCancelHeld(m_host, m_name, id), text);
+    };
     auto *bottom = new QWidget; bottom->setObjectName("teamConversationBottom");
     auto *bv = new QVBoxLayout(bottom); bv->setContentsMargins(10, 6, 10, 10); bv->setSpacing(6);
     m_asks = new QWidget; m_asksLayout = new QHBoxLayout(m_asks); m_asksLayout->setContentsMargins(0, 0, 0, 0); m_asksLayout->setSpacing(6);
     m_asks->hide();
     bv->addWidget(m_asks);
     m_status = new QLabel; m_status->setObjectName("teamConversationStatus"); m_status->setWordWrap(true); m_status->hide();
-    bv->addWidget(m_status);
+    // A dialog or draft in the agent's terminal: the owner finishes it there.
+    m_openTerminal = button(tr("Open terminal"), "teamConversationOpenTerminal"); m_openTerminal->hide();
+    QObject::connect(m_openTerminal, &QPushButton::clicked, this, [this] { if (openTerminal) openTerminal(m_host, m_name); });
+    auto *statusRow = new QHBoxLayout; statusRow->setSpacing(8);
+    statusRow->addWidget(m_status, 1); statusRow->addWidget(m_openTerminal, 0, Qt::AlignTop);
+    bv->addLayout(statusRow);
     m_composerRow = new QWidget;
     auto *row = new QHBoxLayout(m_composerRow); row->setContentsMargins(0, 0, 0, 0); row->setSpacing(6);
     m_input = new QPlainTextEdit; m_input->setObjectName("teamConversationInput"); m_input->setFixedHeight(56);
@@ -68,21 +80,37 @@ TeamConversation::TeamConversation(HgsClient *client, QWidget *parent) : QWidget
     QObject::connect(m_client, &HgsClient::inspectionReady, this, [this](const QString &host, const QString &name, const QJsonObject &data, const QString &archive) {
         received(host, name, data, archive);
     });
-    QObject::connect(m_client, &HgsClient::messageSent, this, [this](quint64 request, const QString &, const QString &, const QJsonObject &) {
+    QObject::connect(m_client, &HgsClient::messageSent, this, [this](quint64 request, const QString &, const QString &, const QJsonObject &receipt) {
         if (request != m_sendRequest) return;
-        m_sendRequest = 0; m_send->setEnabled(true); m_status->hide();
+        m_sendRequest = 0; m_send->setEnabled(true); m_status->hide(); m_openTerminal->hide();
         if (m_input->toPlainText() == m_pendingText) m_input->clear();
+        // Held by hgs: its line shows at once, then as the next reads list it.
+        if (receipt.value("status") == "queued") {
+            m_justHeld.append(QJsonObject{{"request_id", receipt.value("request_id")}, {"text", receipt.value("text")}});
+            renderHeld();
+        }
         if (sent) sent({});
         poll();
     });
     QObject::connect(m_client, &HgsClient::messageFailed, this, [this](quint64 request, const QString &, const QString &, const QString &error, bool uncertain) {
         if (request != m_sendRequest) return;
         m_sendRequest = 0; m_send->setEnabled(true);
-        // An uncertain delivery may have arrived: the text stays, nothing is resent.
-        m_status->setText(uncertain ? tr("Delivery unconfirmed — check the conversation before sending again. %1").arg(error) : error);
-        m_status->setStyleSheet(QStringLiteral("color:%1;").arg(colorsFor(m_dark).danger.name()));
-        m_status->show();
+        showRefusal(error, uncertain);
         if (sent) sent(error.isEmpty() ? tr("Not sent") : error);
+    });
+    QObject::connect(m_client, &HgsClient::heldCancelFinished, this, [this](quint64 request, const QString &, const QString &, bool ok, const QJsonObject &receipt, const QString &error) {
+        if (!m_cancels.contains(request)) return;
+        const QString text = m_cancels.take(request);
+        if (!ok) {
+            m_held->cancelFinished(receipt.value("request_id").toString());
+            m_status->setText(error); m_status->setStyleSheet(QStringLiteral("color:%1;").arg(colorsFor(m_dark).danger.name())); m_status->show();
+            poll(); return;
+        }
+        // The cancelled text comes back to an empty composer.
+        if (m_input->toPlainText().trimmed().isEmpty()) m_input->setPlainText(text);
+        for (int i = int(m_justHeld.size()); i-- > 0;)
+            if (m_justHeld[i].toObject().value("request_id") == receipt.value("request_id")) m_justHeld.removeAt(i);
+        renderHeld(); poll();
     });
     QObject::connect(m_question, &QuestionCard::answerRequested, this, [this](const QString &key, const QString &id, const QJsonArray &answers) {
         answerQuestion(key, id, answers);
@@ -107,8 +135,9 @@ void TeamConversation::setSession(const QString &host, const QString &name)
     m_view->setSessionKey(name.isEmpty() ? QString() : host + '\n' + name);
     m_view->setTimeline({}, {}, {});
     m_input->setEnabled(!name.isEmpty()); m_send->setEnabled(!name.isEmpty() && !m_sendRequest);
-    m_status->hide();
+    m_status->hide(); m_openTerminal->hide();
     m_questionChoice.clear(); renderQuestion();
+    m_justHeld = {}; renderHeld();
     if (isVisible()) poll();
 }
 
@@ -121,6 +150,7 @@ void TeamConversation::setTheme(bool dark)
     // After the sheet: a repolish would reset the Activity canvas palette.
     m_view->setTheme(dark);
     m_question->setTheme(dark);
+    m_held->setColors(c.fg, c.muted, c.border, c.surface);
     m_view->setBubbles(WorkspaceSkin::current().view(QStringLiteral("activity")) == QLatin1String("bubbles"));
 }
 
@@ -187,6 +217,17 @@ void TeamConversation::received(const QString &host, const QString &name, const 
     m_cursor = data.value("cursor").toInteger();
     m_view->setTimeline(m_details, m_events, {});
     renderQuestion();
+    // The reads list what hgs still holds. A message just queued shows until a
+    // read lists it or a second read after it (the first may predate it) does not.
+    QSet<QString> listed;
+    for (const auto &value : m_details.value("held_inputs").toArray()) listed.insert(value.toObject().value("request_id").toString());
+    for (int i = int(m_justHeld.size()); i-- > 0;) {
+        auto item = m_justHeld[i].toObject();
+        item["reads"] = item.value("reads").toInt() + 1;
+        if (listed.contains(item.value("request_id").toString()) || item.value("reads").toInt() >= 2) m_justHeld.removeAt(i);
+        else m_justHeld[i] = item;
+    }
+    renderHeld();
 }
 
 void TeamConversation::send(const QString &raw)
@@ -199,7 +240,9 @@ void TeamConversation::send(const QString &raw)
         m_status->show();
         return;
     }
-    m_sendRequest = m_client->requestSendMessage(m_host, m_name, text, {}, m_details.value("run_id").toString(), m_details.value("conversation_id").toString());
+    // U35: an hgs that holds messages keeps this one until the agent takes the previous.
+    m_sendRequest = m_client->requestSendMessage(m_host, m_name, text, {}, m_details.value("run_id").toString(), m_details.value("conversation_id").toString(),
+                                                 {}, {}, m_details.value("input_hold_supported").toBool());
     if (!m_sendRequest) return;
     m_send->setEnabled(false);
     m_pendingText = raw;
@@ -340,4 +383,44 @@ void TeamConversation::finishAnswer(quint64 request, bool ok, const QString &err
     else m_question->setError(m_answerKey, m_answerQuestion, error, uncertain);
     renderQuestion();
     poll();
+}
+
+void TeamConversation::setAgentName(const QString &name)
+{
+    m_agentName = name;
+    renderHeld();
+}
+
+void TeamConversation::renderHeld()
+{
+    QJsonArray held = m_details.value("held_inputs").toArray();
+    QSet<QString> listed;
+    for (const auto &value : held) listed.insert(value.toObject().value("request_id").toString());
+    for (const auto &value : m_justHeld)
+        if (!listed.contains(value.toObject().value("request_id").toString())) held.append(value);
+    const QString agent = !m_agentName.isEmpty() ? m_agentName
+        : m_details.value("agent").toString().isEmpty() ? tr("the agent") : m_details.value("agent").toString();
+    m_held->setHeld(m_name.isEmpty() ? QJsonArray() : held, agent);
+}
+
+// A refusal names what holds the message. At a dialog, draft or unknown prompt
+// the owner finishes it in the agent's terminal: Open terminal, not "Terminal".
+void TeamConversation::showRefusal(const QString &error, bool uncertain)
+{
+    QString text = error;
+    const bool terminal = !uncertain && error.contains(QStringLiteral("Terminal"));
+    if (terminal) {
+        if (text.startsWith(QStringLiteral("hgs: "))) text = text.mid(5);
+        for (const auto *tail : {"; open Terminal", "; inspect Terminal", "; wait for Ready or use Terminal", ". Open Terminal"})
+            if (const int at = text.indexOf(QString::fromLatin1(tail)); at >= 0) text = text.left(at);
+        text.replace(QStringLiteral(" in Activity or Terminal"), QString()).replace(QStringLiteral(" in Terminal"), QString());
+        text = text.trimmed();
+        if (!text.isEmpty()) text[0] = text[0].toUpper();
+        if (!text.endsWith('.')) text += '.';
+    }
+    // An uncertain delivery may have arrived: the text stays, nothing is resent.
+    m_status->setText(uncertain ? tr("Delivery unconfirmed — check the conversation before sending again. %1").arg(error) : text);
+    m_status->setStyleSheet(QStringLiteral("color:%1;").arg(colorsFor(m_dark).danger.name()));
+    m_status->show();
+    m_openTerminal->setVisible(terminal && openTerminal);
 }

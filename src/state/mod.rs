@@ -33,6 +33,7 @@ mod hooks;
 mod command_guard;
 pub(crate) mod hook_health;
 mod input;
+mod input_hold;
 mod input_queue;
 mod journal;
 mod kimi_cache_hint;
@@ -792,6 +793,8 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         return Err("Native schedule management is available for DeepSeek sessions; other agents report schedules read-only".into());
     }
     if command == "send-now" { return input_queue::dispatch(args); }
+    if command == "send-cancel" { return input_hold::dispatch_cancel(args); }
+    if command == "deliver-held" { return input_hold::deliver(args); }
     if command == "send" {
         return input::dispatch(args);
     }

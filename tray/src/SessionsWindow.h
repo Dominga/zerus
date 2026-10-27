@@ -590,6 +590,13 @@ private:
     QJsonObject m_subagentDetails;
     MessageComposer *m_composer = nullptr, *m_subagentComposer = nullptr;
     class WorkingLine *m_workingLine = nullptr;   // WhiteWh fork
+    // U35: the messages hgs holds for the selected session, with Cancel; the
+    // ones just queued per session until a read lists them; cancels in flight.
+    class HeldInputBar *m_heldBar = nullptr;
+    QHash<QString, QJsonArray> m_justHeld;
+    QHash<quint64, QPair<QString, QString>> m_heldCancels;
+    void renderHeld();
+    void openSessionTerminal(const QString &host, const QString &name);
     QHash<quint64, QString> m_childMessages;
     QuestionCard *m_question = nullptr;
     QList<ActivityWidth::ColumnLayout *> m_activityColumns;   // content sharing Activity's reading column

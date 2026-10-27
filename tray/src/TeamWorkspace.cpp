@@ -113,6 +113,8 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     new QHBoxLayout(m_coordinatorHead);
     m_conversation = new TeamConversation(teams->client());
     m_conversation->setPlaceholder(tr("Message the coordinator…"));
+    m_conversation->setAgentName(tr("the lead"));
+    m_conversation->openTerminal = [this](const QString &host, const QString &session) { if (openTerminal) openTerminal(host, session); };
     cv->addWidget(m_coordinatorHead); cv->addWidget(m_conversation, 1);
     m_sideSplit->addWidget(m_members); m_sideSplit->addWidget(m_coordinator);
     m_sideSplit->setStretchFactor(0, 45); m_sideSplit->setStretchFactor(1, 55);
@@ -310,7 +312,7 @@ void TeamWorkspace::render()
         retire(m_members->takeWidget());
         m_members->setWidget(list); m_membersContent = list;
         m_members->verticalScrollBar()->setValue(scroll);
-        renderCoordinator(*team, status);
+        renderCoordinator(*team);
     }
     if (m_top) { m_topHost->removeWidget(m_top); retire(m_top); }
     m_topHost->addWidget(top); top->show(); m_top = top;
@@ -2556,7 +2558,7 @@ void TeamWorkspace::assignMenu(const Team &team, const QString &member, const QP
     menu.exec(global);
 }
 
-void TeamWorkspace::renderCoordinator(const Team &team, const QString &status)
+void TeamWorkspace::renderCoordinator(const Team &team)
 {
     const Colors c = colorsFor(m_dark);
     const auto *lead = team.member(team.lead);
@@ -2588,13 +2590,8 @@ void TeamWorkspace::renderCoordinator(const Team &team, const QString &status)
     h->addWidget(open, 0, Qt::AlignTop);
     outer->addWidget(inner); inner->show();
     }
+    // U35: the coordinator has no quick-ask chips; the owner writes to the lead.
     m_conversation->setSession(lead ? lead->host : QString(), lead ? lead->session : QString());
-    // Quick asks by the team's state.
-    QStringList asks;
-    if (team.status == "planning") asks = {tr("Explain the plan"), tr("Split the biggest task")};
-    else if (status == "stuck") asks = {tr("What blocks the team?"), tr("Re-plan around the problem")};
-    else if (team.status == "running") asks = {tr("Summarize status"), tr("Re-plan remaining work")};
-    m_conversation->setQuickAsks(asks);
 }
 
 QWidget *TeamWorkspace::feed(const Team &team)

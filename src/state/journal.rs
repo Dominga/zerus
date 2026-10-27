@@ -897,6 +897,10 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     output["message_events_limit"] = json!(MESSAGE_EVENTS_LIMIT);
     output["message_events_max_bytes"] = json!(MESSAGE_EVENTS_BYTES);
     output["attachment_messages"] = attachments::messages(&record, "");
+    // U35: messages hgs holds until the agent takes the previous one, and that
+    // this hgs holds them for a client that asks (`queue_when_unconfirmed`).
+    output["input_hold_supported"] = json!(true);
+    output["held_inputs"] = input_hold::inspection(string(&record, "name"));
     output["voice_messages"] = conversation_history::inspected_voice_messages(&record, &output, None);
     // The lock was released after `snapshot`, so a rename may have landed since.
     // The pane folders go by the session IDs, which a rename keeps, to the name

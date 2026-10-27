@@ -39,6 +39,10 @@ struct Request {
     attachments: Vec<Attachment>,
     #[serde(default)]
     expected_compaction_id: String,
+    /// U35: hold the message in hgs while the previous input is unconfirmed
+    /// (clients that read `input_hold_supported`); otherwise it is refused.
+    #[serde(default)]
+    queue_when_unconfirmed: bool,
 }
 
 fn validate(request: &Request) -> Result<Vec<Vec<u8>>> {
@@ -319,16 +323,48 @@ fn checked_input(
     if !allow_working {
         idle_only(&record)?;
     }
-    if record["input_pending_at"]
-        .as_f64()
-        .is_some_and(|pending| record["last_event_at"].as_f64().unwrap_or(0.0) <= pending)
-    {
-        return Err("previous input has not been confirmed by the agent; inspect Terminal before sending again".into());
+    if !input_confirmed(&record) {
+        return Err(UNCONFIRMED.into());
     }
     if settings_unconfirmed(&record) {
         return Err(SETTINGS_UNCONFIRMED.into());
     }
     Ok(record)
+}
+
+pub(super) const UNCONFIRMED: &str = "previous input has not been confirmed by the agent; inspect Terminal before sending again";
+
+/// U35: the agent has taken the previous input. Any native event after it
+/// confirms it: UserPromptSubmit at once for an idle Claude or Codex, Kimi's
+/// UserPromptQueued while it works (dsh confirms in its own RPC). A working
+/// Claude or Codex queues the text in its TUI and reports UserPromptSubmit only
+/// when that turn ends, so there the text shown in its queue panel confirms it.
+fn input_confirmed(record: &Value) -> bool {
+    let Some(pending) = record["input_pending_at"].as_f64() else { return true };
+    if record["last_event_at"].as_f64().unwrap_or(0.0) > pending {
+        return true;
+    }
+    if !["claude", "codex"].contains(&string(record, "agent")) {
+        return false;
+    }
+    let request = string(record, "input_pending_request");
+    if uuid::Uuid::parse_str(request).is_err() {
+        return false;
+    }
+    let Ok(contents) = absolute_root().and_then(|root| {
+        fs::read_to_string(root.join("input_receipts").join(format!("{request}.json"))).map_err(|e| e.to_string())
+    }) else {
+        return false;
+    };
+    let receipt: Value = serde_json::from_str(&contents).unwrap_or_default();
+    receipt["status"] == "submitted"
+        && kimi_tui_choice::capture(record)
+            .is_ok_and(|screen| queued_on_screen(string(record, "agent"), &screen, string(&receipt, "submitted_text")))
+}
+
+/// Whether `screen` shows `text` in the agent's own queue panel.
+fn queued_on_screen(agent: &str, screen: &str, text: &str) -> bool {
+    !text.trim().is_empty() && input_queue::panel_text(agent, screen).is_some_and(|panel| paste_shown(&panel, text))
 }
 
 /// Keys of a model or effort change the agent may not have read yet. Unlike
@@ -714,6 +750,16 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 
 pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Result<Value> {
     // N34: a BOM is not part of the request or of its digest.
+    submit_with(name, crate::state::without_bom(input), recovery_id, false)
+}
+
+/// A held message, by its deliverer, through the same checks as any send.
+pub(super) fn submit_held(name: &str, input: &[u8]) -> Result<Value> {
+    submit_with(name, input, None, true)
+}
+
+fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool) -> Result<Value> {
+    // N34: a BOM is not part of the request or of its digest.
     let input = crate::state::without_bom(input);
     let request: Request =
         serde_json::from_slice(input).map_err(|e| format!("invalid send payload: {e}"))?;
@@ -733,14 +779,38 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
         if string(&receipt, "digest") != digest || string(&receipt, "name") != name {
             return Err("request ID was already used for different content".into());
         }
-        if receipt["status"] == "submitted" {
+        match string(&receipt, "status") {
             // Replay the exact durable acknowledgement. Reformatting parsed
             // floats can round its subsecond timestamp differently.
-            return Ok(receipt);
+            "submitted" => return Ok(receipt),
+            // U35: a held message answers with its receipt until its deliverer takes it.
+            "queued" if held => {}
+            "cancelled" if held => return Err(input_hold::CANCELLED.into()),
+            "queued" | "cancelled" | "failed" => return Ok(receipt),
+            _ => return Err("delivery uncertain: this request may already be in Terminal; do not resend automatically".into()),
         }
-        return Err("delivery uncertain: this request may already be in Terminal; do not resend automatically".into());
     }
-    let mut record = effort::apply_pending(name, checked_record(name, &request)?)?;
+    // U35: an opted-in message waits behind held ones and while the previous
+    // input is unconfirmed; every other refusal stays.
+    let opted = request.queue_when_unconfirmed && !held && recovery_id.is_none();
+    let checked = if opted && !input_hold::items(name).is_empty() {
+        Err(UNCONFIRMED.to_owned())
+    } else {
+        checked_record(name, &request)
+    };
+    let checked = match checked {
+        Err(error) if opted && error == UNCONFIRMED => {
+            let record = read(name)?;
+            if string(&record, "run_id") != request.expected_run_id
+                || string(&record, "conversation_id") != request.expected_conversation_id
+            {
+                return Err("session identity changed; refresh before sending".into());
+            }
+            return input_hold::hold(name, &request_id, &digest, input, &record, request.text.trim());
+        }
+        checked => checked?,
+    };
+    let mut record = effort::apply_pending(name, checked)?;
     if let Some(id) = recovery_id { recovery::check_submission(&record, id)?; }
     checked_terminal(&record, true)?;
     let attachments_root = root.join("attachments");
@@ -802,6 +872,7 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
     // Preserve attachments after any possible input: the agent may read them later.
     let _ = attachments.keep();
     record["input_pending_at"] = json!(submitted_at);
+    record["input_pending_request"] = json!(request_id);
     if let Err(error) = write(&mut record) {
         cleanup();
         return Err(error);
@@ -860,7 +931,6 @@ fn settle_codex_paste(terminal: &dyn backend::TerminalBackend, pane: &str, paste
 /// Whether `screen` shows all of `pasted` (wrapping, indentation and borders
 /// aside), only its end when it is too long to fit, or Codex's placeholder for a
 /// long paste. The whole text counts, as a reply's closing tag repeats its opening.
-#[cfg_attr(not(windows), allow(dead_code))]
 fn paste_shown(screen: &str, pasted: &str) -> bool {
     let squeeze = |text: &str| -> String {
         text.chars()
@@ -878,6 +948,27 @@ fn paste_shown(screen: &str, pasted: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn previous_input_is_confirmed_by_a_later_event_or_the_native_queue_panel() {
+        // Any native event after the input confirms it (UserPromptSubmit,
+        // Kimi's UserPromptQueued); one at the same moment does not.
+        assert!(input_confirmed(&json!({"agent":"kimi"})));
+        assert!(!input_confirmed(&json!({"agent":"kimi","input_pending_at":10.0,"last_event_at":10.0})));
+        assert!(input_confirmed(&json!({"agent":"kimi","input_pending_at":10.0,"last_event_at":10.5})));
+        // Without a recorded request, a working Claude waits for its next event.
+        assert!(!input_confirmed(&json!({"agent":"claude","input_pending_at":10.0,"last_event_at":9.0})));
+        // A working Claude or Codex shows the text in its own queue panel.
+        let claude = "● Thinking…\n\n❯ please also check the\n  migrations\nctrl+x ctrl+s to send now\n\n❯ \n";
+        assert!(queued_on_screen("claude", claude, "please also check the migrations"));
+        assert!(!queued_on_screen("claude", claude, "a different message"));
+        assert!(!queued_on_screen("claude", "❯ please also check the migrations\n", "please also check the migrations"));
+        assert!(!queued_on_screen("claude", claude, "  "));
+        let codex = "• Working (4s • esc to interrupt)\n\n• Queued follow-up inputs\n  ↳ run the tests again\n    shift+← edit last queued message\n\n\n› Ask Codex to do anything\n";
+        assert!(queued_on_screen("codex", codex, "run the tests again"));
+        // Kimi reports the queued prompt as an event instead.
+        assert!(!queued_on_screen("kimi", claude, "please also check the migrations"));
+    }
+
     #[test]
     fn unread_settings_keys_wait_for_a_native_event() {
         let mut record = json!({"settings_unconfirmed_at": 10.0, "last_event_at": 9.0});
@@ -1113,6 +1204,7 @@ mod tests {
             expected_conversation_id: String::new(),
             expected_compaction_id: String::new(),
             attachments: vec![],
+            queue_when_unconfirmed: false,
         };
         assert!(validate(&r).is_ok());
         for text in ["hi\x1b[201~", "hello\rbye", " /exit", "!rm test"] {

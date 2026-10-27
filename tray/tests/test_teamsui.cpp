@@ -654,6 +654,7 @@ private slots:
     void aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog();
     void designerPageStartsOrOpensTheDesigner();
     void designerQuestionIsAnsweredInTheWindow();
+    void coordinatorQueuesASecondMessageWithCancel();
     void catalogEditorMarksManualEdits();
     void boardColumnsKeepTheirScroll();
     void skinTokensMatchThePrototype();
@@ -1470,14 +1471,12 @@ void TestTeamsUi::workspaceShowsGraphBoardAndFocus()
     QVERIFY(split && split->handleWidth() >= 5);
     QVERIFY(workspace.findChild<QWidget *>("teamWorkspaceFilter"));
     shot(&workspace, "d3-running");
-    // The coordinator's quick asks stay the same buttons across renders, so
-    // they never flicker.
-    const auto asks = workspace.findChildren<QPushButton *>("teamConversationAsk");
-    QVERIFY(!asks.isEmpty());
+    // U35: the coordinator offers no quick-ask chips, in any team state or filter.
+    QVERIFY(workspace.findChildren<QPushButton *>("teamConversationAsk").isEmpty());
     for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceFilter")->findChildren<QPushButton *>())
         if (b->property("segment") == "active") { b->click(); break; }
     QTest::qWait(150);
-    QCOMPARE(workspace.findChildren<QPushButton *>("teamConversationAsk"), asks);
+    QVERIFY(workspace.findChildren<QPushButton *>("teamConversationAsk").isEmpty());
     // U25: the views carry their icons and their names.
     auto *views = workspace.findChild<QWidget *>("teamWorkspaceView");
     for (auto *b : views->findChildren<QPushButton *>()) QVERIFY(!b->text().isEmpty() && !b->icon().isNull());
@@ -4205,6 +4204,101 @@ else:print('{}')
     QTRY_VERIFY(input->isVisible());
     QTest::qWait(300);
     log.seek(0); QCOMPARE(log.readAll().count('\n'), 1);
+}
+
+// U35: the coordinator's composer, against an hgs that holds a message while
+// the lead has not taken the previous one. The held message shows "Queued
+// until the lead takes your previous message" with Cancel; Cancel sends
+// send-cancel with its request ID and returns the text; once hgs delivers it,
+// the line goes. A dialog in the lead's terminal is refused with Open terminal.
+void TestTeamsUi::coordinatorQueuesASecondMessageWithCancel()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString program = dir.filePath("hgs");
+    QVERIFY(FakeCli::install(program, R"PY(#!/usr/bin/env python3
+import json,os,sys
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a=a[1:]
+here=__file__
+held=json.load(open(here+'.held')) if os.path.exists(here+'.held') else []
+if a[:1]==['inspect']:
+ print(json.dumps({'name':a[1],'run_id':'run-1','conversation_id':'conv-1','runtime_state':'live','process_state':'running',
+  'activity':'busy','phase':'working','cursor':0,'events':[],'input_hold_supported':True,'held_inputs':held}))
+elif a[:1]==['send']:
+ body=json.load(sys.stdin)
+ open(here+'.sends','a').write(json.dumps(body)+'\n')
+ if os.path.exists(here+'.dialog'):
+  sys.stderr.write('hgs: terminal has a draft, dialog, or unrecognized prompt; open Terminal and return to an empty agent prompt\n');sys.exit(1)
+ status='queued' if body.get('queue_when_unconfirmed') else 'submitted'
+ if status=='queued':
+  held.append({'request_id':body['request_id'],'text':body['text'],'queued_at':1.0});json.dump(held,open(here+'.held','w'))
+ print(json.dumps({'request_id':body['request_id'],'name':a[1],'run_id':'run-1','conversation_id':'conv-1','first_message':False,
+  'status':status,'text':body['text']}))
+elif a[:1]==['send-cancel']:
+ body=json.load(sys.stdin)
+ open(here+'.cancels','a').write(json.dumps(body)+'\n')
+ json.dump([h for h in held if h['request_id']!=body['request_id']],open(here+'.held','w'))
+ print(json.dumps({'request_id':body['request_id'],'name':a[1],'status':'cancelled'}))
+else:print('{}')
+)PY"));
+    TeamConversation::setPollInterval(100);
+    const auto restore = qScopeGuard([] { TeamConversation::setPollInterval(2000); });
+    HgsClient client(FakeCli::program(program));
+    TeamConversation conversation(&client);
+    conversation.setAgentName("the lead");
+    QString opened;
+    conversation.openTerminal = [&](const QString &host, const QString &name) { opened = host + '|' + name; };
+    conversation.setSession({}, "claude/checkout/lead");
+    conversation.resize(560, 420); conversation.show();
+    auto *input = conversation.findChild<QPlainTextEdit *>("teamConversationInput");
+    auto *sendButton = conversation.findChild<QPushButton *>("teamConversationSend");
+    auto *held = conversation.findChild<QFrame *>("teamConversationHeld");
+    const auto sends = [&] {
+        QList<QJsonObject> found; QFile file(program + ".sends");
+        if (file.open(QIODevice::ReadOnly)) for (const auto &line : file.readAll().split('\n')) if (!line.isEmpty()) found << QJsonDocument::fromJson(line).object();
+        return found;
+    };
+    const auto rows = [&] { return held->findChildren<QWidget *>("heldInput"); };
+    // The send asks hgs to hold it: this hgs reads input_hold_supported.
+    QTRY_VERIFY(sendButton->isEnabled());
+    QTest::qWait(300);
+    input->setPlainText("Also re-run the migrations"); sendButton->click();
+    QTRY_COMPARE(sends().size(), 1);
+    QVERIFY(sends().first()["queue_when_unconfirmed"].toBool());
+    QTRY_COMPARE(rows().size(), 1);
+    QVERIFY(held->isVisible());
+    QCOMPARE(held->findChild<QLabel *>("heldInputText")->text(), QStringLiteral("Queued until the lead takes your previous message"));
+    QCOMPARE(input->toPlainText(), QString());
+    // No quick-ask chips here either.
+    QVERIFY(conversation.findChildren<QPushButton *>("teamConversationAsk").isEmpty());
+    shot(&conversation, "u35-coordinator-queued-dark");
+    lightPalette(); conversation.setTheme(false); lightShot(&conversation, "u35-coordinator-queued-light"); darkPalette(); conversation.setTheme(true);
+    // Cancel: hgs is told its request ID; the line goes and the text comes back.
+    held->findChild<QPushButton *>("heldInputCancel")->click();
+    QTRY_VERIFY(QFile::exists(program + ".cancels"));
+    QFile cancels(program + ".cancels"); QVERIFY(cancels.open(QIODevice::ReadOnly));
+    QCOMPARE(QJsonDocument::fromJson(cancels.readAll().trimmed()).object()["request_id"].toString(), sends().first()["request_id"].toString());
+    QTRY_VERIFY(rows().isEmpty());
+    QTRY_VERIFY(!held->isVisible());
+    QCOMPARE(input->toPlainText(), QStringLiteral("Also re-run the migrations"));
+    // Held again, then delivered by hgs: the line clears on the next read.
+    sendButton->click();
+    QTRY_COMPARE(sends().size(), 2);
+    QTRY_COMPARE(rows().size(), 1);
+    QVERIFY(FakeCli::replace(program + ".held", "[]"));
+    QTRY_VERIFY(rows().isEmpty());
+    // A dialog in the lead's terminal is refused, never held: Open terminal.
+    QFile dialog(program + ".dialog"); QVERIFY(dialog.open(QIODevice::WriteOnly)); dialog.close();
+    input->setPlainText("One more thing"); sendButton->click();
+    auto *status = conversation.findChild<QLabel *>("teamConversationStatus");
+    QTRY_VERIFY(status->isVisible());
+    QVERIFY2(status->text().startsWith("Terminal has a draft, dialog, or unrecognized prompt") && !status->text().contains("open Terminal"), qPrintable(status->text()));
+    auto *open = conversation.findChild<QPushButton *>("teamConversationOpenTerminal");
+    QVERIFY(open->isVisible());
+    QCOMPARE(input->toPlainText(), QStringLiteral("One more thing"));
+    QVERIFY(rows().isEmpty());
+    open->click();
+    QCOMPARE(opened, QStringLiteral("|claude/checkout/lead"));
 }
 
 void TestTeamsUi::catalogEditorMarksManualEdits()

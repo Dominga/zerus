@@ -4429,6 +4429,7 @@ void SessionsWindow::renderDetails()
     else if (archived && !m_details.value("last_restore_error").toString().isEmpty())
         hint = tr("Last restore failed: %1").arg(m_details.value("last_restore_error").toString());
     else if (!m_inspectError.isEmpty()) hint = m_inspectError;
+    else if (!s.subagentConfirm.isEmpty()) hint = s.subagentConfirm;
     else if (!questionError.isEmpty()) hint = tr("Could not load agent questions: %1. Check Terminal.").arg(questionError);
     else if (archived && occupied) hint = tr("Another active or saved session uses this name. Restore becomes available when that name is free.");
     else if (archived && !s.resumable) hint = tr("This session is archived. Its conversation history is currently unavailable, so it cannot be restored.");

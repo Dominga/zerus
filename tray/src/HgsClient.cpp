@@ -207,6 +207,7 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.providerError = obj.value("provider_error").toObject();
     s.providerStatusAt = obj.value("provider_status_at").toDouble();
     s.subagentSource = obj.value("subagent_source").toString();
+    s.subagentConfirm = obj.value("subagent_confirm").toString();
     s.subagentCountsComplete = obj.value("subagent_counts_complete").toBool();
     s.subagentActiveCount = obj.value("subagent_active_count").toInt(s.subagentCount);
     s.subagentCompletedCount = obj.value("subagent_completed_count").toInt();

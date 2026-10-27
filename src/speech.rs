@@ -30,7 +30,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         return Err(Error::new(1, "Speech request is too large"));
     }
     let value: Value =
-        serde_json::from_slice(&input).map_err(|_| Error::new(1, "Invalid speech JSON request"))?;
+        serde_json::from_slice(crate::state::without_bom(&input)).map_err(|_| Error::new(1, "Invalid speech JSON request"))?;
     println!("{}", request(config, &value)?);
     Ok(0)
 }

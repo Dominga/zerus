@@ -728,6 +728,48 @@ answered; a denial cannot carry an explanation.
   per member and episode, not per 20 minutes; the lead may mute it for a member
   ('expected idle until #N'). U9 stays for drafts. Owner: yes.
 
+- **U25. New UI from the owner's design (owner, 2026-10-27).** The designer's
+  clickable prototype and its spec are the source of truth for look and
+  behaviour: `D:\Tools\zerus-team-phases\ui-new-2026-10-27\Zerus-prototype.html`
+  (opens offline; the Prototype button switches Running / Stuck / Done /
+  Planning and the theme) and `Zerus-new-UI-spec.ru.md` (sections 0-14, with an
+  acceptance checklist in 13; screenshots follow). UI strings are English,
+  exactly as in the prototype; colours and sizes go into the skin tokens, never
+  hard-coded. Pieces:
+  (1) Skin: the prototype's tokens in both themes, the new role colours
+  (secretary, coder, qa, designer, leadgpt, expert, proexpert; a role's colour
+  comes from the catalog), thin 8 px scroll bars, the real gear and bell-off
+  icons, one collapsible block pattern remembered in QSettings, and the
+  'agent works' dots under the model icon (static when animations are off).
+  (2) Session list: '+' per project, git / background / services chips with
+  counts in row 2 (the old cloud goes), team members muted by default with
+  bell-off and a grey edge, the lead's team strip without the name, the
+  member tree with its lines (spec 2).
+  (3) The lead's session header carries the team status, phase/tasks/phases
+  progress, time and the team actions; the Team tab's name bar goes. The
+  composer row has three zones (spec 3, 4).
+  (4) Team tab: phase scrolls in Graph, Board and Layers with Accept /
+  Reject (with a comment the lead reworks) / Undo / Auto-accept drafts; the
+  right column's Needs your answer, Team stuck and Plan problems collapsed by
+  default; Members as a tree with collapsed task lists (spec 5.1-5.3, 5.5,
+  5.7). The server adds the phase states rejected and queued, the owner's
+  send-back comment, Undo and the team's auto-accept of error-free drafts.
+  (5) Graph: two-line nodes without a status word, the working indicator at
+  the agent, orthogonal edge routing around nodes with corridors, edge editing
+  in planning and drafts (spec 5.4).
+  (6) Inspector: one column of collapsible cards instead of tabs (spec 6).
+  (7) Projects, Machines (editable connection form with Discard, Refresh,
+  Phones), Agent accounts (machine filter, signed in/out) (spec 7-9).
+  (8) New session dialog 'B - Dense, labels left' (spec 10).
+  (9) Team designer and an editable catalog: roles with prompt order,
+  templates with roster counts and 'only if needed', routing with Try it,
+  Save / Revert, the same widget in Settings > Teams; the catalog model of
+  spec 12 on the server (spec 11, 12).
+  (10) A sub-lead inside a team (spec 5.6): `members[].parent` and `sub`; a
+  sub-lead hands out, reviews and accepts its reports' tasks, the lead reviews
+  only its direct reports. Sub-teams (Hierarchy, Prompt 2) stay for whole
+  delegated tasks. In phase 36 with the review fixes. Owner: yes.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

@@ -713,6 +713,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 }
 
 pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Result<Value> {
+    // N34: a BOM is not part of the request or of its digest.
+    let input = crate::state::without_bom(input);
     let request: Request =
         serde_json::from_slice(input).map_err(|e| format!("invalid send payload: {e}"))?;
     let files = validate(&request)?;

@@ -169,7 +169,7 @@ fn candidates(record: &Value, rows: &BTreeMap<u32, Process>) -> Vec<u32> {
 }
 
 fn configured_services(record: &Value) -> Vec<crate::state::services::Service> {
-    crate::state::services::configured(string(record, "agent"), string(record, "cwd"))
+    crate::state::services::configured(string(record, "agent"), string(record, "cwd"), string(record, "agent_home"))
 }
 
 fn agent_pid(record: &Value) -> u32 {
@@ -330,5 +330,57 @@ mod tests {
         let mut reused = rows[&20].clone();
         reused.birth = "new-birth".into();
         assert_ne!(original, job(&record, &reused, &rows)["id"]);
+    }
+    /// U11: Claude Code on Windows runs an enabled plugin's npx server as
+    /// `cmd.exe /d /s /c npx ^-y^ ...`. The session's listing shows it as the
+    /// plugin's service, not as Background work; an npx job beside it stays
+    /// Background.
+    #[test]
+    fn a_plugin_server_under_the_windows_npx_wrapper_is_a_service_not_work() {
+        let profile = tempfile::tempdir().unwrap();
+        let install = profile.path().join("plugins").join("cache").join("socraticode");
+        std::fs::create_dir_all(install.join(".claude-plugin")).unwrap();
+        std::fs::write(
+            install.join(".claude-plugin").join("plugin.json"),
+            json!({"name":"socraticode","mcpServers":{"socraticode":{"command":"npx","args":["-y","--prefer-online","socraticode@latest"]}}})
+                .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            profile.path().join("plugins").join("installed_plugins.json"),
+            json!({"version":2,"plugins":{"socraticode@socraticode":[{"scope":"user","installPath":install}]}}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(profile.path().join("settings.json"), json!({"enabledPlugins":{"socraticode@socraticode":true}}).to_string())
+            .unwrap();
+        let make = |pid, parent, exe: &str, command: &str| Process {
+            pid,
+            parent,
+            group: Some(pid),
+            birth: "birth".into(),
+            started: f64::from(pid),
+            command: command.into(),
+            executable: exe.into(),
+        };
+        let cmd = r"C:\WINDOWS\system32\cmd.exe";
+        let rows: BTreeMap<_, _> = [
+            make(10, 1, r"C:\Users\u\.local\bin\claude.exe", "claude"),
+            make(20, 10, cmd, r"C:\WINDOWS\system32\cmd.exe /d /s /c npx ^-y^ ^--prefer-online^ ^socraticode@latest^"),
+            make(21, 20, r"C:\Program Files\nodejs\node.exe", r"node C:\npm\npx-cli.js -y --prefer-online socraticode@latest"),
+            make(30, 10, cmd, r"C:\WINDOWS\system32\cmd.exe /d /s /c npx ^-y^ ^prettier^ ^--write^ ^.^"),
+        ]
+        .into_iter()
+        .map(|p| (p.pid, p))
+        .collect();
+        let record = json!({"pid":10,"agent":"claude","cwd":"","agent_home":profile.path()});
+        assert_eq!(roots(&record, &rows), vec![30]);
+        let services = services_of(&record, &rows);
+        assert_eq!(services.len(), 1, "{services:?}");
+        assert_eq!(services[0]["name"], "socraticode");
+        assert_eq!(services[0]["os_pid"], 20);
+        // Another profile has no such plugin: the wrapper is Background there.
+        let other = tempfile::tempdir().unwrap();
+        let record = json!({"pid":10,"agent":"claude","cwd":"","agent_home":other.path()});
+        assert_eq!(roots(&record, &rows), vec![20, 30]);
     }
 }

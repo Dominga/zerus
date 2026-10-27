@@ -1972,7 +1972,7 @@ pub(super) fn projection_dispatch(args: &[String]) -> Result<i32> {
     if bytes.len() > 16 * 1024 {
         return Err("History projection request exceeds bounds".into());
     }
-    let projection: ProjectionRequest = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let projection: ProjectionRequest = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e| e.to_string())?;
     let request = validate_projection(&projection)?;
     let name = &args[0];
     let parent = record(name, &request)?;
@@ -2022,7 +2022,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if bytes.len() > 16 * 1024 {
         return Err("History request exceeds bounds".into());
     }
-    let request: Request = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let request: Request = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e| e.to_string())?;
     validate(&request)?;
     let name = &args[0];
     let parent = record(name, &request)?;

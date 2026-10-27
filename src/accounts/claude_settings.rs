@@ -56,7 +56,7 @@ fn merge(previous: Option<&Value>, current: Option<&Value>, base: Option<&Value>
     }
     current.cloned()
 }
-fn write(path: &Path, value: &Value) -> Result<()> {
+pub(super) fn write(path: &Path, value: &Value) -> Result<()> {
     let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
     platform::make_private(file.as_file())?;
     file.write_all(&serde_json::to_vec_pretty(value).map_err(|e|Error::new(1,e.to_string()))?)?;

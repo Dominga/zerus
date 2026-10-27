@@ -1,10 +1,11 @@
 {
  "schema": 1,
- "description": "U30 six session states: the order of SESSION-STATES.md section 4 over one hgs ls --json row after the host added cache_ttl and last_active. `team` is the team store's reason for the session and whether it is the lead; `budget` is a declared budget still within its minutes. A job nothing waits for moves to process_work.services and no longer counts. Offline is the client's state for a machine that does not answer; a host never lists it.",
+ "description": "U30 six session states: the order of SESSION-STATES.md section 4 over one hgs ls --json row after the host added cache_ttl, last_active and build (the hgs run or hgs team run build still running, or null). `team` is the team store's reason for the session and whether it is the lead; `budget` is a declared budget still within its minutes. A job nothing waits for moves to process_work.services and no longer counts. Offline is the client's state for a machine that does not answer; a host never lists it.",
  "now": 1000000.0,
  "long_operation_seconds": 30,
  "states": [
   "working",
+  "build",
   "user",
   "deps",
   "cooling",
@@ -177,6 +178,299 @@
    },
    "expect": {
     "session_state": "working"
+   }
+  },
+  {
+   "name": "zerus-build-running",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 992800.0,
+    "process_work": {
+     "count": 0
+    },
+    "build": {
+     "source": "hgs_run",
+     "request_id": "44444444-4444-4444-8444-444444444444",
+     "label": "cargo test",
+     "command": "cargo test --workspace",
+     "since": 999640.0
+    }
+   },
+   "expect": {
+    "session_state": "build",
+    "kind": "build",
+    "text": "Running cargo test · 6m so far"
+   }
+  },
+  {
+   "name": "team-run-build",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    },
+    "build": {
+     "source": "team_run",
+     "request_id": "44444444-4444-4444-8444-444444444444",
+     "label": "cargo-test",
+     "command": "cargo test --workspace",
+     "since": 999640.0
+    }
+   },
+   "team": {
+    "lead": false,
+    "reason": {
+     "kind": "team_dependency",
+     "text": "Waiting for #2 Saved cards API (Backend)",
+     "team": "t",
+     "task": 3,
+     "dependency": 2
+    }
+   },
+   "expect": {
+    "session_state": "build",
+    "kind": "build",
+    "text": "Running cargo-test · 6m so far"
+   }
+  },
+  {
+   "name": "zerus-build-defers-the-reply",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    },
+    "build": {
+     "source": "hgs_run",
+     "request_id": "44444444-4444-4444-8444-444444444444",
+     "label": "cargo test",
+     "command": "cargo test --workspace",
+     "since": 999640.0
+    },
+    "reply_id": "7:999990",
+    "read": {
+     "reply_id": "6:999000"
+    },
+    "notification_preferences": {
+     "muted": false
+    }
+   },
+   "expect": {
+    "session_state": "build",
+    "kind": "build"
+   }
+  },
+  {
+   "name": "working-before-build",
+   "raw": {
+    "activity": "busy",
+    "phase": "tool",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999999.0,
+    "process_work": {
+     "count": null
+    },
+    "current_tool": "Edit",
+    "tool_started": 999997.0,
+    "build": {
+     "source": "hgs_run",
+     "request_id": "44444444-4444-4444-8444-444444444444",
+     "label": "cargo test",
+     "command": "cargo test --workspace",
+     "since": 999640.0
+    }
+   },
+   "expect": {
+    "session_state": "working"
+   }
+  },
+  {
+   "name": "approval-before-build",
+   "raw": {
+    "activity": "busy",
+    "phase": "approval",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999999.0,
+    "process_work": {
+     "count": null
+    },
+    "build": {
+     "source": "hgs_run",
+     "request_id": "44444444-4444-4444-8444-444444444444",
+     "label": "cargo test",
+     "command": "cargo test --workspace",
+     "since": 999640.0
+    }
+   },
+   "expect": {
+    "session_state": "user",
+    "kind": "approval"
+   }
+  },
+  {
+   "name": "stopped-before-build",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    },
+    "state": "paused",
+    "build": {
+     "source": "hgs_run",
+     "request_id": "44444444-4444-4444-8444-444444444444",
+     "label": "cargo test",
+     "command": "cargo test --workspace",
+     "since": 999640.0
+    }
+   },
+   "expect": {
+    "session_state": "stopped"
+   }
+  },
+  {
+   "name": "build-before-the-usage-limit",
+   "raw": {
+    "activity": "attention",
+    "phase": "error",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    },
+    "provider_error": {
+     "error_kind": "session_limit",
+     "reset_at": 1005400.0
+    },
+    "activity_summary": "Session limit reached",
+    "build": {
+     "source": "hgs_run",
+     "request_id": "44444444-4444-4444-8444-444444444444",
+     "label": "cargo test",
+     "command": "cargo test --workspace",
+     "since": 999640.0
+    }
+   },
+   "expect": {
+    "session_state": "build",
+    "kind": "build"
+   }
+  },
+  {
+   "name": "finished-build-falls-back-to-cooling",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999970.0,
+    "process_work": {
+     "count": 0
+    },
+    "build": null
+   },
+   "expect": {
+    "session_state": "cooling"
+   }
+  },
+  {
+   "name": "unbudgeted-shell-job-beside-no-build-is-a-service",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 1,
+     "started_at": 999580.0,
+     "command": "cargo build --release",
+     "jobs": [
+      {
+       "command": "cargo build --release",
+       "started_at": 999580.0
+      }
+     ]
+    },
+    "build": null
+   },
+   "expect": {
+    "session_state": "cooling",
+    "process_work_count": 0,
+    "services": [
+     "cargo"
+    ]
    }
   },
   {

@@ -785,13 +785,14 @@ cannot show a green check.
 
 ### Session states
 
-A session is in one of six states; **Offline** (the computer does not answer)
+A session is in one of seven states; **Offline** (the computer does not answer)
 stays as before. A reply ending is not a long task being complete: the states
 say what the session does now and what it waits for.
 
 | State | `session_state` | Meaning |
 |---|---|---|
 | Working | `working` | The turn runs: the model writes code or runs tools. |
+| Building | `build` | A build or test Zerus runs for the session (`hgs run`, `hgs team run`), also while the agent is idle. |
 | Waiting for you | `user` | An approval, an input, an error, a reply to read, or a lead's "Needs you". |
 | Waiting for dependencies | `deps` | Always with its reason (below). |
 | Cooling | `cooling` | Done and waiting for a new task; the prompt cache is still warm. |
@@ -801,8 +802,9 @@ say what the session does now and what it waits for.
 The host computes them in this order: Working, unless the turn waits for
 subagents in flight (`Waiting for 2 subagents: explorer, reviewer`) or for a
 tool call running 30 seconds or more (`Waiting for cargo test --workspace ·
-long operation, 6m so far`); Waiting for you for an approval, an input, a
-provider error or an unread reply (a muted session, such as a team member,
+long operation, 6m so far`); Waiting for you for an approval, an input or a
+provider error; Building while a build Zerus runs for the session still runs
+(`Running cargo test · 6m so far`); Waiting for you for an unread reply (a muted session, such as a team member,
 answers its lead, so its reply does not count); Stopped; the account's usage
 limit (`Waiting for the usage limit to reset · 01:30`); the team's reason; an
 `hgs wait` the session declared; a job under a declared team budget; then
@@ -824,10 +826,12 @@ reasons come from the team store:
 | The team is paused, the plan is drafted | `Waiting for you to resume the team`, `Waiting for you to approve the plan` |
 
 `state_reason` is null for Working, Cooling, Cold and Stopped, and otherwise
-carries `kind` (`subagents`, `long_operation`, `usage_limit`, `coordination`,
-`job`, `approval`, `input`, `error`, `reply` or a `team_*` kind) with its
-source: subagent `names`, the `command` and its start `since`, `resets_at`, or
-the team and task numbers. `last_active` is the last native event, a cache
+carries `kind` (`build`, `subagents`, `long_operation`, `usage_limit`,
+`coordination`, `job`, `approval`, `input`, `error`, `reply` or a `team_*` kind)
+with its source: the build's `label`, `command`, `since` and `source`
+(`hgs_run` or `team_run`), subagent `names`, the `command` and its start
+`since`, `resets_at`, or the team and task numbers. `build` is the running
+build itself, or null. `last_active` is the last native event, a cache
 keepalive included. `cache_ttl` is `{seconds, source, kept_warm}`: the TTL the
 account's native usage last reported (`native_usage`), else Claude's settings
 `env` (`ENABLE_PROMPT_CACHING_1H` gives one hour, `FORCE_PROMPT_CACHING_5M` five
@@ -835,10 +839,21 @@ minutes; `settings`), else five minutes (`default`). Keep cache warm extends it:
 each keepalive turn is a native event, and `kept_warm` says the last turn only
 warmed the cache. These fields are additive; older fields keep their meaning.
 
-A job the session started makes it wait only while it waits for it. A
+Start builds and long tests through Zerus so they show as work:
+`hgs team run` for a team member's templates (`hgs guide team-run`), and
+`hgs run --json [--wait]` with `{request_id, label, command, cwd?,
+timeout_minutes?}` for any session (`hgs guide run`). `hgs run` names the
+calling session by its process ancestry, runs the command in `sh -c` (`cmd /C`
+on Windows) in a detached runner with its whole process tree stopped after the
+timeout (30 minutes by default, at most 240), keeps the last 4000 characters of
+output and records the run under the session; the same `request_id` never runs
+twice, and asking again reads its state. `hgs run --list --json` lists the
+session's newest runs.
+
+A job the session started otherwise makes it wait only while it waits for it. A
 long-lived process it does not wait for, such as a dev server, a watcher or a
-tunnel, a job past its declared budget, and a job that still runs after the turn
-ended with nothing waiting on it, are services: `process_work` lists them under
+tunnel, a job past its declared budget, and any other job that still runs after
+the turn ended with nothing waiting on it, are services: `process_work` lists them under
 `services` with `kind: "job"` (and `unwaited_count`), no longer counts them, and
 the session is Cooling or Cold by its idle time. Services never defer the reply
 badge and never hold a team's capture gate. A session waiting for its own jobs

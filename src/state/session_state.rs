@@ -1,8 +1,10 @@
-//! WhiteWh fork: the six session states (U30; the design is SESSION-STATES.md
-//! in the UI handoff). Every listed or inspected session carries
-//! `session_state` (working, user, deps, cooling, cold or stopped; clients
-//! show offline for a machine that does not answer), `state_reason` (what it
-//! waits for, with its source), `last_active` and `cache_ttl`.
+//! WhiteWh fork: the session states (U30; the design is SESSION-STATES.md in
+//! the UI handoff). Every listed or inspected session carries `session_state`
+//! (working, build, user, deps, cooling, cold or stopped; clients show offline
+//! for a machine that does not answer), `state_reason` (what it waits for,
+//! with its source), `build` (the build Zerus runs for it, or null),
+//! `last_active` and `cache_ttl`. A build started through `hgs run` or
+//! `hgs team run` is work: the session is Building even while it is idle.
 //!
 //! A job the session started makes it wait only while it waits for it: a tool
 //! call past the threshold, subagents in flight, or a job under a declared
@@ -40,6 +42,7 @@ pub(super) fn decorate(sessions: &mut [Value]) {
     }
     let at = now();
     let waiting = team_reasons(at);
+    let builds = super::builds::running(at);
     let observed = observed_ttls();
     let mut accounts = HashMap::new();
     for session in sessions.iter_mut() {
@@ -48,6 +51,7 @@ pub(super) fn decorate(sessions: &mut [Value]) {
                 && (w.conversation_id.is_empty() || w.conversation_id == text(session, "conversation_id"))
         });
         classify_jobs(session, team.and_then(|team| team.budget.as_ref()));
+        session["build"] = build_of(session, &builds).or_else(|| team.and_then(|team| team.build.clone())).unwrap_or(Value::Null);
         let key = format!("{}\n{}", text(session, "agent"), text(session, "account_home"));
         let ttl = accounts.entry(key).or_insert_with(|| cache_ttl(session, &observed)).clone();
         apply(session, ttl, team, at);
@@ -63,6 +67,17 @@ fn apply(session: &mut Value, mut ttl: Value, team: Option<&teams::waiting::Wait
     let (state, reason) = compute(session, team.map(|team| (team.lead, team.reason.as_ref())), at);
     session["session_state"] = json!(state);
     session["state_reason"] = reason.unwrap_or(Value::Null);
+}
+
+/// U30: the oldest `hgs run` build the session started that still runs.
+fn build_of(session: &Value, builds: &[Value]) -> Option<Value> {
+    let run = text(session, "run_id");
+    builds
+        .iter()
+        .filter(|claim| !run.is_empty() && claim["session"]["run_id"] == run && claim["session"]["name"] == session["name"])
+        .min_by(|a, b| a["started"].as_f64().unwrap_or(0.0).total_cmp(&b["started"].as_f64().unwrap_or(0.0)))
+        .map(|claim| json!({"source":"hgs_run","request_id":claim["request_id"],"label":claim["label"],
+            "command":claim["command"],"since":claim["started"]}))
 }
 
 fn team_reasons(at: f64) -> Vec<teams::waiting::Waiting> {
@@ -149,6 +164,18 @@ pub(crate) fn compute(session: &Value, team: Option<(bool, Option<&Value>)>, at:
             }
             _ => {}
         }
+    }
+    // Building: a build or test Zerus runs for the session (hgs run, hgs team
+    // run). Explicit attention comes first; the reply waits for the build.
+    if !stopped && session["build"].is_object() {
+        let build = &session["build"];
+        let label = clipped(&build["label"], 80);
+        let since = build["since"].as_f64().unwrap_or(0.0);
+        let so_far = if since > 0.0 { format!(" \u{b7} {} so far", minutes(at - since)) } else { String::new() };
+        return ("build", Some(json!({"kind":"build","text":format!("Running {label}{so_far}"),"label":label,
+            "command":build["command"],"since":build["since"],"source":build["source"],"request_id":build["request_id"]})));
+    }
+    if state != "archived" {
         // A reply is deferred while the session waits for its own work.
         if unread_reply(session) && session["process_work"]["count"].as_u64().unwrap_or(0) == 0 {
             return ("user", Some(json!({"kind":"reply","text":"Response ready to read"})));
@@ -486,6 +513,42 @@ mod tests {
             // Outside a team the same dev server leaves the session Cooling.
             assert_eq!(state(&rows[3]), (json!("cooling"), Value::Null));
             assert_eq!(rows[3]["process_work"]["services"][0]["command"], "npm run dev");
+        });
+    }
+
+    #[test]
+    fn a_running_zerus_build_is_build_and_a_finished_one_falls_back_to_cooling() {
+        let root = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(root.path(), || {
+            let at = now();
+            let id = "55555555-5555-4555-8555-555555555555";
+            let folder = storage::root().join("builds");
+            crate::platform::private_dir(&folder).unwrap();
+            let claim = json!({"request_id":id,"label":"cargo test","command":"cargo test --locked","cwd":"/x",
+                "session":{"name":"claude/p/dev","run_id":"r1","conversation_id":"c1"},"started":at - 5.0,"timeout_secs":600,
+                "pid":std::process::id()});
+            storage::atomic(&folder.join(format!("{id}.running.json")), &claim.to_string()).unwrap();
+            let row = |run: &str| json!({"name":"claude/p/dev","run_id":run,"conversation_id":"c1","agent":"codex",
+                "activity":"idle","phase":"idle","last_event_at":at - 30.0,"reply_id":"9:1","read":null,
+                "process_work":{"count":1,"started_at":at - 60.0,"command":"npm run dev","jobs":[{"command":"npm run dev","started_at":at - 60.0}]}});
+            let mut rows = vec![row("r1"), row("another-run")];
+            decorate(&mut rows);
+            // The build is work: Building, and the unread reply waits for it.
+            assert_eq!(rows[0]["session_state"], "build");
+            assert_eq!(rows[0]["state_reason"]["kind"], "build");
+            assert_eq!(rows[0]["state_reason"]["text"], "Running cargo test \u{b7} under 1m so far");
+            assert_eq!(rows[0]["build"]["request_id"], id);
+            // The shell's own job beside it is still a service.
+            assert_eq!((rows[0]["process_work"]["count"].clone(), rows[0]["process_work"]["services"][0]["name"].clone()),
+                (json!(0), json!("npm")));
+            // Another run of the same name is not the build's session.
+            assert_eq!((rows[1]["session_state"].clone(), rows[1]["build"].clone()), (json!("user"), Value::Null));
+            // The build ended: its record is no claim, and the session cools.
+            std::fs::rename(folder.join(format!("{id}.running.json")), folder.join(format!("{id}.json"))).unwrap();
+            let mut rows = vec![row("r1")];
+            rows[0]["read"] = json!({"reply_id":"9:1"});
+            decorate(&mut rows);
+            assert_eq!((rows[0]["session_state"].clone(), rows[0]["build"].clone()), (json!("cooling"), Value::Null));
         });
     }
 

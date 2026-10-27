@@ -21,6 +21,9 @@ pub(crate) struct Waiting {
     /// C12: a declared budget still within its minutes keeps the member's
     /// Background job a job it waits for; past it, the job is a service.
     pub budget: Option<Value>,
+    /// U30: the member's `hgs team run` still running in its folder: the
+    /// session is Building.
+    pub build: Option<Value>,
 }
 
 /// The reasons of every session of these teams, the lead's first.
@@ -40,16 +43,41 @@ pub(crate) fn reasons(teams: &[Team], now: f64) -> Vec<Waiting> {
                 json!({"label":budget.label,"minutes":budget.minutes,"declared_at":budget.declared_at,
                     "job":budget.job.as_ref().map(|job| json!({"command":job.command,"since":job.since}))})
             });
+            let build = if lead { None } else { team_build(team, member, now) };
             out.push(Waiting {
                 name: session.name.clone(),
                 conversation_id: session.conversation_id.clone(),
                 lead,
                 reason,
                 budget,
+                build,
             });
         }
     }
     out
+}
+
+/// How long past its bound a claim whose runner never settled still counts
+/// (the dispatcher settles it then, C1).
+const RUN_GRACE_SECONDS: f64 = 120.0;
+
+/// U30: the oldest template run still claimed in the member's own folder.
+fn team_build(team: &Team, member: &Member, now: f64) -> Option<Value> {
+    let folder = super::dispatcher::member_folder_path(team, member).ok()?;
+    super::outbox::running_all(std::path::Path::new(&folder))
+        .into_iter()
+        .map(|(_, claim)| claim)
+        .filter(|claim| {
+            let started = claim["started"].as_f64().unwrap_or(0.0);
+            let bound = claim["timeout_secs"].as_f64().unwrap_or(1800.0);
+            started > 0.0 && now <= started + bound + RUN_GRACE_SECONDS
+        })
+        .min_by(|a, b| a["started"].as_f64().unwrap_or(0.0).total_cmp(&b["started"].as_f64().unwrap_or(0.0)))
+        .map(|claim| {
+            let label = claim["label"].as_str().filter(|label| !label.is_empty()).unwrap_or("hgs team run").to_owned();
+            json!({"source":"team_run","request_id":claim["request_id"],"label":label,
+                "command":claim["command"].as_str().unwrap_or(&label),"since":claim["started"]})
+        })
 }
 
 fn reason(team: &Team, kind: &str, text: String, extra: Value) -> Option<Value> {
@@ -299,5 +327,23 @@ mod tests {
         team.members[1].budget = Some(Budget { label: "install".into(), minutes: 15, red_minutes: 30, declared_at: 100.0, ..Default::default() });
         assert_eq!(of(&reasons(&[team.clone()], 100.0 + 60.0), "dev").budget.as_ref().unwrap()["label"], "install");
         assert_eq!(of(&reasons(&[team], 100.0 + 15.0 * 60.0), "dev").budget, None);
+    }
+
+    #[test]
+    fn a_template_run_claimed_in_the_member_folder_is_its_build() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut team = team(vec![]);
+        team.members[1].directory = folder.path().display().to_string();
+        assert_eq!(of(&reasons(&[team.clone()], 1000.0), "dev").build, None);
+        let claim = json!({"request_id":"11111111-1111-4111-8111-111111111111","started":900.0,"timeout_secs":600,
+            "label":"cargo-test","command":"cargo test --locked"});
+        super::super::outbox::write_running(folder.path(), "11111111-1111-4111-8111-111111111111", &claim).unwrap();
+        let build = of(&reasons(&[team.clone()], 1000.0), "dev").build.clone().unwrap();
+        assert_eq!(build, json!({"source":"team_run","request_id":"11111111-1111-4111-8111-111111111111",
+            "label":"cargo-test","command":"cargo test --locked","since":900.0}));
+        // A claim past its bound and grace is a run that stopped without a result.
+        assert_eq!(of(&reasons(&[team.clone()], 900.0 + 600.0 + RUN_GRACE_SECONDS + 1.0), "dev").build, None);
+        // The lead runs commands itself: it has no template runs.
+        assert_eq!(of(&reasons(&[team], 1000.0), "lead").build, None);
     }
 }

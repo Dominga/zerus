@@ -78,17 +78,20 @@ Opening New Team creates nothing: Start planning creates only the team draft and
 its lead session (in the team folder, never a worktree); member worktrees and
 sessions are created only by Create team.
 
-A session is Working, Waiting for you, Waiting for dependencies (always with
-its reason), Cooling, Cold or Stopped; Offline stays (owner direction U30).
-`hgs ls`, `inspect` and the mobile API carry `session_state`, `state_reason`,
-`last_active` and `cache_ttl`; the order and texts are in `docs/reference.md`
-and the shared `session-state-contract.json`. A job the agent started makes the
-session wait only while it waits for it: a tool call past 30 seconds, subagents
-in flight, or a job under a declared team budget. A long-lived process it does
-not wait for (a dev server, watcher or tunnel, and its MCP servers and other
-services from the agent's own config, with their children), a job past its
-budget and a job still running after the turn ended with nothing waiting on it
-are services: they show as a services icon with names, start times and whether
+A session is Working, Building, Waiting for you, Waiting for dependencies
+(always with its reason), Cooling, Cold or Stopped; Offline stays (owner
+direction U30). `hgs ls`, `inspect` and the mobile API carry `session_state`,
+`state_reason`, `build`, `last_active` and `cache_ttl`; the order and texts are
+in `docs/reference.md` and the shared `session-state-contract.json`. A build or
+test Zerus runs for the session (`hgs team run`, `hgs run`) is work: the session
+is Building right after Working, even while the agent is idle, and its reply
+badge waits for the build; explicit attention still comes first. A job the
+agent started makes the session wait only while it waits for it: a tool call
+past 30 seconds, subagents in flight, or a job under a declared team budget. A
+long-lived process it does not wait for (a dev server, watcher or tunnel, and
+its MCP servers and other services from the agent's own config, with their
+children), a job past its budget and any other job still running after the
+turn ended with nothing waiting on it are services: they show as a services icon with names, start times and whether
 they outlive the session, never make it wait, never count as Background work
 for the teams' capture gate, blocked reminder or time budget, and never defer
 the reply badge; the session is Cooling or Cold by its idle time against the

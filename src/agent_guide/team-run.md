@@ -23,7 +23,7 @@ Ask for one as the member (identity as report; a sandbox needs no approval):
 Use a new request_id for every run. --wait returns the exit code as soon as it
 is ready (90 s); without it the answer is "queued". Ask again with the same
 request_id to read the result: it never runs the command twice. A detached
-runner executes it, so a long build holds nothing up; the run is recorded on the
+runner executes it and your session shows as Building; the run is recorded on the
 attempt, even if the attempt ended meanwhile. Values are typed: an unknown
 template, a value outside its type, a path outside your folder or a shell
 metacharacter in a name or path is refused. What you build is your own code:

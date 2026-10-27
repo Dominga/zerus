@@ -72,6 +72,7 @@ mod subagents;
 mod subagents_confirm;
 mod session_upload;
 mod session_state;
+mod builds;
 mod native_subagents;
 mod supervisor;
 mod tasks;
@@ -709,6 +710,8 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     let Some((command, args)) = args.split_first() else {
         return Err("missing state operation".into());
     };
+    // WhiteWh fork: `hgs run`, a build Zerus tracks as the session's work (U30).
+    if command == "build" { return builds::dispatch(args); }
     if command == "worktrees" { return worktrees::dispatch(args); }
     if command == "git-status" { return git_status::dispatch(args); }
     if command == "git-diff" { return git_status::dispatch_diff(args); }

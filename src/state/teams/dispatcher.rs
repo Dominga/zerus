@@ -1188,6 +1188,7 @@ fn continuation_extra(task: &Task) -> String {
             text += &format!("- {question}\n");
         }
     }
+    text += "\nBefore a test run expected to take more than about ten minutes (the full test_sessionswindow, the full Rust suite, repeated GUI runs), ask the lead with `hgs team ask --json`, naming the suite and why.\n";
     text += "The previous session worked in this folder; check the working tree before you continue.\n";
     text
 }
@@ -1315,6 +1316,11 @@ pub(crate) fn brief_text(team: &Team) -> String {
     }
     if !team.lead_protocol.trim().is_empty() {
         text += &format!("\nTeam protocol:\n{}\n", team.lead_protocol.trim());
+    }
+    if let Ok(catalog) = super::catalog::load() {
+        if !catalog.planning_rules.trim().is_empty() {
+            text += &format!("\nPlanning rules (v{}):\n{}\n", catalog.version, catalog.planning_rules.trim());
+        }
     }
     text += &format!(
         "\nPlan the work as tasks with acceptance criteria and dependencies (hard: waits for Accepted; soft: may start \

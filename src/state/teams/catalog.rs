@@ -165,6 +165,39 @@ pub(crate) struct Catalog {
     pub templates: Vec<Template>,
     #[serde(default)]
     pub routing: Vec<Rule>,
+    /// U28: the lead's planning rules, versioned with the catalog.
+    #[serde(default = "default_planning_rules")]
+    pub planning_rules: String,
+}
+
+pub(crate) fn default_planning_rules() -> String {
+    [
+        "(1) At most 20-25 tasks per phase, each ending with an install-ready build and NOTES.md; split more into phases.",
+        "(2) Checkpoints (merge, then review and QA in their own lanes) on demand.",
+        "(3) Choose checkpoints by efficiency: batch cheaper, check risky work in smaller pieces.",
+        "(4) Checkpoint findings go back to the same member before integration; final review findings go to the next phase.",
+        "(5) An approved plan is not reshaped; new work goes to the next phase's draft.",
+        "(6) A hard dependency only where a task really cannot start earlier; one inside a lane moves that task to the next lane.",
+        "(7) No dependencies on tasks of an earlier phase: the barrier waits for it.",
+        "(8) Shared foundations first, at the start of the first lane, for a strong member.",
+        "(9) Balance every lane by volume and cost (a Qt task weighs about three server tasks), never by task count.",
+        "(10) GUI, hard logic and debugging go to strong models; well-specified server work and small fixes to DeepSeek.",
+        "(11) Split a heavy task into its server and desktop parts.",
+        "(12) QA never implements tasks; the reviewer never writes code it will review.",
+        "(13) Expert and ProExpert stay in reserve; the Expert takes a task returned three times, the ProExpert only when the Expert fails.",
+        "(14) Before planning, ask the owner how to spread members over accounts.",
+        "(15) The lead plans only merges, integration and builds for itself; no long background work except critical end fixes.",
+        "(16) Task text is self-contained: plan item, spec/prototype/screenshot paths, what to change, acceptance criteria.",
+        "(17) Tests go through the real entry point and fail before the fix.",
+        "(18) Name the checks and totals; each suite once, reruns only failures; ask the lead before a run over about ten minutes; plan test load and batch heavy suites.",
+        "(19) Folders follow the agent and need; plan first and ask the owner, explaining the choice.",
+        "(20) Builds and tests through the built-in templates or scripts in the member's folder.",
+        "(21) Before sending: plan health has no errors, a sensible critical path, parallelism near the implementers, balanced lanes, every warning explained.",
+        "(22) Offer a phase split above 25 tasks.",
+        "(23) No starved notices before a phase is approved; idleness only when the lead can act.",
+        "(24) The roster and member limit change only on the owner's explicit word (U26); otherwise the lead proposes.",
+    ]
+    .join("\n")
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -289,7 +322,7 @@ pub(crate) fn builtin() -> Catalog {
         },
     ];
     let routing = vec![Rule { id: "bug".into(), when: "bug fix".into(), template: "bugfix".into(), approval: "review".into(), use_: String::new() }];
-    Catalog { version: 1, roles, templates, routing }
+    Catalog { version: 1, roles, templates, routing, planning_rules: default_planning_rules() }
 }
 
 pub(crate) fn load() -> anyhow::Result<Catalog> {
@@ -484,6 +517,13 @@ fn apply_one(catalog: &mut Catalog, proposal: &Proposal) -> anyhow::Result<()> {
             let value: Option<Rule> = if remove { None } else { Some(serde_json::from_value(proposal.value.clone()).context("Invalid rule")?) };
             upsert(&mut catalog.routing, &proposal.target, value, |r| r.id.as_str());
         }
+        // U28: the planning rules are designer-editable text like roles.
+        "planning_rules" => {
+            ensure!(!remove, "The planning rules cannot be removed");
+            let text = proposal.value.as_str().context("Planning rules value is text")?.trim();
+            ensure!(!text.is_empty() && text.len() <= 20_000, "Planning rules are 1 to 20000 characters");
+            catalog.planning_rules = text.to_owned();
+        }
         kind => bail!("Unknown catalog kind {kind}"),
     }
     Ok(())
@@ -568,6 +608,7 @@ pub(crate) fn designer_brief(catalog: &Catalog, goal: &str, project: &str) -> St
     if !goal.trim().is_empty() {
         text += &format!("\n\nThe owner asks: {}", goal.trim());
     }
+    text += &format!("\n\nThe catalog's planning rules (v{}):\n{}", catalog.version, catalog.planning_rules);
     text
 }
 
@@ -776,6 +817,22 @@ pub(crate) fn run(op: &str, input: &Value, human: bool) -> anyhow::Result<Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn planning_rules_default_and_reach_the_briefs() {
+        let builtin = builtin();
+        assert!(builtin.planning_rules.contains("(24)") && builtin.planning_rules.contains("(18)"));
+        // An old catalog without the field loads the built-in rules.
+        let old: Catalog = serde_json::from_value(json!({"version":3,"roles":[],"templates":[],"routing":[]})).unwrap();
+        assert_eq!(old.planning_rules, default_planning_rules());
+        assert!(designer_brief(&builtin, "goal", "").contains("Planning rules") || designer_brief(&builtin, "goal", "").contains("(24)"));
+        // The rules are versioned with the catalog like any other text.
+        let mut edited = builtin.clone();
+        edited.version = 4;
+        edited.planning_rules = "(1) a changed rule".into();
+        let round_trip: Catalog = serde_json::from_value(serde_json::to_value(&edited).unwrap()).unwrap();
+        assert_eq!(round_trip.planning_rules, "(1) a changed rule");
+    }
 
     #[test]
     fn route_matches_like_the_prototype() {

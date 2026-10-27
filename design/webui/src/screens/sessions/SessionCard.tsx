@@ -18,7 +18,7 @@ export function statusCaption(s: Session): string {
     case "working": return `Working (${s.turnStartedMin ?? 0}m ${String(((s.turnStartedMin ?? 0) * 7) % 60).padStart(2, "0")}s)`;
     case "attention": return s.attention === "approval" ? "Needs approval" : s.attention === "question" ? "Needs input" : "Needs attention";
     case "background": return s.backgroundJobs && s.backgroundJobs > 1 ? `Background (${s.backgroundJobs})` : "Background";
-    case "scheduled": return `Scheduled ${s.scheduleNext ?? ""}`.trim();
+    case "scheduled": return s.scheduleNext ? `Scheduled for ${s.scheduleNext}` : "Scheduled";
     case "ready": return s.draft ? "Draft" : s.unread ? "New reply" : "Ready";
     case "error": return "Error";
     case "offline": return "Offline";

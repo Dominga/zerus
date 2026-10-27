@@ -64,7 +64,7 @@ export function VoiceSection() {
                   <Icon name={p.kind === "gigaam" ? "cpu" : "network"} size={15} class="dim" />
                   <span class="col grow" style={{ gap: "1px" }}>
                     <span class="row"><b class="ell">{p.name}</b><Show when={host() === defaultHost() && prefs.speechDefault === p.id}><span class="chip set-accent-chip"><Icon name="star" size={10} />Default</span></Show></span>
-                    <span class="muted ell">{p.kind === "gigaam" ? "Local GigaAM" : "HTTP server"} · {p.model} · {p.id}</span>
+                    <span class="muted parts"><span>{p.kind === "gigaam" ? "Local GigaAM" : "HTTP server"}</span><span>{p.model}</span><span class="mono">{p.id}</span></span>
                   </span>
                   <span class="voice-ready" classList={{ ok: p.ready }}>{p.ready ? "Ready" : "Not ready"}</span>
                 </button>

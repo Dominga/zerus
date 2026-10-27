@@ -18,7 +18,7 @@ import { MockSwitch, SDialog, closeSetup, leaf, openSetup, Progress } from "../.
 
 const CATEGORY = ["Cleanup candidates", "Review work", "In use", "Not checked", "Main folders"];
 
-const rowSuffix = (r: OverviewRow) => (!r.fresh ? " · Offline snapshot" : r.category === 0 ? " · Will recheck before cleanup" : "");
+const rowSuffix = (r: OverviewRow) => (!r.fresh ? "Offline snapshot" : r.category === 0 ? "Will recheck before cleanup" : "");
 
 function Overview() {
   const [query, setQuery] = createSignal("");
@@ -98,9 +98,9 @@ function Overview() {
           <button class="btn" onClick={refresh} disabled={loading()}><Icon name="refresh-cw" size={13} class={loading() ? "su-spin" : undefined} />Refresh</button>
         </div>
         <div class="hint wto-status" title="Browsing data is cached for 1 hour. Cleanup checks expire after five minutes.">
-          {loading() ? "Processed 4 of 10 folders · 3 repositories · 6 pending…"
+          {loading() ? <span class="parts"><span>Processed 4 of 10 folders</span><span>3 repositories</span><span>6 pending…</span></span>
             : empty() ? "Add a project folder to see its worktrees."
-            : `Processed 10 of 10 folders · 6 repositories · 1 incomplete · ${candidates()} cleanup candidates · ~${estimate().toFixed(1)} GB estimated${demoState() === "error" ? " · Catalog is incomplete: build-02 is offline." : ""} · Updated 11:42`}
+            : <span class="parts"><span>Processed 10 of 10 folders</span><span>6 repositories</span><span>1 incomplete</span><span>{candidates()} cleanup candidates</span><span>~{estimate().toFixed(1)} GB estimated</span><Show when={demoState() === "error"}><span class="warn">Catalog is incomplete: build-02 is offline.</span></Show><span>Updated 11:42</span></span>}
         </div>
         <div class="wto-split">
           <div class="wto-tree" role="grid" aria-label="Worktrees" aria-multiselectable="true">
@@ -128,8 +128,8 @@ function Overview() {
                             <span class="ell"><b>{leaf(r.path)}</b></span>
                             <span class="mono dim ell">{r.branch ?? "—"}</span>
                           </span>
-                          <span role="gridcell" class="ell" classList={{ warn: r.category === 1 || r.category === 3, muted: r.category === 4 }} title={r.remains + rowSuffix(r)}>
-                            <Show when={r.state}><span class="wto-state">{r.state}</span> </Show>{r.remains}{rowSuffix(r)}
+                          <span role="gridcell" class="ell" classList={{ warn: r.category === 1 || r.category === 3, muted: r.category === 4 }} title={rowSuffix(r) ? `${r.remains}\n${rowSuffix(r)}` : r.remains}>
+                            <Show when={r.state}><span class="wto-state">{r.state}</span> </Show>{r.remains}<Show when={rowSuffix(r)}><span class="wto-suffix">{rowSuffix(r)}</span></Show>
                           </span>
                           <span role="gridcell" class="tabular">{r.size}</span>
                           <span role="gridcell"><MachineBadge alias={r.machine} /></span>
@@ -278,7 +278,7 @@ function BatchCleanup() {
                       <div class="bc-result" data-outcome={e.outcome ?? e.status}>
                         <Show when={e.status === "checking" || e.status === "removing"}><Icon name="loader-circle" size={12} class="su-spin" /></Show>
                         <Show when={e.outcome} fallback={<span class="ell">{e.reason}</span>}>
-                          <b>{OUTCOME_LABEL[e.outcome!]}</b><Show when={e.outcome !== "removed" && e.outcome !== "forgotten"}><span class="hint ell"> · {e.reason}</span></Show>
+                          <b>{OUTCOME_LABEL[e.outcome!]}</b><Show when={e.outcome !== "removed" && e.outcome !== "forgotten"}><span class="hint ell wtc-reason">{e.reason}</span></Show>
                         </Show>
                       </div>
                     </td>
@@ -312,7 +312,7 @@ function BatchCleanup() {
       <div class="dlg-foot">
         <span class="bc-summary tabular" role="status">
           {stopping() ? "Finishing the current folder; remaining folders will be kept." : finished() || running() ? summary() : reviewing() ? "Checking folders…" : ""}
-          <Show when={finished() && count("unknown")}><span class="warn"> · An unknown result will not be retried.</span></Show>
+          <Show when={finished() && count("unknown")}><span class="warn bc-note">An unknown result will not be retried.</span></Show>
         </span>
         <span class="grow" />
         <button class="btn" autofocus disabled={stopping()} onClick={() => { if (running()) setStopping(true); else closeSetup("setup-batch-cleanup"); }}>

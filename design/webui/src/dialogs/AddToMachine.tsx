@@ -45,7 +45,7 @@ export function AddToMachineDialog() {
   const blocked = (host: string): string | undefined => {
     const m = ALL_MACHINES.find((x) => x.alias === host)!;
     if (present().has(host)) return "Already has this account";
-    if (!online(host)) return `Not connected · last seen ${m.lastSeen}`;
+    if (!online(host)) return `Not connected, last seen ${m.lastSeen}`;
     if (m.connection === "reconnecting") return "Connecting…";
     if (agentMissing(host)) return `${PROVIDER_NAME[provider()]} is not installed`;
     if (provider() === "opencode" && !m.thisComputer) return "OpenCode accounts stay on this computer";

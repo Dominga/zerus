@@ -43,11 +43,6 @@ function sampleNote(m: Machine): string {
   return f === "stale" ? "Last sample 27 Oct 11:58" : m.alias === "win-lab" ? "Last sample 27 Oct 11:54" : "Last sample 27 Oct 11:24";
 }
 
-// Synthetic system details for the cards (Qt shows the OS name and architecture).
-const OS_DETAIL: Record<string, string> = {
-  workstation: "Arch Linux · x86_64", macbook: "macOS 26.1 · arm64", "build-01": "Ubuntu 24.04 · x86_64",
-  "build-02": "Ubuntu 22.04 · x86_64", "win-lab": "Windows 11 · x86_64",
-};
 
 const level = (pct: number, fresh: boolean) => (!fresh ? "unknown" : pct >= 90 ? "critical" : pct >= 70 ? "warning" : "normal");
 
@@ -76,22 +71,27 @@ function MachineCard(props: { m: Machine }) {
       <header class="ov-mtop">
         <MachineTile os={props.m.platform} state={fresh() ? "online" : f() === "stale" ? "connecting" : "offline"} size={26} />
         <MachineBadge alias={props.m.alias} />
-        <span class="ov-mos ell" title={OS_DETAIL[props.m.alias]}>{props.m.thisComputer ? <><b>This machine</b> · </> : ""}{OS_DETAIL[props.m.alias] ?? ""}</span>
+        <span class="ov-mos ell"><Show when={props.m.thisComputer}><b>This machine</b></Show></span>
         <span class="ov-mstatus" classList={{ online: fresh() }}>{fresh() ? "Connected" : f() === "stale" ? "Stale" : "Offline"}</span>
         <button class="icon-btn small" data-tip="Machine settings" aria-label="Machine settings" onClick={() => setPage("machines")}><Icon name="settings" size={14} /></button>
       </header>
       <div class="ov-mmeters">
+        {/* The percentage is each metric's main figure, in its load colour; the bar and details are secondary. */}
         <div class="ov-mm" title={metrics() ? "Average CPU use over the last 2.0 seconds, across all logical cores." : "CPU use needs two samples. Refresh again after a moment."}>
           <span class="ov-mlabel">CPU</span>
-          <LoadBar pct={metrics() ? props.m.cpu : undefined} fresh={fresh()} />
-          <b class="ov-mval tabular">{metrics() ? `${props.m.cpu}%` : "—"}</b>
+          <span class="ov-mline">
+            <b class="ov-mval tabular" data-level={metrics() ? level(props.m.cpu, fresh()) : "unknown"}>{metrics() ? `${props.m.cpu}%` : "—"}</b>
+            <LoadBar pct={metrics() ? props.m.cpu : undefined} fresh={fresh()} />
+          </span>
           <span class="ov-mdetail">{waiting() ? "Waiting for second sample" : metrics() ? `${props.m.cores} cores, load ${props.m.load.toFixed(2)}` : "Update hgs for metrics"}</span>
         </div>
         <div class="ov-mm" title={props.m.platform === "macos" ? "App, wired and compressed memory. Reclaimable file cache is excluded." : "Total memory minus available memory, including reclaimable cache."}>
           <span class="ov-mlabel">Memory</span>
-          <LoadBar pct={metrics() ? memPct() : undefined} fresh={fresh()} />
-          <b class="ov-mval tabular">{metrics() ? `${props.m.memUsedGiB.toFixed(1)} GiB` : "—"}</b>
-          <span class="ov-mdetail">{metrics() ? `of ${props.m.memTotalGiB.toFixed(1)} GiB (${Math.round(memPct())}%)` : "Memory unavailable"}</span>
+          <span class="ov-mline">
+            <b class="ov-mval tabular" data-level={metrics() ? level(memPct(), fresh()) : "unknown"}>{metrics() ? `${Math.round(memPct())}%` : "—"}</b>
+            <LoadBar pct={metrics() ? memPct() : undefined} fresh={fresh()} />
+          </span>
+          <span class="ov-mdetail">{metrics() ? `${props.m.memUsedGiB.toFixed(1)} of ${props.m.memTotalGiB.toFixed(1)} GiB` : "Memory unavailable"}</span>
         </div>
       </div>
       <footer class="ov-mfoot">

@@ -45,7 +45,7 @@ function WorkspacePanel() {
       case "checking": return { text: "Workspace: checking…", sub: "" };
       case "none": return { text: "No workspace connected", sub: "Create a workspace or use a computer invitation from an enrolled computer." };
       case "legacy": return { text: "Legacy connection: session content is visible to this relay.", sub: "Choose Change workspace to create or join an encrypted workspace." };
-      default: return { text: `${WORKSPACE.name} · ${WORKSPACE.computer}\nPrivate session content is encrypted.`, sub: "" };
+      default: return { text: `${WORKSPACE.name} on ${WORKSPACE.computer}\nPrivate session content is encrypted.`, sub: "" };
     }
   });
   return (

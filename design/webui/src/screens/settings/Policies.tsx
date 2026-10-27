@@ -125,7 +125,7 @@ export function ApprovalsSection() {
             <Show when={entry()} fallback={<p class="muted">Select a journal entry to read the question and its outcome.</p>}>
               {(e) => (
                 <>
-                  <div class="eyebrow">{e().time} · {e().computer} · {e().session}</div>
+                  <div class="eyebrow parts"><span>{e().time}</span><span>{e().computer}</span><span>{e().session}</span></div>
                   <p class="appr-q">{e().question}</p>
                   <p>Selected answer: {e().answer}</p>
                   <p class={`appr-result k-${RESULT_KIND[e().result]}`}>{e().result}</p>

@@ -53,7 +53,7 @@ export function Rail() {
         <Icon name="settings" size={24} />
         <Show when={labeled()}><span>Settings</span></Show>
       </button>
-      <button class="rail-version" data-tip="Zerus 0.48.0-dev.912 · Open About" data-tip-pos="right" onClick={() => { setSection("about"); setPage("settings"); }}>0.48 Dev</button>
+      <button class="rail-version" data-tip="Zerus 0.48.0-dev.912. Open About" data-tip-pos="right" onClick={() => { setSection("about"); setPage("settings"); }}>0.48 Dev</button>
     </nav>
   );
 }

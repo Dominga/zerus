@@ -66,7 +66,7 @@ function PlanAgents() {
       <Show when={s()?.goal}>
         <Card id="plan-goal" title="Goal" class="goal" aside={<span class="sbadge k-scheduled"><i class="sb-ico" /><span class="sb-label">Pursuing goal</span></span>}>
           <p class="icard-text">{s()?.goal}</p>
-          <Row icon="clock" label="recorded">1 h 12 min · 38 turns</Row>
+          <Row icon="clock" label="recorded">1 h 12 min in 38 turns</Row>
           <div class="hint">Reported by the agent. Completion: all v1 contract tests pass.</div>
         </Card>
       </Show>
@@ -114,7 +114,7 @@ function Details() {
         <div class="hint">Activity stays on {s()?.machine}. Closing this window does not stop your agent.</div>
       </Card>
       <Card id="details-account" title="Account">
-        <Row icon="user-round-cog" label="account">{acc() ? `${acc()!.label} · ${acc()!.plan}` : "Not reported"}</Row>
+        <Row icon="user-round-cog" label="account">{acc() ? `${acc()!.label} (${acc()!.plan})` : "Not reported"}</Row>
         <Row icon="hard-drive" label="agent home" mono>~/.config/hgs/accounts/claude-a1</Row>
         <Row icon="sparkles" label="model">{s()?.model} {s()?.effort ?? ""}</Row>
       </Card>

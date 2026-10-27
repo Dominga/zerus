@@ -42,15 +42,21 @@
 
   /* Compact machine cards: three short rows, as many per line as fit. */
   .ov-mgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); gap: 10px; }
+  .ov-mmeters { column-gap: 20px; }
   .ov-mcard { padding: 10px 12px 9px; display: flex; flex-direction: column; gap: 8px; border-radius: var(--z-radius-xl); }
   .ov-mcard .mtile { --mt-ring: var(--z-color-card); }
   .ov-mos { flex: 1; min-width: 0; font-size: var(--fs-xs); color: var(--z-color-muted); }
   .ov-mos b { color: var(--z-color-text); font-weight: 600; }
   .ov-mmeters { display: grid; grid-template-columns: 1fr 1fr; column-gap: 16px; }
-  .ov-mm { display: grid; grid-template-columns: auto minmax(24px, 1fr) auto; align-items: center; column-gap: 8px; row-gap: 2px; min-width: 0; }
-  .ov-mm .ov-mdetail { grid-column: 1 / -1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .ov-mval { font-size: var(--fs-sm); font-weight: 600; }
-  .ov-mcard.stale .ov-mval { color: var(--z-color-text-3); }
+  .ov-mm { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .ov-mline { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .ov-mline .ov-load { flex: 1; min-width: 24px; height: 4px; }
+  .ov-mm .ov-mdetail { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Main figure: 22 px in the load colour (normal, warning from 70%, critical from 90%). */
+  .ov-mval { flex: none; min-width: 3.2ch; font-size: 22px; font-weight: 500; line-height: 28px; color: var(--z-list-usage-normal); }
+  .ov-mval[data-level="warning"] { color: var(--z-list-usage-warning); }
+  .ov-mval[data-level="critical"] { color: var(--z-list-usage-critical); }
+  .ov-mval[data-level="unknown"] { color: var(--z-color-text-3); }
   .ov-mtop { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .ov-mstatus { font-size: var(--fs-xs); color: var(--z-color-dim); }
   .ov-mstatus.online { color: var(--z-color-accent); }

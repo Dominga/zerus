@@ -15,7 +15,7 @@ export function MachineTile(props: { os?: OsKind; state: MachineState; size?: nu
   const size = () => props.size ?? 34;
   return (
     <span class="mtile" classList={{ [`s-${props.state}`]: true }} style={{ "--mt": `${size()}px` }} role="img"
-      aria-label={`${props.os ? OS_NAME[props.os] : "Computer"}, ${STATE_LABEL[props.state]}`} title={props.title ?? `${props.os ? OS_NAME[props.os] : "Unknown system"} · ${STATE_LABEL[props.state]}`}>
+      aria-label={`${props.os ? OS_NAME[props.os] : "Computer"}, ${STATE_LABEL[props.state]}`} title={props.title ?? `${props.os ? OS_NAME[props.os] : "Unknown system"}\n${STATE_LABEL[props.state]}`}>
       <Show when={props.os} fallback={<Icon name="machines" size={Math.round(size() * 0.53)} />}>
         <svg width={Math.round(size() * 0.53)} height={Math.round(size() * 0.53)} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" innerHTML={OS_GLYPH[props.os!]} />
       </Show>

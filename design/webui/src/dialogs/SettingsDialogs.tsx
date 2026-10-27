@@ -610,7 +610,7 @@ function ModelDialog() {
           <For each={chosen()?.efforts ?? []}>{(x) => <option value={x}>{x}</option>}</For>
         </select>
       </div>
-      <Show when={a()?.provider === "claude"}><p class="muted">Account settings: claude-opus-4-6 · high</p></Show>
+      <Show when={a()?.provider === "claude"}><p class="muted">Account settings: claude-opus-4-6, high effort</p></Show>
       <p class="hint">{kimi() ? "Kimi manages effort in its native settings. This choice sets the model for new conversations." : !models().length ? "Open this account's agent once, then refresh to load its models." : "Choose the reasoning effort for the selected model, or keep its provider default."}</p>
       <p class="hint">New conversations with this account on this machine. Existing conversations keep their model and effort. Explicit launch choices take precedence.</p>
     </Dialog>
@@ -673,7 +673,7 @@ export function SettingsDialogs() {
         onConfirm={() => { setLegacyPending(false); toast("Workspace", "The encrypted workspace is connected. Legacy relay retirement remains unconfirmed; its old records or credentials may remain on that relay."); }} />
       <PairPhoneDialog />
       <Confirm id="settings-phone-revoke" title={`Revoke ${phone().name}?`} confirm="Revoke" danger
-        body={<p>{phone().name} loses access to every computer of {phone().group.split(" · ")[0]} at once, and its queued requests are cancelled. Pair it again to restore access.</p>}
+        body={<p>{phone().name} loses access to every computer of {phone().group.split(" (")[0]} at once, and its queued requests are cancelled. Pair it again to restore access.</p>}
         onConfirm={() => {
           const p = phone();
           if (demoState() === "error") { setRevokedNote(`Could not confirm revoking ${p.name}: the relay did not answer. Refresh to check whether it is still listed before trying again.`); return; }

@@ -271,13 +271,13 @@ function Detail() {
         <div class="acct-setting">
           <span title={m().permission === "bypass" ? "Applies to new and resumed sessions; a running session may use a different mode." : m().permissionDetail ?? "Provider defaults have not been verified."}>
             Permissions on {m().host}: <b classList={{ danger: m().permission === "bypass" }}>{permissionLabel(m().permission)}</b>
-            <span class="dim"> · {m().permission === "bypass" ? "Set in Zerus" : "From provider settings"}</span>
+            <span class="dim acct-src">{m().permission === "bypass" ? "set in Zerus" : "from provider settings"}</span>
           </span>
           <button class="btn small" disabled={!online(m().host) || a().provider === "opencode"} title={`Change permission defaults on ${m().host}`} onClick={() => setDialog("accounts-permissions")}>Change…</button>
         </div>
         <Show when={a().provider !== "opencode"}>
           <div class="acct-setting">
-            <span>{m().model ? `New sessions: ${m().model}${m().effort ? ` · ${m().effort}` : ""}` : "New sessions: Provider settings"}</span>
+            <span>{m().model ? `New sessions: ${m().model}${m().effort ? ` (${m().effort})` : ""}` : "New sessions: Provider settings"}</span>
             <button class="btn small" disabled={!online(m().host)} onClick={() => setDialog("accounts-model")}>Model and effort…</button>
           </div>
         </Show>

@@ -118,7 +118,7 @@ function HistoryLine(props: { entry: TaskLog }) {
   const message = () => e().kind === "comment" || e().kind === "report";
   return (
     <Show when={message()} fallback={
-      <div class="tv-event"><i aria-hidden="true" /><span><b>{e().actor}</b> <span class="act-time">{e().at}</span> · {historyAction(e())}</span></div>
+      <div class="tv-event"><i aria-hidden="true" /><span class="parts"><b>{e().actor}</b><span class="act-time">{e().at}</span><span>{historyAction(e())}</span></span></div>
     }>
       <article class="act-msg tv-entry tv-hmsg" classList={{ "k-user": !e().agent, "k-agent": !!e().agent }}>
         <header><b>{e().actor}</b><span class="chip">{e().kind === "report" ? "Report" : "Comment"}</span><span class="act-time">{e().at}</span></header>
@@ -182,10 +182,10 @@ function Title(props: { task: TaskVM }) {
   return (
     <div class="tv-title-col">
       <Show when={renaming()} fallback={
-        <h1 class="tv-title" classList={{ editable: t().writable }} tabindex={t().writable ? 0 : -1} title={`${t().id} · ${STAGE_LABEL[t().stage]}${t().writable ? "\nClick to rename" : ""}`}
+        <h1 class="tv-title" classList={{ editable: t().writable }} tabindex={t().writable ? 0 : -1} title={`${t().id}\n${STAGE_LABEL[t().stage]}${t().writable ? "\nClick to rename" : ""}`}
           onClick={begin} onKeyDown={(e) => { if (e.key === "Enter" || e.key === "F2") { e.preventDefault(); begin(); } }}>{displayTitle(t())}</h1>
       }>
-        <textarea ref={field} class="field tv-title-edit" rows={2} value={draft()} aria-label="Task title · Enter to save, Escape to cancel" maxlength={512}
+        <textarea ref={field} class="field tv-title-edit" rows={2} value={draft()} aria-label="Task title (Enter saves, Escape cancels)" maxlength={512}
           onInput={(e) => setDraft(e.currentTarget.value)} onBlur={finish}
           onKeyDown={(e) => {
             if (e.key === "Enter") { e.preventDefault(); finish(); }

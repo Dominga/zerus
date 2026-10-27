@@ -134,7 +134,7 @@ function CreationPanel() {
                 title={c.state === "bound" ? "This creation has already been resolved." : undefined}>
                 <Icon name={c.state === "bound" ? "check" : c.state === "failed" || c.state === "storage_error" ? "circle-alert" : c.state === "unknown" ? "circle-question-mark" : c.state === "stopped" ? "square" : "loader-circle"}
                   size={13} class={c.state === "bound" ? "accent" : c.state === "failed" || c.state === "storage_error" ? "danger" : c.state === "unknown" ? "warn" : RUNNING.includes(c.state) ? "su-spin dim" : "dim"} />
-                <span class="ell"><b>{c.tag}</b> · {CREATION_CAPTION[c.state]}</span>
+                <span class="parts"><b>{c.tag}</b><span class="ell">{CREATION_CAPTION[c.state]}</span></span>
               </li>
             )}
           </For>
@@ -142,7 +142,7 @@ function CreationPanel() {
         <Show when={r()} fallback={<div class="empty"><Icon name="clock" size={22} /><p>No pending session creations</p></div>}>
           {(c) => (
             <section class="cr-panel" aria-live="polite">
-              <h3 class="cr-title tabular">{c().tag} · {CREATION_CAPTION[c().state]} · {mmss(c())}</h3>
+              <h3 class="cr-title tabular parts"><span>{c().tag}</span><span>{CREATION_CAPTION[c().state]}</span><span>{mmss(c())}</span></h3>
               <Show when={running()}><Progress label={CREATION_CAPTION[c().state]} /></Show>
               <Show when={c().error}>
                 <div class="notice" classList={{ warn: c().state !== "failed" && c().state !== "storage_error", danger: c().state === "failed" || c().state === "storage_error" }}>

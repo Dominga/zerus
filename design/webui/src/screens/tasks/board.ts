@@ -223,11 +223,11 @@ export function targetText(t: TaskVM): string {
   if (queued(t.stage)) {
     if (t.target.kind === "new_session") return "→ new session when started";
     if (t.target.kind === "subagent") return "→ new subagent";
-    if (t.target.kind === "any") return "→ any session" + (c.session ? ` · now ${sessionLabel(c.host, c.session)}` : "");
+    if (t.target.kind === "any") return "→ any session" + (c.session ? `, now ${sessionLabel(c.host, c.session)}` : "");
     return "→ " + sessionLabel(t.target.host, t.target.session);
   }
   if (t.worker) return `Subagent: ${t.worker}`;
-  if (t.target.kind === "subagent" && t.executor) return `coordinator ${sessionLabel(t.executor.host, t.executor.name)} · child unconfirmed`;
+  if (t.target.kind === "subagent" && t.executor) return `coordinator ${sessionLabel(t.executor.host, t.executor.name)}, child unconfirmed`;
   return t.executor ? sessionLabel(t.executor.host, t.executor.name) : "";
 }
 export const ageText = (min = 0) => (min < 60 ? `${min} min` : min < 24 * 60 ? `${Math.floor(min / 60)} h` : `${Math.floor(min / 1440)} d`);
@@ -243,9 +243,9 @@ export function assignmentText(t: TaskVM): string {
   if (queued(t.stage)) {
     const assigned = t.target.kind === "any" || !t.target.session ? "Any available session" : sessionLabel(t.target.host, t.target.session);
     const main = (t.target.host ?? "") === c.host && t.target.session === c.session;
-    const label = t.target.kind === "new_session" ? "New session · create when started"
-      : t.target.kind === "subagent" ? `Subagent · coordinate through ${assigned}`
-      : main ? `Main session · ${assigned}` : assigned;
+    const label = t.target.kind === "new_session" ? "New session, created when started"
+      : t.target.kind === "subagent" ? `Subagent coordinated through ${assigned}`
+      : main ? `Main session: ${assigned}` : assigned;
     return `Planned: ${label}`;
   }
   const w = workerLabel(t) || "Unconfirmed";
@@ -257,22 +257,22 @@ export function contextLine(t: TaskVM): string {
   let line: string;
   if (t.executor) {
     const w = workerLabel(t);
-    line = t.stage === "active" && !t.startConfirmed ? `Dispatched to ${w} · start unconfirmed` : t.stage === "active" ? `Executor: ${w}` : `Last executor: ${w}`;
+    line = t.stage === "active" && !t.startConfirmed ? `Dispatched to ${w}, start unconfirmed` : t.stage === "active" ? `Executor: ${w}` : `Last executor: ${w}`;
   } else line = `Assigned: ${t.target.kind === "any" || !t.target.session ? "Any session" : sessionLabel(t.target.host, t.target.session)}`;
-  if (t.stage === "todo") line += ` · #${queueOf(t)} in queue`;
-  if (t.worker) line = `Subagent: ${t.worker} · coordinated by ${workerLabel(t)}`;
-  else if (t.target.kind === "subagent" && t.stage === "active") line = `Subagent requested · coordinator ${workerLabel(t)} · child unconfirmed`;
+  if (t.stage === "todo") line += `, #${queueOf(t)} in queue`;
+  if (t.worker) line = `Subagent ${t.worker}, coordinated by ${workerLabel(t)}`;
+  else if (t.target.kind === "subagent" && t.stage === "active") line = `Subagent requested from ${workerLabel(t)}, child unconfirmed`;
   return line;
 }
 
 export const DELIVERY_LABEL: Record<TaskNote["delivery"], string> = {
-  note: "Saved note · not sent",
+  note: "Saved note, not sent",
   queued: "Waiting for Start",
   "submitted-queue": "Included in Start request",
   submitted: "Submitted to executor",
-  "submitted-coordinator": "Submitted to coordinator · child receipt unavailable",
-  failed: "Saved in task · not sent",
-  unconfirmed: "Saved in task · delivery unconfirmed",
+  "submitted-coordinator": "Submitted to coordinator, child receipt unavailable",
+  failed: "Saved in task, not sent",
+  unconfirmed: "Saved in task, delivery unconfirmed",
 };
 export const IDENTITY_REFUSAL = "Your comment is saved here. The task’s previous executor could not be verified, so it was not sent. Open executor Activity to continue the discussion, or return the task to To do and start it with the current executor.";
 
@@ -502,7 +502,7 @@ export function checkRecovery(id: string) {
   setTimeout(() => {
     setBusy(false);
     update(id, (x) => { x.recovery = false; x.discussion.forEach((n) => { if (n.delivery === "unconfirmed") n.delivery = "submitted"; }); });
-    log(id, { actor: "You", kind: "message_delivery", text: "8c41f2e0 · submitted" });
+    log(id, { actor: "You", kind: "message_delivery", text: "8c41f2e0 submitted" });
     toast("Delivery receipt found", "The previous comment reached the executor. Nothing was sent again.");
   }, reduced() ? 0 : 700);
 }

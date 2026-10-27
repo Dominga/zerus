@@ -6,7 +6,9 @@ import { projects, machines, accounts } from "../mock/data";
 import { SessionCard } from "../screens/sessions/SessionCard";
 import { projectColor } from "../screens/setup/store";
 
-type GoItem = { kind: "Session" | "Project" | "Account" | "Machine" | "Section" | "Command"; title: string; detail: string; kbd?: string; run: () => void };
+/** detail: separate facts, laid out with space between them (never joined with dots). */
+type GoItem = { kind: "Session" | "Project" | "Account" | "Machine" | "Section" | "Command"; title: string; detail: string | string[]; kbd?: string; run: () => void };
+const details = (d: string | string[]) => (Array.isArray(d) ? d.filter(Boolean) : d ? [d] : []);
 
 // Go to ranking from GoToDialog.cpp: subsequence match, +10 per character,
 // +100 for a match at position 0, +20 at a word start, +10 adjacent, gap penalty.
@@ -19,7 +21,7 @@ function score(text: string, query: string): number {
     if (at < 0) return -1;
     s += 10;
     if (at === 0) s += 100;
-    else if (/[\s/·-]/.test(t[at - 1])) s += 20;
+    else if (/[\s/-]/.test(t[at - 1])) s += 20;
     if (at === pos + 1) s += 10;
     else s -= Math.min(at - pos - 1, 8);
     pos = at;
@@ -32,10 +34,10 @@ function GoTo() {
   const [i, setI] = createSignal(0);
   const go = (p: Page) => () => setPage(p);
   const items = createMemo<GoItem[]>(() => [
-    ...catalog.rows.slice(0, 400).map((s) => ({ kind: "Session" as const, title: s.name, detail: `${projects.find((p) => p.id === s.project)?.name} · ${s.machine} · ${s.status}`, run: () => { setPage("sessions"); setSelectedKey(s.key); } })),
+    ...catalog.rows.slice(0, 400).map((s) => ({ kind: "Session" as const, title: s.name, detail: [projects.find((p) => p.id === s.project)?.name ?? "", s.machine, s.status], run: () => { setPage("sessions"); setSelectedKey(s.key); } })),
     ...projects.map((p) => ({ kind: "Project" as const, title: p.name, detail: "Project", run: go("projects") })),
-    ...accounts.map((a) => ({ kind: "Account" as const, title: a.label, detail: `Account · ${a.agent} · ${a.machine}`, run: go("accounts") })),
-    ...machines.map((m) => ({ kind: "Machine" as const, title: m.alias, detail: m.thisComputer ? "Machine · this computer" : "Machine", run: go("machines") })),
+    ...accounts.map((a) => ({ kind: "Account" as const, title: a.label, detail: [a.agent, a.machine], run: go("accounts") })),
+    ...machines.map((m) => ({ kind: "Machine" as const, title: m.alias, detail: m.thisComputer ? ["this computer"] : [], run: go("machines") })),
     { kind: "Section", title: "Overview", detail: "Section", kbd: "Ctrl+1", run: go("dashboard") },
     { kind: "Section", title: "Sessions", detail: "Section", kbd: "Ctrl+2", run: go("sessions") },
     { kind: "Section", title: "Projects", detail: "Section", kbd: "Ctrl+3", run: go("projects") },
@@ -54,7 +56,7 @@ function GoTo() {
     const query = commandsOnly ? raw.slice(1).trim() : raw;
     return items()
       .filter((it) => !commandsOnly || it.kind === "Section" || it.kind === "Command")
-      .map((it, idx) => ({ it, idx, s: score(`${it.title} ${it.detail}`, query) }))
+      .map((it, idx) => ({ it, idx, s: score(`${it.title} ${details(it.detail).join(" ")}`, query) }))
       .filter((r) => r.s >= 0)
       .sort((a, b) => b.s - a.s || order.indexOf(a.it.kind) - order.indexOf(b.it.kind) || a.idx - b.idx)
       .slice(0, 12)
@@ -80,7 +82,7 @@ function GoTo() {
             <For each={results()} fallback={<li class="goto-empty">Nothing matches</li>}>{(it, k) => (
               <li role="option" aria-selected={k() === i()} classList={{ on: k() === i() }} onMouseEnter={() => setI(k())} onClick={() => activate(it)}>
                 <span class="goto-kind">{it.kind}</span>
-                <span class="ell"><b>{it.title}</b> <span class="dim">{it.detail}</span></span>
+                <span class="ell parts goto-text"><b>{it.title}</b><For each={details(it.detail)}>{(d) => <span class="dim">{d}</span>}</For></span>
                 <span class="grow" />
                 <Show when={it.kbd}><span class="kbd">{it.kbd}</span></Show>
               </li>

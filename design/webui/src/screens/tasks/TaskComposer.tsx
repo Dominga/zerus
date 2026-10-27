@@ -41,8 +41,8 @@ export function TaskComposer(props: { task: TaskVM }) {
   });
 
   const w = () => workerLabel(t());
-  const primary = () => t().stage === "active" ? "Send to current executor" : t().stage === "review" ? "Request changes and send" : t().stage === "done" ? "Reopen and send" : "Add to task · send on Start";
-  const modeLabel = () => noteOnly() ? "Save note only · no delivery" : queued(t().stage) ? "Add to task · sent on Start"
+  const primary = () => t().stage === "active" ? "Send to current executor" : t().stage === "review" ? "Request changes and send" : t().stage === "done" ? "Reopen and send" : "Add to task, send on Start";
+  const modeLabel = () => noteOnly() ? "Save note only, no delivery" : queued(t().stage) ? "Add to task, sent on Start"
     : t().stage === "active" ? `Send to ${w()}` : t().stage === "review" ? `Request changes and send to ${w()}` : `Reopen and send to ${w()}`;
   const sendLabel = () => desc() ? "Save description" : noteOnly() || queued(t().stage) ? "Add to task" : "Send feedback";
   const placeholder = () => !t().writable ? "Update Zerus to comment on this task" : desc() ? "Describe the task…" : noteOnly() ? "Write a note for this task…" : queued(t().stage) ? "Add context for the executor…" : "Message this task’s executor…";

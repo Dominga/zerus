@@ -120,14 +120,15 @@ function MachineCard(props: { alias: string; local?: boolean }) {
     <button class="mach-card" classList={{ on: selectedMachine() === key(), offline: !live() }} aria-current={selectedMachine() === key()} onClick={() => selectMachine(key())}>
       {/* The OS in a rounded tile; the corner dot carries the connection state. */}
       <MachineTile os={m() ? ((props.local ? platform : m()!.platform) as OsKind) : undefined} state={tileState()}
-        title={tileState() === "connecting" ? `Connecting… last answer ${m()?.lastSeen}` : tileState() === "offline" ? `Not connected · last answer ${m()?.lastSeen}` : undefined} />
+        title={tileState() === "connecting" ? `Connecting… last answer ${m()?.lastSeen}` : tileState() === "offline" ? `Not connected, last answer ${m()?.lastSeen}` : undefined} />
       <span class="mach-col">
         <span class="row"><MachineLabel alias={props.alias} /></span>
         <span class="mach-state">{props.local ? (isConsole() ? "This computer: control console" : "This machine") : stateLine(props.alias)}</span>
         <Show when={m() && !(props.local && isConsole())}>
-          <span class="mach-meta tabular">
-            {{ macos: "macOS", windows: "Windows", linux: "Linux" }[props.local ? platform : m()!.platform]} · hgs {m()!.hgsVersion}
-            <Show when={!live()}> · last seen {m()!.lastSeen}</Show>
+          <span class="mach-meta tabular parts">
+            <span>{{ macos: "macOS", windows: "Windows", linux: "Linux" }[props.local ? platform : m()!.platform]}</span>
+            <span>hgs {m()!.hgsVersion}</span>
+            <Show when={!live()}><span>last seen {m()!.lastSeen}</span></Show>
           </span>
         </Show>
       </span>

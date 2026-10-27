@@ -483,7 +483,7 @@ export function SessionList() {
         <footer class="sp-foot">
           <span class="tabular ell">{searching() ? "" : shownSummary().shown ? `${shownSummary().shown} shown, ${shownSummary().working} working, ${shownSummary().attention} attention, 1 starting` : "No matching sessions"}</span>
           <span class="grow" />
-          <button class="icon-btn small" data-tip="Session creation status" onClick={(e) => openMenu(e, [{ heading: "Session creations" }, { label: "orders-v3 · Preparing worktree · 0:41", icon: "loader-circle" }, { label: "docs-index · Waiting for session", icon: "clock" }])}><Icon name="clock" size={16} /></button>
+          <button class="icon-btn small" data-tip="Session creation status" onClick={(e) => openMenu(e, [{ heading: "Session creations" }, { label: "orders-v3: preparing worktree, 0:41", icon: "loader-circle" }, { label: "docs-index: waiting for session", icon: "clock" }])}><Icon name="clock" size={16} /></button>
           <button class="icon-btn small" data-tip="Mark all as read: current replies on every machine" onClick={() => toast("Marked as read", `${catalog.rows.filter((s) => s.unread).length} replies marked as read.`)}><Icon name="read-all" size={16} /></button>
           <button class="icon-btn small" data-tip="Saved drafts: recover local drafts, including those from ended sessions" onClick={() => setDialog("drafts")}><Icon name="drafts" size={16} /></button>
         </footer>
@@ -651,7 +651,7 @@ function ArchiveList() {
           <div class="rowhit archived-row" onClick={() => selectSession(s.key)}>
             <div class="scard compact archived" classList={{ selected: selectedKey() === s.key }}>
               <span class="sc-title ell">{s.name}</span>
-              <span class="hint ell grow">{s.summary} · {s.archivedAt}</span>
+              <span class="hint grow parts"><span class="ell">{s.summary}</span><span class="tabular">{s.archivedAt}</span></span>
               <AgentBadge agent={s.agent} narrow />
               <button class="btn small" onClick={(e) => { e.stopPropagation(); toast("Restore", `${s.name} returns to its project`); }}>Restore</button>
             </div>
@@ -706,7 +706,7 @@ function StripRow(props: { id: string; list: RowSource }) {
       <Show when={row()?.type === "header" ? (row() as Extract<Row, { type: "header" }>) : undefined}>{(h) => <StripBand row={h()} />}</Show>
       <Show when={row()?.type === "child" ? (row() as Extract<Row, { type: "child" }>) : undefined}>
         {(c) => (
-          <button class="strip-child" title={`${c().child.name} · ${childStatus(c().child).caption}`}
+          <button class="strip-child" title={`${c().child.name}\n${childStatus(c().child).caption}`}
             onClick={() => { setSelectedKey(c().parent.key); setSubagentOpen(c().child.id); setDetailTab("activity"); }}>
             <StatusBadge kind={childStatus(c().child).kind} caption="" iconOnly />
             <span class="ell">{c().child.name}</span>
@@ -737,7 +737,7 @@ function StripTile(props: { row: Extract<Row, { type: "card" }> }) {
   const s = () => props.row.session;
   const kind = () => badgeKind(s());
   const frame = () => (emphasis(s()) === "draft" ? "draft" : kind() === "muted-attention" || kind() === "muted-unread" ? "muted" : kind() === "unread" ? "attention" : kind());
-  const tip = () => [`${s().name} · ${statusCaption(s())}`, s().summary, `${s().cwd.split(/[\\/]/).pop()}${s().branch ? ` / ${s().branch}` : ""} · ${s().machine}`, s().git ? gitTooltip(s()) : "", s().optionalQuestions ? `${s().optionalQuestions} optional question(s) waiting` : ""].filter(Boolean).join("\n");
+  const tip = () => [`${s().name}: ${statusCaption(s())}`, s().summary, `${s().cwd.split(/[\\/]/).pop()}${s().branch ? ` / ${s().branch}` : ""} on ${s().machine}`, s().git ? gitTooltip(s()) : "", s().optionalQuestions ? `${s().optionalQuestions} optional question(s) waiting` : ""].filter(Boolean).join("\n");
   return (
     <button class="strip-tile" classList={{ selected: selectedKey() === s().key }} data-frame={frame()} title={tip()} onClick={() => selectSession(s().key)}
       onContextMenu={(e) => { selectSession(s().key); openMenu(e, sessionMenu(s())); }}>

@@ -102,12 +102,12 @@ function AssignPopover(props: { x: number; y: number; taskId: string }) {
       <div class="tk-assign-cols">
         <div class="tk-assign-main">
           <MenuItems close={close} items={[
-            { label: `Main session · ${sessionLabel(c().host, c().session)}`, icon: "monitor", reason: c().session ? undefined : "Open the session to send this task to", action: () => assign({ kind: "session", host: c().host, session: c().session }) },
-            { heading: "New executor · created when the task starts" },
+            { label: `Main session: ${sessionLabel(c().host, c().session)}`, icon: "monitor", reason: c().session ? undefined : "Open the session to send this task to", action: () => assign({ kind: "session", host: c().host, session: c().session }) },
+            { heading: "New executor, created when the task starts" },
             { label: "Subagent", icon: "bot", action: () => assign({ kind: "subagent", host: c().host, session: c().session }) },
             { label: "New session", icon: "plus", action: () => assign({ kind: "new_session", host: c().host, session: c().session }) },
             { separator: true },
-            { label: "Any session · use the selected session at start", icon: "users", action: () => assign({ kind: "any" }) },
+            { label: "Any session (the one selected at start)", icon: "users", action: () => assign({ kind: "any" }) },
           ]} />
           <button class="menu-item tk-mi" classList={{ open: sub() }} role="menuitem" aria-haspopup="true" aria-expanded={sub()} onClick={() => setSub(!sub())}
             onKeyDown={(e) => { if (e.key === "ArrowRight") { e.preventDefault(); setSub(true); } }}>

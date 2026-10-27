@@ -141,9 +141,9 @@ export const overviewRows: OverviewRow[] = [
   { id: "wt2", project: "aurora", machine: "workstation", path: "/home/example/src/aurora-work-3f9a1c20", branch: "work-3f9a1c20", category: 0, remains: "Same files as main; original branch kept", size: "1.2 GB", bytes: 1.2e9, activity: 96, fresh: true, integration: "Same files as main; original branch kept", sessions: ["onboarding-flow (archived)"], localData: [{ path: "target/", size: "1.1 GB" }, { path: ".env.local", size: "2 KB" }], outcome: "unknown" },
   { id: "wt3", project: "aurora", machine: "macbook", path: "/Users/example/src/aurora-work-missing", branch: "work-0b5e93aa", category: 0, state: "Missing", remains: "Folder is missing; only Git's record remains", size: "—", bytes: 0, activity: 400, fresh: true, integration: "Integration not verified", sessions: [], outcome: "forgotten" },
   { id: "wt4", project: "infra", machine: "build-02", path: "/srv/example/runners-work-cache", branch: "work-cache-gc", category: 0, state: "Offline snapshot", remains: "Merged into main", size: "88 MB", bytes: 88e6, activity: 300, fresh: false, integration: "Merged into main", sessions: [], outcome: "kept", detail: "Reconnect this computer to check the folder." },
-  { id: "wt5", project: "aurora", machine: "macbook", path: "/Users/example/src/aurora-work-checkout", branch: "feat/checkout", category: 1, state: "Not reviewed", remains: "Changes to compare with main · 4 uncommitted files", size: "640 MB", bytes: 640e6, activity: 1, fresh: true, integration: "Changes to compare with main", sessions: ["checkout-ui"], discard: ["web/checkout/Form.tsx", "web/checkout/Form.test.tsx", "web/checkout/strings.nl.json", "notes.txt"], outcome: "unsaved" },
+  { id: "wt5", project: "aurora", machine: "macbook", path: "/Users/example/src/aurora-work-checkout", branch: "feat/checkout", category: 1, state: "Not reviewed", remains: "Changes to compare with main, 4 uncommitted files", size: "640 MB", bytes: 640e6, activity: 1, fresh: true, integration: "Changes to compare with main", sessions: ["checkout-ui"], discard: ["web/checkout/Form.tsx", "web/checkout/Form.test.tsx", "web/checkout/strings.nl.json", "notes.txt"], outcome: "unsaved" },
   { id: "wt6", project: "aurora", machine: "workstation", path: "/home/example/src/aurora-work-api-v2", branch: "feat/api-v2", category: 2, remains: "2 sessions use this folder", size: "2.3 GB", bytes: 2.3e9, activity: 0, fresh: true, integration: "Changes to compare with main", sessions: ["api-refactor", "api-refactor-fork"], outcome: "kept", detail: "Another session uses the folder." },
-  { id: "wt7", project: "aurora", machine: "workstation", path: "/home/example/src/aurora-work-cursor", branch: "feat/api-v2-cursor", category: 2, state: "Locked", remains: "Locked · a running program uses the folder", size: "980 MB", bytes: 980e6, activity: 0, fresh: true, integration: "Changes to compare with main", sessions: ["cursor-bench"], outcome: "kept", detail: "A running program uses the folder." },
+  { id: "wt7", project: "aurora", machine: "workstation", path: "/home/example/src/aurora-work-cursor", branch: "feat/api-v2-cursor", category: 2, state: "Locked", remains: "Locked: a running program uses the folder", size: "980 MB", bytes: 980e6, activity: 0, fresh: true, integration: "Changes to compare with main", sessions: ["cursor-bench"], outcome: "kept", detail: "A running program uses the folder." },
   { id: "wt8", project: "aurora", machine: "build-01", path: "/srv/example/aurora-work-bench", branch: "feat/bench", category: 3, state: "Review unavailable", remains: "Some running programs could not be checked", size: "1.6 GB", bytes: 1.6e9, activity: 30, fresh: true, integration: "Merged into release/2.4", sessions: [], processesUnchecked: true, outcome: "removed" },
   { id: "wt9", project: "aurora", machine: "workstation", path: "/home/example/src/aurora", branch: "main", category: 4, state: "Main checkout", remains: "Main checkout", size: "3.1 GB", bytes: 3.1e9, activity: 0, fresh: true, integration: "", sessions: ["accessibility", "search-index", "docs-sync"], outcome: "kept" },
   { id: "wt10", project: "docs", machine: "macbook", path: "/Users/example/notes/handbook", category: 4, state: "Ordinary folder", remains: "Ordinary folder", size: "24 MB", bytes: 24e6, activity: 0, fresh: true, integration: "", sessions: ["handbook", "paper-notes"], outcome: "kept" },
@@ -153,10 +153,10 @@ export const overviewRows: OverviewRow[] = [
 export type Verdict = "Ready" | "Review" | "Missing" | "Blocked" | "Check running programs";
 export interface CleanupRow { path: string; branch: string; verdict: Verdict; details: string; ignored?: string; processes?: boolean; merged?: boolean; result?: "Removed" | "Forgotten" | "Not confirmed" }
 export const cleanupRows: CleanupRow[] = [
-  { path: "aurora-work-old-pager", branch: "chore/old-pager", verdict: "Ready", details: "Merged into main · used 9 days ago", merged: true, result: "Removed" },
-  { path: "aurora-work-3f9a1c20", branch: "work-3f9a1c20", verdict: "Review", details: "Same files as main · 1.1 GB of ignored files", ignored: "1.1 GB", result: "Removed" },
+  { path: "aurora-work-old-pager", branch: "chore/old-pager", verdict: "Ready", details: "Merged into main, used 9 days ago", merged: true, result: "Removed" },
+  { path: "aurora-work-3f9a1c20", branch: "work-3f9a1c20", verdict: "Review", details: "Same files as main, 1.1 GB of ignored files", ignored: "1.1 GB", result: "Removed" },
   { path: "aurora-work-77c1d0e4", branch: "detached 77c1d0e4", verdict: "Missing", details: "The folder is gone; only Git metadata remains.", result: "Forgotten" },
-  { path: "aurora-work-bench", branch: "feat/bench", verdict: "Check running programs", details: "The OS hides some programs’ folder paths · used 2 hours ago", processes: true, result: "Not confirmed" },
+  { path: "aurora-work-bench", branch: "feat/bench", verdict: "Check running programs", details: "The OS hides some programs’ folder paths; used 2 hours ago", processes: true, result: "Not confirmed" },
   { path: "aurora-work-api-v2", branch: "feat/api-v2", verdict: "Blocked", details: "2 sessions use this folder (+1 more)" },
 ];
 
@@ -288,7 +288,7 @@ export const seedCreations: CreationRecord[] = [
 export const swarmComputers = [
   { computer: "workstation", access: "This computer", sync: "Local catalog" },
   { computer: "macbook", access: "macbook", sync: "Synced 11:42:08" },
-  { computer: "build-01", access: "build-01", sync: "Synced 11:42:01 · Update Zerus there to share tasks" },
+  { computer: "build-01", access: "build-01", sync: "Synced 11:42:01. Update Zerus there to share tasks" },
   { computer: "build-02", access: "build-02", sync: "SSH request timed out" },
   { computer: "studio", access: "Not configured", sync: "Shared through swarm" },
 ];

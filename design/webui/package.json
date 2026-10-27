@@ -6,9 +6,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/check-separators.ts",
     "check": "tsc --noEmit",
-    "skins:check": "node scripts/check-skins.ts"
+    "skins:check": "node scripts/check-skins.ts",
+    "separators:check": "node scripts/check-separators.ts"
   },
   "dependencies": {
     "@tanstack/solid-virtual": "3.13.44",

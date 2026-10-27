@@ -16,7 +16,7 @@ const [favorites, setFavorites] = createStore<Record<string, boolean>>(
 
 function marks(m: OcModel): string {
   if (m.unavailable) return "Unavailable";
-  return [m.isDefault && "Default", favorites[m.id] && "Favorite", m.free && "Free"].filter(Boolean).join(" · ");
+  return [m.isDefault && "Default", favorites[m.id] && "Favorite", m.free && "Free"].filter(Boolean).join(", ");
 }
 
 export function OpenCodeModelPicker(props: { value: string; onChoose: (id: string) => void }) {
@@ -44,7 +44,7 @@ export function OpenCodeModelPicker(props: { value: string; onChoose: (id: strin
       list.push(m);
       byProvider.set(m.provider, list);
     }
-    const out = [...byProvider.entries()].map(([label, models]) => ({ label: models[0].folder ? `${label} · This folder` : label, models, unavailable: false }));
+    const out = [...byProvider.entries()].map(([label, models]) => ({ label: models[0].folder ? `${label} (this folder)` : label, models, unavailable: false }));
     const gone = openCodeModels.filter((m) => m.unavailable && favorites[m.id] && (!q || m.name.toLowerCase().includes(q)));
     if (gone.length) out.push({ label: "Unavailable favorites", models: gone, unavailable: true });
     return { out, hidden: hits.length > MAX_ROWS, shortTruncated: !all() && openCodeModels.some((m) => !m.short && !m.unavailable) };

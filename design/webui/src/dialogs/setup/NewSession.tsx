@@ -257,12 +257,12 @@ function NewSessionForm() {
       agent: a ?? "shell",
       folder: source() === "repo" ? destination() : path(),
       worktree: automatic() ? { path: `${source() === "repo" ? destination() : path()}-${generated()}`, branch: generated() } : undefined,
-      model: a === "opencode" ? (model() ? `${modelName(model())}${effort() ? ` · ${effort()}` : ""}` : "Native default model") : undefined,
+      model: a === "opencode" ? (model() ? `${modelName(model())}${effort() ? ` (${effort()})` : ""}` : "Native default model") : undefined,
       repository: source() === "repo" ? url().trim() : undefined,
       predecessor: restore?.id,
     });
     closeSetup("new-session");
-    toast("Session creation started", `${record.tag} · ${record.history[0].text}`);
+    toast("Session creation started", `${record.tag}: ${record.history[0].text}`);
     openSetup("setup-creation");
   };
   const start = () => {

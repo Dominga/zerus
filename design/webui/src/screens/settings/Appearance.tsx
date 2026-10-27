@@ -32,7 +32,7 @@ export function variantSummary(s: ResolvedSkin): string {
   const parts: string[] = [];
   for (const [k, v] of Object.entries(s.components)) if ((base.components as Record<string, string>)[k] !== v) parts.push(VARIANT_TEXT[k]?.[v] ?? `${k}: ${v}`);
   for (const [k, v] of Object.entries(s.layout)) if ((base.layout as Record<string, string>)[k] !== v) parts.push(VARIANT_TEXT[k]?.[v] ?? `${k}: ${v}`);
-  return parts.length ? parts.join(" · ") : "Standard components and layout";
+  return parts.length ? parts.join(", ") : "Standard components and layout";
 }
 
 /** A miniature of the workspace painted only with the skin's own tokens. */

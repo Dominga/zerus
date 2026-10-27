@@ -42,7 +42,7 @@ export function InspectionPanel(props: { row?: OverviewRow }) {
               <button class="btn small" classList={{ on: details() }} aria-pressed={details()} onClick={() => setDetails(!details())}>Details</button>
               <button class="icon-btn small" data-tip="Read files and commits" aria-label="Read files and commits" disabled={offline()} onClick={refresh}><Icon name="refresh-cw" size={13} /></button>
             </header>
-            <p class="ip-brief">{r().branch ? `${r().branch} · ` : ""}{r().remains}{r().fresh ? "" : " · Offline snapshot"}</p>
+            <p class="ip-brief parts"><Show when={r().branch}><span class="mono">{r().branch}</span></Show><span>{r().remains}</span><Show when={!r().fresh}><span class="warn">Offline snapshot</span></Show></p>
             <Show when={details()}>
               <pre class="ip-summary mono">{`Folder: ${r().path}\nComputer: ${r().machine}\nBranch: ${r().branch ?? "—"}\nIntegration: ${r().integration || "—"}\nSize: ${r().size}\nSessions: ${r().sessions.join(", ") || "none"}`}</pre>
             </Show>
@@ -55,7 +55,7 @@ export function InspectionPanel(props: { row?: OverviewRow }) {
             <div class="ip-body">
               <Switch>
                 <Match when={offline()}>
-                  <div class="ip-state">Offline · Changed files are not loaded.</div>
+                  <div class="ip-state">Offline. Changed files are not loaded.</div>
                 </Match>
                 <Match when={loading()}>
                   <div class="ip-state">Loading…</div>
@@ -123,7 +123,7 @@ export function InspectionPanel(props: { row?: OverviewRow }) {
                 </Match>
               </Switch>
             </div>
-            <div class="ip-status hint">{offline() ? "Last known values." : `Updated 11:42 · ${r().machine} · Local Git refs`}</div>
+            <div class="ip-status hint parts">{offline() ? "Last known values." : <><span>Updated 11:42</span><span>{r().machine}</span><span>Local Git refs</span></>}</div>
           </>
         )}
       </Show>

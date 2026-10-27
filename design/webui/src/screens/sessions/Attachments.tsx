@@ -88,7 +88,7 @@ export function AttachmentsChip(props: { items: DraftAttachment[]; onRemove: (id
       <Show when={open()}>
         <div class="att-pop" classList={{ [`pv-${pos().side}`]: true }} ref={list} tabindex="-1" role="dialog" aria-label="Attachments" onKeyDown={onKey}
           style={{ left: `${pos().left}px`, bottom: `${pos().bottom}px` }}>
-          <div class="att-head"><b>Attachments</b><span class="dim">{props.items.length} of 8 · up to 10 MiB each</span></div>
+          <div class="att-head"><b>Attachments</b><span class="dim">{props.items.length} of 8, up to 10 MiB each</span></div>
           <For each={props.items}>{(a, i) => (
             <div class="att-row" tabindex="0" role="button" aria-label={`Open ${a.name}`} title={`Open ${a.name}`}
               onMouseEnter={() => setPreview(a.id)} onMouseLeave={() => setPreview(undefined)} onFocus={() => { if (arrowed) setPreview(a.id); }}

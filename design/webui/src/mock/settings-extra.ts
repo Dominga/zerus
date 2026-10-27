@@ -37,10 +37,10 @@ export const CONNECTOR_CONFIG = "~/.config/zerus-mobile/connector.toml";
 
 export interface Phone { id: string; name: string; platform: string; paired: string; lastActive: string; addedFrom: string; group: string; }
 export const PHONES: Phone[] = [
-  { id: "ph1", name: "Pixel 9", platform: "Android 16", paired: "Oct 12", lastActive: "4 min ago", addedFrom: "workstation", group: "Example team · this computer" },
-  { id: "ph2", name: "iPhone 17", platform: "iOS 26.1", paired: "Sep 30", lastActive: "Yesterday", addedFrom: "macbook", group: "Example team · this computer" },
-  { id: "ph3", name: "Phone", platform: "Android 15", paired: "Aug 2", lastActive: "Oct 1", addedFrom: "", group: "Example team · this computer" },
-  { id: "ph4", name: "Lab tablet", platform: "iPadOS 26.0", paired: "Oct 20", lastActive: "2 h ago", addedFrom: "build-01", group: "Lab · via build-01" },
+  { id: "ph1", name: "Pixel 9", platform: "Android 16", paired: "Oct 12", lastActive: "4 min ago", addedFrom: "workstation", group: "Example team (this computer)" },
+  { id: "ph2", name: "iPhone 17", platform: "iOS 26.1", paired: "Sep 30", lastActive: "Yesterday", addedFrom: "macbook", group: "Example team (this computer)" },
+  { id: "ph3", name: "Phone", platform: "Android 15", paired: "Aug 2", lastActive: "Oct 1", addedFrom: "", group: "Example team (this computer)" },
+  { id: "ph4", name: "Lab tablet", platform: "iPadOS 26.0", paired: "Oct 20", lastActive: "2 h ago", addedFrom: "build-01", group: "Lab (via build-01)" },
 ];
 export const PAIR_WORKSPACES = ["Example team", "Lab (via build-01)"];
 
@@ -56,7 +56,7 @@ export const DELIVERY_OPTIONS = [
 // ---------------------------------------------------------------- Files (5.7)
 
 export const DOWNLOAD_FOLDER = { linux: "/home/example/Downloads/Zerus Files", macos: "/Users/example/Downloads/Zerus Files", windows: "C:\\Users\\example\\Downloads\\Zerus Files" };
-export const DOWNLOAD_USAGE = "Downloaded copies: 1.8 GiB · 214 files";
+export const DOWNLOAD_USAGE = "Downloaded copies: 1.8 GiB in 214 files";
 
 // ---------------------------------------------------------------- Worktrees (2.7)
 
@@ -178,7 +178,7 @@ export const ANALYTICS_COVERAGE = [
   "Computer 2 (Current); generated 15:39; revision 207\nCoverage 2026-10-14 to 2026-10-27; partial\nGaps: 2026-10-19\nUnsupported: none\nCollection: enabled",
   "Computer 3 (Last known (excluded)); generated Oct 26 21:02; revision 88\nSummary is stale or its clock is unconfirmed.",
 ];
-export const ANALYTICS_VOICE = "Computer 1 (latest read; speech collection enabled)\nAccepted audio: 63.4 min · Total queue time: 41.2 s · Total processing time: 412.8 s\nTyped errors: none reported";
+export const ANALYTICS_VOICE = "Computer 1 (latest read; speech collection enabled)\nAccepted audio: 63.4 min\nTotal queue time: 41.2 s\nTotal processing time: 412.8 s\nTyped errors: none reported";
 
 // ---------------------------------------------------------------- Machines (5.14)
 

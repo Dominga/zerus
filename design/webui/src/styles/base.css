@@ -112,6 +112,10 @@
   .mtile.s-disabled { --mt-dot: var(--z-color-dim); color: var(--z-color-dim); }
   .mtile-dot { position: absolute; right: -3px; bottom: -3px; width: 10px; height: 10px; border-radius: 50%; background: var(--mt-dot); box-shadow: 0 0 0 2px var(--mt-ring); }
   .mtile.s-connecting .mtile-dot::after { content: ""; position: absolute; inset: -3px; border-radius: 50%; border: 1.5px solid var(--mt-dot); animation: mt-pulse 1.4s ease-out infinite; }
+  /* Values that sit side by side are separated by space, never by dots. */
+  .wto-suffix, .wtc-reason, .bc-note, .acct-src { margin-left: 10px; }
+  .goto-text { flex-wrap: nowrap; column-gap: 10px; }
+  .parts { display: inline-flex; flex-wrap: wrap; align-items: baseline; column-gap: 12px; row-gap: 2px; min-width: 0; }
   .entity {
     --entity: var(--z-entity-palette-0);
     background: color-mix(in srgb, var(--entity) var(--z-entity-fill-mix), var(--z-color-entity-base));

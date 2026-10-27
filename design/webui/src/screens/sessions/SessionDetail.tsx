@@ -15,7 +15,7 @@ function headerCaption(): string {
   if (!s) return "";
   if (s.status === "working") return s.phase === "tool" ? "Using a tool" : s.phase === "compacting" ? "Compacting" : "Working";
   if (s.status === "attention") return s.attention === "approval" ? "Needs approval" : "Needs input";
-  if (s.status === "scheduled") return `Scheduled · ${s.scheduleNext}`;
+  if (s.status === "scheduled") return `Scheduled for ${s.scheduleNext}`;
   if (s.status === "error") return "Rate limit reached";
   return STATUS_LABEL[s.status];
 }
@@ -66,7 +66,7 @@ function TerminalTab() {
 function ProcessesTab() {
   return (
     <div class="proc-tab">
-      <div class="proc-summary"><b>3 live</b> · 1 active · 0 unconfirmed · 12 recorded<span class="grow" /><button class="btn small danger" title="TERM, then KILL after 2 s">Stop selected (1)</button></div>
+      <div class="proc-summary"><span class="parts"><b>3 live</b><span>1 active</span><span>0 unconfirmed</span><span>12 recorded</span></span><span class="grow" /><button class="btn small danger" title="TERM, then KILL after 2 s">Stop selected (1)</button></div>
       <table class="proc-table">
         <thead><tr><th>Command</th><th>Agent</th><th>State</th><th>Duration</th></tr></thead>
         <tbody>
@@ -82,7 +82,7 @@ function ProcessesTab() {
       </table>
       <div class="proc-detail">
         <div class="row"><b class="mono">cargo test --workspace</b><span class="grow" /><button class="btn small">Copy command</button></div>
-        <div class="hint">workstation · /home/example/src/aurora · running · started 11:43</div>
+        <div class="hint parts"><span>workstation</span><span class="mono">/home/example/src/aurora</span><span>running</span><span>started 11:43</span></div>
         <pre class="act-code mono">running 42 tests{"\n"}test pagination::cursor_round_trip ... ok{"\n"}test routes::orders::v1_shape_unchanged ... ok{"\n"}…</pre>
         <div class="hint">Showing the retained output tail.</div>
       </div>
@@ -113,7 +113,7 @@ function GoalPill() {
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="7" cy="7" r="5.5" /><circle cx="7" cy="7" r="2.5" /></svg>
         <b>Pursuing goal</b>
         <span class="gp-text ell">{s()?.goal}</span>
-        <span class="gp-time tabular">· 1 h 12 min</span>
+        <span class="gp-time tabular">1 h 12 min</span>
         <span class="grow" />
         <span class="gp-more">Details</span><Icon name="chevron-right" size={13} />
       </button>

@@ -91,7 +91,7 @@ export function AnalyticsSection() {
           <aside class="an-detail">
             <Show when={detail()} fallback={<p class="muted">Select a day to see all reported counts, token usage, typed failures and histogram means.</p>}>
               {(r) => (
-                <Lines text={`${r().day} · ${r().computer}\n${PROVIDER_LABEL[r().provider]} · ${r().producer}\n\nCompleted turns: ${r().turns}\nInterrupted turns: ${r().turns % 3}\nWork: ${r().work}\nApproval wait: ${r().approval}\nInput wait: ${r().input}\n\nInput tokens: ${(r().turns * 41.3).toFixed(0)} k\nOutput tokens: ${(r().turns * 3.1).toFixed(0)} k\nCache read: ${(r().turns * 0.42).toFixed(1)} M\nTyped failures: ${r().turns % 5 === 0 ? "rate_limit 1" : "none reported"}\n\nWork histogram mean: ${r().work === "Unavailable" ? "Unavailable (no samples)" : `${2900 + r().turns * 17} ms (${r().turns} samples)`}`} />
+                <Lines text={`Day: ${r().day}\nComputer: ${r().computer}\nProvider: ${PROVIDER_LABEL[r().provider]}\nProducer: ${r().producer}\n\nCompleted turns: ${r().turns}\nInterrupted turns: ${r().turns % 3}\nWork: ${r().work}\nApproval wait: ${r().approval}\nInput wait: ${r().input}\n\nInput tokens: ${(r().turns * 41.3).toFixed(0)} k\nOutput tokens: ${(r().turns * 3.1).toFixed(0)} k\nCache read: ${(r().turns * 0.42).toFixed(1)} M\nTyped failures: ${r().turns % 5 === 0 ? "rate_limit 1" : "none reported"}\n\nWork histogram mean: ${r().work === "Unavailable" ? "Unavailable (no samples)" : `${2900 + r().turns * 17} ms (${r().turns} samples)`}`} />
               )}
             </Show>
           </aside>

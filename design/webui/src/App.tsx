@@ -34,7 +34,7 @@ function StatusBar() {
   const acc = () => accounts.find((a) => a.id === selected()?.account);
   return (
     <footer class="statusbar">
-      <Show when={demoState() === "error"} fallback={<span class="conn-ok"><span class="state-dot ready" />4 of 5 machines connected · build-02 offline</span>}>
+      <Show when={demoState() === "error"} fallback={<span class="conn-ok"><span class="state-dot ready" />4 of 5 machines connected, build-02 offline</span>}>
         <span class="danger">build-02: SSH request timed out (retrying…); win-lab: connecting…</span>
         <button class="btn small ghost" onClick={() => toast("Retry", "Reconnecting now")}>Retry now</button>
       </Show>

@@ -13,6 +13,7 @@ npm ci --ignore-scripts
 npx vite            # dev server
 npx tsc --noEmit    # type check
 npm run skins:check # validate, resolve and compile the built-in skins
+npm run separators:check # fail on dot separators in sources or dist (also runs after build and publish)
 ./scripts/publish.sh <folder>   # type check, build and copy for review
 ```
 
@@ -27,7 +28,9 @@ npm run skins:check # validate, resolve and compile the built-in skins
   Activity to an item, for example `#item-a3c` for the voice note and
   `#item-a3d` for the round video note).
 - `skins/*.json`: skin format v1 (tokens, component variants and layout
-  variants; no CSS). `src/skin/skin.ts` validates, resolves `extends` and
+  variants; no CSS). Skins carry no text; no value in the design is separated by dots
+  (owner rule): use layout (`.parts`, columns, labelled fields, chips) or line
+  breaks. `scripts/check-separators.ts` enforces it. `src/skin/skin.ts` validates, resolves `extends` and
   compiles a skin to CSS custom properties.
 - `src/lib/qt-icons.ts` holds Zerus's own glyphs ported from
   `tray/src/WorkspaceIcons.h`; `<Icon>` prefers them and falls back to Lucide.

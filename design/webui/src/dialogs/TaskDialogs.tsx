@@ -81,7 +81,7 @@ function TaskDetailsInner(props: { task: TaskVM }) {
   };
   const started = () => t().log.some((e) => e.kind === "started");
   return (
-    <Dialog id="task-details" title={editable() ? `Edit task ${t().id}` : `Task details · ${t().id}`} width="760px" icon={editable() ? "pencil" : "file-text"}
+    <Dialog id="task-details" title={editable() ? `Edit task ${t().id}` : `Task details ${t().id}`} width="760px" icon={editable() ? "pencil" : "file-text"}
       footer={<>
         <For each={stageActions()}>{(a) => (
           <button class="btn tv-cmd" classList={{ "is-primary": a === last() }} disabled={busy() || !!why(a)} title={why(a) || label(a)} onClick={() => run(a)}>
@@ -96,7 +96,7 @@ function TaskDetailsInner(props: { task: TaskVM }) {
         </Show>
       </>}>
       <div class="td-form">
-        <div class="td-meta"><StagePill task={t()} /><b class="mono">{t().id}</b><span class="dim">{t().author ? sessionLabel(t().author!.host, t().author!.name) : "You"} · {t().created}</span></div>
+        <div class="td-meta"><StagePill task={t()} /><b class="mono">{t().id}</b><span class="dim parts"><span>{t().author ? sessionLabel(t().author!.host, t().author!.name) : "You"}</span><span>{t().created}</span></span></div>
         <div class="td-title">{displayTitle(t())}</div>
         <label class="td-label" for="td-desc">Description</label>
         <Show when={!editable()}><div class="hint">{!t().writable ? "Update Zerus to edit this task." : "Description, attachments and assignment can be edited in To do or Backlog."}</div></Show>
@@ -124,7 +124,7 @@ function TaskDetailsInner(props: { task: TaskVM }) {
           <>
             <div>{t().target.kind === "any" || !t().target.session ? "Any session" : sessionLabel(t().target.host, t().target.session)}</div>
             <Show when={t().executor}>
-              <span class="td-label">{t().stage !== "active" ? "Last executor" : started() ? "Executor" : "Dispatched to · start unconfirmed"}</span>
+              <span class="td-label">{t().stage !== "active" ? "Last executor" : started() ? "Executor" : "Dispatched to (start unconfirmed)"}</span>
               <div>{workerLabel(t())}</div>
             </Show>
           </>
@@ -139,7 +139,7 @@ function TaskDetailsInner(props: { task: TaskVM }) {
                 const s = () => (c.kind === "session" ? findSession(c.host, c.session) : undefined);
                 return (
                   <button class="td-chip" role="radio" aria-checked={sameTarget(c, target())} classList={{ on: sameTarget(c, target()), gone: c.kind === "session" && !s() }}
-                    title={c.kind === "any" ? "Any session" : `${sessionLabel(c.host, c.session)}${s() ? ` · ${s()!.status}` : " · no longer exists"}`} onClick={() => setTarget(c)}>
+                    title={c.kind === "any" ? "Any session" : `${sessionLabel(c.host, c.session)}${s() ? `: ${s()!.status}` : ": no longer exists"}`} onClick={() => setTarget(c)}>
                     <Show when={c.kind !== "any"}><span class={`tk-dot k-${s()?.kind ?? "gone"}`} /></Show>
                     {chipLabel(c)}
                   </button>
@@ -152,7 +152,7 @@ function TaskDetailsInner(props: { task: TaskVM }) {
         <span class="td-label">History</span>
         <div class="td-history" role="log">
           <For each={t().log.slice(-80)} fallback={<div class="dim">No history yet.</div>}>{(e) => (
-            <p><b>{e.actor}</b> <span class="dim">{e.at}</span> · {historyAction(e)}</p>
+            <p class="parts"><b>{e.actor}</b><span class="dim">{e.at}</span><span>{historyAction(e)}</span></p>
           )}</For>
         </div>
         <div class="row td-note">
@@ -218,7 +218,7 @@ function SettingsInner() {
     setDialog(undefined);
   };
   return (
-    <Dialog id="task-settings" title={`Project tasks · ${c().projectName || "Project"}`} width="620px" icon="settings"
+    <Dialog id="task-settings" title={`Project tasks: ${c().projectName || "Project"}`} width="620px" icon="settings"
       footer={<><span class="spacer" /><button class="btn" onClick={() => setDialog(undefined)}>Cancel</button><button class="btn primary" onClick={save}>Save</button></>}>
       <div class="td-form">
         <h3 class="td-heading">Service prompts</h3>
@@ -251,7 +251,7 @@ function LaunchReviewInner(props: { task: TaskVM }) {
       footer={<>
         <button class="btn" disabled={l().phase === "waiting"} title={l().phase === "waiting" ? "The new executor is starting" : undefined}
           onClick={() => { releaseLaunch(t().id); setDialog(undefined); toast("Launch record released", "Another launch is allowed. Nothing was stopped or sent again."); }}>
-          I reviewed it · allow another launch
+          I reviewed it, allow another launch
         </button>
         <span class="spacer" />
         <button class="btn primary" autofocus onClick={() => setDialog(undefined)}>Close</button>

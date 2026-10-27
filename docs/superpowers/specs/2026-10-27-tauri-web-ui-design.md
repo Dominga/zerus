@@ -381,6 +381,14 @@ One JSON document per skin, independent of the UI stack.
      preference on and off is reported, not gated.
   The same harness qualifies the Chromium fallback.
 
+## Implementation plan
+
+Phase 1 (foundation, first live screen, measurement) is planned task by task in
+`docs/superpowers/plans/2026-10-28-tauri-client-phase1.md`; the later phases are
+listed there with their Beads children of `zerus-5wmh` and get their own plans.
+The client lives in a new top-level `client/` directory (SolidJS frontend in
+`client/src`, Rust side in `client/src-tauri`, its own Cargo package and lock).
+
 ## Migration
 
 The new client ships beside Qt as a separate application. Screens move in this

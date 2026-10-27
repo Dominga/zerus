@@ -213,6 +213,13 @@ private:
                 m_activity.cursor = frame.value("cursor").toInteger(); m_activity.dirty = true;
             } else if (type == "state") {
                 m_activity.state = frame.value("value").toObject(); m_activity.dirty = true;
+            } else if (type == "event") {
+                // A message between tools joins the summary; the next state
+                // replaces provider_messages whole.
+                if (!m_activity.state.isEmpty()) {
+                    EventStream::mergeProviderMessage(m_activity.state, frame.value("event").toObject());
+                    m_activity.dirty = true;
+                }
             } else if (type == "gap") {
                 m_activity.events = {}; m_activity.dirty = false;
             }
@@ -344,6 +351,29 @@ EventStream::~EventStream()
 void EventStream::setListingTimingForTests(int gapMs, int refreshMs)
 {
     ListingGapMs = gapMs; ListingRefreshMs = refreshMs;
+}
+
+void EventStream::mergeProviderMessage(QJsonObject &summary, const QJsonObject &message)
+{
+    auto messages = summary.value(QStringLiteral("provider_messages")).toArray();
+    const auto id = message.value(QStringLiteral("message_id")).toString();
+    const auto type = message.value(QStringLiteral("type"));
+    const double at = message.value(QStringLiteral("at")).toDouble();
+    for (qsizetype i = 0; i < messages.size(); ++i) {
+        const auto held = messages.at(i).toObject();
+        if (held.value(QStringLiteral("type")) != type) continue;
+        if (!id.isEmpty() && held.value(QStringLiteral("message_id")).toString() == id) {
+            messages.removeAt(i);
+            break;
+        }
+        if (held.value(QStringLiteral("detail")) == message.value(QStringLiteral("detail"))
+            && qAbs(held.value(QStringLiteral("at")).toDouble() - at) < 3.0) return;
+    }
+    qsizetype at_index = messages.size();
+    while (at_index > 0 && messages.at(at_index - 1).toObject().value(QStringLiteral("at")).toDouble() > at) --at_index;
+    messages.insert(at_index, message);
+    while (messages.size() > 100) messages.removeFirst();
+    summary.insert(QStringLiteral("provider_messages"), messages);
 }
 
 int EventStream::restartDelayMs(int failures)

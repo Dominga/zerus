@@ -3978,6 +3978,7 @@ follows 10 s without other frames.
 | `delta` | `topic`, `upsert[]` of `{key, row}`, `remove[]` of `{key, reason}`, `cursor` | catalog changes |
 | `events` | `topic`, `key`, `events[]`, `cursor` | new Activity events, oldest first |
 | `state` | `topic`, `key`, `value`, `rev` | the latest summary of one session, or one folder's Git status |
+| `event` | `topic`, `key`, `id`, `rev`, `event` | a message between tools; a higher `rev` of an `id` replaces it |
 | `gap` | `topic`, `key?`, `reason` | discard the topic's state; a snapshot follows |
 | `error` | `code`, `message`, `topic?`, `key?`, `fatal` | a refused operation or a failed source |
 | `pong` | `id` | the answer to `ping` |
@@ -4008,7 +4009,26 @@ keeps, or newer than its newest row, the stream sends `gap` (`retention` or
 own hosts: each change replaces their event window with a `snapshot`. `state`
 carries the `inspect --skip-processes` summary without `events`, `cursor` and
 `history_truncated`. It is sent when anything other than `goal_observed_at`
-changed. A session that leaves the catalog ends its subscription with the error
+changed.
+
+For Codex and Claude sessions the stream follows the conversation's native
+transcript from where it ended when the subscription began, and sends each
+public message written there as an `event` frame within about half a second:
+an `AgentMessage` between tools or Claude's `AgentThinking`, the same object
+`inspect` lists in `provider_messages`, with the same privacy filters. Its `id`
+is the message's `message_id`, or `{type}@{at}#{hash}` (16 hex digits of the
+SHA-256 of its `detail`) when that is empty. A changed message with the same
+`id` comes again with a higher `rev`; frames arrive in order. A client adds it
+to the `provider_messages` of the latest `state`: it replaces the entry with the
+same non-empty `message_id` and `type`, is dropped as a repeat of one with the
+same `type` and `detail` within 3 s of its `at`, and is otherwise inserted in
+`at` order, keeping the newest 100. The next `state` replaces the list and
+includes these messages, so a client that ignores `event` still sees them,
+summaries being re-read every 2 s while the agent is busy. A replaced or
+shortened transcript, or a new conversation, is followed again from its end.
+Kimi, DeepSeek and OpenCode messages arrive only through `state`.
+
+A session that leaves the catalog ends its subscription with the error
 `subscription_ended`. Unsubscribe stops it. A stream follows at most 16 sessions;
 more fail with `too_many_subscriptions`. Other topics (`processes`, `tasks`)
 fail with `unsupported_topic`; read them with their commands.

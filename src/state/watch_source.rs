@@ -7,6 +7,8 @@ use rusqlite::{Connection, OpenFlags};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+pub(crate) use super::provider_messages::{Tail as TranscriptTail, TailRead};
+
 /// The session state folder.
 pub(crate) fn state_root() -> PathBuf {
     root()
@@ -115,6 +117,16 @@ impl Timeline {
 
     pub(crate) fn run_id(&self) -> &str {
         string(&self.record, "run_id")
+    }
+
+    pub(crate) fn conversation(&self) -> &str {
+        string(&self.record, "conversation_id")
+    }
+
+    /// The Codex or Claude transcript of the current conversation, followed
+    /// from its end for messages between tools; None for other agents.
+    pub(crate) fn transcript(&self) -> Option<TranscriptTail> {
+        TranscriptTail::open(&self.record)
     }
 
     /// Events after `after` as `inspect` shapes them, oldest first: the first

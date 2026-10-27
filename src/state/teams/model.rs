@@ -923,6 +923,10 @@ pub(crate) struct Task {
     /// another member with the same role.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
+    /// U27: the visual lane this task is drawn in, set by the lead or the owner;
+    /// it changes nothing about hand-out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<Lane>,
     #[serde(default)]
     pub status: TaskStatus,
     /// Held back from the dispatcher until the lead releases it (A5).
@@ -948,6 +952,15 @@ pub(crate) struct Task {
     /// derived for `hgs team status`, not stored here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subteam: Option<String>,
+}
+
+/// U27: a visual lane of a phase, in order: the tasks drawn in it read as one
+/// row; the label names the row ("Checkpoint 1").
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct Lane {
+    pub n: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
 }
 
 impl Task {

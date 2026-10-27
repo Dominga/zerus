@@ -191,6 +191,14 @@ struct Hold {
     double at = 0;
 };
 
+// U27: a visual lane of a phase, in order; the label names the row ("Checkpoint
+// 1"). Lanes are drawn by the desktop and never change hand-out.
+struct Lane {
+    int n = 0;
+    QString label;
+    bool known() const { return n > 0; }
+};
+
 struct Task {
     int id = 0;
     int phase = 1;             // the approved initial plan is phase 1
@@ -212,6 +220,8 @@ struct Task {
     CheckResult checkResult;
     // G1: the sub-team delegated from this task.
     Subteam subteam;
+    // U27: the visual lane, read from `lane`; n 0 means none.
+    Lane lane;
     bool isCheck() const { return kind == "check" || !check.command.isEmpty(); }
     const Attempt *last() const { return attempts.isEmpty() ? nullptr : &attempts.last(); }
     bool finished() const { return status == "accepted" || status == "rejected" || status == "cancelled"; }
@@ -412,6 +422,8 @@ struct Team {
     QString effectivePhaseApproval() const { return phaseApproval.isEmpty() ? approval : phaseApproval; }
     // The draft records in phase order (spec 10).
     QList<int> draftPhases() const;
+    // U27: the tasks of one phase, in plan order.
+    QList<int> tasksOfPhase(int phase) const;
 };
 
 // A phase as the plan, board, layers and graph group it. Phase 1 has no
@@ -476,6 +488,11 @@ QString phaseHeading(const PhaseGroup &group);
 // Layers by longest path inside one phase; dependencies outside it are ignored
 // (each phase draws its own layers).
 QMap<int, int> phaseLayers(const Team &team, const QList<int> &tasks);
+// U27: one phase's tasks by lane, in lane order, then the tasks without a lane
+// (key 0) which fall back to the dependency layers. Lanes never change hand-out.
+QList<QPair<int, QList<int>>> laneGroups(const Team &team, const QList<int> &ids);
+// The label a lane carries in a phase (the first task that names one).
+QString laneLabel(const Team &team, const QList<int> &ids, int lane);
 
 Team parse(const QJsonObject &value);
 // The plan as `hgs team plan` takes it: members besides the lead, and tasks.

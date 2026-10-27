@@ -150,9 +150,15 @@ QList<int> Team::draftPhases() const
     return drafts;
 }
 
-QString Team::roleOf(const QString &id) const
+QList<int> Team::tasksOfPhase(int phase) const
 {
-    if (id == lead) return tr("Lead");
+    QList<int> ids;
+    for (const auto &task : tasks) if (task.phase == phase) ids.append(task.id);
+    return ids;
+}
+
+QString Team::roleOf(const QString &id) const
+{    if (id == lead) return tr("Lead");
     if (const auto *m = member(id)) return m->role.isEmpty() ? m->id : m->role;
     return id;
 }
@@ -399,6 +405,12 @@ Team parse(const QJsonObject &v)
         task.title = str(t, "title"); task.description = str(t, "description");
         task.status = str(t, "status"); task.assignee = str(t, "assignee");
         task.decidedBy = str(t, "decided_by"); task.reason = str(t, "decision_reason");
+        // U27: the visual lane the task is drawn in.
+        if (t.value("lane").isObject()) {
+            const auto lane = t.value("lane").toObject();
+            task.lane.n = lane.value("n").toInt();
+            task.lane.label = str(lane, "label");
+        }
         for (const auto &c : t.value("criteria").toArray()) task.criteria.append(c.toString());
         for (const auto &d : t.value("deps").toArray()) task.deps.append({d.toObject().value("task").toInt(), str(d.toObject(), "kind") == "soft"});
         if (t.value("hold").isObject()) {
@@ -782,7 +794,9 @@ QJsonObject Task::json() const
     QJsonArray d, c;
     for (const auto &dep : deps) d.append(QJsonObject{{"task", dep.task}, {"kind", dep.soft ? "soft" : "hard"}});
     for (const auto &criterion : criteria) c.append(criterion);
-    return {{"id", id}, {"title", title}, {"description", description}, {"criteria", c}, {"assignee", assignee}, {"deps", d}};
+    QJsonObject value{{"id", id}, {"title", title}, {"description", description}, {"criteria", c}, {"assignee", assignee}, {"deps", d}};
+    if (lane.known()) value.insert("lane", QJsonObject{{"n", lane.n}, {"label", lane.label}});
+    return value;
 }
 
 QJsonObject planInput(const Team &team)
@@ -1310,6 +1324,31 @@ QMap<int, int> phaseLayers(const Team &team, const QList<int> &tasks)
     };
     for (int id : tasks) visit(id);
     return depth;
+}
+
+QList<QPair<int, QList<int>>> laneGroups(const Team &team, const QList<int> &ids)
+{
+    QMap<int, QList<int>> byLane;
+    QList<int> none;
+    for (int id : ids) {
+        const auto *task = team.task(id);
+        if (task && task->lane.known()) byLane[task->lane.n].append(id);
+        else none.append(id);
+    }
+    QList<QPair<int, QList<int>>> groups;
+    for (auto it = byLane.cbegin(); it != byLane.cend(); ++it) groups.append({it.key(), it.value()});
+    if (!none.isEmpty()) groups.append({0, none});
+    return groups;
+}
+
+QString laneLabel(const Team &team, const QList<int> &ids, int lane)
+{
+    if (lane <= 0) return {};
+    for (int id : ids) {
+        const auto *task = team.task(id);
+        if (task && task->lane.n == lane && !task->lane.label.isEmpty()) return task->lane.label;
+    }
+    return {};
 }
 
 FeedLine feedLine(const Team &team, const QJsonObject &event)

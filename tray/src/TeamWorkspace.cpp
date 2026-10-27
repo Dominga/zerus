@@ -1179,6 +1179,12 @@ QWidget *TeamWorkspace::board(const Team &team)
             auto *cardBox = card(c, problemTasks.contains(task.id) ? c.danger : QColor());
             cardBox->setObjectName("teamBoardCard"); cardBox->setCursor(Qt::PointingHandCursor);
             cardBox->setProperty("task", task.id);
+            cardBox->setProperty("lane", task.lane.n);
+            // U27: the card's menu moves it to another lane (planning and drafts).
+            cardBox->setContextMenuPolicy(Qt::CustomContextMenu);
+            QObject::connect(cardBox, &QWidget::customContextMenuRequested, this, [this, id = team.id, card = cardBox, taskId = task.id](const QPoint &at) {
+                if (const auto *fresh = currentTeam(id)) laneMenu(*fresh, taskId, card->mapToGlobal(at));
+            });
             auto *b = new QVBoxLayout(cardBox); b->setContentsMargins(8, 6, 8, 6); b->setSpacing(3);
             auto *title = label(QStringLiteral("#%1 %2").arg(task.id).arg(task.title), c.fg, 12, true); title->setWordWrap(true); b->addWidget(title);
             // Role, agent, state and dependencies share a line while the column
@@ -1618,8 +1624,7 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         // Typing survives the workspace's re-renders: the text, and the focus it had.
         if (m_rejectFocus) { m_rejectFocus = false; QTimer::singleShot(0, edit, [edit] { edit->setFocus(Qt::OtherFocusReason); }); }
     }
-    QWidget *body = m_view == "board" ? boardColumns(team, group.tasks, group.n)
-                  : m_view == "layers" ? layerRows(team, group.tasks) : phaseGraph(team, group);
+    QWidget *body = laneSections(team, group);
     auto *bodyBox = new QWidget; bodyBox->setObjectName("teamPhaseBody"); bodyBox->setProperty("phase", group.n);
     auto *bv = new QVBoxLayout(bodyBox); bv->setContentsMargins(6, 6, 6, 8); bv->setSpacing(0);
     bv->addWidget(body);
@@ -1627,8 +1632,166 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
     return frame;
 }
 
-QWidget *TeamWorkspace::phaseGraph(const Team &team, const PhaseGroup &group)
+QWidget *TeamWorkspace::laneSections(const Team &team, const PhaseGroup &group)
 {
+    const Colors c = colorsFor(m_dark);
+    const auto lanes = laneGroups(team, group.tasks);
+    // No lane at all: the phase's body is exactly what it always was.
+    if (lanes.isEmpty() || (lanes.size() == 1 && lanes.first().first == 0)) return laneBody(team, group.tasks, group);
+    auto *box = new QWidget; box->setObjectName("teamPhaseLanes"); box->setProperty("phase", group.n);
+    auto *v = new QVBoxLayout(box); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(4);
+    for (const auto &[lane, ids] : lanes) {
+        const QString key = QStringLiteral("ui/collapsed/teamLane/%1/%2/%3").arg(team.id).arg(group.n).arg(lane);
+        const bool open = !QSettings().value(key, false).toBool();
+        auto *header = new QToolButton;
+        header->setObjectName("teamLaneHeader");
+        header->setProperty("lane", lane); header->setProperty("phase", group.n); header->setProperty("collapsed", !open);
+        header->setProperty("tasks", ids.size());
+        const QString label = lane > 0 ? laneLabel(team, group.tasks, lane) : QString();
+        const QString name = lane > 0 ? (label.isEmpty() ? tr("Lane %1").arg(lane) : tr("Lane %1 · %2").arg(lane).arg(label))
+                                      : tr("No lane · by dependency");
+        header->setText(ids.size() == 1 ? tr("%1 · 1 task").arg(name) : tr("%1 · %2 tasks").arg(name).arg(ids.size()));
+        header->setIcon(workspaceIcon(open ? "chevron-down" : "chevron-right", c.text2));
+        header->setIconSize(QSize(10, 10));
+        header->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        header->setAutoRaise(true);
+        header->setCursor(Qt::PointingHandCursor);
+        header->setAccessibleDescription(open ? tr("Expanded") : tr("Collapsed"));
+        header->setToolTip(lane > 0 ? tr("Lanes only shape the plan; hand-out still follows dependencies and phases")
+                                    : tr("These tasks fall back to their dependency layers"));
+        header->setStyleSheet(QStringLiteral("QToolButton#teamLaneHeader{color:%1;font-size:11px;font-weight:600;border:0;padding:2px 4px;background:transparent;}"
+                                             "QToolButton#teamLaneHeader:hover{color:%2;}")
+                                  .arg(c.text2.name(), c.fg.name()));
+        QObject::connect(header, &QToolButton::clicked, this, [this, key](bool) {
+            QSettings().setValue(key, !QSettings().value(key, false).toBool());
+            scheduleRender();
+        });
+        // U27: a lane is renamed in the plan and in a draft phase.
+        header->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(header, &QWidget::customContextMenuRequested, this, [this, id = team.id, phase = group.n, lane, label](const QPoint &at) {
+            const auto *current = currentTeam(id);
+            if (!current || lane <= 0 || !(current->status == "planning" || (current->phase(phase) && current->phase(phase)->draft()))) return;
+            QMenu menu; menu.setObjectName("teamLaneMenu");
+            auto *rename = menu.addAction(tr("Rename lane…")); rename->setObjectName("teamLaneRename");
+            auto *chosen = menu.exec(at);
+            if (chosen != rename) return;
+            bool ok = false;
+            const QString text = QInputDialog::getText(this, tr("Rename lane %1").arg(lane), tr("Lane name"), QLineEdit::Normal,
+                                                       label.isEmpty() ? tr("Checkpoint %1").arg(lane) : label, &ok);
+            if (!ok) return;
+            if (const auto *fresh = currentTeam(id)) renameLane(*fresh, phase, lane, text.trimmed());
+        });
+        v->addWidget(header);
+        if (!open) continue;
+        auto *body = laneBody(team, ids, group);
+        body->setProperty("lane", lane);
+        body->setProperty("phase", group.n);
+        auto *wrap = new QWidget; wrap->setObjectName("teamLaneBody"); wrap->setProperty("lane", lane); wrap->setProperty("phase", group.n);
+        auto *wv = new QVBoxLayout(wrap); wv->setContentsMargins(14, 0, 0, 2); wv->setSpacing(0);
+        wv->addWidget(body);
+        v->addWidget(wrap);
+    }
+    return box;
+}
+
+QWidget *TeamWorkspace::laneBody(const Team &team, const QList<int> &ids, const PhaseGroup &group)
+{
+    if (m_view == "board") return boardColumns(team, ids, group.n);
+    if (m_view == "layers") return layerRows(team, ids);
+    return phaseGraph(team, group, ids);
+}
+
+void TeamWorkspace::sendLaneChanges(const Team &team, int phase, const QList<QPair<int, QJsonValue>> &updates)
+{
+    if (updates.isEmpty()) return;
+    // Planning edits the plan with `plan`; a running team's draft phase edits its
+    // tasks with edit-draft (the server takes `plan` only in Planning).
+    if (team.status == "planning") {
+        Team edited = team;
+        for (const auto &[id, lane] : updates) {
+            for (auto &candidate : edited.tasks) {
+                if (candidate.id != id) continue;
+                if (lane.isNull()) { candidate.lane = Lane{}; continue; }
+                const auto value = lane.toObject();
+                candidate.lane.n = value.value("n").toInt();
+                candidate.lane.label = value.value("label").toString();
+            }
+        }
+        m_panel->savePlan(edited);
+        return;
+    }
+    QJsonArray change;
+    for (const auto &[id, lane] : updates) change.append(QJsonObject{{"id", id}, {"lane", lane}});
+    m_panel->act("edit-draft", {{"team", team.id}, {"phase", phase}, {"tasks_update", change}});
+}
+
+void TeamWorkspace::setTaskLane(const Team &team, int task, int lane)
+{
+    const auto *found = team.task(task);
+    if (!found) return;
+    const int phase = found->phase;
+    QStringList ids;
+    for (int id : team.tasksOfPhase(phase)) ids << QString::number(id);
+    const QString label = lane > 0 ? laneLabel(team, team.tasksOfPhase(phase), lane) : QString();
+    sendLaneChanges(team, phase, {{task, lane > 0 ? QJsonValue(QJsonObject{{"n", lane}, {"label", label}}) : QJsonValue()}});
+}
+
+void TeamWorkspace::renameLane(const Team &team, int phase, int lane, const QString &label)
+{
+    if (lane <= 0) return;
+    QList<QPair<int, QJsonValue>> updates;
+    for (int id : team.tasksOfPhase(phase)) {
+        const auto *task = team.task(id);
+        if (!task || task->lane.n != lane) continue;
+        updates.append({id, QJsonValue(QJsonObject{{"n", lane}, {"label", label.left(40)}})});
+    }
+    sendLaneChanges(team, phase, updates);
+}
+
+void TeamWorkspace::laneMenu(const Team &team, int task, const QPoint &global)
+{
+    const auto *found = team.task(task);
+    if (!found) return;
+    const auto *record = team.phase(found->phase);
+    if (!(team.status == "planning" || (record && record->draft()))) return;
+    QMenu menu; menu.setObjectName("teamTaskLaneMenu");
+    const auto phaseTasks = team.tasksOfPhase(found->phase);
+    const auto lanes = laneGroups(team, phaseTasks);
+    for (const auto &[lane, ids] : lanes) {
+        if (lane <= 0) continue;
+        const QString label = laneLabel(team, phaseTasks, lane);
+        auto *action = menu.addAction(label.isEmpty() ? tr("Lane %1").arg(lane) : tr("Lane %1 · %2").arg(lane).arg(label));
+        action->setObjectName(QStringLiteral("teamTaskLane%1").arg(lane));
+        action->setCheckable(true); action->setChecked(found->lane.n == lane);
+        QObject::connect(action, &QAction::triggered, this, [this, id = team.id, task, lane] {
+            if (const auto *fresh = currentTeam(id)) setTaskLane(*fresh, task, lane);
+        });
+    }
+    menu.addSeparator();
+    auto *fresh = menu.addAction(tr("New lane…")); fresh->setObjectName("teamTaskLaneNew");
+    QObject::connect(fresh, &QAction::triggered, this, [this, id = team.id, task, phaseTasks] {
+        const auto *current = currentTeam(id);
+        if (!current) return;
+        int next = 1;
+        for (int id : phaseTasks) if (const auto *t = current->task(id)) next = qMax(next, t->lane.n + 1);
+        bool ok = false;
+        const QString label = QInputDialog::getText(this, tr("New lane"), tr("Lane name"), QLineEdit::Normal, tr("Checkpoint %1").arg(next), &ok);
+        if (!ok) return;
+        const int lane = next;
+        QList<QPair<int, QJsonValue>> updates = {{task, QJsonValue(QJsonObject{{"n", lane}, {"label", label.trimmed().left(40)}})}};
+        if (const auto *freshTeam = currentTeam(id)) sendLaneChanges(*freshTeam, freshTeam->task(task) ? freshTeam->task(task)->phase : 1, updates);
+    });
+    auto *none = menu.addAction(tr("No lane")); none->setObjectName("teamTaskLaneNone");
+    none->setCheckable(true); none->setChecked(!found->lane.known());
+    QObject::connect(none, &QAction::triggered, this, [this, id = team.id, task] {
+        if (const auto *freshTeam = currentTeam(id)) setTaskLane(*freshTeam, task, 0);
+    });
+    menu.exec(global);
+}
+
+QWidget *TeamWorkspace::phaseGraph(const Team &team, const PhaseGroup &group, const QList<int> &ids)
+{
+    const QList<int> shown = ids.isEmpty() ? group.tasks : ids;
     const Colors c = colorsFor(m_dark);
     const auto problemsByTask = problemTasks(team);
     auto *view = new TaskView(c, TaskView::Wide);
@@ -1644,8 +1807,8 @@ QWidget *TeamWorkspace::phaseGraph(const Team &team, const PhaseGroup &group)
         view->edges[id].append(d.task);
         if (d.soft && !team.allHard) view->soft.insert({d.task, id});
     }
-    const auto layers = phaseLayers(team, group.tasks);
-    QList<int> order = group.tasks;
+    const auto layers = phaseLayers(team, shown);
+    QList<int> order = shown;
     std::stable_sort(order.begin(), order.end(), [&layers](int a, int b) { return layers.value(a) < layers.value(b); });
     graphNodes(view, team, order, inPhase);
     for (auto &node : view->nodes) node.layer = layers.value(node.id);
@@ -1716,6 +1879,11 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
             const QColor edge = problem ? toneColor(c, problemsByTask.value(task->id)) : c.border;
             auto *cardBox = new ClickFrame; cardBox->setObjectName("teamBoardCard"); cardBox->setCursor(Qt::PointingHandCursor);
             cardBox->setProperty("task", task->id);
+            cardBox->setProperty("lane", task->lane.n);
+            cardBox->setContextMenuPolicy(Qt::CustomContextMenu);
+            QObject::connect(cardBox, &QWidget::customContextMenuRequested, this, [this, id = team.id, card = cardBox, taskId = task->id](const QPoint &at) {
+                if (const auto *fresh = currentTeam(id)) laneMenu(*fresh, taskId, card->mapToGlobal(at));
+            });
             cardBox->setStyleSheet(QStringLiteral("QFrame#teamBoardCard{background:%1;border:1px %4 %2;border-radius:8px;} QFrame#teamBoardCard:hover{border-color:%3;}")
                                        .arg(c.surface.name(), edge.name(), c.accent.name(), task->status == "draft" ? QStringLiteral("dashed") : QStringLiteral("solid")));
             cardBox->clicked = [this, id = task->id] { m_drawerTask = id; scheduleRender(); };

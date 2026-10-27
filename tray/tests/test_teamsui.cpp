@@ -622,6 +622,7 @@ private slots:
     void typoThenGitCreatesWorktrees();
     void severalDraftPhasesRenderAndApproveInOrder();
     void phaseBandsStackWithStatusDecisionAndHealth();
+    void lanesGroupACollapseInEveryView();
     void draftReorderSendsMovePhase();
     void pinMarkAndFinishedTeamShowWhoFinished();
     void catalogEditorCarriesNewPhaseApproval();
@@ -4285,6 +4286,117 @@ void TestTeamsUi::catalogEditorMarksManualEdits()
 // G9: the workspace graph stacks phase bands top to bottom; each band's header
 // carries the phase status, progress, health and a draft's decisions (spec
 // 10.2). Shots: every status, collapsed and expanded, light and dark.
+void TestTeamsUi::lanesGroupACollapseInEveryView()
+{
+    // U27: a phase's tasks group by lane, in lane order, each lane a labelled
+    // row that collapses; the tasks without a lane fall back to their layers.
+    // Lanes show in Graph, Board and Layers.
+    auto t = phasedTeam();
+    auto tasks = t["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        // Phase 3 keeps #5; give it and two new tasks lanes, and leave one alone.
+        if (task["id"].toInt() == 5) task["lane"] = QJsonObject{{"n", 1}, {"label", "Checkpoint 1"}};
+        tasks[i] = task;
+    }
+    tasks.append(QJsonObject{{"id", 6}, {"phase", 3}, {"title", "Screenshots"}, {"assignee", "tester"}, {"status", "draft"},
+                             {"lane", QJsonObject{{"n", 1}, {"label", "Checkpoint 1"}}}});
+    tasks.append(QJsonObject{{"id", 7}, {"phase", 3}, {"title", "Review"}, {"assignee", "backend"}, {"status", "draft"},
+                             {"lane", QJsonObject{{"n", 2}, {"label", "Review"}}}});
+    tasks.append(QJsonObject{{"id", 8}, {"phase", 3}, {"title", "No lane work"}, {"assignee", "backend"}, {"status", "draft"}});
+    t["tasks"] = tasks;
+    auto phases = t["phases"].toArray();
+    auto polish = phases[1].toObject();
+    polish["tasks"] = QJsonArray{5, 6, 7, 8};
+    phases[1] = polish;
+    t["phases"] = phases;
+    t["pending_phases"] = QJsonArray{3};
+    setTeam(t);
+    QSettings().remove("ui/collapsed/teamLane/team-1/3/1");
+    QSettings().remove("ui/collapsed/teamLane/team-1/3/2");
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 1000);
+    workspace.show();
+    controller.refresh();
+    workspace.showTeam("team-1");
+    const auto laneHeaders = [&workspace](int phase) {
+        QList<QToolButton *> found;
+        for (auto *header : workspace.findChildren<QToolButton *>("teamLaneHeader"))
+            if (header->property("phase").toInt() == phase && header->isVisible()) found << header;
+        return found;
+    };
+    const auto laneBody = [&workspace](int phase, int lane) -> QWidget * {
+        for (auto *body : workspace.findChildren<QWidget *>("teamLaneBody"))
+            if (body->property("phase").toInt() == phase && body->property("lane").toInt() == lane && body->isVisible()) return body;
+        return nullptr;
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(laneHeaders(3).size() == 3, 20000);
+    QCOMPARE(laneHeaders(3)[0]->property("lane").toInt(), 1);
+    QVERIFY2(laneHeaders(3)[0]->text().contains(QStringLiteral("Checkpoint 1")), qPrintable(laneHeaders(3)[0]->text()));
+    QCOMPARE(laneHeaders(3)[2]->property("lane").toInt(), 0);
+    QVERIFY2(laneHeaders(3)[2]->text().contains(QStringLiteral("No lane")), qPrintable(laneHeaders(3)[2]->text()));
+    QVERIFY(laneBody(3, 1));
+    // Graph: the lane's graph shows only its own tasks.
+    auto *graph = laneBody(3, 1)->findChild<QWidget *>("teamPhaseGraph");
+    QVERIFY(graph);
+    // Collapsing a lane hides its body and remembers the choice.
+    laneHeaders(3)[0]->click();
+    QTRY_VERIFY(!laneBody(3, 1));
+    QCOMPARE(QSettings().value("ui/collapsed/teamLane/team-1/3/1").toBool(), true);
+    workspace.render();
+    QTest::qWait(150);
+    shot(&workspace, "u27-lanes-collapsed-dark");
+    lightPalette();
+    workspace.setTheme(false);
+    workspace.render();
+    QTest::qWait(250);
+    shot(&workspace, "u27-lanes-collapsed-light");
+    darkPalette();
+    workspace.setTheme(true);
+    workspace.render();
+    QTest::qWait(150);
+    QTRY_VERIFY(laneHeaders(3).size() == 3);
+    laneHeaders(3)[0]->click();
+    QTRY_VERIFY(laneBody(3, 1));
+    workspace.render();
+    QTest::qWait(150);
+    shot(&workspace, "u27-lanes-expanded-dark");
+    lightPalette();
+    workspace.setTheme(false);
+    workspace.render();
+    QTest::qWait(250);
+    shot(&workspace, "u27-lanes-expanded-light");
+    darkPalette();
+    workspace.setTheme(true);
+    workspace.render();
+    QTest::qWait(150);
+    // Board and Layers group the phase the same way.
+    auto *views = workspace.findChild<QWidget *>("teamWorkspaceView");
+    QVERIFY(views);
+    for (auto *button : views->findChildren<QPushButton *>())
+        if (button->property("segment") == "board") { button->click(); break; }
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBoard"));
+    QTRY_VERIFY_WITH_TIMEOUT(([&] { const auto headers = laneHeaders(3); return headers.size() == 3 && laneBody(3, 2); })(), 20000);
+    const auto cards = [&workspace](const QList<int> &ids) {
+        int n = 0;
+        for (auto *card : workspace.findChildren<QFrame *>("teamBoardCard"))
+            if (ids.contains(card->property("task").toInt())) ++n;
+        return n;
+    };
+    QCOMPARE(cards({5, 6}), 2);
+    QCOMPARE(cards({7}), 1);
+    QCOMPARE(cards({8}), 1);
+    for (auto *button : views->findChildren<QPushButton *>())
+        if (button->property("segment") == "layers") { button->click(); break; }
+    QTRY_VERIFY_WITH_TIMEOUT(([&] { const auto headers = laneHeaders(3); return headers.size() == 3 && laneBody(3, 2); })(), 20000);
+    // The lane bodies survive the view switch: the layers view groups the same way.
+    QTRY_VERIFY_WITH_TIMEOUT(([&] { const auto headers = laneHeaders(3); return headers.size() == 3 && laneBody(3, 1) && laneBody(3, 2); })(), 20000);
+}
+
 void TestTeamsUi::phaseBandsStackWithStatusDecisionAndHealth()
 {
     auto t = phasedTeam();

@@ -110,7 +110,19 @@ private:
     // send-back form and the phase's body in the chosen view.
     QWidget *phaseColumn(const Teams::Team &team);
     QWidget *phaseScroll(const Teams::Team &team, const Teams::PhaseGroup &group);
-    QWidget *phaseGraph(const Teams::Team &team, const Teams::PhaseGroup &group);
+    QWidget *phaseGraph(const Teams::Team &team, const Teams::PhaseGroup &group, const QList<int> &ids = {});
+    // U27: a phase's body split into its lanes, in lane order, each a labelled
+    // row that collapses (QSettings); the tasks without a lane render as the
+    // dependency layers they always were.
+    QWidget *laneSections(const Teams::Team &team, const Teams::PhaseGroup &group);
+    QWidget *laneBody(const Teams::Team &team, const QList<int> &ids, const Teams::PhaseGroup &group);
+    // U27: the lane a task moves to, and a lane's new name, in the plan or in a
+    // draft phase (a plan change in Planning, edit-draft otherwise).
+    void setTaskLane(const Teams::Team &team, int task, int lane);
+    void renameLane(const Teams::Team &team, int phase, int lane, const QString &label);
+    void sendLaneChanges(const Teams::Team &team, int phase, const QList<QPair<int, QJsonValue>> &updates);
+    // U27: the menu that moves a task to a lane, or takes it out.
+    void laneMenu(const Teams::Team &team, int task, const QPoint &global);
     // U25 part 5 (spec 5.4): the nodes of `order` in two lines - the
     // dependencies from other phases and the problem - with the working dots
     // and the full tooltip. `phase` holds the tasks drawn in this view (empty:

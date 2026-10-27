@@ -49,6 +49,7 @@
 #include "TeamDesignerPage.h"
 #include "TeamConversation.h"
 #include "QuestionCard.h"
+#include "ActivityView.h"
 #include "TeamDesignerPanel.h"
 #include "TeamModel.h"
 #include "TeamNewDialog.h"
@@ -4169,8 +4170,13 @@ else:print('{}')
     // The Activity render is slow on a loaded machine.
     QTRY_VERIFY_WITH_TIMEOUT(page.findChild<QTextBrowser *>("teamConversationText")->toPlainText().contains("Design a security reviewer"), 20000);
     QCOMPARE(card->findChild<QLabel *>("questionPrompt")->text(), QStringLiteral("Do you trust the files in this folder?"));
+    // Each shot after the Activity has drawn its theme.
+    auto *activity = static_cast<ActivityView *>(page.findChild<QWidget *>("teamConversationActivity"));
+    QTRY_VERIFY_WITH_TIMEOUT(!activity->renderPending(), 20000);
     shot(&page, "u16-designer-question-dark");
-    lightPalette(); page.setDark(false); lightShot(&page, "u16-designer-question-light"); darkPalette(); page.setDark(true);
+    lightPalette(); page.setDark(false);
+    QTRY_VERIFY_WITH_TIMEOUT(!activity->renderPending(), 20000);
+    lightShot(&page, "u16-designer-question-light"); darkPalette(); page.setDark(true);
     // Answered here: the native answer names the very question it answers.
     QAbstractButton *yes = nullptr;
     for (auto *option : card->findChildren<QAbstractButton *>("questionOption"))

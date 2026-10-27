@@ -490,8 +490,15 @@ QWidget *TeamWorkspace::headerActionsContent(const Team &team)
                 QString where = finding.file;
                 if (!where.isEmpty() && finding.line > 0) where += QStringLiteral(":%1").arg(finding.line);
                 if (!where.isEmpty()) rv->addWidget(label(where, fc.muted, 11));
-                if (!finding.state.isEmpty()) rv->addWidget(label(tr("state: %1%2").arg(finding.state,
+                if (!finding.state.isEmpty()) rv->addWidget(label(tr("state: %1%2%3").arg(finding.state,
+                    finding.phase > 0 ? tr(" · phase %1").arg(finding.phase) : QString(),
                     finding.note.isEmpty() ? QString() : tr(" — %1").arg(finding.note)), fc.muted, 11));
+                // N17: the owner's replan proposal stays with its finding.
+                if (!finding.proposal.isEmpty()) {
+                    auto *proposal = label(tr("Proposal: %1").arg(finding.proposal), fc.text2, 11, false, "teamFindingProposal");
+                    proposal->setWordWrap(true);
+                    rv->addWidget(proposal);
+                }
                 auto *actions = new QHBoxLayout; actions->setContentsMargins(0, 2, 0, 0); actions->setSpacing(6);
                 // D2: the finding actions; each needs a confirmation.
                 const QList<QPair<QString, QString>> choices{
@@ -503,10 +510,21 @@ QWidget *TeamWorkspace::headerActionsContent(const Team &team)
                     action->setObjectName(QStringLiteral("teamFindingAction_%1").arg(choice.first));
                     action->setFlat(true);
                     QObject::connect(action, &QPushButton::clicked, this, [this, finding, choice] {
-                        if (!m_panel->confirm("teamFindingActionConfirm", choice.second,
-                                              tr("%1 finding \"%2\"?").arg(choice.second, finding.title), choice.second))
-                            return;
                         QJsonObject input{{"finding", finding.id}, {"action", choice.first}, {"note", QString()}};
+                        if (choice.first == "replan") {
+                            // N17 (spec 8): a replan carries the owner's proposal; the
+                            // team pauses until the owner resumes it.
+                            bool given = false;
+                            TeamPanel::RenderHold hold(m_panel);
+                            const QString proposal = QInputDialog::getMultiLineText(
+                                this, tr("Replan"), tr("What should the lead change in the plan for \"%1\"? The team pauses until you resume it.").arg(finding.title),
+                                QString(), &given).trimmed();
+                            if (!given || proposal.isEmpty()) return;
+                            input["proposal"] = proposal;
+                        } else if (!m_panel->confirm("teamFindingActionConfirm", choice.second,
+                                                     tr("%1 finding \"%2\"?").arg(choice.second, finding.title), choice.second)) {
+                            return;
+                        }
                         bool ok = false;
                         if (finding.task.toInt(&ok) && ok) input["task"] = finding.task.toInt();
                         m_teams->act("finding", input);
@@ -796,7 +814,8 @@ QWidget *TeamWorkspace::attentionStrip(const Team &team)
     QStringList lines;
     for (const auto &attention : team.attention) {
         QString line = attention.kind == "report" ? tr("report on #%1 from %2 · %3 min").arg(attention.task).arg(attention.member).arg(attention.minutes)
-                                                  : tr("%1 · #%2 · %3 min").arg(attention.kind).arg(attention.task).arg(attention.minutes);
+                     : !attention.summary.isEmpty() ? attention.summary
+                                                    : tr("%1 · #%2 · %3 min").arg(attention.kind).arg(attention.task).arg(attention.minutes);
         lines << line;
     }
     auto *text = elided(lines.join(QStringLiteral("  ·  ")), c.text2, 11);

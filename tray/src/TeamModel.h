@@ -129,8 +129,9 @@ struct StructuredReport {
 
 // D2: one finding as `hgs team status` pages it.
 struct TeamFinding {
-    QString id, fromTask, severity, title, file, scenario, task, state, by, note;
-    int line = 0;
+    // N17, N18: the owner's replan proposal and a fix_phase finding's phase.
+    QString id, fromTask, severity, title, file, scenario, task, state, by, note, proposal;
+    int line = 0, phase = 0;
     double at = 0;
 };
 
@@ -338,7 +339,8 @@ struct Team {
     const PhaseSummary *phaseSummaryOf(int n) const;
     const Health *phaseHealthOf(int n) const;
     // C4: the undecided reports on the owner's attention list.
-    struct Attention { QString kind, member; int task = 0, minutes = 0; double since = 0; };
+    // N17: an item without a task (a replan) says what it is in `summary`.
+    struct Attention { QString kind, member, summary; int task = 0, minutes = 0; double since = 0; };
     QList<Attention> attention;
     // D2: findings_* from status (open items and the deferred list).
     QList<TeamFinding> findings;

@@ -4069,8 +4069,14 @@ void TestTeamsUi::reportPreviewsAndFindings()
         {"items", QJsonArray{
              QJsonObject{{"id", "f1"}, {"severity", "critical"}, {"title", "Cache race"}, {"scenario", "Two writers"},
                          {"file", "src/cache.rs"}, {"line", 42}, {"state", "open"}, {"from_task", "2"}},
-             QJsonObject{{"id", "f2"}, {"severity", "later"}, {"title", "Docs"}, {"state", "deferred"}, {"note", "after v2"}}}},
+             QJsonObject{{"id", "f2"}, {"severity", "later"}, {"title", "Docs"}, {"state", "deferred"}, {"note", "after v2"}},
+             // N17, N18: a replan keeps its proposal, fix_phase its phase.
+             QJsonObject{{"id", "f3"}, {"severity", "normal"}, {"title", "Slow save"}, {"scenario", "Big carts"}, {"state", "replan"},
+                         {"proposal", "Split the save into two steps"}},
+             QJsonObject{{"id", "f4"}, {"severity", "normal"}, {"title", "Copy"}, {"scenario", "Labels"}, {"state", "fix_phase"}, {"phase", 3}}}},
         {"next_cursor", ""}};
+    t["attention"] = QJsonArray{QJsonObject{{"kind", "replan"}, {"finding", "f3"}, {"proposal", "Split the save into two steps"},
+                                            {"summary", "Replan proposed for f3: Split the save into two steps"}}};
     t["findings_summary"] = QJsonObject{{"open", QJsonObject{{"critical", 1}, {"normal", 0}, {"later", 0}}}, {"deferred", 1}};
     setTeam(t);
 
@@ -4110,7 +4116,46 @@ void TestTeamsUi::reportPreviewsAndFindings()
     auto *dialog = workspace.findChild<QWidget *>("teamFindingsDialog");
     for (const auto &action : {"reopen", "urgent", "replan", "defer", "fixed", "dropped"})
         QVERIFY2(dialog->findChild<QPushButton *>(QStringLiteral("teamFindingAction_%1").arg(action)), action);
+    // N17: the proposal shows on its finding and in the attention strip.
+    QStringList proposals;
+    for (auto *found : dialog->findChildren<QLabel *>("teamFindingProposal")) proposals << found->text();
+    QCOMPARE(proposals, QStringList{QStringLiteral("Proposal: Split the save into two steps")});
+    bool phaseShown = false;
+    for (auto *found : dialog->findChildren<QLabel *>()) phaseShown = phaseShown || found->text() == QStringLiteral("state: fix_phase · phase 3");
+    QVERIFY(phaseShown);
+    QTRY_VERIFY(workspace.findChild<QLabel *>("teamAttentionText"));
+    QVERIFY2(workspace.findChild<QLabel *>("teamAttentionText")->toolTip().contains("Replan proposed for f3: Split the save into two steps"),
+             qPrintable(workspace.findChild<QLabel *>("teamAttentionText")->toolTip()));
     shot(dialog, "findings-dialog");
+    // N17: Replan asks for the proposal and sends it; without one nothing goes.
+    QPushButton *replan = nullptr;
+    for (auto *row : dialog->findChildren<QWidget *>("teamFindingRow"))
+        if (!replan && row->findChild<QLabel *>() && row->findChild<QLabel *>()->text().contains("Cache race"))
+            replan = row->findChild<QPushButton *>("teamFindingAction_replan");
+    QVERIFY(replan);
+    const auto answer = [](const QString &text) {
+        auto *timer = new QTimer(qApp); timer->setInterval(10);
+        QObject::connect(timer, &QTimer::timeout, qApp, [timer, text] {
+            auto *input = qobject_cast<QInputDialog *>(QApplication::activeModalWidget());
+            if (!input) return;
+            timer->stop(); timer->deleteLater();
+            if (text.isEmpty()) { input->reject(); return; }
+            input->setTextValue(text);
+            input->accept();
+        });
+        timer->start();
+    };
+    answer(QString());
+    replan->click();
+    QTest::qWait(100);
+    QVERIFY(calls(script(), "finding").isEmpty());
+    answer(QStringLiteral("Split the save into two steps"));
+    replan->click();
+    QTRY_COMPARE(calls(script(), "finding").size(), 1);
+    const auto sent = calls(script(), "finding").first();
+    QCOMPARE(sent["finding"].toString(), QStringLiteral("f1"));
+    QCOMPARE(sent["action"].toString(), QStringLiteral("replan"));
+    QCOMPARE(sent["proposal"].toString(), QStringLiteral("Split the save into two steps"));
 }
 
 void TestTeamsUi::hierarchyInTeamViewsAndMemberCards()

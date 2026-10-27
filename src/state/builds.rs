@@ -67,6 +67,15 @@ fn stdin_json() -> Result<Value> {
     json_request(&bytes)
 }
 
+/// The calling session's binding; a test sets its own.
+fn caller() -> Option<Value> {
+    #[cfg(test)]
+    if let Some(caller) = tests::CALLER.with(|caller| caller.borrow().clone()) {
+        return caller;
+    }
+    caller_record()
+}
+
 fn session_of(record: &Value) -> Value {
     json!({"name":record["name"],"run_id":record["run_id"],"conversation_id":record["conversation_id"]})
 }
@@ -76,7 +85,7 @@ fn start(input: &Value, wait: bool) -> Result<Value> {
     if !canonical_uuid(&id) {
         return Err("A canonical request_id is required; use a new UUID for every run".into());
     }
-    let caller = caller_record()
+    let caller = caller()
         .ok_or("hgs run tracks a build as the calling session's work: run it from inside a Zerus session")?;
     if let Some(done) = read(&result_path(&id)) {
         return Ok(done);
@@ -223,7 +232,7 @@ pub(super) fn running(at: f64) -> Vec<Value> {
 
 /// The calling session's newest runs, running ones first.
 fn list() -> Result<Value> {
-    let caller = caller_record().ok_or("hgs run --list reads the calling session's runs: run it from inside a Zerus session")?;
+    let caller = caller().ok_or("hgs run --list reads the calling session's runs: run it from inside a Zerus session")?;
     let Ok(entries) = fs::read_dir(dir()) else { return Ok(json!({"items":[]})) };
     let at = now();
     let mut items: Vec<Value> = entries
@@ -278,6 +287,12 @@ fn prune() {
 mod tests {
     use super::*;
 
+    thread_local! {
+        /// The caller a test names: Some(None) is no session, whatever
+        /// session runs the tests.
+        pub(super) static CALLER: std::cell::RefCell<Option<Option<Value>>> = const { std::cell::RefCell::new(None) };
+    }
+
     #[test]
     fn a_claim_runs_inside_its_bound_while_its_runner_lives() {
         let at = 10_000.0;
@@ -320,10 +335,29 @@ mod tests {
 
     #[test]
     fn requests_need_a_session_and_valid_fields() {
-        // A test process is not a Zerus session: the run is refused before anything starts.
-        let request = json!({"request_id":"33333333-3333-4333-8333-333333333333","label":"build","command":"true"});
-        assert!(start(&request, false).unwrap_err().contains("inside a Zerus session"));
-        assert!(start(&json!({"request_id":"x"}), false).unwrap_err().contains("canonical request_id"));
-        assert!(dispatch(&["--bogus".into()]).is_err());
+        // The test owns its state and its caller: tests run inside an agent's
+        // session must not find that session, nor write its state.
+        let root = tempfile::tempdir().unwrap();
+        with_test_state_root(root.path(), || {
+            CALLER.with(|caller| *caller.borrow_mut() = Some(None));
+            let request = json!({"request_id":"33333333-3333-4333-8333-333333333333","label":"build","command":"true"});
+            assert!(start(&request, false).unwrap_err().contains("inside a Zerus session"));
+            assert!(list().unwrap_err().contains("inside a Zerus session"));
+            assert!(start(&json!({"request_id":"x"}), false).unwrap_err().contains("canonical request_id"));
+            // A session's request is checked before anything starts.
+            CALLER.with(|caller| *caller.borrow_mut() = Some(Some(json!({"name":"claude/p/t","run_id":"r","conversation_id":"c"}))));
+            let bad = |field: &str, value: Value| {
+                let mut request = request.clone();
+                request[field] = value;
+                start(&request, false).unwrap_err()
+            };
+            assert!(bad("label", json!("")).contains("label"));
+            assert!(bad("command", json!(" ")).contains("command"));
+            assert!(bad("cwd", json!("relative")).contains("cwd"));
+            assert!(bad("timeout_minutes", json!(0)).contains("timeout_minutes"));
+            assert!(!dir().exists(), "nothing was recorded");
+            CALLER.with(|caller| *caller.borrow_mut() = None);
+            assert!(dispatch(&["--bogus".into()]).is_err());
+        });
     }
 }

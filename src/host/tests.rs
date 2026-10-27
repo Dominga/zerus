@@ -2845,13 +2845,15 @@ mod terminal_backend {
             })
             .with_startup(startup),
         );
-        let since = Instant::now();
         let late = {
             let (backend, spec) = (backend.clone(), spec("h", false));
             thread::spawn(move || ended(backend.launch(&spec)))
         };
         eventually("the client", || attached_to("fake_agent/p/h"));
-        thread::sleep(startup.saturating_sub(since.elapsed()));
+        // The launch counts its startup time from the moment its session was
+        // created, before its client attached; a clock started before the
+        // launch ends early when creating the session is slow under load.
+        thread::sleep(startup);
         launcher.program(7).exit(2);
         assert_eq!(late.join().unwrap(), Ok((0, false)));
         assert_eq!(launcher.count(), 8);

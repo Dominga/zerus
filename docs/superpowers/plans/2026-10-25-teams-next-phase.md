@@ -1096,7 +1096,10 @@ phase 37. Lanes are balanced by volume and cost (U28 rule 9), not by count.
   test failure groups fixed at their cause, a new baseline, the upstream
   ufna/zerus main merged into the fork, and the pull request prepared (no
   push without the owner's word).
-- **42 Task pipelines: review and test inside each task (U36)**: a mock-up
+- **42 Review fixes of phases 36-39, then task pipelines (U36)**: first the
+  fixes of the review of phases 36-39 (#499: six critical, the normal
+  findings by area) and the two session window regressions, with their own
+  integration and build; then a mock-up
   first (the Pipelines tab, the new Board columns, the stage chips), then the
   server model and CLI, stage delivery in the task's folder, the Pipelines
   tab, the Board and task views, Android, the lead protocol and docs;

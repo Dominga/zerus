@@ -3144,6 +3144,9 @@ QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e) const
     roles.insert(SessionRoles::Model, s.model.isEmpty() ? (s.cmd == "sh" ? QString() : tr("Model unknown")) : s.model);
     roles.insert(SessionRoles::Effort, s.effort.isEmpty() ? QStringLiteral("—") : s.effort);
     roles.insert(TitleRole, sessionLabel(s)); roles.insert(AgentRole, s.cmd);
+    // F4: the Team designer keeps its fixed name, whatever hgs called the session.
+    const bool designer = Teams::isDesignerSession(e.host, s.name);
+    if (designer) roles.insert(TitleRole, Teams::designerTitle());
     // WhiteWh fork: a team member's card names its role (its id where the
     // role repeats), not the team's long session name.
     if (m_teams) for (const auto &team : m_teams->teams()) {
@@ -3190,6 +3193,8 @@ QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e) const
         roles.insert(SessionRoles::ProjectColor, QColor(group->color));
         roles.insert(SessionRoles::ProjectVivid, group->vivid);
     }
+    // F4: and its own colour, so nobody takes it for a work session.
+    if (designer) { roles.insert(SessionRoles::ProjectColor, QColor(Teams::designerColor())); roles.insert(SessionRoles::ProjectVivid, true); }
     return roles;
 }
 
@@ -6572,7 +6577,7 @@ void SessionsWindow::updateTeamPanel()
     }
     // The Team designer's session shows the catalog draft it proposes.
     {const auto *entry=selected();
-     const bool designer=m_selectedTeam.isEmpty()&&entry&&entry->host.isEmpty()&&entry->session.name.endsWith("/team-designer");
+     const bool designer=m_selectedTeam.isEmpty()&&entry&&Teams::isDesignerSession(entry->host,entry->session.name);
      m_teamPanel->showDesigner(designer);
      if(designer){setNewTeamTab(false);return;}}
     QString team=m_selectedTeam;
@@ -6582,6 +6587,10 @@ void SessionsWindow::updateTeamPanel()
         const auto *found=entry?m_teams->teamOfSession(entry->host,entry->session.name):nullptr;
         team=found?found->id:QString();
     }
+    // F5: a draft is not a team yet; its lead's New team tab shows it.
+    const auto *teamRecord=team.isEmpty()?nullptr:m_teams->team(team);
+    const QString draft=teamRecord&&teamRecord->draft()?team:QString();
+    if(!draft.isEmpty())team.clear();
     m_teamPanel->showTeam(team);
     m_teamPanel->render();
     if(m_teamWorkspace){
@@ -6599,7 +6608,8 @@ void SessionsWindow::updateTeamPanel()
     }
     // New team while the selected local session has no team; it leads the team.
     const auto *entry=selected();
-    setNewTeamTab(m_teams->available()&&team.isEmpty()&&m_selectedTeam.isEmpty()&&entry&&entry->host.isEmpty()&&entry->online&&entry->session.state!="archived");
+    setNewTeamTab(m_teams->available()&&team.isEmpty()&&(m_selectedTeam.isEmpty()||!draft.isEmpty())&&entry&&entry->host.isEmpty()&&entry->online&&entry->session.state!="archived");
+    if(m_teamNewForm&&!draft.isEmpty()&&entry&&m_teamNewForm->leadSession()==entry->session.name)m_teamNewForm->openDraft(draft);
     if(!team.isEmpty()&&team==m_teamOpenAfterCreate){m_teamOpenAfterCreate.clear();m_detailTabs->setCurrentWidget(m_teamWorkspace);}
     if(m_teamDesignerPage&&m_teamDesignerPage->isVisible())m_teamDesignerPage->refresh();
     if(m_teamNewForm&&entry&&m_teamNewForm->leadSession()==entry->session.name){
@@ -6636,7 +6646,8 @@ TeamNewDialog *SessionsWindow::teamNewForm(QWidget *parent)
         computers.append({alias,alias,box&&box->ok&&now-m_fleet.peerPolledAt(alias)<FleetState::kPeerStaleMs});
     }
     QList<TeamNewDialog::Session> sessions;
-    for(const auto &e:m_entries)if(e.session.state!="archived"&&e.online)sessions.append({e.host,e.session.name,e.session.cmd});
+    // F4: the Team designer is offered to no team.
+    for(const auto &e:m_entries)if(e.session.state!="archived"&&e.online&&!Teams::isDesignerSession(e.host,e.session.name))sessions.append({e.host,e.session.name,e.session.cmd});
     const auto *entry=selected();
     QString folder,project;
     if(entry){if(entry->host.isEmpty())folder=entry->session.cwd;project=m_organization.groupFor(entry->identity);
@@ -6672,9 +6683,8 @@ void SessionsWindow::ensureTeamNewForm()
     m_teamNewForm=new TeamNewTab(m_teams,&m_client,computers,coordinator,project,m_teamNewTab);
     m_teamNewForm->setDark(m_dark);
     m_teamNewForm->askDesigner=[this]{showTeamDesigner();};
-    m_teamNewForm->designerSession=[this]{return teamDesignerSession();};
-    m_teamNewForm->startDesigner=[this,folder=entry->session.cwd]{
-        startTeamDesigner(folder,tr("Help me write the goal and the team protocol for a new team; I will send the details."),{});};
+    // A discarded draft leaves the session without a team: the tab starts over.
+    m_teamNewForm->discarded=[this](const QString &){m_teams->refresh();updateTeamPanel();};
     m_teamNewForm->created=[this](const QString &team){
         m_teamOpenAfterCreate=team;m_teams->refresh();
         // A session whose team ends gets a fresh form.
@@ -6685,6 +6695,8 @@ void SessionsWindow::ensureTeamNewForm()
     };
     m_teamNewTab->layout()->addWidget(m_teamNewForm);
     m_teamNewForm->show();
+    // F5: the session leads a draft: the tab shows it again.
+    if(const auto *team=m_teams->teamOfSession(entry->host,entry->session.name);team&&team->draft())m_teamNewForm->openDraft(team->id);
 }
 void SessionsWindow::showNewTeam(const QString &host, const QString &name)
 {
@@ -6740,7 +6752,7 @@ void SessionsWindow::openRelatedSession(const QString &host,const QString &name,
 QString SessionsWindow::teamDesignerSession() const
 {
     // One designer conversation, outside the projects: hgs starts it in its own folder.
-    for(const auto &e:m_entries)if(e.host.isEmpty()&&e.session.state=="running"&&e.session.name.endsWith("/team-designer"))return e.session.name;
+    for(const auto &e:m_entries)if(e.session.state=="running"&&Teams::isDesignerSession(e.host,e.session.name))return e.session.name;
     return {};
 }
 void SessionsWindow::showTeamDesigner()

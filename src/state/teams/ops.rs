@@ -16,6 +16,9 @@ pub(crate) enum Actor {
     Human,
     /// A team member's session, by member id (the lead included).
     Member(String),
+    /// C6: the parent team's lead, proven by its session in the parent team
+    /// (section 9.3), acting on this sub-team.
+    ParentLead,
 }
 
 impl Actor {
@@ -23,6 +26,7 @@ impl Actor {
         match self {
             Actor::Human => "You".into(),
             Actor::Member(id) => team.role_of(id),
+            Actor::ParentLead => "Parent lead".into(),
         }
     }
     pub(crate) fn is_lead(&self, team: &Team) -> bool {
@@ -250,6 +254,7 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
     };
     if let Some(settings) = &settings {
         validate_settings(settings)?;
+        ensure_lead_settings(&team.settings, settings, actor)?;
     }
     // B6: under the auto folder policy a member without its own choice gets
     // its agent's default: a clone for a sandboxed agent, else a worktree.
@@ -257,7 +262,14 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
     if policy == FolderPolicy::Auto {
         for (member, value) in members.iter_mut().skip(1).zip(input["members"].as_array().into_iter().flatten()) {
             if value.get("folder").is_none() && member.directory.is_empty() {
-                member.folder = super::dispatcher::default_folder(&member.agent);
+                // F1.2: auto keeps the agent's default folder (a clone for a
+                // sandboxed agent, a worktree otherwise) unless the plan names
+                // one; a project that forbids worktrees leaves the member shared.
+                member.folder = if team.settings.worktrees_forbidden {
+                    MemberFolder::Shared
+                } else {
+                    super::dispatcher::default_folder(&member.agent)
+                };
             }
         }
     }
@@ -357,20 +369,13 @@ fn ensure_subteam_approver(team: &Team, actor: &Actor) -> anyhow::Result<()> {
     if team.settings.subteam_approval == SubteamApproval::Owner {
         bail!("The owner approves this sub-team's plan and phases");
     }
-    let parent = team.parent.as_ref().unwrap();
-    ensure!(
-        matches!(actor, Actor::Member(id) if !parent.lead.is_empty() && *id == parent.lead),
-        "The parent lead approves this sub-team's plan and phases"
-    );
+    ensure!(matches!(actor, Actor::ParentLead), "The parent lead approves this sub-team's plan and phases");
     Ok(())
 }
 
 /// Whether this actor is the parent lead (section 9.3, default setting).
 fn parent_approves(team: &Team, actor: &Actor) -> bool {
-    team.parent.as_ref().is_some_and(|parent| {
-        team.settings.subteam_approval == SubteamApproval::Parent
-            && matches!(actor, Actor::Member(id) if !parent.lead.is_empty() && *id == parent.lead)
-    })
+    team.parent.is_some() && team.settings.subteam_approval == SubteamApproval::Parent && matches!(actor, Actor::ParentLead)
 }
 
 fn approve(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
@@ -462,12 +467,120 @@ fn errors_text(errors: &[plan::Finding]) -> String {
 /// Appends a phase to a planning, running or paused team: the lead's or your
 /// new work after the plan. A phase is a Draft when the plan is still being
 /// drafted, when an earlier phase is a Draft, or when approval is `review`.
+/// F11: refuses a draft change made against numbers that have since shifted.
+fn ensure_draft_revision(team: &Team, input: &Value) -> anyhow::Result<()> {
+    if let Some(revision) = input["revision"].as_u64() {
+        ensure!(
+            team.phase_numbers_revision <= revision,
+            "Draft numbers changed after revision {revision}; read status again"
+        );
+    }
+    Ok(())
+}
+
+/// F1.5: the lead or owner changes a team's settings and its members in place.
+/// While Planning any member changes; a running team only members without a
+/// session. A wider permissions profile keeps the B5 confirmation.
+fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you change the team's settings");
+    ensure!(
+        matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
+        "Only a planning, running or paused team changes its settings"
+    );
+    let planning = team.status == TeamStatus::Planning;
+    let mut changed = Vec::new();
+    let mut widen = Vec::new();
+    for update in input["members_update"].as_array().into_iter().flatten() {
+        let id = text(update, "id").to_owned();
+        ensure!(!id.is_empty(), "A member update names its member");
+        let member = team.members.iter_mut().find(|member| member.id == id).with_context(|| format!("Unknown member {id}"))?;
+        ensure!(planning || member.session.is_none(), "A running team changes only members without a session");
+        if let Some(folder) = update.get("folder") {
+            member.folder = serde_json::from_value(folder.clone()).context("A folder is shared, worktree or clone")?;
+        }
+        if let Some(directory) = update.get("directory") {
+            member.directory = clean(directory.as_str().unwrap_or_default(), 500, "A directory")?;
+        }
+        if let Some(role) = update.get("role") {
+            let role = clean(role.as_str().unwrap_or_default().trim(), 60, "A role")?;
+            ensure!(!role.is_empty(), "A role is not empty");
+            member.role = role;
+        }
+        if let Some(prompt) = update.get("prompt") {
+            member.prompt = clean(prompt.as_str().unwrap_or_default(), 8000, "A role prompt")?;
+        }
+        if let Some(profile) = update.get("permissions_profile") {
+            let profile = profile.as_str().unwrap_or_default().to_owned();
+            ensure!(
+                profile.is_empty() || ["read", "write", "build", "commit", "network"].contains(&profile.as_str()),
+                "A permissions profile is read, write, build, commit or network"
+            );
+            if profile_rank(&profile) > profile_rank(&member.permissions_profile) {
+                widen.push(json!({"member":id,"from":member.permissions_profile,"to":profile}));
+            }
+            member.permissions_profile = profile;
+        }
+        changed.push(json!(id));
+    }
+    if let Some(value) = input.get("settings") {
+        // C4: a partial object changes only the fields it names.
+        let given = value.as_object().context("Settings are an object")?;
+        let mut merged = serde_json::to_value(&team.settings)?;
+        for (field, value) in given {
+            merged[field] = value.clone();
+        }
+        let updated: Settings = serde_json::from_value(merged).context("Invalid settings")?;
+        validate_settings(&updated)?;
+        ensure_lead_settings(&team.settings, &updated, actor)?;
+        team.settings = updated;
+    }
+    if changed.is_empty() && input.get("settings").is_none() {
+        anyhow::bail!("A settings change names settings or members_update");
+    }
+    // C4: a member of a running team launches with its profile as it is, so
+    // a wider one needs the owner's confirmation now, not at an approval.
+    if !planning && !widen.is_empty() {
+        ensure!(
+            matches!(actor, Actor::Human) && input["confirm_widening"].as_bool() == Some(true),
+            "The owner confirms the wider permissions: settings with \"confirm_widening\": true"
+        );
+    }
+    team.profile_widening.extend(widen);
+    events.push(Event::new("settings_changed", json!({"by":actor.label(team),"members":changed})));
+    Ok(json!({"status":"updated","members":changed,"profile_widening":team.profile_widening}))
+}
+
+/// C4: the settings that decide who approves, how far a team may grow and
+/// what runs without the owner stay the owner's; the lead changes the rest.
+/// Spec 6.1 lets the lead set resume_after_limits too.
+const OWNER_SETTINGS: [&str; 7] = [
+    "approval",
+    "phase_approval",
+    "max_members",
+    "worktrees_forbidden",
+    "tree_depth",
+    "tree_sessions",
+    "subteam_approval",
+];
+
+fn ensure_lead_settings(old: &Settings, new: &Settings, actor: &Actor) -> anyhow::Result<()> {
+    if matches!(actor, Actor::Human) {
+        return Ok(());
+    }
+    let (old, new) = (serde_json::to_value(old)?, serde_json::to_value(new)?);
+    for field in OWNER_SETTINGS {
+        ensure!(old.get(field) == new.get(field), "Only you change the team's {field}");
+    }
+    Ok(())
+}
+
 fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you extend the team");
     ensure!(
         matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
         "Only a planning, running or paused team takes a new phase"
     );
+    ensure_draft_revision(team, input)?;
     let values = input["tasks"].as_array().filter(|tasks| !tasks.is_empty()).context("A phase needs at least one task")?;
     ensure!(values.len() <= 50, "A phase has at most 50 tasks");
     ensure!(team.tasks.len() + values.len() <= 500, "A team has at most 500 tasks (it has {})", team.tasks.len());
@@ -485,12 +598,16 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         }
     };
     let approval = phase_approval(team);
+    // D2: an urgent phase runs at once: no approval under review, no barrier,
+    // and its tasks are handed out first.
+    let urgent = input["urgent"].as_bool() == Some(true);
     // Several drafts may queue, in order; a phase added while an earlier one is
     // still a Draft is a Draft too, whatever the approval says (F9).
-    let drafting = target.is_some()
-        || team.status == TeamStatus::Planning
-        || team.phases.iter().any(|phase| phase.state == PhaseState::Draft)
-        || approval == Approval::Review;
+    let drafting = !urgent
+        && (target.is_some()
+            || team.status == TeamStatus::Planning
+            || team.phases.iter().any(|phase| phase.state == PhaseState::Draft)
+            || approval == Approval::Review);
     let title = clean(text(input, "phase_title").trim(), 120, "A phase title")?;
     let mut tasks = values.iter().map(parse_task).collect::<anyhow::Result<Vec<Task>>>()?;
     // Ids continue after the highest live number: a discarded draft frees its
@@ -535,7 +652,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
             }
         }
     }
-    let barrier = input["barrier"].as_bool() == Some(true);
+    let barrier = !urgent && input["barrier"].as_bool() == Some(true);
     let ids: Vec<u32> = tasks.iter().map(|task| task.id).collect();
     let by = actor.label(team);
     let state = if drafting { PhaseState::Draft } else { PhaseState::Approved };
@@ -590,6 +707,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         decided_at: None,
         owner_word: None,
         changes: Vec::new(),
+        urgent,
         reason: String::new(),
     });
     events.push(Event::new(
@@ -623,6 +741,7 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
             matches!(actor, Actor::Human) || actor.is_lead(team) || parent_approves(team, actor),
             "Only the lead or you discard a phase"
         );
+        ensure_draft_revision(team, input)?;
     }
     ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
     let n = input["phase"]
@@ -651,10 +770,11 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
             if order >= target {
                 continue;
             }
-            let open = team.tasks.iter().any(|task| task.phase == phase_n && !task.status.finished());
+            // F12: the earlier phase must be approved, not finished: an
+            // approved barrier phase still holds its own tasks until they end.
             ensure!(
-                listed.is_none_or(|phase| phase.state != PhaseState::Draft) && !open,
-                "Phase {n} opens after phase {phase_n} ends"
+                listed.is_none_or(|phase| phase.state != PhaseState::Draft),
+                "Phase {n} opens after the previous phase is approved"
             );
         }
         // An assignee may have been removed since the phase was added.
@@ -700,6 +820,8 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
             "phase_discarded",
             json!({"by":label,"phase":n,"title":record.title,"tasks":titles}),
         ));
+        // F11: a discard invalidates the draft numbers a caller may hold.
+        team.phase_numbers_revision = team.revision + 1;
         let renumbering = renumbered(team, &label, events);
         Ok(json!({"status":"phase_discarded","phase":n,"tasks":ids,"renumbered":renumbering}))
     }
@@ -767,6 +889,10 @@ fn renumber_drafts(team: &mut Team) -> Value {
     // The display order is the phase number order now.
     team.phases.sort_by_key(|phase| phase.n);
     normalize_orders(team);
+    // F11: the numbers a caller may still hold are stale from this revision.
+    if phase_map.iter().any(|(from, to)| from != to) || task_map.iter().any(|(from, to)| from != to) {
+        team.phase_numbers_revision = team.revision + 1;
+    }
     let phases: Vec<Value> = phase_map.iter().filter(|(from, to)| from != to).map(|(from, to)| json!({"from":from,"to":to})).collect();
     let tasks: Vec<Value> = task_map.iter().filter(|(from, to)| from != to).map(|(from, to)| json!({"from":from,"to":to})).collect();
     json!({"phases":phases,"tasks":tasks})
@@ -826,6 +952,7 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
         matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
         "Only a planning, running or paused team edits a draft"
     );
+    ensure_draft_revision(team, input)?;
     let n = input["phase"]
         .as_u64()
         .and_then(|phase| u32::try_from(phase).ok())
@@ -962,6 +1089,7 @@ fn move_phase(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Ev
         matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
         "Only a planning, running or paused team moves phases"
     );
+    ensure_draft_revision(team, input)?;
     let n = input["phase"]
         .as_u64()
         .and_then(|phase| u32::try_from(phase).ok())
@@ -1072,6 +1200,18 @@ fn finish(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     ensure!(!summary.is_empty(), "A summary is required");
     let open = team.tasks.iter().filter(|task| !task.status.finished()).count();
     ensure!(open == 0, "{open} task(s) are not decided: decide or cancel them first");
+    // D2: a critical finding that is still open blocks a finish; the owner may
+    // force it.
+    let critical = team
+        .findings
+        .iter()
+        .any(|finding| finding.severity == "critical" && matches!(finding.state.as_str(), "open" | "reopened" | "urgent"));
+    // C16: only the owner forces a finish over an open critical finding.
+    let force = input["force"].as_bool() == Some(true) && matches!(actor, Actor::Human);
+    ensure!(
+        force || !critical,
+        "A critical finding is open: fix it, or the owner finishes with \"force\": true"
+    );
     let by = actor.label(team);
     let accepted = team.tasks.iter().filter(|task| task.status == TaskStatus::Accepted).count();
     let summary_chars = summary.chars().count();
@@ -1083,7 +1223,20 @@ fn finish(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         "finished",
         json!({"by":by,"accepted":accepted,"tasks":team.tasks.len(),"summary_chars":summary_chars}),
     ));
-    Ok(json!({"status":"finished"}))
+    // D2: the result lists every open and deferred finding, at most 100 with a
+    // count of the rest, so the owner sees what remains.
+    let open_findings: Vec<&Finding> = team
+        .findings
+        .iter()
+        .filter(|finding| matches!(finding.state.as_str(), "open" | "reopened" | "urgent" | "deferred"))
+        .collect();
+    let listed: Vec<Value> = open_findings
+        .iter()
+        .take(100)
+        .map(|finding| json!({"id":finding.id,"severity":finding.severity,"title":finding.title,"state":finding.state}))
+        .collect();
+    let more = open_findings.len().saturating_sub(listed.len());
+    Ok(json!({"status":"finished","findings":listed,"findings_more":more}))
 }
 
 /// 9.5: files a finished sub-team's summary (plus its id, 4000 characters) as
@@ -1222,6 +1375,55 @@ pub(crate) fn attempt_phase(task: &Task, session_stopped: bool) -> Option<&'stat
     Some(phase)
 }
 
+/// D1: validates a structured report against the task's criteria and bounds.
+fn structured_report(team: &Team, id: u32, report: &Value) -> anyhow::Result<Value> {
+    ensure!(serde_json::to_string(report)?.len() <= 64 * 1024, "A structured report stays within 64 KB");
+    let criteria = report["criteria"].as_array().cloned().unwrap_or_default();
+    ensure!(criteria.len() <= 50, "A report lists at most 50 criteria");
+    let count = team.task(id).map(|task| task.criteria.len()).unwrap_or(0);
+    let evidence = report["evidence"].as_array().cloned().unwrap_or_default();
+    ensure!(evidence.len() <= 50, "A report lists at most 50 evidence items");
+    for (index, item) in evidence.iter().enumerate() {
+        let kind = item["kind"].as_str().context("An evidence item names its kind")?;
+        ensure!(["command", "image", "html", "file", "log", "url", "text"].contains(&kind), "Unknown evidence kind {kind}");
+        clean(item["caption"].as_str().unwrap_or_default(), 500, "An evidence caption")?;
+        match kind {
+            "command" => {
+                ensure!(!item["command"].as_str().unwrap_or_default().trim().is_empty(), "Command evidence {} needs its command", index);
+                ensure!(item["exit"].as_i64().is_some(), "Command evidence {} needs its exit code", index);
+                clean(item["tail"].as_str().unwrap_or_default(), 4000, "An evidence tail")?;
+            }
+            "url" => ensure!(
+                item["url"].as_str().is_some_and(|url| url.starts_with("http://") || url.starts_with("https://")),
+                "Evidence {} needs an http(s) url",
+                index
+            ),
+            "text" => ensure!(!item["text"].as_str().unwrap_or_default().trim().is_empty(), "Text evidence {} needs its text", index),
+            _ => ensure!(!item["path"].as_str().unwrap_or_default().trim().is_empty(), "Evidence {} needs its path", index),
+        }
+    }
+    for criterion in &criteria {
+        let n = criterion["n"].as_u64().context("A criterion names its 1-based number")?;
+        ensure!(n >= 1 && n as usize <= count, "Task #{id} has no criterion {n}");
+        let result = criterion["result"].as_str().context("A criterion names its result")?;
+        ensure!(["pass", "fail", "partial", "n/a"].contains(&result), "A criterion result is pass, fail, partial or n/a");
+        for index in criterion["evidence"].as_array().into_iter().flatten() {
+            ensure!(
+                index.as_u64().is_some_and(|index| (index as usize) < evidence.len()),
+                "A criterion cites evidence {index} that the report does not list"
+            );
+        }
+    }
+    let limits = report["limits"].as_array().cloned().unwrap_or_default();
+    ensure!(limits.len() <= 50, "A report lists at most 50 limits");
+    for limit in &limits {
+        clean(limit.as_str().unwrap_or_default(), 1000, "A limit")?;
+    }
+    let findings = report["findings"].as_array();
+    ensure!(!findings.is_some_and(|findings| findings.len() > 100), "A report lists at most 100 findings");
+    Ok(report.clone())
+}
+
 fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
     let attempt_id = text(input, "attempt");
@@ -1229,6 +1431,14 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     // C5: a check task reports its exit code and output tail; its text is
     // optional (Zerus writes the summary) and its decision is the exit code.
     let check = input.get("check").filter(|value| value.is_object());
+    // D1: an optional structured report; text falls back to its summary.
+    let structured = input.get("report").filter(|value| value.is_object());
+    let structured = structured.map(|report| structured_report(team, id, report)).transpose()?;
+    if let Some(report) = &structured {
+        if body.is_empty() {
+            body = clean(report["summary"].as_str().unwrap_or_default().trim(), 64 * 1024, "A report")?;
+        }
+    }
     ensure!(!body.is_empty() || check.is_some(), "A report needs text");
     let check_task = team.task(id).is_some_and(Task::is_check);
     ensure!(!check_task || check.is_some(), "A check task's report needs \"check\":{{\"exit\":N,\"tail\":\"...\"}}");
@@ -1236,6 +1446,7 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     let by_member = match actor {
         Actor::Member(member) => member.clone(),
         Actor::Human => String::new(),
+        Actor::ParentLead => bail!("The parent lead does not report on a sub-team's task"),
     };
     let label = actor.label(team);
     let team_lead = team.lead.clone();
@@ -1270,7 +1481,7 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         };
         let attempt = task.attempts.iter_mut().find(|a| a.id == open_id).unwrap();
         attempt.state = AttemptState::Reported;
-        attempt.report = Some(Report { text: body, at: now(), ..Default::default() });
+        attempt.report = Some(Report { text: body, at: now(), structured: structured.clone(), unstructured: structured.is_none(), ..Default::default() });
         attempt.no_report = false;
         attempt.check = check_result;
         // The lead hears of a report unless it wrote it.
@@ -1312,6 +1523,8 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
             report.replaced.remove(0);
         }
         report.text = body;
+        report.structured = structured.clone();
+        report.unstructured = structured.is_none();
         report.at = now();
         report.captured = false;
         attempt.no_report = false;
@@ -1667,7 +1880,9 @@ fn ask(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -
 /// the answer as a message.
 fn reply(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you answer a member's question");
-    let question = clean(text(input, "question").trim(), 40, "A question id")?;
+    // C7: a forwarded sub-team question is "sub:<team id>:<question id>",
+    // once per level (at most 8 levels).
+    let question = clean(text(input, "question").trim(), 400, "A question id")?;
     ensure!(!question.is_empty(), "A question id is required");
     let body = clean(text(input, "text").trim(), 4000, "An answer")?;
     ensure!(!body.is_empty(), "An answer needs text");
@@ -1749,6 +1964,361 @@ fn release(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
     Ok(json!({"status":"released","task":id}))
 }
 
+/// D2: files a report's findings; later ones are deferred at once.
+fn file_findings(team: &mut Team, from: u32, report: &Value, by: &str) -> anyhow::Result<(usize, usize)> {
+    let findings = report["findings"].as_array().cloned().unwrap_or_default();
+    ensure!(team.findings.len() + findings.len() <= 1000, "A team keeps at most 1000 findings");
+    let mut deferred = 0usize;
+    for finding in &findings {
+        let severity = finding["severity"].as_str().unwrap_or("normal").to_owned();
+        ensure!(["critical", "normal", "later"].contains(&severity.as_str()), "A finding is critical, normal or later");
+        let title = clean(finding["title"].as_str().unwrap_or_default().trim(), 200, "A finding title")?;
+        ensure!(!title.is_empty(), "A finding needs a title");
+        let scenario = clean(finding["scenario"].as_str().unwrap_or_default().trim(), 2000, "A finding scenario")?;
+        ensure!(!scenario.is_empty(), "A finding needs its scenario");
+        let file = clean(finding["file"].as_str().unwrap_or_default().trim(), 500, "A finding file")?;
+        let task = finding["task"].as_u64().map(|n| n as u32);
+        if let Some(task) = task {
+            ensure!(team.task(task).is_some(), "A finding names unknown task #{task}");
+        }
+        let state = if severity == "later" {
+            deferred += 1;
+            "deferred"
+        } else {
+            "open"
+        };
+        team.findings_seq += 1;
+        team.findings.push(Finding {
+            id: format!("f{}", team.findings_seq),
+            from_task: from,
+            severity,
+            title,
+            file,
+            line: finding["line"].as_u64().map(|line| line as u32),
+            scenario,
+            task,
+            state: state.into(),
+            by: by.into(),
+            at: now(),
+            note: String::new(),
+        });
+    }
+    Ok((findings.len(), deferred))
+}
+
+/// D2: the lead or owner acts on a finding: reopen, urgent, replan, fix_phase,
+/// defer, fixed or dropped.
+fn finding(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you act on a finding");
+    let id = text(input, "finding").to_owned();
+    let at = team.findings.iter().position(|finding| finding.id == id).with_context(|| format!("Unknown finding {id}"))?;
+    let action = text(input, "action").to_owned();
+    let note = clean(text(input, "note").trim(), 2000, "A finding note")?;
+    let severity = team.findings[at].severity.clone();
+    let state = match action.as_str() {
+        "reopen" => {
+            let task_id = input["task"].as_u64().map(|n| n as u32).or(team.findings[at].task).context("A reopen names its task")?;
+            let location = if team.findings[at].file.is_empty() {
+                String::new()
+            } else {
+                format!("\n{}:{}", team.findings[at].file, team.findings[at].line.unwrap_or(0))
+            };
+            let mut text = format!(
+                "Finding {} ({}): {}{}\nScenario: {}",
+                team.findings[at].id, severity, team.findings[at].title, location, team.findings[at].scenario
+            );
+            if !note.is_empty() {
+                text.push_str(&format!("\nLead's note: {note}"));
+            }
+            let task = team.task_mut(task_id).context("Unknown task")?;
+            ensure!(task.status == TaskStatus::Accepted, "A reopen needs an accepted task");
+            task.history.push(json!({"decided_by":task.decided_by,"reason":task.decision_reason,"at":now()}));
+            task.pinned = true;
+            task.reopen_note = text;
+            task.status = TaskStatus::Pending;
+            task.decided_by = None;
+            task.decision_reason = String::new();
+            "reopened"
+        }
+        "urgent" => {
+            let mut quick = input.clone();
+            quick["urgent"] = json!(true);
+            extend(team, &quick, actor, offline, events)?;
+            "urgent"
+        }
+        "replan" => {
+            ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
+            let proposal = clean(text(input, "proposal").trim(), 4000, "A proposal")?;
+            ensure!(!proposal.is_empty(), "A replan carries the owner's proposal");
+            team.status = TeamStatus::Paused;
+            events.push(Event::new("replan_proposed", json!({"by":actor.label(team),"finding":id,"proposal":proposal})));
+            "replan"
+        }
+        "fix_phase" => {
+            let phase = input["phase"].as_u64().context("fix_phase names its phase")? as u32;
+            ensure!(
+                team.phases.iter().any(|found| found.n == phase && found.state == PhaseState::Draft),
+                "Phase {phase} is not a draft"
+            );
+            "fix_phase"
+        }
+        "defer" => {
+            ensure!(severity != "critical" || matches!(actor, Actor::Human), "Only you defer a critical finding");
+            "deferred"
+        }
+        "fixed" => "fixed",
+        "dropped" => "dropped",
+        _ => bail!("A finding action is reopen, urgent, replan, fix_phase, defer, fixed or dropped"),
+    };
+    team.findings[at].state = state.into();
+    team.findings[at].by = actor.label(team);
+    team.findings[at].note = note;
+    events.push(Event::new("finding_action", json!({"finding":id,"action":action,"state":state})));
+    Ok(json!({"status":action,"finding":id,"state":state}))
+}
+
+/// F5: the owner and the lead edit a draft; the owner creates or discards it.
+fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(team.status == TeamStatus::Draft, "The team is not a draft");
+    let human = matches!(actor, Actor::Human);
+    let action = text(input, "action").to_owned();
+    let mut state = team.draft.clone().unwrap_or_default();
+    match action.as_str() {
+        "update" => {
+            ensure!(human || actor.is_lead(team), "Only the lead or you edit the draft");
+            let revision = input["revision"].as_u64().context("A draft update carries the revision it read")?;
+            ensure!(revision == state.revision, "Draft revision is {} now; read it again", state.revision);
+            let set = input["set"].as_object().context("A draft update names the fields to set")?;
+            let mut changed = Vec::new();
+            for (field, value) in set {
+                if !human && state.owner_edited.contains(field) {
+                    bail!("Owner changed {field}");
+                }
+                match field.as_str() {
+                    "name" => team.name = clean(value.as_str().unwrap_or_default().trim(), 80, "A name")?,
+                    "goal" => team.goal = clean(value.as_str().unwrap_or_default(), 4000, "A goal")?,
+                    // Spec 3: the protocol addendum is the team's lead protocol.
+                    "addendum" => team.lead_protocol = clean(value.as_str().unwrap_or_default(), 8000, "The lead protocol")?,
+                    "settings" => {
+                        let settings: Settings = serde_json::from_value(value.clone()).context("Invalid settings")?;
+                        validate_settings(&settings)?;
+                        // C4: the lead drafts the rest; the owner's settings stay theirs.
+                        ensure_lead_settings(&team.settings, &settings, actor)?;
+                        team.settings = settings;
+                    }
+                    "members" => {
+                        let lead = team.member(&team.lead).cloned();
+                        let mut members: Vec<Member> = value
+                            .as_array()
+                            .context("Members are a list")?
+                            .iter()
+                            .map(parse_member)
+                            .collect::<anyhow::Result<Vec<_>>>()?;
+                        ensure!(!members.is_empty(), "A draft keeps at least its lead");
+                        // C3: the same member checks as a plan: unique ids, the
+                        // auto folder default and the B5 widening the owner
+                        // confirms at create.
+                        for (index, member) in members.iter().enumerate() {
+                            ensure!(members[..index].iter().all(|m| m.id != member.id), "Member id {} is used twice", member.id);
+                        }
+                        let given: Vec<&Value> = value.as_array().into_iter().flatten().collect();
+                        if team.settings.folder_policy == FolderPolicy::Auto {
+                            for (member, value) in members.iter_mut().zip(given) {
+                                if value.get("folder").is_none() && member.directory.is_empty() && member.session.is_none() {
+                                    member.folder = if team.settings.worktrees_forbidden {
+                                        MemberFolder::Shared
+                                    } else {
+                                        super::dispatcher::default_folder(&member.agent)
+                                    };
+                                }
+                            }
+                        }
+                        if let Some(lead) = lead {
+                            members.retain(|member| member.id != lead.id);
+                            members.insert(0, lead);
+                        }
+                        // Nothing is approved yet, so every member above the
+                        // role default widens it.
+                        team.profile_widening = members
+                            .iter()
+                            .filter(|member| member.id != team.lead && profile_rank(&member.permissions_profile) > profile_rank("write"))
+                            .map(|member| json!({"member":member.id,"from":"write","to":member.permissions_profile}))
+                            .collect();
+                        team.members = members;
+                    }
+                    "tasks" => {
+                        let tasks: Vec<Task> = value
+                            .as_array()
+                            .context("Tasks are a list")?
+                            .iter()
+                            .map(parse_task)
+                            .collect::<anyhow::Result<Vec<_>>>()?;
+                        team.tasks = tasks;
+                    }
+                    other => bail!("A draft sets name, goal, addendum, settings, members or tasks, not {other}"),
+                }
+                changed.push(field.clone());
+            }
+            if human {
+                for field in &changed {
+                    if !state.owner_edited.contains(field) {
+                        state.owner_edited.push(field.clone());
+                    }
+                }
+                state.unseen.retain(|field| !changed.contains(field));
+            } else {
+                for field in &changed {
+                    if !state.unseen.contains(field) {
+                        state.unseen.push(field.clone());
+                    }
+                }
+            }
+            state.revision += 1;
+            team.draft = Some(state.clone());
+            events.push(Event::new("draft_updated", json!({"by":actor.label(team),"fields":changed,"revision":state.revision})));
+            // C1: the store answers its own team revision as "revision".
+            Ok(json!({"status":"updated","draft_revision":state.revision,"unseen":state.unseen}))
+        }
+        "seen" => {
+            ensure!(human, "Only you mark the draft as seen");
+            let fields: Vec<String> = input["fields"].as_array().into_iter().flatten().filter_map(|field| field.as_str().map(str::to_owned)).collect();
+            state.unseen.retain(|field| !fields.contains(field));
+            team.draft = Some(state.clone());
+            Ok(json!({"status":"seen","unseen":state.unseen}))
+        }
+        "create" => {
+            ensure!(human, "Only you create the team from the draft");
+            let validation = plan::validate(team, offline);
+            ensure!(
+                validation.errors.is_empty(),
+                "Fix {} plan error(s) to create: {}",
+                validation.errors.len(),
+                validation.errors.iter().map(|finding| finding.text.as_str()).collect::<Vec<_>>().join("; ")
+            );
+            let approve = input["approve"].as_bool() == Some(true);
+            if approve {
+                ensure!(
+                    team.profile_widening.is_empty() || input["confirm_widening"].as_bool() == Some(true),
+                    "The owner confirms the wider permissions first: create with \"confirm_widening\": true"
+                );
+            }
+            team.status = if approve { TeamStatus::Running } else { TeamStatus::Planning };
+            for task in &mut team.tasks {
+                if task.status == TaskStatus::Draft && task.phase == 1 {
+                    task.status = TaskStatus::Pending;
+                }
+            }
+            team.draft = None;
+            events.push(Event::new("draft_created", json!({"approve":approve,"team":team.id})));
+            Ok(json!({"status":if approve {"running"} else {"planning"},"team":team.id}))
+        }
+        "discard" => {
+            ensure!(human, "Only you discard a draft");
+            team.status = TeamStatus::Stopped;
+            team.draft = None;
+            let stop_lead = input["stop_lead"].as_bool() == Some(true);
+            events.push(Event::new("draft_discarded", json!({"stop_lead":stop_lead})));
+            Ok(json!({"status":"stopped","stop_lead":stop_lead}))
+        }
+        other => bail!("A draft action is update, seen, get, create or discard, not {other}"),
+    }
+}
+
+/// F7: the next team a Done team starts: the same folder, settings, lead and
+/// members, whose live sessions are adopted; empty plan and goal.
+pub(crate) fn next_team(team: &Team, goal: &str, name: &str) -> Team {
+    let mut next = Team {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: if name.is_empty() { team.name.clone() } else { name.to_owned() },
+        goal: goal.to_owned(),
+        folder: team.folder.clone(),
+        settings: team.settings.clone(),
+        lead: team.lead.clone(),
+        previous: team.id.clone(),
+        status: TeamStatus::Planning,
+        created: now(),
+        members: team.members.clone(),
+        ..Default::default()
+    };
+    for member in &mut next.members {
+        if member.session.is_none() {
+            member.state = MemberState::NotCreated;
+        }
+    }
+    next
+}
+
+/// F8: the lead proposes a membership change; the owner decides.
+fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(actor.is_lead(team), "The lead proposes a membership change");
+    let kind = text(input, "kind").to_owned();
+    ensure!(
+        ["add-member", "remove-member", "swap-member", "next-goal"].contains(&kind.as_str()),
+        "A proposal adds, removes or swaps a member, or starts the next goal"
+    );
+    let reason = clean(text(input, "reason").trim(), 2000, "A proposal reason")?;
+    ensure!(!reason.is_empty(), "A proposal needs its reason");
+    ensure!(team.proposals.iter().filter(|proposal| proposal["state"] == "open").count() < 50, "A team keeps at most 50 open proposals");
+    // C8: a swap keeps its section 5 fields with the member, the way the
+    // owner's decision runs it and the desktop shows it.
+    let mut member = input["member"].clone();
+    if kind == "swap-member" {
+        if let Some(id) = member.as_str().map(str::to_owned) {
+            member = json!({"id":id});
+        }
+        ensure!(member["id"].as_str().is_some_and(|id| !id.is_empty()), "A swap proposal names its member");
+        for key in ["agent", "model", "effort", "account", "session"] {
+            if let Some(field) = input.get(key).filter(|field| !field.is_null()) {
+                member[key] = field.clone();
+            }
+        }
+    }
+    ensure!(member.to_string().len() <= 8192, "A proposal's member has at most 8 KiB");
+    let id = format!("p{}", team.proposals.len() + 1);
+    let proposal = json!({"id":id,"kind":kind,"by":actor.label(team),"at":now(),"state":"open","reason":reason,
+        "member":member,"goal":input["goal"].clone()});
+    team.proposals.push(proposal);
+    events.push(Event::new("proposed", json!({"id":id,"kind":kind})));
+    Ok(json!({"status":"proposed","proposal":id}))
+}
+
+/// F8: only the owner decides a proposal; accepting runs the change as the
+/// owner would.
+fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human), "Only you decide a proposal");
+    let id = text(input, "proposal").to_owned();
+    let at = team.proposals.iter().position(|proposal| proposal["id"] == id).context("Unknown proposal")?;
+    ensure!(team.proposals[at]["state"] == "open", "The proposal is already decided");
+    let accept = input["accept"].as_bool() == Some(true);
+    let reason = clean(text(input, "reason").trim(), 2000, "A decision reason")?;
+    if !accept {
+        team.proposals[at]["state"] = json!("rejected");
+        team.proposals[at]["decided_at"] = json!(super::super::now());
+        team.proposals[at]["note"] = json!(reason);
+        events.push(Event::new("proposal_decided", json!({"id":id,"accept":false})));
+        return Ok(json!({"status":"rejected","proposal":id}));
+    }
+    let kind = team.proposals[at]["kind"].as_str().unwrap_or_default().to_owned();
+    let member = team.proposals[at]["member"].clone();
+    let result = match kind.as_str() {
+        "add-member" => {
+            let mut value = member;
+            value["request_id"] = json!(uuid::Uuid::new_v4().to_string());
+            apply(team, "add-member", &json!({"member":value}), &Actor::Human, offline, events)?
+        }
+        "remove-member" => {
+            let id = member["id"].as_str().or(member.as_str()).unwrap_or_default().to_owned();
+            apply(team, "remove-member", &json!({"member":id}), &Actor::Human, offline, events)?
+        }
+        _ => bail!("A next-goal proposal is accepted with hgs team next-goal"),
+    };
+    team.proposals[at]["state"] = json!("accepted");
+    team.proposals[at]["decided_at"] = json!(super::super::now());
+    team.proposals[at]["note"] = json!(reason);
+    events.push(Event::new("proposal_decided", json!({"id":id,"accept":true,"kind":kind})));
+    Ok(json!({"status":"accepted","proposal":id,"result":result}))
+}
+
 fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
     let human = matches!(actor, Actor::Human);
@@ -1786,7 +2356,25 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     task.decided_by = Some(if human { Decider::Human } else { Decider::Lead });
     task.decision_reason = reason.clone();
     let title = task.title.clone();
-    // Mark done manually: your acceptance without (or despite) a report.
+    // D2: accepting the report files its findings; later ones are deferred and
+    // the owner hears about them once.
+    if accept {
+        let structured = team
+            .task(id)
+            .and_then(|task| task.attempts.iter().find(|attempt| Some(attempt.n) == n))
+            .and_then(|attempt| attempt.report.as_ref())
+            .and_then(|report| report.structured.clone());
+        if let Some(report) = structured {
+            let (filed, deferred) = file_findings(team, id, &report, &label)?;
+            if filed > 0 {
+                events.push(Event::new("findings_filed", json!({"task":id,"count":filed,"deferred":deferred})));
+                if deferred > 0 {
+                    events.push(Event::new("findings_deferred", json!({"count":deferred,
+                        "notice":format!("{deferred} findings deferred")})));
+                }
+            }
+        }
+    }
     let manual = accept && human && input["manual"].as_bool() == Some(true);
     events.push(Event::new(
         if accept { "accepted" } else { "rejected" },
@@ -1802,6 +2390,9 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
 fn reassign(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you reassign tasks");
+    // 9.7: a task with a sub-team says what becomes of it (C5: checked here,
+    // acted on after this change is stored).
+    subteam_stop_choice(input, team.task(id).context("Unknown task")?)?;
     let target = text(input, "member");
     ensure!(team.member(target).is_some_and(|m| m.state != MemberState::Removed), "Unknown member {target}");
     let label = actor.label(team);
@@ -1845,6 +2436,7 @@ fn take_over(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Eve
 fn cancel(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you cancel tasks");
+    subteam_stop_choice(input, team.task(id).context("Unknown task")?)?;
     let label = actor.label(team);
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!task.status.finished(), "Task #{id} is already decided");
@@ -1899,11 +2491,23 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
     let was_decided = all_decided(team);
     let result = match op {
         "plan" => plan(team, input, actor, events),
-        "extend" => extend(team, input, actor, offline, events),
+        "extend" => {
+            // C15: an urgent phase comes only from the finding action.
+            let mut plain = input.clone();
+            if let Some(object) = plain.as_object_mut() {
+                object.remove("urgent");
+            }
+            extend(team, &plain, actor, offline, events)
+        }
         "edit-draft" => edit_draft(team, input, actor, offline, events),
         "move-phase" => move_phase(team, input, actor, events),
         "approve-phase" => decide_phase(team, input, actor, true, offline, events),
         "discard-phase" => decide_phase(team, input, actor, false, offline, events),
+        "settings" => settings(team, input, actor, events),
+        "finding" => finding(team, input, actor, offline, events),
+        "draft" => draft(team, input, actor, offline, events),
+        "propose" => propose(team, input, actor, events),
+        "decide-proposal" => decide_proposal(team, input, actor, offline, events),
         "finish" => finish(team, input, actor, events),
         "approve" => {
             // B5: a wider permissions profile needs the owner's word.
@@ -2004,7 +2608,13 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                 && input["member"].get("folder").is_none()
                 && member.directory.is_empty()
             {
-                member.folder = super::dispatcher::default_folder(&member.agent);
+                // F1.2: the agent's default folder, shared when the project
+                // forbids worktrees.
+                member.folder = if team.settings.worktrees_forbidden {
+                    MemberFolder::Shared
+                } else {
+                    super::dispatcher::default_folder(&member.agent)
+                };
             }
             ensure!(team.members.iter().all(|m| m.id != member.id), "Member id {} is used", member.id);
             let active = team.members.iter().filter(|m| m.state != MemberState::Removed).count();
@@ -2212,27 +2822,27 @@ mod tests {
     }
 
     #[test]
-    fn approve_phase_waits_for_every_earlier_phase() {
+    fn approve_phase_waits_for_the_earlier_phases_approval() {
         let mut team = running_team();
         let mut events = Vec::new();
         let none = BTreeSet::new();
         for id in [3, 4] {
             extend(&mut team, &json!({"tasks":[{"id":id,"title":"T","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
         }
-        // Phase 1 is still open.
-        let error = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
-        assert_eq!(error, "Phase 2 opens after phase 1 ends");
-        // Decide phase 1: phase 2 may open, phase 3 still waits.
-        for id in [1, 2] {
-            apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
-        }
+        // F12: phase 1's tasks are still open, and phase 2 opens anyway.
         let approved = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
         assert_eq!(approved["status"], "phase_approved");
-        let error = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
-        assert_eq!(error, "Phase 3 opens after phase 2 ends");
-        apply(&mut team, "cancel", &json!({"task":3}), &Actor::Human, &none, &mut events).unwrap();
+        // Phase 3 opens while phase 2's tasks are open too.
         let approved = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap();
         assert_eq!((approved["status"].as_str(), approved["tasks"].clone()), (Some("phase_approved"), json!([4])));
+        // A draft before the phase still refuses the approval.
+        let mut review = running_team();
+        review.settings.approval = Approval::Review;
+        for id in [3, 4] {
+            extend(&mut review, &json!({"tasks":[{"id":id,"title":"T","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        }
+        let error = apply(&mut review, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert_eq!(error, "Phase 3 opens after the previous phase is approved");
     }
 
     #[test]
@@ -3084,20 +3694,24 @@ mod tests {
         assert_eq!(record.owner_word.as_ref().unwrap().text, "next phase plan approved");
         let event = events.iter().rev().find(|event| event.kind == "phase_approved").unwrap();
         assert_eq!(event.payload["owner_word"]["text"], "next phase plan approved");
-        // The ordering rule (F12) still applies before the word matters.
+        // The ordering rule (F12) still applies: a draft before the phase
+        // refuses, before the word matters.
         let mut early = running_team();
-        extend(&mut early, &json!({"tasks":[{"id":3,"title":"Fix","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        early.settings.approval = Approval::Review;
+        for id in [3, 4] {
+            extend(&mut early, &json!({"tasks":[{"id":id,"title":"Fix","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        }
         let blocked = apply(
             &mut early,
             "approve-phase",
-            &json!({"phase":2,"owner_word_checked":{"text":"next phase plan approved","at":1000.0,"event":7}}),
+            &json!({"phase":3,"owner_word_checked":{"text":"next phase plan approved","at":1000.0,"event":7}}),
             &Actor::Member("lead".into()),
             &none,
             &mut events,
         )
         .unwrap_err()
         .to_string();
-        assert_eq!(blocked, "Phase 2 opens after phase 1 ends");
+        assert_eq!(blocked, "Phase 3 opens after the previous phase is approved");
     }
 
     #[test]
@@ -3728,7 +4342,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_folders_follow_the_agent() {
+    fn auto_gives_the_agents_default_folder() {
         let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
         let mut events = Vec::new();
         plan(
@@ -3742,6 +4356,7 @@ mod tests {
         )
         .unwrap();
         let folder = |id: &str| team.member(id).unwrap().folder;
+        // F1.2: auto keeps the agent's default folder; an explicit one stays.
         assert_eq!(folder("dev"), MemberFolder::Clone);
         assert_eq!(folder("qa"), MemberFolder::Worktree);
         assert_eq!(folder("api"), MemberFolder::Shared);
@@ -3772,6 +4387,247 @@ mod tests {
         team.settings.folder_policy = FolderPolicy::Auto;
         let validation = plan::validate(&team, &BTreeSet::new());
         assert!(!validation.errors.iter().any(|finding| finding.text.contains("folder policy")), "{:?}", validation.errors);
+    }
+
+    #[test]
+    fn a_stale_draft_revision_is_refused_until_status_is_read_again() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        extend(&mut team, &json!({"phase_title":"A","tasks":[{"id":3,"title":"A","assignee":"dev"}]}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+        // The caller read this revision; a renumber or discard moves the marker.
+        let read = team.revision;
+        team.phase_numbers_revision = team.revision + 1;
+        for op in ["edit-draft", "move-phase"] {
+            let input = if op == "edit-draft" {
+                json!({"phase":2,"task":3,"title":"Changed","revision":read})
+            } else {
+                json!({"phase":2,"to":"after","revision":read})
+            };
+            let error = apply(&mut team, op, &input, &Actor::Human, &BTreeSet::new(), &mut events).unwrap_err().to_string();
+            assert_eq!(error, format!("Draft numbers changed after revision {read}; read status again"), "{op}");
+        }
+        let error = apply(&mut team, "discard-phase", &json!({"phase":2,"revision":read}), &Actor::Human, &BTreeSet::new(), &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, format!("Draft numbers changed after revision {read}; read status again"));
+        // The revision the change produced works, and no revision works as before.
+        let current = team.phase_numbers_revision;
+        apply(&mut team, "edit-draft", &json!({"phase":2,"task":3,"title":"Changed","revision":current}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        apply(&mut team, "edit-draft", &json!({"phase":2,"task":3,"title":"Again"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        // A real discard moves the marker and refuses the revision it read.
+        let mut fresh = running_team();
+        extend(&mut fresh, &json!({"phase_title":"A","tasks":[{"id":3,"title":"A","assignee":"dev"}]}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+        let before = fresh.revision;
+        apply(&mut fresh, "discard-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(fresh.phase_numbers_revision, before + 1);
+        let error = apply(&mut fresh, "edit-draft", &json!({"phase":2,"task":3,"title":"X","revision":before}), &Actor::Human, &BTreeSet::new(), &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Draft numbers changed"), "{error}");
+    }
+
+    #[test]
+    fn settings_change_planning_members_and_keep_a_widening_for_the_owner() {
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let mut events = Vec::new();
+        plan(
+            &mut team,
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"claude"}],"tasks":[{"id":1,"title":"A","assignee":"dev"}]}),
+            &Actor::Human,
+            &mut events,
+        )
+        .unwrap();
+        let value = apply(
+            &mut team,
+            "settings",
+            &json!({"members_update":[{"id":"dev","role":"API","folder":"clone","permissions_profile":"commit"}],
+                "settings":{"report_timeout_seconds":90}}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(value["status"], "updated");
+        let dev = team.member("dev").unwrap();
+        assert_eq!((dev.role.as_str(), dev.folder, dev.permissions_profile.as_str()), ("API", MemberFolder::Clone, "commit"));
+        assert_eq!(team.settings.report_timeout_seconds, 90);
+        assert_eq!(team.profile_widening[0]["to"], "commit");
+        assert_eq!(events.last().unwrap().kind, "settings_changed");
+        // A member with a session cannot change on a running team.
+        let mut running = running_team();
+        let error = apply(
+            &mut running,
+            "settings",
+            &json!({"members_update":[{"id":"lead","role":"X"}]}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("without a session"), "{error}");
+    }
+
+    #[test]
+    fn findings_are_filed_reopened_and_decided() {
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let mut events = Vec::new();
+        plan(
+            &mut team,
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"claude"},{"id":"qa","role":"Tester","agent":"claude"}],
+                "tasks":[{"id":1,"title":"A","assignee":"dev"},{"id":2,"title":"B","assignee":"qa","deps":[{"task":1,"kind":"hard"}]}]}),
+            &Actor::Human,
+            &mut events,
+        )
+        .unwrap();
+        approve(&mut team, &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        let attempt = hand_out(&mut team, 1);
+        report(
+            &mut team,
+            &json!({"task":1,"attempt":attempt,"report":{"summary":"Done","findings":[
+                {"severity":"critical","title":"Lost write","scenario":"two saves at once","task":1},
+                {"severity":"normal","title":"Slow","scenario":"big log"},
+                {"severity":"later","title":"Polish","scenario":"later"}]}}),
+            &Actor::Member("dev".into()),
+            &mut events,
+        )
+        .unwrap();
+        // D2: nothing is filed until the report is accepted.
+        assert!(team.findings.is_empty());
+        apply(&mut team, "accept", &json!({"task":1}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(team.findings.len(), 3);
+        assert_eq!(
+            (team.findings[0].id.as_str(), team.findings[0].severity.as_str(), team.findings[0].state.as_str()),
+            ("f1", "critical", "open")
+        );
+        assert_eq!(team.findings[2].state, "deferred");
+        assert!(events.iter().any(|event| event.kind == "findings_deferred"));
+        // A critical finding is deferred only by the owner; fixed closes it.
+        let error = apply(&mut team, "finding", &json!({"finding":"f1","action":"defer"}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Only you defer a critical finding"), "{error}");
+        apply(&mut team, "finding", &json!({"finding":"f1","action":"fixed","note":"fixed"}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(team.findings[0].state, "fixed");
+        // Reopen: the accepted task returns, pinned, with the finding as its note.
+        apply(&mut team, "finding", &json!({"finding":"f1","action":"reopen"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        let task = team.task(1).unwrap();
+        assert_eq!(task.status, TaskStatus::Pending);
+        assert!(task.pinned);
+        assert!(task.reopen_note.contains("Lost write"), "{}", task.reopen_note);
+        assert_eq!((task.history.len(), task.decided_by), (1, None));
+        // Urgent: a new approved phase with no barrier, handed out first.
+        apply(
+            &mut team,
+            "finding",
+            &json!({"finding":"f2","action":"urgent","phase_title":"Fix","tasks":[{"id":3,"title":"Fix fast","assignee":"qa"}]}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        let phase = team.phases.last().unwrap();
+        assert_eq!((phase.state, phase.urgent, phase.barrier), (PhaseState::Approved, true, false));
+        assert_eq!(plan::ready(&team)[0], 3);
+        // Replan pauses the team with the owner's proposal.
+        apply(&mut team, "finding", &json!({"finding":"f2","action":"replan","proposal":"Split the phase"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(team.status, TeamStatus::Paused);
+        assert!(events.iter().any(|event| event.kind == "replan_proposed"));
+    }
+
+    #[test]
+    fn a_critical_finding_blocks_the_finish_unless_forced() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        for id in [1, 2] {
+            apply(&mut team, "accept", &json!({"task":id}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        }
+        team.findings.push(Finding {
+            id: "f1".into(),
+            from_task: 1,
+            severity: "critical".into(),
+            title: "Lost write".into(),
+            scenario: "two saves at once".into(),
+            state: "open".into(),
+            ..Default::default()
+        });
+        let error = apply(&mut team, "finish", &json!({"summary":"Done"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap_err().to_string();
+        assert!(error.contains("critical finding"), "{error}");
+        let finished = apply(&mut team, "finish", &json!({"summary":"Done","force":true}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(team.status, TeamStatus::Done);
+        // D2: the result lists the open findings and how many were cut.
+        assert_eq!(finished["findings"][0]["id"], "f1");
+        assert_eq!(finished["findings"][0]["state"], "open");
+        assert_eq!(finished["findings_more"], 0);
+    }
+
+    #[test]
+    fn a_structured_report_is_validated_and_kept() {
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let mut events = Vec::new();
+        plan(
+            &mut team,
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"claude"}],
+                "tasks":[{"id":1,"title":"A","assignee":"dev","criteria":["one","two"]}]}),
+            &Actor::Human,
+            &mut events,
+        )
+        .unwrap();
+        approve(&mut team, &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        let attempt = hand_out(&mut team, 1);
+        // D1: text becomes the summary; the object is kept with its evidence.
+        report(
+            &mut team,
+            &json!({"task":1,"attempt":attempt,"report":{
+                "summary":"Done: the guard is in.",
+                "criteria":[{"n":1,"result":"pass","evidence":[0]}],
+                "evidence":[{"kind":"command","caption":"cargo test teams","command":"cargo test --locked --bin hgs teams","exit":0,"tail":"ok"},
+                    {"kind":"text","caption":"note","text":"reads well"},
+                    {"kind":"url","caption":"log","url":"https://example.com/log"}],
+                "limits":["the GUI was not rebuilt"]}}),
+            &Actor::Member("dev".into()),
+            &mut events,
+        )
+        .unwrap();
+        let stored = team.task(1).unwrap().attempts[0].report.as_ref().unwrap();
+        assert_eq!(stored.text, "Done: the guard is in.");
+        assert!(!stored.unstructured);
+        assert_eq!(stored.structured.as_ref().unwrap()["evidence"].as_array().unwrap().len(), 3);
+        // Refusals: an unknown criterion, evidence kind, result or missing path.
+        let attempt = hand_out(&mut team, 1);
+        for (object, expected) in [
+            (json!({"summary":"x","criteria":[{"n":9,"result":"pass"}]}), "has no criterion 9"),
+            (json!({"summary":"x","evidence":[{"kind":"video","path":"a"}]}), "Unknown evidence kind video"),
+            (json!({"summary":"x","criteria":[{"n":1,"result":"maybe"}]}), "A criterion result is pass, fail, partial or n/a"),
+            (json!({"summary":"x","evidence":[{"kind":"file","caption":"no path"}]}), "Evidence 0 needs its path"),
+            (json!({"summary":"x","criteria":[{"n":1,"result":"pass","evidence":[4]}]}), "cites evidence 4"),
+        ] {
+            let error = report(&mut team, &json!({"task":1,"attempt":attempt,"report":object}), &Actor::Member("dev".into()), &mut events)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+        // An unstructured report is still accepted and flagged as such.
+        report(&mut team, &json!({"task":1,"attempt":attempt,"text":"plain"}), &Actor::Member("dev".into()), &mut events).unwrap();
+        let stored = team.task(1).unwrap().attempts.last().unwrap().report.as_ref().unwrap();
+        assert!(stored.unstructured);
+        assert!(stored.structured.is_none());
+    }
+
+    #[test]
+    fn the_worktree_policy_refuses_a_shared_member() {
+        let mut team = running_team();
+        team.settings.folder_policy = FolderPolicy::Worktree;
+        for member in team.members.iter_mut() {
+            if member.id != "lead" {
+                member.folder = MemberFolder::Worktree;
+            }
+        }
+        let validation = plan::validate(&team, &BTreeSet::new());
+        assert!(!validation.errors.iter().any(|finding| finding.text.contains("worktree policy")), "{:?}", validation.errors);
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().folder = MemberFolder::Shared;
+        let validation = plan::validate(&team, &BTreeSet::new());
+        assert!(validation.errors.iter().any(|finding| finding.text.contains("worktree policy")), "{:?}", validation.errors);
     }
 
     #[test]
@@ -3931,12 +4787,129 @@ mod tests {
             apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
         }
         let error = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
-        assert_eq!(error, "Phase 3 opens after phase 2 ends");
+        assert_eq!(error, "Phase 3 opens after the previous phase is approved");
         let approved = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
         assert_eq!((approved["status"].as_str(), approved["tasks"].clone()), (Some("phase_approved"), json!([3])));
         apply(&mut team, "cancel", &json!({"task":3}), &Actor::Human, &none, &mut events).unwrap();
         let approved = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap();
         assert_eq!(approved["tasks"], json!([4]));
+    }
+
+    #[test]
+    fn a_draft_keeps_the_owners_edit_and_creates_after_the_preflight() {
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        team.status = TeamStatus::Draft;
+        team.draft = Some(Draft { revision: 1, ..Default::default() });
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        // The lead edits the goal; the owner sees it later.
+        apply(&mut team, "draft", &json!({"action":"update","revision":1,"set":{"goal":"Ship"}}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!((team.goal.as_str(), team.draft.as_ref().unwrap().revision), ("Ship", 2));
+        assert_eq!(team.draft.as_ref().unwrap().unseen, vec!["goal".to_string()]);
+        // Spec 3: the protocol addendum is the team's lead protocol.
+        apply(&mut team, "draft", &json!({"action":"update","revision":2,"set":{"addendum":"Two waves"}}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!((team.lead_protocol.as_str(), team.draft.as_ref().unwrap().unseen.len()), ("Two waves", 2));
+        // The owner's edit wins over a later lead edit of that field.
+        apply(&mut team, "draft", &json!({"action":"update","revision":3,"set":{"members":[{"id":"dev","role":"Backend","agent":"claude"}]}}), &Actor::Human, &none, &mut events).unwrap();
+        let error = apply(&mut team, "draft", &json!({"action":"update","revision":4,"set":{"members":[{"id":"qa","role":"Tester","agent":"claude"}]}}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Owner changed members");
+        // A stale revision is refused with the current one, and seen clears it.
+        let error = apply(&mut team, "draft", &json!({"action":"update","revision":1,"set":{"goal":"X"}}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("Draft revision is 4 now"), "{error}");
+        let value = apply(&mut team, "draft", &json!({"action":"seen","fields":["goal","addendum"]}), &Actor::Human, &none, &mut events).unwrap();
+        assert!(value["unseen"].as_array().unwrap().is_empty());
+        // Create runs the preflight: an unknown assignee refuses, a good plan creates.
+        team.tasks.push(Task { id: 1, title: "A".into(), assignee: "ghost".into(), ..Default::default() });
+        let error = apply(&mut team, "draft", &json!({"action":"create"}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("no assignee"), "{error}");
+        team.tasks[0].assignee = "dev".into();
+        let value = apply(&mut team, "draft", &json!({"action":"create"}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(value["status"], "planning");
+        assert_eq!(team.status, TeamStatus::Planning);
+        assert!(team.draft.is_none());
+        assert_eq!(team.tasks[0].status, TaskStatus::Pending);
+        // Discard stops a draft and carries stop_lead.
+        let mut fresh = running_team();
+        fresh.status = TeamStatus::Draft;
+        fresh.draft = Some(Draft::default());
+        let value = apply(&mut fresh, "draft", &json!({"action":"discard","stop_lead":true}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!((fresh.status, value["stop_lead"].as_bool()), (TeamStatus::Stopped, Some(true)));
+    }
+
+    #[test]
+    fn a_next_goal_team_keeps_members_and_adopts_their_sessions() {
+        let mut team = running_team();
+        team.status = TeamStatus::Done;
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().session =
+            Some(SessionRef { name: "claude/x/dev".into(), ..Default::default() });
+        let next = next_team(&team, "Ship v2", "Checkout 2");
+        assert_eq!(next.status, TeamStatus::Planning);
+        assert_eq!((next.folder.as_str(), next.goal.as_str(), next.previous.as_str()), (team.folder.as_str(), "Ship v2", team.id.as_str()));
+        assert_eq!(next.lead, team.lead);
+        assert_eq!(next.members.len(), team.members.len());
+        assert!(next.tasks.is_empty());
+        assert_eq!(next.member("dev").unwrap().session.as_ref().map(|session| session.name.as_str()), Some("claude/x/dev"));
+    }
+
+    #[test]
+    fn the_owner_decides_the_leads_membership_proposal() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        let value = apply(
+            &mut team,
+            "propose",
+            &json!({"kind":"add-member","reason":"needs help","member":{"id":"extra","role":"Helper","agent":"claude"}}),
+            &Actor::Member("lead".into()),
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        let id = value["proposal"].as_str().unwrap().to_owned();
+        // Only the owner decides.
+        let error = apply(&mut team, "decide-proposal", &json!({"proposal":id,"accept":true}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Only you decide a proposal");
+        apply(&mut team, "decide-proposal", &json!({"proposal":id,"accept":true}), &Actor::Human, &none, &mut events).unwrap();
+        assert!(team.member("extra").is_some());
+        assert_eq!(team.proposals[0]["state"], "accepted");
+        // F8: a swap-member proposal is stored with the member it changes.
+        let value = apply(
+            &mut team,
+            "propose",
+            &json!({"kind":"swap-member","reason":"replace the session","member":{"id":"dev","agent":"claude","account":"work"}}),
+            &Actor::Member("lead".into()),
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        assert!(value["proposal"].as_str().is_some());
+        let swap = team.proposals.last().unwrap();
+        assert_eq!((swap["kind"].as_str(), swap["member"]["agent"].as_str()), (Some("swap-member"), Some("claude")));
+    }
+
+    #[test]
+    fn a_phase_opens_when_the_previous_is_approved_not_finished() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        extend(&mut team, &json!({"tasks":[{"id":3,"title":"Fix","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        extend(&mut team, &json!({"tasks":[{"id":4,"title":"Next","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        // F12: phase 2 opens while phase 1's tasks are still open, and phase 3
+        // while phase 2's are: approval, not completion, orders the phases.
+        let approved = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(approved["phase"], 2);
+        apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap();
+        // A draft before it still refuses the approval.
+        let mut review = running_team();
+        review.settings.approval = Approval::Review;
+        extend(&mut review, &json!({"tasks":[{"id":3,"title":"Fix","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        extend(&mut review, &json!({"tasks":[{"id":4,"title":"Next","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        let error = apply(&mut review, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("after the previous phase is approved"), "{error}");
     }
 
     #[test]
@@ -4122,20 +5095,27 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("parent lead approves"), "{error}");
-        apply(&mut child, "approve", &json!({}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        // C6: a sub-team member whose id is the parent lead's is not it.
+        child.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "codex".into(), ..Default::default() });
+        let error = apply(&mut child, "approve", &json!({}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("parent lead approves"), "{error}");
+        child.members.retain(|member| member.id != "lead");
+        apply(&mut child, "approve", &json!({}), &Actor::ParentLead, &none, &mut events).unwrap();
         assert_eq!(child.status, TeamStatus::Running);
         // The owner always approves, whatever the setting.
         let mut owner = subteam(SubteamApproval::Owner);
         apply(&mut owner, "approve", &json!({}), &Actor::Human, &none, &mut events).unwrap();
         let mut strict = subteam(SubteamApproval::Owner);
-        let error = apply(&mut strict, "approve", &json!({}), &Actor::Member("lead".into()), &none, &mut events)
+        let error = apply(&mut strict, "approve", &json!({}), &Actor::ParentLead, &none, &mut events)
             .unwrap_err()
             .to_string();
         assert!(error.contains("owner approves"), "{error}");
         // A phase of a sub-team: the parent lead approves it without the
         // owner's word; the sub-lead cannot.
         let mut phases = subteam(SubteamApproval::Parent);
-        apply(&mut phases, "approve", &json!({}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        apply(&mut phases, "approve", &json!({}), &Actor::ParentLead, &none, &mut events).unwrap();
         apply(&mut phases, "cancel", &json!({"task":1}), &Actor::Human, &none, &mut events).unwrap();
         extend(
             &mut phases,
@@ -4150,11 +5130,11 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("parent lead approves"), "{error}");
-        apply(&mut phases, "approve-phase", &json!({"phase":phase}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        apply(&mut phases, "approve-phase", &json!({"phase":phase}), &Actor::ParentLead, &none, &mut events).unwrap();
         // A flat team is unchanged: its own lead still needs the owner's word.
         let mut flat = subteam(SubteamApproval::Parent);
         flat.parent = None;
-        let error = apply(&mut flat, "approve", &json!({}), &Actor::Member("lead".into()), &none, &mut events)
+        let error = apply(&mut flat, "approve", &json!({}), &Actor::ParentLead, &none, &mut events)
             .unwrap_err()
             .to_string();
         assert!(error.contains("owner's word"), "{error}");
@@ -4290,5 +5270,155 @@ mod tests {
         assert!(subteam_stop_choice(&json!({}), &task).is_err());
         assert!(subteam_stop_choice(&json!({"subteam":"stop"}), &task).unwrap());
         assert!(!subteam_stop_choice(&json!({"subteam":"keep"}), &task).unwrap());
+    }
+
+    #[test]
+    fn a_draft_members_update_keeps_the_plans_member_checks() {
+        // C3: unique ids, the auto folder default and the widening the owner
+        // confirms before a create that runs the team.
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        team.status = TeamStatus::Draft;
+        team.draft = Some(Draft { revision: 1, ..Default::default() });
+        team.settings.folder_policy = FolderPolicy::Auto;
+        let none = BTreeSet::new();
+        let mut events = Vec::new();
+        let twice = json!({"action":"update","revision":1,"set":{"members":[{"id":"dev","role":"A","agent":"dsh"},{"id":"dev","role":"B","agent":"dsh"}]}});
+        let error = apply(&mut team, "draft", &twice, &Actor::Member("lead".into()), &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("used twice"), "{error}");
+        let wide = json!({"action":"update","revision":1,"set":{"members":[{"id":"dev","role":"Backend","agent":"dsh","permissions_profile":"network"}],
+            "tasks":[{"id":1,"title":"A","assignee":"dev"}]}});
+        apply(&mut team, "draft", &wide, &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(team.member("dev").unwrap().folder, MemberFolder::Clone);
+        assert_eq!(team.profile_widening, vec![json!({"member":"dev","from":"write","to":"network"})]);
+        let error = apply(&mut team, "draft", &json!({"action":"create","approve":true}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("confirm_widening"), "{error}");
+        apply(&mut team, "draft", &json!({"action":"create","approve":true,"confirm_widening":true}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.status, TeamStatus::Running);
+    }
+
+    #[test]
+    fn the_lead_cannot_take_the_owners_settings() {
+        // C4: approval, growth and unattended running stay the owner's; a
+        // partial object keeps the fields it does not name.
+        let mut team = running_team();
+        let none = BTreeSet::new();
+        let mut events = Vec::new();
+        team.settings.report_timeout_seconds = 77;
+        for change in [json!({"phase_approval":"auto"}), json!({"approval":"auto"}), json!({"tree_sessions":99}), json!({"max_members":12})] {
+            let error = apply(&mut team, "settings", &json!({"settings":change}), &Actor::Member("lead".into()), &none, &mut events)
+                .unwrap_err()
+                .to_string();
+            assert!(error.starts_with("Only you change the team's"), "{error}");
+        }
+        apply(&mut team, "settings", &json!({"settings":{"remind_lead_minutes":9}}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!((team.settings.remind_lead_minutes, team.settings.report_timeout_seconds), (9, 77));
+        apply(&mut team, "settings", &json!({"settings":{"phase_approval":"auto"}}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!((team.settings.phase_approval, team.settings.report_timeout_seconds), (Some(Approval::Auto), 77));
+        // A wider profile for a member a running team will launch is confirmed
+        // by the owner at once.
+        let widen = json!({"members_update":[{"id":"qa","permissions_profile":"network"}]});
+        let qa = team.members.iter_mut().find(|member| member.id == "qa").unwrap();
+        (qa.session, qa.permissions_profile) = (None, "read".into());
+        // A refused change is not stored (the store drops the changed copy).
+        let error = apply(&mut team.clone(), "settings", &widen, &Actor::Member("lead".into()), &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("confirm_widening"), "{error}");
+        let error = apply(&mut team.clone(), "settings", &widen, &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("confirm_widening"), "{error}");
+        let mut confirmed = widen.clone();
+        confirmed["confirm_widening"] = json!(true);
+        apply(&mut team, "settings", &confirmed, &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.member("qa").unwrap().permissions_profile, "network");
+        // Nor in Planning, where an auto plan would let the lead approve itself.
+        let (mut planning, _) = create("p", &json!({"name":"P","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let error = apply(
+            &mut planning,
+            "plan",
+            &json!({"tasks":[{"id":1,"title":"A","assignee":"lead"}],"settings":{"approval":"auto"}}),
+            &Actor::Member("lead".into()),
+            &none,
+            &mut events,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.starts_with("Only you change the team's approval"), "{error}");
+        // Nor in a draft the owner creates; the lead may set the limits flag
+        // (spec 6.1).
+        let (mut draft, _) = create("d", &json!({"name":"D","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        draft.status = TeamStatus::Draft;
+        draft.draft = Some(Draft { revision: 1, ..Default::default() });
+        let mut auto = serde_json::to_value(&draft.settings).unwrap();
+        auto["approval"] = json!("auto");
+        let error = apply(&mut draft.clone(), "draft", &json!({"action":"update","revision":1,"set":{"settings":auto}}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("Only you change the team's approval"), "{error}");
+        apply(&mut team, "settings", &json!({"settings":{"resume_after_limits":true}}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert!(team.settings.resume_after_limits);
+    }
+
+    #[test]
+    fn a_cancel_of_a_subteam_task_is_checked_before_anything_stops() {
+        // C5: the choice and the caller are checked by the cancel itself; the
+        // sub-team stops only after it is stored.
+        let mut team = running_team();
+        team.task_mut(1).unwrap().subteam = Some("child".into());
+        let none = BTreeSet::new();
+        let mut events = Vec::new();
+        let stop = json!({"task":1,"subteam":"stop"});
+        let error = apply(&mut team, "cancel", &stop, &Actor::Member("dev".into()), &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("Only the lead or you cancel"), "{error}");
+        let error = apply(&mut team, "cancel", &json!({"task":1}), &Actor::Member("lead".into()), &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("has a sub-team"), "{error}");
+        let error = apply(&mut team, "reassign", &json!({"task":1,"member":"qa"}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("has a sub-team"), "{error}");
+        apply(&mut team, "cancel", &stop, &Actor::Member("lead".into()), &none, &mut events).unwrap();
+    }
+
+    #[test]
+    fn the_parent_lead_answers_a_question_forwarded_from_a_real_team_id() {
+        // C7: with a UUID team id the forwarded id is longer than 40 characters.
+        let mut team = running_team();
+        let child = Team { id: "0b6f3f0e-5d6c-4b1e-9b8a-2f4c6d8e0a11".into(), ..Default::default() };
+        let id = forward_question(&child, &Question { id: "q12".into(), ..Default::default() });
+        assert!(id.len() > 40);
+        let mut attempt = Attempt { n: 1, id: "a1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() };
+        attempt.questions.push(Question { id: id.clone(), text: "Which DB?".into(), at: 1.0, ..Default::default() });
+        team.task_mut(1).unwrap().attempts.push(attempt);
+        let mut events = Vec::new();
+        apply(&mut team, "reply", &json!({"question":id,"text":"Postgres"}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(team.task(1).unwrap().attempts[0].questions[0].answer, "Postgres");
+    }
+
+    #[test]
+    fn only_a_finding_makes_an_urgent_phase_and_only_the_owner_forces_a_finish() {
+        // C15: under review approval a phase the lead adds stays a draft, even
+        // when it says "urgent".
+        let mut team = running_team();
+        let none = BTreeSet::new();
+        let mut events = Vec::new();
+        assert_eq!(phase_approval(&team), Approval::Review);
+        apply(
+            &mut team,
+            "extend",
+            &json!({"urgent":true,"phase_title":"Now","tasks":[{"id":3,"title":"Skip the owner","assignee":"dev"}]}),
+            &Actor::Member("lead".into()),
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        let phase = team.phases.last().unwrap();
+        assert_eq!((phase.state, phase.urgent), (PhaseState::Draft, false));
+        // C16: an open critical finding blocks the lead's finish, forced or not.
+        let mut team = running_team();
+        for id in [1, 2] {
+            apply(&mut team, "accept", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
+        }
+        team.findings.push(Finding { id: "f1".into(), severity: "critical".into(), title: "Lost write".into(), scenario: "s".into(), state: "open".into(), ..Default::default() });
+        let error = apply(&mut team, "finish", &json!({"summary":"Done","force":true}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("critical finding"), "{error}");
+        apply(&mut team, "finish", &json!({"summary":"Done","force":true}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.status, TeamStatus::Done);
     }
 }

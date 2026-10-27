@@ -131,6 +131,22 @@ pub(crate) enum Decision {
     Rejected,
 }
 
+/// F3: the designer's role corrections: each names its role, the change and
+/// why, at most 20 and 500 characters each.
+fn check_notes(proposal: &Proposal) -> anyhow::Result<()> {
+    ensure!(proposal.notes.len() <= 20, "A proposal has at most 20 role notes");
+    for note in &proposal.notes {
+        ensure!(!note["role"].as_str().unwrap_or_default().trim().is_empty(), "A role note names its role");
+        for field in ["change", "why"] {
+            ensure!(
+                note[field].as_str().unwrap_or_default().trim().chars().count() <= 500,
+                "A role note {field} has at most 500 characters"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// One change the designer proposes: a whole role, template or rule to add or
 /// replace (by id), or an id to remove.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -147,6 +163,9 @@ pub(crate) struct Proposal {
     pub title: String,
     #[serde(default)]
     pub reason: String,
+    /// F3: the designer's role corrections, [{role, change, why}], at most 20.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<Value>,
     #[serde(default)]
     pub value: Value,
     #[serde(default)]
@@ -482,6 +501,8 @@ pub(crate) fn run(op: &str, input: &Value, human: bool) -> anyhow::Result<Value>
                 ensure!(matches!(proposal.kind.as_str(), "role" | "template" | "rule"), "A proposal changes a role, template or rule");
                 ensure!(matches!(proposal.action.as_str(), "add" | "change" | "remove"), "A proposal adds, changes or removes");
                 proposal.target = clean_id(&proposal.target)?;
+                // F3: the designer names each role correction with its reason.
+                check_notes(&proposal)?;
                 // A proposal must apply on its own to the current catalog.
                 let mut trial = current.clone();
                 apply_one(&mut trial, &proposal)?;
@@ -550,6 +571,19 @@ mod tests {
         validate(&catalog).unwrap();
         assert_eq!(route(&catalog, "Fix the login bug")["template"]["id"], "bugfix");
         assert_eq!(route(&catalog, "New checkout")["template"]["id"], "feature");
+    }
+
+    #[test]
+    fn a_proposals_role_notes_are_bounded_and_explained() {
+        let mut proposal = Proposal { kind: "role".into(), action: "add".into(), target: "security".into(), ..Default::default() };
+        proposal.notes = vec![json!({"role":"backend","change":"merge the tests role","why":"the goal has no tests owner"})];
+        check_notes(&proposal).unwrap();
+        proposal.notes = (0..21).map(|_| json!({"role":"r","change":"c","why":"w"})).collect();
+        assert_eq!(check_notes(&proposal).unwrap_err().to_string(), "A proposal has at most 20 role notes");
+        proposal.notes = vec![json!({"role":"","change":"c","why":"w"})];
+        assert!(check_notes(&proposal).unwrap_err().to_string().contains("names its role"));
+        proposal.notes = vec![json!({"role":"r","change":"c","why":"x".repeat(501)})];
+        assert!(check_notes(&proposal).unwrap_err().to_string().contains("A role note why"));
     }
 
     #[test]

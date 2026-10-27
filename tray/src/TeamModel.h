@@ -1,4 +1,5 @@
 #pragma once
+#include <QCoreApplication>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QList>
@@ -57,6 +58,13 @@ struct Member {
     // (F8); empty for a member Zerus launches itself.
     QString runId, conversationId;
     bool lead = false;
+    // H1: the session stopped at a usage limit; the reset time when the
+    // session reported one, and whether Zerus waits for it (resume after limits).
+    struct Limit { bool known = false; double at = 0, resetsAt = 0; QString detail; };
+    Limit limited;
+    bool limitResume = false;
+    // H3: its DeepSeek host serves other members too.
+    bool hostShared = false;
     // The member queue (A5): its open task first, then the tasks returned to it
     // (pending, with attempts). From `team status` when hgs sends it; an older
     // hgs gets the same list derived from the tasks.
@@ -297,6 +305,21 @@ struct Team {
         QList<Starved> starved;
     };
     Health health;
+    // G9 (spec 10.2): status.phase_summary - one header record per phase in
+    // display order, phase 1 included. Empty on an older hgs; the desktop then
+    // falls back to its own heading.
+    struct PhaseSummary {
+        int n = 0;
+        QString title, status, healthLine;   // status: done|in_work|approved|draft|paused
+        int done = 0, total = 0;
+        bool barrier = false;
+    };
+    QList<PhaseSummary> phaseSummary;
+    // G9 (spec 10.1): status.phases_health - the plan health of each phase,
+    // keyed by phase number; empty on an older hgs.
+    QMap<int, Health> phasesHealth;
+    const PhaseSummary *phaseSummaryOf(int n) const;
+    const Health *phaseHealthOf(int n) const;
     // C4: the undecided reports on the owner's attention list.
     struct Attention { QString kind, member; int task = 0, minutes = 0; double since = 0; };
     QList<Attention> attention;
@@ -307,6 +330,38 @@ struct Team {
     QString findingsNext;
     // F13: "approved by Lead on the owner's word" and the sentence.
     QString approvedBy, ownerWord;
+    // F5: a team in status "draft" is edited by the owner and the lead before
+    // it exists: its goal, protocol addendum, folder policy and limit, the
+    // draft revision every update carries and the fields the lead changed that
+    // the owner has not seen yet.
+    QString goal, leadProtocol, folderPolicy;
+    int maxMembers = 0;
+    qint64 draftRevision = 0;
+    QStringList draftUnseen;
+    bool draft() const { return status == QLatin1String("draft"); }
+    // F7: the team a next goal came from, and the one it led to.
+    QString previous, next;
+    // H1: members limited by usage wait for their reset (settings).
+    bool resumeAfterLimits = false;
+    // The settings as stored, so a change sends them back whole.
+    QJsonObject settingsJson;
+    // F8: the lead's membership proposals, decided by the owner. `member` is
+    // the proposed member (add), its id (remove) or the swap fields (swap).
+    struct Proposal {
+        QString id, kind, by, state, reason, goal, note;
+        double at = 0;
+        QJsonValue member;
+        bool open() const { return state == QLatin1String("open"); }
+        QString memberId() const;
+    };
+    QList<Proposal> proposals;
+    // H6: the sessions a swap left running for the owner to stop (last 20).
+    struct Swapped { QString member, old, by; double at = 0; };
+    QList<Swapped> swapped;
+    // H3: the DeepSeek hosts that serve members.
+    struct Host { QString agent; qint64 pid = 0; double started = 0; QStringList members; };
+    QList<Host> hosts;
+    const Host *hostOf(const QString &member) const;
     const Member *member(const QString &id) const;
     const Member *memberOfSession(const QString &host, const QString &session) const;
     const Task *task(int id) const;
@@ -412,11 +467,25 @@ struct Problem {
 };
 QList<Problem> problems(const Team &team, const LiveLookup &live);
 
-// planning, running, paused, stuck, done, stopped, archived. Stuck: a running
+// draft, planning, running, paused, stuck, done, stopped, archived. Stuck: a running
 // team where no open task can move without you.
 QString displayStatus(const Team &team, const LiveLookup &live);
 QString statusLabel(const QString &status);
 Tone statusTone(const QString &status);
+// F8: what a proposal would do, in one line ("Swap Backend to Codex · gpt-5.5").
+QString proposalText(const Team &team, const Team::Proposal &proposal);
+// H1: "resets 14:30" (today) or "resets 3 Nov 14:30"; empty when unknown.
+QString resetText(double resetsAt);
+// F4: the one Team designer conversation hgs starts (`catalog designer`). It
+// keeps its fixed name and colour, and the desktop files no other work in it:
+// it never leads or joins a team.
+inline bool isDesignerSession(const QString &host, const QString &session)
+{
+    return host.isEmpty() && session.endsWith(QLatin1String("/team-designer"));
+}
+// Its card's fixed title and colour, whatever project the folder falls in.
+inline QString designerTitle() { return QCoreApplication::translate("Teams", "Team designer"); }
+inline QString designerColor() { return QStringLiteral("#a46ee0"); }
 // "Next: #4, #5 wait for #3 Saved cards API" or "Ready: #4 Payment storage".
 QString nextLine(const Team &team);
 // One tone per task, in task order, for the segmented progress bar.

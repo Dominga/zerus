@@ -6,6 +6,8 @@ use serde_json::Value;
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TeamStatus {
+    /// F5: a team the owner and the lead are still drafting, before Planning.
+    Draft,
     #[default]
     Planning,
     Running,
@@ -13,6 +15,21 @@ pub(crate) enum TeamStatus {
     Stopped,
     Done,
     Archived,
+}
+
+/// F5: a draft team's editing state: who changed what since the other side last
+/// looked, so the owner's edit always wins and the lead sees the changes.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Draft {
+    #[serde(default)]
+    pub revision: u64,
+    /// Fields the lead changed that the owner has not seen yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unseen: Vec<String>,
+    /// Fields the owner edited after the lead's last read; a later lead edit of
+    /// one is refused ("owner changed <field>").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_edited: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -349,6 +366,10 @@ fn is_zero(value: &i64) -> bool {
     *value == 0
 }
 
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
 /// An MCP server or service a member's session runs (G7): shown on the member
 /// card and never counted as Background work.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -624,6 +645,29 @@ pub(crate) struct Finish {
     pub at: f64,
 }
 
+/// D2: a finding a report filed, kept until it is fixed or dropped.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Finding {
+    /// f1, f2, ... in filing order.
+    pub id: String,
+    pub from_task: u32,
+    pub severity: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    pub scenario: String,
+    /// The task that caused it, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<u32>,
+    pub state: String,
+    pub by: String,
+    pub at: f64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Report {
     pub text: String,
@@ -635,6 +679,13 @@ pub(crate) struct Report {
     /// Captured texts this report replaced, the newest three (A6).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replaced: Vec<ReplacedReport>,
+    /// D1: the structured report object, validated and bounded; None for an
+    /// unstructured report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured: Option<serde_json::Value>,
+    /// D1: a report without a structured object, shown as such in status.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unstructured: bool,
 }
 
 /// A report text that a member's real report replaced (A6).
@@ -804,6 +855,12 @@ pub(crate) struct Task {
     pub decided_by: Option<Decider>,
     #[serde(default)]
     pub decision_reason: String,
+    /// D2: what a reopen replaced, newest last (an accepted task's decision).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<Value>,
+    /// D2: the finding text a reopened task hands out with its next attempt.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reopen_note: String,
     /// H6: the hand-out after a swap carries the previous attempt's partial
     /// report and open questions; cleared once the new attempt is delivered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -877,6 +934,10 @@ pub(crate) struct Phase {
     /// owner's diff view (F10): {"kind":"added|removed|changed|moved", ...}.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changes: Vec<serde_json::Value>,
+    /// D2: an urgent phase runs at once (no approval under review, no barrier)
+    /// and its tasks are handed out before other pending ones.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub urgent: bool,
     /// Section 9.5: why a "Rework" draft was opened after the parent lead
     /// rejected the sub-team's report.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -924,8 +985,29 @@ pub(crate) struct Team {
     /// confirms them before the plan can be approved.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profile_widening: Vec<serde_json::Value>,
+    /// D2: findings filed by accepted reports, oldest first (at most 1000).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<Finding>,
+    /// D2: the last finding number given; ids stay unique for the team's life.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub findings_seq: u64,
+    /// F5: the editing state while the team is a draft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<Draft>,
+    /// F7: the team this one continues, and the team that continues it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub previous: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub next: String,
+    /// F8: membership and next-goal proposals the lead made.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<serde_json::Value>,
     #[serde(default)]
     pub revision: u64,
+    /// F11: the revision that last changed draft phase or task numbers; a
+    /// caller holding an older revision is refused.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub phase_numbers_revision: u64,
     #[serde(default)]
     pub created: f64,
     #[serde(default)]
@@ -1238,6 +1320,7 @@ mod tests {
                         at: 1792939600.0,
                         captured: true,
                         replaced: vec![ReplacedReport { text: "Building and running...".into(), at: 1792939550.0 }],
+                        ..Default::default()
                     }),
                     ..Default::default()
                 }],

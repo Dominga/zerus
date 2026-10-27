@@ -31,6 +31,7 @@
 #include <QScrollBar>
 #include <QScrollArea>
 #include <QListWidget>
+#include <QRadioButton>
 #include "WorkingLine.h"
 #include "GoToDialog.h"
 #include "ShortcutsDialog.h"
@@ -1565,18 +1566,32 @@ void TestSessionsWindow::readmeScreenshots()
     QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QWidget *>("teamWorkspaceBoard"), 10000);
     QVERIFY(save("team-board", {1440, 900}));
 
-    // 7. New team, led by a session without a team, with the Team designer's help.
+    // 7. New team, led by a session without a team: the lead drafts it with you.
     window.findChild<QPushButton *>("railSessionsToggle")->click();
     QTRY_VERIFY(listPanel->isVisible());
     window.setFleet(designing);
+    // F4: the Team designer's card keeps its fixed name and colour.
+    {
+        auto *list = window.findChild<SessionList *>("sessionList");
+        QListWidgetItem *designerItem = nullptr;
+        QTRY_VERIFY([&] {
+            for (int i = 0; i < list->count(); ++i)
+                if (list->item(i)->data(SessionRoles::Identity).toString().contains("claude/team-designer/team-designer")) designerItem = list->item(i);
+            return designerItem != nullptr;
+        }());
+        QCOMPARE(designerItem->data(SessionRoles::Title).toString(), Teams::designerTitle());
+        QCOMPARE(designerItem->data(SessionRoles::ProjectColor).value<QColor>(), QColor(Teams::designerColor()));
+    }
     window.showSession({}, "claude/orbit/release");
     QTRY_VERIFY_WITH_TIMEOUT(tabNamed("New team") >= 0, 10000);
     tabs->setCurrentIndex(tabNamed("New team"));
     QTRY_VERIFY_WITH_TIMEOUT(tabs->currentWidget()->findChild<QWidget *>("teamNewDialog"), 10000);
     auto *form = tabs->currentWidget()->findChild<QWidget *>("teamNewDialog");
-    QTRY_VERIFY(!form->findChildren<QFrame *>("teamNewTemplate").isEmpty());
-    for (auto *card : form->findChildren<QFrame *>("teamNewTemplate")) if (card->property("template") == "feature") QTest::mouseClick(card, Qt::LeftButton);
-    QTRY_COMPARE(form->findChildren<QFrame *>("teamNewMemberRow").size(), 3);
+    // F6: the compact template list; F5: the member rows as a table or cards.
+    QListWidget *templates = nullptr;
+    QTRY_VERIFY((templates = form->findChild<QListWidget *>("teamTemplateList")));
+    for (int i = 0; i < templates->count(); ++i) if (templates->item(i)->data(Qt::UserRole) == "feature") templates->setCurrentRow(i);
+    QTRY_COMPARE(form->findChildren<QFrame *>("teamNewMemberRow").size() + form->findChildren<QFrame *>("teamNewMemberCard").size(), 3);
     // The members run on three computers.
     const QStringList computers{QString(), "macbook", "build-01"};
     for (int row = 1; row < 3; ++row) {
@@ -1587,8 +1602,10 @@ void TestSessionsWindow::readmeScreenshots()
     form->findChild<QPlainTextEdit *>("teamNewGoal")->setPlainText(QString::fromLatin1(ReadmeShots::goal));
     form->findChild<QPlainTextEdit *>("teamNewProtocol")->setPlainText(QString::fromLatin1(ReadmeShots::protocol));
     form->findChild<QLineEdit *>("teamNewName")->setText("Saved cards");
-    QTRY_VERIFY_WITH_TIMEOUT(form->findChild<QWidget *>("teamNewHelper")->isVisible(), 10000);
-    QTRY_VERIFY(form->findChild<QPushButton *>("teamNewCreate")->isEnabled());
+    // The lead is this session; nothing exists before Start planning.
+    QVERIFY(form->findChild<QRadioButton *>("teamNewLeadThis")->isChecked());
+    QTRY_VERIFY(form->findChild<QPushButton *>("teamNewStartPlanning")->isEnabled());
+    QVERIFY(!form->findChild<QPushButton *>("teamNewCreate")->isEnabled());
     // The form is long: the picture starts at the templates and ends with the members.
     QVERIFY(save("team-new", {1440, 1500}, [&] {
         form->findChild<QScrollArea *>("teamNewScroll")->verticalScrollBar()->setValue(90);

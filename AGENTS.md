@@ -74,6 +74,9 @@ New session defaults to a generated worktree for a verified Git folder, created
 only after the user selects Start session. Inspecting or opening a dialog must
 never create a worktree. Keep direct-folder launch and explicit custom/existing
 worktree choices available. Destructive UI actions require explicit confirmation.
+Opening New Team creates nothing: Start planning creates only the team draft and
+its lead session (in the team folder, never a worktree); member worktrees and
+sessions are created only by Create team.
 
 An idle agent with confirmed owned live shell or native jobs shows `Background`,
 remains in Active and accepts new messages. Its MCP servers and other services

@@ -404,6 +404,7 @@ mod tests {
                             at: 6.0,
                             captured: true,
                             replaced: vec![ReplacedReport { text: "Building".into(), at: 5.5 }],
+                            ..Default::default()
                         }),
                         ..Default::default()
                     },

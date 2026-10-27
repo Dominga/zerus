@@ -58,6 +58,10 @@ public:
     void act(const QString &operation, const QJsonObject &input,
              const std::function<void(bool ok, const QString &message)> &done = {});
     bool confirm(const QString &name, const QString &title, const QString &text, const QString &action);
+    // A confirmation runs its own event loop: while it is open the team views
+    // do not rebuild, or the widget that asked would be deleted under it.
+    bool confirming() const { return m_confirming > 0; }
+    std::function<void()> confirmClosed;
     // Planning, shared with the team workspace (TeamPanelPlan.cpp): the whole
     // plan once per edit; a task editor (0 = a new task); a dependency.
     void savePlan(const Teams::Team &edited);
@@ -94,6 +98,7 @@ private:
     Teams::LiveLookup m_live;
     QString m_team, m_filter = QStringLiteral("all"), m_feedMember, m_notice;
     bool m_dark = true, m_showBlockers = false, m_pending = false, m_dirty = false;
+    int m_confirming = 0;
     double m_zoom = 1.0;
     // team id -> phase -> open; at most a handful of teams, oldest dropped.
     QHash<QString, QHash<int, bool>> m_phaseOpen;

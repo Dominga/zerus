@@ -233,7 +233,12 @@ pub(crate) fn ready(team: &Team) -> Vec<u32> {
         .filter(|task| !barrier_holds(team, task))
         .map(|task| task.id)
         .collect();
-    out.sort_unstable();
+    // D2: an urgent phase's tasks go before every other pending one.
+    let urgent = |id: u32| {
+        team.task(id)
+            .is_some_and(|task| task.phase > 1 && team.phases.iter().any(|phase| phase.n == task.phase && phase.urgent))
+    };
+    out.sort_by_key(|id| (!urgent(*id), *id));
     out
 }
 
@@ -727,6 +732,19 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
                 Some(&member.id),
                 format!("{}: a sandboxed dsh agent in a worktree cannot write its git metadata; use a clone", member.id),
             ));
+        }
+    }
+    // F1.3: a shared member contradicts the worktree policy.
+    if team.settings.folder_policy == super::model::FolderPolicy::Worktree {
+        for member in team.members.iter().filter(|member| member.state != MemberState::Removed && member.id != team.lead) {
+            if member.folder == super::model::MemberFolder::Shared {
+                found.errors.push(finding(
+                    "folder",
+                    None,
+                    Some(&member.id),
+                    format!("{}: the worktree policy gives every member its own folder", member.id),
+                ));
+            }
         }
     }
     // H4: B3 preflight also names a user dsh configuration that would upload

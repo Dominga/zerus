@@ -730,9 +730,9 @@ answered; a denial cannot carry an explanation.
 
 - **U25. New UI from the owner's design (owner, 2026-10-27).** The designer's
   clickable prototype and its spec are the source of truth for look and
-  behaviour: `D:\Tools\zerus-team-phases\ui-new-2026-10-27\Zerus-prototype.html`
+  behaviour: `D:\Tools\Zerus-UI-handoff\Zerus-prototype.html`
   (opens offline; the Prototype button switches Running / Stuck / Done /
-  Planning and the theme) and `Zerus-new-UI-spec.ru.md` (sections 0-14, with an
+  Planning and the theme) and `SPEC.md` with 52 screenshots in `shots` (sections 0-14, with an
   acceptance checklist in 13; screenshots follow). UI strings are English,
   exactly as in the prototype; colours and sizes go into the skin tokens, never
   hard-coded. Pieces:

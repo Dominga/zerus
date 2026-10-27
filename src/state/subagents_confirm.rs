@@ -83,6 +83,25 @@ pub(crate) fn group_reset(session: &str) {
     let _ = fs::remove_file(group_path(session));
 }
 
+/// A session that is a member (or the lead) of an active team. The teams store
+/// is indexed by status, so this is a bounded lookup, not a full scan.
+pub(crate) fn team_member(session: &str, run_id: &str) -> bool {
+    if session.is_empty() {
+        return false;
+    }
+    let Ok(store) = super::teams::store::Store::open(false) else { return false };
+    let Ok(teams) = store.active_teams(1000) else { return false };
+    teams.iter().any(|team| {
+        team.members.iter().any(|member| {
+            member.session.as_ref().is_some_and(|found| {
+                found.host.is_empty()
+                    && found.name == session
+                    && (found.run_id.is_empty() || found.run_id == run_id)
+            })
+        })
+    })
+}
+
 /// Claude's print mode has nobody to answer a native ask.
 pub(crate) fn can_ask() -> bool {
     can_ask_with(std::env::var("CLAUDE_CODE_ENTRYPOINT").ok().as_deref())
@@ -192,6 +211,35 @@ mod tests {
         assert!(!confirm());
         write(true).unwrap();
         assert!(confirm());
+        match old {
+            Some(value) => std::env::set_var("HGS_STATE_DIR", value),
+            None => std::env::remove_var("HGS_STATE_DIR"),
+        }
+    }
+
+    #[test]
+    fn a_team_member_is_known_and_the_owner_is_not() {
+        let _guard = crate::state::ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let old = std::env::var("HGS_STATE_DIR").ok();
+        std::env::set_var("HGS_STATE_DIR", dir.path());
+        assert!(!team_member("claude/x/lead", "r0"));
+        let mut team = super::teams::model::Team {
+            id: "11111111-1111-4111-8111-111111111111".into(),
+            name: "T".into(),
+            lead: "lead".into(),
+            status: super::teams::model::TeamStatus::Running,
+            ..Default::default()
+        };
+        team.members.push(super::teams::model::Member {
+            id: "lead".into(), role: "Lead".into(), agent: "claude".into(),
+            session: Some(super::teams::model::SessionRef { name: "claude/x/lead".into(), run_id: "r0".into(), ..Default::default() }),
+            ..Default::default()
+        });
+        let mut store = super::teams::store::Store::open(true).unwrap();
+        store.create("22222222-2222-4222-8222-222222222222", &json!({}), team, Vec::new()).unwrap();
+        assert!(team_member("claude/x/lead", "r0"));
+        assert!(!team_member("claude/x/owner", "r1"));
         match old {
             Some(value) => std::env::set_var("HGS_STATE_DIR", value),
             None => std::env::remove_var("HGS_STATE_DIR"),

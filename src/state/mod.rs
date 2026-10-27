@@ -70,6 +70,7 @@ pub(crate) mod session_graph;
 mod storage;
 mod subagents;
 mod subagents_confirm;
+mod session_upload;
 mod native_subagents;
 mod supervisor;
 mod tasks;
@@ -739,6 +740,9 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     }
     if command == "subagents-confirm" {
         return subagents_confirm::dispatch(args);
+    }
+    if command == "session-upload-block" {
+        return session_upload::dispatch(args);
     }
     if command == "answer-channel" {
         return answer_channel::run();

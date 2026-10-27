@@ -82,6 +82,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - run: python3 scripts/ci/check-source.py
+      - name: No dot separators in the web UI
+        run: python3 scripts/check-ui-separators.py
       - name: Standalone speech HTTP contracts
         run: |
           python3 -m venv "$RUNNER_TEMP/speech-http-venv"

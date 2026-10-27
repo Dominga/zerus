@@ -87,7 +87,7 @@ export const PARITY: ParityGroup[] = [
     { what: "Не переносим: команды, лиды, фазы, граф, слои, iron rules, удержание кэша, автоприём, дизайнер", where: "—", status: "mock", note: "Сознательно отсутствуют" },
   ] },
   { id: "pages", title: "Overview, Projects, New session, Machines, Accounts", rows: [
-    { what: "Overview: плитки (внимание, работают, машины онлайн, сессии), карточки машин, аккаунты, «Attention & in progress»", where: "Логотип в рейле", status: "mock", link: app("page=dashboard") },
+    { what: "Overview: колонка по центру с перетаскиваемыми краями и шириной по умолчанию в Settings; плитки (внимание, работают, машины онлайн, сессии), компактные карточки машин (система и архитектура, состояние, CPU с ядрами и нагрузкой, память, сессии; время замера только когда он не текущий), аккаунты, «Attention & in progress»", where: "Логотип в рейле", status: "mock", link: app("page=dashboard") },
     { what: "Projects: проекты, цвета, папки, Clone repository, Worktrees, Swarm…", where: "Projects", status: "mock", link: app("page=projects") },
     { what: "Очистка worktree: просмотр, согласия, исходы «удалено/оставлено/неизвестно», ветки и игнорируемые данные сохраняются", where: "Worktrees → Clean up", status: "mock", link: app("dialog=worktree-cleanup") },
     { what: "New session: машина, агент, аккаунт (жирное имя и компактные полоски лимитов, как в Qt), папка, worktree (создаётся только после Start), прямой запуск, своя/существующая worktree, модель, предупреждения", where: "Кнопка «+» в рейле, Ctrl+N", status: "mock", link: app("dialog=new-session") },

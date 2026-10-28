@@ -558,7 +558,12 @@ pub struct Placed {
 }
 
 /// Places a creation against the current project catalog and makes the
-/// edits [`place`] asks for; Err is the failure text.
+/// edits [`place`] asks for; Err is the failure text, and the operation
+/// fails with it. Called inside [`Creations::answered`], it may block for
+/// one catalog edit, so `Creations` runs on its own worker. Continue setup
+/// places the same plan again, so the edits must be idempotent: creating
+/// the project by its reserved ID, and adding a folder by project, computer
+/// and path. An edit whose outcome is unknown is Err.
 pub trait Placement {
     fn resolve(&mut self, plan: &mut Value, evidence: &Value) -> Result<(), String>;
 }

@@ -9,6 +9,8 @@
 
 pub mod actions;
 pub mod batch;
+#[cfg(windows)]
+mod conpty;
 pub mod details;
 pub mod fleet;
 pub mod legacy;

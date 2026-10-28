@@ -824,6 +824,10 @@ elif a[:2]==['team','draft']:
  else:print(json.dumps({'status':'ok'}))
 elif a[:2]==['account','ls']:print(json.dumps({'profiles':[{'id':'native-claude','provider':'claude','label':'Default','account_status':{'status':'ok'}},
  {'id':'work','provider':'claude','label':'Claude work','account_status':{'status':'signed_out'}}]}))
+elif a[:2]==['account','model-settings']:
+ models={'native-claude':[{'id':'opus'},{'id':'sonnet'},{'id':'haiku'}],
+         'native-kimi':[{'id':'kimi-code/kimi-for-coding'},{'id':'kimi-code/k3.1-pro'}]}
+ print(json.dumps({'account_id':a[2],'models':models.get(a[2],[])}))
 else:print(json.dumps({'status':'ok','version':4,'request_id':body.get('request_id')}))
 )PY"));
 }
@@ -1662,6 +1666,10 @@ void TestTeamsUi::catalogRoleChoosesAccountModelAndComputer()
     QCOMPARE(lead["computer"].toString(), QStringLiteral("devbox"));
     QCOMPARE(lead["machines"].toArray(), (QJsonArray{"devbox", "laptop"}));
     QCOMPARE(lead.value("account").toString(), QString());
+
+    auto *agent = editor.findChild<QComboBox *>("teamRoleAgent");
+    agent->setCurrentIndex(agent->findData("kimi")); emit agent->activated(agent->currentIndex());
+    QTRY_VERIFY(editor.findChild<QComboBox *>("teamRoleModel")->findText("kimi-code/k3.1-pro") >= 0);
 }
 
 void TestTeamsUi::designerDraftIsKeptThenApplied()

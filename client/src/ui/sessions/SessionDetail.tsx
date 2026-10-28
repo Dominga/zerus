@@ -4,6 +4,8 @@ import { ActivityView, columnStyle } from "./Activity";
 import { AgentBadge, MachineBadge, statusOf, folderOf } from "./SessionCard";
 import { selected, setMenu, subagentOpen, type MenuEntry } from "../../store/ui";
 import { activity } from "../../store/session";
+import { activityReadOnly, type ActivitySource } from "../../store/activitySource";
+import { archiveActivity } from "../../store/archiveActivity";
 import { computerOffline } from "../../store/catalog";
 import { copyName, detailsFor, followedFor } from "../../store/actions";
 import { headerClearSlot } from "./actions-ui";
@@ -94,7 +96,15 @@ function Header() {
   );
 }
 
-const TABS = [{ id: "activity", label: "Activity" }] as const;
+type Tab = { id: string; label: string };
+const TABS: readonly Tab[] = [{ id: "activity", label: "Activity" }];
+
+/** The Activity of a row: an archived row's recorded one, read-only and never streamed, else the live follow. */
+export const activitySourceFor = (key: string): ActivitySource => (activityReadOnly(key) ? archiveActivity : activity);
+
+/** The tabs of a row: an archived row has no Terminal (Qt hides only that one; terminal_status answers unsupported). */
+export const detailTabs = (key: string, tabs: readonly Tab[] = TABS): readonly Tab[] =>
+  (activityReadOnly(key) ? tabs.filter((t) => t.id !== "terminal") : tabs);
 
 export function SessionDetail() {
   return (
@@ -104,14 +114,14 @@ export function SessionDetail() {
         <div class="work">
           <div class="work-main">
             <div class="detail-tabs tabs" role="tablist">
-              <For each={TABS}>{(t) => (
+              <For each={detailTabs(selected()!.key)}>{(t) => (
                 <button class="tab on" role="tab" aria-selected="true">{t.label}</button>
               )}</For>
               <span class="grow" />
             </div>
             <div class="tab-body">
               <div class="activity-wrap" style={columnStyle()}>
-                <ActivityView />
+                <ActivityView source={activitySourceFor(selected()!.key)} />
               </div>
             </div>
           </div>

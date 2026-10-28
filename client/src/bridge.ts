@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ArchivePage, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ArchivePage, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type ArchivedActivity } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 
@@ -240,6 +240,21 @@ export async function copyCommand(computer: string, name: string, archiveId: str
 export async function archivePage(computer: string, from: number, until: number, cursor: string, query: string, request: number): Promise<ArchivePage> {
   if (!inTauri()) throw "Archive pages need the desktop app.";
   return invoke<ArchivePage>("archive_page", { computer, from, until, cursor, query, request });
+}
+
+/** The text of `archivedActivity` rejecting because that row's read is already running. */
+export const ARCHIVED_ACTIVITY_BUSY = "busy";
+
+/**
+ * One read of an archived session's recorded Activity after cursor `after`
+ * (`archived_activity`, `hgs [@alias] inspect NAME --after N --skip-processes
+ * --archive ID`). Rejects with "busy" (`ARCHIVED_ACTIVITY_BUSY`, to ignore)
+ * while a read of the same computer, name and archive id runs, else with Qt's
+ * failure text.
+ */
+export async function archivedActivity(computer: string, name: string, archiveId: string, after: number): Promise<ArchivedActivity> {
+  if (!inTauri()) throw "Archived Activity needs the desktop app.";
+  return invoke<ArchivedActivity>("archived_activity", { computer, name, archiveId, after });
 }
 
 /**

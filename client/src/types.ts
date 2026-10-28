@@ -324,3 +324,17 @@ export interface ArchivePage {
   total: number;
   position: number | null;
 }
+
+/** One read of an archived session's recorded Activity (`archived_activity`, `hgs inspect --archive`). */
+export interface ArchivedActivity {
+  /** The reply's events, unchanged. */
+  events: ActivityEvent[];
+  replace_events: boolean;
+  conversation_id: string;
+  run_id: string;
+  cleared_conversations: string[];
+  /** The journal cursor the next read asks `--after`. */
+  cursor: number;
+  /** The other top-level fields, what `buildTranscript` reads as the summary. */
+  summary: Record<string, unknown>;
+}

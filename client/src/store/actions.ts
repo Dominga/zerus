@@ -3,6 +3,7 @@ import { createStore } from "solid-js/store";
 import * as bridge from "../bridge";
 import { catalog as appCatalog, computerOffline, type CatalogState } from "./catalog";
 import { marks as appMarks, type Marks } from "./marks";
+import { activityReadOnly } from "./activitySource";
 import { copyState, detailsFromInspection, MUTE_PENDING, STATE_CHANGED, forgetsBindingOnly, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type ForgetScope, type PendingNotifications } from "../ui/sessions/actions-ui";
 import type { Action, Details, Outcome, Target } from "../types";
 import type { Session } from "../ui/sessions/types";
@@ -36,6 +37,8 @@ const ALREADY_STOPPED = ["hgs: This turn is no longer working", "This turn is no
 
 const sessionId = (computer: string, name: string) => `${computer}\n${name}`;
 const failed = (detail: string): Outcome => ({ outcome: "failed", detail });
+/** The text of a rejected call: the string itself, an Error's message, else its String(). */
+export const errorText = (error: unknown) => (typeof error === "string" ? error : error instanceof Error ? error.message : String(error));
 
 /**
  * The target of an action. Interrupt, mark read and terminate act on one
@@ -332,8 +335,6 @@ export function createActions(
     return matches(value) ? value : undefined;
   }
 
-  const errorText = (error: unknown) => (typeof error === "string" ? error : error instanceof Error ? error.message : String(error));
-
   /** The text the last successful copy put on the clipboard (the actions smoke logs it). */
   let copied = "";
   const lastCopied = () => copied;
@@ -416,6 +417,8 @@ export function bindActivity(source: FollowSource) { activity = source; }
 
 /** The Activity subscription of a session: its state value while it is the followed one, and whether it has answered. */
 export function followedFor(key: string): Followed {
+  // An archived row has no subscription (it is never streamed): its details are inspected at once.
+  if (activityReadOnly(key)) return { value: undefined, settled: true };
   if (!activity) return { value: undefined, settled: false };
   const mine = activity.target()?.id === key;
   const value = mine ? activity.summary() : undefined;

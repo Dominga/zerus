@@ -219,10 +219,13 @@ pub fn attach_env(
     env
 }
 
-/// A running attach client in its own pseudoterminal. Dropping it stops it.
+/// A running attach client in its own pseudoterminal (a ConPTY
+/// pseudoconsole on Windows). Dropping it stops it.
 pub struct Attach {
     #[cfg(unix)]
     pty: crate::pty::Pty,
+    #[cfg(windows)]
+    pty: crate::conpty::Pty,
 }
 
 impl Attach {
@@ -235,9 +238,13 @@ impl Attach {
         rows: u16,
     ) -> Result<(Attach, Receiver<AttachEvent>), String> {
         let (sender, events) = sync_channel::<AttachEvent>(PENDING_CHUNKS);
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
-            let pty = crate::pty::Pty::start(
+            #[cfg(windows)]
+            use crate::conpty::Pty;
+            #[cfg(unix)]
+            use crate::pty::Pty;
+            let pty = Pty::start(
                 std::path::Path::new(&target.hgs),
                 &attach_args(target),
                 &attach_env(std::env::vars_os()),
@@ -247,22 +254,19 @@ impl Attach {
             )?;
             Ok((Attach { pty }, events))
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (target, cols, rows, sender, events);
-            Err(
-                "Cannot open terminal: Terminal is not available on Windows in this build yet."
-                    .into(),
-            )
+            Err("Cannot open terminal: Terminal is not available on this platform.".into())
         }
     }
 
     /// Queue input; over 4 MiB pending it fails with Qt's text and queues
     /// nothing. Input after the end is ignored.
     pub fn write(&self, bytes: &[u8]) -> Result<(), String> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         return self.pty.write(bytes);
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = bytes;
             Ok(())
@@ -271,32 +275,32 @@ impl Attach {
 
     /// Resize with the same clamps.
     pub fn resize(&self, cols: u16, rows: u16) {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         self.pty.resize(cols, rows);
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         let _ = (cols, rows);
     }
 
     /// The last 1 MiB of output, for a view shown again.
     pub fn replay(&self) -> Vec<u8> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         return self.pty.replay();
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         Vec::new()
     }
 
     /// The attach client's process ID while it runs.
     pub fn process_id(&self) -> Option<u32> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         return self.pty.pid();
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         None
     }
 
     /// Hang up the attach client and close its terminal. The session keeps
     /// running.
     pub fn stop(&mut self) {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         self.pty.stop();
     }
 }

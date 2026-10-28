@@ -1,0 +1,729 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Task pipelines · U36 mock-up</title>
+<style>
+/* Tokens, buttons, chips, cards and the catalog editor come from the Zerus UI
+   prototype (Zerus-UI-handoff/Zerus-prototype.html); new here are the stage
+   chip, the stage track, the stage editor and the rounds timeline. */
+html,body{margin:0}
+body{background:#0e1115;font:13px/1.45 "Segoe UI",system-ui,sans-serif;color:#e6e8eb}
+body.lightpage{background:#e4e9ee;color:#1a2733}
+.app{--bg:#14181d;--surface:#1b1f26;--card:#181c22;--cardBorder:#232932;--cardHover:#1e232b;--cardSel:#1b2621;--cardSelBorder:#2f5a4a;--field:#11151a;--border:#2c323b;--segOn:#26443a;--hover:#222830;--accent:#7dd3b0;--accentText:#0f1a16;--accentHover:#a8e6cc;--accentMuted:#5c9e86;--warn:#e8a75a;--danger:#ef7d6d;--folder:#7fb6e0;--violet:#b79cff;--fg:#e6e8eb;--text2:#c4cad1;--text3:#aab1ba;--muted:#9aa3ad;--label:#8f97a2;--dim:#7b8590;--tile:#0f1318;--warnBg:rgba(232,167,90,.11);--dangerBg:rgba(239,125,109,.11);--accentBg:rgba(125,211,176,.10);--page:#0e1115;--shadow:0 12px 40px rgba(0,0,0,.45);--r-lead:#b79cff;--r-backend:#6fa8ff;--r-frontend:#f08bb4;--r-tester:#56c8e0;--r-reviewer:#d9b38c;--r-secretary:#7fcf9a;--r-researcher:#b9d36b;
+  --s-review:#b79cff;--s-test:#7fb6e0;--s-accept:#7dd3b0;
+  position:relative;display:flex;flex-direction:column;background:var(--page);color:var(--fg);font:12px/1.38 "Segoe UI",-apple-system,system-ui,sans-serif;overflow:hidden;color-scheme:dark}
+.app.light{--bg:#f5f7f9;--surface:#ffffff;--card:#ffffff;--cardBorder:#e1e6eb;--cardHover:#eef2f5;--cardSel:#e7f3ee;--cardSelBorder:#9fd3bd;--field:#ffffff;--border:#d6dde4;--segOn:#e0f0e9;--hover:#edf1f4;--accent:#167357;--accentText:#ffffff;--accentHover:#115d46;--accentMuted:#4f8f78;--warn:#9a5a0c;--danger:#c4402f;--folder:#2f6ea3;--violet:#6f4fd8;--fg:#1a2733;--text2:#2c3a47;--text3:#415060;--muted:#5d6b7c;--label:#647181;--dim:#6f7b88;--tile:#eef2f5;--warnBg:rgba(168,98,15,.09);--dangerBg:rgba(196,64,47,.08);--accentBg:rgba(22,115,87,.08);--page:#e4e9ee;--shadow:0 12px 36px rgba(20,30,40,.18);--r-lead:#6f4fd8;--r-backend:#2f66c9;--r-frontend:#b83a72;--r-tester:#137f95;--r-reviewer:#8a5a2b;--r-secretary:#2f7d4a;--r-researcher:#5f7a12;
+  --s-review:#6f4fd8;--s-test:#2f6ea3;--s-accept:#167357;color-scheme:light}
+.app *{box-sizing:border-box}
+.app button,.app input,.app select,.app textarea{font:inherit;color:inherit}
+.mono{font-family:"Cascadia Mono",Consolas,ui-monospace,monospace}
+.i{width:14px;height:14px;flex:none;vertical-align:middle;overflow:visible}
+.i path{fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.i path.f{fill:currentColor;stroke:none}
+.i path.k{stroke:var(--card);stroke-width:2.2}
+.i.s10{width:10px;height:10px}.i.s12{width:12px;height:12px}.i.s16{width:16px;height:16px}
+.lg{width:14px;height:14px;flex:none}
+.lg path{stroke:none}
+.ell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.grow{flex:1;min-width:0}
+.muted{color:var(--muted)}.dim{color:var(--dim)}.lbl{color:var(--label)}.warn{color:var(--warn)}.danger{color:var(--danger)}.acc{color:var(--accent)}.okc{color:var(--accentMuted)}
+.row{display:flex;align-items:center;gap:6px;min-width:0}
+.col{display:flex;flex-direction:column;gap:6px;min-width:0}
+.wrap{flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:26px;padding:3px 11px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:var(--text2);white-space:nowrap}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--accentText);font-weight:600}
+.btn.dng{color:var(--danger)}
+.btn.ghost{border-color:transparent;background:transparent}
+.btn.sm{min-height:23px;padding:2px 9px;font-size:11px}
+.btn.icon{padding:0;width:26px}
+.btn.sm.icon{width:23px}
+.btn.dis{opacity:.42}
+.field{min-width:0;white-space:nowrap;overflow:hidden;background:var(--field);border:1px solid var(--border);border-radius:7px;padding:4px 8px;min-height:27px;color:var(--fg);width:100%;display:flex;align-items:center;gap:6px}
+.field.sel::after{content:"";margin-left:auto;width:7px;height:7px;border-right:1.6px solid var(--muted);border-bottom:1.6px solid var(--muted);transform:translateY(-2px) rotate(45deg);flex:none}
+.field.focus{border-color:var(--cardSelBorder);box-shadow:0 0 0 3px var(--accentBg)}
+.field.ta{white-space:normal;align-items:flex-start;min-height:46px;line-height:1.45}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--surface);flex:none}
+.seg span{color:var(--muted);padding:4px 10px;min-height:25px;display:inline-flex;align-items:center;gap:5px;font-size:11.5px}
+.seg span+span{border-left:1px solid var(--border)}
+.seg span.on{background:var(--segOn);color:var(--accent);font-weight:600}
+.seg.sm span{padding:2px 8px;min-height:21px;font-size:11px}
+.pill{display:inline-flex;align-items:center;gap:4px;height:19px;padding:0 7px;border-radius:6px;background:var(--hover);color:var(--text3);font-size:11px;white-space:nowrap;flex:none}
+.pill.acc{background:var(--accentBg);color:var(--accent)}
+.pill.warnp{background:var(--warnBg);color:var(--warn)}
+.pill.dngp{background:var(--dangerBg);color:var(--danger)}
+.pill.out{background:transparent;border:1px solid var(--border)}
+.role{--rc:var(--muted);display:inline-flex;align-items:center;gap:3px;height:18px;padding:0 7px 0 5px;border-radius:9px;font-size:11px;font-weight:600;color:var(--rc);border:1px solid color-mix(in srgb,var(--rc) 45%,transparent);background:color-mix(in srgb,var(--rc) 12%,transparent);white-space:nowrap;flex:none}
+.role .i{width:11px;height:11px}
+.role.mini{height:16px;padding:0 5px 0 4px;font-size:10px}
+.rc-lead{--rc:var(--r-lead)}.rc-backend{--rc:var(--r-backend)}.rc-frontend{--rc:var(--r-frontend)}.rc-tester{--rc:var(--r-tester)}.rc-reviewer{--rc:var(--r-reviewer)}.rc-secretary{--rc:var(--r-secretary)}.rc-researcher{--rc:var(--r-researcher)}
+.tile{width:22px;height:22px;border-radius:6px;background:var(--tile);border:1px solid var(--cardBorder);display:inline-grid;place-items:center;flex:none}
+.tile .lg{width:13px;height:13px}
+.tile.t16{width:17px;height:17px;border-radius:5px}.tile.t16 .lg{width:11px;height:11px}
+.ih{font-size:10.5px;letter-spacing:.4px;text-transform:uppercase;color:var(--dim);font-weight:600;display:flex;align-items:center;gap:6px}
+.dmark{display:inline-flex;align-items:center;height:17px;padding:0 6px;border-radius:5px;font-size:9.5px;font-weight:700;letter-spacing:.3px;flex:none}
+.dm-new{background:var(--accentBg);color:var(--accent);border:1px solid var(--cardSelBorder)}
+.dm-changed{background:color-mix(in srgb,var(--folder) 14%,transparent);color:var(--folder);border:1px solid color-mix(in srgb,var(--folder) 45%,transparent)}
+.dm-removed{background:var(--dangerBg);color:var(--danger);border:1px solid color-mix(in srgb,var(--danger) 45%,transparent)}
+.old{text-decoration:line-through;color:var(--danger);background:var(--dangerBg);border-radius:3px;padding:0 4px;margin-right:4px}
+.nw{background:var(--accentBg);color:var(--accent);border-radius:3px;padding:0 4px}
+.app,.app *{scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--text3) 28%,transparent) transparent}
+.app ::-webkit-scrollbar{width:8px;height:8px}
+.app ::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--text3) 24%,transparent);border-radius:8px;border:2px solid transparent;background-clip:padding-box}
+.app ::-webkit-scrollbar-track,.app ::-webkit-scrollbar-corner{background:transparent}
+
+/* ===== new: stage chip and track ===== */
+.stg{--sc:var(--muted);display:inline-flex;align-items:center;gap:4px;height:19px;padding:0 6px 0 5px;border-radius:6px;font-size:11px;font-weight:600;white-space:nowrap;flex:none;color:var(--sc);background:color-mix(in srgb,var(--sc) 13%,transparent)}
+.stg .i{width:12px;height:12px}
+.stg .r{font-weight:400;opacity:.85}
+.sk-review{--sc:var(--s-review)}.sk-test{--sc:var(--s-test)}.sk-accept{--sc:var(--s-accept)}.sk-warn{--sc:var(--warn)}.sk-danger{--sc:var(--danger)}.sk-wait{--sc:var(--muted)}
+.stg.out{background:transparent;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--sc) 50%,transparent)}
+.stg.skip{text-decoration:line-through;opacity:.8}
+.trk{display:inline-flex;gap:2px;align-items:center;flex:none}
+.trk i{width:9px;height:4px;border-radius:2px;background:var(--border)}
+.trk i.d{background:var(--accentMuted)}
+.trk i.c{background:var(--sc,var(--accent))}
+.trk i.x{background:transparent;box-shadow:inset 0 0 0 1px var(--dim)}
+.hold{display:flex;align-items:center;gap:5px;color:var(--warn);font-size:11px;min-width:0}
+.hold .i{width:12px;height:12px}
+
+/* ===== workspace and board (U33 widths) ===== */
+.twbar{flex:none;display:flex;align-items:center;gap:9px;min-height:40px;padding:4px 14px;border-bottom:1px solid var(--cardBorder);background:var(--bg)}
+.twbar .tn{font-weight:600;font-size:14px}
+.tbadge{display:inline-flex;align-items:center;gap:4px;height:19px;padding:0 8px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap;border:1px solid currentColor;flex:none}
+.tb-running{color:var(--accent)}.tb-draft{color:var(--folder);border-style:dashed}
+.twbody{flex:1;min-height:0;display:flex}
+.twmain{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;background:var(--bg)}
+.twtool{flex:none;display:flex;align-items:center;gap:8px;padding:8px 12px}
+.bscroll{flex:1;min-height:0;overflow-x:auto;overflow-y:auto;padding:0 12px 10px}
+.bpage{display:flex;flex-direction:column;gap:8px;width:max-content}
+.phase{border:1px solid var(--cardBorder);border-radius:11px;background:var(--card)}
+.phase.run{border-color:color-mix(in srgb,var(--accent) 45%,var(--cardBorder))}
+.phase.draft{border-style:dashed;border-color:color-mix(in srgb,var(--folder) 55%,var(--cardBorder))}
+.ph{display:flex;align-items:center;gap:9px;height:38px;padding:0 12px;position:sticky;left:0;width:fit-content}
+.ph .pn{width:18px;height:18px;border-radius:9px;background:var(--hover);display:grid;place-items:center;font-size:10.5px;color:var(--muted)}
+.ph b{font-size:13px}
+.pbar{display:flex;gap:2px;height:5px;width:120px}
+.pbar i{flex:1;border-radius:2px;background:var(--border)}.pbar i.on{background:var(--accentMuted)}
+.board7{display:grid;grid-template-columns:repeat(7,240px);gap:8px;padding:0 8px 8px;align-items:start}
+.bcol{background:var(--bg);border:1px solid var(--cardBorder);border-radius:10px;padding:7px;display:flex;flex-direction:column;gap:6px;min-height:70px}
+.bcol.prob{border-color:color-mix(in srgb,var(--danger) 55%,var(--cardBorder))}
+.bcol.rev{border-color:color-mix(in srgb,var(--s-review) 40%,var(--cardBorder))}
+.bcol.tst{border-color:color-mix(in srgb,var(--s-test) 40%,var(--cardBorder))}
+.bh{display:flex;align-items:center;gap:5px;font-weight:600;color:var(--text3);padding:2px 4px;font-size:10.5px;letter-spacing:.4px;text-transform:uppercase}
+.bh .n{margin-left:auto}
+.bh .q{font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim)}
+.bcard{border:1px solid var(--border);border-radius:8px;background:var(--surface);padding:7px 9px;display:flex;flex-direction:column;gap:5px;width:100%;position:relative}
+.bcard.pw{border-color:var(--warn)}.bcard.pd{border-color:var(--danger)}.bcard.on{box-shadow:0 0 0 2px var(--accent)}
+.bcard .l1{display:flex;align-items:flex-start;gap:6px;font-size:12px;min-width:0}
+.bcard .l1 .id{font-weight:600;flex:none}
+.bcard .l1 .dep{color:var(--folder);font-size:11px;flex:none;padding-top:1px}
+.bcard .l1 .tt{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bcard .l2{display:flex;align-items:center;gap:6px;min-width:0;font-size:11px}
+.bcard .l3{display:flex;align-items:center;gap:5px;min-width:0;font-size:11px}
+.bcard .l3 .who{display:inline-flex;align-items:center;gap:4px;color:var(--muted);min-width:0}
+.bempty{color:var(--dim);border:1px dashed var(--border);border-radius:8px;text-align:center;padding:10px 6px;font-size:11px}
+.feedbar{flex:none;height:34px;border-top:1px solid var(--cardBorder);display:flex;align-items:center;gap:8px;padding:0 14px;font-size:11.5px;background:var(--bg)}
+.side{width:400px;flex:none;border-left:1px solid var(--cardBorder);display:flex;flex-direction:column;min-height:0;background:var(--bg);padding:10px;gap:8px;overflow:hidden}
+.sech{display:flex;align-items:center;gap:6px;min-height:26px}
+.sech h3{margin:0;font-size:12.5px;font-weight:600}
+.mcard{display:grid;grid-template-columns:22px 1fr auto;gap:4px 9px;padding:8px 9px;border-radius:10px;border:1px solid var(--cardBorder);background:var(--card)}
+.mcard.probw{border-color:color-mix(in srgb,var(--warn) 60%,var(--cardBorder))}
+.mcard .mr{display:flex;align-items:center;gap:6px;min-width:0}
+.mcard .rt{display:flex;flex-direction:column;align-items:flex-end;gap:4px;font-size:11px;color:var(--dim)}
+.sq{grid-column:2/4;display:flex;flex-direction:column;gap:3px;margin-top:2px;padding:5px 7px;border-radius:7px;background:var(--hover);font-size:11px}
+.sq .sqh{display:flex;align-items:center;gap:5px;color:var(--label)}
+.sq .sqr{display:flex;align-items:center;gap:6px;color:var(--text2);min-width:0}
+.tip{position:absolute;z-index:5;width:300px;background:var(--surface);border:1px solid var(--border);border-radius:9px;box-shadow:var(--shadow);padding:8px 10px;font-size:11.5px;display:flex;flex-direction:column;gap:4px;color:var(--text2)}
+.tip b{color:var(--fg)}
+
+/* ===== catalog editor ===== */
+.cat{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;background:var(--bg)}
+.cath{flex:none;display:flex;align-items:center;gap:9px;min-height:48px;padding:0 16px;border-bottom:1px solid var(--cardBorder)}
+.cath .tn{font-size:15px;font-weight:600}
+.catbody{flex:1;overflow:hidden;padding:12px 16px 20px;display:flex;flex-direction:column;gap:12px}
+.ctabs{display:flex;align-items:center;gap:10px}
+.ctabs .seg span{font-size:12.5px;padding:5px 12px}
+.ctabs .cnt{display:inline-grid;place-items:center;min-width:18px;height:17px;padding:0 5px;border-radius:9px;background:var(--hover);color:var(--text3);font-size:10.5px;font-weight:600}
+.roles2{display:flex;gap:14px;align-items:flex-start;min-height:0}
+.rlist{width:250px;flex:none;display:flex;flex-direction:column;gap:3px}
+.pitem{padding:7px 10px;border-radius:9px;border:1px solid transparent;display:flex;flex-direction:column;gap:2px}
+.pitem.on{background:var(--cardSel);border-color:var(--cardSelBorder)}
+.pitem .pn{font-weight:600;font-size:12.5px;display:flex;align-items:center;gap:6px}
+.pitem .ps{font-size:11px;color:var(--muted)}
+.pitem .flow{display:flex;align-items:center;gap:3px;margin-top:3px;flex-wrap:wrap}
+.redit{flex:1;min-width:0;border:1px solid var(--cardBorder);border-radius:11px;background:var(--card);padding:12px 14px;display:flex;flex-direction:column;gap:11px}
+.kv{display:grid;grid-template-columns:130px 1fr;gap:9px 14px;align-items:center}
+.kv>.k{color:var(--label);text-align:right;font-size:12px}
+.kv>.k.top{align-self:start;padding-top:5px}
+.note{font-size:11px;color:var(--dim);line-height:1.45}
+.stab{display:grid;grid-template-columns:16px 22px 132px 1fr 210px 92px 24px;gap:8px;align-items:center}
+.stab .th{font-size:11px;color:var(--label)}
+.stab .fixed{opacity:.7}
+.grip{color:var(--dim)}
+.stepper{display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:7px;overflow:hidden;height:26px}
+.stepper span{width:24px;text-align:center;color:var(--muted)}
+.stepper b{min-width:24px;text-align:center;font-weight:600;border-left:1px solid var(--border);border-right:1px solid var(--border);line-height:24px}
+.sdetail{grid-column:3/7;border:1px solid var(--cardBorder);border-radius:9px;background:var(--bg);padding:9px 11px;display:flex;flex-direction:column;gap:7px}
+.opt{display:grid;grid-template-columns:16px 1fr;gap:3px 7px;align-items:start}
+.radio{width:13px;height:13px;border-radius:7px;border:1.5px solid var(--border);margin-top:2px}
+.radio.on{border-color:var(--accent);box-shadow:inset 0 0 0 2.5px var(--card),inset 0 0 0 7px var(--accent)}
+.cbx{width:13px;height:13px;border-radius:3px;border:1.5px solid var(--border);flex:none;display:inline-grid;place-items:center}
+.cbx.on{background:var(--accent);border-color:var(--accent)}
+.cbx.on::after{content:"";width:6px;height:3px;border-left:1.6px solid var(--accentText);border-bottom:1.6px solid var(--accentText);transform:translateY(-1px) rotate(-45deg)}
+.dtab{width:100%;border-collapse:collapse;font-size:12px}
+.dtab td,.dtab th{padding:5px 8px;border-bottom:1px solid var(--cardBorder);text-align:left}
+.dtab th{color:var(--label);font-weight:400;font-size:11px}
+.try{border:1px dashed var(--border);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:9px;background:var(--bg)}
+.steps{display:flex;flex-direction:column}
+.step{display:grid;grid-template-columns:22px 1fr;gap:2px 9px;position:relative;padding-bottom:9px}
+.step:not(:last-child)::before{content:"";position:absolute;left:10px;top:22px;bottom:0;width:1.5px;background:var(--border)}
+.step .dot{width:22px;height:22px;border-radius:11px;display:grid;place-items:center;background:color-mix(in srgb,var(--sc,var(--muted)) 15%,transparent);color:var(--sc,var(--muted))}
+.step .dot .i{width:12px;height:12px}
+.step .sh{display:flex;align-items:center;gap:6px;min-height:22px;font-weight:600;flex-wrap:wrap}
+.step .sb{grid-column:2;font-size:11.5px;color:var(--muted);display:flex;flex-direction:column;gap:2px}
+.prop{border:1px solid var(--cardBorder);border-radius:10px;background:var(--card);padding:8px 10px;display:flex;flex-direction:column;gap:4px}
+.prop.kept{border-color:var(--cardSelBorder)}.prop.rej{opacity:.55}.prop.rej .pt{text-decoration:line-through}
+.plate{border:1px dashed color-mix(in srgb,var(--folder) 55%,var(--cardBorder));border-radius:9px;padding:7px 10px;display:flex;flex-direction:column;gap:3px;background:color-mix(in srgb,var(--folder) 5%,transparent)}
+.dchat{width:470px;flex:none;display:flex;flex-direction:column;border-right:1px solid var(--cardBorder);min-height:0;background:var(--bg)}
+.dhd{flex:none;padding:10px 14px;border-bottom:1px solid var(--cardBorder);display:flex;flex-direction:column;gap:7px}
+.dfeed{flex:1;overflow:hidden;padding:12px 14px;display:flex;flex-direction:column;gap:9px}
+.bubble{align-self:flex-end;max-width:88%;background:var(--segOn);border:1px solid var(--cardSelBorder);border-radius:12px 12px 4px 12px;padding:8px 11px;color:var(--fg);line-height:1.45}
+.tool{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:11.5px;padding-left:4px;border-left:2px solid var(--border)}
+.tool b{color:var(--text2);font-weight:600}
+
+/* ===== inspector and plan ===== */
+.insp{background:var(--bg);display:flex;flex-direction:column;min-height:0;border:1px solid var(--cardBorder)}
+.ihd{padding:12px 14px 10px;border-bottom:1px solid var(--cardBorder);display:flex;flex-direction:column;gap:7px}
+.ibody{flex:1;overflow:hidden;padding:12px 14px;display:flex;flex-direction:column;gap:12px}
+.ifoot{flex:none;border-top:1px solid var(--cardBorder);padding:9px 12px;display:flex;gap:6px;align-items:center;background:var(--bg)}
+.box{border:1px solid var(--cardBorder);border-radius:10px;background:var(--card);padding:9px 11px;display:flex;flex-direction:column;gap:7px}
+.kv2{display:grid;grid-template-columns:86px 1fr;gap:5px 10px;font-size:11.5px;align-items:baseline}
+.kv2 .k{color:var(--label)}
+.kv2 .v{color:var(--text2);min-width:0}
+.pipe{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.pipe .arr{color:var(--dim);font-size:11px}
+.rnd{display:grid;grid-template-columns:22px 1fr;gap:3px 8px;position:relative;padding-bottom:10px}
+.rnd:not(:last-child)::before{content:"";position:absolute;left:10px;top:23px;bottom:1px;width:1.5px;background:var(--border)}
+.rnd .dot{width:22px;height:22px;border-radius:11px;display:grid;place-items:center;color:var(--sc,var(--muted));background:color-mix(in srgb,var(--sc,var(--muted)) 15%,transparent)}
+.rnd .dot .i{width:12px;height:12px}
+.rnd .rh{display:flex;align-items:center;gap:6px;min-height:22px;flex-wrap:wrap}
+.rnd .rh b{font-size:12px}
+.rnd .rb{grid-column:2;display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--muted)}
+.verdict{display:inline-flex;align-items:center;gap:3px;height:18px;padding:0 7px;border-radius:9px;font-size:10.5px;font-weight:700;letter-spacing:.2px}
+.v-pass{background:var(--accentBg);color:var(--accent)}
+.v-return{background:var(--warnBg);color:var(--warn)}
+.v-run{background:color-mix(in srgb,var(--s-test) 14%,transparent);color:var(--s-test)}
+.v-wait{background:var(--hover);color:var(--muted)}
+.find{display:grid;grid-template-columns:auto 1fr;gap:2px 7px;padding:5px 8px;border:1px solid var(--cardBorder);border-radius:7px;background:var(--card);color:var(--text2);font-size:11.5px}
+.sev{font-size:9.5px;font-weight:700;letter-spacing:.3px;padding:0 5px;border-radius:4px;height:16px;display:inline-flex;align-items:center;text-transform:uppercase}
+.sev-major{background:var(--dangerBg);color:var(--danger)}.sev-minor{background:var(--warnBg);color:var(--warn)}.sev-nit{background:var(--hover);color:var(--muted)}
+.find .loc{grid-column:2;color:var(--dim);font-size:11px}
+.find.fixed{opacity:.65}
+.menu{position:absolute;z-index:6;min-width:250px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:4px;box-shadow:var(--shadow)}
+.menu .mi{display:grid;grid-template-columns:16px 1fr;gap:1px 9px;align-items:center;padding:6px 9px;border-radius:6px;color:var(--text2)}
+.menu .mi.on{background:var(--hover);color:var(--fg)}
+.menu .mi .md{grid-column:2;font-size:11px;color:var(--dim)}
+.menu .msep{height:1px;background:var(--cardBorder);margin:4px 2px}
+.menu .mh{font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.4px;font-weight:600;padding:6px 9px 3px}
+.frow{display:grid;grid-template-columns:38px 16px 1fr;gap:6px;align-items:start;padding:5px 2px;border-bottom:1px solid var(--cardBorder);font-size:11.5px}
+.frow .ft{color:var(--dim);font-size:10.5px;padding-top:1px}
+.frow .fx{color:var(--text2)}
+
+/* ===== gallery chrome (not part of the design) ===== */
+.gal{max-width:2300px;margin:0 auto;padding:24px 28px 60px}
+.gal header{display:flex;align-items:center;gap:16px;margin-bottom:6px}
+.gal h1{font-size:20px;margin:0}
+.gal .lead{max-width:980px;opacity:.8;margin:4px 0 18px}
+.gal .tgl{display:inline-flex;border:1px solid #445;border-radius:8px;overflow:hidden}
+.gal .tgl a{padding:4px 12px;color:inherit;text-decoration:none;font-size:12px}
+.gal .tgl a.on{background:#2a4a3e;color:#bdf0da}
+.lightpage .gal .tgl a.on{background:#cfe8dc;color:#115d46}
+.gal nav{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:22px}
+.gal nav a{font-size:12px;color:inherit;opacity:.85;border:1px solid #445;border-radius:12px;padding:2px 10px;text-decoration:none}
+.gal section{margin:0 0 40px}
+.gal h2{font-size:15px;margin:0 0 4px}
+.gal .cap{max-width:1100px;opacity:.8;margin:0 0 10px;font-size:12.5px}
+.gal .frame{box-shadow:0 0 0 1px rgba(128,140,155,.35);border-radius:6px;overflow:hidden;width:max-content;max-width:100%;overflow-x:auto}
+body.shot{overflow:hidden}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const LOGO_D = {
+  ollama: "M7.905 1.09c.216.085.411.225.588.41.295.306.544.744.734 1.263.191.522.315 1.1.362 1.68a5.054 5.054 0 012.049-.636l.051-.004c.87-.07 1.73.087 2.48.474.101.053.2.11.297.17.05-.569.172-1.134.36-1.644.19-.52.439-.957.733-1.264a1.67 1.67 0 01.589-.41c.257-.1.53-.118.796-.042.401.114.745.368 1.016.737.248.337.434.769.561 1.287.23.934.27 2.163.115 3.645l.053.04.026.019c.757.576 1.284 1.397 1.563 2.35.435 1.487.216 3.155-.534 4.088l-.018.021.002.003c.417.762.67 1.567.724 2.4l.002.03c.064 1.065-.2 2.137-.814 3.19l-.007.01.01.024c.472 1.157.62 2.322.438 3.486l-.006.039a.651.651 0 01-.747.536.648.648 0 01-.54-.742c.167-1.033.01-2.069-.48-3.123a.643.643 0 01.04-.617l.004-.006c.604-.924.854-1.83.8-2.72-.046-.779-.325-1.544-.8-2.273a.644.644 0 01.18-.886l.009-.006c.243-.159.467-.565.58-1.12a4.229 4.229 0 00-.095-1.974c-.205-.7-.58-1.284-1.105-1.683-.595-.454-1.383-.673-2.38-.61a.653.653 0 01-.632-.371c-.314-.665-.772-1.141-1.343-1.436a3.288 3.288 0 00-1.772-.332c-1.245.099-2.343.801-2.67 1.686a.652.652 0 01-.61.425c-1.067.002-1.893.252-2.497.703-.522.39-.878.935-1.066 1.588a4.07 4.07 0 00-.068 1.886c.112.558.331 1.02.582 1.269l.008.007c.212.207.257.53.109.785-.36.622-.629 1.549-.673 2.44-.05 1.018.186 1.902.719 2.536l.016.019a.643.643 0 01.095.69c-.576 1.236-.753 2.252-.562 3.052a.652.652 0 01-1.269.298c-.243-1.018-.078-2.184.473-3.498l.014-.035-.008-.012a4.339 4.339 0 01-.598-1.309l-.005-.019a5.764 5.764 0 01-.177-1.785c.044-.91.278-1.842.622-2.59l.012-.026-.002-.002c-.293-.418-.51-.953-.63-1.545l-.005-.024a5.352 5.352 0 01.093-2.49c.262-.915.777-1.701 1.536-2.269.06-.045.123-.09.186-.132-.159-1.493-.119-2.73.112-3.67.127-.518.314-.95.562-1.287.27-.368.614-.622 1.015-.737.266-.076.54-.059.797.042zm4.116 9.09c.936 0 1.8.313 2.446.855.63.527 1.005 1.235 1.005 1.94 0 .888-.406 1.58-1.133 2.022-.62.375-1.451.557-2.403.557-1.009 0-1.871-.259-2.493-.734-.617-.47-.963-1.13-.963-1.845 0-.707.398-1.417 1.056-1.946.668-.537 1.55-.849 2.485-.849zm0 .896a3.07 3.07 0 00-1.916.65c-.461.37-.722.835-.722 1.25 0 .428.21.829.61 1.134.455.347 1.124.548 1.943.548.799 0 1.473-.147 1.932-.426.463-.28.7-.686.7-1.257 0-.423-.246-.89-.683-1.256-.484-.405-1.14-.643-1.864-.643zm.662 1.21l.004.004c.12.151.095.37-.056.49l-.292.23v.446a.375.375 0 01-.376.373.375.375 0 01-.376-.373v-.46l-.271-.218a.347.347 0 01-.052-.49.353.353 0 01.494-.051l.215.172.22-.174a.353.353 0 01.49.051zm-5.04-1.919c.478 0 .867.39.867.871a.87.87 0 01-.868.871.87.87 0 01-.867-.87.87.87 0 01.867-.872zm8.706 0c.48 0 .868.39.868.871a.87.87 0 01-.868.871.87.87 0 01-.867-.87.87.87 0 01.867-.872zM7.44 2.3l-.003.002a.659.659 0 00-.285.238l-.005.006c-.138.189-.258.467-.348.832-.17.692-.216 1.631-.124 2.782.43-.128.899-.208 1.404-.237l.01-.001.019-.034c.046-.082.095-.161.148-.239.123-.771.022-1.692-.253-2.444-.134-.364-.297-.65-.453-.813a.628.628 0 00-.107-.09L7.44 2.3zm9.174.04l-.002.001a.628.628 0 00-.107.09c-.156.163-.32.45-.453.814-.29.794-.387 1.776-.23 2.572l.058.097.008.014h.03a5.184 5.184 0 011.466.212c.086-1.124.038-2.043-.128-2.722-.09-.365-.21-.643-.349-.832l-.004-.006a.659.659 0 00-.285-.239h-.004z",
+  claude: "M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.970 2.970 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.030.456.898.243.832.091.255h.158V9.010l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.020.225.79.522.474.638-.079.485-1.215.62-1.640-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.810 2.509 2.330.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.620h-.128v.17l.444.649 2.345 3.521.122 1.080-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.530.286-1.900.17-.632-.012-.042-.14.018-1.434 1.967-2.180 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.440-1.882.93-1.086-.006-.158h-.055L4.132 18.560l-1.130.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z",
+  codexBg: "M19.503 0H4.496A4.496 4.496 0 000 4.496v15.007A4.496 4.496 0 004.496 24h15.007A4.496 4.496 0 0024 19.503V4.496A4.496 4.496 0 0019.503 0z",
+  codex: "M9.064 3.344a4.578 4.578 0 012.285-.312c1 .115 1.891.54 2.673 1.275.01.01.024.017.037.021a.09.09 0 00.043 0 4.55 4.55 0 013.046.275l.047.022.116.057a4.581 4.581 0 012.188 2.399c.209.51.313 1.041.315 1.595a4.24 4.24 0 01-.134 1.223.123.123 0 00.03.115c.594.607.988 1.33 1.183 2.17.289 1.425-.007 2.71-.887 3.854l-.136.166a4.548 4.548 0 01-2.201 1.388.123.123 0 00-.081.076c-.191.551-.383 1.023-.74 1.494-.9 1.187-2.222 1.846-3.711 1.838-1.187-.006-2.239-.44-3.157-1.302a.107.107 0 00-.105-.024c-.388.125-.78.143-1.204.138a4.441 4.441 0 01-1.945-.466 4.544 4.544 0 01-1.61-1.335c-.152-.202-.303-.392-.414-.617a5.81 5.81 0 01-.37-.961 4.582 4.582 0 01-.014-2.298.124.124 0 00.006-.056.085.085 0 00-.027-.048 4.467 4.467 0 01-1.034-1.651 3.896 3.896 0 01-.251-1.192 5.189 5.189 0 01.141-1.6c.337-1.112.982-1.985 1.933-2.618.212-.141.413-.251.601-.33.215-.089.43-.164.646-.227a.098.098 0 00.065-.066 4.51 4.51 0 01.829-1.615 4.535 4.535 0 011.837-1.388zm3.482 10.565a.637.637 0 000 1.272h3.636a.637.637 0 100-1.272h-3.636zM8.462 9.23a.637.637 0 00-1.106.631l1.272 2.224-1.266 2.136a.636.636 0 101.095.649l1.454-2.455a.636.636 0 00.005-.64L8.462 9.23z",
+  deepseek: "M23.748 4.482c-.254-.124-.364.113-.512.234-.051.039-.094.09-.137.136-.372.397-.806.657-1.373.626-.829-.046-1.537.214-2.163.848-.133-.782-.575-1.248-1.247-1.548-.352-.156-.708-.311-.955-.65-.172-.241-.219-.51-.305-.774-.055-.16-.11-.323-.293-.35-.2-.031-.278.136-.356.276-.313.572-.434 1.202-.422 1.84.027 1.436.633 2.58 1.838 3.393.137.093.172.187.129.323-.082.28-.18.552-.266.833-.055.179-.137.217-.329.14a5.526 5.526 0 01-1.736-1.18c-.857-.828-1.631-1.742-2.597-2.458a11.365 11.365 0 00-.689-.471c-.985-.957.13-1.743.388-1.836.27-.098.093-.432-.779-.428-.872.004-1.67.295-2.687.684a3.055 3.055 0 01-.465.137 9.597 9.597 0 00-2.883-.102c-1.885.21-3.39 1.102-4.497 2.623C.082 8.606-.231 10.684.152 12.85c.403 2.284 1.569 4.175 3.36 5.653 1.858 1.533 3.997 2.284 6.438 2.14 1.482-.085 3.133-.284 4.994-1.86.47.234.962.327 1.78.397.63.059 1.236-.03 1.705-.128.735-.156.684-.837.419-.961-2.155-1.004-1.682-.595-2.113-.926 1.096-1.296 2.746-2.642 3.392-7.003.05-.347.007-.565 0-.845-.004-.17.035-.237.23-.256a4.173 4.173 0 001.545-.475c1.396-.763 1.96-2.015 2.093-3.517.02-.23-.004-.467-.247-.588zM11.581 18c-2.089-1.642-3.102-2.183-3.52-2.16-.392.024-.321.471-.235.763.09.288.207.486.371.739.114.167.192.416-.113.603-.673.416-1.842-.14-1.897-.167-1.361-.802-2.5-1.86-3.301-3.307-.774-1.393-1.224-2.887-1.298-4.482-.02-.386.093-.522.477-.592a4.696 4.696 0 011.529-.039c2.132.312 3.946 1.265 5.468 2.774.868.86 1.525 1.887 2.202 2.891.72 1.066 1.494 2.082 2.48 2.914.348.292.625.514.891.677-.802.09-2.140.11-3.054-.614zm1-6.44a.306.306 0 01.415-.287.302.302 0 01.2.288.306.306 0 01-.31.307.303.303 0 01-.304-.308zm3.11 1.596c-.2.081-.399.151-.59.16a1.245 1.245 0 01-.798-.254c-.274-.23-.47-.358-.552-.758a1.730 1.730 0 01.016-.588c.07-.327-.008-.537-.239-.727-.187-.156-.426-.199-.688-.199a.559.559 0 01-.254-.078c-.11-.054-.2-.19-.114-.358.028-.054.16-.186.192-.21.356-.202.767-.136 1.146.016.352.144.618.408 1.001.782.391.451.462.576.685.914.176.265.336.537.445.848.067.195-.019.354-.25.452z",
+  kimiDot: "M21.846 0a1.923 1.923 0 110 3.846H20.15a.226.226 0 01-.227-.226V1.923C19.923.861 20.784 0 21.846 0z",
+  kimi: "M11.065 11.199l7.257-7.2c.137-.136.06-.41-.116-.41H14.3a.164.164 0 00-.117.051l-7.82 7.756c-.122.12-.302.013-.302-.179V3.820c0-.127-.083-.23-.185-.23H3.186c-.103 0-.186.103-.186.23V19.770c0 .128.083.23.186.23h2.690c.103 0 .186-.102.186-.23v-3.250c0-.069.025-.135.069-.178l2.424-2.406a.158.158 0 01.205-.023l6.484 4.772a7.677 7.677 0 003.453 1.283c.108.012.2-.095.2-.23v-3.060c0-.117-.07-.212-.164-.227a5.028 5.028 0 01-2.027-.807l-5.613-4.064c-.117-.078-.132-.279-.028-.381z",
+};
+const IC = {
+  play: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0ZM10 8.5l5 3.5-5 3.5z",
+  check: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0ZM8 12.5l2.8 2.8L16.5 9",
+  checkf: ["M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0Z", "M8 12.5l2.8 2.8L16.5 9"],
+  tick: "M5 12.5l4.5 4.5L19 7.5",
+  clock: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0ZM12 7v5l3 2",
+  circle: "M4 12a8 8 0 1 0 16 0a8 8 0 1 0 -16 0Z",
+  arrowc: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0ZM8 12h8M13 9l3 3-3 3",
+  x: "M6 6l12 12M18 6L6 18",
+  chevd: "M6 9l6 6 6-6", chevr: "M9 6l6 6-6 6", chevl: "M15 6l-6 6 6 6",
+  dots: "M4.7 12a1.3 1.3 0 1 0 2.6 0a1.3 1.3 0 1 0 -2.6 0ZM10.7 12a1.3 1.3 0 1 0 2.6 0a1.3 1.3 0 1 0 -2.6 0ZM16.7 12a1.3 1.3 0 1 0 2.6 0a1.3 1.3 0 1 0 -2.6 0Z",
+  plus: "M12 5v14M5 12h14",
+  copy: "M10 8h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-8a2 2 0 0 1 2 -2ZM16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3",
+  trash: "M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13",
+  send: "M4 12l16-8-6 16-2.5-6.5zM11.5 13.5L20 4",
+  folder: "M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z",
+  branch: "M4 5a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM4 19a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM16 7a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM6 7v10M18 9c0 5-6 4-11.5 8.5",
+  eye: "M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12zM9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0Z",
+  back: "M10 6l-6 6 6 6M4 12h16",
+  lock: "M6.5 11h11a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1 -1.5 1.5h-11a1.5 1.5 0 0 1 -1.5 -1.5v-6a1.5 1.5 0 0 1 1.5 -1.5ZM8 11V8a4 4 0 0 1 8 0v3",
+  q: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0ZM9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .8-1 1.5v.4M11.65 16.8a0.35 0.35 0 1 0 0.7 0a0.35 0.35 0 1 0 -0.7 0Z",
+  alert: "M12 3.5l9.5 16.5h-19zM12 10v4.5M11.65 17.2a0.35 0.35 0 1 0 0.7 0a0.35 0.35 0 1 0 -0.7 0Z",
+  refresh: "M20 11a8 8 0 0 0-14.5-4.5M4 13a8 8 0 0 0 14.5 4.5M5 3v4h4M19 21v-4h-4",
+  ret: "M9 14l-5-5 5-5M4 9h10a6 6 0 0 1 0 12h-3",
+  skip: "M5 6l7 6-7 6zM13 6l7 6-7 6z",
+  grip: "M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01",
+  graph: "M10 3h4a1 1 0 0 1 1 1v2a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1v-2a1 1 0 0 1 1 -1ZM4 17h4a1 1 0 0 1 1 1v2a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1v-2a1 1 0 0 1 1 -1ZM16 17h4a1 1 0 0 1 1 1v2a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1v-2a1 1 0 0 1 1 -1ZM12 7v4M6 17v-3h12v3",
+  board: "M4 4h4v16H4zM10 4h4v10h-4zM16 4h4v7h-4z",
+  layers: "M12 3l9 5-9 5-9-5zM3 12l9 5 9-5M3 16l9 5 9-5",
+  users: "M5.5 8a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0 -7 0ZM2.5 20c.6-3.5 3.2-5.5 6.5-5.5s5.9 2 6.5 5.5M16 4.6a3.5 3.5 0 0 1 0 6.8M18 14.8c2 .7 3.2 2.5 3.5 5.2",
+  user: "M8 8a4 4 0 1 0 8 0a4 4 0 1 0 -8 0ZM4 21c1-4 4-6 8-6s7 2 8 6",
+  bolt: "M13 3L5 14h6l-1 7 8-11h-6z",
+  pipe: "M5 6a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM15 18a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM9 6h6a3 3 0 0 1 0 6H9a3 3 0 0 0 0 6h6",
+  sparkle: "M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z",
+  imp: "M4 20h4L19 9l-4-4L4 16zM14 6l4 4",
+  dl: "M12 4v11M7 10l5 5 5-5M5 20h14", ul: "M12 20V9M7 14l5-5 5 5M5 4h14",
+  r_lead: "M4 8l4 4 4-6 4 6 4-4-2 10H6zM6 21h12",
+  r_backend: "M5.5 4h13a1.5 1.5 0 0 1 1.5 1.5v3a1.5 1.5 0 0 1 -1.5 1.5h-13a1.5 1.5 0 0 1 -1.5 -1.5v-3a1.5 1.5 0 0 1 1.5 -1.5ZM5.5 14h13a1.5 1.5 0 0 1 1.5 1.5v3a1.5 1.5 0 0 1 -1.5 1.5h-13a1.5 1.5 0 0 1 -1.5 -1.5v-3a1.5 1.5 0 0 1 1.5 -1.5ZM8 7h.01M8 17h.01",
+  r_frontend: "M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2ZM3 9h18M9 9v11",
+  r_tester: "M9 3h6M10 3v6l-5 9.5A1.5 1.5 0 0 0 6.3 21h11.4a1.5 1.5 0 0 0 1.3-2.5L14 9V3M7.5 15h9",
+  r_reviewer: "M4.5 10.5a6 6 0 1 0 12 0a6 6 0 1 0 -12 0ZM20 20l-5-5M8 10.5l2 2 3.5-3.5",
+  r_secretary: "M4 20h4L19 9l-4-4L4 16z",
+  r_researcher: "M4 5h6a2 2 0 0 1 2 2v13a2 2 0 0 0-2-2H4zM20 5h-6a2 2 0 0 0-2 2v13a2 2 0 0 1 2-2h6z",
+};
+const ic = (n, c = '') => {
+  const v = IC[n] || IC.circle;
+  const p = Array.isArray(v) ? `<path class="f" d="${v[0]}"/><path class="k" d="${v[1]}"/>` : `<path d="${v}"/>`;
+  return `<svg class="i ${c}" viewBox="0 0 24 24">${p}</svg>`;
+};
+const lg = (a) => {
+  const L = LOGO_D;
+  if (a === 'claude') return `<svg class="lg" viewBox="0 0 24 24"><path fill="#D97757" d="${L.claude}"/></svg>`;
+  if (a === 'codex') return `<svg class="lg" viewBox="0 0 24 24"><path fill="#f4f6ff" d="${L.codexBg}"/><path fill="#5b78ff" d="${L.codex}"/></svg>`;
+  if (a === 'deepseek') return `<svg class="lg" viewBox="0 0 24 24"><path fill="#4D6BFE" d="${L.deepseek}"/></svg>`;
+  if (a === 'kimi') return `<svg class="lg" viewBox="0 0 24 24"><path fill="#1783FF" d="${L.kimiDot}"/><path fill="currentColor" d="${L.kimi}"/></svg>`;
+  return '';
+};
+const tile = (a, c = '') => `<span class="tile ${c}">${lg(a)}</span>`;
+const RN = { lead: 'Lead', backend: 'Backend', frontend: 'Frontend', tester: 'Tester', reviewer: 'Reviewer', secretary: 'Secretary', researcher: 'Researcher' };
+const role = (k, mini = false, name) => `<span class="role rc-${k}${mini ? ' mini' : ''}">${ic('r_' + k)}${name || RN[k]}</span>`;
+const KIND = { review: ['r_reviewer', 'Review', 'sk-review'], test: ['r_tester', 'Test', 'sk-test'], accept: ['r_lead', 'Lead', 'sk-accept'], auto: ['bolt', 'Auto', 'sk-accept'], impl: ['imp', 'Implement', 'sk-wait'] };
+const stg = (k, extra = '', cls = '') => { const [i, n, c] = KIND[k]; return `<span class="stg ${c} ${cls}">${ic(i)}${n}${extra ? ` <span class="r">${extra}</span>` : ''}</span>`; };
+// stage track: d = done, c = current, x = skipped, '' = to come
+const trk = (cells, sc) => `<span class="trk" style="${sc ? `--sc:var(${sc})` : ''}">${cells.map(c => `<i class="${c}"></i>`).join('')}</span>`;
+const seg = (opts, on, cls = '') => `<span class="seg ${cls}">${opts.map((o, n) => `<span class="${n === on ? 'on' : ''}">${o}</span>`).join('')}</span>`;
+const ST = {
+  pending: ['circle', 'var(--muted)'], active: ['play', 'var(--accent)'], problem: ['q', 'var(--warn)'], submitted: ['arrowc', 'var(--accentMuted)'],
+  review: ['r_reviewer', 'var(--s-review)'], test: ['r_tester', 'var(--s-test)'], accepted: ['checkf', 'var(--accentMuted)'], rework: ['refresh', 'var(--warn)'], accept: ['r_lead', 'var(--s-accept)'],
+};
+const sti = (s) => `<span style="color:${ST[s][1]};display:inline-flex;padding-top:1px">${ic(ST[s][0], 's12')}</span>`;
+
+// A Board card: line 1 status, id, deps and title; line 2 the implementer;
+// line 3 (new) the stage chip, its member and the stage track, or a hold.
+function card(t) {
+  const deps = t.deps ? `<span class="dep">↤${t.deps}</span>` : '';
+  const l2 = `<div class="l2">${role(t.role)}${tile(t.agent, 't16')}<span class="ell ${t.l2c || 'muted'}">${t.l2 || ''}</span></div>`;
+  const l3 = t.l3 ? `<div class="l3">${t.l3}</div>` : '';
+  return `<div class="bcard ${t.cls || ''}" ${t.style ? `style="${t.style}"` : ''}><div class="l1">${sti(t.st)}<span class="id">#${t.id}</span>${deps}<span class="tt">${t.title}</span></div>${l2}${l3}${t.tip || ''}</div>`;
+}
+// The stage member: its agent, and a number when the role has several members.
+const who = (k, a, name) => `<span class="who" title="${RN[k]}">${tile(a, 't16')}${name ? `<span class="ell">${name}</span>` : ''}</span>`;
+
+/* ---------------------------------------------------------------- views */
+const V = {};
+
+/* 1. Catalog editor: the Pipelines tab */
+V.pipelines = { w: 1320, h: 1215, title: 'Catalog editor · Pipelines tab',
+  cap: 'Settings › Teams and the Team designer page share this editor. The fourth tab lists the presets; the editor sets each stage’s kind, who takes it, where it works and its rounds, then the final acceptance. Defaults per template and per role sit below, and Try it walks a sample task through the preset with today’s members. Edits stay local until Save catalog, like the other tabs.',
+  html: () => `
+<div class="cat" style="height:100%">
+  <div class="cath"><span class="tn">Team catalog</span><span class="muted">v14 · 1 unsaved change</span><span class="grow"></span>
+    <span class="btn ghost">${ic('dl')}Import…</span><span class="btn ghost">${ic('ul')}Export…</span><span class="btn">Revert</span><span class="btn pri">Save catalog</span></div>
+  <div class="catbody">
+    <div class="ctabs"><span class="seg"><span>Roles</span><span>Templates</span><span>Routing</span><span class="on">${ic('pipe', 's12')}Pipelines</span></span></div>
+    <div class="roles2">
+      <div class="rlist">
+        <div class="pitem on"><div class="pn">Code: review, test, lead</div><div class="ps">3 rounds · task’s folder · default of 3 templates</div>
+          <div class="flow">${stg('review')}<span class="dim">›</span>${stg('test')}<span class="dim">›</span>${stg('accept')}</div></div>
+        <div class="pitem"><div class="pn">Docs: review, auto</div><div class="ps">2 rounds · default of Secretary, Researcher</div>
+          <div class="flow">${stg('review')}<span class="dim">›</span>${stg('auto')}</div></div>
+        <div class="pitem"><div class="pn">Check: lead</div><div class="ps">today’s flow · default of Review pass</div>
+          <div class="flow">${stg('accept')}</div></div>
+        <div class="pitem"><div class="pn">None</div><div class="ps">no stages: the report accepts the task</div></div>
+        <div class="pitem" style="flex-direction:row;align-items:center;gap:6px;color:var(--text2)">${ic('plus', 's12')}Pipeline</div>
+      </div>
+      <div class="redit">
+        <div class="row"><b style="font-size:14px">Code: review, test, lead</b><span class="muted">· default of Feature delivery, Bug hunt, Dev Team</span><span class="grow"></span>
+          <span class="btn ghost sm">${ic('copy', 's12')}Duplicate</span><span class="btn ghost sm dng">${ic('trash', 's12')}Delete</span></div>
+        <div class="kv">
+          <span class="k">Name</span><span class="field">Code: review, test, lead</span>
+          <span class="k">Description</span><span class="field">Code changes: a reviewer reads the change, a tester runs its suites and takes its shots, then the lead accepts.</span>
+          <span class="k top">Stages</span>
+          <div class="col" style="gap:7px">
+            <div class="stab">
+              <span></span><span class="th">#</span><span class="th">Kind</span><span class="th">Who takes it</span><span class="th">Works in</span><span class="th">Rounds</span><span></span>
+              <span></span><span class="dim">0</span><span class="row fixed">${stg('impl')}</span><span class="muted fixed">the task’s assignee</span><span class="muted fixed">its own folder</span><span class="dim fixed">—</span><span></span>
+              <span class="grip">${ic('grip')}</span><span class="dim">1</span>${seg(['Review', 'Test'], 0, 'sm')}<span class="field sel">${role('reviewer', true)}<span>first free Reviewer</span></span><span class="field sel">Task’s folder · reads</span><span class="stepper"><span>–</span><b>3</b><span>+</span></span><span class="dim">${ic('trash', 's12')}</span>
+              <span class="grip">${ic('grip')}</span><span class="dim">2</span>${seg(['Review', 'Test'], 1, 'sm')}<span class="field sel">${role('tester', true)}<span>first free Tester</span></span><span class="field sel focus">Task’s folder · holds it</span><span class="stepper"><span>–</span><b>3</b><span>+</span></span><span class="dim">${ic('trash', 's12')}</span>
+              <div class="sdetail">
+                <div class="ih">Where the test works</div>
+                <div class="opt"><span class="radio on"></span><b>The task’s folder</b><span></span><span class="note">The implementer’s worktree or clone, or the shared folder when the team works in one. The stage reads and builds there and writes only build output and its own temporary folder. While it runs the folder is held: the implementer’s next task there waits, and its card says “folder held by the test of #N”. In a shared folder the others keep working; the hand-off names the task’s files.</span></div>
+                <div class="opt"><span class="radio"></span><b>A detached checkout of the attempt’s commits</b><span></span><span class="note">Frees the implementer at once and costs one build. Needs a Git checkout; for a non-Git folder the stage uses the task’s folder.</span></div>
+                <div class="row" style="gap:8px"><span class="lbl" style="font-size:11px">Who takes it</span>${seg(['Role', 'Pinned member'], 0, 'sm')}<span class="note">A second member with the role takes waiting stages. The implementer never takes its own task’s stage.</span></div>
+              </div>
+            </div>
+            <div class="row"><span class="btn sm">${ic('plus', 's12')}Stage</span><span class="note">Review reads the attempt’s change against the task’s criteria; Test runs the suites of the files the task changed and takes the criteria’s shots.</span></div>
+          </div>
+          <span class="k">Final acceptance</span><div class="row">${seg(['Lead', 'Sub-lead', 'Auto'], 0)}<span class="note">Sub-lead: the member’s <span class="mono">reviewer_of</span> lead. Auto accepts once the last stage passes.</span></div>
+          <span class="k">After the rounds</span><span class="note" style="font-size:11.5px;color:var(--muted)">A stage that returns the task 3 times sends it to the lead with every round’s findings.</span>
+        </div>
+        <div class="ih" style="margin-top:4px">Defaults</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          <table class="dtab"><tr><th>Template</th><th>Pipeline</th></tr>
+            <tr><td>Feature delivery</td><td><span class="field sel" style="min-height:24px">Code: review, test, lead</span></td></tr>
+            <tr><td>Bug hunt</td><td><span class="field sel" style="min-height:24px">Code: review, test, lead</span></td></tr>
+            <tr><td>Dev Team</td><td><span class="field sel" style="min-height:24px">Code: review, test, lead</span></td></tr>
+            <tr><td>Review pass</td><td><span class="field sel" style="min-height:24px">Check: lead</span></td></tr>
+            <tr><td>Documentation to CodeLore</td><td><span class="field sel" style="min-height:24px">Docs: review, auto</span></td></tr></table>
+          <div class="col">
+            <table class="dtab"><tr><th>Role with its own</th><th>Pipeline</th></tr>
+              <tr><td>${role('secretary')}</td><td><span class="field sel" style="min-height:24px">Docs: review, auto</span></td></tr>
+              <tr><td>${role('researcher')}</td><td><span class="field sel" style="min-height:24px">Docs: review, auto</span></td></tr></table>
+            <div class="row"><span class="btn sm">${ic('plus', 's12')}Role</span></div>
+            <span class="note">A role’s pipeline wins over its template’s. The plan and <span class="mono">edit-draft</span> can set any task’s; a task keeps a snapshot from its assignment, so later edits here do not change a running task.</span>
+          </div>
+        </div>
+        <div class="try">
+          <div class="row"><span class="acc">${ic('play')}</span><b>Try it</b><span class="muted">on a sample task — nothing is sent</span><span class="grow"></span>
+            <span class="field sel" style="width:330px">#4 Address validation · Frontend · Feature delivery</span><span class="btn sm pri">Try</span></div>
+          <div class="steps">
+            <div class="step"><span class="dot">${ic('imp')}</span><div class="sh">Implement ${role('frontend', true)}${tile('codex', 't16')}<span class="muted" style="font-weight:400">gpt-6.1-sol · macbook</span></div>
+              <div class="sb"><span>In its worktree <span class="mono">orbit-team/frontend</span>; reports with its commits.</span></div></div>
+            <div class="step" style="--sc:var(--s-review)"><span class="dot">${ic('r_reviewer')}</span><div class="sh">Review, up to 3 rounds ${role('reviewer', true)}${tile('claude', 't16')}<span class="muted" style="font-weight:400">claude-sonnet-4-6 · free now</span></div>
+              <div class="sb"><span>Reads <span class="mono">orbit-team/frontend</span> at the attempt’s commits. Return → Frontend gets the findings as attempt 2.</span></div></div>
+            <div class="step" style="--sc:var(--s-test)"><span class="dot">${ic('r_tester')}</span><div class="sh">Test, up to 3 rounds ${role('tester', true)}${tile('kimi', 't16')}<span class="muted" style="font-weight:400">kimi-k2.5 · build-01 · busy with #5, 1 waiting</span></div>
+              <div class="sb"><span>Builds in <span class="mono">orbit-team/frontend</span> and runs the suites of the changed files. Holds the folder: Frontend’s next task there waits.</span></div></div>
+            <div class="step" style="--sc:var(--s-accept)"><span class="dot">${ic('r_lead')}</span><div class="sh">Lead accepts ${role('lead', true)}${tile('claude', 't16')}</div>
+              <div class="sb"><span>After 3 returned rounds in one stage the task goes to the lead with every round’s findings.</span></div></div>
+          </div>
+          <div class="row warn" style="font-size:11.5px">${ic('alert', 's12')}<span>One Tester in this team: test stages queue behind it. A second Tester, or a detached checkout, shortens the hold on Frontend.</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>` };
+
+/* 2. Team designer: proposals with keep/reject plates */
+V.designer = { w: 1600, h: 1000, title: 'Team designer · pipeline proposals',
+  cap: 'The designer proposes pipelines like roles and templates: a plate per proposal on the left with Keep and Reject, the draft catalog on the right with NEW and CHANGED marks on the Pipelines tab, and the changed field shown old → new inside the editor. Nothing changes until Apply.',
+  html: () => `
+<div class="row" style="height:100%;align-items:stretch;gap:0">
+  <div class="dchat">
+    <div class="dhd"><div class="row"><span class="tile" style="color:var(--accent)">${ic('users', 's12')}</span><b style="font-size:15px">Team designer</b><span class="grow"></span><span class="pill warnp">Needs your decision</span></div>
+      <div class="row wrap"><span class="pill out">${ic('folder', 's12')}Reads D:\\work\\orbit</span><span class="pill out">${ic('lock', 's12')}Proposes only</span><span class="pill out">Catalog v14</span></div></div>
+    <div class="dfeed">
+      <div class="bubble">Docs tasks do not need a tester. And Frontend keeps waiting an hour while its folder is being tested.</div>
+      <div class="tool">${ic('pipe', 's12')}<b>hgs team catalog get</b> — v14 · 4 pipelines</div>
+      <div class="tool">${ic('users', 's12')}<b>hgs team history</b> — last 12 teams, 41 attempts, 63 stage rounds</div>
+      <div style="color:var(--text2);line-height:1.5">Three proposals. The docs preset drops the test; the code preset can test a copy of the attempt so the implementer is free.</div>
+      <div class="prop kept"><div class="row"><span class="dmark dm-new">NEW</span><b class="pt">Pipeline · Docs: review, auto</b><span class="grow"></span><span class="btn ghost sm">${ic('x', 's12')}Reject</span><span class="btn sm on" style="color:var(--accent);border-color:var(--cardSelBorder);background:var(--segOn)">${ic('tick', 's12')}Kept</span></div>
+        <span class="muted">Review by a Reviewer, 2 rounds, then auto. 9 of the last 11 docs tasks were accepted unchanged by the lead.</span><span class="acc" style="font-size:11.5px">Show in catalog</span></div>
+      <div class="prop"><div class="row"><span class="dmark dm-changed">CHANGED</span><b class="pt ell">Code: the test works on a detached checkout</b><span class="grow"></span><span class="btn ghost sm">${ic('x', 's12')}Reject</span><span class="btn sm">${ic('tick', 's12')}Keep</span></div>
+        <span class="muted">Frontend waited 52 min on average while the test held its folder (7 tasks). A detached checkout frees it for one extra build, about 4 min.</span><span class="acc" style="font-size:11.5px">Show in catalog</span></div>
+      <div class="prop rej"><div class="row"><span class="dmark dm-changed">CHANGED</span><b class="pt">Secretary’s default → Docs</b><span class="grow"></span><span class="pill">Rejected</span><span class="btn ghost sm">Undo</span></div>
+        <span class="muted">Secretary already reaches Docs through its template.</span></div>
+      <div class="row" style="border:1px dashed var(--border);border-radius:9px;padding:7px 9px;gap:8px"><span class="dmark" style="background:var(--hover);color:var(--muted)">DRAFT</span><span class="muted ell grow">based on v14 · 1 of 3 kept · 1 undecided</span><span class="danger">Discard draft</span><span class="btn sm pri">${ic('tick', 's12')}Apply 1 change</span></div>
+    </div>
+    <div style="padding:10px 14px 14px"><div class="field" style="min-height:58px;align-items:flex-start;color:var(--dim)">Answer, or ask for something else…<span class="grow"></span><span class="btn sm">${ic('send', 's12')}Send</span></div></div>
+  </div>
+  <div class="cat">
+    <div class="cath"><span class="tn">Draft catalog</span><span class="muted">based on v14 · 1 of 3 kept · 1 undecided</span><span class="grow"></span><span class="danger">Discard draft</span><span class="btn pri">${ic('tick', 's12')}Apply 1 change</span></div>
+    <div class="catbody">
+      <div class="ctabs"><span class="seg"><span>Roles</span><span>Templates</span><span>Routing</span><span class="on">${ic('pipe', 's12')}Pipelines <span class="cnt">3</span></span></span><span class="grow"></span><span class="dmark dm-new">NEW</span><span class="dmark dm-changed">CHANGED</span><span class="dmark dm-removed">REMOVED</span></div>
+      <div class="roles2">
+        <div class="rlist">
+          <div class="pitem on"><div class="pn">Code: review, test, lead <span class="dmark dm-changed">CHANGED</span></div><div class="ps">3 rounds · detached checkout</div></div>
+          <div class="pitem"><div class="pn">Docs: review, auto <span class="dmark dm-new">NEW</span></div><div class="ps">2 rounds</div></div>
+          <div class="pitem"><div class="pn">Check: lead</div><div class="ps">today’s flow</div></div>
+          <div class="pitem"><div class="pn">None</div><div class="ps">no stages</div></div>
+        </div>
+        <div class="redit">
+          <div class="row"><b style="font-size:14px">Code: review, test, lead</b><span class="muted">· default of 3 templates</span></div>
+          <div class="plate"><div class="row"><span class="dmark dm-changed">CHANGED</span><b>Test works in: task’s folder → detached checkout</b><span class="grow"></span><span class="btn ghost sm">Reject</span><span class="btn sm">Keep</span></div>
+            <span class="muted">Frontend waited 52 min on average while the test held its folder (7 tasks). One extra build, about 4 min.</span></div>
+          <div class="kv">
+            <span class="k">Name</span><span class="field">Code: review, test, lead</span>
+            <span class="k top">Stages</span>
+            <div class="stab" style="grid-template-columns:16px 18px 116px minmax(0,1fr) 230px 92px">
+              <span></span><span class="th">#</span><span class="th">Kind</span><span class="th">Who takes it</span><span class="th">Works in</span><span class="th">Rounds</span>
+              <span class="grip">${ic('grip')}</span><span class="dim">1</span>${seg(['Review', 'Test'], 0, 'sm')}<span class="field sel">${role('reviewer', true)}first free</span><span class="field sel">Task’s folder · reads</span><span class="stepper"><span>–</span><b>3</b><span>+</span></span>
+              <span class="grip">${ic('grip')}</span><span class="dim">2</span>${seg(['Review', 'Test'], 1, 'sm')}<span class="field sel">${role('tester', true)}first free</span><span class="field sel" style="border-color:color-mix(in srgb,var(--folder) 55%,var(--border))"><span class="old">Task’s folder</span><span class="nw">Detached checkout</span></span><span class="stepper"><span>–</span><b>3</b><span>+</span></span>
+            </div>
+            <span class="k">Final acceptance</span><div>${seg(['Lead', 'Sub-lead', 'Auto'], 0)}</div>
+          </div>
+          <div class="try" style="gap:6px"><div class="row"><span class="acc">${ic('play')}</span><b>Try it</b><span class="muted">#4 Address validation with the draft</span></div>
+            <div class="row wrap" style="gap:5px">${stg('impl')}<span class="dim">›</span>${stg('review')}<span class="dim">›</span>${stg('test', 'on a3f9c1e, build-01')}<span class="dim">›</span>${stg('accept')}<span class="muted" style="margin-left:6px">Frontend is free while the test runs.</span></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>` };
+
+/* 3. Board with In review and In test columns */
+function boardHtml() {
+  const C = {
+    pending: [card({ id: 9, deps: '#4', title: 'Card form keyboard order', st: 'pending', role: 'frontend', agent: 'codex', l2: 'Frontend', cls: 'pw',
+        l3: `<span class="hold">${ic('lock')}<span class="ell">Folder held by the test of #4</span></span>` }),
+      card({ id: 6, deps: '#3 #5', title: 'E2E checkout flow', st: 'pending', role: 'tester', agent: 'kimi', l2: 'waits for #3, #5' })],
+    active: [card({ id: 2, deps: '#1', title: 'Saved cards API', st: 'rework', role: 'backend', agent: 'deepseek', l2: 'Attempt 2 · 3 findings', l2c: 'warn',
+        l3: `${stg('review', 'returned r1', 'out')}<span class="grow"></span>${trk(['d', 'c', '', ''], '--warn')}` }),
+      card({ id: 8, deps: '#2', title: 'Rate limits on /v1/cards', st: 'active', role: 'backend', agent: 'deepseek', l2: 'Edit: limits.rs', l2c: 'acc' })],
+    problems: [card({ id: 7, deps: '#2', title: 'Cards table migration', st: 'problem', role: 'backend', agent: 'deepseek', l2: 'Needs your answer', l2c: 'warn', cls: 'pw' })],
+    submitted: [card({ id: 5, deps: '#2', title: 'Contract tests', st: 'submitted', role: 'tester', agent: 'kimi', cls: 'pw', l2: '3 test rounds used', l2c: 'warn',
+        l3: `${stg('accept', 'decides · 7 findings')}<span class="grow"></span>${trk(['d', 'd', 'd', 'c'], '--warn')}` }),
+      card({ id: 10, title: 'Saved cards API docs', st: 'submitted', role: 'secretary', agent: 'claude', l2: 'Report in',
+        l3: `${stg('review', 'waits · 1st in queue', 'out')}<span class="grow"></span>${trk(['d', '', ''])}` })],
+    review: [card({ id: 3, deps: '#1', title: 'Card form UI', st: 'review', role: 'frontend', agent: 'codex', l2: 'Frontend · attempt 1',
+        l3: `${stg('review', 'r1/3')}${who('reviewer', 'claude')}<span class="grow"></span>${trk(['d', 'c', '', ''], '--s-review')}` }),
+      card({ id: 11, deps: '#2', title: 'Ledger cursor index', st: 'review', role: 'backend', agent: 'deepseek', l2: 'Backend · attempt 2',
+        l3: `${stg('review', 'r2/3')}${who('reviewer', 'codex', '2')}<span class="grow"></span>${trk(['d', 'c', '', ''], '--s-review')}` })],
+    test: [card({ id: 4, deps: '#1', title: 'Address validation', st: 'test', role: 'frontend', agent: 'codex', l2: 'Frontend · attempt 2', cls: 'on',
+        l3: `${stg('test', 'r1/3')}${who('tester', 'kimi')}<span class="grow"></span>${trk(['d', 'd', 'c', ''], '--s-test')}` })],
+    accepted: [card({ id: 12, deps: '#1', title: 'Provider token vault', st: 'accepted', role: 'backend', agent: 'deepseek', l2: 'Accepted by Lead', l2c: 'okc',
+        l3: `${stg('review', '✓')}${stg('test', '✓')}<span class="grow"></span>${trk(['d', 'd', 'd', 'd'])}` }),
+      card({ id: 13, title: 'Checkout copy review', st: 'accepted', role: 'secretary', agent: 'claude', l2: 'Accepted · auto', l2c: 'okc',
+        l3: `${stg('review', '✓')}${stg('auto')}<span class="grow"></span>${trk(['d', 'd', 'd'])}` })],
+  };
+  const col = (k, name, cls = '', q = '') => `<div class="bcol ${cls}"><div class="bh">${k === 'review' || k === 'test' ? sti(k) : ''}${name}${q ? `<span class="q">${q}</span>` : ''}<span class="n">${(C[k] || []).length}</span></div>${(C[k] || []).join('') || '<div class="bempty">—</div>'}</div>`;
+  const cols = col('pending', 'Pending') + col('active', 'Active') + col('problems', 'Problems', 'prob') + col('submitted', 'Submitted') + col('review', 'In review', 'rev', '· 1 waiting') + col('test', 'In test', 'tst') + col('accepted', 'Accepted');
+  const empty = ['Pending', 'Active', 'Problems', 'Submitted', 'In review', 'In test', 'Accepted'].map(n => `<div class="bcol ${n === 'In review' ? 'rev' : n === 'In test' ? 'tst' : ''}"><div class="bh">${n}<span class="n">0</span></div><div class="bempty">—</div></div>`);
+  const d3 = [`<div class="bcol"><div class="bh">Pending<span class="n">2</span></div>${card({ id: 14, deps: '#5', title: 'Sandbox flake guard', st: 'pending', role: 'tester', agent: 'kimi', l2: 'Code · review, test, lead', l2c: 'dim' })}${card({ id: 15, title: 'Release notes', st: 'pending', role: 'secretary', agent: 'claude', l2: 'Docs · review, auto', l2c: 'dim' })}</div>`, ...empty.slice(1)].join('');
+  return `
+<div class="twbar"><span class="tn">Orbit platform / checkout</span><span class="tbadge tb-running">${ic('play', 's12')}Running</span><span class="muted">Phase 2 · Build</span><span class="pbar">${'<i class="on"></i>'.repeat(3)}${'<i></i>'.repeat(7)}</span><span class="muted">3/10</span><span class="grow"></span><span class="btn sm">Pause</span><span class="btn sm dng">Stop…</span></div>
+<div class="twbody">
+  <div class="twmain">
+    <div class="twtool"><span class="seg"><span>${ic('graph', 's12')}Graph</span><span class="on">${ic('board', 's12')}Board</span><span>${ic('layers', 's12')}Layers</span></span><span class="grow"></span><span class="muted">Auto-accept drafts</span><span class="btn ghost sm">${ic('chevd', 's12')}Collapse all</span></div>
+    <div class="bscroll" data-scroll="SCROLL">
+      <div class="bpage">
+        <div class="phase"><div class="ph"><span class="dim">${ic('chevr', 's12')}</span><span class="pn">1</span><b>Phase 1 · Analysis</b><span class="tbadge" style="color:var(--accentMuted)">${ic('check', 's12')}Done</span><span class="muted">1/1</span></div></div>
+        <div class="phase run"><div class="ph"><span class="dim">${ic('chevd', 's12')}</span><span class="pn">2</span><b>Phase 2 · Build</b><span class="tbadge tb-running">${ic('play', 's12')}Running</span><span class="pbar">${'<i class="on"></i>'.repeat(2)}${'<i></i>'.repeat(9)}</span><span class="muted">2/11</span><span class="warn">1 folder held</span></div><div class="board7">${cols}</div></div>
+        <div class="phase draft"><div class="ph"><span class="dim">${ic('chevd', 's12')}</span><span class="pn">3</span><b>Phase 3 · Verify &amp; ship</b><span class="tbadge tb-draft">Draft — waiting for you</span><span class="muted">0/2</span></div><div class="board7">${d3}</div></div>
+      </div>
+    </div>
+    <div class="feedbar"><span class="dim">${ic('chevr', 's12')}</span><b>Feed</b><span class="muted">23:02 Review returned #2 to Backend · round 1 · 3 findings</span></div>
+  </div>
+  <div class="side">
+    <div class="sech"><span class="dim">${ic('chevd', 's12')}</span><h3>Members</h3><span class="dim">6</span><span class="grow"></span><span class="btn sm">${ic('plus', 's12')}Member</span></div>
+    <div class="mcard"><span>${tile('claude')}</span><div class="mr">${role('lead')}<span class="muted ell">claude-opus-4-6</span></div><div class="rt">1/3</div>
+      <div class="mr" style="grid-column:2/4">${sti('submitted')}<span class="ell">Deciding #5 Contract tests · after 3 rounds</span></div></div>
+    <div class="mcard"><span>${tile('deepseek')}</span><div class="mr">${role('backend')}<span class="muted ell">deepseek-v4-pro</span></div><div class="rt">0/4</div>
+      <div class="mr" style="grid-column:2/4">${sti('rework')}<span class="ell warn">Fixing #2 · 3 review findings</span></div></div>
+    <div class="mcard probw"><span>${tile('codex')}</span><div class="mr">${role('frontend')}<span class="muted ell">gpt-6.1-sol</span></div><div class="rt">0/3</div>
+      <div class="mr" style="grid-column:2/4"><span class="hold">${ic('lock')}<span>Waits: its folder is held by the test of #4</span></span></div></div>
+    <div class="mcard"><span>${tile('claude')}</span><div class="mr">${role('reviewer')}<span class="muted ell">claude-sonnet-4-6</span></div><div class="rt">stage</div>
+      <div class="mr" style="grid-column:2/4">${sti('review')}<span class="ell">Reviewing #3 Card form UI · round 1</span></div>
+      <div class="sq"><div class="sqh">${ic('pipe', 's12')}Stage queue 1</div><div class="sqr">${stg('review', 'r1')}<span class="ell">#10 Saved cards API docs</span><span class="grow"></span><span class="dim">4m</span></div></div></div>
+    <div class="mcard"><span>${tile('codex')}</span><div class="mr">${role('reviewer', false, 'Reviewer 2')}<span class="muted ell">gpt-5.5-codex</span></div><div class="rt">stage</div>
+      <div class="mr" style="grid-column:2/4">${sti('review')}<span class="ell">Reviewing #11 Ledger cursor index · round 2</span></div></div>
+    <div class="mcard"><span>${tile('kimi')}</span><div class="mr">${role('tester')}<span class="muted ell">kimi-k2.5 · build-01</span></div><div class="rt">stage</div>
+      <div class="mr" style="grid-column:2/4">${sti('test')}<span class="ell">Testing #4 in Frontend’s folder · round 1</span></div>
+      <div class="sq"><div class="sqh">${ic('pipe', 's12')}Stage queue empty · 12m in this stage</div></div></div>
+  </div>
+</div>`;
+}
+V.board = { w: 1440, h: 900, scroll: 760, title: 'Board · In review and In test (narrow window)',
+  cap: 'Two new columns between Submitted and Accepted. Columns keep U33’s 240 px; the whole Board scrolls as one page, here moved right to show the new columns. Each card’s third line is its stage. Members show what stage they work on and their stage queue; the second Reviewer takes waiting stages.',
+  html: () => boardHtml().replace('SCROLL', '760') };
+V.boardwide = { w: 2240, h: 900, title: 'Board · the whole page (wide window)',
+  cap: 'The same Board on a wide window: all seven columns at 240 px, every phase lined up. Phase 2’s header names the held folder; the draft phase shows each task’s pipeline before it is assigned.',
+  html: () => boardHtml().replace('SCROLL', '0') };
+
+/* 4. Stage chips on cards, nodes and rows */
+V.chips = { w: 1180, h: 900, title: 'Task card · the stage chip',
+  cap: 'Line 3 of a card: the stage (color per kind), the round, who works on it and a track of the task’s stages (done, current, to come, skipped). A pending task whose folder is held says so instead. The same chip sits on Graph nodes and Layers rows; its tooltip names the member, the folder and the hold.',
+  html: () => {
+    const cell = (c, t) => `<div class="col" style="width:240px;gap:6px">${c}<div class="note" style="font-size:11px">${t}</div></div>`;
+    const tip = `<div class="tip" style="position:static;width:240px"><div class="row">${stg('test', 'round 1 of 3')}<span class="grow"></span><span class="dim">12m</span></div>
+      <div class="row">${role('tester', true)}${tile('kimi', 't16')}<span>kimi-k2.5 · build-01</span></div>
+      <div>Works in <span class="mono">orbit-team/frontend</span> at <span class="mono">a3f9c1e</span>. Holds the folder: <b>#9 Card form keyboard order</b> waits.</div>
+      <div class="muted">Next: Lead accepts. Returns so far: none in this stage; Review returned once.</div></div>`;
+    const cards = [
+      cell(card({ id: 3, deps: '#1', title: 'Card form UI', st: 'review', role: 'frontend', agent: 'codex', l2: 'Frontend · attempt 1', l3: `${stg('review', 'r1/3')}${who('reviewer', 'claude')}<span class="grow"></span>${trk(['d', 'c', '', ''], '--s-review')}` }), '<b>In review.</b> Round 1 of 3, the Reviewer (Claude) reads the change.'),
+      cell(card({ id: 4, deps: '#1', title: 'Address validation', st: 'test', role: 'frontend', agent: 'codex', l2: 'Frontend · attempt 2', cls: 'on', l3: `${stg('test', 'r1/3')}${who('tester', 'kimi')}<span class="grow"></span>${trk(['d', 'd', 'c', ''], '--s-test')}` }) + tip, '<b>In test</b>, and the chip’s tooltip.'),
+      cell(card({ id: 9, deps: '#4', title: 'Card form keyboard order', st: 'pending', role: 'frontend', agent: 'codex', l2: 'Frontend', cls: 'pw', l3: `<span class="hold">${ic('lock')}<span class="ell">Folder held by the test of #4</span></span>` }), '<b>Pending, folder held.</b> Ready, but the implementer’s folder is under a test; it starts when #4’s test ends.'),
+      cell(card({ id: 2, deps: '#1', title: 'Saved cards API', st: 'rework', role: 'backend', agent: 'deepseek', l2: 'Attempt 2 · 3 findings', l2c: 'warn', l3: `${stg('review', 'returned r1', 'out')}<span class="grow"></span>${trk(['d', 'c', '', ''], '--warn')}` }), '<b>Returned.</b> Review round 1 sent 3 findings to Backend as attempt 2, without the lead.'),
+      cell(card({ id: 10, title: 'Saved cards API docs', st: 'submitted', role: 'secretary', agent: 'claude', l2: 'Report in', l3: `${stg('review', 'waits · 1st in queue', 'out')}<span class="grow"></span>${trk(['d', '', ''])}` }), '<b>Waiting for a stage member.</b> Reported; first in the Reviewers’ stage queue.'),
+      cell(card({ id: 5, deps: '#2', title: 'Contract tests', st: 'submitted', role: 'tester', agent: 'kimi', cls: 'pw', l2: '3 test rounds used', l2c: 'warn', l3: `${stg('accept', 'decides · 7 findings')}<span class="grow"></span>${trk(['d', 'd', 'd', 'c'], '--warn')}` }), '<b>Out of rounds.</b> Test returned it 3 times; the lead decides with every round’s findings.'),
+      cell(card({ id: 11, deps: '#2', title: 'Ledger cursor index', st: 'test', role: 'backend', agent: 'deepseek', l2: 'Backend · attempt 2', l3: `${stg('test', 'r1/3 · detached')}${who('tester', 'kimi')}<span class="grow"></span>${trk(['d', 'd', 'c', ''], '--s-test')}` }), '<b>Detached checkout.</b> The test runs on a copy of the attempt’s commits; Backend keeps working.'),
+      cell(card({ id: 16, title: 'Postal code table', st: 'accept', role: 'backend', agent: 'deepseek', l2: 'Backend · attempt 1', l3: `${stg('review', 'skipped', 'out skip')}${stg('accept')}<span class="grow"></span>${trk(['d', 'x', 'd', 'c'])}` }), '<b>Skipped stage.</b> The lead skipped Review with a reason; the track shows the gap.'),
+      cell(card({ id: 12, deps: '#1', title: 'Provider token vault', st: 'accepted', role: 'backend', agent: 'deepseek', l2: 'Accepted by Lead', l2c: 'okc', l3: `${stg('review', '✓')}${stg('test', '✓')}<span class="grow"></span>${trk(['d', 'd', 'd', 'd'])}` }), '<b>Accepted.</b> The passed stages stay as a summary.'),
+      cell(card({ id: 13, title: 'Checkout copy review', st: 'accepted', role: 'secretary', agent: 'claude', l2: 'Accepted · auto', l2c: 'okc', l3: `${stg('review', '✓')}${stg('auto')}<span class="grow"></span>${trk(['d', 'd', 'd'])}` }), '<b>Auto.</b> Docs preset: accepted once Review passed.'),
+      cell(card({ id: 17, title: 'Shipping copy', st: 'test', role: 'secretary', agent: 'claude', l2: 'Secretary · shared folder', l3: `${stg('test', 'r1/3 · 4 files')}${who('tester', 'kimi')}<span class="grow"></span>${trk(['d', 'd', 'c', ''], '--s-test')}` }), '<b>Shared folder.</b> No hold: the hand-off names the task’s 4 files; others keep working.'),
+    ];
+    const node = `<div style="width:170px;height:84px;border-radius:9px;border:1px solid var(--border);background:var(--surface);padding:6px 8px 6px 12px;display:flex;flex-direction:column;gap:4px;position:relative;overflow:hidden"><span style="position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--s-test)"></span>
+      <div class="row" style="align-items:flex-start;gap:5px"><span class="dim" style="font-size:10.5px">#4</span><b style="font-size:12px">Address validation</b></div>
+      <div class="row">${role('frontend', true)}${tile('codex', 't16')}</div><div class="row">${stg('test', 'r1/3')}${tile('kimi', 't16')}<span class="grow"></span>${trk(['d', 'd', 'c', ''], '--s-test')}</div></div>`;
+    const lrow = `<div style="display:grid;grid-template-columns:16px 1fr auto;column-gap:8px;row-gap:2px;align-items:center;padding:6px 8px;border-radius:8px;border:1px solid var(--cardBorder);background:var(--card);width:470px">${sti('test')}<span><b>#4</b> Address validation</span>${stg('test', 'r1/3')}
+      <span></span><span class="row muted" style="font-size:11px">${role('frontend', true)} attempt 2 · ${role('tester', true)}${tile('kimi', 't16')} kimi-k2.5</span>${trk(['d', 'd', 'c', ''], '--s-test')}</div>`;
+    return `<div style="padding:18px 20px;background:var(--bg);height:100%;display:flex;flex-direction:column;gap:18px">
+      <div style="display:grid;grid-template-columns:repeat(4,240px);gap:20px 26px;align-items:start">${cards.join('')}</div>
+      <div class="row" style="gap:26px;align-items:flex-start"><div class="col"><span class="ih">Graph node</span>${node}</div><div class="col"><span class="ih">Layers row</span>${lrow}</div>
+        <div class="col"><span class="ih">Stage colors</span><div class="row wrap" style="width:300px">${stg('review')}${stg('test')}${stg('accept')}${stg('auto')}${stg('review', 'returned', 'out sk-warn')}${stg('review', 'skipped', 'out skip')}</div></div></div>
+    </div>`;
+  } };
+
+/* 5. Task inspector: the pipeline section with rounds */
+V.inspector = { w: 440, h: 1230, title: 'Task inspector · pipeline and rounds',
+  cap: 'The task panel gains a Pipeline section: the preset snapshot taken at assignment, where the stage works and what changed, then each attempt and stage round with its verdict and findings (fixed ones dimmed). The footer adds the overrides; each asks for a reason and the feed records who did it.',
+  html: () => `
+<div class="insp" style="height:100%;border:0">
+  <div class="ihd"><div class="row"><span class="dim">${ic('chevl')}</span><span class="dim" style="font-size:15px">#4</span><b style="font-size:15px">Address validation</b></div>
+    <div class="row">${sti('test')}<span style="color:var(--s-test)">In test · round 1 of 3</span><span class="muted">Attempt 2</span>${role('frontend')}</div></div>
+  <div class="ibody">
+    <div class="col" style="gap:8px">
+      <div class="row"><span class="ih">${ic('pipe', 's12')}Pipeline</span><span class="grow"></span><span class="muted" style="font-size:11px">Code: review, test, lead · catalog v14</span></div>
+      <div class="pipe">${stg('impl', '✓ 2 attempts')}<span class="arr">›</span>${stg('review', '✓ r2')}<span class="arr">›</span>${stg('test', 'r1/3')}<span class="arr">›</span>${stg('accept', '', 'out')}</div>
+      <div class="box"><div class="kv2">
+        <span class="k">Works in</span><span class="v"><span class="mono">orbit-team/frontend</span> · Frontend’s worktree on macbook</span>
+        <span class="k">Changes</span><span class="v"><span class="mono">e41b2a0..a3f9c1e</span> · 2 commits · 4 files</span>
+        <span class="k">Test may</span><span class="v">read; build; write <span class="mono">.build/</span> and its temp folder</span>
+        <span class="k">Holds</span><span class="v warn">${ic('lock', 's12')} the folder: #9 Card form keyboard order waits</span>
+      </div></div>
+    </div>
+    <div class="col" style="gap:0">
+      <div class="ih" style="margin-bottom:8px">Rounds</div>
+      <div class="rnd"><span class="dot">${ic('imp')}</span><div class="rh"><b>Attempt 1</b>${role('frontend', true)}${tile('codex', 't16')}<span class="grow"></span><span class="dim">22:14–22:46</span></div>
+        <div class="rb"><span>Reported: postal codes per country, message under the field. 14 tests passed.</span></div></div>
+      <div class="rnd" style="--sc:var(--warn)"><span class="dot">${ic('r_reviewer')}</span><div class="rh"><b>Review · round 1</b><span class="verdict v-return">${ic('ret', 's10')}RETURN</span><span class="grow"></span><span class="dim">22:58</span></div>
+        <div class="rb"><span class="row">${role('reviewer', true)}${tile('claude', 't16')}<span>claude-sonnet-4-6 · 3 findings, sent to Frontend as attempt 2</span></span>
+          <div class="find fixed"><span class="sev sev-major">major</span><span>Canadian codes pass in lower case but are stored unnormalized.</span><span class="loc mono">web/checkout/address/validate.ts:41</span></div>
+          <div class="find fixed"><span class="sev sev-minor">minor</span><span>Criterion 3: the error is announced only on submit, not on blur.</span><span class="loc mono">AddressForm.tsx:88</span></div>
+          <div class="find fixed"><span class="sev sev-nit">nit</span><span>Test name repeats “should”.</span><span class="loc mono">validate.test.ts:12</span></div></div></div>
+      <div class="rnd"><span class="dot">${ic('imp')}</span><div class="rh"><b>Attempt 2</b>${role('frontend', true)}${tile('codex', 't16')}<span class="grow"></span><span class="dim">23:02–23:20</span></div>
+        <div class="rb"><span>Fixed all 3; normalization in <span class="mono">normalizePostal()</span>. 17 tests passed.</span></div></div>
+      <div class="rnd" style="--sc:var(--accent)"><span class="dot">${ic('r_reviewer')}</span><div class="rh"><b>Review · round 2</b><span class="verdict v-pass">${ic('tick', 's10')}PASS</span><span class="grow"></span><span class="dim">23:27</span></div>
+        <div class="rb"><span class="row">${role('reviewer', true)}${tile('claude', 't16')}<span>The three findings are fixed; criteria 1–3 met.</span></span></div></div>
+      <div class="rnd" style="--sc:var(--s-test)"><span class="dot">${ic('r_tester')}</span><div class="rh"><b>Test · round 1</b><span class="verdict v-run">${ic('play', 's10')}RUNNING 12m</span><span class="grow"></span><span class="dim">23:29</span></div>
+        <div class="rb"><span class="row">${role('tester', true)}${tile('kimi', 't16')}<span>kimi-k2.5 · build-01</span></span>
+          <span>Suites of the changed files: <span class="mono">pnpm test web/checkout/address</span> — 17 passed; <span class="mono">test_checkout_e2e</span> running</span>
+          <span>Shots: 2 of 3 criteria · <span class="acc">open</span></span></div></div>
+      <div class="rnd" style="--sc:var(--muted)"><span class="dot">${ic('r_lead')}</span><div class="rh"><b>Lead accepts</b><span class="verdict v-wait">NEXT</span></div>
+        <div class="rb"><span>After the test passes. Out of rounds goes here too, with every round’s findings.</span></div></div>
+    </div>
+    <div class="col" style="gap:4px">
+      <div class="ih">Acceptance criteria</div>
+      <div class="row"><span class="cbx on"></span>Postal codes are checked per country</div>
+      <div class="row"><span class="cbx on"></span>Street, city, postal code keep keyboard order</div>
+      <div class="row"><span class="cbx"></span>The error shows under the field on blur</div>
+    </div>
+  </div>
+  <div class="ifoot"><span class="btn sm pri">Accept now…</span><span class="btn sm">${ic('skip', 's12')}Skip test…</span><span class="btn sm">${ic('ret', 's12')}Send back…</span><span class="btn sm dng">Reject…</span><span class="grow"></span><span class="btn sm">More ${ic('chevd', 's10')}</span></div>
+</div>` };
+
+/* 6. Plan editor: the pipeline picker, and the overrides on a running task */
+V.plan = { w: 1240, h: 880, title: 'Plan editor · pipeline picker and overrides',
+  cap: 'Left: the plan review panel’s task editor gains Pipeline — the preset (the template’s or role’s default is marked) and its stages, where a stage can be skipped for this task with a reason. The lead sets the same with hgs team plan and edit-draft. Right: on a running task the stage menu offers Accept now, Skip, Send back and Reject at any stage; each asks for a reason and lands in the feed with who did it.',
+  html: () => `
+<div class="row" style="height:100%;align-items:stretch;gap:0;background:var(--page)">
+  <div class="insp" style="width:500px;border-width:0 1px 0 0">
+    <div class="ihd"><div class="row"><span class="tbadge tb-draft" style="border-style:solid">${ic('circle', 's12')}Planning</span><b style="font-size:14px">Checkout redesign</b><span class="grow"></span><span class="btn sm">Send back to lead</span><span class="btn sm pri">Approve &amp; Run</span></div>
+      <span class="muted">Plan from Lead — review before running</span></div>
+    <div class="ibody" style="gap:10px">
+      <div class="row"><b style="font-size:13px">Task #4</b><span class="grow"></span><span class="btn ghost sm dng">${ic('trash', 's12')}Remove from plan</span></div>
+      <div class="kv2" style="grid-template-columns:100px 1fr;gap:8px 10px;align-items:center">
+        <span class="k">Title</span><span class="field">Address validation</span>
+        <span class="k" style="align-self:start;padding-top:5px">Description</span><span class="field ta">Check postal codes per country with the message under the field; keep the public contract.</span>
+        <span class="k" style="align-self:start;padding-top:5px">Acceptance criteria</span><span class="field ta">Postal codes are checked per country<br>The error shows under the field on blur</span>
+        <span class="k">Depends on</span><span class="row"><span class="pill out" style="height:24px"><span class="okc">${ic('checkf', 's12')}</span>#1 Requirements and acceptance</span></span>
+        <span class="k">Assignee</span><span class="field sel">${role('frontend', true)}${tile('codex', 't16')}gpt-6.1-sol · macbook</span>
+        <span class="k">Pipeline</span><div class="field sel focus" style="position:relative">${ic('pipe', 's12')}<b>Code: review, test, lead</b><span class="pill acc" style="height:17px">template default</span></div>
+      </div>
+      <div style="position:relative;height:250px">
+        <div class="menu" style="left:110px;top:-2px;width:356px">
+          <div class="mh">Feature delivery · Frontend</div>
+          <div class="mi on"><span class="acc">${ic('tick', 's12')}</span><span class="row"><b>Code: review, test, lead</b><span class="pill acc" style="height:16px;font-size:10px">template default</span></span><span class="md">Review › Test › Lead · 3 rounds</span></div>
+          <div class="mi"><span></span><b>Docs: review, auto</b><span class="md">Review › Auto · 2 rounds · Secretary’s default</span></div>
+          <div class="mi"><span></span><b>Check: lead</b><span class="md">Lead only, as today</span></div>
+          <div class="mi"><span></span><b>None</b><span class="md">The report accepts the task</span></div>
+          <div class="msep"></div>
+          <div class="mi"><span class="dim">${ic('pipe', 's12')}</span><span>Edit pipelines in the catalog…</span></div>
+        </div>
+      </div>
+      <div class="col" style="gap:6px;margin-left:110px">
+        <div class="ih">Stages for this task</div>
+        <div class="row" style="padding:5px 8px;border:1px solid var(--cardBorder);border-radius:8px;background:var(--card)">${stg('review')}${role('reviewer', true)}<span class="muted">first free</span><span class="grow"></span><span class="muted" style="font-size:11px">Skip</span><span class="cbx"></span></div>
+        <div class="row" style="padding:5px 8px;border:1px solid var(--cardBorder);border-radius:8px;background:var(--card)">${stg('test', '', 'skip')}${role('tester', true)}<span class="grow"></span><span class="muted" style="font-size:11px">Skip</span><span class="cbx on"></span></div>
+        <div class="field" style="min-height:25px;margin-left:22px;width:auto">Why: “covered by #6 E2E checkout flow”</div>
+        <div class="row" style="padding:5px 8px;border:1px solid var(--cardBorder);border-radius:8px;background:var(--card)">${stg('accept')}<span class="muted">the lead</span><span class="grow"></span><span class="dim" style="font-size:11px">final</span></div>
+        <span class="note">Changes the preset for this task only. The task keeps this snapshot when it is assigned.</span>
+      </div>
+    </div>
+  </div>
+  <div style="flex:1;display:flex;flex-direction:column;gap:12px;padding:16px 18px;min-width:0;background:var(--bg)">
+    <div class="ih">On a running task</div>
+    <div class="box" style="gap:9px;position:relative">
+      <div class="row"><span class="dim" style="font-size:14px">#3</span><b style="font-size:14px">Card form UI</b><span class="grow"></span>${stg('review', 'r2/3')}${who('reviewer', 'claude')}</div>
+      <div class="pipe">${stg('impl', '✓ 2 attempts')}<span class="arr">›</span>${stg('review', 'r2/3')}<span class="arr">›</span>${stg('test', '', 'out')}<span class="arr">›</span>${stg('accept', '', 'out')}</div>
+      <div class="row"><span class="btn sm on" style="background:var(--segOn);border-color:var(--cardSelBorder);color:var(--accent)">Stage ${ic('chevd', 's10')}</span><span class="btn sm">Reassign…</span><span class="grow"></span><span class="btn sm">More ${ic('chevd', 's10')}</span></div>
+      <div style="height:226px"></div>
+      <div class="menu" style="left:10px;top:104px;width:330px">
+        <div class="mi"><span class="acc">${ic('tick', 's12')}</span><b>Accept now…</b><span class="md">Ends the pipeline here; Test and Lead are not run</span></div>
+        <div class="mi on"><span>${ic('skip', 's12')}</span><b>Skip Review…</b><span class="md">Moves to Test now; the round so far is kept</span></div>
+        <div class="mi"><span>${ic('ret', 's12')}</span><b>Send back to Frontend…</b><span class="md">A new attempt with your reason as a finding</span></div>
+        <div class="msep"></div>
+        <div class="mi"><span class="danger">${ic('x', 's12')}</span><span class="danger">Reject…</span><span class="md">As today: the task goes back with a comment</span></div>
+      </div>
+    </div>
+    <div class="box" style="gap:8px;border-color:var(--cardSelBorder)">
+      <div class="row"><span>${ic('skip')}</span><b style="font-size:13px">Skip Review on #3 Card form UI?</b></div>
+      <span class="muted">The Reviewer stops; #3 moves to Test. The feed records that you skipped it and why.</span>
+      <div class="field focus" style="min-height:44px;align-items:flex-start">Storybook already reviewed by the owner|</div>
+      <div class="row"><span class="grow"></span><span class="btn sm">Cancel</span><span class="btn sm pri">Skip Review</span></div>
+    </div>
+    <div class="col" style="gap:0">
+      <div class="row" style="margin-bottom:4px"><b>Feed</b><span class="muted">pipeline overrides</span></div>
+      <div class="frow"><span class="ft mono">23:41</span><span>${ic('skip', 's12')}</span><span class="fx">You skipped Review on #3 at round 2: “Storybook already reviewed by the owner”</span></div>
+      <div class="frow"><span class="ft mono">23:35</span><span class="acc">${ic('tick', 's12')}</span><span class="fx">Lead accepted #5 at Test round 3: “sandbox flake, tracked in #14”</span></div>
+      <div class="frow"><span class="ft mono">23:20</span><span class="warn">${ic('ret', 's12')}</span><span class="fx">You sent #2 back to Backend at Review round 1: “keep cursor ids opaque”</span></div>
+      <div class="frow"><span class="ft mono">23:02</span><span class="warn">${ic('ret', 's12')}</span><span class="fx">Review returned #2 to Backend · round 1 · 3 findings</span></div>
+    </div>
+  </div>
+</div>` };
+
+/* ---------------------------------------------------------------- render */
+const params = new URLSearchParams(location.search);
+const theme = params.get('theme') || 'dark';
+const one = params.get('view');
+const root = document.getElementById('root');
+const frame = (k) => `<div class="app ${theme === 'light' ? 'light' : ''}" style="width:${V[k].w}px;height:${V[k].h}px">${V[k].html()}</div>`;
+if (one && V[one]) {
+  document.body.classList.add('shot');
+  if (theme === 'light') document.body.classList.add('lightpage');
+  root.innerHTML = frame(one);
+} else {
+  if (theme === 'light') document.body.classList.add('lightpage');
+  const other = theme === 'light' ? 'dark' : 'light';
+  root.innerHTML = `<div class="gal"><header><h1>U36 · Task pipelines — mock-up</h1>
+    <span class="tgl"><a href="?theme=dark" class="${theme === 'dark' ? 'on' : ''}">Dark</a><a href="?theme=light" class="${theme === 'light' ? 'on' : ''}">Light</a></span></header>
+    <p class="lead">Review and test inside each task: a task carries a pipeline of stages after its report; a stage member’s verdict moves it on or returns it to the implementer, and the lead decides after the last stage or when the rounds run out. Every view below has a PNG beside this file in both themes (<code>shots/&lt;view&gt;-dark.png</code>, <code>-light.png</code>). Sample data: the Orbit checkout team from the UI prototype.</p>
+    <nav>${Object.keys(V).map(k => `<a href="#${k}">${V[k].title}</a>`).join('')}</nav>
+    ${Object.keys(V).map(k => `<section id="${k}"><h2>${V[k].title}</h2><p class="cap">${V[k].cap}</p><div class="frame">${frame(k)}</div></section>`).join('')}</div>`;
+}
+document.querySelectorAll('[data-scroll]').forEach(e => { e.scrollLeft = +e.dataset.scroll; });
+</script>
+</body>
+</html>

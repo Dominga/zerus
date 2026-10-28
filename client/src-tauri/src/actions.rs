@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::Duration;
 
 use tauri::State;
 use zerus_client_core::actions::{
@@ -323,6 +324,22 @@ impl Attention {
         }
     }
 
+    /// Waits at most `limit` until the file holds every change made so far,
+    /// and says whether it does. A write in progress is never interrupted: the
+    /// writer saves to a temporary file and renames it, so a process that ends
+    /// mid-write leaves the old file whole.
+    pub fn flush_within(&self, limit: Duration) -> bool {
+        let state = self.shared.lock();
+        let (state, _) = self
+            .shared
+            .signal
+            .wait_timeout_while(state, limit, |state| {
+                state.marks.is_none() || state.dirty || state.writing
+            })
+            .unwrap_or_else(PoisonError::into_inner);
+        !(state.marks.is_none() || state.dirty || state.writing)
+    }
+
     /// Waits until the file holds every change made so far.
     #[cfg(test)]
     pub fn flush(&self) {
@@ -403,6 +420,29 @@ impl AttentionShared {
             }
             self.lock().writing = false;
             self.signal.notify_all();
+        }
+    }
+}
+
+/// How long the exit waits for the attention writer.
+// Called from the Exit block once it lands (zerus-5wmh.53).
+#[cfg(feature = "live")]
+#[allow(dead_code)]
+const EXIT_FLUSH_LIMIT: Duration = Duration::from_millis(750);
+
+/// For the app's exit: Tauri ends the process after `RunEvent::Exit`, so
+/// `Attention`'s drop never runs. Saves the unsent read marks (a no-op when
+/// none), then waits a bounded time for the attention writer.
+#[cfg(feature = "live")]
+#[allow(dead_code)]
+pub fn flush_on_exit(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(actions) = app.try_state::<Actions>() {
+        actions.flush_marks();
+    }
+    if let Some(attention) = app.try_state::<Attention>() {
+        if !attention.flush_within(EXIT_FLUSH_LIMIT) {
+            eprintln!("zerus-client: attention marks were not saved before exit");
         }
     }
 }
@@ -1071,6 +1111,50 @@ mod tests {
         attention.flush();
         drop(attention);
         assert_eq!(Attention::new(path.clone()).snapshot().order, order);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn flush_within_returns_at_once_when_nothing_is_dirty() {
+        let path = attention_path("within-clean");
+        let attention = Attention::new(path.clone());
+        let started = std::time::Instant::now();
+        assert!(attention.flush_within(std::time::Duration::from_secs(30)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn flush_within_is_true_once_a_pending_change_is_written() {
+        let path = attention_path("within-write");
+        let key = r#"["mac","claude","conv-1"]"#.to_owned();
+        let attention = Attention::new(path.clone());
+        attention.update(
+            BTreeMap::new(),
+            BTreeMap::from([(key.clone(), Some("r1".to_owned()))]),
+        );
+        assert!(attention.flush_within(std::time::Duration::from_secs(30)));
+        assert_eq!(Attention::new(path.clone()).snapshot().replies[&key], "r1");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn flush_within_gives_up_at_the_limit_while_the_writer_is_busy() {
+        let path = attention_path("within-busy");
+        let attention = Attention::new(path.clone());
+        attention.snapshot();
+        // A write in progress that does not finish.
+        attention.shared.lock().writing = true;
+        let started = std::time::Instant::now();
+        let limit = std::time::Duration::from_millis(100);
+        assert!(!attention.flush_within(limit));
+        let waited = started.elapsed();
+        assert!(waited >= limit, "waited the whole limit: {waited:?}");
+        assert!(waited < std::time::Duration::from_secs(10));
+        // The write ends: everything is on file.
+        attention.shared.lock().writing = false;
+        attention.shared.signal.notify_all();
+        assert!(attention.flush_within(std::time::Duration::from_secs(30)));
         let _ = std::fs::remove_file(&path);
     }
 

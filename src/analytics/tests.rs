@@ -5,12 +5,25 @@ use store::{Store, NIL_EPOCH};
 
 const AT: i64 = 1_792_281_600_000; // 2026-10-18T00:00:00Z
 const MACHINE: &str = "11111111-1111-4111-8111-111111111111";
-fn enabled() -> (tempfile::TempDir, Store) {
-    let dir = tempfile::tempdir().unwrap();
-    crate::platform::restrict_dir(dir.path()).unwrap();
-    let mut db = Store::open(dir.path(), true, true).unwrap().unwrap();
+/// The store's own folder inside a temp folder. The store creates it
+/// owner-only, as in the product: a folder that already exists (the temp
+/// folder itself) keeps whatever ACL it inherited, and a store refuses it on a
+/// computer where that is not private (#526).
+struct Folder {
+    _temp: tempfile::TempDir,
+    root: std::path::PathBuf,
+}
+impl Folder {
+    fn path(&self) -> &std::path::Path {
+        &self.root
+    }
+}
+fn enabled() -> (Folder, Store) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("analytics");
+    let mut db = Store::open(&root, true, true).unwrap().unwrap();
     db.configure(NIL_EPOCH, true, 90, AT - 86_400_000).unwrap();
-    (dir, db)
+    (Folder { _temp: temp, root }, db)
 }
 fn event(id: &str, kind: Kind, at: i64) -> Event {
     Event {

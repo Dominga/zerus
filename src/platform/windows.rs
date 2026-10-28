@@ -996,6 +996,106 @@ pub fn grant_full_control(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// An ACL with one entry: this user's FullControl, which a folder's new files
+/// and folders inherit when `container`.
+fn owner_only_acl(container: bool) -> io::Result<Acl> {
+    use windows_sys::Win32::Security::NO_INHERITANCE;
+    let sid = process::current_user().ok_or_else(|| io::Error::other("this user's identity is unavailable"))?;
+    let access = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: FILE_ALL_ACCESS,
+        grfAccessMode: GRANT_ACCESS,
+        grfInheritance: if container { SUB_CONTAINERS_AND_OBJECTS_INHERIT } else { NO_INHERITANCE },
+        Trustee: TRUSTEE_W {
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_UNKNOWN,
+            ptstrName: sid.as_ptr() as *mut u16,
+            ..Default::default()
+        },
+    };
+    let mut acl: *mut ACL = std::ptr::null_mut();
+    let code = unsafe { SetEntriesInAclW(1, &access, std::ptr::null(), &mut acl) };
+    if code != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    Ok(Acl(acl))
+}
+
+/// #526: creates `path` and its missing parents, each new folder with a
+/// protected DACL that grants only this user, as Unix creates them 0700. An
+/// inherited ACL is not private on every computer: a folder on a second drive
+/// inherits Authenticated Users Modify, and a Codex sandbox adds its users to
+/// the profile. A folder that already exists keeps its ACL, so a privacy check
+/// still refuses one that Zerus did not make private.
+pub fn owner_only_dir(path: &Path) -> io::Result<()> {
+    use windows_sys::Win32::{
+        Foundation::ERROR_ALREADY_EXISTS,
+        Security::{
+            InitializeSecurityDescriptor, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
+            SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SE_DACL_PROTECTED,
+        },
+        Storage::FileSystem::CreateDirectoryW,
+    };
+    let mut missing = Vec::new();
+    let mut next = Some(path);
+    while let Some(folder) = next.filter(|folder| !folder.as_os_str().is_empty() && !folder.exists()) {
+        missing.push(folder);
+        next = folder.parent();
+    }
+    if missing.is_empty() {
+        return if path.is_dir() { Ok(()) } else { Err(io::Error::from(io::ErrorKind::AlreadyExists)) };
+    }
+    let acl = owner_only_acl(true)?;
+    let mut descriptor: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+    let pointer = &mut descriptor as *mut SECURITY_DESCRIPTOR as PSECURITY_DESCRIPTOR;
+    // SECURITY_DESCRIPTOR_REVISION.
+    if unsafe { InitializeSecurityDescriptor(pointer, 1) } == 0
+        || unsafe { SetSecurityDescriptorDacl(pointer, 1, acl.0, 0) } == 0
+        || unsafe { SetSecurityDescriptorControl(pointer, SE_DACL_PROTECTED, SE_DACL_PROTECTED) } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: pointer,
+        bInheritHandle: 0,
+    };
+    for folder in missing.into_iter().rev() {
+        let wide = wide_path(folder);
+        if unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) } == 0 {
+            let error = io::Error::last_os_error();
+            // Another process made it meanwhile: it keeps its own ACL.
+            if error.raw_os_error() != Some(ERROR_ALREADY_EXISTS as i32) || !folder.is_dir() {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// #526: gives a file this process has just created, before anything is
+/// written to it, a protected DACL that grants only this user, as Unix
+/// creates private files 0600.
+pub fn owner_only_file(path: &Path) -> io::Result<()> {
+    use windows_sys::Win32::Security::PROTECTED_DACL_SECURITY_INFORMATION;
+    let acl = owner_only_acl(false)?;
+    let wide = wide_path(path);
+    let code = unsafe {
+        SetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            acl.0,
+            std::ptr::null_mut(),
+        )
+    };
+    if code != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    Ok(())
+}
+
 /// U34: the one-line fix the owner gets when the sandbox cannot use a folder;
 /// None when this process already has both rights.
 pub fn sandbox_folder_problem(path: &Path) -> io::Result<Option<String>> {
@@ -2259,6 +2359,52 @@ pub fn stdin_from_bytes(bytes: Vec<u8>) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #526: under a folder whose ACL passes Authenticated Users Modify on (as
+    /// a second drive does), a folder made by create_dir_all is not private and
+    /// the check refuses it; owner_only_dir makes each new folder private, and
+    /// so are the files created inside it and a file owner_only_file protects.
+    /// A folder that already existed keeps its ACL and stays refused.
+    #[test]
+    fn owner_only_folders_and_files_stay_private_under_an_open_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let open = temp.path().join("open");
+        fs::create_dir(&open).unwrap();
+        // S-1-5-11: Authenticated Users.
+        let granted = Command::new("icacls")
+            .arg(&open)
+            .args(["/grant", "*S-1-5-11:(OI)(CI)M", "/Q"])
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(granted.success());
+        let inherited = open.join("inherited");
+        fs::create_dir_all(&inherited).unwrap();
+        assert!(!verify_private(&inherited, Private::Directory).unwrap(), "the check refuses an inherited open ACL");
+
+        let private = open.join("a").join("b");
+        owner_only_dir(&private).unwrap();
+        for folder in [open.join("a"), private.clone()] {
+            assert!(verify_private(&folder, Private::Directory).unwrap(), "{}", folder.display());
+        }
+        fs::write(private.join("store.sqlite3"), b"x").unwrap();
+        assert!(verify_private(&private.join("store.sqlite3"), Private::File).unwrap(), "a new file inherits only this user");
+        // Again: nothing to create, nothing changes.
+        owner_only_dir(&private).unwrap();
+        assert!(verify_private(&private, Private::Directory).unwrap());
+        // A folder Zerus did not make private stays refused.
+        owner_only_dir(&inherited).unwrap();
+        assert!(!verify_private(&inherited, Private::Directory).unwrap());
+        // A file is not a folder.
+        assert!(owner_only_dir(&private.join("store.sqlite3")).is_err());
+
+        let file = open.join("marks.json");
+        fs::write(&file, b"{}").unwrap();
+        assert!(!verify_private(&file, Private::File).unwrap());
+        owner_only_file(&file).unwrap();
+        assert!(verify_private(&file, Private::File).unwrap());
+        assert_eq!(fs::read(&file).unwrap(), b"{}");
+    }
 
     /// U34: a folder that inherits Modify only has WRITE_DAC (the owner's
     /// implicit right) but no WRITE_OWNER, so the DeepSeek sandbox would fail;

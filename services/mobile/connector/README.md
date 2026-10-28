@@ -50,7 +50,8 @@ advertises the computer-scoped `git_status` read. Its exact payload is
 `{request_id,path}` with an empty session; v1 uses the existing POSIX mobile
 folder contract: a leading slash, no controls and at most 4096 UTF-8 bytes.
 Windows Git transport is unsupported and unqualified in this version. It invokes only
-`hgs git-status --path PATH --json`, without stdin, within five seconds. A
+`hgs git-status --path PATH --json`, without stdin, within 25 seconds (hgs bounds
+each of its Git reads to 2 seconds, 19 seconds in all). A
 32 KiB whitelist projection keeps checkout/publication metadata, with absent
 counts remaining absent and no file lists or remote URLs. The result is
 `{schema:1,request_id,requested_path,snapshot}`: `requested_path` preserves the

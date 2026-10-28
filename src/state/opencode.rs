@@ -2202,7 +2202,7 @@ mod tests {
         let (old, new) = ("opencode/p/old", "opencode/p/new");
         let marks = dir.path().join("read-marks.json");
         let before = rename_marks(old);
-        atomic(&marks, &before.to_string()).unwrap();
+        atomic_private(&marks, &before.to_string()).unwrap();
         let mut guard = read_marks::RenameGuard::at(&marks).unwrap();
         let old_binding = dir.path().join("old.json");
         let new_binding = dir.path().join("new.json");
@@ -2258,7 +2258,7 @@ mod tests {
             let (old, new) = ("opencode/p/old", "opencode/p/new");
             let marks = dir.path().join("read-marks.json");
             let before = rename_marks(old);
-            atomic(&marks, &before.to_string()).unwrap();
+            atomic_private(&marks, &before.to_string()).unwrap();
             let mut guard = read_marks::RenameGuard::at(&marks).unwrap();
             let (old_binding, new_binding) =
                 (dir.path().join("old.json"), dir.path().join("new.json"));
@@ -2392,7 +2392,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("read-marks.json");
         let bytes = b"{\"version\":1, \"sessions\":{\"other\":{\"conversation\":{\"reply_id\":\"same\"}}}}\n";
-        atomic(&path, std::str::from_utf8(bytes).unwrap()).unwrap();
+        atomic_private(&path, std::str::from_utf8(bytes).unwrap()).unwrap();
         let mut guard = read_marks::RenameGuard::at(&path).unwrap();
         guard.transfer("missing", "new").unwrap();
         guard.transfer("other", "other").unwrap();

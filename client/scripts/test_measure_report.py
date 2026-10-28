@@ -128,6 +128,26 @@ class MeasureReportTest(unittest.TestCase):
         compare = page.split('class="compare"', 1)[1].split("</table>", 1)[0]
         self.assertEqual(len(re.findall("<tr><th scope=\"row\">", compare)), 6)
 
+    def test_activity_source_is_shown_and_older_files_still_render(self):
+        old = client_report("synthetic-old", 1000 / 120)
+        self.assertNotIn("activity_source", old)
+        self.assertNotIn("Источник Activity", report.build([old]))
+        replayed = client_report("synthetic-replay", 1000 / 120)
+        replayed["activity_source"] = {"replay": True, "events": 1100, "scroll_px": 2412, "older_pages": 4}
+        page = report.build([replayed])
+        self.assertIn("Источник Activity: воспроизведение", page)
+        self.assertIn("событий 1100", page)
+        self.assertIn("прокрутка 2412" + report.NBSP + "px", page)
+        self.assertIn("прочитано страниц 4", page)
+        live = client_report("synthetic-live", 1000 / 120)
+        live["activity_source"] = {"replay": False, "events": 250, "scroll_px": 12, "older_pages": 0}
+        self.assertIn("Источник Activity: живой список", report.build([live]))
+        self.assertFalse(any(c in report.build([replayed, live]) for c in report.SEPARATORS))
+        # A malformed field never breaks the page.
+        broken = client_report("synthetic-broken", 1000 / 120)
+        broken["activity_source"] = "oops"
+        self.assertNotIn("Источник Activity", report.build([broken]))
+
     def test_cli_writes_the_page(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = pathlib.Path(tmp) / "client.json"

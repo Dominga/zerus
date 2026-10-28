@@ -255,7 +255,8 @@ pub async fn unfollow(
 /// `ZERUS_CLIENT_PERF_OUT` (where the report goes), `ZERUS_CLIENT_PERF_LABEL`
 /// (the platform label), `ZERUS_CLIENT_PERF_REPRESENTATIVE=0` (Xvfb and other
 /// non-representative runs) and `ZERUS_CLIENT_PERF_PREFERENCE` (`default`
-/// leaves the macOS and Linux WebKit frame-rate preference unchanged).
+/// leaves the macOS and Linux WebKit frame-rate preference unchanged). `replay`
+/// tells the page that `ZERUS_CLIENT_REPLAY` supplies the data.
 #[tauri::command]
 pub fn perf_config() -> Value {
     let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
@@ -270,6 +271,8 @@ pub fn perf_config() -> Value {
         "display": crate::display::display_name(),
         // The actions smoke runs only on a replay with an explicit fake hgs.
         "actions_smoke": actions_smoke_allowed(),
+        // A replay run measures a synthetic Activity (the auto run tries every session for it).
+        "replay": var("ZERUS_CLIENT_REPLAY").is_some(),
     })
 }
 

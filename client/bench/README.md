@@ -339,6 +339,59 @@ end. It records process names only, never command lines or paths, and never
 signals or attaches to the process. "Idle" means no input from the harness; the
 GUI keeps following its live sessions meanwhile, and the owner may be using it.
 
+## Activity pass in replay mode
+
+A real catalog does not always hold an Activity that scrolls: on the 120 Hz Mac
+`activity-scroll` was skipped as nothing to scroll. The measurement therefore has
+two passes in the same display window:
+
+- the **live pass** (no `ZERUS_CLIENT_REPLAY`) measures the real session list
+  (`list-scroll`) and, when a live session happens to scroll, `activity-scroll`;
+- the **replay pass** measures Activity: the same auto run with
+  `ZERUS_CLIENT_REPLAY` set to `client/fixtures/replay.ndjson`, whose session
+  `run:000001-run` holds 1100 synthetic events.
+
+Replay never touches real data: read marks go to a separate file and actions stay
+blocked without a fake `ZERUS_CLIENT_HGS`. In replay mode the run tries every
+session of the catalog (a live run tries 16 at most), reads older pages with
+`activity.loadOlder` and keeps the first session that scrolls 2000 px, so the
+choice does not depend on list order. The report holds a top-level
+`activity_source` object (`replay`, `events`, `scroll_px`, `older_pages`; counts
+only), `measure-report.py` prints it in the run details, and the run logs
+`activity source: replay, N events, M px, K older pages`. A skipped scroll
+scenario says how far it scrolled, for example `nothing to scroll (12 px)`.
+
+Build the binary with the frontend embedded (a plain `cargo build --release`
+loads the dev server URL and never starts the run): `npm run build`, then in
+`client/src-tauri` `cargo +1.99.1 build --release --locked --features tauri/custom-protocol`.
+
+Linux, headless (never a window on a desktop), from the repository root:
+
+```sh
+env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 ZERUS_CLIENT_HEADLESS=1 \
+  xvfb-run -a -s "-screen 0 1440x900x24" \
+  env ZERUS_CLIENT_PERF=auto ZERUS_CLIENT_PERF_OUT="$PWD/replay-linux.json" ZERUS_CLIENT_PERF_LABEL=linux-replay \
+      ZERUS_CLIENT_PERF_REPRESENTATIVE=0 ZERUS_CLIENT_REPLAY="$PWD/client/fixtures/replay.ndjson" \
+      client/src-tauri/target/release/zerus-client
+```
+
+macOS, a bundle of the release build with its own identifier (never the
+installed app's or the Phase 2 build's), started by `open` in the console session
+like the Qt bench above. `open --env` passes the variables and every path is
+absolute:
+
+```sh
+client/bench/mac-bundle.sh client/src-tauri/target/release/zerus-client bundles/ZerusPerfReplay.app dev.zerus.next.perfreplay
+open -n -W --stdout "$PWD/replay.out" --stderr "$PWD/replay.err" \
+  --env ZERUS_CLIENT_PERF=auto --env ZERUS_CLIENT_PERF_OUT="$PWD/replay-mac.json" \
+  --env ZERUS_CLIENT_PERF_LABEL=mac-replay --env ZERUS_CLIENT_REPLAY="$PWD/client/fixtures/replay.ndjson" \
+  bundles/ZerusPerfReplay.app
+```
+
+Run the live pass in the same window with the same bundle and without the
+`ZERUS_CLIENT_REPLAY` variable (and another `--env ZERUS_CLIENT_PERF_OUT`). Put
+both reports on one page with `measure-report.py`.
+
 ## Recorded results
 
 | File | What |

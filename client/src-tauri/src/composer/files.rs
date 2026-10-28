@@ -59,8 +59,10 @@ impl Cache {
         spawn: &Spawn,
         extra: Arc<dyn Fn() -> HashSet<PathBuf> + Send + Sync>,
     ) {
+        // Asked for before the claim: a prune that ends between the two
+        // still sees it.
+        self.again.store(true, Ordering::SeqCst);
         if self.pruning.swap(true, Ordering::SeqCst) {
-            self.again.store(true, Ordering::SeqCst);
             return;
         }
         let cache = Arc::clone(self);
@@ -1161,5 +1163,38 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn a_store_during_a_prune_runs_exactly_one_more() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Mutex;
+        let root = dir("prune-later");
+        let cache = Cache::new(root.join("cache"));
+        let jobs: Arc<Mutex<Vec<crate::composer::Job>>> = Arc::default();
+        let queue = Arc::clone(&jobs);
+        let spawn: Spawn = Arc::new(move |job| queue.lock().unwrap().push(job));
+        let asked = Arc::new(AtomicUsize::new(0));
+        let (counted, me, again) = (Arc::clone(&asked), Arc::clone(&cache), Arc::clone(&spawn));
+        // The first prune meets a store of its own while it runs.
+        let extra: Arc<dyn Fn() -> HashSet<PathBuf> + Send + Sync> = Arc::new(move || {
+            if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                me.prune_later(&again, Arc::new(HashSet::new));
+            }
+            HashSet::new()
+        });
+        cache.prune_later(&spawn, Arc::clone(&extra));
+        cache.prune_later(&spawn, Arc::clone(&extra));
+        assert_eq!(jobs.lock().unwrap().len(), 1, "one prune at a time");
+        let job = jobs.lock().unwrap().pop().unwrap();
+        job();
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            2,
+            "the store during it ran one more"
+        );
+        assert!(jobs.lock().unwrap().is_empty());
+        cache.prune_later(&spawn, extra);
+        assert_eq!(jobs.lock().unwrap().len(), 1, "a later store prunes again");
     }
 }

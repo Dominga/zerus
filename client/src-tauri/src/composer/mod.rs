@@ -70,8 +70,9 @@ const EXCERPT_CHARS: usize = 1200;
 const EXIT_WAIT: Duration = Duration::from_secs(2);
 /// A failed save is tried again after this long (Qt's `retrySave` timer).
 const SAVE_RETRY: Duration = Duration::from_secs(2);
-/// Events of the followed session kept for the local rows' reconcile.
-const EVENTS: usize = 200;
+/// Events of the followed session kept for the local rows' reconcile, as
+/// many as Qt keeps in `m_events` (`SessionsWindow.cpp:3651`).
+const EVENTS: usize = 500;
 /// Sessions whose draft key the hub remembers by catalog key, as S4 keeps
 /// the local rows of at most 512 sessions.
 const OPENED: usize = 512;
@@ -205,6 +206,9 @@ pub(crate) struct Composer {
     /// A Retry that leaves this draft as it is (Qt's `m_preservedDrafts`):
     /// its error mark and notice, given back when the delivery ends.
     pub(crate) kept: Option<(bool, String)>,
+    /// The delivery under way, by the revision of its "sending" save: only
+    /// that delivery may call or end; an older one's late steps do nothing.
+    pub(crate) delivering: Option<u64>,
 }
 
 impl Composer {
@@ -234,6 +238,7 @@ impl Composer {
             saving: false,
             save_failed: false,
             kept: None,
+            delivering: None,
         }
     }
 
@@ -307,7 +312,7 @@ pub(crate) struct Followed {
     pub(crate) streamed: bool,
     /// The row's run, conversation and state when the last inspect started.
     pub(crate) inspected: Option<send::Basis>,
-    /// Its last 200 Activity events (Qt's `m_events`), for the local rows'
+    /// Its last 500 Activity events (Qt's `m_events`), for the local rows'
     /// reconcile.
     pub(crate) events: VecDeque<Value>,
 }
@@ -351,11 +356,6 @@ pub(crate) struct Hub {
 }
 
 impl Hub {
-    /// The draft keys that may have local rows (S4 lists rows per key only).
-    pub(crate) fn local_keys(&self) -> Vec<String> {
-        self.opened.values().cloned().collect()
-    }
-
     /// Remembers which draft key the catalog row `entry` opened.
     fn remember(&mut self, entry: (String, String), key: &str) {
         self.opened_order.retain(|known| known != &entry);
@@ -1137,7 +1137,7 @@ impl Composers {
                 _ => {}
             }
         }
-        // Only the last 200 are kept, so only those are copied.
+        // Only the last 500 are kept, so only those are copied.
         let events: Vec<Value> = events[events.len().saturating_sub(EVENTS)..]
             .iter()
             .map(|&event| event.clone())

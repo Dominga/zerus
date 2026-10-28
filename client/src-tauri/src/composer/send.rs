@@ -33,9 +33,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::State;
-use zerus_client_core::attachments::{self, Attachment};
+use zerus_client_core::attachments::{self, Attachment, StoredFile};
 use zerus_client_core::cache::{self, Chip, ColdAction, ColdPrompt};
-use zerus_client_core::local_messages::{self, Inspect, LocalMessages, Status};
+use zerus_client_core::local_messages::{self, Inspect, LocalMessage, LocalMessages, Status};
 use zerus_client_core::send::{block_reason, BlockFacts};
 use zerus_client_core::terminal::{self, TerminalFacts};
 use zerus_client_core::{Action, Exit, Outcome, Target, TooLarge, ViewRow};
@@ -490,7 +490,7 @@ pub(crate) fn session_view(composers: &Composers, hub: &Hub, composer: &Composer
 
 /// An inspection's events joined to the followed window as Qt joins them to
 /// `m_events` (`SessionsWindow.cpp:3639-3651`): the window replaced when the
-/// reply says so, else one event per `seq`; the last 200 stay.
+/// reply says so, else one event per `seq`; the last 500 stay.
 fn merge_events(kept: &mut VecDeque<Value>, replace: bool, events: Option<Value>) {
     let Some(Value::Array(events)) = events else {
         return;
@@ -539,8 +539,9 @@ pub enum SendReply {
     Busy,
     /// The composer shows `reason` (`deliveryFinished(false, reason)`).
     Blocked { reason: String },
-    /// A sticky notice (`showNotice(..., true)`).
-    Notice { text: String },
+    /// A window notice (`showNotice(text, error)`): `error` is Qt's error
+    /// tone, for a block reason or a read failure; a plain notice otherwise.
+    Notice { text: String, error: bool },
     /// Ask "Continue with a cold cache?"; answer with `token`.
     Cold { token: u64, prompt: ColdPrompt },
 }
@@ -550,6 +551,15 @@ pub enum SendReply {
 pub enum Answer {
     Cold { action: ColdAction },
     Cancel,
+}
+
+/// A Retry between its checks and the read of its cached files.
+pub(crate) struct RetryBegun {
+    handle: u64,
+    id: String,
+    ctx: Context,
+    row: LocalMessage,
+    files: Vec<StoredFile>,
 }
 
 /// A failed row's message, sent again by Retry.
@@ -597,6 +607,8 @@ pub(crate) struct Delivery {
     pub(crate) consent: bool,
     /// The composer's draft is not the message (a Retry): keep the draft.
     pub(crate) preserve: bool,
+    /// The revision of its "sending" save, set by `deliver`.
+    pub(crate) revision: u64,
 }
 
 fn text<'a>(value: &'a Value, key: &str) -> &'a str {
@@ -785,6 +797,7 @@ impl Composers {
             compaction,
             consent,
             preserve,
+            revision: 0,
         }
     }
 
@@ -829,13 +842,17 @@ impl Composers {
         match action {
             ColdAction::Send => {
                 if let Some(reason) = ctx.reason() {
-                    return SendReply::Notice { text: reason };
+                    return SendReply::Notice {
+                        text: reason,
+                        error: true,
+                    };
                 }
                 if prompt.retry.is_none()
                     && !matches_draft(composer, &prompt.text, &prompt.attachments)
                 {
                     return SendReply::Notice {
                         text: DRAFT_CHANGED.into(),
+                        error: false,
                     };
                 }
                 let delivery = self.delivery(
@@ -864,7 +881,7 @@ impl Composers {
     /// never sent again here: only a Retry that keeps it passes. A delivery
     /// drops the open questions of its key and clears Undo, so no older
     /// question resends and Undo never brings a sent file back.
-    pub(crate) fn deliver(&self, hub: &mut Hub, delivery: Delivery) -> bool {
+    pub(crate) fn deliver(&self, hub: &mut Hub, mut delivery: Delivery) -> bool {
         if hub.closed {
             return false;
         }
@@ -903,6 +920,8 @@ impl Composers {
         composer.saves += 1;
         composer.saving = true;
         let (key, handle, revision) = (composer.key.clone(), composer.handle, composer.saves);
+        composer.delivering = Some(revision);
+        delivery.revision = revision;
         self.0.store.save_durable(&key, composer.stored(), {
             let me = self.clone();
             move |saved| me.prepared(delivery, handle, revision, saved)
@@ -917,16 +936,15 @@ impl Composers {
         let mut hub = self.lock();
         // Only the answer of the newest save of this composer counts (Qt's
         // `m_saveRevision`, `MessageComposer.cpp:741`).
-        let Some(composer) = hub
-            .composers
-            .get_mut(&delivery.key)
-            .filter(|c| c.handle == handle && c.saves == revision && c.sending)
-        else {
+        let Some(composer) = hub.composers.get_mut(&delivery.key).filter(|c| {
+            c.handle == handle && c.saves == revision && c.sending && c.delivering == Some(revision)
+        }) else {
             return;
         };
         composer.saving = false;
         if let Err(error) = saved {
             composer.sending = false;
+            composer.delivering = None;
             composer.kept = None;
             composer.notice.clear();
             composer.save_failed = true;
@@ -948,7 +966,7 @@ impl Composers {
         }
         drop(hub);
         if !self.still_valid(&delivery) {
-            self.delivery_finished(&delivery.key, false, CHANGED, false, delivery.preserve);
+            self.ended(&delivery, false, CHANGED, false);
             return;
         }
         {
@@ -973,14 +991,12 @@ impl Composers {
         let cache = self.cache();
         let files = match attachments::prepare(cache.root(), &delivery.attachments) {
             Ok(files) => files,
-            Err(error) => {
-                return self.delivery_finished(&key, false, &error, false, delivery.preserve)
-            }
+            Err(error) => return self.ended(&delivery, false, &error, false),
         };
         let me = self.clone();
         cache.prune_later(&self.0.deps.spawn, Arc::new(move || me.retry_files()));
         if !self.still_valid(&delivery) {
-            return self.delivery_finished(&key, false, CHANGED, false, delivery.preserve);
+            return self.ended(&delivery, false, CHANGED, false);
         }
         // One request id per delivery, made here for its one dispatch: the
         // local row, the CLI request and the receipt check carry it, and no
@@ -992,10 +1008,15 @@ impl Composers {
             if hub.closed {
                 return;
             }
-            // Qt (`deliverMessage`, 4905): the delivery ended meanwhile.
-            if !hub.composers.get(&key).is_some_and(|c| c.sending) {
+            // Qt (`deliverMessage`, 4905): the delivery ended meanwhile, or a
+            // newer one took its place; either way this one calls nothing.
+            if !hub
+                .composers
+                .get(&key)
+                .is_some_and(|c| c.sending && c.delivering == Some(delivery.revision))
+            {
                 drop(hub);
-                return self.delivery_finished(&key, false, CHANGED, false, delivery.preserve);
+                return self.ended(&delivery, false, CHANGED, false);
             }
             hub.local.sending(
                 &key,
@@ -1038,7 +1059,7 @@ impl Composers {
         let detail = self.lock().local.finished(&key, &request_id, &outcome);
         let ok = matches!(outcome, Outcome::Done { .. });
         let uncertain = matches!(outcome, Outcome::Uncertain { .. });
-        self.delivery_finished(&key, ok, &detail, uncertain, delivery.preserve);
+        self.ended(&delivery, ok, &detail, uncertain);
         // `finishMessage`: the open session is read again (`inspect()`).
         if self.lock().open_key.as_deref() == Some(key.as_str()) {
             self.refresh_details();
@@ -1129,8 +1150,40 @@ impl Composers {
         uncertain: bool,
         preserve: bool,
     ) {
+        self.finish(key, None, ok, detail, uncertain, preserve);
+    }
+
+    /// The end of `delivery`: it ends the composer's send only while it is
+    /// still the delivery under way.
+    fn ended(&self, delivery: &Delivery, ok: bool, detail: &str, uncertain: bool) {
+        let revision = Some(delivery.revision);
+        self.finish(
+            &delivery.key,
+            revision,
+            ok,
+            detail,
+            uncertain,
+            delivery.preserve,
+        );
+    }
+
+    fn finish(
+        &self,
+        key: &str,
+        revision: Option<u64>,
+        ok: bool,
+        detail: &str,
+        uncertain: bool,
+        preserve: bool,
+    ) {
         let mut hub = self.lock();
         if let Some(composer) = hub.composers.get_mut(key) {
+            // A delivery that already ended, or that a newer one replaced,
+            // ends nothing.
+            if revision.is_some_and(|revision| composer.delivering != Some(revision)) {
+                return;
+            }
+            composer.delivering = None;
             composer.sending = false;
             composer.waiting = None;
             let kept = composer.kept.take();
@@ -1162,14 +1215,22 @@ impl Composers {
         self.changed();
     }
 
-    /// The cached files every failed, definite local row still needs.
+    /// The cached files every failed, definite local row still needs, of
+    /// every session S4 keeps rows for. Only those rows are copied under the
+    /// hub lock; their files are read after it.
     pub(crate) fn retry_files(&self) -> HashSet<PathBuf> {
-        let hub = self.lock();
-        hub.local_keys()
-            .into_iter()
-            .flat_map(|key| hub.local.rows(&key).to_vec())
-            .filter(|row| row.status == Status::Error && !row.uncertain)
-            .filter_map(|row| LocalMessages::stored_files(&row))
+        let failed: Vec<LocalMessage> = {
+            let hub = self.lock();
+            hub.local
+                .keys()
+                .flat_map(|key| hub.local.rows(key))
+                .filter(|row| row.status == Status::Error && !row.uncertain)
+                .cloned()
+                .collect()
+        };
+        failed
+            .iter()
+            .filter_map(LocalMessages::stored_files)
             .flatten()
             .map(|file| file.local_path)
             .collect()
@@ -1208,54 +1269,94 @@ impl Composers {
     }
 
     /// Retry on a failed row (`messageAction` "retry"). Blocking: it reads
-    /// the cached files back. Only a definite failure (S4's `retryable`) is
-    /// ever sent again, as a new submission with its own request id.
+    /// the cached files back between `retry_begin` and `retry_finish`. Only
+    /// a definite failure (S4's `retryable`) is ever sent again, as a new
+    /// submission with its own request id.
     pub fn retry(&self, handle: u64, id: &str) -> SendReply {
-        let (ctx, files, row) = {
-            let mut hub = self.lock();
-            let Some(ctx) = self.context(&hub) else {
-                return SendReply::Busy;
-            };
-            if hub.closed
-                || !hub
-                    .composers
-                    .get(&ctx.key)
-                    .is_some_and(|c| c.handle == handle && !c.busy())
-            {
-                return SendReply::Busy;
-            }
-            let Some(row) = hub
-                .local
-                .retryable(&ctx.key, id, &ctx.run(), &ctx.conversation())
-                .cloned()
-            else {
-                return SendReply::Busy;
-            };
-            if let Some(reason) = ctx.reason() {
-                return SendReply::Notice { text: reason };
-            }
-            let Some(files) = LocalMessages::stored_files(&row) else {
-                return SendReply::Notice {
-                    text: UNAVAILABLE.into(),
-                };
-            };
-            if !hub.retry_reads.insert(ctx.key.clone()) {
-                return SendReply::Busy;
-            }
-            (ctx, files, row)
+        let begun = match self.retry_begin(handle, id) {
+            Ok(begun) => begun,
+            Err(reply) => return reply,
         };
-        let read = attachments::read_stored(self.cache().root(), &files);
+        let read = attachments::read_stored(self.cache().root(), &begun.files);
+        self.retry_finish(begun, read)
+    }
+
+    /// Retry's checks before the read (`messageAction`, 4484-4492): the row
+    /// a definite failure of the run the session shows, the composer idle,
+    /// no block reason and no other read of this session's files.
+    pub(crate) fn retry_begin(&self, handle: u64, id: &str) -> Result<RetryBegun, SendReply> {
+        let mut hub = self.lock();
+        let Some(ctx) = self.context(&hub) else {
+            return Err(SendReply::Busy);
+        };
+        if hub.closed
+            || !hub
+                .composers
+                .get(&ctx.key)
+                .is_some_and(|c| c.handle == handle && !c.busy())
+        {
+            return Err(SendReply::Busy);
+        }
+        let Some(row) = hub
+            .local
+            .retryable(&ctx.key, id, &ctx.run(), &ctx.conversation())
+            .cloned()
+        else {
+            return Err(SendReply::Busy);
+        };
+        if let Some(reason) = ctx.reason() {
+            return Err(SendReply::Notice {
+                text: reason,
+                error: true,
+            });
+        }
+        let Some(files) = LocalMessages::stored_files(&row) else {
+            return Err(SendReply::Notice {
+                text: UNAVAILABLE.into(),
+                error: true,
+            });
+        };
+        if !hub.retry_reads.insert(ctx.key.clone()) {
+            return Err(SendReply::Busy);
+        }
+        Ok(RetryBegun {
+            handle,
+            id: id.to_owned(),
+            ctx,
+            row,
+            files,
+        })
+    }
+
+    /// Retry after the read (`messageAction`, 4497-4521).
+    pub(crate) fn retry_finish(
+        &self,
+        begun: RetryBegun,
+        read: Result<Vec<Attachment>, String>,
+    ) -> SendReply {
+        let RetryBegun {
+            handle,
+            id,
+            ctx,
+            row,
+            ..
+        } = begun;
         let mut hub = self.lock();
         hub.retry_reads.remove(&ctx.key);
         let attachments = match read {
             Ok(attachments) => attachments,
-            Err(error) => return SendReply::Notice { text: error },
+            Err(error) => {
+                return SendReply::Notice {
+                    text: error,
+                    error: true,
+                }
+            }
         };
         if hub.closed {
             return SendReply::Busy;
         }
         // Qt returns quietly when the session or its run changed during the
-        // read, or a write or a send began (`messageAction`, 4501-4509).
+        // read, or a write or a send began (4501-4509).
         let Some((now_row, online)) =
             (self.0.deps.rows)(&ctx.session.computer, &ctx.session.key, &ctx.session.name)
         else {
@@ -1286,19 +1387,19 @@ impl Composers {
                 .is_some_and(|c| c.handle == handle && !c.busy())
             && hub
                 .local
-                .retryable(&ctx.key, id, &row.run_id, &row.conversation_id)
+                .retryable(&ctx.key, &id, &row.run_id, &row.conversation_id)
                 .is_some_and(|now| *now == row);
         if !unchanged {
             return SendReply::Busy;
         }
         let retry = Retry {
-            id: id.to_owned(),
+            id,
             text: row.text.clone(),
             attachments: attachments.clone(),
         };
         match open {
-            // `sendMessage(key, text, files, id)`: its block reason ends in
-            // the composer's error, then the cold cache question.
+            // `sendMessage(key, text, files, id)` (4515): its block reason
+            // ends in the composer's error (4811), then the cold question.
             Some(now) => {
                 if let Some(reason) = now.reason() {
                     if let Some(composer) = hub.composers.get_mut(&now.key) {
@@ -1311,7 +1412,8 @@ impl Composers {
                 self.consent_or_deliver(&mut hub, &now, row.text, attachments, Some(retry))
             }
             // Another session opened during the read: a warm retry stays
-            // with its own session; a cold one needs the question there.
+            // with its own session; a cold one needs the question there
+            // (4517-4521).
             None => {
                 if cache::expired(evidence, self.now()) {
                     return SendReply::Busy;
@@ -2863,6 +2965,254 @@ pub(crate) mod tests {
         }
     }
 
+    /// The oldest held job, once one is there (within five seconds).
+    fn next_job(jobs: &Held) -> Job {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let job = {
+                let mut queue = lock(jobs);
+                (!queue.is_empty()).then(|| queue.remove(0))
+            };
+            if let Some(job) = job {
+                return job;
+            }
+            assert!(std::time::Instant::now() < deadline, "no job came");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn other_session() -> SessionRef {
+        SessionRef {
+            key: "run:run-2".into(),
+            name: "claude/sample-project/other".into(),
+            ..session()
+        }
+    }
+
+    /// A definite failure of `text`, sent from the open composer: its row id.
+    fn failed_send(c: &Composers, fake: &Fake, text: &str) -> String {
+        *lock(&fake.outcome) = Box::new(|_, _| Outcome::Failed {
+            detail: "hgs: refused".into(),
+        });
+        let view = c.current().unwrap();
+        c.send_message(
+            view.handle,
+            view.rev + 1,
+            view.text_epoch,
+            text.into(),
+            0,
+            0,
+        );
+        let view = until(c, |v| {
+            !v.sending && v.local.iter().any(|row| row.status == Status::Error)
+        });
+        *lock(&fake.outcome) = Box::new(receipt);
+        view.local[0].id.clone()
+    }
+
+    /// Waits until `done` holds, within five seconds.
+    fn settles(done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "timed out");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn retry_pins_follow_the_rows_not_the_sessions_opened() {
+        let root = dir("send-retry-pins");
+        let file = root.join("a.txt");
+        std::fs::write(&file, "attached").unwrap();
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(|_, _| Outcome::Failed {
+            detail: "hgs: refused".into(),
+        });
+        let view = opened(&c, ready());
+        c.attach_paths(
+            view.handle,
+            vec![file],
+            zerus_client_core::attachments::Selection::default(),
+        );
+        let view = until(&c, |v| v.attachments.len() == 1 && !v.attaching);
+        c.send_message(view.handle, 1, view.text_epoch, view.text.clone(), 0, 0);
+        let view = until(&c, |v| {
+            !v.sending && v.local.first().is_some_and(|r| !r.error.is_empty())
+        });
+        let stored = LocalMessages::stored_files(&view.local[0]).unwrap();
+        let pinned = || c.retry_files();
+        assert_eq!(pinned(), HashSet::from([stored[0].local_path.clone()]));
+        // The hub forgot which sessions it opened (past 512 of them); S4
+        // still keeps the row, so Retry still needs its file.
+        c.lock().opened.clear();
+        assert_eq!(pinned(), HashSet::from([stored[0].local_path.clone()]));
+    }
+
+    #[test]
+    fn a_warm_retry_stays_with_its_session_when_another_opens() {
+        let root = dir("send-retry-away");
+        let (c, fake) = send_hub(&root);
+        let view = opened(&c, ready());
+        let id = failed_send(&c, &fake, "first");
+        let Ok(begun) = c.retry_begin(view.handle, &id) else {
+            panic!("no retry")
+        };
+        // Another session opens while the cached files are read.
+        c.open(Some(other_session()));
+        until(&c, |v| v.loaded && v.key.ends_with("/other"));
+        let read = attachments::read_stored(c.cache().root(), &begun.files);
+        assert_eq!(c.retry_finish(begun, read), SendReply::Sending);
+        settles(|| sent(&fake).len() == 2 && !c.lock().composers[KEY].sending);
+        let calls = sent(&fake);
+        let (target, action, _) = &calls[1];
+        assert_eq!(
+            (target.name.as_str(), target.run_id.as_str()),
+            ("claude/sample-project/review", "run-1"),
+            "the retry's own session"
+        );
+        let Action::Send { text, .. } = action else {
+            panic!("not a send")
+        };
+        assert_eq!(text, "first");
+        let view = c.current().unwrap();
+        assert!(view.key.ends_with("/other") && !view.sending && view.local.is_empty());
+    }
+
+    #[test]
+    fn a_cold_retry_never_reaches_a_session_no_longer_open() {
+        let root = dir("send-retry-away-cold");
+        let (c, fake) = send_hub(&root);
+        let mut details = ready();
+        details["cache_hint"] = json!({"status": "cold", "tokens": 120000});
+        let view = opened(&c, details);
+        *lock(&fake.outcome) = Box::new(|_, _| Outcome::Failed {
+            detail: "hgs: refused".into(),
+        });
+        let SendReply::Cold { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "first".into(), 0, 0)
+        else {
+            panic!("no question")
+        };
+        assert_eq!(
+            c.answer(
+                token,
+                Answer::Cold {
+                    action: ColdAction::Send
+                }
+            ),
+            SendReply::Sending
+        );
+        let view = until(&c, |v| !v.sending && !v.local.is_empty());
+        let id = view.local[0].id.clone();
+        *lock(&fake.outcome) = Box::new(receipt);
+        let Ok(begun) = c.retry_begin(view.handle, &id) else {
+            panic!("no retry")
+        };
+        c.open(Some(other_session()));
+        until(&c, |v| v.loaded && v.key.ends_with("/other"));
+        let read = attachments::read_stored(c.cache().root(), &begun.files);
+        assert_eq!(c.retry_finish(begun, read), SendReply::Busy);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(sent(&fake).len(), 1, "only the first send");
+        assert!(!c.lock().composers[KEY].sending);
+    }
+
+    #[test]
+    fn a_write_that_starts_during_the_save_keeps_the_draft() {
+        let root = dir("send-write-mid");
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        let view = opened(&c, ready());
+        let release = hold(&store);
+        assert_eq!(
+            c.send_message(view.handle, 1, view.text_epoch, "mid write".into(), 9, 9),
+            SendReply::Sending
+        );
+        // Qt's `m_pending`: any session's update now runs.
+        *lock(&fake.write) = Some(WriteKind::Update);
+        release.send(()).unwrap();
+        let view = until(&c, |v| !v.sending);
+        assert_eq!(view.status, CHANGED);
+        assert_eq!(view.text, "mid write");
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(sent(&fake).is_empty());
+        // The same with another session open: the write alone stops it,
+        // as Qt's `m_pending` does (4889).
+        *lock(&fake.write) = None;
+        let view = c.current().unwrap();
+        let release = hold(&store);
+        assert_eq!(
+            c.send_message(view.handle, 2, view.text_epoch, "mid write".into(), 9, 9),
+            SendReply::Sending
+        );
+        c.open(Some(other_session()));
+        *lock(&fake.write) = Some(WriteKind::Update);
+        release.send(()).unwrap();
+        settles(|| !c.lock().composers[KEY].sending);
+        assert_eq!(c.lock().composers[KEY].notice, CHANGED);
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(sent(&fake).is_empty());
+    }
+
+    #[test]
+    fn an_older_deliverys_call_never_runs_after_a_newer_one_started() {
+        let root = dir("send-older-call");
+        let store = drafts(&root);
+        let (spawn, jobs) = held_spawn();
+        let (c, fake) = send_hub_with(&store, spawn);
+        let view = opened(&c, ready());
+        assert_eq!(
+            c.send_message(view.handle, 1, view.text_epoch, "once".into(), 4, 4),
+            SendReply::Sending
+        );
+        let older = next_job(&jobs);
+        // A cancel (Task 5) ends the send, and the draft is sent anew.
+        c.delivery_finished(KEY, false, "Cancelled.", false, false);
+        let view = c.current().unwrap();
+        assert!(!view.sending && view.text == "once");
+        assert_eq!(
+            c.send_message(view.handle, 1, view.text_epoch, "once".into(), 4, 4),
+            SendReply::Sending
+        );
+        let newer = next_job(&jobs);
+        older();
+        assert!(sent(&fake).is_empty(), "the older delivery calls nothing");
+        assert!(c.current().unwrap().sending, "nor ends the newer one");
+        newer();
+        until(&c, |v| !v.sending);
+        assert_eq!(sent(&fake).len(), 1);
+        assert_eq!(c.current().unwrap().local.len(), 1);
+    }
+
+    #[test]
+    fn a_block_reason_at_the_answer_is_an_error_notice() {
+        let root = dir("send-question-blocked");
+        let (c, fake) = send_hub(&root);
+        let mut details = ready();
+        details["cache_hint"] = json!({"status": "cold", "tokens": 120000});
+        let view = opened(&c, details.clone());
+        let SendReply::Cold { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "asked".into(), 5, 5)
+        else {
+            panic!("no question")
+        };
+        details["phase"] = json!("approval");
+        c.observe(&state(details));
+        assert_eq!(
+            c.answer(
+                token,
+                Answer::Cold {
+                    action: ColdAction::Send
+                }
+            ),
+            SendReply::Notice {
+                text: "Respond to the agent in the Terminal tab.".into(),
+                error: true,
+            }
+        );
+        assert!(sent(&fake).is_empty());
+    }
+
     #[test]
     fn a_send_over_an_older_text_epoch_is_refused_and_handed_back() {
         let root = dir("send-epoch");
@@ -2967,26 +3317,30 @@ pub(crate) mod tests {
         let blocker = root.join("blocked");
         std::fs::write(&blocker, "a file where the store's folder belongs").unwrap();
         let store = Arc::new(DraftStore::open(blocker.join("drafts")));
-        let (c, fake) = send_hub_on(&store);
+        let (spawn, jobs) = held_spawn();
+        let (c, fake) = send_hub_with(&store, spawn);
         let view = opened(&c, ready());
         c.edit(view.handle, 1, view.text_epoch, "kept".into(), 4, 4);
         let view = until(&c, |v| v.status_error);
-        let failed = std::time::Instant::now();
+        // Qt's 2 s retry of the failed save, held until the send's save waits.
+        let retry = next_job(&jobs);
         std::fs::remove_file(&blocker).unwrap();
-        // The "sending" save waits while Qt's 2 s retry of the failed save
-        // comes due: it must not take the send's save revision. Send comes at
-        // the same rev, so its edit saves nothing of its own.
         let release = hold(&store);
+        // Send comes at the same rev, so its edit saves nothing of its own.
         assert_eq!(
             c.send_message(view.handle, 1, view.text_epoch, "kept".into(), 4, 4),
             SendReply::Sending
         );
-        std::thread::sleep(Duration::from_millis(2500).saturating_sub(failed.elapsed()));
+        // The retry comes due while the "sending" save waits: it finds a
+        // newer revision and saves nothing.
+        retry();
         release.send(()).unwrap();
+        store.flush();
+        let call = next_job(&jobs);
+        call();
         let view = until(&c, |v| !v.sending);
         assert!(view.text.is_empty() && !view.status_error, "{view:?}");
         assert_eq!(sent(&fake).len(), 1);
-        store.flush();
     }
 
     #[test]
@@ -3267,7 +3621,8 @@ pub(crate) mod tests {
                 }
             ),
             SendReply::Notice {
-                text: "Draft changed. Send it when you are ready.".into()
+                text: "Draft changed. Send it when you are ready.".into(),
+                error: false,
             }
         );
         std::thread::sleep(Duration::from_millis(50));
@@ -3323,8 +3678,8 @@ pub(crate) mod tests {
             }],
             ..Batch::default()
         };
-        c.observe(&events("events", 0..150));
-        c.observe(&events("events", 150..300));
+        c.observe(&events("events", 0..300));
+        c.observe(&events("events", 300..600));
         let seqs = || {
             c.lock()
                 .followed
@@ -3333,7 +3688,7 @@ pub(crate) mod tests {
                 .map(|e| e["seq"].as_i64().unwrap())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(seqs(), (100..300).collect::<Vec<_>>());
+        assert_eq!(seqs(), (100..600).collect::<Vec<_>>(), "Qt keeps 500");
         c.observe(&events("replace", 7..9));
         assert_eq!(seqs(), vec![7, 8]);
     }
@@ -3367,7 +3722,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_failed_row_offers_inspect_and_delete_only() {
+    fn a_definite_failure_offers_retry_inspect_and_delete() {
         let root = dir("send-row-actions");
         let (c, fake) = send_hub(&root);
         *lock(&fake.outcome) = Box::new(|_, _| Outcome::Failed {
@@ -3379,16 +3734,24 @@ pub(crate) mod tests {
         c.send_message(view.handle, 1, view.text_epoch, "failed".into(), 6, 6);
         let view = until(&c, |v| !v.sending && v.local.len() == 1);
         let id = view.local[0].id.clone();
+        assert!(!view.local[0].uncertain, "a definite failure");
         assert_eq!(c.inspect_local(view.handle, &id), Some(Inspect::Terminal));
         assert_eq!(c.inspect_local(view.handle, "not-a-row"), None);
-        c.delete_local(view.handle + 1, &id);
+        // Retry: a new submission whose row replaces this one.
+        assert_eq!(c.retry(view.handle, &id), SendReply::Sending);
+        let view = until(&c, |v| {
+            !v.sending && v.local.len() == 1 && v.local[0].id != id
+        });
+        let again = view.local[0].id.clone();
+        assert_eq!(sent(&fake).len(), 2);
+        c.delete_local(view.handle + 1, &again);
         assert_eq!(
             c.current().unwrap().local.len(),
             1,
             "another composer's handle deletes nothing"
         );
-        c.delete_local(view.handle, &id);
+        c.delete_local(view.handle, &again);
         assert!(c.current().unwrap().local.is_empty());
-        assert_eq!(sent(&fake).len(), 1);
+        assert_eq!(sent(&fake).len(), 2);
     }
 }

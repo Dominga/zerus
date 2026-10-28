@@ -752,6 +752,8 @@ private:
         // deps its reason (in its tone), a build what runs, Cooling the warmth
         // left, Cold how long the cache has been cold, Stopped how to go on.
         QString lineIcon; QColor lineInk = state == "Offline" ? muted : foreground;
+        // U22/N17: the DeepSeek upload warning is line three in a warning tone.
+        if (index.data(SessionRoles::UploadWarning).toBool()) lineInk = QColor(dark ? "#f0c77b" : "#885400");
         const bool stateLine = SessionStatusBadge::isState(kind) || (status.shown.key == "user" && caption == tr("Needs you"));
         if (stateLine && !status.shown.line.isEmpty()) {
             detail = status.shown.line; lineIcon = status.shown.icon;

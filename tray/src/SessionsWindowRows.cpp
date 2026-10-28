@@ -221,7 +221,12 @@ QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e, const RowIn
     const auto &s = e.session;
     const bool ending = terminating(e, inputs);
     const QString rowStatus = ending ? tr("Terminating…") : status(s, e.online);
-    const QString desc = ending ? tr("Waiting for the session to stop") : currentAction(s, e.online).simplified();
+    QString desc = ending ? tr("Waiting for the session to stop") : currentAction(s, e.online).simplified();
+    // U22/N17: an owner warning about DeepSeek's session-log upload owns line
+    // three; an activity excerpt never hides it, because the block's promise is
+    // what the owner needs to see.
+    const bool uploadWarning = !s.uploadNote.isEmpty();
+    if (uploadWarning) desc = s.uploadNote;
     roles.insert(SessionRoles::Model, s.model.isEmpty() ? (s.cmd == "sh" ? QString() : tr("Model unknown")) : s.model);
     roles.insert(SessionRoles::Effort, s.effort.isEmpty() ? QStringLiteral("—") : s.effort);
     roles.insert(SessionRoles::Title, sessionLabel(s)); roles.insert(SessionRoles::Agent, s.cmd);
@@ -245,6 +250,7 @@ QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e, const RowIn
         meta += QDateTime::fromSecsSinceEpoch(qint64(s.archivedAt)).toLocalTime().toString("d MMM HH:mm");
     }
     roles.insert(SessionRoles::Meta, meta); roles.insert(SessionRoles::Status, rowStatus); roles.insert(SessionRoles::Detail, desc);
+    if (uploadWarning) roles.insert(SessionRoles::UploadWarning, true);
     const auto gitPath = SessionPresentation::gitStatusPath(s);
     const auto git = SessionPresentation::gitStatus(s, inputs.gitStatus.value(e.host + '\n' + gitPath), e.online);
     roles.insert(SessionRoles::GitHost, e.host); roles.insert(SessionRoles::GitPath, gitPath);

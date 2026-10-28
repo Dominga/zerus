@@ -39,6 +39,9 @@ protected:
     void showEvent(QShowEvent *) override;
 private:
     void render();
+    // U22/N17: the session-log upload warning a DeepSeek account's sessions
+    // carry on this machine, empty when none does.
+    QString deepSeekUploadNote(const QString &host, const QString &home, const QString &provider) const;
     void renderTeams(const QJsonObject &account);
     void selectionChanged();
     bool changing() const;

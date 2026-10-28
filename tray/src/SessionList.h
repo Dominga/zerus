@@ -33,6 +33,10 @@ enum Role { Key = Qt::UserRole, Title, Meta, Status, Detail, Agent, Host, Childr
             BackgroundCommand,
             // U25 (spec 2.3): muted by its team's default, not by its own choice.
             TeamMuted,
+            // U22/N17: line three warns about DeepSeek's session-log upload; the
+            // card draws it in the warning tone rather than a glyph the UI font
+            // may not have.
+            UploadWarning,
             // U25 (spec 2.1): a project's first folder, for its '+' tooltip.
             ProjectFolder,
             Muted = Qt::UserRole + 50, RowCollapsed = Qt::UserRole + 51,

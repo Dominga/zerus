@@ -415,7 +415,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
         const auto addFolder=!infer&&m_folder->currentData().toString().isEmpty()&&!projectWorktree(m_folder->currentData(Qt::UserRole+2).toString())?path:QString();
         if(m_startWithWorktree){
             m_creationCatalog=m_worktreeCatalog;m_creationFolder=addFolder;m_error->setText(tr("Creating worktree…"));
-            m_creation=m_client.createWorktree(host(),path,m_creationCatalog["common_dir"].toString(),m_generatedBranch,"HEAD",automaticWorktreePath());updateForm();
+            m_creation=m_client.createWorktree(host(),path,m_creationCatalog["common_dir"].toString(),m_generatedBranch,"HEAD",automaticWorktreePath(),{},false,{},this->agent()=="dsh");updateForm();
         }else launch(path,addFolder);
     });
     connect(&m_client,&HgsClient::directoriesFailed,this,[this](quint64 request,const QString &machine,const QString &error){

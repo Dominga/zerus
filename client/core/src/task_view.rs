@@ -125,6 +125,24 @@ pub struct Board {
     pub damaged: usize,
 }
 
+/// The most rows one page holds.
+pub const MAX_ROWS: usize = 200;
+
+/// Where the next page starts: after this task, or at this place when it
+/// left the stage.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cursor {
+    pub uuid: String,
+    pub index: usize,
+}
+
+/// One page of a stage's rows.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Page<'a> {
+    pub rows: Vec<&'a TaskItem>,
+    pub next: Option<Cursor>,
+}
+
 /// The open session the board is shown for.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct View {
@@ -178,9 +196,7 @@ impl Board {
         }
     }
 
-    /// A stage's rows for the view. Done holds the last seven days unless
-    /// `older` asks for the rest.
-    pub fn rows(&self, stage: &str, view: &View, older: bool) -> Vec<&TaskItem> {
+    fn matching<'s>(&'s self, stage: &str, view: &View, older: bool) -> Vec<&'s TaskItem> {
         let done = stage == "done";
         self.tasks
             .iter()
@@ -190,8 +206,43 @@ impl Board {
             .collect()
     }
 
+    /// One page of a stage's rows for the view, in board order: at most
+    /// `limit` (1-200) rows after the task `after` names. Done holds the last
+    /// seven days unless `older` asks for the rest. The cursor is the last
+    /// row's task, so tasks that arrive or move before it never shift the
+    /// next page; if that task left the stage, the page starts at its old
+    /// place.
+    pub fn page(
+        &self,
+        stage: &str,
+        view: &View,
+        older: bool,
+        after: Option<&Cursor>,
+        limit: usize,
+    ) -> Page<'_> {
+        let limit = limit.clamp(1, MAX_ROWS);
+        let rows = self.matching(stage, view, older);
+        let start = match after {
+            None => 0,
+            Some(cursor) => rows
+                .iter()
+                .position(|task| task.uuid == cursor.uuid)
+                .map_or(cursor.index.min(rows.len()), |index| index + 1),
+        };
+        let end = (start + limit).min(rows.len());
+        let next = (end < rows.len()).then(|| Cursor {
+            uuid: rows[end - 1].uuid.clone(),
+            index: end,
+        });
+        Page {
+            rows: rows[start..end].to_vec(),
+            next,
+        }
+    }
+
+    /// How many rows a stage has for the view (the tile's count).
     pub fn count(&self, stage: &str, view: &View) -> usize {
-        self.rows(stage, view, false).len()
+        self.matching(stage, view, false).len()
     }
 
     /// Whether a dragged task can be reordered within `stage` of this board.
@@ -522,7 +573,8 @@ mod tests {
             now: 11 * DAY,
         };
         let todo: Vec<_> = board
-            .rows("todo", &view, false)
+            .page("todo", &view, false, None, 50)
+            .rows
             .iter()
             .map(|t| t.uuid.as_str())
             .collect();
@@ -531,19 +583,61 @@ mod tests {
             only: false,
             ..view.clone()
         };
-        assert_eq!(board.rows("current", &all, false).len(), 1);
+        assert_eq!(board.count("current", &all), 1);
         let recent: Vec<_> = board
-            .rows("done", &all, false)
+            .page("done", &all, false, None, 50)
+            .rows
             .iter()
             .map(|t| t.uuid.as_str())
             .collect();
         assert_eq!(recent, ["d1"]);
-        assert_eq!(board.rows("done", &all, true)[0].uuid, "d2");
+        assert_eq!(board.page("done", &all, true, None, 50).rows[0].uuid, "d2");
         assert_eq!(board.count("done", &view,), 1, "sent to this session");
         assert_eq!(
             damaged_text(1, "Alpha"),
             "1 task file of Alpha could not be read."
         );
+    }
+
+    #[test]
+    fn pages_stay_stable_while_tasks_arrive() {
+        let tasks: Vec<Value> = (0..500)
+            .map(|i| json!({"uuid": format!("t{i:03}"), "stage": "todo"}))
+            .collect();
+        let mut board = Board::from_listing(&json!({"project": {"id": "alpha"}, "tasks": tasks}));
+        let view = View::default();
+        let first = board.page("todo", &view, false, None, 5000);
+        assert_eq!(first.rows.len(), MAX_ROWS);
+        let cursor = first.next.clone().unwrap();
+        assert_eq!(cursor.uuid, "t199");
+        let mut seen: Vec<String> = first.rows.iter().map(|t| t.uuid.clone()).collect();
+        // A task arrives at the top and another moves ahead: the next page
+        // still starts after the last row shown.
+        board.tasks.insert(
+            0,
+            TaskItem::from_value(&json!({"uuid": "new", "stage": "todo"})),
+        );
+        let moved = board.tasks.remove(400);
+        board.tasks.insert(1, moved);
+        let second = board.page("todo", &view, false, Some(&cursor), 200);
+        assert_eq!(second.rows[0].uuid, "t200");
+        seen.extend(second.rows.iter().map(|t| t.uuid.clone()));
+        let next = second.next.clone();
+        let third = board.page("todo", &view, false, next.as_ref(), 200);
+        assert!(third.next.is_none());
+        seen.extend(third.rows.iter().map(|t| t.uuid.clone()));
+        let unique: std::collections::HashSet<_> = seen.iter().collect();
+        assert_eq!(unique.len(), seen.len(), "no row twice");
+        // A cursor whose task left the stage resumes at its place.
+        let gone = Cursor {
+            uuid: "missing".into(),
+            index: 10,
+        };
+        assert_eq!(
+            board.page("todo", &view, false, Some(&gone), 1).rows[0].uuid,
+            board.page("todo", &view, false, None, 11).rows[10].uuid
+        );
+        assert_eq!(board.page("todo", &view, false, None, 0).rows.len(), 1);
     }
 
     #[test]

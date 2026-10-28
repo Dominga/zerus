@@ -2475,7 +2475,11 @@ void ActivityView::startRender()
         worker->deleteLater();
         if (view) { --view->m_renderWorkers; view->startRender(); }
     });
-    worker->start(QThread::LowPriority);
+    // Not below the GUI's priority (#523): a below-normal worker gets almost no
+    // CPU while normal-priority work - the agents' builds and tests - fills the
+    // cores, and Activity then never renders. The GUI stays responsive because
+    // the preparation runs on its own thread, not because it waits.
+    worker->start(QThread::NormalPriority);
 }
 
 void ActivityView::commitRender(const std::shared_ptr<ActivityRenderResult> &result)

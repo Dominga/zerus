@@ -2,6 +2,7 @@
 #include <QImage>
 #include <QImageReader>
 #include <QtTest>
+#include <QScopeGuard>
 #include "IconFactory.h"
 
 // Легитимность цифры на глаз не проверить (см. план задачи), поэтому тест бьёт по
@@ -128,9 +129,25 @@ void TestIconFactory::forErrorIsNeverNull()
 
 void TestIconFactory::foregroundFallsBackToPaletteOnEmptyOrInvalidOverride()
 {
-    const QColor paletteColor = QApplication::palette().windowText().color();
-    QCOMPARE(IconFactory::foreground(QString()), paletteColor);
-    QCOMPARE(IconFactory::foreground(QStringLiteral("not-a-color")), paletteColor);
+    // The test owns what the fallback reads, so the machine's theme cannot
+    // decide it: on Windows the taskbar's theme, elsewhere the palette.
+#ifdef Q_OS_WIN
+    const auto restore = qScopeGuard([] { IconFactory::setTaskbarLightForTests(-1); });
+    for (const auto &[light, expected] : {std::pair{1, QColor(Qt::black)}, std::pair{0, QColor(Qt::white)}}) {
+        IconFactory::setTaskbarLightForTests(light);
+        QCOMPARE(IconFactory::foreground(QString()), expected);
+        QCOMPARE(IconFactory::foreground(QStringLiteral("not-a-color")), expected);
+    }
+#else
+    const QPalette before = QApplication::palette();
+    const auto restore = qScopeGuard([before] { QApplication::setPalette(before); });
+    for (const QColor text : {QColor(0x12, 0x34, 0x56), QColor(0xee, 0xdd, 0xcc)}) {
+        QPalette palette = before; palette.setColor(QPalette::WindowText, text);
+        QApplication::setPalette(palette);
+        QCOMPARE(IconFactory::foreground(QString()), text);
+        QCOMPARE(IconFactory::foreground(QStringLiteral("not-a-color")), text);
+    }
+#endif
 }
 
 void TestIconFactory::foregroundParsesValidOverride()

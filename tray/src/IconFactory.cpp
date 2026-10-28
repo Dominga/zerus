@@ -10,6 +10,7 @@
 #include <QTransform>
 
 namespace {
+int taskbarLightForTests = -1;
 
 // Размеры, которые панель реально запрашивает у StatusNotifier-иконки, плюс пара
 // промежуточных — набор размеров для разных масштабов экрана.
@@ -68,6 +69,8 @@ void IconFactory::setForegroundOverride(const QString &colorName)
     m_foregroundOverride = colorName;
 }
 
+void IconFactory::setTaskbarLightForTests(int light) { taskbarLightForTests = light; }
+
 QColor IconFactory::foreground(const QString &override)
 {
     if (!override.isEmpty()) {
@@ -90,6 +93,7 @@ QColor IconFactory::foreground(const QString &override)
 #ifdef Q_OS_WIN
     // Windows: the taskbar has its own theme, dark by default even when apps are
     // light. The registry value is what Explorer itself follows.
+    if (taskbarLightForTests >= 0) return taskbarLightForTests == 1 ? QColor(Qt::black) : QColor(Qt::white);
     const QSettings personalize(
         QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
         QSettings::NativeFormat);

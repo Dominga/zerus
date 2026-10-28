@@ -103,18 +103,52 @@ impl Identity {
     }
 
     pub fn data_dir_now(&self) -> PathBuf {
-        let var = |name: &str| {
-            std::env::var_os(name)
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-        };
         self.data_dir(
             Platform::current(),
             &home_dir(),
-            var("XDG_DATA_HOME").as_deref(),
-            var("APPDATA").as_deref(),
+            env_path("XDG_DATA_HOME").as_deref(),
+            env_path("APPDATA").as_deref(),
         )
     }
+
+    /// Tauri's `app_cache_dir` formula (`dirs::cache_dir`), with this
+    /// identifier: `XDG_CACHE_HOME` counts only as an absolute path.
+    pub fn cache_dir(
+        &self,
+        platform: Platform,
+        home: &Path,
+        xdg_cache_home: Option<&Path>,
+        local_appdata: Option<&Path>,
+    ) -> PathBuf {
+        match platform {
+            Platform::Mac => home.join("Library/Caches").join(&self.bundle_id),
+            Platform::Linux => xdg_cache_home
+                .filter(|path| path.is_absolute())
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| home.join(".cache"))
+                .join(&self.bundle_id),
+            Platform::Windows => local_appdata
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| home.join("AppData/Local"))
+                .join(&self.bundle_id),
+        }
+    }
+
+    pub fn cache_dir_now(&self) -> PathBuf {
+        self.cache_dir(
+            Platform::current(),
+            &home_dir(),
+            env_path("XDG_CACHE_HOME").as_deref(),
+            env_path("LOCALAPPDATA").as_deref(),
+        )
+    }
+}
+
+/// A nonempty path from the environment.
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 /// The user's home: `HOME` (`USERPROFILE` on Windows), else the account's
@@ -254,5 +288,54 @@ mod tests {
             "a dev run is never aborted"
         );
         assert!(Identity::new("dev.zerus.next").watchdog(true));
+    }
+
+    #[test]
+    fn the_cache_directory_follows_the_running_identifier() {
+        let mac = Path::new("/Users/example");
+        assert_eq!(
+            Identity::new("com.hgdev.hgs-tray").cache_dir(Platform::Mac, mac, None, None),
+            Path::new("/Users/example/Library/Caches/com.hgdev.hgs-tray"),
+            "never the .local build identifier the signer promoted"
+        );
+        let linux = Path::new("/home/example");
+        let dev = Identity::new("dev.zerus.next");
+        assert_eq!(
+            dev.cache_dir(Platform::Linux, linux, None, None),
+            Path::new("/home/example/.cache/dev.zerus.next")
+        );
+        assert_eq!(
+            dev.cache_dir(
+                Platform::Linux,
+                linux,
+                Some(Path::new("/cache/example")),
+                None
+            ),
+            Path::new("/cache/example/dev.zerus.next")
+        );
+        assert_eq!(
+            dev.cache_dir(
+                Platform::Linux,
+                linux,
+                Some(Path::new("cache/example")),
+                None
+            ),
+            Path::new("/home/example/.cache/dev.zerus.next"),
+            "dirs ignores a relative XDG_CACHE_HOME"
+        );
+        let windows = Path::new("C:/Users/example");
+        assert_eq!(
+            dev.cache_dir(
+                Platform::Windows,
+                windows,
+                None,
+                Some(Path::new("D:/Local/example"))
+            ),
+            Path::new("D:/Local/example/dev.zerus.next")
+        );
+        assert_eq!(
+            dev.cache_dir(Platform::Windows, windows, None, None),
+            Path::new("C:/Users/example/AppData/Local/dev.zerus.next")
+        );
     }
 }

@@ -435,6 +435,11 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn probe(kind: &str) -> std::process::Output {
         use std::os::unix::process::CommandExt;
+        // A child process: shared with the other tests that start one, never
+        // while one samples this process's tree.
+        let _tree = crate::PROCESS_TREE
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command
             .args([

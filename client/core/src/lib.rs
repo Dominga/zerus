@@ -11,6 +11,7 @@ pub mod actions;
 pub mod batch;
 pub mod details;
 pub mod fleet;
+pub mod machine;
 pub mod processes;
 pub mod readmarks;
 pub mod reads;
@@ -25,10 +26,12 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 pub use actions::{Action, Exit, Invocation, Outcome, Target, WorktreeCleanup};
+pub use batch::MachineOut;
 pub use batch::ProcessesOut;
 pub use batch::TasksOut;
 pub use batch::{ActivityOut, Batch, Coalescer, ComputerOut, KeyOut, ReplaceOut, RowOut};
 pub use fleet::{Fleet, FollowError};
+pub use machine::{LocalHost, MachineMeta};
 pub use processes::{ProcessesState, ProcessesUpdate};
 pub use reads::{Read, ReadError};
 pub use run::{run, run_limited, run_with_env, TooLarge};
@@ -165,6 +168,12 @@ pub enum Change {
         key: String,
         update: TasksUpdate,
     },
+    /// The computer's card data from its `catalog.meta`, sent when it changed;
+    /// see [`machine`].
+    Machine {
+        computer: ComputerId,
+        machine: MachineMeta,
+    },
 }
 
 impl Change {
@@ -176,7 +185,8 @@ impl Change {
             | Self::Computer { computer, .. }
             | Self::Activity { computer, .. }
             | Self::Processes { computer, .. }
-            | Self::Tasks { computer, .. } => computer,
+            | Self::Tasks { computer, .. }
+            | Self::Machine { computer, .. } => computer,
         }
     }
 }

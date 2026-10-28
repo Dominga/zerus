@@ -22,7 +22,7 @@ const [mode, setMode] = createSignal<BridgeMode | "starting">("starting");
 startMotion();
 render(() => <App mode={mode} />, document.getElementById("root")!);
 // The menu bar and notifications open sessions and show notices in this window.
-startDesk();
+startDesk().catch((error) => console.warn("Zerus Next: the menu bar wiring did not start", error));
 
 void startBridge(receive).then(setMode, (error) => console.error("Zerus Next: the data source did not start", error));
 

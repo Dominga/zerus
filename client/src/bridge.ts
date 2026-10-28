@@ -318,27 +318,29 @@ export type OpenSession = { computer: ComputerId; key: string };
 export type DeskNotice = { title: string; text: string };
 export type DeskPending = { open: OpenSession | null; notices: DeskNotice[] };
 
-function onEvent<T>(name: string, listener: (payload: T) => void): () => void {
-  if (!inTauri()) return () => {};
-  let stop: (() => void) | undefined;
-  let stopped = false;
-  void listen<T>(name, (event) => listener(event.payload)).then((unlisten) => {
-    if (stopped) unlisten();
-    else stop = unlisten;
-  });
-  return () => {
-    stopped = true;
-    stop?.();
-  };
+/** Listens to `name`; resolves with the stop once the listener is registered. */
+function onEvent<T>(name: string, listener: (payload: T) => void): Promise<() => void> {
+  if (!inTauri()) return Promise.resolve(() => {});
+  return listen<T>(name, (event) => listener(event.payload));
 }
 
-/** `open-session`: the menu bar or a notification opens a session; returns the stop. */
+/** `open-session`: the menu bar or a notification opens a session; resolves with the stop once listening. */
 export const onOpenSession = (listener: (target: OpenSession) => void) => onEvent<OpenSession>("open-session", listener);
-/** `desk-notice`: a notice for the window; returns the stop. */
+/** `desk-notice`: a notice for the window; resolves with the stop once listening. */
 export const onDeskNotice = (listener: (notice: DeskNotice) => void) => onEvent<DeskNotice>("desk-notice", listener);
 
-/** What the menu bar or a notification asked for before this page loaded. */
-export async function deskTakePending(): Promise<DeskPending> {
+type DeskWindow = { __zerusDeskPage?: number; __zerusDeskPageReady?: (page: number) => void };
+
+/** This page load's number, which the native side tells the page once it has loaded (`desk::page_loaded`). */
+export function deskPage(): Promise<number> {
+  if (!inTauri()) return Promise.resolve(0);
+  const w = window as unknown as DeskWindow;
+  if (typeof w.__zerusDeskPage === "number") return Promise.resolve(w.__zerusDeskPage);
+  return new Promise((resolve) => { w.__zerusDeskPageReady = resolve; });
+}
+
+/** What the menu bar or a notification asked for before this page listened; `page` is `deskPage()`. */
+export async function deskTakePending(page: number): Promise<DeskPending> {
   if (!inTauri()) return { open: null, notices: [] };
-  return invoke<DeskPending>("desk_take_pending");
+  return invoke<DeskPending>("desk_take_pending", { page });
 }

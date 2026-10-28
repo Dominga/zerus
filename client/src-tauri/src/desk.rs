@@ -65,41 +65,60 @@ impl Pending {
 
 /// What the menu bar and notifications send the window's page. Until the
 /// page asks ([`desk_take_pending`]) it waits in [`Pending`]; afterwards it
-/// goes out as an event, until the page loads again.
+/// goes out as an event, until the page loads again. Each page load has a
+/// number, which the page passes when it asks, so a late request from the
+/// page before a reload takes nothing.
 #[derive(Debug, Default)]
 pub struct Inbox {
+    page: u64,
     ready: bool,
     pending: Pending,
 }
 
 impl Inbox {
-    /// A session to open: returned to send now, or held for the page.
-    pub fn open(&mut self, target: OpenSession) -> Option<OpenSession> {
+    /// A session to open: `send` gets it now if the page listens, else it
+    /// waits. The glue calls this on the main thread and sends under the lock
+    /// that [`Inbox::loading`] takes too, so a page that starts loading cannot
+    /// fall between the decision and the event.
+    pub fn open(&mut self, target: OpenSession, send: impl FnOnce(OpenSession)) {
         if self.ready {
-            return Some(target);
+            send(target);
+        } else {
+            self.pending.open = Some(target);
         }
-        self.pending.open = Some(target);
-        None
     }
 
-    /// A notice: returned to send now, or held for the page.
-    pub fn notice(&mut self, notice: Notice) -> Option<Notice> {
+    /// A notice: `send` gets it now if the page listens, else it waits.
+    pub fn notice(&mut self, notice: Notice, send: impl FnOnce(Notice)) {
         if self.ready {
-            return Some(notice);
+            send(notice);
+        } else {
+            self.pending.notice(notice);
         }
-        self.pending.notice(notice);
-        None
     }
 
-    /// The page asks for what waited; it listens from now on.
-    pub fn take(&mut self) -> Pending {
+    /// The page of load `page` asks for what waited and listens from now on.
+    /// A request from an older page, which arrived after a reload started,
+    /// takes nothing.
+    pub fn take(&mut self, page: u64) -> Pending {
+        if page != self.page {
+            return Pending::default();
+        }
         self.ready = true;
         std::mem::take(&mut self.pending)
     }
 
-    /// The page loads (again); nothing listens until it asks.
-    pub fn loading(&mut self) {
+    /// A page starts loading (again): nothing listens until it asks. Returns
+    /// its number.
+    pub fn loading(&mut self) -> u64 {
+        self.page += 1;
         self.ready = false;
+        self.page
+    }
+
+    /// The number of the page loading or loaded now.
+    pub fn page(&self) -> u64 {
+        self.page
     }
 }
 
@@ -241,18 +260,34 @@ fn publish(app: &AppHandle, desk: &Desk, mode: OpenMode) {
     let _ = (app, desk, mode);
 }
 
-/// What the webview could not take yet; it asks once when it loads.
+/// What the webview could not take yet; its page asks once, with the number
+/// [`page_loaded`] gave it.
 #[tauri::command]
-pub fn desk_take_pending(app: AppHandle) -> Pending {
+pub fn desk_take_pending(app: AppHandle, page: u64) -> Pending {
     app.try_state::<DeskState>()
-        .map(|state| lock(&state.inbox).take())
+        .map(|state| lock(&state.inbox).take(page))
         .unwrap_or_default()
 }
 
-/// The main window's page started to load: what follows waits until it asks.
+/// The main window's page started to load (on the main thread): it gets a
+/// new number, and what follows waits until it asks.
 pub fn page_loading(app: &AppHandle) {
     if let Some(state) = app.try_state::<DeskState>() {
         lock(&state.inbox).loading();
+    }
+}
+
+/// The main window's page has loaded (on the main thread): tells it its
+/// number. Only the new document runs a script at this point, so a page
+/// that is going away never learns it.
+pub fn page_loaded(webview: &tauri::Webview) {
+    let Some(state) = webview.app_handle().try_state::<DeskState>() else {
+        return;
+    };
+    let page = lock(&state.inbox).page();
+    let script = format!("window.__zerusDeskPage = {page}; window.__zerusDeskPageReady?.({page});");
+    if let Err(error) = webview.eval(script) {
+        eprintln!("zerus-client: could not tell the page its number: {error}");
     }
 }
 
@@ -262,17 +297,18 @@ pub fn open_session(app: &AppHandle, computer: &ComputerId, key: &str) {
         computer: computer.0.clone(),
         key: key.to_owned(),
     };
-    let now = match app.try_state::<DeskState>() {
-        Some(state) => lock(&state.inbox).open(target),
-        None => Some(target),
-    };
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Err(error) = crate::lifecycle::show_main(&handle) {
             eprintln!("zerus-client: could not open the window: {error}");
         }
-        if let Some(target) = now {
+        let send = |target: OpenSession| {
             let _ = handle.emit("open-session", target);
+        };
+        // Decided and sent under the inbox lock, on the main thread like a page load.
+        match handle.try_state::<DeskState>() {
+            Some(state) => lock(&state.inbox).open(target, send),
+            None => send(target),
         }
     });
 }
@@ -284,13 +320,17 @@ pub fn window_notice(app: &AppHandle, title: &str, text: &str) {
         title: title.to_owned(),
         text: text.to_owned(),
     };
-    let now = match app.try_state::<DeskState>() {
-        Some(state) => lock(&state.inbox).notice(notice),
-        None => Some(notice),
-    };
-    if let Some(notice) = now {
-        let _ = app.emit("desk-notice", notice);
-    }
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let send = |notice: Notice| {
+            let _ = handle.emit("desk-notice", notice);
+        };
+        // Decided and sent under the inbox lock, on the main thread like a page load.
+        match handle.try_state::<DeskState>() {
+            Some(state) => lock(&state.inbox).notice(notice, send),
+            None => send(notice),
+        }
+    });
 }
 
 /// Qt's `TrayAgent::notify` on macOS: `osascript display notification`,
@@ -761,30 +801,82 @@ mod tests {
         }
     }
 
+    /// What an inbox call sent at once.
+    fn sent<T>(call: impl FnOnce(&mut dyn FnMut(T))) -> Vec<T> {
+        let mut out = Vec::new();
+        call(&mut |value| out.push(value));
+        out
+    }
+
     #[test]
     fn a_session_waits_until_the_page_takes_it() {
         let mut inbox = Inbox::default();
-        assert_eq!(inbox.open(target("a")), None, "no page yet: held");
+        let page = inbox.loading();
+        assert!(
+            sent(|send| inbox.open(target("a"), send)).is_empty(),
+            "no page yet: held"
+        );
         let notice = Notice {
             title: "Zerus".into(),
             text: "sample".into(),
         };
-        assert_eq!(inbox.notice(notice.clone()), None);
-        let pending = inbox.take();
+        assert!(sent(|send| inbox.notice(notice.clone(), send)).is_empty());
+        let pending = inbox.take(page);
         assert_eq!(pending.open, Some(target("a")));
         assert_eq!(pending.notices, std::slice::from_ref(&notice));
-        assert_eq!(inbox.take(), Pending::default(), "taken once");
+        assert_eq!(inbox.take(page), Pending::default(), "taken once");
         assert_eq!(
-            inbox.open(target("b")),
-            Some(target("b")),
+            sent(|send| inbox.open(target("b"), send)),
+            [target("b")],
             "a ready page gets the event"
         );
-        assert_eq!(inbox.notice(notice.clone()), Some(notice));
+        assert_eq!(sent(|send| inbox.notice(notice.clone(), send)), [notice]);
         // A window that exists but whose page loads again (a reload, a new webview).
+        let next = inbox.loading();
+        assert!(sent(|send| inbox.open(target("c"), send)).is_empty());
+        assert!(
+            sent(|send| inbox.open(target("d"), send)).is_empty(),
+            "the latest session wins"
+        );
+        assert_eq!(inbox.take(next).open, Some(target("d")));
+    }
+
+    #[test]
+    fn a_page_that_starts_loading_holds_what_follows() {
+        // The decision and the send happen in one call, under the lock the page
+        // load also takes, so nothing is sent to a page that started loading.
+        let mut inbox = Inbox::default();
+        let first = inbox.loading();
+        inbox.take(first);
         inbox.loading();
-        assert_eq!(inbox.open(target("c")), None);
-        assert_eq!(inbox.open(target("d")), None, "the latest session wins");
-        assert_eq!(inbox.take().open, Some(target("d")));
+        let mut sent_after_load = Vec::new();
+        inbox.open(target("a"), &mut |value| sent_after_load.push(value));
+        assert!(
+            sent_after_load.is_empty(),
+            "the reloading page would lose it"
+        );
+        assert_eq!(inbox.pending.open, Some(target("a")));
+    }
+
+    #[test]
+    fn a_take_from_the_page_before_a_reload_is_ignored() {
+        let mut inbox = Inbox::default();
+        let old = inbox.loading();
+        inbox.take(old);
+        // The old page asks again, but its request arrives after the reload started.
+        let new = inbox.loading();
+        assert!(sent(|send| inbox.open(target("a"), send)).is_empty());
+        assert_eq!(
+            inbox.take(old),
+            Pending::default(),
+            "a stale take gets nothing"
+        );
+        assert!(
+            sent(|send| inbox.open(target("b"), send)).is_empty(),
+            "and does not make the new page ready"
+        );
+        assert_eq!(inbox.take(new).open, Some(target("b")));
+        assert_eq!(inbox.page(), new);
     }
 
     #[test]

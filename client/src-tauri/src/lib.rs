@@ -153,14 +153,17 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
     let builder = builder.activate_ignoring_other_apps(!menu_bar);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let builder = builder.manage(instance::InstanceState(std::sync::Mutex::new(listening)));
-    // A page that loads (again) takes what the menu bar sent once it asks.
+    // A page that loads (again) takes what the menu bar sent once it asks,
+    // with the number it learns when it has loaded.
     #[cfg(feature = "live")]
     let builder = builder.on_page_load(|webview, payload| {
         use tauri::Manager;
-        if webview.label() == MAIN_WINDOW
-            && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
-        {
-            desk::page_loading(webview.app_handle());
+        if webview.label() != MAIN_WINDOW {
+            return;
+        }
+        match payload.event() {
+            tauri::webview::PageLoadEvent::Started => desk::page_loading(webview.app_handle()),
+            tauri::webview::PageLoadEvent::Finished => desk::page_loaded(webview),
         }
     });
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]

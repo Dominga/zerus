@@ -471,6 +471,14 @@ impl Controller {
             self.draft_change += 1;
             self.revision += 1;
             self.tick_pulled = false;
+            // A failed apply's line goes with its edits: the newest state's
+            // line again, or the source's failure, where Qt's next tick reads
+            // the catalog (100). A held state adopted below replaces it.
+            if let Some(error) = &self.source_error {
+                self.status = Some((unavailable(error), true));
+            } else if let Some(value) = &self.value {
+                self.status = Some(status_of(value));
+            }
             // Qt reads on its next tick (100); here the state refused under
             // the edits is the newest one, and the source sends no other.
             if let Some(held) = self.held.take() {
@@ -1947,6 +1955,22 @@ mod tests {
             "beta",
             "Projects shows what was written too"
         );
+    }
+
+    /// A kept apply's failure line goes once nothing is pending any more:
+    /// the edit moved back before the tick settles without a call.
+    #[test]
+    fn a_reverted_kept_edit_clears_the_failure_line() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let _ = input(sync.due(120));
+        sync.finish(Exit::TimedOut, 10_120);
+        assert!(sync.view().status_error);
+        sync.edit(&to("alpha"), 11_000).unwrap();
+        assert!(matches!(sync.due(11_200), Due::Settled(_)));
+        assert!(!sync.pending());
+        assert_eq!(sync.view().status, LOCAL, "the newest state's line again");
+        assert!(!sync.view().status_error);
     }
 
     /// A restored draft that fails on every tick still gives Projects the

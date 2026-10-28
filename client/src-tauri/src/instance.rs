@@ -1132,6 +1132,17 @@ mod tests {
             "reported once"
         );
         assert!(!script.locked, "the lock is released");
+        // Each pause leaves the lock to other starts, as Qt's `lock.unlock()` does.
+        let locking: Vec<&str> = script
+            .log
+            .iter()
+            .map(String::as_str)
+            .filter(|line| *line == "lock" || *line == "unlock")
+            .collect();
+        assert_eq!(
+            locking,
+            ["lock", "unlock", "lock", "unlock", "lock", "unlock"]
+        );
     }
 
     #[test]
@@ -1230,8 +1241,28 @@ mod tests {
             Activation::Sessions
         );
         assert!(!paths.lock.exists(), "the start lock is released");
+        assert_eq!(
+            fs::metadata(&paths.socket).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "only this user may connect"
+        );
         drop(first.listening);
         assert!(!paths.socket.exists(), "quitting removes the socket");
+    }
+
+    #[test]
+    fn quitting_keeps_a_socket_another_instance_put_there() {
+        let dir = scratch("replaced");
+        let paths = paths("zerus-test", &dir, &dir);
+        let Claim::Claimed(first) =
+            claim_at(&paths, None, Activation::Show, &LockInfo::own(), &fast())
+        else {
+            panic!("the first start claims")
+        };
+        fs::remove_file(&paths.socket).unwrap();
+        let _replacement = UnixListener::bind(&paths.socket).unwrap();
+        drop(first.listening);
+        assert!(paths.socket.exists(), "the replacement's socket stays");
     }
 
     #[test]

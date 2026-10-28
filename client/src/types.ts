@@ -35,6 +35,22 @@ export interface ViewRow {
   turn_started?: number | null;
   run_id?: string | null;
   conversation_id?: string | null;
+  /** The raw `state` (`running`, `paused`, `stopped`, `archived`, ...). */
+  state?: string;
+  tracked?: boolean;
+  resumable?: boolean;
+  activity?: string;
+  process_state?: string;
+  archive_id?: string | null;
+  /** The latest reply and the attention it raised, for marking them read. */
+  reply_id?: string | null;
+  attention_signature?: string | null;
+  shared_read?: boolean;
+  read_reply_id?: string | null;
+  read_attention_signature?: string | null;
+  /** The operations the computer reports as allowed; null when it reports none. */
+  allowed_actions?: string[] | null;
+  action_reasons?: Record<string, string>;
 }
 
 export interface RowOut { computer: ComputerId; key: string; row: ViewRow }
@@ -75,4 +91,43 @@ export interface ActivityEvent {
   attachments?: { name?: string; path?: string; size?: number; kind?: string; mime?: string }[];
   voice?: Record<string, unknown>;
   [field: string]: unknown;
+}
+
+/** The session an action applies to (client/core `actions.rs`). */
+export interface Target { computer: ComputerId; name: string; run_id: string; conversation_id: string }
+
+export type Action =
+  | { kind: "interrupt"; turn_started: number }
+  | { kind: "mark_read"; reply_id: string | null; attention_signature: string | null }
+  | { kind: "pause" }
+  | { kind: "resume" }
+  | { kind: "rename"; new_name: string; archive_id: string | null }
+  | { kind: "archive" }
+  | { kind: "terminate" };
+
+export interface WorktreeCleanup { status: string; path: string; common_dir: string; reason?: string | null }
+
+export type Outcome =
+  | { outcome: "done"; receipt: unknown; cleanup: WorktreeCleanup | null }
+  | { outcome: "failed"; detail: string };
+
+/** The inspect fields that enable header actions (client/core `details.rs`). */
+export interface Details {
+  run_id: string;
+  conversation_id: string;
+  auth_required: boolean;
+  expected_id: string;
+  resume_message_can_send: boolean;
+  allowed_actions: string[] | null;
+  action_reasons: Record<string, string>;
+}
+
+/** A read mark whose delivery is still pending (client/core `readmarks.rs`). */
+export interface ReadMark {
+  computer: ComputerId;
+  name: string;
+  run_id: string;
+  conversation_id: string;
+  reply_id: string | null;
+  attention_signature: string | null;
 }

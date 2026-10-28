@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { emptyBatch, isEmptyBatch, type Batch, type ComputerId } from "./types";
+import { emptyBatch, isEmptyBatch, type Action, type Batch, type ComputerId, type Details, type Outcome, type ReadMark, type Target } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 
@@ -150,4 +150,22 @@ export const activityPort: ActivityPort = {
 export async function metrics(windowMs?: number): Promise<Record<string, unknown> | undefined> {
   if (!inTauri()) return undefined;
   try { return await invoke<Record<string, unknown>>("metrics", windowMs ? { window_ms: windowMs } : {}); } catch { return undefined; }
+}
+
+/** One guarded session action; an Err (a rejected promise) is an unknown outcome. */
+export async function runAction(target: Target, action: Action): Promise<Outcome> {
+  if (!inTauri()) return { outcome: "failed", detail: "Actions need the desktop app." };
+  return invoke<Outcome>("run_action", { target, action });
+}
+
+/** The inspect fields of a session; null when they are unavailable. */
+export async function inspectSession(target: Target, archiveId: string | null): Promise<Details | null> {
+  if (!inTauri()) return null;
+  return (await invoke<Details | null>("inspect_session", { target, archiveId })) ?? null;
+}
+
+/** Read marks whose delivery has not been confirmed yet. */
+export async function pendingReadMarks(): Promise<ReadMark[]> {
+  if (!inTauri()) return [];
+  return invoke<ReadMark[]>("pending_read_marks");
 }

@@ -1,6 +1,7 @@
 import { createEffect, createRoot, on } from "solid-js";
 import { activityPort } from "../bridge";
 import { applyBatch, onReplaced, orderedRows } from "./catalog";
+import { observeBatch } from "./actions";
 import { createActivity } from "./activity";
 import { compactRows, selected, selectedKey, setCompactRows, setSelectedKey } from "./ui";
 import type { Batch } from "../types";
@@ -14,6 +15,7 @@ export const activity = createActivity(activityPort);
 /** Applies one batch from the bridge. */
 export function receive(b: Batch) {
   applyBatch(b);
+  observeBatch(b);
   if (b.activity.length) activity.applyActivity(b.activity);
 }
 

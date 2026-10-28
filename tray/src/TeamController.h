@@ -19,6 +19,8 @@ class TeamController : public QObject {
 public:
     explicit TeamController(HgsClient *client, QObject *parent = nullptr);
     void setActive(bool active);
+    // This controller's pace; setPollInterval sets the default of new ones.
+    void setInterval(int milliseconds) { m_poll.setInterval(milliseconds); }
     void refresh();
     const QList<Teams::Team> &teams() const { return m_teams; }
     const Teams::Team *team(const QString &id) const;

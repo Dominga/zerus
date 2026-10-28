@@ -558,6 +558,7 @@ private:
     // WhiteWh fork: agent teams on this computer and the inspector's Team tab.
     class TeamController *m_teams=nullptr;
     std::shared_ptr<class TeamAttentionNotices> m_teamNotices;
+    QString m_pendingTeamAttention;   // a clicked notice whose team is not read yet
     class TeamPanel *m_teamPanel=nullptr;
     // The team header the user selected in the list; a selected session shows its own team.
     QString m_selectedTeam;

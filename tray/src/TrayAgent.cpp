@@ -5,6 +5,7 @@
 #include "QuestionNotificationSettings.h"
 #include "AutomaticApprovals.h"
 #include "CacheKeepalive.h"
+#include "TeamAttentionWatch.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -203,6 +204,12 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
             QTimer::singleShot(16000, this, [this, token] { if (m_pendingAttention == token) resolveAttentionClick(true); });
         });
     });
+    // N32 of #499: Zerus started in the tray still learns of a stuck team
+    // permission; the window's own team poll replaces this one (showSessions).
+    m_teamWatch = new TeamAttentionWatch(&m_client, this);
+    connect(m_teamWatch, &TeamAttentionWatch::raised, this, [this](const QString &token, const QString &title, const QString &body) { m_notifier->post(token, title, body); });
+    connect(m_teamWatch, &TeamAttentionWatch::cleared, this, [this](const QString &token) { m_notifier->withdraw(token); });
+    m_teamWatch->setActive(true);
     connect(m_notifier.get(), &AttentionNotifier::failed, this, [this](const QString &token, const QString &detail) {
         qWarning().noquote() << "Zerus: notification:" << detail;
         if(UpdateController::isUpdateToken(token)||token.startsWith(QLatin1String("zerus-fork-update:"))||token.startsWith(QLatin1String("zerus-team-attention:")))return;
@@ -715,6 +722,8 @@ void TrayAgent::launchSession(const QString &host, const QString &cmd, const QSt
 void TrayAgent::showSessions()
 {
     if (!m_sessionsWindow) {
+        // The window reads the known team items the watch stored and polls from now on.
+        if (m_teamWatch) m_teamWatch->setActive(false);
         m_sessionsWindow = new SessionsWindow(m_cfg.hgsPath);
         const auto publishReadState = [this]() {
             SettingsJson::store(QStringLiteral("attention/readReplies"), QJsonDocument(m_state.readReplies()));

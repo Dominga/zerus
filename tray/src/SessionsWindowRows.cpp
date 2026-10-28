@@ -684,7 +684,10 @@ SessionsWindow::PreparedRows SessionsWindow::prepareRows(const RowInputs &in)
             const int optionalQuestions = roles.value(SessionRoles::OptionalQuestions).toInt();
             if (optionalQuestions > 0) accessibleFields << SessionPresentation::optionalQuestionsLabel(optionalQuestions);
             if (s.reviewLater) accessibleFields << tr("Marked needs attention: review later");
-            if (s.muted) accessibleFields << (s.sharedNotifications && e.online ? tr("Muted on all devices") : tr("Muted on all devices (last confirmed)"));
+            // N36 of #499: the team default lives in this desktop only; hgs
+            // keeps the session unmuted for Android and the other desktops.
+            if (s.muted && s.teamMuted) accessibleFields << tr("Muted on this computer: team members are muted by default");
+            else if (s.muted) accessibleFields << (s.sharedNotifications && e.online ? tr("Muted on all devices") : tr("Muted on all devices (last confirmed)"));
             accessibleFields << desc;
             if (!childCount(s, false, e.online, in.includeCompleted).isEmpty())
                 accessibleFields << tr("Subagents: %1").arg(childCount(s, true, e.online, in.includeCompleted));

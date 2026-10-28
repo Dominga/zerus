@@ -176,7 +176,7 @@ add_library(hgs-tray-core STATIC src/ProcessRunner.cpp src/JsonParse.cpp src/Set
     src/ReadMarkSync.cpp src/AppConfig.cpp src/AccountUsageStore.cpp src/ComposerDraftStore.cpp
     src/SwarmController.cpp src/DesktopPresence.cpp src/AttentionNotifier.h src/CommandBackend.cpp
     # WhiteWh fork: agent teams (hgs team).
-    src/TeamModel.cpp src/TeamController.cpp
+    src/TeamModel.cpp src/TeamController.cpp src/TeamAttentionWatch.cpp
     src/LocalSessionHost.cpp src/DownloadCache.cpp src/AutomaticApprovals.cpp src/CacheKeepalive.cpp src/TaskBoard.cpp
     # Main-thread watchdog (MainThreadWatchdog.h): every platform, prompted by macOS.
     src/MainThreadWatchdog.cpp)

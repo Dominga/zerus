@@ -130,6 +130,8 @@ private:
     QString m_localReadError;
     ReadState m_appliedReadState;
     SessionsWindow *m_sessionsWindow = nullptr;
+    // N32 of #499: team attention notifications until the window exists.
+    class TeamAttentionWatch *m_teamWatch = nullptr;
     // Records desktop activity for phone alerts; see DesktopPresence.h.
     std::unique_ptr<DesktopPresence> m_presence;
     class EventStreams *m_streams = nullptr;

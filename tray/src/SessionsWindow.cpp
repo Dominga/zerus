@@ -610,6 +610,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         emit notificationPreferencesChanged(original.host, original.session.name, original.session.runId,
                                             original.session.conversationId, preferences);
         if (!thenUnmute) return;
+        // The signal's receiver (TrayAgent) calls setFleet at once, which
+        // replaces m_fleet and frees the box read above: read it again.
+        box = original.host.isEmpty() ? &m_fleet.local() : m_fleet.peer(original.host);
+        if (!box) return;
         for (const auto &s : box->sessions) if (s.name == original.session.name && s.runId == original.session.runId
                                                 && s.conversationId == original.session.conversationId && s.state != "archived") {
             Entry next = original; next.session = s;
@@ -1698,6 +1702,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             for(const auto &member:team.members)if(!member.lead&&member.id!=team.lead&&!member.session.isEmpty())members.insert(member.host+'\n'+member.session);
         if(members!=m_teamMembers){m_teamMembers=members;m_fleet.setTeamMembers(members);emit teamMembersChanged(members);}
         rebuild();updateTeamPanel();
+        if(!m_pendingTeamAttention.isEmpty()&&m_teams->team(TeamAttentionNotices::teamOf(m_pendingTeamAttention)))showTeamAttention(m_pendingTeamAttention);
         const auto changes=m_teamNotices->observe(m_teams->teams());
         if(changes.raised.isEmpty()&&changes.cleared.isEmpty())return;
         QSettings().setValue("teams/attentionNotified",m_teamNotices->known());
@@ -4655,7 +4660,6 @@ void SessionsWindow::renderDetails()
     else if (archived && !m_details.value("last_restore_error").toString().isEmpty())
         hint = tr("Last restore failed: %1").arg(m_details.value("last_restore_error").toString());
     else if (!m_inspectError.isEmpty()) hint = m_inspectError;
-    else if (!s.subagentConfirm.isEmpty()) hint = s.subagentConfirm;
     else if (!questionError.isEmpty()) hint = tr("Could not load agent questions: %1. Check Terminal.").arg(questionError);
     else if (archived && occupied) hint = tr("Another active or saved session uses this name. Restore becomes available when that name is free.");
     else if (archived && !s.resumable) hint = tr("This session is archived. Its conversation history is currently unavailable, so it cannot be restored.");
@@ -4665,6 +4669,10 @@ void SessionsWindow::renderDetails()
     else if (s.state == "stopped") hint = tr("Agent stopped. Its saved conversation can be resumed.");
     else if (s.processState == "exited") hint = tr("The agent process exited, but its terminal session still exists. Open the terminal to inspect it.");
     else if (s.conversationState == "ended" && s.activity != "idle") hint = tr("The last conversation ended, but the agent process is still running. Its current activity is unconfirmed; open the terminal to check.");
+    // U19: the record keeps its last subagent note for good; it says something
+    // only while that ask waits, and only when someone else answers it.
+    else if (state == "Needs approval" && s.subagentConfirm == QLatin1String("asked; the team's lead answers"))
+        hint = tr("The agent asks to start subagents. Its team's lead answers.");
     else if (state == "Needs approval" || state == "Needs input") hint = tr("Your agent needs you. Open its terminal to respond.");
     else if (s.activity == "busy") hint = tr("Agent is active. Pause becomes available after the response and subagents finish.");
     else if (SessionPresentation::backgroundIdle(s)) hint = (s.backgroundProcesses == 1
@@ -7339,7 +7347,11 @@ void SessionsWindow::openTeamTask(int task)
 void SessionsWindow::showTeamAttention(const QString &token)
 {
     const auto team=TeamAttentionNotices::teamOf(token);
-    if(team.isEmpty()||!m_teams||!m_teams->team(team))return;
+    m_pendingTeamAttention.clear();
+    if(team.isEmpty()||!m_teams)return;
+    // N32: a notification raised before this window existed can be clicked
+    // before its first team list: open the team once it is read.
+    if(!m_teams->team(team)){m_pendingTeamAttention=token;return;}
     showTeam(team);
     if(m_teamPanel&&m_teamPanel->openWorkspace)m_teamPanel->openWorkspace();
 }

@@ -374,6 +374,7 @@ fn the_generated_worktree_goes_beside_the_selected_root() {
 fn project(id: &str, folders: &[(&str, &str)]) -> Project {
     Project {
         id: id.into(),
+        name: format!("Project {id}"),
         folders: folders
             .iter()
             .map(|(machine, path)| ProjectFolder {

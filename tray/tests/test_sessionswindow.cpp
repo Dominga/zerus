@@ -8476,6 +8476,25 @@ void TestSessionsWindow::sessionIdentifiersRemainInDetailsAcrossNavigation()
     window.findChild<QSplitter *>("sessionWorkSplitter")->setSizes({600, 420});
     QTRY_VERIFY(value->width() >= value->fontMetrics().horizontalAdvance(value->text()));
     QTRY_VERIFY(copyFits());
+    // #542: at 290 px (QA #500 finding 2) and the narrowest inspector the ID
+    // never overlaps its title or the copy button: it takes a line of its own
+    // and shows whole while that line is long enough.
+    auto *row = window.findChild<QWidget *>("detailsIdentity"); QVERIFY(row);
+    const auto apart = [&] {
+        const auto rect = [row](QWidget *widget) { return QRect(widget->mapTo(row, QPoint()), widget->size()); };
+        return !rect(value).intersects(rect(copy)) && (!title->isVisible() || !rect(value).intersects(rect(title)));
+    };
+    auto *splitter = window.findChild<QSplitter *>("sessionWorkSplitter");
+    const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS");
+    for (const int width : {420, 290, 240}) {
+        splitter->setSizes({splitter->width() - width, width});
+        QTRY_VERIFY(apart()); QTRY_VERIFY(copyFits());
+        QTRY_VERIFY(value->width() >= qMin(value->fontMetrics().horizontalAdvance(value->text()), row->width()));
+        if (title->isVisible()) QVERIFY(value->y() >= copy->y() + copy->height());
+        if (!shots.isEmpty()) QVERIFY(window.findChild<QWidget *>("sessionInspectorPanel")->grab().save(QDir(shots).filePath(QString("u542-session-id-%1.png").arg(width))));
+    }
+    splitter->setSizes({600, 420});
+    QTRY_VERIFY(value->width() >= value->fontMetrics().horizontalAdvance(value->text()));
     QCOMPARE(title->text(), QString("Session ID")); QCOMPARE(value->text(), box.sessions[0].conversationId);
     QVERIFY(value->textInteractionFlags().testFlag(Qt::TextSelectableByMouse));
     QCOMPARE(copy->accessibleName(), QString("Copy session ID"));

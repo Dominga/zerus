@@ -1,5 +1,6 @@
 #pragma once
 #include <QFrame>
+#include <QGridLayout>
 #include <QLabel>
 #include <QMap>
 #include <QPainter>
@@ -118,11 +119,14 @@ public:
             // .irow: the Environment rows, the key row's mono ID, dim keys.
             "QFrame#inspectorCard QLabel#inspectorEnvValue,QFrame#inspectorCard QLabel#keepCacheWarmLabel{color:%4;font-size:12px;}"
             "QFrame#inspectorCard QLabel#inspectorEnvKey,QFrame#inspectorCard QLabel#keepCacheWarmLimit{color:%3;font-size:12px;}"
-            "QFrame#inspectorCard QLabel#detailsIdentityValue{color:%4;font-family:monospace;font-size:11.5px;}"
+            // Named mono families first (#542): a bare "monospace" can resolve
+            // to a font without these glyphs, as in QA #500's shots.
+            "QFrame#inspectorCard QLabel#detailsIdentityValue{color:%4;font-family:\"Cascadia Mono\",Consolas,Menlo,\"DejaVu Sans Mono\",monospace;font-size:11.5px;}"
+            "QFrame#inspectorCard QLabel#detailsIdentityTitle{color:%3;font-size:12px;font-weight:400;}"
             "QFrame#inspectorCard QLabel#inspectorContextUsed{color:%5;font-size:12.5px;font-weight:600;}"
-            "QFrame#inspectorCard QLabel#inspectorContextTokens{color:%3;font-family:monospace;font-size:12px;}"
+            "QFrame#inspectorCard QLabel#inspectorContextTokens{color:%3;font-family:\"Cascadia Mono\",Consolas,Menlo,\"DejaVu Sans Mono\",monospace;font-size:12px;}"
             "QFrame#inspectorCard QLabel#inspectorContextLeft,QFrame#inspectorCard QLabel#inspectorChangesEmpty{color:%3;font-size:11px;}"
-            "QFrame#inspectorCard QLabel#inspectorChangePath{color:%4;font-family:monospace;font-size:11.5px;}"
+            "QFrame#inspectorCard QLabel#inspectorChangePath{color:%4;font-family:\"Cascadia Mono\",Consolas,Menlo,\"DejaVu Sans Mono\",monospace;font-size:11.5px;}"
             "QFrame#inspectorCard QTextBrowser{background:transparent;border:0;}"
             // A panel inside a card (Team) draws on the card, not the window.
             "QFrame#inspectorCard QScrollArea,QFrame#inspectorCard QScrollArea>QWidget>QWidget{background:transparent;border:0;}"
@@ -214,6 +218,67 @@ protected:
 
 private:
     Qt::TextElideMode m_mode;
+};
+
+// #542: the Environment card's Session ID row (spec 6). The key icon, the
+// mono ID and its copy button share one line while the whole ID fits there;
+// on a narrower inspector the icon, the ID's title and the button keep the
+// first line and the ID gets the card's full width on its own line. Only when
+// even that is too short does the ID elide in the middle (the copy button and
+// the tooltip still give the whole ID). The layout follows the row's width and
+// the ID's text, never the other way round.
+class InspectorIdentityRow : public QWidget {
+public:
+    InspectorIdentityRow(QWidget *icon, QLabel *title, QLabel *value, QWidget *copy, QWidget *parent = nullptr)
+        : QWidget(parent), m_icon(icon), m_title(title), m_value(value), m_copy(copy)
+    {
+        m_grid = new QGridLayout(this);
+        m_grid->setContentsMargins(0, 0, 0, 0); m_grid->setHorizontalSpacing(9); m_grid->setVerticalSpacing(4);
+        m_grid->setColumnStretch(2, 1);
+        // The title is laid out only on two lines; the row owns it on one too.
+        title->setParent(this);
+        place(false);
+    }
+    bool split() const { return m_split; }
+
+protected:
+    void resizeEvent(QResizeEvent *event) override { QWidget::resizeEvent(event); relayout(); }
+    // A new ID (QLabel::setText) asks its parent for a layout pass.
+    bool event(QEvent *event) override
+    {
+        if (event->type() == QEvent::LayoutRequest) relayout();
+        return QWidget::event(event);
+    }
+
+private:
+    void relayout()
+    {
+        const int text = m_value->fontMetrics().horizontalAdvance(m_value->text());
+        const int beside = width() - m_icon->sizeHint().width() - m_copy->sizeHint().width() - 2 * m_grid->horizontalSpacing();
+        const bool split = text > beside;
+        if (split != m_split) place(split);
+        m_value->setToolTip(text > m_value->contentsRect().width() ? m_value->text() : QString());
+    }
+    void place(bool split)
+    {
+        m_split = split;
+        for (auto *widget : {m_icon, static_cast<QWidget *>(m_title), static_cast<QWidget *>(m_value), m_copy}) m_grid->removeWidget(widget);
+        m_grid->addWidget(m_icon, 0, 0, Qt::AlignVCenter);
+        if (split) {
+            m_grid->addWidget(m_title, 0, 1, 1, 2);
+            m_grid->addWidget(m_copy, 0, 3);
+            m_grid->addWidget(m_value, 1, 0, 1, 4);
+        } else {
+            m_grid->addWidget(m_value, 0, 1, 1, 2);
+            m_grid->addWidget(m_copy, 0, 3);
+        }
+        m_title->setVisible(split);
+    }
+    QGridLayout *m_grid = nullptr;
+    QWidget *m_icon;
+    QLabel *m_title, *m_value;
+    QWidget *m_copy;
+    bool m_split = false;
 };
 
 // U25 part 6 (spec 6): the Context card's composite bar - one segment per

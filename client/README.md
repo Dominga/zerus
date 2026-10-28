@@ -695,8 +695,9 @@ Apply rules (`SwarmController.cpp`, ported in `core/src/swarm/sync.rs`):
   answer and the status line say "Project sync unavailable: <error>" (or "Project
   sync needs an updated HGS installation."), and the next tick sends one apply
   with the same base, desired state and versions. The tick is 5 s after the
-  failure or the topic's next state, whichever comes first. Edits made meanwhile
-  ride on it.
+  failure or the topic's next state, whichever comes first. After a resend fails
+  again, only the 5 s tick sends it, so a refused apply goes out at most once per
+  5 s. Edits made meanwhile ride on it.
 - After a restart the saved draft is shown at once and sent once after the first
   state, from its saved base and versions, so a catalog that changed meanwhile
   gives a conflict. A draft that cannot be used is moved aside, never applied,

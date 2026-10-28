@@ -498,6 +498,9 @@ impl Organization {
     /// Renames the list saw become `Renamed` edits while edits are accepted
     /// (renameSession). Until then they stay with the grouping, and a late
     /// one changes nothing; a blocked replay, which edits nothing, drops them.
+    /// A rename whose old name is no member of the presented organization
+    /// (a fallback row) makes no edit, as Qt's renameSession returns for an
+    /// unknown id (SessionOrganization.cpp:206).
     fn renames(&self, hub: &mut Hub) {
         if !self.0.allowed {
             let _ = self.0.pump.take_renames();
@@ -508,6 +511,14 @@ impl Organization {
         }
         let mut renamed = false;
         for (from, to) in self.0.pump.take_renames() {
+            // Read for each one: an earlier rename may have made `from` a member.
+            let member = hub
+                .sync
+                .presented()
+                .is_some_and(|(_, membership)| membership.contains_key(&from));
+            if !member {
+                continue;
+            }
             let intent = Intent::Renamed { from, to };
             if hub.sync.edit(&intent, self.now()).is_ok() {
                 self.0.pump.edited(&intent);
@@ -1641,6 +1652,34 @@ mod tests {
         };
         assert!(held.load(Ordering::SeqCst), "built under the hub's lock");
         assert_eq!(outcome, EditOutcome::Done { conflicts: 0 });
+        fake.finish(organization);
+    }
+
+    /// A fallback row's rename seen before the first state changes nothing
+    /// shared: no `Renamed` edit, so no ticket, revision or draft write (Qt's
+    /// renameSession returns early for an unknown id).
+    #[test]
+    fn a_fallback_row_renamed_before_the_first_state_makes_no_edit() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        pump.push(row("run:2", "claude/sample-project/other"));
+        pump.push(row("run:2", "claude/sample-project/other-2"));
+        let organization = fake.organization(&pump, true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        let revision = organization.lock().sync.revision();
+        let passes = parked(&organization);
+        organization.0.wake.notify_all();
+        wait_until("two passes after the first state", || {
+            parked(&organization) > passes + 1
+        });
+        assert_eq!(
+            organization.lock().sync.revision(),
+            revision,
+            "no Renamed edit"
+        );
+        assert!(fake.applies().is_empty());
+        assert!(!fake.draft().exists());
         fake.finish(organization);
     }
 }

@@ -172,10 +172,14 @@ Outcome rules:
   read state are kept in `attention-marks.json` (a replay uses
   `attention-marks-replay.json`). `update_attention_marks` writes or removes
   entries in memory; each map keeps its 20 000 newest written entries, in the
-  window too. A writer thread reads the file at start and saves the latest
-  state after each change, listing entries in write order, so the window never
-  waits for the disk. The computers whose older marks were queued are
-  remembered in the webview's local storage.
+  window too: `attention_marks` answers each map's keys oldest written first,
+  and the window writes one update's entries in key order as the Rust side
+  does, so both drop the same entries. A Mark needs attention made before the
+  stored marks arrive changes only `review`. A writer thread reads the file at
+  start and saves the latest state after each change, listing entries in write
+  order, so the window never waits for the disk. The computers whose older
+  marks were queued are remembered in the webview's local storage. Outside the
+  app (a browser) there is no pending list, and the window keeps its own.
 
 Forgetting, restoring, Mark needs attention and sending arrive in later phases;
 their entries are disabled with a reason. The copy entries below are live.

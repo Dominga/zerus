@@ -302,7 +302,7 @@ Rules:
 - **Keys** are the client's own (`FleetState.cpp:44-52`):
   - reply key `["{computer}","{agent}","{conversation}"]`;
   - attention key the reply key, or `["{computer}","{agent}","{name}",created]` without a conversation.
-  - The frontend keeps the merge rules (Task B3) and sends deltas: `attention_marks()` answers `{ marks, replies }` (maps by key), `update_attention_marks(marks, replies)` takes maps of key to entry or null (removal). A full replace would send megabytes per click at the cap. The file is `attention-marks.json` beside `read-marks.json` (`attention-marks-replay.json` for a replay) and lists each map as `[key, value]` pairs in write order, so the cap drops the oldest written after a restart too.
+  - The frontend keeps the merge rules (Task B3) and sends deltas: `attention_marks()` answers `{ marks, replies, order: { marks, replies } }` (maps by key, and each map's keys oldest written first, so the window's cap drops the same entries after a restart), `update_attention_marks(marks, replies)` takes maps of key to entry or null (removal). A full replace would send megabytes per click at the cap. The file is `attention-marks.json` beside `read-marks.json` (`attention-marks-replay.json` for a replay) and lists each map as `[key, value]` pairs in write order, so the cap drops the oldest written after a restart too.
 - **`ReadSync`** (`ReadMarkSync.h`, `ReadMarkSync.cpp:36-95`):
   - at most 4 marks in flight; each free slot goes to the computer with the fewest in flight, then key order;
   - a mark in flight, or one already sent unchanged that is not yet due, waits;

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createComputed, createRoot } from "solid-js";
 import { createCatalog } from "./catalog";
-import { CAP, attentionKey, createMarks, fallbackKey, replyKey, type AttentionSnapshot, type Mark, type MarksPort, type MigratedStorage } from "./marks";
+import { CAP, attentionKey, byCodePoint, createMarks, fallbackKey, replyKey, type AttentionSnapshot, type Mark, type MarksPort, type MigratedStorage, type RowsPort } from "./marks";
 import { snapshotOf } from "../ui/sessions/actions-ui";
 import { emptyBatch, type Batch, type ReadMark, type RowOut, type ViewRow } from "../types";
 
@@ -44,7 +45,7 @@ function fakePort(snapshot: AttentionSnapshot = { marks: {}, replies: {} }, pend
   const port = {
     attentionMarks: vi.fn(async () => snapshot),
     updateAttentionMarks: vi.fn(async (_marks: Record<string, Mark | null>, _replies: Record<string, string | null>) => {}),
-    queueReadMarks: vi.fn(async (marks: ReadMark[]) => {
+    queueReadMarks: vi.fn(async (marks: ReadMark[]): Promise<ReadMark[] | undefined> => {
       for (const next of marks) {
         const key = JSON.stringify([next.computer, next.name]);
         const old = server.get(key);
@@ -53,7 +54,7 @@ function fakePort(snapshot: AttentionSnapshot = { marks: {}, replies: {} }, pend
       }
       return [...server.values()];
     }),
-    pendingReadMarks: vi.fn(async () => [...server.values()]),
+    pendingReadMarks: vi.fn(async (): Promise<ReadMark[] | undefined> => [...server.values()]),
   } satisfies MarksPort;
   return port;
 }
@@ -85,6 +86,12 @@ describe("keys", () => {
     expect(keyOf()).toBe(REPLY);
     expect(keyOf({ conversationId: "" })).toBe(JSON.stringify(["", "claude", NAME, 1_790_000_000]));
     expect(fallbackKey({ computer: "mac", cmd: "codex", name: "codex/p/x", created: 5 })).toBe(JSON.stringify(["mac", "codex", "codex/p/x", 5]));
+  });
+
+  it("sort as Rust strings do (UTF-8 bytes), not as UTF-16 units", () => {
+    const keys = ["\u{1F600}", "\uFFFD", "b", "a", "ab", "\u00E9"];
+    expect([...keys].sort(byCodePoint)).toEqual(["a", "ab", "b", "\u00E9", "\uFFFD", "\u{1F600}"]);
+    expect([...keys].sort()).not.toEqual([...keys].sort(byCodePoint));
   });
 });
 
@@ -220,6 +227,35 @@ describe("markRead", () => {
   });
 });
 
+describe("affected rows only", () => {
+  it("marking one row patches that row and leaves the other untouched", async () => {
+    await createRoot(async (dispose) => {
+      const marks = createMarks(fakePort(), memoryStorage([""]));
+      const attach = marks.attach;
+      const patched: string[] = [];
+      marks.attach = (rows: RowsPort) => attach({ ...rows, patch: (rowId, fields) => { patched.push(rowId); rows.patch(rowId, fields); } });
+      const catalog = createCatalog(marks);
+      catalog.applyBatch(batchOf({ replaces: [{ computer: "", rows: [rowOut(), rowOut({ name: "claude/sample-project/b", run_id: "run-2", conversation_id: "conv-2", reply_id: "rb" }, "run:b")] }] }));
+      await marks.load();
+      await flush();
+      const b = catalog.catalog.rows[id("run:b")];
+      let bReads = 0;
+      createComputed(() => { void [b.unread, b.status, b.reviewLater, b.summary]; bReads++; });
+      bReads = 0;
+      patched.length = 0;
+
+      marks.markRead(snapshotOf(catalog.catalog.rows[id()]));
+      marks.markNeedsAttention(snapshotOf(catalog.catalog.rows[id()]));
+      await flush();
+
+      expect(new Set(patched)).toEqual(new Set([id()]));
+      expect(bReads).toBe(0);
+      expect(catalog.catalog.rows[id("run:b")]).toBe(b);
+      dispose();
+    });
+  });
+});
+
 describe("markNeedsAttention", () => {
   it("sets the review mark and keeps the acknowledgement", async () => {
     const a = await setup([rowOut()], fakePort({ marks: { [keyOf()]: { review: false, acknowledged: FP } }, replies: {} }));
@@ -299,7 +335,7 @@ describe("unreadReplies and markAllRead", () => {
 });
 
 describe("persistence", () => {
-  it("waits for the stored marks before its first update, and a write made meanwhile wins", async () => {
+  it("waits for the stored marks before its first update, and a field written meanwhile wins", async () => {
     const port = fakePort();
     const stored = deferred<AttentionSnapshot>();
     port.attentionMarks.mockReturnValue(stored.promise);
@@ -313,8 +349,25 @@ describe("persistence", () => {
     stored.resolve({ marks: { [keyOf()]: { review: false, acknowledged: "old" }, other: { review: true, acknowledged: "" } }, replies: { [REPLY]: "r1" } });
     await loading;
     expect(port.updateAttentionMarks).toHaveBeenCalledTimes(1);
-    expect(port.updateAttentionMarks).toHaveBeenCalledWith({ [keyOf()]: { review: true, acknowledged: "" } }, {});
+    // Mark needs attention sets only `review`; the stored acknowledgement stays (setReviewLater).
+    expect(port.updateAttentionMarks).toHaveBeenCalledWith({ [keyOf()]: { review: true, acknowledged: "old" } }, {});
     expect(catalog.rows[id()]).toMatchObject({ reviewLater: true, unread: true });
+  });
+
+  it("lets a Mark as read made before the load replace both fields", async () => {
+    const port = fakePort();
+    const stored = deferred<AttentionSnapshot>();
+    port.attentionMarks.mockReturnValue(stored.promise);
+    const marks = createMarks(port, memoryStorage([""]));
+    const { applyBatch, catalog } = createCatalog(marks);
+    applyBatch(batchOf({ replaces: [{ computer: "", rows: [rowOut()] }] }));
+    const loading = marks.load();
+    marks.markNeedsAttention(snapshotOf(catalog.rows[id()]));
+    marks.markRead(snapshotOf(catalog.rows[id()]));
+    stored.resolve({ marks: { [keyOf()]: { review: true, acknowledged: "old" } }, replies: {} });
+    await loading;
+    expect(port.updateAttentionMarks).toHaveBeenCalledWith({ [keyOf()]: { review: false, acknowledged: FP } }, { [REPLY]: "r1" });
+    expect(catalog.rows[id()]).toMatchObject({ reviewLater: false, unread: false });
   });
 
   it("loads empty when the stored marks cannot be read", async () => {
@@ -364,6 +417,60 @@ describe("persistence", () => {
   });
 });
 
+describe("write order", () => {
+  const legacy = { shared_read: false, attention_signature: undefined };
+  const conv = (n: number, key = `run:${n}`) => rowOut({ ...legacy, name: `claude/sample-project/s${n}`, run_id: `run-${n}`, conversation_id: `conv-${n}`, reply_id: `r${n}` }, key);
+  const markKey = (n: number) => replyKey("", "claude", `conv-${n}`);
+
+  it("loads in the stored write order, so the next write at the cap drops the oldest written, as the Rust side does", async () => {
+    // conv-2 was written first and conv-1 last; by key, conv-1 sorts first.
+    const order = [markKey(2), ...Array.from({ length: CAP - 2 }, (_, i) => `filler-${i}`), markKey(1)];
+    const marks = Object.fromEntries([...order].sort().map((k) => [k, { review: true, acknowledged: "" }]));
+    const a = await setup([conv(1), conv(2), conv(3)], fakePort({ marks, replies: {}, order: { marks: order, replies: [] } }));
+    expect(a.row("run:1").reviewLater).toBe(true);
+    expect(a.row("run:2").reviewLater).toBe(true);
+    a.marks.markNeedsAttention(snapshotOf(a.row("run:3")));
+    expect(a.row("run:2").reviewLater).toBe(false);
+    expect(a.row("run:1").reviewLater).toBe(true);
+    expect(a.marks.writeOrder().marks.slice(-2)).toEqual([markKey(1), markKey(3)]);
+  });
+
+  it("keeps entries the order does not list, as the oldest", async () => {
+    const a = await setup([conv(1)], fakePort({ marks: { [markKey(1)]: { review: true, acknowledged: "" }, stray: { review: true, acknowledged: "" } }, replies: {}, order: { marks: [markKey(1)], replies: [] } }));
+    expect(a.marks.writeOrder().marks).toEqual(["stray", markKey(1)]);
+    expect(a.row("run:1").reviewLater).toBe(true);
+  });
+
+  it("an early change equal to the stored value sends nothing and keeps its place", async () => {
+    const port = fakePort();
+    const stored = deferred<AttentionSnapshot>();
+    port.attentionMarks.mockReturnValue(stored.promise);
+    const m = createMarks(port, memoryStorage([""]));
+    const { applyBatch, catalog } = createCatalog(m);
+    applyBatch(batchOf({ replaces: [{ computer: "", rows: [conv(1)] }] }));
+    const loading = m.load();
+    m.markNeedsAttention(snapshotOf(catalog.rows[id("run:1")]));
+    stored.resolve({ marks: { [markKey(1)]: { review: true, acknowledged: "x" }, later: { review: true, acknowledged: "" } }, replies: {}, order: { marks: [markKey(1), "later"], replies: [] } });
+    await loading;
+    expect(port.updateAttentionMarks).not.toHaveBeenCalled();
+    expect(m.writeOrder().marks).toEqual([markKey(1), "later"]);
+  });
+
+  it("makes one change's entries the newest in key order, as one Rust update applies them", async () => {
+    // Rows in catalog order conv-9, conv-1: Rust applies the delta's keys sorted.
+    const a = await setup([conv(9), conv(1)], fakePort({ marks: {}, replies: { old: "x" }, order: { marks: [], replies: ["old"] } }));
+    expect(a.marks.markAllRead()).toBe(2);
+    expect(a.marks.writeOrder().replies).toEqual(["old", markKey(1), markKey(9)]);
+  });
+
+  it("orders one change's keys as Rust strings, also beyond the basic plane", async () => {
+    const wide = (n: string, key: string) => rowOut({ ...legacy, name: `claude/sample-project/${key}`, run_id: key, conversation_id: `conv-${n}`, reply_id: "r" }, `run:${key}`);
+    const a = await setup([wide("\uFFFD", "bmp"), wide("\u{1F600}", "astral")]);
+    expect(a.marks.markAllRead()).toBe(2);
+    expect(a.marks.writeOrder().replies).toEqual([replyKey("", "claude", "conv-\uFFFD"), replyKey("", "claude", "conv-\u{1F600}")]);
+  });
+});
+
 describe("pending mirror", () => {
   it("drops a mark a batch row shows settled", async () => {
     const a = await setup([rowOut()], fakePort(undefined, [mark()]));
@@ -407,6 +514,15 @@ describe("pending mirror", () => {
     await flush();
     expect(a.marks.pending().map((m) => m.name).sort()).toEqual([NAME, "claude/sample-project/b"]);
     expect(a.row("run:b").unread).toBe(false);
+    expect(a.row().unread).toBe(false);
+  });
+
+  it("keeps its own marks when there is no app to answer (the browser build)", async () => {
+    const a = await setup([rowOut()]);
+    a.port.queueReadMarks.mockResolvedValueOnce(undefined);
+    a.marks.markRead(snapshotOf(a.row()));
+    await flush();
+    expect(a.marks.pending()).toEqual([mark()]);
     expect(a.row().unread).toBe(false);
   });
 

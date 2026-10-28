@@ -129,10 +129,10 @@ describe("pump", () => {
 });
 
 describe("marks outside the app", () => {
-  it("falls back to no marks, ignores updates and queues nothing", async () => {
-    expect(await attentionMarks()).toEqual({ marks: {}, replies: {} });
+  it("falls back to no marks, ignores updates and has no pending list, so the store keeps its own", async () => {
+    expect(await attentionMarks()).toEqual({ marks: {}, replies: {}, order: { marks: [], replies: [] } });
     await expect(updateAttentionMarks({ k: { review: true, acknowledged: "" } }, { k: "r1" })).resolves.toBeUndefined();
-    expect(await queueReadMarks([{ computer: "", name: "claude/p/a", run_id: "r", conversation_id: "c", reply_id: "x", attention_signature: null }])).toEqual([]);
-    expect(await pendingReadMarks()).toEqual([]);
+    expect(await queueReadMarks([{ computer: "", name: "claude/p/a", run_id: "r", conversation_id: "c", reply_id: "x", attention_signature: null }])).toBeUndefined();
+    expect(await pendingReadMarks()).toBeUndefined();
   });
 });

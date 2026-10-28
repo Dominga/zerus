@@ -30,8 +30,9 @@ export type Overlay = Pick<Session, "status" | "caption" | "attention" | "unread
 export interface MarksPort {
   attentionMarks(): Promise<AttentionSnapshot>;
   updateAttentionMarks(marks: Record<string, Mark | null>, replies: Record<string, string | null>): Promise<void>;
-  queueReadMarks(marks: ReadMark[]): Promise<ReadMark[]>;
-  pendingReadMarks(): Promise<ReadMark[]>;
+  /** Every pending mark after the merge; undefined when there is no list (outside the app), and the store keeps its own. */
+  queueReadMarks(marks: ReadMark[]): Promise<ReadMark[] | undefined>;
+  pendingReadMarks(): Promise<ReadMark[] | undefined>;
 }
 
 /** The computers whose older marks were queued once (Qt's `attention/sharedReadMigrated`). */
@@ -106,13 +107,35 @@ function browserStorage(): MigratedStorage {
 interface Change {
   marks: Record<string, Mark | null>;
   replies: Record<string, string | null>;
+  /** The fields each written mark sets (Mark needs attention sets only `review`). */
+  fields: Record<string, Partial<Mark>>;
   saved: boolean;
   /** Rows to overlay again, by computer and name or by computer and conversation (a superset is harmless). */
   names: Set<string>;
   conversations: Set<string>;
   all: boolean;
 }
-const change = (): Change => ({ marks: {}, replies: {}, saved: false, names: new Set(), conversations: new Set(), all: false });
+const change = (): Change => ({ marks: {}, replies: {}, fields: {}, saved: false, names: new Set(), conversations: new Set(), all: false });
+
+/** Rust's string order (UTF-8 bytes, that is code points): the order a `BTreeMap` delta is applied in. */
+export function byCodePoint(a: string, b: string): number {
+  const unit = (u: number) => (u >= 0xd800 && u <= 0xdfff ? u + 0x2000 : u >= 0xe000 ? u - 0x800 : u);
+  for (let i = 0; i < a.length && i < b.length; i++) {
+    const x = a.charCodeAt(i), y = b.charCodeAt(i);
+    if (x !== y) return unit(x) - unit(y);
+  }
+  return a.length - b.length;
+}
+
+/** The entries `keys` names become the newest, in key order, as one Rust update writes them. */
+function newestInKeyOrder<V>(map: Map<string, V>, keys: string[]) {
+  for (const key of [...keys].sort(byCodePoint)) {
+    const value = map.get(key);
+    if (value === undefined) continue;
+    map.delete(key);
+    map.set(key, value);
+  }
+}
 const pair = (computer: string, value: string) => `${computer}\n${value}`;
 
 /** The rows a key belongs to: a pending key names the session, a reply key its conversation, a fallback key its name. */
@@ -132,8 +155,12 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
   let replies = new Map<string, string>();
   let pending = new Map<string, ReadMark>();
   let loaded = false;
-  /** Writes made before the stored marks arrived, sent with the load. */
-  const early = { marks: new Map<string, Mark | null>(), replies: new Map<string, string | null>() };
+  /**
+   * Changes made before the stored marks arrived, applied over them and sent
+   * with the load: a mark as the fields it sets, so an early Mark needs
+   * attention keeps a stored acknowledgement.
+   */
+  const early = { marks: new Map<string, Partial<Mark> | null>(), replies: new Map<string, string | null>() };
   /** Fallback keys a row with a conversation still finds its mark under, and that key. */
   const moves = new Map<string, string>();
   /** The last pending request; an older answer never replaces a newer local change. */
@@ -151,12 +178,13 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     }
   }
 
-  function writeMark(key: string, mark: Mark, c: Change) {
+  function writeMark(key: string, mark: Mark, c: Change, fields: Partial<Mark> = mark) {
     const old = marks.get(key);
     if (old && old.review === mark.review && old.acknowledged === mark.acknowledged) return;
     marks.delete(key);
     marks.set(key, mark);
     c.marks[key] = mark;
+    c.fields[key] = { ...c.fields[key], ...fields };
     c.saved = true;
     touch(c, key);
     cap(marks, c);
@@ -165,6 +193,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
   function removeMark(key: string, c: Change) {
     if (!marks.delete(key)) return;
     c.marks[key] = null;
+    delete c.fields[key];
     c.saved = true;
     touch(c, key);
   }
@@ -298,12 +327,12 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     refresh(c);
   }
 
-  /** Reads the pending marks from the Rust side. */
+  /** Reads the pending marks from the Rust side; without a list (outside the app) the mirror stays. */
   async function loadPending() {
     const request = ++pendingRequest;
     try {
       const list = await port.pendingReadMarks();
-      if (request === pendingRequest) replacePending(list);
+      if (request === pendingRequest && list) replacePending(list);
     } catch { /* a build without the command keeps what it has */ }
   }
 
@@ -311,7 +340,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     if (!fresh.length) return;
     const request = ++pendingRequest;
     port.queueReadMarks(fresh).then(
-      (list) => { if (request === pendingRequest) replacePending(list); },
+      (list) => { if (request === pendingRequest && list) replacePending(list); },
       // The Rust side's own list is what will be delivered.
       () => { if (request === pendingRequest) void loadPending(); },
     );
@@ -320,10 +349,18 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
   function save(c: Change) {
     if (!c.saved) return;
     if (!loaded) {
-      for (const [key, mark] of Object.entries(c.marks)) { early.marks.delete(key); early.marks.set(key, mark); }
+      for (const [key, mark] of Object.entries(c.marks)) {
+        const before = early.marks.get(key);
+        early.marks.delete(key);
+        // A removal, or the fields written over the earlier ones (a removal before them stays a full mark).
+        early.marks.set(key, mark === null ? null : before === null ? mark : { ...before, ...c.fields[key] });
+      }
       for (const [key, reply] of Object.entries(c.replies)) { early.replies.delete(key); early.replies.set(key, reply); }
       return;
     }
+    // The Rust side writes one update's entries in key order; so does this copy.
+    newestInKeyOrder(marks, Object.keys(c.marks));
+    newestInKeyOrder(replies, Object.keys(c.replies));
     port.updateAttentionMarks(c.marks, c.replies).catch((error) => console.warn("Zerus Next: saving attention marks failed", error));
   }
 
@@ -375,34 +412,77 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     if (changed) storage.save([...migrated]);
   }
 
-  /** Loads the stored marks and the pending read marks; writes made meanwhile win and are saved then. */
+  /**
+   * A stored map in its write order, oldest first: the keys the order lists,
+   * after any it does not (kept as the oldest).
+   */
+  function inWriteOrder<V>(entries: Record<string, unknown> | undefined, order: unknown, read: (value: unknown) => V | undefined): Map<string, V> {
+    const values = new Map<string, V>();
+    for (const [key, value] of Object.entries(entries ?? {})) {
+      const v = read(value);
+      if (v !== undefined) values.set(key, v);
+    }
+    const listed = Array.isArray(order) ? order.filter((key): key is string => typeof key === "string" && values.has(key)) : [];
+    const listedSet = new Set(listed);
+    const out = new Map<string, V>();
+    for (const [key, value] of values) if (!listedSet.has(key)) out.set(key, value);
+    for (const key of listed) { out.delete(key); out.set(key, values.get(key)!); }
+    return out;
+  }
+
+  /** The stored mark of a key, as the snapshot holds it. */
+  function marksBefore(key: string, stored: AttentionSnapshot | undefined): Partial<Mark> {
+    const value: unknown = stored?.marks?.[key];
+    if (!value || typeof value !== "object") return {};
+    const mark = value as Partial<Mark>;
+    return { review: mark.review === true, acknowledged: typeof mark.acknowledged === "string" ? mark.acknowledged : "" };
+  }
+
+  /** Loads the stored marks and the pending read marks; changes made meanwhile win and are saved then. */
   async function load() {
     const pendingLoad = loadPending();
     let stored: AttentionSnapshot | undefined;
     try { stored = await port.attentionMarks(); } catch { stored = undefined; }
     const c = change();
-    const nextMarks = new Map<string, Mark>();
-    const nextReplies = new Map<string, string>();
-    for (const [key, value] of Object.entries(stored?.marks ?? {})) {
-      if (value && typeof value === "object") nextMarks.set(key, { review: value.review === true, acknowledged: typeof value.acknowledged === "string" ? value.acknowledged : "" });
+    const nextMarks = inWriteOrder(stored?.marks, stored?.order?.marks, (value) => value && typeof value === "object"
+      ? { review: (value as Mark).review === true, acknowledged: typeof (value as Mark).acknowledged === "string" ? (value as Mark).acknowledged : "" }
+      : undefined);
+    const nextReplies = inWriteOrder(stored?.replies, stored?.order?.replies, (value) => (typeof value === "string" ? value : undefined));
+    // As Rust's update: the value an entry holds already is no change and keeps its place.
+    const delta = change();
+    for (const [key, fields] of early.marks) {
+      const before = nextMarks.get(key);
+      if (fields === null) {
+        if (nextMarks.delete(key)) delta.marks[key] = null;
+        continue;
+      }
+      const mark: Mark = { review: false, acknowledged: "", ...marksBefore(key, stored), ...fields };
+      if (before && before.review === mark.review && before.acknowledged === mark.acknowledged) continue;
+      nextMarks.delete(key);
+      nextMarks.set(key, mark);
+      delta.marks[key] = mark;
     }
-    for (const [key, value] of Object.entries(stored?.replies ?? {})) if (typeof value === "string") nextReplies.set(key, value);
-    for (const [key, mark] of early.marks) { nextMarks.delete(key); if (mark) nextMarks.set(key, mark); }
-    for (const [key, reply] of early.replies) { nextReplies.delete(key); if (reply !== null) nextReplies.set(key, reply); }
+    for (const [key, reply] of early.replies) {
+      const before = nextReplies.get(key);
+      if (reply === null) {
+        if (nextReplies.delete(key)) delta.replies[key] = null;
+        continue;
+      }
+      if (before === reply) continue;
+      nextReplies.delete(key);
+      nextReplies.set(key, reply);
+      delta.replies[key] = reply;
+    }
+    delta.saved = Object.keys(delta.marks).length > 0 || Object.keys(delta.replies).length > 0;
+    early.marks.clear();
+    early.replies.clear();
     marks = nextMarks;
     replies = nextReplies;
+    loaded = true;
+    // The early changes go as one update, which the Rust side applies before its cap.
+    save(delta);
     cap(marks, c);
     cap(replies, c);
-    loaded = true;
-    if (early.marks.size || early.replies.size) {
-      const delta = change();
-      delta.marks = Object.fromEntries(early.marks);
-      delta.replies = Object.fromEntries(early.replies);
-      delta.saved = true;
-      early.marks.clear();
-      early.replies.clear();
-      save(delta);
-    }
     c.all = true;
     refresh(c);
     const after = change();
@@ -479,7 +559,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     const c = change();
     moveFallbacks(c);
     const key = attentionKey(s);
-    writeMark(key, { review: true, acknowledged: marks.get(key)?.acknowledged ?? "" }, c);
+    writeMark(key, { review: true, acknowledged: marks.get(key)?.acknowledged ?? "" }, c, { review: true });
     commit(c);
     return true;
   }
@@ -535,6 +615,8 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     },
     /** The pending read marks the rows read (a copy). */
     pending: (): ReadMark[] => [...pending.values()],
+    /** Each map's keys, oldest written first (tests, diagnostics). */
+    writeOrder: () => ({ marks: [...marks.keys()], replies: [...replies.keys()] }),
   };
 }
 

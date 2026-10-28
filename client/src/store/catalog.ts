@@ -172,11 +172,13 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
 /** How long a `replaced` removal waits for the new run of the same name. */
 const REPLACED_MS = 10_000;
 
-export function createCatalog(marks: RowMarks = appMarks) {
+/** `marks` given: the catalog applies them and they refresh it. Without, rows get the app's overlay and nothing is attached. */
+export function createCatalog(given?: RowMarks) {
+  const marks = given ?? appMarks;
   const [catalog, setCatalog] = createStore<CatalogState>({ rows: {}, order: [], computers: {} });
   // A marks change applies the overlay again to the rows it touched, in place.
   // The marks only read the rows, so they scan the plain objects (no proxy reads).
-  marks.attach({ rows: () => unwrap(catalog.rows), patch: (id, fields) => setCatalog("rows", id, fields) });
+  given?.attach({ rows: () => unwrap(catalog.rows), patch: (id, fields) => setCatalog("rows", id, fields) });
   // `replaced` removals by computer + name, so the next run of that name can
   // inherit selection and drafts (the remove and its upsert may land in
   // different batches).
@@ -261,7 +263,7 @@ export function createCatalog(marks: RowMarks = appMarks) {
 }
 
 /** The app's catalog. Tests build their own with `createCatalog`. */
-export const { catalog, applyBatch, moveRow, onReplaced } = createCatalog();
+export const { catalog, applyBatch, moveRow, onReplaced } = createCatalog(appMarks);
 
 /** Rows in display order. */
 export const orderedRows = () => catalog.order.map((id) => catalog.rows[id]).filter(Boolean);

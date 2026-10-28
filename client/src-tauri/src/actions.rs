@@ -220,11 +220,21 @@ pub struct Attention {
     shared: Arc<AttentionShared>,
 }
 
-/// Both maps by key, as the frontend receives them.
+/// Both maps by key, as the frontend receives them, and the order their
+/// keys were written in (a JSON object's key order does not survive serde).
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub struct AttentionSnapshot {
     pub marks: BTreeMap<String, Mark>,
     pub replies: BTreeMap<String, String>,
+    pub order: AttentionOrder,
+}
+
+/// The keys of each map, oldest written first: the frontend's cap drops the
+/// same entries as this one's.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct AttentionOrder {
+    pub marks: Vec<String>,
+    pub replies: Vec<String>,
 }
 
 struct AttentionShared {
@@ -319,12 +329,19 @@ impl AttentionShared {
 
     fn snapshot(&self) -> AttentionSnapshot {
         let state = self.loaded();
-        let (marks, replies) = state
-            .marks
-            .as_ref()
-            .map(AttentionMarks::snapshot)
-            .unwrap_or_default();
-        AttentionSnapshot { marks, replies }
+        let Some(store) = state.marks.as_ref() else {
+            return AttentionSnapshot::default();
+        };
+        let (marks, replies) = store.snapshot();
+        let (mark_order, reply_order) = store.order();
+        AttentionSnapshot {
+            marks,
+            replies,
+            order: AttentionOrder {
+                marks: mark_order,
+                replies: reply_order,
+            },
+        }
     }
 
     /// The writer thread: reads the file, then writes the latest state after
@@ -662,7 +679,11 @@ mod tests {
         attention.update(BTreeMap::from([(other, None)]), BTreeMap::new());
         let expected = AttentionSnapshot {
             marks: BTreeMap::from([(key.clone(), review)]),
-            replies: BTreeMap::from([(key, "r1".to_owned())]),
+            replies: BTreeMap::from([(key.clone(), "r1".to_owned())]),
+            order: AttentionOrder {
+                marks: vec![key.clone()],
+                replies: vec![key],
+            },
         };
         assert_eq!(attention.snapshot(), expected);
         attention.flush();
@@ -673,8 +694,32 @@ mod tests {
             serde_json::json!({
                 "marks": {r#"["mac","claude","conv-1"]"#: {"review": true, "acknowledged": ""}},
                 "replies": {r#"["mac","claude","conv-1"]"#: "r1"},
+                "order": {"marks": [r#"["mac","claude","conv-1"]"#], "replies": [r#"["mac","claude","conv-1"]"#]},
             })
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_snapshot_lists_the_write_order_across_a_restart() {
+        let path = attention_path("order");
+        let (older, newer) = (
+            r#"["mac","claude","conv-9"]"#,
+            r#"["mac","claude","conv-1"]"#,
+        );
+        let attention = Attention::new(path.clone());
+        let mark = |key: &str| BTreeMap::from([(key.to_owned(), Some(Mark::default()))]);
+        let reply = |key: &str| BTreeMap::from([(key.to_owned(), Some("r".to_owned()))]);
+        attention.update(mark(older), reply(older));
+        attention.update(mark(newer), reply(newer));
+        let order = AttentionOrder {
+            marks: vec![older.to_owned(), newer.to_owned()],
+            replies: vec![older.to_owned(), newer.to_owned()],
+        };
+        assert_eq!(attention.snapshot().order, order);
+        attention.flush();
+        drop(attention);
+        assert_eq!(Attention::new(path.clone()).snapshot().order, order);
         let _ = std::fs::remove_file(&path);
     }
 

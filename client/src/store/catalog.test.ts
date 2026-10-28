@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createComputed, createRoot } from "solid-js";
 import { createCatalog, rowId, statusOf, toSession } from "./catalog";
+import { createMarks, marks as appMarks } from "./marks";
 import { emptyBatch, type Batch, type RowOut, type ViewRow } from "../types";
 
 const view = (name: string, extra: Partial<ViewRow> = {}): ViewRow => ({
@@ -77,6 +78,17 @@ describe("applyBatch", () => {
       expect(catalog.order).toEqual([rowId("", "run:new")]);
       dispose();
     });
+  });
+
+  it("attaches only the marks it is given, never retargeting the app's", () => {
+    const appAttach = vi.spyOn(appMarks, "attach");
+    createCatalog();
+    expect(appAttach).not.toHaveBeenCalled();
+    const own = createMarks({ attentionMarks: async () => ({ marks: {}, replies: {} }), updateAttentionMarks: async () => {}, queueReadMarks: async () => [], pendingReadMarks: async () => [] }, { load: () => [], save: () => {} });
+    const ownAttach = vi.spyOn(own, "attach");
+    createCatalog(own);
+    expect(ownAttach).toHaveBeenCalledTimes(1);
+    appAttach.mockRestore();
   });
 
   it("records computer status", () => {

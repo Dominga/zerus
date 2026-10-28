@@ -164,24 +164,33 @@ export async function inspectSession(target: Target, archiveId: string | null): 
   return (await invoke<Details | null>("inspect_session", { target, archiveId })) ?? null;
 }
 
-/** Read marks whose delivery has not been confirmed yet. */
-export async function pendingReadMarks(): Promise<ReadMark[]> {
-  if (!inTauri()) return [];
+/** Read marks whose delivery has not been confirmed yet; undefined outside the app, which keeps no list. */
+export async function pendingReadMarks(): Promise<ReadMark[] | undefined> {
+  if (!inTauri()) return undefined;
   return invoke<ReadMark[]>("pending_read_marks");
 }
 
 /** One attention mark of this device (client/core `marks.rs`); a missing field reads as false or "". */
 export interface Mark { review: boolean; acknowledged: string }
-/** This device's attention marks and the replies it read on hosts without shared read state, by key. */
-export interface AttentionSnapshot { marks: Record<string, Mark>; replies: Record<string, string> }
+/**
+ * This device's attention marks and the replies it read on hosts without
+ * shared read state, by key, and each map's keys oldest written first (a
+ * JSON object's key order is the key order, not the write order).
+ */
+export interface AttentionSnapshot {
+  marks: Record<string, Mark>;
+  replies: Record<string, string>;
+  order?: { marks: string[]; replies: string[] };
+}
 
 // The commands below exist only in the live app. Outside Tauri there are no
-// marks, an update does nothing and nothing is queued; a build without the live
-// feature rejects them, and the marks store falls back the same way.
+// marks, an update does nothing and there is no pending list, so the marks
+// store keeps its own; a build without the live feature rejects them, and the
+// store falls back the same way.
 
 /** The stored marks; the store awaits them before its first update. */
 export async function attentionMarks(): Promise<AttentionSnapshot> {
-  if (!inTauri()) return { marks: {}, replies: {} };
+  if (!inTauri()) return { marks: {}, replies: {}, order: { marks: [], replies: [] } };
   return invoke<AttentionSnapshot>("attention_marks");
 }
 
@@ -191,9 +200,9 @@ export async function updateAttentionMarks(marks: Record<string, Mark | null>, r
   await invoke<null>("update_attention_marks", { marks, replies });
 }
 
-/** Merges read marks into the pending ones and wakes the Rust delivery worker; answers every pending mark. */
-export async function queueReadMarks(marks: ReadMark[]): Promise<ReadMark[]> {
-  if (!inTauri()) return [];
+/** Merges read marks into the pending ones and wakes the Rust delivery worker; answers every pending mark (undefined outside the app). */
+export async function queueReadMarks(marks: ReadMark[]): Promise<ReadMark[] | undefined> {
+  if (!inTauri()) return undefined;
   return invoke<ReadMark[]>("queue_read_marks", { marks });
 }
 

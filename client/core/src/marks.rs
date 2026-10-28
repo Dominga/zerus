@@ -64,6 +64,12 @@ impl AttentionMarks {
         (self.marks.snapshot(), self.replies.snapshot())
     }
 
+    /// The keys of the marks and of the read replies, oldest written first,
+    /// so a reader can drop the same entries the cap drops here.
+    pub fn order(&self) -> (Vec<String>, Vec<String>) {
+        (self.marks.keys_in_order(), self.replies.keys_in_order())
+    }
+
     /// `Some` writes the entry (it becomes the newest written) unless it holds
     /// that value already, `None` removes it. Then each map keeps its [`CAP`]
     /// newest entries. Memory only: returns true when anything changed, so
@@ -195,6 +201,11 @@ impl<V: Clone + PartialEq> Written<V> {
             .iter()
             .map(|(key, (_, value))| (key.clone(), value.clone()))
             .collect()
+    }
+
+    /// The keys, oldest written first.
+    fn keys_in_order(&self) -> Vec<String> {
+        self.order.values().cloned().collect()
     }
 
     /// A copy, oldest written first.
@@ -334,6 +345,33 @@ mod tests {
                 "replies": [["y", "r1"], ["x", "r2"]],
             })
         );
+    }
+
+    #[test]
+    fn the_order_lists_keys_oldest_written_first_and_survives_a_restart() {
+        let temp = Temp::new("keys");
+        let mut store = AttentionMarks::load(temp.0.clone());
+        store.update(
+            marks(&[("z", Some(mark(true, "")))]),
+            replies(&[("z", Some("r1"))]),
+        );
+        // One update applies its entries in key order.
+        store.update(
+            marks(&[("m", Some(mark(true, ""))), ("a", Some(mark(true, "")))]),
+            replies(&[("a", Some("r2"))]),
+        );
+        // A rewrite moves its key to the newest; the same value keeps its place.
+        store.update(
+            marks(&[("z", Some(mark(false, "fp")))]),
+            replies(&[("z", Some("r1"))]),
+        );
+        let expected = (
+            vec!["a".to_owned(), "m".to_owned(), "z".to_owned()],
+            vec!["z".to_owned(), "a".to_owned()],
+        );
+        assert_eq!(store.order(), expected);
+        store.save().unwrap();
+        assert_eq!(AttentionMarks::load(temp.0.clone()).order(), expected);
     }
 
     #[test]

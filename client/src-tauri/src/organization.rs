@@ -147,8 +147,12 @@ impl Organization {
         layout: PathBuf,
         draft_path: PathBuf,
     ) -> Self {
-        if let Ok(bytes) = std::fs::read(&layout) {
-            pump.load_layout(&bytes);
+        // Read with the draft's size limit; a layout that cannot be read is
+        // started afresh, and the next save replaces it.
+        match zerus_client_core::swarm::layout::read(&layout) {
+            Ok(Some(bytes)) => pump.load_layout(&bytes),
+            Ok(None) => {}
+            Err(error) => eprintln!("zerus-client: the project layout was not loaded: {error}"),
         }
         // A blocked replay sends nothing, so it takes up no draft either.
         let saved = if allowed {

@@ -5,11 +5,40 @@
 //! 188) and never shares them. The Tauri side saves the JSON.
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::io::{self, Read};
+use std::path::Path;
 
 /// The space between neighbouring ranks; an insert takes the middle.
 pub const GAP: u64 = 1 << 20;
 /// The most members the layout remembers.
 pub const MAX_MEMBERS: usize = 100_000;
+/// The most bytes read from the layout file, as from the draft
+/// (`super::draft::MAX_BYTES`): far above what [`MAX_MEMBERS`] members take.
+pub const MAX_BYTES: u64 = super::draft::MAX_BYTES;
+
+/// The saved layout file's bytes, read at most [`MAX_BYTES`] as
+/// `super::draft::load` reads the draft; `None` when there is none. A larger
+/// file is an error and is never read whole.
+pub fn read(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    read_at_most(path, MAX_BYTES)
+}
+
+fn read_at_most(path: &Path, limit: u64) -> io::Result<Option<Vec<u8>>> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the layout file is larger than {limit} bytes"),
+        ));
+    }
+    Ok(Some(bytes))
+}
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -271,6 +300,26 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_file_is_read_up_to_its_limit_and_no_further() {
+        let dir = std::env::temp_dir().join(format!("zerus-layout-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("organization-layout.json");
+        assert!(read_at_most(&path, 8).unwrap().is_none(), "a missing file");
+        std::fs::write(&path, b"12345678").unwrap();
+        assert_eq!(
+            read_at_most(&path, 8).unwrap().as_deref(),
+            Some(&b"12345678"[..])
+        );
+        std::fs::write(&path, b"123456789").unwrap();
+        let error = read_at_most(&path, 8).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "the layout file is larger than 8 bytes");
+        assert_eq!(MAX_BYTES, crate::swarm::draft::MAX_BYTES);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn names(n: &[&str]) -> Vec<String> {
         n.iter().map(|m| (*m).to_owned()).collect()

@@ -27,10 +27,10 @@ const details = (extra: Partial<Details> = {}): Details => ({
 });
 const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
 
-function setup(entry = rowOut()) {
+function setup(entry = rowOut(), online: (computer: string) => boolean = () => true) {
   const catalog = createCatalog();
   catalog.applyBatch(batchOf({ upserts: [entry] }));
-  const actions = createActions(catalog.catalog);
+  const actions = createActions(catalog.catalog, online);
   return { ...catalog, ...actions };
 }
 
@@ -245,6 +245,16 @@ describe("rechecks after a confirmation", () => {
       mocked.runAction.mockResolvedValue(done());
       await a.end(session(), "kill");
       expect(mocked.runAction.mock.calls[0][1]).toEqual({ kind: "kill" });
+      dispose();
+    });
+  });
+
+  it("makes no call and no notice when the machine went offline before the click", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut(), () => false);
+      expect((await a.end(session(), "terminate")).outcome).toBe("failed");
+      expect(mocked.runAction).not.toHaveBeenCalled();
+      expect(a.notices()).toEqual([]);
       dispose();
     });
   });
@@ -504,6 +514,29 @@ describe("pending guard", () => {
       expect(a.notices()).toEqual([]);
       finish(done());
       await first;
+      dispose();
+    });
+  });
+
+  it("sends Stop beside a pending write, and a running Stop shows no Updating", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      const finishes: ((o: Outcome) => void)[] = [];
+      mocked.runAction.mockImplementation(() => new Promise((r) => { finishes.push(r); }));
+      const write = a.perform(session(), { kind: "pause" });
+      const stop = a.perform(session(), { kind: "interrupt", turn_started: 1 });
+      expect(mocked.runAction).toHaveBeenCalledTimes(2);
+      expect(a.updating("", "claude/sample-project/a")).toBe(true);
+      expect(a.interrupting("", "claude/sample-project/a")).toBe(true);
+      finishes[0](done());
+      await write;
+      expect(a.updating("", "claude/sample-project/a")).toBe(false);
+      expect(a.interrupting("", "claude/sample-project/a")).toBe(true);
+      await a.perform(session(), { kind: "interrupt", turn_started: 1 });
+      expect(mocked.runAction).toHaveBeenCalledTimes(2);
+      finishes[1](done());
+      await stop;
+      expect(a.interrupting("", "claude/sample-project/a")).toBe(false);
       dispose();
     });
   });

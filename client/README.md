@@ -105,7 +105,9 @@ Outcome rules:
   the session only.
 - One write per session at a time. While it runs the session's entries show
   "Updating…"; another write for that session is a silent no-op (the Rust side
-  answers `busy`). Read marks run in their own lane and never hold up a write.
+  answers `busy`). Stop and read marks each run in their own lane: Stop waits
+  only for its own interrupt, as in Qt, and a read mark never holds up a write.
+  Mark as read stays available while a write runs.
 - Terminate stops a tracked Codex, Claude or Kimi session into Archive and
   kills any other live session; the confirmation says which. After the
   confirmation (and after a menu's Pause or Resume) the session must still be

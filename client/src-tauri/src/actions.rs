@@ -3,8 +3,10 @@
 //! `run`; this module owns the in-flight guard and the read-mark file.
 //!
 //! One write per session at a time: Qt's `updating` disables all of a
-//! session's actions while one runs (`tray/src/`). A read mark has its own
-//! lane, so a quiet retry never makes a confirmed write answer busy.
+//! session's actions while one runs (`tray/src/`). An interrupt and a read
+//! mark each have their own lane: Qt guards Stop only by its own request
+//! (`m_interruptRequest`), and a quiet retry never makes a confirmed write
+//! answer busy.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -19,10 +21,12 @@ use zerus_client_core::{default_hgs, run, Action, Batch, Outcome, Target};
 /// A session by computer id and session name, and the action's lane.
 type Key = (String, String, Lane);
 
-/// Writes and read marks run apart: at most one of each per session.
+/// Writes, interrupts and read marks run apart: at most one of each per
+/// session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Lane {
     Write,
+    Interrupt,
     Read,
 }
 
@@ -30,6 +34,7 @@ impl Lane {
     pub fn of(action: &Action) -> Self {
         match action {
             Action::MarkRead { .. } => Self::Read,
+            Action::Interrupt { .. } => Self::Interrupt,
             _ => Self::Write,
         }
     }
@@ -86,7 +91,10 @@ impl Actions {
     /// Settles pending read marks with a batch the pump hands out: each row,
     /// single or inside a computer's snapshot, drops the mark it shows
     /// settled, and a snapshot drops its computer's marks for sessions it no
-    /// longer lists. Nothing to do (the usual case) costs one lock.
+    /// longer lists. An empty replace is not taken as a snapshot: a stopped
+    /// stream and a resend for a computer that never listed sessions send one,
+    /// and Qt drops marks only after a successful listing. Nothing to do (the
+    /// usual case) costs one lock.
     pub fn observe(&self, batch: &Batch) {
         let mut marks = self.marks.lock().unwrap_or_else(PoisonError::into_inner);
         if marks.is_empty() {
@@ -100,7 +108,11 @@ impl Actions {
         ) {
             marks.settle(&out.computer.0, &out.row);
         }
-        for replace in &batch.replaces {
+        for replace in batch
+            .replaces
+            .iter()
+            .filter(|replace| !replace.rows.is_empty())
+        {
             let names: HashSet<&str> = replace
                 .rows
                 .iter()
@@ -292,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn only_mark_read_takes_the_read_lane() {
+    fn mark_read_and_interrupt_take_their_own_lanes() {
         assert_eq!(
             Lane::of(&Action::MarkRead {
                 reply_id: None,
@@ -300,12 +312,11 @@ mod tests {
             }),
             Lane::Read
         );
-        for action in [
-            Action::Pause,
-            Action::Terminate,
-            Action::Kill,
-            Action::Interrupt { turn_started: 1.0 },
-        ] {
+        assert_eq!(
+            Lane::of(&Action::Interrupt { turn_started: 1.0 }),
+            Lane::Interrupt
+        );
+        for action in [Action::Pause, Action::Terminate, Action::Kill] {
             assert_eq!(Lane::of(&action), Lane::Write);
         }
     }
@@ -359,6 +370,15 @@ mod tests {
             .map(|m| m.name)
             .collect();
         assert_eq!(left, ["claude/sample-project/review"]);
+        // A stopped stream or a resend sends an empty replace: not a listing.
+        actions.observe(&Batch {
+            replaces: vec![ReplaceOut {
+                computer: ComputerId::from("mac"),
+                rows: Vec::new(),
+            }],
+            ..Batch::default()
+        });
+        assert_eq!(actions.marks.lock().unwrap().pending().len(), 1);
         let _ = std::fs::remove_file(&path);
     }
 }

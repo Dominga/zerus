@@ -24,7 +24,9 @@ Unknown outcomes are shown and never replayed.
 > (`SessionTag::problem`); details come from the followed session's Activity
 > `state` value, with `inspect` only as a fallback; a live row without a
 > `state` is `running`, as Qt reads it; the store keeps flat action fields,
-> never the nested view row; read marks have their own in-flight lane. See
+> never the nested view row; Stop and read marks each have their own
+> in-flight lane (Qt guards Stop only by `m_interruptRequest`); an empty
+> replace never drops read marks. See
 > `client/README.md` ("Actions") for the resulting rules.
 
 **Tech Stack:** Rust 1.99.1 (`client/core`, `client/src-tauri`, Tauri 2), SolidJS 1.9 + TypeScript + Vite, vitest, Python 3 stdlib for the fake `hgs`.
@@ -603,7 +605,7 @@ Rules:
   - `kept` and `unconfirmed`: a sticky warning "Worktree kept for review: {reason}".
   - Nothing ever retries.
 - `detailsFor` takes the followed session's Activity `state` value (the same inspection, `src/state/watch_source.rs`) when it names the row's run and conversation. Only when the subscription answered without such a value does it call `inspectSession`, again when the `run_id`, `conversation_id` or `state` changes, and never while the computer is offline. Only one inspect runs per session at a time, and only details whose identities match the row are kept.
-- **Read-mark retry:** load `pendingReadMarks()` at start. When a batch upserts a row with a pending mark that still shows unread, call `perform(entry, mark_read)` again, at most once per 5 s per session.
+- **Read-mark retry:** load `pendingReadMarks()` at start. When a batch upserts a row, or lists it in a computer's snapshot, with a pending mark that still shows unread, call `perform(entry, mark_read)` again, at most once per 5 s per session.
 
 - [ ] **Step 1: Write the failing vitest tests** (`vi.mock("../bridge")`, fake timers):
   - pending state is set and cleared;
@@ -701,7 +703,7 @@ git commit -m "feat(client): session actions with Qt's enablement and confirmati
 - Modify: `client/src/ui/PerfHost.tsx` (an `actions-smoke=1` query hook beside the perf hooks, documented in the README)
 - Modify: `docs/superpowers/plans/2026-10-28-tauri-client-phase1.md` (the phase table: phase 2 without send; send in phase 4)
 
-- [ ] **Step 1: End-to-end with the fake `hgs`.** Copy `fake_hgs_actions.py` as `hgs` with `{"reply":{"exit":0,"stdout":"echo_interrupt"}}` into a scratch folder and point `ZERUS_CLIENT_HGS` at it.
+- [ ] **Step 1: End-to-end with the fake `hgs`.** Copy `fake_hgs_actions.py` as `hgs` with `{"reply":{"exit":0}}` into a scratch folder and point `ZERUS_CLIENT_HGS` at it.
   - Run the release app headless on the replay fixtures with `ZERUS_CLIENT_QUERY=actions-smoke=1` and the Headless constraint's environment.
   - The hook selects the replay session `claude/sample-project/review`, runs pause, resume, rename (to `claude/sample-project/review-renamed`), archive, the end call the Terminate dialog picks through its confirmation (`kill` for the untracked replay row), then the other end call (`terminate`), then exits.
   - Afterwards `log.ndjson` holds exactly one call per action, with the table's argument lists.

@@ -92,7 +92,9 @@ describe("menuState rename, archive, end, read", () => {
   });
   it("marks read when attention needs it and the host shares read state", () => {
     expect(menuState(row({ unread: true, shared_read: true }), true, false).markRead).toEqual({ label: "Mark as read", enabled: true });
-    expect(menuState(row({ unread: true, shared_read: true }), true, true).markRead.enabled).toBe(false);
+    // A read mark runs in its own lane: a pending write does not hold it up.
+    expect(menuState(row({ unread: true, shared_read: true }), true, true).markRead.enabled).toBe(true);
+    expect(menuState(row({ unread: true, shared_read: true }), false, false).markRead.enabled).toBe(false);
     expect(menuState(row({ unread: true, shared_read: true }), true, false, undefined, { reading: true }).markRead.enabled).toBe(false);
     expect(menuState(row({ status: "attention", attention: "approval", shared_read: false }), true, false).markRead)
       .toMatchObject({ label: "Mark as read", enabled: false, reason: "Update hgs on this session's host to share read state." });
@@ -113,6 +115,9 @@ describe("menuState stop", () => {
     expect(menuState(row(working), false, false, details({ interrupt_supported: true })).stop).toMatchObject({ enabled: false, reason: "Machine is offline" });
     expect(menuState(row(working), true, true, details({ interrupt_supported: true }), { interrupting: true }).stop)
       .toMatchObject({ enabled: false, reason: "Interrupt is being sent…" });
+  });
+  it("waits only for its own interrupt, not for another write (Qt's m_interruptRequest)", () => {
+    expect(menuState(row(working), true, true, details({ interrupt_supported: true })).stop.enabled).toBe(true);
   });
   it("follows the inspected phase and a running state", () => {
     expect(menuState(row(), true, false, details({ interrupt_supported: true, phase: "compacting" })).stop.enabled).toBe(true);

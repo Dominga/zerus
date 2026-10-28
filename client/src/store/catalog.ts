@@ -124,7 +124,8 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow): Sessio
     runId: optional(v.run_id),
     conversationId: optional(v.conversation_id),
     cmd: text(v.agent),
-    state: text(v.state),
+    // A row without a state is running, as Qt's HgsClient reads it.
+    state: typeof v.state === "string" ? v.state : "running",
     tracked: !!v.tracked,
     resumable: !!v.resumable,
     activity: text(v.activity),

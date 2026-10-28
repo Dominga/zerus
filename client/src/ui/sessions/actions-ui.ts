@@ -88,7 +88,7 @@ export function menuState(s: ActionRow, online: boolean, updating: boolean, deta
   const interruptible = !!details?.interrupt_supported;
   const stop: MenuState["stop"] = {
     visible: working,
-    enabled: working && online && interruptible && !updating,
+    enabled: working && online && interruptible && !options.interrupting,
     reason: options.interrupting ? "Interrupt is being sent…" : !online ? "Machine is offline"
       : !interruptible ? "Interrupt is unavailable. Open Terminal to stop this turn." : undefined,
   };
@@ -98,7 +98,7 @@ export function menuState(s: ActionRow, online: boolean, updating: boolean, deta
     ? { label: "Mark needs attention", enabled: false, reason: MARK_NEEDS_LATER }
     : !s.sharedRead
       ? { label: "Mark as read", enabled: false, reason: READ_STATE_HOST }
-      : { label: "Mark as read", enabled: available && !options.reading };
+      : { label: "Mark as read", enabled: online && !options.reading };
 
   return {
     change: {

@@ -1,7 +1,7 @@
 import { createSignal, untrack } from "solid-js";
 import { createStore } from "solid-js/store";
 import * as bridge from "../bridge";
-import { catalog as appCatalog, rowId, type CatalogState } from "./catalog";
+import { catalog as appCatalog, computerOffline, rowId, type CatalogState } from "./catalog";
 import { detailsFromInspection, snapshotOf, terminates, type ActionRow } from "../ui/sessions/actions-ui";
 import type { Action, Batch, Details, Outcome, ReadMark, Target } from "../types";
 
@@ -10,9 +10,10 @@ import type { Action, Batch, Details, Outcome, ReadMark, Target } from "../types
 // failure. The only repeat is a read mark whose delivery is still pending,
 // and only when a batch shows the row unread again.
 //
-// Writes and read marks run in separate lanes (as the Rust in-flight guard
-// does): one write per session shows "Updating…" on its entries; a read mark,
-// the user's or a quiet retry, never holds up a write.
+// Writes, interrupts and read marks run in separate lanes (as the Rust
+// in-flight guard does): one write per session shows "Updating…" on its
+// entries; Stop waits only for its own interrupt, as Qt's m_interruptRequest;
+// a read mark, the user's or a quiet retry, never holds up a write.
 
 export interface Notice { id: number; tone: "error" | "warn" | "info"; text: string; sticky: boolean }
 
@@ -41,9 +42,10 @@ export function targetOf(s: Pick<ActionRow, "computer" | "name" | "runId" | "con
   return { computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.conversationId ?? "" };
 }
 
-export function createActions(catalog: Pick<CatalogState, "rows">) {
-  /** The write in flight per session (its kind), and whether a read mark is. */
+export function createActions(catalog: Pick<CatalogState, "rows">, online: (computer: string) => boolean = () => true) {
+  /** The write in flight per session (its kind), and whether an interrupt or a read mark is. */
   const [writes, setWrites] = createStore<Record<string, Action["kind"] | undefined>>({});
+  const [interrupts, setInterrupts] = createStore<Record<string, boolean>>({});
   const [reads, setReads] = createStore<Record<string, boolean>>({});
   const [list, setList] = createSignal<Notice[]>([]);
   let nextId = 1;
@@ -65,7 +67,7 @@ export function createActions(catalog: Pick<CatalogState, "rows">) {
   }
 
   const updating = (computer: string, name: string) => !!writes[sessionId(computer, name)];
-  const interrupting = (computer: string, name: string) => writes[sessionId(computer, name)] === "interrupt";
+  const interrupting = (computer: string, name: string) => !!interrupts[sessionId(computer, name)];
   const reading = (computer: string, name: string) => !!reads[sessionId(computer, name)];
 
   function report(action: Action, out: Outcome, row: ActionRow) {
@@ -92,15 +94,16 @@ export function createActions(catalog: Pick<CatalogState, "rows">) {
   async function call(target: Target, action: Action): Promise<{ out: Outcome; busy: boolean }> {
     const id = sessionId(target.computer, target.name);
     const read = action.kind === "mark_read";
-    if (read ? reads[id] : writes[id]) return { out: failed("busy"), busy: true };
-    if (read) setReads(id, true); else setWrites(id, action.kind);
+    const interrupt = action.kind === "interrupt";
+    if (read ? reads[id] : interrupt ? interrupts[id] : writes[id]) return { out: failed("busy"), busy: true };
+    if (read) setReads(id, true); else if (interrupt) setInterrupts(id, true); else setWrites(id, action.kind);
     try {
       return { out: await bridge.runAction(target, action), busy: false };
     } catch (error) {
       const detail = typeof error === "string" ? error : error instanceof Error ? error.message : String(error);
       return { out: failed(detail), busy: detail === "busy" };
     } finally {
-      if (read) setReads(id, false); else setWrites(id, undefined);
+      if (read) setReads(id, false); else if (interrupt) setInterrupts(id, false); else setWrites(id, undefined);
     }
   }
 
@@ -132,9 +135,11 @@ export function createActions(catalog: Pick<CatalogState, "rows">) {
   /**
    * The Terminate confirmation's click: the session must still terminate
    * (a live session that is not an OpenCode binding) as when the dialog
-   * opened; then `action` is the call the dialog chose.
+   * opened; then `action` is the call the dialog chose. A computer that went
+   * offline meanwhile gets no call and no notice, as in Qt.
    */
   async function end(row: ActionRow, action: "terminate" | "kill"): Promise<Outcome> {
+    if (!online(row.computer)) return failed("offline");
     const live = catalog.rows[row.key];
     if (live && terminates(live) !== terminates(row)) {
       notify("error", STATE_CHANGED, true);
@@ -244,6 +249,6 @@ export function createActions(catalog: Pick<CatalogState, "rows">) {
   return { perform, end, change, updating, interrupting, reading, detailsFor, notices: list, dismiss, loadReadMarks, observeBatch };
 }
 
-const app = createActions(appCatalog);
+const app = createActions(appCatalog, (computer) => !computerOffline(computer));
 export const { perform, end, change, updating, interrupting, reading, detailsFor, notices, dismiss, loadReadMarks, observeBatch } = app;
 void loadReadMarks();

@@ -12,8 +12,13 @@ use super::{
 use crate::{Change, ComputerId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+
+/// The most renames kept for the hub, which takes them only while edits are
+/// accepted ([`Grouping::take_renames`]): as many as the layout remembers
+/// members. The oldest go first.
+pub const MAX_RENAMES: usize = super::layout::MAX_MEMBERS;
 
 /// One row's place: its project and its rank inside it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -103,7 +108,8 @@ pub struct Grouping {
     dirty: BTreeSet<At>,
     sent: Option<GroupingOut>,
     sync: SyncView,
-    renames: Vec<(String, String)>,
+    /// Renames for the hub ([`Grouping::take_renames`]), at most [`MAX_RENAMES`].
+    renames: VecDeque<(String, String)>,
     next_seq: u64,
     headers_dirty: bool,
     /// The layout size after the last prune from `observe`.
@@ -140,7 +146,7 @@ impl Grouping {
             dirty: BTreeSet::new(),
             sent: None,
             sync: SyncView::default(),
-            renames: Vec::new(),
+            renames: VecDeque::new(),
             next_seq: 0,
             headers_dirty: true,
             prune_floor: 0,
@@ -194,7 +200,8 @@ impl Grouping {
                 && !old.starts_with('\n')
             {
                 self.layout.rename(&old, &member);
-                if self.membership.contains_key(&old) {
+                let explicit = self.membership.contains_key(&old);
+                if explicit {
                     // The new name stays in the old one's project until the catalog follows.
                     let membership = Arc::make_mut(&mut self.membership);
                     if let Some(project) = membership.remove(&old) {
@@ -202,7 +209,16 @@ impl Grouping {
                         membership.insert(member.clone(), project);
                     }
                 }
-                self.renames.push((old, member.clone()));
+                // Only an explicit member's rename changes the catalog; a
+                // fallback row's is a no-op, as Qt's renameSession of an
+                // unknown id. Before the first catalog none is known, so the
+                // hub checks each one.
+                if explicit || !self.loaded {
+                    if self.renames.len() >= MAX_RENAMES {
+                        self.renames.pop_front();
+                    }
+                    self.renames.push_back((old, member.clone()));
+                }
             }
         }
         let seq = seq.unwrap_or_else(|| {
@@ -483,8 +499,9 @@ impl Grouping {
         self.headers_dirty = true;
     }
 
+    /// The renames seen since the last call, oldest first.
     pub fn take_renames(&mut self) -> Vec<(String, String)> {
-        std::mem::take(&mut self.renames)
+        std::mem::take(&mut self.renames).into()
     }
 
     pub fn take_layout(&mut self) -> Option<Vec<u8>> {
@@ -696,14 +713,10 @@ mod tests {
         grouping.observe(&upsert("name:x", "workstation", "sh/p"));
         grouping.observe(&upsert("run:1", "workstation", "claude/p/new"));
         grouping.observe(&upsert("name:x", "workstation", "sh/q"));
-        assert_eq!(
-            grouping.take_renames(),
-            [(
-                "workstation\nclaude/p/old".to_owned(),
-                "workstation\nclaude/p/new".to_owned()
-            )]
+        assert!(
+            grouping.take_renames().is_empty(),
+            "a fallback row's rename changes nothing shared: none for the hub"
         );
-        assert!(grouping.take_renames().is_empty());
         let (after, _) = grouping.take();
         assert_eq!(
             rank_of(&after, "run:1"),
@@ -728,6 +741,57 @@ mod tests {
         assert!(
             grouping.take_renames().is_empty(),
             "no machine yet: no rename"
+        );
+    }
+
+    #[test]
+    fn renames_for_the_hub_are_explicit_members_or_unknown_yet_and_bounded() {
+        let mut grouping = Grouping::new(Layout::default());
+        // Before the first catalog no member is known: each rename waits for the hub.
+        grouping.observe(&upsert("run:1", "workstation", "claude/p/a"));
+        grouping.observe(&upsert("run:1", "workstation", "claude/p/a2"));
+        assert_eq!(
+            grouping.take_renames(),
+            [(
+                "workstation\nclaude/p/a".to_owned(),
+                "workstation\nclaude/p/a2".to_owned()
+            )]
+        );
+        present(
+            &mut grouping,
+            &organization(&["workstation\nclaude/p/b"], &[]),
+            1,
+        );
+        grouping.observe(&upsert("run:2", "workstation", "claude/p/b"));
+        grouping.observe(&upsert("run:3", "workstation", "claude/p/c"));
+        grouping.observe(&upsert("run:2", "workstation", "claude/p/b2"));
+        grouping.observe(&upsert("run:3", "workstation", "claude/p/c2"));
+        assert_eq!(
+            grouping.take_renames(),
+            [(
+                "workstation\nclaude/p/b".to_owned(),
+                "workstation\nclaude/p/b2".to_owned()
+            )],
+            "only the explicit member's rename"
+        );
+    }
+
+    // Never drained while edits are refused (an uninitialized catalog, an
+    // ended topic, a stopped worker): the oldest go first.
+    #[test]
+    fn renames_waiting_for_the_hub_keep_at_most_the_newest_max_renames() {
+        let mut grouping = Grouping::new(Layout::default());
+        for n in 0..=MAX_RENAMES {
+            let key = format!("run:{n}");
+            grouping.observe(&upsert(&key, "workstation", &format!("claude/p/{n}")));
+            grouping.observe(&upsert(&key, "workstation", &format!("claude/p/{n}-2")));
+        }
+        let renames = grouping.take_renames();
+        assert_eq!(renames.len(), MAX_RENAMES);
+        assert_eq!(renames[0].0, "workstation\nclaude/p/1", "the oldest went");
+        assert_eq!(
+            renames.last().unwrap().1,
+            format!("workstation\nclaude/p/{MAX_RENAMES}-2")
         );
     }
 

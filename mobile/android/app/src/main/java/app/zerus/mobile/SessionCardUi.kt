@@ -28,6 +28,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
 /** The desktop card's checkout line: folder / branch with a Git branch mark, or an ordinary folder's name. */
 @Composable internal fun SessionCheckoutLine(session: Session, gitBadge: GitStatusBadge? = null) {

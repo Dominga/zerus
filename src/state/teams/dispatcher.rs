@@ -6064,7 +6064,11 @@ mod tests {
         };
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("a.txt"), "a").unwrap();
+        // merge_lead makes the merge commit itself: the repository carries its
+        // own identity for a machine without a global one (a CI runner).
         git(&["init", "-q"])
+            && git(&["config", "user.email", "t@example.com"])
+            && git(&["config", "user.name", "T"])
             && git(&["add", "."])
             && git(&["commit", "-qm", "A"])
             && git(&["checkout", "-qb", "teams-v2/lead"])

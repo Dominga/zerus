@@ -3095,7 +3095,11 @@ mod tests {
         use crate::state::teams::dispatcher;
         use crate::state::teams::model::{Member, MemberFolder, Team, TeamStatus};
         let dir = tempfile::tempdir().unwrap();
-        dispatcher::set_git_ceiling(&dir.path().display().to_string());
+        // A Windows runner's TEMP is an 8.3 short path (RUNNER~1); status names
+        // folders in the long form git reports, so the test works in that form.
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let base = std::path::PathBuf::from(base.to_string_lossy().trim_start_matches(r"\\?\").to_owned());
+        dispatcher::set_git_ceiling(&base.display().to_string());
         // Two different repositories: distinct paths and distinct initial
         // commits. Identical content committed in the same second makes the same
         // root commit, and clone_of would rightly call them one repository, so
@@ -3118,7 +3122,7 @@ mod tests {
             .trim()
             .to_owned()
         };
-        let repo = dir.path().join("project");
+        let repo = base.join("project");
         make_repo(&repo, "project");
         let main = String::from_utf8(std::process::Command::new("git").arg("-C").arg(&repo).args(["rev-parse", "--abbrev-ref", "HEAD"]).output().unwrap().stdout).unwrap().trim().to_owned();
         let folder = repo.display().to_string();
@@ -3135,7 +3139,7 @@ mod tests {
         team.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
         team.members.push(Member { id: "dev".into(), role: "Backend".into(), agent: "dsh".into(), folder: MemberFolder::Worktree, ..Default::default() });
         team.members.push(Member { id: "qa".into(), role: "QA".into(), agent: "codex".into(), ..Default::default() });
-        let foreign = dir.path().join("sibling");
+        let foreign = base.join("sibling");
         make_repo(&foreign, "sibling");
         assert_ne!(root(&repo), root(&foreign), "the foreign repository must have its own history");
         team.members.push(Member { id: "out".into(), role: "Ops".into(), agent: "codex".into(), directory: foreign.display().to_string(), ..Default::default() });

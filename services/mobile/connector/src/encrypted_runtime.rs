@@ -1484,9 +1484,10 @@ mod tests {
         let (result, ()) = future::join(engine.requests(), stopping).await;
         result.unwrap();
         let (claims, results, gaps) = server.join().unwrap();
+        // Two requests executed once each; a Windows gateway inspects first.
         assert_eq!(
             (claims, results, f.connector.native.calls.borrow().len()),
-            (4, 2, 2)
+            (4, 2, 2 * DISPATCH_CALLS)
         );
         assert_eq!(gaps.len(), 2);
         assert!(gaps.iter().all(|gap| *gap < Duration::from_millis(200)), "queued reads must claim promptly after a flushed result, without a quarter-second success sleep: {gaps:?}");

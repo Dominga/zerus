@@ -1,6 +1,6 @@
 import { createMemo, createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
-import { catalog, orderedRows } from "./catalog";
+import { catalog, computerOffline, orderedRows } from "./catalog";
 import { documentVisibility } from "./visibility";
 import { isActive, needsAttention } from "./attention";
 import type { Session, Status } from "../ui/sessions/types";
@@ -97,11 +97,14 @@ export const selected = createMemo<Session | undefined>(() => {
   return key ? catalog.rows[key] ?? archivedRow(key) : undefined;
 });
 
+/** The window's online state of a row: its computer's stream is not down (the card's Offline). */
+const online = (s: Session) => !computerOffline(s.computer);
+
 export function matchesFilter(s: Session, f: StateFilter): boolean {
   switch (f) {
     case "all": return true;
-    case "attention": return needsAttention(s);
-    case "active": return isActive(s);
+    case "attention": return needsAttention(s, online(s));
+    case "active": return isActive(s, online(s));
     case "paused": return s.status === "paused";
     case "archived": return s.state === "archived";
   }
@@ -111,8 +114,9 @@ export const counts = createMemo(() => {
   let all = 0, active = 0, attention = 0, working = 0, paused = 0;
   for (const s of orderedRows()) {
     all++;
-    if (isActive(s)) active++;
-    if (needsAttention(s) && !s.muted) attention++;
+    const up = online(s);
+    if (isActive(s, up)) active++;
+    if (needsAttention(s, up) && !s.muted) attention++;
     if (s.status === "working" || s.status === "background") working++;
     if (s.status === "paused") paused++;
   }

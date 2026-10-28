@@ -187,7 +187,7 @@ describe("the shared overlay fixture", () => {
     pending: ReadMark[];
     expect: {
       review_later: boolean; unread_reply: boolean; unread: boolean; acknowledged: boolean;
-      needs_attention: boolean; counts: boolean; counts_stale: boolean; window: boolean;
+      needs_attention: boolean; counts: boolean; counts_stale: boolean; window: boolean; window_stale: boolean;
     };
   }
   const cases = (overlayFixture as unknown as { cases: OverlayCase[] }).cases;
@@ -205,8 +205,8 @@ describe("the shared overlay fixture", () => {
     const counts = (current: boolean) => !row.muted && (!!row.reviewLater || (current && attentionNeeded(row)));
     expect({ counts: counts(true), counts_stale: counts(false) }).toEqual({ counts: c.expect.counts, counts_stale: c.expect.counts_stale });
     // The window: online, and on an unreachable computer only Review later.
-    expect(needsAttention(row)).toBe(c.expect.window);
-    expect(needsAttention({ ...row, status: "offline" })).toBe(c.expect.review_later);
+    expect({ window: needsAttention(row, true), window_stale: needsAttention(row, false) })
+      .toEqual({ window: c.expect.window, window_stale: c.expect.window_stale });
   });
 });
 

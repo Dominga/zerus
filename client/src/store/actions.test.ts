@@ -646,13 +646,38 @@ describe("toggleMute", () => {
       // An older listing does not roll it back; a newer one replaces it.
       a.receive(batchOf({ upserts: [shared({ notification_revision: 3, muted: false })] }));
       expect(a.row()).toMatchObject({ muted: true, notificationConflict: false });
+      expect(a.marks.overrideCount()).toBe(1);
+      // The row reaching the confirmed revision and value ends the override; the core keeps it from there.
       a.receive(batchOf({ upserts: [shared({ notification_revision: 4, muted: true })] }));
       expect(a.row().muted).toBe(true);
-      // The override stays until the row lists a higher revision.
-      expect(a.marks.overrideCount()).toBe(1);
+      expect(a.marks.overrideCount()).toBe(0);
       a.receive(batchOf({ upserts: [shared({ notification_revision: 5, muted: false })] }));
       expect(a.row().muted).toBe(false);
+      dispose();
+    });
+  });
+
+  it("ends the override when a higher revision lists, and when its conversation leaves the listing", async () => {
+    await createRoot(async (dispose) => {
+      const a = await setupMute([shared(), shared({ conversation_id: "conv-2" }, "run:b")]);
+      mocked.setNotifications.mockResolvedValue(prefs(true, 4));
+      await a.toggleMute(a.snap());
+      expect(a.marks.overrideCount()).toBe(1);
+      a.receive(batchOf({ removes: [{ computer: "", key: "run:b" }] }));
+      expect(a.marks.overrideCount()).toBe(1);
+      a.receive(batchOf({ removes: [{ computer: "", key: "run:a" }] }));
       expect(a.marks.overrideCount()).toBe(0);
+      dispose();
+    });
+  });
+
+  it("never hides the core's conflict behind a newer override", async () => {
+    await createRoot(async (dispose) => {
+      const a = await setupMute();
+      mocked.setNotifications.mockResolvedValue(prefs(true, 4));
+      await a.toggleMute(a.snap());
+      a.receive(batchOf({ upserts: [shared({ notification_revision: 3, muted: false, notification_error: "Conflicting shared notification preferences. Refresh the session." })] }));
+      expect(a.row()).toMatchObject({ muted: true, notificationConflict: true });
       dispose();
     });
   });
@@ -673,6 +698,10 @@ describe("toggleMute", () => {
       const a = await setupMute();
       mocked.setNotifications.mockResolvedValue(prefs(true, 4));
       await a.toggleMute(a.snap());
+      a.receive(batchOf({ upserts: [shared({ notification_revision: 4, muted: false })] }));
+      expect(a.row()).toMatchObject({ muted: true, notificationConflict: true });
+      // The conflict holds until a listing agrees: the override stays.
+      expect(a.marks.overrideCount()).toBe(1);
       a.receive(batchOf({ upserts: [shared({ notification_revision: 4, muted: false })] }));
       expect(a.row()).toMatchObject({ muted: true, notificationConflict: true });
       expect(notificationsState(a.snap(), true, a.pendingNotifications("", "conv-1"))).toMatchObject({ enabled: false, hint: "Conflicting shared notification preferences. Refresh the session." });

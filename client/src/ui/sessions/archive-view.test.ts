@@ -25,7 +25,8 @@ import * as bridge from "../../bridge";
 import { applyBatch } from "../../store/catalog";
 import { archiveCount, archiveTip } from "../../store/archive";
 import { stillListed } from "../../store/actions";
-import { matchesFilter, selected, setMachineFilter, setSearch, setSelectedKey, setStateFilter } from "../../store/ui";
+import { counts, matchesFilter, selected, setMachineFilter, setSearch, setSelectedKey, setStateFilter } from "../../store/ui";
+import { catalog } from "../../store/catalog";
 import { listRows } from "./model";
 import { snapshotOf } from "./actions-ui";
 import { emptyBatch, type ArchivePage, type ViewRow } from "../../types";
@@ -35,6 +36,25 @@ const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve()
 const uuid = (n: number) => `10000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const archived = (n: number, at: number): ViewRow => ({ name: `codex/example/a${n}`, agent: "codex", state: "archived", status: "ended", archive_id: uuid(n), archived_at: at, run_id: `run-a${n}`, conversation_id: `conv-a${n}` });
 const live: ViewRow = { name: "codex/example/live", agent: "codex", state: "running", status: "ready", machine: "workstation", run_id: "run-live", conversation_id: "conv-live" };
+
+describe("the window's attention in the app", () => {
+  it("follows the computer's stream: an unreachable peer counts only Review later (SessionPresentation.h:281)", () => {
+    const asking: ViewRow = { name: "claude/p/ask", agent: "claude", status: "attention", phase: "approval", state: "running",
+      needs_action: true, needs_attention: true, child_attention: false };
+    applyBatch({ ...emptyBatch(), computers: [{ computer: "attention-peer", status: "live", attempt: 0 }],
+      replaces: [{ computer: "attention-peer", rows: [{ computer: "attention-peer", key: "run:ask", row: asking }] }] });
+    const row = () => catalog.rows["attention-peer\nrun:ask"];
+    const before = counts().attention;
+    expect(matchesFilter(row(), "attention")).toBe(true);
+    applyBatch({ ...emptyBatch(), computers: [{ computer: "attention-peer", status: "reconnecting", attempt: 1 }] });
+    expect(matchesFilter(row(), "attention")).toBe(false);
+    expect(counts().attention).toBe(before - 1);
+    expect(matchesFilter({ ...row(), reviewLater: true }, "attention")).toBe(true);
+    applyBatch({ ...emptyBatch(), removes: [{ computer: "attention-peer", key: "run:ask" }],
+      computers: [{ computer: "attention-peer", status: "ended", attempt: 0 }] });
+    expect(row()).toBeUndefined();
+  });
+});
 
 describe("the Archive view in the app", () => {
   const pending: ((p: ArchivePage) => void)[] = [];

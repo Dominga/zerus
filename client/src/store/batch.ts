@@ -208,7 +208,7 @@ const app = createBatch({
   notify: appNotify,
   dismiss: appDismiss,
   compact: { get: (key) => !!compactRows[key], set: (key, compact) => setCompactRows(key, compact) },
-  attention: (s) => needsAttention(s as Session),
+  attention: (s) => needsAttention(s as Session, !computerOffline(s.computer)),
   markRead: appMarkRead,
   markNeedsAttention: appMarkNeedsAttention,
   // Without the dialog nothing destructive runs.

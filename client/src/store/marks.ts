@@ -274,11 +274,12 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     const base = { muted: s.baseMuted, conflict: s.baseNotificationError };
     const kept = overrides.size && s.conversationId ? overrides.get(overrideKey(s)) : undefined;
     if (!kept) return base;
-    if (!s.sharedNotifications) return { muted: kept.muted, conflict: false };
+    // The core's conflict shows whatever the override says.
+    if (!s.sharedNotifications) return { muted: kept.muted, conflict: base.conflict };
     const incoming = s.notificationRevision ?? -1;
     if (incoming > kept.revision) return base;
     if (incoming === kept.revision) return s.baseMuted === kept.muted ? base : { muted: kept.muted, conflict: true };
-    return { muted: kept.muted, conflict: false };
+    return { muted: kept.muted, conflict: base.conflict };
   }
 
   const mutedOf = (s: Session) => notificationOf(s).muted;
@@ -292,8 +293,10 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
       attention: status === "attention" ? s.baseAttention : undefined,
       unread: r.unread,
       reviewLater: r.reviewLater,
-      // SessionInfo::needsAttention with these marks (the core's `needs_attention`
-      // gives the same without them); a projection without the field keeps none.
+      // SessionInfo::needsAttention with these marks. The core's `needs_attention`
+      // is the listing's value before any device mark: an older host's reply is
+      // never unread there, so it must never be read without this overlay. A
+      // projection without the field keeps none.
       attentionNeeded: s.baseAttentionNeeded === undefined ? undefined
         : (s.needsAction && !r.ack) || (s.state !== "archived" && (r.unread || r.reviewLater)),
       childAttention: s.baseChildAttention && !r.ack,
@@ -568,13 +571,23 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
       }
     }
     if (overrides.size) {
-      // A listing with a higher revision ends the override (the overlay already shows the row's own value).
+      // A listing that reaches the override ends it: a higher revision, or the
+      // same revision with the same value (the overlay already shows the row's
+      // own value then). The core keeps the confirmed value from here on.
       for (const u of b.replaces.length ? [...b.upserts, ...b.replaces.flatMap((r) => r.rows)] : b.upserts) {
         const row = u.row;
-        const kept = row.conversation_id ? overrides.get(replyKey(u.computer, row.agent ?? "", row.conversation_id)) : undefined;
-        if (kept && row.shared_notifications && (row.notification_revision ?? -1) > kept.revision) {
-          overrides.delete(replyKey(u.computer, row.agent ?? "", row.conversation_id!));
+        const key = row.conversation_id ? replyKey(u.computer, row.agent ?? "", row.conversation_id) : undefined;
+        const kept = key ? overrides.get(key) : undefined;
+        const revision = row.notification_revision ?? -1;
+        if (kept && row.shared_notifications && (revision > kept.revision || (revision === kept.revision && !!row.muted === kept.muted))) {
+          overrides.delete(key!);
         }
+      }
+      // A conversation no longer listed takes its override with it, as Qt's
+      // preferences go with their rows. An empty replace is not a listing.
+      if (overrides.size && (b.removes.length || b.replaces.some((r) => r.rows.length))) {
+        const listedKeys = new Set(listed().filter((s) => s.conversationId).map((s) => overrideKey(s)));
+        for (const key of [...overrides.keys()]) if (!listedKeys.has(key)) overrides.delete(key);
       }
     }
     moveFallbacks(c);

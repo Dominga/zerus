@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { LOCAL, localState, peerState, placeholders, sessionHostLine, summary, testEnabled } from "./machines-ui";
+import { LOCAL, localState, machineKey, peerState, placeholders, sessionHostLine, summary, testEnabled } from "./machines-ui";
 import { machineMeta } from "../../store/testing";
 import { emptyMachines, type MachineRow } from "../../types";
 
@@ -9,6 +9,11 @@ const row = (extra: Partial<MachineRow> = {}): MachineRow => ({
 const at = (status: string, attempt = 0) => ({ id: "studio", status, attempt });
 
 describe("machines page", () => {
+  it("selects this computer by its LOCAL key and a peer by its alias", () => {
+    expect(machineKey("")).toBe(LOCAL);
+    expect(machineKey("studio")).toBe("studio");
+  });
+
   it("words a peer's state line as Qt, with the stream's states", () => {
     expect(peerState(row({ enabled: false }), at("live"), 2)).toEqual({ tile: "disabled", line: "Disabled", live: false });
     expect(peerState(row(), at("live"), 1)).toEqual({ tile: "online", line: "Connected, 1 session", live: true });

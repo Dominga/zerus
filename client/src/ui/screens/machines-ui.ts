@@ -8,6 +8,9 @@ import type { MachineState } from "../components/MachineTile";
 /** The selection key of this computer. */
 export const LOCAL = "@local";
 
+/** The Machines selection of a fleet computer: this computer's ID is "", its key is LOCAL. */
+export const machineKey = (computer: string): string => (computer === "" ? LOCAL : computer);
+
 export interface PeerState { tile: MachineState; line: string; live: boolean }
 
 /** A saved peer's state line (renderRows, MachinesPage.cpp:308-311) with the stream's states of the Decisions note. */

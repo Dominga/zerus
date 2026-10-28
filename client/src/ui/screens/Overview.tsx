@@ -13,6 +13,7 @@ import { accountsPage, loadAccounts, setAccountMachine, setRequestedProfile } fr
 import { createOverview, type MachineCardModel, type OverviewStats } from "../../store/overview";
 import { setMachineFilter, setPage, setProjectFilter, setSelectedKey, setStateFilter, type StateFilter } from "../../store/ui";
 import { accountTooltip, clock, summaryText, usageLoading, windowsAt } from "../lib/usage";
+import { machineKey } from "./machines-ui";
 import { accountIdentity, accountTone, accountsNote, cpuFigure, level, loadTip, memoryFigure, sampleNote, sampleTip, sessionsLabel } from "./overview-ui";
 
 // Overview (DashboardPage.cpp), ported from design/webui/src/screens/Dashboard.tsx:
@@ -47,7 +48,7 @@ function MachineCard(props: { m: MachineCardModel; stats: OverviewStats; now: nu
         <MachineBadge alias={props.m.name} computer={props.m.computer} />
         <span class="ov-mos ell"><Show when={props.m.local}><b>This machine</b></Show></span>
         <span class="ov-mstatus" classList={{ online: c().fresh }}>{c().text}</span>
-        <button class="icon-btn small" data-tip="Machine settings" aria-label="Machine settings" onClick={() => { requestMachine(props.m.computer); setPage("machines"); }}><Icon name="settings" size={14} /></button>
+        <button class="icon-btn small" data-tip="Machine settings" aria-label="Machine settings" onClick={() => { requestMachine(machineKey(props.m.computer)); setPage("machines"); }}><Icon name="settings" size={14} /></button>
       </header>
       <div class="ov-mmeters">
         <div class="ov-mm" title={cpu().tip}>

@@ -805,8 +805,10 @@ pub async fn sort_project(
     .await
 }
 
-/// Expand or collapse a project: this device's layout, no `hgs`.
-#[tauri::command]
+/// Expand or collapse a project: this device's layout, no `hgs`. Off the
+/// main thread, as every command that takes a lock: the pump's lock may be
+/// held by a grouping pass over every row.
+#[tauri::command(async)]
 pub fn set_project_collapsed(state: State<'_, Organization>, project: String, collapsed: bool) {
     state.0.pump.set_collapsed(&project, collapsed);
 }

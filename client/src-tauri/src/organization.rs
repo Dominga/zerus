@@ -1096,23 +1096,38 @@ mod tests {
         fake.finish(organization);
     }
 
-    // SwarmController.cpp:67-73, 96-101: the edit stays, and the topic's next state sends it again.
+    // SwarmController.cpp:67-73, 96-101: the edit stays, and the topic's next
+    // state sends it again. Projects shows the failure until the resend lands,
+    // as Qt's statusChanged reaches it (SessionsWindow.cpp:1653).
     #[test]
     fn a_failed_apply_answers_kept_and_the_next_state_sends_it_once_more() {
+        const FAILED: &str =
+            "Project sync unavailable: hgs: session belongs to more than one project";
         let refused =
             json!({"exit": 1, "stderr": "hgs: session belongs to more than one project\n"});
         let fake = Fake::new(json!([refused, {"stdout": full("d2")}]));
         let organization = fake.organization(&Pump::default(), true);
         organization.set_source(snapshot("d1"));
         organization.observe(&state("d1"));
+        let lines: Arc<Mutex<Vec<(String, bool)>>> = Arc::default();
+        {
+            let lines = Arc::clone(&lines);
+            organization.set_presented(Arc::new(move |_, _, status| {
+                lines.lock().unwrap().push(status);
+            }));
+        }
+        let last = || lines.lock().unwrap().last().cloned();
         let outcome = organization.submit(move_to_inbox());
         assert_eq!(
             outcome,
             EditOutcome::Kept {
-                detail: "Project sync unavailable: hgs: session belongs to more than one project"
-                    .into()
+                detail: FAILED.into()
             }
         );
+        // The answer goes out just before the Projects call, both after the lock.
+        wait_until("Projects to get the failure", || {
+            last() == Some((FAILED.into(), true))
+        });
         assert_eq!(fake.applies().len(), 1);
         assert!(fake.draft().exists(), "the kept edit stays on disk");
         let before = passes(&organization);
@@ -1126,6 +1141,15 @@ mod tests {
             "the state sent it again within two passes"
         );
         wait_until("the resend to land", || fake.settled_after(2));
+        // The worker made the call before the pass that removed the draft.
+        assert_eq!(
+            last(),
+            Some((
+                "Local catalog. Connect another computer to sync projects.".into(),
+                false
+            )),
+            "the landed catalog's line replaces the failure"
+        );
         let log = fake.applies();
         assert_eq!(log.len(), 2, "one resend, and no more once it landed");
         assert_eq!(

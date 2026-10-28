@@ -687,18 +687,32 @@ pub async fn run_action(
 /// already in flight to the same agent fails with Qt's text; any other lane
 /// answers `Err("busy")`.
 pub async fn dispatch(state: &Actions, target: Target, action: Action) -> Result<Outcome, String> {
+    dispatch_as(state, target, action, uuid::Uuid::new_v4().to_string()).await
+}
+
+/// `dispatch` under the caller's request id: the composer's send makes one
+/// per delivery, right before its one call, and records its local row under
+/// it. The id reaches the CLI request and the receipt check unchanged, and
+/// nothing here runs the call twice.
+pub async fn dispatch_as(
+    state: &Actions,
+    target: Target,
+    action: Action,
+    request_id: String,
+) -> Result<Outcome, String> {
     if blocked() {
         return Ok(failed(REPLAY_NEEDS_HGS));
     }
-    dispatch_with(state, target, action, run).await
+    dispatch_with(state, target, action, request_id, run).await
 }
 
-/// `dispatch` past its replay guard, with the runner that starts `hgs`:
+/// `dispatch_as` past its replay guard, with the runner that starts `hgs`:
 /// the core's `run`, or in tests a stand-in that starts no process.
 async fn dispatch_with(
     state: &Actions,
     target: Target,
     action: Action,
+    request_id: String,
     runner: impl FnOnce(&std::path::Path, &zerus_client_core::Invocation) -> zerus_client_core::Exit
         + Send
         + 'static,
@@ -721,7 +735,6 @@ async fn dispatch_with(
             _ => Err("busy".into()),
         };
     };
-    let request_id = uuid::Uuid::new_v4().to_string();
     if let Action::MarkRead {
         reply_id,
         attention_signature,
@@ -1204,6 +1217,7 @@ mod tests {
                 &actions,
                 review(),
                 action,
+                uuid::Uuid::new_v4().to_string(),
                 move |_, _| {
                     *record.lock().unwrap() =
                         Some(seen.write_kind("studio", "claude/sample-project/review"));
@@ -1248,6 +1262,77 @@ mod tests {
         );
         let (_, during) = call(Action::Interrupt { turn_started: 1.0 }, 0);
         assert_eq!(during, None, "an interrupt is no write");
+    }
+
+    #[test]
+    fn a_send_carries_the_callers_request_id_into_its_one_call() {
+        use zerus_client_core::Exit;
+        let actions = Actions::new(std::env::temp_dir().join("zerus-dispatch-as-test-marks.json"));
+        let send = Action::Send {
+            text: "hello".into(),
+            attachments: Vec::new(),
+            agent_id: None,
+            expected_compaction_id: None,
+        };
+        // As the composer's dispatch dep runs it: `block_on` on a blocking
+        // thread of the app's runtime.
+        let call = |id: &str, echo: Option<&str>| {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let seen = Arc::clone(&calls);
+            let (state, action, id) = (actions.clone(), send.clone(), id.to_owned());
+            let echo = echo.map(str::to_owned);
+            let outcome =
+                tauri::async_runtime::block_on(tauri::async_runtime::spawn_blocking(move || {
+                    tauri::async_runtime::block_on(dispatch_with(
+                        &state,
+                        review(),
+                        action,
+                        id,
+                        move |_, inv| {
+                            let input: serde_json::Value =
+                                serde_json::from_slice(inv.stdin.as_deref().unwrap()).unwrap();
+                            let asked = input["request_id"].as_str().unwrap().to_owned();
+                            seen.lock()
+                                .unwrap()
+                                .push((inv.request_id.clone(), asked.clone()));
+                            let receipt = serde_json::json!({
+                                "status": "submitted",
+                                "request_id": echo.unwrap_or(asked),
+                                "name": "claude/sample-project/review",
+                                "run_id": "run-1",
+                                "conversation_id": "conv-1",
+                            });
+                            Exit::Code {
+                                code: 0,
+                                stdout: serde_json::to_vec(&receipt).unwrap(),
+                                stderr: String::new(),
+                            }
+                        },
+                    ))
+                }))
+                .unwrap()
+                .unwrap();
+            let calls = calls.lock().unwrap().clone();
+            (outcome, calls)
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        let (outcome, calls) = call(&id, None);
+        assert_eq!(
+            calls,
+            vec![(Some(id.clone()), id.clone())],
+            "one call, under the caller's id"
+        );
+        let Outcome::Done { receipt, .. } = outcome else {
+            panic!("not done: {outcome:?}")
+        };
+        assert_eq!(receipt["request_id"], id.as_str());
+        let other = uuid::Uuid::new_v4().to_string();
+        let (outcome, calls) = call(&id, Some(&other));
+        assert_eq!(calls.len(), 1, "an unconfirmed receipt is never sent again");
+        assert!(
+            matches!(outcome, Outcome::Uncertain { .. }),
+            "a receipt of another request: {outcome:?}"
+        );
     }
 
     fn live(state: &str, run: &str) -> Option<ViewRow> {

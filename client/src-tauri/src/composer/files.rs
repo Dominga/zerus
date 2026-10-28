@@ -16,20 +16,26 @@
 //! `convertFileSrc` encodes it whole. A response names the type `sniff`
 //! finds in the bytes, never one a webview would run as a page.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tauri::http::{header, response::Builder, Method, Request, Response, StatusCode};
 use zerus_client_core::attachments;
 
-use super::Composers;
+use super::{Composers, Spawn};
 
 /// The private attachment cache: `{root}/{sha256}/{name}`, as
 /// `attachments::store_at` writes it.
 pub struct Cache {
     root: PathBuf,
+    /// A prune runs on the blocking pool.
+    pruning: AtomicBool,
+    /// A store arrived during the prune: one more runs after it.
+    again: AtomicBool,
 }
 
 pub(crate) fn canonical(path: &Path) -> PathBuf {
@@ -41,7 +47,40 @@ impl Cache {
         let _ = std::fs::create_dir_all(&root);
         Arc::new(Cache {
             root: canonical(&root),
+            pruning: AtomicBool::new(false),
+            again: AtomicBool::new(false),
         })
+    }
+
+    /// One prune after a store, on the blocking pool; a store during a prune
+    /// runs exactly one more. `extra` names the copies Retry still needs.
+    pub fn prune_later(
+        self: &Arc<Self>,
+        spawn: &Spawn,
+        extra: Arc<dyn Fn() -> HashSet<PathBuf> + Send + Sync>,
+    ) {
+        if self.pruning.swap(true, Ordering::SeqCst) {
+            self.again.store(true, Ordering::SeqCst);
+            return;
+        }
+        let cache = Arc::clone(self);
+        spawn(Box::new(move || loop {
+            cache.again.store(false, Ordering::SeqCst);
+            let kept: HashSet<PathBuf> = extra().iter().map(|path| canonical(path)).collect();
+            attachments::prune(&cache.root, attachments::CACHE_LIMIT, |path| {
+                kept.contains(&canonical(path))
+            });
+            if cache.again.load(Ordering::SeqCst) {
+                continue;
+            }
+            cache.pruning.store(false, Ordering::SeqCst);
+            // A store between the check and the release saw a prune running
+            // and left it to this one: run once more, unless another job
+            // took over meanwhile.
+            if !cache.again.load(Ordering::SeqCst) || cache.pruning.swap(true, Ordering::SeqCst) {
+                break;
+            }
+        }));
     }
 
     /// The canonical root.

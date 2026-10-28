@@ -309,7 +309,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(some.cwd.as_deref(), Some("/w/x"));
-        let empty = parse_details(&t, exit(r#"{"run_id":"r","conversation_id":"c","cwd":""}"#)).unwrap();
+        let empty =
+            parse_details(&t, exit(r#"{"run_id":"r","conversation_id":"c","cwd":""}"#)).unwrap();
         assert_eq!(empty.cwd.as_deref(), Some(""));
         assert_eq!(some.terminal_supported, Some(false));
         assert_eq!(some.terminal_attach_supported, Some(true));

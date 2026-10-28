@@ -4198,7 +4198,10 @@ void TestSessionsWindow::refreshedListingsKeepRowsUnlessTimeChangesThem()
     const auto now = QDateTime::currentMSecsSinceEpoch();
     auto local = fleet().local(); local.digest = "arch-1";
     auto mac = *fleet().peer("mac"); mac.digest = "mac-1";
-    FleetState state; state.setLocal(local, now); state.setPeer(mac, now - FleetState::kPeerStaleMs + 1500);
+    // The peer's poll grows stale this long after the fixture's clock: room for a
+    // slow runner to create and show the window before the checks below.
+    constexpr qint64 StaleInMs = 4000;
+    FleetState state; state.setLocal(local, now); state.setPeer(mac, now - FleetState::kPeerStaleMs + StaleInMs);
     SessionsWindow window(program()); keepDetailsPollsOut(window); window.resize(1120, 680); window.setFleet(state); window.show();
     auto *list = window.findChild<QListWidget *>("sessionList"); QVERIFY(list);
     const auto row = [list](const QString &name) -> QListWidgetItem * {
@@ -4212,9 +4215,9 @@ void TestSessionsWindow::refreshedListingsKeepRowsUnlessTimeChangesThem()
     auto later = local; later.metrics["cpu_percent"] = 42.0; later.sessions[0].backgroundObservedAt = 7;
     QVERIFY(state.refreshListing({}, later, now + 100)); window.refreshFleet(state);
     QCOMPARE(row("kimi/docs/research")->data(SessionRoles::Detail).toString(), QString("kept"));
-    QVERIFY(state.refreshListing("mac", mac, now - FleetState::kPeerStaleMs + 1500)); window.refreshFleet(state);
+    QVERIFY(state.refreshListing("mac", mac, now - FleetState::kPeerStaleMs + StaleInMs)); window.refreshFleet(state);
     QCOMPARE(row("kimi/docs/research")->data(SessionRoles::Detail).toString(), QString("kept"));
-    // Unless the peer's poll grew stale meanwhile (1.5 s, as on a slow runner),
+    // Unless the peer's poll grew stale meanwhile (on a very slow runner),
     // which shows it offline and rightly prepares the rows again.
     if (!state.isStale(QDateTime::currentMSecsSinceEpoch())) QCOMPARE(window.rowGenerationForTests(), rendered);
     // A changed listing renders at once.
@@ -4235,7 +4238,7 @@ void TestSessionsWindow::refreshedListingsKeepRowsUnlessTimeChangesThem()
     // A peer whose last poll grew stale is shown offline, even while the rest refreshes.
     retrying.sessions[1].recovery = {}; retrying.digest = "arch-4"; state.setLocal(retrying, now + 600); window.setFleet(state);
     QCOMPARE(row("claude/infra/review")->data(SessionRoles::Status).toString(), QString("Needs approval"));
-    QTRY_VERIFY_WITH_TIMEOUT(state.isStale(QDateTime::currentMSecsSinceEpoch()), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(state.isStale(QDateTime::currentMSecsSinceEpoch()), StaleInMs + 4000);
     QVERIFY(state.refreshListing({}, retrying, QDateTime::currentMSecsSinceEpoch())); window.refreshFleet(state);
     QCOMPARE(row("claude/infra/review")->data(SessionRoles::Status).toString(), QString("Offline"));
 }

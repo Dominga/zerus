@@ -16,7 +16,8 @@
 //! The one-second ticker does no per-profile work: it compares the fleet and
 //! steps the account reads only when the fleet changed, a catalog arrived, an
 //! account screen showed or the earliest due time passed. A view is
-//! projected again only after a read finished or the fleet changed.
+//! projected again only after a read finished, the fleet changed, or account
+//! reads started while Overview or Accounts shows (their busy state).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -62,7 +63,8 @@ struct Hub {
     swarm: SwarmState,
     /// The view each visible screen last showed, so a change emits once.
     shown: BTreeMap<Screen, Value>,
-    /// Screens a reply or the fleet touched since the last publish.
+    /// Screens a reply, the fleet or starting account reads touched since the
+    /// last publish.
     dirty: BTreeSet<Screen>,
     /// The account reads need a fresh look: the fleet changed, a catalog
     /// arrived or an account screen showed.
@@ -294,6 +296,12 @@ impl Screens {
             }
         }
         runs.extend(hub.dispatch());
+        // Reads that start show at once (AccountsPage::request calls
+        // updateRefreshState): the busy state, "Updating… N remaining" and a
+        // disabled Refresh. A step that starts nothing publishes nothing.
+        if !runs.is_empty() && shown {
+            hub.dirty.extend(ACCOUNT_SCREENS);
+        }
         runs
     }
 
@@ -388,8 +396,8 @@ impl Screens {
     }
 
     /// One `screens-changed` per visible screen whose view changed since the
-    /// webview last saw it. Only the screens a reply or the fleet touched are
-    /// projected again.
+    /// webview last saw it. Only the screens a reply, the fleet or starting
+    /// account reads touched are projected again.
     fn publish(&self) {
         let changed: Vec<Screen> = {
             let mut hub = self.lock();
@@ -723,6 +731,12 @@ mod tests {
         fn work(&self) -> Work {
             self.screens.lock().work
         }
+
+        /// The view the last event or pull handed the webview for `screen`.
+        fn published(&self, screen: Screen) -> Value {
+            let hub = self.screens.lock();
+            hub.shown.get(&screen).cloned().unwrap_or_default()
+        }
     }
 
     fn local() -> FleetEntry {
@@ -907,7 +921,15 @@ mod tests {
             "no retry inside five minutes"
         );
         h.at(300_000);
+        h.events();
         h.screens.tick();
+        assert_eq!(h.queued(), 2, "the re-inspect batch starts");
+        assert_eq!(h.events(), [Screen::Accounts], "and shows at once");
+        let shown = h.published(Screen::Accounts);
+        assert_eq!(
+            (shown["busy"].clone(), shown["pending"].clone()),
+            (json!(true), json!(3))
+        );
         h.drain();
         for call in INSPECTS {
             assert_eq!(h.count(call), 2, "{call}");
@@ -1000,12 +1022,21 @@ mod tests {
             (changed.steps, changed.projections),
             (idle.steps + 1, idle.projections + 1)
         );
-        // The catalogs fall due 30 s after they started.
+        // The catalogs fall due 30 s after they started; the reads that
+        // start show at once (Qt's updateRefreshState), in one projection.
         h.at(30_000);
         h.screens.tick();
         assert_eq!(h.queued(), 2);
+        assert_eq!(h.events(), [Screen::Accounts]);
+        assert_eq!(h.published(Screen::Accounts)["busy"], json!(true));
+        let busy = h.work();
+        assert_eq!(busy.projections, changed.projections + 1);
+        h.screens.tick();
+        assert_eq!(h.work(), busy, "nothing due: nothing published");
+        assert!(h.events().is_empty() && h.queued() == 2);
         h.drain();
         assert_eq!(h.count("account ls"), 2);
+        assert_eq!(h.published(Screen::Accounts)["busy"], json!(false));
     }
 
     #[test]

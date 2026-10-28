@@ -26,7 +26,7 @@ pub const MAIN_WINDOW: &str = "main";
 /// Tests that start child processes hold this shared; the tests that sample
 /// this process's tree hold it alone, since a child that exits mid-sample
 /// leaves the tree's memory total unknown.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) static PROCESS_TREE: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 /// Builds the app and runs its event loop until the last window closes.

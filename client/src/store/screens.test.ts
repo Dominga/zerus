@@ -39,13 +39,39 @@ describe("screens wiring", () => {
     expect(mocked.accountsView).toHaveBeenCalledTimes(1);
     setPage("machines");
     await settle();
-    expect(mocked.screenVisible.mock.calls.slice(1)).toEqual([["overview", false], ["machines", true]]);
+    expect(mocked.screenVisible.mock.calls.slice(1)).toEqual([["machines", true], ["overview", false]]);
     expect(mocked.machinesView).toHaveBeenCalledWith(false);
     hidden = true;
     listeners.forEach((l) => l());
     await settle();
     expect(mocked.screenVisible.mock.calls.at(-1)).toEqual(["machines", false]);
     stop();
+  });
+
+  it("shows the new screen before it hides the old one, one change at a time", async () => {
+    const answers: (() => void)[] = [];
+    mocked.screenVisible.mockImplementation(() => new Promise<void>((resolve) => answers.push(resolve)));
+    try {
+      const [page, setPage] = createSignal<Page>("dashboard");
+      const stop = startScreens(page, { hidden: () => false, onChange: () => () => {} });
+      await settle();
+      answers.shift()!();
+      await settle();
+      expect(mocked.accountsView).toHaveBeenCalledTimes(1);
+      setPage("accounts");
+      await settle();
+      // Accounts shows first, so the hub never sees neither account screen and keeps its queued inspects.
+      expect(mocked.screenVisible.mock.calls.slice(1)).toEqual([["accounts", true]]);
+      expect(mocked.accountsView).toHaveBeenCalledTimes(1);
+      answers.shift()!();
+      await settle();
+      expect(mocked.screenVisible.mock.calls.slice(1)).toEqual([["accounts", true], ["overview", false]]);
+      expect(mocked.accountsView).toHaveBeenCalledTimes(2);
+      answers.shift()!();
+      stop();
+    } finally {
+      mocked.screenVisible.mockImplementation(async () => {});
+    }
   });
 
   it("re-pulls the visible screen on screens-changed", async () => {

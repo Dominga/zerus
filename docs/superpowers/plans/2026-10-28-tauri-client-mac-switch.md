@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give the Tauri client (`client/`) the native Mac work it needs before it replaces the Qt GUI as Zerus (`com.hgdev.hgs-tray`): the menu-bar item, Qt's single-instance protocol and command line, login through the existing LaunchAgent, quit handling, attention notifications, a switch bundle, and an updater that switches, verifies and rolls back.
+**Goal:** Give the Tauri client (`client/`) the native Mac work it needs before it replaces the Qt GUI as Zerus (`com.hgdev.hgs-tray`): the menu-bar item, Qt's single-instance protocol and command line, login through the existing LaunchAgent, quit handling, attention notifications, Qt's main-thread watchdog, a switch bundle, and an updater that switches, verifies and rolls back.
 
-**Architecture:** Decision logic is pure and tested on Linux. The menu-bar model, the tile geometry and a port of Qt's `AttentionTracker` live in `client/core`. The command line, build identity, bundle identity and single-instance protocol are pure modules of `client/src-tauri`. The updater's rules are pure Python functions in `tray/update-installed.py`. Thin macOS glue (objc2 and Tauri's `tray-icon`) draws the tile, shows the menu, posts notifications and keeps the app in the menu bar. The switch bundle is the Tauri build with Qt's identifier, executable name and Info.plist keys. `tray/sign-local-macos.py` signs it, and `tray/install.sh` installs it through `tray/update-installed.py`.
+**Architecture:** Decision logic is pure and tested on Linux. The menu-bar model, the tile geometry and a port of Qt's `AttentionTracker` live in `client/core`. The command line, build identity, bundle identity and single-instance protocol are pure modules of `client/src-tauri`. The updater's rules are pure Python functions in `tray/update-installed.py`. Thin macOS glue (objc2, IOKit and Tauri's `tray-icon`) draws the tile, shows the menu, posts notifications, beats the watchdog's heartbeat and keeps the app in the menu bar. The switch bundle is the Tauri build with Qt's identifier, executable name and Info.plist keys. `tray/sign-local-macos.py` signs it, and `tray/install.sh` installs it through `tray/update-installed.py`.
 
-**Tech Stack:** Rust 1.99.1, Tauri 2.12 (`tray-icon` feature), objc2 0.6, objc2-foundation, objc2-app-kit and objc2-user-notifications 0.3.2, block2 0.6, libc; SolidJS and Vitest; Python 3 `unittest`; bash.
+**Tech Stack:** Rust 1.99.1, Tauri 2.12 (`tray-icon` feature), objc2 0.6, objc2-foundation, objc2-app-kit and objc2-user-notifications 0.3.2, block2 0.6, libc, IOKit and libdispatch through a few hand-declared calls; SolidJS and Vitest; Python 3 `unittest`; bash.
 
-**Spec:** `docs/superpowers/specs/2026-10-27-tauri-web-ui-design.md`: Platform integrations (rows 289 tray, 290 notifications, 297 watchdog and signals, 298 single instance, 299 autostart, 300 updates), Packaging and signing, Migration. Beads: `zerus-5wmh.44`, `zerus-5wmh.43`, `zerus-5wmh.12.1`, `zerus-5wmh.12.2` (parent `zerus-5wmh.13`). Owner decisions of 2026-10-28 are recorded on `zerus-5wmh.13`.
+**Spec:** `docs/superpowers/specs/2026-10-27-tauri-web-ui-design.md`: Platform integrations (rows 289 tray, 290 notifications, 297 watchdog and signals, 298 single instance, 299 autostart, 300 updates), Packaging and signing, Migration. Beads: `zerus-5wmh.44`, `zerus-5wmh.43`, `zerus-5wmh.12.1`, `zerus-5wmh.12.2`, `zerus-5wmh.12.3` (parent `zerus-5wmh.13`). Owner decisions of 2026-10-28 are recorded on `zerus-5wmh.13`; the coordinator's rulings of the same day are on `zerus-5wmh.12.2`, `zerus-5wmh.12.3` and `zerus-5wmh.13.1`.
 
 ## Decisions
 
@@ -17,40 +17,51 @@
   - The notification rules apply the host-confirmed session Mute and Qt's optional-question banner setting (`notifications/optionalQuestions`, off by default). There is no "Reduce" notification setting in Qt. Bead .43's wording was wrong.
   - The switch does not wait for M1c. Voice and round video are phase 4 Part B, after the switch. The install enables `--features media` whenever the feature exists.
   - Lazy window: the switch bundle creates its webview on first open, as Qt creates its window lazily. The slower first open is accepted.
-  - Questions 3-7 and 9 (the rollback slot, the scope of the numbered Dev guard, the watchdog, data carry-over, update notices and display windows) went to the coordinator. Their answers are recorded here when they arrive.
+- **Coordinator rulings (2026-10-28).**
+  - **Rollback slot.** The one kept copy stays the last Qt bundle until the owner retires Qt. A failed start restores automatically. There is no second slot (Decision 12, Task 7).
+  - **Numbered Dev guard.** It applies on every platform, as AGENTS.md states. The local preview label (`ZERUS_LOCAL_PREVIEW_LABEL`) is the escape hatch. `docs/reference.md` documents the guard and the label, and the updater's refusal uses the same wording (Decision 13, Task 7). The events and menu-parity sessions are told before this reaches main (runbook, "Before the merge").
+  - **Main-thread watchdog (`zerus-5wmh.12.3`).** It lands in this plan, before the bundle task: Task 8 ports Qt's `MainThreadWatchdog` with its thresholds and its exit path (Decision 4).
+  - **Data carry-over.** The one-time draft import of `zerus-5wmh.13.1` also reads the dev app's drafts, read-only on the source, the same way it reads Qt's. That import is phase 4's work and is not planned here. Settings start at their defaults, and read marks start fresh (Decision 5).
+  - **Update notices.** They are accepted as missing after the switch. The follow-up is `zerus-5wmh.12.4`.
+  - **Display windows.** Runbook step 4 needs an owner-given Mac window: the implementer tells the coordinator when the build reaches it. Step 8 is the coordinator's job, done with the owner.
 
-These are settled for this plan. Items 1 to 4 deviate from the spec text and are recorded in the spec's Decisions section by Task 8.
+These are settled for this plan. Items 1 to 3 deviate from the spec text and are recorded in the spec's Decisions section by Task 9.
 
 1. **Single instance follows Qt, not `tauri-plugin-single-instance` (deviates from spec row 298).** The client implements Qt's `SingleInstance` protocol (`tray/src/SingleInstance.{h,cpp}`, `tray/src/main.cpp:337-361` and `:424-433`): the per-user start lock `hgs-tray-start.lock` in Qt's runtime location, the socket named `hgs-tray` in the canonical temporary folder, and the one-line `show` and `sessions` activations. `tray/update-installed.py` finds the old GUI's socket by `lsof` (a path ending in `/hgs-tray`), waits on that same path for the new GUI and sends `sessions` (`update-installed.py:187-208`, `:295-315`). The plugin uses another path, so the updater would time out and roll back.
 2. **The bundle takes over Qt's identity (supersedes the spec's "A distinct bundle identifier from the Qt app" and "Binary names and paths must not collide with `hgs-tray`", for the Mac only).** These are the owner's decisions of 2026-10-28. The switch bundle is `com.hgdev.hgs-tray`, named Zerus, with executable `hgs-tray`. It replaces `~/Applications/hgs-tray.app` in place, and Qt is not kept beside it on the Mac. The dev app keeps `dev.zerus.next` and its name.
 3. **Menu entries: Qt's, except Refresh and the update entries (deviates from spec row 289's "menu with machines and sessions" parity).** Every computer streams through `hgs watch`, and a failed stream restarts on its own schedule, so there is nothing to poll. The client has no update controller yet (spec row 300). The tooltip drops Qt's poll ages for the same reason. The "?" error tile shows while this computer's stream is reconnecting.
-4. **The main-thread watchdog (spec row 297) is not in this plan.** It needs IOKit sleep and dark-wake handling (`tray/src/MainThreadWatchdog.h`). The plan keeps Qt's other guard, `QuietTrayIcon`: no status-item update while its menu is open. A follow-up is proposed in the report.
-5. **The client's private data directory follows the running bundle's identifier (ruling 4).** `identity::Identity::data_dir` is Tauri's `app_data_dir` formula applied to the identifier the running bundle reports (`NSBundle.mainBundle.bundleIdentifier` on macOS). The switch bundle therefore uses `~/Library/Application Support/com.hgdev.hgs-tray/`, which does not collide with Qt's `~/Library/Application Support/hgdev/hgs-tray`. The dev app keeps `~/Library/Application Support/dev.zerus.next/`. **Cost:** read marks still pending in the dev app, its webview settings (Animate working sessions, Reduce motion, panel widths) and any durable drafts typed in it (S5, not yet on main) do not appear in the switched app. They stay readable in the dev app. **Why not pin:** after the switch the dev app keeps running beside the installed client for testing. A pinned directory would give one drafts root two writers, which the phase 4 core section rules out ("each store has exactly one writer"). Mitigation: the one-time draft import of `zerus-5wmh.13.1` can read the dev root as a second read-only source, which the report proposes.
+4. **The main-thread watchdog follows Qt (spec row 297, `zerus-5wmh.12.3`, coordinator ruling).** Task 8 ports `tray/src/MainThreadWatchdog.{h,cpp}` and `MacSystemPower`: a main-thread heartbeat every 7.5 s, a check every 15 s on a thread named `hgs-watchdog`, a 30 s threshold, uptime that stops during sleep, a hold from the sleep notice until the main thread beats after a wake (10 minutes at most), and `abort()` so launchd's `KeepAlive Crashed` restarts the client and the crash report shows the main thread. The decision logic is pure and tested on Linux; the heartbeat (an `NSTimer` in the common run-loop modes, a GLib timeout on Linux) and the IOKit power notices are thin glue. It runs in the switch bundle, which launchd supervises, and in other builds only with `ZERUS_CLIENT_WATCHDOG=1`, so a dev run on the shared machine is never aborted (Decision 7's rule). Qt's other guard stays too: no status-item update while its menu is open (`QuietTrayIcon`).
+5. **The client's private data directory follows the running bundle's identifier (ruling 4).** `identity::Identity::data_dir` is Tauri's `app_data_dir` formula applied to the identifier the running bundle reports (`NSBundle.mainBundle.bundleIdentifier` on macOS). The switch bundle therefore uses `~/Library/Application Support/com.hgdev.hgs-tray/`, which does not collide with Qt's `~/Library/Application Support/hgdev/hgs-tray`. The dev app keeps `~/Library/Application Support/dev.zerus.next/`.
+   - **One source for every client path.** Read marks, `menubar.json`, `attention-observed.json` and phase 4's drafts root (`<data dir>/drafts`) all come from `Identity::data_dir_now()`. Tauri's `app.path().app_data_dir()` reports the compile-time identifier, which is `com.hgdev.hgs-tray.local` in a switch build (Decision 6), so the client never calls it. Task 2 manages the `Identity` in the app state for that reason. Phase 4's composer (`DraftStore::open(root.join("drafts"))`) currently takes its root from `app_data_dir`: whichever of phase 4 and this plan lands second routes it through `app.state::<identity::Identity>()`, and `grep -rn "app_data_dir()" client/src-tauri/src` must print nothing (Task 9 checks it). Otherwise the client would write its drafts under the `.local` identifier and the updater would verify an empty drafts root. Phase 4's attachment cache (`app_cache_dir`) is disposable; under the `.local` identifier it is only a misnamed cache, and phase 4 may move it the same way.
+   - **Data carry-over (coordinator ruling).** Settings start at their defaults, and read marks start fresh: the hosts' read state stays authoritative. The dev app's webview settings (Animate working sessions, Reduce motion, panel widths) and its pending read marks stay with the dev app. Its durable drafts reach the switched client through the one-time import of `zerus-5wmh.13.1`, which reads the dev app's drafts root (`~/Library/Application Support/dev.zerus.next/drafts`) read-only, the same way it reads Qt's store. That import is phase 4's work; this plan only depends on it (runbook step 8), and until it lands those drafts stay readable in the dev app.
+   - **Why not pin:** after the switch the dev app keeps running beside the installed client for testing. A pinned directory would give one drafts root two writers, which the phase 4 core section rules out ("each store has exactly one writer").
 6. **The switch build is configured as `com.hgdev.hgs-tray.local` and promoted at signing.** This is Qt's privacy split (`tray/CMakeLists.txt:283-285`, `tray/sign-local-macos.py:134-143`): an unsigned copy in a build folder never registers the public identifier. The runtime identity therefore comes from the bundle, not from Tauri's compile-time configuration (Decision 5).
-7. **Only the switch identity claims Qt's names and posts notifications.** The dev app gets single-instance only with `ZERUS_CLIENT_SINGLE_INSTANCE=1`, under its own name, and notifications only with `ZERUS_CLIENT_NOTIFICATIONS=1`. This keeps parallel headless runs on the shared arch machine working. It also means a dev client never claims Qt's `/tmp/hgs-tray` on arch and never doubles Qt's banners on the Mac. A replay (`ZERUS_CLIENT_REPLAY`) never posts notifications.
-8. **Primary click shows and activates the window, as Qt's `TrayAgent::showSessions` does (`TrayAgent.cpp:776-780`).** The bead says "shows or hides"; Qt never hides on click. Kept as an open question.
+7. **Only the switch identity claims Qt's names, posts notifications and runs the watchdog.** The dev app gets single-instance only with `ZERUS_CLIENT_SINGLE_INSTANCE=1`, under its own name, notifications only with `ZERUS_CLIENT_NOTIFICATIONS=1`, and the main-thread watchdog only with `ZERUS_CLIENT_WATCHDOG=1`. This keeps parallel headless runs on the shared arch machine working. It also means a dev client never claims Qt's `/tmp/hgs-tray` on arch and never doubles Qt's banners on the Mac. A replay (`ZERUS_CLIENT_REPLAY`) never posts notifications.
+8. **Primary click shows and activates the window, as Qt's `TrayAgent::showSessions` does (`TrayAgent.cpp:776-780`).** Qt never hides on click; the controller confirmed it.
 9. **`show` changes nothing visible.** Qt's handler acts only on `sessions` (`main.cpp:428`). A launchd or second plain start therefore never pops the window.
 10. **The "Open in" choice lives in the client's data directory (`menubar.json`).** It is seeded once from `open-mode` in `~/.config/hgs/tray.conf`, which the client never writes. `icon-color` from the same file is honoured read-only.
 11. **The attention state is the client's own file (`attention-observed.json`).** On the switch identity's first start it is seeded from Qt's `attention/observed` value (`TrayAgent.cpp:157`). That value is read from the shared NSUserDefaults domain, read-only. Banners Qt delivered under the same bundle identifier are therefore withdrawn when their attention clears, and stay clickable.
-12. **Rollback slot.** Once `~/.local/share/hgs/desktop-previous/hgs-tray.app` holds Qt and the client updates itself, Qt stays the one rollback copy. The replaced client waits only in the update's own staging folder, for that update's automatic restore. A copy moved into the slot is unregistered from LaunchServices, so a notification click cannot launch the old app.
-13. **Numbered Dev guard, all platforms.** `update-installed.py` refuses to replace an installed numbered Dev build with an unnumbered build unless the build has a local preview label. This is the AGENTS.md rule, now enforced.
-14. **Mute applies as in Qt.** Muting is the host-confirmed `notification_preferences` (`SessionNotifications::valid`). The optional-questions banner setting (`notifications/optionalQuestions`, default off) is read from Qt's domain until the client has its own Settings entry. Qt has no notification setting named "Reduce"; see the open questions.
-15. **Run-event hook merge rule.** All lifecycle handling lives in `client/src-tauri/src/lifecycle.rs`. `lib.rs` gains one call, `lifecycle::on_event(app, &event);`, inside the `.run(|app, event| ...)` closure. The media branch (`work-ba0ed9fd-media`) adds the same `.build(...).expect(...).run(...)` chain with an `if let tauri::RunEvent::Exit` block calling its `exit(app)`. Whichever lands second keeps the other's lines and adds its own. The only shared line that changes is `.build(...)`, which now takes a `context` built earlier.
+12. **Rollback slot (coordinator ruling).** The one kept copy, `~/.local/share/hgs/desktop-previous/hgs-tray.app`, stays the last Qt bundle until the owner retires Qt. When the client updates itself, the replaced client waits only in the update's own staging folder while that update runs: a new client that does not start is replaced by it automatically, and after any other outcome the staging folder goes with it. There is no second slot and no later rollback to an older client. `--rollback` reinstalls the Qt copy, and only then does the client move into the slot. A copy moved into the slot is unregistered from LaunchServices, so a notification click cannot launch the old app.
+13. **Numbered Dev guard, all platforms (coordinator ruling).** `update-installed.py` refuses to replace an installed numbered Dev build with a build that has neither a Dev number nor a local preview label (`previewLabel` in `--build-info`, from `ZERUS_LOCAL_PREVIEW_LABEL`). `HGS_TRAY_RESTART=0` installs, which replace the GUI on disk without the live update, ask the updater first (`--check`), so no path skips the guard. `docs/reference.md` states the rule and the label, and the refusal quotes the same sentence; a test keeps the two equal. The Tauri client embeds the label as Qt does (Task 2).
+14. **Mute applies as in Qt.** Muting is the host-confirmed `notification_preferences` (`SessionNotifications::valid`). The optional-questions banner setting (`notifications/optionalQuestions`, default off) is read from Qt's domain until the client has its own Settings entry. Qt has no notification setting named "Reduce"; the controller confirmed it.
+15. **Run-event hook merge rule.** All lifecycle handling lives in `client/src-tauri/src/lifecycle.rs`. `lib.rs` gains one call, `lifecycle::on_event(app, &event);`, as the first statement of the `.run(|app, event| ...)` closure, so the watchdog stops (Task 8) before any other exit work. The media branch (`work-ba0ed9fd-media`) adds the same `.build(...).expect(...).run(...)` chain with an `if let tauri::RunEvent::Exit` block calling its `exit(app)`. Whichever lands second keeps the other's lines and adds its own. The only shared line that changes is `.build(...)`, which now takes a `context` built earlier.
 16. **Merge point with M1c (media).** M1c adds `client/src-tauri/Info.plist` (microphone text), `Entitlements.plist` (audio input) and the `media` feature. The switch configuration names its own `Info.switch.plist`, which repeats Qt's microphone text. `tray/install.sh` adds `--features media` whenever the manifest has that feature, so the build order does not matter.
 17. **Release packaging stays phase 7.** A notarized Tauri Zerus.app with the CLI, connector, setup scripts and notices is phase 7 work. This plan makes `scripts/check-macos-bundle.py --gui tauri` and `scripts/sign-macos.py` accept the switch bundle (hardened runtime, `packaging/macos/Zerus.entitlements`). Notarization itself runs only in the `macos-signing` environment.
 
 ## Global Constraints
 
 - **Rust 1.99.1 only:** `cargo +1.99.1` (or `RUSTUP_TOOLCHAIN=1.99.1`). On the shared machine prefix builds with `nice` and set `CARGO_BUILD_JOBS=4`.
-- **No new dependencies.** Allowed: objc2 crates already in `client/src-tauri/Cargo.lock` (`objc2`, `objc2-foundation`, `objc2-app-kit`, `objc2-user-notifications`, `block2`), Tauri's existing `tray-icon` feature (its crates are already in the lock) and `libc`, which is already a direct dependency. `client/core` keeps `serde`, `serde_json`, `zerus-watch-protocol` and `libc`; base64 and the notice IDs are written by hand or injected. After every Cargo change, `git diff --stat -- client/*/Cargo.lock` must show no new `[[package]]`.
-- **Mac display runs are not allowed** until the owner gives a window, which the coordinator relays. Builds and display-free tests over `ssh -o BatchMode=yes mac` are fine, in `~/zerus-next-p2` only.
-- **Never touch, on any machine:** the installed GUI (`~/Applications/hgs-tray.app`), its LaunchAgent, `~/Library/Preferences/com.hgdev.hgs-tray*` (including through `defaults`), the hgs CLI, native agents, tmux, services, and the mobile connector. Tests use a fake HOME, fake bundles with the identifier `com.example.zerus-switch-test`, and a fake `defaults` executable.
+- **No new dependencies.** Allowed: objc2 crates already in `client/src-tauri/Cargo.lock` (`objc2`, `objc2-foundation`, `objc2-app-kit`, `objc2-user-notifications`, `block2`), Tauri's existing `tray-icon` feature (its crates are already in the lock) and `libc`, which is already a direct dependency. IOKit and libdispatch, which no crate of the lock binds, are declared by hand in `platform/macos_power.rs` (Task 8). `client/core` keeps the dependencies it has on main (`base64`, `infer`, `serde`, `serde_json`, `sha2`, `zerus-watch-protocol`, `libc`); the attention tokens use its `base64`, and the notice IDs are injected. After every Cargo change, `git diff --stat -- client/*/Cargo.lock` must show no new `[[package]]`.
+- **Mac display runs are not allowed** until the owner gives a window, which the coordinator relays: tell the coordinator when a task reaches one (runbook step 4). Builds and display-free tests over `ssh -o BatchMode=yes mac` are fine, only in the persistent checkout `~/zerus-dev/webui`, only on a scratch branch, and only while holding the shared heavy-build lock (**mac-lock** to **mac-done** below). Never open a window or start the app there; never touch `~/zerus-next-p2`, which other sessions use.
+- **Never touch, on any machine:** the installed GUI (`~/Applications/hgs-tray.app`) or anything else in `~/Applications`, `~/Library/LaunchAgents`, `~/Library/Preferences/com.hgdev.hgs-tray*` (including through `defaults`), the hgs CLI, `com.hgdev.hgs-recovery`, `com.hgdev.hgs-voice`, native agents, tmux, services, and the mobile connector. Tests use a fake HOME, fake bundles with the identifier `com.example.zerus-switch-test`, and a fake `defaults` executable.
 - **Installing on the owner's Mac stays with the coordinator.** This plan ends with a runbook; no task performs the switch.
 - **Arch display runs:** any time, under `flock -w 1800 /tmp/zerus-arch-display.lock`, closing every window opened. **Headless runs only with** `env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 ZERUS_CLIENT_HEADLESS=1 xvfb-run -a -s "-screen 0 1440x900x24" <cmd>`.
 - **Repository text** is English. Fixtures are synthetic: example domains, `/Users/example` or `/home/example` paths. No team IDs, certificate names, device identifiers or other identities go into the repository.
 - **The web UI never separates values with dots.** `scripts/check-ui-separators.py` scans `client` (U+00B7, U+2022, U+2219, U+22C5, U+2027, U+2981, U+30FB). The menu-bar marker U+25CF before an attached session is Qt's status mark, not a separator, and is not in that list.
 - **Commits:** every commit message ends with the `Co-Authored-By: Claude Opus 5.5` trailer and address given in the implementer's instructions. The examples below omit the trailer because the source privacy guard rejects its address in repository files. The owner authorized commits, pushes, PRs and merging green, reviewed work to main (2026-10-13). Each task commits; pushing follows the coordinator.
 - **Formatting.** The Rust in this plan is not rustfmt-formatted: run `cargo +1.99.1 fmt --manifest-path core/Cargo.toml` and the same for `src-tauri/Cargo.toml` (from `client/`) before the format check.
+- **Cargo.lock.** The checks run with `--locked`. A task that adds a direct dependency (Tasks 4 and 6: `block2`, `objc2-app-kit`, `objc2-user-notifications`, all already in the lock) records it once with `cd client && cargo +1.99.1 metadata --offline --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null`. Then `git diff client/src-tauri/Cargo.lock` must show only new lines inside existing `dependencies` lists, never a new `[[package]]`. Feature changes never touch the lock.
+- **Secrets.** CI's gitleaks scan fails on token-like strings, synthetic ones included. Test values are words (`sample`, `placeholder`) or repeated characters, such as the forty `a` characters that stand for a commit in Task 2.
 - **Checks before each task's commit** (from the repository root unless noted; skip the ones a task does not touch):
   - `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 fmt --check --manifest-path core/Cargo.toml && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 fmt --check --manifest-path src-tauri/Cargo.toml`
   - `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 clippy --locked --manifest-path core/Cargo.toml --all-targets -- -D warnings`
@@ -60,20 +71,41 @@ These are settled for this plan. Items 1 to 4 deviate from the spec text and are
   - `cd client && npm run check && npm test`
   - `python3 scripts/check-ui-separators.py && python3 scripts/check-source-privacy.py`
   - `python3 -m unittest discover -s tests -p 'test_macos_*.py' -v` plus the task's own Python tests
-- **Shared commands** (used by name in the tasks):
-  - **mac-sync** copies the tracked sources of this branch into the Mac dev folder, keeping its build caches:
+- **Shared commands** (used by name in the tasks). Run them from the repository root, in this order, and always end with **mac-done**, also when a step failed:
+  - **mac-lock** takes the shared heavy-build lock of the Mac, waiting up to 60 minutes while another session holds it:
     ```sh
-    git ls-files -z client crates/watch-protocol tray scripts tests packaging VERSION DEV_VERSION \
+    owner="$(basename "$(git rev-parse --show-toplevel)") (mac switch plan)"
+    for attempt in $(seq 1 120); do
+      ssh -o BatchMode=yes mac "mkdir ~/zerus-dev/.heavy.lock 2>/dev/null && echo '$owner' > ~/zerus-dev/.heavy.lock/owner" && break
+      ssh -o BatchMode=yes mac 'echo "held by $(cat ~/zerus-dev/.heavy.lock/owner)"'; sleep 30
+    done
+    ```
+  - **mac-sync** puts this branch's sources on a scratch branch of the persistent checkout `~/zerus-dev/webui`, at the commit of `origin/main` this branch starts from, keeping the checkout's build caches. `tar -m` gives the files the current time, so cargo rebuilds what changed:
+    ```sh
+    base="$(git merge-base HEAD origin/main)"
+    git ls-files -z --cached --others --exclude-standard client crates/watch-protocol tray scripts tests packaging VERSION DEV_VERSION \
       | tar --null -T - -czf - \
-      | ssh -o BatchMode=yes mac 'mkdir -p ~/zerus-next-p2 && tar -C ~/zerus-next-p2 -xzf -'
+      | ssh -o BatchMode=yes mac "cd ~/zerus-dev/webui && git fetch -q origin && git checkout -q -- . \
+          && git clean -fdq -- client tray scripts tests packaging && git checkout -q -B scratch/mac-switch $base && tar -xmzf -"
     ```
   - **mac-clippy** runs the macOS lints display-free:
     ```sh
-    ssh -o BatchMode=yes mac 'cd ~/zerus-next-p2/client && export PATH=$HOME/.cargo/bin:/opt/homebrew/bin:$PATH RUSTUP_TOOLCHAIN=1.99.1 CARGO_BUILD_JOBS=4 && nice cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings && nice cargo clippy --locked --manifest-path src-tauri/Cargo.toml --no-default-features --all-targets -- -D warnings'
+    ssh -o BatchMode=yes mac 'cd ~/zerus-dev/webui && export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH" RUSTUP_TOOLCHAIN=1.99.1 CARGO_BUILD_JOBS=6 \
+      && cargo clippy --locked --keep-going --manifest-path client/core/Cargo.toml --target-dir target/client-core --all-targets -- -D warnings \
+      && cargo clippy --locked --keep-going --manifest-path client/src-tauri/Cargo.toml --target-dir target/client-tauri --all-targets \
+      && cargo clippy --locked --keep-going --manifest-path client/src-tauri/Cargo.toml --target-dir target/client-tauri --no-default-features --all-targets'
     ```
-  - **mac-test** runs the src-tauri unit tests display-free:
+    Expected: exit 0, and no warning in a file this plan adds or a line it changes. Until `zerus-5wmh.51` is on main, `client/src-tauri` has 20 dead-code warnings of its own on macOS (`display.rs`, `metrics.rs`, and the measurement helpers and `CVDisplayLink` declarations of `platform/macos.rs`); they are the only warnings expected. Once that fix is on main, add `-- -D warnings` to the two src-tauri commands.
+  - **mac-test** runs the unit tests display-free:
     ```sh
-    ssh -o BatchMode=yes mac 'cd ~/zerus-next-p2/client && export PATH=$HOME/.cargo/bin:/opt/homebrew/bin:$PATH RUSTUP_TOOLCHAIN=1.99.1 CARGO_BUILD_JOBS=4 && nice cargo test --locked --manifest-path src-tauri/Cargo.toml'
+    ssh -o BatchMode=yes mac 'cd ~/zerus-dev/webui && export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH" RUSTUP_TOOLCHAIN=1.99.1 CARGO_BUILD_JOBS=6 \
+      && cargo test --locked --manifest-path client/core/Cargo.toml --target-dir target/client-core \
+      && cargo test --locked --manifest-path client/src-tauri/Cargo.toml --target-dir target/client-tauri'
+    ```
+  - **mac-done** returns the checkout to `origin/main`, deletes the scratch branch and releases the lock:
+    ```sh
+    ssh -o BatchMode=yes mac 'cd ~/zerus-dev/webui && git checkout -q -- . && git clean -fdq -- client tray scripts tests packaging \
+      && git checkout -q --detach origin/main && git branch -D scratch/mac-switch; rm -rf ~/zerus-dev/.heavy.lock'
     ```
 
 ## Review Focus
@@ -85,6 +117,8 @@ These are the conditions most likely to hurt a person using this client that the
 3. **The menu open while the fleet changes** must not update the status item; that can deadlock AppKit on macOS 26 (`QuietTrayIcon.h`). The latest state shows once the menu closes. Pinned by `menubar::tests::gate_defers_everything_while_the_menu_is_open` (Task 1).
 4. **A notification clicked after its session was renamed, resumed, archived or forgotten** must open the session by conversation or run identity, or say "This session is no longer available: NAME". It must never open another session. Pinned by `attention::tests::targets_match_by_conversation_run_or_name_and_creation` (Task 5) and `attention::tests::a_click_waits_then_reports_a_gone_session` (Task 5).
 5. **An update interrupted or refused mid-switch** must leave Qt's drafts and settings untouched and keep Qt as the rollback copy. A failing new client must restore the GUI it replaced, never an unexpected one. Pinned by `test_tray_update_switch.SlotAndRestore` (Task 7) and `test_tray_update.TrayUpdate.test_rollback_reinstalls_the_kept_copy` (Task 7).
+6. **An unnumbered build over the owner's numbered Dev install**, through the live update or `HGS_TRAY_RESTART=0`, must be refused before anything is replaced or restarted. Pinned by `test_tray_update.TrayUpdate.test_an_unnumbered_build_never_replaces_a_numbered_dev_install` and `test_tray_update_switch.Switch.test_an_on_disk_install_asks_the_updater_first` (Task 7).
+7. **A Mac waking from sleep, or a dark wake on battery,** must not look like a hung main thread, and a main thread that never runs again after a wake must still count. Pinned by `watchdog::tests::a_wake_holds_until_the_main_thread_beats` and `a_main_thread_silent_past_the_wake_grace_is_hung` (Task 8); an open menu is the runbook's step 4 display check.
 
 ## File Structure
 
@@ -93,28 +127,32 @@ These are the conditions most likely to hurt a person using this client that the
 | `client/core/src/view.rs` (modify) | 1, 5 | `NotifyFacts`: what the menu bar and notifications read from a row, never serialized |
 | `client/core/src/menubar.rs` (new) | 1 | `Desk` mirror of the fleet, `Face`, tooltip, menu `Entry` list, `OpenMode`, `Gate` |
 | `client/core/src/trayicon.rs` (new) | 4 | Tile geometry and colours, the Zerus mark path, `unpremultiply`, colour parsing |
-| `client/core/src/shell.rs` (modify) | 4 | `terminal_app_script` (Qt's `MacBackend`) |
+| `client/core/src/shell.rs` (modify) | 4 | `terminal_app_script`, `notification_script` (Qt's `MacBackend`), `notification_text` |
 | `client/core/src/attention.rs` (new) | 5 | Port of `AttentionTracker`, preference validation, tokens, `Delivery`, click resolution, seeding |
 | `client/src-tauri/build_identity.rs` (new) | 2 | Pure build-identity rules shared by `build.rs` and the tests |
-| `client/src-tauri/build.rs` (modify) | 2 | Embeds VERSION, DEV_VERSION, the Dev number and the source commit |
+| `client/src-tauri/build.rs` (modify) | 2 | Embeds VERSION, DEV_VERSION, the Dev number, the local preview label and the source commit |
 | `client/src-tauri/src/cli.rs` (new) | 2 | Qt's command line, `--build-info`, `--version`, `--help` |
-| `client/src-tauri/src/identity.rs` (new) | 2 | Running bundle identity, data directory, single-instance name, notifications switch |
+| `client/src-tauri/src/identity.rs` (new) | 2, 6, 8 | Running bundle identity, data directory, single-instance name, notifications and watchdog switches |
 | `client/src-tauri/src/instance.rs` (new) | 2 | Qt's single-instance protocol on Unix |
 | `client/src-tauri/src/lifecycle.rs` (new) | 3 | Window show/hide, activation policy, reopen, run-event hook, socket cleanup |
 | `client/src-tauri/src/signals.rs` (new) | 3 | SIGTERM, SIGINT, SIGHUP quit like the menu's Quit |
 | `client/src-tauri/src/desk.rs` (new) | 4, 6 | Desk thread: changes into the menu bar and notifications; menu actions; pending opens |
 | `client/src-tauri/src/pump.rs` (modify) | 4 | A tap that hands every change to the desk thread |
-| `client/src-tauri/src/platform/macos.rs` (modify) | 2, 3, 6 | Bundle identifier, main-thread QoS, Qt defaults reads |
+| `client/src-tauri/src/watchdog.rs` (new) | 8 | Qt's main-thread watchdog: `Pulse`, `Watchdog`, uptime clock, abort |
+| `client/src-tauri/src/platform/macos.rs` (modify) | 2, 3, 6, 8 | Bundle identifier, main-thread QoS, Qt defaults reads, the watchdog's heartbeat |
+| `client/src-tauri/src/platform/linux.rs` (modify) | 8 | The watchdog's heartbeat |
+| `client/src-tauri/src/platform/macos_power.rs` (new) | 8 | IOKit sleep and wake notices for the watchdog |
 | `client/src-tauri/src/platform/macos_menubar.rs` (new) | 4 | Status item, tile drawing with AppKit, menu, menu-tracking observers |
 | `client/src-tauri/src/platform/macos_notify.rs` (new) | 6 | `UNUserNotificationCenter` glue and its delegate |
-| `client/src-tauri/src/lib.rs`, `commands.rs` (modify) | 2, 3, 4, 6 | Startup order, state, command list |
-| `client/src-tauri/Cargo.toml` (modify) | 3, 4, 6 | Feature lists only |
-| `client/src/bridge.ts`, `client/src/store/desk.ts` (new), `client/src/main.tsx` | 6 | `open-session` and `desk-notice` events |
-| `tray/update-installed.py` (modify) | 7 | Draft roots, GUI kind, slot policy, Dev guard, settings snapshot and check, `--rollback`, `--installed-gui` |
-| `client/src-tauri/tauri.switch.conf.json`, `Info.switch.plist`, `client/scripts/switch-config.py` (new) | 8 | The switch bundle |
-| `tray/install.sh`, `mac-install.sh` (modify) | 8 | Build and install the client when chosen or already installed |
-| `scripts/check-macos-bundle.py`, `scripts/sign-macos.py` (modify) | 8 | Accept the Tauri bundle |
-| `docs/macos-distribution.md`, `client/README.md`, the spec (modify) | 8 | Docs and the switch runbook |
+| `client/src-tauri/src/lib.rs`, `commands.rs` (modify) | 2, 3, 4, 6, 8 | Startup order, state, command list |
+| `client/src-tauri/Cargo.toml`, `Cargo.lock` (modify) | 2, 4, 6, 8 | The `tray-icon` feature, objc2 crates already in the lock, feature lists |
+| `client/src/bridge.ts`, `client/src/store/desk.ts` (new), `client/src/main.tsx` | 4 | `open-session` and `desk-notice` events |
+| `tray/update-installed.py` (modify) | 7 | Draft roots, GUI kind, slot policy, Dev guard, settings snapshot and check, `--rollback`, `--installed-gui`, `--check` |
+| `docs/reference.md` (modify) | 7 | The numbered Dev guard and the local preview label |
+| `client/src-tauri/tauri.switch.conf.json`, `Info.switch.plist`, `client/scripts/switch-config.py` (new) | 9 | The switch bundle |
+| `tray/install.sh`, `mac-install.sh` (modify) | 7, 9 | `HGS_TRAY_RESTART=0` asks `--check` (7); build and install the client when chosen or already installed (9) |
+| `scripts/check-macos-bundle.py`, `scripts/sign-macos.py` (modify) | 9 | Accept the Tauri bundle |
+| `docs/macos-distribution.md`, `client/README.md`, the spec (modify) | 2, 9 | Docs and the switch runbook |
 
 ---
 
@@ -918,15 +956,17 @@ The start-up contract with the LaunchAgent and the updater. Qt's command line: `
 - Modify: `client/src-tauri/src/lib.rs` (modules, `run`, `Startup`, `launch`)
 - Modify: `client/src-tauri/src/platform/macos.rs` (add `bundle_identifier`)
 - Modify: `client/src-tauri/Cargo.toml` (objc2-foundation feature `NSBundle`)
+- Modify: `client/README.md` (the read-marks path)
 - Test: unit tests in `cli.rs`, `identity.rs`, `instance.rs`
 
 **Interfaces:**
 - Consumes: nothing from Task 1.
 - Produces:
-  - `cli::{parse(&[String]) -> Result<Command, String>, Command { Run(Options), Help, Version, BuildInfo }, Options { hgs, sessions, background, ignored }, Options::opens_sessions(switch: bool) -> bool, usage() -> &'static str, BuildFacts, BUILD, build_info(&BuildFacts) -> serde_json::Value, version_line(&BuildFacts) -> String}`.
+  - `cli::{parse(&[String]) -> Result<Command, String>, Command { Run(Options), Help, Version, BuildInfo }, Options { hgs, sessions, background, ignored }, Options::opens_sessions(switch: bool) -> bool, usage() -> &'static str, BuildFacts { version, dev_base, dev_number, source_commit, source_dirty, preview_label }, BUILD, build_info(&BuildFacts) -> serde_json::Value, version_line(&BuildFacts) -> String}`. `build_info` adds Qt's `previewLabel` for a local preview build; Task 7's Dev guard reads it.
+  - `build_identity::{release_version, check_dev_base, dev_number, source_commit, check_numbered, preview_label, check_preview}` (shared by `build.rs` and the tests).
   - `identity::{SWITCH_ID, LAUNCHD_LABEL, Platform { Mac, Linux, Windows }, Platform::current(), Identity { bundle_id }, Identity::{new, is_switch, instance_name(requested) -> Option<String>, launchd_label() -> Option<&'static str>, data_dir(platform, home, xdg_data_home, appdata) -> PathBuf, data_dir_now() -> PathBuf}, current(config_identifier) -> Identity, flag(name) -> bool}`.
   - `instance::{Activation { Show, Sessions }, Paths, paths, temp_dir, runtime_dir, LockInfo, is_stale, try_lock, LockAttempt, Service, ServiceState, launchd_service, waits_for_service, Timing, Start, Outcome, start, forward, Listening, Claimed { listening, activations: Receiver<Activation> }, Claim, claim(name, label, activation) -> Claim, claim_at(..), InstanceState(Mutex<Option<Listening>>)}` (Linux and macOS only).
-  - `lib::Startup { identity, instance }`; `lib::run()` keeps its name, so `main.rs` stays unchanged.
+  - `lib::Startup { identity, instance }`; `lib::run()` keeps its name, so `main.rs` stays unchanged. The app state holds the `identity::Identity`, the one source of the client's data directory (Decision 5).
 
 - [ ] **Step 1: Write the failing tests for the command line and the build identity**
 
@@ -996,21 +1036,28 @@ mod tests {
 
     #[test]
     fn build_info_has_qt_shape() {
-        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let dev = BuildFacts {
             version: "0.47.0", dev_base: "0.47.1", dev_number: Some("1413"),
-            source_commit: Some(commit), source_dirty: Some("0"),
+            source_commit: Some(commit), source_dirty: Some("0"), preview_label: None,
         };
         assert_eq!(build_info(&dev), serde_json::json!({
             "version": "0.47.0", "versionName": "0.47.1-dev.1413", "devBuildNumber": 1413,
             "sourceCommit": commit, "sourceDirty": false,
         }));
         assert_eq!(version_line(&dev), "Zerus 0.47.1-dev.1413\n");
-        let local = BuildFacts { version: "0.47.0", dev_base: "0.47.1", dev_number: None, source_commit: None, source_dirty: None };
+        let local = BuildFacts {
+            version: "0.47.0", dev_base: "0.47.1", dev_number: None, source_commit: None, source_dirty: None, preview_label: None,
+        };
         assert_eq!(build_info(&local), serde_json::json!({
             "version": "0.47.0", "versionName": "0.47.0", "devBuildNumber": 0,
             "sourceCommit": "", "sourceDirty": null,
         }));
+        // A local branch preview (`UpdateController.cpp:130-134`): the label and its own version name.
+        let preview = BuildFacts { dev_number: None, preview_label: Some("task-board"), ..dev };
+        assert_eq!(build_info(&preview)["versionName"], "0.47.1-preview.task-board.aaaaaaa");
+        assert_eq!(build_info(&preview)["previewLabel"], "task-board");
+        assert_eq!(build_info(&preview)["devBuildNumber"], 0);
     }
 
     #[test]
@@ -1033,7 +1080,7 @@ mod tests {
         for bad in ["0", "012", "-1", "1e3", "1234567890123456"] {
             assert!(dev_number(bad).is_err(), "{bad}");
         }
-        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         assert_eq!(source_commit(commit, "/src/example", "/src/example").as_deref(), Some(commit));
         assert_eq!(source_commit(commit, "/src/parent", "/src/example"), None, "a parent repository's commit is not ours");
         assert_eq!(source_commit("ABC", "/src/example", "/src/example"), None);
@@ -1041,6 +1088,16 @@ mod tests {
         assert!(check_numbered(Some(1), Some(commit), Some(true)).is_err());
         assert!(check_numbered(Some(1), None, None).is_err());
         assert!(check_numbered(None, None, None).is_ok());
+        // `ZERUS_LOCAL_PREVIEW_LABEL` (`BuildVersion.cmake:9-18`).
+        assert_eq!(preview_label(""), Ok(None));
+        assert_eq!(preview_label("task-board"), Ok(Some("task-board".to_owned())));
+        for bad in ["Task", "task--board", "-task", "task-", "task_board", &"a".repeat(33)] {
+            assert!(preview_label(bad).is_err(), "{bad}");
+        }
+        assert!(check_preview(Some("task-board"), None, Some(commit), Some(false)).is_ok());
+        assert!(check_preview(Some("task-board"), Some(7), Some(commit), Some(false)).is_err(), "never with a Dev number");
+        assert!(check_preview(Some("task-board"), None, Some(commit), Some(true)).is_err(), "never from local changes");
+        assert!(check_preview(None, None, None, None).is_ok());
     }
 }
 ```
@@ -1049,6 +1106,8 @@ mod tests {
 
 Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml cli::`
 Expected: FAIL to compile: `parse`, `Options`, `Command`, `BuildFacts`, `build_info` and the `build_identity` functions are missing.
+
+`commit` in these tests is forty `a` characters: a valid hex commit that no secret scanner mistakes for a key.
 
 - [ ] **Step 3: Write `build_identity.rs`**
 
@@ -1111,6 +1170,30 @@ pub fn check_numbered(number: Option<u64>, commit: Option<&str>, dirty: Option<b
         Ok(())
     }
 }
+
+/// `ZERUS_LOCAL_PREVIEW_LABEL`: empty, or at most 32 lowercase letters and
+/// digits in hyphen-separated words (`BuildVersion.cmake:9-14`).
+pub fn preview_label(raw: &str) -> Result<Option<String>, String> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let valid = raw.len() <= 32
+        && raw.split('-').all(|word| !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit()));
+    if valid {
+        Ok(Some(raw.to_owned()))
+    } else {
+        Err("A local preview label must contain at most 32 lowercase letters, digits or separated hyphens".to_owned())
+    }
+}
+
+/// A local branch preview has no Dev number and a clean source tree (`BuildVersion.cmake:15-17`).
+pub fn check_preview(label: Option<&str>, number: Option<u64>, commit: Option<&str>, dirty: Option<bool>) -> Result<(), String> {
+    if label.is_some() && (number.is_some() || !(commit.is_some() && dirty == Some(false))) {
+        Err("A local branch preview requires clean Git source and no Dev build number".to_owned())
+    } else {
+        Ok(())
+    }
+}
 ```
 
 - [ ] **Step 4: Embed the identity in `build.rs`**
@@ -1134,8 +1217,9 @@ fn canonical(path: &str) -> String {
 }
 
 /// `--build-info` and `--version` report Zerus' identity as the Qt GUI does:
-/// the product version, the Dev number from `ZERUS_DEV_BUILD_NUMBER` and the
-/// clean source commit (`tray/cmake/BuildVersion.cmake`).
+/// the product version, the Dev number from `ZERUS_DEV_BUILD_NUMBER`, a local
+/// preview label from `ZERUS_LOCAL_PREVIEW_LABEL` and the clean source commit
+/// (`tray/cmake/BuildVersion.cmake`).
 fn embed_identity() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"));
     let root = manifest.join("../..").canonicalize().expect("the repository root");
@@ -1148,6 +1232,9 @@ fn embed_identity() {
     build_identity::check_dev_base(&version, &dev_base).unwrap_or_else(|error| panic!("{error}"));
     println!("cargo:rerun-if-env-changed=ZERUS_DEV_BUILD_NUMBER");
     let number = build_identity::dev_number(&std::env::var("ZERUS_DEV_BUILD_NUMBER").unwrap_or_default())
+        .unwrap_or_else(|error| panic!("{error}"));
+    println!("cargo:rerun-if-env-changed=ZERUS_LOCAL_PREVIEW_LABEL");
+    let label = build_identity::preview_label(&std::env::var("ZERUS_LOCAL_PREVIEW_LABEL").unwrap_or_default())
         .unwrap_or_else(|error| panic!("{error}"));
     let root_text = root.to_string_lossy().into_owned();
     let commit = git(&root, &["rev-parse", "HEAD"])
@@ -1162,6 +1249,10 @@ fn embed_identity() {
         println!("cargo:rerun-if-changed={dir}/index");
     }
     build_identity::check_numbered(number, commit.as_deref(), dirty).unwrap_or_else(|error| panic!("{error}"));
+    build_identity::check_preview(label.as_deref(), number, commit.as_deref(), dirty).unwrap_or_else(|error| panic!("{error}"));
+    if let Some(label) = &label {
+        println!("cargo:rustc-env=ZERUS_LOCAL_PREVIEW_LABEL={label}");
+    }
     println!("cargo:rustc-env=ZERUS_VERSION={version}");
     println!("cargo:rustc-env=ZERUS_DEV_BASE_VERSION={dev_base}");
     if let Some(number) = number {
@@ -1270,6 +1361,7 @@ pub struct BuildFacts {
     pub dev_number: Option<&'static str>,
     pub source_commit: Option<&'static str>,
     pub source_dirty: Option<&'static str>,
+    pub preview_label: Option<&'static str>,
 }
 
 pub const BUILD: BuildFacts = BuildFacts {
@@ -1278,23 +1370,29 @@ pub const BUILD: BuildFacts = BuildFacts {
     dev_number: option_env!("ZERUS_DEV_BUILD_NUMBER"),
     source_commit: option_env!("ZERUS_SOURCE_COMMIT"),
     source_dirty: option_env!("ZERUS_SOURCE_DIRTY"),
+    preview_label: option_env!("ZERUS_LOCAL_PREVIEW_LABEL"),
 };
 
 /// Qt's `UpdateController::buildInfo` (`tray/src/UpdateController.cpp:118-136`).
 pub fn build_info(facts: &BuildFacts) -> Value {
     let number: u64 = facts.dev_number.and_then(|value| value.parse().ok()).unwrap_or(0);
-    let version_name = if number > 0 {
-        format!("{}-dev.{number}", facts.dev_base)
-    } else {
-        facts.version.to_owned()
+    let commit = facts.source_commit.unwrap_or("");
+    let version_name = match facts.preview_label {
+        Some(label) => format!("{}-preview.{label}.{}", facts.dev_base, commit.get(..7).unwrap_or(commit)),
+        None if number > 0 => format!("{}-dev.{number}", facts.dev_base),
+        None => facts.version.to_owned(),
     };
-    json!({
+    let mut info = json!({
         "version": facts.version,
         "versionName": version_name,
         "devBuildNumber": number,
-        "sourceCommit": facts.source_commit.unwrap_or(""),
+        "sourceCommit": commit,
         "sourceDirty": facts.source_commit.map(|_| facts.source_dirty == Some("1")),
-    })
+    });
+    if let Some(label) = facts.preview_label {
+        info["previewLabel"] = Value::from(label);
+    }
+    info
 }
 
 /// `hgs-tray --version` (`main.cpp:196-200`).
@@ -1602,7 +1700,7 @@ mod tests {
 
 - [ ] **Step 8: Run them to verify they fail**
 
-Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml identity:: instance::`
+Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml -- identity:: instance::`
 Expected: FAIL to compile: `Identity`, `Platform`, `paths`, `LockInfo`, `start` and the rest are missing.
 
 - [ ] **Step 9: Write `identity.rs` above its tests**
@@ -2288,7 +2386,7 @@ fn listen(listener: UnixListener, deliver: impl Fn(Activation) + Send + 'static)
 
 - [ ] **Step 11: Run the identity and instance tests to verify they pass**
 
-Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml identity:: instance::`
+Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml -- identity:: instance::`
 Expected: PASS (2 identity tests, 14 instance tests).
 
 - [ ] **Step 12: Wire the start-up into `lib.rs`**
@@ -2381,9 +2479,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
     builder
         .invoke_handler(handler())
         .setup(move |app| {
+            use tauri::Manager;
+            // The one source of the client's data directory (Decision 5).
+            app.manage(identity.clone());
             #[cfg(feature = "live")]
             {
-                use tauri::Manager;
                 let dir = identity.data_dir_now();
                 std::fs::create_dir_all(&dir)?;
                 // A replay never touches the real read marks.
@@ -2392,8 +2492,6 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 let pump = app.state::<commands::AppState>().pump();
                 app.manage(screens::Screens::tauri(app.handle().clone(), pump));
             }
-            #[cfg(not(feature = "live"))]
-            let _ = &identity;
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             if let Some(activations) = activations {
                 // Task 3 shows the window on `sessions`.
@@ -2422,7 +2520,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
 }
 ```
 
-The README's read-marks path moves from `app_data_dir` to `identity.data_dir_now()`. For the dev app the two are identical (Decision 5). Do not touch `main.rs`.
+In `client/README.md`, the read-marks paragraph names "the app data directory (`app_data_dir`, ...)": change it to "the client's data directory (Tauri's `app_data_dir` formula with the running bundle's identifier, `identity.rs`, ...)". For the dev app the two are identical (Decision 5). Nothing in `src-tauri` calls `app.path().app_data_dir()` any more. Do not touch `main.rs`.
 
 - [ ] **Step 13: Check the binary's early answers without a display**
 
@@ -2457,7 +2555,7 @@ Expected: `zerus-client: already running`, `second exit 0`, then `zerus-client: 
 
 - [ ] **Step 15: Check on the Mac, display-free**
 
-Run **mac-sync**, then **mac-clippy** and **mac-test**.
+Run **mac-lock**, **mac-sync**, **mac-clippy**, **mac-test** and **mac-done**.
 Expected: clean, with the `instance::` and `identity::` tests passing on macOS (`proc_name` path).
 
 - [ ] **Step 16: Run the task's checks and commit**
@@ -2467,7 +2565,7 @@ Run fmt, both clippy variants, the src-tauri tests, `check-ui-separators.py` and
 ```bash
 git add client/src-tauri/build.rs client/src-tauri/build_identity.rs client/src-tauri/src/cli.rs \
   client/src-tauri/src/identity.rs client/src-tauri/src/instance.rs client/src-tauri/src/lib.rs \
-  client/src-tauri/src/platform/macos.rs client/src-tauri/Cargo.toml
+  client/src-tauri/src/platform/macos.rs client/src-tauri/Cargo.toml client/README.md
 git commit -m "feat(client): Qt's command line, build identity and single-instance protocol"
 ```
 
@@ -2560,7 +2658,7 @@ mod tests {
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml lifecycle:: signals::`
+Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml -- lifecycle:: signals::`
 Expected: FAIL to compile: `policy`, `Policy`, `reopen_restores`, `window_at_start`, `close_hides` and `install_for` are missing.
 
 - [ ] **Step 3: Write `lifecycle.rs` above its tests**
@@ -2786,7 +2884,7 @@ fn install_for(signals: &[libc::c_int], on_quit: impl FnOnce(i32) + Send + 'stat
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml lifecycle:: signals::`
+Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml -- lifecycle:: signals::`
 Expected: PASS (4 tests).
 
 - [ ] **Step 6: Start the fleet from Rust and raise the main thread's QoS**
@@ -2844,9 +2942,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
     builder
         .invoke_handler(handler())
         .setup(move |app| {
+            use tauri::Manager;
+            // The one source of the client's data directory (Decision 5).
+            app.manage(identity.clone());
             #[cfg(feature = "live")]
             {
-                use tauri::Manager;
                 let dir = identity.data_dir_now();
                 std::fs::create_dir_all(&dir)?;
                 // A replay never touches the real read marks.
@@ -2858,8 +2958,6 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     app.state::<commands::AppState>().start_source()?;
                 }
             }
-            #[cfg(not(feature = "live"))]
-            let _ = &identity;
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
                 if let Some(activations) = activations {
@@ -2918,7 +3016,7 @@ fn forward_activations(app: tauri::AppHandle, activations: std::sync::mpsc::Rece
 }
 ```
 
-**Merge note (Decision 15).** If the media branch landed first, its closure has an `if let tauri::RunEvent::Exit = event { ... exit(_app); }` block. Keep that block and add the `lifecycle::on_event(app, &event);` line beside it. Rename the closure argument consistently, and change only `.build(...)` to take `context`.
+**Merge note (Decision 15).** If the media branch landed first, its closure has an `if let tauri::RunEvent::Exit = event { ... exit(_app); }` block. Keep that block and put the `lifecycle::on_event(app, &event);` line before it, as the closure's first statement (Decision 15). Rename the closure argument consistently, and change only `.build(...)` to take `context`.
 
 - [ ] **Step 8: Check the quit path headless on arch**
 
@@ -2938,7 +3036,7 @@ Expected: `socket present`, `exit 0`, `zerus-client: quitting on signal 15`, `so
 
 - [ ] **Step 9: Check on the Mac, display-free**
 
-Run **mac-sync**, **mac-clippy** and **mac-test**. Expected: clean.
+Run **mac-lock**, **mac-sync**, **mac-clippy**, **mac-test** and **mac-done**. Expected: clean.
 
 - [ ] **Step 10: Run the task's checks and commit**
 
@@ -3076,7 +3174,7 @@ Add to the tests of `client/core/src/shell.rs`:
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path core/Cargo.toml trayicon shell::`
+Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path core/Cargo.toml -- trayicon shell::`
 Expected: FAIL to compile (missing `tile`, `Rgb`, `mark_path`, `unpremultiply`, `parse_color`, `foreground`, `apple_script_escape`, `terminal_app_script`, `notification_script`, `notification_text`).
 
 - [ ] **Step 3: Write `trayicon.rs` above its tests**
@@ -3318,8 +3416,15 @@ pub fn notification_text(command: &str) -> String {
 
 - [ ] **Step 4: Run the core tests to verify they pass**
 
-Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path core/Cargo.toml trayicon shell::`
+Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path core/Cargo.toml -- trayicon shell::`
 Expected: PASS.
+
+The core part stands alone and is the task's first reviewable unit. Run core fmt, core clippy and the core tests, then commit it:
+
+```bash
+git add client/core/src/trayicon.rs client/core/src/shell.rs client/core/src/lib.rs
+git commit -m "feat(client): Qt's menu-bar tile geometry and AppleScript strings in the core"
+```
 
 - [ ] **Step 5: Write the failing src-tauri tests**
 
@@ -3391,7 +3496,7 @@ mod tests {
 }
 ```
 
-Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml desk:: the_tap_sees`
+Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml -- desk:: the_tap_sees`
 Expected: FAIL to compile (`tap`, `load_mode`, `save_mode`, `Pending`, `Notice`, `menu_bar_change`, `MODE_FILE` are missing).
 
 - [ ] **Step 6: Add the pump tap**
@@ -3731,12 +3836,12 @@ pub fn set_mode(app: &AppHandle, mode: OpenMode) {
 
 - [ ] **Step 8: Run the src-tauri tests to verify they pass**
 
-Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml desk:: the_tap_sees`
+Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml -- desk:: the_tap_sees`
 Expected: PASS (4 tests).
 
 - [ ] **Step 9: Write the macOS status item**
 
-Create `client/src-tauri/src/platform/macos_menubar.rs` and add `#[cfg(target_os = "macos")] pub mod macos_menubar;` to `platform/mod.rs`:
+Create `client/src-tauri/src/platform/macos_menubar.rs` and add `#[cfg(all(target_os = "macos", feature = "live"))] pub mod macos_menubar;` to `platform/mod.rs`. The menu bar drives the desk thread, which exists only with the live data source; without the `live` gate, `--no-default-features` fails to compile on macOS (`crate::desk` and `zerus_client_core` are missing there):
 
 ```rust
 //! The status item on macOS: Tauri's tray icon carrying Qt's tile and menu
@@ -3752,13 +3857,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::MainThreadMarker;
+use objc2::{AnyThread, MainThreadMarker};
 use objc2_app_kit::{
-    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSAttributedStringKey, NSBezierPath, NSBitmapImageRep,
-    NSColor, NSDeviceRGBColorSpace, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext,
+    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSBezierPath, NSBitmapImageRep, NSColor,
+    NSDeviceRGBColorSpace, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext,
     NSMenuDidBeginTrackingNotification, NSMenuDidEndTrackingNotification, NSStringDrawing,
 };
-use objc2_foundation::{NSArray, NSDictionary, NSNotification, NSNotificationCenter, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    NSArray, NSAttributedStringKey, NSDictionary, NSNotification, NSNotificationCenter, NSPoint, NSRect, NSSize, NSString,
+};
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -3924,7 +4031,7 @@ fn observe_tracking(app: &AppHandle) {
     });
     let ended_app = app.clone();
     let ended = RcBlock::new(move |_note: NonNull<NSNotification>| {
-        let before = depth.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |d| Some(d.saturating_sub(1))).unwrap_or(0);
+        let before = depth.try_update(Ordering::SeqCst, Ordering::SeqCst, |d| Some(d.saturating_sub(1))).unwrap_or(0);
         if before == 1 {
             let handle = ended_app.clone();
             // After the tracking loop has unwound.
@@ -4076,9 +4183,9 @@ mod tests {
 In `client/src-tauri/Cargo.toml`:
 - Make `tauri = { version = "2", features = ["tray-icon"] }`.
 - In the macOS table, add `block2 = "0.6.2"` and `objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "objc2-core-graphics", "NSAppearance", "NSApplication", "NSAttributedString", "NSBezierPath", "NSBitmapImageRep", "NSColor", "NSDockTile", "NSFont", "NSGraphics", "NSGraphicsContext", "NSImageRep", "NSMenu", "NSResponder", "NSStringDrawing"] }`.
-- Extend the `objc2-foundation` features with `"block2", "NSDictionary", "NSGeometry", "NSNotification", "NSOperation"`.
+- Extend the `objc2-foundation` features with `"block2", "NSAttributedString", "NSDictionary", "NSGeometry", "NSNotification", "NSOperation"`.
 
-If the Mac compiler names another missing feature, add exactly that one. Then confirm that `git diff client/src-tauri/Cargo.lock` adds no `[[package]]`.
+Record the new direct dependencies in the lock (Global Constraints, "Cargo.lock") and confirm that `git diff client/src-tauri/Cargo.lock` adds no `[[package]]`. If the Mac compiler names another missing feature, add exactly that one; the feature lists above passed `cargo clippy --all-targets` on `aarch64-apple-darwin`.
 
 - [ ] **Step 10: Install the menu bar in `launch`**
 
@@ -4255,7 +4362,7 @@ Expected: PASS.
 
 - [ ] **Step 14: Check on the Mac, display-free**
 
-Run **mac-sync**, **mac-clippy** and **mac-test**.
+Run **mac-lock**, **mac-sync**, **mac-clippy**, **mac-test** and **mac-done**.
 Expected: clean, and `macos_menubar::tests::the_tile_draws_amber_attention_and_the_stale_dot` passes over SSH. If AppKit refuses to draw without a window server session, the test fails with `None`. In that case mark it `#[ignore = "needs the owner's display window"]` and list it in the runbook's display checks; do not weaken its assertions.
 
 - [ ] **Step 15: Run the task's checks and commit**
@@ -4263,8 +4370,7 @@ Expected: clean, and `macos_menubar::tests::the_tile_draws_amber_attention_and_t
 Run fmt, both clippy variants on Linux, the core and src-tauri tests, `npm run check`, `npm test`, `check-ui-separators.py` and `check-source-privacy.py`.
 
 ```bash
-git add client/core/src/trayicon.rs client/core/src/shell.rs client/core/src/lib.rs \
-  client/src-tauri/src/pump.rs client/src-tauri/src/desk.rs client/src-tauri/src/platform \
+git add client/src-tauri/src/pump.rs client/src-tauri/src/desk.rs client/src-tauri/src/platform \
   client/src-tauri/src/lib.rs client/src-tauri/Cargo.toml client/src-tauri/Cargo.lock \
   client/src/bridge.ts client/src/main.tsx client/src/store/desk.ts client/src/store/desk.test.ts
 git commit -m "feat(client): Qt's menu-bar item on macOS with its tile, menu and Open in"
@@ -4302,7 +4408,7 @@ The client decides what to notify, withdraw and open exactly as Qt does. Qt's pa
 - Produces:
   - `view::NotifyFacts { attached, needs_action, acknowledged, cmd, created, attention_id, attention_started, recovery_reason, activity_detail, unread_reply, reply_scheduled, recurring_schedules, background, subagents_active, coordination_wait, conversation_state, subagent_source, children: Vec<ChildFacts>, preferences: Option<Preferences>, optional_reported, optional_count, optional_ids }`.
   - `view::ChildFacts { id, label, phase, request, started: Option<f64> }`; `view::Preferences { muted, suppressed: Value }`.
-  - `attention::{NEEDS_ATTENTION, NEW_REPLY, OPTIONAL_QUESTION, SEEN_QUESTIONS, RETRY_SECONDS, DENIED, CLICK_WAIT, Host { alias, label, ok, rows }, Notice { token, title, body }, Changes { raised, cleared }, Tracker::{new, set_optional_questions, state, observe(&Host, now: i64, focused: bool, &mut dyn FnMut() -> String) -> Changes, delivery_failed(&str, i64)}, target(&str) -> Option<Map>, matches(&Map, &ViewRow) -> bool, Resolution { Open { computer, key }, Gone(String), Waiting }, resolve(&Map, &Desk, expired: bool) -> Resolution, gone_text(&str) -> String, seed(Option<&[u8]>, Option<&[u8]>) -> Map, valid_preferences(&Value, &str) -> bool, request_json, concise, base64url, from_base64url, encode_token, Delivery::{post, withdraw, authorized, added}, DeliveryStep, request_id(&str) -> String}`.
+  - `attention::{NEEDS_ATTENTION, NEW_REPLY, OPTIONAL_QUESTION, SEEN_QUESTIONS, RETRY_SECONDS, DENIED, CLICK_WAIT, Host { alias, label, ok, rows }, Notice { token, title, body }, Changes { raised, cleared }, Tracker::{new, set_optional_questions, state, observe(&Host, now: i64, focused: bool, &mut dyn FnMut() -> String) -> Changes, delivery_failed(&str, i64)}, target(&str) -> Option<Map>, matches(&Map, &ViewRow) -> bool, Resolution { Open { computer, key }, Gone(String), Waiting }, resolve(&Map, &Desk, expired: bool) -> Resolution, gone_text(&str) -> String, seed(Option<&[u8]>, Option<&[u8]>) -> Map, valid_preferences(&Value, &str) -> bool, request_json, concise, base64url, from_base64url, encode_token, Delivery::{post, withdraw, authorized, added}, DeliveryStep, request_id(&str) -> String}`. `base64url` and `from_base64url` wrap the core's `base64` crate (URL alphabet, no padding).
 
 - [ ] **Step 1: Write the failing view test**
 
@@ -4897,6 +5003,8 @@ Expected: FAIL to compile (every item of the module is missing).
 //! JSON shape, so Qt's saved `attention/observed` can seed it.
 use crate::menubar::{Computer, Desk};
 use crate::{ComputerId, ViewRow};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -4965,43 +5073,15 @@ pub fn request_json(request: &str, started: Option<f64>) -> String {
     format!("[{},{started}]", Value::from(request))
 }
 
-const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-
 /// `QByteArray::toBase64(Base64UrlEncoding | OmitTrailingEquals)`.
 pub fn base64url(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = (u32::from(chunk[0]) << 16)
-            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*chunk.get(2).unwrap_or(&0));
-        for index in 0..=chunk.len() {
-            out.push(char::from(ALPHABET[((n >> (18 - 6 * index)) & 63) as usize]));
-        }
-    }
-    out
+    URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// The reverse; standard digits and padding are accepted as Qt accepts them.
+/// `QByteArray::fromBase64(Base64UrlEncoding)`: the URL alphabet, with or
+/// without trailing `=`.
 pub fn from_base64url(text: &str) -> Option<Vec<u8>> {
-    let (mut bits, mut count, mut out) = (0_u32, 0_u32, Vec::new());
-    for byte in text.trim_end_matches('=').bytes() {
-        let value = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'-' | b'+' => 62,
-            b'_' | b'/' => 63,
-            _ => return None,
-        };
-        bits = (bits << 6) | u32::from(value);
-        count += 6;
-        if count >= 8 {
-            count -= 8;
-            out.push((bits >> count) as u8);
-            bits &= (1 << count) - 1;
-        }
-    }
-    Some(out)
+    URL_SAFE_NO_PAD.decode(text.trim_end_matches('=')).ok()
 }
 
 pub fn encode_token(target: &Map<String, Value>) -> String {
@@ -5688,7 +5768,7 @@ impl Delivery {
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path core/Cargo.toml attention:: notify_facts`
+Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path core/Cargo.toml -- attention:: notify_facts`
 Expected: PASS (18 attention tests and both view tests).
 
 - [ ] **Step 6: Run the task's checks and commit**
@@ -5788,7 +5868,7 @@ Add to the tests of `client/src-tauri/src/desk.rs`:
 
 The local label comes from the machine card's host; with no card, notices name it with an empty host, as Qt's `box.host` would be before the first listing.
 
-Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml only_the_switch a_round_observes`
+Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml -- only_the_switch a_round_observes`
 Expected: FAIL to compile (`notifications`, `observe_round` missing).
 
 - [ ] **Step 2: Add `Identity::notifications`**
@@ -6023,12 +6103,12 @@ fn deliver(app: &AppHandle, changes: Changes) {
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml only_the_switch a_round_observes desk::`
+Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml -- only_the_switch a_round_observes desk::`
 Expected: PASS.
 
 - [ ] **Step 5: Write the macOS notifier**
 
-Create `client/src-tauri/src/platform/macos_notify.rs` and add `#[cfg(target_os = "macos")] pub mod macos_notify;` to `platform/mod.rs`:
+Create `client/src-tauri/src/platform/macos_notify.rs` and add `#[cfg(all(target_os = "macos", feature = "live"))] pub mod macos_notify;` to `platform/mod.rs` (the live gate, as for `macos_menubar`):
 
 ```rust
 //! Attention notifications under the app's identity, as Qt posts them
@@ -6044,7 +6124,7 @@ use std::sync::{Mutex, PoisonError};
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, NSObject, NSObjectProtocol, ProtocolObject};
-use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass};
+use objc2::{define_class, msg_send, AnyThread, DefinedClass};
 use objc2_foundation::{ns_string, NSArray, NSDictionary, NSError, NSString};
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent, UNNotification,
@@ -6255,7 +6335,9 @@ Add to `client/src-tauri/src/platform/macos.rs`:
 ```rust
 /// A value Qt's QSettings saved in this bundle's defaults domain
 /// (`com.hgdev.hgs-tray`): `group/key` is stored as `group.key`, a
-/// QByteArray as data. Read only (Decision 11).
+/// QByteArray as data. Read only (Decision 11). Only the live build posts
+/// notifications, so only it reads Qt's values.
+#[cfg(feature = "live")]
 pub fn qt_default_data(key: &str) -> Option<Vec<u8>> {
     let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
     let key = objc2_foundation::NSString::from_str(key);
@@ -6266,6 +6348,7 @@ pub fn qt_default_data(key: &str) -> Option<Vec<u8>> {
 }
 
 /// A boolean QSettings value of this bundle's defaults domain, read only.
+#[cfg(feature = "live")]
 pub fn qt_default_bool(key: &str) -> Option<bool> {
     let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
     let key = objc2_foundation::NSString::from_str(key);
@@ -6277,7 +6360,7 @@ In `client/src-tauri/Cargo.toml`, macOS table:
 - add `objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }`;
 - extend `objc2-foundation` with `"NSData", "NSError", "NSUserDefaults"`.
 
-As before, add only features the compiler names. The lock must gain no `[[package]]`.
+Record `objc2-user-notifications` in the lock (Global Constraints, "Cargo.lock"); it must gain no `[[package]]`. As before, add only features the compiler names.
 
 - [ ] **Step 6: Wire focus and the notifier into the app**
 
@@ -6325,7 +6408,7 @@ This replaces the single `desk::start(...)` line of Task 4.
 
 - [ ] **Step 7: Check on the Mac, display-free**
 
-Run **mac-sync**, **mac-clippy** and **mac-test**.
+Run **mac-lock**, **mac-sync**, **mac-clippy**, **mac-test** and **mac-done**.
 Expected: clean. The notifier cannot be exercised without a bundle and a display; the runbook's display checks cover posting, withdrawing, clicking and the carried-over grant.
 
 - [ ] **Step 8: Run the task's checks and commit**
@@ -6348,7 +6431,7 @@ git commit -m "feat(client): attention notifications on macOS with Qt's rules, s
 
 **zerus-5wmh.12.2, updater part.**
 - **Rollback slot.** Keep Qt as the one rollback copy across client updates (Decision 12), and unregister a moved copy from LaunchServices.
-- **Dev guard.** Refuse to replace a numbered Dev install with an unnumbered build (Decision 13).
+- **Dev guard.** Refuse to replace a numbered Dev install with a build that has neither a Dev number nor a local preview label (Decision 13). `--check BUILT INSTALLED` applies the same guard for `HGS_TRAY_RESTART=0` installs, which replace the GUI on disk without the live update, and on macOS refuses a change between Qt and the client there, so a switch always takes the full flow. `docs/reference.md` states the rule in the sentence the refusal quotes (`DEV_GUARD`).
 - **Settings snapshot.** At a Qt-to-client switch, snapshot Qt's settings domain beside the rollback copy, through `defaults export` (cfprefsd), never the plist file.
 - **Settings check.** Report every Qt key that changed, every unexpected non-Cocoa key, and, as information, the Cocoa keys written. Client updates compare after the new client starts; a rollback compares before Qt starts, since Qt then writes its own keys.
 - **`--rollback INSTALLED`.** Reinstalls exactly the rollback copy through the same flow.
@@ -6356,19 +6439,21 @@ git commit -m "feat(client): attention notifications on macOS with Qt's rules, s
 
 **Files:**
 - Modify: `tray/update-installed.py`
+- Modify: `tray/install.sh` (the `HGS_TRAY_RESTART=0` branches of macOS and Linux ask `--check` first)
+- Modify: `docs/reference.md` (the guard and the local preview label, in "Installation, configuration and diagnostics")
 - Create: `tests/test_tray_update_switch.py` (Linux and macOS, in-process with patched paths)
-- Modify: `tests/test_tray_update.py` (snapshot layout, rollback end to end on Linux)
+- Modify: `tests/test_tray_update.py` (snapshot layout, the guard through the updater and `HGS_TRAY_RESTART=0`, rollback end to end on Linux)
 - Create: `tests/test_macos_switch_updater.py` (macOS only: codesign with ad-hoc fake bundles)
 
 **Interfaces:**
-- Consumes: the bundle keys of Task 8 (`ZerusGUI`, `CFBundleIdentifier`) and the client's drafts format (Qt's v1, `draft.json` and `<sha256>.bin`).
+- Consumes: the bundle keys of Task 9 (`ZerusGUI`, `CFBundleIdentifier`), `--build-info`'s `devBuildNumber` and `previewLabel` (Task 2, and Qt's `UpdateController::buildInfo`) and the client's drafts format (Qt's v1, `draft.json` and `<sha256>.bin`).
 - Produces:
   - Constants: `LSREGISTER`, `DEFAULTS`, `PREFERENCES`, `SETTINGS_SNAPSHOT`, `COCOA_PREFIXES`.
   - Bundles and roots: `bundle_info(path) -> dict`, `gui_kind(info) -> 'qt' | 'tauri'`, `client_drafts_root(identifier) -> Path`, `draft_roots(*infos) -> list[(label, Path)]`, `snapshot(destination, roots) -> int`, `changed_drafts(saved, roots) -> (int, list[str])`.
   - Slot and LaunchServices: `keeps_slot(installed_kind, slot_kind, new_kind) -> bool`, `register(bundle)`, `unregister(bundle)`, `replace(stage, installed, aside=None) -> Path`, `roll_back(installed, previous) -> bool`.
-  - Dev guard: `installed_build_info(path) -> dict | None`, `numbered_refusal(installed_info, new_info) -> str | None`.
+  - Dev guard: `DEV_GUARD` (the sentence `docs/reference.md` repeats), `installed_build_info(path) -> dict | None`, `numbered_refusal(installed_info, new_info) -> str | None`, `check_replace(built, installed) -> int`.
   - Settings: `export_settings() -> (bytes, dict) | None`, `cocoa_key(key) -> bool`, `settings_changes(before, after) -> (changed, added, cocoa)`, `save_settings_snapshot()`, `settings_report(rollback=False) -> (problems, notes)`.
-  - Entry points: `update(built, installed, rollback=False)`, `roll_back_installed(installed)`, and the `--rollback` and `--installed-gui` options.
+  - Entry points: `update(built, installed, rollback=False)`, `roll_back_installed(installed)`, `check_replace(built, installed)`, and the `--rollback`, `--installed-gui` and `--check` options.
 
 - [ ] **Step 1: Write the failing unit tests**
 
@@ -6511,11 +6596,34 @@ class Switch(Fixture):
 
     def test_a_numbered_dev_install_is_never_replaced_by_an_unnumbered_build(self):
         numbered = {'version': '0.47.0', 'devBuildNumber': 1413}
-        self.assertIn('Dev build 1413', updater.numbered_refusal(numbered, {'version': '0.47.0', 'devBuildNumber': 0}))
+        refusal = updater.numbered_refusal(numbered, {'version': '0.47.0', 'devBuildNumber': 0})
+        self.assertIn('Dev build 1413', refusal)
+        self.assertIn(updater.DEV_GUARD, refusal)
         self.assertIsNone(updater.numbered_refusal(numbered, {'devBuildNumber': 1414}))
         self.assertIsNone(updater.numbered_refusal(numbered, {'devBuildNumber': 0, 'previewLabel': 'task-board'}))
         self.assertIsNone(updater.numbered_refusal(None, {'devBuildNumber': 0}))
         self.assertIsNone(updater.numbered_refusal({'devBuildNumber': 0}, {'devBuildNumber': 0}))
+
+    def test_the_refusal_says_what_the_reference_says(self):
+        # The coordinator's ruling: the same wording in docs/reference.md and the refusal.
+        words = lambda text: ' '.join(text.replace('`', '').split())
+        self.assertIn(words(updater.DEV_GUARD), words((ROOT / 'docs/reference.md').read_text()))
+
+    def test_an_on_disk_install_asks_the_updater_first(self):
+        installed, built = self.bundle('installed', 'qt'), self.bundle('built', 'qt')
+        infos = {installed: {'version': '0.47.0', 'devBuildNumber': 1413}, built: {'version': '0.47.0', 'devBuildNumber': 0}}
+        with mock.patch.object(updater, 'build_info', lambda path: infos[Path(path).resolve()]), \
+                mock.patch.object(updater, 'installed_build_info', lambda path: infos[Path(path).resolve()]):
+            with self.assertRaisesRegex(updater.UpdateError, 'Dev build 1413.*Nothing was replaced'):
+                updater.check_replace(built, installed)
+            infos[built] = {'version': '0.47.0', 'devBuildNumber': 0, 'previewLabel': 'task-board'}
+            self.assertEqual(updater.check_replace(built, installed), 0)
+            client = self.bundle('client', 'tauri')
+            infos[client] = {'version': '0.47.0', 'devBuildNumber': 1414}
+            with mock.patch.object(updater, 'MAC', True):
+                with self.assertRaisesRegex(updater.UpdateError, 'needs the live update'):
+                    updater.check_replace(client, installed)
+            self.assertEqual(updater.check_replace(built, self.root / 'missing.app'), 0, 'nothing installed yet')
 
     def test_settings_changes_separate_qt_keys_from_cocoa_keys(self):
         before = {'attention.observed': b'{}', 'workspace.reduceMotion': False, 'NSStatusItem Preferred Position Item-0': 900.0}
@@ -6580,8 +6688,8 @@ if __name__ == '__main__':
     unittest.main()
 ```
 
-Run: `python3 -m unittest tests/test_tray_update_switch.py -v`
-Expected: FAIL with `AttributeError` (`gui_kind`, `bundle_info`, `draft_roots`, `keeps_slot`, `numbered_refusal`, `settings_changes`, `save_settings_snapshot`, the patched constants).
+Run: `python3 -m unittest discover -s tests -p test_tray_update_switch.py -v`
+Expected: FAIL with `AttributeError` (`gui_kind`, `bundle_info`, `draft_roots`, `keeps_slot`, `numbered_refusal`, `DEV_GUARD`, `check_replace`, `settings_changes`, `save_settings_snapshot`, the patched constants).
 
 - [ ] **Step 2: Add the bundle, roots and slot rules**
 
@@ -6751,14 +6859,37 @@ def installed_build_info(installed):
         return None
 
 
+# The rule as docs/reference.md states it ("Installation, configuration and
+# diagnostics"); a test keeps the two equal.
+DEV_GUARD = ('A numbered Dev installation is replaced only by a numbered Dev build or by a local preview build: '
+             'set ZERUS_DEV_BUILD_NUMBER to the CI sequence of the main push the build comes from, '
+             'or build an owner-requested branch preview with ZERUS_LOCAL_PREVIEW_LABEL.')
+
+
 def numbered_refusal(installed_info, new_info):
     """Why a build may not replace the installed GUI: a numbered Dev install
     is replaced only by a numbered build or an explicit local preview (AGENTS.md)."""
     installed = int((installed_info or {}).get('devBuildNumber') or 0)
     if installed > 0 and not int(new_info.get('devBuildNumber') or 0) and not new_info.get('previewLabel'):
-        return (f'the installed GUI is Dev build {installed} and this build has no Dev number; '
-                'set ZERUS_DEV_BUILD_NUMBER to the CI sequence of its main push')
+        return (f'the installed GUI is Dev build {installed} and this build has neither a Dev number '
+                f'nor a local preview label. {DEV_GUARD}')
     return None
+
+
+def check_replace(built, installed):
+    """For an install that replaces the GUI on disk without the live update
+    (HGS_TRAY_RESTART=0): the numbered Dev guard, and on macOS no change
+    between Qt and the client, which only the live update may make."""
+    built, installed = Path(built).resolve(), Path(installed).absolute()
+    if not installed.exists():
+        return 0
+    refusal = numbered_refusal(installed_build_info(installed), build_info(built))
+    if refusal:
+        raise UpdateError(refusal + ' Nothing was replaced.')
+    if MAC and gui_kind(bundle_info(built)) != gui_kind(bundle_info(installed)):
+        raise UpdateError('switching between the Qt GUI and the Tauri client needs the live update; '
+                          'run tray/install.sh without HGS_TRAY_RESTART=0. Nothing was replaced.')
+    return 0
 
 
 def export_settings():
@@ -6823,15 +6954,35 @@ def settings_report(rollback=False):
     return problems, notes
 ```
 
+In `docs/reference.md`, section "Installation, configuration and diagnostics", add this paragraph after the one that begins "The GUI installer updates only Zerus" (its second sentence is `DEV_GUARD` word for word; the test compares them without backticks and line breaks):
+
+```markdown
+The live update and `HGS_TRAY_RESTART=0` both refuse to put an unnumbered build
+over a numbered Dev installation (AGENTS.md). A numbered Dev installation is
+replaced only by a numbered Dev build or by a local preview build: set
+`ZERUS_DEV_BUILD_NUMBER` to the CI sequence of the main push the build comes
+from, or build an owner-requested branch preview with
+`ZERUS_LOCAL_PREVIEW_LABEL`. The label is at most 32 lowercase letters and
+digits in hyphen-separated words; it needs a clean Git checkout and no Dev
+number, and the build shows as `DEV_VERSION-preview.LABEL.COMMIT`. The Qt GUI
+reads it as a CMake cache variable (configure `tray/build` with
+`-DZERUS_DEV_BUILD_NUMBER= -DZERUS_LOCAL_PREVIEW_LABEL=task-board` before
+running `tray/install.sh`); the Tauri client reads the environment variable
+when it builds. Clear the label before building main again. On macOS, a switch
+between the Qt GUI and the Tauri client always takes the live update, never
+`HGS_TRAY_RESTART=0`.
+```
+
 - [ ] **Step 4: Run the unit tests to verify they pass**
 
-Run: `python3 -m unittest tests/test_tray_update_switch.py -v`
-Expected: PASS (10 tests) except `test_the_gui_kind_comes_from_the_info_plist`, which needs Step 6's `--installed-gui`.
+Run: `python3 -m unittest discover -s tests -p test_tray_update_switch.py -v`
+Expected: 11 of the 12 tests pass. `test_the_gui_kind_comes_from_the_info_plist` needs Step 6's `--installed-gui`.
 
 - [ ] **Step 5: Write the failing end-to-end tests on Linux**
 
 In `tests/test_tray_update.py`:
 - In `test_lost_drafts_are_reported_with_their_snapshot`, change `snapshot / 'kept/draft.json'` to `snapshot / 'qt/kept/draft.json'`.
+- In `FAKE_GUI`, a variant named `dev-N` reports Dev build N: replace `'devBuildNumber': 0` with `'devBuildNumber': int(VARIANT[4:]) if VARIANT.startswith('dev-') else 0`.
 - Add to `TrayUpdate`:
 
 ```python
@@ -6859,10 +7010,28 @@ In `tests/test_tray_update.py`:
         self.assertEqual(result.returncode, 1)
         self.assertIn('there is no rollback copy', result.stderr)
         self.assertIn("'first'", self.installed.read_text())
+
+    def test_an_unnumbered_build_never_replaces_a_numbered_dev_install(self):
+        # AGENTS.md and docs/reference.md: the live update and HGS_TRAY_RESTART=0 refuse alike.
+        self.build('dev-1413', self.installed)
+        result = self.update(self.build('second'))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Dev build 1413', result.stderr)
+        self.assertIn('ZERUS_LOCAL_PREVIEW_LABEL', result.stderr)
+        install = self.installer(self.build('third'))
+        result = subprocess.run(['bash', str(install)], env=dict(self.env, HGS_TRAY_RESTART='0'),
+                                capture_output=True, text=True, timeout=90)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Dev build 1413', result.stderr)
+        self.assertIn("'dev-1413'", self.installed.read_text())
+        self.assertFalse((self.root / 'systemctl').exists(), 'nothing was started or enabled')
+        result = self.update(self.build('dev-1414'))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("'dev-1414'", self.installed.read_text())
 ```
 
-Run: `python3 -m unittest tests/test_tray_update.py -v`
-Expected: the two new tests FAIL (`--rollback` is not an option yet); `test_lost_drafts_are_reported_with_their_snapshot` FAILS until Step 6 wires the roots into `update`.
+Run: `python3 -m unittest discover -s tests -p test_tray_update.py -v` (the module imports `tray_update_fixture` from `tests/`, so it runs through discovery)
+Expected: the three new tests FAIL (`--rollback` is not an option yet, and `tray/install.sh` does not ask `--check`); `test_lost_drafts_are_reported_with_their_snapshot` FAILS until Step 6 wires the roots into `update`.
 
 - [ ] **Step 6: Wire the rules into `update`, add the rollback command and the options**
 
@@ -6872,6 +7041,7 @@ Update the module docstring's usage paragraph (the second paragraph, which `main
     update-installed.py <built hgs-tray | hgs-tray.app> <installed path>
     update-installed.py --rollback <installed path>
     update-installed.py --installed-gui <installed path>
+    update-installed.py --check <built hgs-tray | hgs-tray.app> <installed path>
 ```
 
 Add these sentences to the numbered list of the docstring:
@@ -6879,6 +7049,7 @@ Add these sentences to the numbered list of the docstring:
 - `--rollback` reinstalls that copy through the same steps.
 - Drafts of Qt and of the Tauri client (`<app data>/drafts`) are both snapshotted and verified.
 - At a Qt-to-client switch on macOS, Qt's settings are exported beside the rollback copy and checked afterwards.
+- A numbered Dev installation is replaced only by a numbered build or a local preview build (`DEV_GUARD`); `--check` applies that guard for `HGS_TRAY_RESTART=0`, which replaces the GUI on disk only, and refuses a switch between Qt and the client there.
 
 Replace `update` and `main`, and add `roll_back_installed`:
 
@@ -6896,7 +7067,7 @@ def update(built, installed, rollback=False):
     if not rollback and installed.exists():
         refusal = numbered_refusal(installed_build_info(installed), info)
         if refusal:
-            raise UpdateError(refusal + '; nothing was replaced')
+            raise UpdateError(refusal + ' Nothing was replaced.')
     switching = MAC and old_kind == 'qt' and new_kind == 'tauri'
     keep = keeps_slot(old_kind, slot_kind, new_kind)
     roots = draft_roots(old_info, new_info)
@@ -7006,15 +7177,19 @@ def main():
     parser = argparse.ArgumentParser(usage=usage, add_help=False)
     parser.add_argument('--rollback', metavar='INSTALLED', type=Path)
     parser.add_argument('--installed-gui', metavar='INSTALLED', type=Path)
+    parser.add_argument('--check', nargs=2, metavar=('BUILT', 'INSTALLED'), type=Path)
     parser.add_argument('paths', nargs='*', type=Path)
     args = parser.parse_args()
+    chosen = [option for option in (args.rollback, args.installed_gui, args.check) if option]
     try:
-        if args.installed_gui and not args.rollback and not args.paths:
+        if args.installed_gui and len(chosen) == 1 and not args.paths:
             print(gui_kind(bundle_info(args.installed_gui)) if args.installed_gui.exists() else 'none')
             return 0
-        if args.rollback and not args.installed_gui and not args.paths:
+        if args.rollback and len(chosen) == 1 and not args.paths:
             return roll_back_installed(args.rollback)
-        if len(args.paths) == 2 and not args.rollback and not args.installed_gui:
+        if args.check and len(chosen) == 1 and not args.paths:
+            return check_replace(*args.check)
+        if len(args.paths) == 2 and not chosen:
             return update(*args.paths)
     except UpdateError as error:
         print(f'hgs-tray update failed: {error}', file=sys.stderr)
@@ -7023,10 +7198,23 @@ def main():
     return 2
 ```
 
+In `tray/install.sh`, both `HGS_TRAY_RESTART=0` branches ask the updater before they replace anything:
+- macOS, step 2, in the `else` branch, before `rm -rf "${APP_DEST}"`:
+  ```bash
+        # The numbered Dev guard, and no switch between Qt and the client without the live update.
+        python3 "${SCRIPT_DIR}/update-installed.py" --check "${BUILD_APP}" "${APP_DEST}"
+  ```
+- Linux, step 2, in the `else` branch, before `install -Dm755 "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}.new"`:
+  ```bash
+        # The numbered Dev guard (docs/reference.md).
+        python3 "${SCRIPT_DIR}/update-installed.py" --check "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}"
+  ```
+`set -e` stops the installer on a refusal, before the LaunchAgent or the unit changes.
+
 - [ ] **Step 7: Run all updater tests on Linux**
 
-Run: `python3 -m unittest tests/test_tray_update_switch.py tests/test_tray_update.py tests/test_tray_update_fixture.py -v`
-Expected: PASS, including `test_rollback_reinstalls_the_kept_copy`, `test_rollback_without_a_copy_changes_nothing` and the Linux updates that were green before.
+Run: `python3 -m unittest discover -s tests -p 'test_tray_update*.py' -v`
+Expected: PASS, including `test_rollback_reinstalls_the_kept_copy`, `test_rollback_without_a_copy_changes_nothing`, `test_an_unnumbered_build_never_replaces_a_numbered_dev_install` and the Linux updates that were green before. Also run `python3 -m unittest discover -s tests -p 'test_mac_install.py' -v` and the same for `test_macos_local_signing.py`: they copy `tray/install.sh` and must stay green.
 
 - [ ] **Step 8: Write the macOS updater test with codesign**
 
@@ -7117,24 +7305,608 @@ if __name__ == '__main__':
 
 - [ ] **Step 9: Run it on the Mac, display-free**
 
-Run **mac-sync**, then:
+Run **mac-lock** and **mac-sync**, then:
 ```bash
-ssh -o BatchMode=yes mac 'cd ~/zerus-next-p2 && python3 -m unittest tests/test_macos_switch_updater.py tests/test_tray_update_switch.py -v'
+ssh -o BatchMode=yes mac 'cd ~/zerus-dev/webui && python3 -m unittest discover -s tests -p "test_macos_switch_updater.py" -v && python3 -m unittest discover -s tests -p "test_tray_update_switch.py" -v'
 ```
-Expected: PASS. Nothing outside the temporary folders changes; LaunchServices is untouched because `lsregister` is `/usr/bin/true`.
+then **mac-done**. Expected: PASS. Nothing outside the temporary folders changes; LaunchServices is untouched because `lsregister` is `/usr/bin/true`, and `defaults` is a fixture.
 
 - [ ] **Step 10: Run the task's checks and commit**
 
 Run `python3 -m unittest discover -s tests -p 'test_macos_*.py' -v`, the updater tests and `python3 scripts/check-source-privacy.py`.
 
 ```bash
-git add tray/update-installed.py tests/test_tray_update_switch.py tests/test_tray_update.py tests/test_macos_switch_updater.py
-git commit -m "feat(tray): updater keeps client drafts, the Qt rollback copy and Qt settings, and can roll back"
+git add tray/update-installed.py tray/install.sh docs/reference.md tests/test_tray_update_switch.py \
+  tests/test_tray_update.py tests/test_macos_switch_updater.py
+git commit -m "feat(tray): updater keeps client drafts, the Qt rollback copy and Qt settings, guards Dev numbers and can roll back"
 ```
 
 ---
 
-### Task 8: The switch bundle, its install path, bundle checks, signing and docs (zerus-5wmh.12.2)
+### Task 8: Main-thread watchdog, as Qt's (zerus-5wmh.12.3)
+
+Spec row 297 and the coordinator's ruling of 2026-10-28: a port of `tray/src/MainThreadWatchdog.{h,cpp}`, `tray/src/MacSystemPower.{h,cpp}` and their wiring in `tray/src/main.cpp:163-166` and `:385-423`. Qt added the watchdog after its menu-bar item hung inside AppKit on macOS 26 for six days while the process still "ran" (`QuietTrayIcon.h`). After the switch the client is the only GUI, so it needs the same safety net.
+- **Thresholds.** A main-thread heartbeat every 7.5 s, a check every 15 s on a thread named `hgs-watchdog`, a 30 s threshold (`kMainThreadHangMs`) and a 10-minute wake grace, all Qt's.
+- **Clock.** Uptime that stops while the machine sleeps: `CLOCK_UPTIME_RAW` on macOS, `CLOCK_MONOTONIC` on Linux (`MainThreadWatchdog::nowMs`).
+- **Sleep and dark wake.** IOKit's root power domain notifies a dispatch queue of its own, never the main thread. The check holds from the sleep notice until the main thread beats after a wake, for the grace at most. Sleep is never vetoed.
+- **Exit path.** One line on stderr, then `abort()`, at most once. launchd's `KeepAlive Crashed` restarts the client, and the crash report shows where the main thread stood. A plain `exit` would not be restarted.
+- **Not a hang.** An open menu or a modal panel: the macOS heartbeat is an `NSTimer` in the common run-loop modes, as Qt's `QTimer` is. A Tauri `run_on_main_thread` beat would not do: it waits for tao's event callback, which a modal loop inside a callback blocks.
+- **Who runs it.** The switch bundle, which launchd supervises, and any other build with `ZERUS_CLIENT_WATCHDOG=1` (Decision 4). The decision logic (`Pulse`, `Watchdog`) is pure and tested on Linux; the platform glue is thin.
+
+**Files:**
+- Create: `client/src-tauri/src/watchdog.rs`
+- Create: `client/src-tauri/src/platform/macos_power.rs`; modify `client/src-tauri/src/platform/mod.rs`
+- Modify: `client/src-tauri/src/platform/macos.rs` (`heartbeat`), `client/src-tauri/src/platform/linux.rs` (`heartbeat`)
+- Modify: `client/src-tauri/src/identity.rs` (`watchdog`), `client/src-tauri/src/lib.rs` (module, `start_watchdog`, setup), `client/src-tauri/src/lifecycle.rs` (stop on exit)
+- Modify: `client/src-tauri/Cargo.toml` (objc2-foundation features `NSDate`, `NSRunLoop`, `NSTimer`)
+- Test: unit tests in `watchdog.rs` and `identity.rs`
+
+**Interfaces:**
+- Consumes: `identity::{Identity, flag}` (Task 2); `launch`'s setup closure (Tasks 3, 4, 6).
+- Produces:
+  - `watchdog::{HANG_MS, WAKE_GRACE_MS, THREAD, Limits { hang_ms, wake_grace_ms }, Limits::QT, Limits::beat_every(), Limits::check_every(), Pulse::{new, beat, will_sleep, powered_on, silent_ms, hung}, Watchdog::{start(Limits, fn() -> i64, impl FnOnce(i64) + Send), pulse() -> Arc<Pulse>, stop()}, now_ms() -> i64, abort_on_hang(i64) -> !}` (Linux and macOS).
+  - `lifecycle::on_event` stops the watchdog first on `RunEvent::Exit`.
+  - `identity::Identity::watchdog(requested: bool) -> bool`.
+  - `platform::macos::heartbeat(Duration, impl Fn() + 'static)`, `platform::linux::heartbeat(Duration, impl Fn() + 'static)`, `platform::macos_power::observe(Arc<Pulse>)`.
+  - `lib::start_watchdog() -> std::io::Result<watchdog::Watchdog>`; the running `Watchdog` lives in the app state.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `client/src-tauri/src/watchdog.rs` with only this test module, and add `#[cfg(any(target_os = "linux", target_os = "macos"))] mod watchdog;` to `lib.rs`. Each test names the Qt test in `tray/tests/test_watchdog.cpp` it ports; Qt's real-time scenarios become fake-clock checks of the same rule, so they cannot flake on a loaded machine, and three short real-time tests cover the thread:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LIMITS: Limits = Limits { hang_ms: 300, wake_grace_ms: 600 };
+
+    #[test]
+    fn qt_values_and_periods() {
+        assert_eq!(Limits::QT, Limits { hang_ms: 30_000, wake_grace_ms: 600_000 });
+        assert_eq!(Limits::QT.beat_every(), Duration::from_millis(7_500));
+        assert_eq!(Limits::QT.check_every(), Duration::from_millis(15_000));
+    }
+
+    #[test]
+    fn a_silent_main_thread_is_hung_past_the_threshold() {
+        // firesOnceWhenTheMainThreadStopsPumpingEvents
+        let pulse = Pulse::new(1_000);
+        assert!(!pulse.hung(1_300, LIMITS), "exactly the threshold is not a hang");
+        assert!(pulse.hung(1_301, LIMITS));
+    }
+
+    #[test]
+    fn beats_keep_it_quiet() {
+        // staysQuietWhileEventsFlow
+        let pulse = Pulse::new(0);
+        for now in (75..=3_000).step_by(75) {
+            pulse.beat(now);
+            assert!(!pulse.hung(now + 75, LIMITS));
+        }
+    }
+
+    #[test]
+    fn going_to_sleep_holds_until_power_on() {
+        // holdsWhileTheSystemGoesToSleep: beats in between do not end the hold.
+        let pulse = Pulse::new(0);
+        pulse.will_sleep(0);
+        pulse.beat(200);
+        assert!(!pulse.hung(600, LIMITS));
+        assert!(pulse.hung(601, LIMITS), "the hold lasts the wake grace at most");
+    }
+
+    #[test]
+    fn a_wake_holds_until_the_main_thread_beats() {
+        // holdsAfterAWakeUntilTheMainThreadRuns
+        let pulse = Pulse::new(0);
+        pulse.will_sleep(0);
+        pulse.powered_on(10);
+        assert!(!pulse.hung(500, LIMITS), "silent after the wake, within the grace");
+        pulse.beat(500);
+        assert!(!pulse.hung(800, LIMITS));
+        assert!(pulse.hung(801, LIMITS), "watched as usual once it ran");
+    }
+
+    #[test]
+    fn a_main_thread_silent_past_the_wake_grace_is_hung() {
+        // firesWhenTheMainThreadStaysSilentPastTheWakeGrace
+        let pulse = Pulse::new(0);
+        pulse.powered_on(0);
+        assert!(!pulse.hung(600, LIMITS));
+        assert!(pulse.hung(601, LIMITS));
+    }
+
+    #[test]
+    fn the_thread_fires_once_on_its_own_name() {
+        let (sender, fired) = std::sync::mpsc::channel();
+        let dog = Watchdog::start(Limits { hang_ms: 100, wake_grace_ms: 100 }, now_ms, move |silent| {
+            let _ = sender.send((std::thread::current().name().map(str::to_owned), silent));
+        })
+        .unwrap();
+        let (name, silent) = fired.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(name.as_deref(), Some(THREAD));
+        assert!(silent > 100, "{silent}");
+        assert!(fired.recv_timeout(Duration::from_millis(400)).is_err(), "at most once");
+        drop(dog);
+    }
+
+    #[test]
+    fn a_quit_is_not_a_hang() {
+        let (sender, fired) = std::sync::mpsc::channel::<i64>();
+        let dog = Watchdog::start(Limits { hang_ms: 100, wake_grace_ms: 0 }, now_ms, move |silent| {
+            let _ = sender.send(silent);
+        })
+        .unwrap();
+        dog.stop();
+        assert!(fired.recv_timeout(Duration::from_millis(500)).is_err(), "stopped before the main thread went quiet");
+    }
+
+    #[test]
+    fn a_dropped_watchdog_stops_at_once() {
+        let (sender, fired) = std::sync::mpsc::channel::<i64>();
+        let started = std::time::Instant::now();
+        drop(Watchdog::start(Limits { hang_ms: 10_000, wake_grace_ms: 0 }, now_ms, move |silent| {
+            let _ = sender.send(silent);
+        })
+        .unwrap());
+        assert!(started.elapsed() < Duration::from_secs(2), "not at the next check, 5 s later");
+        assert!(fired.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn the_clock_moves_forward() {
+        let first = now_ms();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(now_ms() >= first + 15);
+    }
+}
+```
+
+Add to the tests of `client/src-tauri/src/identity.rs`:
+
+```rust
+    #[test]
+    fn only_the_switch_bundle_runs_the_watchdog_unless_asked() {
+        assert!(Identity::new("com.hgdev.hgs-tray").watchdog(false), "launchd restarts it");
+        assert!(!Identity::new("dev.zerus.next").watchdog(false), "a dev run is never aborted");
+        assert!(Identity::new("dev.zerus.next").watchdog(true));
+    }
+```
+
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml -- watchdog:: only_the_switch_bundle_runs`
+Expected: FAIL to compile: `Limits`, `Pulse`, `Watchdog`, `now_ms`, `THREAD` and `Identity::watchdog` are missing.
+
+- [ ] **Step 3: Write `watchdog.rs` above its tests**
+
+```rust
+//! The main-thread watchdog, as the Qt GUI has it
+//! (`tray/src/MainThreadWatchdog.{h,cpp}`, `tray/src/main.cpp:163-166` and
+//! `:385-423`). Qt added it after its menu-bar item hung inside AppKit for six
+//! days on macOS 26 while the process kept "running" (`tray/src/QuietTrayIcon.h`).
+//!
+//! A timer on the main thread records a beat every quarter of [`HANG_MS`]; a
+//! thread named `hgs-watchdog` checks every half. Once the main thread has not
+//! beaten for longer than [`HANG_MS`], it prints why and aborts, at most once:
+//! launchd (`KeepAlive Crashed`, `tray/packaging/com.hgdev.hgs-tray.plist`) or
+//! systemd (`Restart=on-failure`) starts the client again, and the crash report
+//! shows where the main thread stood. A plain exit would not be restarted.
+//!
+//! The clock stops while the machine sleeps ([`now_ms`]). Around sleep macOS
+//! leaves the main thread unscheduled for longer than the threshold while the
+//! rest of the process runs: during the transition into sleep and in a dark
+//! wake. [`Pulse::will_sleep`] and [`Pulse::powered_on`] (IOKit,
+//! `platform/macos_power.rs`) hold the check from the sleep notice until the
+//! main thread has beaten after a wake, for [`WAKE_GRACE_MS`] of uptime at
+//! most, so a main thread that never runs again after a wake still counts.
+//!
+//! Not a hang: an open menu or a modal panel, since the macOS timer runs in
+//! the common run-loop modes as Qt's does. A main thread starved of CPU trips
+//! it too, whatever its stack shows.
+use std::io;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+/// `kMainThreadHangMs`: half a minute, far above any honest pause of the
+/// event loop and far below the week a hung menu-bar item once stayed.
+pub const HANG_MS: i64 = 30_000;
+/// `MainThreadWatchdog`'s default `wakeGraceMs`: ten minutes of uptime.
+pub const WAKE_GRACE_MS: i64 = 10 * 60 * 1000;
+/// The checking thread's name, which crash reports show.
+pub const THREAD: &str = "hgs-watchdog";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    pub hang_ms: i64,
+    pub wake_grace_ms: i64,
+}
+
+impl Limits {
+    /// Qt's values.
+    pub const QT: Limits = Limits { hang_ms: HANG_MS, wake_grace_ms: WAKE_GRACE_MS };
+
+    /// How often the main thread beats: a quarter of the threshold.
+    pub fn beat_every(self) -> Duration {
+        Duration::from_millis((self.hang_ms / 4).max(1).unsigned_abs())
+    }
+
+    /// How often the watchdog checks: half of the threshold.
+    pub fn check_every(self) -> Duration {
+        Duration::from_millis((self.hang_ms / 2).max(1).unsigned_abs())
+    }
+}
+
+/// What the watchdog knows, written from any thread.
+#[derive(Debug)]
+pub struct Pulse {
+    last_beat: AtomicI64,
+    power_event: AtomicI64,
+    sleeping: AtomicBool,
+    awaiting_beat: AtomicBool,
+}
+
+impl Pulse {
+    pub fn new(now: i64) -> Self {
+        Self {
+            last_beat: AtomicI64::new(now),
+            power_event: AtomicI64::new(0),
+            sleeping: AtomicBool::new(false),
+            awaiting_beat: AtomicBool::new(false),
+        }
+    }
+
+    /// The main thread ran: the heartbeat timer fired.
+    pub fn beat(&self, now: i64) {
+        self.last_beat.store(now, Ordering::SeqCst);
+        self.awaiting_beat.store(false, Ordering::SeqCst);
+    }
+
+    /// The system is about to sleep: hold the check until it powers on.
+    /// Only macOS reports it (`platform/macos_power.rs`).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn will_sleep(&self, now: i64) {
+        self.power_event.store(now, Ordering::SeqCst);
+        self.sleeping.store(true, Ordering::SeqCst);
+    }
+
+    /// The system powered on, also for a dark wake: hold the check until the
+    /// main thread beats.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn powered_on(&self, now: i64) {
+        self.power_event.store(now, Ordering::SeqCst);
+        // Before `sleeping` clears, so that the check never sees neither hold.
+        self.awaiting_beat.store(true, Ordering::SeqCst);
+        self.sleeping.store(false, Ordering::SeqCst);
+    }
+
+    /// How long the main thread has been silent.
+    pub fn silent_ms(&self, now: i64) -> i64 {
+        now - self.last_beat.load(Ordering::SeqCst)
+    }
+
+    /// The check (`MainThreadWatchdog.cpp:62-71`): silent past the threshold
+    /// and not held by a sleep or a wake within the grace.
+    pub fn hung(&self, now: i64, limits: Limits) -> bool {
+        if self.silent_ms(now) <= limits.hang_ms {
+            return false;
+        }
+        let held = self.sleeping.load(Ordering::SeqCst) || self.awaiting_beat.load(Ordering::SeqCst);
+        !(held && now - self.power_event.load(Ordering::SeqCst) <= limits.wake_grace_ms)
+    }
+}
+
+/// The checking thread. Stopping or dropping it ends the thread at once, not
+/// at its next check.
+pub struct Watchdog {
+    pulse: Arc<Pulse>,
+    stopping: Arc<(Mutex<bool>, Condvar)>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Watchdog {
+    /// Starts checking; `on_hang` runs at most once, on the watchdog thread,
+    /// with how long the main thread has been silent.
+    pub fn start(limits: Limits, clock: fn() -> i64, on_hang: impl FnOnce(i64) + Send + 'static) -> io::Result<Self> {
+        let pulse = Arc::new(Pulse::new(clock()));
+        let stopping = Arc::new((Mutex::new(false), Condvar::new()));
+        let (watched, signal) = (Arc::clone(&pulse), Arc::clone(&stopping));
+        let thread = std::thread::Builder::new().name(THREAD.into()).spawn(move || {
+            let (lock, wake) = &*signal;
+            let mut stopped = lock.lock().unwrap_or_else(PoisonError::into_inner);
+            loop {
+                // Returns early only when stopped; a timeout is the next check.
+                stopped = wake
+                    .wait_timeout_while(stopped, limits.check_every(), |stopped| !*stopped)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+                if *stopped {
+                    return;
+                }
+                let now = clock();
+                if watched.hung(now, limits) {
+                    drop(stopped);
+                    on_hang(watched.silent_ms(now));
+                    return;
+                }
+            }
+        })?;
+        Ok(Self { pulse, stopping, thread: Some(thread) })
+    }
+
+    /// What the heartbeat and the power notices write to.
+    pub fn pulse(&self) -> Arc<Pulse> {
+        Arc::clone(&self.pulse)
+    }
+
+    /// Stops checking. Quitting is not a hang: Qt destroys its watchdog before
+    /// the tray is torn down (`main.cpp:385-389`), and the client stops it
+    /// first thing on `RunEvent::Exit`, so a slow flush never ends in an abort
+    /// that launchd would answer with a restart.
+    pub fn stop(&self) {
+        *self.stopping.0.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.stopping.1.notify_all();
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.stop();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Milliseconds that stop while the machine sleeps (`MainThreadWatchdog::nowMs`):
+/// uptime (`CLOCK_UPTIME_RAW`) on macOS, `CLOCK_MONOTONIC` on Linux.
+pub fn now_ms() -> i64 {
+    #[cfg(target_os = "macos")]
+    let clock = libc::CLOCK_UPTIME_RAW;
+    #[cfg(not(target_os = "macos"))]
+    let clock = libc::CLOCK_MONOTONIC;
+    let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: clock_gettime writes only the struct it is given.
+    unsafe { libc::clock_gettime(clock, &mut time) };
+    // Both fields are 64-bit on the client's targets.
+    time.tv_sec * 1000 + time.tv_nsec / 1_000_000
+}
+
+/// Qt's exit path (`main.cpp:410-417`): say why, then abort. The line is
+/// written with one `write(2)`: the main thread may hang holding Rust's
+/// stderr lock.
+pub fn abort_on_hang(silent_ms: i64) -> ! {
+    let line = format!(
+        "zerus-client: main thread unresponsive for {} s (AppKit deadlock? see tray/src/QuietTrayIcon.h); \
+         aborting so the service manager restarts it\n",
+        silent_ms / 1000
+    );
+    // SAFETY: writes the bytes of a live string to stderr.
+    unsafe { libc::write(libc::STDERR_FILENO, line.as_ptr().cast(), line.len()) };
+    std::process::abort()
+}
+```
+
+In `impl Identity` of `client/src-tauri/src/identity.rs`, after `notifications`:
+
+```rust
+    /// Whether the main-thread watchdog runs: the switch bundle, which launchd
+    /// restarts after the watchdog's abort, or another build on request
+    /// (`ZERUS_CLIENT_WATCHDOG=1`).
+    pub fn watchdog(&self, requested: bool) -> bool {
+        self.is_switch() || requested
+    }
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `cd client && nice env CARGO_BUILD_JOBS=4 cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml -- watchdog:: only_the_switch_bundle_runs`
+Expected: PASS (10 watchdog tests and the identity test).
+
+- [ ] **Step 5: Write the heartbeat and the sleep notices**
+
+Add to `client/src-tauri/src/platform/macos.rs`:
+
+```rust
+/// Runs `beat` on the main thread every `every`, in the common run-loop modes,
+/// so an open menu or a modal panel does not stop it, as Qt's `QTimer` does
+/// not stop (the watchdog's heartbeat). Call on the main thread; the run loop
+/// keeps the timer for the life of the app.
+pub fn heartbeat(every: Duration, beat: impl Fn() + 'static) {
+    let block = block2::RcBlock::new(move |_timer: std::ptr::NonNull<objc2_foundation::NSTimer>| beat());
+    // SAFETY: a repeating timer whose block owns what it captures.
+    let timer = unsafe { objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(every.as_secs_f64(), true, &block) };
+    // SAFETY: Foundation's constant mode name; the main run loop, from the main thread.
+    unsafe { objc2_foundation::NSRunLoop::mainRunLoop().addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes) };
+}
+```
+
+Add to `client/src-tauri/src/platform/linux.rs`:
+
+```rust
+/// Runs `beat` on the main thread every `every` (the watchdog's heartbeat): a
+/// GLib timeout on the default main context, which nested dialog loops keep
+/// dispatching. Call on the main thread.
+pub fn heartbeat(every: std::time::Duration, beat: impl Fn() + 'static) {
+    gtk::glib::timeout_add_local(every, move || {
+        beat();
+        gtk::glib::ControlFlow::Continue
+    });
+}
+```
+
+Create `client/src-tauri/src/platform/macos_power.rs` and add `#[cfg(target_os = "macos")] pub mod macos_power;` to `platform/mod.rs`:
+
+```rust
+//! System sleep and wake for the main-thread watchdog, as Qt's
+//! `tray/src/MacSystemPower.{h,cpp}`. IOKit's root power domain notifies a
+//! serial dispatch queue of its own, never the main thread, which macOS may
+//! not schedule while it goes to sleep or in a dark wake. Sleep is never
+//! vetoed: queries and sleep notices are acknowledged at once. IOKit has no
+//! binding among the client's crates, so the few calls are declared here.
+use std::ffi::{c_char, c_void};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+
+use crate::watchdog::{now_ms, Pulse};
+
+/// `io_object_t`, `io_connect_t` and `io_service_t`: Mach port names.
+type IoObject = u32;
+type NotificationPort = *mut c_void;
+type InterestCallback = extern "C" fn(refcon: *mut c_void, service: IoObject, message: u32, argument: *mut c_void);
+
+// `IOKit/IOMessage.h`: iokit_common_msg(n) is 0xe0000000 | n.
+const CAN_SYSTEM_SLEEP: u32 = 0xe000_0270;
+const SYSTEM_WILL_SLEEP: u32 = 0xe000_0280;
+const SYSTEM_HAS_POWERED_ON: u32 = 0xe000_0300;
+const SYSTEM_WILL_POWER_ON: u32 = 0xe000_0320;
+
+#[link(name = "IOKit", kind = "framework")]
+extern "C" {
+    fn IORegisterForSystemPower(
+        refcon: *mut c_void,
+        port: *mut NotificationPort,
+        callback: InterestCallback,
+        notifier: *mut IoObject,
+    ) -> IoObject;
+    fn IOAllowPowerChange(kernel_port: IoObject, notification_id: isize) -> i32;
+    fn IONotificationPortSetDispatchQueue(port: NotificationPort, queue: *mut c_void);
+}
+
+extern "C" {
+    // libdispatch, part of libSystem; a null attribute makes a serial queue.
+    fn dispatch_queue_create(label: *const c_char, attributes: *mut c_void) -> *mut c_void;
+}
+
+struct Context {
+    pulse: Arc<Pulse>,
+    /// The root power domain connection, set before the first notice arrives.
+    root: AtomicU32,
+}
+
+extern "C" fn received(refcon: *mut c_void, _service: IoObject, message: u32, argument: *mut c_void) {
+    // SAFETY: `observe` passes a Context it never frees.
+    let context = unsafe { &*refcon.cast::<Context>() };
+    match message {
+        // An unanswered query delays idle sleep by 30 s.
+        CAN_SYSTEM_SLEEP => allow(context, argument),
+        SYSTEM_WILL_SLEEP => {
+            context.pulse.will_sleep(now_ms());
+            allow(context, argument);
+        }
+        SYSTEM_WILL_POWER_ON | SYSTEM_HAS_POWERED_ON => context.pulse.powered_on(now_ms()),
+        _ => {}
+    }
+}
+
+fn allow(context: &Context, argument: *mut c_void) {
+    // SAFETY: the connection IORegisterForSystemPower returned; the argument is the notice's ID.
+    unsafe { IOAllowPowerChange(context.root.load(Ordering::Acquire), argument as isize) };
+}
+
+/// Holds the watchdog's check around sleep and dark wakes for the life of the
+/// process. Without the notices a wake may abort the client, as Qt warns.
+pub fn observe(pulse: Arc<Pulse>) {
+    let context = Box::into_raw(Box::new(Context { pulse, root: AtomicU32::new(0) }));
+    let mut port: NotificationPort = std::ptr::null_mut();
+    let mut notifier: IoObject = 0;
+    // SAFETY: a plain registration; the context outlives every callback, since it is never freed.
+    let root = unsafe { IORegisterForSystemPower(context.cast(), &mut port, received, &mut notifier) };
+    if root == 0 {
+        eprintln!("zerus-client: cannot observe system sleep; the main-thread watchdog may abort after a wake");
+        // SAFETY: IOKit kept no reference to the context.
+        drop(unsafe { Box::from_raw(context) });
+        return;
+    }
+    // SAFETY: the context is live; the queue and the port last as long as the process.
+    unsafe {
+        (*context).root.store(root, Ordering::Release);
+        let queue = dispatch_queue_create(c"hgs-system-power".as_ptr(), std::ptr::null_mut());
+        IONotificationPortSetDispatchQueue(port, queue);
+    }
+}
+```
+
+In `client/src-tauri/Cargo.toml`, add `"NSDate"`, `"NSRunLoop"` and `"NSTimer"` to the `objc2-foundation` features of the macOS table. Features never change `Cargo.lock`.
+
+- [ ] **Step 6: Start the watchdog in `launch`**
+
+In `lib.rs`, add the module from Step 1 and this function after `forward_activations`:
+
+```rust
+/// The main-thread watchdog (Task 8): Qt's thresholds, a heartbeat on the main
+/// thread and, on macOS, the hold around sleep. The returned value keeps it running.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn start_watchdog() -> std::io::Result<watchdog::Watchdog> {
+    let limits = watchdog::Limits::QT;
+    let dog = watchdog::Watchdog::start(limits, watchdog::now_ms, |silent| watchdog::abort_on_hang(silent))?;
+    let pulse = dog.pulse();
+    #[cfg(target_os = "macos")]
+    {
+        platform::macos::heartbeat(limits.beat_every(), move || pulse.beat(watchdog::now_ms()));
+        platform::macos_power::observe(dog.pulse());
+    }
+    #[cfg(target_os = "linux")]
+    platform::linux::heartbeat(limits.beat_every(), move || pulse.beat(watchdog::now_ms()));
+    eprintln!("zerus-client: main-thread watchdog on ({} s)", limits.hang_ms / 1000);
+    Ok(dog)
+}
+```
+
+In the setup closure, add as its last statement before `Ok(())`, so the watchdog starts once the window and the menu bar exist, as Qt starts it after its tray agent:
+
+```rust
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if identity.watchdog(identity::flag("ZERUS_CLIENT_WATCHDOG")) {
+                app.manage(start_watchdog()?);
+            }
+```
+
+In `client/src-tauri/src/lifecycle.rs`, make this the first statement of `exit`, so the watchdog stops before the socket goes and before any other `RunEvent::Exit` work (drafts, media) runs. Keep `lifecycle::on_event` the first call in `lib.rs`'s run closure (Decision 15):
+
+```rust
+    // Quitting is not a hang (`Watchdog::stop`).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(dog) = app.try_state::<crate::watchdog::Watchdog>() {
+        dog.stop();
+    }
+```
+
+- [ ] **Step 7: Check the heartbeat headless on arch**
+
+```bash
+cd client && RUSTUP_TOOLCHAIN=1.99.1 CARGO_BUILD_JOBS=4 nice npx tauri build --no-bundle
+env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 ZERUS_CLIENT_HEADLESS=1 \
+  ZERUS_CLIENT_WATCHDOG=1 ZERUS_CLIENT_REPLAY=$PWD/fixtures/replay.ndjson \
+  xvfb-run -a -s "-screen 0 1440x900x24" sh -c '
+    ./src-tauri/target/release/zerus-client 2> watchdog.log & app=$!
+    sleep 50; kill -0 $app && echo "alive after 50 s"
+    kill -TERM $app; wait $app; echo "exit $?"
+    grep -c "main-thread watchdog on (30 s)" watchdog.log; grep -c "unresponsive" watchdog.log'
+rm -f watchdog.log
+```
+Expected: `alive after 50 s`, `exit 0`, `1`, `0`. Without beats the watchdog would have aborted by its third check, at 45 s. A run without `ZERUS_CLIENT_WATCHDOG` prints no watchdog line.
+
+- [ ] **Step 8: Check on the Mac, display-free**
+
+Run **mac-lock**, **mac-sync**, **mac-clippy**, **mac-test** and **mac-done**. Expected: clean, with the `watchdog::` tests passing on macOS (`CLOCK_UPTIME_RAW`). The heartbeat in an open menu and the sleep hold need a display; runbook steps 4 and 8 cover them.
+
+- [ ] **Step 9: Run the task's checks and commit**
+
+Run fmt, both Linux clippy variants, the src-tauri tests, `check-ui-separators.py` and `check-source-privacy.py`.
+
+```bash
+git add client/src-tauri/src/watchdog.rs client/src-tauri/src/identity.rs client/src-tauri/src/lib.rs \
+  client/src-tauri/src/lifecycle.rs client/src-tauri/src/platform client/src-tauri/Cargo.toml
+git commit -m "feat(client): Qt's main-thread watchdog with the sleep hold"
+```
+
+---
+
+### Task 9: The switch bundle, its install path, bundle checks, signing and docs (zerus-5wmh.12.2)
 
 The switch bundle is the Tauri build with Qt's Info.plist identity:
 - Identifier `com.hgdev.hgs-tray.local`, promoted to `com.hgdev.hgs-tray` at signing.
@@ -7299,7 +8071,7 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-Run: `python3 -m unittest tests/test_macos_switch_bundle.py -v`
+Run: `python3 -m unittest discover -s tests -p test_macos_switch_bundle.py -v`
 Expected: FAIL (`Info.switch.plist`, `switch-config.py`, `TAURI_REQUIRED`, `TAURI_EXECUTABLE`, `tauri_bundle_findings` and `tauri_plist_findings` do not exist).
 
 - [ ] **Step 2: Write the switch configuration**
@@ -7498,7 +8270,7 @@ Keep the `--team-id` signature check after either profile.
 
 - [ ] **Step 4: Run the bundle tests**
 
-Run: `python3 -m unittest tests/test_macos_switch_bundle.py tests/test_macos_bundle.py tests/test_macos_package.py -v`
+Run: `python3 -m unittest discover -s tests -p 'test_macos_*.py' -v` (it includes the switch bundle, bundle and package tests)
 Expected: PASS.
 
 - [ ] **Step 5: Pin release signing of the switch layout**
@@ -7522,8 +8294,16 @@ Add to `Signing` in `tests/test_macos_signing.py`:
         self.assertNotIn("com.apple.security.cs.allow-jit", entitlements, "WKWebView runs JavaScript out of process")
 ```
 
-Run: `python3 -m unittest tests/test_macos_signing.py -v`
+Run: `python3 -m unittest discover -s tests -p test_macos_signing.py -v`
 Expected: PASS without changing `scripts/sign-macos.py`. Its release archive metadata (`qt_version`) stays Qt's; a Tauri release archive is phase 7 (Decision 17).
+
+Commit the bundle and its checks, the task's first reviewable unit:
+
+```bash
+git add client/src-tauri/tauri.switch.conf.json client/src-tauri/Info.switch.plist client/scripts/switch-config.py \
+  scripts/check-macos-bundle.py tests/test_macos_switch_bundle.py tests/test_macos_signing.py
+git commit -m "feat(client): the Mac switch bundle with Qt's identity and its bundle checks"
+```
 
 - [ ] **Step 6: Write the failing install tests**
 
@@ -7610,7 +8390,7 @@ class TrayInstallGui(unittest.TestCase):
 
 Add `import json` and `import plistlib` to the test module's imports.
 
-Run: `python3 -m unittest tests/test_mac_install.py -v`
+Run: `python3 -m unittest discover -s tests -p test_mac_install.py -v`
 Expected: the new tests FAIL (no `HGS_MAC_GUI` handling, no client build).
 
 - [ ] **Step 7: Build the client from `tray/install.sh`**
@@ -7686,8 +8466,15 @@ Add `HGS_MAC_GUI` to the help comment at the top of `mac-install.sh`: `# HGS_MAC
 
 - [ ] **Step 9: Run the install tests**
 
-Run: `python3 -m unittest tests/test_mac_install.py tests/test_tray_update.py -v`
+Run: `python3 -m unittest discover -s tests -p test_mac_install.py -v && python3 -m unittest discover -s tests -p 'test_tray_update*.py' -v`
 Expected: PASS.
+
+Commit the install path, the second unit:
+
+```bash
+git add tray/install.sh mac-install.sh tests/test_mac_install.py
+git commit -m "feat(tray): build and install the Tauri client on the Mac when chosen or installed"
+```
 
 - [ ] **Step 10: Write the docs**
 
@@ -7716,9 +8503,10 @@ The client behaves as Qt does at the points other tools rely on:
 - **Single instance.** It uses Qt's protocol: the lock `~/Library/Application Support/hgs-tray-start.lock`, the socket `hgs-tray` in the canonical per-user temporary folder, and the lines `show` and `sessions`. A start that launchd did not run waits for the service.
 - **Quitting.** The Apple Event quit and SIGTERM, SIGINT and SIGHUP all end in the same exit path, which flushes what must reach the disk and removes the socket.
 - **Menu-bar item.** It shows Qt's tile, tooltip and menu. Refresh and the update entries are left out. A primary click opens Zerus; closing the window keeps the app in the menu bar.
-- **Notifications.** It posts Qt's attention notifications under the same identifiers (`zerus.attention.<token>`). Qt's saved `attention.observed` seeds the client's state once, so banners Qt delivered are withdrawn and stay clickable.
+- **Notifications.** It posts Qt's attention notifications under the same identifiers (`zerus.attention.<token>`). Qt's saved `attention.observed` seeds the client's state once, so banners Qt delivered are withdrawn and stay clickable. Qt's update notices ("Zerus update available") are not ported yet (`zerus-5wmh.12.4`).
+- **Main-thread watchdog.** Qt's: a main thread silent for 30 s aborts the client, so launchd's `KeepAlive Crashed` restarts it, with a hold around sleep and dark wakes. The menu and modal panels do not stop its heartbeat.
 
-The client keeps its own data in `~/Library/Application Support/com.hgdev.hgs-tray/`: read marks, `attention-observed.json`, `menubar.json` and its drafts root, `drafts/`. It reads Qt's settings domain, `~/.config/hgs/tray.conf` and Qt's drafts, and never writes them. AppKit writes its own keys into the shared defaults domain: the status item's position and visibility (`NSStatusItem …`) and, where used, window and panel state (`NSWindow Frame …`, `NSNav…`). The updater reports them after each client update.
+The client keeps its own data in `~/Library/Application Support/com.hgdev.hgs-tray/`: read marks, `attention-observed.json`, `menubar.json` and its drafts root, `drafts/`. It reads Qt's settings domain, `~/.config/hgs/tray.conf` and Qt's drafts, and never writes them. Its settings start at their defaults and its read marks start fresh, since the hosts' read state is authoritative; the one-time draft import (`zerus-5wmh.13.1`) copies Qt's drafts and the dev app's drafts into its drafts root, reading both read-only. AppKit writes its own keys into the shared defaults domain: the status item's position and visibility (`NSStatusItem …`) and, where used, window and panel state (`NSWindow Frame …`, `NSNav…`). The updater reports them after each client update.
 
 ### Building and installing
 
@@ -7739,8 +8527,8 @@ HGS_MAC_GUI=client bash tray/install.sh
   5. installs the client and bootstraps the same LaunchAgent;
   6. waits on Qt's socket path and sends `sessions`;
   7. verifies the drafts, the native processes and Qt's settings keys.
-- **Later client updates.** Qt stays the rollback copy; the replaced client is kept only until that update has verified itself.
-- **Dev numbers.** The updater refuses to replace a numbered Dev install with an unnumbered build.
+- **Later client updates.** Qt stays the rollback copy until the owner retires Qt; there is no second slot. The replaced client is kept only while that update runs, so a new client that does not start is replaced by it automatically.
+- **Dev numbers.** The updater refuses to replace a numbered Dev install with a build that has neither a Dev number nor a local preview label, also for `HGS_TRAY_RESTART=0` (`docs/reference.md`). `HGS_TRAY_RESTART=0` never switches between Qt and the client.
 
 ### Rollback
 
@@ -7767,9 +8555,10 @@ In `client/README.md`, replace the paragraph that starts "The app is a separate 
 
 ```markdown
 The dev app is a separate application (`dev.zerus.next`, "Zerus Next (dev)"): it
-never claims Qt's single-instance socket and never posts notifications unless
-asked (`ZERUS_CLIENT_SINGLE_INSTANCE=1`, `ZERUS_CLIENT_NOTIFICATIONS=1`), and it
-never starts, stops or replaces the installed Zerus GUI, CLI, agents or services.
+never claims Qt's single-instance socket, never posts notifications and runs no
+main-thread watchdog unless asked (`ZERUS_CLIENT_SINGLE_INSTANCE=1`,
+`ZERUS_CLIENT_NOTIFICATIONS=1`, `ZERUS_CLIENT_WATCHDOG=1`), and it never starts,
+stops or replaces the installed Zerus GUI, CLI, agents or services.
 On the Mac the client also builds as Zerus itself, the switch bundle that takes
 over `com.hgdev.hgs-tray`; see `docs/macos-distribution.md#tauri-client-switch`.
 ```
@@ -7787,6 +8576,7 @@ Add a section before `## Build and run`:
 | Hidden start, close hides, Dock icon only with a window, signals | `src-tauri/src/lifecycle.rs`, `signals.rs` | `main.cpp`, `MacAppVisibility.mm`, `TerminationSignals.h` |
 | Tile, tooltip, menu, "Open in" | `core/src/menubar.rs`, `core/src/trayicon.rs`, `src-tauri/src/desk.rs`, `src-tauri/src/platform/macos_menubar.rs` | `IconFactory.cpp`, `FleetState.cpp`, `TrayMenu.cpp`, `QuietTrayIcon.h`, `MacBackend.cpp` |
 | Attention notifications | `core/src/attention.rs`, `src-tauri/src/platform/macos_notify.rs` | `AttentionTracker.cpp`, `MacAttentionNotifier.mm` |
+| Main-thread watchdog and its sleep hold | `src-tauri/src/watchdog.rs`, `src-tauri/src/platform/macos_power.rs` | `MainThreadWatchdog.cpp`, `MacSystemPower.cpp` |
 
 The data directory is Tauri's `app_data_dir` formula with the running bundle's
 identifier: `~/Library/Application Support/dev.zerus.next/` for the dev app,
@@ -7807,44 +8597,50 @@ Mac switch, 2026-10-28 (plan `docs/superpowers/plans/2026-10-28-tauri-client-mac
   `sessions` lines) instead of `tauri-plugin-single-instance` (row 298): the
   maintained updater waits on Qt's socket path and would roll back otherwise.
 - The menu keeps Qt's entries except Refresh (every computer streams) and the
-  update entries (no update controller yet, row 300). The main-thread watchdog
-  (row 297) is a follow-up; the status item is never updated while its menu is open.
-- The client's data directory follows the running bundle's identifier.
+  update entries (no update controller yet, row 300); update notices follow in
+  `zerus-5wmh.12.4`. The main-thread watchdog (row 297) is Qt's, and the status
+  item is never updated while its menu is open.
+- The client's data directory follows the running bundle's identifier; settings
+  start at their defaults and read marks start fresh at the switch.
 ```
 
 - [ ] **Step 11: Check the docs and the whole branch**
 
-Run: `python3 scripts/check-ui-separators.py && python3 scripts/check-source-privacy.py && python3 -m unittest discover -s tests -p 'test_macos_*.py' -v && python3 -m unittest tests/test_mac_install.py tests/test_tray_update.py tests/test_tray_update_switch.py -v`, then the full Rust and frontend checks from Global Constraints.
+Run: `python3 scripts/check-ui-separators.py && python3 scripts/check-source-privacy.py && python3 -m unittest discover -s tests -p 'test_macos_*.py' -v && python3 -m unittest discover -s tests -p test_mac_install.py -v && python3 -m unittest discover -s tests -p 'test_tray_update*.py' -v`, then the full Rust and frontend checks from Global Constraints.
 Expected: all PASS.
+
+Run: `grep -rn "app_data_dir()" client/src-tauri/src`
+Expected: no output. Every client path comes from `Identity::data_dir_now()` (Decision 5); if phase 4 landed first with `app.path().app_data_dir()` for its drafts root, route it through `app.state::<identity::Identity>()` here.
 
 - [ ] **Step 12: Build the switch bundle on the Mac without installing it**
 
-Run **mac-sync**, then build and check the switch bundle in the dev folder:
+Run **mac-lock** and **mac-sync**, then build and check the switch bundle in the persistent checkout, and end with **mac-done**:
 
 ```bash
-ssh -o BatchMode=yes mac 'cd ~/zerus-next-p2/client && export PATH=$HOME/.cargo/bin:/opt/homebrew/bin:$PATH RUSTUP_TOOLCHAIN=1.99.1 CARGO_BUILD_JOBS=4 \
+ssh -o BatchMode=yes mac 'cd ~/zerus-dev/webui/client && export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH" RUSTUP_TOOLCHAIN=1.99.1 CARGO_BUILD_JOBS=6 \
   && npm ci --no-audit --no-fund && python3 scripts/switch-config.py src-tauri/target/switch.conf.json \
-  && nice npx tauri build --config src-tauri/target/switch.conf.json --bundles app \
+  && npx tauri build --config src-tauri/target/switch.conf.json --bundles app \
   && python3 ../scripts/check-macos-bundle.py --gui tauri --version "$(cat ../VERSION)" --selftest src-tauri/target/release/bundle/macos/Zerus.app'
 ```
 
-Expected: `Zerus.app <VERSION>: bundle checks passed.` Do not open, sign or install this bundle: its identifier is `com.hgdev.hgs-tray.local`, and launching it is a display run.
+Expected: `Zerus.app <VERSION>: bundle checks passed.` The self-test runs only `--version` and `--build-info`, which answer before anything starts. Do not open, sign or install this bundle: its identifier is `com.hgdev.hgs-tray.local`, and launching it is a display run.
 
 - [ ] **Step 13: Commit**
 
 ```bash
-git add client/src-tauri/tauri.switch.conf.json client/src-tauri/Info.switch.plist client/scripts/switch-config.py \
-  tray/install.sh mac-install.sh scripts/check-macos-bundle.py tests/test_macos_switch_bundle.py \
-  tests/test_mac_install.py tests/test_macos_signing.py docs/macos-distribution.md client/README.md \
-  docs/superpowers/specs/2026-10-27-tauri-web-ui-design.md
-git commit -m "feat(client): Mac switch bundle with Qt's identity, install path, checks and runbook"
+git add docs/macos-distribution.md client/README.md docs/superpowers/specs/2026-10-27-tauri-web-ui-design.md
+git commit -m "docs(client): the Mac switch, its rollback and the coordinator's runbook"
 ```
 
 ---
 
 ## Switch runbook (coordinator)
 
-The coordinator runs this on the owner's Mac after Tasks 1 to 8 are merged to main and their main push has a CI sequence `N`. Steps marked **display** run only in a window the owner gives. Nothing here touches the hgs CLI, `com.hgdev.hgs-recovery`, `com.hgdev.hgs-voice`, native agents, tmux or the mobile connector. Signing needs the login keychain, so signing steps run as a `.command` in Terminal, like other Dev rollouts.
+The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to main and their main push has a CI sequence `N`. Steps marked **display** run only in a window the owner gives: the implementer tells the coordinator when the work reaches step 4, and step 8 is the coordinator's own, done with the owner. Nothing here touches the hgs CLI, `com.hgdev.hgs-recovery`, `com.hgdev.hgs-voice`, native agents, tmux or the mobile connector. Signing needs the login keychain, so signing steps run as a `.command` in Terminal, like other Dev rollouts.
+
+**Before the merge (Task 7).** The numbered Dev guard also refuses unnumbered `tray/install.sh` and `mac-install.sh` runs over a numbered Dev install on arch and on the Mac, including `HGS_TRAY_RESTART=0`. Tell the events and menu-parity sessions before Task 7 reaches main: their ad hoc installs then need `ZERUS_DEV_BUILD_NUMBER` or a local preview label (`ZERUS_LOCAL_PREVIEW_LABEL`, `docs/reference.md`), both from a clean Git checkout. `mac-install.sh` ships a tarball without `.git`, so it can make neither; on a Mac with a numbered Dev install it then updates the CLI and stops at the GUI with the refusal.
+
+**What the switch does not carry over (coordinator ruling).** Settings start at their defaults and read marks start fresh; the hosts' read state stays authoritative. Qt's drafts and the dev app's drafts reach the client through the one-time import of `zerus-5wmh.13.1` (phase 4), which reads both stores read-only; until then they stay where they are. In-app update notices are missing after the switch, accepted until `zerus-5wmh.12.4`; the coordinator rolls Dev out by hand meanwhile.
 
 1. **Prepare the clean checkout** (no display). In the clean clone used for Dev rollouts:
    ```sh
@@ -7868,13 +8664,14 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 8 are merged to ma
    `sign-local-macos.py` must print "privacy identity matches the installed application". Report both `designated =>` lines to the owner privately; they contain the team. Equal requirements carry the TCC and Notification Center grants over. Different ones need the owner's decision, because the grants would be asked for again.
 3. **Check the socket path** (no display, read-only):
    ```sh
-   lsof -n -a -c hgs-tray -U -F n | grep '/hgs-tray$'
+   realpath "$(lsof -n -a -c hgs-tray -U -F n | grep '/hgs-tray$' | sed 's/^n//')"
    echo "$(realpath "$(getconf DARWIN_USER_TEMP_DIR)")/hgs-tray"
    ```
-   The two paths must be equal. If they differ, stop and report: the updater would time out on the new client and roll it back.
-4. **Try the dev app** (**display**). Build the dev bundle in `~/zerus-next-p2/client` with `npx tauri build --bundles app`. Start its executable from Terminal:
+   The two paths must be equal: the client binds `hgs-tray` in the canonical per-user temporary folder (`TMPDIR`, else `_CS_DARWIN_USER_TEMP_DIR`, as Qt's `QDir::tempPath`). Both sides go through `realpath`, so `/var` and `/private/var` spellings of one folder compare equal; the updater reaches the socket through either. If they still differ, stop and report: the updater would time out on the new client and roll it back.
+4. **Try the dev app** (**display**, in an owner-given window; the implementer tells the coordinator when the work reaches this step). Build the dev bundle under the heavy-build lock (**mac-lock**): in `~/zerus-dev/webui`, `git fetch origin && git checkout --detach origin/main`, then `npx tauri build --bundles app` in `client/`; remove `~/zerus-dev/.heavy.lock` once the build is done. Start its executable from Terminal, in `~/zerus-dev/webui/client`:
    ```sh
-   ZERUS_CLIENT_SINGLE_INSTANCE=1 ZERUS_CLIENT_NOTIFICATIONS=1 "src-tauri/target/release/bundle/macos/Zerus Next (dev).app/Contents/MacOS/zerus-client"
+   ZERUS_CLIENT_SINGLE_INSTANCE=1 ZERUS_CLIENT_NOTIFICATIONS=1 ZERUS_CLIENT_WATCHDOG=1 \
+     "src-tauri/target/release/bundle/macos/Zerus Next (dev).app/Contents/MacOS/zerus-client"
    ```
    Then check:
    - **The tile:** counts, amber attention and the stale dot, on a light and a dark menu bar; the tooltip lines.
@@ -7889,6 +8686,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 8 are merged to ma
      - clicking a banner opens that session;
      - nothing posts while the window is focused.
    - **Defaults:** `defaults read dev.zerus.next` lists only Cocoa and WebKit keys (`NS…`, `Apple…`, `WebKit…`). Report the list; it shows what Cocoa or WebKit writes into a client's domain.
+   - **Watchdog:** Terminal shows `main-thread watchdog on (30 s)`. Open the menu-bar menu and leave it open for 60 s, then close it: the app keeps running and no `main thread unresponsive` line appears (the heartbeat runs in the common run-loop modes).
    - **Ignored tile test:** if `the_tile_draws_amber_attention_and_the_stale_dot` was ignored over SSH, run it here with `--ignored`.
    Quit the dev app from its menu.
 5. **Agree the moment with the owner.** Qt flushes its drafts when it quits, but the owner should not be typing.
@@ -7915,17 +8713,18 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 8 are merged to ma
    - the agent is running `~/Applications/hgs-tray.app/Contents/MacOS/hgs-tray`;
    - the rollback folder holds `hgs-tray.app` (Qt) and `com.hgdev.hgs-tray.plist`;
    - the socket is at the path from step 3.
-8. **Confirm** (**display**):
+8. **Confirm** (**display**; the coordinator's job, done with the owner):
    - one menu-bar item;
    - notifications post without a new permission prompt (when step 2 matched);
    - a click on a banner Qt delivered before the switch opens its session;
-   - the owner's sessions, drafts in Qt's store and settings are where they were. Qt drafts appear in the client once `zerus-5wmh.13.1` lands.
-9. **Later Dev rollouts.** Run the same `bash tray/install.sh` with the new `N` and without `HGS_MAC_GUI`. The installed client is kept, and Qt stays the rollback copy.
+   - the owner's sessions, drafts in Qt's store and settings are where they were. Qt drafts and the dev app's drafts appear in the client once `zerus-5wmh.13.1` lands; the client's own settings start at their defaults;
+   - after the Mac's next sleep and wake, `launchctl print gui/$(id -u)/com.hgdev.hgs-tray | grep 'pid ='` shows the same pid as before, and `~/Library/Logs/hgs-tray.log` has no `main thread unresponsive` line.
+9. **Later Dev rollouts.** Run the same `bash tray/install.sh` with the new `N` and without `HGS_MAC_GUI`. The installed client is kept, and Qt stays the rollback copy: there is no second slot. A new client that does not start is replaced by the client it replaced, automatically. The numbered Dev guard refuses a run without `ZERUS_DEV_BUILD_NUMBER` or a local preview label.
 10. **Rollback.** From the clean checkout, in Terminal:
     ```sh
     python3 tray/update-installed.py --rollback ~/Applications/hgs-tray.app
     ```
-    Qt comes back with its drafts, and the client moves into the rollback folder. If the updater reports changed Qt settings, quit Zerus and run `defaults import com.hgdev.hgs-tray ~/.local/share/hgs/desktop-previous/com.hgdev.hgs-tray.plist`. Use `HGS_MAC_GUI=qt` on later installs to stay on Qt, and file a bead for the cause.
+    Qt comes back with its drafts, and the client moves into the rollback folder. If the updater reports changed Qt settings, quit Zerus and run `defaults import com.hgdev.hgs-tray ~/.local/share/hgs/desktop-previous/com.hgdev.hgs-tray.plist`. Use `HGS_MAC_GUI=qt` on later installs to stay on Qt, and file a bead for the cause. The Qt bundle stays the rollback copy until the owner retires Qt.
 
 ## Coverage
 
@@ -7935,14 +8734,17 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 8 are merged to ma
 | Same per-user lock and socket path as `SingleInstance`, `show`/`sessions`, second start forwards; the updater finds the socket and sends `sessions` (.44) | 2, 3, 7 (end-to-end on Linux) |
 | Window activation (.44) | 3, 4 |
 | Dock badge with the attention count (spec row 291, not in a bead) | 1, 4 |
-| Login only through the tray LaunchAgent template with KeepAlive Crashed and ProcessType Interactive; only the new client starts at login (.44) | 8 (template and agent unchanged; the bundle replaces Qt at the same path) |
+| Login only through the tray LaunchAgent template with KeepAlive Crashed and ProcessType Interactive; only the new client starts at login (.44) | 9 (template and agent unchanged; the bundle replaces Qt at the same path) |
 | Notifications under the app identity, default sound, one request per token, pending and delivered withdrawn, default action opens the session (.43) | 5, 6 |
 | Unread reply identity kept, reply banners wait for background work, explicit attention first, Mute (.43) | 5 |
 | Authorization as Qt requests it; the grant carries over with a matching requirement (.43) | 5, 6, runbook step 2 |
 | Quit, flush, snapshot (private, no links) and verify the client's drafts root (.12.1) | 3, 7 |
-| Info.plist identity, LaunchAgent template in `Resources/setup`, dev app keeps its identity, `check-macos-bundle` accepts the bundle (.12.2) | 8 |
-| Signing continuity (Developer ID, same team, no cdhash), release signing with the hardened runtime and entitlements, requirement comparison (.12.2) | 8, runbook step 2 |
-| `--build-info` shape with the Dev number; quit and SIGTERM flush (.12.2) | 2, 3 |
+| Info.plist identity, LaunchAgent template in `Resources/setup`, dev app keeps its identity, `check-macos-bundle` accepts the bundle (.12.2) | 9 |
+| Signing continuity (Developer ID, same team, no cdhash), release signing with the hardened runtime and entitlements, requirement comparison (.12.2) | 9, runbook step 2 |
+| `--build-info` shape with the Dev number and the local preview label; quit and SIGTERM flush (.12.2) | 2, 3 |
 | Qt's stores read only; plist snapshot beside the rollback copy; Qt keys byte-for-byte; list of Cocoa keys (.12.2) | 6, 7, runbook step 4 |
-| Client data directory decided (.12.2) | Decision 5, Task 2 |
-| Switch only through the installers, numbered builds only, one rollback copy (last Qt) and a rollback command, docs (.12.2) | 2, 7, 8, runbook |
+| Client data directory decided; dev drafts reach the client through `zerus-5wmh.13.1`; settings at defaults, read marks fresh (.12.2, coordinator ruling) | Decision 5, Tasks 2 and 9, runbook |
+| Switch only through the installers, numbered builds only, one rollback copy (last Qt) and a rollback command, docs (.12.2, coordinator ruling) | 2, 7, 9, runbook |
+| Numbered Dev guard on every platform with the local preview label as the escape hatch; `docs/reference.md` and the refusal say the same; events and menu-parity told before main (coordinator ruling) | 2, 7, runbook "Before the merge" |
+| Main-thread watchdog with Qt's thresholds, sleep and dark-wake hold and abort for launchd or systemd (.12.3) | 8, runbook steps 4 and 8 |
+| Update notices missing after the switch, follow-up `zerus-5wmh.12.4` (coordinator ruling) | Decisions, Task 9 docs, runbook |

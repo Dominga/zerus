@@ -37,6 +37,7 @@ fn live_smoke() {
                         if let Some(session) = session {
                             let key = session.key();
                             let _ = fleet.follow_processes(&local, session.clone());
+                            let _ = fleet.follow_organization(&local);
                             followed = fleet.follow(&local, &key, session, None, 100).is_ok();
                         }
                     }
@@ -50,6 +51,7 @@ fn live_smoke() {
                 Change::Processes { .. } => "processes",
                 Change::Tasks { .. } => "tasks",
                 Change::Machine { .. } => "machine",
+                Change::Organization { .. } => "organization",
             };
             *kinds.entry(kind).or_default() += 1;
             coalescer.push(change);

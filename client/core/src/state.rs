@@ -5,8 +5,9 @@
 //! rows at once, so a `gap` never empties the list; a delta gives one upsert or
 //! removal per item; Activity frames of followed sessions become
 //! [`Change::Activity`], processes frames [`Change::Processes`], tasks frames
-//! [`Change::Tasks`] and a changed `catalog.meta` [`Change::Machine`]. Frame
-//! types and topics it does not know change nothing.
+//! [`Change::Tasks`], a changed `catalog.meta` [`Change::Machine`] and the
+//! organization's frames [`Change::Organization`]. Frame types and topics it
+//! does not know change nothing.
 use crate::{
     view, ActivityUpdate, Change, ComputerId, ComputerStatus, ProcessesState, TasksState, ViewRow,
 };
@@ -141,6 +142,7 @@ pub struct CatalogState {
     activity: HashMap<String, ActivityState>,
     processes: ProcessesState,
     tasks: TasksState,
+    organization: crate::OrganizationState,
     live: bool,
     failed: bool,
     failures: u32,
@@ -313,6 +315,15 @@ impl CatalogState {
                         .state(computer, &state.key, &state.value, state.rev),
                 );
             }
+            Body::Snapshot(snapshot) if snapshot.topic == topic::ORGANIZATION => {
+                changes.extend(self.organization.snapshot_page(computer, snapshot));
+            }
+            Body::Delta(delta) if delta.topic == topic::ORGANIZATION => {
+                changes.extend(self.organization.delta(computer, delta));
+            }
+            Body::Error(error) if error.topic.as_deref() == Some(topic::ORGANIZATION) => {
+                changes.extend(self.organization.error(computer, error));
+            }
             Body::Snapshot(snapshot) if snapshot.topic == topic::TASKS => {
                 changes.extend(self.tasks.snapshot(computer, snapshot));
             }
@@ -375,6 +386,7 @@ impl CatalogState {
             activity.staged = None;
         }
         self.tasks.begin();
+        self.organization.begin();
     }
 
     /// The stream ended, failed or stayed silent: the computer reconnects and
@@ -474,6 +486,22 @@ impl CatalogState {
             .iter()
             .any(|name| name == topic::PROCESSES)
             .then_some(hello.limits.processes_subscriptions)
+    }
+
+    /// The followed organization; see [`crate::organization`].
+    pub fn organization(&self) -> &crate::OrganizationState {
+        &self.organization
+    }
+
+    pub fn organization_mut(&mut self) -> &mut crate::OrganizationState {
+        &mut self.organization
+    }
+
+    /// Whether the latest `hello` offers the organization topic.
+    pub fn organization_offered(&self) -> bool {
+        self.hello
+            .as_ref()
+            .is_some_and(|hello| hello.topics.iter().any(|name| name == topic::ORGANIZATION))
     }
 
     /// The followed task lists; see [`crate::tasks`].

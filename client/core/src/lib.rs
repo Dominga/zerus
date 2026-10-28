@@ -40,6 +40,7 @@ pub mod terminal;
 pub mod view;
 pub mod views;
 pub mod voice;
+pub mod worktrees;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

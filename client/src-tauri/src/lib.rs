@@ -102,16 +102,20 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("Zerus Next failed to start")
         .run(|app, event| {
-            // Pending project edits and the layout reach the disk before the process ends.
-            #[cfg(feature = "live")]
+            // The app's one exit hook: every stream that must reach the disk
+            // before the process ends adds its flush to this block.
             if matches!(event, tauri::RunEvent::Exit) {
-                use tauri::Manager;
-                if let Some(organization) = app.try_state::<organization::Organization>() {
-                    organization.flush();
+                // Pending project edits and the layout.
+                #[cfg(feature = "live")]
+                {
+                    use tauri::Manager;
+                    if let Some(organization) = app.try_state::<organization::Organization>() {
+                        organization.flush();
+                    }
                 }
             }
-            #[cfg(not(feature = "live"))]
-            let _ = (app, event);
+            // Borrowed, never moved, so code added after it still builds.
+            let _ = (&app, &event);
         });
 }
 

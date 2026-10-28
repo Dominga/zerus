@@ -454,9 +454,15 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         if desired && !member.limit_resume {
             steps.push(Step::StartLimitResume { member: member.id.clone() });
         } else if desired && member.limit_resume {
-            // The request expires if the dispatcher stops refreshing it; a
-            // reset can be hours away.
-            steps.push(Step::RefreshLimitResume { member: member.id.clone() });
+            // N29: a swap may have given the member another session; the request
+            // follows the session it is bound to now, withdrawing the old one.
+            if member.limit_session.as_ref() != member.session.as_ref() {
+                steps.push(Step::StartLimitResume { member: member.id.clone() });
+            } else {
+                // The request expires if the dispatcher stops refreshing it; a
+                // reset can be hours away.
+                steps.push(Step::RefreshLimitResume { member: member.id.clone() });
+            }
         } else if !desired && member.limit_resume {
             steps.push(Step::StopLimitResume { member: member.id.clone() });
         }
@@ -1802,6 +1808,12 @@ pub(crate) fn default_folder(agent: &str) -> MemberFolder {
 /// team's (or its own) folder, or the worktree/clone path a writing member
 /// gets.
 pub(crate) fn member_folder_path(team: &Team, member: &Member) -> anyhow::Result<String> {
+    // F8/N13: an adopted session works in the folder it was adopted in. That
+    // folder is the member's own; a worktree name computed from it is a folder
+    // nobody writes to, so a report queued there never reaches the worker.
+    if member.session.is_some() && !member.directory.is_empty() {
+        return Ok(member.directory.clone());
+    }
     let folder = if member.directory.is_empty() { team.folder.clone() } else { member.directory.clone() };
     anyhow::ensure!(!folder.is_empty(), "The team has no folder");
     if !matches!(member.folder, MemberFolder::Worktree | MemberFolder::Clone) {
@@ -2143,6 +2155,11 @@ fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) 
     if member.folder == MemberFolder::Clone {
         args.insert(2, "--clone");
     }
+    // N9: a DeepSeek member works in a sandbox that needs full control of its
+    // folder; every other member's worktree is created without touching ACLs.
+    if member.agent == "dsh" {
+        args.insert(2, "--sandbox");
+    }
     let output = run(&member.computer, &args)?;
     anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
     // F1.4: the new folder is the repository's (a clone by its origin), on the
@@ -2266,32 +2283,72 @@ fn change(store: &mut Store, team: &str, change: impl FnOnce(&mut Team, &mut Vec
 
 /// H1: asks the recovery service to wait for a member's usage-limit reset (or
 /// to stop). The service keeps the timing, cancellation and text; Zerus only
-/// names the session and its run.
+/// names the session and its run. N29: the request always names the session the
+/// member is bound to now; the one a swap replaced is withdrawn first.
 fn set_limit_resume(store: &mut Store, team: &str, member: &str, on: bool) -> anyhow::Result<()> {
-    let mut session = None;
+    let mut calls = Vec::new();
     change(store, team, |team, _| {
         let found = team.members.iter_mut().find(|found| found.id == member).context("unknown member")?;
-        if found.limit_resume == on {
-            return Ok(());
-        }
-        found.limit_resume = on;
-        // N29: the request is withdrawn for the session it named, even after
-        // a swap gave the member another one.
-        session = if on {
-            found.limit_session = found.session.clone();
-            found.session.clone()
-        } else {
-            found.limit_session.take().or_else(|| found.session.clone())
-        };
+        let current = found.session.clone();
+        calls = limit_resume_calls(found.limit_session.as_ref(), current.as_ref(), on && current.is_some());
+        found.limit_resume = on && current.is_some();
+        found.limit_session = if found.limit_resume { current } else { None };
+        found.limit_refreshed_at = None;
         Ok(())
     })?;
-    let Some(session) = session else { return Ok(()) };
-    if let Err(error) = team_override(&session, on) {
-        eprintln!(
-            "hgs: the team could not {} automatic recovery for {}: {error}",
-            if on { "start" } else { "stop" },
-            session.name
-        );
+    for (session, on) in calls {
+        if let Err(error) = team_override(&session, on) {
+            eprintln!(
+                "hgs: the team could not {} automatic recovery for {}: {error}",
+                if on { "start" } else { "stop" },
+                session.name
+            );
+        }
+    }
+    Ok(())
+}
+
+/// N29: the recovery calls one limit-resume change makes: the recorded session
+/// is withdrawn when it is not the current one, and a new request names the
+/// current one.
+fn limit_resume_calls(recorded: Option<&SessionRef>, current: Option<&SessionRef>, on: bool) -> Vec<(SessionRef, bool)> {
+    let mut calls = Vec::new();
+    if let Some(recorded) = recorded {
+        // Turning the wait off always withdraws the recorded session; turning it
+        // on withdraws it only when a swap replaced it.
+        if !on || current != Some(recorded) {
+            calls.push((recorded.clone(), false));
+        }
+    }
+    if on {
+        if let Some(current) = current {
+            calls.push((current.clone(), true));
+        }
+    }
+    calls
+}
+
+/// N30: the recovery service ignores a refresh younger than a minute, and a
+/// refresh on another computer is an `hgs` call with a 60 s bound; a slow peer
+/// would hold the dispatcher for every team. One refresh a minute per member is
+/// enough and stays well inside the request's 900 s expiry. The time is
+/// recorded before the call, so a peer that hangs is not asked again next tick.
+fn refresh_limit_resume(store: &mut Store, team: &Team, member: &str) -> anyhow::Result<()> {
+    const REFRESH_SECONDS: f64 = 60.0;
+    let Some(found) = team.member(member) else { return Ok(()) };
+    let named = found.limit_session.clone().or_else(|| found.session.clone());
+    let Some(session) = named else { return Ok(()) };
+    if now() - found.limit_refreshed_at.unwrap_or(0.0) < REFRESH_SECONDS {
+        return Ok(());
+    }
+    change(store, &team.id, |team, _| {
+        if let Some(found) = team.members.iter_mut().find(|found| found.id == member) {
+            found.limit_refreshed_at = Some(now());
+        }
+        Ok(())
+    })?;
+    if let Err(error) = team_override(&session, true) {
+        eprintln!("hgs: the team could not refresh automatic recovery for {}: {error}", session.name);
     }
     Ok(())
 }
@@ -3203,8 +3260,10 @@ pub(crate) fn commit_in(folder: &str, branch: &str, message: &str, paths: &[Stri
 /// (C2): the repository's own config may name neither a hook path, fsmonitor,
 /// an include, a filter nor a signing program, and hooks are disabled outright;
 /// a clone member owns its .git, so its config must never run code here. N1: the
-/// branch is the lead's own, passed in, never a name built into Zerus.
-pub(crate) fn merge_lead(folder: &str, branch: &str, timeout: Duration) -> super::templates::Outcome {
+/// branch is the lead's own, passed in, never a name built into Zerus. N12: the
+/// branch is fetched from the team's folder first, so a clone merges the lead's
+/// current work, not the copy frozen at clone time.
+pub(crate) fn merge_lead(folder: &str, source: &str, branch: &str, timeout: Duration) -> super::templates::Outcome {
     let started = Instant::now();
     let deadline = started + timeout;
     let elapsed = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -3229,17 +3288,57 @@ pub(crate) fn merge_lead(folder: &str, branch: &str, timeout: Duration) -> super
         };
     }
     let hooks = format!("core.hooksPath={}", if cfg!(windows) { "NUL" } else { "/dev/null" });
+    // N12: a clone keeps its own copy of the lead's branch from the day it was
+    // made, so merging that name says "Already up to date" without the lead's
+    // work. Fetch the branch from the team's folder and merge what came. A
+    // worktree shares the team's refs, where the branch is current already, so
+    // there is nothing to fetch and no transport to run.
+    let fetch_from_source = !same_repository(folder, source, deadline);
+    if fetch_from_source {
+        let mut fetch = std::process::Command::new("git");
+        fetch
+            .arg("-C")
+            .arg(folder)
+            .args(["-c", hooks.as_str(), "-c", "core.fsmonitor=false"])
+            .arg("--no-optional-locks")
+            .args(["fetch", "--no-tags", "--quiet", source, branch]);
+        let remaining = deadline.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));
+        let fetched = super::templates::run_tree(&mut fetch, remaining, None);
+        if fetched.exit != Some(0) || fetched.timed_out {
+            return super::templates::Outcome {
+                exit: Some(1),
+                tail: format!("The lead's branch was not fetched from {source}:\n{}", fetched.tail),
+                ms: elapsed(),
+                ..Default::default()
+            };
+        }
+    }
+    let merge = if fetch_from_source { "FETCH_HEAD" } else { branch };
     let mut command = std::process::Command::new("git");
     command
         .arg("-C")
         .arg(folder)
         .args(["-c", hooks.as_str(), "-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false", "-c", "gpg.program="])
         .arg("--no-optional-locks")
-        .args(["merge", "--no-edit", branch]);
+        .args(["merge", "--no-edit", merge]);
     let remaining = deadline.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));
     let mut outcome = super::templates::run_tree(&mut command, remaining, None);
     outcome.ms = elapsed();
     outcome
+}
+
+/// N12: whether two folders are the same repository (a worktree and its main
+/// checkout share refs); a clone is not.
+fn same_repository(folder: &str, source: &str, deadline: Instant) -> bool {
+    let common = |path: &str| {
+        super::super::worktrees::git(Path::new(path), &["rev-parse", "--path-format=absolute", "--git-common-dir"], deadline)
+            .map(|out| String::from_utf8_lossy(&out).trim().to_owned())
+            .ok()
+    };
+    match (common(folder), common(source)) {
+        (Some(folder), Some(source)) => same_path(&folder, &source),
+        _ => false,
+    }
 }
 
 fn send_brief(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
@@ -3629,17 +3728,9 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             Ok(())
         }),
         Step::StartLimitResume { member } => set_limit_resume(store, &team.id, member, true),
-        Step::RefreshLimitResume { member } => {
-            // No team write: the recovery service ignores a refresh younger
-            // than a minute, so this is cheap.
-            let named = team.member(member).and_then(|member| member.limit_session.clone().or_else(|| member.session.clone()));
-            if let Some(session) = named {
-                if let Err(error) = team_override(&session, true) {
-                    eprintln!("hgs: the team could not refresh automatic recovery for {}: {error}", session.name);
-                }
-            }
-            Ok(())
-        }
+        // N30: a refresh on another computer is a 60 s `hgs` call; once a
+        // minute is enough inside the request's expiry.
+        Step::RefreshLimitResume { member } => refresh_limit_resume(store, team, member),
         Step::StopLimitResume { member } => set_limit_resume(store, &team.id, member, false),
         Step::Started { task } => change(store, &team.id, |team, events| {
             let Some(member) = team.task(*task).and_then(|t| t.attempts.last()).map(|a| a.member.clone()) else {
@@ -3808,6 +3899,27 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     Ok(true)
 }
 
+/// N13: the folder the worker reads a member's outbox from is the one the
+/// member's sandbox writes to: the folder the store records for it, once that
+/// agrees with its live session. An adopted session's folder is its own, never
+/// a worktree name computed from it; a shared member may work in a subfolder of
+/// the team's checkout, where its sandbox writes.
+fn outbox_folder(team: &Team, member: &Member, cwd: &str) -> PathBuf {
+    match member_folder_path(team, member) {
+        Ok(folder) if !folder.is_empty() && same_path(&folder, cwd) => PathBuf::from(folder),
+        _ => PathBuf::from(cwd),
+    }
+}
+
+/// N16: whether the request's member works in this same folder, so its request
+/// is theirs to apply on their own pass.
+fn shares_folder(team: &Team, request: &Value, seen: &[Seen], cwd: &str) -> bool {
+    let Some(other) = team.member(request["member"].as_str().unwrap_or_default()) else { return false };
+    other.id != team.lead
+        && other.state != MemberState::Removed
+        && session_of(other, seen).is_some_and(|found| found.host.is_empty() && !found.cwd.is_empty() && same_path(&found.cwd, cwd))
+}
+
 /// Applies the requests members left in their folders: a sandbox may not write
 /// the team store, but it can write its own folder (U20). The folder proves the
 /// member; the request must name that member and one of its running attempts.
@@ -3828,12 +3940,20 @@ fn take_outbox_with(
     }
     for member in team.members.iter().filter(|member| member.id != team.lead && member.state != MemberState::Removed) {
         let Some(found) = session_of(member, seen).filter(|found| !found.cwd.is_empty() && found.host.is_empty()) else { continue };
-        let folder = Path::new(&found.cwd);
+        let folder = outbox_folder(team, member, &found.cwd);
+        let folder = folder.as_path();
         // C1: a runner that died leaves its claim behind; the member then hears
         // that the run stopped instead of waiting for a result that never comes.
         settle_stale_runs(folder, team);
         let Ok(requests) = super::outbox::pending(folder, super::outbox::PER_TICK) else { continue };
         for (path, request) in requests {
+            // N16: members that may not have worktrees share one folder and one
+            // outbox. A request another member of this folder queued there is
+            // theirs to apply, never this member's to refuse and settle; only a
+            // name nobody here answers to is refused below.
+            if request["member"].as_str() != Some(member.id.as_str()) && shares_folder(team, &request, seen, &found.cwd) {
+                continue;
+            }
             if request["op"] == "run" {
                 match start_run(store, team, member, folder, &request, spawn) {
                     // A refusal is answered now; a claim needs no answer - the
@@ -3899,7 +4019,7 @@ fn run_outcome(team: &Team, member: &Member, folder: &Path, request: &Value) -> 
             "This team works in one shared folder; Zerus does not merge the lead's branch into it"
         );
         let branch = lead_branch(team)?;
-        return Ok(merge_lead(&mine, &branch, timeout));
+        return Ok(merge_lead(&mine, &team.folder, &branch, timeout));
     }
     if let Some(payload) = &plan.commit {
         // B4/U21: the commit template is Zerus' own code, not a subprocess: the
@@ -3989,6 +4109,12 @@ fn start_run(
     if super::outbox::running(folder, &id).is_some() {
         // A push of the same id while the runner works: keep the claim, drop the copy.
         let _ = std::fs::remove_file(super::outbox::request_path(folder, &id));
+        return Ok(None);
+    }
+    // N11: one run per member folder at a time. A second claim while the first
+    // runner works would run beside it in the same folder (a build and a test
+    // on a half-linked binary); the request stays queued for a later tick.
+    if !super::outbox::running_all(folder).is_empty() {
         return Ok(None);
     }
     if request["team"].as_str() != Some(team.id.as_str()) {
@@ -4151,7 +4277,7 @@ fn run_request(store: &mut Store, folder: &Path, request: &Value) {
 /// before it removed the file) is a replay, not a second report.
 fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value) -> anyhow::Result<Value> {
     let op = request["op"].as_str().unwrap_or_default();
-    anyhow::ensure!(matches!(op, "report" | "ask" | "commit"), "Unknown outbox request {op}");
+    anyhow::ensure!(matches!(op, "report" | "ask" | "commit" | "reply"), "Unknown outbox request {op}");
     anyhow::ensure!(request["team"] == team.id.as_str(), "a request for another team");
     anyhow::ensure!(request["member"] == member.id.as_str(), "the folder belongs to {}", team.role_of(&member.id));
     // The member's own request, unchanged: a replay keys the same store receipt.
@@ -4176,9 +4302,18 @@ fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value
         return super::commands::commit_in_team(team, &member.id, &input);
     }
     let member_id = member.id.clone();
-    store.mutate(Some((&request_id, &input)), &team.id, None, |team, events| {
+    let value = store.mutate(Some((&request_id, &input)), &team.id, None, |team, events| {
         ops::apply(team, op, &input, &ops::Actor::Member(member_id.clone()), &BTreeSet::new(), events)
-    })
+    })?;
+    // 9.6: a queued reply is the same answer the direct path routes down to the
+    // sub-team's question; the answer is already recorded, so a routing error
+    // is logged and never refused as if nothing had been applied.
+    if op == "reply" {
+        if let Err(error) = super::commands::route_reply_down(store, &team.id, &input) {
+            eprintln!("hgs team worker: {}: reply: {error:#}", team.name);
+        }
+    }
+    Ok(value)
 }
 
 /// The worker's own files: a pid, a heartbeat, a stop request and a log (U2).
@@ -5957,7 +6092,7 @@ mod tests {
             return;
         }
         assert!(hardened.join(".git").join("hooks").join("post-merge").exists());
-        let outcome = merge_lead(&hardened.display().to_string(), "teams-v2/lead", Duration::from_secs(60));
+        let outcome = merge_lead(&hardened.display().to_string(), &hardened.display().to_string(), "teams-v2/lead", Duration::from_secs(60));
         assert_eq!(outcome.exit, Some(0), "{outcome:?}");
         assert!(!marker.exists(), "the repository's post-merge hook ran");
     }
@@ -5985,7 +6120,7 @@ mod tests {
         }
         let program = format!("cmd /c echo x > \"{}\"", marker.display());
         assert!(git(&["config", "core.fsmonitor", &program]));
-        let outcome = merge_lead(&repo.display().to_string(), "main", Duration::from_secs(60));
+        let outcome = merge_lead(&repo.display().to_string(), &repo.display().to_string(), "main", Duration::from_secs(60));
         assert_eq!(outcome.exit, Some(1), "{outcome:?}");
         assert!(outcome.tail.contains("configures core.fsmonitor"), "{}", outcome.tail);
         assert!(!marker.exists());
@@ -7341,6 +7476,9 @@ mod tests {
             let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
             member.folder = MemberFolder::Clone;
             member.directory = "C:/work/project".into();
+            // A clone is cut for a member that has not started yet; an adopted
+            // session works in its own folder instead (N13).
+            member.session = None;
         }
         let member = team.member("dev").unwrap();
         let path = member_folder_path(&team, member).unwrap();
@@ -7540,6 +7678,272 @@ mod tests {
         } else {
             Ok(std::process::Command::new("git").arg("-C").arg(&source).args(["worktree", "add", "--quiet", "-b", &branch, &destination, "HEAD"]).output()?)
         }
+    }
+
+    /// N9: the generic `worktrees create` grants nothing; only a DeepSeek
+    /// member's folder asks for the sandbox grant, so a share without ACL
+    /// support cannot turn another agent's created worktree into a failure.
+    #[test]
+    fn only_a_dsh_members_worktree_asks_for_the_sandbox_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        set_git_ceiling(&dir.path().display().to_string());
+        let repo = folder_repo(dir.path(), "project");
+        for (agent, sandbox) in [("codex", false), ("dsh", true)] {
+            let member = Member { id: format!("dev-{agent}"), role: "Backend".into(), agent: agent.into(), folder: MemberFolder::Worktree, ..Default::default() };
+            let team = folder_team(&repo, member.clone());
+            let calls = std::cell::RefCell::new(Vec::<Vec<String>>::new());
+            let run = |_: &str, args: &[&str]| {
+                calls.borrow_mut().push(args.iter().map(|arg| arg.to_string()).collect());
+                local_create(args)
+            };
+            member_folder_with(&team, &member, &run).unwrap();
+            let args = calls.borrow()[0].clone();
+            assert_eq!(args.iter().any(|arg| arg == "--sandbox"), sandbox, "{agent}: {args:?}");
+        }
+    }
+
+    /// F8/N13: an adopted worktree member works in its session's own folder; a
+    /// report queued in the folder computed beside it would stay queued forever.
+    #[test]
+    fn an_adopted_sessions_outbox_is_the_sessions_own_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let folder = dir.path().join("work");
+        std::fs::create_dir_all(&folder).unwrap();
+        t.folder = dir.path().join("repo").display().to_string();
+        let task = t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+        task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        task.status = TaskStatus::InProgress;
+        let task_id = task.id;
+        {
+            let member = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            member.folder = MemberFolder::Worktree;
+            member.directory = folder.display().to_string();
+            member.session = Some(SessionRef { name: "codex/x/dev".into(), run_id: "r1".into(), ..Default::default() });
+        }
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let current = store.load(&t.id).unwrap().unwrap();
+        assert_eq!(
+            member_folder_path(&current, current.member("dev").unwrap()).unwrap(),
+            folder.display().to_string(),
+            "the adopted session's own folder is the member's"
+        );
+        let request_id = "44444444-4444-4444-8444-444444444444";
+        // #522: a sandboxed member's ask queues in its folder like a report and
+        // reaches the lead as the member's own question.
+        let request = json!({"op":"ask","request_id":request_id,"team":t.id,"member":"dev","attempt":"A1",
+            "input":{"request_id":request_id,"team":t.id,"attempt":"A1","text":"Must I keep the cache?"}});
+        super::super::outbox::push(&folder, &request).unwrap();
+        let mut dev = session("codex/x/dev", "r1", true);
+        dev.cwd = folder.display().to_string();
+        take_outbox(&mut store, &current, &[dev]).unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let questions = &saved.task(task_id).unwrap().attempts.last().unwrap().questions;
+        assert_eq!(questions.first().map(|question| question.text.as_str()), Some("Must I keep the cache?"), "the queued ask reached the lead");
+    }
+
+    /// N11: two runs queued together in one folder (a build and a test) are
+    /// serialized; the second is claimed only after the first settles.
+    #[test]
+    fn a_second_run_in_one_folder_waits_for_the_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let folder = dir.path().join("work");
+        std::fs::create_dir_all(&folder).unwrap();
+        t.folder = folder.display().to_string();
+        let task = t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+        task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        task.status = TaskStatus::InProgress;
+        let task_id = task.id;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let settings = dir.path().join("templates.json");
+        crate::state::teams::templates::settings_override(Some(settings));
+        crate::state::teams::templates::set_additions(&[json!({"id":"say","program":"cmd","args":["/c","echo run-ok"]})]).unwrap();
+        let run = |id: &str| {
+            json!({"op":"run","request_id":id,"team":t.id,"member":"dev","attempt":"A1","template":"say","args":{},
+                "input":{"request_id":id,"team":t.id,"attempt":"A1","template":"say","args":{}}})
+        };
+        let first = "77777777-7777-4777-8777-777777777771";
+        let second = "77777777-7777-4777-8777-777777777772";
+        super::super::outbox::push(&folder, &run(first)).unwrap();
+        super::super::outbox::push(&folder, &run(second)).unwrap();
+        let mut dev = session("codex/x/dev", "r1", true);
+        dev.cwd = folder.display().to_string();
+        let started = std::cell::RefCell::new(Vec::<String>::new());
+        let spawn = |_: &Path, request: &Value| {
+            started.borrow_mut().push(request["request_id"].as_str().unwrap_or_default().to_owned());
+            Ok(())
+        };
+        let current = store.load(&t.id).unwrap().unwrap();
+        take_outbox_with(&mut store, &current, &[dev.clone()], &spawn).unwrap();
+        assert_eq!(started.borrow().as_slice(), [first.to_owned()], "a second run waits");
+        assert!(super::super::outbox::request_path(&folder, second).exists(), "the second run is still queued");
+        // The first run ends; the next tick claims the second.
+        run_request(&mut store, &folder, &run(first));
+        let current = store.load(&t.id).unwrap().unwrap();
+        take_outbox_with(&mut store, &current, &[dev], &spawn).unwrap();
+        assert_eq!(started.borrow().as_slice(), [first.to_owned(), second.to_owned()]);
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert_eq!(saved.task(task_id).unwrap().attempts.last().unwrap().runs.len(), 1);
+        crate::state::teams::templates::settings_override(None);
+    }
+
+    /// N16: members that may not have worktrees share one folder and one outbox;
+    /// a request there belongs to the member that queued it and is applied on
+    /// their own pass, never refused as the folder's first member's.
+    #[test]
+    fn a_shared_folders_request_belongs_to_the_member_that_queued_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        t.settings.worktrees_forbidden = true;
+        let folder = dir.path().join("work");
+        std::fs::create_dir_all(&folder).unwrap();
+        t.folder = folder.display().to_string();
+        for member in t.members.iter_mut().filter(|member| member.id != "lead") {
+            member.folder = MemberFolder::Shared;
+            member.directory.clear();
+        }
+        let qa_task = t.tasks.iter_mut().find(|task| task.assignee == "qa").unwrap();
+        qa_task.attempts.push(Attempt { n: 1, id: "A3".into(), member: "qa".into(), state: AttemptState::Delivered, ..Default::default() });
+        qa_task.status = TaskStatus::InProgress;
+        let qa_id = qa_task.id;
+        {
+            let qa = t.members.iter_mut().find(|member| member.id == "qa").unwrap();
+            qa.session = Some(SessionRef { name: "kimi/x/qa".into(), run_id: "r2".into(), ..Default::default() });
+        }
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let request_id = "44444444-4444-4444-8444-444444444445";
+        let request = json!({"op":"report","request_id":request_id,"team":t.id,"member":"qa","attempt":"A3",
+            "input":{"request_id":request_id,"team":t.id,"task":qa_id,"attempt":"A3","text":"qa done"}});
+        super::super::outbox::push(&folder, &request).unwrap();
+        let mut dev = session("codex/x/dev", "r1", true);
+        dev.cwd = folder.display().to_string();
+        let mut qa = session("kimi/x/qa", "r2", true);
+        qa.cwd = folder.display().to_string();
+        let current = store.load(&t.id).unwrap().unwrap();
+        take_outbox(&mut store, &current, &[dev, qa]).unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert_eq!(
+            saved.task(qa_id).unwrap().attempts.last().unwrap().report.as_ref().map(|report| report.text.as_str()),
+            Some("qa done"),
+            "qa's report was applied for qa"
+        );
+    }
+
+    /// N12: a clone carries its own copy of the lead's branch from the day it
+    /// was made. The merge fetches the branch from the team's folder first, so
+    /// it brings the lead's current work instead of saying "Already up to date".
+    #[test]
+    fn a_clone_merges_the_leads_current_branch_not_its_old_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        set_git_ceiling(&dir.path().display().to_string());
+        let repo = folder_repo(dir.path(), "project");
+        let clone = dir.path().join("clone");
+        let run_git = |folder: &Path, args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(folder).args(["-c", "user.email=t@e", "-c", "user.name=T"]).args(args).status().is_ok_and(|status| status.success())
+        };
+        let cloned = std::process::Command::new("git")
+            .args(["clone", "--local", "--no-hardlinks", "--quiet", &repo.display().to_string(), &clone.display().to_string()])
+            .status()
+            .is_ok_and(|status| status.success());
+        if !cloned {
+            eprintln!("git could not build the test clone; the sandbox blocks it");
+            return;
+        }
+        // The lead moves on after the clone was made.
+        std::fs::write(repo.join("lead.txt"), "l").unwrap();
+        assert!(run_git(&repo, &["add", "."]) && run_git(&repo, &["commit", "-qm", "lead"]));
+        let member = Member {
+            id: "dev".into(),
+            role: "Backend".into(),
+            agent: "dsh".into(),
+            folder: MemberFolder::Clone,
+            directory: clone.display().to_string(),
+            session: Some(SessionRef { name: "dsh/x/dev".into(), run_id: "r1".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let team = folder_team(&repo, member.clone());
+        let request = json!({"template":"git-merge-lead","args":{}});
+        let outcome = run_outcome(&team, &member, &clone, &request).unwrap();
+        assert_eq!(outcome.exit, Some(0), "{outcome:?}");
+        assert!(clone.join("lead.txt").exists(), "the lead's current branch was not merged: {}", outcome.tail);
+    }
+
+    /// N29: the new session of a swap is limited too; the old request must not
+    /// stay on the session that is no longer the member's.
+    #[test]
+    fn a_limit_request_follows_a_swap_to_another_limited_session() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let mut t = team();
+            t.status = TeamStatus::Running;
+            t.settings.resume_after_limits = true;
+            {
+                let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+                dev.limited = Some(MemberLimit { at: 100.0, resets_at: Some(5_000.0), detail: "session limit".into() });
+                dev.limit_resume = true;
+                dev.limit_session = dev.session.clone();
+            }
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+            // A swap binds another session; the old limit episode stays recorded.
+            store
+                .mutate(Some(("22222222-2222-4222-8222-222222222222", &json!({}))), &t.id, None, |team, _| {
+                    let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+                    dev.session = Some(SessionRef { name: "codex/x/dev2".into(), run_id: "r2".into(), ..Default::default() });
+                    Ok(json!({}))
+                })
+                .unwrap();
+            let mut second = session("codex/x/dev2", "r2", false);
+            second.phase = "error".into();
+            second.limited = Some(SeenLimit { at: 100.0, resets_at: Some(5_000.0), detail: "session limit".into() });
+            let found = pass(&mut store, &t.id, &[session("claude/x/lead", "r0", true), second]);
+            assert!(found.contains(&Step::StartLimitResume { member: "dev".into() }), "{found:?}");
+            assert_eq!(local_overrides(), vec!["codex/x/dev2".to_owned()], "the request follows the new session");
+            let saved = store.load(&t.id).unwrap().unwrap();
+            assert_eq!(saved.member("dev").unwrap().limit_session.as_ref().map(|session| session.name.as_str()), Some("codex/x/dev2"));
+        });
+    }
+
+    /// N30: a refresh on another computer costs an `hgs` call with a 60 s bound;
+    /// it is asked once a minute, never on every 3 s tick.
+    #[test]
+    fn a_remote_limit_refresh_is_asked_once_a_minute() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let mut t = team();
+            t.settings.resume_after_limits = true;
+            {
+                let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+                dev.computer = "msi".into();
+                dev.session.as_mut().unwrap().host = "msi".into();
+            }
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Vec<String>>::new()));
+            let counted = calls.clone();
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], _| {
+                counted.borrow_mut().push(args.iter().map(|arg| arg.to_string()).collect());
+                Ok(fake_output(0, r#"{"status":"ok"}"#, ""))
+            })));
+            let recovery = || calls.borrow().iter().filter(|args| args.first().map(String::as_str) == Some("recovery")).count();
+            let mut remote = limited_dev("codex/x/dev", "r1");
+            remote.host = "msi".into();
+            let lead = session("claude/x/lead", "r0", true);
+            pass(&mut store, &t.id, &[lead.clone(), remote.clone()]);
+            assert_eq!(recovery(), 1, "the first pass asks for the wait");
+            pass(&mut store, &t.id, &[lead.clone(), remote.clone()]);
+            assert_eq!(recovery(), 2, "a later pass refreshes it");
+            pass(&mut store, &t.id, &[lead, remote]);
+            assert_eq!(recovery(), 2, "a second tick inside the minute asks nothing");
+            set_fake_hgs(None);
+        });
     }
 
     fn folder_team(folder: &Path, member: Member) -> Team {
@@ -7866,8 +8270,12 @@ mod tests {
         base.members.iter_mut().find(|member| member.id == "dev").unwrap().limited = Some(stored.clone());
         assert!(steps(&base, &[lead.clone(), dev.clone()], 300.0).contains(&Step::StartLimitResume { member: "dev".into() }));
         // Once started it is refreshed, not asked again; the end of the
-        // episode stops it.
-        base.members.iter_mut().find(|member| member.id == "dev").unwrap().limit_resume = true;
+        // episode stops it. N29: the start records the session it names.
+        {
+            let dev = base.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            dev.limit_resume = true;
+            dev.limit_session = dev.session.clone();
+        }
         let waiting = steps(&base, &[lead.clone(), dev.clone()], 300.0);
         assert!(!waiting.iter().any(|step| matches!(step, Step::StartLimitResume { .. })));
         assert!(waiting.contains(&Step::RefreshLimitResume { member: "dev".into() }), "{waiting:?}");

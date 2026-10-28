@@ -95,6 +95,12 @@ struct SessionInfo {
     QString sessionState;
     QJsonObject stateReason, cacheTtl, build;
     double lastActive = 0;
+    // U22/N17: DeepSeek's session-log upload. uploadSeen is the verified mark -
+    // the session's own records still accepted an upload after its launch;
+    // uploadMayBeActive marks a session whose running host was started before
+    // the block. uploadNote is the sentence the session card and Accounts show.
+    QJsonObject uploadSeen, uploadMayBeActive;
+    QString uploadNote;
     int subagentCount = 0;
     // Pending optional Codex questions ("optional_questions"): the exact count,
     // the IDs the host lists (the newest ones) and the newest question's time.
@@ -270,7 +276,8 @@ public:
     quint64 requestGitDiff(const QString &host, const QString &path);
     quint64 createWorktree(const QString &host, const QString &path, const QString &commonDir,
                            const QString &branch, const QString &base, const QString &destination,
-                           const QString &requestId = {}, bool receipt = false, const QString &expectedMachine = {});
+                           const QString &requestId = {}, bool receipt = false, const QString &expectedMachine = {},
+                           bool sandbox = false);
     quint64 worktreeReceipt(const QString &host, const QString &action, const QString &requestId, const QString &expectedMachine = {});
     // Cleanup verdicts are computed on the owning machine. Whole-repository reviews
     // stay cached for five minutes for the Clean up reminder; removal repeats every

@@ -320,9 +320,18 @@ fn hosts_value(members: &[(String, Option<Value>)]) -> (Value, BTreeSet<String>)
     (value, shared)
 }
 
+/// N31: when an attempt stopped being the task's current one: the time its
+/// report came, or the end of its turn when it ended without one. An open
+/// attempt has no end yet, so the answers arriving now still belong to it.
+fn attempt_end(attempt: &Attempt) -> f64 {
+    if attempt.state.open() {
+        return f64::INFINITY;
+    }
+    attempt.report.as_ref().map(|report| report.at).or(attempt.turn_ended_at).unwrap_or(f64::INFINITY)
+}
+
 /// The team with its live members when the caller listed sessions (F7).
-fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::Seen]>) -> Value {
-    let mut value = serde_json::to_value(team).unwrap_or_default();
+fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::Seen]>) -> Value {    let mut value = serde_json::to_value(team).unwrap_or_default();
     // C7: the plan-health block, with the members starving on the plan now.
     let now = super::super::now();
     let mut validation = plan::validate(team, &BTreeSet::new());
@@ -393,18 +402,22 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
     // it; the task card lists them with that attempt (newest shown first).
     if let Some(tasks) = value["tasks"].as_array_mut() {
         for (task, value) in team.tasks.iter().zip(tasks) {
-            let Some(member) = team.member(&task.assignee) else { continue };
-            if member.permission_answers.is_empty() {
-                continue;
-            }
             let Some(attempts) = value["attempts"].as_array_mut() else { continue };
             for (index, attempt) in attempts.iter_mut().enumerate() {
-                let Some(sent) = task.attempts.get(index).map(|attempt| attempt.sent_at) else { continue };
-                let end = task.attempts.get(index + 1).map(|next| next.sent_at).unwrap_or(f64::INFINITY);
+                let Some(recorded) = task.attempts.get(index) else { continue };
+                // N31: an answer belongs to the member the attempt ran for, not
+                // to whoever the task is assigned to now (a reassigned task).
+                let Some(member) = team.member(&recorded.member) else { continue };
+                if member.permission_answers.is_empty() {
+                    continue;
+                }
+                // N31: the window ends with the attempt, not at the next one
+                // only: a closed attempt never collects later answers.
+                let end = task.attempts.get(index + 1).map(|next| next.sent_at).unwrap_or_else(|| attempt_end(recorded));
                 let answers: Vec<&Value> = member
                     .permission_answers
                     .iter()
-                    .filter(|answer| answer["at"].as_f64().is_some_and(|at| at >= sent && at < end))
+                    .filter(|answer| answer["at"].as_f64().is_some_and(|at| at >= recorded.sent_at && at < end))
                     .collect();
                 if !answers.is_empty() {
                     attempt["permissions"] = json!(answers);
@@ -560,14 +573,16 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
             if let Some(since) = member.background_since {
                 value["background_minutes"] = json!(((now - since).max(0.0) / 60.0).round() as u64);
             }
-            // U22: a DeepSeek member's session that still uploads says so on
-            // the member and its card.
+            // U22/N17: a DeepSeek member's session that still uploads, or whose
+            // running host was started before the block, says so on the member
+            // and its card.
             if member.agent == "dsh" {
                 if let Some(session) = &member.session {
                     if session.host.is_empty() {
-                        if let Some(seen) = super::super::dsh::check_upload(&session.name) {
-                            value["upload_seen"] = seen;
-                            value["upload_note"] = json!("DeepSeek session-log upload still active");
+                        if let Some(upload) = super::super::dsh::upload_state_for(&session.name).as_object() {
+                            for (key, mark) in upload {
+                                value[key] = mark.clone();
+                            }
                         }
                     }
                 }
@@ -2512,8 +2527,10 @@ fn question_with_task(team: &Team, id: &str) -> Option<(u32, Question)> {
 
 /// 9.6: copies the parent lead's answer into the sub-team's question. N23: the
 /// inbox's reply names only the question, so its task is found here. N24: an
-/// answer travels one level per call, on down the chain of escalations.
-fn route_reply_down(store: &mut Store, parent_id: &str, input: &Value) -> anyhow::Result<()> {
+/// answer travels one level per call, on down the chain of escalations. A
+/// queued reply from a sandboxed sub-lead is applied by the worker and routed
+/// here too.
+pub(super) fn route_reply_down(store: &mut Store, parent_id: &str, input: &Value) -> anyhow::Result<()> {
     let parent = store.load(parent_id)?.context("Unknown team")?;
     let question_id = text(input, "question");
     let asked_task = input["task"].as_u64().and_then(|task| u32::try_from(task).ok());
@@ -2832,7 +2849,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // refusal can come with the write as well as with the open.
             let mut store = match Store::open(true) {
                 Ok(store) => store,
-                Err(error) if matches!(op, "report" | "ask" | "commit") && read_only(&error) => {
+                Err(error) if matches!(op, "report" | "ask" | "commit" | "reply") && read_only(&error) => {
                     return queue_write(op, input, wait)
                 }
                 // U20: a write the sandbox blocked says what to do, not a bare
@@ -2939,7 +2956,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 ops::apply(team, op, &filled, &actor, &BTreeSet::new(), events)
             }) {
                 Ok(receipt) => receipt,
-                Err(error) if matches!(op, "report" | "ask" | "commit") && read_only(&error) => {
+                Err(error) if matches!(op, "report" | "ask" | "commit" | "reply") && read_only(&error) => {
                     return queue_write(op, input, wait)
                 }
                 Err(error) => return Err(super::store::write_error(error)),
@@ -4053,6 +4070,37 @@ mod tests {
             assert!(!team.member("qa").unwrap().launch_after_swap);
             assert_eq!(team.member("dev").unwrap().state, MemberState::Paused);
         });
+    }
+
+    #[test]
+    fn a_swap_to_an_existing_session_takes_the_listings_folder_not_the_requests() {
+        // N32: the adopted session's own folder comes from the live listing; the
+        // request may not name a different folder or folder kind for it.
+        use crate::state::teams::dispatcher::Seen;
+        use crate::state::teams::model::MemberFolder;
+        let (team, _, _) = review_team();
+        with_review_team(&team, || {
+            super::live_sessions_override(Some(vec![Seen {
+                name: "codex/x/other".into(),
+                run_id: "r9".into(),
+                conversation_id: "c9".into(),
+                live: true,
+                cwd: "/work/other-checkout".into(),
+                ..Default::default()
+            }]));
+            let value = call(
+                "swap-member",
+                json!({"member":"dev","session":{"name":"codex/x/other","run_id":"r9"},
+                    "directory":"/work/forged","folder":"worktree","by":"human"}),
+            )
+            .unwrap();
+            assert_eq!(value["status"], "swapped", "{value}");
+            let saved = stored();
+            let dev = saved.member("dev").unwrap();
+            assert_eq!(dev.directory, "/work/other-checkout", "the listing's folder, never the request's");
+            assert_eq!(dev.folder, MemberFolder::Shared, "the adopted session's own kind");
+        });
+        super::live_sessions_override(None);
     }
 
     #[test]
@@ -5616,6 +5664,25 @@ mod tests {
         assert_eq!(attempt["permissions"].as_array().unwrap().len(), 1, "{attempt}");
         assert_eq!(attempt["permissions"][0]["command"], "rm -rf build");
         assert_eq!(attempt["permissions"][0]["at"], 25.0);
+        // N31: the answers belong to the member the attempt ran for, not to the
+        // task's current assignee after a reassignment.
+        team.task_mut(1).unwrap().assignee = "qa".into();
+        let value = view_with(&team, &[], None);
+        assert_eq!(value["tasks"][0]["attempts"][0]["permissions"].as_array().unwrap().len(), 1, "{value}");
+        // N31: a closed attempt's window ends with its report; an answer recorded
+        // after it is not that attempt's any more.
+        {
+            let attempt = team.task_mut(1).unwrap().attempts.last_mut().unwrap();
+            attempt.state = AttemptState::Reported;
+            attempt.report = Some(crate::state::teams::model::Report { text: "Done".into(), at: 30.0, ..Default::default() });
+        }
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().permission_answers.push(json!(
+            {"question_id":"q2","decision":"allow","by":"lead","at":60.0,"reason":"late","tool":"Bash","command":"npm test"}
+        ));
+        let value = view_with(&team, &[], None);
+        let permissions = value["tasks"][0]["attempts"][0]["permissions"].as_array().unwrap();
+        assert_eq!(permissions.len(), 1, "{permissions:?}");
+        assert_eq!(permissions[0]["at"], 25.0);
         assert!(denies("No") && denies("Deny") && !denies("Allow"));
     }
 

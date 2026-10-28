@@ -98,6 +98,8 @@ private slots:
     void defaultAccountIsMachineScopedAndUsedForNewSessions();
     void detailsPaneShowsPageBackground();
     void controlOnlyComputerManagesAccountsOnRemoteMachinesOnly();
+    // U22/N17: the DeepSeek account names a session whose upload block may not hold.
+    void deepSeekUploadWarningShowsOnTheAccount();
     void preview();
 private:
     FleetState fleet(bool remote = true) const;
@@ -1236,6 +1238,33 @@ void TestAccountsPage::summaryCountsReadInSingularAndPlural()
     QTRY_COMPARE(page.findChild<QListWidget *>("accountProfiles")->count(), 1);
     QTRY_VERIFY(page.findChild<QPushButton *>("refreshAccounts")->isEnabled());
     QCOMPARE(summary(page), QString("1 account, 1 machine loaded"));
+}
+
+void TestAccountsPage::deepSeekUploadWarningShowsOnTheAccount()
+{
+    // U22/N17: a DeepSeek session whose records still accept the upload (or
+    // whose host was started before the block) names it on its account, in the
+    // same words as its session card. Another provider's account carries none.
+    auto state = fleet();
+    BoxState mac; mac.host = "mac"; mac.ok = true;
+    SessionInfo upload; upload.cmd = "dsh"; upload.name = "dsh/orbit/backend";
+    upload.tracked = true; upload.resumable = true;
+    upload.uploadNote = "DeepSeek session-log upload still active";
+    mac.sessions = {upload};
+    state.setPeer(mac, QDateTime::currentMSecsSinceEpoch());
+    // A DeepSeek account exists on that machine.
+    QFile deepseek(m_dir.filePath("deepseek")); QVERIFY(deepseek.open(QIODevice::WriteOnly)); deepseek.close();
+    AccountsPage page(FakeCli::program(m_script)); page.setFleet(state); page.show();
+    page.showAccount("mac", "native-dsh");
+    auto *detail = page.findChild<QLabel *>("accountMachineStatus");
+    QVERIFY(detail);
+    QTRY_VERIFY2(detail->text().contains(upload.uploadNote), qPrintable(detail->text()));
+    // The page as the window shows it, once its panes have laid out.
+    page.resize(1080, 700); QTest::qWait(250);
+    PageShots::shot(page, true, "ux-8-accounts-upload-dark");
+    PageShots::shot(page, false, "ux-8-accounts-upload-light");
+    page.showAccount("mac", "native-codex");
+    QTRY_VERIFY2(!detail->text().contains(upload.uploadNote), qPrintable(detail->text()));
 }
 
 void TestAccountsPage::preview()

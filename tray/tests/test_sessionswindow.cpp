@@ -341,6 +341,8 @@ private slots:
     void sessionMuteMenuPersistsWithoutAcknowledging();
     void sharedReadsQueueOnTheSessionHost();
     void unsentDraftBecomesARowStatus();
+    // U22/N17: the DeepSeek session-log upload warning on line three.
+    void deepSeekUploadWarningShowsOnTheCard();
     void compactWorkspaceGeometry();
     void worktreeFilterKeepsConversationDraftAndSearchScope();
     void worktreePreview();
@@ -4393,6 +4395,41 @@ void TestSessionsWindow::unsentDraftBecomesARowStatus()
     window.findChild<MachineFilter *>("machineFilterChips")->setSelection({});
     window.showSession({}, box.sessions[0].name); composer->editor()->clear();
     QVERIFY(!draft(box.sessions[0].name));
+}
+
+void TestSessionsWindow::deepSeekUploadWarningShowsOnTheCard()
+{
+    // U22/N17: a DeepSeek session whose own records still accept the upload, or
+    // whose running host was started before the block, warns on line three of
+    // its card - the block's promise is never hidden by an activity excerpt.
+    // One DeepSeek session whose own records still accept the upload.
+    FleetState state;
+    BoxState box; box.host = "arch"; box.ok = true;
+    SessionInfo upload; upload.name = "dsh/orbit/backend"; upload.cmd = "dsh"; upload.project = "orbit"; upload.tag = "backend";
+    upload.tracked = true; upload.resumable = true; upload.activity = "idle"; upload.phase = "idle";
+    upload.uploadNote = "DeepSeek session-log upload still active";
+    upload.uploadSeen = QJsonObject{{"at", 1.0}, {"plugin", "session-log-deepseek"}};
+    box.sessions = {upload};
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program()); window.setFleet(state); window.show();
+    auto *list = window.findChild<SessionList *>("sessionList"); QVERIFY(list);
+    const auto warnedRow = [list]() -> QListWidgetItem * {
+        for (int i = 0; i < list->count(); ++i)
+            if (list->item(i)->data(SessionRoles::Agent) == QLatin1String("dsh")) return list->item(i);
+        return nullptr;
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(warnedRow() != nullptr, 5000);
+    QCOMPARE(warnedRow()->data(SessionRoles::Detail).toString(), QString("DeepSeek session-log upload still active"));
+    QVERIFY(warnedRow()->data(SessionRoles::UploadWarning).toBool());
+    QVERIFY(warnedRow()->data(Qt::AccessibleTextRole).toString().contains("upload still active"));
+    // Optional shots: the same warning in both themes.
+    if (const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS"); !shots.isEmpty()) {
+        QDir().mkpath(shots);
+        list->setProperty("hgsDark", true); list->viewport()->update(); QTest::qWait(300);
+        QVERIFY(list->grab().save(QDir(shots).filePath("upload-warning-dark.png")));
+        list->setProperty("hgsDark", false); list->viewport()->update(); QTest::qWait(300);
+        QVERIFY(list->grab().save(QDir(shots).filePath("upload-warning-light.png")));
+    }
 }
 
 void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()

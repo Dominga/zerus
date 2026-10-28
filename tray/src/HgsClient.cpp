@@ -181,6 +181,10 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.cacheTtl = obj.value("cache_ttl").toObject();
     s.build = obj.value("build").toObject();
     s.lastActive = obj.value("last_active").toDouble();
+    // U22/N17: the owner warning about DeepSeek's session-log upload.
+    s.uploadSeen = obj.value("upload_seen").toObject();
+    s.uploadMayBeActive = obj.value("upload_may_be_active").toObject();
+    s.uploadNote = obj.value("upload_note").toString();
     const auto work = obj.value("process_work").toObject();
     s.backgroundProcesses = work.value("count").toInt(-1);
     s.backgroundStarted = work.value("started_at").toDouble();
@@ -1671,12 +1675,15 @@ quint64 HgsClient::requestWorktrees(const QString &host,const QString &path,bool
 }
 
 quint64 HgsClient::createWorktree(const QString &host,const QString &path,const QString &commonDir,
-    const QString &branch,const QString &base,const QString &destination,const QString &requestId,bool receipt,const QString &expectedMachine)
+    const QString &branch,const QString &base,const QString &destination,const QString &requestId,bool receipt,const QString &expectedMachine,bool sandbox)
 {
     const auto request=++m_worktreeRequest;
     const auto token=requestId.isEmpty()?QUuid::createUuid().toString(QUuid::WithoutBraces):requestId;
     QStringList args{"worktrees","create","--path",path,"--common-dir",commonDir,"--branch",branch,
         "--base",base,"--destination",destination,"--request-id",token,"--json"};
+    // N9: only a DeepSeek session's folder asks for the sandbox grant; a file
+    // system without ACL support must not fail another agent's worktree.
+    if(sandbox)args<<"--sandbox";
     if(receipt)args<<"--receipt";
     if(!host.isEmpty())args.prepend('@'+host);
     guardMachine(args,expectedMachine);

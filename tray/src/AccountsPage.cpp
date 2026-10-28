@@ -797,6 +797,10 @@ void AccountsPage::selectionChanged()
         m_openCodeProvidersNote->setText(notes.join('\n'));m_openCodeProvidersNote->setVisible(!notes.isEmpty());
     }
     m_detail->setToolTip(p["home"].toString());
+    // U22/N17: the DeepSeek account whose sessions still upload - or whose host
+    // was started before the block - says so here, in the session card's words.
+    if (const auto upload = deepSeekUploadNote(p["host"].toString(), p["home"].toString(), p["provider"].toString()); !upload.isEmpty())
+        m_detail->setText(m_detail->text().isEmpty() ? upload : m_detail->text() + QLatin1Char('\n') + upload);
     // U25 (spec 9): an account that cannot be used here says so in warn, and
     // its sign-in becomes the primary action.
     const bool attention = !online(p["host"].toString()) || status == "signed_out" || status == "expired";
@@ -810,6 +814,22 @@ void AccountsPage::selectionChanged()
     renderTeams(selectedAccount());
     if(isVisible())inspectSelected();
 }
+QString AccountsPage::deepSeekUploadNote(const QString &host, const QString &home, const QString &provider) const
+{
+    if (provider != QLatin1String("dsh")) return {};
+    // The local machine's accounts name it by host; peers by their alias.
+    const BoxState *box = host.isEmpty() || host == m_fleet.local().host ? &m_fleet.local() : m_fleet.peer(host);
+    if (!box) return {};
+    for (const auto &session : box->sessions) {
+        if (session.cmd != QLatin1String("dsh") || session.uploadNote.isEmpty()) continue;
+        // A profile's own home scopes the warning to its sessions; an empty
+        // profile home is the machine's default account, which keeps every one.
+        if (!home.isEmpty() && !session.accountHome.isEmpty() && session.accountHome != home) continue;
+        return session.uploadNote;
+    }
+    return {};
+}
+
 // U25 (spec 9): "Checkout v2 · Frontend, Lead (GPT)" with Open team, for every
 // team whose members use the account; hidden when none does.
 void AccountsPage::renderTeams(const QJsonObject &account)

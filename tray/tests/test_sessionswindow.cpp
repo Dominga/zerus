@@ -5252,7 +5252,16 @@ void TestSessionsWindow::stoppedDshSessionStartsAndSends()
     {QFile details(temp.filePath("details.json"));QVERIFY(details.open(QIODevice::WriteOnly));
      details.write(QJsonDocument(QJsonObject{{"tracked",true},{"run_id","run-dsh"},{"conversation_id","conversation-dsh"},
                                              {"runtime_state","saved"},{"process_state","exited"}}).toJson());}
-    SessionsWindow window(FakeCli::program(program));window.setFleet(state);window.show();window.showSession({},name);QTest::qWait(100);
+    SessionsWindow window(FakeCli::program(program));
+    auto *client = window.findChild<HgsClient *>(); QVERIFY(client);
+    QSignalSpy inspections(client, &HgsClient::inspectionReady);
+    window.setFleet(state);window.show();window.showSession({},name);
+    // The listing enables Resume before its async preparation has inspected identity.
+    WAIT_VERIFY(std::any_of(inspections.cbegin(), inspections.cend(), [&name](const QList<QVariant> &reply) {
+        const auto detail = reply.at(2).toJsonObject();
+        return reply.at(0).toString().isEmpty() && reply.at(1).toString() == name
+            && detail["run_id"] == "run-dsh" && detail["conversation_id"] == "conversation-dsh";
+    }));
     auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *send=composer->findChild<QPushButton *>("sendMessage");
     auto *status=composer->findChild<QLabel *>("messageStatus");
     setComposerText(composer,"Continue the dsh session");

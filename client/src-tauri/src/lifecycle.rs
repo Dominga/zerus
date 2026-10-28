@@ -22,7 +22,7 @@ pub enum Policy {
 }
 
 /// A normal app while its window is open, shown or minimised, else a
-/// menu-bar app (`MacAppVisibility.mm:85-101`).
+/// menu-bar app (`MacAppVisibility.mm:65-81`).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn policy(window_open: bool) -> Policy {
     if window_open {
@@ -33,7 +33,7 @@ pub fn policy(window_open: bool) -> Policy {
 }
 
 /// A Dock click restores a minimised window when none is visible
-/// (`MacAppVisibility.mm:102-108`).
+/// (`MacAppVisibility.mm:82-88`).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn reopen_restores(minimized: bool, visible: bool) -> bool {
     minimized && !visible
@@ -76,7 +76,7 @@ pub fn on_event(app: &AppHandle, event: &RunEvent) {
     }
 }
 
-/// Opens Zerus: Qt's `TrayAgent::showSessions` (`TrayAgent.cpp:776-780`).
+/// Opens Zerus: Qt's `TrayAgent::showSessions` (`TrayAgent.cpp:781-783`).
 pub fn show_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let window = match app.get_webview_window(MAIN_WINDOW) {
         Some(window) => window,

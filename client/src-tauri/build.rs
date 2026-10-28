@@ -69,6 +69,26 @@ fn embed_identity() {
         println!("cargo:rerun-if-changed={dir}/HEAD");
         println!("cargo:rerun-if-changed={dir}/index");
     }
+    // A commit moves the branch HEAD names, not HEAD itself: watch its loose
+    // ref and packed-refs, so the embedded commit never goes stale.
+    let git_path = |name: &str| {
+        git(
+            &root,
+            &["rev-parse", "--path-format=absolute", "--git-path", name],
+        )
+        .map(PathBuf::from)
+    };
+    if let Some(loose) =
+        git(&root, &["symbolic-ref", "-q", "HEAD"]).and_then(|branch| git_path(&branch))
+    {
+        println!(
+            "cargo:rerun-if-changed={}",
+            build_identity::watched(&loose).display()
+        );
+    }
+    if let Some(packed) = git_path("packed-refs").filter(|path| path.exists()) {
+        println!("cargo:rerun-if-changed={}", packed.display());
+    }
     build_identity::check_numbered(number, commit.as_deref(), dirty)
         .unwrap_or_else(|error| panic!("{error}"));
     build_identity::check_preview(label.as_deref(), number, commit.as_deref(), dirty)

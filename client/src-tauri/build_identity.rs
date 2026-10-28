@@ -1,6 +1,8 @@
 //! The build's identity, shared by `build.rs` and the crate's tests: Qt's
 //! rules in `tray/cmake/BuildVersion.cmake` and `tray/CMakeLists.txt:120-139`.
 
+use std::path::Path;
+
 /// `MAJOR.MINOR.PATCH` without leading zeros, as `VERSION` and `DEV_VERSION` hold it.
 pub fn release_version(raw: &str) -> Option<String> {
     let value = raw.trim();
@@ -109,4 +111,11 @@ pub fn check_preview(
     } else {
         Ok(())
     }
+}
+
+/// The path itself, or while it does not exist (a packed ref) the nearest
+/// folder above it that does: cargo reruns on every build for a missing path,
+/// and the folder changes when git writes the ref loose again.
+pub fn watched(path: &Path) -> &Path {
+    path.ancestors().find(|path| path.exists()).unwrap_or(path)
 }

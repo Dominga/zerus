@@ -410,5 +410,12 @@ mod tests {
             "never from local changes"
         );
         assert!(check_preview(None, None, None, None).is_ok());
+        // A packed branch ref has no loose file: its folder is watched.
+        let temp = std::env::temp_dir();
+        assert_eq!(watched(&temp), temp.as_path());
+        assert_eq!(
+            watched(&temp.join("zci-absent/refs/heads/main")),
+            temp.as_path()
+        );
     }
 }

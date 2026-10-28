@@ -1394,9 +1394,13 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "infer",
+ "libc",
+ "objc2",
+ "objc2-foundation",
  "serde",
  "serde_json",
  "sha2",
+ "windows-sys",
  "zerus-watch-protocol",
 ]
 

@@ -2,8 +2,9 @@
 //! (`tray/src/QtTrayIcon.cpp`, `TrayMenu.cpp`). [`Bar`] decides what reaches
 //! it: only changes, and nothing while a menu of the app tracks
 //! (`QuietTrayIcon.h`). A primary click opens Zerus; the secondary click
-//! opens the menu (`QtTrayIcon.cpp:71-79`). The Dock tile shows the attention
+//! opens the menu (`QtTrayIcon.cpp:12-20`). The Dock tile shows the attention
 //! count (`MacApplicationBadge.mm`).
+use std::cell::Cell;
 use std::ptr::NonNull;
 use std::sync::{Mutex, PoisonError};
 
@@ -237,19 +238,19 @@ pub fn menu_event(app: &AppHandle, id: &str) {
     }
 }
 
-/// Runs `task` on the main thread on a later turn of its loop. Tauri runs a
-/// main-thread task at once when it is asked from the main thread.
+/// Runs `task` on the main queue once the current callback has returned.
+/// Tauri runs a main-thread task at once when it is asked from the main
+/// thread, so it cannot defer one.
 fn later(app: &AppHandle, task: impl FnOnce(&AppHandle) + Send + 'static) {
     let handle = app.clone();
-    let spawned = std::thread::Builder::new()
-        .name("zerus-client-menu-bar".into())
-        .spawn(move || {
-            let target = handle.clone();
-            let _ = handle.run_on_main_thread(move || task(&target));
-        });
-    if let Err(error) = spawned {
-        eprintln!("zerus-client: menu bar: {error}");
-    }
+    let task = Cell::new(Some(task));
+    let block = RcBlock::new(move || {
+        if let Some(task) = task.take() {
+            task(&handle);
+        }
+    });
+    // SAFETY: the block captures only Send state and runs once on the main queue.
+    unsafe { NSOperationQueue::mainQueue().addOperationWithBlock(&block) };
 }
 
 /// NSMenu posts the tracking notifications around every menu of the app,
@@ -270,7 +271,8 @@ fn observe(app: &AppHandle) {
             return;
         };
         if lock(&state).bar.ended() {
-            // After the tracking loop has unwound.
+            // Once this notification has returned: still later than Qt,
+            // whose quiet icon flushes in aboutToHide (`QuietTrayIcon.cpp:44-47`).
             later(&ended_app, |handle| {
                 if let Some(state) = handle.try_state::<MenuBarState>() {
                     let changes = lock(&state).bar.settle();

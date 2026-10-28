@@ -1109,6 +1109,9 @@ answered; a denial cannot carry an explanation.
     lead had to take it from the member's last message. A queued report must
     store its whole text or nothing, and a member must be able to replace a
     placeholder before the lead decides.
+  - `hgs team expect` from a DeepSeek member's sandbox is refused ("the sandbox
+    blocks the team store") instead of being queued in the member's folder like
+    a report, ask or commit, so a sandboxed member cannot declare a budget.
   - After the lead answers a permission with `hgs team answer`, the next
     question sync records the same question again as answered "by unknown":
     the answer leaves `pending` set. The answer clears it.
@@ -1120,6 +1123,15 @@ answered; a denial cannot carry an explanation.
     findings (N1 a Zerus build is not Background in the capture gate; N2
     work-ahead ignores dependencies inside a draft phase; N5 a failed held
     message is lost silently; ...).
+
+- **U43. A team member's mute on every device (for the owner).** A team member
+  is muted by default only on the desktop that shows the team (#547 N36): the
+  phone and other desktops keep notifying. Phase 42 makes the desktop's text
+  honest ("Muted on this computer"). The shared fix makes hgs apply the team
+  default itself: a member of an active team without a recorded choice reads
+  muted in `notification_preferences`, so Android and every desktop follow.
+  That changes the notification semantics and the mobile contract, so it waits
+  for the owner's direction.
 
 ## Phases 37-40 (replanned 2026-10-27)
 

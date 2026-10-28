@@ -15,6 +15,7 @@ pub mod fleet;
 pub mod legacy;
 pub mod machine;
 pub mod organization;
+pub mod paths;
 pub mod processes;
 #[cfg(unix)]
 mod pty;
@@ -27,6 +28,7 @@ pub mod state;
 pub mod stream;
 pub mod tasks;
 pub mod terminal;
+pub mod terminal_launch;
 pub mod view;
 pub mod views;
 

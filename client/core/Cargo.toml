@@ -16,3 +16,20 @@ zerus-watch-protocol = { path = "../../crates/watch-protocol" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Konsole tabs and raising over the session D-Bus (libdbus); the Linux app
+# turns it on, while the crate's own checks build without it.
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus = { version = "0.9", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+] }
+
+[features]
+konsole = ["dep:dbus"]

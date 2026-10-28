@@ -4690,9 +4690,11 @@ dependencies = [
 name = "zerus-client-core"
 version = "0.1.0"
 dependencies = [
+ "dbus",
  "libc",
  "serde",
  "serde_json",
+ "windows-sys 0.61.2",
  "zerus-watch-protocol",
 ]
 

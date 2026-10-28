@@ -28,18 +28,27 @@ pub struct Layout {
     order: HashMap<String, BTreeMap<u64, String>>,
     index: HashMap<String, (String, u64)>,
     dirty: bool,
+    /// Counts renumberings, so `place` can tell a no-op from a move.
+    renumbers: u64,
 }
 
 impl Layout {
     pub fn from_json(bytes: &[u8]) -> Self {
         let saved: Saved = serde_json::from_slice(bytes).unwrap_or_default();
         let mut layout = Self {
-            collapsed: saved.collapsed.into_iter().collect(),
+            collapsed: saved
+                .collapsed
+                .into_iter()
+                .take(super::MAX_PROJECTS)
+                .collect(),
             default_project: saved.default_project,
             ..Self::default()
         };
-        for (project, members) in saved.order {
+        'load: for (project, members) in saved.order {
             for member in members {
+                if layout.index.len() >= MAX_MEMBERS {
+                    break 'load;
+                }
                 layout.append(&project, &member);
             }
         }
@@ -141,6 +150,7 @@ impl Layout {
     }
 
     fn renumber(&mut self, project: &str) {
+        self.renumbers += 1;
         let members: Vec<String> = self
             .order
             .remove(project)
@@ -181,7 +191,14 @@ impl Layout {
     /// when it is in `project` and not moving itself, else last
     /// (moveSession, SessionOrganization.cpp:196-199).
     pub fn place(&mut self, project: &str, members: &[String], before: Option<&str>) {
+        if members.is_empty() {
+            return;
+        }
         let anchor = before.filter(|anchor| !members.iter().any(|m| m == anchor));
+        let was_dirty = self.dirty;
+        let renumbers = self.renumbers;
+        let ranks_before: Vec<Option<(String, u64)>> =
+            members.iter().map(|m| self.index.get(m).cloned()).collect();
         for member in members {
             self.remove(member);
         }
@@ -193,7 +210,9 @@ impl Layout {
                 }
             }
         }
-        self.dirty = true;
+        let ranks_after: Vec<Option<(String, u64)>> =
+            members.iter().map(|m| self.index.get(m).cloned()).collect();
+        self.dirty = was_dirty || self.renumbers != renumbers || ranks_before != ranks_after;
     }
 
     /// Sort sessions by name: the members leave their places and follow in
@@ -226,6 +245,10 @@ impl Layout {
             self.dirty = true;
         }
         self.dirty |= self.collapsed.remove(project);
+        if self.default_project.as_deref() == Some(project) {
+            self.default_project = None;
+            self.dirty = true;
+        }
     }
 
     /// Past [`MAX_MEMBERS`], forgets every member `keep` refuses.
@@ -291,10 +314,22 @@ mod tests {
             order(&mut layout, "alpha", &["a", "b", "c"]),
             ["a", "c", "b"]
         );
+        assert_eq!(
+            layout.rank("alpha", "a"),
+            GAP,
+            "with room nobody else moves"
+        );
+        assert_eq!(
+            layout.rank("alpha", "b"),
+            2 * GAP,
+            "with room nobody else moves"
+        );
         assert_eq!(layout.rank("alpha", "c"), GAP + GAP / 2);
+        assert_eq!(layout.renumbers, 0, "no renumber with room");
         for n in 0..40 {
             layout.place("alpha", &[format!("x{n}")], Some("c"));
         }
+        assert!(layout.renumbers > 0, "a renumber happened without room");
         assert_eq!(
             order(&mut layout, "alpha", &["a", "x39", "c", "b"]),
             ["a", "x39", "c", "b"]
@@ -349,6 +384,74 @@ mod tests {
         assert_eq!(order(&mut again, "alpha", &["a", "b"]), ["b", "a"]);
         assert!(again.take_dirty().is_none(), "loading is not a change");
         assert_eq!(Layout::from_json(b"not json").len(), 0);
+        assert_eq!(Layout::from_json(b"").len(), 0, "an empty file");
+        for wrong in [
+            &br#"{"order": 5}"#[..],
+            br#"{"order": {"alpha": "a"}}"#,
+            br#"{"collapsed": {"x": 1}, "version": "one"}"#,
+            br#"[1, 2]"#,
+            br#"null"#,
+        ] {
+            let loaded = Layout::from_json(wrong);
+            assert_eq!(loaded.len(), 0);
+            assert!(!loaded.collapsed("x"));
+        }
+        let mut future = Layout::from_json(
+            br#"{"version": 99, "collapsed": ["p"], "order": {"p": ["a"]}, "extra": true}"#,
+        );
+        assert!(
+            future.collapsed("p"),
+            "an unknown version loads what it can"
+        );
+        assert_eq!(future.rank("p", "a"), GAP);
+    }
+
+    #[test]
+    fn loading_caps_members_and_collapsed_projects() {
+        let members: Vec<String> = (0..MAX_MEMBERS + 5).map(|n| format!("m{n}")).collect();
+        let collapsed: Vec<String> = (0..crate::swarm::MAX_PROJECTS + 5)
+            .map(|n| format!("p{n}"))
+            .collect();
+        let json = serde_json::json!({"collapsed": collapsed, "order": {"alpha": members}});
+        let loaded = Layout::from_json(&serde_json::to_vec(&json).unwrap());
+        assert_eq!(loaded.len(), MAX_MEMBERS);
+        assert!(loaded.index.contains_key("m0"));
+        assert!(
+            !loaded.index.contains_key(&format!("m{MAX_MEMBERS}")),
+            "the excess is dropped"
+        );
+        assert_eq!(loaded.collapsed.len(), crate::swarm::MAX_PROJECTS);
+    }
+
+    #[test]
+    fn forget_clears_the_default_project_it_names() {
+        let mut layout = Layout::default();
+        layout.set_default_project(Some("gone".into()));
+        layout.take_dirty();
+        layout.forget("other");
+        assert_eq!(layout.default_project(), Some("gone"));
+        assert!(layout.take_dirty().is_none());
+        layout.forget("gone");
+        assert_eq!(layout.default_project(), None);
+        assert!(
+            layout.take_dirty().is_some(),
+            "the cleared default is saved"
+        );
+    }
+
+    #[test]
+    fn a_place_that_moves_nothing_is_not_a_change() {
+        let mut layout = Layout::default();
+        for m in ["a", "b"] {
+            layout.rank("alpha", m);
+        }
+        layout.take_dirty();
+        layout.place("alpha", &[], Some("a"));
+        assert!(layout.take_dirty().is_none(), "no members");
+        layout.place("alpha", &names(&["a"]), Some("b"));
+        assert!(layout.take_dirty().is_none(), "a keeps its rank before b");
+        layout.place("alpha", &names(&["b"]), Some("a"));
+        assert!(layout.take_dirty().is_some(), "a real move is saved");
     }
 
     #[test]

@@ -1,10 +1,10 @@
 //! Read marks the host's snapshot does not show yet. Kept in a file so a
 //! restart keeps retrying (`tray/src/ReadMarks.h`).
+use crate::fsx::write_private_atomic;
 use crate::view::ViewRow;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReadMark {
@@ -114,29 +114,14 @@ impl ReadMarks {
         settled
     }
 
-    /// Writes a temporary file beside the target, then renames it over it. A
+    /// Replaces the file through a temporary one ([`write_private_atomic`]). A
     /// failure keeps the marks in memory; the next change tries again.
     fn save(&self) {
         let list: Vec<&ReadMark> = self.marks.values().collect();
         let Ok(bytes) = serde_json::to_vec(&list) else {
             return;
         };
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let mut temporary = self.path.clone().into_os_string();
-        temporary.push(format!(
-            ".{}-{}.tmp",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let temporary = PathBuf::from(temporary);
-        if let Some(folder) = self.path.parent().filter(|f| !f.as_os_str().is_empty()) {
-            let _ = std::fs::create_dir_all(folder);
-        }
-        if std::fs::write(&temporary, bytes).is_err()
-            || std::fs::rename(&temporary, &self.path).is_err()
-        {
-            let _ = std::fs::remove_file(&temporary);
-        }
+        let _ = write_private_atomic(&self.path, &bytes);
     }
 }
 

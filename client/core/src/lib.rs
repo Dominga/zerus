@@ -11,6 +11,7 @@ pub mod actions;
 pub mod batch;
 pub mod details;
 pub mod fleet;
+mod fsx;
 pub mod legacy;
 pub mod machine;
 pub mod organization;

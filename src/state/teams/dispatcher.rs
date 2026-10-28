@@ -289,6 +289,11 @@ pub(crate) enum Step {
     /// Gives a ready task to a free member with the assignee's role: the
     /// assignee is busy, or failed the task's last attempt.
     Rebalance { task: u32, from: String, to: String },
+    /// U36: gives a task's waiting stage to a free member with its role (or
+    /// its pinned member), in the task's own folder.
+    StageOut { task: u32, member: String },
+    /// U36: an ended stage's detached checkout and temporary folder go.
+    StageCleanup { task: u32, run: String },
     /// Tells the lead, in one message, which open tasks Zerus gave to
     /// another member with the same role.
     Rebalanced { tasks: Vec<u32> },
@@ -790,12 +795,14 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             steps.push(Step::Rebalanced { tasks });
         }
     }
-    // Members busy with an open attempt, or handed one in this tick.
+    // Members busy with an open attempt, or handed one in this tick, or with
+    // a stage of another member's task (U36).
     let mut busy: BTreeSet<&str> = team
         .tasks
         .iter()
         .filter_map(|task| task.open_attempt())
         .map(|attempt| attempt.member.as_str())
+        .chain(super::stages::busy(team))
         .collect();
     // C7: a member idle without a ready task while tasks are open starves the
     // plan. The lead hears once after 20 minutes; the episode ends with work.
@@ -893,6 +900,20 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             && !refused_recently(member)
             && session_of(member, seen).is_some_and(|s| s.free && !s.run_id.is_empty())
     };
+    // U36: a waiting stage goes to its first free candidate (the pinned
+    // member, or a member with its role who did not implement the task),
+    // before new tasks: it finishes work already done.
+    if team.status == TeamStatus::Running {
+        for (task, candidates) in super::stages::waiting(team) {
+            if let Some(member) = candidates.iter().filter_map(|id| team.member(id)).find(|member| available(member, &busy)) {
+                busy.insert(member.id.as_str());
+                steps.push(Step::StageOut { task, member: member.id.clone() });
+            }
+        }
+    }
+    for (task, run) in super::stages::to_clean(team) {
+        steps.push(Step::StageCleanup { task, run });
+    }
     // C6: among a member's ready tasks the one with the most transitive
     // dependants goes first, then the lowest number.
     let ready = plan::dispatch_order(team, ready_ids);
@@ -918,13 +939,17 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         // Members with one role do the same work: a ready task goes to a free
         // one when its assignee is busy, and a retry to one that did not fail
         // it (a fresh context). The lead's or your choice stays.
+        // U36: a test holding the assignee's folder keeps its next task back;
+        // a free member with the same role may take it.
+        let held = super::stages::held(team, &member.id).is_some();
         if !task.pinned {
             let failed = |m: &Member| task.attempts.iter().any(|a| a.member == m.id && matches!(a.state, AttemptState::Rejected | AttemptState::Refused));
-            let assignee_fits = available(member, &busy) && !failed(member);
+            let assignee_fits = available(member, &busy) && !failed(member) && !held;
             if !assignee_fits {
                 let role = team.role_of(&member.id);
                 if let Some(peer) = team.members.iter().find(|m| {
                     m.id != member.id && m.id != team.lead && team.role_of(&m.id) == role && available(m, &busy) && !failed(m)
+                        && super::stages::held(team, &m.id).is_none()
                 }) {
                     busy.insert(peer.id.as_str());
                     steps.push(Step::Rebalance { task: id, from: member.id.clone(), to: peer.id.clone() });
@@ -932,7 +957,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 }
             }
         }
-        if matches!(member.state, MemberState::Removed | MemberState::Paused) || busy.contains(member.id.as_str()) {
+        if matches!(member.state, MemberState::Removed | MemberState::Paused) || busy.contains(member.id.as_str()) || held {
             continue;
         }
         if member.session.is_none() {
@@ -1833,7 +1858,7 @@ pub(crate) fn member_folder_path(team: &Team, member: &Member) -> anyhow::Result
 /// F1.4/F1.6: one git command in a folder. Tests can set a per-thread ceiling
 /// (a temp dir) so a TEMP inside another repository cannot leak into discovery
 /// without touching the process environment other tests share.
-fn git_command(folder: &str) -> std::process::Command {
+pub(crate) fn git_command(folder: &str) -> std::process::Command {
     let mut command = std::process::Command::new("git");
     // A member's folder may carry its own config: no fsmonitor, hooks or
     // optional locks run for these reads.
@@ -1895,7 +1920,7 @@ pub(crate) fn set_git_ceiling(ceiling: &str) {
     GIT_CEILING.with(|value| *value.borrow_mut() = Some(ceiling.to_owned()));
 }
 
-fn git_at(folder: &str, args: &[&str]) -> Option<String> {
+pub(crate) fn git_at(folder: &str, args: &[&str]) -> Option<String> {
     let output = git_command(folder).args(args).output().ok()?;
     if !output.status.success() {
         return None;
@@ -2414,6 +2439,91 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
                 task.continuation = None;
                 events.push(Event::new("unconfirmed", json!({"task":task_id,"attempt":n,"error":error})));
             }
+        }
+        Ok(())
+    })
+}
+
+/// U36: gives the task's waiting stage to `member` and sends the stage
+/// hand-off. The run is recorded before the send, so a crash leaves it with its
+/// member; a refused send puts it back to wait, and its checkout goes.
+fn stage_hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, host: &str) -> anyhow::Result<()> {
+    let team = store.load(team_id)?.context("unknown team")?;
+    anyhow::ensure!(team.status == TeamStatus::Running, "the team is not running");
+    let session = team.member(member_id).and_then(|m| m.session.clone()).context("no session")?;
+    let member_host = team.member(member_id).map(|m| m.computer.clone()).unwrap_or_default();
+    // The folder, the checkout and the file states, outside the store's lock.
+    let prepared = super::stages::prepare(&team, task_id)?;
+    let mut message = None;
+    let recorded = change(store, team_id, |team, events| {
+        let run_id = super::pipeline::give_stage(team, task_id, member_id)?;
+        super::stages::record(team, task_id, &run_id, &prepared);
+        let task = team.task(task_id).context("unknown task")?;
+        let run = task.pipeline_run.as_ref().and_then(|run| run.open_run()).context("no open stage")?;
+        let report_host = if member_host.is_empty() { String::new() } else { host.to_owned() };
+        message = Some((run_id.clone(), super::stages::hand_off_text(team, task, run, &prepared, &report_host)));
+        events.push(Event::new(
+            "stage_handed_out",
+            json!({"task":task_id,"stage":run.kind,"round":run.round,"to":team.role_of(member_id),"folder":prepared.folder,
+                "checkout":!prepared.checkout.is_empty(),"holds":prepared.holds}),
+        ));
+        Ok(())
+    });
+    if let Err(error) = recorded {
+        let _ = super::stages::clean_up(&StageRun { checkout: prepared.checkout.clone(), checkout_repo: prepared.checkout_repo.clone(), temp: prepared.temp.clone(), ..Default::default() });
+        return Err(error);
+    }
+    let (run_id, text) = message.context("no stage message")?;
+    let outcome = send(&session, &run_id, &text);
+    change(store, team_id, |team, events| {
+        let Some(task) = team.task_mut(task_id) else { return Ok(()) };
+        let pinned = task.pipeline_run.as_ref().and_then(|run| run.open_run()).and_then(|run| task.pipeline_run.as_ref()?.stages.get(run.stage)).map(|stage| stage.member.clone()).unwrap_or_default();
+        let Some(run) = task.pipeline_run.as_mut().and_then(|run| run.open_run_mut()).filter(|run| run.id == run_id) else { return Ok(()) };
+        match &outcome {
+            Sent::Delivered => {
+                run.delivered_at = Some(now());
+                events.push(Event::new("stage_delivered", json!({"task":task_id,"stage":run.kind,"round":run.round})));
+            }
+            Sent::Refused(error) => {
+                // Back to wait for a member; nothing reached this one.
+                let _ = super::stages::clean_up(run);
+                run.state = StageState::Waiting;
+                run.member = if pinned == run.member { pinned } else { String::new() };
+                run.delivered_at = None;
+                run.folder.clear();
+                run.checkout.clear();
+                run.temp.clear();
+                run.holds = false;
+                events.push(Event::new("stage_refused", json!({"task":task_id,"stage":run.kind,"error":error})));
+            }
+            Sent::Uncertain(error) => {
+                events.push(Event::new("stage_unconfirmed", json!({"task":task_id,"stage":run.kind,"error":error})));
+            }
+        }
+        Ok(())
+    })
+}
+
+/// U36: removes an ended stage's checkout and temporary folder, then forgets
+/// them; a failure is kept for the next tick and shown in the feed once.
+fn stage_clean_up(store: &mut Store, team: &Team, task_id: u32, run_id: &str) -> anyhow::Result<()> {
+    let Some(run) = team.task(task_id).and_then(|task| task.pipeline_run.as_ref()).and_then(|run| run.runs.iter().find(|run| run.id == run_id)).cloned() else {
+        return Ok(());
+    };
+    let removed = super::stages::clean_up(&run);
+    change(store, &team.id, |team, events| {
+        let Some(found) = team.task_mut(task_id).and_then(|task| task.pipeline_run.as_mut()).and_then(|run| run.runs.iter_mut().find(|run| run.id == run_id)) else {
+            return Ok(());
+        };
+        match &removed {
+            Ok(()) => {
+                if !found.checkout.is_empty() {
+                    events.push(Event::new("stage_checkout_removed", json!({"task":task_id,"stage":found.kind,"round":found.round})));
+                }
+                found.checkout.clear();
+                found.temp.clear();
+            }
+            Err(error) => anyhow::bail!("{error:#}"),
         }
         Ok(())
     })
@@ -3556,6 +3666,8 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             })
         }
         Step::Rebalance { task, from, to } => hand_out(store, &team.id, *task, to, Some(from), host),
+        Step::StageOut { task, member } => stage_hand_out(store, &team.id, *task, member, host),
+        Step::StageCleanup { task, run } => stage_clean_up(store, team, *task, run),
         Step::Rebalanced { tasks } => tell_lead_rebalanced(store, team, tasks),
         Step::TurnEnded { task, at, reply } => change(store, &team.id, |team, _| {
             if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
@@ -3903,8 +4015,15 @@ fn inside(folder: &str, root: &str) -> bool {
 fn run_outcome(team: &Team, member: &Member, folder: &Path, request: &Value) -> anyhow::Result<super::templates::Outcome> {
     let template = request["template"].as_str().unwrap_or_default();
     let args = request["args"].clone();
-    let plan = super::templates::plan(template, &args, folder)?;
     let timeout = Duration::from_secs(super::templates::timeout_for(template));
+    // U36: a test stage builds in the task's folder (or its checkout), with
+    // its own temporary folder, only while the stage is open.
+    if let Some((stage_folder, temp)) = super::stages::run_folder(team, &member.id, request["attempt"].as_str().unwrap_or_default(), template)? {
+        let plan = super::templates::plan(template, &args, &stage_folder)?;
+        let env: Vec<(&str, String)> = if temp.is_empty() { Vec::new() } else { ["TEMP", "TMP", "TMPDIR"].map(|key| (key, temp.clone())).to_vec() };
+        return Ok(super::templates::execute(&plan, &stage_folder, timeout, &env));
+    }
+    let plan = super::templates::plan(template, &args, folder)?;
     if template == "git-merge-lead" {
         let mine = member_folder_path(team, member)?;
         anyhow::ensure!(
@@ -3947,6 +4066,20 @@ fn record_run(store: &mut Store, team: &Team, member: &Member, request: &Value, 
     let attempt_id = request["attempt"].as_str().unwrap_or_default().to_owned();
     let role = team.role_of(&member.id);
     let recorded = change(store, &team.id, |team, events| {
+        let record = RunRecord { template: template.to_owned(), args: args.clone(), exit: outcome.exit, at: now(), ms: outcome.ms, timed_out: outcome.timed_out };
+        // U36: a stage's run is kept on its stage run.
+        if let Some(task) = team.tasks.iter_mut().find(|task| task.pipeline_run.as_ref().is_some_and(|run| run.runs.iter().any(|run| run.id == attempt_id))) {
+            let task_id = task.id;
+            let run = task.pipeline_run.as_mut().and_then(|run| run.runs.iter_mut().find(|run| run.id == attempt_id)).context("unknown stage")?;
+            run.runs.push(record);
+            let excess = run.runs.len().saturating_sub(20);
+            run.runs.drain(..excess);
+            events.push(Event::new(
+                "ran",
+                json!({"member":role,"task":task_id,"stage":run.kind,"round":run.round,"template":template,"exit":outcome.exit,"timed_out":outcome.timed_out}),
+            ));
+            return Ok(());
+        }
         let task = team
             .tasks
             .iter_mut()
@@ -4018,6 +4151,9 @@ fn start_run(
         return refuse(format!("attempt {attempt} does not run for this member"));
     }
     let template = request["template"].as_str().unwrap_or_default();
+    if let Err(error) = super::stages::run_folder(team, &member.id, attempt, template) {
+        return refuse(format!("{error:#}"));
+    }
     let plan = match super::templates::plan(template, &request["args"], folder) {
         Ok(plan) => plan,
         Err(error) => return refuse(format!("{error:#}")),
@@ -4476,6 +4612,120 @@ mod tests {
         ops::apply(&mut team, "approve", &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
         team
     }
+    /// U36: dev reported #1 under the Code pipeline; rev reviews and qa tests,
+    /// each with a free session; every member works in `folder`.
+    fn staged(folder: &str) -> Team {
+        let mut t = team();
+        t.folder = folder.to_owned();
+        t.members.push(Member { id: "rev".into(), role: "Reviewer".into(), agent: "claude".into(), state: MemberState::Active,
+            session: Some(SessionRef { name: "claude/x/rev".into(), run_id: "r2".into(), ..Default::default() }), ..Default::default() });
+        for member in &mut t.members {
+            member.folder = MemberFolder::Shared;
+            if member.id == "qa" {
+                member.state = MemberState::Active;
+                member.session = Some(SessionRef { name: "kimi/x/qa".into(), run_id: "r3".into(), ..Default::default() });
+            }
+        }
+        t.task_mut(1).unwrap().pipeline = "code".into();
+        super::super::pipeline::snapshot_with(&mut t, 1, &super::super::catalog::builtin());
+        let task = t.task_mut(1).unwrap();
+        task.attempts.push(Attempt { n: 1, id: "a1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        task.status = TaskStatus::InProgress;
+        let mut events = Vec::new();
+        ops::apply(&mut t, "report", &json!({"task":1,"attempt":"a1","text":"Done"}), &Actor::Member("dev".into()), &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(t.task(1).unwrap().status, TaskStatus::InReview);
+        t
+    }
+    fn free_sessions() -> Vec<Seen> {
+        vec![session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true), session("claude/x/rev", "r2", true), session("kimi/x/qa", "r3", true)]
+    }
+
+    #[test]
+    fn a_waiting_stage_goes_to_its_first_free_member_never_the_implementer() {
+        let mut t = staged("C:\\proj");
+        let found = steps(&t, &free_sessions(), 100.0);
+        assert!(found.contains(&Step::StageOut { task: 1, member: "rev".into() }), "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::StageOut { member, .. } if member == "dev")), "{found:?}");
+        // A busy reviewer gets nothing; a second reviewer takes the stage.
+        let busy = vec![session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true), session("claude/x/rev", "r2", false), session("kimi/x/qa", "r3", true)];
+        assert!(!steps(&t, &busy, 100.0).iter().any(|step| matches!(step, Step::StageOut { .. })));
+        t.members.push(Member { id: "rev2".into(), role: "Reviewer".into(), agent: "claude".into(), state: MemberState::Active,
+            session: Some(SessionRef { name: "claude/x/rev2".into(), run_id: "r4".into(), ..Default::default() }), ..Default::default() });
+        let mut seen = busy;
+        seen.push(session("claude/x/rev2", "r4", true));
+        assert!(steps(&t, &seen, 100.0).contains(&Step::StageOut { task: 1, member: "rev2".into() }));
+        // Given out, its member is busy with it: no second stage and no task.
+        super::super::pipeline::give_stage(&mut t, 1, "rev").unwrap();
+        let found = steps(&t, &free_sessions(), 100.0);
+        assert!(!found.iter().any(|step| matches!(step, Step::StageOut { .. })), "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::HandOut { member, .. } if member == "rev")), "{found:?}");
+    }
+
+    #[test]
+    fn a_held_folder_keeps_the_implementers_next_task_back() {
+        let mut t = staged("C:\\proj");
+        // While #1 is in review, dev takes #2 as usual.
+        assert!(steps(&t, &free_sessions(), 100.0).contains(&Step::HandOut { task: 2, member: "dev".into() }));
+        let run = super::super::pipeline::give_stage(&mut t, 1, "rev").unwrap();
+        let mut events = Vec::new();
+        ops::apply(&mut t, "report", &json!({"task":1,"attempt":run,"verdict":"pass"}), &Actor::Member("rev".into()), &BTreeSet::new(), &mut events).unwrap();
+        // The test holds the folder: #2 waits, the test goes to qa.
+        let found = steps(&t, &free_sessions(), 100.0);
+        assert!(found.contains(&Step::StageOut { task: 1, member: "qa".into() }), "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::HandOut { task: 2, .. } | Step::Rebalance { task: 2, .. })), "{found:?}");
+        // An ended stage with a temporary folder is cleaned up.
+        let run = super::super::pipeline::give_stage(&mut t, 1, "qa").unwrap();
+        t.task_mut(1).unwrap().pipeline_run.as_mut().unwrap().open_run_mut().unwrap().temp = "C:\\gone".into();
+        ops::apply(&mut t, "report", &json!({"task":1,"attempt":run,"verdict":"pass"}), &Actor::Member("qa".into()), &BTreeSet::new(), &mut events).unwrap();
+        let found = steps(&t, &free_sessions(), 100.0);
+        assert!(found.contains(&Step::StageCleanup { task: 1, run: run.clone() }), "{found:?}");
+        assert!(found.contains(&Step::HandOut { task: 2, member: "dev".into() }), "the hold ended: {found:?}");
+    }
+
+    #[test]
+    fn a_stage_hand_out_names_the_folder_and_a_refusal_puts_it_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("proj");
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let t = staged(&folder.display().to_string());
+        store.create("11111111-1111-4111-8111-111111111532", &json!({}), t.clone(), vec![]).unwrap();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(String, String)>::new()));
+        let record = sent.clone();
+        let refuse = std::rc::Rc::new(std::cell::Cell::new(true));
+        let refusing = refuse.clone();
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+            assert_eq!(args.first().copied(), Some("send"));
+            let input = input.cloned().unwrap_or_default();
+            record.borrow_mut().push((args.get(1).copied().unwrap_or_default().to_owned(), input["text"].as_str().unwrap_or_default().to_owned()));
+            Ok(if refusing.get() { fake_output(1, "", "hgs: the session is busy") } else { fake_output(0, r#"{"status":"submitted"}"#, "") })
+        })));
+        let refused = stage_hand_out(&mut store, &t.id, 1, "rev", "");
+        let after_refusal = store.load(&t.id).unwrap().unwrap();
+        refuse.set(false);
+        let delivered = stage_hand_out(&mut store, &t.id, 1, "rev", "");
+        set_fake_hgs(None);
+        refused.unwrap();
+        delivered.unwrap();
+        let run = after_refusal.task(1).unwrap().pipeline_run.as_ref().unwrap().open_run().unwrap().clone();
+        assert_eq!((run.state, run.member.as_str(), run.folder.as_str()), (StageState::Waiting, "", ""), "a refused stage waits again");
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let run = saved.task(1).unwrap().pipeline_run.as_ref().unwrap().open_run().unwrap().clone();
+        assert_eq!((run.state, run.member.as_str()), (StageState::Delivered, "rev"));
+        assert!(run.delivered_at.is_some());
+        assert_eq!(std::path::PathBuf::from(&run.folder), folder);
+        let sent = sent.borrow();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[1].0, "claude/x/rev");
+        assert!(sent[1].1.contains("review stage") && sent[1].1.contains(&format!("Folder: {}", folder.display())), "{}", sent[1].1);
+        assert!(sent[1].1.contains(&format!("\"attempt\":\"{}\"", run.id)), "{}", sent[1].1);
+        // hgs team current names the stage for its member.
+        let current = super::super::commands::current_view(&saved, "rev").unwrap();
+        assert_eq!((current["attempt"].clone(), current["stage"].clone()), (json!(run.id), json!("review")));
+        // The implementer is never given its own stage.
+        assert!(stage_hand_out(&mut store, &t.id, 1, "dev", "").is_err());
+    }
+
     fn session(name: &str, run: &str, free: bool) -> Seen {
         Seen { name: name.into(), run_id: run.into(), conversation_id: "c".into(), free, idle: free, live: true, ..Default::default() }
     }

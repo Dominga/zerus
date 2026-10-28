@@ -552,6 +552,8 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
         for (member, value) in team.members.iter().zip(members) {
             value["host_shared"] = json!(shared.contains(&member.id));
             value["queue"] = json!(member_queue(team, &member.id));
+            // U36: the stage it has, then the waiting stages it may take.
+            value["stage_queue"] = json!(super::stages::queue(team, &member.id));
             // U32: how the member joined on the owner's word, with the quote.
             if let Some(added) = &member.added {
                 value["added"] = added.clone();
@@ -667,6 +669,7 @@ fn summary(team: &Team) -> Value {
         .map(|m| {
             json!({"id":m.id,"role":team.role_of(&m.id),"agent":m.agent,"model":m.model,"computer":m.computer,
                 "session":m.session,"state":m.state,"error":m.error,"queue":member_queue(team, &m.id),
+                "stage_queue":super::stages::queue(team, &m.id),
                 "services":m.services,"question":m.permission})
         })
         .collect();
@@ -1587,7 +1590,7 @@ pub(crate) fn commit_in_team(team: &Team, member_id: &str, input: &Value) -> any
 /// What `hgs team current` answers for one member of a team (spec section 5):
 /// the live attempt, its phase, its open questions and the report command.
 /// Read only.
-fn current_view(team: &Team, member: &str) -> anyhow::Result<Value> {
+pub(crate) fn current_view(team: &Team, member: &str) -> anyhow::Result<Value> {
     let Some((task, attempt)) = team
         .tasks
         .iter()
@@ -1595,6 +1598,18 @@ fn current_view(team: &Team, member: &str) -> anyhow::Result<Value> {
         .filter_map(|task| task.open_attempt().map(|attempt| (task, attempt)))
         .find(|(_, attempt)| attempt.member == member)
     else {
+        // U36: a member given a stage of another member's task reports on it.
+        if let Some((task, run)) = team.tasks.iter().find_map(|task| {
+            let run = task.pipeline_run.as_ref()?.open_run()?;
+            (run.state == StageState::Delivered && run.member == member).then_some((task, run))
+        }) {
+            return Ok(json!({
+                "team": team.id, "task": task.id, "title": task.title, "attempt": run.id, "stage": run.kind,
+                "round": run.round, "folder": run.folder, "phase": "stage", "open_questions": [],
+                "report": {"request_id": uuid::Uuid::new_v4().to_string(), "team": team.id, "task": task.id,
+                    "attempt": run.id, "verdict": "pass", "text": "...", "findings": []}
+            }));
+        }
         bail!("{}", no_attempt_text(team, member));
     };
     let phase = ops::attempt_phase(task, false).unwrap_or("unconfirmed");

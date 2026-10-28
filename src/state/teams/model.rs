@@ -1077,6 +1077,29 @@ pub(crate) struct StageRun {
     /// Who ended it: the stage's role, Lead, You or Pipeline.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub by: String,
+    /// #532: the folder the stage works in: the task's own folder, or its
+    /// detached checkout.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub folder: String,
+    /// A detached checkout Zerus made for this test, removed after it, and the
+    /// repository it belongs to.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub checkout: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub checkout_repo: String,
+    /// This test holds the task's folder until it ends.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub holds: bool,
+    /// What changed: the attempt's commits, or its reported files with their
+    /// size and hash when the stage began.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed: Vec<serde_json::Value>,
+    /// A test's own temporary folder, removed after the stage.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub temp: String,
+    /// The command templates the stage ran, newest last, at most 20.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<RunRecord>,
 }
 
 /// U36: a task's pipeline snapshot and progress.

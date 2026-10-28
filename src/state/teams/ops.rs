@@ -1913,6 +1913,13 @@ fn structured_report(team: &Team, id: u32, report: &Value) -> anyhow::Result<Val
             );
         }
     }
+    // U36: the files the attempt changed, which a stage reads in a folder
+    // without Git.
+    let files = report["files"].as_array().cloned().unwrap_or_default();
+    ensure!(report.get("files").is_none_or(Value::is_array) && files.len() <= 500, "A report lists at most 500 changed files");
+    for file in &files {
+        ensure!(file.as_str().is_some_and(|file| !file.trim().is_empty() && file.chars().count() <= 500), "A changed file is a path of at most 500 characters");
+    }
     let limits = report["limits"].as_array().cloned().unwrap_or_default();
     ensure!(limits.len() <= 50, "A report lists at most 50 limits");
     for limit in &limits {

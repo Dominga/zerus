@@ -12,6 +12,7 @@ pub(crate) mod owner_word;
 pub(crate) mod pipeline;
 pub(crate) mod plan;
 pub(crate) mod safe_actions;
+pub(crate) mod stages;
 pub(crate) mod store;
 pub(crate) mod templates;
 pub(crate) mod waiting;

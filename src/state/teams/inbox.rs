@@ -489,6 +489,12 @@ pub(crate) fn waits(team: &Team, task: &Task, ready: bool) -> Option<Value> {
     if let Some(hold) = &task.hold {
         return Some(json!({"for":"hold","on":[hold.by],"unblock":format!("release #{}", task.id)}));
     }
+    // U36: a test holds the assignee's folder; its next task waits for it.
+    if matches!(task.status, TaskStatus::Pending) {
+        if let Some(held) = super::stages::held(team, &task.assignee).filter(|held| *held != task.id) {
+            return Some(json!({"for":"folder","on":[format!("#{held}")],"unblock":format!("folder held by the test of #{held}")}));
+        }
+    }
     if task.status == TaskStatus::Submitted {
         return Some(json!({
             "for":"lead","on":[team.role_of(&team.lead)],"unblock":format!("accept #{}", task.id)

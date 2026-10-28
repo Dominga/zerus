@@ -40,6 +40,7 @@ pub mod terminal;
 pub mod view;
 pub mod views;
 pub mod voice;
+pub mod worktree_review;
 pub mod worktrees;
 
 use serde::{Deserialize, Serialize};

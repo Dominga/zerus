@@ -449,8 +449,11 @@ impl Contents {
     }
 }
 
-/// A change other code reacts to: the setting's name and its new value.
-pub type Listener = Box<dyn Fn(&str, &Value) + Send + Sync>;
+/// A change other code reacts to: the setting's name, its new value and the
+/// store's revision after it. Revisions grow with every change, in the order
+/// the store took them, so a reader can drop an answer or event that arrives
+/// after a newer one.
+pub type Listener = Box<dyn Fn(&str, &Value, u64) + Send + Sync>;
 
 struct State {
     contents: Contents,
@@ -463,6 +466,7 @@ struct State {
     closed: bool,
     seed: Option<QtStore>,
     error: Option<String>,
+    revision: u64,
 }
 
 struct Shared {
@@ -500,6 +504,7 @@ impl Settings {
                 closed: false,
                 seed,
                 error: None,
+                revision: 0,
             }),
             signal: Condvar::new(),
             listeners: Mutex::new(Vec::new()),
@@ -569,8 +574,14 @@ impl Settings {
     }
 
     /// Stores a value, normalized as Qt reads it, and returns what is now in
-    /// effect. Removing a shortcut override (`Null`) restores its defaults.
+    /// effect. Removing a shortcut override (`Null`) restores its defaults and
+    /// returns `Null`.
     pub fn set(&self, name: &str, value: Value) -> Result<Value, String> {
+        self.set_tracked(name, value).map(|(value, _)| value)
+    }
+
+    /// [`Settings::set`] with the store's revision after the change.
+    pub fn set_tracked(&self, name: &str, value: Value) -> Result<(Value, u64), String> {
         let key = find(name).ok_or_else(|| format!("Unknown setting: {name}"))?;
         if name == QT_AUTOMATIC_APPROVALS {
             return Err("This setting only records Qt's choice.".into());
@@ -588,7 +599,7 @@ impl Settings {
             }
             _ => return Err(format!("Wrong type for {name}")),
         };
-        let now = {
+        let (now, revision) = {
             let mut state = self.loaded();
             if let Some(error) = &state.unreadable {
                 return Err(error.clone());
@@ -602,8 +613,15 @@ impl Settings {
                 }
             }
             state.dirty = true;
+            state.revision += 1;
             self.shared.signal.notify_all();
-            effective(key.kind, stored.as_ref())
+            // A removed shortcut override is null: its defaults apply again,
+            // which differs from an override without chords ([]).
+            let now = match &stored {
+                Some(value) => effective(key.kind, Some(value)),
+                None => Value::Null,
+            };
+            (now, state.revision)
         };
         let listeners = self
             .shared
@@ -611,9 +629,9 @@ impl Settings {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         for listener in listeners.iter() {
-            listener(name, &now);
+            listener(name, &now, revision);
         }
-        Ok(now)
+        Ok((now, revision))
     }
 
     /// Calls `listener` after every change made through [`Settings::set`].

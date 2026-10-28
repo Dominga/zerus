@@ -1,6 +1,6 @@
 import { createSignal, createMemo } from "solid-js";
 import { resolveSkins, compileSkin, type ResolvedSkin, type SkinFile } from "./skin";
-import { DEFAULTS, setSetting, settingsReady, text } from "../store/settings";
+import { DEFAULTS, flag, setSetting, settingsReady, text } from "../store/settings";
 import zerusDark from "./skins/zerus-dark.json";
 import zerusLight from "./skins/zerus-light.json";
 import fjord from "./skins/fjord.json";
@@ -63,20 +63,31 @@ export function chooseSkin(id: string): boolean {
   if (!chosen) return false;
   void setSetting(slot(chosen.appearance), id);
   if (theme() !== "system" && theme() !== chosen.appearance) void setSetting("workspace/theme", chosen.appearance);
+  // Choosing a skin applies its activity-column variant (a user action; a
+  // skin switched by the system appearance changes no setting).
+  const full = chosen.layout["activity-column"] === "full";
+  if (full !== flag("workspace/activityFullWidth")) void setSetting("workspace/activityFullWidth", full);
   return appearanceFor(theme(), systemLight()) === chosen.appearance;
 }
 
-/** The skin picked before the settings store (local storage), moved once into its slot. */
+/**
+ * The skin picked before the settings store (local storage), moved once into
+ * its slot. A skin of the other appearance than the system's also sets the
+ * theme, so it stays in use (the mockup's start). The entry goes only after
+ * the store took the move.
+ */
 const LEGACY_SKIN = "zerus-client-skin";
-void settingsReady.then(() => {
-  try {
-    const id = localStorage.getItem(LEGACY_SKIN);
-    const legacy = id ? skins.find((s) => s.id === id) : undefined;
-    if (legacy) void setSetting(slot(legacy.appearance), legacy.id);
-    localStorage.removeItem(LEGACY_SKIN);
-  } catch {
-    /* storage may be unavailable */
+void settingsReady.then(async () => {
+  let id: string | null = null;
+  try { id = localStorage.getItem(LEGACY_SKIN); } catch { return; /* storage may be unavailable */ }
+  if (id === null) return;
+  const legacy = skins.find((s) => s.id === id);
+  let stored = true;
+  if (legacy) {
+    stored = await setSetting(slot(legacy.appearance), legacy.id);
+    if (stored && (legacy.appearance === "light") !== systemLight()) stored = await setSetting("workspace/theme", legacy.appearance);
   }
+  if (stored) try { localStorage.removeItem(LEGACY_SKIN); } catch { /* storage may be unavailable */ }
 });
 
 /** Register a validated, resolved user skin and its compiled CSS rule. */

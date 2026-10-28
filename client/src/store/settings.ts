@@ -8,9 +8,14 @@ import defaults from "./settings-defaults.json";
 // names with Qt's defaults. In the app they live in the core's store
 // (<data_dir>/settings.json): read with `settings_get`, written with
 // `settings_set`, which answers with the value in effect (clamped as Qt
-// clamps it), and announced as `settings-changed`. The defaults come from the
-// core's key table (settings-defaults.json, kept equal by a core test).
-// Outside Tauri (the browser dev mode) they fall back to local storage.
+// clamps it) and the store's revision, and announced as `settings-changed`
+// with the same revision. The defaults come from the core's key table
+// (settings-defaults.json, kept equal by a core test). Outside Tauri (the
+// browser dev mode) they fall back to local storage.
+//
+// Writes and events can arrive out of call order, so each key has at most
+// one save in flight, later values coalesce to the newest, and an answer or
+// event older than what the key already shows is dropped.
 //
 // A measurement run may try a value without storing it (`persist: false`);
 // `restoreSettings` returns to what the user chose.
@@ -23,6 +28,12 @@ export const DEFAULTS: Readonly<Settings> = defaults;
 
 /** Local storage of the browser dev mode (and of builds before the core store). */
 export const STORAGE_KEY = "zerus-client-settings";
+/** Overview's and Activity's column widths before the core store. */
+export const OVERVIEW_WIDTH_KEY = "zerus-client-overview-width";
+export const ACTIVITY_WIDTH_KEY = "zerus-client-activity-width";
+/** This viewer's copy of what the first paint needs (settings.json stays the truth). */
+export const HINT_KEY = "zerus-client-settings-hint";
+export const HINTED = ["workspace/theme", "client/darkSkin", "client/lightSkin", "workspace/contentScale"] as const;
 
 export interface SettingsStorage {
   getItem(key: string): string | null;
@@ -30,14 +41,17 @@ export interface SettingsStorage {
   removeItem(key: string): void;
 }
 
+/** A store answer: the value in effect (null for a removed shortcut override) and the revision. */
+export interface Saved { value: SettingValue | null; revision: number }
+
 /** Where settings live: the core store in the app, local storage outside it. */
 export interface SettingsBackend {
   /** Every setting as the store has it. */
   load(): Promise<Settings>;
-  /** Stores one setting; the value in effect. */
-  save(key: string, value: SettingValue | null): Promise<SettingValue>;
-  /** Changes made elsewhere (another window, the Rust side). */
-  listen(onChange: (key: string, value: SettingValue) => void): void;
+  /** Stores one setting. */
+  save(key: string, value: SettingValue | null): Promise<Saved>;
+  /** Changes made elsewhere; resolves to the unregister function. */
+  listen(onChange: (key: string, change: Saved) => void): Promise<() => void>;
 }
 
 /** The stored object, or an empty one when it is missing or not a JSON object. */
@@ -59,117 +73,213 @@ export function sameType(key: string, value: unknown): SettingValue | undefined 
   return typeof value === typeof fallback ? value as SettingValue : undefined;
 }
 
+/** A shortcut override: a list of portable chords under shortcuts/<id>. */
+function shortcut(key: string, value: unknown): string[] | undefined {
+  return key.startsWith("shortcuts/") && Array.isArray(value) && value.every((item) => typeof item === "string") ? value as string[] : undefined;
+}
+
+const typed = (key: string, value: unknown) => sameType(key, value) ?? shortcut(key, value);
+
+function typedObject(raw: Record<string, unknown>, keys?: readonly string[]): Settings {
+  const values: Settings = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (keys && !keys.includes(key)) continue;
+    const checked = typed(key, value);
+    if (checked !== undefined) values[key] = checked;
+  }
+  return values;
+}
+
 /** The settings of the browser dev mode, kept in local storage. */
 export function storageBackend(storage: SettingsStorage | undefined): SettingsBackend {
   const read = () => { try { return storedObject(storage?.getItem(STORAGE_KEY)); } catch { return {}; } };
+  let revision = 0;
   return {
-    load: async () => {
-      const stored = read();
-      const values: Settings = {};
-      for (const [key, value] of Object.entries(stored)) {
-        const typed = sameType(key, value);
-        if (typed !== undefined) values[key] = typed;
-      }
-      return values;
-    },
+    load: async () => typedObject(read()),
     save: async (key, value) => {
       const stored = read();
       if (value === null) delete stored[key];
       else stored[key] = value;
-      try { storage?.setItem(STORAGE_KEY, JSON.stringify(stored)); } catch { /* storage may be unavailable or full */ }
-      return value ?? DEFAULTS[key];
+      storage?.setItem(STORAGE_KEY, JSON.stringify(stored));
+      return { value: value ?? DEFAULTS[key] ?? null, revision: ++revision };
     },
-    listen: () => {},
+    listen: async () => () => {},
   };
 }
 
+/** Values to move once from local storage, and how to remove them after. */
+export interface Legacy { moves: Settings; clear(): void }
+
 /**
- * The values local storage held before the core store, to move once: the
- * settings object and the Overview and Activity widths. They are removed
- * after the move.
+ * What local storage held before the core store: the settings object (in the
+ * app only; the browser dev mode keeps using it) and the Overview and
+ * Activity widths. `clear` removes them; call it only after every move saved.
  */
-export function takeLegacy(storage: SettingsStorage | undefined): Settings {
-  const moved: Settings = {};
+export function takeLegacy(storage: SettingsStorage | undefined, withSettings: boolean): Legacy {
+  const moves: Settings = {};
   try {
-    const stored = storedObject(storage?.getItem(STORAGE_KEY));
-    for (const [key, value] of Object.entries(stored)) {
-      const typed = sameType(key, value);
-      if (typed !== undefined) moved[key] = typed;
-    }
+    if (withSettings) Object.assign(moves, typedObject(storedObject(storage?.getItem(STORAGE_KEY))));
     const width = Number(storage?.getItem(OVERVIEW_WIDTH_KEY));
-    if (Number.isFinite(width) && width > 0) moved["client/overviewWidth"] = Math.round(width);
+    if (Number.isFinite(width) && width > 0) moves["client/overviewWidth"] = Math.round(width);
     const column = Number(storage?.getItem(ACTIVITY_WIDTH_KEY));
-    if (Number.isFinite(column) && column > 0) moved["workspace/activityWidth"] = Math.round(column);
-    storage?.removeItem(STORAGE_KEY);
-    storage?.removeItem(OVERVIEW_WIDTH_KEY);
-    storage?.removeItem(ACTIVITY_WIDTH_KEY);
+    if (Number.isFinite(column) && column > 0) moves["workspace/activityWidth"] = Math.round(column);
   } catch {
     /* storage may be unavailable */
   }
-  return moved;
+  return {
+    moves,
+    clear: () => {
+      try {
+        if (withSettings) storage?.removeItem(STORAGE_KEY);
+        storage?.removeItem(OVERVIEW_WIDTH_KEY);
+        storage?.removeItem(ACTIVITY_WIDTH_KEY);
+      } catch {
+        /* storage may be unavailable */
+      }
+    },
+  };
 }
 
-/** Overview's column width before the core store (Overview.tsx). */
-export const OVERVIEW_WIDTH_KEY = "zerus-client-overview-width";
-/** Activity's column width before the core store (Activity.tsx). */
-export const ACTIVITY_WIDTH_KEY = "zerus-client-activity-width";
+/** The first-paint copy (theme, skins, content scale) this viewer kept. */
+export function readHint(storage: SettingsStorage | undefined): Settings {
+  try { return typedObject(storedObject(storage?.getItem(HINT_KEY)), HINTED); } catch { return {}; }
+}
+
+export function writeHint(storage: SettingsStorage | undefined, settings: Settings) {
+  const hint: Settings = {};
+  for (const key of HINTED) if (settings[key] !== undefined) hint[key] = settings[key];
+  try { storage?.setItem(HINT_KEY, JSON.stringify(hint)); } catch { /* storage may be unavailable or full */ }
+}
+
+interface Slot { queued?: { value: SettingValue | null }; running: boolean; waiters: ((ok: boolean) => void)[] }
 
 /**
- * A reactive settings store over `backend`, starting from the defaults until
- * the backend's values arrive. `moves` are written once before loading.
+ * A reactive settings store over `backend`, starting from the defaults (and
+ * this viewer's hint) until the backend's values arrive. The legacy moves are
+ * written first and cleared only once all saved; `remember` keeps the hint.
  */
-export function createSettings(backend: SettingsBackend, moves: Settings = {}) {
-  const [settings, setSettings] = createStore<Settings>({ ...DEFAULTS });
+export function createSettings(backend: SettingsBackend, options: { legacy?: Legacy; hint?: Settings; remember?: (settings: Settings) => void } = {}) {
+  const [settings, setSettings] = createStore<Settings>({ ...DEFAULTS, ...options.hint });
   const [loaded, setLoaded] = createSignal(false);
-  // What the user chose, and the keys holding a value tried without storing.
+  // What the store last confirmed, the newest revision applied per key, the
+  // keys holding a value tried without storing, and the saves per key.
   const chosen: Settings = { ...DEFAULTS };
+  const revisions = new Map<string, number>();
   const tried = new Set<string>();
+  const slots = new Map<string, Slot>();
+  // Bumped on every local change or event, so a load does not undo them.
+  const versions = new Map<string, number>();
+  const bump = (key: string) => versions.set(key, (versions.get(key) ?? 0) + 1);
 
-  const apply = (key: string, value: SettingValue) => {
-    chosen[key] = value;
-    if (!tried.has(key)) setSettings(key, value);
+  const show = (key: string, value: SettingValue | null | undefined) => {
+    // Undefined removes the key: a shortcut's defaults apply again.
+    if (!tried.has(key)) setSettings(key, (value ?? undefined) as SettingValue);
   };
+  /** Whether a change of `key` at `revision` is the newest seen. */
+  const fresh = (key: string, revision: number) => {
+    if (revision <= (revisions.get(key) ?? 0)) return false;
+    revisions.set(key, revision);
+    return true;
+  };
+  const confirm = (key: string, value: SettingValue | null) => {
+    if (value === null) delete chosen[key];
+    else chosen[key] = value;
+  };
+  /** Keeps this viewer's first-paint copy after a hinted key changed. */
+  const remember = (key: string) => { if ((HINTED as readonly string[]).includes(key)) options.remember?.(settings); };
 
-  async function set(key: string, value: SettingValue | null, options: { persist?: boolean } = {}) {
+  async function drain(key: string, slot: Slot) {
+    slot.running = true;
+    while (slot.queued) {
+      const { value } = slot.queued;
+      slot.queued = undefined;
+      const waiters = slot.waiters;
+      slot.waiters = [];
+      let ok = true;
+      let saved: Saved | undefined;
+      try {
+        saved = await backend.save(key, value);
+      } catch (error) {
+        ok = false;
+        console.warn(`settings: ${key} not saved: ${String(error)}`);
+      }
+      // A newer value waits: this answer only updates what the store holds.
+      const latest = !slot.queued;
+      if (saved && fresh(key, saved.revision)) {
+        confirm(key, saved.value);
+        if (latest) { show(key, saved.value); remember(key); }
+      } else if (!ok && latest) {
+        // Refused: back to what the store last confirmed.
+        show(key, chosen[key]);
+      }
+      for (const waiter of waiters) waiter(ok);
+    }
+    slot.running = false;
+    slots.delete(key);
+  }
+
+  /** Stores one setting; whether the store took it. */
+  function set(key: string, value: SettingValue | null, options: { persist?: boolean } = {}): Promise<boolean> {
     if (options.persist === false) {
-      if (value === null) return;
+      if (value === null) return Promise.resolve(true);
       tried.add(key);
       setSettings(key, value);
-      return;
+      return Promise.resolve(true);
     }
     tried.delete(key);
-    const before = chosen[key];
-    if (value !== null) setSettings(key, value);
-    try {
-      apply(key, await backend.save(key, value));
-    } catch (error) {
-      // The store refused it (an unreadable settings file): keep what it has.
-      console.warn(`settings: ${key} not saved: ${String(error)}`);
-      if (before !== undefined) setSettings(key, before);
-    }
+    bump(key);
+    show(key, value);
+    return new Promise((resolve) => {
+      let slot = slots.get(key);
+      if (!slot) { slot = { running: false, waiters: [] }; slots.set(key, slot); }
+      slot.queued = { value };
+      slot.waiters.push(resolve);
+      if (!slot.running) void drain(key, slot);
+    });
   }
 
   /** Back to what the user chose, after values tried with `persist: false`. */
   function restore() {
-    for (const key of tried) setSettings(key, chosen[key]);
+    const keys = [...tried];
     tried.clear();
+    for (const key of keys) show(key, chosen[key]);
   }
 
+  /** A change made elsewhere: shown unless one of ours is still being saved. */
+  const changed = (key: string, change: Saved) => {
+    if (!fresh(key, change.revision)) return;
+    bump(key);
+    confirm(key, change.value);
+    if (!slots.has(key)) { show(key, change.value); remember(key); }
+  };
+
+  let unlisten: (() => void) | undefined;
   const ready = (async () => {
-    backend.listen((key, value) => apply(key, value));
-    for (const [key, value] of Object.entries(moves)) {
-      try { await backend.save(key, value); } catch { /* keeps the store's value */ }
+    try {
+      unlisten = await backend.listen(changed);
+    } catch (error) {
+      console.warn(`settings: changes made elsewhere will not show: ${String(error)}`);
     }
+    const moves = options.legacy?.moves ?? {};
+    const results = await Promise.all(Object.entries(moves).map(([key, value]) => set(key, value)));
+    if (results.every(Boolean)) options.legacy?.clear();
+    const before = new Map(versions);
     try {
       const values = await backend.load();
-      for (const [key, value] of Object.entries(values)) apply(key, value);
+      for (const [key, value] of Object.entries(values)) {
+        // A change made since the load started is newer than the loaded value.
+        if ((versions.get(key) ?? 0) !== (before.get(key) ?? 0) || slots.has(key)) continue;
+        confirm(key, value);
+        show(key, value);
+      }
     } catch (error) {
       console.warn(`settings: not loaded: ${String(error)}`);
     }
+    options.remember?.(settings);
     setLoaded(true);
   })();
 
-  return { settings, set, restore, loaded, ready };
+  return { settings, set, restore, loaded, ready, dispose: () => unlisten?.() };
 }
 
 function browserStorage(): SettingsStorage | undefined {
@@ -186,20 +296,20 @@ const inTauri = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in 
 function tauriBackend(): SettingsBackend {
   return {
     load: () => invoke<Settings>("settings_get"),
-    save: (key, value) => invoke<SettingValue>("settings_set", { key, value }),
-    listen: (onChange) => {
-      void listen<{ key: string; value: SettingValue }>("settings-changed", (e) => onChange(e.payload.key, e.payload.value));
-    },
+    save: (key, value) => invoke<Saved>("settings_set", { key, value }),
+    listen: (onChange) => listen<{ key: string; value: SettingValue | null; revision: number }>("settings-changed",
+      (e) => onChange(e.payload.key, { value: e.payload.value, revision: e.payload.revision })),
   };
 }
 
+const storage = browserStorage();
 const store = inTauri()
-  ? createSettings(tauriBackend(), takeLegacy(browserStorage()))
-  : createSettings(storageBackend(browserStorage()));
+  ? createSettings(tauriBackend(), { legacy: takeLegacy(storage, true), hint: readHint(storage), remember: (s) => writeHint(storage, s) })
+  : createSettings(storageBackend(storage), { legacy: takeLegacy(storage, false) });
 
 /** The client's settings by QSettings name, reactive. */
 export const settings = store.settings;
-/** Changes one setting and stores it (unless `persist: false`); `null` removes a shortcut override. */
+/** Changes one setting and stores it (unless `persist: false`); `null` removes a shortcut override; whether it was stored. */
 export const setSetting = store.set;
 /** Undoes values tried with `persist: false`. */
 export const restoreSettings = store.restore;

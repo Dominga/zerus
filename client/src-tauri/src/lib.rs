@@ -126,11 +126,14 @@ pub fn run() {
                 std::process::exit(3);
             }
             let window = create_main_window(app.handle())?;
+            // An unattended measurement keeps its window in front (below);
+            // otherwise the stored Keep above applies once the store loads.
             #[cfg(feature = "live")]
-            {
+            settings::init_window_layer(display.as_deref());
+            #[cfg(feature = "live")]
+            if !std::env::var("ZERUS_CLIENT_PERF").is_ok_and(|mode| mode == "auto") {
                 use tauri::Manager;
-                let store = app.state::<settings::Store>();
-                settings::apply_window_layer(&window, store.0.flag(settings::ALWAYS_ON_TOP));
+                settings::apply_stored_window_layer(&app.state::<settings::Store>(), window.clone());
             }
             // An unattended measurement needs frames: keep its window in front
             // and focused for the run, which ends by exiting the app.

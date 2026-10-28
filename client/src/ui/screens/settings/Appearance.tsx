@@ -1,8 +1,9 @@
-import { For, Show, createMemo, createResource, createSignal } from "solid-js";
+import { For, Show, createMemo, createResource, createSignal, onCleanup } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { inTauri } from "../../../bridge";
 import { Icon } from "../../lib/icons";
-import { toast } from "../../../store/ui";
+import { setContentScale, toast } from "../../../store/ui";
+import { previewColumn } from "../../sessions/Activity";
 import { flag, num, setSetting, text } from "../../../store/settings";
 import { appearanceFor, chooseSkin, chooseTheme, chosenSkin, skin, skinList, skins, systemLight, theme, type Theme } from "../../../skin/runtime";
 import type { ResolvedSkin } from "../../../skin/skin";
@@ -14,7 +15,8 @@ import { Group, Row, SectionHead, Select, Slider, Check } from "./ui";
 // (design/webui/src/screens/settings/Appearance.tsx).
 
 /** Whether the window can be kept above others here (src-tauri settings.rs). */
-const [layerSupported] = createResource(() => (inTauri() ? invoke<boolean>("window_layer_supported") : Promise.resolve(false)));
+const [layerSupported] = createResource(() =>
+  inTauri() ? invoke<boolean>("window_layer_supported").catch(() => false) : Promise.resolve(false));
 
 /** A token of a skin, following {group.token} references. */
 export function tok(s: ResolvedSkin, group: string, key: string, depth = 0): string {
@@ -106,22 +108,36 @@ function SkinCard(props: { skin: ResolvedSkin }) {
   );
 }
 
-/** Live while dragging, stored once it settles. */
-function liveSetting(key: string) {
-  const [dragging, setDragging] = createSignal<number | undefined>();
+/**
+ * A slider's setting: live while dragging, previewed after 150 ms as Qt does
+ * for content scale and Activity width, stored once it settles. A drag that
+ * ends where it started stores nothing and returns to the stored value.
+ */
+function liveSetting(key: string, preview?: (value: number | undefined) => void) {
+  const [live, setLive] = createSignal<number | undefined>();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stop = () => { if (timer !== undefined) clearTimeout(timer); timer = undefined; };
+  const clear = () => { stop(); setLive(undefined); preview?.(undefined); };
+  onCleanup(clear);
   return {
-    value: () => dragging() ?? num(key),
-    input: (v: number) => setDragging(v),
-    commit: (v: number) => { setDragging(undefined); void setSetting(key, v); },
+    value: () => live() ?? num(key),
+    input: (v: number) => {
+      setLive(v);
+      stop();
+      if (preview) timer = setTimeout(() => preview(v), 150);
+    },
+    commit: (v: number) => { stop(); setLive(undefined); void setSetting(key, v); preview?.(undefined); },
+    // After release a change event may still come: let it store first.
+    end: () => setTimeout(() => { if (live() !== undefined) clear(); }, 0),
   };
 }
 
 export function AppearanceSection() {
   const dark = createMemo(() => skinList().filter((s) => s.appearance === "dark"));
   const light = createMemo(() => skinList().filter((s) => s.appearance === "light"));
-  const scale = liveSetting("workspace/contentScale");
+  const scale = liveSetting("workspace/contentScale", (v) => setContentScale(v ?? num("workspace/contentScale")));
   const overview = liveSetting("client/overviewWidth");
-  const activity = liveSetting("workspace/activityWidth");
+  const activity = liveSetting("workspace/activityWidth", previewColumn);
   const appearanceHint = (a: "dark" | "light") =>
     theme() === "system" ? (systemLight() === (a === "light") ? "In use with your system appearance" : `Used when your system appearance is ${a}`)
       : theme() === a ? "In use" : `Used with the ${a === "dark" ? "Dark" : "Light"} theme`;
@@ -141,8 +157,8 @@ export function AppearanceSection() {
           <div class="skin-groups">
             <For each={[["dark", dark()], ["light", light()]] as const}>
               {([a, list]) => (
-                <div class="skin-group" classList={{ idle: appearanceFor(theme(), systemLight()) !== a }}>
-                  <div class="skin-group-head"><span class="eyebrow">{a === "dark" ? "Dark" : "Light"}</span><span class="dim">{appearanceHint(a)}</span></div>
+                <div class="skin-group" role="group" aria-labelledby={`skin-group-${a}`} classList={{ idle: appearanceFor(theme(), systemLight()) !== a }}>
+                  <div class="skin-group-head"><span class="eyebrow" id={`skin-group-${a}`}>{a === "dark" ? "Dark" : "Light"}</span><span class="dim">{appearanceHint(a)}</span></div>
                   <div class="skin-grid"><For each={list}>{(s) => <SkinCard skin={s} />}</For></div>
                 </div>
               )}
@@ -165,23 +181,23 @@ export function AppearanceSection() {
       <Group>
         <Row label="Content scale" wide hint="Adjusts Activity, the message field and Terminal from 75% to 200%. The session list and the side panel keep their size.">
           <Slider label="Content scale" resetLabel="Reset to 100%" value={Math.round(scale.value() * 100)} min={75} max={200} step={5} defaultValue={100} format={(v) => `${v}%`}
-            onInput={(v) => scale.input(v / 100)} onCommit={(v) => scale.commit(v / 100)} />
+            onInput={(v) => scale.input(v / 100)} onCommit={(v) => scale.commit(v / 100)} onEnd={scale.end} />
         </Row>
         <Row label="Activity width" wide hint="In a wide window, Activity, questions and the message field stay centered at this width, which grows with content scale. Drag the column edges in Activity to adjust it, or double-click an edge to restore 900 px. Full-width Activity fills the whole pane.">
           <div class="col" style={{ gap: "8px", "align-items": "stretch" }}>
             <Slider label="Maximum Activity width" resetLabel="Reset to 900 px" value={activity.value()} min={480} max={2400} step={10} defaultValue={900} format={(v) => `${v} px`}
-              disabled={flag("workspace/activityFullWidth")} onInput={activity.input} onCommit={activity.commit} />
+              disabled={flag("workspace/activityFullWidth")} onInput={activity.input} onCommit={activity.commit} onEnd={activity.end} />
             <Check label="Full-width Activity" checked={flag("workspace/activityFullWidth")} onChange={(v) => void setSetting("workspace/activityFullWidth", v)} />
           </div>
         </Row>
         <Row label="Overview width" wide hint="In a wide window, Overview stays centered at this width. Drag its edges to adjust it; double-click an edge to return to this width. Full-width Overview fills the whole page.">
           <div class="col" style={{ gap: "8px", "align-items": "stretch" }}>
             <Slider label="Default Overview width" resetLabel="Reset to 1200 px" value={overview.value()} min={720} max={2400} step={20} defaultValue={1200} format={(v) => `${v} px`}
-              disabled={flag("client/overviewFullWidth")} onInput={overview.input} onCommit={overview.commit} />
+              disabled={flag("client/overviewFullWidth")} onInput={overview.input} onCommit={overview.commit} onEnd={overview.end} />
             <Check label="Full-width Overview" checked={flag("client/overviewFullWidth")} onChange={(v) => void setSetting("client/overviewFullWidth", v)} />
           </div>
         </Row>
-        <Row label="Window" hint={layerSupported()
+        <Row label="Window" hint={layerSupported.loading ? undefined : layerSupported()
           ? "Files and terminals opened from Zerus may appear behind it while this is on."
           : "Keep Above is unavailable in this Zerus session. On Wayland, KDE Plasma 6 with KWin scripting is required. You can use your desktop's window menu or rules."}>
           <Check label="Keep Zerus above other windows" checked={flag("workspace/alwaysOnTop")} disabled={!layerSupported()}

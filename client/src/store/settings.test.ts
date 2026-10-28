@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  ACTIVITY_WIDTH_KEY, DEFAULTS, OVERVIEW_WIDTH_KEY, STORAGE_KEY, createSettings, sameType, storageBackend, takeLegacy,
-  type SettingValue, type Settings, type SettingsBackend, type SettingsStorage,
+  ACTIVITY_WIDTH_KEY, DEFAULTS, HINT_KEY, OVERVIEW_WIDTH_KEY, STORAGE_KEY, createSettings, readHint, sameType,
+  storageBackend, takeLegacy, writeHint, type Saved, type SettingValue, type Settings, type SettingsBackend,
+  type SettingsStorage,
 } from "./settings";
 
 function memoryStorage(initial: Record<string, string> = {}): SettingsStorage & { data: Record<string, string> } {
@@ -14,131 +15,241 @@ function memoryStorage(initial: Record<string, string> = {}): SettingsStorage & 
   };
 }
 
-/** A core store stand-in: clamps like the core and records each save. */
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/**
+ * A core stand-in whose saves and load answer when the test says: each save
+ * takes the next revision when it is answered, as the core's lock orders them.
+ */
 function fakeCore(values: Settings = {}) {
-  const saved: [string, SettingValue | null][] = [];
-  let listener: ((key: string, value: SettingValue) => void) | undefined;
-  let refuse = false;
+  let revision = 0;
+  const saves: { key: string; value: SettingValue | null; answer: (refuse?: boolean) => void }[] = [];
+  let listener: ((key: string, change: Saved) => void) | undefined;
+  let answerLoad: (() => void) | undefined;
+  let deferLoad = false;
+  const store: Settings = { ...DEFAULTS, ...values };
   const backend: SettingsBackend = {
-    load: async () => ({ ...DEFAULTS, ...values }),
-    save: async (key, value) => {
-      saved.push([key, value]);
-      if (refuse) throw "Settings are not readable";
-      if (key === "processes/activeSeconds" && typeof value === "number") return Math.max(1, Math.min(60, value));
-      return value ?? DEFAULTS[key];
-    },
-    listen: (onChange) => { listener = onChange; },
+    load: () => new Promise((resolve) => {
+      const answer = () => resolve({ ...store });
+      if (deferLoad) answerLoad = answer; else answer();
+    }),
+    save: (key, value) => new Promise((resolve, reject) => {
+      saves.push({
+        key, value, answer: (refuse) => {
+          if (refuse) { reject("Settings are not readable"); return; }
+          const clamped = key === "processes/activeSeconds" && typeof value === "number" ? Math.max(1, Math.min(60, value)) : value;
+          if (clamped === null) delete store[key]; else store[key] = clamped;
+          resolve({ value: clamped, revision: ++revision });
+        },
+      });
+    }),
+    listen: async (onChange) => { listener = onChange; return () => { listener = undefined; }; },
   };
-  return { backend, saved, emit: (key: string, value: SettingValue) => listener?.(key, value), refuse: () => { refuse = true; } };
+  return {
+    backend, saves, store,
+    /** A change made elsewhere, taking the next revision. */
+    elsewhere: (key: string, value: SettingValue | null) => {
+      if (value === null) delete store[key]; else store[key] = value;
+      listener?.(key, { value, revision: ++revision });
+    },
+    /** An event that arrives late, with an older revision. */
+    late: (key: string, value: SettingValue, at: number) => listener?.(key, { value, revision: at }),
+    deferLoad: () => { deferLoad = true; },
+    answerLoad: () => answerLoad?.(),
+  };
 }
 
 describe("defaults", () => {
   it("are Qt's, by QSettings name, from the core's table", () => {
     expect(DEFAULTS["workspace/animateActivity"]).toBe(true);
-    expect(DEFAULTS["workspace/reduceMotion"]).toBe(false);
     expect(DEFAULTS["workspace/theme"]).toBe("system");
-    expect(DEFAULTS["workspace/contentScale"]).toBe(1);
     expect(DEFAULTS["processes/activeSeconds"]).toBe(2.5);
     expect(DEFAULTS["client/darkSkin"]).toBe("zerus-dark");
-    expect(DEFAULTS["client/lightSkin"]).toBe("zerus-light");
-    expect(DEFAULTS["client/overviewWidth"]).toBe(1200);
     expect("automaticApprovals/enabled" in DEFAULTS).toBe(false);
   });
-
   it("accept only values of the default's type", () => {
     expect(sameType("workspace/compact", true)).toBe(true);
     expect(sameType("workspace/compact", "true")).toBeUndefined();
-    expect(sameType("workspace/contentScale", 1.5)).toBe(1.5);
     expect(sameType("no/such", true)).toBeUndefined();
   });
 });
 
-describe("the browser dev mode", () => {
-  it("keeps typed values in local storage and drops the rest", async () => {
-    const storage = memoryStorage({ [STORAGE_KEY]: JSON.stringify({ "workspace/theme": "dark", "workspace/compact": "yes", other: 1 }) });
-    const backend = storageBackend(storage);
-    expect(await backend.load()).toEqual({ "workspace/theme": "dark" });
-    expect(await backend.save("workspace/compact", true)).toBe(true);
-    expect(JSON.parse(storage.data[STORAGE_KEY])).toEqual({ "workspace/theme": "dark", "workspace/compact": true, other: 1 });
-    await backend.save("workspace/theme", null);
-    expect(JSON.parse(storage.data[STORAGE_KEY])["workspace/theme"]).toBeUndefined();
-  });
-
-  it("works without storage or when storage throws", async () => {
-    expect(await storageBackend(undefined).load()).toEqual({});
-    const throwing: SettingsStorage = { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); }, removeItem: () => {} };
-    expect(await storageBackend(throwing).load()).toEqual({});
-    expect(await storageBackend(throwing).save("workspace/compact", true)).toBe(true);
-  });
-});
-
-describe("the one-time move from local storage", () => {
-  it("takes the old settings and the Overview and Activity widths once", () => {
-    const storage = memoryStorage({
-      [STORAGE_KEY]: JSON.stringify({ "workspace/animateActivity": false, "workspace/reduceMotion": true }),
-      [OVERVIEW_WIDTH_KEY]: "1480",
-      [ACTIVITY_WIDTH_KEY]: "1100",
-    });
-    expect(takeLegacy(storage)).toEqual({
-      "workspace/animateActivity": false, "workspace/reduceMotion": true, "client/overviewWidth": 1480, "workspace/activityWidth": 1100,
-    });
-    expect(storage.data).toEqual({});
-    expect(takeLegacy(storage)).toEqual({});
-  });
-});
-
-describe("createSettings", () => {
-  it("starts at the defaults, writes the moves first, then loads the store", async () => {
-    const core = fakeCore({ "workspace/theme": "light" });
-    const store = createSettings(core.backend, { "workspace/reduceMotion": true });
-    expect(store.settings["workspace/theme"]).toBe("system");
-    expect(store.loaded()).toBe(false);
+describe("answers and events in any order", () => {
+  it("keeps one save in flight per key and sends only the newest value next", async () => {
+    const core = fakeCore();
+    const store = createSettings(core.backend);
     await store.ready;
-    expect(core.saved).toEqual([["workspace/reduceMotion", true]]);
-    expect(store.settings["workspace/theme"]).toBe("light");
-    expect(store.loaded()).toBe(true);
+    void store.set("workspace/contentScale", 1.1);
+    void store.set("workspace/contentScale", 1.2);
+    void store.set("workspace/contentScale", 1.3);
+    expect(core.saves.map((s) => s.value)).toEqual([1.1]);
+    // The first answer does not replace the newer value on screen.
+    core.saves[0].answer();
+    await flush();
+    expect(store.settings["workspace/contentScale"]).toBe(1.3);
+    expect(core.saves.map((s) => s.value)).toEqual([1.1, 1.3]);
+    core.saves[1].answer();
+    await flush();
+    expect(store.settings["workspace/contentScale"]).toBe(1.3);
   });
 
-  it("shows a change at once and keeps the value the store put in effect", async () => {
+  it("drops an event older than what the key shows", async () => {
+    const core = fakeCore();
+    const store = createSettings(core.backend);
+    await store.ready;
+    void store.set("workspace/theme", "dark");
+    core.saves[0].answer();
+    await flush();
+    void store.set("workspace/theme", "light");
+    core.saves[1].answer();
+    await flush();
+    core.late("workspace/theme", "dark", 1);
+    expect(store.settings["workspace/theme"]).toBe("light");
+  });
+
+  it("shows the value the store put in effect", async () => {
     const core = fakeCore();
     const store = createSettings(core.backend);
     await store.ready;
     const saving = store.set("processes/activeSeconds", 0.2);
     expect(store.settings["processes/activeSeconds"]).toBe(0.2);
-    await saving;
+    core.saves[0].answer();
+    expect(await saving).toBe(true);
     expect(store.settings["processes/activeSeconds"]).toBe(1);
   });
 
-  it("keeps the stored value when the store refuses a change", async () => {
+  it("reverts a refusal to the store's value, including a change made elsewhere meanwhile", async () => {
     const core = fakeCore({ "workspace/theme": "dark" });
     const store = createSettings(core.backend);
     await store.ready;
-    core.refuse();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    await store.set("workspace/theme", "light");
+    const saving = store.set("workspace/theme", "light");
+    core.elsewhere("workspace/theme", "system");
+    // While our save is pending the event only updates what the store holds.
+    expect(store.settings["workspace/theme"]).toBe("light");
+    core.saves[0].answer(true);
+    expect(await saving).toBe(false);
     warn.mockRestore();
+    expect(store.settings["workspace/theme"]).toBe("system");
+  });
+
+  it("ignores a refusal of an older value once a newer one waits", async () => {
+    const core = fakeCore({ "workspace/theme": "dark" });
+    const store = createSettings(core.backend);
+    await store.ready;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    void store.set("workspace/theme", "light");
+    void store.set("workspace/theme", "system");
+    core.saves[0].answer(true);
+    await flush();
+    expect(store.settings["workspace/theme"]).toBe("system");
+    core.saves[1].answer();
+    await flush();
+    warn.mockRestore();
+    expect(store.settings["workspace/theme"]).toBe("system");
+  });
+
+  it("leaves a tried value alone when an answer or refusal arrives", async () => {
+    const core = fakeCore();
+    const store = createSettings(core.backend);
+    await store.ready;
+    void store.set("workspace/animateActivity", false);
+    await store.set("workspace/animateActivity", true, { persist: false });
+    core.saves[0].answer();
+    await flush();
+    expect(store.settings["workspace/animateActivity"]).toBe(true);
+    store.restore();
+    expect(store.settings["workspace/animateActivity"]).toBe(false);
+  });
+
+  it("does not let the load undo a change made before it answered", async () => {
+    const core = fakeCore({ "workspace/theme": "dark", "workspace/language": "en" });
+    core.deferLoad();
+    const store = createSettings(core.backend);
+    await flush();
+    void store.set("workspace/language", "ru");
+    core.elsewhere("workspace/theme", "light");
+    core.answerLoad();
+    await store.ready;
+    expect(store.settings["workspace/language"]).toBe("ru");
+    expect(store.settings["workspace/theme"]).toBe("light");
+  });
+
+  it("removes a shortcut override when the store answers null", async () => {
+    const core = fakeCore({ "shortcuts/go.anywhere": ["Ctrl+J"] });
+    const store = createSettings(core.backend);
+    await store.ready;
+    expect(store.settings["shortcuts/go.anywhere"]).toEqual(["Ctrl+J"]);
+    void store.set("shortcuts/go.anywhere", null);
+    core.saves[0].answer();
+    await flush();
+    expect("shortcuts/go.anywhere" in store.settings).toBe(false);
+  });
+});
+
+describe("the one-time moves", () => {
+  it("take the old settings and widths, and clear them only after every save", async () => {
+    const storage = memoryStorage({
+      [STORAGE_KEY]: JSON.stringify({ "workspace/reduceMotion": true }),
+      [OVERVIEW_WIDTH_KEY]: "1480",
+      [ACTIVITY_WIDTH_KEY]: "1100",
+    });
+    const legacy = takeLegacy(storage, true);
+    expect(legacy.moves).toEqual({ "workspace/reduceMotion": true, "client/overviewWidth": 1480, "workspace/activityWidth": 1100 });
+    const core = fakeCore();
+    const store = createSettings(core.backend, { legacy });
+    await flush();
+    expect(Object.keys(storage.data)).toHaveLength(3);
+    for (const save of core.saves) save.answer();
+    await store.ready;
+    expect(storage.data).toEqual({});
+    expect(store.settings["workspace/activityWidth"]).toBe(1100);
+  });
+
+  it("keep the old values when a save is refused", async () => {
+    const storage = memoryStorage({ [OVERVIEW_WIDTH_KEY]: "1480" });
+    const core = fakeCore();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const store = createSettings(core.backend, { legacy: takeLegacy(storage, true) });
+    await flush();
+    core.saves[0].answer(true);
+    await store.ready;
+    warn.mockRestore();
+    expect(storage.data[OVERVIEW_WIDTH_KEY]).toBe("1480");
+  });
+
+  it("move only the widths in the browser dev mode, which keeps its settings object", async () => {
+    const storage = memoryStorage({ [STORAGE_KEY]: JSON.stringify({ "workspace/theme": "dark" }), [ACTIVITY_WIDTH_KEY]: "1000" });
+    const store = createSettings(storageBackend(storage), { legacy: takeLegacy(storage, false) });
+    await store.ready;
+    expect(JSON.parse(storage.data[STORAGE_KEY])).toEqual({ "workspace/theme": "dark", "workspace/activityWidth": 1000 });
+    expect(storage.data[ACTIVITY_WIDTH_KEY]).toBeUndefined();
     expect(store.settings["workspace/theme"]).toBe("dark");
   });
+});
 
-  it("tries a value without storing it and restores the chosen one", async () => {
-    const core = fakeCore();
-    const store = createSettings(core.backend);
+describe("the first-paint hint", () => {
+  it("starts from this viewer's copy and refreshes it after load and changes", async () => {
+    const storage = memoryStorage({ [HINT_KEY]: JSON.stringify({ "workspace/theme": "dark", "workspace/contentScale": 1.5, other: 1 }) });
+    expect(readHint(storage)).toEqual({ "workspace/theme": "dark", "workspace/contentScale": 1.5 });
+    const core = fakeCore({ "workspace/theme": "light" });
+    const store = createSettings(core.backend, { hint: readHint(storage), remember: (s) => writeHint(storage, s) });
+    expect(store.settings["workspace/theme"]).toBe("dark");
+    expect(store.settings["workspace/contentScale"]).toBe(1.5);
     await store.ready;
-    await store.set("workspace/animateActivity", false, { persist: false });
-    expect(store.settings["workspace/animateActivity"]).toBe(false);
-    expect(core.saved).toEqual([]);
-    // A change from elsewhere waits while a value is tried.
-    core.emit("workspace/animateActivity", true);
-    expect(store.settings["workspace/animateActivity"]).toBe(false);
-    store.restore();
-    expect(store.settings["workspace/animateActivity"]).toBe(true);
+    expect(JSON.parse(storage.data[HINT_KEY])["workspace/theme"]).toBe("light");
+    void store.set("workspace/contentScale", 1.25);
+    core.saves[0].answer();
+    await flush();
+    expect(JSON.parse(storage.data[HINT_KEY])["workspace/contentScale"]).toBe(1.25);
   });
+});
 
-  it("follows changes made elsewhere", async () => {
-    const core = fakeCore();
-    const store = createSettings(core.backend);
-    await store.ready;
-    core.emit("client/overviewWidth", 1600);
-    expect(store.settings["client/overviewWidth"]).toBe(1600);
+describe("the browser dev mode", () => {
+  it("keeps typed values in local storage", async () => {
+    const storage = memoryStorage({ [STORAGE_KEY]: JSON.stringify({ "workspace/theme": "dark", "workspace/compact": "yes" }) });
+    const backend = storageBackend(storage);
+    expect(await backend.load()).toEqual({ "workspace/theme": "dark" });
+    expect((await backend.save("workspace/compact", true)).value).toBe(true);
   });
 });

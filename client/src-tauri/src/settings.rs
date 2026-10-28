@@ -7,6 +7,7 @@
 
 use serde_json::{json, Map, Value};
 use std::path::Path;
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use zerus_client_core::settings::{QtStore, Settings};
@@ -40,27 +41,41 @@ pub fn open(app: &AppHandle, dir: &Path) -> Store {
         seed_source(&app.config().identifier),
     );
     let handle = app.clone();
-    settings.subscribe(Box::new(move |key, value| {
+    settings.subscribe(Box::new(move |key, value, revision| {
         if key == ALWAYS_ON_TOP {
             if let Some(window) = handle.get_webview_window(crate::MAIN_WINDOW) {
+                let _layer = LAYER.lock().unwrap_or_else(PoisonError::into_inner);
                 apply_window_layer(&window, value.as_bool().unwrap_or(false));
             }
         }
-        let _ = handle.emit("settings-changed", json!({ "key": key, "value": value }));
+        let _ = handle.emit(
+            "settings-changed",
+            json!({ "key": key, "value": value, "revision": revision }),
+        );
     }));
     Store(settings)
 }
 
-/// Whether the window can be kept above others. GTK has no keep-above on
-/// Wayland, where Qt needs KWin scripting (WindowLayer.cpp); X11, macOS and
-/// Windows keep it.
+/// Whether this session can keep the window above others, decided once.
+static KEEP_ABOVE: OnceLock<bool> = OnceLock::new();
+/// The startup apply and the subscriber take turns, so the newest value wins.
+static LAYER: Mutex<()> = Mutex::new(());
+
+/// Whether a window on `display` can be kept above others. GTK has no
+/// keep-above on Wayland, where Qt needs KWin scripting (WindowLayer.cpp);
+/// X11, macOS and Windows keep it.
+pub fn supports_keep_above(display: Option<&str>) -> bool {
+    !(cfg!(target_os = "linux") && display.is_some_and(|name| name.starts_with("wayland")))
+}
+
+/// Records, from the display GTK opened (display::display_name), whether
+/// Keep Zerus above other windows can work.
+pub fn init_window_layer(display: Option<&str>) {
+    let _ = KEEP_ABOVE.set(supports_keep_above(display));
+}
+
 pub fn keep_above_supported() -> bool {
-    if !cfg!(target_os = "linux") {
-        return true;
-    }
-    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|display| !display.is_empty());
-    let backend = std::env::var("GDK_BACKEND").unwrap_or_default();
-    !wayland || backend.starts_with("x11")
+    KEEP_ABOVE.get().copied().unwrap_or(true)
 }
 
 /// Keeps `window` above other windows, or not, where the platform can.
@@ -69,6 +84,22 @@ pub fn apply_window_layer(window: &WebviewWindow, on_top: bool) {
         return;
     }
     if let Err(error) = window.set_always_on_top(on_top) {
+        eprintln!("zerus-client: Keep Zerus above other windows: {error}");
+    }
+}
+
+/// Applies the stored Keep Zerus above other windows once the store has
+/// loaded (on the switch identity's first start, after the Qt seed), on a
+/// thread of its own: setup never waits for the store.
+pub fn apply_stored_window_layer(store: &Store, window: WebviewWindow) {
+    let settings = store.0.clone();
+    let started = std::thread::Builder::new()
+        .name("window-layer".into())
+        .spawn(move || {
+            let _layer = LAYER.lock().unwrap_or_else(PoisonError::into_inner);
+            apply_window_layer(&window, settings.flag(ALWAYS_ON_TOP));
+        });
+    if let Err(error) = started {
         eprintln!("zerus-client: Keep Zerus above other windows: {error}");
     }
 }
@@ -85,20 +116,32 @@ pub async fn settings_get(store: State<'_, Store>) -> Result<Map<String, Value>,
     Ok(store.0.all())
 }
 
-/// Stores one setting and returns the value now in effect (clamped as Qt
-/// clamps it); `null` removes a shortcut override.
+/// Stores one setting and answers with the value now in effect (clamped as
+/// Qt clamps it; `null` for a removed shortcut override) and the store's
+/// revision after the change.
 #[tauri::command]
 pub async fn settings_set(
     store: State<'_, Store>,
     key: String,
     value: Value,
 ) -> Result<Value, String> {
-    store.0.set(&key, value)
+    let (value, revision) = store.0.set_tracked(&key, value)?;
+    Ok(json!({ "value": value, "revision": revision }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keep_above_is_unavailable_only_on_a_wayland_display() {
+        assert!(supports_keep_above(Some(":0")));
+        assert!(supports_keep_above(None));
+        assert_eq!(
+            supports_keep_above(Some("wayland-0")),
+            !cfg!(target_os = "linux")
+        );
+    }
 
     #[test]
     fn only_the_switch_identity_seeds_from_qt() {

@@ -1,9 +1,8 @@
-import { For, Show, createEffect, createMemo, createRoot, createSignal, on, onCleanup } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { Icon } from "../lib/icons";
 import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, type MenuEntry } from "../../store/ui";
 import { activity } from "../../store/session";
-import { skin } from "../../skin/runtime";
 import { flag, num, setSetting } from "../../store/settings";
 import { buildTranscript, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { statusOf } from "./SessionCard";
@@ -13,23 +12,29 @@ import type { MediaMessage, TranscriptItem } from "./types";
 // Reading column (ActivityWidth.h): 900 px at 100% content scale, 480–2400,
 // scaled with the content scale, or the full pane. The transcript, queue,
 // questions, banners and the composer all share it; Terminal, Processes and
-// Native UI ignore it. The skin's L2 activity-column variant is the start.
+// Native UI ignore it.
 
 export const COLUMN = { min: 480, max: 2400, initial: 900, edge: 10 } as const;
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 // The width is Settings > Appearance > Activity width (workspace/activityWidth,
 // workspace/activityFullWidth): a drag shows it live and stores it once, when
-// the pointer lets go. Choosing a skin applies its activity-column variant.
+// the pointer lets go. Choosing a skin applies its activity-column variant
+// (skin/runtime.ts chooseSkin).
 const [dragColumn, setDragColumn] = createSignal<number | undefined>();
 const columnWidth = () => dragColumn() ?? clamp(Math.round(num("workspace/activityWidth")), COLUMN.min, COLUMN.max);
 const fullWidth = () => flag("workspace/activityFullWidth");
 const setFullWidth = (full: boolean) => { if (full !== fullWidth()) void setSetting("workspace/activityFullWidth", full); };
-createRoot(() => createEffect(on(() => skin().layout["activity-column"], (v) => setFullWidth(v === "full"), { defer: true })));
 export { columnWidth, fullWidth };
 
+/** Stores a width once, and only when it differs from the stored one. */
 function storeColumn(width: number) {
   setDragColumn(undefined);
-  void setSetting("workspace/activityWidth", clamp(Math.round(width), COLUMN.min, COLUMN.max));
+  const next = clamp(Math.round(width), COLUMN.min, COLUMN.max);
+  if (next !== clamp(Math.round(num("workspace/activityWidth")), COLUMN.min, COLUMN.max)) void setSetting("workspace/activityWidth", next);
+}
+/** Shows a width while Settings' slider moves, or the stored one again (undefined). */
+export function previewColumn(width: number | undefined) {
+  setDragColumn(width === undefined ? undefined : clamp(Math.round(width), COLUMN.min, COLUMN.max));
 }
 /** Double-click on an edge or Reset Activity width: the default, centered. */
 export function resetColumn() { storeColumn(COLUMN.initial); setFullWidth(false); }
@@ -52,6 +57,9 @@ export function columnMenuItems(): MenuEntry[] {
 /** A 10 px column edge in the transcript margin; both edges move together. */
 function ColumnEdge(props: { right?: boolean }) {
   const [dragging, setDragging] = createSignal(false);
+  // A drag cut off (capture lost, the edge unmounted) leaves the stored width.
+  const endDrag = () => { if (dragging()) { setDragging(false); setDragColumn(undefined); } };
+  onCleanup(endDrag);
   let origin = 0, start = 0, widest = 0, narrowest = 0;
   const measure = (el: HTMLElement) => {
     const scroller = el.closest(".act-scroll") as HTMLElement;
@@ -78,10 +86,14 @@ function ColumnEdge(props: { right?: boolean }) {
         e.currentTarget.releasePointerCapture(e.pointerId);
         if (!dragging()) return;
         setDragging(false);
-        storeColumn(columnWidth());
+        // A click without movement stores nothing.
+        const moved = dragColumn();
+        if (moved === undefined) return;
+        storeColumn(moved);
         setFullWidth(false);
       }}
-      onPointerCancel={() => { setDragging(false); setDragColumn(undefined); }}
+      onPointerCancel={endDrag}
+      onLostPointerCapture={endDrag}
       onDblClick={resetColumn}
       onKeyDown={(e) => {
         const step = e.key === "ArrowLeft" ? -1 : e.key === "ArrowRight" ? 1 : 0;

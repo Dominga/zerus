@@ -78,19 +78,22 @@ export function Select(props: { value: string; options: Option[]; onChange: (val
 /**
  * A slider with its value and a reset button that appears only after a
  * change and keeps its space while hidden (SettingsPage.h resetButton).
- * `onInput` follows the drag; `onCommit` stores the value once it settles.
+ * `onInput` follows the drag; `onCommit` stores the value once it settles;
+ * `onEnd` (release, blur) ends a drag that settled where it started.
  */
 export function Slider(props: {
   value: number; min: number; max: number; step: number; defaultValue: number; format: (v: number) => string;
-  onInput: (v: number) => void; onCommit: (v: number) => void; disabled?: boolean; label: string; resetLabel: string;
+  onInput: (v: number) => void; onCommit: (v: number) => void; onEnd?: () => void; disabled?: boolean; label: string; resetLabel: string;
 }) {
   let input!: HTMLInputElement;
   return (
     <div class="set-slider" classList={{ disabled: props.disabled }}>
       <input ref={input} type="range" min={props.min} max={props.max} step={props.step} value={props.value} disabled={props.disabled} aria-label={props.label}
+        aria-valuetext={props.format(props.value)}
         style={{ "--fill": `${((props.value - props.min) / (props.max - props.min)) * 100}%` }}
         onInput={(e) => props.onInput(Number(e.currentTarget.value))}
-        onChange={(e) => props.onCommit(Number(e.currentTarget.value))} />
+        onChange={(e) => props.onCommit(Number(e.currentTarget.value))}
+        onPointerUp={() => props.onEnd?.()} onBlur={() => props.onEnd?.()} />
       <span class="set-slider-value tabular">{props.format(props.value)}</span>
       <button class="icon-btn small set-reset" classList={{ hidden: props.disabled || props.value === props.defaultValue }} title={props.resetLabel} aria-label={props.resetLabel}
         onClick={() => { input.focus(); props.onCommit(props.defaultValue); }}>

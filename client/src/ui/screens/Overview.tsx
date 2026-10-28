@@ -165,13 +165,18 @@ const clampWidth = (width: number) => Math.round(Math.max(OVERVIEW.min, Math.min
 const [dragWidth, setDragWidth] = createSignal<number | undefined>();
 const overviewWidth = () => dragWidth() ?? clampWidth(num("client/overviewWidth"));
 const overviewFullWidth = () => flag("client/overviewFullWidth");
+/** Stores a width once, and only when it differs from the stored one. */
 function storeOverviewWidth(width: number) {
   setDragWidth(undefined);
-  void setSetting("client/overviewWidth", clampWidth(width));
+  const next = clampWidth(width);
+  if (next !== clampWidth(num("client/overviewWidth"))) void setSetting("client/overviewWidth", next);
 }
 
 function OverviewEdge(props: { right?: boolean }) {
   const [dragging, setDragging] = createSignal(false);
+  // A drag cut off (capture lost, the page switched) leaves the stored width.
+  const endDrag = () => { if (dragging()) { setDragging(false); setDragWidth(undefined); } };
+  onCleanup(endDrag);
   let origin = 0, start = 0, widest = 0;
   return (
     <div class="col-edge ov-edge" classList={{ right: props.right, dragging: dragging() }} role="separator" aria-orientation="vertical" tabindex="0"
@@ -191,8 +196,15 @@ function OverviewEdge(props: { right?: boolean }) {
         const distance = (e.clientX - origin) * (props.right ? 1 : -1);
         setDragWidth(clampWidth(Math.min(widest, start + 2 * distance)));
       }}
-      onPointerUp={() => { if (dragging()) { setDragging(false); storeOverviewWidth(overviewWidth()); } }}
-      onPointerCancel={() => { setDragging(false); setDragWidth(undefined); }}
+      onPointerUp={() => {
+        if (!dragging()) return;
+        setDragging(false);
+        // A click without movement stores nothing.
+        const moved = dragWidth();
+        if (moved !== undefined) storeOverviewWidth(moved);
+      }}
+      onPointerCancel={endDrag}
+      onLostPointerCapture={endDrag}
       onDblClick={() => storeOverviewWidth(OVERVIEW.fallback)}
       onKeyDown={(e) => {
         if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); storeOverviewWidth(overviewWidth() + ((e.key === "ArrowRight") === !!props.right ? 40 : -40)); }

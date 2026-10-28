@@ -57,8 +57,17 @@
   .skin-swatches i {width: 11px; height: 11px; border-radius: 50%; border: 1px solid var(--z-color-divider); }
   .skin-origin {margin-left: auto; font-size: var(--fs-2xs); color: var(--z-color-dim); }
   .skin-variants {font-size: var(--fs-2xs); color: var(--z-color-dim); }
-  .set-row.wide {grid-template-columns: minmax(0, 1fr); }
-  .skin-card, .cd-swatch {transition: none; }
-  .skin-card:hover {translate: none; }
-  .set-content, .set-nav-item.on::before {animation: none; }
+  /* The mockup's narrow and reduced-motion rules, with the client's Reduce
+     motion setting (motion.css) as well as the system's. */
+  @media (max-width: 1180px) {
+    .set-row.wide { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .skin-card { transition: none; }
+    .skin-card:hover { translate: none; }
+    .set-content, .set-nav-item.on::before { animation: none; }
+  }
+  :root[data-reduce-motion="1"] .skin-card { transition: none; }
+  :root[data-reduce-motion="1"] .skin-card:hover { translate: none; }
+  :root[data-reduce-motion="1"] .set-content, :root[data-reduce-motion="1"] .set-nav-item.on::before { animation: none; }
 }

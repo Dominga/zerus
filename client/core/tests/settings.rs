@@ -377,8 +377,11 @@ fn set_normalizes_persists_and_tells_listeners() {
     let settings = Settings::open(path.clone(), None);
     let heard = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&heard);
-    settings.subscribe(Box::new(move |name, value| {
+    let revisions = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&revisions);
+    settings.subscribe(Box::new(move |name, value, revision| {
         sink.lock().unwrap().push((name.to_owned(), value.clone()));
+        seen.lock().unwrap().push(revision);
     }));
     assert_eq!(
         settings.set("workspace/theme", json!("dark")),
@@ -406,12 +409,19 @@ fn set_normalizes_persists_and_tells_listeners() {
         settings.set("shortcuts/message.push", json!([])),
         Ok(json!([]))
     );
-    // Null removes an override: the defaults apply again.
+    // Null removes an override: the defaults apply again, told as null.
     assert_eq!(
         settings.set("shortcuts/message.push", Value::Null),
-        Ok(json!([]))
+        Ok(Value::Null)
     );
+    assert!(!settings.all().contains_key("shortcuts/message.push"));
     assert_eq!(heard.lock().unwrap().len(), 6);
+    // Each change takes the next revision; the answer carries it too.
+    assert_eq!(*revisions.lock().unwrap(), vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(
+        settings.set_tracked("workspace/language", json!("ru")),
+        Ok((json!("ru"), 7))
+    );
     assert_eq!(
         heard.lock().unwrap()[1],
         ("processes/activeSeconds".to_owned(), json!(1.0))

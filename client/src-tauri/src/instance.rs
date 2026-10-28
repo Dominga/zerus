@@ -11,7 +11,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Mutex;
@@ -70,8 +70,10 @@ pub fn paths(name: &str, temp: &Path, runtime: &Path) -> Paths {
 }
 
 /// `QDir::tempPath()`: a non-empty `TMPDIR`, else the per-user `confstr`
-/// folder on macOS (`NSTemporaryDirectory`) and `/tmp` elsewhere,
-/// canonicalized as Qt does.
+/// folder on macOS (`NSTemporaryDirectory`) and `/tmp` elsewhere. Qt cleans
+/// the path only lexically and keeps symbolic links, so the socket is
+/// `<TMPDIR as given>/<name>`, where Qt's own QLocalSocket connects; no
+/// `/private` is added toward Darwin's 104-byte socket path limit.
 pub fn temp_dir() -> PathBuf {
     temp_dir_from(std::env::var_os("TMPDIR"))
 }
@@ -82,7 +84,27 @@ fn temp_dir_from(tmpdir: Option<OsString>) -> PathBuf {
         .map(PathBuf::from)
         .or_else(user_temp_dir)
         .unwrap_or_else(|| PathBuf::from("/tmp"));
-    temp.canonicalize().unwrap_or(temp)
+    clean_path(&temp)
+}
+
+/// `QDir::cleanPath`: no repeated or trailing separators, `.` and `..`
+/// resolved by name only; symbolic links stay as they are.
+fn clean_path(path: &Path) -> PathBuf {
+    let mut parts: Vec<Component> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match parts.last() {
+                Some(Component::Normal(_)) => {
+                    parts.pop();
+                }
+                Some(Component::RootDir) => {}
+                _ => parts.push(component),
+            },
+            other => parts.push(other),
+        }
+    }
+    parts.iter().collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -847,14 +869,37 @@ mod tests {
     }
 
     #[test]
-    fn the_socket_folder_is_qts_canonical_temp_path() {
+    fn the_socket_folder_is_qts_lexically_cleaned_temp_path() {
         let dir = scratch("temp");
         let real = dir.join("real");
         fs::create_dir(&real).unwrap();
-        std::os::unix::fs::symlink(&real, dir.join("link")).unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut given = link.clone().into_os_string();
+        given.push("/");
         assert_eq!(
-            temp_dir_from(Some(dir.join("link/").into())),
-            real.canonicalize().unwrap()
+            temp_dir_from(Some(given)),
+            link,
+            "a symbolic link stays, the trailing slash goes"
+        );
+        assert_eq!(
+            temp_dir_from(Some("/var/folders/x/T/".into())),
+            Path::new("/var/folders/x/T"),
+            "never /private/var"
+        );
+        assert_eq!(
+            temp_dir_from(Some("/tmp//a/./b/../c/".into())),
+            Path::new("/tmp/a/c")
+        );
+        assert_eq!(temp_dir_from(Some("/../tmp".into())), Path::new("/tmp"));
+        assert_eq!(
+            paths(
+                "hgs-tray",
+                &temp_dir_from(Some("/var/folders/x/T/".into())),
+                Path::new("/r")
+            )
+            .socket,
+            Path::new("/var/folders/x/T/hgs-tray")
         );
         assert_eq!(
             temp_dir_from(Some(OsString::new())),

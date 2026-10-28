@@ -4,6 +4,8 @@
 //! code can hand the webview its configuration before it exists (the macOS
 //! frame-rate preference, plan Task 7).
 
+#[cfg(feature = "live")]
+mod actions;
 mod commands;
 mod display;
 mod metrics;
@@ -22,20 +24,15 @@ pub const MAIN_WINDOW: &str = "main";
 pub fn run() {
     tauri::Builder::default()
         .manage(commands::AppState::default())
-        .invoke_handler(tauri::generate_handler![
-            commands::start,
-            commands::next_batch,
-            commands::follow,
-            commands::unfollow,
-            commands::metrics,
-            commands::perf_config,
-            commands::save_perf,
-            commands::perf_log,
-            commands::display_hz,
-            commands::exit_app,
-            commands::perf_away,
-        ])
+        .invoke_handler(handler())
         .setup(|app| {
+            #[cfg(feature = "live")]
+            {
+                use tauri::Manager;
+                let dir = app.path().app_data_dir()?;
+                std::fs::create_dir_all(&dir)?;
+                app.manage(actions::Actions::new(dir.join("read-marks.json")));
+            }
             let display = display::display_name();
             if !display::headless_allowed(std::env::var("ZERUS_CLIENT_HEADLESS").is_ok_and(|v| v == "1"), display.as_deref()) {
                 eprintln!("zerus-client: ZERUS_CLIENT_HEADLESS=1 but the display is {display:?}, not an X server; no window opens (set GDK_BACKEND=x11)");
@@ -53,6 +50,45 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("Zerus Next failed to start");
+}
+
+/// The commands the frontend may call. The session actions need the core's
+/// `hgs` runner, so they exist only with the `live` feature.
+#[cfg(feature = "live")]
+fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
+        commands::start,
+        commands::next_batch,
+        commands::follow,
+        commands::unfollow,
+        commands::metrics,
+        commands::perf_config,
+        commands::save_perf,
+        commands::perf_log,
+        commands::display_hz,
+        commands::exit_app,
+        commands::perf_away,
+        actions::run_action,
+        actions::inspect_session,
+        actions::pending_read_marks,
+    ]
+}
+
+#[cfg(not(feature = "live"))]
+fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
+        commands::start,
+        commands::next_batch,
+        commands::follow,
+        commands::unfollow,
+        commands::metrics,
+        commands::perf_config,
+        commands::save_perf,
+        commands::perf_log,
+        commands::display_hz,
+        commands::exit_app,
+        commands::perf_away,
+    ]
 }
 
 /// Creates the main window. Platform webview configuration (macOS: the

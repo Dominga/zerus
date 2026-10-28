@@ -4285,6 +4285,7 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
+ "uuid",
  "zerus-client-core",
  "zerus-watch-protocol",
 ]

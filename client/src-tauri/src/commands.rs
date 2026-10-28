@@ -128,9 +128,19 @@ pub async fn start(state: State<'_, AppState>) -> Result<String, String> {
 /// beyond what the evaluated-script path should carry.
 #[cfg(feature = "live")]
 #[tauri::command]
-pub async fn next_batch(state: State<'_, AppState>) -> Result<tauri::ipc::Response, String> {
+pub async fn next_batch(state: State<'_, AppState>, actions: State<'_, crate::actions::Actions>) -> Result<tauri::ipc::Response, String> {
     let live = Arc::clone(&state.live);
-    let bytes = blocking(move || serde_json::to_vec(&live.pump.take(crate::pump::PARK)).map_err(|error| error.to_string())).await?;
+    let actions = actions.inner().clone();
+    let bytes = blocking(move || {
+        let batch = live.pump.take(crate::pump::PARK);
+        // The host's rows settle pending read marks, whether they arrive as
+        // single upserts or inside a computer's snapshot.
+        for out in batch.upserts.iter().chain(batch.replaces.iter().flat_map(|replace| replace.rows.iter())) {
+            actions.settle(&out.computer.0, &out.row);
+        }
+        serde_json::to_vec(&batch).map_err(|error| error.to_string())
+    })
+    .await?;
     Ok(tauri::ipc::Response::new(bytes))
 }
 

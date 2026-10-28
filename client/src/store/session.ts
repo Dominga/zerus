@@ -4,7 +4,9 @@ import { applyBatch, onReplaced, orderedRows } from "./catalog";
 import { bindActivity, bindSelection } from "./actions";
 import { observeMarks } from "./marks";
 import { createActivity } from "./activity";
-import { compactRows, selected, selectedKey, setCompactRows, setSelectedKey, subagentOpen } from "./ui";
+import { compactRows, page, selected, selectedKey, setCompactRows, setSelectedKey, subagentOpen } from "./ui";
+import { startScreens } from "./screens";
+import { documentVisibility } from "./visibility";
 import type { Batch } from "../types";
 
 // Wires the stores together: batches go to the catalog and the followed
@@ -49,3 +51,6 @@ onReplaced((from, to) => {
   if (compactRows[from]) setCompactRows(to, true);
   if (selectedKey() === from) setSelectedKey(to);
 });
+
+// The Overview, Projects, Machines and Accounts reads run while their page shows.
+startScreens(page, documentVisibility);

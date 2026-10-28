@@ -55,6 +55,9 @@ pub struct Timing {
     /// How often a followed organization without a stream offering it is
     /// polled with `hgs swarm get`.
     pub organization_poll: Duration,
+    /// How often a computer without the stream is polled (see
+    /// [`crate::legacy`]).
+    pub legacy: crate::legacy::Intervals,
 }
 
 impl Default for Timing {
@@ -67,6 +70,7 @@ impl Default for Timing {
             peer_probe_timeout: Duration::from_secs(15),
             stop_grace: Duration::from_secs(1),
             organization_poll: crate::organization::POLL,
+            legacy: crate::legacy::Intervals::default(),
         }
     }
 }
@@ -80,6 +84,11 @@ impl Timing {
             restart: default.restart.map(|delay| delay.mul_f64(factor)),
             reprobe: default.reprobe.mul_f64(factor),
             organization_poll: default.organization_poll.mul_f64(factor),
+            legacy: crate::legacy::Intervals {
+                listing: default.legacy.listing.mul_f64(factor),
+                activity: default.legacy.activity.mul_f64(factor),
+                processes: default.legacy.processes.mul_f64(factor),
+            },
             ..default
         }
     }
@@ -340,6 +349,11 @@ enum Input {
     UnsubscribeOrganization,
     /// A `swarm get` of the organization poll.
     OrganizationPolled(Result<Value, crate::ReadError>),
+    /// A read of the polling of a computer without the stream.
+    Legacy {
+        read: crate::legacy::Read,
+        result: Result<Value, String>,
+    },
     Control(Control),
     Stop,
 }
@@ -637,6 +651,8 @@ pub fn spawn(
         organization_snapshot: organization_snapshot.clone(),
         poller: None,
         worker_fixed: None,
+        legacy: None,
+        legacy_windows: BTreeSet::new(),
         stop: stop.clone(),
         state: CatalogState::new(),
         generation: 0,
@@ -691,6 +707,11 @@ struct Supervisor {
     poller: Option<Poller>,
     /// When an outdated catalog worker last got its `swarm get`.
     worker_fixed: Option<Instant>,
+    /// The polling of this computer while its CLI lacks the stream; kept
+    /// across re-probes and dropped when a stream starts.
+    legacy: Option<crate::legacy::Schedule>,
+    /// Followed sessions whose first window the polling sent.
+    legacy_windows: BTreeSet<String>,
     stop: Arc<AtomicBool>,
     state: CatalogState,
     generation: u64,
@@ -711,10 +732,20 @@ impl Supervisor {
             self.state.begin();
             let timeout = self.timing.probe_timeout(&self.computer);
             match probe_until(&self.hgs, &self.computer, timeout, &self.stop) {
-                Probe::Supported => {}
+                Probe::Supported => {
+                    self.legacy = None;
+                    self.legacy_windows.clear();
+                }
                 Probe::Unsupported => {
-                    self.status(ComputerStatus::Unsupported);
-                    if self.wait(self.timing.reprobe) {
+                    // Polled already: the status stays until a listing fails.
+                    if !self
+                        .legacy
+                        .as_ref()
+                        .is_some_and(|legacy| legacy.has_listed())
+                    {
+                        self.status(ComputerStatus::Unsupported);
+                    }
+                    if self.poll(self.timing.reprobe) {
                         continue;
                     }
                     break;
@@ -800,6 +831,187 @@ impl Supervisor {
         }
     }
 
+    /// Waits like [`Self::wait`] while polling this computer as the Qt client
+    /// does (see [`crate::legacy`]); false on stop.
+    fn poll(&mut self, time: Duration) -> bool {
+        self.sync_poller();
+        let deadline = Instant::now() + time;
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return true;
+            }
+            let activity: Vec<(String, String, Option<i64>)> = lock(&self.follows)
+                .iter()
+                .filter(|(key, _)| self.state.is_followed(key))
+                .map(|(key, follow)| {
+                    let after = self
+                        .legacy_windows
+                        .contains(key)
+                        .then(|| self.state.cursor(key).unwrap_or(0));
+                    (key.clone(), follow.session.name.clone(), after)
+                })
+                .collect();
+            let processes: Vec<(String, String)> = lock(&self.processes)
+                .iter()
+                .filter(|(key, _)| self.state.processes().is_followed(key))
+                .map(|(key, session)| (key.clone(), session.name.clone()))
+                .collect();
+            let follows = crate::legacy::Follows {
+                activity: &activity,
+                processes: &processes,
+            };
+            let every = self.timing.legacy;
+            let legacy = self
+                .legacy
+                .get_or_insert_with(|| crate::legacy::Schedule::new(every));
+            let reads = legacy.due(now, &follows);
+            for read in reads {
+                self.spawn_legacy(read);
+            }
+            let wake = self
+                .legacy
+                .as_ref()
+                .and_then(crate::legacy::Schedule::next)
+                .map_or(deadline, |at| at.min(deadline));
+            let left = wake
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_millis(1));
+            match self.rx.recv_timeout(left) {
+                Ok(Input::Stop) | Err(RecvTimeoutError::Disconnected) => return false,
+                Ok(Input::Subscribe { key }) => self.state.follow(&key),
+                Ok(Input::Unsubscribe { key, .. }) => {
+                    self.state.unfollow(&key);
+                    self.legacy_windows.remove(&key);
+                }
+                Ok(Input::SubscribeProcesses { key }) => self.state.processes_mut().follow(&key),
+                Ok(Input::UnsubscribeProcesses { key, .. }) => {
+                    self.state.processes_mut().unfollow(&key)
+                }
+                Ok(Input::SubscribeTasks { key }) => self.state.tasks_mut().follow(&key),
+                Ok(Input::UnsubscribeTasks { key }) => self.state.tasks_mut().unfollow(&key),
+                Ok(Input::SubscribeOrganization) => self.subscribe_organization(),
+                Ok(Input::UnsubscribeOrganization) => self.unsubscribe_organization(),
+                Ok(Input::OrganizationPolled(result)) => self.organization_polled(result),
+                Ok(Input::Legacy { read, result }) => self.legacy_reply(read, result),
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
+
+    /// Runs one polling read on its own thread; the reply comes back as input.
+    fn spawn_legacy(&mut self, read: crate::legacy::Read) {
+        let (hgs, computer, tx) = (self.hgs.clone(), self.computer.clone(), self.tx.clone());
+        let failed = read.clone();
+        let spawned = thread::Builder::new()
+            .name("hgs-legacy-poll".into())
+            .spawn(move || {
+                let result = crate::legacy::run(&hgs, &computer, &read);
+                let _ = tx.send(Input::Legacy { read, result });
+            });
+        if spawned.is_err() {
+            if let Some(legacy) = self.legacy.as_mut() {
+                legacy.done(&failed, Instant::now());
+            }
+        }
+    }
+
+    /// Applies a polling reply as the stream's frames would be.
+    fn legacy_reply(&mut self, read: crate::legacy::Read, result: Result<Value, String>) {
+        let Some(legacy) = self.legacy.as_mut() else {
+            return;
+        };
+        legacy.done(&read, Instant::now());
+        let computer = self.computer.clone();
+        let changes = match (&read, result) {
+            (crate::legacy::Read::Listing, Ok(listing)) => {
+                let (_, first) = legacy.listed(true);
+                let mut changes = self.state.listing(&computer, &listing);
+                // This computer's listing names the peers, as its meta would.
+                if computer.is_local() {
+                    if let Some(peers) = self.state.peers() {
+                        let _ = self.sink.send(StreamEvent::Peers {
+                            computer: computer.clone(),
+                            peers,
+                        });
+                    }
+                }
+                if first {
+                    changes.push(Change::Computer {
+                        computer: computer.clone(),
+                        status: ComputerStatus::Polled,
+                    });
+                }
+                changes
+            }
+            (crate::legacy::Read::Listing, Err(_)) => {
+                let (attempt, _) = legacy.listed(false);
+                vec![Change::Computer {
+                    computer: computer.clone(),
+                    status: ComputerStatus::Reconnecting {
+                        attempt: attempt.unwrap_or(1),
+                    },
+                }]
+            }
+            (crate::legacy::Read::Activity { key, .. }, Ok(inspection)) => {
+                let run = lock(&self.follows)
+                    .get(key)
+                    .and_then(|follow| follow.session.run_id.clone());
+                let window = !self.legacy_windows.contains(key);
+                let changes =
+                    self.state
+                        .activity_polled(&computer, key, run.as_deref(), &inspection, window);
+                if self.state.is_followed(key) {
+                    self.legacy_windows.insert(key.clone());
+                }
+                changes
+            }
+            (crate::legacy::Read::Processes { key, .. }, Ok(inspection)) => self
+                .state
+                .processes_polled(&computer, key, &inspection)
+                .into_iter()
+                .collect(),
+            (crate::legacy::Read::Processes { key, .. }, Err(message)) => {
+                let error = zerus_watch_protocol::ErrorFrame {
+                    code: "inspect_failed".into(),
+                    message,
+                    topic: Some(topic::PROCESSES.into()),
+                    key: Some(key.clone()),
+                    fatal: false,
+                };
+                self.state
+                    .processes_mut()
+                    .error(&computer, &error)
+                    .into_iter()
+                    .collect()
+            }
+            // A failed Activity read is retried on the next tick.
+            (crate::legacy::Read::Activity { .. }, Err(_)) => Vec::new(),
+        };
+        for change in changes {
+            match &change {
+                Change::Activity {
+                    key,
+                    update: crate::ActivityUpdate::Ended,
+                    ..
+                } => {
+                    lock(&self.follows).remove(key);
+                    self.legacy_windows.remove(key);
+                }
+                Change::Processes {
+                    key,
+                    update: crate::ProcessesUpdate::Ended,
+                    ..
+                } => {
+                    lock(&self.processes).remove(key);
+                }
+                _ => {}
+            }
+            self.emit(change);
+        }
+    }
+
     fn launch(&mut self) -> io::Result<()> {
         let mut command = hgs_command(&self.hgs, &self.computer, &["watch", "--json"]);
         command
@@ -872,6 +1084,8 @@ impl Supervisor {
                 Ok(Input::SubscribeOrganization) => self.subscribe_organization(),
                 Ok(Input::UnsubscribeOrganization) => self.unsubscribe_organization(),
                 Ok(Input::OrganizationPolled(result)) => self.organization_polled(result),
+                // A polling read that finished after the stream started.
+                Ok(Input::Legacy { .. }) => {}
                 Ok(Input::SubscribeTasks { key }) => self.subscribe_tasks(&key),
                 Ok(Input::UnsubscribeTasks { key }) => {
                     self.state.tasks_mut().unfollow(&key);

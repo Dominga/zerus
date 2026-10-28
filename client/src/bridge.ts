@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { emptyBatch, isEmptyBatch, type Action, type Batch, type ComputerId, type Details, type Outcome, type ReadMark, type Target } from "./types";
+import { listen } from "@tauri-apps/api/event";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type Outcome, type ReadMark, type Target } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 
@@ -137,7 +138,7 @@ export function pump(from: Source, onBatch: (b: Batch) => void, host: PumpHost =
 /** Missing arrays default to empty, so a core that omits empty fields still applies. */
 function normalize(b: Partial<Batch>): Batch {
   const e = emptyBatch();
-  return { upserts: b.upserts ?? e.upserts, removes: b.removes ?? e.removes, replaces: b.replaces ?? e.replaces, computers: b.computers ?? e.computers, activity: b.activity ?? e.activity };
+  return { upserts: b.upserts ?? e.upserts, removes: b.removes ?? e.removes, replaces: b.replaces ?? e.replaces, computers: b.computers ?? e.computers, machines: b.machines ?? [], activity: b.activity ?? e.activity };
 }
 
 /** The Activity port of the current source (follow and unfollow). */
@@ -234,4 +235,57 @@ export async function copyText(text: string): Promise<void> {
   if (/[\r\n]/.test(text)) throw "the command has a newline in it -- copying that is dangerous: the shell would run it the moment you paste";
   if (!navigator.clipboard) throw "The clipboard is unavailable.";
   await navigator.clipboard.writeText(text);
+}
+
+/** What the browser build shows instead of the screen reads. */
+const DESKTOP_ONLY = "Reads need the desktop app.";
+
+/** Tells the screens hub which screen shows; its reads run only while it does. */
+export async function screenVisible(screen: Screen, visible: boolean): Promise<void> {
+  if (!inTauri()) return;
+  await invoke("screen_visible", { screen, visible }).catch((error) => console.warn("Zerus Next: screen_visible failed", error));
+}
+
+/** The Accounts and Overview account data; `force` is Refresh. */
+export async function accountsView(force = false): Promise<AccountsView> {
+  if (!inTauri()) return emptyAccounts([DESKTOP_ONLY]);
+  return invoke<AccountsView>("accounts_view", { force });
+}
+
+/** The Machines view; `force` is Refresh. */
+export async function machinesView(force = false): Promise<MachinesView> {
+  if (!inTauri()) return emptyMachines(DESKTOP_ONLY);
+  return invoke<MachinesView>("machines_view", { force });
+}
+
+/** Reads the selected peer's effective SSH connection. */
+export async function machineResolve(alias: string): Promise<MachinesView> {
+  if (!inTauri()) return emptyMachines(DESKTOP_ONLY);
+  return invoke<MachinesView>("machine_resolve", { alias });
+}
+
+/** "Test connection": `machine check`, up to 25 s. */
+export async function machineCheck(alias: string): Promise<MachinesView> {
+  if (!inTauri()) return emptyMachines(DESKTOP_ONLY);
+  return invoke<MachinesView>("machine_check", { alias });
+}
+
+export async function projectsView(): Promise<ProjectsView> {
+  if (!inTauri()) return emptyProjects(DESKTOP_ONLY);
+  return invoke<ProjectsView>("projects_view");
+}
+
+/** Calls `listener` with the screen whose view changed (`screens-changed`); returns the stop. */
+export function onScreensChanged(listener: (screen: Screen) => void): () => void {
+  if (!inTauri()) return () => {};
+  let stop: (() => void) | undefined;
+  let stopped = false;
+  void listen<string>("screens-changed", (event) => listener(event.payload as Screen)).then((unlisten) => {
+    if (stopped) unlisten();
+    else stop = unlisten;
+  });
+  return () => {
+    stopped = true;
+    stop?.();
+  };
 }

@@ -19,6 +19,14 @@ pub struct AppState {
 }
 
 #[cfg(feature = "live")]
+impl AppState {
+    /// The change pump, whose mirror is the screens hub's view of the fleet.
+    pub fn pump(&self) -> crate::pump::Pump {
+        self.live.pump.clone()
+    }
+}
+
+#[cfg(feature = "live")]
 mod live {
     use std::collections::BTreeSet;
     use std::sync::{mpsc, Mutex, PoisonError};
@@ -265,7 +273,7 @@ pub async fn unfollow(
 /// `ZERUS_CLIENT_PERF_OUT` (where the report goes), `ZERUS_CLIENT_PERF_LABEL`
 /// (the platform label), `ZERUS_CLIENT_PERF_REPRESENTATIVE=0` (Xvfb and other
 /// non-representative runs) and `ZERUS_CLIENT_PERF_PREFERENCE` (`default`
-/// leaves the macOS WebKit frame-rate preference unchanged).
+/// leaves the macOS and Linux WebKit frame-rate preference unchanged).
 #[tauri::command]
 pub fn perf_config() -> Value {
     let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());

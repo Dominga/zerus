@@ -4681,6 +4681,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-clipboard-manager",
  "uuid",
+ "webkit2gtk",
  "zerus-client-core",
  "zerus-watch-protocol",
 ]
@@ -4689,6 +4690,7 @@ dependencies = [
 name = "zerus-client-core"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "zerus-watch-protocol",

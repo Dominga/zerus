@@ -22,7 +22,7 @@ replaces the installed Zerus GUI, CLI, agents or services.
 cd client
 npm ci
 npm run check                  # TypeScript
-npm test                       # Vitest: stores, transcript
+npm test                       # Vitest: stores, transcript, screens
 cargo +1.99.1 test --manifest-path src-tauri/Cargo.toml
 RUSTUP_TOOLCHAIN=1.99.1 npx tauri dev
 ```
@@ -293,6 +293,75 @@ session and logs `actions-smoke marks-after-restart: review true` (exit 0) or
 `review false` (exit 1) once the stored marks have applied. Give both runs one
 scratch `XDG_DATA_HOME` so a smoke run never touches the real marks files.
 
+## Screens
+
+Overview, Projects, Machines and Accounts show live data and read only;
+every write keeps its place, label and Qt enablement shape, disabled with the
+phase that brings it ("Arrives with machine editing.", "... account
+management.", "... project editing.", "... the New session dialog.", "... the
+worktree flows.", "... the copy actions.").
+
+| Data | Source |
+| --- | --- |
+| Machine cards (host, version, platform, metrics, console fields) | `catalog.meta`, projected in the core (`machine.rs`) and sent as `Batch.machines` |
+| Connection state | `Batch.computers`: only `live` is fresh; `probing` and `reconnecting` connect (amber), `ended` is offline, `unsupported` reads "Update hgs" |
+| Accounts | `hgs [@host] account ls` per host (every 30 s while Overview or Accounts shows, once per new host otherwise) and `account inspect ID --refresh` per installed profile (every 5 min, two at once, offline hosts skipped) |
+| Machines | `hgs machine ls` on show and Refresh, `machine resolve ALIAS` on selection, `machine check ALIAS` only on Test connection |
+| Projects | `hgs swarm get` every 5 s while Projects shows |
+
+The reads run in `src-tauri/src/screens.rs` on the blocking pool with the
+core's timeouts and output limits (`core/src/reads.rs`); when each read is
+due is decided in `core/src/views/schedule.rs`, and the core projects every
+reply into a view model (`core/src/views`). A changed view emits
+`screens-changed` with the screen's name, and the frontend pulls it again.
+In replay mode the reads refuse unless `ZERUS_CLIENT_HGS` is set ("Reads in
+replay mode need ZERUS_CLIENT_HGS."). Peers without the event stream get no
+polling fallback yet (see the phase table).
+
+### Screens smoke run
+
+`ZERUS_CLIENT_QUERY=screens-smoke=1` (hook in `src/ui/PerfHost.tsx`) shows
+the four screens on the replay with a fake `hgs` answering the reads from
+`core/tests/fixtures/views`, and exits 0 once each has loaded:
+
+```sh
+S=$(mktemp -d); cp core/tests/support/fake_hgs_reads.py $S/hgs; chmod +x $S/hgs
+python3 - "$S" "$PWD/core/tests/fixtures/views" <<'EOF'
+import json, sys
+replies = {
+    "account ls": {"file": "accounts-local.json"},
+    "@mac account ls": {"file": "accounts-studio.json"},
+    "account inspect claude-work --refresh": {"file": "inspect-claude-work.json"},
+    "account inspect native-codex --refresh": {"file": "inspect-native-codex.json"},
+    # The replay's other installed profiles have no fixture: their inspect fails.
+    "account inspect native-claude --refresh": {"stderr": "no fixture", "exit": 1},
+    "@mac account inspect claude-studio --refresh": {"stderr": "no fixture", "exit": 1},
+    "@mac account inspect kimi-studio --refresh": {"stderr": "no fixture", "exit": 1},
+    "machine ls": {"file": "machines.json"},
+    "swarm get": {"file": "swarm.json"},
+}
+json.dump({"fixtures": sys.argv[2], "replies": replies}, open(sys.argv[1] + "/config.json", "w"))
+EOF
+cat > $S/run.sh <<'EOF'
+src-tauri/target/release/zerus-client 2> "$S/app.log" &
+app=$!
+for page in overview machines accounts projects; do
+  until grep -q "screens-smoke $page: shown" "$S/app.log" || ! kill -0 "$app" 2>/dev/null; do sleep 0.2; done
+  sleep 1 # the frame after the page switch
+  import -window root "$S/$page.png"
+done
+wait "$app"
+EOF
+env -u DISPLAY S="$S" WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=1 \
+  WEBKIT_DISABLE_DMABUF_RENDERER=1 ZERUS_CLIENT_REPLAY="$PWD/fixtures/replay.ndjson:mac=$PWD/fixtures/replay-mac.ndjson" \
+  ZERUS_CLIENT_HGS=$S/hgs ZERUS_CLIENT_QUERY=screens-smoke=1 ZERUS_CLIENT_PERF=smoke \
+  xvfb-run -a -s "-screen 0 1440x900x24" sh $S/run.sh
+echo "exit $?"; grep screens-smoke $S/app.log
+python3 -c 'import collections, json, sys; print(collections.Counter(" ".join(json.loads(l)["argv"]) for l in open(sys.argv[1])))' $S/log.ndjson
+```
+
+The screenshots stay in `$S`; they are never committed.
+
 ## Measurement run
 
 `ZERUS_CLIENT_PERF=auto` runs the Diagnostics scenarios unattended (`src/perf`),
@@ -307,7 +376,7 @@ last two followed by one as displayed again.
 `ZERUS_CLIENT_PERF_LABEL` names the platform, `ZERUS_CLIENT_PERF_HZ`
 overrides the display rate (`display_hz`), `ZERUS_CLIENT_PERF_REPRESENTATIVE=0`
 marks Xvfb runs and `ZERUS_CLIENT_PERF_PREFERENCE=default` keeps WebKit's
-near-60 fps preference on macOS (the control run). The page is cross-origin
+near-60 fps preference on macOS and Linux (the control run). The page is cross-origin
 isolated (COOP and COEP headers) for precise timers.
 
 Screenshots of real sessions are never committed; the fixtures are synthetic

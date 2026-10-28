@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { endpointValid, formValid, type AdapterView, type EditorForm } from "./voice-form";
+import { endpointValid, formValid, retype, type AdapterView, type EditorForm } from "./voice-form";
 
 // The same cases as client/core/src/speech_settings/tests.rs, whose rules
 // these mirror.
@@ -45,5 +45,24 @@ describe("the provider editor's form", () => {
     expect(endpointValid("https://speech.example.net:+80/v1", false)).toBe(false);
     expect(endpointValid("https://speech.example.net/%zz", false)).toBe(false);
     expect(endpointValid("HTTPS://speech.example.net/v1", false)).toBe(true);
+  });
+});
+
+describe("switching the provider type", () => {
+  const offered: AdapterView[] = [
+    { id: "gigaam", label: "Local GigaAM", models: ["v3_e2e_rnnt", "v3_ctc"], devices: ["cpu", "cuda"] },
+    { id: "openai_http", label: "OpenAI-compatible server", models: ["whisper-1"], devices: [] },
+  ];
+  it("starts a local type at the computer's first model and device", () => {
+    expect(retype("gigaam", offered, { adapter: "openai_http", model: "private-model" })).toEqual({ model: "v3_e2e_rnnt", device: "cpu" });
+  });
+  it("keeps the saved model when switching back to the saved remote type", () => {
+    expect(retype("openai_http", offered, { adapter: "openai_http", model: "private-model" })).toEqual({ model: "private-model", device: "" });
+  });
+  it("offers the remote type's first model for a provider saved as another type", () => {
+    expect(retype("openai_http", offered, { adapter: "gigaam", model: "v3_ctc" })).toEqual({ model: "whisper-1", device: "" });
+  });
+  it("leaves an unknown type empty", () => {
+    expect(retype("whisper", offered, { adapter: "whisper", model: "large" })).toEqual({ model: "", device: "" });
   });
 });

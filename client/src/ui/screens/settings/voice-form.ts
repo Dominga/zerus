@@ -47,6 +47,18 @@ export function endpointValid(url: string, insecure: boolean): boolean {
   return port === undefined || port === "" || (/^[0-9]+$/.test(port) && Number(port) <= 65535);
 }
 
+/**
+ * ProfileEditor::configureType: the model and device a newly chosen type
+ * starts with. A remote type the provider was saved with keeps its saved
+ * model; otherwise the first the computer offers. The other fields stay
+ * as typed.
+ */
+export function retype(chosen: string, adapters: AdapterView[], saved: { adapter: string; model: string }): { model: string; device: string } {
+  const offered = adapters.find((adapter) => adapter.id === chosen);
+  const model = chosen === "openai_http" && chosen === saved.adapter ? saved.model : (offered?.models[0] ?? "");
+  return { model, device: offered?.devices[0] ?? "" };
+}
+
 /** Whether Save may send the form, for the adapters the editor offered. */
 export function formValid(form: EditorForm, adapters: AdapterView[]): boolean {
   const remote = form.adapter === "openai_http";

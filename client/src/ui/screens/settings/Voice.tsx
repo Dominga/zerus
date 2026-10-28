@@ -5,7 +5,7 @@ import { inTauri } from "../../../bridge";
 import { flag, setSetting, text } from "../../../store/settings";
 import { Icon } from "../../lib/icons";
 import { Check, Group, Lines, SectionHead, Select, Status, type Option } from "./ui";
-import { formValid, type AdapterView, type EditorForm } from "./voice-form";
+import { formValid, retype, type AdapterView, type EditorForm } from "./voice-form";
 
 // Settings > Voice input (tray/src/speech/SpeechSettings.cpp) as the approved
 // mockup lays it out (design/webui/src/screens/settings/Voice.tsx). The
@@ -23,6 +23,8 @@ interface EditorView {
   key_stored: boolean; status: string; busy: boolean; conflict: boolean; check_visible: boolean; check_enabled: boolean;
 }
 interface View {
+  /** Grows with every view: an older one arriving late is dropped. */
+  seq: number;
   hosts: Option[]; host: string; loaded: boolean; profiles: ProfileRow[]; selected: number | null; details: string;
   can_add: boolean; can_edit: boolean; can_remove: boolean; can_test: boolean; can_use_default: boolean;
   default_text: string; status: string; result: string; result_failed: boolean; can_refresh: boolean;
@@ -31,7 +33,9 @@ interface View {
 interface RemoveAsk { ticket: number; text: string }
 interface Microphone { id: string; name: string; default: boolean }
 
-const [view, setView] = createSignal<View | undefined>();
+const [view, setShown] = createSignal<View | undefined>();
+/** Shows `next` unless a newer view already arrived (answers and events race). */
+const setView = (next: View) => { if (next.seq > (view()?.seq ?? 0)) setShown(next); };
 const [media, setMedia] = createSignal(false);
 const [microphones, setMicrophones] = createSignal<Microphone[]>([]);
 
@@ -231,8 +235,9 @@ function ProviderEditor(props: { editor: EditorView }) {
   createEffect(on(adapter, (chosen) => {
     setDocumentationFailure("");
     if (!retyped()) return;
-    setModel(remote() && chosen === start.adapter ? start.model : (offered()?.models[0] ?? ""));
-    setDevice(offered()?.devices[0] ?? "");
+    const next = retype(chosen, editor().adapters, start);
+    setModel(next.model);
+    setDevice(next.device);
   }, { defer: true }));
   const form = (): EditorForm => ({
     name: name(), id: id(), adapter: adapter(), model: model(), language: language(), device: device(),
@@ -242,9 +247,11 @@ function ProviderEditor(props: { editor: EditorView }) {
   const canSave = () => !busy() && !editor().conflict && formValid(form(), editor().adapters);
   const save = () => {
     if (!canSave()) return;
-    const sent = form();
-    setKey("");
-    void input("save", { ticket: editor().ticket, form: sent });
+    // The key stays typed until the core takes the save (a duplicate ID
+    // is refused first, as Qt checks it before clearing the key).
+    void input("save", { ticket: editor().ticket, form: form() }).then(() => {
+      if (view()?.editor?.busy) setKey("");
+    });
   };
   const close = () => void input("close_editor", { ticket: editor().ticket });
   const documentationLabel = () => remote() ? "HTTP transcription documentation" : adapter() === "gigaam" ? "Local GigaAM documentation" : "Speech provider documentation";
@@ -264,10 +271,10 @@ function ProviderEditor(props: { editor: EditorView }) {
         <div class="form-row"><label for="voice-id">Profile ID</label>
           <input id="voice-id" class="field mono" maxLength={64} readOnly={!editor().create} disabled={busy()} value={id()} onInput={(e) => setId(e.currentTarget.value)} /></div>
         <div class="form-row"><label for="voice-type">Type</label>
-          <Select id="voice-type" value={adapter()} options={types()} onChange={(chosen) => { setRetyped(true); setAdapter(chosen); }} /></div>
+          <Select id="voice-type" value={adapter()} options={types()} disabled={busy()} onChange={(chosen) => { setRetyped(true); setAdapter(chosen); }} /></div>
         <div class="form-row"><label for="voice-model">Model</label>
           <Show when={remote()} fallback={
-            <Select id="voice-model" value={model()} options={models().map((m) => ({ value: m, label: m }))} onChange={setModel} />
+            <Select id="voice-model" value={model()} options={models().map((m) => ({ value: m, label: m }))} disabled={busy()} onChange={setModel} />
           }>
             <input id="voice-model" class="field mono" maxLength={128} list="voice-models" disabled={busy()} value={model()} onInput={(e) => setModel(e.currentTarget.value)} />
             <datalist id="voice-models"><For each={models()}>{(m) => <option value={m} />}</For></datalist>
@@ -277,14 +284,14 @@ function ProviderEditor(props: { editor: EditorView }) {
           <input id="voice-language" class="field mono voice-lang" maxLength={2} placeholder="Auto-detect" disabled={busy()} value={language()} onInput={(e) => setLanguage(e.currentTarget.value)} /></div>
         <Show when={remote()} fallback={
           <div class="form-row"><label for="voice-device">Device</label>
-            <Select id="voice-device" value={device()} options={devices().map((d) => ({ value: d, label: d }))} onChange={setDevice} /></div>
+            <Select id="voice-device" value={device()} options={devices().map((d) => ({ value: d, label: d }))} disabled={busy()} onChange={setDevice} /></div>
         }>
           <div class="form-row"><label for="voice-url">Base URL</label>
             <input id="voice-url" class="field mono" maxLength={2048} placeholder="https://speech.example.net/v1" disabled={busy()} value={url()} onInput={(e) => setUrl(e.currentTarget.value)} /></div>
           <div class="form-row"><span />
             <Check label="Allow unencrypted HTTP for a local or private server" checked={insecure()} disabled={busy()} onChange={setInsecure} /></div>
           <div class="form-row"><label for="voice-credential">API key</label>
-            <Select id="voice-credential" value={credential()} onChange={(mode) => { setKey(""); setCredential(mode); }} options={[
+            <Select id="voice-credential" value={credential()} disabled={busy()} onChange={(mode) => { setKey(""); setCredential(mode); }} options={[
               { value: "keep", label: editor().key_stored ? "Keep stored API key" : "No API key" },
               { value: "replace", label: "Replace API key" },
               { value: "remove", label: "Remove API key" },

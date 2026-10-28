@@ -11,6 +11,7 @@
 //! receipt. An editor's API key passes from [`EditorForm`] into the call's
 //! standard input and nowhere else; [`Call`] and [`EditorForm`] never print it.
 
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::fmt;
 use std::path::Path;
@@ -21,6 +22,7 @@ use serde_json::{json, Map, Value};
 
 use crate::actions::Exit;
 use crate::creation::{canonical_uuid, uuid};
+use crate::settings::Settings;
 use crate::voice;
 pub use crate::voice_composer::Platform;
 use crate::ComputerId;
@@ -44,6 +46,35 @@ pub fn documentation_url(adapter: &str) -> String {
         "openai_http" => format!("{DOCUMENTATION}#openai-compatible-server"),
         _ => DOCUMENTATION.into(),
     }
+}
+
+/// What the page shows when no browser opened the documentation
+/// (SpeechSettings.cpp `openDocumentationLink`).
+pub fn documentation_failure(url: &str) -> String {
+    format!("Could not open the browser. Open this link manually:\n{url}")
+}
+
+/// How long a change's identity may take to reach the disk before the
+/// change is given up unsent.
+pub const STORE_PENDING: Duration = Duration::from_secs(2);
+
+/// [`Effect::StorePending`], first half: the record into the store, under
+/// the caller's lock so it is ordered with [`Effect::ClearPending`]. False
+/// when the store refuses it.
+pub fn keep_pending(settings: &Settings, text: &str) -> bool {
+    settings.set(PENDING_KEY, json!(text)).is_ok()
+}
+
+/// [`Effect::StorePending`], second half, off the caller's lock: whether
+/// the record reached the disk within [`STORE_PENDING`]. Answer
+/// [`Providers::stored`] with it.
+pub fn pending_written(settings: &Settings) -> bool {
+    settings.flush_within(STORE_PENDING)
+}
+
+/// [`Effect::ClearPending`], under the caller's lock.
+pub fn clear_pending(settings: &Settings) {
+    let _ = settings.set(PENDING_KEY, json!(""));
 }
 
 /// What the computer list calls this computer.
@@ -206,6 +237,9 @@ pub struct EditorView {
 /// What the page shows.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct View {
+    /// Grows with every view, so a page keeps the newest of views that
+    /// reach it out of order.
+    pub seq: u64,
     pub hosts: Vec<HostOption>,
     pub host: String,
     /// The list takes input only once loaded.
@@ -529,6 +563,7 @@ pub struct Providers {
     editor: Option<Editor>,
     removal: Option<Removal>,
     tickets: u64,
+    views: Cell<u64>,
 }
 
 impl Providers {
@@ -579,6 +614,7 @@ impl Providers {
             editor: None,
             removal: None,
             tickets: 0,
+            views: Cell::new(0),
         };
         providers.set_peers(Vec::new());
         providers
@@ -991,11 +1027,14 @@ impl Providers {
         {
             return Vec::new();
         }
-        let payload = json!({
+        let mut payload = json!({
             "action": "profile_remove",
             "expected_revision": removal.revision,
-            "profile_id": removal.profile,
         });
+        // Qt omits a missing ID rather than sending null.
+        if !removal.profile.is_null() {
+            payload["profile_id"] = removal.profile;
+        }
         self.operation(&removal.host, &removal.machine, payload, Owner::Page)
     }
 
@@ -1008,11 +1047,16 @@ impl Providers {
         let Some(profile) = self.selected_profile() else {
             return Vec::new();
         };
-        let payload = json!({
-            "action": "profile_test",
-            "profile_id": profile.get("id").cloned().unwrap_or(Value::Null),
-            "expected_profile_revision": profile.get("revision").cloned().unwrap_or(Value::Null),
-        });
+        let mut payload = json!({ "action": "profile_test" });
+        // Qt omits what the profile lacks rather than sending null.
+        for (field, key) in [
+            ("profile_id", "id"),
+            ("expected_profile_revision", "revision"),
+        ] {
+            if let Some(value) = profile.get(key) {
+                payload[field] = value.clone();
+            }
+        }
         let (host, machine) = (self.host.clone(), self.machine.clone());
         self.operation(&host, &machine, payload, Owner::Page)
     }
@@ -1054,8 +1098,10 @@ impl Providers {
             return Vec::new();
         };
         if !written {
+            // Nothing was sent: the record, if the store took it, goes.
             self.pending = None;
             self.busy = false;
+            let mut effects = vec![Effect::ClearPending];
             let failure = "Could not save the operation identity. No provider request was sent.";
             match self.owner.take() {
                 Some(Owner::Editor(ticket)) => {
@@ -1070,7 +1116,7 @@ impl Providers {
                     self.result_failed = true;
                 }
             }
-            return Vec::new();
+            return std::mem::take(&mut effects);
         }
         self.waiting = false;
         self.polls = 0;
@@ -1313,7 +1359,9 @@ impl Providers {
                 text(pending, "computer")
             ),
         };
+        self.views.set(self.views.get() + 1);
         View {
+            seq: self.views.get(),
             hosts: self.hosts.clone(),
             host: self.host.clone(),
             loaded: self.loaded,

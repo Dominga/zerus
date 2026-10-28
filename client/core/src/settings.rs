@@ -664,14 +664,14 @@ impl Settings {
         state.unreadable.clone().or_else(|| state.error.clone())
     }
 
-    /// Waits at most `limit` for every change to reach the disk (exit);
-    /// whether it did.
+    /// Waits at most `limit` for every change to reach the disk; whether it
+    /// did: loaded, clean, idle, and the last write succeeded.
     pub fn flush_within(&self, limit: Duration) -> bool {
         let deadline = Instant::now() + limit;
         let mut state = self.shared.lock();
         loop {
             if state.loaded && !state.dirty && !state.writing {
-                return true;
+                return state.error.is_none();
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {

@@ -662,7 +662,7 @@ fn a_change_whose_identity_cannot_be_stored_is_not_sent() {
     let mut providers = page("", Defaults::default(), "");
     loaded(&mut providers, json!([russian()]));
     providers.test();
-    assert!(providers.stored(false, now()).is_empty());
+    assert_eq!(providers.stored(false, now()), [Effect::ClearPending]);
     let view = providers.view();
     assert!(view.pending.is_empty());
     assert_eq!(
@@ -675,7 +675,7 @@ fn a_change_whose_identity_cannot_be_stored_is_not_sent() {
     assert!(providers.open_editor(false));
     let ticket = editor(&providers).ticket;
     providers.save(ticket, local_form("Russian"));
-    assert!(providers.stored(false, now()).is_empty());
+    assert_eq!(providers.stored(false, now()), [Effect::ClearPending]);
     let view = editor(&providers);
     assert!(!view.busy);
     assert!(!view.check_visible);
@@ -779,6 +779,195 @@ fn documentation_links_follow_the_provider_type() {
     );
 }
 
+/// A test's folder, removed with everything written there (a payload may
+/// hold the synthetic key), also when the test fails.
+#[cfg(unix)]
+struct Folder(std::path::PathBuf);
+
+#[cfg(unix)]
+impl Drop for Folder {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn polling_stops_after_60_checks_within_90_seconds() {
+    let mut providers = page("", Defaults::default(), "");
+    loaded(&mut providers, json!([russian()]));
+    providers.test();
+    let start = now();
+    let call = calls(&providers.stored(true, start)).remove(0);
+    let request = call.payload["request_id"].as_str().unwrap().to_owned();
+    let running = completed(&call, json!({"state": "running"}));
+    let mut effects = providers.answered(CallId::Change, running.clone(), start);
+    let mut polls = 0;
+    while effects == [Effect::PollLater(request.clone())] {
+        polls += 1;
+        assert_eq!(calls(&providers.poll(&request, start)).len(), 1);
+        effects = providers.answered(CallId::Status, running.clone(), start);
+    }
+    assert_eq!(polls, 60);
+    assert!(effects.is_empty());
+    assert!(providers.view().pending.contains("not yet confirmed"));
+}
+
+#[test]
+fn a_remove_confirmed_after_any_change_sends_nothing() {
+    // A newer revision, another machine, or a change under way.
+    for change in ["revision", "machine", "pending"] {
+        let mut providers = page("", Defaults::default(), "");
+        loaded(&mut providers, json!([russian()]));
+        let ask = providers.ask_remove().unwrap();
+        match change {
+            "revision" | "machine" => {
+                let effects = providers.refresh();
+                let mut listing = listing(json!([russian()]));
+                if change == "revision" {
+                    listing.reply.insert("revision".into(), json!(2));
+                } else {
+                    listing.reply.insert(
+                        "machine_id".into(),
+                        json!("cccccccc-cccc-4ccc-cccc-cccccccccccc"),
+                    );
+                }
+                providers.answered(CallId::List(generation(&effects)), listing, now());
+            }
+            _ => {
+                providers.test();
+                providers.stored(true, now());
+            }
+        }
+        assert!(providers.remove(ask.ticket, true).is_empty(), "{change}");
+    }
+}
+
+#[test]
+fn the_documentation_failure_names_the_link() {
+    assert_eq!(
+        documentation_failure("https://github.com/ufna/zerus/blob/main/docs/speech-setup.md#local-gigaam"),
+        "Could not open the browser. Open this link manually:\nhttps://github.com/ufna/zerus/blob/main/docs/speech-setup.md#local-gigaam"
+    );
+}
+
+#[test]
+fn cancel_leaves_no_change_behind() {
+    let mut providers = page("", Defaults::default(), "");
+    loaded(&mut providers, json!([russian()]));
+    assert!(providers.open_editor(true));
+    providers.close_editor(editor(&providers).ticket);
+    let view = providers.view();
+    assert!(view.editor.is_none());
+    assert!(view.pending.is_empty());
+    assert!(view.can_add);
+}
+
+#[test]
+fn an_edit_with_a_stored_key_keeps_or_removes_it_and_needs_consent_for_http() {
+    for mode in ["keep", "remove"] {
+        let mut providers = page("", Defaults::default(), "");
+        loaded(
+            &mut providers,
+            json!([{"id": "remote", "name": "Remote", "available": true, "adapter": "openai_http", "model": "gigaam",
+                "base_url": "https://speech.example.net/v1", "credential": {"configured": true}, "revision": 1}]),
+        );
+        assert!(providers.open_editor(false));
+        let view = editor(&providers);
+        assert!(view.key_stored);
+        let form = |url: &str, insecure: bool| EditorForm {
+            name: "Remote".into(),
+            id: "remote".into(),
+            adapter: "openai_http".into(),
+            model: "gigaam".into(),
+            language: "ru".into(),
+            base_url: url.into(),
+            allow_insecure_http: insecure,
+            credential: mode.into(),
+            ..EditorForm::default()
+        };
+        assert!(providers
+            .save(view.ticket, form("http://127.0.0.1:9000/v1", false))
+            .is_empty());
+        assert!(providers
+            .save(
+                view.ticket,
+                form("https://user:secret@example.net/v1", false)
+            )
+            .is_empty());
+        assert!(providers
+            .save(
+                view.ticket,
+                form("https://speech.example.net/v1?key=secret", false)
+            )
+            .is_empty());
+        let call = save_and_send(&mut providers, form("http://127.0.0.1:9000/v1", true));
+        assert_eq!(call.payload["credential"], json!({"mode": mode}));
+        assert_eq!(call.payload["profile"]["allow_insecure_http"], true);
+    }
+}
+
+#[test]
+fn a_refused_store_clears_the_record_and_sends_nothing() {
+    let mut providers = page("", Defaults::default(), "");
+    loaded(&mut providers, json!([russian()]));
+    providers.test();
+    let effects = providers.stored(false, now());
+    assert_eq!(effects, [Effect::ClearPending]);
+    assert!(providers.view().pending.is_empty());
+}
+
+/// The src-tauri glue: the record goes into the store under the page's
+/// lock, and only a write that reached the disk lets the change go.
+#[cfg(unix)]
+#[test]
+fn a_record_the_disk_refuses_is_cleared_and_the_change_not_sent() {
+    use std::os::unix::fs::PermissionsExt;
+    let folder =
+        Folder(std::env::temp_dir().join(format!("zerus-speech-store-{}", std::process::id())));
+    let dir = &folder.0;
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).unwrap();
+    let settings = Settings::open(dir.join("settings.json"), None);
+    let mut providers = page("", Defaults::default(), "");
+    loaded(&mut providers, json!([russian()]));
+    let effects = providers.test();
+    let [Effect::StorePending(text)] = effects.as_slice() else {
+        panic!("a change starts by storing its record");
+    };
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let refused = std::fs::write(dir.join("probe"), b"").is_err();
+    assert!(keep_pending(&settings, text));
+    let written = pending_written(&settings);
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if refused {
+        assert!(!written);
+        let effects = providers.stored(written, now());
+        assert_eq!(effects, [Effect::ClearPending]);
+        clear_pending(&settings);
+        assert_eq!(settings.text(PENDING_KEY), "");
+    }
+}
+
+#[test]
+fn test_and_remove_omit_what_the_profile_lacks() {
+    let mut providers = page("", Defaults::default(), "");
+    loaded(
+        &mut providers,
+        json!([{"name": "No id", "adapter": "gigaam"}]),
+    );
+    providers.test();
+    let call = calls(&providers.stored(true, now())).remove(0);
+    assert!(call.payload.get("profile_id").is_none());
+    assert!(call.payload.get("expected_profile_revision").is_none());
+}
+
+#[test]
+fn every_view_is_newer_than_the_last() {
+    let providers = page("", Defaults::default(), "");
+    let first = providers.view().seq;
+    assert!(providers.view().seq > first);
+}
+
 #[cfg(unix)]
 mod transport {
     use super::*;
@@ -787,7 +976,7 @@ mod transport {
     /// A folder with `hgs`, a symlink to the checked-in fake. A symlink,
     /// never a copy: writing an executable while another test thread forks
     /// lets the child inherit the write fd, and exec then fails with ETXTBSY.
-    fn fixture(name: &str, management: bool) -> (PathBuf, PathBuf) {
+    fn fixture(name: &str, management: bool) -> (Folder, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "zerus-speech-settings-{name}-{}",
             std::process::id()
@@ -800,12 +989,13 @@ mod transport {
         let hgs = dir.join("hgs");
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_speech_hgs.sh");
         std::os::unix::fs::symlink(script, &hgs).unwrap();
-        (dir, hgs)
+        (Folder(dir), hgs)
     }
 
     #[test]
     fn management_needs_its_own_marker_before_a_key_is_sent() {
-        let (dir, hgs) = fixture("legacy", false);
+        let (folder, hgs) = fixture("legacy", false);
+        let dir = &folder.0;
         let mut supported = HashSet::new();
         let payload =
             json!({"action": "profile_upsert", "credential": {"mode": "replace", "value": KEY}});
@@ -836,7 +1026,8 @@ mod transport {
 
     #[test]
     fn a_change_goes_on_standard_input_once_the_help_names_management() {
-        let (dir, hgs) = fixture("current", true);
+        let (folder, hgs) = fixture("current", true);
+        let dir = &folder.0;
         let mut supported = HashSet::new();
         let payload =
             json!({"action": "profile_upsert", "credential": {"mode": "replace", "value": KEY}});

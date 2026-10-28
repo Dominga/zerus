@@ -66,9 +66,9 @@ export function Check(props: { label: JSX.Element; checked: boolean; onChange: (
 
 export interface Option { value: string; label: string }
 
-export function Select(props: { value: string; options: Option[]; onChange: (value: string) => void; label?: string; id?: string }) {
+export function Select(props: { value: string; options: Option[]; onChange: (value: string) => void; label?: string; id?: string; disabled?: boolean }) {
   return (
-    <select id={props.id} class="field set-select" value={props.value} aria-label={props.label}
+    <select id={props.id} class="field set-select" value={props.value} aria-label={props.label} disabled={props.disabled}
       onChange={(e) => props.onChange(e.currentTarget.value)}>
       <For each={props.options}>{(o) => <option value={o.value} selected={o.value === props.value}>{o.label}</option>}</For>
     </select>

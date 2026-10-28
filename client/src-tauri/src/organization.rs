@@ -19,7 +19,12 @@
 //! writes of the worker and `flush`. The snapshot source, `hgs`, the files,
 //! the edits' answers and the Projects callback all run without the hub's
 //! lock, `hgs` also without the writer's, and the worker is woken after the
-//! hub's lock is released.
+//! hub's lock is released. The Projects callback runs under the `announced`
+//! lock, one call at a time. A pass that applies or settles edits drops the
+//! writer's lock before its call; the calls made where `save_draft` releases
+//! the hub's lock, in an idle pass and in `flush` still run under it. So the
+//! callback must never block on the main thread, which takes the writer's
+//! lock in `flush` as the app quits, and must never take the writer's lock.
 
 use std::collections::HashMap;
 use std::io;
@@ -57,6 +62,11 @@ pub type SnapshotSource = Arc<dyn Fn() -> Option<OrganizationSnapshot> + Send + 
 /// It runs without the hub's lock, one call at a time, and a call never
 /// follows a newer one; it must not call back into [`Organization`]. A
 /// panic in it is caught and logged.
+///
+/// It must never block on the main thread and never take the writer's lock:
+/// some calls run under that lock (see the module's lock list), and some on
+/// the main thread itself, in [`Organization::flush`] as the app quits. A
+/// call that waited for the main thread there would deadlock the quit.
 pub type Presented = Arc<dyn Fn(Arc<Value>, String, (String, bool)) + Send + Sync>;
 
 /// One call of [`Presented`], made once the hub's lock is released.
@@ -370,7 +380,8 @@ impl Organization {
     /// Writes the pending draft and the layout now, as the app quits. It
     /// takes the worker's writer, so their writes never interleave, and it
     /// never runs `hgs`: an edit made while an apply runs is in the draft,
-    /// which the next start sends.
+    /// which the next start sends. It runs on the main thread, and so does
+    /// a Projects call it makes ([`Presented`]).
     pub fn flush(&self) {
         let mut writer = self.writer();
         let hub = self.save_draft(self.lock(), &mut writer);
@@ -420,10 +431,12 @@ impl Organization {
         match hub.sync.due(self.now()) {
             Due::Apply(invocation) => {
                 // The list shows the apply running while `hgs` runs without
-                // the hub's lock, and `flush` may write meanwhile.
+                // the hub's lock, and `flush` may write meanwhile. The
+                // writer's lock goes first, so `flush` never waits behind the
+                // Projects call (ruling N1).
                 self.publish(&mut hub);
-                self.release(hub);
                 drop(writer);
+                self.release(hub);
                 let exit = run_limited(&self.0.hgs, &invocation, &[], Read::Swarm.limit())
                     .unwrap_or_else(|too| Exit::Abnormal {
                         stderr: ReadError::TooLarge { limit: too.cap }.to_string(),
@@ -441,6 +454,7 @@ impl Organization {
             Due::Settled(settled) => {
                 Self::settle(&mut hub, settled);
                 self.publish(&mut hub);
+                drop(writer);
                 self.release(hub);
                 return;
             }
@@ -1357,6 +1371,77 @@ mod tests {
             "the worker still runs edits"
         );
         fake.finish(organization);
+    }
+
+    /// Makes `intent` in the controller without a publish, so the worker's
+    /// next pass that acts on it makes the Projects call: at the start of the
+    /// apply, or in a pass that settles it. That call blocks, on the worker
+    /// only, until the test lets it go; meanwhile `flush` must finish.
+    /// Answers the applies run once the edit settled.
+    fn flush_beside_a_slow_projects_call(intent: Intent) -> usize {
+        let fake = Fake::landing();
+        let organization = fake.organization(&Pump::default(), true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        let (entered, on_entry) = sync_channel::<()>(1);
+        let (go, gate) = sync_channel::<()>(1);
+        let gate = Mutex::new(gate);
+        organization.set_presented(Arc::new(move |_, _, _| {
+            if std::thread::current().name() == Some("zerus-organization") {
+                let _ = entered.try_send(());
+                // Once `go` is dropped, later calls pass at once.
+                let _ = gate.lock().unwrap().recv_timeout(Duration::from_secs(10));
+            }
+        }));
+        {
+            let mut hub = organization.lock();
+            let now = organization.now();
+            hub.sync.edit(&intent, now).unwrap();
+        }
+        organization.0.wake.notify_all();
+        on_entry
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker's Projects call");
+        let (flushed, on_flush) = sync_channel(1);
+        {
+            let organization = organization.clone();
+            std::thread::spawn(move || {
+                organization.flush();
+                let _ = flushed.send(());
+            });
+        }
+        let quit = on_flush.recv_timeout(Duration::from_secs(5));
+        drop(go);
+        assert!(
+            quit.is_ok(),
+            "flush waited behind the Projects call on the worker"
+        );
+        wait_until("the edit to settle", || !fake.draft().exists());
+        let applies = fake.applies().len();
+        fake.finish(organization);
+        applies
+    }
+
+    // Ruling N1 (Task 6's review): the main thread runs `flush` as the app
+    // quits, and it never waits behind the Projects call at the start of an
+    // apply, which runs after the writer's lock is dropped.
+    #[test]
+    fn flush_never_waits_behind_the_projects_call_at_the_start_of_an_apply() {
+        assert_eq!(flush_beside_a_slow_projects_call(move_to_inbox()), 1);
+    }
+
+    // The same for a pass that settles an edit without an apply.
+    #[test]
+    fn flush_never_waits_behind_the_projects_call_of_a_settled_pass() {
+        let same = Intent::Rename {
+            project: "alpha".into(),
+            name: "Alpha".into(),
+        };
+        assert_eq!(
+            flush_beside_a_slow_projects_call(same),
+            0,
+            "nothing shared changed"
+        );
     }
 
     // The grouping keeps a rename it saw before the first state (Task 3);

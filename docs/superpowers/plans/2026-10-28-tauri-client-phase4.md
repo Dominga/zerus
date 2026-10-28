@@ -4612,6 +4612,23 @@ git commit -m "feat(client): the composer's block reasons, cache chip and inspec
 
 ### Task 4b: The delivery: the guarded send, the cold cache question and local rows
 
+**As built** (`71a2f63d`). Where the steps below differ, the code and this list win (Qt wins over the brief; `SessionsWindow.cpp` and `MessageComposer.cpp` lines):
+- **Send's checks.** `send_message` also refuses (`Busy`) when the editor's text is not the draft's after its own edit, and when Qt's Send would be disabled (`view.can_send`: content, 64 KiB, files the agent takes; `MessageComposer.cpp:1185`, `send` 814). Every `Busy` or `Blocked` answer hands the text back under a new epoch. `Cold` does not: the question holds the send, as Qt's modal dialog does.
+- **The last gate.** `deliver` returns `bool` and refuses (Qt's `prepareSendingAsync`, 731): a closed hub, a composer that is not loaded or is sending, attaching or renaming, an uncertain draft unless the delivery preserves it, and a Retry whose row is no longer a definite failure (`deliverMessage`, 4862-4869). It does not refuse `waiting` (Task 5 delivers from a waiting continuation; Qt drops `m_waitingSends`, 732). Callers answer `Busy` when it refuses.
+- **The save revision.** The durable save takes the next `saves` and sets `saving`. `prepared(delivery, handle, revision, saved)` ignores a stale answer (741). A failed one ends the send, sets `save_failed`, schedules `retry_save` and hands the text back. A successful one clears the storage error and bumps `text_epoch` (Qt clears the editor, 751).
+- **Undo.** `deliver` clears `removed` for every delivery, a Retry's included.
+- **Preserve.** A Retry that keeps the draft keeps its error mark and notice in `Composer.kept` and gives them back at the end (Qt's `m_preservedDrafts`, `MessageComposer.cpp:758-763`).
+- **`Delivery`** gains `row_run`, `row_conversation` (Qt's `observedIdentityMatches`, 147-154) and `evidence` (the details checked at Send, Qt's send evidence). Task 5 builds deliveries with `delivery()` or fills these in its literal.
+- **`still_valid`** follows `observedIdentityMatches` (the row's run at Send, or the details' run). Without consent, a cache that expired in the evidence or in the current details is invalid (4881). For a session no longer open, the evidence stands in for its details.
+- **`Prompt`** gains `handle`, `text` and `attachments`, the message asked about, filled by `ask(hub, ctx, retry)` (its signature is unchanged). A new question replaces its composer's older one. A non-retry answer sends only while the draft still holds that message; otherwise it answers `Notice` with Qt's "Draft changed. Send it when you are ready." (4845).
+- **`SendReply::ClearContext`** is not in 4b: nothing constructs it before Task 5, and clippy's `dead_code` refuses it. Task 5 adds it with the Clear answer.
+- **The call.** `send_now` treats a panicked dispatch like an `Err`: uncertain. After the end it calls `refresh_details` for the open key (`finishMessage`'s `inspect()`, 4956).
+- **Retry after the read** (`messageAction`, 4497-4523): Qt's quiet checks (identity, online, no write, live and running evidence, the row unchanged, the composer not busy). For the open session, a block reason becomes the composer's error (`Blocked`), then the cold question. For a session no longer open, a warm retry is delivered there and a cold one is dropped. Unreadable file entries answer `Notice` with `read_stored`'s text.
+- **`inspect_local`** answers only for the id of a failed row (4475-4481).
+- **Events.** `refresh_details` keeps the inspected `events` and merges them into `Followed.events` by `seq` (3639-3651; `replace_events` replaces). `observe` reconciles on events-only batches too and wakes the view only when a row went. `reconcile` returns whether a row went and runs with null details when none are known.
+- **Not done, by Qt:** a send is not a write mark in `Actions`. Qt's `m_pending` is set by writes only; a send lives in `m_pendingMessages` and blocks only its own session (`isSending`, 4808, 4858). `still_valid` refuses while any write runs (`facts`, Qt's `m_pending` at 4889).
+- **Tests.** `send_hub_with(store, spawn)` takes the test's spawn; the brief's `dir("retry")` became `dir("retry-row")`, since Task 3a's `a_failed_save_is_retried_until_it_succeeds` uses that folder. `Cache::prune_later` checks `again` once more after its release, so a store during the release is not lost.
+
 **Depends on:**
 - A2 `zerus-5wmh.9.4` (#404): `Action::Send`, `Outcome::Uncertain`, `actions::dispatch` in src-tauri, `Lane::Send`;
 - S2 `zerus-5wmh.9.8` (#408, on main): `cache::{cold_prompt, ColdPrompt, ColdAction}`;

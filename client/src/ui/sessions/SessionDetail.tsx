@@ -6,7 +6,7 @@ import { selected, setMenu, subagentOpen, type MenuEntry } from "../../store/ui"
 import { activity } from "../../store/session";
 import { computerOffline } from "../../store/catalog";
 import { copyName, detailsFor, followedFor } from "../../store/actions";
-import { actionEntries } from "./ActionDialogs";
+import { actionEntries, freshActionEntry } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
 import { markEntry } from "./mark-entries";
 
@@ -37,6 +37,7 @@ function Header() {
   const details = createMemo(() => detailsFor(s(), !computerOffline(s().computer), followedFor(s().key)));
   const act = createMemo(() => actionEntries(s(), details()));
   const mark = createMemo(() => markEntry(s()));
+  const fresh = createMemo(() => freshActionEntry(s(), true));
   const actions = (): MenuEntry[] => [
     { label: "Open folder", icon: "folder-open", disabled: true },
     { label: "Open shell in session folder", icon: "square-terminal", disabled: true },
@@ -50,7 +51,7 @@ function Header() {
     ...(act().stop.disabled ? [] : [act().stop]),
     ...(mark() ? [mark()!] : []),
     { separator: true },
-    { label: "Clear session…", icon: "clear", disabled: true },
+    ...(fresh() ? [fresh()!] : [{ label: "Clear session…", icon: "clear", disabled: true }]),
     ...(act().archive ? [act().archive!] : []),
     act().end,
   ];

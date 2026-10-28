@@ -269,7 +269,43 @@ export function copyState(s: ActionRow, online: boolean, details?: Details): Cop
   };
 }
 
-export type DialogKind = "rename" | "terminate";
+// Start fresh (SessionsWindow.cpp 4672-4704, 5333-5340).
+
+export const FRESH_HINT = "Start with a new conversation and the same folder, account and model";
+export const FRESH_TIP = "Start this stopped session with a new conversation and the same folder, account and model.";
+export const FRESH_CHANGED = "The session changed. Open its actions again.";
+
+/**
+ * Qt's canStartStopped: online, paused or stopped, tracked, a Codex, Claude or
+ * Kimi session, no write pending for it. `batchRunning` is for Piece F's batch
+ * runner (Qt: no batch running); until then callers leave it false.
+ */
+export function canStartStopped(s: Pick<ActionRow, "state" | "tracked" | "cmd">, online: boolean, updating: boolean, batchRunning = false): boolean {
+  return online && (s.state === "paused" || s.state === "stopped") && s.tracked && ["codex", "claude", "kimi"].includes(s.cmd)
+    && !updating && !batchRunning;
+}
+
+/** The Start fresh entry of a paused or stopped row: undefined for any other row. */
+export function freshEntry(s: ActionRow, online: boolean, updating: boolean, batchRunning = false): { enabled: boolean; hint: string } | undefined {
+  if (s.state !== "paused" && s.state !== "stopped") return undefined;
+  return { enabled: canStartStopped(s, online, updating, batchRunning), hint: FRESH_HINT };
+}
+
+export function freshCopy(s: Pick<ActionRow, "name" | "machine">): { title: string; text: string; confirm: string } {
+  return {
+    title: "Start fresh?",
+    text: `Start ${s.name} on ${s.machine} with a new conversation?\n\nThe agent starts in the same folder with the same account and model, without the current conversation context. Earlier messages stay readable in Activity and in the agent\u2019s native history, but Resume will no longer continue them.`,
+    confirm: "Start fresh",
+  };
+}
+
+/** The confirmation check: the live row is the one the dialog named and still qualifies. */
+export function freshStillValid(live: ActionRow, shown: ActionRow, online: boolean, updating: boolean, batchRunning = false): boolean {
+  return live.key === shown.key && live.runId === shown.runId && live.conversationId === shown.conversationId
+    && canStartStopped(live, online, updating, batchRunning);
+}
+
+export type DialogKind = "rename" | "terminate" | "fresh";
 export type DialogState = { kind: DialogKind; row: ActionRow } | undefined;
 export type DialogEvent = { type: "open"; kind: DialogKind; row: ActionRow } | { type: "close" };
 

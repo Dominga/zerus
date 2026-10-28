@@ -1,11 +1,11 @@
 import { For, Show, createEffect, createMemo, createSignal, untrack } from "solid-js";
 import { Icon } from "../lib/icons";
 import { catalog, computerOffline } from "../../store/catalog";
-import { change, copyCommand, copyFolder, copyName, copyReference, dismiss, end, interrupting, notices, perform, pendingNotifications, toggleMute, updating } from "../../store/actions";
+import { change, copyCommand, copyFolder, copyName, copyReference, dismiss, end, interrupting, notices, notify, perform, stillListed, pendingNotifications, toggleMute, updating } from "../../store/actions";
 import type { MenuEntry } from "../../store/ui";
 import type { Details } from "../../types";
 import type { Session } from "./types";
-import { copyState, dialogReducer, menuState, notificationsState, renameParts, renameProblem, snapshotOf, terminateCopy, type ActionRow, type DialogEvent } from "./actions-ui";
+import { FRESH_CHANGED, FRESH_TIP, copyState, dialogReducer, freshCopy, freshEntry, freshStillValid, menuState, notificationsState, renameParts, renameProblem, snapshotOf, terminateCopy, type ActionRow, type DialogEvent } from "./actions-ui";
 
 // The guarded session actions: the entries both menus share, the Rename and
 // Terminate dialogs, and the notices the action store raises.
@@ -76,6 +76,21 @@ export function muteEntry(s: Session): Item | undefined {
   return { label: m.label, icon: row.muted ? "bell" : "bell-off", disabled: !m.enabled, hint: m.hint, action: () => { void toggleMute(row); } };
 }
 
+/**
+ * The Start fresh entry of a paused or stopped row (Qt's contextStartFresh and
+ * the header's m_freshAction), undefined for other rows. Clicking runs the
+ * click-time recheck, then asks.
+ */
+export function freshActionEntry(s: Session, header = false): Item | undefined {
+  const row = snapshotOf(s);
+  const m = freshEntry(row, !computerOffline(s.computer), updating(s.computer, s.name));
+  if (!m) return undefined;
+  return {
+    label: "Start fresh…", icon: "clear", disabled: !m.enabled, hint: header ? FRESH_TIP : m.hint,
+    action: () => { const live = stillListed(row); if (live) send({ type: "open", kind: "fresh", row: snapshotOf(live) }); },
+  };
+}
+
 /** The listed rows, for the rename dialog's check of names in use. */
 function* listedRows(): Iterable<Session> {
   for (const id of catalog.order) {
@@ -137,6 +152,31 @@ function TerminateDialog(props: { row: ActionRow; close: () => void }) {
   );
 }
 
+function FreshDialog(props: { row: ActionRow; close: () => void }) {
+  const copy = freshCopy(props.row);
+  const confirm = () => {
+    props.close();
+    const live = catalog.rows[props.row.key];
+    if (!live || !freshStillValid(snapshotOf(live), props.row, !computerOffline(live.computer), updating(live.computer, live.name))) {
+      notify("warn", FRESH_CHANGED, true);
+      return;
+    }
+    notify("info", `Starting ${props.row.name} with a new conversation…`);
+    void perform(snapshotOf(live), { kind: "start_fresh" });
+  };
+  return (
+    <>
+      <div class="dlg-head"><Icon name="triangle-alert" size={18} class="accent" /><h2 id="action-dlg-title">{copy.title}</h2></div>
+      <div class="dlg-body"><div class="confirm-body" id="action-dlg-body" style={{ "white-space": "pre-line" }}>{copy.text}</div></div>
+      <div class="dlg-foot">
+        <span class="spacer" />
+        <button type="button" class="btn primary" data-initial autofocus onClick={props.close}>Cancel</button>
+        <button type="button" class="btn solid-danger" onClick={confirm}>{copy.confirm}</button>
+      </div>
+    </>
+  );
+}
+
 /**
  * One modal host for the two dialogs. In one code path it opens the modal,
  * then focuses the dialog's initial control (the tag field with its text
@@ -156,10 +196,11 @@ export function ActionDialogs() {
     });
   });
   return (
-    <dialog class="dlg" ref={el} role={open()?.kind === "terminate" ? "alertdialog" : "dialog"} aria-labelledby="action-dlg-title"
-      aria-describedby={open()?.kind === "terminate" ? "action-dlg-body" : undefined} style={{ width: "460px" }} onClose={closeDialog}>
+    <dialog class="dlg" ref={el} role={open()?.kind === "rename" || !open() ? "dialog" : "alertdialog"} aria-labelledby="action-dlg-title"
+      aria-describedby={open()?.kind === "terminate" || open()?.kind === "fresh" ? "action-dlg-body" : undefined} style={{ width: "460px" }} onClose={closeDialog}>
       <Show when={open()} keyed>
-        {(p) => (p.kind === "rename" ? <RenameDialog row={p.row} close={closeDialog} /> : <TerminateDialog row={p.row} close={closeDialog} />)}
+        {(p) => (p.kind === "rename" ? <RenameDialog row={p.row} close={closeDialog} />
+          : p.kind === "fresh" ? <FreshDialog row={p.row} close={closeDialog} /> : <TerminateDialog row={p.row} close={closeDialog} />)}
       </Show>
     </dialog>
   );

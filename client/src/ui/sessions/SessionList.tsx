@@ -8,7 +8,7 @@ import {
 } from "./SessionCard";
 import { catalog, computerOffline } from "../../store/catalog";
 import { detailsFor, followedFor } from "../../store/actions";
-import { actionEntries, copyEntries, muteEntry } from "./ActionDialogs";
+import { actionEntries, copyEntries, freshActionEntry, muteEntry } from "./ActionDialogs";
 import { markAllEntry, markAllTip, markEntry, runMarkAll } from "./mark-entries";
 import {
   selectedKey, setSelectedKey, collapsed, setCollapsed, setExpandedChildren, expandedChildren,
@@ -94,13 +94,13 @@ function setRowCompact(key: string, compact: boolean) {
 }
 
 function sessionMenu(s: Session): MenuEntry[] {
-  const live = s.status !== "paused" && s.status !== "ended";
   // The selected row's menu reads the same details as the header (Qt's m_details).
   const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
   const act = actionEntries(s, undefined, { context: true });
   const cp = copyEntries(s, details);
   const mute = muteEntry(s);
   const mark = markEntry(s);
+  const fresh = freshActionEntry(s);
   return [
     { label: compactRows[s.key] ? "Expand session row" : "Compact session row", icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setRowCompact(s.key, !compactRows[s.key]) },
     { label: "Expand all collapsed", icon: "expand-row", disabled: !Object.values(compactRows).some(Boolean), action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
@@ -114,7 +114,7 @@ function sessionMenu(s: Session): MenuEntry[] {
     ...(mark ? [mark] : []),
     { separator: true },
     act.change,
-    { label: live ? "Clear session…" : "Start fresh…", icon: "clear", disabled: LATER },
+    fresh ?? { label: "Clear session…", icon: "clear", disabled: LATER },
     act.rename,
     { label: "Fork session…", icon: "git-fork", disabled: LATER },
     ...(act.archive ? [act.archive] : []),

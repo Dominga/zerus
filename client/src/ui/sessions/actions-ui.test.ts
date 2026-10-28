@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { toSession } from "../../store/catalog";
 import {
-  copyState, detailsFromInspection, identityOk, notificationsState, notificationsStillAllowed, dialogReducer, menuItemActivates, menuState, renameParts, renameProblem, snapshotOf, tagProblem, terminal, terminateCopy,
+  canStartStopped, copyState, detailsFromInspection, freshCopy, freshEntry, freshStillValid, identityOk, notificationsState, notificationsStillAllowed, dialogReducer, menuItemActivates, menuState, renameParts, renameProblem, snapshotOf, tagProblem, terminal, terminateCopy,
 } from "./actions-ui";
 import fixture from "../../../core/tests/fixtures/action-rows.json";
 import type { Details, ViewRow } from "../../types";
@@ -335,5 +335,51 @@ describe("notificationsState", () => {
     expect(notificationsStillAllowed(snapshotOf(shared({ notification_revision: 3 })), shown, true, free)).toBe(false);
     expect(notificationsStillAllowed(snapshotOf(shared({ muted: true })), shown, true, free)).toBe(false);
     expect(notificationsStillAllowed(snapshotOf(shared()), shown, false, free)).toBe(false);
+  });
+});
+
+describe("Start fresh", () => {
+  const stopped = (extra: Partial<ViewRow> = {}) => row({ state: "stopped", tracked: true, ...extra });
+  it("is enabled for an online tracked paused or stopped codex, claude or kimi session", () => {
+    for (const state of ["paused", "stopped"]) for (const agent of ["codex", "claude", "kimi"]) {
+      expect(canStartStopped(row({ state, agent, tracked: true }), true, false)).toBe(true);
+    }
+  });
+  it("is off when offline, untracked, live, archived, another agent or a write is pending", () => {
+    expect(canStartStopped(stopped(), false, false)).toBe(false);
+    expect(canStartStopped(stopped({ tracked: false }), true, false)).toBe(false);
+    expect(canStartStopped(row({ tracked: true }), true, false)).toBe(false);
+    expect(canStartStopped(stopped({ state: "archived" }), true, false)).toBe(false);
+    expect(canStartStopped(stopped({ agent: "opencode" }), true, false)).toBe(false);
+    expect(canStartStopped(stopped({ agent: "deepseek" }), true, false)).toBe(false);
+    expect(canStartStopped(stopped(), true, true)).toBe(false);
+    expect(canStartStopped(stopped(), true, false, true)).toBe(false);
+  });
+  it("shows the entry for paused or stopped rows only, with Qt's hint", () => {
+    expect(freshEntry(stopped(), true, false)).toEqual({ enabled: true, hint: "Start with a new conversation and the same folder, account and model" });
+    expect(freshEntry(row({ state: "paused", tracked: true }), true, false)?.enabled).toBe(true);
+    expect(freshEntry(stopped(), false, false)?.enabled).toBe(false);
+    expect(freshEntry(row(), true, false)).toBeUndefined();
+    expect(freshEntry(stopped({ state: "archived" }), true, false)).toBeUndefined();
+  });
+  it("words the dialog as Qt does", () => {
+    expect(freshCopy(stopped())).toEqual({
+      title: "Start fresh?",
+      text: "Start claude/proj/a on box with a new conversation?\n\nThe agent starts in the same folder with the same account and model, without the current conversation context. Earlier messages stay readable in Activity and in the agent\u2019s native history, but Resume will no longer continue them.",
+      confirm: "Start fresh",
+    });
+  });
+  it("refuses a changed row at confirmation", () => {
+    const shown = snapshotOf(stopped());
+    expect(freshStillValid(snapshotOf(stopped()), shown, true, false)).toBe(true);
+    expect(freshStillValid(snapshotOf(stopped({ run_id: "r2" })), shown, true, false)).toBe(false);
+    expect(freshStillValid(snapshotOf(stopped({ conversation_id: "c2" })), shown, true, false)).toBe(false);
+    expect(freshStillValid(snapshotOf(row({ tracked: true })), shown, true, false)).toBe(false);
+    expect(freshStillValid(snapshotOf(stopped()), shown, false, false)).toBe(false);
+    expect(freshStillValid(snapshotOf(stopped()), shown, true, true)).toBe(false);
+  });
+  it("opens as a dialog kind", () => {
+    const a = snapshotOf(stopped());
+    expect(dialogReducer(undefined, { type: "open", kind: "fresh", row: a })).toEqual({ kind: "fresh", row: a });
   });
 });

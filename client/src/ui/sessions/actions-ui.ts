@@ -189,7 +189,7 @@ export function detailsFromInspection(value: unknown): Details | undefined {
     interrupt_supported: v.interrupt_supported === true,
     turn_started: typeof v.turn_started === "number" ? v.turn_started : 0,
     phase: text(v.phase),
-    cwd: text(v.cwd),
+    cwd: typeof v.cwd === "string" ? v.cwd : null,
     terminal_supported: typeof v.terminal_supported === "boolean" ? v.terminal_supported : null,
     terminal_attach_supported: typeof v.terminal_attach_supported === "boolean" ? v.terminal_attach_supported : null,
   };
@@ -217,7 +217,7 @@ export interface CopyState {
 /** The copy entries (SessionsWindow.cpp 5306-5307, 5374-5376): Copy session name is always enabled. */
 export function copyState(s: ActionRow, online: boolean, details?: Details): CopyState {
   const archived = s.state === "archived";
-  const path = details?.cwd || s.cwdPath;
+  const path = details?.cwd ?? s.cwdPath;
   return {
     command: { label: archived ? "Copy restore command" : "Copy connect command", enabled: (archived || terminal(s)) && (!archived || !!s.archiveId) },
     reference: online && !!s.runId,

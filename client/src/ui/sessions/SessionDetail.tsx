@@ -6,7 +6,7 @@ import { selected, setMenu, subagentOpen, type MenuEntry } from "../../store/ui"
 import { activity } from "../../store/session";
 import { computerOffline } from "../../store/catalog";
 import { copy, detailsFor, followedFor } from "../../store/actions";
-import { actionEntries, copyEntries } from "./ActionDialogs";
+import { actionEntries } from "./ActionDialogs";
 
 // The session header and its Activity, after design/webui SessionDetail. The
 // composer, Terminal, Processes and the side panel move in with later phases;
@@ -34,7 +34,6 @@ function Header() {
   // inspects only once that subscription answered without one.
   const details = createMemo(() => detailsFor(s(), !computerOffline(s().computer), followedFor(s().key)));
   const act = createMemo(() => actionEntries(s(), details()));
-  const cp = createMemo(() => copyEntries(s(), details()));
   const actions = (): MenuEntry[] => [
     { label: "Open folder", icon: "folder-open", disabled: true },
     { label: "Open shell in session folder", icon: "square-terminal", disabled: true },
@@ -43,7 +42,7 @@ function Header() {
     act().rename,
     { label: "Fork session…", icon: "git-fork", disabled: true },
     { separator: true },
-    cp().command,
+    { label: "Copy connect command", icon: "link", disabled: true },
     act().change,
     ...(act().stop.disabled ? [] : [act().stop]),
     act().markRead,

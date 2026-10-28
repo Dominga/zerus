@@ -133,8 +133,8 @@ export interface Details {
   turn_started: number;
   /** The inspected phase ("" when not reported). */
   phase: string;
-  /** The session's working directory ("" when not reported). */
-  cwd?: string;
+  /** The session's working directory; null when the inspection does not report one (an empty string stays empty). */
+  cwd?: string | null;
   /** Null when the inspection does not report it. */
   terminal_supported?: boolean | null;
   terminal_attach_supported?: boolean | null;

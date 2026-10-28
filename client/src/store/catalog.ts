@@ -123,6 +123,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow): Sessio
     turnStarted: typeof v.turn_started === "number" && v.turn_started > 0 ? v.turn_started : undefined,
     runId: optional(v.run_id),
     conversationId: optional(v.conversation_id),
+    view: v,
   };
 }
 

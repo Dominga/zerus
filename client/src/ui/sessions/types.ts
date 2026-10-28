@@ -66,6 +66,8 @@ export interface Session {
   turnStarted?: number;
   runId?: string;
   conversationId?: string;
+  /** The core's row as received, for the guarded actions (state, tracked, allowed_actions, ...). */
+  view?: import("../../types").ViewRow;
 }
 
 export interface ActivityItem {

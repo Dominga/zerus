@@ -4,6 +4,8 @@ import { ActivityView, columnStyle } from "./Activity";
 import { AgentBadge, MachineBadge, statusOf, folderOf } from "./SessionCard";
 import { selected, setMenu, subagentOpen, toast, type MenuEntry } from "../../store/ui";
 import { activity } from "../../store/session";
+import { detailsFor } from "../../store/actions";
+import { actionEntries, entryOf } from "./ActionDialogs";
 
 // The session header and its Activity, after design/webui SessionDetail. The
 // composer, Terminal, Processes and the side panel move in with later phases;
@@ -31,20 +33,26 @@ const copy = (text: string, what: string) => {
 function Header() {
   const s = () => selected()!;
   const tone = () => (statusOf(s()) === "attention" ? "attention" : statusOf(s()));
+  const act = () => {
+    const entry = entryOf(s());
+    return actionEntries(s(), entry ? detailsFor(entry) : undefined);
+  };
   const actions = (): MenuEntry[] => [
     { label: "Open folder", icon: "folder-open", disabled: true },
     { label: "Open shell in session folder", icon: "square-terminal", disabled: true },
     { label: "Copy session name", icon: "copy", action: () => copy(s().name, "The session name is on the clipboard") },
     { separator: true },
-    { label: "Rename…", icon: "pencil", kbd: "F2", disabled: true },
+    act()?.rename ?? { label: "Rename…", icon: "pencil", disabled: true },
     { label: "Fork session…", icon: "git-fork", disabled: true },
     { separator: true },
     { label: "Copy connect command", icon: "link", disabled: true },
-    { label: "Pause session", icon: "pause", disabled: true },
+    act()?.change ?? { label: "Pause session", icon: "pause", disabled: true },
+    ...(act()?.stop && !act()!.stop.disabled ? [act()!.stop] : []),
+    ...(act()?.markRead ? [act()!.markRead] : []),
     { separator: true },
     { label: "Clear session…", icon: "clear", disabled: true },
-    { label: "Move to archive", icon: "archive", disabled: true },
-    { label: "Terminate session…", icon: "circle-stop", danger: true, disabled: true },
+    ...(act() ? (act()!.archive ? [act()!.archive!] : []) : [{ label: "Move to archive", icon: "archive", disabled: true }]),
+    act()?.end ?? { label: "Terminate session…", icon: "circle-stop", danger: true, disabled: true },
   ];
   return (
     <header class="detail-head">
@@ -53,6 +61,15 @@ function Header() {
         <Show when={s().computer !== "" && statusOf(s()) === "working" && !activity.loaded()}><span class="busy-arc" title="Waiting for the remote read" /></Show>
         <span class="grow" />
         <span class={`hbadge t-${tone()}`}>{headerCaption()}</span>
+        <Show when={act()}>
+          {(a) => (
+            <>
+              <Show when={!a().stop.disabled}><button class="icon-btn" data-tip="Stop the current turn" onClick={() => a().stop.action()}><Icon name="circle-stop" size={16} /></button></Show>
+              <button class="icon-btn" data-tip={a().change.hint ?? a().change.label} disabled={a().change.disabled} aria-label={a().change.label}
+                onClick={() => a().change.action()}><Icon name={a().change.icon!} size={16} /></button>
+            </>
+          )}
+        </Show>
         <button class="icon-btn" data-tip="Open session folder in file manager" disabled><Icon name="folder-open" size={16} /></button>
         <button class="icon-btn" data-tip="Open shell in session folder" disabled><Icon name="square-terminal" size={16} /></button>
         <button class="icon-btn" data-tip="Copy session name" onClick={() => copy(s().name, "The session name is on the clipboard")}><Icon name="copy" size={15} /></button>

@@ -8,7 +8,7 @@ import type { Session, Status } from "../ui/sessions/types";
 // menus and toasts. Data lives in store/catalog.ts and store/activity.ts.
 
 export type MenuEntry =
-  | { label: string; icon?: string; kbd?: string; danger?: boolean; disabled?: boolean; checked?: boolean; action?: () => void }
+  | { label: string; icon?: string; kbd?: string; danger?: boolean; disabled?: boolean; hint?: string; checked?: boolean; action?: () => void }
   | { separator: true }
   | { heading: string };
 

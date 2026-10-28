@@ -8,6 +8,8 @@
 //! and the "Event stream" section of `docs/reference.md`.
 
 pub mod actions;
+pub mod analytics;
+pub mod approvals;
 pub mod attachments;
 pub mod attention;
 pub mod batch;
@@ -20,7 +22,7 @@ pub mod download_cache;
 pub mod drafts;
 pub mod external_file;
 pub mod fleet;
-mod fsx;
+pub mod fsx;
 pub mod input_queue;
 pub mod launch;
 pub mod legacy;
@@ -62,6 +64,7 @@ pub mod views;
 pub mod voice;
 pub mod voice_composer;
 pub mod voice_driver;
+pub mod worktree_policy;
 pub mod worktree_review;
 pub mod worktrees;
 

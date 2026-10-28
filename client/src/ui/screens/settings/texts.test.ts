@@ -152,7 +152,118 @@ const FILES_CORE = [
   "Cannot find an unused name for the downloaded copy.",
 ];
 
+const analyticsQt = ["tray/src/AnalyticsSettings.cpp", "tray/src/AnalyticsClient.cpp"].map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");
+const analyticsCore = ["client/core/src/analytics.rs", "client/core/src/analytics/page.rs", "client/src-tauri/src/analytics.rs"]
+  .map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");
+const ANALYTICS = [
+  "Private analytics",
+  "Content-free daily counters stay on each computer. Reads do not enable collection. Unknown measures are unavailable, not zero. Dates are inclusive UTC days (up to 90).",
+  "Selected computers", "This computer", "All configured computers", "First 32 configured computers", "Apply and refresh",
+  "From", "Through", "From UTC day", "Through UTC day", "Choose a range and refresh to read analytics.",
+  "Daily agent work", "Provider", "All providers", "UTC day", "Computer", "Producer", "Completed turns", "Work",
+  "Approval wait", "Input wait", "Previous", "Next", " (last known)", "Reading…",
+  "Select a day to see all reported counts, token usage, typed failures and histogram means.",
+  "Voice on processing computers",
+  "Voice counts are separate from agent turns. Accepted audio and total queue/processing time have units; percentile latency is unavailable. Speech collection is managed independently on its processing host.",
+  "Collection on this computer", "Collect content-free agent analytics", "Daily aggregate retention", "Apply locally",
+  "Purge local history…",
+  "Disabling collection keeps existing history. Purge removes only this computer's agent analytics, not speech statistics or durable delivery receipts. Remote collection controls are read-only here.",
+  "Review aggregate diagnostics…", "Shorten local analytics history?", "Shorten retention", "Purge local agent analytics?",
+  "Permanently delete all retained agent analytics on this computer. Speech statistics, other computers and durable delivery receipts are unaffected. Collection keeps its current enabled/disabled setting.",
+  "Purge local history", "Review aggregate diagnostics",
+  "Review these aggregate fields before saving a local JSON file. Computer numbers are anonymous within this file. This export includes no logs, message content, account details or native identifiers, and is never uploaded automatically.",
+  "Save file…", "This view includes at most 32 configured computers. Additional configured routes are omitted.",
+];
+const ANALYTICS_CORE = [
+  "Reading…", "Read finished. Last-known or missing data is excluded from current totals.",
+  "Retired, older or ambiguous analytics source. Excluded from current totals.",
+  "Summary is stale or its clock is unconfirmed.", "No current read available.", "Applying local collection settings…",
+  "Local analytics epoch is stale or ambiguous. Refresh before purging.", "Choose an inclusive UTC range of at most 90 days.",
+  "Computer unavailable. No current analytics read.", "This computer does not support the requested analytics read.",
+  "Change was not confirmed. Refresh and review before another action.",
+  "Analytics read failed or exceeded its response limit.", "Computer returned invalid analytics data.",
+  "Aggregate diagnostics saved locally.", "Could not save aggregate diagnostics.",
+];
+
+const approvalsQt = ["tray/src/AutomaticApprovalSettings.cpp", "tray/src/HgsClient.cpp", "tray/src/SettingsPage.h"]
+  .map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");
+const approvalsCore = fs.readFileSync(new URL("client/core/src/approvals.rs", repo), "utf8");
+const APPROVALS = [
+  "Automatic approvals", "Automatically approve tool requests (dangerous)", "Approval journal",
+  "Exact computer name (optional)", "Exact session name (optional)", "Refresh", "Time", "Computer", "Session", "Question",
+  "Result", "Newer", "Older", "Up to 50 entries per page", "Select a journal entry to read the question and its outcome.",
+  "Loading question…", "Loading approval journal…", "No automatic approvals recorded for this filter.",
+];
+const APPROVALS_CORE = [
+  "Approved once", "Failed", "Cancelled", "Unconfirmed", "Invalid approval journal page.",
+  "Invalid automatic approval journal response.",
+  "The automatic approval journal is unavailable. No new approval was authorized.",
+  "Update the local hgs CLI to use automatic approvals and its journal.",
+];
+// webui's wording for this client, where Qt has no text (approvals stay off here).
+const APPROVALS_CLIENT = [
+  "This client never approves tool requests automatically. Answer each request in its session.",
+  "Automatic approvals are turned on in the Qt client. They work only while the Qt client is running; this client does not approve tool requests.",
+];
+
+const worktreesQt = fs.readFileSync(new URL("tray/src/WorktreeSettings.h", repo), "utf8");
+const worktreesCore = ["client/core/src/worktree_policy.rs", "client/core/src/worktree_policy/page.rs"]
+  .map((path) => fs.readFileSync(new URL(path, repo), "utf8")).join("\n");
+const WORKTREES = [
+  "Worktrees", "This computer", "Refresh",
+  "Cleanup runs on the computer that owns each worktree, even when this window is closed. Rules are enabled by default and apply across its projects. Other computers keep their own settings.",
+  "Enable automatic worktree cleanup", "Clean integrated worktrees after the last session is archived or terminated",
+  "Periodically clean unused integrated worktrees", "Forget verified managed worktrees whose folders no longer exist",
+  "Minimum inactivity for periodic cleanup",
+  "Only verified Zerus-created worktrees qualify. Cleanup keeps branches and conversation history. Changed, untracked and ignored local files, sessions, running programs, locked folders and incomplete checks protect a worktree. Build folders and local configuration require review in Projects > Worktrees.",
+  "Refresh to read this computer's cleanup rules.", "Apply to this computer",
+];
+const WORKTREES_CORE = [
+  "Refresh to read this computer's cleanup rules.", "Reading cleanup settings…",
+  "Cleanup settings saved on the selected computer.", "Cleanup settings loaded. Uncertain removals stay for manual review.",
+  "This computer is unavailable or needs an updated hgs CLI for cleanup settings.",
+  "Save was not confirmed. Refresh before changing settings again.", "Could not read cleanup settings.",
+  "Computer returned invalid cleanup settings.", "worktree-maintenance-v1",
+];
+
 describe("Settings texts", () => {
+  it.each(ANALYTICS)("Private analytics shows Qt's %s", (text) => {
+    expect(analyticsQt).toContain(`"${text}"`);
+    expect(source("Analytics.tsx") + source("analytics-text.ts")).toContain(text);
+  });
+  it.each(ANALYTICS_CORE)("the analytics core says Qt's %s", (text) => {
+    expect(analyticsQt).toContain(`"${text}"`);
+    expect(analyticsCore).toContain(`"${text}"`);
+  });
+  it("the analytics core counts the routes it reads as Qt does", () => {
+    expect(analyticsQt).toContain('"Reading %1 configured route(s)…"');
+    expect(analyticsCore).toContain('"Reading {} configured route(s)…"');
+  });
+  it.each(APPROVALS)("Automatic approvals shows Qt's %s", (text) => {
+    expect(approvalsQt).toContain(`"${text}"`);
+    expect(source("Approvals.tsx") + source("approvals-journal.ts")).toContain(text);
+  });
+  it.each(APPROVALS_CORE)("the approval journal says Qt's %s", (text) => {
+    expect(approvalsQt).toContain(`"${text}"`);
+    expect(approvalsCore).toContain(`"${text}"`);
+  });
+  it("the approval journal fills in Qt's counts and answers", () => {
+    expect(approvalsQt).toContain('"%1 entries. Unconfirmed attempts require checking Activity or Terminal; they are not retried."');
+    expect(source("approvals-journal.ts")).toContain("${page.entries.length} entries. Unconfirmed attempts require checking Activity or Terminal; they are not retried.");
+    expect(approvalsQt).toContain('"Selected answer: %1"');
+    expect(approvalsCore).toContain('"Selected answer: {}"');
+  });
+  it.each(APPROVALS_CLIENT)("Automatic approvals shows the client's %s", (text) => {
+    expect(source("Approvals.tsx")).toContain(text);
+  });
+  it.each(WORKTREES)("Worktrees shows Qt's %s", (text) => {
+    expect(worktreesQt).toContain(`"${text}"`);
+    expect(source("Worktrees.tsx")).toContain(text);
+  });
+  it.each(WORKTREES_CORE)("the cleanup policy says Qt's %s", (text) => {
+    expect(worktreesQt).toContain(`"${text}"`);
+    expect(worktreesCore).toContain(`"${text}"`);
+  });
   it.each(FILES)("Files shows Qt's %s", (text) => {
     expect(filesQt).toContain(`"${text}"`);
     expect(source("Files.tsx")).toContain(text);

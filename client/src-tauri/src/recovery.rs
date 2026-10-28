@@ -91,11 +91,18 @@ pub fn start(app: &AppHandle) -> Recovery {
             .name("recovery-sync".into())
             .spawn(move || {
                 let mut second = 0u64;
+                let mut seen = false;
                 loop {
                     std::thread::sleep(FOLLOW);
                     second += 1;
                     let waited = FOLLOW * u32::try_from(second).unwrap_or(u32::MAX);
-                    step(&handle, &service, waited, second.is_multiple_of(periods));
+                    seen |= step(
+                        &handle,
+                        &service,
+                        waited,
+                        seen,
+                        second.is_multiple_of(periods),
+                    );
                 }
             });
         if let Err(error) = started {
@@ -107,9 +114,12 @@ pub fn start(app: &AppHandle) -> Recovery {
 
 /// One look at the fleet `waited` after the service started: this
 /// computer's card and the peers, and a read of every machine when `due`.
-fn step(app: &AppHandle, inner: &Arc<Inner>, waited: Duration, due: bool) {
+/// Returns whether the real card was there (`seen`: it has been before).
+fn step(app: &AppHandle, inner: &Arc<Inner>, waited: Duration, seen: bool, due: bool) -> bool {
     let state = app.state::<AppState>();
-    let card = assumed_card(state.pump().machine(&ComputerId::local()), waited);
+    let real = state.pump().machine(&ComputerId::local());
+    let present = real.is_some();
+    let card = assumed_card(real, waited, seen);
     let peers = state.peers().map(|peers| peers.into_iter().collect());
     let (calls, persist) = {
         let mut sync = inner.sync();
@@ -122,6 +132,7 @@ fn step(app: &AppHandle, inner: &Arc<Inner>, waited: Duration, due: bool) {
         changed(app, inner);
     }
     spawn(app, inner, calls);
+    present
 }
 
 /// The calls to run, and whether the stored policy is to be written (with

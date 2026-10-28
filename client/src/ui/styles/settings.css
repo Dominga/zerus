@@ -129,4 +129,22 @@
   .rec-delays { display: flex; align-items: center; gap: 10px; padding-left: 22px; }
   .rec-delays.disabled { opacity: .5; }
   .rec-delays .set-label { font-size: var(--fs-sm); white-space: nowrap; color: var(--z-color-label); font-weight: 400; }
+  /* Private analytics (design/webui settings.css). */
+  .an-date { display: inline-flex; align-items: center; gap: 6px; }
+  .an-date .set-label { font-size: var(--fs-sm); color: var(--z-color-label); font-weight: 400; }
+  .an-overview { font-size: var(--fs-sm); line-height: 1.5; color: var(--z-color-text-2); padding: 4px 0; }
+  .an-coverage { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; padding: 4px 0; }
+  .an-cov { padding: 8px 10px; border-radius: var(--z-radius-md); background: var(--z-color-tile); border: 1px solid var(--z-color-card-border); font-size: var(--fs-xs); line-height: 1.5; color: var(--z-color-text-3); overflow-wrap: anywhere; }
+  .an-cov.stale { color: var(--z-color-dim); border-style: dashed; }
+  .an-cov > div:first-child { color: var(--z-color-text); font-weight: 600; }
+  .an-split { display: flex; flex-direction: column; gap: 10px; }
+  .an-table { max-height: 380px; }
+  .an-table td { white-space: nowrap; }
+  .an-detail { padding: 10px 12px; border-radius: var(--z-radius-md); background: var(--z-color-tile); border: 1px solid var(--z-color-card-border); font-size: var(--fs-sm); display: flex; flex-direction: column; gap: 4px; overflow: auto; max-height: 260px; }
+  .an-detail .set-lines { columns: 2 220px; column-gap: 24px; }
+  .an-voice { display: flex; flex-direction: column; gap: 10px; font-size: var(--fs-sm); }
+  /* The approval journal's detail: Qt's plain-text pane, one column. */
+  .appr-detail .appr-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+  dialog.dlg.wide { width: min(760px, calc(100vw - 48px)); }
+  .an-json { margin: 10px 0 0; padding: 10px 12px; max-height: 360px; overflow: auto; border-radius: var(--z-radius-md); background: var(--z-color-code-bg); font-family: var(--z-font-mono); font-size: var(--fs-xs); white-space: pre; }
 }

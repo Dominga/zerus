@@ -6,6 +6,10 @@
 
 #[cfg(feature = "live")]
 mod actions;
+#[cfg(feature = "live")]
+mod analytics;
+#[cfg(feature = "live")]
+mod approvals;
 mod cli;
 mod clipboard;
 mod commands;
@@ -50,6 +54,8 @@ mod voice;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod watchdog;
 mod window_visibility;
+#[cfg(feature = "live")]
+mod worktree_policy;
 
 use tauri::{AppHandle, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
@@ -277,6 +283,9 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(speech_settings::SpeechPage::default());
                 app.manage(recovery::start(app.handle()));
                 app.manage(files::start());
+                app.manage(analytics::start(app.handle()));
+                app.manage(approvals::start());
+                app.manage(worktree_policy::start(app.handle()));
                 // A replay never touches the real read or attention marks.
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
@@ -664,6 +673,23 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         files::files_usage,
         files::files_apply_limit,
         files::files_open_folder,
+        analytics::analytics_view,
+        analytics::analytics_refresh,
+        analytics::analytics_rows,
+        analytics::analytics_age,
+        analytics::analytics_configure,
+        analytics::analytics_configure_answer,
+        analytics::analytics_purge_check,
+        analytics::analytics_purge,
+        analytics::analytics_review,
+        analytics::analytics_review_cancel,
+        analytics::analytics_save_review,
+        approvals::approvals_list,
+        approvals::approvals_detail,
+        worktree_policy::worktree_policy_view,
+        worktree_policy::worktree_policy_read,
+        worktree_policy::worktree_policy_choose,
+        worktree_policy::worktree_policy_apply,
         recovery::recovery_view,
         recovery::recovery_load,
         recovery::recovery_save,

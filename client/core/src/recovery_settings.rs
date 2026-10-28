@@ -470,10 +470,16 @@ impl RecoverySync {
 pub const CARD_WAIT: Duration = Duration::from_secs(30);
 
 /// The card the service goes by: this computer's, or, once [`CARD_WAIT`]
-/// has passed without one (no `hgs`, a watch that keeps failing), a card
-/// that keeps local sessions, as Qt's RecoverySync starts with them.
-pub fn assumed_card(card: Option<MachineMeta>, waited: Duration) -> Option<MachineMeta> {
-    card.or_else(|| (waited >= CARD_WAIT).then(MachineMeta::default))
+/// has passed while no card has ever come (no `hgs`, a watch that keeps
+/// failing), a card that keeps local sessions, as Qt's RecoverySync starts
+/// with them. A card that came and went (the fleet stopping) is never
+/// replaced: the service then waits.
+pub fn assumed_card(
+    card: Option<MachineMeta>,
+    waited: Duration,
+    seen: bool,
+) -> Option<MachineMeta> {
+    card.or_else(|| (!seen && waited >= CARD_WAIT).then(MachineMeta::default))
 }
 
 /// One period of the service, as SessionsWindow drives Qt's RecoverySync:

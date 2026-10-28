@@ -200,7 +200,7 @@ export function AppearanceSection() {
         <Row label="Window" hint={layerSupported.loading ? undefined : layerSupported()
           ? "Files and terminals opened from Zerus may appear behind it while this is on."
           : "Keep Above is unavailable in this Zerus session. On Wayland, KDE Plasma 6 with KWin scripting is required. You can use your desktop's window menu or rules."}>
-          <Check label="Keep Zerus above other windows" checked={flag("workspace/alwaysOnTop")} disabled={!layerSupported()}
+          <Check label="Keep Zerus above other windows" checked={flag("workspace/alwaysOnTop")} disabled={layerSupported.loading || !layerSupported()}
             onChange={(v) => void setSetting("workspace/alwaysOnTop", v)} />
         </Row>
       </Group>

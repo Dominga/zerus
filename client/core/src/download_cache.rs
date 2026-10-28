@@ -288,8 +288,9 @@ fn reserved(name: &str) -> bool {
 
 /// QFile::rename to a new name: an exclusive rename where the file system
 /// has one (Linux RENAME_NOREPLACE, macOS RENAME_EXCL, Windows MoveFile),
-/// else a hard link and an unlink. Never Qt's last resort, a plain rename,
-/// which could replace a file that took the name meanwhile.
+/// else a hard link and an unlink, else (no hard links: exFAT on macOS,
+/// some shares) a rename onto an empty file created for the name. Never
+/// Qt's last resort, a plain rename onto whatever holds the name.
 fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -340,12 +341,33 @@ fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
             }
         }
         let _ = (&source, &target);
-        fs::hard_link(from, to)?;
-        if let Err(error) = fs::remove_file(from) {
-            let _ = fs::remove_file(to);
-            return Err(error);
+        match fs::hard_link(from, to) {
+            Ok(()) => {
+                if let Err(error) = fs::remove_file(from) {
+                    let _ = fs::remove_file(to);
+                    return Err(error);
+                }
+                Ok(())
+            }
+            // The errors Qt takes as final (the name is taken, among them).
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(
+                        libc::EACCES
+                            | libc::EEXIST
+                            | libc::ENAMETOOLONG
+                            | libc::ENOENT
+                            | libc::ENOTDIR
+                            | libc::EROFS
+                            | libc::EXDEV
+                    )
+                ) =>
+            {
+                Err(error)
+            }
+            Err(_) => rename_onto_placeholder(from, to),
         }
-        Ok(())
     }
     #[cfg(windows)]
     {
@@ -365,6 +387,38 @@ fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
             Err(std::io::Error::last_os_error())
         }
     }
+}
+
+/// Takes the name with an empty file of its own, then renames onto it, but
+/// only while the name still holds that file; one it no longer holds is
+/// left to whoever took it. A crash between the two leaves that empty file
+/// under the final name: it keeps the name taken, as any file there does,
+/// and the next download of that name takes a numbered one.
+#[cfg(unix)]
+fn rename_onto_placeholder(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let placeholder = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)?;
+    let ours = placeholder.metadata()?;
+    drop(placeholder);
+    let still_ours = || {
+        fs::symlink_metadata(to).is_ok_and(|named| {
+            named.file_type().is_file()
+                && named.dev() == ours.dev()
+                && named.ino() == ours.ino()
+                && named.len() == 0
+        })
+    };
+    if !still_ours() {
+        return Err(std::io::ErrorKind::AlreadyExists.into());
+    }
+    fs::rename(from, to).inspect_err(|_| {
+        if still_ours() {
+            let _ = fs::remove_file(to);
+        }
+    })
 }
 
 /// Makes or checks the folder: it must be a folder of its own, not a link.

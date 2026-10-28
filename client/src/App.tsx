@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createEffect, createMemo, onCleanup, onMount } from "solid-js";
+import { For, Match, Show, Suspense, Switch, createEffect, createMemo, lazy, onCleanup, onMount } from "solid-js";
 import { Rail } from "./ui/components/Rail";
 import { MenuLayer, Toasts } from "./ui/components/Overlays";
 import { ActionDialogs, ActionNotices } from "./ui/sessions/ActionDialogs";
@@ -10,7 +10,6 @@ import { OverviewScreen } from "./ui/screens/Overview";
 import { MachinesScreen } from "./ui/screens/Machines";
 import { AccountsScreen } from "./ui/screens/Accounts";
 import { ProjectsScreen } from "./ui/screens/Projects";
-import { SettingsScreen } from "./ui/screens/Settings";
 import { applySkin, skin } from "./skin/runtime";
 import { catalog } from "./store/catalog";
 import { contentScale, page, setContentScale, setPage, toast } from "./store/ui";
@@ -19,6 +18,10 @@ import { installShortcutRouter, onCommand } from "./store/shortcuts";
 import type { BridgeMode } from "./bridge";
 
 // The client shell: the rail, the pages and the status bar.
+
+// Settings and its sections load the first time Settings opens; their
+// state lives in their modules, so it stays once loaded.
+const SettingsScreen = lazy(() => import("./ui/screens/Settings").then((m) => ({ default: m.SettingsScreen })));
 
 const STATE_TEXT: Record<string, string> = {
   probing: "checking",
@@ -96,7 +99,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
           <Match when={page() === "machines"}><MachinesScreen /></Match>
           <Match when={page() === "accounts"}><AccountsScreen /></Match>
           <Match when={page() === "projects"}><ProjectsScreen /></Match>
-          <Match when={page() === "settings"}><SettingsScreen /></Match>
+          <Match when={page() === "settings"}><Suspense><SettingsScreen /></Suspense></Match>
         </Switch>
       </main>
       <StatusBar mode={props.mode} />

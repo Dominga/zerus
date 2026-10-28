@@ -13,6 +13,9 @@ const repo = new URL("../../../../../", import.meta.url);
 const qt = ["tray/src/SettingsPage.h", "tray/src/UiLanguage.h"].map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");
 const source = (file: string) => fs.readFileSync(new URL(file, here), "utf8");
 const layer = fs.readFileSync(new URL("tray/src/WindowLayer.cpp", repo), "utf8");
+const keyboard = fs.readFileSync(new URL("tray/src/KeyboardSettings.cpp", repo), "utf8");
+const shortcuts = fs.readFileSync(new URL("tray/src/Shortcuts.cpp", repo), "utf8");
+const store = fs.readFileSync(new URL("../../../store/shortcuts.ts", here), "utf8");
 
 const APPEARANCE = [
   "Follow system appearance", "Dark", "Light", "Interface language",
@@ -44,7 +47,30 @@ const SESSIONS = [
   "Closing Zerus keeps agents running. Projects and the arrangement of your workspace are saved on this device.",
 ];
 
+const KEYBOARD = [
+  "Keyboard", "Command", "Shortcut", "Alternate", "Reset", "Reset all", "Restore the default chords of the selected command",
+  "Chords marked ✓ work in Terminal.", "Double-click a shortcut, or press Enter on it, to change it.", "Works in Terminal",
+  "Reset all shortcuts", "Restore the default chords of every command?", "Change shortcut", "Clear", "Shortcut in use",
+];
+const KEYBOARD_FILLED: [string, string][] = [
+  ["Press the new shortcut for %1.", "Press the new shortcut for {title}."],
+  ["Already used by %1. Reassign?", "Already used by ${separatedList("],
+];
+
 describe("Settings texts", () => {
+  it.each(KEYBOARD)("Keyboard shows Qt's %s", (text) => {
+    expect(keyboard).toContain(`"${text}"`);
+    expect(source("Keyboard.tsx")).toContain(text);
+  });
+  it.each(KEYBOARD_FILLED)("Keyboard fills in Qt's %s", (template, shown) => {
+    expect(keyboard).toContain(`"${template}"`);
+    expect(source("Keyboard.tsx")).toContain(shown);
+  });
+  it("uses Shortcuts.cpp's titles, groups, reasons and Terminal rules", () => {
+    const qtTexts = [...shortcuts.matchAll(/(?:QT_TRANSLATE_NOOP\("Shortcuts", |translate\("Shortcuts", )"((?:[^"\\]|\\.)+)"/g)].map((m) => m[1]);
+    expect(qtTexts.length).toBeGreaterThan(40);
+    for (const text of qtTexts) expect(store, text).toContain(`"${text}"`);
+  });
   it.each(APPEARANCE)("Appearance shows Qt's %s", (text) => {
     expect(qt).toContain(`"${text}"`);
     expect(source("Appearance.tsx")).toContain(text);

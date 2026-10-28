@@ -70,4 +70,29 @@
   :root[data-reduce-motion="1"] .skin-card { transition: none; }
   :root[data-reduce-motion="1"] .skin-card:hover { translate: none; }
   :root[data-reduce-motion="1"] .set-content, :root[data-reduce-motion="1"] .set-nav-item.on::before { animation: none; }
+  .set-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; }
+  .set-table-wrap { border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-md); overflow: auto; background: var(--z-color-tile); }
+  .set-table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
+  .set-table th { position: sticky; top: 0; z-index: 1; text-align: left; padding: 7px 10px; font-size: var(--fs-xs); font-weight: 600; color: var(--z-color-label); background: var(--z-color-raised); border-bottom: 1px solid var(--z-color-divider); white-space: nowrap; }
+  .set-table td { padding: 6px 10px; border-bottom: 1px solid var(--z-color-divider); color: var(--z-color-text-2); vertical-align: middle; }
+  .set-table tbody tr:last-child td { border-bottom: 0; }
+  .set-table tbody tr[tabindex]:hover { background: var(--z-color-row-hover); }
+  .set-table tbody tr.on { background: var(--z-color-row-selected); }
+  .set-table tbody tr.on td { color: var(--z-color-text); }
+  .set-table tbody tr:focus-visible { outline: 2px solid var(--z-color-focus); outline-offset: -2px; }
+  .set-table .set-table-group td { font-weight: 600; color: var(--z-color-text); background: var(--z-color-card); font-size: var(--fs-xs); padding: 6px 10px; }
+  .set-table .set-table-empty td { text-align: center; padding: 22px 10px; }
+  .set-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .set-table .ell-cell { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .kb-wrap { max-height: none; }
+  .kb-table td { padding: 5px 10px; }
+  .kb-cmd.custom { font-style: italic; color: var(--z-color-text); }
+  .kb-chord { white-space: nowrap; width: 1%; }
+  .kb-chord .kbd { font-size: var(--fs-xs); color: var(--z-color-text-2); }
+  .kb-term { margin-left: 6px; color: var(--z-color-accent); font-size: var(--fs-xs); }
+  .kb-capture { flex: 1; display: flex; align-items: center; min-height: 36px; cursor: text; }
+  .kb-capture:focus { outline: none; border-color: var(--z-color-accent-muted); box-shadow: var(--z-shadow-focus-ring); }
+  .kb-capture .kbd { font-size: var(--fs-sm); color: var(--z-color-text); }
+  .kb-reason { font-size: var(--fs-sm); margin: 4px 0; }
+  .kb-capture-row { display: flex; gap: 8px; align-items: center; margin: 10px 0 6px; }
 }

@@ -14,6 +14,7 @@ import { applySkin, skin } from "./skin/runtime";
 import { catalog } from "./store/catalog";
 import { contentScale, page, setContentScale, setPage, toast } from "./store/ui";
 import { num, setSetting } from "./store/settings";
+import { installShortcutRouter, onCommand } from "./store/shortcuts";
 import type { BridgeMode } from "./bridge";
 
 // The client shell: the rail, the pages and the status bar.
@@ -58,17 +59,27 @@ function zoom(scale: number) {
 export function App(props: { mode: () => BridgeMode | "starting" }) {
   createEffect(() => applySkin(skin()));
   createEffect(() => setContentScale(num("workspace/contentScale")));
-  const keys = (e: KeyboardEvent) => {
-    const mod = e.ctrlKey || e.metaKey;
-    if (!mod) return;
-    if (/^[1-5]$/.test(e.key)) { e.preventDefault(); setPage((["dashboard", "sessions", "projects", "machines", "accounts"] as const)[Number(e.key) - 1]); }
-    else if (e.key === ",") { e.preventDefault(); setPage("settings"); }
-    else if (e.key === "=" || e.key === "+") { e.preventDefault(); zoom(Math.min(2, +(contentScale() + 0.1).toFixed(2))); toast("Content scale", `${Math.round(contentScale() * 100)}%`); }
-    else if (e.key === "-") { e.preventDefault(); zoom(Math.max(0.75, +(contentScale() - 0.1).toFixed(2))); toast("Content scale", `${Math.round(contentScale() * 100)}%`); }
-    else if (e.key === "0") { e.preventDefault(); zoom(1); }
+  // Window commands through the shortcut router (store/shortcuts.ts), with the
+  // chords of Settings > Keyboard.
+  const zoomBy = (step: number) => {
+    zoom(Math.max(0.75, Math.min(2, +(contentScale() + step).toFixed(2))));
+    toast("Content scale", `${Math.round(contentScale() * 100)}%`);
   };
-  onMount(() => addEventListener("keydown", keys));
-  onCleanup(() => removeEventListener("keydown", keys));
+  const commands: [string, () => void][] = [
+    ["go.overview", () => setPage("dashboard")],
+    ["go.sessions", () => setPage("sessions")],
+    ["go.projects", () => setPage("projects")],
+    ["go.machines", () => setPage("machines")],
+    ["go.accounts", () => setPage("accounts")],
+    ["go.settings", () => setPage("settings")],
+    ["zoom.in", () => zoomBy(0.1)],
+    ["zoom.out", () => zoomBy(-0.1)],
+    ["zoom.reset", () => zoom(1)],
+  ];
+  onMount(() => {
+    const off = [installShortcutRouter(), ...commands.map(([id, run]) => onCommand(id, run))];
+    onCleanup(() => off.forEach((undo) => undo()));
+  });
   return (
     <div class="app" classList={{ "rail-labeled": skin().layout.rail === "labeled" }}>
       <Rail />

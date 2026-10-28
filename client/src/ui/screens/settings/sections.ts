@@ -2,6 +2,7 @@ import { createSignal, type JSX } from "solid-js";
 import { setPage } from "../../../store/ui";
 import { AppearanceSection } from "./Appearance";
 import { SessionsSection } from "./Sessions";
+import { KeyboardSection } from "./Keyboard";
 
 // Settings sections in Qt's order (tray/src/SettingsPage.h:43, Worktrees
 // inserted at :140). A section shows once it has a component; `refresh` runs
@@ -31,7 +32,7 @@ export const SECTIONS: readonly Section[] = [
   { id: "worktrees", label: "Worktrees", icon: "folder-git-2" },
   { id: "approvals", label: "Automatic approvals", icon: "shield-check" },
   { id: "voice", label: "Voice input", icon: "mic" },
-  { id: "keyboard", label: "Keyboard", icon: "keyboard" },
+  { id: "keyboard", label: "Keyboard", icon: "keyboard", component: KeyboardSection },
   { id: "analytics", label: "Private analytics", icon: "gauge" },
   { id: "about", label: "About", icon: "info" },
 ];

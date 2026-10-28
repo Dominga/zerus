@@ -11,11 +11,12 @@
 //! view keeps every field; the core checks only the top-level keys below.
 use crate::actions::{Exit, Invocation};
 use crate::fleet::valid_alias;
-use crate::run::{run_limited, TooLarge};
+use crate::run::{run_cancellable, run_limited, Stopped, TooLarge};
 use crate::ComputerId;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 /// The largest reply of an ordinary read (`swarm get` is about 120 KB).
@@ -136,6 +137,14 @@ pub enum ReadError {
     },
     /// The computer's hgs does not have this read.
     Unsupported,
+    /// An archive page failed Qt's checks (or did not parse); `message` is
+    /// one of Qt's three texts, to show unchanged.
+    ArchiveInvalid {
+        message: String,
+    },
+    /// A newer archive page request for the computer took over; the child
+    /// was ended.
+    Superseded,
 }
 
 impl std::fmt::Display for ReadError {
@@ -147,6 +156,8 @@ impl std::fmt::Display for ReadError {
             Self::Failed { message, .. } => f.write_str(message),
             Self::Invalid { message } => write!(f, "invalid reply: {message}"),
             Self::Unsupported => f.write_str("this computer's hgs does not have this read"),
+            Self::ArchiveInvalid { message } => f.write_str(message),
+            Self::Superseded => f.write_str("superseded"),
         }
     }
 }
@@ -372,6 +383,10 @@ pub fn decode(read: &Read, exit: Exit) -> Result<Value, ReadError> {
             .map(|version| Value::String(version.to_owned()))
             .ok_or_else(|| invalid("not an hgs version"));
     }
+    if matches!(read, Read::ArchivePage { .. }) && serde_json::from_slice::<Value>(&stdout).is_err()
+    {
+        return Err(archive_invalid(ARCHIVE_PAGE_INVALID));
+    }
     let value: Value =
         serde_json::from_slice(&stdout).map_err(|error| invalid(&error.to_string()))?;
     if let Read::ArchivePage {
@@ -381,7 +396,7 @@ pub fn decode(read: &Read, exit: Exit) -> Result<Value, ReadError> {
         query,
     } = read
     {
-        check_archive_page(*from, *until, cursor, query, &value).map_err(invalid_text)?;
+        check_archive_page(*from, *until, cursor, query, &value).map_err(archive_invalid)?;
         return Ok(value);
     }
     if *read == Read::Projects {
@@ -424,8 +439,8 @@ fn canonical_uuid(id: &str) -> bool {
         })
 }
 
-fn invalid_text(text: &'static str) -> ReadError {
-    ReadError::Invalid {
+fn archive_invalid(text: &'static str) -> ReadError {
+    ReadError::ArchiveInvalid {
         message: text.into(),
     }
 }
@@ -471,7 +486,7 @@ pub fn check_archive_page(
             && position.is_some_and(|position| {
                 position >= 0.0
                     && position == position.floor()
-                    && position + rows.len() as f64 <= total.unwrap_or(f64::NAN)
+                    && position + rows.len() as f64 <= total.unwrap_or(0.0)
             });
         if !window {
             error = Some(ARCHIVE_WINDOW_INVALID);
@@ -519,14 +534,43 @@ pub fn archive_page(
     cursor: &str,
     query: &str,
 ) -> Result<ArchivePage, ReadError> {
+    archive_page_cancellable(
+        hgs,
+        computer,
+        from,
+        until,
+        cursor,
+        query,
+        &AtomicBool::new(false),
+    )
+}
+
+/// [`archive_page`] that ends its child and gives [`ReadError::Superseded`]
+/// once `cancel` is set (Qt's `cancelArchivePages`).
+pub fn archive_page_cancellable(
+    hgs: &Path,
+    computer: &ComputerId,
+    from: f64,
+    until: f64,
+    cursor: &str,
+    query: &str,
+    cancel: &AtomicBool,
+) -> Result<ArchivePage, ReadError> {
     let request = Read::ArchivePage {
         from,
         until,
         cursor: cursor.to_owned(),
         query: query.to_owned(),
     };
-    let data = read(hgs, computer, &request)?;
-    Ok(page(&data))
+    let invocation = invocation(computer, &request)?;
+    let exit =
+        run_cancellable(hgs, &invocation, &[], request.limit(), cancel).map_err(|stopped| {
+            match stopped {
+                Stopped::TooLarge(TooLarge { cap, .. }) => ReadError::TooLarge { limit: cap },
+                Stopped::Cancelled => ReadError::Superseded,
+            }
+        })?;
+    Ok(page(&decode(&request, exit)?))
 }
 
 /// The typed page of a reply [`check_archive_page`] accepted.
@@ -868,7 +912,7 @@ mod tests {
     fn verdict(cursor: &str, page: Value) -> Option<String> {
         match decode(&archive_read(cursor), code(&page.to_string())) {
             Ok(_) => None,
-            Err(ReadError::Invalid { message }) => Some(message),
+            Err(ReadError::ArchiveInvalid { message }) => Some(message),
             Err(other) => panic!("{other:?}"),
         }
     }
@@ -972,10 +1016,26 @@ mod tests {
             page_err,
             "next_cursor equal to the query cursor"
         );
-        assert!(matches!(
-            decode(&archive_read(""), code("not json")),
-            Err(ReadError::Invalid { .. })
-        ));
+        for text in ["not json", ""] {
+            assert_eq!(
+                decode(&archive_read(""), code(text)),
+                Err(ReadError::ArchiveInvalid {
+                    message: ARCHIVE_PAGE_INVALID.into()
+                })
+            );
+        }
+        // No total is Qt's 0, so a window with a row fails as the window.
+        assert_eq!(
+            verdict(
+                "",
+                page_with(|p| {
+                    p.as_object_mut().unwrap().remove("total");
+                    p["previous_cursor"] = json!("");
+                    p["position"] = json!(0);
+                })
+            ),
+            Some(ARCHIVE_WINDOW_INVALID.to_owned())
+        );
         assert_eq!(
             verdict(
                 "",

@@ -416,8 +416,41 @@ fn an_archive_page_through_the_fake_is_checked_and_typed() {
     let out = Fake::new(&config(2000.0));
     assert_eq!(
         archive_page(&out.hgs, &studio, 1000.0, 2000.0, "", ""),
-        Err(ReadError::Invalid {
+        Err(ReadError::ArchiveInvalid {
             message: ARCHIVE_IDENTITY_INVALID.into()
         })
+    );
+}
+
+#[test]
+fn a_cancelled_archive_page_ends_its_child_promptly() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use zerus_client_core::reads::{archive_page_cancellable, ReadError};
+    use zerus_client_core::ComputerId;
+    let config = serde_json::json!({"reply": {"exit": 0, "sleep": 30, "stdout": {}}}).to_string();
+    let fake = Fake::new(&config);
+    let cancel = AtomicBool::new(false);
+    let started = std::time::Instant::now();
+    let result = std::thread::scope(|scope| {
+        let job = scope.spawn(|| {
+            archive_page_cancellable(
+                &fake.hgs,
+                &ComputerId::from("studio"),
+                1.0,
+                2.0,
+                "",
+                "",
+                &cancel,
+            )
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        cancel.store(true, Ordering::Relaxed);
+        job.join().unwrap()
+    });
+    assert_eq!(result, Err(ReadError::Superseded));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
     );
 }

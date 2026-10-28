@@ -13,6 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use tauri::State;
@@ -24,7 +25,7 @@ use zerus_client_core::marks::{AttentionMarks, Mark};
 use zerus_client_core::readmarks::{ReadMark, ReadMarks};
 use zerus_client_core::reads::{self, ArchivePage};
 use zerus_client_core::shell::{current_shell, open_command};
-use zerus_client_core::{default_hgs, run, Action, Batch, ComputerId, Outcome, ReadError, Target};
+use zerus_client_core::{default_hgs, run, Action, Batch, ComputerId, Outcome, Target};
 
 /// A session by computer id and session name, and the action's lane.
 type Key = (String, String, Lane);
@@ -541,35 +542,42 @@ pub async fn session_reference(
     parse_reference(exit)
 }
 
-/// Per computer, the number of the latest archive page request: a newer
-/// request makes an older answer stale (`HgsClient::cancelArchivePages`).
+/// Per computer, the cancel flag of the latest archive page request: a
+/// newer request sets the older one's flag, which ends its `hgs` and drops
+/// its answer (`HgsClient::cancelArchivePages`).
 #[derive(Default)]
 pub struct ArchiveReads {
-    latest: Mutex<std::collections::HashMap<String, u64>>,
+    latest: Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>,
 }
 
 impl ArchiveReads {
-    /// Starts a request for `computer`; the older ones become stale.
-    fn begin(&self, computer: &str) -> u64 {
-        let mut latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
-        let number = latest.get(computer).map_or(1, |n| n + 1);
-        latest.insert(computer.to_owned(), number);
-        number
-    }
-
-    fn current(&self, computer: &str, number: u64) -> bool {
-        self.latest
+    /// Starts a request for `computer`, cancelling its older one.
+    fn begin(&self, computer: &str) -> Arc<AtomicBool> {
+        let flag = Arc::new(AtomicBool::new(false));
+        let older = self
+            .latest
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(computer)
-            == Some(&number)
+            .insert(computer.to_owned(), Arc::clone(&flag));
+        if let Some(older) = older {
+            older.store(true, Ordering::Relaxed);
+        }
+        flag
+    }
+
+    /// Forgets a finished request unless a newer one replaced it.
+    fn finish(&self, computer: &str, flag: &Arc<AtomicBool>) {
+        let mut latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
+        if latest.get(computer).is_some_and(|f| Arc::ptr_eq(f, flag)) {
+            latest.remove(computer);
+        }
     }
 }
 
 /// One checked page of the computer's archive (30 s, Qt's validation). A
-/// newer request for the same computer drops this answer as
+/// newer request for the same computer ends this one's `hgs` and answers it
 /// `Err("superseded")`; the store ignores it. A reply that fails Qt's checks
-/// is `Err` with Qt's text and no rows.
+/// is `Err` with one of Qt's three texts and no rows.
 #[tauri::command]
 pub async fn archive_page(
     state: State<'_, ArchiveReads>,
@@ -582,21 +590,21 @@ pub async fn archive_page(
     if blocked() {
         return Err(REPLAY_NEEDS_HGS.to_owned());
     }
-    let number = state.begin(&computer);
+    let flag = state.begin(&computer);
     let hgs = default_hgs();
     let id = ComputerId::from(computer.as_str());
+    let job = Arc::clone(&flag);
     let result = tauri::async_runtime::spawn_blocking(move || {
-        reads::archive_page(&hgs, &id, from, until, &cursor, &query)
+        reads::archive_page_cancellable(&hgs, &id, from, until, &cursor, &query, &job)
     })
     .await
-    .map_err(|error| error.to_string())?;
-    if !state.current(&computer, number) {
+    .map_err(|error| error.to_string());
+    state.finish(&computer, &flag);
+    // An answer that arrived as the newer request started is dropped too.
+    if flag.load(Ordering::Relaxed) {
         return Err("superseded".into());
     }
-    result.map_err(|error| match error {
-        ReadError::Invalid { message } if message.starts_with("Invalid archive") => message,
-        other => other.to_string(),
-    })
+    result?.map_err(|error| error.to_string())
 }
 
 /// The command that opens the session in a terminal, written for this
@@ -658,22 +666,29 @@ pub fn update_attention_marks(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
-    fn a_newer_archive_request_of_a_computer_supersedes_the_older() {
-        let reads = super::ArchiveReads::default();
+    fn a_newer_archive_request_of_a_computer_cancels_the_older() {
+        let reads = ArchiveReads::default();
         let first = reads.begin("studio");
         let other = reads.begin("laptop");
-        assert!(reads.current("studio", first));
+        assert!(!first.load(Ordering::Relaxed));
         let second = reads.begin("studio");
-        assert!(!reads.current("studio", first));
-        assert!(reads.current("studio", second));
+        assert!(first.load(Ordering::Relaxed));
+        assert!(!second.load(Ordering::Relaxed));
         assert!(
-            reads.current("laptop", other),
+            !other.load(Ordering::Relaxed),
             "computers do not cancel each other"
         );
+        reads.finish("studio", &first);
+        let third = reads.begin("studio");
+        assert!(
+            second.load(Ordering::Relaxed),
+            "a stale finish forgot nothing"
+        );
+        assert!(!third.load(Ordering::Relaxed));
     }
-
-    use super::*;
 
     #[test]
     fn replay_needs_an_explicit_hgs() {

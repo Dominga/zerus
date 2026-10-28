@@ -58,6 +58,11 @@ These surfaces are missing from the core section. This plan does not build them;
 
 ## Global Constraints
 
+- **Client private paths come from one function.** New code never calls `app.path().app_data_dir()`. In the Mac switch build that reports the compile-time identifier `com.hgdev.hgs-tray.local`, so the updater would check an empty drafts root.
+  - Every private path takes its root from `crate::data_dir(app)`, a single function in `lib.rs` that returns `app_data_dir()` today. This includes the draft store root (`<data dir>/drafts`, or `drafts-replay` in replay), read marks and any later file.
+  - The Mac switch plan (docs/superpowers/plans/2026-10-28-tauri-client-mac-switch.md, Task 2) replaces that function's body with `identity::Identity::data_dir_now()`. Its Task 9 checks that `grep -rn "app_data_dir()" client/src-tauri/src` prints only that one function.
+  - The attachment cache may stay on `app_cache_dir`; it is disposable.
+
 - **Qt wins.** Where this plan and the Qt GUI disagree, Qt is right; fix the plan in the same PR. Add nothing Qt does not have.
 - **Ownership:** core modules are consumed exactly as their surfaces stand on main (or on the named PR). If a name differs at execution time, follow main and fix the task's code, never the core module.
 - "Actions keep today's guarded CLI calls and their rules: request identities, expected run and conversation, destructive confirmations with the safe choice focused, and **unknown outcomes are never replayed automatically**." (spec, Actions)

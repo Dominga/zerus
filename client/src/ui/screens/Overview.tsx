@@ -12,6 +12,7 @@ import { machineCards, requestMachine } from "../../store/machines";
 import { accountsPage, loadAccounts, setAccountMachine, setRequestedProfile } from "../../store/accounts";
 import { createOverview, type MachineCardModel, type OverviewStats } from "../../store/overview";
 import { setMachineFilter, setPage, setProjectFilter, setSelectedKey, setStateFilter, type StateFilter } from "../../store/ui";
+import { flag, num, setSetting } from "../../store/settings";
 import { accountTooltip, clock, summaryText, usageLoading, windowsAt } from "../lib/usage";
 import { machineKey } from "./machines-ui";
 import { accountIdentity, accountTone, accountsNote, cpuFigure, level, loadTip, memoryFigure, sampleNote, sampleTip, sessionsLabel } from "./overview-ui";
@@ -156,15 +157,17 @@ function LiveSessions(props: { rows: Session[]; scroller: () => HTMLElement | un
 }
 
 // A centred column like Activity: both edges drag together, double-click
-// returns to the default, and the width is kept for this viewer.
+// returns to the default. The width is Settings > Appearance > Overview width
+// (client/overviewWidth, client/overviewFullWidth); a drag shows it live and
+// stores it once, when the pointer lets go.
 const OVERVIEW = { min: 720, max: 2400, edge: 12, fallback: 1200 } as const;
-const WIDTH_KEY = "zerus-client-overview-width";
 const clampWidth = (width: number) => Math.round(Math.max(OVERVIEW.min, Math.min(OVERVIEW.max, width)));
-const savedWidth = (() => { try { return Number(localStorage.getItem(WIDTH_KEY)) || 0; } catch { return 0; } })();
-const [overviewWidth, setOverviewWidthRaw] = createSignal(savedWidth ? clampWidth(savedWidth) : OVERVIEW.fallback);
-function setOverviewWidth(width: number) {
-  setOverviewWidthRaw(clampWidth(width));
-  try { localStorage.setItem(WIDTH_KEY, String(overviewWidth())); } catch { /* storage may be unavailable */ }
+const [dragWidth, setDragWidth] = createSignal<number | undefined>();
+const overviewWidth = () => dragWidth() ?? clampWidth(num("client/overviewWidth"));
+const overviewFullWidth = () => flag("client/overviewFullWidth");
+function storeOverviewWidth(width: number) {
+  setDragWidth(undefined);
+  void setSetting("client/overviewWidth", clampWidth(width));
 }
 
 function OverviewEdge(props: { right?: boolean }) {
@@ -186,13 +189,14 @@ function OverviewEdge(props: { right?: boolean }) {
       onPointerMove={(e) => {
         if (!dragging()) return;
         const distance = (e.clientX - origin) * (props.right ? 1 : -1);
-        setOverviewWidth(Math.min(widest, start + 2 * distance));
+        setDragWidth(clampWidth(Math.min(widest, start + 2 * distance)));
       }}
-      onPointerUp={() => setDragging(false)} onPointerCancel={() => setDragging(false)}
-      onDblClick={() => setOverviewWidth(OVERVIEW.fallback)}
+      onPointerUp={() => { if (dragging()) { setDragging(false); storeOverviewWidth(overviewWidth()); } }}
+      onPointerCancel={() => { setDragging(false); setDragWidth(undefined); }}
+      onDblClick={() => storeOverviewWidth(OVERVIEW.fallback)}
       onKeyDown={(e) => {
-        if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); setOverviewWidth(overviewWidth() + ((e.key === "ArrowRight") === !!props.right ? 40 : -40)); }
-        else if (e.key === "Home") { e.preventDefault(); setOverviewWidth(OVERVIEW.fallback); }
+        if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); storeOverviewWidth(overviewWidth() + ((e.key === "ArrowRight") === !!props.right ? 40 : -40)); }
+        else if (e.key === "Home") { e.preventDefault(); storeOverviewWidth(OVERVIEW.fallback); }
       }} />
   );
 }
@@ -207,8 +211,8 @@ export function OverviewScreen() {
   const go = (filter: StateFilter) => { setMachineFilter([]); setProjectFilter([]); setStateFilter(filter); setPage("sessions"); };
   return (
     <div class="su-page ov-page" ref={scroller}>
-      <div class="ov-content" style={{ "--ovw": `${overviewWidth()}px` }}>
-        <OverviewEdge /><OverviewEdge right />
+      <div class="ov-content" classList={{ full: overviewFullWidth() }} style={{ "--ovw": `${overviewWidth()}px` }}>
+        <Show when={!overviewFullWidth()}><OverviewEdge /><OverviewEdge right /></Show>
         <header class="su-head">
           <h1>Overview</h1>
           <span class="grow" />

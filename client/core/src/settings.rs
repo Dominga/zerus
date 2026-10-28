@@ -172,8 +172,10 @@ pub const KEYS: &[Key] = &[
     key("updates/automatic", Kind::Flag(true)),
     // Automatic approvals: Qt's choice, for the notice only.
     key(QT_AUTOMATIC_APPROVALS, Kind::Flag(false)),
-    // The client's own: its skin and the Overview column (design round 7).
-    client("client/skin", Kind::Text("zerus-dark")),
+    // The client's own: the skin for each appearance (the theme picks one)
+    // and the Overview column (design round 7).
+    client("client/darkSkin", Kind::Text("zerus-dark")),
+    client("client/lightSkin", Kind::Text("zerus-light")),
     client(
         "client/overviewWidth",
         Kind::Whole {

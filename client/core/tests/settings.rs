@@ -140,7 +140,9 @@ fn every_key_has_qt_s_default_and_range() {
     // The opt-in itself is not a client setting.
     assert!(find("automaticApprovals/enabled").is_none());
     assert!(find("shortcuts/").is_none() && find("shortcuts/a/b").is_none());
-    assert_eq!(default("client/skin"), "zerus-dark");
+    assert_eq!(default("client/darkSkin"), "zerus-dark");
+    assert_eq!(default("client/lightSkin"), "zerus-light");
+    assert!(find("client/skin").is_none());
     assert_eq!(default("client/overviewWidth"), 1200);
     assert_eq!(default("client/overviewFullWidth"), false);
     // The client's own keys are never seeded from Qt.
@@ -477,5 +479,26 @@ fn seed_values_take_only_what_qt_stored() {
         ]
         .into_iter()
         .collect()
+    );
+}
+
+/// The web client imports every setting's default from
+/// `client/src/store/settings-defaults.json`; this keeps that file equal to
+/// the table. `ZERUS_UPDATE_SETTINGS_DEFAULTS=1` rewrites it.
+#[test]
+fn the_web_client_defaults_equal_the_table() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/store/settings-defaults.json");
+    let table: serde_json::Map<String, Value> = KEYS
+        .iter()
+        .map(|key| (key.name.to_owned(), effective(key.kind, None)))
+        .collect();
+    let expected = serde_json::to_string_pretty(&table).unwrap() + "\n";
+    if std::env::var_os("ZERUS_UPDATE_SETTINGS_DEFAULTS").is_some() {
+        fs::write(&path, &expected).unwrap();
+    }
+    assert_eq!(
+        fs::read_to_string(&path).unwrap_or_default(),
+        expected,
+        "regenerate with ZERUS_UPDATE_SETTINGS_DEFAULTS=1 cargo test --test settings"
     );
 }

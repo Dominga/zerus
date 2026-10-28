@@ -28,8 +28,8 @@ Qt's values with Qt's types and defaults, and never write Qt's store."
   On macOS the domain is read through cfprefsd (`/usr/bin/defaults export
   com.hgdev.hgs-tray -`), which may hold values the plist file does not
   have yet, and the file only when that fails.
-- Settings Qt does not have use a `client/` prefix (`client/skin`,
-  `client/overviewWidth`, `client/overviewFullWidth`), so a key Qt adds
+- Settings Qt does not have use a `client/` prefix (`client/darkSkin`,
+  `client/lightSkin`, `client/overviewWidth`, `client/overviewFullWidth`), so a key Qt adds
   later never collides with them; they are never seeded. Webview-only
   layout such as panel widths starts at its defaults.
 - `settings.json` records that it was seeded, when, and from which source,

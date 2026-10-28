@@ -254,12 +254,12 @@ async function autoRun(config: PerfConfig) {
     // settings are tried without being stored.
     log(`running animations: ${runningAnimations()}`);
     const idle = await idleSample("idle");
-    setSetting("animateActivity", false, { persist: false });
+    void setSetting("workspace/animateActivity", false, { persist: false });
     await sleep(1000);
     log(`running animations with Animate working sessions off: ${runningAnimations()}`);
     const still = await idleSample("idle with Animate working sessions off");
     restoreSettings();
-    setSetting("reduceMotion", true, { persist: false });
+    void setSetting("workspace/reduceMotion", true, { persist: false });
     await sleep(1000);
     log(`running animations with Reduce motion: ${runningAnimations()}`);
     const calm = await idleSample("idle with Reduce motion");

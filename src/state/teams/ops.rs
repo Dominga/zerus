@@ -1051,14 +1051,17 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
     let label = actor.label(team);
     let count = ids.len();
     if approve {
-        let state = accept_phase(team, at, &label);
+        // N6/F12: the owner's confirmed "approve alongside" hands the phase's
+        // tasks out now; without it a phase behind open work queues (U25).
+        let alongside = input["alongside"].as_bool() == Some(true);
+        let state = accept_phase(team, at, &label, alongside);
         // F13: the phase keeps the owner's sentence when the lead opened it.
         team.phases[at].owner_word = owner_word.clone();
         events.push(Event::new(
             "phase_approved",
-            json!({"by":label,"phase":n,"tasks":count,"owner_word":owner_word,"state":state}),
+            json!({"by":label,"phase":n,"tasks":count,"owner_word":owner_word,"state":state,"alongside":alongside}),
         ));
-        Ok(json!({"status":"phase_approved","phase":n,"tasks":ids,"owner_word":owner_word,"phase_state":state}))
+        Ok(json!({"status":"phase_approved","phase":n,"tasks":ids,"owner_word":owner_word,"phase_state":state,"alongside":alongside}))
     } else {
         // F285: a discarded draft leaves no trace in the numbering. The record
         // goes, its Draft tasks go, and the later drafts close the gaps; the
@@ -1125,15 +1128,17 @@ fn earlier_open(team: &Team, at: usize) -> bool {
 
 /// Accepts the draft at `at`: its Draft tasks become Pending, and the phase
 /// runs at once when every earlier phase is finished, else it queues behind
-/// them (U25). Returns the state the receipt and the feed name.
-fn accept_phase(team: &mut Team, at: usize, label: &str) -> &'static str {
+/// them (U25) - unless the owner confirmed approving it to run alongside them
+/// (F12/N6), when it is approved and its barrier, if any, still holds it.
+/// Returns the state the receipt and the feed name.
+fn accept_phase(team: &mut Team, at: usize, label: &str, alongside: bool) -> &'static str {
     let wanted: BTreeSet<u32> = team.phases[at].tasks.iter().copied().collect();
     for task in &mut team.tasks {
         if task.status == TaskStatus::Draft && wanted.contains(&task.id) {
             task.status = TaskStatus::Pending;
         }
     }
-    let queued = earlier_open(team, at);
+    let queued = !alongside && earlier_open(team, at);
     let record = &mut team.phases[at];
     record.state = if queued { PhaseState::Queued } else { PhaseState::Approved };
     record.decided_by = label.to_owned();
@@ -1232,7 +1237,7 @@ fn auto_accept(team: &mut Team, offline: &BTreeSet<String>, events: &mut Vec<Eve
         if team.phases[at].state != PhaseState::Draft || accept_blockers(team, at, offline).is_err() {
             return;
         }
-        let state = accept_phase(team, at, "Auto");
+        let state = accept_phase(team, at, "Auto", false);
         let record = &team.phases[at];
         events.push(Event::new(
             "phase_auto_accepted",
@@ -1709,10 +1714,15 @@ pub(crate) fn file_subteam_report(child: &Team, parent: &mut Team) -> anyhow::Re
     let member = if link.member.is_empty() { task.assignee.clone() } else { link.member.clone() };
     let text: String = format!("[Sub-team {} {}] {}", child.id, child.name, summary).chars().take(4000).collect();
     // N23: a replayed finish (or a second call after the report landed) files
-    // no second report.
-    if task.attempts.iter().any(|attempt| {
-        attempt.report.as_ref().is_some_and(|report| report.text.starts_with(&format!("[Sub-team {} ", child.id)))
-    }) {
+    // no second report. C5: only a report still waiting for the parent lead
+    // counts - a rejected one is a decision the sub-team reworked, and its
+    // new finish must reach the lead.
+    if task.status == TaskStatus::Submitted
+        && task.attempts.iter().any(|attempt| {
+            attempt.state == AttemptState::Reported
+                && attempt.report.as_ref().is_some_and(|report| report.text.starts_with(&format!("[Sub-team {} ", child.id)))
+        })
+    {
         return Ok(task.id);
     }
     let n = task.attempts.len() as u32 + 1;
@@ -1767,7 +1777,9 @@ pub(crate) fn forward_question(child: &Team, question: &Question) -> String {
 }
 
 /// 9.6: copies the parent lead's answer back into the sub-team question.
-pub(crate) fn answer_forwarded(child: &mut Team, parent_question: &str, answer: &str) -> bool {
+/// N24: returns the answered question's id, so the caller can carry the answer
+/// on down when that question itself came from a deeper sub-team.
+pub(crate) fn answer_forwarded(child: &mut Team, parent_question: &str, answer: &str) -> Option<String> {
     for task in &mut child.tasks {
         for attempt in &mut task.attempts {
             for question in &mut attempt.questions {
@@ -1777,12 +1789,12 @@ pub(crate) fn answer_forwarded(child: &mut Team, parent_question: &str, answer: 
                     question.by = "Lead".into();
                     // N21: the dispatcher delivers a Pending answer to the member.
                     question.notice = Notice::Pending;
-                    return true;
+                    return Some(question.id.clone());
                 }
             }
         }
     }
-    false
+    None
 }
 
 /// 9.7: cancelling or reassigning a task with a sub-team asks first; "stop"
@@ -2831,6 +2843,11 @@ pub(crate) fn next_team(team: &Team, goal: &str, name: &str, live: &[super::disp
         ..Default::default()
     };
     for member in &team.members {
+        // N21: a removed member stays removed; reviving it would count against
+        // the tree budget and block its adoption elsewhere.
+        if member.state == MemberState::Removed {
+            continue;
+        }
         let mut member = member.clone();
         let adopted = member.session.as_ref().filter(|session| !serves_another_team(session, others)).and_then(|session| {
             live.iter()
@@ -2996,7 +3013,16 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
             attempt.state = AttemptState::Rejected;
         }
         revoke(task, "rejected");
-        task.status = if input["final"].as_bool() == Some(true) { TaskStatus::Rejected } else { TaskStatus::Pending };
+        task.status = if input["final"].as_bool() == Some(true) {
+            TaskStatus::Rejected
+        } else if task.subteam.is_some() {
+            // N28: a rejected sub-team report goes back to the sub-team, which
+            // reworks it; until its next finish the parent task belongs to it
+            // and is never handed to the sub-lead as a fresh attempt.
+            TaskStatus::InProgress
+        } else {
+            TaskStatus::Pending
+        };
         if hold {
             task.hold = Some(Hold { by: label.clone(), at: now(), reason: reason.clone() });
         }
@@ -5933,6 +5959,19 @@ mod tests {
     }
 
     #[test]
+    fn a_next_goal_team_leaves_out_a_removed_member() {
+        let mut team = running_team();
+        team.status = TeamStatus::Done;
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().state = MemberState::Removed;
+        // N21: the next goal copies the living roster only; a revived member
+        // would count against the tree budget and block adoption elsewhere.
+        let next = next_team(&team, "Ship v2", "", &[], &[]);
+        assert!(next.member("dev").is_none());
+        assert_eq!(next.members.len(), team.members.len() - 1);
+        assert!(next.members.iter().all(|member| member.state != MemberState::Removed));
+    }
+
+    #[test]
     fn the_owner_decides_the_leads_membership_proposal() {
         let mut team = running_team();
         let mut events = Vec::new();
@@ -6321,6 +6360,21 @@ mod tests {
         let before = parent_task.attempts.len();
         file_subteam_report(&child, &mut parent).unwrap();
         assert_eq!(parent.task(1).unwrap().attempts.len(), before);
+        // C5: the parent lead rejected the first report (not final) and the
+        // sub-team reworked and finished again: the new summary is filed
+        // instead of the replay check swallowing it.
+        {
+            let task = parent.task_mut(1).unwrap();
+            task.attempts.last_mut().unwrap().state = AttemptState::Rejected;
+            task.status = TaskStatus::InProgress;
+        }
+        let mut reworked = child.clone();
+        reworked.finish = Some(Finish { by: "Lead".into(), summary: "The migration is fixed".into(), at: 20.0 });
+        file_subteam_report(&reworked, &mut parent).unwrap();
+        let task = parent.task(1).unwrap();
+        assert_eq!((task.attempts.len(), task.status), (before + 1, TaskStatus::Submitted));
+        assert!(task.attempts.last().unwrap().report.as_ref().unwrap().text.contains("The migration is fixed"));
+        assert_eq!(task.attempts.last().unwrap().state, AttemptState::Reported);
         // Section 9.5: the rejection reopens the sub-team with a Rework draft
         // that carries the reason for its lead.
         let phase = reopen_subteam(&mut child, "Fix the migration").unwrap();
@@ -6346,13 +6400,13 @@ mod tests {
         child.tasks[0].attempts.push(attempt);
         let forwarded = child.tasks[0].attempts[0].questions[0].forwarded.clone();
         assert_eq!(forwarded, "sub:child:q1");
-        assert!(answer_forwarded(&mut child, &forwarded, "Postgres"));
+        assert!(answer_forwarded(&mut child, &forwarded, "Postgres").is_some());
         let question = &child.tasks[0].attempts[0].questions[0];
         assert_eq!((question.answer.as_str(), question.by.as_str()), ("Postgres", "Lead"));
         assert!(question.answered_at.is_some());
         // N21: the answer is pending for the member's dispatcher.
         assert_eq!(question.notice, Notice::Pending);
-        assert!(!answer_forwarded(&mut child, &forwarded, "again"));
+        assert!(answer_forwarded(&mut child, &forwarded, "again").is_none());
         // Section 9.7: a task with a sub-team asks how to treat it.
         let mut task = Task { id: 1, title: "Work".into(), assignee: "dev".into(), ..Default::default() };
         assert!(!subteam_stop_choice(&json!({}), &task).unwrap());

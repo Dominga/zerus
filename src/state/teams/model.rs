@@ -823,6 +823,11 @@ pub(crate) struct Question {
     /// parent's answer is copied back here.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub forwarded: String,
+    /// N24: on a parent-side question, the child question it carries (created
+    /// by an escalation); the answer travels on down to it. A team stored
+    /// before this field keeps that child id in `forwarded`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
 }
 
 impl Question {

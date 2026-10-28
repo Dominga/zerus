@@ -1725,8 +1725,11 @@ inline QList<TaskView::PhaseBand> phaseBands(const Team &team, const std::functi
         const int alongside = band.draft ? alongsidePhase(team, group.n) : 0;
         if (alongside) {
             band.alongside = true;
-            band.blockedTip = tr("Approve runs phase %1 now, alongside phase %2",
-                                 QString::number(group.n), QString::number(alongside));
+            // N6: a barrier phase's tasks wait however it is approved.
+            band.blockedTip = group.barrier
+                ? tr("Approve phase %1 now; its tasks start when phase %2 is finished",
+                     QString::number(group.n), QString::number(alongside))
+                : tr("Approve runs phase %1 now, alongside phase %2", QString::number(group.n), QString::number(alongside));
         } else if (const auto *record = team.phase(group.n); record && !record->waiting.text.isEmpty()) {
             band.blocked = record->waiting.text;
             QStringList open;

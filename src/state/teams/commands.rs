@@ -463,9 +463,15 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
             } else if !open.is_empty() {
                 // F12/N40: an approved phase that is still running does not
                 // block the draft - the owner may approve it to run alongside
-                // (the desktop warns before sending).
+                // (the desktop warns before sending). N6: a barrier phase's
+                // tasks still wait for the earlier phase, so its text says so.
+                let barrier = team.phases.iter().find(|other| other.n == phase.n).is_some_and(|other| other.barrier);
                 value["waiting"] = json!({
-                    "text":format!("Can run alongside phase {previous}"),
+                    "text": if barrier {
+                        format!("Starts when phase {previous} is finished")
+                    } else {
+                        format!("Can run alongside phase {previous}")
+                    },
                     "phase":previous,
                     "open":open,
                     "alongside":true
@@ -740,24 +746,30 @@ fn draft_get_in(store: &mut Store, input: &Value) -> anyhow::Result<Value> {
     let mut team = store.load(text(input, "team"))?.context("Unknown team")?;
     ensure!(team.status == TeamStatus::Draft, "The team is not a draft");
     let lead_reads = matches!(actor(&team, "draft", input), Ok(Actor::Member(member)) if member == team.lead);
+    // N22: the lead must see which fields the owner changed in the answer that
+    // clears their marks, or it never learns what the owner edited.
+    let mut cleared: Vec<String> = Vec::new();
     let marked = team.draft.as_ref().is_some_and(|draft| !draft.owner_edited.is_empty());
     if lead_reads && marked {
+        let marks = team.draft.as_ref().map(|draft| draft.owner_edited.clone()).unwrap_or_default();
         let label = team.role_of(&team.lead);
-        let cleared = store.mutate(None, &team.id, None, |team, events| {
+        let cleared_write = store.mutate(None, &team.id, None, |team, events| {
             if let Some(draft) = team.draft.as_mut() {
                 draft.owner_edited.clear();
             }
             events.push(Event::new("draft_read", json!({"by":label})));
             Ok(Value::Null)
         });
-        // A read that cannot write (a read-only store) still answers the draft.
-        if cleared.is_ok() {
+        // A read that cannot write (a read-only store) still answers the draft,
+        // and then names no cleared field: the marks are still there.
+        if cleared_write.is_ok() {
             team = store.load(&team.id)?.context("Unknown team")?;
+            cleared = marks;
         }
     }
     let draft = team.draft.clone().unwrap_or_default();
     let validation = super::plan::validate(&team, &BTreeSet::new());
-    Ok(json!({"draft":draft,"revision":draft.revision,"unseen":draft.unseen,"preflight":validation}))
+    Ok(json!({"draft":draft,"revision":draft.revision,"unseen":draft.unseen,"owner_edited":cleared,"preflight":validation}))
 }
 
 /// F5: the owner starts a draft team; the lead session is adopted when given,
@@ -960,15 +972,49 @@ fn proposal_input(team: &str, kind: &str, member: &Value, request: &str) -> anyh
     Ok(value)
 }
 
+/// The tree-budget key of one session, as `tree_session_count` counts it: the
+/// live session when there is one, else the member that still needs it.
+fn session_key(team: &str, member: &str, session: Option<(&str, &str)>) -> String {
+    match session {
+        Some((host, name)) => format!("session:{host}:{name}"),
+        None => format!("member:{team}:{member}"),
+    }
+}
+
 /// How many new sessions a change binds, for the tree budget (section 9.2).
 fn added_sessions(team: &Team, op: &str, filled: &Value) -> usize {
     match op {
-        "add-member" => usize::from(filled["member"]["session"].is_object()),
+        // N26: an added member without a session is launched once work is
+        // ready, so it counts now: leaving it out let a 17th session start at
+        // 16/16. A member with an adopted session adds that session.
+        "add-member" => 1,
         "swap-member" => usize::from(
             filled["session"].is_object() && team.member(text(filled, "member")).is_none_or(|member| member.session.is_none()),
         ),
-        // N26: a plan can add a whole roster before any session exists.
-        "plan" => filled["members"].as_array().map_or(0, Vec::len),
+        // N26: a plan replaces the stored roster; only the members whose
+        // session is not already counted are added, so a same-size re-plan fits.
+        "plan" => {
+            let old: BTreeSet<String> = team
+                .members
+                .iter()
+                .filter(|member| member.id != team.lead && member.state != MemberState::Removed)
+                .map(|member| {
+                    session_key(&team.id, &member.id, member.session.as_ref().map(|session| (session.host.as_str(), session.name.as_str())))
+                })
+                .collect();
+            let new: BTreeSet<String> = filled["members"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|member| {
+                    let id = member["id"].as_str().unwrap_or_default();
+                    let host = member["session"]["host"].as_str().unwrap_or_default();
+                    let name = member["session"]["name"].as_str().unwrap_or_default();
+                    if name.is_empty() { session_key(&team.id, id, None) } else { session_key(&team.id, id, Some((host, name))) }
+                })
+                .collect();
+            new.difference(&old).count()
+        }
         _ => 0,
     }
 }
@@ -1283,6 +1329,23 @@ fn repair_parent_link(child_id: &str, input: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// N25: takes back the parent task's sub-team reservation after a create that
+/// failed before the child existed, so a later create can delegate it again.
+fn release_reservation(parent_link: &Option<(String, u32)>, child_id: &str) {
+    let Some((parent_id, task)) = parent_link else { return };
+    let Ok(mut store) = Store::open(true) else { return };
+    let number = *task;
+    let ours = child_id.to_owned();
+    let _ = store.mutate(None, parent_id, None, |parent, _events| {
+        if let Some(parent_task) = parent.tasks.iter_mut().find(|candidate| candidate.id == number) {
+            if parent_task.subteam.as_deref() == Some(ours.as_str()) {
+                parent_task.subteam = None;
+            }
+        }
+        Ok(Value::Null)
+    });
+}
+
 fn create(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id");
     ensure!(canonical_uuid(request), "A canonical request_id is required");
@@ -1318,7 +1381,7 @@ fn create(input: &Value) -> anyhow::Result<Value> {
             .context("Run this from the lead's session, or add \"by\":\"human\" to act as yourself")?;
         }
     }
-    let (team, events) = {
+    let (team, events, child_id) = {
         let mut child_id = uuid::Uuid::new_v4().to_string();
         if let Some((parent_id, task)) = &parent_link {
             // N25: reserve the parent link before the child exists. The request
@@ -1338,21 +1401,42 @@ fn create(input: &Value) -> anyhow::Result<Value> {
                 Ok(Value::Null)
             })?;
         }
-        ops::create(&child_id, &filled)?
+        match ops::create(&child_id, &filled) {
+            Ok(created) => (created.0, created.1, child_id),
+            Err(error) => {
+                // N25: a create refused before the child exists releases the
+                // reservation, or no later delegation of the task could happen.
+                release_reservation(&parent_link, &child_id);
+                return Err(error);
+            }
+        }
     };
     // Section 9.2: depth, children and tree sessions are checked at create.
     if let Some((parent_id, _)) = &parent_link {
-        let store = Store::open(false)?;
-        let parent = store.load(parent_id)?.context("The parent team is no longer active")?;
-        // Bounded: the parent's chain by id and its children down to the
-        // master's depth; this never lists every team.
-        let tree = tree_around(&parent, &mut |id| store.load(id))?;
-        let master = ops::root_of(&parent, &tree);
-        ops::ensure_tree_create(&parent, &master, &tree, &team)?;
+        let check = (|| -> anyhow::Result<()> {
+            let store = Store::open(false)?;
+            let parent = store.load(parent_id)?.context("The parent team is no longer active")?;
+            // Bounded: the parent's chain by id and its children down to the
+            // master's depth; this never lists every team.
+            let tree = tree_around(&parent, &mut |id| store.load(id))?;
+            let master = ops::root_of(&parent, &tree);
+            ops::ensure_tree_create(&parent, &master, &tree, &team)
+        })();
+        if let Err(error) = check {
+            // N25: a refused depth, children or session check releases it too.
+            release_reservation(&parent_link, &child_id);
+            return Err(error);
+        }
     }
     let start = team.brief == Notice::Pending;
     // The request's identity is what the caller sent, so a replay matches.
-    let receipt = Store::open(true)?.create(request, input, team.clone(), events)?;
+    let receipt = match Store::open(true)?.create(request, input, team.clone(), events) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            release_reservation(&parent_link, &child_id);
+            return Err(error);
+        }
+    };
     if let Some((parent_id, task)) = parent_link {
         let mut store = Store::open(true)?;
         let child = team.id.clone();
@@ -2005,11 +2089,17 @@ fn file_subteam_report(store: &mut Store, child_id: &str) -> anyhow::Result<()> 
 }
 
 /// 9.5: a rejected sub-team report reopens the sub-team with a Rework draft.
+/// N28: only a non-final reject of a finished sub-team reopens it; a stopped or
+/// running child keeps its state instead of failing the stored reject.
 fn reopen_rejected_subteam(store: &mut Store, parent_id: &str, input: &Value) -> anyhow::Result<()> {
+    if input["final"].as_bool() == Some(true) {
+        return Ok(());
+    }
     let parent = store.load(parent_id)?.context("Unknown team")?;
     let Some(task) = parent.task(input["task"].as_u64().unwrap_or_default() as u32) else { return Ok(()) };
     let Some(child) = task.subteam.clone() else { return Ok(()) };
-    if store.load(&child)?.is_none() {
+    let Some(finished) = store.load(&child)? else { return Ok(()) };
+    if finished.status != TeamStatus::Done {
         return Ok(());
     }
     let reason = text(input, "reason").to_owned();
@@ -2250,7 +2340,9 @@ fn forward_to_parent(
             id: parent_question.to_owned(),
             text: format!("From the sub-team {child_name}:\n{text}"),
             at: now(),
-            forwarded: child_question.to_owned(),
+            // N24: the child question this one carries; `forwarded` stays for
+            // the level above if this one is passed on again.
+            source: child_question.to_owned(),
             ..Default::default()
         });
         events.push(Event::new("subteam_question", json!({"team":child_id,"question":parent_question,"task":link.task})));
@@ -2320,14 +2412,32 @@ fn escalate(input: &Value) -> anyhow::Result<Value> {
         }
     };
     let parent_question = ops::forward_question(&team, &question);
-    ensure!(question.forwarded.is_empty(), "This question was already escalated");
-    let child_name = team.name.clone();
     let child_id = team.id.clone();
-    store.mutate(Some((request, input)), &child_id, None, |team, events| {
+    let receipt = json!({"status":"escalated","team":child_id,"question":parent_question,"parent":link.team});
+    // N27: a retry that finds the forward landed but its receipt lost writes
+    // the receipt instead of refusing the question as already escalated.
+    if question.forwarded == parent_question {
+        store.mutate(Some((request, input)), &child_id, None, |_team, _events| Ok(receipt.clone()))?;
+        return Ok(receipt);
+    }
+    // N24: one forward per level. A question the level below escalated (it
+    // carries the child's id in `source`, or in `forwarded` on a team stored
+    // before that field) may go one level up; one already passed on is refused.
+    ensure!(!question.forwarded.starts_with("sub:"), "This question was already escalated");
+    let child_name = team.name.clone();
+    // N27: the child link is marked without a receipt; the receipt waits for
+    // the parent question, so a retry after a failed forward escalates again
+    // instead of returning an empty one.
+    store.mutate(None, &child_id, None, |team, events| {
         for task in &mut team.tasks {
             for attempt in &mut task.attempts {
                 for question in &mut attempt.questions {
                     if question.id == question_id {
+                        // A question stored before `source` kept the child id
+                        // in `forwarded`; keep it as the down-link.
+                        if question.source.is_empty() && !question.forwarded.is_empty() {
+                            question.source = question.forwarded.clone();
+                        }
                         question.forwarded = parent_question.clone();
                     }
                 }
@@ -2353,38 +2463,80 @@ fn escalate(input: &Value) -> anyhow::Result<Value> {
         });
         return Err(error);
     }
-    Ok(json!({"status":"escalated","team":child_id,"question":parent_question,"parent":link.team}))
+    // N27: the receipt is written only now, once the parent has the question.
+    store.mutate(Some((request, input)), &child_id, None, |_team, _events| Ok(receipt.clone()))?;
+    Ok(receipt)
 }
 
-/// 9.6: copies the parent lead's answer into the sub-team's question.
+/// 9.6/N24: the question `id` on `task`.
+fn question_in(task: &Task, id: &str) -> Option<Question> {
+    task.attempts.iter().flat_map(|attempt| &attempt.questions).find(|question| question.id == id).cloned()
+}
+
+/// 9.6/N24: the question `id` in `team` with the task that holds it.
+fn question_with_task(team: &Team, id: &str) -> Option<(u32, Question)> {
+    team.tasks.iter().find_map(|task| question_in(task, id).map(|question| (task.id, question)))
+}
+
+/// 9.6: copies the parent lead's answer into the sub-team's question. N23: the
+/// inbox's reply names only the question, so its task is found here. N24: an
+/// answer travels one level per call, on down the chain of escalations.
 fn route_reply_down(store: &mut Store, parent_id: &str, input: &Value) -> anyhow::Result<()> {
     let parent = store.load(parent_id)?.context("Unknown team")?;
-    let Some(task) = parent.task(input["task"].as_u64().unwrap_or_default() as u32) else { return Ok(()) };
-    let Some(child) = task.subteam.clone() else { return Ok(()) };
     let question_id = text(input, "question");
-    let Some(question) = task
-        .attempts
-        .iter()
-        .flat_map(|attempt| &attempt.questions)
-        .find(|question| question.id == question_id)
-    else {
-        return Ok(());
+    let asked_task = input["task"].as_u64().and_then(|task| u32::try_from(task).ok());
+    let found = match asked_task {
+        Some(id) => parent.task(id).and_then(|task| question_in(task, question_id)).map(|question| (id, question)),
+        None => question_with_task(&parent, question_id),
     };
-    if question.forwarded.is_empty() {
+    let Some((task_id, question)) = found else { return Ok(()) };
+    let Some(child) = parent.task(task_id).and_then(|task| task.subteam.clone()) else { return Ok(()) };
+    // A question asked inside this team has no sub-team question to reach.
+    if question.source.is_empty() && question.forwarded.is_empty() {
         return Ok(());
     }
     let answer = text(input, "text").trim().to_owned();
     if answer.is_empty() || store.load(&child)?.is_none() {
         return Ok(());
     }
-    let parent_question = question_id.to_owned();
-    store.mutate(None, &child, None, |child, events| {
-        if ops::answer_forwarded(child, &parent_question, &answer) {
-            events.push(Event::new("answered_from_parent", json!({"question":parent_question})));
+    carry_answer_down(store, parent_id, question_id, &answer, 0)?;
+    Ok(())
+}
+
+/// 9.6: the answer of `carrier` (a question in `team_id` that carries a
+/// sub-team's question) goes to the child question it carries, and on down if
+/// that child question carries one itself (N24).
+fn carry_answer_down(store: &mut Store, team_id: &str, carrier: &str, answer: &str, depth: usize) -> anyhow::Result<bool> {
+    if depth >= 8 {
+        return Ok(false);
+    }
+    let Some(team) = store.load(team_id)? else { return Ok(false) };
+    let Some((task_id, _)) = question_with_task(&team, carrier) else { return Ok(false) };
+    let Some(child_id) = team.task(task_id).and_then(|task| task.subteam.clone()) else { return Ok(false) };
+    let mut next: Option<String> = None;
+    let mut delivered = false;
+    store.mutate(None, &child_id, None, |child, events| {
+        if let Some(answered) = ops::answer_forwarded(child, carrier, answer) {
+            delivered = true;
+            events.push(Event::new("answered_from_parent", json!({"question":carrier})));
+            // The answered question may itself carry a deeper sub-team's one.
+            let carries = child
+                .tasks
+                .iter()
+                .flat_map(|task| &task.attempts)
+                .flat_map(|attempt| &attempt.questions)
+                .find(|question| question.id == answered)
+                .is_some_and(|question| !question.source.is_empty());
+            if carries {
+                next = Some(answered);
+            }
         }
         Ok(Value::Null)
-    })
-    .map(|_| ())
+    })?;
+    if let Some(next) = next {
+        carry_answer_down(store, &child_id, &next, answer, depth + 1)?;
+    }
+    Ok(delivered)
 }
 
 /// N4: how long `hgs team run --wait` waits by default: a short poll a member's
@@ -2781,24 +2933,36 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 bail!("This attempt is no longer current for task #{}; the report was not accepted", receipt["task"]);
             }
             // Sections 9.5 and 9.7: the tree reacts to a finished, rejected,
-            // paused, resumed or stopped team, and to a parent answer.
+            // paused, resumed or stopped team, and to a parent answer. N28: the
+            // change above is already stored, so a tree hook that fails says so
+            // in the receipt instead of turning the stored change into an error.
             if op == "finish" {
-                file_subteam_report(&mut store, team_id)?;
+                if let Err(error) = file_subteam_report(&mut store, team_id) {
+                    receipt["subteam_report_error"] = json!(format!("{error:#}"));
+                }
             }
             if op == "reject" {
-                reopen_rejected_subteam(&mut store, team_id, &filled)?;
+                if let Err(error) = reopen_rejected_subteam(&mut store, team_id, &filled) {
+                    receipt["subteam_reopen_error"] = json!(format!("{error:#}"));
+                }
             }
             if matches!(op, "cancel" | "reassign") {
                 // C5: the sub-team stops only once the cancel or reassign
                 // itself went through for its caller.
                 let team = store.load(team_id)?.context("Unknown team")?;
-                choose_subteam(&mut store, &team, &filled)?;
+                if let Err(error) = choose_subteam(&mut store, &team, &filled) {
+                    receipt["subteam_error"] = json!(format!("{error:#}"));
+                }
             }
             if matches!(op, "pause" | "resume" | "stop") {
-                cascade_status(&mut store, team_id, op, 0)?;
+                if let Err(error) = cascade_status(&mut store, team_id, op, 0) {
+                    receipt["cascade_error"] = json!(format!("{error:#}"));
+                }
             }
             if op == "reply" {
-                route_reply_down(&mut store, team_id, &filled)?;
+                if let Err(error) = route_reply_down(&mut store, team_id, &filled) {
+                    receipt["reply_down_error"] = json!(format!("{error:#}"));
+                }
             }
             Ok(receipt)
         }
@@ -3444,10 +3608,14 @@ mod tests {
             super::set_test_caller_identities(Some((None, None, None)));
             let owner = run("draft", &json!({"team":id,"action":"get","by":"human"}), false).unwrap();
             assert_eq!(owner["draft"]["owner_edited"], json!(["members"]), "{owner}");
-            // The lead's read clears them, and the same field can be changed.
+            // The lead's read clears them and names them in the answer (N22).
             super::set_test_caller_identities(Some((Some("conv-lead".into()), None, None)));
             let get = run("draft", &json!({"team":id,"action":"get","by":"human"}), false).unwrap();
             assert!(get["draft"]["owner_edited"].is_null() || get["draft"]["owner_edited"] == json!([]), "{get}");
+            assert_eq!(get["owner_edited"], json!(["members"]), "{get}");
+            // A second read has nothing left to clear.
+            let again_get = run("draft", &json!({"team":id,"action":"get","by":"human"}), false).unwrap();
+            assert_eq!(again_get["owner_edited"], json!([]), "{again_get}");
             let mut again = update;
             again["request_id"] = json!("33333333-3333-4333-8333-333333333333");
             let value = run("draft", &again, false).unwrap();
@@ -3868,6 +4036,42 @@ mod tests {
             assert_eq!(phase["waiting"]["alongside"], true, "{phase}");
             assert_eq!(phase["waiting"]["text"], "Can run alongside phase 1", "{phase}");
             call("approve-phase", json!({"phase":2,"by":"human"})).unwrap();
+        });
+    }
+
+    #[test]
+    fn a_confirmed_alongside_approval_hands_the_phase_out_now() {
+        // N6: "Can run alongside phase 1" was false - approving phase 2 put it
+        // in Queued and every task waited for phase 1. The owner's confirmed
+        // approval starts it; without the confirmation it still queues (U25).
+        let (team, _, _) = review_team();
+        with_review_team(&team, || {
+            let value = call("approve-phase", json!({"phase":2,"by":"human"})).unwrap();
+            assert_eq!(value["phase_state"], "queued", "{value}");
+            assert!(!crate::state::teams::plan::ready(&stored()).contains(&3), "a queued phase hands nothing out");
+        });
+        let (team, _, _) = review_team();
+        with_review_team(&team, || {
+            let value = call("approve-phase", json!({"phase":2,"alongside":true,"by":"human"})).unwrap();
+            assert_eq!(
+                (value["phase_state"].as_str(), value["alongside"].as_bool()),
+                (Some("running"), Some(true)),
+                "{value}"
+            );
+            let saved = stored();
+            assert_eq!(saved.phases.iter().find(|phase| phase.n == 2).unwrap().state, PhaseState::Approved);
+            assert!(crate::state::teams::plan::ready(&saved).contains(&3), "the phase really runs alongside phase 1");
+        });
+        // A barrier phase keeps its tasks for the end of phase 1 either way, so
+        // its waiting text names that, not an alongside that cannot happen.
+        let (mut team, _, _) = review_team();
+        team.phases.iter_mut().find(|phase| phase.n == 2).unwrap().barrier = true;
+        with_review_team(&team, || {
+            let status = run("status", &json!({"team":"rv"}), false).unwrap();
+            let phase = status["phases"].as_array().unwrap().iter().find(|phase| phase["n"] == 2).unwrap().clone();
+            assert_eq!(phase["waiting"]["text"], "Starts when phase 1 is finished", "{phase}");
+            call("approve-phase", json!({"phase":2,"alongside":true,"by":"human"})).unwrap();
+            assert!(!crate::state::teams::plan::ready(&stored()).contains(&3), "a barrier holds the phase's tasks");
         });
     }
 
@@ -4503,11 +4707,12 @@ mod tests {
             super::run("finish", &finish, false).unwrap();
             assert_eq!(store.load("p").unwrap().unwrap().tasks[0].attempts.len(), count);
 
-            // N24: a reject does not reopen a Stopped sub-team.
+            // N24: a reject does not reopen a Stopped sub-team, and the stored
+            // reject is not turned into an error by the tree hook (N28).
             let mut stopped = store.load("c").unwrap().unwrap();
             stopped.status = TeamStatus::Stopped;
             store.mutate(None, "c", None, |team, _| { *team = stopped; Ok(Value::Null) }).unwrap();
-            let _ = super::run("reject", &json!({"request_id":req(5),"team":"p","task":1,"reason":"Rework","by":"human"}), false);
+            super::run("reject", &json!({"request_id":req(5),"team":"p","task":1,"reason":"Rework","by":"human"}), false).unwrap();
             assert_eq!(store.load("c").unwrap().unwrap().status, TeamStatus::Stopped);
 
             // N25: a second create on the same parent task is refused; a
@@ -4561,6 +4766,69 @@ mod tests {
             let count = store.load("p3").unwrap().unwrap().tasks[0].attempts[0].questions.len();
             super::run("escalate", &escalate, false).unwrap();
             assert_eq!(store.load("p3").unwrap().unwrap().tasks[0].attempts[0].questions.len(), count, "a replay does not duplicate");
+            // N24: a question goes up one level at a time: c6 -> c4 -> p3, and
+            // the parent's answer travels back down to the member that asked.
+            let mut c6 = Team { id: "c6".into(), name: "Child6".into(), lead: "dev".into(), status: TeamStatus::Running,
+                parent: Some(Parent { team: "c4".into(), task: 1, lead: "dev".into(), member: "dev".into() }), ..Default::default() };
+            c6.tasks.push(Task { id: 1, title: "Deep work".into(), assignee: "dev".into(), status: TaskStatus::InProgress, ..Default::default() });
+            c6.tasks[0].attempts.push(Attempt { n: 1, id: "c6a".into(), member: "dev".into(), state: AttemptState::Delivered,
+                questions: vec![Question { id: "q11".into(), text: "Which cache?".into(), at: 1.0, ..Default::default() }], ..Default::default() });
+            store.create(&req(16), &json!({}), c6, Vec::new()).unwrap();
+            let mut c4_deep = store.load("c4").unwrap().unwrap();
+            c4_deep.children.push("c6".into());
+            c4_deep.tasks[0].subteam = Some("c6".into());
+            store.mutate(None, "c4", None, |team, _| { *team = c4_deep; Ok(Value::Null) }).unwrap();
+            super::run("escalate", &json!({"request_id":req(17),"team":"c6","question":"q11","by":"human"}), false).unwrap();
+            let c4_level = store.load("c4").unwrap().unwrap();
+            let carrier = c4_level.tasks[0].attempts[0].questions.iter().find(|q| q.source == "q11").cloned();
+            let carrier = carrier.unwrap_or_else(|| panic!("no carrier in c4: {:?}", c4_level.tasks[0].attempts[0].questions));
+            // The middle level passes the same question one level up.
+            super::run("escalate", &json!({"request_id":req(18),"team":"c4","question":carrier.id,"by":"human"}), false).unwrap();
+            let top = store.load("p3").unwrap().unwrap();
+            let top_question = top.tasks[0].attempts[0].questions.iter().find(|q| q.source == carrier.id).cloned();
+            let top_question = top_question.unwrap_or_else(|| panic!("no question in p3: {:?}", top.tasks[0].attempts[0].questions));
+            // The top lead answers by the question only (N23), and the answer
+            // reaches q11 two levels down.
+            super::run("reply", &json!({"request_id":req(19),"team":"p3","question":top_question.id,"text":"Redis","by":"human"}), false).unwrap();
+            let deep = store.load("c6").unwrap().unwrap();
+            assert_eq!(deep.tasks[0].attempts[0].questions[0].answer, "Redis", "{:?}", deep.tasks[0].attempts[0].questions);
+            let middle = store.load("c4").unwrap().unwrap();
+            assert!(middle.tasks[0].attempts[0].questions.iter().any(|q| q.id == carrier.id && q.answer == "Redis"));
+            // N25: a create refused before the child exists releases the parent
+            // task's reservation; a corrected create for the same task works.
+            let mut p5 = Team { id: "p5".into(), name: "Parent5".into(), lead: "dev".into(), status: TeamStatus::Running, ..Default::default() };
+            p5.members.push(Member { id: "dev".into(), role: "Lead".into(), agent: "codex".into(),
+                session: Some(SessionRef { name: "codex/x/dev".into(), run_id: "r0".into(), ..Default::default() }), ..Default::default() });
+            p5.tasks.push(Task { id: 1, title: "Delegated".into(), assignee: "dev".into(), status: TaskStatus::InProgress, ..Default::default() });
+            store.create(&req(20), &json!({}), p5, Vec::new()).unwrap();
+            let refused = super::run("create", &json!({"request_id":req(21),"team":"p5","name":"Sub","by":"human",
+                "parent":{"team":"p5","task":1},"lead":{"id":"dev","agent":"codex","role":"Lead"},
+                "members":[{"id":"dev","role":"Helper","agent":"codex"}]}), false).unwrap_err().to_string();
+            assert!(refused.contains("used twice"), "{refused}");
+            assert!(store.load("p5").unwrap().unwrap().tasks[0].subteam.is_none(), "a refused create leaves the task undelegated");
+            super::run("create", &json!({"request_id":req(22),"team":"p5","name":"Sub","by":"human",
+                "parent":{"team":"p5","task":1},"lead":{"id":"dev","agent":"codex","role":"Lead"}}), false).unwrap();
+            assert_eq!(store.load("p5").unwrap().unwrap().tasks[0].subteam.as_deref(), Some(req(22).as_str()));
+            // N26: an added member without a session still takes a tree session:
+            // at 16/16 the 17th is refused (it used to count 0 and launch).
+            let mut full = Team { id: "m1".into(), name: "Full".into(), lead: "lead".into(), status: TeamStatus::Planning,
+                settings: Settings { tree_sessions: 16, ..Default::default() }, ..Default::default() };
+            for n in 0..16 {
+                full.members.push(Member { id: if n == 0 { "lead".into() } else { format!("m{n}") }, role: "Dev".into(), agent: "codex".into(), ..Default::default() });
+            }
+            store.create(&req(23), &json!({}), full, Vec::new()).unwrap();
+            let error = super::run("add-member", &json!({"request_id":req(24),"team":"m1","by":"human",
+                "member":{"id":"extra","role":"Ops","agent":"codex"}}), false).unwrap_err().to_string();
+            assert!(error.contains("at most 16 sessions"), "{error}");
+            // N26: a same-size re-plan counts the roster once, not twice.
+            let members: Vec<Value> = (1..=15).map(|n| json!({"id":format!("m{n}"),"role":"Dev","agent":"codex"})).collect();
+            super::run("plan", &json!({"request_id":req(25),"team":"m1","by":"human",
+                "members":members,"tasks":[{"id":1,"title":"A","assignee":"lead"}]}), false)
+                .unwrap_or_else(|error| panic!("a same-size re-plan is allowed: {error:#}"));
+            // N27: a forward that landed but lost its receipt answers with the
+            // receipt instead of refusing the question as already escalated.
+            let again = super::run("escalate", &json!({"request_id":req(26),"team":"c4","question":"q9","by":"human"}), false);
+            assert_eq!(again.unwrap()["status"], "escalated");
             let mut stopped_parent = store.load("p3").unwrap().unwrap();
             stopped_parent.tasks[0].status = TaskStatus::Accepted;
             store.mutate(None, "p3", None, |team, _| { *team = stopped_parent; Ok(Value::Null) }).unwrap();
@@ -4614,7 +4882,8 @@ mod tests {
         forward_to_parent(&mut store, &child, &forwarded, "q1", "Which DB?", &link).unwrap();
         let parent = store.load("p").unwrap().unwrap();
         assert!(parent.task(1).unwrap().attempts.iter().flat_map(|a| &a.questions).any(|q| q.id == forwarded));
-        route_reply_down(&mut store, "p", &json!({"task":1,"question":forwarded,"text":"Postgres"})).unwrap();
+        // N23: the inbox's reply names only the question; its task is found.
+        route_reply_down(&mut store, "p", &json!({"question":forwarded,"text":"Postgres"})).unwrap();
         let child = store.load("c").unwrap().unwrap();
         assert_eq!(child.tasks[0].attempts[0].questions[0].answer, "Postgres");
         // 9.7: archive needs closed children, cancel asks, stop cascades two levels.
@@ -4631,6 +4900,67 @@ mod tests {
         }
         let parent = store.load("p").unwrap().unwrap();
         ensure_children_closed(&store, &parent).unwrap();
+    }
+
+    #[test]
+    fn a_rejected_subteam_report_reopens_it_but_a_final_reject_does_not() {
+        // N28: the tree hooks run after the reject is stored; they never turn
+        // it into an error, reopen only a non-final reject of a finished
+        // sub-team, and leave the parent task with the sub-team.
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            super::set_test_caller_identities(Some((None, None, None)));
+            let mut store = Store::open(true).unwrap();
+            let req = |n: u8| format!("00000000-0000-4000-8000-0000000000{n:02}");
+            let pair = |parent: &str, child: &str, child_status: TeamStatus| -> (Team, Team) {
+                let mut parent_team = Team { id: parent.into(), name: parent.into(), lead: "lead".into(), status: TeamStatus::Running, ..Default::default() };
+                parent_team.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "codex".into(),
+                    session: Some(SessionRef { name: "codex/x/lead".into(), run_id: "r0".into(), ..Default::default() }), ..Default::default() });
+                parent_team.members.push(Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), ..Default::default() });
+                parent_team.tasks.push(Task { id: 1, title: "Delegated".into(), assignee: "dev".into(), status: TaskStatus::Submitted,
+                    subteam: Some(child.into()), ..Default::default() });
+                parent_team.tasks[0].attempts.push(Attempt { n: 1, id: "pa".into(), member: "dev".into(), state: AttemptState::Reported,
+                    report: Some(Report { text: format!("[Sub-team {child} Child] Done"), at: 1.0, ..Default::default() }), ..Default::default() });
+                parent_team.children.push(child.into());
+                let child_team = Team { id: child.into(), name: "Child".into(), lead: "dev".into(), status: child_status,
+                    parent: Some(Parent { team: parent.into(), task: 1, lead: "lead".into(), member: "dev".into() }),
+                    finish: Some(Finish { by: "Lead".into(), summary: "Done".into(), at: 1.0 }), ..Default::default() };
+                (parent_team, child_team)
+            };
+            let (p1, c1) = pair("p1", "c1", TeamStatus::Done);
+            store.create(&req(1), &json!({}), p1, Vec::new()).unwrap();
+            store.create(&req(2), &json!({}), c1, Vec::new()).unwrap();
+            super::run("reject", &json!({"request_id":req(3),"team":"p1","task":1,"reason":"Fix the migration","by":"human"}), false)
+                .unwrap();
+            assert_eq!(store.load("c1").unwrap().unwrap().status, TeamStatus::Running);
+            let p1_now = store.load("p1").unwrap().unwrap();
+            assert_eq!(p1_now.tasks[0].status, TaskStatus::InProgress);
+            assert_eq!(p1_now.tasks[0].attempts.last().unwrap().state, AttemptState::Rejected);
+            assert!(!crate::state::teams::plan::ready(&p1_now).contains(&1), "the reworking sub-team keeps its task");
+            // C5: the reworked sub-team finishes again and its report is filed.
+            super::run("finish", &json!({"request_id":req(4),"team":"c1","summary":"The migration is fixed","by":"human"}), false)
+                .unwrap();
+            let p1_now = store.load("p1").unwrap().unwrap();
+            assert_eq!((p1_now.tasks[0].status, p1_now.tasks[0].attempts.len()), (TaskStatus::Submitted, 2));
+            assert!(p1_now.tasks[0].attempts.last().unwrap().report.as_ref().unwrap().text.contains("The migration is fixed"));
+            // A final reject ends the task and does not reopen a finished child.
+            let (p2, c2) = pair("p2", "c2", TeamStatus::Done);
+            store.create(&req(5), &json!({}), p2, Vec::new()).unwrap();
+            store.create(&req(6), &json!({}), c2, Vec::new()).unwrap();
+            super::run("reject", &json!({"request_id":req(7),"team":"p2","task":1,"reason":"Wrong approach","final":true,"by":"human"}), false)
+                .unwrap();
+            assert_eq!(store.load("c2").unwrap().unwrap().status, TeamStatus::Done, "a final reject leaves the sub-team");
+            assert_eq!(store.load("p2").unwrap().unwrap().tasks[0].status, TaskStatus::Rejected);
+            // A stopped child does not turn the stored reject into an error.
+            let (p3, c3) = pair("p3", "c3", TeamStatus::Stopped);
+            store.create(&req(8), &json!({}), p3, Vec::new()).unwrap();
+            store.create(&req(9), &json!({}), c3, Vec::new()).unwrap();
+            let rejected = super::run("reject", &json!({"request_id":req(10),"team":"p3","task":1,"reason":"Stop it","by":"human"}), false)
+                .unwrap();
+            assert!(rejected.get("subteam_reopen_error").is_none(), "{rejected}");
+            assert_eq!(store.load("c3").unwrap().unwrap().status, TeamStatus::Stopped);
+            super::set_test_caller_identities(None);
+        });
     }
 
     #[test]

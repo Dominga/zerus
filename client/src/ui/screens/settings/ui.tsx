@@ -120,3 +120,19 @@ export function Status(props: { kind?: "ok" | "warn" | "error" | "busy" | "muted
 export function Lines(props: { text: string; class?: string }) {
   return <div class={`set-lines ${props.class ?? ""}`}><For each={props.text.split("\n")}>{(line) => <div>{line}</div>}</For></div>;
 }
+
+/** A number with its unit, clamped to its range (QDoubleSpinBox without buttons). */
+export function NumberField(props: {
+  value: number; min: number; max: number; step?: number; decimals?: number; suffix?: string;
+  onChange: (v: number) => void; disabled?: boolean; id?: string; label?: string;
+}) {
+  const clamp = (v: number) => Math.min(props.max, Math.max(props.min, v));
+  return (
+    <span class="set-number" classList={{ disabled: props.disabled }}>
+      <input id={props.id} class="field tabular" type="number" min={props.min} max={props.max} step={props.step ?? 1}
+        value={props.value.toFixed(props.decimals ?? 0)} disabled={props.disabled} aria-label={props.label}
+        onChange={(e) => props.onChange(clamp(Number(e.currentTarget.value) || props.min))} />
+      <Show when={props.suffix}><span class="set-suffix">{props.suffix}</span></Show>
+    </span>
+  );
+}

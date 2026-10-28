@@ -15,6 +15,7 @@ pub mod cache;
 mod conpty;
 pub mod creation;
 pub mod details;
+pub mod download_cache;
 pub mod drafts;
 pub mod external_file;
 pub mod fleet;
@@ -32,6 +33,7 @@ pub mod process_view;
 pub mod processes;
 #[cfg(unix)]
 mod pty;
+pub mod qt_lock;
 pub mod questions;
 pub mod readmarks;
 pub mod reads;

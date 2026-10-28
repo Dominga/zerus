@@ -32,6 +32,7 @@ pub mod tasks;
 pub mod terminal;
 pub mod view;
 pub mod views;
+pub mod voice;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

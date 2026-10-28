@@ -9,6 +9,7 @@
 
 pub mod actions;
 pub mod analytics;
+pub mod approvals;
 pub mod attachments;
 pub mod batch;
 pub mod cache;

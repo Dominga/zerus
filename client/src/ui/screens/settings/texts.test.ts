@@ -185,6 +185,27 @@ const ANALYTICS_CORE = [
   "Aggregate diagnostics saved locally.", "Could not save aggregate diagnostics.",
 ];
 
+const approvalsQt = ["tray/src/AutomaticApprovalSettings.cpp", "tray/src/HgsClient.cpp", "tray/src/SettingsPage.h"]
+  .map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");
+const approvalsCore = fs.readFileSync(new URL("client/core/src/approvals.rs", repo), "utf8");
+const APPROVALS = [
+  "Automatic approvals", "Automatically approve tool requests (dangerous)", "Approval journal",
+  "Exact computer name (optional)", "Exact session name (optional)", "Refresh", "Time", "Computer", "Session", "Question",
+  "Result", "Newer", "Older", "Up to 50 entries per page", "Select a journal entry to read the question and its outcome.",
+  "Loading question…", "Loading approval journal…", "No automatic approvals recorded for this filter.",
+];
+const APPROVALS_CORE = [
+  "Approved once", "Failed", "Cancelled", "Unconfirmed", "Invalid approval journal page.",
+  "Invalid automatic approval journal response.",
+  "The automatic approval journal is unavailable. No new approval was authorized.",
+  "Update the local hgs CLI to use automatic approvals and its journal.",
+];
+// webui's wording for this client, where Qt has no text (approvals stay off here).
+const APPROVALS_CLIENT = [
+  "This client never approves tool requests automatically. Answer each request in its session.",
+  "Automatic approvals are turned on in the Qt client. They work only while the Qt client is running; this client does not approve tool requests.",
+];
+
 describe("Settings texts", () => {
   it.each(ANALYTICS)("Private analytics shows Qt's %s", (text) => {
     expect(analyticsQt).toContain(`"${text}"`);
@@ -197,6 +218,23 @@ describe("Settings texts", () => {
   it("the analytics core counts the routes it reads as Qt does", () => {
     expect(analyticsQt).toContain('"Reading %1 configured route(s)…"');
     expect(analyticsCore).toContain('"Reading {} configured route(s)…"');
+  });
+  it.each(APPROVALS)("Automatic approvals shows Qt's %s", (text) => {
+    expect(approvalsQt).toContain(`"${text}"`);
+    expect(source("Approvals.tsx")).toContain(text);
+  });
+  it.each(APPROVALS_CORE)("the approval journal says Qt's %s", (text) => {
+    expect(approvalsQt).toContain(`"${text}"`);
+    expect(approvalsCore).toContain(`"${text}"`);
+  });
+  it("the approval journal fills in Qt's counts and answers", () => {
+    expect(approvalsQt).toContain('"%1 entries. Unconfirmed attempts require checking Activity or Terminal; they are not retried."');
+    expect(source("Approvals.tsx")).toContain("${next.entries.length} entries. Unconfirmed attempts require checking Activity or Terminal; they are not retried.");
+    expect(approvalsQt).toContain('"Selected answer: %1"');
+    expect(approvalsCore).toContain('"Selected answer: {}"');
+  });
+  it.each(APPROVALS_CLIENT)("Automatic approvals shows the client's %s", (text) => {
+    expect(source("Approvals.tsx")).toContain(text);
   });
   it.each(FILES)("Files shows Qt's %s", (text) => {
     expect(filesQt).toContain(`"${text}"`);

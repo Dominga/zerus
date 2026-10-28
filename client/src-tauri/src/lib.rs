@@ -8,6 +8,8 @@
 mod actions;
 #[cfg(feature = "live")]
 mod analytics;
+#[cfg(feature = "live")]
+mod approvals;
 mod cli;
 mod clipboard;
 mod commands;
@@ -278,6 +280,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(recovery::start(app.handle()));
                 app.manage(files::start());
                 app.manage(analytics::start());
+                app.manage(approvals::start());
                 // A replay never touches the real read or attention marks.
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
@@ -647,6 +650,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         analytics::analytics_purge,
         analytics::analytics_review,
         analytics::analytics_save_review,
+        approvals::approvals_list,
+        approvals::approvals_detail,
         recovery::recovery_view,
         recovery::recovery_load,
         recovery::recovery_save,

@@ -26,6 +26,7 @@ pub mod tasks;
 pub mod view;
 pub mod views;
 pub mod voice;
+pub mod voice_composer;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -31,25 +31,30 @@
 >
 >   This device's choice changes only when Delete project removes the default project (`SessionOrganization::removeGroup`). Setting a default is 3c.
 > - **Local layout:** the collapsed state, the order of sessions inside a project and the default project are local, as in Qt. They live in `organization-layout.json` in the app data directory, because Qt's QSettings cannot be shared (deviation 1 below). The project order is shared (`project_order`).
-> - **Edits run while the catalog is ready.** Before that, the entries show disabled with the reason. Qt queues edits made before its first reply. This client refuses them, because it has no observed base and no draft cache.
+> - **Edits run while the catalog is ready.** Before that, the entries show disabled with the reason. Qt queues edits made before its first reply. This client refuses them until its first state, also on top of a draft restored from the last run (deviation 4).
 > - **Never `swarm initialize`.** This client has no GUI cache to import. An initialize from it would mark the catalog imported and skip the Qt GUI's one-time import (`src/swarm/mod.rs:212-215`, `SwarmController.cpp:86-88`). With `initialized: false`, edits stay disabled. Task 10 files the follow-up for computers without the Qt GUI.
 > - **A failed or timed-out apply is sent again, as in Qt** (coordinator ruling, 2026-10-28; it withdraws this plan's first "never sent again" rule):
 >   - **Qt:** a failure leaves `m_base`, `m_desired` and `m_versions` as they were (`SwarmController.cpp:67-73`), and so does a reply of another schema (194-196). The next 5 s `refresh` sends `apply` again from them (55, 96-101; `send` 102-110). An edit made meanwhile restarts the 120 ms flush (94), which sends the same base and versions with the newer desired state.
 >   - **Why this is not a replay:** it is reconciliation toward a desired state, not the repeat of a side effect. `swarm apply` writes each field that differs between base and desired, with the observed versions as parents (`src/swarm/model.rs:126-201`; `catalog.rs:418-444`). A duplicate of a diff that already landed adds a head with the same value, and the snapshot reports conflicts only for differing values (`model.rs:298-312`), so it is a no-op for the list. A stale base surfaces as a conflict instead of clobbering anything. The spec's never-replay rule covers non-idempotent actions (send, interrupt, terminate), and dropping the user's move on a network blip would regress from Qt.
 >   - **Here:** the edits stay pending and the list keeps showing them. The next tick sends one apply with the same base, desired and versions. The tick is 5 s after the failure (Qt's poll), or the organization source's next state, whichever comes first. That source is this client's read tick: the topic, or the core's fallback `swarm get` poll, which delivers its reads as the same states. One apply runs at a time, and no state is adopted under pending edits (204-206).
 >   - **Answers:** each edit is answered by the first apply that carries it, with `Done`, or `Kept` and Qt's status line. A later resend shows its result in the status line, as Qt's `statusChanged` does (Global Constraints).
->   - **Nothing pending is dropped.** Qt keeps every failed draft, and hgs exits 1 for every swarm error (`src/swarm/mod.rs:168-173`), so a validation refusal cannot be told from a transient failure. The client's own checks (`edit::apply`) refuse an invalid edit before it is queued, and the reason is the notice. Pending edits end in three ways: an apply succeeds; they return to the base, which settles them without a call (Qt's `m_base==m_desired`, 100); or the client quits (deviation 6).
+>   - **Nothing pending is dropped.** Qt keeps every failed draft, and hgs exits 1 for every swarm error (`src/swarm/mod.rs:168-173`), so a validation refusal cannot be told from a transient failure. The client's own checks (`edit::apply`) refuse an invalid edit before it is queued, and the reason is the notice. Pending edits end in two ways: an apply succeeds, or they return to the base, which settles them without a call (Qt's `m_base==m_desired`, 100). Quitting does not end them (next rule).
+>   - As in Qt, a draft whose versions the catalog no longer knows fails on every tick ("unknown field version; reload the catalog", `src/swarm/catalog.rs:431`), and the status line shows it.
+> - **The pending draft persists, as in Qt** (coordinator ruling, 2026-10-28):
+>   - **Qt:** `saveOrganization` saves the draft with every change (`SessionsWindow.cpp:2496`), and `persist` saves the observed base and versions (`SwarmController.cpp:111-130`, called at 72, 205, 206 and 209). At start Qt loads the draft (`SessionsWindow.cpp:275-276`) and calls `start` with it (1661). `start` takes the draft as `m_desired` and the saved base and versions (`SwarmController.cpp:78, 81-83`), and its first call is a `get` (88), never an `apply`. That reply makes it ready (197) and keeps the base, since it was a read (203). With the draft pending, the reply is not adopted, and the flush sends the draft 120 ms later from the saved base and versions (204-205).
+>   - **Here:** the controller's base, desired state and versions go to `organization-draft.json` in the app data directory, beside `organization-layout.json` (`organization-draft-replay.json` in a replay). The file is written atomically, through a temporary file and a rename, as `client/core/src/readmarks.rs:117-140` does. The hub writes it whenever pending edits change, before their apply runs, and removes it when they settle.
+>   - **On start:** the hub loads the draft, and the list shows it at once. Nothing is sent before the first organization state. That state is not adopted under the draft; it makes the controller ready and starts the 120 ms flush. Then one apply carries the saved base, desired state and versions, so a catalog that changed meanwhile surfaces as a conflict through `swarm apply`'s merge, never as an overwrite. After that, the rules above apply.
+>   - A replay starts from the fixture's catalog, so it removes a leftover replay draft at start.
 > - **A rename keeps the project.** While the client runs, the same run under a new name moves the old name's explicit membership to the new name, as Qt's `renameSession` does. It is one apply, and only when the old name was explicit. With Qt and this client side by side, both migrate the same rename (Qt on its own rename, `SessionsWindow.cpp:1942`, and on observed ones by run token, `SessionOrganization::observe`, `SessionOrganization.cpp:223-230`). Task 4 tests that the second migration is a no-op or a clean merge. Qt also follows renames made while it was closed, by persisted run tokens; that is a follow-up (Task 10).
 > - **Move to project takes a set of members.** It is one `swarm apply` from one snapshot. The session menu passes one member; the batch menu of `zerus-5wmh.20` passes the selection.
 > - **Sort sessions by name** compares titles case-folded, then as written, then by member (deviation 2).
 > - **Headers and colours:** a header's colour is the project's `color`, else its palette slot, as on 3a's Projects screen. The vivid style and local colours are 3c.
-> - **Deviations from Qt.** The coordinator accepted 1 and 2 as deviations, and 3 to 5 are part of the approved plan (2026-10-28). 6 is new in this revision and follows from the resend:
+> - **Deviations from Qt.** The coordinator accepted 1 and 2 as deviations, and 3 to 5 are part of the approved plan (2026-10-28):
 >   1. This device's layout (collapsed projects, the order inside each project, the default project) lives in `organization-layout.json` in the app data directory. Qt keeps it in QSettings (`workspace/organization`, `SessionsWindow.cpp:2486-2500`).
 >   2. Sort sessions by name folds case, then compares as written, then by member. Qt uses `QString::localeAwareCompare` (`SessionsWindow.cpp:2603-2608`), which has no equivalent in the core.
 >   3. No `swarm initialize` (above).
 >   4. Edits made before the first ready catalog are refused, not queued (above).
 >   5. Renames made while the client was closed are not followed yet (Task 10 follow-up).
->   6. Pending edits live in memory only. Qt saves its draft (`SessionsWindow.cpp:2496`) and sends it again after a restart (`SwarmController.cpp:76-89`). This client loses pending edits when it quits.
 
 **Tech Stack:** Rust 1.99.1 (`client/core`, `client/src-tauri`, Tauri 2), SolidJS 1.9 + TypeScript + Vite, vitest, Python 3 stdlib for the fake `hgs`.
 
@@ -115,6 +120,10 @@
     - a non-zero exit, a timeout, a signal, an unreadable reply or a reply of another schema changes only the status. Base, desired and versions stay, and so does the presented organization;
     - the next tick sends one apply from them, exactly as Qt's `refresh` would. The tick is `REFRESH_MS` (5 s, `.cpp:55`) after the failure, or the organization topic's next state, whichever comes first;
     - edits made during the failed apply ride on that resend. Edits made after it flush 120 ms later, from the same base and versions.
+  - **The pending draft persists** (`SessionsWindow.cpp:275-276, 1661, 2496`; `SwarmController.cpp:76-89, 111-130, 191-206`):
+    - base, desired and versions are saved in `organization-draft.json` whenever pending edits change, through a temporary file and a rename (`client/core/src/readmarks.rs:117-140`), and removed when they settle;
+    - a restart restores them. Nothing is sent before the first organization state, which is not adopted under the draft: it makes the controller ready and starts the flush, as Qt's first `get` reply does (197, 203-205);
+    - the apply then carries the saved base and versions, never the newer state's, so a catalog that changed meanwhile gives a conflict, not an overwrite.
   - **`initialize` versus `get`** (`.cpp:81-88, 100, 197, 203`). Qt's first call is `initialize` when it holds no observed baseline. This client never initializes (Decisions). Its baseline is the first observed state, and an uninitialized catalog keeps edits disabled.
   - **Base, desired and versions observed together** (`.cpp:105, 108, 207-209`). Base and versions come from one `OrganizationSnapshot` of the update's digest, or from one `swarm apply` or `swarm get` reply. They are never combined across states. The request's base is what the user saw: a newer state is not merged under a pending edit.
   - **Never apply from a stale base:**
@@ -165,6 +174,12 @@
    - "Project sync stopped." (a worker that is gone, and now also the reason new edits are refused after the topic ended);
    - "Enter a project name.".
 9. **Failure answers use Qt's texts:** a kept edit's answer and the status line say "Project sync unavailable: <error>" or "Project sync needs an updated HGS installation.", as Qt's failure path and schema check do. The Projects screen shows the controller's status line (Task 9).
+10. **The pending draft survives a restart** (coordinator ruling, 2026-10-28; Task 4, `a_pending_draft_survives_a_restart_and_is_sent_once_after_the_first_state` and `a_restored_draft_against_a_newer_catalog_gives_a_conflict_not_an_overwrite`):
+    - an edit is pending and its draft is on disk; the client stops, and a new controller loads the draft and shows it;
+    - no apply goes out before the first state, also after 20 s;
+    - after the first state, exactly one apply goes out, with the saved base, desired state and versions, and the settled draft file is removed;
+    - when the first state shows a newer catalog, the apply still carries the saved base and versions, and the outcome is hgs's conflict status, "1 project conflict(s) need review in Swarm.", not an overwrite;
+    - beside them: the draft follows pending edits and is removed when they settle (`the_draft_follows_pending_edits_and_is_removed_when_they_settle`), a restored draft waits for the first state (`a_restored_draft_is_shown_and_waits_for_the_first_state`), the file is replaced whole (`draft.rs` tests), and the hub loads it at start and sends it once after the first state (Task 6, `a_saved_draft_waits_for_the_first_state_then_one_apply_sends_it`).
 
 ---
 
@@ -176,14 +191,15 @@ client/core/src/swarm/edit.rs         Intent, apply(), shared(), changes_shared(
 client/core/src/swarm/layout.rs       Layout: collapsed, ranks, default project; JSON load and save
 client/core/src/swarm/grouping.rs     Grouping, GroupOut, HeaderOut, GroupingOut, SyncView, by_name()
 client/core/src/swarm/sync.rs         Controller (SwarmController), Observation, EditOutcome, Due, Reply, classify(), invocation()
+client/core/src/swarm/draft.rs        Draft, DraftWrite, load(), store(), write(): the pending draft file, written atomically
 client/core/src/batch.rs              Batch.groups, Batch.grouping (additive)
 client/core/src/lib.rs                pub mod swarm; re-exports
 client/core/src/views/projects.rs     3a extensions: pub(crate) status_of; SwarmState::set_default, set_status
 client/core/tests/swarm_sync.rs       Controller against a fake hgs: a second writer, a timed-out apply and its resend,
-                                      a refused apply per tick, and a rename both writers migrate
+                                      a refused apply per tick, a rename both writers migrate, and a draft across a restart
 client/core/tests/support/fake_hgs_swarm.py   scripted swarm get and swarm apply replies, logged
 client/src-tauri/src/pump.rs          grouping beside the mirror; strips organizations; drain_with()
-client/src-tauri/src/organization.rs  Organization hub, worker thread, commands, layout file
+client/src-tauri/src/organization.rs  Organization hub, worker thread, commands, layout and draft files
 client/src-tauri/src/commands.rs      follows the organization, routes its changes, the snapshot source
 client/src-tauri/src/replay.rs        follows the replay's organization; organization_snapshot()
 client/src-tauri/src/lib.rs           manages the hub, registers the commands
@@ -255,7 +271,7 @@ export function openMoveDialog(rows: readonly Session[]): void;   // the project
 
 **Files:**
 - Create: `client/core/src/swarm/mod.rs`, `client/core/src/swarm/edit.rs`
-- Create (one line each, `//! Task 2.`, `//! Task 3.`, `//! Task 4.`, so this task compiles alone): `client/core/src/swarm/layout.rs`, `grouping.rs`, `sync.rs`
+- Create (one line each, `//! Task 2.`, `//! Task 3.`, `//! Task 4.`, `//! Task 4.`, so this task compiles alone): `client/core/src/swarm/layout.rs`, `grouping.rs`, `sync.rs`, `draft.rs`
 - Modify: `client/core/src/lib.rs` (`pub mod swarm;` after `pub mod state;`)
 - Test: unit tests in `mod.rs` and `edit.rs`
 
@@ -487,13 +503,15 @@ mod tests {
 //! - [`layout`]: this device's collapsed projects, session order and default;
 //! - [`grouping`]: each row's project and rank and the headers, sent to the
 //!   webview only when they change;
-//! - [`sync`]: the write controller, a port of tray/src/SwarmController.cpp.
+//! - [`sync`]: the write controller, a port of tray/src/SwarmController.cpp;
+//! - [`draft`]: its pending edits on disk, so a restart sends them again.
 //!
 //! Pure Rust: the Tauri hub (client/src-tauri/src/organization.rs) runs
 //! `hgs swarm apply` and passes the clock in. Placement itself (concurrent
 //! Inbox and default markers against a concrete project, causal heads) is
 //! resolved by `hgs swarm apply` and the replica (src/swarm/model.rs:126-201,
 //! src/swarm/catalog.rs:369-394), never here.
+pub mod draft;
 pub mod edit;
 pub mod grouping;
 pub mod layout;
@@ -1428,7 +1446,7 @@ fn groups_and_grouping_are_left_out_when_empty() {
 }
 ```
 
-- [ ] **Step 2: Run** `cargo +1.99.1 test --manifest-path client/core/Cargo.toml --target-dir target/client-core swarm::grouping batch::`. Expected: compile errors.
+- [ ] **Step 2: Run** `cargo +1.99.1 test --manifest-path client/core/Cargo.toml --target-dir target/client-core --lib -- swarm::grouping batch::`. Expected: compile errors.
 
 - [ ] **Step 3: Implement.**
 
@@ -1793,19 +1811,30 @@ git commit -m "feat(client): rows to projects in Rust, sent to the webview only 
 
 ### Task 4: The write controller, SwarmController ported (`client/core/src/swarm/sync.rs`)
 
-This task owns the coordinator's binding requirements for `zerus-5wmh.18` (2026-10-28): Qt's apply rules with their lines, intent sent for hgs to resolve, the second-writer test, and the resend of a failed or timed-out apply on the next tick. Rename migrations are written through this controller, so the two-writer rename tests are here too: the hub (Task 6) only turns an observed rename into `Intent::Renamed`.
+This task owns the coordinator's binding requirements for `zerus-5wmh.18` (2026-10-28): Qt's apply rules with their lines, intent sent for hgs to resolve, the second-writer test, the resend of a failed or timed-out apply on the next tick, and the pending draft that survives a restart (2026-10-28). Rename migrations are written through this controller, so the two-writer rename tests are here too: the hub (Task 6) only turns an observed rename into `Intent::Renamed`.
 
 **Files:**
-- Modify: `client/core/src/swarm/sync.rs` (replacing the stub)
+- Modify: `client/core/src/swarm/sync.rs` and `client/core/src/swarm/draft.rs` (replacing the stubs)
 - Modify (3a extension): `client/core/src/views/projects.rs` makes `fn status_of` `pub(crate)`, so Qt's status precedence has one implementation.
 - Create: `client/core/tests/support/fake_hgs_swarm.py`, `client/core/tests/swarm_sync.rs`
-- Test: unit tests in `sync.rs`; the integration tests against the fake
+- Test: unit tests in `sync.rs` and `draft.rs`; the integration tests against the fake
 
 **Interfaces:**
 - Consumes: `Intent`, `edit::{apply, shared, changes_shared}` (Task 1); `members` (Task 1); `SyncView` (Task 3); `Exit`, `Invocation` (phase 2, `client/core/src/actions.rs`); `views::projects::status_of` (3a).
 - Produces:
 
 ```rust
+// swarm/draft.rs
+pub const FILE: &str = "organization-draft.json";
+pub const REPLAY_FILE: &str = "organization-draft-replay.json";
+pub struct Draft { pub version: u32, pub base: Value, pub desired: Value, pub versions: Map<String, Value> }
+impl Draft { pub fn new(base: Value, desired: Value, versions: Map<String, Value>) -> Self;
+             pub fn to_json(&self) -> Vec<u8>; pub fn from_json(bytes: &[u8]) -> Option<Self> }
+pub enum DraftWrite { Save(Vec<u8>), Remove }
+pub fn load(path: &Path) -> Option<Draft>;
+pub fn write(path: &Path, bytes: &[u8]) -> io::Result<()>;      // temporary file, then rename
+pub fn store(path: &Path, change: &DraftWrite) -> io::Result<()>;
+// swarm/sync.rs
 pub const FLUSH_MS: u64 = 120;
 pub const REFRESH_MS: u64 = 5_000;
 pub const GUARD_MS: u64 = 10_000;
@@ -1834,6 +1863,8 @@ impl Controller {
     pub fn edit(&mut self, intent: &Intent, now: u64) -> Result<Ticket, String>;
     pub fn due(&mut self, now: u64) -> Due;
     pub fn finish(&mut self, exit: Exit, now: u64) -> Vec<(Ticket, EditOutcome)>;
+    pub fn restore(&mut self, draft: Draft);
+    pub fn take_draft(&mut self) -> Option<DraftWrite>;
 }
 ```
 
@@ -1851,6 +1882,8 @@ Rules, each with its Qt source (the Global Constraints quote the binding list):
 | Conflict and review states | `.cpp:211-218` | the status comes from 3a's `status_of`; `Done { conflicts }` counts the reply's conflicts whose `key` was written |
 | Failure keeps the edits | `.cpp:67-73` (failure), `194-196` (schema) | only the status changes: `unavailable(error)` or `OUTDATED`, as an error. Base, desired, versions and the presented organization stay. The tickets the apply carried are answered `Kept` with that status; edits queued meanwhile stay queued and ride on the resend |
 | The resend | `.cpp:96-110` | the next `due` sends `{base, desired, versions}` from the held state, which is exactly what Qt's `refresh` sends; nothing pending is ever dropped (Decisions) |
+| The draft is saved | `SessionsWindow.cpp:2496`; `.cpp:111-130` (persist, called at 72, 205, 206, 209) | `edit`, `acknowledged` and a `due` that settles without a call mark the draft changed; `take_draft` gives `Save` with base, desired and versions while edits are pending, else `Remove`. A failure changes nothing pending, so it writes nothing. The hub writes the file with `draft::store` |
+| A restart sends the draft after the first read | `SessionsWindow.cpp:275-276, 1661`; `.cpp:76-89` (start), `191-206` | `restore` takes the saved base, desired and versions and leaves the controller not ready, so `due` sends nothing and edits are refused (`STARTING`). The first state is not adopted under the draft: it sets `ready` from `initialized` (197) and starts the flush (204-205). Then one apply carries the saved base and versions |
 
 `classify` follows Qt's reply handling: `parseObject` and "Invalid project catalog response" (`HgsClient.cpp:711-715`), then the schema check (`SwarmController.cpp:194`). Whether the apply landed does not matter, since a failure is sent again either way.
 - exit 0 with a schema 1 object that has `organization` is `Done`;
@@ -2172,6 +2205,63 @@ mod tests {
         assert!(sync.ready());
     }
 
+    // Qt saves its draft with every change (SessionsWindow.cpp:2496) and its base
+    // and versions with persist (SwarmController.cpp:111-130, called at 205 and 209).
+    #[test]
+    fn the_draft_follows_pending_edits_and_is_removed_when_they_settle() {
+        let saved = |change: Option<DraftWrite>| match change {
+            Some(DraftWrite::Save(bytes)) => Draft::from_json(&bytes).unwrap(),
+            other => panic!("no draft saved: {other:?}"),
+        };
+        let mut sync = ready();
+        assert_eq!(sync.take_draft(), None, "nothing pending");
+        sync.edit(&to("beta"), 0).unwrap();
+        let seen = state("d1", "alpha", &["op-1"]);
+        let draft = saved(sync.take_draft());
+        assert_eq!(draft.base, seen["organization"], "the base the edit started from");
+        assert_eq!(Value::Object(draft.versions), seen["versions"]);
+        assert_eq!(crate::swarm::members(&draft.desired)[R], "beta");
+        assert_eq!(sync.take_draft(), None, "written once");
+        let _ = input(sync.due(120));
+        sync.edit(&to("ungrouped"), 200).unwrap();
+        assert_eq!(crate::swarm::members(&saved(sync.take_draft()).desired)[R], "ungrouped", "an edit during the apply");
+        sync.finish(reply(state("d2", "beta", &["op-2"]), &["op-2"]), 300);
+        let draft = saved(sync.take_draft());
+        assert_eq!(crate::swarm::members(&draft.base)[R], "beta", "the acknowledged write is the new base");
+        assert_eq!(draft.versions[review().as_str()], json!(["op-2"]), "with its written version");
+        let _ = input(sync.due(420));
+        sync.finish(Exit::TimedOut, 10_420);
+        assert_eq!(sync.take_draft(), None, "a failure changes nothing pending");
+        let _ = input(sync.due(10_420 + REFRESH_MS));
+        sync.finish(reply(state("d3", "ungrouped", &["op-3"]), &["op-3"]), 15_600);
+        assert_eq!(sync.take_draft(), Some(DraftWrite::Remove), "settled");
+    }
+
+    // Qt's start with a saved draft (SwarmController.cpp:76-89) and its first reply (191-206).
+    #[test]
+    fn a_restored_draft_is_shown_and_waits_for_the_first_state() {
+        let seen = state("d1", "alpha", &["op-1"]);
+        let mut desired = seen["organization"].clone();
+        desired["projects"][0]["sessions"] = json!([]);
+        desired["projects"][1]["sessions"] = json!([R]);
+        let versions = seen["versions"].as_object().unwrap().clone();
+        let mut sync = Controller::default();
+        sync.restore(Draft::new(seen["organization"].clone(), desired, versions));
+        assert_eq!(place(&sync), "beta", "the list shows the draft");
+        assert_eq!(sync.edit(&to("ungrouped"), 0), Err(STARTING.into()));
+        for now in (0..30_000).step_by(500) {
+            assert!(matches!(sync.due(now), Due::Nothing), "nothing before the first state, at {now}");
+        }
+        assert_eq!(sync.take_draft(), None, "the file already holds it");
+        assert!(!sync.observe(observation(state("d2", "alpha", &["op-1"])), 30_000), "not adopted under the draft");
+        assert!(sync.ready() && sync.pending());
+        assert_eq!(sync.next_due(), Some(30_000 + FLUSH_MS));
+        let sent = input(sync.due(30_000 + FLUSH_MS));
+        assert_eq!(sent["base"], crate::swarm::edit::shared(&seen["organization"]));
+        assert_eq!(sent["versions"], seen["versions"]);
+        assert_eq!(crate::swarm::members(&sent["desired"])[R], "beta");
+    }
+
     #[test]
     fn conflicts_on_written_fields_are_the_outcome_and_the_status_follows_qt() {
         let mut sync = ready();
@@ -2228,13 +2318,15 @@ mod tests {
 //! The organization's write controller (`swarm::sync`) with the real runner
 //! against a fake `hgs` (tests/support/fake_hgs_swarm.py) whose `swarm get`
 //! and `swarm apply` replies model a second writer, a timed-out apply and its
-//! resend, and Qt migrating the same rename. Never the real CLI.
+//! resend, Qt migrating the same rename, and a catalog that changed while the
+//! client was stopped with a draft. Never the real CLI.
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use zerus_client_core::reads::{self, Read};
+use zerus_client_core::swarm::draft;
 use zerus_client_core::swarm::edit::{shared, Intent};
 use zerus_client_core::swarm::sync::{Controller, Due, EditOutcome, Observation, REFRESH_MS};
 use zerus_client_core::swarm::{members, projects, sessions};
@@ -2360,6 +2452,20 @@ fn renamed() -> Intent {
 
 fn place(sync: &Controller) -> String {
     members(sync.presented().unwrap().0)[R].clone()
+}
+
+/// What the hub does after each change: the draft file follows the pending edits.
+fn persist(sync: &mut Controller, path: &Path) {
+    if let Some(change) = sync.take_draft() {
+        draft::store(path, &change).unwrap();
+    }
+}
+
+/// A new instance of the client: it loads the draft the last one saved.
+fn restarted(path: &Path) -> Controller {
+    let mut sync = Controller::default();
+    sync.restore(draft::load(path).expect("the last run saved a draft"));
+    sync
 }
 
 // Review Focus 1 (coordinator ruling, 2026-10-28).
@@ -2527,11 +2633,84 @@ fn a_rename_the_other_writer_migrates_between_read_and_apply_merges_cleanly() {
     assert_eq!((view.conflicts, view.status.as_str(), view.status_error), (0, LOCAL, false));
     assert_eq!(fake.calls(), ["get", "get", "apply"]);
 }
+
+// Review Focus 10 (coordinator ruling, 2026-10-28). Qt saves its draft
+// (SessionsWindow.cpp:2496) and, after a restart, sends it once its first read
+// answered (SwarmController.cpp:76-89, 191-206).
+#[test]
+fn a_pending_draft_survives_a_restart_and_is_sent_once_after_the_first_state() {
+    let seen = snapshot("d1", "alpha", &["op-1"], json!([]), &[]);
+    let landed = snapshot("d2", "beta", &["op-2"], json!([]), &["op-2"]);
+    let fake = Fake::new(&json!({"get": [reply(seen.clone())], "apply": [reply(landed)]}));
+    let path = fake.dir.join(draft::FILE);
+    // The first run: the edit is pending, and its draft is on disk before any apply.
+    let mut first = Controller::default();
+    assert!(first.observe(fake.read(), 0));
+    first.edit(&to("beta"), 0).unwrap();
+    persist(&mut first, &path);
+    assert!(first.pending() && path.exists());
+    drop(first); // the client stops (before its flush; during or after a failed apply the draft is the same)
+
+    let mut sync = restarted(&path);
+    assert_eq!(place(&sync), "beta", "the new instance shows the draft");
+    assert!(!sync.ready(), "edits wait for the first state");
+    for now in (0..20_000).step_by(250) {
+        assert!(matches!(sync.due(now), Due::Nothing), "nothing before the first state, at {now}");
+    }
+    assert!(fake.applies().is_empty());
+    // The first state: not adopted under the draft; the flush sends it (197, 203-205).
+    assert!(!sync.observe(fake.read(), 20_000));
+    assert!(matches!(sync.due(20_000 + 119), Due::Nothing));
+    let exit = fake.run(sync.due(20_000 + 120));
+    assert!(matches!(sync.due(20_300), Due::Nothing), "one apply at a time");
+    assert!(sync.finish(exit, 20_400).is_empty(), "nobody waits for a restored edit");
+    let applies = fake.applies();
+    assert_eq!(applies.len(), 1, "exactly one apply");
+    assert_eq!(applies[0]["base"], shared(&seen["organization"]), "the saved base");
+    assert_eq!(applies[0]["versions"], seen["versions"], "the saved versions");
+    assert_eq!(members(&applies[0]["desired"])[R], "beta", "the saved desired state");
+    assert!(!sync.pending());
+    assert_eq!(place(&sync), "beta");
+    persist(&mut sync, &path);
+    assert!(!path.exists(), "a settled draft is removed");
+    assert_eq!(fake.calls(), ["get", "get", "apply"]);
+}
+
+// While the client was stopped, another writer changed the catalog: the draft
+// goes out with the saved base and versions, and hgs records both writes.
+#[test]
+fn a_restored_draft_against_a_newer_catalog_gives_a_conflict_not_an_overwrite() {
+    let seen = snapshot("d1", "alpha", &["op-1"], json!([]), &[]);
+    let newer = snapshot("d2", "gamma", &["op-2"], json!([]), &[]);
+    // hgs: the draft's write has parents op-1, so op-2 and op-3 are concurrent heads.
+    let conflict = json!([{"key": review(), "field": {"kind": "session"}, "selected": "op-3", "variants": []}]);
+    let answer = snapshot("d3", "beta", &["op-2", "op-3"], conflict, &["op-3"]);
+    let fake = Fake::new(&json!({"get": [reply(seen.clone()), reply(newer.clone())], "apply": [reply(answer)]}));
+    let path = fake.dir.join(draft::FILE);
+    let mut first = Controller::default();
+    assert!(first.observe(fake.read(), 0));
+    first.edit(&to("beta"), 0).unwrap();
+    persist(&mut first, &path);
+    drop(first);
+
+    let mut sync = restarted(&path);
+    assert!(!sync.observe(fake.read(), 1000), "the newer catalog is not merged under the draft");
+    let exit = fake.run(sync.due(1120));
+    let sent = &fake.applies()[0];
+    assert_eq!(sent["base"], shared(&seen["organization"]), "the saved base, not the newer catalog");
+    assert_eq!(sent["versions"], seen["versions"], "the saved versions, so hgs keeps both writes");
+    assert_ne!(sent["versions"], newer["versions"]);
+    assert!(sync.finish(exit, 1400).is_empty());
+    let view = sync.view();
+    assert_eq!((view.status.as_str(), view.status_error, view.conflicts), ("1 project conflict(s) need review in Swarm.", true, 1));
+    assert_eq!(place(&sync), "beta", "where hgs placed it");
+    assert_eq!(fake.calls(), ["get", "get", "apply"]);
+}
 ```
 
 `Due` and `Reply` derive `Debug` and `PartialEq`, since the tests compare them.
 
-- [ ] **Step 4: Run** `cargo +1.99.1 test --manifest-path client/core/Cargo.toml --target-dir target/client-core swarm::sync`, then `--test swarm_sync`. Expected: compile errors.
+- [ ] **Step 4: Run** `cargo +1.99.1 test --manifest-path client/core/Cargo.toml --target-dir target/client-core --lib -- swarm::sync swarm::draft`, then `--test swarm_sync`. Expected: compile errors.
 
 - [ ] **Step 5: Implement.** In `client/core/src/views/projects.rs` change `fn status_of` to `pub(crate) fn status_of` (3a extension 1).
 
@@ -2551,11 +2730,18 @@ fn a_rename_the_other_writer_migrates_between_read_and_apply_merges_cleanly() {
 //! value, which is no conflict, and a stale base surfaces as a conflict
 //! (src/swarm/model.rs:126-201, 298-312; coordinator ruling, 2026-10-28).
 //!
+//! Pending edits survive a restart as Qt's do: [`Controller::take_draft`]
+//! gives the draft file's next content ([`super::draft`]), and
+//! [`Controller::restore`] takes it back at start. Nothing is sent before the
+//! first state, and the draft then goes out from its saved base and versions
+//! (SwarmController.cpp:76-89, 191-206).
+//!
 //! One rule differs from Qt on purpose. Qt initializes an empty local catalog
 //! with its own cache (81-88). This client has none, and an initialize from it
 //! would mark the catalog imported and skip the Qt GUI's one-time import
 //! (src/swarm/mod.rs:212-215): edits wait until the catalog reports
 //! `initialized`.
+use super::draft::{Draft, DraftWrite};
 use super::edit::{self, Intent};
 use super::grouping::SyncView;
 use super::members;
@@ -2721,6 +2907,10 @@ pub struct Controller {
     ready: bool,
     /// The organization topic ended: new edits wait for its next state.
     ended: bool,
+    /// A draft of the last run waits for the first state (Qt's `start`, 76-89).
+    restored: bool,
+    /// Pending edits changed since the draft file was last given out.
+    draft_changed: bool,
     /// The operations the last acknowledged write made, per token, until a state shows them.
     guard: BTreeMap<String, Value>,
     guard_until: u64,
@@ -2834,7 +3024,16 @@ impl Controller {
             return false;
         }
         if self.pending() {
-            if self.refresh_at.is_some() {
+            if self.restored {
+                // Qt's first reply after a start with a draft: ready (197), the
+                // base kept since it was a read (203), and the flush sends the
+                // draft from the saved base and versions (204-205).
+                self.ready |= observation.value["initialized"] == true;
+                if self.ready {
+                    self.restored = false;
+                    self.flush_at = Some(now + FLUSH_MS);
+                }
+            } else if self.refresh_at.is_some() {
                 self.refresh_at = Some(now);
             }
             return false;
@@ -2873,6 +3072,7 @@ impl Controller {
         let next = edit::apply(current, intent)?;
         self.desired_membership = Some(Arc::new(members(&next)));
         self.desired = Some(next);
+        self.draft_changed = true;
         self.revision += 1;
         self.tickets += 1;
         self.queued.push(self.tickets);
@@ -2899,6 +3099,7 @@ impl Controller {
             // m_base == m_desired: nothing to send (65, 100).
             self.desired = None;
             self.desired_membership = None;
+            self.draft_changed = true;
             return Due::Settled(saved(tickets));
         }
         // send (102-110): the held base, desired and versions. After a
@@ -2924,6 +3125,8 @@ impl Controller {
 
     fn acknowledged(&mut self, sent: Sent, reply: Value, now: u64) -> Vec<(Ticket, EditOutcome)> {
         self.refresh_at = None;
+        // A new base and versions for the edits made meanwhile, or none left (persist, 205, 209).
+        self.draft_changed = true;
         let written = reply["written"].as_object().cloned().unwrap_or_default();
         for (token, ops) in &written {
             self.versions.insert(token.clone(), ops.clone());
@@ -2965,6 +3168,166 @@ impl Controller {
         self.refresh_at = Some(now + REFRESH_MS);
         sent.tickets.into_iter().map(|ticket| (ticket, EditOutcome::Kept { detail: status.clone() })).collect()
     }
+
+    /// The draft of the last run (Qt's `start`, SwarmController.cpp:76-89):
+    /// the saved base, desired state and versions. The list shows the draft at
+    /// once. The controller stays not ready, so nothing is sent and no edit is
+    /// taken before the first state (`observe`). Ignored once a base is held.
+    pub fn restore(&mut self, draft: Draft) {
+        if self.base.is_some() {
+            return;
+        }
+        self.membership = Arc::new(members(&draft.base));
+        self.desired_membership = Some(Arc::new(members(&draft.desired)));
+        self.base = Some(draft.base);
+        self.desired = Some(draft.desired);
+        self.versions = draft.versions;
+        self.restored = true;
+        self.revision += 1;
+    }
+
+    /// The draft file's next content, once after pending edits changed: the
+    /// base, desired state and versions while edits are pending, else its
+    /// removal. Qt saves its draft with every change (SessionsWindow.cpp:2496)
+    /// and its base and versions with `persist` (SwarmController.cpp:111-130).
+    pub fn take_draft(&mut self) -> Option<DraftWrite> {
+        if !std::mem::take(&mut self.draft_changed) {
+            return None;
+        }
+        Some(match (&self.base, &self.desired) {
+            (Some(base), Some(desired)) => {
+                DraftWrite::Save(Draft::new(base.clone(), desired.clone(), self.versions.clone()).to_json())
+            }
+            _ => DraftWrite::Remove,
+        })
+    }
+}
+```
+
+`client/core/src/swarm/draft.rs`:
+
+```rust
+//! The pending organization edits on disk, so a restart sends them again, as
+//! Qt does: it saves its draft with every change (`workspace/organization`,
+//! tray/src/SessionsWindow.cpp:2496) and its observed base and versions
+//! (SwarmController.cpp:111-130). After a restart it sends the draft from them
+//! once its first read answered (SwarmController.cpp:76-89, 191-206). The
+//! controller ([`super::sync::Controller::take_draft`]) says what the file
+//! holds; the Tauri hub keeps it beside `organization-layout.json`.
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// The draft file in the app data directory; a replay keeps its own.
+pub const FILE: &str = "organization-draft.json";
+pub const REPLAY_FILE: &str = "organization-draft-replay.json";
+const VERSION: u32 = 1;
+
+/// Pending edits: the base they start from, the organization they make and
+/// the versions observed with the base.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Draft {
+    pub version: u32,
+    pub base: Value,
+    pub desired: Value,
+    pub versions: Map<String, Value>,
+}
+
+impl Draft {
+    pub fn new(base: Value, desired: Value, versions: Map<String, Value>) -> Self {
+        Self { version: VERSION, base, desired, versions }
+    }
+
+    pub fn to_json(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("the draft serializes")
+    }
+
+    /// A draft of this version with both organizations; anything else is none.
+    pub fn from_json(bytes: &[u8]) -> Option<Self> {
+        let draft: Self = serde_json::from_slice(bytes).ok()?;
+        (draft.version == VERSION && draft.base.is_object() && draft.desired.is_object()).then_some(draft)
+    }
+}
+
+/// What the draft file becomes.
+#[derive(Debug, PartialEq)]
+pub enum DraftWrite {
+    Save(Vec<u8>),
+    Remove,
+}
+
+/// The saved draft; a missing or unreadable file is none.
+pub fn load(path: &Path) -> Option<Draft> {
+    std::fs::read(path).ok().and_then(|bytes| Draft::from_json(&bytes))
+}
+
+/// Writes a temporary file beside the target, then renames it over it, as
+/// client/core/src/readmarks.rs:117-140 does. A failure keeps the old file.
+pub fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(format!(".{}-{}.tmp", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed)));
+    let temporary = PathBuf::from(temporary);
+    if let Some(folder) = path.parent().filter(|folder| !folder.as_os_str().is_empty()) {
+        std::fs::create_dir_all(folder)?;
+    }
+    let written = std::fs::write(&temporary, bytes).and_then(|()| std::fs::rename(&temporary, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written
+}
+
+/// Saves or removes the draft; removing a missing file is no error.
+pub fn store(path: &Path, change: &DraftWrite) -> io::Result<()> {
+    match change {
+        DraftWrite::Save(bytes) => write(path, bytes),
+        DraftWrite::Remove => match std::fs::remove_file(path) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("zerus-draft-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn the_draft_file_is_replaced_whole_and_removed_when_settled() {
+        let dir = scratch("store");
+        let path = dir.join(FILE);
+        let draft = Draft::new(json!({"projects": []}), json!({"projects": [{"id": "alpha"}]}), Map::new());
+        store(&path, &DraftWrite::Save(draft.to_json())).unwrap();
+        assert_eq!(load(&path), Some(draft.clone()));
+        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        assert_eq!(names, [std::ffi::OsString::from(FILE)], "no temporary file is left");
+        let newer = Draft::new(draft.desired.clone(), json!({"projects": []}), Map::new());
+        store(&path, &DraftWrite::Save(newer.to_json())).unwrap();
+        assert_eq!(load(&path), Some(newer));
+        store(&path, &DraftWrite::Remove).unwrap();
+        assert!(!path.exists());
+        store(&path, &DraftWrite::Remove).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unreadable_or_other_draft_is_none() {
+        assert_eq!(Draft::from_json(b"not json"), None);
+        assert_eq!(Draft::from_json(br#"{"version": 2, "base": {}, "desired": {}, "versions": {}}"#), None);
+        assert_eq!(Draft::from_json(br#"{"version": 1, "base": null, "desired": {}, "versions": {}}"#), None);
+        assert!(Draft::from_json(br#"{"version": 1, "base": {}, "desired": {}, "versions": {}}"#).is_some());
+        assert_eq!(load(&scratch("missing").join(FILE)), None);
+    }
 }
 ```
 
@@ -2973,8 +3336,8 @@ impl Controller {
 - [ ] **Step 7: Commit**
 
 ```bash
-git add client/core/src/swarm/sync.rs client/core/src/views/projects.rs client/core/tests/swarm_sync.rs client/core/tests/support/fake_hgs_swarm.py
-git commit -m "feat(client): SwarmController's apply rules for the organization, with Qt's resend of a failed apply"
+git add client/core/src/swarm/sync.rs client/core/src/swarm/draft.rs client/core/src/views/projects.rs client/core/tests/swarm_sync.rs client/core/tests/support/fake_hgs_swarm.py
+git commit -m "feat(client): SwarmController's apply rules for the organization, with Qt's resend and saved draft"
 ```
 
 ---
@@ -3094,7 +3457,7 @@ git commit -m "feat(client): the pump sends each row's project and the headers, 
 
 **Interfaces:**
 - Consumes:
-  - `Controller`, `Observation`, `EditOutcome`, `Due`, `Intent`, `by_name`, `STOPPED` (Tasks 1-4) and the Pump methods (Task 5);
+  - `Controller`, `Observation`, `EditOutcome`, `Due`, `Intent`, `by_name`, `STOPPED`, `swarm::draft` (Tasks 1-4) and the Pump methods (Task 5);
   - `Fleet::follow_organization`, `Fleet::organization_snapshot`, `OrganizationUpdate`, `OrganizationSnapshot` (PR #395);
   - `run_limited`, `Read::Swarm` (its reply limit; phase 2 and PR #390);
   - `actions::actions_allowed` (phase 2).
@@ -3104,9 +3467,10 @@ git commit -m "feat(client): the pump sends each row's project and the headers, 
 pub type SnapshotSource = Arc<dyn Fn() -> Option<OrganizationSnapshot> + Send + Sync>;
 pub type Presented = Arc<dyn Fn(Arc<Value>, String, (String, bool)) + Send + Sync>;
 pub fn layout_file(replay: bool) -> &'static str;
+pub fn draft_file(replay: bool) -> &'static str;
 #[derive(Clone)] pub struct Organization;
 impl Organization {
-    pub fn new(pump: Pump, hgs: PathBuf, allowed: bool, layout: PathBuf) -> Self;
+    pub fn new(pump: Pump, hgs: PathBuf, allowed: bool, layout: PathBuf, draft_path: PathBuf) -> Self;
     pub fn set_source(&self, source: SnapshotSource);
     pub fn set_presented(&self, presented: Presented);      // Task 9
     pub fn observe(&self, change: &Change);
@@ -3132,13 +3496,16 @@ Behaviour:
 - **The worker thread** (`zerus-organization`):
   - it turns the pump's renames into `Intent::Renamed` edits while ready;
   - it runs `due`. An `Apply` runs `run_limited(hgs, invocation, &[], Read::Swarm.limit())` without the hub's lock, then `finish`. A too large reply counts as `Abnormal`: a failure, kept for the next tick like any other;
-  - it saves a changed layout at most once a second, through a temporary file and a rename;
+  - before `due`, it writes the draft file when pending edits changed (`take_draft`, `draft::store`), so an edit is on disk before its apply runs, and the file goes when the edits settled (`SessionsWindow.cpp:2496`);
+  - it saves a changed layout at most once a second, through a temporary file and a rename (`draft::write`, as `readmarks.rs:117-140`);
   - it then waits until the next flush or tick (`next_due`), at most 1 s, or until a state or an edit wakes it.
+- **Start:** `new` loads the draft file into the controller (`Controller::restore`) before the worker starts, and publishes it, so the list shows the pending edits at once. Nothing is sent before the first organization state (Qt's `start`, `SwarmController.cpp:76-89`, `SessionsWindow.cpp:1661`).
 - **Delete project** passes the project's listed rows (`pump.members_of`), and **Sort sessions by name** passes them through `by_name`. **New project** makes its ID with `uuid::Uuid::new_v4()`.
 - **Replay:**
   - `Replay::start` calls `organization_mut().follow()` on this computer's `CatalogState` before the first frame;
   - `Replay::organization_snapshot()` returns its `organization().snapshot()`;
-  - the layout file is `organization-layout-replay.json`, so replays never touch the real one.
+  - the layout file is `organization-layout-replay.json` and the draft file `organization-draft-replay.json`, so replays never touch the real ones;
+  - a replay starts from the fixture's catalog, so `setup` removes a leftover replay draft before `new`.
 
 - [ ] **Step 1: Write the failing tests** (in `organization.rs`):
 
@@ -3147,6 +3514,8 @@ Behaviour:
 mod tests {
     use super::*;
     use serde_json::json;
+    use zerus_client_core::swarm::draft::Draft;
+    use zerus_client_core::swarm::edit::shared;
     use zerus_client_core::{ComputerId, ViewRow};
 
     const R: &str = "workstation\nclaude/sample-project/review";
@@ -3214,7 +3583,7 @@ mod tests {
     #[test]
     fn a_blocked_replay_refuses_edits_with_the_replay_text() {
         let dir = scratch("replay");
-        let organization = Organization::new(Pump::default(), fake(&dir), false, dir.join("layout.json"));
+        let organization = Organization::new(Pump::default(), fake(&dir), false, dir.join("layout.json"), dir.join("draft.json"));
         organization.set_source(snapshot("d1"));
         organization.observe(&state("d1"));
         let outcome = organization.submit(Intent::Move { members: vec![R.into()], project: "ungrouped".into(), before: None });
@@ -3225,7 +3594,7 @@ mod tests {
     fn a_state_of_another_digest_than_the_snapshot_is_skipped() {
         let dir = scratch("digest");
         let pump = Pump::default();
-        let organization = Organization::new(pump.clone(), fake(&dir), true, dir.join("layout.json"));
+        let organization = Organization::new(pump.clone(), fake(&dir), true, dir.join("layout.json"), dir.join("draft.json"));
         organization.set_source(snapshot("d2"));
         organization.observe(&state("d1"));
         assert!(!pump.take(crate::pump::PARK).grouping.is_some_and(|g| g.loaded), "versions of another state are never paired");
@@ -3239,7 +3608,7 @@ mod tests {
         let pump = Pump::default();
         pump.push(Change::Upsert { computer: ComputerId::local(), key: "run:1".into(),
             row: ViewRow { machine: "workstation".into(), name: "claude/sample-project/review".into(), ..ViewRow::default() } });
-        let organization = Organization::new(pump.clone(), fake(&dir), true, dir.join("layout.json"));
+        let organization = Organization::new(pump.clone(), fake(&dir), true, dir.join("layout.json"), dir.join("draft.json"));
         organization.set_source(snapshot("d1"));
         organization.observe(&state("d1"));
         let outcome = organization.submit(Intent::Move { members: vec![R.into()], project: "ungrouped".into(), before: None });
@@ -3254,7 +3623,7 @@ mod tests {
     fn a_failed_apply_answers_kept_and_the_next_state_sends_it_once_more() {
         let dir = scratch("resend");
         let refused = json!({"exit": 1, "stderr": "hgs: session belongs to more than one project\n"});
-        let organization = Organization::new(Pump::default(), fake_with(&dir, json!([refused, {"stdout": full("d2")}])), true, dir.join("layout.json"));
+        let organization = Organization::new(Pump::default(), fake_with(&dir, json!([refused, {"stdout": full("d2")}])), true, dir.join("layout.json"), dir.join("draft.json"));
         organization.set_source(snapshot("d1"));
         organization.observe(&state("d1"));
         let outcome = organization.submit(Intent::Move { members: vec![R.into()], project: "ungrouped".into(), before: None });
@@ -3270,6 +3639,39 @@ mod tests {
         assert_eq!(log.len(), 2, "one resend, and no more once it landed");
         let stdin = |line: &str| serde_json::from_str::<Value>(line).unwrap()["stdin"].clone();
         assert_eq!(stdin(&log[0]), stdin(&log[1]), "the same base, desired and versions");
+    }
+
+    // Qt loads its draft at start (SessionsWindow.cpp:275-276, 1661) and sends it
+    // once its first read answered (SwarmController.cpp:76-89, 197, 203-205).
+    #[test]
+    fn a_saved_draft_waits_for_the_first_state_then_one_apply_sends_it() {
+        let dir = scratch("draft");
+        let hgs = fake(&dir);
+        let base = full("d1")["organization"].clone();
+        let mut desired = base.clone();
+        desired["projects"][0]["sessions"] = json!([]);
+        desired["projects"][1]["sessions"] = json!([R]);
+        let versions = serde_json::Map::new();
+        draft::write(&dir.join("draft.json"), &Draft::new(base.clone(), desired.clone(), versions.clone()).to_json()).unwrap();
+        let pump = Pump::default();
+        let organization = Organization::new(pump.clone(), hgs, true, dir.join("layout.json"), dir.join("draft.json"));
+        organization.set_source(snapshot("d1"));
+        assert!(pump.take(crate::pump::PARK).grouping.is_some_and(|g| g.loaded), "the list shows the draft before any state");
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(applies(&dir).is_empty(), "nothing before the first state");
+        assert!(dir.join("draft.json").exists());
+        organization.observe(&state("d1"));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while (applies(&dir).is_empty() || dir.join("draft.json").exists()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        let log = applies(&dir);
+        assert_eq!(log.len(), 1, "exactly one apply");
+        let entry: Value = serde_json::from_str(&log[0]).unwrap();
+        let stdin: Value = serde_json::from_str(entry["stdin"].as_str().unwrap()).unwrap();
+        assert_eq!(stdin, json!({"base": shared(&base), "desired": shared(&desired), "versions": versions}), "the saved draft");
+        assert!(!dir.join("draft.json").exists(), "removed once it landed");
     }
 }
 ```
@@ -3287,10 +3689,13 @@ mod tests {
 //! which also saves the local layout. A failed apply stays pending in the
 //! controller, and this thread sends it again on the next tick: 5 s later, or
 //! when the topic's next state arrives (SwarmController.cpp:67-73, 96-101).
+//! Pending edits are kept in a draft file, written before their apply and
+//! removed once they settled; a restart loads it and sends it after the first
+//! state, as Qt does (SessionsWindow.cpp:2496, 1661; SwarmController.cpp:76-89).
 //! The webview never receives the organization itself.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -3298,6 +3703,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tauri::State;
 use zerus_client_core::reads::Read;
+use zerus_client_core::swarm::draft;
 use zerus_client_core::swarm::edit::Intent;
 use zerus_client_core::swarm::grouping::{by_name, SyncView};
 use zerus_client_core::swarm::sync::{Controller, Due, EditOutcome, Observation, Ticket, STOPPED};
@@ -3326,6 +3732,15 @@ pub fn layout_file(replay: bool) -> &'static str {
     }
 }
 
+/// The pending draft beside the layout; a replay keeps its own.
+pub fn draft_file(replay: bool) -> &'static str {
+    if replay {
+        draft::REPLAY_FILE
+    } else {
+        draft::FILE
+    }
+}
+
 #[derive(Default)]
 struct Hub {
     sync: Controller,
@@ -3343,6 +3758,7 @@ struct Shared {
     hgs: PathBuf,
     allowed: bool,
     layout: PathBuf,
+    draft: PathBuf,
     clock: Instant,
 }
 
@@ -3350,17 +3766,12 @@ struct Shared {
 #[derive(Clone)]
 pub struct Organization(Arc<Shared>);
 
-fn save(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, bytes)?;
-    std::fs::rename(&temporary, path)
-}
-
 impl Organization {
-    pub fn new(pump: Pump, hgs: PathBuf, allowed: bool, layout: PathBuf) -> Self {
+    pub fn new(pump: Pump, hgs: PathBuf, allowed: bool, layout: PathBuf, draft_path: PathBuf) -> Self {
         if let Ok(bytes) = std::fs::read(&layout) {
             pump.load_layout(&bytes);
         }
+        let saved = draft::load(&draft_path);
         let organization = Self(Arc::new(Shared {
             hub: Mutex::default(),
             wake: Condvar::new(),
@@ -3368,9 +3779,18 @@ impl Organization {
             hgs,
             allowed,
             layout,
+            draft: draft_path,
             clock: Instant::now(),
         }));
-        organization.publish(&mut organization.lock());
+        {
+            let mut hub = organization.lock();
+            // The last run's pending edits (Qt's start, SwarmController.cpp:76-89):
+            // shown at once, sent after the first state.
+            if let Some(saved) = saved {
+                hub.sync.restore(saved);
+            }
+            organization.publish(&mut hub);
+        }
         let worker = organization.clone();
         std::thread::Builder::new()
             .name("zerus-organization".into())
@@ -3507,6 +3927,12 @@ impl Organization {
                     self.publish(&mut hub);
                 }
             }
+            // The draft on disk before its apply runs, and gone once it settled.
+            if let Some(change) = hub.sync.take_draft() {
+                if let Err(error) = draft::store(&self.0.draft, &change) {
+                    eprintln!("zerus-client: the pending project changes were not saved: {error}");
+                }
+            }
             match hub.sync.due(self.now()) {
                 Due::Apply(invocation) => {
                     self.publish(&mut hub);
@@ -3530,7 +3956,7 @@ impl Organization {
             }
             if saved.elapsed() >= SAVE_EVERY {
                 if let Some(bytes) = self.0.pump.take_layout() {
-                    if let Err(error) = save(&self.0.layout, &bytes) {
+                    if let Err(error) = draft::write(&self.0.layout, &bytes) {
                         eprintln!("zerus-client: the project layout was not saved: {error}");
                     }
                 }
@@ -3631,8 +4057,13 @@ pub fn set_project_collapsed(state: State<'_, Organization>, project: String, co
                 let pump = app.state::<commands::AppState>().pump();
                 let allowed = actions::actions_allowed(std::env::var("ZERUS_CLIENT_REPLAY").ok().as_deref(),
                                                        std::env::var("ZERUS_CLIENT_HGS").ok().as_deref());
+                let draft_path = dir.join(organization::draft_file(replay));
+                if replay {
+                    // A replay starts from the fixture's catalog: no draft of an earlier replay.
+                    let _ = zerus_client_core::swarm::draft::store(&draft_path, &zerus_client_core::swarm::draft::DraftWrite::Remove);
+                }
                 let organization = organization::Organization::new(pump, zerus_client_core::default_hgs(), allowed,
-                                                                   dir.join(organization::layout_file(replay)));
+                                                                   dir.join(organization::layout_file(replay)), draft_path);
                 app.state::<commands::AppState>().set_organization(organization.clone());
                 app.manage(organization);
 ```
@@ -4568,9 +4999,9 @@ git commit -m "feat(client): Projects shows the organization the Sessions list g
 
 - [ ] **Step 4: Documentation.** In `client/README.md`, add "Projects in the Sessions list":
   - the data path: the topic, the controller, the pump's per-row deltas, no organization in the webview;
-  - Qt's grouping rules, the local layout file and its replay twin;
+  - Qt's grouping rules, the local layout file, the pending draft file and their replay twins;
   - the edit commands, with the `move_to_project` contract for selections;
-  - the apply rules, the resend of a failed or timed-out apply on the next tick (5 s, or the topic's next state), and the deviations from Qt listed in this plan's Decisions;
+  - the apply rules, the resend of a failed or timed-out apply on the next tick (5 s, or the topic's next state), the draft that a restart sends after the first state, and the deviations from Qt listed in this plan's Decisions;
   - the smoke, and the measurement command.
 
 - [ ] **Step 5: Follow-ups in Beads** (`bd create` under `zerus-5wmh`; no absolute paths in the text; then `bd export -o .beads/issues.jsonl` and `python3 scripts/check-source-privacy.py`):

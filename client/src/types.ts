@@ -31,6 +31,12 @@ export interface ViewRow {
   attention_fingerprint?: string;
   /** The session needs the person's action (approval, input, error, recovery). */
   needs_action?: boolean;
+  /** Qt's SessionInfo::needsAttention from the listing alone, before this device's marks (no children). */
+  needs_attention?: boolean;
+  /** A subagent asks while the session runs, before an acknowledgement (Qt's window adds it). */
+  child_attention?: boolean;
+  /** The host's preferences conflict with the confirmed ones (Qt's notificationPreferencesError). */
+  notification_error?: string;
   /** `status` and `caption` with the attention acknowledged. */
   acknowledged_status?: string;
   acknowledged_caption?: string;

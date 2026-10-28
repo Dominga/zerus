@@ -43,6 +43,17 @@ impl AppState {
     pub fn set_organization(&self, organization: crate::organization::Organization) {
         let _ = self.live.organization.set(organization);
     }
+
+    /// Applies the preferences the host confirmed for a Mute or Unmute to the
+    /// session's row at once, for the window and the menu bar alike
+    /// (`FleetState::applyNotificationPreferences`). A replay has no hosts.
+    pub fn apply_notifications(
+        &self,
+        target: &zerus_client_core::actions::Target,
+        preferences: &Value,
+    ) {
+        self.live.apply_notifications(target, preferences);
+    }
 }
 
 #[cfg(feature = "live")]
@@ -190,6 +201,21 @@ mod live {
                 None => return Err("not started".into()),
             }
             Ok(())
+        }
+
+        pub fn apply_notifications(
+            &self,
+            target: &zerus_client_core::actions::Target,
+            preferences: &serde_json::Value,
+        ) {
+            if let Some(Source::Fleet(fleet)) = self
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                fleet.apply_notifications(target, preferences.clone());
+            }
         }
 
         pub fn unfollow(&self, computer: String, key: String) -> Result<(), String> {

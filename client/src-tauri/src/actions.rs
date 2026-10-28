@@ -38,6 +38,28 @@ use zerus_client_core::{default_hgs, run, Action, Batch, ComputerId, Outcome, Ta
 /// message, the agent it goes to ("" for the session's own agent).
 type Key = (String, String, Lane, String);
 
+/// Hears that this device's marks changed: the menu bar's desk reads them
+/// again at once (`desk::marks_changed`), as Qt's window hands the tray its
+/// read state at each change. Clones share it; the call runs on the thread
+/// that made the change, after its lock is released.
+#[derive(Clone, Default)]
+pub struct MarksListener(Arc<Mutex<Option<Listener>>>);
+
+/// What a [`MarksListener`] calls.
+pub type Listener = Box<dyn Fn() + Send + Sync>;
+
+impl MarksListener {
+    pub fn set(&self, listener: Listener) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(listener);
+    }
+
+    fn changed(&self) {
+        if let Some(listener) = &*self.0.lock().unwrap_or_else(PoisonError::into_inner) {
+            listener();
+        }
+    }
+}
+
 /// Writes, interrupts, read marks, messages and process stops run apart: at
 /// most one of each per session (messages: per agent).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -198,6 +220,8 @@ pub struct Actions {
     /// Computer, session name and the run each succeeded termination ended,
     /// oldest first.
     terminated: Arc<Mutex<VecDeque<(String, String, String)>>>,
+    /// Hears every change of the pending marks.
+    pub(crate) listener: MarksListener,
 }
 
 impl Actions {
@@ -210,6 +234,7 @@ impl Actions {
             writes: Arc::default(),
             hook: Arc::default(),
             terminated: Arc::default(),
+            listener: MarksListener::default(),
         }
     }
 
@@ -337,12 +362,14 @@ impl Actions {
     /// pending. No file I/O: the worker writes the marks before it sends any
     /// ([`Actions::flush_marks`]).
     pub fn queue_marks(&self, marks: Vec<ReadMark>) -> Vec<ReadMark> {
-        let pending = {
+        let (added, pending) = {
             let mut store = self.marks.lock().unwrap_or_else(PoisonError::into_inner);
-            store.add_all(marks);
-            store.pending()
+            (store.add_all(marks), store.pending())
         };
         self.wake.notify();
+        if added {
+            self.listener.changed();
+        }
         pending
     }
 
@@ -367,10 +394,14 @@ impl Actions {
         let Some(peers) = waiting.then(peers).flatten() else {
             return;
         };
-        self.marks
+        let dropped = self
+            .marks
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .drop_orphans(&peers);
+        if dropped {
+            self.listener.changed();
+        }
     }
 
     /// The marks not settled yet.
@@ -405,13 +436,14 @@ impl Actions {
         if marks.is_empty() {
             return;
         }
+        let mut changed = false;
         for out in batch.upserts.iter().chain(
             batch
                 .replaces
                 .iter()
                 .flat_map(|replace| replace.rows.iter()),
         ) {
-            marks.settle(&out.computer.0, &out.row);
+            changed |= marks.settle(&out.computer.0, &out.row);
         }
         for replace in batch
             .replaces
@@ -423,7 +455,11 @@ impl Actions {
                 .iter()
                 .map(|out| out.row.name.as_str())
                 .collect();
-            marks.drop_unlisted(&replace.computer.0, &names);
+            changed |= marks.drop_unlisted(&replace.computer.0, &names);
+        }
+        drop(marks);
+        if changed {
+            self.listener.changed();
         }
     }
 }
@@ -454,6 +490,8 @@ pub fn attention_file(replay: bool) -> &'static str {
 /// writer save what is pending, then end.
 pub struct Attention {
     shared: Arc<AttentionShared>,
+    /// Hears every change of the marks.
+    pub(crate) listener: MarksListener,
 }
 
 /// Both maps by key, as the frontend receives them, and the order their
@@ -487,7 +525,12 @@ struct AttentionState {
     dirty: bool,
     writing: bool,
     closed: bool,
+    /// Counts the changes, so a reader copies the maps only after one.
+    version: u64,
 }
+
+/// Both attention maps by key, and the version they were copied at.
+pub type MarkMaps = (u64, BTreeMap<String, Mark>, BTreeMap<String, String>);
 
 impl Attention {
     pub fn new(path: PathBuf) -> Self {
@@ -506,7 +549,27 @@ impl Attention {
             shared.lock().marks = Some(AttentionMarks::load(path));
             shared.signal.notify_all();
         }
-        Self { shared }
+        Self {
+            shared,
+            listener: MarksListener::default(),
+        }
+    }
+
+    /// Both maps by key once the file has been read, with their version;
+    /// None while the version is still `seen`. The maps hold up to 20 000
+    /// entries each and the window's updates take this lock on the main
+    /// thread, so a reader copies them only after they changed.
+    pub fn marks_since(&self, seen: Option<u64>) -> Option<MarkMaps> {
+        let state = self.shared.loaded();
+        if seen == Some(state.version) {
+            return None;
+        }
+        let (marks, replies) = state
+            .marks
+            .as_ref()
+            .map(AttentionMarks::snapshot)
+            .unwrap_or_default();
+        Some((state.version, marks, replies))
     }
 
     #[cfg(test)]
@@ -521,12 +584,21 @@ impl Attention {
         marks: BTreeMap<String, Option<Mark>>,
         replies: BTreeMap<String, Option<String>>,
     ) {
-        let mut state = self.shared.loaded();
-        if let Some(store) = state.marks.as_mut() {
-            if store.update(marks, replies) {
+        let changed = {
+            let mut state = self.shared.loaded();
+            let changed = state
+                .marks
+                .as_mut()
+                .is_some_and(|store| store.update(marks, replies));
+            if changed {
                 state.dirty = true;
+                state.version += 1;
                 self.shared.signal.notify_all();
             }
+            changed
+        };
+        if changed {
+            self.listener.changed();
         }
     }
 
@@ -816,10 +888,13 @@ async fn dispatch_with(
 /// Changes the shared notification preferences of a session (Mute and Unmute)
 /// and returns the host's confirmed `preferences`. One change per session at a
 /// time, in its own lane (`Err("busy")` otherwise). The core probes the local
-/// `hgs --help` first.
+/// `hgs --help` first. The confirmed preferences go to the session's row at
+/// once (`FleetState::applyNotificationPreferences`), so the menu bar's
+/// count and the attention notifications follow before the next listing.
 #[tauri::command]
 pub async fn set_notifications(
     state: State<'_, Actions>,
+    app: State<'_, crate::commands::AppState>,
     target: Target,
     muted: bool,
     expected_revision: Option<i64>,
@@ -831,11 +906,14 @@ pub async fn set_notifications(
         return Err("busy".into());
     };
     let hgs = default_hgs();
-    tauri::async_runtime::spawn_blocking(move || {
-        change_notifications(&hgs, &target, muted, expected_revision)
+    let call_target = target.clone();
+    let confirmed = tauri::async_runtime::spawn_blocking(move || {
+        change_notifications(&hgs, &call_target, muted, expected_revision)
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())??;
+    app.apply_notifications(&target, &confirmed);
+    Ok(confirmed)
 }
 
 /// The session's read-only details, None when it cannot be read. Not guarded:
@@ -2187,6 +2265,132 @@ mod tests {
             ..Batch::default()
         });
         assert_eq!(actions.marks.lock().unwrap().pending().len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A listener that counts its calls.
+    fn counted(listener: &MarksListener) -> Arc<std::sync::atomic::AtomicUsize> {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        listener.set(Box::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }));
+        calls
+    }
+
+    #[test]
+    fn every_change_of_the_pending_read_marks_is_heard_once() {
+        use zerus_client_core::{ComputerId, ReplaceOut, RowOut, ViewRow};
+        let path = std::env::temp_dir().join(format!(
+            "zerus-actions-listener-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let actions = Actions::new(path.clone());
+        let calls = counted(&actions.listener);
+        let heard = || calls.swap(0, Ordering::SeqCst);
+        let mark = |computer: &str, name: &str| ReadMark {
+            computer: computer.into(),
+            name: name.into(),
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+            reply_id: Some("r1".into()),
+            attention_signature: None,
+        };
+        actions.queue_marks(vec![
+            mark("mac", "claude/sample-project/a"),
+            mark("gone", "claude/sample-project/b"),
+        ]);
+        assert_eq!(heard(), 1, "queued marks: one call for the call");
+        let mut empty = mark("mac", "claude/sample-project/a");
+        empty.reply_id = None;
+        actions.queue_marks(vec![empty]);
+        assert_eq!(heard(), 0, "nothing to mark changes nothing");
+        actions.drop_orphans(|| Some(["mac".to_owned(), "gone".to_owned()].into()));
+        assert_eq!(heard(), 0, "every peer still listed");
+        actions.drop_orphans(|| Some(["mac".to_owned()].into()));
+        assert_eq!(heard(), 1, "a removed peer's mark");
+        let row = |read: Option<&str>| RowOut {
+            computer: ComputerId::from("mac"),
+            key: "run:a".into(),
+            row: ViewRow {
+                name: "claude/sample-project/a".into(),
+                run_id: Some("run-1".into()),
+                conversation_id: Some("conv-1".into()),
+                reply_id: Some("r1".into()),
+                read_reply_id: read.map(Into::into),
+                ..ViewRow::default()
+            },
+        };
+        let upsert = |read: Option<&str>| Batch {
+            upserts: vec![row(read)],
+            ..Batch::default()
+        };
+        actions.observe(&upsert(None));
+        assert_eq!(heard(), 0, "the host has not shown it yet");
+        actions.observe(&upsert(Some("r1")));
+        assert_eq!(heard(), 1, "the mark settled");
+        assert!(actions.pending_marks().is_empty());
+        actions.queue_marks(vec![mark("mac", "claude/sample-project/c")]);
+        heard();
+        actions.observe(&Batch {
+            replaces: vec![ReplaceOut {
+                computer: ComputerId::from("mac"),
+                rows: vec![row(None)],
+            }],
+            ..Batch::default()
+        });
+        assert_eq!(heard(), 1, "a listing without the session drops its mark");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn every_change_of_the_attention_marks_is_heard_once() {
+        let path = attention_path("listener");
+        let attention = Attention::new(path.clone());
+        let calls = counted(&attention.listener);
+        let key = r#"["mac","claude","conv-1"]"#.to_owned();
+        let review = Mark {
+            review: true,
+            acknowledged: String::new(),
+        };
+        attention.update(
+            BTreeMap::from([(key.clone(), Some(review.clone()))]),
+            BTreeMap::new(),
+        );
+        assert_eq!(calls.swap(0, Ordering::SeqCst), 1);
+        attention.update(
+            BTreeMap::from([(key.clone(), Some(review.clone()))]),
+            BTreeMap::new(),
+        );
+        assert_eq!(calls.swap(0, Ordering::SeqCst), 0, "the same mark");
+        attention.update(
+            BTreeMap::new(),
+            BTreeMap::from([(key.clone(), Some("r1".to_owned()))]),
+        );
+        assert_eq!(calls.swap(0, Ordering::SeqCst), 1, "a read reply");
+        let (version, marks, replies) = attention.marks_since(None).expect("a first copy");
+        assert_eq!(marks, BTreeMap::from([(key.clone(), review.clone())]));
+        assert_eq!(replies, BTreeMap::from([(key.clone(), "r1".to_owned())]));
+        assert_eq!(
+            attention.marks_since(Some(version)),
+            None,
+            "unchanged: nothing is copied"
+        );
+        attention.update(
+            BTreeMap::from([(key.clone(), Some(review))]),
+            BTreeMap::new(),
+        );
+        assert_eq!(
+            attention.marks_since(Some(version)),
+            None,
+            "an update that changes nothing keeps the version"
+        );
+        attention.update(BTreeMap::from([(key, None)]), BTreeMap::new());
+        let (next, marks, _) = attention.marks_since(Some(version)).expect("changed");
+        assert_ne!(next, version);
+        assert!(marks.is_empty());
+        attention.flush();
         let _ = std::fs::remove_file(&path);
     }
 }

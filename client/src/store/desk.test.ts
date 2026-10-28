@@ -31,6 +31,7 @@ vi.mock("./ui", () => ({
   setMachineFilter: vi.fn(),
   setProjectFilter: vi.fn(),
   setSearch: vi.fn(),
+  setDetailTab: vi.fn(),
   revealRow: vi.fn(),
   toast: vi.fn(),
 }));
@@ -67,6 +68,18 @@ describe("desk wiring", () => {
     expect(shown.revealRow).toHaveBeenCalledWith("mac\nclaude/sample-project/review");
     stopDesk();
     expect(stop).toHaveBeenCalled();
+  });
+
+  it("opens a clicked notification's session on Activity, a menu row on the tab it had", async () => {
+    const open = await opener();
+    open({ computer: "mac", key: "run:folded" });
+    expect(shown.setDetailTab).not.toHaveBeenCalled();
+    vi.clearAllMocks();
+    open({ computer: "mac", key: "run:folded", attention: true });
+    expect(shown.setDetailTab).toHaveBeenCalledWith("activity");
+    // The click expands the row's organization group as a menu row does.
+    expect(projects.setProjectCollapsed).toHaveBeenCalledWith("folded-project", false);
+    expect(shown.setSelectedKey).toHaveBeenLastCalledWith("mac\nrun:folded");
   });
 
   it("clears every filter first, as Qt's showSession does", async () => {

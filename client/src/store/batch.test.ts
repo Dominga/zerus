@@ -69,7 +69,7 @@ function setup(rows: RowOut[], options: { online?: (computer: string) => boolean
     notify: actions.notify,
     dismiss: actions.dismiss,
     compact: { get: (key) => !!compact[key], set: (key, value) => setCompact(key, value) },
-    attention: (s) => needsAttention(s as Session),
+    attention: (s) => needsAttention(s as Session, online(s.computer)),
     markRead,
     markNeedsAttention,
     confirm,
@@ -550,10 +550,14 @@ describe("marks", () => {
 
   it("mark the rows that do not need attention for review", async () => {
     await createRoot(async (dispose) => {
-      const a = setup([rowOut("a", { unread: true }), rowOut("b"), rowOut("c", { state: "paused" })], { online: () => false });
+      const a = setup([rowOut("a", { unread: true }), rowOut("b"), rowOut("c", { state: "paused" })]);
       await a.run("review_later", a.listed("a", "b", "c"));
       expect(a.markNeedsAttention.mock.calls.map((c) => (c[0] as SelectionRow).name)).toEqual(["claude/p/b", "claude/p/c"]);
       expect(a.texts()).toEqual(["Mark needs attention: 2 of 2 sessions updated."]);
+      // Offline, a listed reply is not attention (SessionPresentation.h:281): it can be marked too.
+      const offline = setup([rowOut("a", { unread: true }), rowOut("b")], { online: () => false });
+      await offline.run("review_later", offline.listed("a", "b"));
+      expect(offline.markNeedsAttention.mock.calls.map((c) => (c[0] as SelectionRow).name)).toEqual(["claude/p/a", "claude/p/b"]);
       dispose();
     });
   });

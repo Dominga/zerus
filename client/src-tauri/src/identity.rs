@@ -56,6 +56,15 @@ impl Identity {
         }
     }
 
+    /// Whether attention notifications post: the switch bundle, or another
+    /// build on request (`ZERUS_CLIENT_NOTIFICATIONS=1`); never a replay. Two
+    /// bundles posting at once would show every banner twice beside Qt.
+    // Only the macOS live build has a notifier.
+    #[cfg_attr(not(all(target_os = "macos", feature = "live")), allow(dead_code))]
+    pub fn notifications(&self, requested: bool, replay: bool) -> bool {
+        !replay && (self.is_switch() || requested)
+    }
+
     /// The service a second start waits for (`SingleInstance::currentService`).
     pub fn launchd_label(&self) -> Option<&'static str> {
         self.is_switch().then_some(LAUNCHD_LABEL)
@@ -126,6 +135,16 @@ pub fn current(config_identifier: &str) -> Identity {
     Identity::new(config_identifier)
 }
 
+/// Whether the notifier runs: the build posts (`Identity::notifications`)
+/// and the process is an app bundle. Only a bundled app has a notification
+/// center: asking for one in `cargo run` or `tauri dev` raises an exception,
+/// which aborts.
+// Only the macOS live build has a notifier.
+#[cfg_attr(not(all(target_os = "macos", feature = "live")), allow(dead_code))]
+pub fn notifier_runs(posts: bool, bundled: bool) -> bool {
+    posts && bundled
+}
+
 /// `NAME=1` in the environment.
 // Only the Linux and macOS single instance asks it so far.
 #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
@@ -153,6 +172,31 @@ mod tests {
             );
             assert_eq!(identity.launchd_label(), None);
         }
+    }
+
+    #[test]
+    fn only_the_switch_bundle_posts_unless_asked() {
+        assert!(Identity::new("com.hgdev.hgs-tray").notifications(false, false));
+        assert!(
+            !Identity::new("com.hgdev.hgs-tray").notifications(false, true),
+            "a replay never posts"
+        );
+        assert!(
+            !Identity::new("dev.zerus.next").notifications(false, false),
+            "no double banners beside Qt"
+        );
+        assert!(Identity::new("dev.zerus.next").notifications(true, false));
+        assert!(
+            !Identity::new("dev.zerus.next").notifications(true, true),
+            "not even on request"
+        );
+    }
+
+    #[test]
+    fn a_process_without_a_bundle_never_runs_the_notifier() {
+        assert!(notifier_runs(true, true));
+        assert!(!notifier_runs(true, false), "cargo run and tauri dev");
+        assert!(!notifier_runs(false, true));
     }
 
     #[test]

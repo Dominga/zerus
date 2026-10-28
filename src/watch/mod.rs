@@ -10,6 +10,7 @@
 mod activity;
 mod catalog;
 mod git;
+mod processes;
 mod stamps;
 mod writer;
 
@@ -73,6 +74,8 @@ enum Input {
     Dropped,
     /// A git status check finished on a worker.
     Git(git::Done),
+    /// A process inventory read finished on a worker.
+    Processes(processes::Done),
     End,
 }
 
@@ -133,6 +136,7 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
                 None,
             ),
             Ok(Input::Git(done)) => watch.git_done(done),
+            Ok(Input::Processes(done)) => watch.processes_done(done),
             Ok(Input::End) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
@@ -153,6 +157,7 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         watch.emit_catalog();
         watch.resync_activity();
         watch.flush_git();
+        watch.flush_processes();
     }
 }
 
@@ -325,6 +330,8 @@ struct Watch<'a> {
     /// Started with the first check; its results return as `Input::Git`.
     git_pool: Option<git::Pool>,
     git_results: mpsc::Sender<Input>,
+    processes: processes::Processes,
+    processes_pool: Option<processes::Pool>,
     writers: Writers,
 }
 
@@ -367,6 +374,8 @@ impl<'a> Watch<'a> {
             git: git::Git::new(),
             git_pool: None,
             git_results,
+            processes: processes::Processes::new(),
+            processes_pool: None,
             writers: Writers::None,
         }
     }
@@ -379,7 +388,7 @@ impl<'a> Watch<'a> {
             stream: uuid::Uuid::new_v4().to_string(),
             heartbeat_ms: protocol::HEARTBEAT_MS,
             max_frame_bytes: protocol::MAX_FRAME_BYTES,
-            topics: [topic::CATALOG, topic::CATALOG_META, topic::ACTIVITY, topic::GIT].map(str::to_owned).to_vec(),
+            topics: [topic::CATALOG, topic::CATALOG_META, topic::ACTIVITY, topic::GIT, topic::PROCESSES].map(str::to_owned).to_vec(),
             limits: protocol::Limits::default(),
         };
         self.out.put(&Body::Hello(hello));
@@ -745,6 +754,20 @@ impl<'a> Watch<'a> {
                 Some(&sub.key),
             );
         }
+        // Processes subscriptions follow their rows the same way; a changed
+        // row reads the session again.
+        if !self.processes.is_empty() {
+            let rows: BTreeMap<&str, (String, Digest32)> = self
+                .rows
+                .iter()
+                .zip(&self.digests)
+                .map(|((key, row), digest)| (key.as_str(), (row["name"].as_str().unwrap_or_default().to_owned(), *digest)))
+                .collect();
+            for (key, name) in self.processes.follow(|key| rows.get(key).cloned(), Instant::now()) {
+                let why = removed.get(&key).copied().unwrap_or(reason::ENDED);
+                self.out.error("subscription_ended", &format!("{name} left the catalog ({why})"), Some(topic::PROCESSES), Some(&key));
+            }
+        }
     }
 
     // ---- Pulse -------------------------------------------------------------
@@ -794,6 +817,10 @@ impl<'a> Watch<'a> {
         }
         self.activity(now);
         self.pulse_git(now);
+        if !self.processes.is_empty() {
+            let jobs = self.processes.pulse(now);
+            self.run_processes(jobs);
+        }
     }
 
     fn open_journal(&mut self) {
@@ -1123,6 +1150,71 @@ impl<'a> Watch<'a> {
         });
     }
 
+    // ---- Processes ---------------------------------------------------------
+
+    fn subscribe_processes(&mut self, session: Option<protocol::SessionRef>) {
+        let Some(session) = session
+            .filter(|session| !session.name.is_empty() && session.name.len() <= 1024 && !session.name.chars().any(char::is_control))
+        else {
+            self.out.error("bad_request", "a processes subscription names its session", Some(topic::PROCESSES), None);
+            return;
+        };
+        let key = session.key();
+        if !self.processes.contains(&key) && self.processes.len() >= protocol::PROCESSES_SUBSCRIPTIONS {
+            self.out.error(
+                "too_many_subscriptions",
+                &format!("a stream follows the processes of at most {} sessions", protocol::PROCESSES_SUBSCRIPTIONS),
+                Some(topic::PROCESSES),
+                Some(&key),
+            );
+            return;
+        }
+        // A renamed session keeps its run key; follow its current name.
+        let row = self.rows.iter().position(|(row_key, _)| *row_key == key);
+        let name = row.and_then(|index| self.rows[index].1["name"].as_str()).unwrap_or(&session.name).to_owned();
+        let digest = row.map(|index| self.digests[index]);
+        let job = self.processes.subscribe(&key, &name, session.run_id.filter(|run| !run.is_empty()), digest, Instant::now());
+        self.run_processes([job]);
+    }
+
+    /// Hands reads to the processes workers, started with the first one.
+    fn run_processes(&mut self, jobs: impl IntoIterator<Item = processes::Job>) {
+        for job in jobs {
+            let pool = self.processes_pool.get_or_insert_with(|| {
+                let results = self.git_results.clone();
+                processes::Pool::spawn(processes::WORKERS, move |done| {
+                    let _ = results.send(Input::Processes(done));
+                })
+            });
+            pool.run(job);
+        }
+    }
+
+    fn processes_done(&mut self, done: processes::Done) {
+        let key = done.key.clone();
+        if let processes::Outcome::Failed(error) = self.processes.done(done) {
+            self.out.failure("inspect_failed", &error, Some(topic::PROCESSES), Some(&key));
+        }
+    }
+
+    /// Sends changed inventories unless the client is behind; they wait and
+    /// the latest of each session goes out once it catches up.
+    fn flush_processes(&mut self) {
+        if !self.processes.pending() || self.out.writer.backlog() > DEFER_BYTES {
+            return;
+        }
+        let out = &mut self.out;
+        self.processes.flush(|key, value, rev| {
+            let mut value = value.clone();
+            activity::shrink_state(&mut value, activity::PAYLOAD_LIMIT);
+            let body = Body::State(protocol::State { topic: topic::PROCESSES.into(), key: key.into(), value, rev });
+            match Out::encode(&body) {
+                Some(body) => out.writer.offer(Item { coalesce: Some(format!("state|{}|{key}", topic::PROCESSES)), body }),
+                None => true,
+            }
+        });
+    }
+
     // ---- Control -----------------------------------------------------------
 
     fn control(&mut self, text: &str) {
@@ -1146,6 +1238,8 @@ impl<'a> Watch<'a> {
                     if let Some(path) = &subscription.path {
                         self.git.unsubscribe(path);
                     }
+                } else if let Some(session) = subscription.session.as_ref().filter(|_| subscription.topic == topic::PROCESSES) {
+                    self.processes.unsubscribe(&session.key());
                 } else if let Some(session) = subscription.session.filter(|_| subscription.topic == topic::ACTIVITY) {
                     let key = session.key();
                     self.subs.retain(|sub| sub.key != key);
@@ -1158,6 +1252,7 @@ impl<'a> Watch<'a> {
         match request.topic.as_str() {
             topic::CATALOG | topic::CATALOG_META => return,
             topic::GIT => return self.subscribe_git(request.path.as_deref()),
+            topic::PROCESSES => return self.subscribe_processes(request.session),
             topic::ACTIVITY => {}
             other => {
                 self.out.error(
@@ -1357,6 +1452,7 @@ mod tests {
                 Input::TooLong => "<too long>".into(),
                 Input::Dropped => "<dropped>".into(),
                 Input::Git(done) => format!("<git {}>", done.path),
+                Input::Processes(done) => format!("<processes {}>", done.key),
                 Input::End => "<end>".into(),
             })
             .collect()

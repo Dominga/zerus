@@ -145,9 +145,10 @@ class WatchStream(unittest.TestCase):
         self.assertEqual((hello['v'], hello['t'], hello['seq']), (1, 'hello', 1))
         self.assertEqual(hello['host'], 'test')
         self.assertEqual((hello['heartbeat_ms'], hello['max_frame_bytes']), (10000, 1048576))
-        self.assertEqual(hello['topics'], ['catalog', 'catalog.meta', 'activity', 'git'])
+        self.assertEqual(hello['topics'], ['catalog', 'catalog.meta', 'activity', 'git', 'processes'])
         self.assertEqual(hello['limits']['activity_subscriptions'], 16)
         self.assertEqual(hello['limits']['git_subscriptions'], 64)
+        self.assertEqual(hello['limits']['processes_subscriptions'], 16)
         uuid.UUID(hello['stream'])
         self.assertEqual([frame['seq'] for frame in stream.seen], list(range(1, len(stream.seen) + 1)))
         self.assertTrue(all(frame['v'] == 1 for frame in stream.seen))
@@ -294,6 +295,35 @@ class WatchStream(unittest.TestCase):
         self.assertNotIn('PRIVATE_REASONING', ''.join(stream.raw))
         self.assertEqual(stream.close(), 0)
 
+    def test_processes_state_matches_inspect_and_follows_the_binding(self):
+        stream, *_ = self.start()
+        stream.send(op='subscribe', topic='processes', session=self.session())
+        state = stream.next(lambda f: f['t'] == 'state' and f['topic'] == 'processes', timeout=10)
+        self.assertEqual((state['key'], state['rev']), (self.key(), 1))
+        inspected = subprocess.run([str(HGS), 'inspect', self.name], env=self.env, text=True, capture_output=True, timeout=10)
+        self.assertEqual(inspected.returncode, 0, inspected.stderr)
+        inspection = json.loads(inspected.stdout)
+        def steady_value(value):
+            return {key: {k: v for k, v in value[key].items() if k != 'sampled_at'} for key in ('processes', 'process_work')}
+        self.assertEqual(set(state['value']), {'processes', 'process_work'})
+        self.assertEqual(steady_value(state['value']), steady_value(inspection))
+        # A recorded background job in the binding is read again and sent.
+        self.record['shell_jobs'] = {'job-1': dict(id='job-1', status='running', background=True, observed=True,
+                                                   run_id=self.run_id, command='sleep 600', started_at=time.time(), source='hooks')}
+        self.record.update(activity='idle', phase='idle', last_event_at=time.time())
+        self.write_record()
+        changed = stream.next(lambda f: f['t'] == 'state' and f['topic'] == 'processes' and f['rev'] == 2, timeout=10)
+        inspected = json.loads(subprocess.run([str(HGS), 'inspect', self.name], env=self.env, text=True,
+                                              capture_output=True, timeout=10).stdout)
+        self.assertEqual(steady_value(changed['value']), steady_value(inspected))
+        stream.send(op='unsubscribe', topic='processes', session=self.session())
+        stream.send(op='ping', id='unsubscribed')
+        stream.next(lambda f: f['t'] == 'pong' and f['id'] == 'unsubscribed')
+        self.record['shell_jobs'] = {}
+        self.write_record()
+        stream.quiet(lambda f: f['t'] == 'state' and f['topic'] == 'processes', 3)
+        self.assertEqual(stream.close(), 0)
+
     def test_resume_after_a_cursor_and_gap_below_retention(self):
         rows = [self.journal('Stop', detail=f'reply {n}') for n in range(5)]
         stream, *_ = self.start()
@@ -325,7 +355,7 @@ class WatchStream(unittest.TestCase):
         error = stream.next(lambda f: f['t'] == 'error', timeout=30)
         self.assertEqual((error['code'], error['key'], error['fatal']), ('too_many_subscriptions', 'name:sh/limit-16', False))
         self.assertEqual(sum(1 for f in stream.seen if f['t'] == 'events'), 16)
-        stream.send(op='subscribe', topic='processes', session=self.session())
+        stream.send(op='subscribe', topic='tasks', project='orchard')
         self.assertEqual(stream.next(lambda f: f['t'] == 'error')['code'], 'unsupported_topic')
         stream.process.stdin.write('{"op":"launch"}\nnot json\n')
         stream.process.stdin.flush()

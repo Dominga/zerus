@@ -75,26 +75,27 @@ Commit `feat(client): the archived Activity read`.
 
 - **The store** (`client/src/store/archiveActivity.ts`), a port of Qt's merge in `acceptInspection` (3639-3660):
   - `createArchiveActivity(deps)`, where `deps` is the bridge call, a clock or timer seam, and whether the Sessions page shows. The app instance follows the selected row: active only for an `archive:` key whose loaded archived row has an archive id.
-  - It exposes the surface `ActivityView` reads: `target`, `events`, `summary`, `loaded`, `loadingOlder` (always false), `olderDone` (always true), `ended` (false), `loadOlder` (no-op), `error` and `readOnly: true`.
+  - It implements `ActivitySource`, an exported interface in `client/src/store/activitySource.ts` that both this store and the live `activity` store implement: `target`, `events`, `summary`, `loaded`, `loadingOlder` (always false here), `olderDone` (always true here), `ended` (false here), `loadOlder` (a no-op here), `error` and `readOnly` (true here). Phase 4 extends only the live store's side. A source that lacks something renders nothing for it.
   - On a new selection it resets the events, summary and cursor and the error, and reads with `after = 0`.
-  - It polls every 2500 ms while the row stays selected and the page shows, with no overlapping read.
+  - It polls every 2500 ms only while the row stays selected and the page shows, with no overlapping read. A "busy" answer (`ARCHIVED_ACTIVITY_BUSY`) is ignored, as Qt's `return false`.
   - A reply for another key than the selected one is dropped.
-  - Leaving the row drops everything.
+  - Leaving the row, or closing the window, stops the timer and drops everything.
+  - `ARCHIVED_EVENTS_MAX = 5000` caps the events, dropping the oldest first. It guards against a runaway poll and has no Qt counterpart: Qt keeps what it loaded, and an archived session does not grow. One test pins the drop.
   - Replies merge as Qt does:
     - `replace_events` replaces the events;
     - otherwise new events with a seq above the cursor are appended in seq order;
     - a conversation change (not in `cleared_conversations`) resets the events to the reply's and the cursor to 0.
   - A failure sets `error` to "Could not refresh activity: {detail}"; the next good reply clears it.
-- **`ActivityView`** (`Activity.tsx`):
+- **`ActivityView`** (`Activity.tsx`), with the read-only branching kept as small as possible:
   - It takes an optional `source` with that surface, defaulting to the live `activity` store.
   - With `source.readOnly`, it shows the transcript instead of the "This conversation is archived." notice, and it shows no live tool line, no attention or error banners for live states, no offline notice and no "left the list" notice.
   - It shows `source.error` as a notice when set.
   - The older-page scroll trigger never fires for it (`olderDone` is true).
-- **`SessionDetail.tsx`:** for a selected archived row, pass the archived store as the source. Export `activityReadOnly(key)` (true for `archive:` keys) for the owner session's composer.
+- **`SessionDetail.tsx`:** for a selected archived row, pass the archived store as the source. Export `activityReadOnly(key)` (true for `archive:` keys) for the owner session's composer, either from here or from the store. Archived rows show no Terminal tab: Qt has none for them, and `terminal_status` already answers unsupported.
 - **Tests:**
   - the store: reset on selection, the poll cadence and no overlap, the merge rules, a conversation change, a dropped late reply, the error text and its clearing, and nothing kept after leaving;
   - `ActivityView` with a fake read-only source: it renders items, and shows none of the live indicators;
-  - `SessionDetail` picks the archived source only for `archive:` keys.
+  - `SessionDetail` picks the archived source only for `archive:` keys and shows no Terminal tab for them.
 - **README** (`client/README.md`, the "Archive" section): one paragraph on archived Activity.
 - **Smoke:** after the archive inspect step, the actions smoke logs `actions-smoke archive-activity: done (N events)` once the archived row's Activity shows the fake's events. The README config gives the fake's `inspect` entry for that row one or two synthetic events.
 

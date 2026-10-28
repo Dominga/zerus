@@ -22,11 +22,12 @@ impl Fake {
         std::fs::create_dir_all(&dir).unwrap();
         let hgs = dir.join("hgs");
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-        std::fs::copy(manifest.join("tests/support/fake_hgs_actions.py"), &hgs).unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&hgs, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        // A symlink to the checked-in (executable) script, never a copy: writing
+        // a new executable while another test thread forks lets the child
+        // inherit the write fd, and exec then fails with ETXTBSY. The fake finds
+        // its config and log beside the link, not beside the target.
+        std::os::unix::fs::symlink(manifest.join("tests/support/fake_hgs_actions.py"), &hgs)
+            .unwrap();
         std::fs::write(dir.join("config.json"), config).unwrap();
         Self { dir, hgs }
     }

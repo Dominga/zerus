@@ -76,6 +76,45 @@ impl Actions {
     }
 }
 
+/// The refusal of a replay that would reach the real CLI.
+const REPLAY_NEEDS_HGS: &str = "Actions in replay mode need ZERUS_CLIENT_HGS.";
+
+fn set(value: Option<&str>) -> bool {
+    value.is_some_and(|v| !v.is_empty())
+}
+
+/// Whether actions may run: in replay mode (`ZERUS_CLIENT_REPLAY` set) only
+/// with an explicit `ZERUS_CLIENT_HGS`, so a replay never drives the real CLI.
+pub fn actions_allowed(replay: Option<&str>, hgs: Option<&str>) -> bool {
+    !set(replay) || set(hgs)
+}
+
+/// Whether the actions smoke may start: replay mode, an explicit fake `hgs`
+/// and a measurement run (`ZERUS_CLIENT_PERF`, which also allows `exit_app`).
+pub fn smoke_allowed(replay: Option<&str>, hgs: Option<&str>, perf: Option<&str>) -> bool {
+    set(replay) && set(hgs) && set(perf)
+}
+
+fn env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+fn blocked() -> bool {
+    !actions_allowed(
+        env("ZERUS_CLIENT_REPLAY").as_deref(),
+        env("ZERUS_CLIENT_HGS").as_deref(),
+    )
+}
+
+/// For `perf_config`: whether the environment allows the actions smoke.
+pub fn smoke_env_allowed() -> bool {
+    smoke_allowed(
+        env("ZERUS_CLIENT_REPLAY").as_deref(),
+        env("ZERUS_CLIENT_HGS").as_deref(),
+        env("ZERUS_CLIENT_PERF").as_deref(),
+    )
+}
+
 fn failed(detail: impl Into<String>) -> Outcome {
     Outcome::Failed {
         detail: detail.into(),
@@ -89,6 +128,9 @@ pub async fn run_action(
     target: Target,
     action: Action,
 ) -> Result<Outcome, String> {
+    if blocked() {
+        return Ok(failed(REPLAY_NEEDS_HGS));
+    }
     let Some(_claim) = state
         .flight
         .claim((target.computer.clone(), target.name.clone()))
@@ -131,6 +173,9 @@ pub async fn run_action(
 /// the store keeps at most one inspect in flight per session.
 #[tauri::command]
 pub async fn inspect_session(target: Target, archive_id: Option<String>) -> Option<Details> {
+    if blocked() {
+        return None;
+    }
     let inv = details_invocation(&target, archive_id.as_deref());
     let hgs = default_hgs();
     let exit = tauri::async_runtime::spawn_blocking(move || run(&hgs, &inv))
@@ -152,6 +197,25 @@ pub fn pending_read_marks(state: State<'_, Actions>) -> Vec<ReadMark> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_needs_an_explicit_hgs() {
+        assert!(actions_allowed(None, None));
+        assert!(actions_allowed(Some(""), None));
+        assert!(actions_allowed(None, Some("/x/hgs")));
+        assert!(!actions_allowed(Some("f.ndjson"), None));
+        assert!(!actions_allowed(Some("f.ndjson"), Some("")));
+        assert!(actions_allowed(Some("f.ndjson"), Some("/x/hgs")));
+    }
+
+    #[test]
+    fn the_smoke_needs_replay_hgs_and_perf() {
+        assert!(smoke_allowed(Some("f"), Some("h"), Some("smoke")));
+        assert!(!smoke_allowed(None, Some("h"), Some("smoke")));
+        assert!(!smoke_allowed(Some("f"), None, Some("smoke")));
+        assert!(!smoke_allowed(Some("f"), Some("h"), None));
+        assert!(!smoke_allowed(Some("f"), Some("h"), Some("")));
+    }
 
     #[test]
     fn one_action_per_session_at_a_time() {

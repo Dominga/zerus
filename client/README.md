@@ -81,7 +81,7 @@ Outcome rules:
 - A call is made once and never repeated. A timeout, a failed hand-over or an
   abnormal end is an unknown outcome: it is shown as a failure ("Request timed
   out. Check Terminal before retrying.", "Transfer failed. Check Terminal
-  before retrying.") and is never replayed. Unknown outcomes are never replayed.
+  before retrying."). Unknown outcomes are never replayed.
 - Stop succeeds only when the receipt echoes the request id, session name, run
   id and conversation id of the call (status `submitted`); anything else is
   "Invalid acknowledgement. Check Terminal before retrying."
@@ -110,17 +110,35 @@ entries are disabled with a reason.
 ### Actions smoke run
 
 `ZERUS_CLIENT_QUERY=actions-smoke=1` (hook in `src/ui/PerfHost.tsx`, beside the
-perf hooks) checks the actions end to end without the real `hgs`. Use a fake
-`hgs` (`core/tests/support/fake_hgs_actions.py` copied as `hgs`, with a
-`config.json` beside it, `{"reply":{"exit":0}}` (exit 0 with no output is a success for these writes);
-it logs each call to `log.ndjson`) as `ZERUS_CLIENT_HGS`, and the replay
-fixtures as the catalog. The hook selects `claude/sample-project/review`, runs
-pause, resume, rename (to `claude/sample-project/review-renamed`), archive and
-terminate once each through the same `perform` the menus use, logs each outcome
-to stderr (`zerus-client perf: actions-smoke ...`) and exits 0, or 1 when an
-outcome failed. `ZERUS_CLIENT_PERF` must be set to something other than `auto`
-(for example `smoke`), because `exit_app` is allowed only in a measurement run.
-Run it only with the headless environment above.
+perf hooks) checks the actions end to end without the real `hgs`. It starts only
+when the native side reports replay mode (`ZERUS_CLIENT_REPLAY`), an explicit
+`ZERUS_CLIENT_HGS` and `ZERUS_CLIENT_PERF` (any value but `auto`; `exit_app` is
+allowed only in a measurement run); otherwise it logs why and does nothing. In
+replay mode `run_action` and `inspect_session` refuse unless
+`ZERUS_CLIENT_HGS` is set ("Actions in replay mode need ZERUS_CLIENT_HGS."), so
+a replay never drives the real CLI.
+
+Put `core/tests/support/fake_hgs_actions.py` as `hgs` in a scratch folder with a
+`config.json` beside it containing `{"reply":{"exit":0}}` (exit 0 without
+output is a success for the write actions; `echo_interrupt` parses standard
+input and fails on writes that have none). The fake logs each call to
+`log.ndjson` beside it. Run it only with the headless environment:
+
+```sh
+S=$(mktemp -d); cp core/tests/support/fake_hgs_actions.py $S/hgs
+echo '{"reply":{"exit":0}}' > $S/config.json
+env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=1 \
+  WEBKIT_DISABLE_DMABUF_RENDERER=1 ZERUS_CLIENT_REPLAY=$PWD/fixtures/replay.ndjson \
+  ZERUS_CLIENT_HGS=$S/hgs ZERUS_CLIENT_QUERY=actions-smoke=1 ZERUS_CLIENT_PERF=smoke \
+  xvfb-run -a -s "-screen 0 1440x900x24" src-tauri/target/release/zerus-client
+cat $S/log.ndjson
+```
+
+The hook selects `claude/sample-project/review`, runs pause, resume, rename (to
+`claude/sample-project/review-renamed`), archive and terminate once each through
+the `perform` the menus use, logs each outcome to stderr
+(`zerus-client perf: actions-smoke ...`) and exits 0, or 1 when an outcome
+failed.
 
 ## Measurement run
 

@@ -97,7 +97,11 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     // ZERUS_CLIENT_QUERY opens a given state (`select=<session name>`) for
     // headless screenshots and scripted measurements, as the mockup's URL
     // parameters do; ZERUS_CLIENT_PERF=auto adds `perf=auto`.
-    let mut query: Vec<String> = std::env::var("ZERUS_CLIENT_QUERY").ok().filter(|q| !q.is_empty()).into_iter().collect();
+    let mut query: Vec<String> = std::env::var("ZERUS_CLIENT_QUERY")
+        .ok()
+        .filter(|q| !q.is_empty())
+        .into_iter()
+        .collect();
     if let Ok(mode) = std::env::var("ZERUS_CLIENT_PERF") {
         if !mode.is_empty() {
             query.push(format!("perf={mode}"));
@@ -118,7 +122,8 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     #[cfg(target_os = "macos")]
     if !keep_default_preference() {
         if let Some(mtm) = objc2::MainThreadMarker::new() {
-            builder = builder.with_webview_configuration(platform::macos::webview_configuration(mtm));
+            builder =
+                builder.with_webview_configuration(platform::macos::webview_configuration(mtm));
         }
     }
     builder.build()

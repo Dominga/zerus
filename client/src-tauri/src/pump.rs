@@ -43,7 +43,11 @@ impl Pump {
     /// Everything pending, waiting up to `park` while nothing is.
     pub fn take(&self, park: Duration) -> Batch {
         let inner = self.lock();
-        let (mut inner, _) = self.0 .1.wait_timeout_while(inner, park, |inner| !inner.dirty).unwrap_or_else(PoisonError::into_inner);
+        let (mut inner, _) = self
+            .0
+             .1
+            .wait_timeout_while(inner, park, |inner| !inner.dirty)
+            .unwrap_or_else(PoisonError::into_inner);
         inner.dirty = false;
         inner.coalescer.take()
     }
@@ -99,7 +103,11 @@ impl Rows {
 impl Mirror {
     fn observe(&mut self, change: &Change) {
         match change {
-            Change::Upsert { computer, key, row } => self.computers.entry(computer.0.clone()).or_default().upsert(key, row),
+            Change::Upsert { computer, key, row } => self
+                .computers
+                .entry(computer.0.clone())
+                .or_default()
+                .upsert(key, row),
             Change::Remove { computer, key, .. } => {
                 if let Some(rows) = self.computers.get_mut(&computer.0) {
                     if rows.rows.remove(key).is_some() {
@@ -115,7 +123,9 @@ impl Mirror {
                     entry.upsert(key, row);
                 }
             }
-            Change::Computer { computer, status } => self.computers.entry(computer.0.clone()).or_default().status = Some(status.clone()),
+            Change::Computer { computer, status } => {
+                self.computers.entry(computer.0.clone()).or_default().status = Some(*status)
+            }
             Change::Activity { .. } | Change::Processes { .. } => {}
         }
     }
@@ -124,10 +134,20 @@ impl Mirror {
         let mut out = Vec::new();
         for (computer, rows) in &self.computers {
             if let Some(status) = &rows.status {
-                out.push(Change::Computer { computer: ComputerId(computer.clone()), status: status.clone() });
+                out.push(Change::Computer {
+                    computer: ComputerId(computer.clone()),
+                    status: *status,
+                });
             }
-            let list = rows.order.iter().filter_map(|key| rows.rows.get(key).map(|row| (key.clone(), row.clone()))).collect();
-            out.push(Change::Replace { computer: ComputerId(computer.clone()), rows: list });
+            let list = rows
+                .order
+                .iter()
+                .filter_map(|key| rows.rows.get(key).map(|row| (key.clone(), row.clone())))
+                .collect();
+            out.push(Change::Replace {
+                computer: ComputerId(computer.clone()),
+                rows: list,
+            });
         }
         out
     }
@@ -139,11 +159,18 @@ mod tests {
     use std::time::Instant;
 
     fn row(name: &str) -> ViewRow {
-        ViewRow { name: name.into(), ..ViewRow::default() }
+        ViewRow {
+            name: name.into(),
+            ..ViewRow::default()
+        }
     }
 
     fn upsert(key: &str, name: &str) -> Change {
-        Change::Upsert { computer: ComputerId(String::new()), key: key.into(), row: row(name) }
+        Change::Upsert {
+            computer: ComputerId(String::new()),
+            key: key.into(),
+            row: row(name),
+        }
     }
 
     #[test]
@@ -179,22 +206,39 @@ mod tests {
         }
         let batch = pump.take(PARK);
         assert_eq!(batch.upserts.len(), 50);
-        assert!(batch.upserts.iter().all(|r| r.row.name.ends_with(&format!("{}", 4950 + r.key[4..].parse::<usize>().unwrap()))));
+        assert!(batch.upserts.iter().all(|r| r
+            .row
+            .name
+            .ends_with(&format!("{}", 4950 + r.key[4..].parse::<usize>().unwrap()))));
     }
 
     #[test]
     fn resend_queues_the_last_known_catalog() {
         let pump = Pump::default();
-        pump.push(Change::Replace { computer: ComputerId(String::new()), rows: vec![("run:a".into(), row("a")), ("run:b".into(), row("b"))] });
-        pump.push(Change::Remove { computer: ComputerId(String::new()), key: "run:a".into(), reason: Some("archived".into()) });
+        pump.push(Change::Replace {
+            computer: ComputerId(String::new()),
+            rows: vec![("run:a".into(), row("a")), ("run:b".into(), row("b"))],
+        });
+        pump.push(Change::Remove {
+            computer: ComputerId(String::new()),
+            key: "run:a".into(),
+            reason: Some("archived".into()),
+        });
         pump.push(upsert("run:c", "c"));
-        pump.push(Change::Computer { computer: ComputerId(String::new()), status: ComputerStatus::Live });
+        pump.push(Change::Computer {
+            computer: ComputerId(String::new()),
+            status: ComputerStatus::Live,
+        });
         let _ = pump.take(PARK);
 
         pump.resend();
         let batch = pump.take(PARK);
         assert_eq!(batch.replaces.len(), 1);
-        let keys: Vec<_> = batch.replaces[0].rows.iter().map(|r| r.key.as_str()).collect();
+        let keys: Vec<_> = batch.replaces[0]
+            .rows
+            .iter()
+            .map(|r| r.key.as_str())
+            .collect();
         assert_eq!(keys, ["run:b", "run:c"]);
         assert_eq!(batch.computers[0].status, "live");
     }

@@ -34,6 +34,7 @@ interface PerfConfig {
   representative?: boolean;
   preference?: string;
   display?: string | null;
+  actions_smoke?: boolean;
 }
 
 /** Resolves once `ready` holds; fails after `ms`. Timers, not frames: rAF stops while a window is hidden. */
@@ -280,8 +281,12 @@ async function autoRun(config: PerfConfig) {
 const SMOKE_SESSION = "claude/sample-project/review";
 const SMOKE_RENAMED = "claude/sample-project/review-renamed";
 
-async function actionsSmoke() {
+async function actionsSmoke(allowed: boolean) {
   const exit = (code: number) => invoke("exit_app", { code }).catch(() => {});
+  if (!allowed) {
+    log("actions-smoke not started: it needs ZERUS_CLIENT_REPLAY, ZERUS_CLIENT_HGS and ZERUS_CLIENT_PERF");
+    return;
+  }
   try {
     await until(() => orderedRows().some((s) => s.name === SMOKE_SESSION && s.view?.run_id), 30_000, "the replay session did not appear");
     const entry = (): RowOut => {
@@ -331,7 +336,7 @@ export function PerfHost() {
       const native = await invoke<PerfConfig>("perf_config").catch(() => undefined);
       if (native) setConfig({ ...native, mode: native.mode ?? urlMode });
     }
-    if (new URLSearchParams(location.search).get("actions-smoke") === "1" && inTauri()) void actionsSmoke();
+    if (new URLSearchParams(location.search).get("actions-smoke") === "1" && inTauri()) void actionsSmoke(!!config().actions_smoke);
     if (config().mode === "auto") {
       setOpen(true);
       void autoRun(config());

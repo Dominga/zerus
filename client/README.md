@@ -57,6 +57,71 @@ env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=
   sh -c 'RUSTUP_TOOLCHAIN=1.99.1 ZERUS_CLIENT_REPLAY=$PWD/fixtures/replay.ndjson npx tauri dev'
 ```
 
+## Actions
+
+The session menus and the Rename and Terminate dialogs run guarded actions
+through the `hgs` CLI (`core/src/actions.rs`, `src-tauri/src/actions.rs`),
+with Qt's enablement, confirmations and texts (`actions-ui.ts`). A peer's call
+is prefixed with `@alias` and uses the longer timeout. Every call is made with
+the child's own environment: the agent attribution (`HGS_SESSION`,
+`HGS_RUN_ID`) is never passed on.
+
+| Action | Arguments (`NAME` is the session name) | Standard input | Timeout here, peer |
+| --- | --- | --- | --- |
+| Stop (interrupt) | `interrupt NAME --json` | JSON: `request_id`, `expected_run_id`, `expected_conversation_id`, `expected_turn_started` | 15 s, 45 s |
+| Mark as read | `read NAME --json` | JSON: `run_id`, `conversation_id`, `reply_id`, `attention_signature` | 15 s, 35 s |
+| Pause | `pause NAME` | none | 45 s, 45 s |
+| Resume | `resume NAME -d` | none | 30 s, 30 s |
+| Rename | `rename NAME NEW [--archive ID]` | none | 5 s, 15 s |
+| Move to archive | `archive NAME` | none | 30 s, 45 s |
+| Terminate | `terminate NAME --expected-run-id RUN` | none | 45 s, 60 s |
+
+Outcome rules:
+
+- A call is made once and never repeated. A timeout, a failed hand-over or an
+  abnormal end is an unknown outcome: it is shown as a failure ("Request timed
+  out. Check Terminal before retrying.", "Transfer failed. Check Terminal
+  before retrying.") and is never replayed. Unknown outcomes are never replayed.
+- Stop succeeds only when the receipt echoes the request id, session name, run
+  id and conversation id of the call (status `submitted`); anything else is
+  "Invalid acknowledgement. Check Terminal before retrying."
+- Pause, Resume and Rename succeed on exit 0. Move to archive and Terminate also
+  read the single worktree report line on standard error: a removed worktree
+  gives an information notice, a kept or unconfirmed one a sticky warning with
+  its reason. Otherwise a failure shows the trimmed standard error.
+- One action per session at a time, for every kind. A second request while one
+  runs (or one for a row whose run id changed) is a silent no-op, answered
+  `busy` by the Rust side; a changed row shows "This session changed. Open its
+  actions again."
+- Details (allowed actions and their reasons, `auth_required`) come from one
+  read-only `inspect` per selected session, refetched when its run, conversation
+  or state changes.
+- Mark as read applies at once. The mark is saved before the call in
+  `read-marks.json` in the app data directory (`app_data_dir`, e.g.
+  `~/.local/share/<bundle id>/` on Linux) so a restart keeps it, and is dropped
+  once the row shows the host has settled it. While a mark is pending and a
+  batch shows its row unread again for the same reply and attention signature,
+  the call is retried quietly, at most once per 5 s per session.
+  A host without shared read state keeps the entry disabled.
+
+Forgetting, restoring, attention marks and sending arrive in later phases; their
+entries are disabled with a reason.
+
+### Actions smoke run
+
+`ZERUS_CLIENT_QUERY=actions-smoke=1` (hook in `src/ui/PerfHost.tsx`, beside the
+perf hooks) checks the actions end to end without the real `hgs`. Use a fake
+`hgs` (`core/tests/support/fake_hgs_actions.py` copied as `hgs`, with a
+`config.json` beside it, `{"reply":{"exit":0}}` (exit 0 with no output is a success for these writes);
+it logs each call to `log.ndjson`) as `ZERUS_CLIENT_HGS`, and the replay
+fixtures as the catalog. The hook selects `claude/sample-project/review`, runs
+pause, resume, rename (to `claude/sample-project/review-renamed`), archive and
+terminate once each through the same `perform` the menus use, logs each outcome
+to stderr (`zerus-client perf: actions-smoke ...`) and exits 0, or 1 when an
+outcome failed. `ZERUS_CLIENT_PERF` must be set to something other than `auto`
+(for example `smoke`), because `exit_app` is allowed only in a measurement run.
+Run it only with the headless environment above.
+
 ## Measurement run
 
 `ZERUS_CLIENT_PERF=auto` runs the Diagnostics scenarios unattended (`src/perf`),

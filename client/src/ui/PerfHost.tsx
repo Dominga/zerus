@@ -4,6 +4,8 @@ import { listRows } from "./sessions/model";
 import { orderedRows } from "../store/catalog";
 import { selectedKey, setSelectedKey } from "../store/ui";
 import { activity } from "../store/session";
+import { perform } from "../store/actions";
+import type { Action, RowOut } from "../types";
 import { inTauri, metrics, pumpStats } from "../bridge";
 import { restoreSettings, setSetting } from "../store/settings";
 import type { ScenarioResult } from "../perf/scenarios";
@@ -268,6 +270,45 @@ async function autoRun(config: PerfConfig) {
   }
 }
 
+// `?actions-smoke=1` (ZERUS_CLIENT_QUERY=actions-smoke=1, with ZERUS_CLIENT_PERF
+// set to any value but auto so that exit_app is allowed) is the end-to-end check
+// of the guarded actions: with ZERUS_CLIENT_REPLAY supplying the catalog and
+// ZERUS_CLIENT_HGS a fake hgs, it runs pause, resume, rename, archive and
+// terminate once each on the replay session through `perform`, then exits 0
+// (1 when an outcome failed). The Terminate dialog's confirmation is the click
+// that calls `perform`, so the check calls it directly.
+const SMOKE_SESSION = "claude/sample-project/review";
+const SMOKE_RENAMED = "claude/sample-project/review-renamed";
+
+async function actionsSmoke() {
+  const exit = (code: number) => invoke("exit_app", { code }).catch(() => {});
+  try {
+    await until(() => orderedRows().some((s) => s.name === SMOKE_SESSION && s.view?.run_id), 30_000, "the replay session did not appear");
+    const entry = (): RowOut => {
+      const s = orderedRows().find((r) => r.name === SMOKE_SESSION);
+      if (!s?.view) throw new Error("the replay session is gone");
+      return { computer: s.computer, key: s.catalogKey, row: s.view };
+    };
+    const steps: Action[] = [
+      { kind: "pause" },
+      { kind: "resume" },
+      { kind: "rename", new_name: SMOKE_RENAMED, archive_id: null },
+      { kind: "archive" },
+      { kind: "terminate" },
+    ];
+    let bad = 0;
+    for (const action of steps) {
+      const out = await perform(entry(), action);
+      log(`actions-smoke ${action.kind}: ${out.outcome}${out.outcome === "failed" ? ` (${out.detail})` : ""}`);
+      if (out.outcome === "failed") bad++;
+    }
+    await exit(bad ? 1 : 0);
+  } catch (error) {
+    log(`actions-smoke failed: ${String(error)}`);
+    await exit(1);
+  }
+}
+
 const onScenarioStart = (id: string, index: number, total: number) => log(`scenario ${index + 1}/${total} ${id} start`);
 const onScenarioEnd = (id: string, index: number, total: number, ms: number, result: ScenarioResult) => {
   finished.push(result);
@@ -290,6 +331,7 @@ export function PerfHost() {
       const native = await invoke<PerfConfig>("perf_config").catch(() => undefined);
       if (native) setConfig({ ...native, mode: native.mode ?? urlMode });
     }
+    if (new URLSearchParams(location.search).get("actions-smoke") === "1" && inTauri()) void actionsSmoke();
     if (config().mode === "auto") {
       setOpen(true);
       void autoRun(config());

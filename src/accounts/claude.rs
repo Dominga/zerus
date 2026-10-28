@@ -106,7 +106,7 @@ pub(super) fn trust_folder(file: &Path, folder: &str) -> Result<bool> {
     if !settings.get("projects").is_some_and(Value::is_object) {
         settings["projects"] = json!({});
     }
-    let entry = &mut settings["projects"][folder];
+    let entry = &mut settings["projects"][project_key(folder, cfg!(windows))];
     if !entry.is_object() {
         *entry = json!({});
     }
@@ -116,6 +116,13 @@ pub(super) fn trust_folder(file: &Path, folder: &str) -> Result<bool> {
     entry["hasTrustDialogAccepted"] = json!(true);
     super::claude_settings::write(file, &settings)?;
     Ok(true)
+}
+
+/// N19: the key Claude files a project under. On Windows it writes the folder
+/// with forward slashes (`D:/work/app`), so a backslash key is a different
+/// project whose answer Claude never reads.
+pub(super) fn project_key(folder: &str, windows: bool) -> String {
+    if windows { folder.replace('\\', "/") } else { folder.to_owned() }
 }
 
 pub(super) fn finish_login(home: &Path) -> Result<()> {

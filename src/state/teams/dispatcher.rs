@@ -1152,15 +1152,13 @@ pub(crate) fn hand_off_text_with(
         // N3: a member's own snapshot wins; an old member keeps today's live text.
         let snapshot = team.member(&attempt.member).and_then(|member| member.prompt_snapshot.clone());
         let (ordered, has_task) = if let Some(snapshot) = snapshot {
-            let has_task = snapshot.prompt_order.iter().any(|key| key == "task")
-                && !snapshot.prompt_off.iter().any(|key| key == "task");
+            let has_task = super::catalog::sends_task(&snapshot.prompt_order, &snapshot.prompt_off, &snapshot.task_template);
             (super::catalog::prompt_order_text_snapshot(&snapshot, prompt, Some(task)), has_task)
         } else {
             super::catalog::load().ok().and_then(|catalog| {
                 let role_name = team.role_of(&attempt.member);
                 let role = catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name)?;
-                let has_task = role.prompt_order.iter().any(|key| key == "task")
-                    && !role.prompt_off.iter().any(|key| key == "task");
+                let has_task = super::catalog::sends_task(&role.prompt_order, &role.prompt_off, &role.task_template);
                 Some((super::catalog::prompt_order_text(role, prompt, Some(task), ""), has_task))
             }).unwrap_or((None, false))
         };
@@ -4476,6 +4474,34 @@ mod tests {
         t.members.iter_mut().find(|member| member.id == "dev").unwrap().prompt_snapshot = None;
         let text = hand_off_text(&t, &task, &attempt, "", "");
         assert!(!text.contains("SNAPSHOT EXTRA"), "{text}");
+    }
+
+    #[test]
+    fn a_task_block_without_a_template_keeps_the_standard_task_text() {
+        // C1: the owner moved a block, so the order names "task", but the role's
+        // template was never typed (or a U25 import had none).
+        let mut t = team();
+        t.tasks.iter_mut().find(|task| task.id == 1).unwrap().description = "Build the cards API".into();
+        t.tasks.iter_mut().find(|task| task.id == 1).unwrap().criteria = vec!["Paged list".into()];
+        let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.prompt = "Backend prompt".into();
+        dev.prompt_snapshot = Some(crate::state::teams::model::PromptSnapshot {
+            prompt_order: vec!["role".into(), "task".into(), "protocol".into()],
+            task_template: "  ".into(),
+            ..Default::default()
+        });
+        let task = t.task(1).unwrap().clone();
+        let attempt = Attempt { n: 1, id: "a1".into(), member: "dev".into(), ..Default::default() };
+        let text = hand_off_text(&t, &task, &attempt, "", "");
+        assert!(text.contains("\nTask #1: API\nBuild the cards API\n"), "{text}");
+        assert!(text.contains("Acceptance criteria:\n- Paged list\n"), "{text}");
+        assert!(!text.contains("Task:\n"), "no empty task block: {text}");
+        // A typed template still replaces the standard block, once.
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().prompt_snapshot.as_mut().unwrap().task_template =
+            "Do #{id} {title}: {criteria}".into();
+        let text = hand_off_text(&t, &task, &attempt, "", "");
+        assert!(text.contains("Task:\nDo #1 API: Paged list\n"), "{text}");
+        assert!(!text.contains("Task #1: API"), "{text}");
     }
 
     #[test]

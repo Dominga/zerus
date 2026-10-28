@@ -177,25 +177,53 @@ fn close_drafts(composers: Option<&composer::Composers>, flush_store: impl FnOnc
 }
 
 /// SIGTERM, SIGINT or SIGHUP (`signals.rs`, Qt's `TerminationSignals`):
-/// the app quits through the one exit hook (`app.exit` ends in
-/// `RunEvent::Exit`). The hook also runs here first, so drafts reach the
-/// disk even if the event loop is stuck; running it twice is harmless.
-/// Should the process not end, it ends five seconds after the signal; a
-/// second signal ends it at once (SA_RESETHAND).
+/// the app quits as Qt's posted quit does. `app.exit` ends in
+/// `RunEvent::Exit`, where the one exit hook runs once, on the main thread.
+/// Should the process not end within five seconds, the fallback ends it.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn exit_on_signals(app: AppHandle) {
     let installed = signals::install(move |_signal| {
-        std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            std::process::exit(0);
+        let stalled = app.clone();
+        std::thread::spawn(move || {
+            force_exit_after(
+                std::time::Duration::from_secs(5),
+                || flush_drafts(&stalled),
+                || std::process::exit(0),
+            )
         });
-        #[cfg(feature = "live")]
-        exit(&app);
         app.exit(0);
     });
     if let Err(error) = installed {
         eprintln!("zerus-client: termination signals keep their default action: {error}");
     }
+}
+
+/// The fallback of a quit that stalls (the event loop is stuck, so the exit
+/// hook never runs): after `grace`, the draft store writes what is queued,
+/// then the process ends. In this order, so the owner's typed drafts reach
+/// the disk first. Only the store is flushed here, since it is thread-safe
+/// and a second flush is harmless; voice and anything else bound to the
+/// main thread is left alone. A flush that hangs keeps the process up, and
+/// a second signal still ends it (SA_RESETHAND), as in Qt.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn force_exit_after(grace: std::time::Duration, flush_drafts: impl FnOnce(), end: impl FnOnce()) {
+    std::thread::sleep(grace);
+    flush_drafts();
+    end();
+}
+
+/// Writes every queued draft save of the app's one store, if it has one.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn flush_drafts(app: &AppHandle) {
+    #[cfg(feature = "live")]
+    {
+        use tauri::Manager;
+        if let Some(drafts) = app.try_state::<Drafts>() {
+            drafts.0.flush();
+        }
+    }
+    #[cfg(not(feature = "live"))]
+    let _ = app;
 }
 
 /// The commands the frontend may call. The session actions need the core's
@@ -449,6 +477,29 @@ mod tests {
         );
         assert!(!stdout.contains("survived the second"), "{stdout}");
         assert_eq!(output.status.signal(), Some(libc::SIGTERM));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_stalled_quit_writes_the_drafts_before_the_process_ends() {
+        let root = dir("stalled-quit");
+        let store = drafts(&root);
+        // A save still queued behind a busy writer when the fallback fires.
+        let release = composer::tests::hold(&store);
+        let mut typed = zerus_client_core::drafts::StoredDraft::default();
+        typed.draft.text = "typed before the signal".into();
+        store.save(KEY, typed, |_| {});
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            let _ = release.send(());
+        });
+        let mut at_exit = None;
+        force_exit_after(
+            Duration::ZERO,
+            || store.flush(),
+            || at_exit = Some(read_draft(&root.join("drafts"), KEY).draft.draft.text),
+        );
+        assert_eq!(at_exit.as_deref(), Some("typed before the signal"));
     }
 
     #[test]

@@ -2138,7 +2138,7 @@ impl Pump { pub fn poke(&self); }
 - A refused rename marks the moved draft under its old key and reloads the new key with no message (Qt). A newer composer of the old key is never replaced, and a successful rename takes the old key out of the eviction order.
 - `status_error` follows Qt's `ownError`: an uncertain mark alone is a caution.
 - The file picker is modal to the main window; a pasted body is copied up to 10 MiB and one byte only.
-- The termination signals use the Mac switch plan's `signals.rs`; `signal-hook` is not used.
+- The termination signals use the Mac switch plan's `signals.rs`; `signal-hook` is not used. A signal only quits the app (`app.exit(0)`): the exit hook runs once, on the main thread, and a 5 s fallback writes the draft store and ends the process (fix round 1b).
 
 `AttachmentView.path` is `draft/{handle}/{list}/{index}`: the composer, the revision of its attachment list, and the file's place. Task 3b serves it through the `zerus-file` scheme. No digest is computed per view: a new list (an attach, remove, undo, load or send) gets new paths, so an old URL never shows another file.
 
@@ -3308,26 +3308,35 @@ Leave the `media` lines out if M1c is not on main; M1c's rebase brings them.
 
 ```rust
 /// SIGTERM, SIGINT or SIGHUP (`signals.rs`, Qt's `TerminationSignals`):
-/// the app quits through the one exit hook (`app.exit` ends in
-/// `RunEvent::Exit`). The hook also runs here first, so drafts reach the
-/// disk even if the event loop is stuck; running it twice is harmless.
-/// Should the process not end, it ends five seconds after the signal; a
-/// second signal ends it at once (SA_RESETHAND).
+/// the app quits as Qt's posted quit does. `app.exit` ends in
+/// `RunEvent::Exit`, where the one exit hook runs once, on the main thread.
+/// Should the process not end within five seconds, the fallback ends it.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn exit_on_signals(app: AppHandle) {
     let installed = signals::install(move |_signal| {
-        std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            std::process::exit(0);
+        let stalled = app.clone();
+        std::thread::spawn(move || {
+            force_exit_after(std::time::Duration::from_secs(5), || flush_drafts(&stalled), || std::process::exit(0))
         });
-        #[cfg(feature = "live")]
-        exit(&app);
         app.exit(0);
     });
     if let Err(error) = installed {
         eprintln!("zerus-client: termination signals keep their default action: {error}");
     }
 }
+
+/// The fallback of a quit that stalls (the exit hook never runs): after
+/// `grace`, the draft store writes what is queued, then the process ends.
+/// Only the store is flushed here (thread-safe, idempotent); voice and
+/// anything else bound to the main thread is left alone. A flush that hangs
+/// keeps the process up, and a second signal still ends it (SA_RESETHAND).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn force_exit_after(grace: std::time::Duration, flush_drafts: impl FnOnce(), end: impl FnOnce()) {
+    std::thread::sleep(grace);
+    flush_drafts();
+    end();
+}
+// flush_drafts(app): `app.try_state::<Drafts>()` then `drafts.0.flush()` (live builds).
 ```
 
 The Cargo additions change `client/src-tauri/Cargo.lock`: run `cargo +1.99.1 check --manifest-path src-tauri/Cargo.toml` once without `--locked` and commit the lock.

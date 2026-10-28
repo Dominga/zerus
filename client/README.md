@@ -285,6 +285,176 @@ python3 -c 'import collections, json, sys; print(collections.Counter(" ".join(js
 
 The screenshots stay in `$S`; they are never committed.
 
+## Projects in the Sessions list
+
+The Sessions list groups sessions by the shared project organization, as the
+Qt GUI does, and its menus edit that organization (plan:
+`docs/superpowers/plans/2026-10-28-tauri-client-organization.md`).
+
+Data path:
+
+- The source is this computer's `organization` topic (`core/src/organization.rs`);
+  a CLI without the topic is polled with `hgs swarm get` every 5 s by the core,
+  with the same states. Only this computer is followed: the catalog is shared.
+- The organization hub (`src-tauri/src/organization.rs`) feeds each state to the
+  write controller (`core/src/swarm/sync.rs`, a port of `SwarmController`) and
+  hands the presented organization to the pump's grouping
+  (`core/src/swarm/grouping.rs`).
+- The pump puts `Batch.groups` (each row's project and rank, only for rows
+  whose project or rank changed) and `Batch.grouping` (the headers and whether
+  edits can run, when they changed) on its batches, and strips
+  `Batch.organizations`: the organization itself never reaches the webview.
+- `src/store/organization.ts` keeps the assignments and headers, and
+  `src/ui/sessions/model.ts` groups rows by their ids and assignments only, so a
+  status update never regroups. The header counts are computed there, beside the
+  webview's state and machine filters.
+
+Qt's grouping rules (`SessionOrganization.cpp`, `SessionsWindowRows.cpp`):
+
+- Projects follow the shared `project_order`. Members are
+  `organization.projects[].sessions[]`, keyed `<host>\n<session name>`, where the
+  host is this computer's host name or the peer's alias (the row's `machine`). A
+  session listed by two projects belongs to the first.
+- A row no project lists belongs to the default project: this device's choice
+  when it is listed, else the catalog's `default_project` when it is listed, else
+  the first project, else the Inbox (`ungrouped`).
+- With one project the list shows no header and nothing collapses. A project
+  without visible members is hidden ("Hide projects without active sessions",
+  on by default). A header's counts cover members the filters hide; muted
+  members never count as attention or unread. Its colour is the project's
+  `color`, else its palette slot.
+
+This device's layout (collapsed projects, the order inside each project and the
+default project) stays local, as in Qt. It lives in `organization-layout.json`
+in the app data directory, remembers at most 100,000 members and is saved at
+most once a second and as the app quits. Pending edits live beside it in
+`organization-draft.json`, written through a temporary file and a rename
+whenever they change, before their apply, and removed once they settle. A
+replay keeps its own `organization-layout-replay.json` and
+`organization-draft-replay.json`, and removes a leftover replay draft at start.
+
+Edit commands (one `swarm apply` each, answered `done` with the conflicts it
+recorded, `kept` with Qt's status text, or `refused` with the reason):
+
+| Command | Menu entry |
+| --- | --- |
+| `move_to_project(members, project, before)` | Move to project, a drop |
+| `create_project(name, members)` | New project… (in the Move to project dialog) |
+| `rename_project(project, name)` | Rename project… |
+| `move_project(project, before)` | Move project up, Move project down |
+| `sort_project(project)` | Sort sessions by name |
+| `delete_project(project, destination)` | Delete project… |
+| `set_project_collapsed(project, collapsed)` | a header click, Collapse project, Expand project (layout only, no `hgs`) |
+
+`move_to_project` takes a set of members, `<host>\n<session name>` from the
+row's own machine (`memberOf`): every member goes into the project as one
+`swarm apply` from one snapshot. The session menu passes one member; the batch
+Move to project (`zerus-5wmh.20`) passes the selection. `before` places them in
+this device's order only. Sort sessions by name makes every listed row an
+explicit member; when they all are already, it changes only the layout and runs
+no `hgs`.
+
+Apply rules (`SwarmController.cpp`, ported in `core/src/swarm/sync.rs`):
+
+- `hgs swarm apply` runs on this computer only, without `@host`, with
+  `{base, desired, versions}` as compact JSON on standard input and a 10 s
+  timeout; one runs at a time. Edits are sent 120 ms after the last one.
+- Base and versions are the state the user saw, from one snapshot. A state is
+  not adopted while edits are pending or an apply runs, and after an
+  acknowledged write a state that does not show it yet is held back for 10 s.
+  Only the fields an apply wrote (`written`) advance their versions, so another
+  writer's change surfaces as a conflict, never as an overwrite.
+- Nothing is sent before the first state. A catalog with `initialized: false`
+  keeps the entries disabled ("Project sync is not set up on this computer yet.
+  Start Zerus here once to import its projects."); this client never runs
+  `swarm initialize`.
+- A failed or timed-out apply keeps its edits: the list keeps showing them, the
+  answer and the status line say "Project sync unavailable: <error>" (or "Project
+  sync needs an updated HGS installation."), and the next tick sends one apply
+  with the same base, desired state and versions. The tick is 5 s after the
+  failure or the topic's next state, whichever comes first. Edits made meanwhile
+  ride on it.
+- After a restart the saved draft is shown at once and sent once after the first
+  state, from its saved base and versions, so a catalog that changed meanwhile
+  gives a conflict. A draft that cannot be used is moved aside, never applied,
+  and the list says why until the first state.
+- The status line keeps Qt's texts and reaches the Projects screen.
+- In a replay, edits need `ZERUS_CLIENT_HGS` ("Actions in replay mode need
+  ZERUS_CLIENT_HGS."); the browser replay refuses them ("Project changes need
+  the desktop app.").
+
+Deviations from Qt (the plan's Decisions):
+
+1. The layout lives in `organization-layout.json`, not in QSettings
+   (`workspace/organization`).
+2. Sort sessions by name folds case, then compares as written, then by member;
+   Qt uses `localeAwareCompare`.
+3. No `swarm initialize`: a computer without the Qt GUI's import keeps edits
+   disabled.
+4. Edits made before the first ready catalog are refused, not queued.
+5. Renames made while the client was closed are not followed yet (Qt follows
+   them by persisted run tokens).
+
+### Organization smoke run
+
+`ZERUS_CLIENT_QUERY=organization-smoke=1` (hook in `src/ui/PerfHost.tsx`, with
+the actions smoke's environment and guard) waits until the replay's organization
+is ready and lists `claude/sample-project/review`, then runs one edit of each
+menu through the store the menus use: Move to project (`p-aurora`), New project
+("Smoke project", with the session), Rename project (`p-docs-site`), Sort
+sessions by name (`p-sample-project`), Move project (`p-orders-api` before
+`p-sample-project`) and Delete project (`p-docs-site` into the Inbox). It logs
+`organization-smoke <step>: <outcome>` and exits 0 when every outcome is `done`.
+The fake `hgs` answers `swarm get` and `swarm apply` with
+`fixtures/replay-organization.json`, so each step's project is listed again
+after every apply. The sort is layout only, so the log holds five `swarm apply`
+calls and no `swarm get`, each from the fixture's organization (in its shared
+form) and versions, and the layout file holds the sorted project. The screens
+hub's account warm-up (`account ls`) reaches the fake too, which refuses it, so
+the check counts only the `swarm` calls. `XDG_DATA_HOME` keeps the app data
+directory in the scratch folder:
+
+```sh
+S=$(mktemp -d); cp core/tests/support/fake_hgs_swarm.py $S/hgs; chmod +x $S/hgs
+python3 -c 'import json, sys; o = json.load(open(sys.argv[1])); json.dump({"get": [{"stdout": o}], "apply": [{"stdout": o}]}, open(sys.argv[2], "w"))' \
+  fixtures/replay-organization.json $S/config.json
+env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=1 \
+  WEBKIT_DISABLE_DMABUF_RENDERER=1 XDG_DATA_HOME=$S/data \
+  ZERUS_CLIENT_REPLAY="$PWD/fixtures/replay.ndjson:mac=$PWD/fixtures/replay-mac.ndjson" \
+  ZERUS_CLIENT_HGS=$S/hgs ZERUS_CLIENT_QUERY=organization-smoke=1 ZERUS_CLIENT_PERF=smoke \
+  xvfb-run -a -s "-screen 0 1440x900x24" src-tauri/target/release/zerus-client 2> $S/app.log
+echo "exit $?"; grep organization-smoke $S/app.log
+python3 - "$S" fixtures/replay-organization.json <<'EOF'
+import json, sys
+S, fixture = sys.argv[1], json.load(open(sys.argv[2]))
+calls = [c for c in map(json.loads, open(f"{S}/log.ndjson")) if c["argv"][:1] == ["swarm"]]
+assert [c["argv"] for c in calls] == [["swarm", "apply"]] * 5, [c["argv"] for c in calls]
+base = dict(fixture["organization"], session_assignments_explicit=True)
+for call in calls:
+    sent = json.loads(call["stdin"])
+    assert sent["base"] == base and sent["versions"] == fixture["versions"]
+layout = json.load(open(f"{S}/data/dev.zerus.next/organization-layout-replay.json"))
+members = next(p for p in fixture["organization"]["projects"] if p["id"] == "p-sample-project")["sessions"]
+title = lambda member: member.rsplit("/", 1)[-1]
+assert layout["order"]["p-sample-project"] == sorted(members, key=lambda m: (title(m).casefold(), title(m), m))
+print("5 swarm apply calls from the fixture's base and versions; p-sample-project sorted in the layout")
+EOF
+```
+
+### Organization measurement
+
+`src/store/organization.perf.test.ts` measures 20,000 rows: one replace into a
+catalog (phase 2's reconcile), then 20,000 assignments in 50 projects with the
+grouped members and list rows, then 1,000 status upserts, which must not group
+the members again. It is skipped unless `ZERUS_CLIENT_MEASURE=1`:
+
+```sh
+ZERUS_CLIENT_MEASURE=1 NODE_OPTIONS=--expose-gc npx vitest run src/store/organization.perf.test.ts
+```
+
+The Rust grouping's own pass over 20,000 rows has an ignored timing test:
+`cargo +1.99.1 test --manifest-path core/Cargo.toml --lib twenty_thousand_sessions_group_within_five_seconds -- --ignored --nocapture`.
+
 ## Measurement run
 
 `ZERUS_CLIENT_PERF=auto` runs the Diagnostics scenarios unattended (`src/perf`),

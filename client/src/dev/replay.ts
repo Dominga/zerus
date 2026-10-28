@@ -12,7 +12,8 @@ interface Fixture {
   computers: ComputerOut[];
   machines?: MachineOut[];
   snapshot: ReplaceOut[];
-  deltas: { upserts?: RowOut[]; removes?: KeyOut[] }[];
+  /** `groups` places the rows a delta adds (a replaced run), as the Rust grouping does. */
+  deltas: { upserts?: RowOut[]; removes?: KeyOut[]; groups?: GroupOut[] }[];
   activity: Record<string, { events: ActivityEvent[]; cursor: number; state?: Record<string, unknown> }>;
   /** The snapshot rows' projects and the headers, sent with the first batch. */
   groups?: GroupOut[];
@@ -43,6 +44,7 @@ export function createReplay() {
     setInterval(() => {
       if (!fixture?.deltas.length) return;
       const delta = fixture.deltas[tick++ % fixture.deltas.length];
+      if (delta.groups?.length) pending.groups = [...(pending.groups ?? []), ...delta.groups];
       push({ upserts: delta.upserts ?? [], removes: delta.removes ?? [] });
     }, fixture.interval_ms);
   });

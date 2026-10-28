@@ -1487,4 +1487,44 @@ mod tests {
         assert_eq!(sent["desired"]["projects"][0]["sessions"], json!([R2]));
         fake.finish(organization);
     }
+
+    /// Runs `submit` on a thread; its answer comes back on the receiver.
+    fn submitted(
+        organization: &Organization,
+        intent: Intent,
+    ) -> std::sync::mpsc::Receiver<EditOutcome> {
+        let (sender, receiver) = sync_channel(1);
+        let organization = organization.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(organization.submit(intent));
+        });
+        receiver
+    }
+
+    /// The same move again while its apply runs leaves the desired state as
+    /// sent: that apply answers both, and the second `submit` returns.
+    #[test]
+    fn an_edit_repeated_while_its_apply_runs_is_answered_by_that_apply() {
+        let fake = Fake::new(json!([{"stdout": full("d2"), "gate": "go"}]));
+        let organization = fake.organization(&Pump::default(), true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        let first = submitted(&organization, move_to_inbox());
+        wait_until("the apply to start", || fake.applies().len() == 1);
+        let second = submitted(&organization, move_to_inbox());
+        wait_until("the second edit to wait", || {
+            organization.lock().waiting.len() == 2
+        });
+        std::fs::write(fake.dir.join("go"), b"").unwrap();
+        let done = Ok(EditOutcome::Done { conflicts: 0 });
+        assert_eq!(first.recv_timeout(Duration::from_secs(10)), done);
+        assert_eq!(
+            second.recv_timeout(Duration::from_secs(10)),
+            done,
+            "the second submit returns with the apply that wrote its state"
+        );
+        wait_until("the draft to go", || fake.settled_after(1));
+        assert_eq!(fake.applies().len(), 1, "no second apply");
+        fake.finish(organization);
+    }
 }

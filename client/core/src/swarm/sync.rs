@@ -442,6 +442,10 @@ impl Controller {
     /// back and answers `Settled` with no tickets, so the hub publishes the
     /// new revision.
     pub fn due(&mut self, now: u64) -> Due {
+        debug_assert!(
+            self.pending() || self.queued.is_empty(),
+            "every queued edit has a desired state to answer it"
+        );
         if !self.busy() && !self.pending() && now >= self.guard_until {
             if let Some(held) = self.held.take() {
                 self.offer(held, now);
@@ -520,7 +524,7 @@ impl Controller {
                 .count()
         });
         let outcome = EditOutcome::Done { conflicts };
-        let settled = sent
+        let mut settled: Vec<(Ticket, EditOutcome)> = sent
             .tickets
             .iter()
             .map(|ticket| (*ticket, outcome.clone()))
@@ -539,6 +543,13 @@ impl Controller {
         if self.desired.as_ref() == Some(&sent.desired) {
             self.desired = None;
             self.desired_membership = None;
+            // Edits made while it ran that left the desired state as sent:
+            // what was written is theirs too, and no later apply carries them.
+            settled.extend(
+                std::mem::take(&mut self.queued)
+                    .into_iter()
+                    .map(|ticket| (ticket, outcome.clone())),
+            );
         }
         if self.desired.is_some() {
             // Edits made meanwhile go next, from what was sent (203-205).
@@ -1827,5 +1838,27 @@ mod tests {
         sync.edit(&to("alpha"), 1_100).unwrap();
         assert!(matches!(sync.due(1_220), Due::Settled(_)));
         assert_eq!((sync.digest(), alpha(&sync)), ("d3", "Alpha 2".to_owned()));
+    }
+
+    /// An edit made while an apply runs that leaves the desired state as
+    /// sent: moving the session again to the project the apply moves it to.
+    #[test]
+    fn an_edit_during_an_apply_that_leaves_the_desired_state_is_answered_by_it() {
+        let mut sync = ready();
+        let first = sync.edit(&to("beta"), 0).unwrap();
+        let _ = input(sync.due(120));
+        let second = sync.edit(&to("beta"), 130).unwrap();
+        let answered = sync.finish(reply(state("d2", "beta", &["op-2"]), &["op-2"]), 200);
+        assert_eq!(
+            answered,
+            [
+                (first, EditOutcome::Done { conflicts: 0 }),
+                (second, EditOutcome::Done { conflicts: 0 })
+            ],
+            "what was written is the second edit's desired state too"
+        );
+        assert!(!sync.pending());
+        assert_eq!(sync.next_due(), None, "nothing left to send");
+        assert!(matches!(sync.due(20_000), Due::Nothing));
     }
 }

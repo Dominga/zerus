@@ -1,0 +1,153 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createRoot } from "solid-js";
+import * as bridge from "../bridge";
+import { createOrganization, memberOf } from "./organization";
+import { rowOut } from "./testing";
+import { emptyBatch, type Batch, type GroupingOut } from "../types";
+
+vi.mock("../bridge", () => ({
+  moveToProject: vi.fn(), createProject: vi.fn(), renameProject: vi.fn(), deleteProject: vi.fn(),
+  moveProject: vi.fn(), sortProject: vi.fn(), setProjectCollapsed: vi.fn(() => Promise.resolve()),
+}));
+vi.mock("./actions", () => ({ notify: vi.fn() }));
+
+const mocked = vi.mocked(bridge);
+const header = (id: string, name: string) => ({ id, name, color: null, accessible: true, collapsed: false, is_default: id === "ungrouped", palette: 0 });
+const ready = (extra: Partial<GroupingOut> = {}): GroupingOut => ({
+  loaded: true, default_project: "ungrouped", headers: [header("alpha", "Alpha"), header("ungrouped", "Inbox")],
+  ready: true, reason: null, busy: false, status: "", status_error: false, conflicts: 0, ...extra,
+});
+const batchOf = (part: Partial<Batch>): Batch => ({ ...emptyBatch(), ...part });
+const rows = [{ machine: "workstation", name: "claude/sample-project/review" }, { machine: "studio", name: "codex/aurora/orders-v3" }];
+
+function setup(grouping = ready()) {
+  const say = vi.fn();
+  const org = createOrganization(say);
+  org.applyGrouping(batchOf({ grouping }));
+  return { org, say };
+}
+
+beforeEach(() => {
+  mocked.moveToProject.mockReset();
+  mocked.createProject.mockReset();
+  mocked.renameProject.mockReset();
+  mocked.deleteProject.mockReset();
+  mocked.moveProject.mockReset();
+  mocked.sortProject.mockReset();
+  mocked.setProjectCollapsed.mockReset();
+  mocked.setProjectCollapsed.mockResolvedValue(undefined);
+});
+
+describe("the organization store", () => {
+  it("assigns rows from batches and falls back to the default project", () => createRoot((dispose) => {
+    const { org } = setup();
+    org.applyGrouping(batchOf({ groups: [{ computer: "", key: "run:1", group: "alpha", rank: 1048576 }] }));
+    expect(org.groupOf("\nrun:1")).toBe("alpha");
+    expect(org.groupOf("\nrun:2")).toBe("ungrouped");
+    org.applyGrouping(batchOf({ removes: [{ computer: "", key: "run:1", reason: null }] }));
+    expect(org.groupOf("\nrun:1")).toBe("ungrouped");
+    expect(org.headerOf("alpha")?.name).toBe("Alpha");
+    dispose();
+  }));
+
+  it("drops the assignments of rows a computer's replace left out and keeps the rest", () => createRoot((dispose) => {
+    const { org } = setup();
+    org.applyGrouping(batchOf({ groups: [
+      { computer: "studio", key: "run:1", group: "alpha", rank: 1 },
+      { computer: "studio", key: "run:2", group: "alpha", rank: 2 },
+      { computer: "", key: "run:1", group: "alpha", rank: 3 },
+    ] }));
+    // The replace keeps run:2 without resending its group (grouping sends only changes).
+    org.applyGrouping(batchOf({ replaces: [{ computer: "studio", rows: [rowOut("studio", 2)] }] }));
+    expect(Object.keys(org.groups).sort()).toEqual(["\nrun:1", "studio\nrun:2"]);
+    expect(org.groupOf("studio\nrun:2")).toBe("alpha");
+    expect(org.groupOf("\nrun:1")).toBe("alpha");
+    // An empty replace drops every assignment of that computer only.
+    org.applyGrouping(batchOf({ replaces: [{ computer: "", rows: [] }] }));
+    expect(Object.keys(org.groups)).toEqual(["studio\nrun:2"]);
+    dispose();
+  }));
+
+  it("moves a set of rows with one call carrying their members", async () => {
+    const { org, say } = setup();
+    mocked.moveToProject.mockResolvedValue({ outcome: "done", conflicts: 0 });
+    const out = await org.moveToProject(rows, "alpha");
+    expect(out).toEqual({ outcome: "done", conflicts: 0 });
+    expect(mocked.moveToProject).toHaveBeenCalledTimes(1);
+    expect(mocked.moveToProject).toHaveBeenCalledWith(["workstation\nclaude/sample-project/review", "studio\ncodex/aurora/orders-v3"], "alpha", null);
+    expect(say).not.toHaveBeenCalled();
+    expect(memberOf(rows[0])).toBe("workstation\nclaude/sample-project/review");
+  });
+
+  it("refuses before the catalog is ready and for a project that is gone, without a call", async () => {
+    const { org, say } = setup(ready({ ready: false, reason: "Project sync is starting." }));
+    expect(await org.moveToProject(rows, "alpha")).toEqual({ outcome: "refused", detail: "Project sync is starting." });
+    org.applyGrouping(batchOf({ grouping: ready() }));
+    expect(await org.renameProject("gone", "x")).toEqual({ outcome: "refused", detail: "This project is no longer listed. Open the menu again." });
+    expect(mocked.moveToProject).not.toHaveBeenCalled();
+    expect(mocked.renameProject).not.toHaveBeenCalled();
+    expect(say).toHaveBeenCalledWith("info", "Project sync is starting.");
+  });
+
+  it("shows a rejected call once with Qt's failure text and never repeats it", async () => {
+    vi.useFakeTimers();
+    try {
+      const { org, say } = setup();
+      mocked.sortProject.mockRejectedValue("lost the answer");
+      const out = await org.sortProject("alpha");
+      expect(out).toEqual({ outcome: "kept", detail: "Project sync unavailable: lost the answer" });
+      // Neither time nor the batches that follow make the webview send it again; only the Rust side resends.
+      vi.advanceTimersByTime(60_000);
+      org.applyGrouping(batchOf({ grouping: ready({ busy: true }) }));
+      org.applyGrouping(batchOf({ grouping: ready({ status: "Project sync unavailable: lost the answer", status_error: true }) }));
+      org.applyGrouping(batchOf({ grouping: ready() }));
+      vi.advanceTimersByTime(60_000);
+      await Promise.resolve();
+      expect(mocked.sortProject).toHaveBeenCalledTimes(1);
+      expect(say).toHaveBeenCalledTimes(1);
+      expect(say).toHaveBeenCalledWith("error", "Project sync unavailable: lost the answer", true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("warns about conflicts on the change and shows a kept edit's status line", async () => {
+    const { org, say } = setup();
+    mocked.deleteProject.mockResolvedValue({ outcome: "done", conflicts: 2 });
+    await org.deleteProject("alpha", "ungrouped");
+    expect(say).toHaveBeenCalledWith("warn", "2 project conflict(s) need review in Swarm.", true);
+    mocked.moveProject.mockResolvedValue({ outcome: "kept", detail: "Project sync unavailable: hgs did not answer in time" });
+    await org.moveProject("alpha", undefined);
+    expect(mocked.moveProject).toHaveBeenCalledWith("alpha", null);
+    expect(mocked.moveProject).toHaveBeenCalledTimes(1);
+    expect(say).toHaveBeenCalledWith("error", "Project sync unavailable: hgs did not answer in time", true);
+    mocked.renameProject.mockResolvedValue({ outcome: "kept", detail: "Project sync needs an updated HGS installation." });
+    await org.renameProject("alpha", "Alpha two");
+    expect(say).toHaveBeenCalledWith("error", "Project sync needs an updated HGS installation.", true);
+  });
+
+  it("shows the hub's notice once as a sticky warning, and again only after it cleared", () => createRoot((dispose) => {
+    const notice = "The saved project changes were not applied: the draft file is larger than 4096 bytes";
+    const { org, say } = setup(ready({ notice }));
+    // The same notice in a later view (another field changed), and a batch without a view.
+    org.applyGrouping(batchOf({ grouping: ready({ notice, busy: true }) }));
+    org.applyGrouping(batchOf({ groups: [{ computer: "", key: "run:1", group: "alpha", rank: 1 }] }));
+    expect(say).toHaveBeenCalledTimes(1);
+    expect(say).toHaveBeenCalledWith("warn", notice, true);
+    org.applyGrouping(batchOf({ grouping: ready() }));
+    expect(say).toHaveBeenCalledTimes(1);
+    org.applyGrouping(batchOf({ grouping: ready({ notice }) }));
+    expect(say).toHaveBeenCalledTimes(2);
+    dispose();
+  }));
+
+  it("asks for collapse without an answer to show", async () => {
+    const { org, say } = setup();
+    org.setProjectCollapsed("alpha", true);
+    expect(mocked.setProjectCollapsed).toHaveBeenCalledWith("alpha", true);
+    mocked.setProjectCollapsed.mockRejectedValueOnce("no app");
+    org.setProjectCollapsed("alpha", false);
+    await Promise.resolve();
+    expect(say).not.toHaveBeenCalled();
+  });
+});

@@ -1,4 +1,4 @@
-import { emptyBatch, type ActivityEvent, type Batch, type ComputerOut, type MachineOut, type ReplaceOut, type RowOut, type KeyOut } from "../types";
+import { emptyBatch, type ActivityEvent, type Batch, type ComputerOut, type GroupingOut, type GroupOut, type MachineOut, type ReplaceOut, type RowOut, type KeyOut } from "../types";
 import type { FollowRequest } from "../store/activity";
 
 // Browser-only stand-in for the Rust side, for `npm run dev` without Tauri.
@@ -14,6 +14,9 @@ interface Fixture {
   snapshot: ReplaceOut[];
   deltas: { upserts?: RowOut[]; removes?: KeyOut[] }[];
   activity: Record<string, { events: ActivityEvent[]; cursor: number; state?: Record<string, unknown> }>;
+  /** The snapshot rows' projects and the headers, sent with the first batch. */
+  groups?: GroupOut[];
+  grouping?: GroupingOut;
 }
 
 const PARK_MS = 250;
@@ -34,6 +37,8 @@ export function createReplay() {
 
   void import("../../fixtures/replay-batches.json").then((m) => {
     fixture = m.default as unknown as Fixture;
+    pending.groups = fixture.groups ?? [];
+    pending.grouping = fixture.grouping;
     push({ computers: fixture.computers, machines: fixture.machines ?? [], replaces: fixture.snapshot });
     setInterval(() => {
       if (!fixture?.deltas.length) return;

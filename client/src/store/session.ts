@@ -1,24 +1,29 @@
-import { createEffect, createRoot, on } from "solid-js";
+import { batch, createEffect, createRoot, on } from "solid-js";
 import { activityPort } from "../bridge";
 import { applyBatch, onReplaced, orderedRows } from "./catalog";
 import { bindActivity, bindSelection, observeBatch } from "./actions";
 import { createActivity } from "./activity";
+import { applyGrouping } from "./organization";
 import { compactRows, page, selected, selectedKey, setCompactRows, setSelectedKey, subagentOpen } from "./ui";
 import { startScreens } from "./screens";
 import { documentVisibility } from "./visibility";
 import type { Batch } from "../types";
 
-// Wires the stores together: batches go to the catalog and the followed
-// Activity, the selected session is the followed one, and a `replaced` run
-// hands its selection and row layout to the new run of the same name.
+// Wires the stores together: batches go to the catalog, the grouping and
+// the followed Activity, the selected session is the followed one, and a
+// `replaced` run hands its selection and row layout to the new run of the
+// same name.
 
 export const activity = createActivity(activityPort);
 bindActivity(activity);
 bindSelection(() => ({ key: selectedKey(), subagent: subagentOpen() }));
 
-/** Applies one batch from the bridge. */
+/** Applies one batch from the bridge: its rows and their grouping are one reactive update. */
 export function receive(b: Batch) {
-  applyBatch(b);
+  batch(() => {
+    applyBatch(b);
+    applyGrouping(b);
+  });
   observeBatch(b);
   if (b.activity.length) activity.applyActivity(b.activity);
 }

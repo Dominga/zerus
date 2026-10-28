@@ -8,6 +8,7 @@ import {
 } from "./SessionCard";
 import { catalog, computerOffline } from "../../store/catalog";
 import { detailsFor, followedFor } from "../../store/actions";
+import { headerOf, setProjectCollapsed } from "../../store/organization";
 import { actionEntries, copyEntries } from "./ActionDialogs";
 import {
   selectedKey, setSelectedKey, collapsed, setCollapsed, setExpandedChildren, expandedChildren,
@@ -20,8 +21,8 @@ import type { Session } from "./types";
 import { motionReduced } from "../motion";
 import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem } from "./organize";
 
-/** The project band's colour: a palette slot per project until the listing carries project colours. */
-const projectColor = (project: string) => `var(--z-entity-palette-${paletteIndex(project)})`;
+/** The project band's colour: the organization's colour, else its palette slot. */
+const projectColor = (h: { color: string | null; palette: number }) => h.color ?? `var(--z-entity-palette-${h.palette})`;
 
 /** Actions that go through guarded `hgs` calls arrive in phase 2; their menu entries show disabled. */
 const LATER = true;
@@ -164,11 +165,11 @@ function batchMenu(): MenuEntry[] {
 
 /** Project header: 40 px row, 32 px band (radius 6), Qt chevron, icon and counters. */
 function Header(props: { row: Extract<Row, { type: "header" }> }) {
-  const name = () => props.row.project;
-  const open = () => !collapsed[props.row.project];
+  const name = () => props.row.name;
+  const open = () => !props.row.collapsed;
   return (
-    <button class="group-band entity" style={{ "--entity": projectColor(name()) }} draggable="true" onDragStart={(e) => startDrag(e, { kind: "group", id: props.row.project })}
-      aria-expanded={open()} onClick={() => setCollapsed(props.row.project, open())}
+    <button class="group-band entity" style={{ "--entity": projectColor(props.row) }} draggable="true" onDragStart={(e) => startDrag(e, { kind: "group", id: props.row.project })}
+      aria-expanded={open()} onClick={() => setProjectCollapsed(props.row.project, !props.row.collapsed)}
       onContextMenu={(e) => openMenu(e, headerMenu(props.row.project))}
       title={`${name()}: ${props.row.total} shown, ${props.row.attention} need a response, ${props.row.working} working, ${props.row.unread} unread replies. Click to collapse or expand; drag to reorder.`}>
       <svg class="gb-chev" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -217,7 +218,7 @@ function ScopeButton(props: { icon: string; label: string; selected: string[]; s
 function FilterChips() {
   const chips = () => [
     ...machineFilter().map((m) => ({ id: m, label: m, kind: "m" as const })),
-    ...projectFilter().map((p) => ({ id: p, label: p, kind: "p" as const })),
+    ...projectFilter().map((p) => ({ id: p, label: headerOf(p)?.name ?? p, kind: "p" as const })),
   ];
   const remove = (c: { id: string; kind: "m" | "p" }) =>
     c.kind === "m" ? setMachineFilter(machineFilter().filter((x) => x !== c.id)) : setProjectFilter(projectFilter().filter((x) => x !== c.id));
@@ -663,12 +664,12 @@ function StripRow(props: { id: string; list: RowSource }) {
 
 /** Header band in the strip: one counter (attention > unread > working > total), name in the rest. */
 function StripBand(props: { row: Extract<Row, { type: "header" }> }) {
-  const name = () => props.row.project;
+  const name = () => props.row.name;
   const counter = () => props.row.attention ? { text: `! ${props.row.attention}`, cls: "hot" } : props.row.unread ? { text: `● ${props.row.unread}`, cls: "hot" }
     : props.row.working ? { text: `● ${props.row.working}`, cls: "working" } : { text: String(props.row.total), cls: "total" };
   return (
-    <button class="group-band strip-band entity" style={{ "--entity": projectColor(name()) }} title={name()}
-      onClick={() => setCollapsed(props.row.project, !collapsed[props.row.project])}>
+    <button class="group-band strip-band entity" style={{ "--entity": projectColor(props.row) }} title={name()}
+      onClick={() => setProjectCollapsed(props.row.project, !props.row.collapsed)}>
       <span class="ell">{name()}</span>
       <span class={`gb-count ${counter().cls}`}>{counter().text}</span>
     </button>

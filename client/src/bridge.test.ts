@@ -50,6 +50,25 @@ describe("pump", () => {
     expect(got[0].upserts).toEqual([]);
   });
 
+  it("keeps the grouping and counts a batch of only grouping as content", async () => {
+    const src = source();
+    const h = host();
+    const got: Batch[] = [];
+    pump(src.s, (b) => got.push(b), h.h);
+    const grouping = { loaded: true, default_project: "ungrouped", headers: [], ready: true, reason: null, busy: false, status: "", status_error: false, conflicts: 0 };
+    src.answer({ grouping } as unknown as Batch);
+    await settle();
+    h.runFrames();
+    src.answer({ groups: [{ computer: "", key: "run:1", group: "ungrouped", rank: 1 }] } as unknown as Batch);
+    await settle();
+    h.runFrames();
+    expect(got).toHaveLength(2);
+    expect(got[0].grouping).toEqual(grouping);
+    expect(got[0].groups).toEqual([]);
+    expect(got[1].groups).toHaveLength(1);
+    expect(got[1].grouping).toBeUndefined();
+  });
+
   it("applies a batch in the next frame and asks again only after it", async () => {
     const src = source();
     const page = host();

@@ -1,6 +1,8 @@
 import { createMemo } from "solid-js";
-import { orderedRows } from "../../store/catalog";
-import { collapsed, stateFilter, matchesFilter, search, machineFilter, projectFilter, expandedChildren, compactRows, projectOrder } from "../../store/ui";
+import { catalog, orderedRows } from "../../store/catalog";
+import { defaultProject, grouping, groups } from "../../store/organization";
+import { stateFilter, matchesFilter, search, machineFilter, projectFilter, expandedChildren, compactRows } from "../../store/ui";
+import type { GroupingOut } from "../../types";
 import type { Session, Subagent } from "./types";
 
 // Flattened list model. Heights match tray/src/SessionCardDelegate.h
@@ -9,7 +11,8 @@ import type { Session, Subagent } from "./types";
 // type let the virtualizer place rows without measuring the DOM.
 
 export type Row =
-  | { type: "header"; id: string; project: string; total: number; attention: number; unread: number; working: number }
+  /** `project` is the project's id; `name` and the colour come from the organization's header. */
+  | { type: "header"; id: string; project: string; name: string; color: string | null; palette: number; collapsed: boolean; total: number; attention: number; unread: number; working: number }
   | { type: "card"; id: string; session: Session; expandable: boolean; expanded: boolean; compactRow: boolean }
   | { type: "child"; id: string; parent: Session; child: Subagent; first: boolean; last: boolean };
 
@@ -30,47 +33,92 @@ export function sessionMatchesSearch(s: Session, q: string): boolean {
     || s.machine.toLowerCase().includes(needle) || (s.branch ?? "").toLowerCase().includes(needle);
 }
 
+/**
+ * Each project's rows in list order: by rank, ties in arrival order (the
+ * sort is stable); a row without an assignment is in `fallback`. It reads
+ * only row ids and assignments, so a status upsert does not run it again.
+ */
+export function groupMembers(order: readonly string[], rows: Record<string, Session>,
+                             assigned: Record<string, { group: string; rank: number } | undefined>, fallback: string): Map<string, Session[]> {
+  const map = new Map<string, Session[]>();
+  const rank = new Map<string, number>();
+  for (const id of order) {
+    const s = rows[id];
+    if (!s) continue;
+    const a = assigned[id];
+    rank.set(id, a?.rank ?? Number.MAX_SAFE_INTEGER);
+    const group = a?.group ?? fallback;
+    const list = map.get(group);
+    if (list) list.push(s);
+    else map.set(group, [s]);
+  }
+  for (const list of map.values()) list.sort((x, y) => rank.get(x.key)! - rank.get(y.key)!);
+  return map;
+}
+
+export interface ListInput {
+  grouping: GroupingOut;
+  /** Each project's rows in list order (groupMembers). */
+  members: Map<string, Session[]>;
+  /** The state, machine and search filters. */
+  visible: (s: Session) => boolean;
+  /** The project filter's project ids; empty is every project. */
+  projects: readonly string[];
+  expanded: (key: string) => boolean;
+  compact: (key: string) => boolean;
+}
+
+/** Qt's grouped rows (SessionsWindowRows.cpp:289-338, header counts 393-411). */
+export function groupRows(input: ListInput): Row[] {
+  const out: Row[] = [];
+  const cards = (list: readonly Session[]) => {
+    for (const s of list) {
+      const kids = s.subagents ?? [];
+      const expanded = kids.length > 0 && input.expanded(s.key);
+      out.push({ type: "card", id: s.key, session: s, expandable: kids.length > 0, expanded, compactRow: input.compact(s.key) });
+      if (expanded) kids.forEach((child, i) => out.push({ type: "child", id: `${s.key}/${child.id}`, parent: s, child, first: i === 0, last: i === kids.length - 1 }));
+    }
+  };
+  const wanted = (id: string) => !input.projects.length || input.projects.includes(id);
+  const headers = input.grouping.loaded ? input.grouping.headers : [];
+  if (headers.length <= 1) {
+    // One project, or none presented yet: no header, and nothing collapses (293, 324, 326).
+    for (const [id, list] of input.members) if (wanted(id)) cards(list.filter(input.visible));
+    return out;
+  }
+  for (const h of headers) {
+    if (!wanted(h.id)) continue;
+    const all = input.members.get(h.id) ?? [];
+    const list = all.filter(input.visible);
+    // A project without visible members stays hidden (323; "Hide projects without active sessions" defaults on, 109).
+    if (!list.length) continue;
+    // The counters cover members the filters hide; muted members never count as attention or unread (398-404).
+    let attention = 0, unread = 0, working = 0;
+    for (const s of all) {
+      if (!s.muted && (s.reviewLater || s.status === "attention")) attention++;
+      if (!s.muted && s.unread && s.status !== "offline") unread++;
+      if (s.status === "working" || s.status === "background") working++;
+    }
+    out.push({ type: "header", id: `h:${h.id}`, project: h.id, name: h.name, color: h.color, palette: h.palette,
+               collapsed: h.collapsed, total: list.length, attention, unread, working });
+    if (!h.collapsed) cards(list);
+  }
+  return out;
+}
+
+/** The list's rows by project, from the row ids and the assignments only. */
+export const membersByGroup = createMemo(() => groupMembers(catalog.order, catalog.rows, groups, defaultProject()));
+
 export const listRows = createMemo<Row[]>(() => {
+  // The archive view returns its own flat rows here, ahead of the grouping.
   const f = stateFilter();
   const q = search().trim();
   const hosts = machineFilter();
-  const projs = projectFilter();
-  const rows = orderedRows();
-  const groups = new Map<string, Session[]>();
-  for (const s of rows) {
-    if (!matchesFilter(s, f)) continue;
-    if (hosts.length && !hosts.includes(s.machine)) continue;
-    if (projs.length && !projs.includes(s.project)) continue;
-    if (!sessionMatchesSearch(s, q)) continue;
-    const list = groups.get(s.project);
-    if (list) list.push(s);
-    else groups.set(s.project, [s]);
-  }
-  // Header counters cover every session of the project, including ones the
-  // filters hide; muted sessions never count as attention or unread.
-  const all = new Map<string, { attention: number; unread: number; working: number }>();
-  for (const s of rows) {
-    const c = all.get(s.project) ?? { attention: 0, unread: 0, working: 0 };
-    if (!s.muted && s.status === "attention") c.attention++;
-    else if (!s.muted && s.unread) c.unread++;
-    if (s.status === "working" || s.status === "background") c.working++;
-    all.set(s.project, c);
-  }
-  const out: Row[] = [];
-  for (const project of projectOrder()) {
-    const list = groups.get(project);
-    if (!list?.length) continue;
-    const { attention, unread, working } = all.get(project)!;
-    out.push({ type: "header", id: `h:${project}`, project, total: list.length, attention, unread, working });
-    if (collapsed[project]) continue;
-    for (const s of list) {
-      const kids = s.subagents ?? [];
-      const expanded = kids.length > 0 && !!expandedChildren[s.key];
-      out.push({ type: "card", id: s.key, session: s, expandable: kids.length > 0, expanded, compactRow: !!compactRows[s.key] });
-      if (expanded) kids.forEach((child, i) => out.push({ type: "child", id: `${s.key}/${child.id}`, parent: s, child, first: i === 0, last: i === kids.length - 1 }));
-    }
-  }
-  return out;
+  const visible = (s: Session) => matchesFilter(s, f) && (!hosts.length || hosts.includes(s.machine)) && sessionMatchesSearch(s, q);
+  return groupRows({
+    grouping: grouping(), members: membersByGroup(), visible, projects: projectFilter(),
+    expanded: (k) => !!expandedChildren[k], compact: (k) => !!compactRows[k],
+  });
 });
 
 export const shownSummary = createMemo(() => {
@@ -95,9 +143,10 @@ export const machineChoices = createMemo(() => {
   return [...seen.values()];
 });
 
-/** Projects with their session counts, in list order (the project filter's choices). */
+/** Projects with members and their member counts, in the organization's order (the project filter's choices, by id). */
 export const projectChoices = createMemo(() => {
-  const counts = new Map<string, number>();
-  for (const s of orderedRows()) counts.set(s.project, (counts.get(s.project) ?? 0) + 1);
-  return projectOrder().filter((p) => counts.has(p)).map((p) => ({ id: p, label: p, count: counts.get(p)! }));
+  const g = grouping();
+  const members = membersByGroup();
+  if (!g.loaded) return [];
+  return g.headers.filter((h) => members.get(h.id)?.length).map((h) => ({ id: h.id, label: h.name, count: members.get(h.id)!.length }));
 });

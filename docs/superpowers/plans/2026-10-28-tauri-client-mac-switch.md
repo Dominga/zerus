@@ -31,6 +31,7 @@
   - **Data carry-over.** The one-time draft import of `zerus-5wmh.13.1` also reads the dev app's drafts, read-only on the source, the same way it reads Qt's. That import is phase 4's work and is not planned here. Settings start at their defaults, and read marks start fresh (Decision 5).
   - **Update notices.** They are accepted as missing after the switch. The follow-up is `zerus-5wmh.12.4`.
   - **Display windows.** Runbook step 4 needs an owner-given Mac window: the implementer tells the coordinator when the build reaches it. Step 8 is the coordinator's job, done with the owner.
+  - **Tasks 3 and 4 reach `integrate/client-webui` together.** Task 3 alone leaves a hidden Mac app with no way back: a closed window or a hidden start leaves no Dock icon and no menu-bar item until Task 4, and only a `sessions` line or a signal reaches the app.
 
 These are settled for this plan. Items 1 to 3 deviate from the spec text and are recorded in the spec's Decisions section by Task 9.
 
@@ -44,14 +45,14 @@ These are settled for this plan. Items 1 to 3 deviate from the spec text and are
    - **Why not pin:** after the switch the dev app keeps running beside the installed client for testing. A pinned directory would give one drafts root two writers, which the phase 4 core section rules out ("each store has exactly one writer").
 6. **The switch build is configured as `com.hgdev.hgs-tray.local` and promoted at signing.** This is Qt's privacy split (`tray/CMakeLists.txt:283-285`, `tray/sign-local-macos.py:134-143`): an unsigned copy in a build folder never registers the public identifier. The runtime identity therefore comes from the bundle, not from Tauri's compile-time configuration (Decision 5).
 7. **Only the switch identity claims Qt's names, posts notifications and runs the watchdog.** The dev app gets single-instance only with `ZERUS_CLIENT_SINGLE_INSTANCE=1`, under its own name, notifications only with `ZERUS_CLIENT_NOTIFICATIONS=1`, and the main-thread watchdog only with `ZERUS_CLIENT_WATCHDOG=1`. This keeps parallel headless runs on the shared arch machine working. It also means a dev client never claims Qt's `/tmp/hgs-tray` on arch and never doubles Qt's banners on the Mac. A replay (`ZERUS_CLIENT_REPLAY`) never posts notifications.
-8. **Primary click shows and activates the window, as Qt's `TrayAgent::showSessions` does (`TrayAgent.cpp:776-780`).** Qt never hides on click; the controller confirmed it.
+8. **Primary click shows and activates the window, as Qt's `TrayAgent::showSessions` does (`TrayAgent.cpp:781-783`).** Qt never hides on click; the controller confirmed it.
 9. **`show` changes nothing visible.** Qt's handler acts only on `sessions` (`main.cpp:428`). A launchd or second plain start therefore never pops the window.
 10. **The "Open in" choice lives in the client's data directory (`menubar.json`).** It is seeded once from `open-mode` in `~/.config/hgs/tray.conf`, which the client never writes. `icon-color` from the same file is honoured read-only.
 11. **The attention state is the client's own file (`attention-observed.json`).** On the switch identity's first start it is seeded from Qt's `attention/observed` value (`TrayAgent.cpp:157`). That value is read from the shared NSUserDefaults domain, read-only. Banners Qt delivered under the same bundle identifier are therefore withdrawn when their attention clears, and stay clickable.
 12. **Rollback slot (coordinator ruling).** The one kept copy, `~/.local/share/hgs/desktop-previous/hgs-tray.app`, stays the last Qt bundle until the owner retires Qt. When the client updates itself, the replaced client waits only in the update's own staging folder while that update runs: a new client that does not start is replaced by it automatically, and after any other outcome the staging folder goes with it. There is no second slot and no later rollback to an older client. `--rollback` reinstalls the Qt copy, and only then does the client move into the slot. A copy moved into the slot is unregistered from LaunchServices, so a notification click cannot launch the old app.
 13. **Numbered Dev guard, all platforms (coordinator ruling).** `update-installed.py` refuses to replace an installed numbered Dev build with a build that has neither a Dev number nor a local preview label (`previewLabel` in `--build-info`, from `ZERUS_LOCAL_PREVIEW_LABEL`). `HGS_TRAY_RESTART=0` installs, which replace the GUI on disk without the live update, ask the updater first (`--check`), so no path skips the guard. `docs/reference.md` states the rule and the label, and the refusal quotes the same sentence; a test keeps the two equal. The Tauri client embeds the label as Qt does (Task 2).
 14. **Mute applies as in Qt.** Muting is the host-confirmed `notification_preferences` (`SessionNotifications::valid`). The optional-questions banner setting (`notifications/optionalQuestions`, default off) is read from Qt's domain until the client has its own Settings entry. Qt has no notification setting named "Reduce"; the controller confirmed it.
-15. **Run-event hook merge rule.** All lifecycle handling lives in `client/src-tauri/src/lifecycle.rs`. `lib.rs` gains one call, `lifecycle::on_event(app, &event);`, as the first statement of the `.run(|app, event| ...)` closure, so the watchdog stops (Task 8) before any other exit work. The media branch (`work-ba0ed9fd-media`) adds the same `.build(...).expect(...).run(...)` chain with an `if let tauri::RunEvent::Exit` block calling its `exit(app)`. Whichever lands second keeps the other's lines and adds its own. The only shared line that changes is `.build(...)`, which now takes a `context` built earlier.
+15. **Run-event hook merge rule.** All lifecycle handling lives in `client/src-tauri/src/lifecycle.rs`. The run chain in `lib.rs` is `let mut app = …build(context).expect(…);`, then `lifecycle::prepare(&mut app, menu_bar, opens_sessions);` (macOS: the policy the app launches with, Task 3), then `app.run(|app, event| { lifecycle::on_event(app, &event); })`, with `on_event` as the closure's first statement. `RunEvent::Exit` reaches `lifecycle::exit`, the one exit hook. The watchdog stops first (Task 8). Other exit work (phase 4's drafts flush, the media branch's voice close, the organisation and read-mark flushes) runs there next. `state.release()` comes last, so the single-instance socket goes after every flush, as Qt's `QLocalServer` outlives the tray agent whose `aboutToQuit` flushes (`main.cpp:340` vs `:378`). The media branch (`work-ba0ed9fd-media`) adds a `.build(...).expect(...).run(...)` chain with an `if let tauri::RunEvent::Exit` block calling its `exit(app)`. Whichever lands second keeps the chain above and moves that exit work into `lifecycle::exit`, before `state.release()`. The shared `.build(...)` takes a `context` built earlier.
 16. **Merge point with M1c (media).** M1c adds `client/src-tauri/Info.plist` (microphone text), `Entitlements.plist` (audio input) and the `media` feature. The switch configuration names its own `Info.switch.plist`, which repeats Qt's microphone text. `tray/install.sh` adds `--features media` whenever the manifest has that feature, so the build order does not matter.
 17. **Release packaging stays phase 7.** A notarized Tauri Zerus.app with the CLI, connector, setup scripts and notices is phase 7 work. This plan makes `scripts/check-macos-bundle.py --gui tauri` and `scripts/sign-macos.py` accept the switch bundle (hardened runtime, `packaging/macos/Zerus.entitlements`). Notarization itself runs only in the `macos-signing` environment.
 
@@ -2583,8 +2584,8 @@ git commit -m "feat(client): Qt's command line, build identity and single-instan
 The client behaves as Qt's menu-bar app on the Mac:
 - **Hidden start.** It starts hidden unless started with `--sessions` (`main.cpp:297`, `AppConfig.cpp:461-464`).
 - **Close hides.** Closing the window hides it and the app keeps running (`main.cpp:279`).
-- **Dock icon.** The Dock icon shows only while the window is open, shown or minimised (`MacAppVisibility.mm:85-108`).
-- **Activation lines.** A `sessions` line opens and raises the window (`main.cpp:424-433`, `TrayAgent.cpp:776-780`).
+- **Dock icon.** The Dock icon shows only while the window is open, shown or minimised (`MacAppVisibility.mm:65-88`).
+- **Activation lines.** A `sessions` line opens and raises the window (`main.cpp:424-433`, `TrayAgent.cpp:781-783`).
 - **Signals and quit.** SIGTERM, SIGINT and SIGHUP quit like Quit (`TerminationSignals.h`). The Apple Event quit from the updater ends in `RunEvent::Exit` (tao's `applicationWillTerminate`), where the socket is removed. Other flushes (drafts, organization) join that hook under Decision 15.
 - **Main-thread QoS.** The main thread gets Qt's QoS (`main.cpp:256-263`).
 - **Fleet at start.** The fleet starts from Rust at launch, so the menu bar and notifications work before any window loads.
@@ -2695,7 +2696,7 @@ pub enum Policy {
 }
 
 /// A normal app while its window is open, shown or minimised, else a
-/// menu-bar app (`MacAppVisibility.mm:85-101`).
+/// menu-bar app (`MacAppVisibility.mm:65-81`).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn policy(window_open: bool) -> Policy {
     if window_open {
@@ -2706,7 +2707,7 @@ pub fn policy(window_open: bool) -> Policy {
 }
 
 /// A Dock click restores a minimised window when none is visible
-/// (`MacAppVisibility.mm:102-108`).
+/// (`MacAppVisibility.mm:82-88`).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn reopen_restores(minimized: bool, visible: bool) -> bool {
     minimized && !visible
@@ -2744,7 +2745,7 @@ pub fn on_event(app: &AppHandle, event: &RunEvent) {
     }
 }
 
-/// Opens Zerus: Qt's `TrayAgent::showSessions` (`TrayAgent.cpp:776-780`).
+/// Opens Zerus: Qt's `TrayAgent::showSessions` (`TrayAgent.cpp:781-783`).
 pub fn show_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let window = match app.get_webview_window(MAIN_WINDOW) {
         Some(window) => window,
@@ -3023,7 +3024,7 @@ fn forward_activations(app: tauri::AppHandle, activations: std::sync::mpsc::Rece
 }
 ```
 
-**Merge note (Decision 15).** If the media branch landed first, its closure has an `if let tauri::RunEvent::Exit = event { ... exit(_app); }` block. Keep that block and put the `lifecycle::on_event(app, &event);` line before it, as the closure's first statement (Decision 15). Rename the closure argument consistently, and change only `.build(...)` to take `context`.
+**Merge note (Decision 15).** If the media branch landed first, its closure has an `if let tauri::RunEvent::Exit = event { ... exit(_app); }` block. Move that exit work into `lifecycle::exit`, before `state.release()`, and keep `lifecycle::on_event(app, &event);` as the closure's first statement (Decision 15). Change only `.build(...)` to take `context`.
 
 - [ ] **Step 8: Check the quit path headless on arch**
 
@@ -4196,7 +4197,7 @@ Record the new direct dependencies in the lock (Global Constraints, "Cargo.lock"
 
 - [ ] **Step 10: Install the menu bar in `launch`**
 
-In the `#[cfg(feature = "live")]` block of the setup closure, replace the two `pump` lines and the `start_source` call with:
+In the `#[cfg(feature = "live")]` block of the setup closure, replace the two `pump` lines and the `start_fleet` call with:
 
 ```rust
                 let pump = app.state::<commands::AppState>().pump();
@@ -4218,7 +4219,7 @@ In the `#[cfg(feature = "live")]` block of the setup closure, replace the two `p
                     desk::start(app.handle(), &pump, dir.clone(), desk::load_mode(&dir, conf.as_deref()));
                 }
                 if menu_bar {
-                    app.state::<commands::AppState>().start_source()?;
+                    lifecycle::start_fleet(|| app.state::<commands::AppState>().start_source());
                 }
 ```
 
@@ -8684,6 +8685,8 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    - **The tile:** counts, amber attention and the stale dot, on a light and a dark menu bar; the tooltip lines.
    - **The menu:** computers; sessions with the marker, "(paused)" and "(stopped)"; "Open in" with Terminal.app and Clipboard; Quit.
    - **The window:** a primary click opens and raises it. Closing hides it and the Dock icon goes. A Dock click restores a minimised window.
+   - **`--sessions` while minimised:** minimise the window, then start the executable again with `--sessions`. The window comes back in front and active, as Qt's `activateWindow` brings it (`TrayAgent.cpp:781-783`).
+   - **Closing in native fullscreen:** put the window in fullscreen with its green button, then close it. It hides, and no empty Space is left behind in Mission Control.
    - **Session entries:** a running session opens in Terminal.app. Clipboard copies its command and shows "Zerus: copied to the clipboard".
    - **Second start:** the same executable started again with `--sessions` raises the first window and exits with "already running".
    - **Notifications:**
@@ -8715,6 +8718,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
      ZERUS_CLIENT_REPLAY="$PWD/fixtures/replay.ndjson" \
      ZERUS_CLIENT_PERF_OUT=$HOME/zerus-dev/perf-36/replay.json "$B"
    ```
+   Over SSH, the same runs use `open -n -W --env …` as in "Activity pass in replay mode" in `client/bench/README.md`.
    - **The live run** measures `list-scroll` on the real catalog.
    - **The replay run** measures `activity-scroll` on the fixture's long session. It always scrolls at least 2000 px; see "Activity pass in replay mode" in `client/bench/README.md`.
    - Each report records whether its Activity was live or replay.

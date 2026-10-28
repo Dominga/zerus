@@ -71,12 +71,8 @@ pub struct UsageSlot {
 pub struct AccountsState {
     pub catalogs: BTreeMap<ComputerId, CatalogSlot>,
     pub usage: BTreeMap<UsageKey, UsageSlot>,
-    // Read by the usage scheduler of Task 2.
-    #[allow(dead_code)]
     pub(crate) queue: VecDeque<UsageRef>,
-    #[allow(dead_code)]
     pub(crate) running: usize,
-    #[allow(dead_code)]
     pub(crate) warmed: BTreeSet<ComputerId>,
 }
 
@@ -218,8 +214,10 @@ pub fn reachable(entry: &FleetEntry) -> bool {
     entry.computer.is_local() || online(entry)
 }
 
+/// This computer keeps accounts only once its card says it runs sessions: before
+/// that `local_sessions` is a default, and a control console must not be read.
 fn keeps_accounts(entry: &FleetEntry) -> bool {
-    !entry.computer.is_local() || entry.local_sessions
+    !entry.computer.is_local() || (entry.host.is_some() && entry.local_sessions)
 }
 
 /// The machines that keep accounts, in fleet order, at most [`HOSTS`].
@@ -310,7 +308,15 @@ fn profile_usage(entry: &FleetEntry, raw: &Value, r: &UsageRef, state: &Accounts
     let mut u = match data {
         Some(data) => usage::usage(data),
         None => Usage {
-            status: if reachable { "loading" } else { "offline" }.to_owned(),
+            status: if !reachable {
+                "offline"
+            } else if slot.is_some_and(|slot| slot.failed) {
+                // The first inspect failed: settled, shown from the cache.
+                "unavailable"
+            } else {
+                "loading"
+            }
+            .to_owned(),
             ..Usage::default()
         },
     };
@@ -1260,6 +1266,44 @@ mod tests {
         assert_eq!(studio.usage.windows.len(), 2);
         assert!(studio.usage.seeded && studio.usage.refresh_error);
         assert_eq!(studio.usage.checked_at, Some(1793000100.0));
+        assert_eq!(studio.usage.status, "unavailable", "settled, not loading");
+    }
+
+    #[test]
+    fn a_failed_first_inspect_settles_the_pending_count() {
+        let fleet = [entry("", "live", 0), entry("studio", "live", 0)];
+        let key = (
+            ComputerId::from("studio"),
+            "claude-studio".to_owned(),
+            "/home/example/.claude".to_owned(),
+        );
+        let mut state = loaded();
+        let before = project(&fleet, &state, &mut AccountsDisplay::default()).pending;
+        state.usage.insert(
+            key.clone(),
+            UsageSlot {
+                auth_revision: "s1".into(),
+                attempted: Some(1),
+                failed: true,
+                ..UsageSlot::default()
+            },
+        );
+        let after = project(&fleet, &state, &mut AccountsDisplay::default()).pending;
+        assert_eq!(after + 1, before, "the failed profile no longer counts");
+        // A retry in flight counts again.
+        state.usage.get_mut(&key).unwrap().pending = true;
+        let retry = project(&fleet, &state, &mut AccountsDisplay::default()).pending;
+        assert_eq!(retry, before);
+    }
+
+    #[test]
+    fn this_computer_is_not_an_account_host_until_its_card_arrived() {
+        let mut local = entry("", "live", 0);
+        local.host = None;
+        assert!(hosts(std::slice::from_ref(&local)).is_empty());
+        assert!(refs(std::slice::from_ref(&local), &loaded()).is_empty());
+        local.host = Some("workstation".into());
+        assert_eq!(hosts(std::slice::from_ref(&local)).len(), 1);
     }
 
     #[test]

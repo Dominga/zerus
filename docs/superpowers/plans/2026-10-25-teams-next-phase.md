@@ -1109,6 +1109,14 @@ answered; a denial cannot carry an explanation.
     lead had to take it from the member's last message. A queued report must
     store its whole text or nothing, and a member must be able to replace a
     placeholder before the lead decides.
+  - The Android app module did not compile since U30 (#509): SessionCardUi.kt
+    used `20.sp` without its import, so QA could not run Android and nothing
+    showed it (fixed in #535's c68c2e7b). With it compiling, four U30 tests
+    fail on the merits: DesktopSessionPaletteTest (3, e.g. Attention expected,
+    Neutral shown) and SessionStateContractTest (1: the reason of
+    zerus-build-defers-the-reply). They need a fix with the contract. 27 more
+    fail only on Windows (POSIX file permissions in AttachmentStore and the
+    conversation caches) and one on a queue shutdown wait.
   - A plan edit (`plan`) recreates the phases it is given as Draft records with
     this edit's proposer and time, ordered by number: an order chosen with
     move-phase and the original proposer are lost (#548's residual). Phases

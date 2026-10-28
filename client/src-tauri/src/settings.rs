@@ -5,7 +5,7 @@
 //! Rust code reads a setting from the managed [`Store`], for example
 //! `app.state::<settings::Store>().0.number("processes/activeSeconds")`.
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
@@ -42,9 +42,8 @@ pub fn open(app: &AppHandle, dir: &Path) -> Store {
     );
     let handle = app.clone();
     settings.subscribe(Box::new(move |key, value, revision| {
-        if key == ALWAYS_ON_TOP {
+        if key == ALWAYS_ON_TOP && newer_layer(revision) {
             if let Some(window) = handle.get_webview_window(crate::MAIN_WINDOW) {
-                let _layer = LAYER.lock().unwrap_or_else(PoisonError::into_inner);
                 apply_window_layer(&window, value.as_bool().unwrap_or(false));
             }
         }
@@ -58,8 +57,20 @@ pub fn open(app: &AppHandle, dir: &Path) -> Store {
 
 /// Whether this session can keep the window above others, decided once.
 static KEEP_ABOVE: OnceLock<bool> = OnceLock::new();
-/// The startup apply and the subscriber take turns, so the newest value wins.
-static LAYER: Mutex<()> = Mutex::new(());
+/// The store revision of the last Keep above applied (0: none yet). Listeners
+/// run after the store's lock is released, so changes can arrive out of
+/// order: only a newer one applies. Never held while calling Tauri.
+static LAYER: Mutex<u64> = Mutex::new(0);
+
+/// Records `revision` as applied when it is newer than the last one.
+fn newer_layer(revision: u64) -> bool {
+    let mut last = LAYER.lock().unwrap_or_else(PoisonError::into_inner);
+    if revision <= *last {
+        return false;
+    }
+    *last = revision;
+    true
+}
 
 /// Whether a window on `display` can be kept above others. GTK has no
 /// keep-above on Wayland, where Qt needs KWin scripting (WindowLayer.cpp);
@@ -96,8 +107,12 @@ pub fn apply_stored_window_layer(store: &Store, window: WebviewWindow) {
     let started = std::thread::Builder::new()
         .name("window-layer".into())
         .spawn(move || {
-            let _layer = LAYER.lock().unwrap_or_else(PoisonError::into_inner);
-            apply_window_layer(&window, settings.flag(ALWAYS_ON_TOP));
+            // Waits for the load without the lock; a change applied since
+            // then is newer than the stored value.
+            let on = settings.flag(ALWAYS_ON_TOP);
+            if *LAYER.lock().unwrap_or_else(PoisonError::into_inner) == 0 {
+                apply_window_layer(&window, on);
+            }
         });
     if let Err(error) = started {
         eprintln!("zerus-client: Keep Zerus above other windows: {error}");
@@ -110,10 +125,11 @@ pub fn window_layer_supported() -> bool {
     keep_above_supported()
 }
 
-/// Every setting, as Qt would read it.
+/// Every setting, as Qt would read it, and the store's revision.
 #[tauri::command]
-pub async fn settings_get(store: State<'_, Store>) -> Result<Map<String, Value>, String> {
-    Ok(store.0.all())
+pub async fn settings_get(store: State<'_, Store>) -> Result<Value, String> {
+    let (values, revision) = store.0.all_tracked();
+    Ok(json!({ "values": values, "revision": revision }))
 }
 
 /// Stores one setting and answers with the value now in effect (clamped as

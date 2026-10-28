@@ -416,6 +416,8 @@ fn set_normalizes_persists_and_tells_listeners() {
     );
     assert!(!settings.all().contains_key("shortcuts/message.push"));
     assert_eq!(heard.lock().unwrap().len(), 6);
+    // The load reads the revision under the same lock.
+    assert_eq!(settings.all_tracked().1, 6);
     // Each change takes the next revision; the answer carries it too.
     assert_eq!(*revisions.lock().unwrap(), vec![1, 2, 3, 4, 5, 6]);
     assert_eq!(

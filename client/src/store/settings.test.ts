@@ -30,7 +30,7 @@ function fakeCore(values: Settings = {}) {
   const store: Settings = { ...DEFAULTS, ...values };
   const backend: SettingsBackend = {
     load: () => new Promise((resolve) => {
-      const answer = () => resolve({ ...store });
+      const answer = () => resolve({ values: { ...store }, revision });
       if (deferLoad) answerLoad = answer; else answer();
     }),
     save: (key, value) => new Promise((resolve, reject) => {
@@ -39,7 +39,10 @@ function fakeCore(values: Settings = {}) {
           if (refuse) { reject("Settings are not readable"); return; }
           const clamped = key === "processes/activeSeconds" && typeof value === "number" ? Math.max(1, Math.min(60, value)) : value;
           if (clamped === null) delete store[key]; else store[key] = clamped;
-          resolve({ value: clamped, revision: ++revision });
+          const change = { value: clamped, revision: ++revision };
+          // The core announces the change before the command answers.
+          listener?.(key, change);
+          resolve(change);
         },
       });
     }),
@@ -187,6 +190,56 @@ describe("answers and events in any order", () => {
   });
 });
 
+describe("this window's own saves", () => {
+  it("show the value the store put in effect although its event came first", async () => {
+    const core = fakeCore();
+    const store = createSettings(core.backend);
+    await store.ready;
+    void store.set("processes/activeSeconds", 0.2);
+    core.saves[0].answer();
+    await flush();
+    expect(store.settings["processes/activeSeconds"]).toBe(1);
+  });
+
+  it("show a newer change made elsewhere while the save was pending", async () => {
+    const core = fakeCore({ "workspace/theme": "system" });
+    const store = createSettings(core.backend);
+    await store.ready;
+    void store.set("workspace/theme", "light");
+    core.saves[0].answer();
+    core.elsewhere("workspace/theme", "dark");
+    await flush();
+    expect(store.settings["workspace/theme"]).toBe("dark");
+    void store.set("workspace/theme", "light");
+    core.elsewhere("workspace/theme", "dark");
+    core.saves[1].answer();
+    await flush();
+    // Our answer (newest revision) wins over the earlier change.
+    expect(store.settings["workspace/theme"]).toBe("light");
+  });
+
+  it("rewrite the first-paint hint after this window's change", async () => {
+    const storage = memoryStorage();
+    const core = fakeCore();
+    const store = createSettings(core.backend, { remember: (s) => writeHint(storage, s) });
+    await store.ready;
+    void store.set("client/darkSkin", "fjord");
+    core.saves[0].answer();
+    await flush();
+    expect(JSON.parse(storage.data[HINT_KEY])["client/darkSkin"]).toBe("fjord");
+  });
+
+  it("drop an event older than the load", async () => {
+    const core = fakeCore();
+    void core.backend.save("workspace/theme", "dark").catch(() => {});
+    core.saves[0].answer();
+    const store = createSettings(core.backend);
+    await store.ready;
+    core.late("workspace/theme", "light", 1);
+    expect(store.settings["workspace/theme"]).toBe("dark");
+  });
+});
+
 describe("the one-time moves", () => {
   it("take the old settings and widths, and clear them only after every save", async () => {
     const storage = memoryStorage({
@@ -249,7 +302,7 @@ describe("the browser dev mode", () => {
   it("keeps typed values in local storage", async () => {
     const storage = memoryStorage({ [STORAGE_KEY]: JSON.stringify({ "workspace/theme": "dark", "workspace/compact": "yes" }) });
     const backend = storageBackend(storage);
-    expect(await backend.load()).toEqual({ "workspace/theme": "dark" });
+    expect(await backend.load()).toEqual({ values: { "workspace/theme": "dark" }, revision: 0 });
     expect((await backend.save("workspace/compact", true)).value).toBe(true);
   });
 });

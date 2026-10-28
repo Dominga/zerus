@@ -555,6 +555,12 @@ impl Settings {
 
     /// Every listed setting and every shortcut override, as Qt reads them.
     pub fn all(&self) -> Map<String, Value> {
+        self.all_tracked().0
+    }
+
+    /// [`Settings::all`] with the store's revision, read under the same lock,
+    /// so a reader can tell older changes from newer ones.
+    pub fn all_tracked(&self) -> (Map<String, Value>, u64) {
         let state = self.loaded();
         let mut all: Map<String, Value> = KEYS
             .iter()
@@ -570,7 +576,7 @@ impl Settings {
                 all.insert(name.clone(), effective(Kind::Chords, Some(value)));
             }
         }
-        all
+        (all, state.revision)
     }
 
     /// Stores a value, normalized as Qt reads it, and returns what is now in

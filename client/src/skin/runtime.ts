@@ -63,11 +63,13 @@ export function chooseSkin(id: string): boolean {
   if (!chosen) return false;
   void setSetting(slot(chosen.appearance), id);
   if (theme() !== "system" && theme() !== chosen.appearance) void setSetting("workspace/theme", chosen.appearance);
-  // Choosing a skin applies its activity-column variant (a user action; a
-  // skin switched by the system appearance changes no setting).
+  const shown = appearanceFor(theme(), systemLight()) === chosen.appearance;
+  // Choosing a skin that shows applies its activity-column variant (a user
+  // action; a skin waiting for the other appearance, or one the system
+  // appearance switches to, changes no setting).
   const full = chosen.layout["activity-column"] === "full";
-  if (full !== flag("workspace/activityFullWidth")) void setSetting("workspace/activityFullWidth", full);
-  return appearanceFor(theme(), systemLight()) === chosen.appearance;
+  if (shown && full !== flag("workspace/activityFullWidth")) void setSetting("workspace/activityFullWidth", full);
+  return shown;
 }
 
 /**

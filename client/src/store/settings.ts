@@ -46,8 +46,8 @@ export interface Saved { value: SettingValue | null; revision: number }
 
 /** Where settings live: the core store in the app, local storage outside it. */
 export interface SettingsBackend {
-  /** Every setting as the store has it. */
-  load(): Promise<Settings>;
+  /** Every setting as the store has it, and the store's revision. */
+  load(): Promise<{ values: Settings; revision: number }>;
   /** Stores one setting. */
   save(key: string, value: SettingValue | null): Promise<Saved>;
   /** Changes made elsewhere; resolves to the unregister function. */
@@ -95,7 +95,7 @@ export function storageBackend(storage: SettingsStorage | undefined): SettingsBa
   const read = () => { try { return storedObject(storage?.getItem(STORAGE_KEY)); } catch { return {}; } };
   let revision = 0;
   return {
-    load: async () => typedObject(read()),
+    load: async () => ({ values: typedObject(read()), revision }),
     save: async (key, value) => {
       const stored = read();
       if (value === null) delete stored[key];
@@ -203,14 +203,14 @@ export function createSettings(backend: SettingsBackend, options: { legacy?: Leg
         ok = false;
         console.warn(`settings: ${key} not saved: ${String(error)}`);
       }
-      // A newer value waits: this answer only updates what the store holds.
-      const latest = !slot.queued;
-      if (saved && fresh(key, saved.revision)) {
-        confirm(key, saved.value);
-        if (latest) { show(key, saved.value); remember(key); }
-      } else if (!ok && latest) {
-        // Refused: back to what the store last confirmed.
+      if (saved && fresh(key, saved.revision)) confirm(key, saved.value);
+      // Once the newest value has its answer, the key shows what the store
+      // holds: this answer, or the event for it (the core announces a change
+      // before it answers), a newer change from elsewhere, or after a
+      // refusal the last confirmed value.
+      if (!slot.queued) {
         show(key, chosen[key]);
+        if (ok) remember(key);
       }
       for (const waiter of waiters) waiter(ok);
     }
@@ -265,10 +265,12 @@ export function createSettings(backend: SettingsBackend, options: { legacy?: Leg
     if (results.every(Boolean)) options.legacy?.clear();
     const before = new Map(versions);
     try {
-      const values = await backend.load();
+      const { values, revision } = await backend.load();
       for (const [key, value] of Object.entries(values)) {
         // A change made since the load started is newer than the loaded value.
         if ((versions.get(key) ?? 0) !== (before.get(key) ?? 0) || slots.has(key)) continue;
+        // Events older than the load can no longer show.
+        if (revision > (revisions.get(key) ?? 0)) revisions.set(key, revision);
         confirm(key, value);
         show(key, value);
       }
@@ -295,7 +297,7 @@ const inTauri = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in 
 /** The core store through the Tauri commands. */
 function tauriBackend(): SettingsBackend {
   return {
-    load: () => invoke<Settings>("settings_get"),
+    load: () => invoke<{ values: Settings; revision: number }>("settings_get"),
     save: (key, value) => invoke<Saved>("settings_set", { key, value }),
     listen: (onChange) => listen<{ key: string; value: SettingValue | null; revision: number }>("settings-changed",
       (e) => onChange(e.payload.key, { value: e.payload.value, revision: e.payload.revision })),

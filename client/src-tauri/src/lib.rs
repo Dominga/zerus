@@ -153,6 +153,16 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
     let builder = builder.activate_ignoring_other_apps(!menu_bar);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let builder = builder.manage(instance::InstanceState(std::sync::Mutex::new(listening)));
+    // A page that loads (again) takes what the menu bar sent once it asks.
+    #[cfg(feature = "live")]
+    let builder = builder.on_page_load(|webview, payload| {
+        use tauri::Manager;
+        if webview.label() == MAIN_WINDOW
+            && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
+        {
+            desk::page_loading(webview.app_handle());
+        }
+    });
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut app = builder
         .invoke_handler(handler())
@@ -297,6 +307,14 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     ]
 }
 
+/// Without the data source there is no menu bar, so nothing waits for the
+/// page; the page asks all the same.
+#[cfg(not(feature = "live"))]
+#[tauri::command]
+fn desk_take_pending() -> serde_json::Value {
+    serde_json::json!({ "open": null, "notices": [] })
+}
+
 #[cfg(not(feature = "live"))]
 fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
@@ -313,6 +331,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::perf_away,
         renderer::renderer_frame,
         clipboard::copy_text,
+        desk_take_pending,
     ]
 }
 

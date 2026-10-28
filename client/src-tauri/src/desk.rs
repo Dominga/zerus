@@ -24,8 +24,6 @@ use zerus_client_core::menubar::{tray_conf_value, Apply, Desk, Entry, Face, Gate
 use zerus_client_core::shell;
 use zerus_client_core::{Change, ComputerId};
 
-use crate::MAIN_WINDOW;
-
 /// The status item is offered at most this often.
 pub const PACE: Duration = Duration::from_millis(250);
 /// The client's own "Open in" choice, in its data directory.
@@ -57,7 +55,6 @@ pub struct Pending {
 }
 
 impl Pending {
-    #[allow(dead_code)] // Task 6's notifier is its first caller.
     pub fn notice(&mut self, notice: Notice) {
         if self.notices.len() == PENDING_NOTICES {
             self.notices.remove(0);
@@ -66,12 +63,52 @@ impl Pending {
     }
 }
 
+/// What the menu bar and notifications send the window's page. Until the
+/// page asks ([`desk_take_pending`]) it waits in [`Pending`]; afterwards it
+/// goes out as an event, until the page loads again.
+#[derive(Debug, Default)]
+pub struct Inbox {
+    ready: bool,
+    pending: Pending,
+}
+
+impl Inbox {
+    /// A session to open: returned to send now, or held for the page.
+    pub fn open(&mut self, target: OpenSession) -> Option<OpenSession> {
+        if self.ready {
+            return Some(target);
+        }
+        self.pending.open = Some(target);
+        None
+    }
+
+    /// A notice: returned to send now, or held for the page.
+    pub fn notice(&mut self, notice: Notice) -> Option<Notice> {
+        if self.ready {
+            return Some(notice);
+        }
+        self.pending.notice(notice);
+        None
+    }
+
+    /// The page asks for what waited; it listens from now on.
+    pub fn take(&mut self) -> Pending {
+        self.ready = true;
+        std::mem::take(&mut self.pending)
+    }
+
+    /// The page loads (again); nothing listens until it asks.
+    pub fn loading(&mut self) {
+        self.ready = false;
+    }
+}
+
 /// Kept in the app state.
 pub struct DeskState {
     sender: Mutex<Sender<DeskInput>>,
     mode: Mutex<OpenMode>,
     dir: PathBuf,
-    pending: Mutex<Pending>,
+    inbox: Mutex<Inbox>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -159,7 +196,7 @@ pub fn start(app: &AppHandle, pump: &crate::pump::Pump, dir: PathBuf, mode: Open
         sender: Mutex::new(sender),
         mode: Mutex::new(mode),
         dir,
-        pending: Mutex::new(Pending::default()),
+        inbox: Mutex::new(Inbox::default()),
     });
     let handle = app.clone();
     std::thread::Builder::new()
@@ -171,7 +208,7 @@ pub fn start(app: &AppHandle, pump: &crate::pump::Pump, dir: PathBuf, mode: Open
 fn run(app: AppHandle, inputs: Receiver<DeskInput>, mut mode: OpenMode) {
     let mut desk = Desk::default();
     // The menu with Open Zerus and Quit, before any change arrives or when the
-    // fleet does not start: Qt builds its menu at once (`TrayAgent.cpp:247-253`).
+    // fleet does not start: Qt builds its menu at once (`TrayAgent.cpp:252-254`).
     publish(&app, &desk, mode);
     while let Ok(first) = inputs.recv() {
         for input in std::iter::once(first).chain(std::iter::from_fn(|| inputs.try_recv().ok())) {
@@ -179,7 +216,10 @@ fn run(app: AppHandle, inputs: Receiver<DeskInput>, mut mode: OpenMode) {
                 DeskInput::Change(change) => {
                     desk.observe(&change);
                 }
-                DeskInput::Mode(chosen) => mode = chosen,
+                DeskInput::Mode(chosen) => {
+                    mode = chosen;
+                    store_mode(&app, chosen);
+                }
             }
         }
         publish(&app, &desk, mode);
@@ -205,8 +245,15 @@ fn publish(app: &AppHandle, desk: &Desk, mode: OpenMode) {
 #[tauri::command]
 pub fn desk_take_pending(app: AppHandle) -> Pending {
     app.try_state::<DeskState>()
-        .map(|state| std::mem::take(&mut *lock(&state.pending)))
+        .map(|state| lock(&state.inbox).take())
         .unwrap_or_default()
+}
+
+/// The main window's page started to load: what follows waits until it asks.
+pub fn page_loading(app: &AppHandle) {
+    if let Some(state) = app.try_state::<DeskState>() {
+        lock(&state.inbox).loading();
+    }
 }
 
 /// Opens the window on a session's row (`TrayAgent.cpp:214-216`).
@@ -215,17 +262,18 @@ pub fn open_session(app: &AppHandle, computer: &ComputerId, key: &str) {
         computer: computer.0.clone(),
         key: key.to_owned(),
     };
-    if app.get_webview_window(MAIN_WINDOW).is_none() {
-        if let Some(state) = app.try_state::<DeskState>() {
-            lock(&state.pending).open = Some(target.clone());
-        }
-    }
+    let now = match app.try_state::<DeskState>() {
+        Some(state) => lock(&state.inbox).open(target),
+        None => Some(target),
+    };
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Err(error) = crate::lifecycle::show_main(&handle) {
             eprintln!("zerus-client: could not open the window: {error}");
         }
-        let _ = handle.emit("open-session", target);
+        if let Some(target) = now {
+            let _ = handle.emit("open-session", target);
+        }
     });
 }
 
@@ -236,10 +284,12 @@ pub fn window_notice(app: &AppHandle, title: &str, text: &str) {
         title: title.to_owned(),
         text: text.to_owned(),
     };
-    if app.get_webview_window(MAIN_WINDOW).is_some() {
+    let now = match app.try_state::<DeskState>() {
+        Some(state) => lock(&state.inbox).notice(notice),
+        None => Some(notice),
+    };
+    if let Some(notice) = now {
         let _ = app.emit("desk-notice", notice);
-    } else if let Some(state) = app.try_state::<DeskState>() {
-        lock(&state.pending).notice(notice);
     }
 }
 
@@ -281,7 +331,7 @@ pub fn open_running(app: &AppHandle, computer: &ComputerId, name: &str) {
         .map(|state| *lock(&state.mode))
         .unwrap_or_default();
     let opened = match mode {
-        OpenMode::Terminal => open_in_terminal(&command).map_err(|error| error.to_string()),
+        OpenMode::Terminal => open_in_terminal(&command),
         OpenMode::Clipboard => {
             use tauri_plugin_clipboard_manager::ClipboardExt;
             shell::copyable(&command)
@@ -309,20 +359,35 @@ pub fn open_running(app: &AppHandle, computer: &ComputerId, name: &str) {
 }
 
 /// `osascript` with Qt's Terminal.app script, detached (`MacBackend::open`).
-fn open_in_terminal(command: &str) -> std::io::Result<()> {
+fn open_in_terminal(command: &str) -> Result<(), String> {
+    detached_script("osascript", &shell::terminal_app_script(command))
+}
+
+/// Starts `program -e script` from HOME without waiting for it. Qt reports
+/// only that it could not start (`MacBackend.cpp:61-65`); the reason goes to
+/// the log.
+fn detached_script(program: &str, script: &str) -> Result<(), String> {
     let home = std::env::var_os("HOME").unwrap_or_else(|| "/".into());
-    let mut child = std::process::Command::new("osascript")
+    let spawned = std::process::Command::new(program)
         .arg("-e")
-        .arg(shell::terminal_app_script(command))
+        .arg(script)
         .current_dir(home)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
+        .spawn();
+    match spawned {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            Ok(())
+        }
+        Err(error) => {
+            eprintln!("zerus-client: {program}: {error}");
+            Err("cannot start osascript".to_owned())
+        }
+    }
 }
 
 /// Takes `chosen` unless it is the mode already in use (`TrayAgent::setOpenMode`
@@ -335,7 +400,8 @@ fn choose(current: &mut OpenMode, chosen: OpenMode) -> bool {
     true
 }
 
-/// The "Open in" choice: applied at once, then saved (`TrayAgent::setOpenMode`).
+/// The "Open in" choice: applied at once (`TrayAgent::setOpenMode`). The desk
+/// thread saves it, so the main thread never waits for the disk.
 pub fn set_mode(app: &AppHandle, mode: OpenMode) {
     let Some(state) = app.try_state::<DeskState>() else {
         return;
@@ -343,16 +409,28 @@ pub fn set_mode(app: &AppHandle, mode: OpenMode) {
     if !choose(&mut lock(&state.mode), mode) {
         return;
     }
-    if let Err(error) = save_mode(&state.dir, mode) {
-        tray_notify(
-            "Zerus: mode applied, but not saved",
-            &format!(
-                "New sessions already open the new way, but the choice could not be written to {}: {error}",
-                state.dir.join(MODE_FILE).display()
-            ),
-        );
-    }
     let _ = lock(&state.sender).send(DeskInput::Mode(mode));
+}
+
+/// Saves a chosen mode; Qt's notice when it cannot (`TrayAgent.cpp:864-872`).
+fn mode_saved(dir: &Path, mode: OpenMode) -> Result<(), Notice> {
+    save_mode(dir, mode).map_err(|error| Notice {
+        title: "Zerus: mode applied, but not saved".to_owned(),
+        text: format!(
+            "New sessions already open the new way, but the choice could not be written to {}: {error}",
+            dir.join(MODE_FILE).display()
+        ),
+    })
+}
+
+/// On the desk thread: saves the mode `set_mode` applied.
+fn store_mode(app: &AppHandle, mode: OpenMode) {
+    let Some(dir) = app.try_state::<DeskState>().map(|state| state.dir.clone()) else {
+        return;
+    };
+    if let Err(notice) = mode_saved(&dir, mode) {
+        tray_notify(&notice.title, &notice.text);
+    }
 }
 
 /// What a menu entry does when chosen (Qt's `TrayMenu` signals).
@@ -589,16 +667,124 @@ mod tests {
 
     #[test]
     fn the_desk_listens_to_rows_statuses_and_cards_only() {
-        use zerus_client_core::{ActivityUpdate, ComputerStatus};
-        assert!(menu_bar_change(&Change::Computer {
-            computer: ComputerId::local(),
-            status: ComputerStatus::Live
-        }));
-        assert!(!menu_bar_change(&Change::Activity {
-            computer: ComputerId::local(),
-            key: "k".into(),
-            update: ActivityUpdate::Ended,
-        }));
+        use zerus_client_core::{
+            ActivityUpdate, ComputerStatus, MachineMeta, OrganizationUpdate, ProcessesUpdate,
+            TasksUpdate, ViewRow,
+        };
+        let local = ComputerId::local;
+        let read = [
+            Change::Upsert {
+                computer: local(),
+                key: "k".into(),
+                row: ViewRow::default(),
+            },
+            Change::Remove {
+                computer: local(),
+                key: "k".into(),
+                reason: None,
+            },
+            Change::Replace {
+                computer: local(),
+                rows: Vec::new(),
+            },
+            Change::Computer {
+                computer: local(),
+                status: ComputerStatus::Live,
+            },
+            Change::Machine {
+                computer: local(),
+                machine: MachineMeta::default(),
+            },
+        ];
+        for change in &read {
+            assert!(menu_bar_change(change), "{change:?}");
+        }
+        let skipped = [
+            Change::Activity {
+                computer: local(),
+                key: "k".into(),
+                update: ActivityUpdate::Ended,
+            },
+            Change::Processes {
+                computer: local(),
+                key: "k".into(),
+                update: ProcessesUpdate::Ended,
+            },
+            Change::Tasks {
+                computer: local(),
+                key: "k".into(),
+                update: TasksUpdate::Ended,
+            },
+            Change::Organization {
+                computer: local(),
+                update: OrganizationUpdate::Ended,
+            },
+        ];
+        for change in &skipped {
+            assert!(!menu_bar_change(change), "{change:?}");
+        }
+    }
+
+    #[test]
+    fn a_mode_that_cannot_be_saved_gives_qts_notice() {
+        let dir = scratch("unsaved");
+        assert_eq!(mode_saved(&dir, OpenMode::Clipboard), Ok(()));
+        assert_eq!(load_mode(&dir, None), OpenMode::Clipboard);
+        // A file where the data directory should be.
+        let file = dir.join("not-a-directory");
+        std::fs::write(&file, b"").unwrap();
+        let notice = mode_saved(&file, OpenMode::Terminal).unwrap_err();
+        assert_eq!(notice.title, "Zerus: mode applied, but not saved");
+        assert!(
+            notice.text.starts_with(&format!(
+                "New sessions already open the new way, but the choice could not be written to {}: ",
+                file.join(MODE_FILE).display()
+            )),
+            "{}",
+            notice.text
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_osascript_that_cannot_start_reads_like_qt() {
+        assert_eq!(
+            detached_script("/nonexistent/zerus-osascript", "return"),
+            Err("cannot start osascript".to_owned())
+        );
+    }
+
+    fn target(key: &str) -> OpenSession {
+        OpenSession {
+            computer: "studio".into(),
+            key: key.into(),
+        }
+    }
+
+    #[test]
+    fn a_session_waits_until_the_page_takes_it() {
+        let mut inbox = Inbox::default();
+        assert_eq!(inbox.open(target("a")), None, "no page yet: held");
+        let notice = Notice {
+            title: "Zerus".into(),
+            text: "sample".into(),
+        };
+        assert_eq!(inbox.notice(notice.clone()), None);
+        let pending = inbox.take();
+        assert_eq!(pending.open, Some(target("a")));
+        assert_eq!(pending.notices, [notice.clone()]);
+        assert_eq!(inbox.take(), Pending::default(), "taken once");
+        assert_eq!(
+            inbox.open(target("b")),
+            Some(target("b")),
+            "a ready page gets the event"
+        );
+        assert_eq!(inbox.notice(notice.clone()), Some(notice));
+        // A window that exists but whose page loads again (a reload, a new webview).
+        inbox.loading();
+        assert_eq!(inbox.open(target("c")), None);
+        assert_eq!(inbox.open(target("d")), None, "the latest session wins");
+        assert_eq!(inbox.take().open, Some(target("d")));
     }
 
     #[test]

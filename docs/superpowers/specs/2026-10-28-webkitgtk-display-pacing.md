@@ -3,10 +3,10 @@
 Date: 2026-10-28
 Beads: `zerus-5wmh.28` (investigation: `zerus-5wmh.14`)
 
-Status: deferred by the owner on 2026-10-28. Linux stays on WebKitGTK at 60 fps
-until feature parity is complete; the 144 Hz work will be revisited afterwards.
-The patches and private builds are preserved, but no further display runs are
-part of this documentation handoff.
+Status: active research, clarified by the owner on 2026-10-28. The WebKit and
+CEF investigations continue in parallel; feature work and releases do not wait
+for them. The private builds are complete and real-display measurements are
+next.
 
 ## Recommendation
 
@@ -243,9 +243,9 @@ and `VBlank refresh rate 144Hz`, while the same build's rAF interval remains
 about 16.67 ms. This is direct evidence of the downstream presentation gate and
 motivates patch 0003; it is not a pass result.
 
-Real-display attempts were refused before opening a window because the KDE
-session was locked and both outputs were in standby. No real-display 144 Hz
-qualification was performed. The owner then deferred this work until after
-feature parity and asked for no further display runs now. Raw commands, exit
-codes, logs and JSON are preserved in the task's WebKit evidence directory;
+Earlier real-display attempts were refused before opening a window because
+the KDE session was locked and both outputs were in standby. The owner then
+clarified that the research continues in parallel with feature work and
+releases. Raw commands, exit codes, logs and JSON are preserved in the task's
+WebKit evidence directory; final measurements are added after the display runs.
 rAF intervals alone are not compositor-phase validation.

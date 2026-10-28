@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # Historical data validation only; native execution always uses stage_latest().
 HISTORICAL_VERSIONS = ('2.1.1', '2.2.0')
 METHODS = (
+    'test_kimi_native.NativeKimi.test_launch_prompt_waits_for_trust_and_is_not_replayed_on_resume',
     'test_kimi_native.NativeKimi.test_exact_input_reaches_the_model_once',
     'test_kimi_native.NativeKimi.test_pause_and_resume_keep_the_conversation',
     'test_kimi_native.NativeKimi.test_rolling_window_429_recovers_in_the_same_conversation',
@@ -238,7 +239,7 @@ def checked_methods():
             node = next(item for item in tree.body if isinstance(item, ast.ClassDef) and item.name == name)
             found.extend(filename + '.' + name + '.' + item.name for item in node.body
                          if isinstance(item, ast.FunctionDef) and item.name.startswith('test_'))
-    if len(found) != 12 or set(found) != set(METHODS):
+    if len(found) != len(METHODS) or set(found) != set(METHODS):
         raise ValueError('native method inventory needs an explicit review')
     return METHODS
 
@@ -336,7 +337,7 @@ def suite_child(result_path, custody_path):
 
 
 def outcome(result, code):
-    return (code == 0 and type(result.get('tests')) is int and result['tests'] == 12 and result.get('started') == list(METHODS)
+    return (code == 0 and type(result.get('tests')) is int and result['tests'] == len(METHODS) and result.get('started') == list(METHODS)
             and result.get('completed') == list(METHODS)
             and all(type(result.get(key)) is int and result[key] == 0 for key in
                     ('failures', 'errors', 'skipped', 'expected_failures', 'unexpected_successes')))
@@ -456,7 +457,7 @@ def main():
     source, hgs_sha = source_map(), digest(hgs)
     tools = {str(path): digest(path) for path in (Path(sys.executable).resolve(), args.tmux.resolve(), Path('/usr/bin/cc'))}
     write(evidence / 'plan.json', dict(source_sha=args.source_sha, platform=platform_id, methods=METHODS,
-          native_cases=12, mac_shim_compiles=12 if platform_id == 'darwin-arm64' else 0,
+          native_cases=len(METHODS), mac_shim_compiles=len(METHODS) if platform_id == 'darwin-arm64' else 0,
           hgs_sha256=hgs_sha, tools=tools, environment=env, runtime=str(runtime), no_retries=True))
     write(evidence / 'source-before.json', source)
     records, custody, success = [], [], False
@@ -464,7 +465,7 @@ def main():
         release, image, record_path = stage_latest(images, evidence, platform_id)
         version = release['version']
         selected_seals = {str(path): digest(path) for path in (image, record_path, images / 'manifest.json')}
-        write(evidence / 'reservation.json', dict(state='SPENT', versions=[version], native_cases=12,
+        write(evidence / 'reservation.json', dict(state='SPENT', versions=[version], native_cases=len(METHODS),
               selected_release=release, time=time.time()))
         if source_map() != source or digest(hgs) != hgs_sha:
             raise ValueError('source or hgs changed before native execution')
@@ -501,7 +502,7 @@ def main():
         raise
     finally:
         write(evidence / 'receipt.json', dict(source=args.source_sha, platform=platform_id, outcome='PASS' if success else 'FAIL',
-              completed_versions=len(records), native_cases=12 if success else None, images_retained=str(images), runtime_retained=str(runtime),
+              completed_versions=len(records), native_cases=len(METHODS) if success else None, images_retained=str(images), runtime_retained=str(runtime),
               owner_install=False, historical_np50_authority=False))
     return 0
 

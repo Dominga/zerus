@@ -228,6 +228,13 @@ which then names the new conversation instead of the restored one. A sent first
 message or an archive restore still waits for that confirmation.
 Unknown flags or noninteractive modes such as `codex exec` are not guessed.
 The original positional prompt is never replayed during resume.
+For Kimi Code whose help advertises a non-interactive `--prompt`, Zerus removes
+the initial message from native arguments and the saved resume recipe, then
+submits it through the ordinary guarded send path for the exact launched run.
+Folder trust and setup remain manual. `inspect` includes `launch_prompt` with
+the retained text, request ID and status. After an attempted submission there
+is no automatic retry, including on refusal or an uncertain delivery. Review
+the retained message and ordinary input receipt before sending it manually.
 
 A launch interrupted before conversation confirmation is not a Saved session.
 Repeat the same command without `--fresh`; the diagnostic attempt is preserved in

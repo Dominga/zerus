@@ -20,6 +20,10 @@ fn codex_daemon_flag(executable: &str) -> Result<bool> {
 }
 
 fn codex_supports_no_daemon(executable: &str) -> Result<bool> {
+    Ok(agent_help(executable)?.split_whitespace().any(|word| word == "--no-daemon"))
+}
+
+pub(super) fn agent_help(executable: &str) -> Result<String> {
     use std::process::Stdio;
     // Probe capabilities without starting a conversation or inheriting a hook identity.
     let mut output = tempfile::tempfile().map_err(|e| e.to_string())?;
@@ -29,6 +33,7 @@ fn codex_supports_no_daemon(executable: &str) -> Result<bool> {
         command
             .env_remove("HGS_RUN_ID")
             .env_remove("HGS_SESSION")
+            .env("KIMI_CODE_NO_AUTO_UPDATE", "1")
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .stdout(output.try_clone().map_err(|e| e.to_string())?),
@@ -37,14 +42,14 @@ fn codex_supports_no_daemon(executable: &str) -> Result<bool> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(status) = child.try_wait().map_err(|e|e.to_string())? {
-            if !status.success() { return Err("Cannot check Codex launch capabilities (--help failed)".into()); }
+            if !status.success() { return Err(format!("Cannot check {executable} launch capabilities (--help failed)")); }
             use std::io::{Read, Seek, SeekFrom};
             output.seek(SeekFrom::Start(0)).map_err(|e|e.to_string())?;
             let mut text=String::new();output.take(128*1024).read_to_string(&mut text).map_err(|e|e.to_string())?;
-            return Ok(text.split_whitespace().any(|word|word=="--no-daemon"));
+            return Ok(text);
         }
         if Instant::now()>=deadline {
-            let _=child.kill();let _=child.wait();return Err("Codex capability check timed out".into());
+            let _=child.kill();let _=child.wait();return Err(format!("{executable} capability check timed out"));
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -73,6 +78,18 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             std::env::remove_var(key);
         }
     }
+    // Strip only a capability-verified interactive launch prompt. Never save it
+    // in the native resume recipe, where a later resume could replay it.
+    let mut launch_prompt = if agent == "kimi" && base.len() > 1 {
+        let help = agent_help("kimi")?;
+        let prompt = kimi_launch::take_prompt(&mut base, &help)?;
+        if !first.is_empty() {
+            let other = kimi_launch::take_prompt(&mut first, &help)?;
+            if other != prompt { return Err("Kimi launch prompts do not match".into()); }
+        }
+        if let Some(text) = &prompt { input::validate_launch_prompt(text)?; }
+        prompt.map(kimi_launch::Prompt::new)
+    } else { None };
     if nonempty_env("HGS_ACCOUNT_ID").is_some_and(|id| !id.starts_with("native-")) {
         for key in crate::accounts::AUTH_ENV {
             std::env::remove_var(key);
@@ -274,7 +291,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         let started = Instant::now();
         let mut child = spawn_agent(&first, &name, &token)?;
         let child_id = child.id();
-        let status = supervisor::wait(&mut child)?;
+        let status = kimi_launch::wait(&mut child, &name, &token, launch_prompt.as_mut())?;
         let confirmed = {
             let _guard = lock(None)?;
             let current =
@@ -311,7 +328,9 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     }
     let mut child = spawn_agent(&base, &name, &token)?;
     let child_id = child.id();
-    let status = supervisor::wait(&mut child)?;
+    // The same in-memory ticket survives a definite early resume failure. Once
+    // a submission is attempted, even a refusal can never authorize a replay.
+    let status = kimi_launch::wait(&mut child, &name, &token, launch_prompt.as_mut())?;
     supervisor::finish(&name, &token, child_id, status)?;
     Ok(ExitInfo::of(status).exit_code())
 }

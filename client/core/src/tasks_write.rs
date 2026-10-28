@@ -1,0 +1,645 @@
+//! Zerus Tasks writes, ported from the Qt client: the `hgs task` calls the
+//! board, the inspector and the composer make, their limits and texts, and
+//! the step runner that applies several calls in order. The reads come from
+//! the `tasks` topic.
+//!
+//! Every call runs on this computer, since the task catalog is shared through
+//! the swarm, and blocks; callers run it off the UI thread.
+//!
+//! Reference: `tray/src/HgsClient.cpp` (`requestTask`, `taskTimeoutMs`),
+//! `tray/src/TasksView.cpp` (`run`, `steps`, `editSteps`, `targetArguments`,
+//! `addTask`, `createNamedTask`, `reorderTask`, `stageTask`, `renameTask`,
+//! `saveTaskNote`, the cancel dialog) and `tray/src/TaskContent.h`.
+use crate::actions::{Exit, Invocation};
+use crate::attachments::{Attachment, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_TOTAL_BYTES};
+use crate::run::{run_limited, TooLarge};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+use std::path::Path;
+use std::time::Duration;
+
+/// The largest reply a task call may print.
+pub const TASK_REPLY_LIMIT: usize = 36 * 1024 * 1024;
+const STDERR_CHARS: usize = 4000;
+
+/// One `hgs task ...` call: its arguments after `task`, and the text on its
+/// standard input, which is always given and closed, even empty, so a command
+/// that reads a text never waits.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskCall {
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub input: String,
+}
+
+/// A task's stage on the board.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stage {
+    Backlog,
+    Todo,
+    Done,
+}
+
+impl Stage {
+    fn word(self) -> &'static str {
+        match self {
+            Self::Backlog => "backlog",
+            Self::Todo => "todo",
+            Self::Done => "done",
+        }
+    }
+}
+
+/// Who a task goes to (`targetArguments`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskTarget {
+    /// The session's computer alias, empty for this computer.
+    pub host: String,
+    /// The session's name; empty for any session.
+    pub session: String,
+    /// The session's stable ID, when known.
+    pub session_id: String,
+    /// `new_session` or `subagent` for a planned executor under `session`;
+    /// empty for the session itself.
+    pub mode: String,
+}
+
+fn with_project(mut args: Vec<String>, project: &str) -> Vec<String> {
+    args.extend(["--project".to_owned(), project.to_owned()]);
+    args
+}
+
+fn words(items: &[&str]) -> Vec<String> {
+    items.iter().map(|item| (*item).to_owned()).collect()
+}
+
+impl TaskCall {
+    fn new(args: Vec<String>, input: impl Into<String>) -> TaskCall {
+        TaskCall {
+            args,
+            input: input.into(),
+        }
+    }
+
+    /// `hgs task ...` with Qt's timeouts: 90 s for `send`, `cancel` and
+    /// `message`, otherwise 30 s.
+    pub fn invocation(&self) -> Invocation {
+        let long = matches!(
+            self.args.first().map(String::as_str),
+            Some("send" | "cancel" | "message")
+        );
+        let mut args = vec!["task".to_owned()];
+        args.extend(self.args.iter().cloned());
+        Invocation {
+            args,
+            stdin: Some(self.input.clone().into_bytes()),
+            timeout: Duration::from_secs(if long { 90 } else { 30 }),
+            request_id: None,
+        }
+    }
+
+    /// A new task from the composer for the open session (`addTask`): the
+    /// text, or the content payload when it has files.
+    pub fn add(
+        project: &str,
+        target: &TaskTarget,
+        backlog: bool,
+        text: &str,
+        files: &[Attachment],
+    ) -> TaskCall {
+        let mut args = words(&["add", "--project", project, "--target", &target.session]);
+        if !target.session_id.is_empty() {
+            args.extend(["--session-id".to_owned(), target.session_id.clone()]);
+        }
+        if !target.host.is_empty() {
+            args.extend(["--host".to_owned(), target.host.clone()]);
+        }
+        if backlog {
+            args.push("--backlog".into());
+        }
+        if files.is_empty() {
+            TaskCall::new(args, text)
+        } else {
+            args.push("--content-json".into());
+            TaskCall::new(args, content(text, files))
+        }
+    }
+
+    /// A named card reserved under `request_id` (`createNamedTask`); its
+    /// reply must name the same task (see [`created`]).
+    pub fn add_named(
+        project: &str,
+        title: &str,
+        request_id: &str,
+        target: &TaskTarget,
+        backlog: bool,
+    ) -> TaskCall {
+        let session = if target.session.is_empty() {
+            "any"
+        } else {
+            &target.session
+        };
+        let mut args = words(&[
+            "add",
+            "--project",
+            project,
+            "--title",
+            title,
+            "--request-id",
+            request_id,
+            "--target",
+            session,
+            "--content-json",
+        ]);
+        if backlog {
+            args.push("--backlog".into());
+        }
+        if !target.session_id.is_empty() {
+            args.extend(["--session-id".to_owned(), target.session_id.clone()]);
+        }
+        if !target.host.is_empty() {
+            args.extend(["--host".to_owned(), target.host.clone()]);
+        }
+        TaskCall::new(args, content("", &[]))
+    }
+
+    pub fn get(project: &str, task: &str) -> TaskCall {
+        TaskCall::new(with_project(words(&["get", task]), project), "")
+    }
+
+    /// To the top of its list.
+    pub fn move_top(project: &str, task: &str) -> TaskCall {
+        TaskCall::new(with_project(words(&["move", task, "--top"]), project), "")
+    }
+
+    /// Before or after another task of the same list.
+    pub fn move_next_to(project: &str, task: &str, anchor: &str, before: bool) -> TaskCall {
+        let side = if before { "--before" } else { "--after" };
+        TaskCall::new(
+            with_project(words(&["move", task, side, anchor]), project),
+            "",
+        )
+    }
+
+    pub fn stage(project: &str, task: &str, stage: Stage) -> TaskCall {
+        TaskCall::new(
+            with_project(words(&["stage", task, stage.word()]), project),
+            "",
+        )
+    }
+
+    /// The title goes on standard input.
+    pub fn rename(project: &str, task: &str, title: &str) -> TaskCall {
+        TaskCall::new(with_project(words(&["rename", task]), project), title)
+    }
+
+    /// A new description: the text, or the content payload with files.
+    pub fn edit(project: &str, task: &str, text: &str, files: Option<&[Attachment]>) -> TaskCall {
+        match files {
+            Some(files) => TaskCall::new(
+                with_project(words(&["edit", task, "--content-json"]), project),
+                content(text, files),
+            ),
+            None => TaskCall::new(with_project(words(&["edit", task]), project), text),
+        }
+    }
+
+    /// A comment: the text, or the content payload with files.
+    pub fn comment(project: &str, task: &str, text: &str, files: &[Attachment]) -> TaskCall {
+        if files.is_empty() {
+            TaskCall::new(with_project(words(&["comment", task]), project), text)
+        } else {
+            TaskCall::new(
+                words(&["comment", task, "--content-json", "--project", project]),
+                content(text, files),
+            )
+        }
+    }
+
+    /// Who the task goes to (`targetArguments`).
+    pub fn target(project: &str, task: &str, target: &TaskTarget) -> TaskCall {
+        let planned = matches!(target.mode.as_str(), "new_session" | "subagent");
+        let who = if planned {
+            if target.mode == "new_session" {
+                "new-session"
+            } else {
+                "subagent"
+            }
+        } else if target.session.is_empty() {
+            "any"
+        } else {
+            target.session.as_str()
+        };
+        let mut args = words(&["target", task, who]);
+        if planned {
+            args.extend(["--parent".to_owned(), target.session.clone()]);
+        }
+        if !target.session.is_empty() && !target.host.is_empty() {
+            args.extend(["--host".to_owned(), target.host.clone()]);
+        }
+        if !target.session.is_empty() && !target.session_id.is_empty() {
+            args.extend(["--session-id".to_owned(), target.session_id.clone()]);
+        }
+        TaskCall::new(with_project(args, project), "")
+    }
+
+    /// Send now. A task for any session goes to the open one, on whichever
+    /// computer runs it.
+    pub fn send(
+        project: &str,
+        task: &str,
+        any_session: bool,
+        open_host: &str,
+        open_session: &str,
+    ) -> TaskCall {
+        let mut args = words(&["send", task]);
+        if any_session {
+            args.extend(["--session".to_owned(), open_session.to_owned()]);
+            if !open_host.is_empty() {
+                args.extend(["--host".to_owned(), open_host.to_owned()]);
+            }
+        }
+        TaskCall::new(with_project(args, project), "")
+    }
+
+    /// Cancel, with the reason the dialog asked for, if any.
+    pub fn cancel(project: &str, task: &str, reason: &str) -> TaskCall {
+        let mut args = words(&["cancel", task]);
+        if !reason.is_empty() {
+            args.extend(["--reason".to_owned(), reason.to_owned()]);
+        }
+        TaskCall::new(with_project(args, project), "")
+    }
+}
+
+/// The task content payload (`TaskContent::payload`): the text and its files
+/// as `{name, mime, reference, data_base64}`.
+pub fn content(text: &str, files: &[Attachment]) -> String {
+    use base64::Engine;
+    let files: Vec<Value> = files
+        .iter()
+        .map(|file| {
+            json!({"name": file.name, "mime": file.mime, "reference": file.reference,
+                   "data_base64": base64::engine::general_purpose::STANDARD.encode(&file.bytes)})
+        })
+        .collect();
+    json!({"text": text, "attachments": files}).to_string()
+}
+
+/// The files of a task content payload (`TaskContent::decode`): nothing when
+/// any file is invalid or the files pass the attachment limits.
+pub fn decode_files(files: &Value) -> Vec<Attachment> {
+    use base64::Engine;
+    let Some(items) = files.as_array() else {
+        return Vec::new();
+    };
+    if items.len() > MAX_ATTACHMENTS {
+        return Vec::new();
+    }
+    let mut total = 0;
+    let mut out = Vec::with_capacity(items.len());
+    for file in items {
+        let encoded = file["data_base64"].as_str().unwrap_or("");
+        if encoded.len() > MAX_ATTACHMENT_BYTES.div_ceil(3) * 4 {
+            return Vec::new();
+        }
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+            return Vec::new();
+        };
+        total += bytes.len();
+        if bytes.is_empty() || bytes.len() > MAX_ATTACHMENT_BYTES || total > MAX_TOTAL_BYTES {
+            return Vec::new();
+        }
+        out.push(Attachment {
+            name: file["name"].as_str().unwrap_or("").into(),
+            mime: file["mime"].as_str().unwrap_or("").into(),
+            bytes: bytes.into(),
+            reference: file["reference"].as_str().unwrap_or("").into(),
+        });
+    }
+    out
+}
+
+/// A call's reply: a JSON object, or Qt's text for why there is none.
+pub fn decode(exit: Exit) -> Result<Map<String, Value>, String> {
+    match exit {
+        Exit::TimedOut => Err("hgs task timed out".into()),
+        Exit::StartFailed(error) => Err(format!(
+            "cannot start '{}': {error}",
+            crate::default_hgs().to_string_lossy()
+        )),
+        Exit::Code {
+            code: 0, stdout, ..
+        } => match serde_json::from_slice::<Value>(&stdout) {
+            Ok(Value::Object(object)) => Ok(object),
+            _ => Err("Invalid task response".into()),
+        },
+        Exit::Code { code, stderr, .. } => {
+            let detail: String = stderr.trim().chars().take(STDERR_CHARS).collect();
+            Err(if detail.is_empty() {
+                format!("exit code {code}")
+            } else {
+                detail
+            })
+        }
+        Exit::Abnormal { stderr } => {
+            let detail: String = stderr.trim().chars().take(STDERR_CHARS).collect();
+            Err(if detail.is_empty() {
+                "exit code -1".into()
+            } else {
+                detail
+            })
+        }
+        Exit::WriteFailed => Err("exit code -1".into()),
+    }
+}
+
+/// Runs one call through `hgs`.
+pub fn run(hgs: &Path, call: &TaskCall) -> Result<Map<String, Value>, String> {
+    match run_limited(hgs, &call.invocation(), &[], TASK_REPLY_LIMIT) {
+        Ok(exit) => decode(exit),
+        Err(TooLarge { .. }) => Err("Task response exceeds 36 MiB".into()),
+    }
+}
+
+/// Runs calls in order and stops at the first failure (`TasksView::run`):
+/// the replies so far, or the index and text of the call that failed.
+pub fn run_steps(
+    hgs: &Path,
+    calls: &[TaskCall],
+) -> Result<Vec<Map<String, Value>>, (usize, String)> {
+    let mut replies = Vec::with_capacity(calls.len());
+    for (index, call) in calls.iter().enumerate() {
+        replies.push(run(hgs, call).map_err(|error| (index, error))?);
+    }
+    Ok(replies)
+}
+
+/// Whether a named card's reply names the reserved task; otherwise Qt's text.
+pub fn created(reply: &Map<String, Value>, request_id: &str) -> Result<Value, String> {
+    let task = reply.get("task").cloned().unwrap_or(Value::Null);
+    if task["uuid"].as_str() == Some(request_id) {
+        Ok(task)
+    } else {
+        Err("Task creation needs review: the reply did not match the reserved card.".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(name: &str, bytes: &[u8]) -> Attachment {
+        Attachment {
+            name: name.into(),
+            mime: "text/plain".into(),
+            bytes: bytes.into(),
+            reference: "[File #1]".into(),
+        }
+    }
+
+    fn here(session: &str) -> TaskTarget {
+        TaskTarget {
+            host: "studio".into(),
+            session: session.into(),
+            session_id: "sid-1".into(),
+            mode: String::new(),
+        }
+    }
+
+    #[test]
+    fn calls_carry_qt_arguments_input_and_timeouts() {
+        let add = TaskCall::add("alpha", &here("claude/p/a"), true, "do it", &[]);
+        assert_eq!(
+            add.args,
+            [
+                "add",
+                "--project",
+                "alpha",
+                "--target",
+                "claude/p/a",
+                "--session-id",
+                "sid-1",
+                "--host",
+                "studio",
+                "--backlog"
+            ]
+        );
+        assert_eq!(add.input, "do it");
+        let inv = add.invocation();
+        assert_eq!(inv.args[0], "task");
+        assert_eq!(inv.timeout, Duration::from_secs(30));
+        assert_eq!(inv.stdin.as_deref(), Some(&b"do it"[..]));
+        // Input is always given, even empty.
+        assert_eq!(
+            TaskCall::get("alpha", "t-1").invocation().stdin.as_deref(),
+            Some(&b""[..])
+        );
+        for long in [
+            TaskCall::send("alpha", "t-1", false, "", ""),
+            TaskCall::cancel("alpha", "t-1", ""),
+        ] {
+            assert_eq!(long.invocation().timeout, Duration::from_secs(90));
+        }
+        let files = TaskCall::add(
+            "alpha",
+            &here("claude/p/a"),
+            false,
+            "see",
+            &[file("a.txt", b"hi")],
+        );
+        assert_eq!(files.args.last().unwrap(), "--content-json");
+        let payload: Value = serde_json::from_str(&files.input).unwrap();
+        assert_eq!(
+            payload,
+            json!({"text": "see", "attachments": [{"name": "a.txt", "mime": "text/plain", "reference": "[File #1]", "data_base64": "aGk="}]})
+        );
+        let named = TaskCall::add_named("alpha", "Ship", "uuid-1", &TaskTarget::default(), false);
+        assert_eq!(
+            named.args,
+            [
+                "add",
+                "--project",
+                "alpha",
+                "--title",
+                "Ship",
+                "--request-id",
+                "uuid-1",
+                "--target",
+                "any",
+                "--content-json"
+            ]
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&named.input).unwrap(),
+            json!({"text": "", "attachments": []})
+        );
+    }
+
+    #[test]
+    fn board_and_inspector_calls() {
+        assert_eq!(
+            TaskCall::move_top("alpha", "t").args,
+            ["move", "t", "--top", "--project", "alpha"]
+        );
+        assert_eq!(
+            TaskCall::move_next_to("alpha", "t", "u", true).args,
+            ["move", "t", "--before", "u", "--project", "alpha"]
+        );
+        assert_eq!(
+            TaskCall::stage("alpha", "t", Stage::Done).args,
+            ["stage", "t", "done", "--project", "alpha"]
+        );
+        let rename = TaskCall::rename("alpha", "t", "New title");
+        assert_eq!(
+            (rename.args.as_slice(), rename.input.as_str()),
+            (
+                &words(&["rename", "t", "--project", "alpha"])[..],
+                "New title"
+            )
+        );
+        assert_eq!(
+            TaskCall::edit("alpha", "t", "body", None).args,
+            ["edit", "t", "--project", "alpha"]
+        );
+        assert_eq!(
+            TaskCall::edit("alpha", "t", "body", Some(&[])).args,
+            ["edit", "t", "--content-json", "--project", "alpha"]
+        );
+        assert_eq!(
+            TaskCall::comment("alpha", "t", "note", &[file("a", b"x")]).args,
+            ["comment", "t", "--content-json", "--project", "alpha"]
+        );
+        assert_eq!(
+            TaskCall::comment("alpha", "t", "note", &[]).args,
+            ["comment", "t", "--project", "alpha"]
+        );
+        assert_eq!(
+            TaskCall::send("alpha", "t", true, "studio", "claude/p/a").args,
+            [
+                "send",
+                "t",
+                "--session",
+                "claude/p/a",
+                "--host",
+                "studio",
+                "--project",
+                "alpha"
+            ]
+        );
+        assert_eq!(
+            TaskCall::cancel("alpha", "t", "Not needed").args,
+            [
+                "cancel",
+                "t",
+                "--reason",
+                "Not needed",
+                "--project",
+                "alpha"
+            ]
+        );
+    }
+
+    #[test]
+    fn targets_follow_target_arguments() {
+        assert_eq!(
+            TaskCall::target("alpha", "t", &here("claude/p/a")).args,
+            [
+                "target",
+                "t",
+                "claude/p/a",
+                "--host",
+                "studio",
+                "--session-id",
+                "sid-1",
+                "--project",
+                "alpha"
+            ]
+        );
+        assert_eq!(
+            TaskCall::target("alpha", "t", &TaskTarget::default()).args,
+            ["target", "t", "any", "--project", "alpha"]
+        );
+        let planned = TaskTarget {
+            mode: "new_session".into(),
+            ..here("claude/p/a")
+        };
+        assert_eq!(
+            TaskCall::target("alpha", "t", &planned).args,
+            [
+                "target",
+                "t",
+                "new-session",
+                "--parent",
+                "claude/p/a",
+                "--host",
+                "studio",
+                "--session-id",
+                "sid-1",
+                "--project",
+                "alpha"
+            ]
+        );
+        let subagent = TaskTarget {
+            mode: "subagent".into(),
+            host: String::new(),
+            session_id: String::new(),
+            session: "claude/p/a".into(),
+        };
+        assert_eq!(
+            TaskCall::target("alpha", "t", &subagent).args,
+            [
+                "target",
+                "t",
+                "subagent",
+                "--parent",
+                "claude/p/a",
+                "--project",
+                "alpha"
+            ]
+        );
+    }
+
+    #[test]
+    fn replies_and_failures_use_qt_texts() {
+        let exit = |code: i32, stdout: &str, stderr: &str| Exit::Code {
+            code,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.into(),
+        };
+        assert_eq!(
+            decode(exit(0, r#"{"task":{"uuid":"u"}}"#, "")).unwrap()["task"]["uuid"],
+            "u"
+        );
+        assert_eq!(
+            decode(exit(0, "[]", "")),
+            Err("Invalid task response".into())
+        );
+        assert_eq!(
+            decode(exit(2, "", "  no such task \n")),
+            Err("no such task".into())
+        );
+        assert_eq!(decode(exit(3, "", "")), Err("exit code 3".into()));
+        assert_eq!(decode(Exit::TimedOut), Err("hgs task timed out".into()));
+        let reply = decode(exit(0, r#"{"task":{"uuid":"uuid-1","title":"Ship"}}"#, "")).unwrap();
+        assert_eq!(created(&reply, "uuid-1").unwrap()["title"], "Ship");
+        assert_eq!(
+            created(&reply, "uuid-2"),
+            Err("Task creation needs review: the reply did not match the reserved card.".into())
+        );
+    }
+
+    #[test]
+    fn content_files_decode_within_the_limits() {
+        let payload: Value =
+            serde_json::from_str(&content("t", &[file("a.txt", b"hello")])).unwrap();
+        let files = decode_files(&payload["attachments"]);
+        assert_eq!(files.len(), 1);
+        assert_eq!(&files[0].bytes[..], b"hello");
+        assert!(decode_files(&json!([{"name": "a", "data_base64": "not base64!"}])).is_empty());
+        assert!(decode_files(&json!([{"name": "a", "data_base64": ""}])).is_empty());
+        let nine: Vec<Value> = (0..9).map(|_| json!({"data_base64": "aGk="})).collect();
+        assert!(decode_files(&Value::Array(nine)).is_empty());
+    }
+}

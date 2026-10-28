@@ -22,6 +22,7 @@ pub mod shell;
 pub mod state;
 pub mod stream;
 pub mod tasks;
+pub mod tasks_write;
 pub mod view;
 pub mod views;
 

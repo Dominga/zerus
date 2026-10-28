@@ -7,6 +7,7 @@
 //! `docs/superpowers/plans/2026-10-28-tauri-client-phase1.md` (Tasks 3 and 4)
 //! and the "Event stream" section of `docs/reference.md`.
 
+pub mod actions;
 pub mod batch;
 pub mod fleet;
 pub mod processes;
@@ -18,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 
+pub use actions::{Action, Exit, Invocation, Outcome, Target, WorktreeCleanup};
 pub use batch::ProcessesOut;
 pub use batch::{ActivityOut, Batch, Coalescer, ComputerOut, KeyOut, ReplaceOut, RowOut};
 pub use fleet::{Fleet, FollowError};

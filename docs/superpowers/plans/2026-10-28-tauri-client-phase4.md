@@ -3386,9 +3386,25 @@ impl Composers {
 pub struct Cache; // the private cache's canonical root
 impl Cache { pub fn new(root: PathBuf) -> Arc<Self>; pub fn root(&self) -> &Path; }
 pub fn respond(composers: &Composers, webview: &str, request: &http::Request<Vec<u8>>) -> http::Response<Vec<u8>>;
-// the scheme: zerus-file://localhost/draft/{handle}/{list}/{index} and zerus-file://localhost/cache/<path under the root>
-// (http://zerus-file.localhost/... on Windows), answered only to the main webview, with HTTP Range (206)
+// the scheme: zerus-file://localhost/draft/{handle}/{list}/{index} and zerus-file://localhost/cache/{64 hex digest}/{name}
+// (http://zerus-file.localhost/... on Windows), answered only to the main webview and only to GET (405 with
+// `Allow: GET` otherwise), with one HTTP byte range (206; 416 with `bytes */len`)
+// lib.rs
+pub(crate) fn cache_dir(app: &AppHandle) -> PathBuf; // the only call to `app_cache_dir()`, like `data_dir`
 ```
+
+The scheme's rules (Task 3b review):
+- **Draft paths** name a live composer's handle, its current attachment list and an index, each plain decimal digits. A draft that sends answers 404, since Qt lists no attachments then (`tray/src/MessageComposer.cpp:1017`) and opens none (`:1069`).
+- **Cache paths** are exactly `{64 lowercase hex digest}/{name}`. The name has no `/`, `\` or `:` and is not a `.partial-` copy that `store_at` is still writing. Neither the digest folder nor the file may be a link (`symlink_metadata`, under the canonical root), and `attachments::cached_at` must accept the file. So no `..`, absolute path, drive, stream, link or second folder leads anywhere else.
+- **Decoding:** the path is percent-decoded once, before routing or any check. A `%` without two hex digits, a control character (NUL included) or bytes that are not UTF-8, overlong forms such as `%C0%AE` included, answer 404.
+- **Ranges:**
+  - One `bytes=a-b`, `bytes=a-` or `bytes=-n` with digits only; the end is clamped to the last byte.
+  - A unit other than bytes is ignored and the whole file answers 200 (RFC 9110 §14.2).
+  - A field without a unit token answers 416 with `Content-Range: bytes */len`, and so do several ranges, a sign, space or other character, a start past the end, an end before the start, `-0`, two `Range` fields and a value that is not text.
+  - An `If-Range` never matches, since these answers carry no validator, so the whole file answers.
+- **Reads:** a cached copy is opened once and its size taken from the handle: a regular file of at most 10 MiB. Its type is sniffed from a head of up to 64 KiB. A range seeks and reads only its bytes, and a copy that shrank under it answers 404. A whole read stops one byte past 10 MiB.
+- **Types:** the type is `sniff`'s for images, audio and video, any `+xml` (SVG) aside. Other text, HTML and XML included, is `text/plain`; the rest is `application/octet-stream`. Nothing served is a page or a script.
+- **Guard headers on every answer:** `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox`, `Cache-Control: no-store` and `Cross-Origin-Resource-Policy: cross-origin`. 200 and 206 also carry `Content-Length`.
 
 Task 4b adds `Cache::prune_later`, and Task 9 the pins, `with_limit` and `set_extra`, each with its first use (clippy denies unused code).
 
@@ -3454,6 +3470,22 @@ mod tests {
 }
 ```
 
+The other tests in `composer/files.rs` each pin a rule:
+- `only_the_main_webview_is_answered`: other labels, `""`, `Main` and `mainx` get 403.
+- `only_get_is_answered`: other methods get 405 with `Allow: GET`.
+- `paths_are_decoded_once_and_strictly`, including overlong UTF-8.
+- `cache_paths_never_leave_the_cache`: `..` in every encoding, a `..` that reaches a real copy, backslashes, absolute, drive and UNC paths, NUL, streams, uppercase or short digests, non-digest folders, loose files, and `\` and `:` names on Unix.
+- `a_copy_still_being_written_is_not_served`.
+- `cached_copies_keep_the_cache_bounds`: empty, 10 MiB + 1, a folder, exactly 10 MiB, the handle's size check, a copy that grew after it was opened, and `read_at_most` reads at most limit + 1 bytes.
+- `a_link_never_leads_out_of_or_within_the_cache` (Unix): a file or folder linked out, a link to another copy, a folder linked to another digest folder, and a link reached through `..`.
+- `ranges_are_parsed_strictly`, including unknown units.
+- `a_bad_or_unsatisfiable_range_answers_416`: clamping, suffix, bad ranges, a value that is not text, two fields, `If-Range`, and unknown units answering 200.
+- `a_range_reads_only_its_bytes_of_the_cached_copy`: the bytes equal the file's slice past the 64 KiB head; a copy that shrank answers nothing.
+- `draft_paths_name_a_live_composer_and_its_list`: encoded paths, stale lists, signs, extra segments, the type, and sending.
+- `nothing_served_is_a_page`.
+
+`lib.rs` has `the_attachment_cache_is_the_clients_own`.
+
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer::files::`
@@ -3470,24 +3502,36 @@ Expected: compile errors, `files` does not exist.
 - [ ] **Step 4: Write `client/src-tauri/src/composer/files.rs`** above its tests:
 
 ```rust
-//! The `zerus-file` URI scheme over the private attachment cache.
+//! The `zerus-file` URI scheme over draft attachments and the private
+//! attachment cache.
 //!
 //! `zerus-file://localhost/draft/{handle}/{list}/{index}` serves an
 //! attachment of a composer in memory while its attachment list is the one
-//! the view named; `.../cache/<path>` serves a copy in the private cache, only
-//! when `attachments::cached_at` accepts it (a regular file inside the
-//! canonical root, nonempty, at most 10 MiB). Only the main webview gets
-//! answers. Range requests answer 206, as media elements seek with them.
-//! Bytes reach the webview only this way or as raw IPC bodies, never as JSON.
+//! the view named; `.../cache/{digest}/{name}` serves a copy in the private
+//! cache, only when `attachments::cached_at` accepts it (a regular file inside
+//! the canonical root, nonempty, at most 10 MiB) and no link leads to it.
+//! Windows webviews ask `http://zerus-file.localhost/...` instead. Only the
+//! main webview gets answers, and only to GET. Range requests answer 206, as
+//! media elements seek with them; a cached copy is read only as far as the
+//! range needs. Bytes reach the webview only this way or as raw IPC bodies,
+//! never as JSON.
+//!
+//! The path is percent-decoded once, before any check: the webview's
+//! `convertFileSrc` encodes it whole. A response names the type `sniff`
+//! finds in the bytes, never one a webview would run as a page.
 
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tauri::http::{Request, Response, StatusCode};
+use tauri::http::{header, response::Builder, Method, Request, Response, StatusCode};
 use zerus_client_core::attachments;
 
 use super::Composers;
 
+/// The private attachment cache: `{root}/{sha256}/{name}`, as
+/// `attachments::store_at` writes it.
 pub struct Cache {
     root: PathBuf,
 }
@@ -3499,106 +3543,370 @@ pub(crate) fn canonical(path: &Path) -> PathBuf {
 impl Cache {
     pub fn new(root: PathBuf) -> Arc<Self> {
         let _ = std::fs::create_dir_all(&root);
-        Arc::new(Cache { root: canonical(&root) })
+        Arc::new(Cache {
+            root: canonical(&root),
+        })
     }
 
+    /// The canonical root.
     pub fn root(&self) -> &Path {
         &self.root
     }
+
+    /// The copy `relative` names, decoded: exactly `{digest}/{name}`, a
+    /// digest folder and a file that are neither links, which
+    /// `attachments::cached_at` accepts. So no `..`, absolute path, drive,
+    /// link or second folder ever leads anywhere else.
+    fn copy(&self, relative: &str) -> Option<PathBuf> {
+        let (digest, name) = relative.split_once('/')?;
+        let digest_ok = digest.len() == 64
+            && digest
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        if !digest_ok || !plain_name(name) {
+            return None;
+        }
+        let folder = self.root().join(digest);
+        let file = folder.join(name);
+        // The root is canonical; `symlink_metadata` never follows a link.
+        let real_folder = std::fs::symlink_metadata(&folder).is_ok_and(|m| m.is_dir());
+        let real_file = std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file());
+        if !real_folder || !real_file {
+            return None;
+        }
+        attachments::cached_at(self.root(), &file)
+    }
 }
 
-fn status(code: StatusCode) -> Response<Vec<u8>> {
-    Response::builder().status(code).body(Vec::new()).expect("a bare status response")
+/// One file name: no separator of any platform, no drive or stream colon,
+/// and not a copy `store_at` is still writing. (An empty name, `.` and `..`
+/// name a folder, which `copy` never takes for a file.)
+fn plain_name(name: &str) -> bool {
+    !name.contains(['/', '\\', ':']) && !name.starts_with(".partial-")
 }
 
+/// Percent-decodes a URI path once. A `%` without two hex digits after it,
+/// a control character (NUL included) or bytes that are not UTF-8 make the
+/// path invalid.
 fn decode(path: &str) -> Option<String> {
     let bytes = path.as_bytes();
+    let digit = |at: usize| char::from(*bytes.get(at)?).to_digit(16);
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
+        let byte = if bytes[i] == b'%' {
+            let value = digit(i + 1)? * 16 + digit(i + 2)?;
             i += 3;
+            value as u8
         } else {
-            out.push(bytes[i]);
             i += 1;
+            bytes[i - 1]
+        };
+        if byte.is_ascii_control() {
+            return None;
         }
+        out.push(byte);
     }
     String::from_utf8(out).ok()
 }
 
-/// `bytes=a-b`, `bytes=a-` or `bytes=-n` within `len`.
-fn range(header: Option<&str>, len: usize) -> Option<(usize, usize)> {
-    let spec = header?.strip_prefix("bytes=")?.split(',').next()?.trim();
-    let (start, end) = spec.split_once('-')?;
-    let (start, end) = match (start.parse::<usize>().ok(), end.parse::<usize>().ok()) {
-        (Some(s), Some(e)) => (s, e.min(len.checked_sub(1)?)),
-        (Some(s), None) => (s, len.checked_sub(1)?),
-        (None, Some(n)) => (len.saturating_sub(n), len.checked_sub(1)?),
-        (None, None) => return None,
+/// What a request's `Range` asks of a file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wanted {
+    /// No range, an `If-Range`, or a unit other than bytes (RFC 9110 §14.2).
+    Whole,
+    /// Bytes `start..=end`, the end clamped to the last byte.
+    Part(usize, usize),
+    /// 416: not one satisfiable byte range.
+    Unsatisfiable,
+}
+
+/// The `Range` of a request for `len` bytes. An `If-Range` never matches,
+/// since these answers carry no validator, so the whole file answers then.
+/// Two `Range` fields, or one that is not text, are unsatisfiable.
+fn wanted(headers: &tauri::http::HeaderMap, len: usize) -> Wanted {
+    let ranges: Vec<_> = headers.get_all(header::RANGE).iter().collect();
+    match ranges.as_slice() {
+        [] => Wanted::Whole,
+        _ if headers.contains_key(header::IF_RANGE) => Wanted::Whole,
+        [one] => one
+            .to_str()
+            .map_or(Wanted::Unsatisfiable, |spec| range(spec, len)),
+        _ => Wanted::Unsatisfiable,
+    }
+}
+
+/// One `Range` field: a unit other than `bytes` is ignored (RFC 9110
+/// §14.2); a field without a unit token is unsatisfiable, and so is a
+/// bytes range `byte_range` refuses.
+fn range(spec: &str, len: usize) -> Wanted {
+    let Some((unit, set)) = spec.trim().split_once('=') else {
+        return Wanted::Unsatisfiable;
     };
-    (start <= end && end < len).then_some((start, end))
+    let token = !unit.is_empty()
+        && unit
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+    if !token {
+        Wanted::Unsatisfiable
+    } else if !unit.eq_ignore_ascii_case("bytes") {
+        Wanted::Whole
+    } else {
+        byte_range(set, len).map_or(Wanted::Unsatisfiable, |(start, end)| {
+            Wanted::Part(start, end)
+        })
+    }
+}
+
+/// One `a-b`, `a-` or `-n` byte range of `len` bytes, its end clamped to the
+/// last byte. None for anything else: several ranges, a number with a sign,
+/// space or other character, a start past the last byte or after the end,
+/// an empty suffix, or an empty file.
+fn byte_range(set: &str, len: usize) -> Option<(usize, usize)> {
+    let (first, last) = set.trim().split_once('-')?;
+    // Digits only; a number too large for `usize` is past any file.
+    let number = |text: &str| {
+        (!text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| text.parse::<usize>().unwrap_or(usize::MAX))
+    };
+    let last_byte = len.checked_sub(1)?;
+    let (start, end) = match (first.is_empty(), last.is_empty()) {
+        (false, false) => (number(first)?, number(last)?),
+        (false, true) => (number(first)?, last_byte),
+        // `-0` starts past the last byte, so it is refused below.
+        (true, false) => (len - number(last)?.min(len), last_byte),
+        (true, true) => return None,
+    };
+    (start <= end && start <= last_byte).then_some((start, end.min(last_byte)))
+}
+
+/// The type a response names for `bytes`.
+fn served_type(bytes: &[u8]) -> String {
+    safe_type(attachments::sniff(bytes))
+}
+
+/// A sniffed type as served: images, audio and video keep theirs (any XML
+/// aside, SVG's `image/svg+xml` included), any other text is plain text, HTML
+/// and XML included, and the rest an opaque stream. Nothing served is a page
+/// or a script.
+fn safe_type(sniffed: String) -> String {
+    let media = ["image/", "audio/", "video/"]
+        .iter()
+        .any(|kind| sniffed.starts_with(kind));
+    if media && !sniffed.contains("xml") {
+        sniffed
+    } else if sniffed.starts_with("text/") {
+        "text/plain".into()
+    } else {
+        "application/octet-stream".into()
+    }
+}
+
+/// Headers of every answer: never stored, never sniffed into another type,
+/// run as nothing if opened as a page, and loadable by the app's pages under
+/// their `Cross-Origin-Embedder-Policy: require-corp`.
+fn guarded(builder: Builder) -> Builder {
+    builder
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; sandbox",
+        )
+        .header("cross-origin-resource-policy", "cross-origin")
+}
+
+/// The response, or a bare 500 should the builder refuse a header (it never
+/// does: every value here is ASCII), so a request is always answered.
+fn finish(builder: Builder, body: Vec<u8>) -> Response<Vec<u8>> {
+    builder
+        .header(header::CONTENT_LENGTH, body.len())
+        .body(body)
+        .unwrap_or_else(|_| {
+            let mut response = Response::new(Vec::new());
+            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            response
+        })
+}
+
+fn status(code: StatusCode) -> Response<Vec<u8>> {
+    finish(guarded(Response::builder()).status(code), Vec::new())
+}
+
+fn unsatisfiable(len: usize) -> Response<Vec<u8>> {
+    finish(
+        guarded(Response::builder())
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .header(header::CONTENT_RANGE, format!("bytes */{len}")),
+        Vec::new(),
+    )
+}
+
+/// `{handle}/{list}/{index}`, each plain decimal digits.
+fn draft_numbers(rest: &str) -> Option<[u64; 3]> {
+    let mut parts = rest.split('/').map(|part| {
+        (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.parse::<u64>().ok())
+            .flatten()
+    });
+    let numbers = [parts.next()??, parts.next()??, parts.next()??];
+    parts.next().is_none().then_some(numbers)
 }
 
 /// `draft/{handle}/{list}/{index}`: the attachment of a composer in memory,
 /// while its list is still the one the view named. No hashing: an attachment
-/// list that changed answers 404 for its old paths.
-fn draft_file(composers: &Composers, rest: &str) -> Option<(Arc<[u8]>, String)> {
-    let numbers: Vec<u64> = rest.split('/').map(|part| part.parse().ok()).collect::<Option<_>>()?;
-    let &[handle, list, index] = numbers.as_slice() else { return None };
+/// list that changed answers 404 for its old paths. A draft that sends lists
+/// no attachments (Qt's `rebuildAttachments`, `MessageComposer.cpp:1017`),
+/// so its paths answer nothing until it is back.
+fn draft_file(composers: &Composers, rest: &str) -> Option<Arc<[u8]>> {
+    let [handle, list, index] = draft_numbers(rest)?;
     let hub = composers.lock();
-    let composer = hub.composers.values().find(|c| c.handle == handle && c.attachments_rev == list)?;
-    let attachment = composer.draft.attachments.get(usize::try_from(index).ok()?)?;
-    Some((Arc::clone(&attachment.bytes), attachment.mime.clone()))
+    let composer = hub
+        .composers
+        .values()
+        .find(|c| c.handle == handle && c.attachments_rev == list && !c.sending)?;
+    let attachment = composer
+        .draft
+        .attachments
+        .get(usize::try_from(index).ok()?)?;
+    Some(Arc::clone(&attachment.bytes))
+}
+
+/// The bytes a type is sniffed from.
+const HEAD_BYTES: usize = 64 * 1024;
+
+/// A cached copy, opened once, and its size, taken from the open handle: a
+/// regular file of at most 10 MiB.
+fn open_copy(file: &Path) -> Option<(File, usize)> {
+    let handle = File::open(file).ok()?;
+    let metadata = handle.metadata().ok()?;
+    let len = usize::try_from(metadata.len()).ok()?;
+    (metadata.is_file() && len <= attachments::MAX_ATTACHMENT_BYTES).then_some((handle, len))
+}
+
+/// The bytes `part` names of an open copy, with its served type: the whole
+/// file (at most 10 MiB, should it have grown since it was opened) typed
+/// from its head, or only the range's bytes, typed from a head read first.
+/// A copy that shrank so the range is short answers nothing.
+fn read_copy(mut handle: File, part: Option<(usize, usize)>) -> Option<(String, Vec<u8>)> {
+    let Some((start, end)) = part else {
+        let bytes = read_at_most(&mut handle, attachments::MAX_ATTACHMENT_BYTES)?;
+        return Some((served_type(&bytes[..bytes.len().min(HEAD_BYTES)]), bytes));
+    };
+    let mut head = Vec::new();
+    (&mut handle)
+        .take(HEAD_BYTES as u64)
+        .read_to_end(&mut head)
+        .ok()?;
+    let count = end - start + 1;
+    handle.seek(SeekFrom::Start(start as u64)).ok()?;
+    let mut part = Vec::with_capacity(count);
+    handle.take(count as u64).read_to_end(&mut part).ok()?;
+    (part.len() == count).then(|| (served_type(&head), part))
+}
+
+/// All of `source` when it holds at most `limit` bytes. It reads at most
+/// one byte past the limit, never the whole of a larger source.
+fn read_at_most(source: impl Read, limit: usize) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    source.take(limit as u64 + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() <= limit).then_some(bytes)
+}
+
+/// A file of `len` bytes, whole or the one range the request names; `read`
+/// gives the served type and the bytes of the whole file (None) or of the
+/// range, or nothing when the file is gone.
+fn answer(
+    request: &Request<Vec<u8>>,
+    len: usize,
+    read: impl FnOnce(Option<(usize, usize)>) -> Option<(String, Vec<u8>)>,
+) -> Response<Vec<u8>> {
+    let part = match wanted(request.headers(), len) {
+        Wanted::Whole => None,
+        Wanted::Part(start, end) => Some((start, end)),
+        Wanted::Unsatisfiable => return unsatisfiable(len),
+    };
+    let Some((mime, body)) = read(part) else {
+        return status(StatusCode::NOT_FOUND);
+    };
+    let builder = guarded(Response::builder())
+        .header(header::CONTENT_TYPE, mime)
+        .header(header::ACCEPT_RANGES, "bytes");
+    match part {
+        Some((start, end)) => finish(
+            builder
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}")),
+            body,
+        ),
+        None => finish(builder.status(StatusCode::OK), body),
+    }
 }
 
 /// Answers one `zerus-file` request for webview `webview`.
-pub fn respond(composers: &Composers, webview: &str, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
+pub fn respond(
+    composers: &Composers,
+    webview: &str,
+    request: &Request<Vec<u8>>,
+) -> Response<Vec<u8>> {
     if webview != crate::MAIN_WINDOW {
         return status(StatusCode::FORBIDDEN);
     }
-    let Some(path) = decode(request.uri().path().trim_start_matches('/')) else { return status(StatusCode::NOT_FOUND) };
-    let found = if let Some(rest) = path.strip_prefix("draft/") {
-        draft_file(composers, rest)
-    } else if let Some(relative) = path.strip_prefix("cache/") {
-        let cache = composers.cache();
-        attachments::cached_at(cache.root(), &cache.root().join(relative)).and_then(|file| {
-            attachments::touch(&file);
-            // `cached_at` refuses files over 10 MiB, so this read is bounded.
-            let bytes = std::fs::read(&file).ok()?;
-            let mime = attachments::sniff(&bytes);
-            Some((Arc::<[u8]>::from(bytes), mime))
-        })
-    } else {
-        None
-    };
-    let Some((bytes, mime)) = found else { return status(StatusCode::NOT_FOUND) };
-    let len = bytes.len();
-    let builder = Response::builder()
-        .header("content-type", mime)
-        .header("accept-ranges", "bytes")
-        .header("cache-control", "no-store")
-        .header("cross-origin-resource-policy", "cross-origin");
-    let requested = request.headers().get("range").and_then(|v| v.to_str().ok());
-    match range(requested, len) {
-        Some((start, end)) => builder
-            .status(StatusCode::PARTIAL_CONTENT)
-            .header("content-range", format!("bytes {start}-{end}/{len}"))
-            .body(bytes[start..=end].to_vec()),
-        None if requested.is_some() => return status(StatusCode::RANGE_NOT_SATISFIABLE),
-        None => builder.status(StatusCode::OK).body(bytes.to_vec()),
+    if request.method() != Method::GET {
+        return finish(
+            guarded(Response::builder())
+                .status(StatusCode::METHOD_NOT_ALLOWED)
+                .header(header::ALLOW, "GET"),
+            Vec::new(),
+        );
     }
-    .expect("a file response")
+    let Some(path) = request.uri().path().strip_prefix('/').and_then(decode) else {
+        return status(StatusCode::NOT_FOUND);
+    };
+    if let Some(rest) = path.strip_prefix("draft/") {
+        let Some(bytes) = draft_file(composers, rest) else {
+            return status(StatusCode::NOT_FOUND);
+        };
+        answer(request, bytes.len(), |part| {
+            let mime = served_type(&bytes[..bytes.len().min(HEAD_BYTES)]);
+            Some(match part {
+                Some((start, end)) => (mime, bytes[start..=end].to_vec()),
+                None => (mime, bytes.to_vec()),
+            })
+        })
+    } else if let Some(relative) = path.strip_prefix("cache/") {
+        let copy = composers.cache().copy(relative).and_then(|file| {
+            attachments::touch(&file);
+            open_copy(&file)
+        });
+        let Some((handle, len)) = copy else {
+            return status(StatusCode::NOT_FOUND);
+        };
+        answer(request, len, |part| read_copy(handle, part))
+    } else {
+        status(StatusCode::NOT_FOUND)
+    }
 }
 ```
 
-`attachments::cached_at` canonicalizes and rejects anything outside the root, so `cache/../...` paths answer 404.
+Each guard has a test that fails without it. The mutation runs are recorded in the Task 3b report.
 
-- [ ] **Step 5: Register it** in `client/src-tauri/src/lib.rs`. `Composers::new` gets the config, from the app's cache folder (Tauri's `app_cache_dir`, so the identifier decides it; Qt's cache is `hgdev/hgs-tray/attachments`, a different folder this client never touches):
+- [ ] **Step 5: Register it** in `client/src-tauri/src/lib.rs`. `Composers::new` gets the config, from the app's cache folder. `cache_dir(app)` is the only call to Tauri's `app_cache_dir`, as `data_dir` is for the data folder, so the Mac switch build can replace its body. Qt's cache is `hgdev/hgs-tray/attachments` (`tray/src/AttachmentViewer.h:28`), a different folder this client never touches:
 
 ```rust
-let cache = app.path().app_cache_dir()?.join(if replay { "attachments-replay" } else { "attachments" });
+#[cfg(feature = "live")]
+pub(crate) fn cache_dir(app: &AppHandle) -> std::path::PathBuf {
+    use tauri::Manager;
+    app.path().app_cache_dir().expect("the platform has an app cache directory")
+}
+
+#[cfg(feature = "live")]
+fn attachments_root(cache_dir: &std::path::Path, replay: bool) -> std::path::PathBuf {
+    cache_dir.join(if replay { "attachments-replay" } else { "attachments" })
+}
+
+// in setup:
+let cache = attachments_root(&cache_dir(app.handle()), replay);
 app.manage(composer::Composers::new(drafts, composer::Config { cache }, composer::Deps { /* Task 3a's */ }));
 ```
 
@@ -3612,8 +3920,11 @@ and the builder gains the scheme:
                 let webview = ctx.webview_label().to_owned();
                 let app = ctx.app_handle().clone();
                 tauri::async_runtime::spawn_blocking(move || {
-                    let composers = app.state::<composer::Composers>();
-                    responder.respond(composer::files::respond(&composers, &webview, &request));
+                    let response = match app.try_state::<composer::Composers>() {
+                        Some(composers) => composer::files::respond(&composers, &webview, &request),
+                        None => tauri::http::Response::builder().status(404).body(Vec::new()).expect("a bare 404"),
+                    };
+                    responder.respond(response);
                 });
             }
             #[cfg(not(feature = "live"))]
@@ -3624,12 +3935,19 @@ and the builder gains the scheme:
         })
 ```
 
-In `tauri.conf.json`, in `csp` and `devCsp` (keeping the dev server origin in `devCsp`): `img-src` gains `zerus-file: http://zerus-file.localhost`, `media-src` is `'self' zerus-file: http://zerus-file.localhost`, and `connect-src` gains `zerus-file: http://zerus-file.localhost` (Task 9 reads a text preview's first bytes with `fetch`). The responses carry `Cross-Origin-Resource-Policy: cross-origin`, which the app's `Cross-Origin-Embedder-Policy: require-corp` needs.
+In `tauri.conf.json`, in `csp` and `devCsp`, keeping the dev server origin in `devCsp` (its `media-src` keeps `http://127.0.0.1:1420`):
+- `img-src` gains `zerus-file: http://zerus-file.localhost`;
+- `media-src` is `'self' zerus-file: http://zerus-file.localhost`;
+- `connect-src` gains `zerus-file: http://zerus-file.localhost`.
+
+The `connect-src` entry is for Task 9's text preview only if Task 9 reads it with `fetch`; see Task 9's CORS conditions. Task 9 removes the entry if it takes the IPC route.
+
+The responses carry `Cross-Origin-Resource-Policy: cross-origin`, which the app's `Cross-Origin-Embedder-Policy: require-corp` needs for images and media. They carry no `Access-Control-Allow-Origin`, so a cors-mode `fetch` cannot read them yet.
 
 - [ ] **Step 6: Run the tests to see them pass**
 
 Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer::`
-Expected: PASS (Task 3a's 13 and these 2). Clippy and fmt clean.
+Expected: PASS, with Task 3a's tests plus the 14 in `composer/files.rs`. `lib.rs` adds `the_attachment_cache_is_the_clients_own`. Clippy with and without default features, the Windows-target clippy (only the known `display.rs` and `metrics.rs` items) and fmt are clean.
 
 - [ ] **Step 7: Commit**
 
@@ -10939,7 +11257,14 @@ export const previews = createPreviews({
 
 - [ ] **Step 5: Show them in Activity, and Open in the composer's list.**
   - `transcript.ts` keeps, on each attachment of an item, a fetch reference built from the event (or the local row's file after a send): `request_id` and `index`, the session's name, the followed summary's `conversation_id`, the row's `archive_id` when archived, and the event's `agent_id`.
-  - In `Activity.tsx`, an attachment chip with a reference shows, on hover or after an arrow-key move (never on focus alone, round 6), a preview of at most 320 px beside it. It is an `<img>` with `onError={() => previews.failed(ref)}` for an image, or the first 2 KiB of a text file read through `fetch(url)`.
+  - In `Activity.tsx`, an attachment chip with a reference shows, on hover or after an arrow-key move (never on focus alone, round 6), a preview of at most 320 px beside it. It is an `<img>` with `onError={() => previews.failed(ref)}` for an image, or the first 2 KiB of a text file.
+  - **The text preview's bytes (Task 3b review).** The app's origin (`tauri://localhost`, or `http://tauri.localhost` on Windows) is cross-origin to `zerus-file`. Task 3b's responses carry no `Access-Control-Allow-Origin`, and wry 0.57.1 registers custom schemes on Linux as secure only, never as CORS-enabled.
+    - First choice: read the first 2 KiB as a raw IPC command body, `attachment_head(path) -> tauri::ipc::Response`. It resolves the path through `Cache::copy` with the scheme's rules and is refused unless the calling webview is main. This needs no CORS, and `zerus-file:` then leaves `connect-src`.
+    - If Task 9 keeps `fetch`:
+      - the scheme sends `Access-Control-Allow-Origin` only when the request's `Origin` exactly matches the app origin (`tauri://localhost` or `http://tauri.localhost`, and the dev server origin in dev builds only), together with `Vary: Origin`;
+      - never `*`, and never credentials;
+      - the `fetch` sends no `Range` header, since its preflight (OPTIONS) gets 405, and reads the first 2 KiB from the body.
+    - Either way, prove it in a headless WebKitGTK run and on WebView2 before the task closes.
   - Hiding the preview calls `previews.hide(ref)`.
   - Open uses `bridge.attachmentOpen(path)` (disabled until R2).
   - In `Attachments.tsx`, a composer attachment row gains Open: a click, Enter or Space calls `bridge.attachmentOpenDraft(handle, index)`, and the row's title reads "Open {name}". Until R2 the row's Open is disabled with "Arrives with the downloaded-file marker." as its title.

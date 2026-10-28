@@ -9,6 +9,7 @@
 
 pub mod batch;
 pub mod fleet;
+pub mod processes;
 pub mod state;
 pub mod stream;
 pub mod view;
@@ -17,8 +18,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 
+pub use batch::ProcessesOut;
 pub use batch::{ActivityOut, Batch, Coalescer, ComputerOut, KeyOut, ReplaceOut, RowOut};
 pub use fleet::{Fleet, FollowError};
+pub use processes::{ProcessesState, ProcessesUpdate};
 pub use state::{ActivityState, CatalogState};
 pub use stream::{StreamEvent, StreamHandle, Timing};
 pub use view::ViewRow;
@@ -139,6 +142,12 @@ pub enum Change {
         key: String,
         update: ActivityUpdate,
     },
+    /// A followed session's processes; see [`processes`].
+    Processes {
+        computer: ComputerId,
+        key: String,
+        update: ProcessesUpdate,
+    },
 }
 
 impl Change {
@@ -148,7 +157,8 @@ impl Change {
             | Self::Remove { computer, .. }
             | Self::Replace { computer, .. }
             | Self::Computer { computer, .. }
-            | Self::Activity { computer, .. } => computer,
+            | Self::Activity { computer, .. }
+            | Self::Processes { computer, .. } => computer,
         }
     }
 }

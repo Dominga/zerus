@@ -116,7 +116,7 @@ impl Mirror {
                 }
             }
             Change::Computer { computer, status } => self.computers.entry(computer.0.clone()).or_default().status = Some(status.clone()),
-            Change::Activity { .. } => {}
+            Change::Activity { .. } | Change::Processes { .. } => {}
         }
     }
 

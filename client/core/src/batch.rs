@@ -4,7 +4,7 @@
 //! requests a [`Coalescer`] folds every [`Change`] so that a burst of thousands
 //! of deltas costs one batch with the latest row per key, and its memory stays
 //! bounded by the number of distinct keys.
-use crate::{ActivityUpdate, Change, ComputerId, ComputerStatus, ViewRow};
+use crate::{ActivityUpdate, Change, ComputerId, ComputerStatus, ProcessesUpdate, ViewRow};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -56,10 +56,24 @@ pub struct ActivityOut {
     pub payload: Value,
 }
 
+/// The latest change of a followed session's processes. `kind` and `payload`:
+/// `state` carries `{value, rev}` (`value` is `{processes, process_work}` as
+/// `hgs inspect` reports them; `rev` orders one stream's states), `failed`
+/// `{code, message}` (the last state stays as known) and `ended` null (the
+/// follow ended and its state is gone).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProcessesOut {
+    pub computer: ComputerId,
+    pub key: String,
+    pub kind: String,
+    pub payload: Value,
+}
+
 /// Everything that changed since the previous batch. The view applies, in
-/// order: `computers`, `replaces`, `removes`, `upserts`, `activity`. Row changes
-/// of a computer with a replacement are already part of it; otherwise a key is
-/// in at most one of `removes` and `upserts`.
+/// order: `computers`, `replaces`, `removes`, `upserts`, `activity`, then
+/// `processes`. Row changes of a computer with a replacement are already part
+/// of it; otherwise a key is in at most one of `removes` and `upserts`.
+/// `processes` holds at most one entry per key and is left out when empty.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Batch {
     pub upserts: Vec<RowOut>,
@@ -67,6 +81,8 @@ pub struct Batch {
     pub replaces: Vec<ReplaceOut>,
     pub computers: Vec<ComputerOut>,
     pub activity: Vec<ActivityOut>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub processes: Vec<ProcessesOut>,
 }
 
 impl Batch {
@@ -76,6 +92,7 @@ impl Batch {
             && self.replaces.is_empty()
             && self.computers.is_empty()
             && self.activity.is_empty()
+            && self.processes.is_empty()
     }
 }
 
@@ -99,7 +116,9 @@ type SessionKey = (ComputerId, String);
 /// - Activity updates of a key keep their order: consecutive events merge
 ///   (into a pending window replacement too), a replacement drops the events
 ///   before it, the latest summary and the highest `rev` of an event id win,
-///   and an end drops what was pending before it.
+///   and an end drops what was pending before it;
+/// - the latest processes change of a `(computer, key)` wins, except that a
+///   failure never replaces a pending state.
 ///
 /// Memory is bounded by the distinct keys, the computers and
 /// [`PENDING_EVENTS`] per followed session.
@@ -111,6 +130,7 @@ pub struct Coalescer {
     activity: BTreeMap<SessionKey, Vec<ActivityUpdate>>,
     /// Activity keys in the order they first changed.
     order: Vec<SessionKey>,
+    processes: BTreeMap<SessionKey, ProcessesUpdate>,
 }
 
 impl Coalescer {
@@ -170,6 +190,18 @@ impl Coalescer {
                 };
                 fold(list, update);
             }
+            Change::Processes {
+                computer,
+                key,
+                update,
+            } => {
+                let id = (computer, key);
+                let keep = matches!(update, ProcessesUpdate::Failed { .. })
+                    && matches!(self.processes.get(&id), Some(ProcessesUpdate::State { .. }));
+                if !keep {
+                    self.processes.insert(id, update);
+                }
+            }
         }
     }
 
@@ -218,11 +250,28 @@ impl Coalescer {
                 });
             }
         }
+        for ((computer, key), update) in std::mem::take(&mut self.processes) {
+            let (kind, payload) = match update {
+                ProcessesUpdate::State { value, rev } => {
+                    ("state", json!({"value": value, "rev": rev}))
+                }
+                ProcessesUpdate::Failed { code, message } => {
+                    ("failed", json!({"code": code, "message": message}))
+                }
+                ProcessesUpdate::Ended => ("ended", Value::Null),
+            };
+            batch.processes.push(ProcessesOut {
+                computer,
+                key,
+                kind: kind.to_owned(),
+                payload,
+            });
+        }
         batch
     }
 
-    /// Pending entries: rows (a replacement counts each row), computers and
-    /// Activity updates, with events counted one by one.
+    /// Pending entries: rows (a replacement counts each row), computers,
+    /// Activity updates, with events counted one by one, and processes changes.
     pub fn pending(&self) -> usize {
         let replaced: usize = self.replaces.values().map(|rows| rows.len().max(1)).sum();
         let activity: usize =
@@ -235,7 +284,7 @@ impl Coalescer {
                     _ => 1,
                 })
                 .sum();
-        self.computers.len() + replaced + self.rows.len() + activity
+        self.computers.len() + replaced + self.rows.len() + activity + self.processes.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -243,6 +292,7 @@ impl Coalescer {
             && self.replaces.is_empty()
             && self.rows.is_empty()
             && self.activity.is_empty()
+            && self.processes.is_empty()
     }
 }
 
@@ -706,6 +756,78 @@ mod tests {
         assert_eq!(kept[0]["seq"], 5000 - PENDING_EVENTS as i64);
         assert_eq!(update.payload["cursor"], 4999);
         assert!(coalescer.is_empty());
+    }
+
+    fn processes(key: &str, update: ProcessesUpdate) -> Change {
+        Change::Processes {
+            computer: local(),
+            key: key.to_owned(),
+            update,
+        }
+    }
+
+    #[test]
+    fn the_latest_processes_change_of_a_key_wins_but_a_failure_keeps_a_state() {
+        let state = |rev| ProcessesUpdate::State {
+            value: json!({"processes": {"active_count": rev}}),
+            rev,
+        };
+        let failed = ProcessesUpdate::Failed {
+            code: "inspect_failed".into(),
+            message: "ps failed".into(),
+        };
+        let mut coalescer = Coalescer::new();
+        for rev in 1..=500 {
+            coalescer.push(processes("run:a", state(rev)));
+        }
+        coalescer.push(processes("run:a", failed.clone()));
+        coalescer.push(processes("run:b", failed.clone()));
+        coalescer.push(processes("run:c", state(1)));
+        coalescer.push(processes("run:c", ProcessesUpdate::Ended));
+        coalescer.push(processes("run:d", ProcessesUpdate::Ended));
+        coalescer.push(processes("run:d", state(2)));
+        assert_eq!(coalescer.pending(), 4);
+        let batch = coalescer.take();
+        let kinds: Vec<_> = batch
+            .processes
+            .iter()
+            .map(|out| (out.key.as_str(), out.kind.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("run:a", "state"),
+                ("run:b", "failed"),
+                ("run:c", "ended"),
+                ("run:d", "state")
+            ]
+        );
+        assert_eq!(batch.processes[0].payload["rev"], 500);
+        assert_eq!(
+            batch.processes[0].payload["value"]["processes"]["active_count"],
+            500
+        );
+        assert_eq!(
+            batch.processes[1].payload,
+            json!({"code": "inspect_failed", "message": "ps failed"})
+        );
+        assert_eq!(batch.processes[2].payload, Value::Null);
+        assert!(!batch.is_empty() && coalescer.is_empty());
+        // A batch without processes changes leaves the field out.
+        coalescer.push(upsert(&local(), "run:a", 1.0));
+        let value = serde_json::to_value(coalescer.take()).unwrap();
+        assert!(value.get("processes").is_none(), "{value}");
+        let back: Batch = serde_json::from_value(value).unwrap();
+        assert!(back.processes.is_empty());
+        let only = Batch {
+            processes: vec![ProcessesOut::default()],
+            ..Batch::default()
+        };
+        assert!(!only.is_empty());
+        assert_eq!(
+            serde_json::to_value(&only).unwrap()["processes"][0]["kind"],
+            ""
+        );
     }
 
     #[test]

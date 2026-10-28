@@ -4,8 +4,9 @@
 //! snapshot pages are staged until the page with `last` and then replace the
 //! rows at once, so a `gap` never empties the list; a delta gives one upsert or
 //! removal per item; Activity frames of followed sessions become
-//! [`Change::Activity`]. Frame types and topics it does not know change nothing.
-use crate::{view, ActivityUpdate, Change, ComputerId, ComputerStatus, ViewRow};
+//! [`Change::Activity`] and processes frames [`Change::Processes`]. Frame types
+//! and topics it does not know change nothing.
+use crate::{view, ActivityUpdate, Change, ComputerId, ComputerStatus, ProcessesState, ViewRow};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
@@ -133,6 +134,7 @@ pub struct CatalogState {
     staged: Option<BTreeMap<String, ViewRow>>,
     meta: Option<Value>,
     activity: HashMap<String, ActivityState>,
+    processes: ProcessesState,
     live: bool,
     failed: bool,
     failures: u32,
@@ -177,6 +179,11 @@ impl CatalogState {
                             .map(|(key, row)| (key.clone(), row.clone()))
                             .collect(),
                     });
+                    let rows = &self.rows;
+                    changes.extend(
+                        self.processes
+                            .retain(computer, |key| rows.contains_key(key)),
+                    );
                     if !self.live {
                         self.live = true;
                         changes.push(Change::Computer {
@@ -242,6 +249,7 @@ impl CatalogState {
                         key: removal.key.clone(),
                         reason,
                     });
+                    changes.extend(self.processes.end(computer, &removal.key));
                 }
             }
             Body::Events(events) if events.topic == topic::ACTIVITY => {
@@ -283,6 +291,12 @@ impl CatalogState {
                     ));
                 }
             }
+            Body::State(state) if state.topic == topic::PROCESSES => {
+                changes.extend(
+                    self.processes
+                        .state(computer, &state.key, &state.value, state.rev),
+                );
+            }
             Body::Gap(gap) if gap.topic == topic::CATALOG => {
                 // The rows stay until the snapshot that follows is complete.
                 self.staged = None;
@@ -295,6 +309,9 @@ impl CatalogState {
             }
             Body::Error(error) if error.fatal => {
                 return self.end(computer, Instant::now());
+            }
+            Body::Error(error) if error.topic.as_deref() == Some(topic::PROCESSES) => {
+                changes.extend(self.processes.error(computer, error));
             }
             Body::Error(error) => {
                 let ended = matches!(
@@ -412,6 +429,25 @@ impl CatalogState {
 
     pub fn activity(&self, key: &str) -> Option<&ActivityState> {
         self.activity.get(key)
+    }
+
+    /// The followed processes; see [`crate::processes`].
+    pub fn processes(&self) -> &ProcessesState {
+        &self.processes
+    }
+
+    pub fn processes_mut(&mut self) -> &mut ProcessesState {
+        &mut self.processes
+    }
+
+    /// The processes limit of the latest `hello`; None when it lacks the topic.
+    pub fn processes_limit(&self) -> Option<usize> {
+        let hello = self.hello.as_ref()?;
+        hello
+            .topics
+            .iter()
+            .any(|name| name == topic::PROCESSES)
+            .then_some(hello.limits.processes_subscriptions)
     }
 
     /// The name rows carry: a peer's alias, or this computer's host name.
@@ -770,6 +806,83 @@ mod tests {
         assert!(
             !state.is_followed("run:run-review-1"),
             "the subscription ended"
+        );
+    }
+
+    fn processes_of(changes: Vec<Change>) -> Vec<(String, crate::ProcessesUpdate)> {
+        changes
+            .into_iter()
+            .filter_map(|change| match change {
+                Change::Processes { key, update, .. } => Some((key, update)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn processes_of_followed_sessions_change_until_they_leave_the_catalog() {
+        use crate::ProcessesUpdate;
+        let frames = fixture("basic.ndjson");
+        let local = ComputerId::local();
+        let mut state = CatalogState::new();
+        for key in ["run:run-review-1", "run:run-lint-1", "run:missing"] {
+            state.processes_mut().follow(key);
+        }
+        // A complete catalog without a followed key ends it.
+        let ended = processes_of(apply_all(&mut state, &local, &frames[..4]));
+        assert_eq!(ended, vec![("run:missing".into(), ProcessesUpdate::Ended)]);
+        let value = json!({"processes": {"items": [], "active_count": 1, "sampled_at": 1.0}, "process_work": null});
+        let states = processes_of(apply_all(
+            &mut state,
+            &local,
+            &[
+                frame(
+                    json!({"v":1,"seq":20,"t":"state","topic":"processes","key":"run:run-review-1","value":value,"rev":4}),
+                ),
+                frame(
+                    json!({"v":1,"seq":21,"t":"state","topic":"processes","key":"run:run-tests-1","value":value,"rev":1}),
+                ),
+                frame(
+                    json!({"v":1,"seq":22,"t":"error","code":"inspect_failed","message":"ps failed","topic":"processes","key":"run:run-review-1","fatal":false}),
+                ),
+            ],
+        ));
+        assert_eq!(
+            states,
+            vec![
+                (
+                    "run:run-review-1".into(),
+                    ProcessesUpdate::State {
+                        value: value.clone(),
+                        rev: 4
+                    }
+                ),
+                (
+                    "run:run-review-1".into(),
+                    ProcessesUpdate::Failed {
+                        code: "inspect_failed".into(),
+                        message: "ps failed".into()
+                    }
+                ),
+            ]
+        );
+        assert_eq!(
+            state.processes().value("run:run-review-1"),
+            Some((&value, 4))
+        );
+        // The basic fixture's processes error names no key; its delta removes
+        // the lint session, which ends that follow.
+        let changes = apply_all(&mut state, &local, &frames[4..]);
+        assert_eq!(
+            processes_of(changes),
+            vec![("run:run-lint-1".into(), ProcessesUpdate::Ended)]
+        );
+        assert!(state.processes().is_followed("run:run-review-1"));
+        assert!(!state.processes().is_followed("run:run-lint-1"));
+        assert_eq!(
+            state.processes_limit(),
+            None,
+            "the fixture's hello lacks the topic"
         );
     }
 

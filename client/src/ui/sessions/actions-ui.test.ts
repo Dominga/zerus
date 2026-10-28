@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { toSession } from "../../store/catalog";
 import {
-  canStartStopped, headerClearSlot, copyState, detailsFromInspection, freshCopy, freshEntry, freshStillValid, identityOk, notificationsState, notificationsStillAllowed, dialogReducer, menuItemActivates, menuState, renameParts, renameProblem, snapshotOf, tagProblem, terminal, terminateCopy,
+  canStartStopped, headerClearSlot, copyState, detailsFromInspection, freshCopy, freshEntry, freshStillValid, identityOk, notificationsState, notificationsStillAllowed, dialogReducer, menuItemActivates, menuState, renameParts, renameProblem, snapshotOf, tagProblem, terminal, terminateCopy, forgetCopy, forgetsBindingOnly, FORGET_ARCHIVE_LATER,
 } from "./actions-ui";
 import fixture from "../../../core/tests/fixtures/action-rows.json";
 import type { Details, ViewRow } from "../../types";
@@ -85,10 +85,19 @@ describe("menuState rename, archive, end, read", () => {
     expect(menuState(row(), false, false).end.enabled).toBe(false);
     expect(menuState(row({ allowed_actions: ["pause"], action_reasons: { terminate: "Not now" } }), true, false).end).toMatchObject({ enabled: false, reason: "Not now" });
   });
-  it("forgets a running opencode binding and keeps forgets disabled", () => {
-    expect(menuState(row({ agent: "opencode" }), true, false).end).toMatchObject({ label: "Forget saved session…", enabled: false, reason: "Forgetting sessions arrives in a later version." });
-    expect(menuState(row({ state: "paused" }), true, false).end.label).toBe("Forget saved session…");
-    expect(menuState(row({ state: "archived" }), true, false).end.label).toBe("Forget archived session…");
+  it("enables the saved-session forget by allowed(forget) with Qt's reason otherwise", () => {
+    expect(menuState(row({ agent: "opencode" }), true, false).end).toMatchObject({ label: "Forget saved session…", enabled: true });
+    expect(menuState(row({ state: "paused" }), true, false).end).toMatchObject({ label: "Forget saved session…", enabled: true });
+    expect(menuState(row({ state: "paused" }), false, false).end.enabled).toBe(false);
+    expect(menuState(row({ state: "paused" }), true, true).end.enabled).toBe(false);
+    const no = menuState(row({ state: "paused", allowed_actions: ["rename"] }), true, false).end;
+    expect(no).toMatchObject({ enabled: false, reason: "This native adapter does not support this action in the current session state." });
+    expect(menuState(row({ state: "paused", allowed_actions: ["rename"] }), true, false, details({ action_reasons: { forget: "Busy" } })).end.reason).toBe("Busy");
+    expect(menuState(row({ state: "paused", allowed_actions: ["rename"] }), true, false, details({ allowed_actions: ["forget"] })).end.enabled).toBe(true);
+  });
+  it("keeps the archived forget disabled until the Archive view", () => {
+    expect(menuState(row({ state: "archived", archive_id: "a1" }), true, false).end).toMatchObject({ label: "Forget archived session…", enabled: false, reason: FORGET_ARCHIVE_LATER });
+    expect(FORGET_ARCHIVE_LATER).toBe("Forgetting archived sessions arrives with the Archive view.");
   });
 });
 
@@ -229,7 +238,7 @@ describe("menus from hgs rows as the core projects them", () => {
     const m = menuState(s, true, false, undefined, { context: true });
     expect(m.archive.visible).toBe(false);
     expect(m.change).toMatchObject({ label: "Resume session", enabled: true });
-    expect(m.end).toMatchObject({ label: "Forget saved session…", enabled: false });
+    expect(m.end).toMatchObject({ label: "Forget saved session…" });
   });
 
   it("forgets only the binding of an OpenCode session", () => {
@@ -238,7 +247,7 @@ describe("menus from hgs rows as the core projects them", () => {
     const m = menuState(s, true, false);
     expect(m.change.enabled).toBe(false);
     expect(m.rename).toBe(true);
-    expect(m.end).toMatchObject({ label: "Forget saved session…", enabled: false, reason: "Forgetting sessions arrives in a later version." });
+    expect(m.end).toMatchObject({ label: "Forget saved session…", enabled: true });
   });
 });
 
@@ -391,5 +400,28 @@ describe("header Start fresh slot", () => {
     expect(headerClearSlot(true, "running")).toBe("clear");
     expect(headerClearSlot(false, "stopped")).toBeUndefined();
     expect(headerClearSlot(false, "running")).toBeUndefined();
+  });
+});
+
+describe("forgetCopy", () => {
+  const saved = snapshotOf(row({ state: "paused" }));
+  it("words the saved session", () => {
+    expect(forgetCopy(saved, false)).toEqual({
+      title: "Forget saved session?", text: "Remove claude/proj/a from HGS? The agent’s native conversation history is kept.",
+      detail: "Computer: box", confirm: "Forget saved session",
+    });
+  });
+  it("words the OpenCode binding", () => {
+    expect(forgetCopy(saved, true)).toEqual({
+      title: "Forget saved session?", text: "Forget claude/proj/a in Zerus? The conversation stays in OpenCode; only Zerus forgets it.",
+      detail: "Computer: box", confirm: "Forget saved session",
+    });
+  });
+  it("sees a running OpenCode forget-only session as a binding", () => {
+    expect(forgetsBindingOnly({ cmd: "opencode", allowed: "forget rename" })).toBe(true);
+  });
+  it("opens the forget dialog with its scope", () => {
+    const bound = { binding: true, run: "r1", conversation: "c1" };
+    expect(dialogReducer(undefined, { type: "open", kind: "forget", row: saved, bound })).toEqual({ kind: "forget", row: saved, bound });
   });
 });

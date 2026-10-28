@@ -785,3 +785,112 @@ describe("toggleMute", () => {
     });
   });
 });
+
+describe("forget", () => {
+  const opened = (extra: Partial<{ binding: boolean; run: string; conversation: string }> = {}) => ({ binding: false, run: "run-1", conversation: "conv-1", ...extra });
+  const oc = { agent: "opencode", state: "running", allowed: "forget rename" } as Partial<ViewRow>;
+
+  it("forgets a saved session with kill and the write notice", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut({ state: "paused" }));
+      mocked.runAction.mockResolvedValue(done());
+      const out = await a.forget(session({ state: "paused" }), opened());
+      expect(out.outcome).toBe("done");
+      expect(mocked.runAction.mock.calls[0][1]).toEqual({ kind: "forget" });
+      expect(a.notices()).toMatchObject([{ tone: "info", text: "Session updated. Refreshing…" }]);
+      dispose();
+    });
+  });
+
+  it("shows a failed forget as a sticky detail", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut({ state: "paused" }));
+      mocked.runAction.mockResolvedValue({ outcome: "failed", detail: "no way" });
+      await a.forget(session({ state: "paused" }), opened());
+      expect(a.notices()).toMatchObject([{ tone: "error", text: "no way", sticky: true }]);
+      dispose();
+    });
+  });
+
+  it("forgets an OpenCode binding with its run and conversation", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut(oc));
+      mocked.runAction.mockResolvedValue(done());
+      await a.forget(session(oc), opened({ binding: true }));
+      expect(mocked.runAction.mock.calls[0][0]).toMatchObject({ run_id: "run-1", conversation_id: "conv-1" });
+      expect(mocked.runAction.mock.calls[0][1]).toEqual({ kind: "forget_binding" });
+      expect(a.notices()).toMatchObject([{ tone: "info", text: "Zerus forgot claude/sample-project/a. The conversation stays in OpenCode." }]);
+      dispose();
+    });
+  });
+
+  it("shows a failed binding forget as a sticky error", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut(oc));
+      mocked.runAction.mockResolvedValue({ outcome: "failed", detail: "stale" });
+      await a.forget(session(oc), opened({ binding: true }));
+      expect(a.notices()).toMatchObject([{ tone: "error", text: "stale", sticky: true }]);
+      dispose();
+    });
+  });
+
+  it("uses plain forget for a binding without a run id", async () => {
+    await createRoot(async (dispose) => {
+      const bare = { ...oc, run_id: undefined } as Partial<ViewRow>;
+      const a = setup(rowOut(bare));
+      mocked.runAction.mockResolvedValue(done());
+      await a.forget(session(bare), opened({ binding: true, run: "" }));
+      expect(mocked.runAction.mock.calls[0][1]).toEqual({ kind: "forget" });
+      dispose();
+    });
+  });
+
+  it("refuses with the sticky state-changed notice when the binding kind changed", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut({ state: "paused" }));
+      const dialog = session({ state: "paused" });
+      a.applyBatch(batchOf({ upserts: [rowOut({ ...oc, state: "paused" })] }));
+      await a.forget(dialog, opened());
+      expect(mocked.runAction).not.toHaveBeenCalled();
+      expect(a.notices()).toMatchObject([{ tone: "error", text: "The session state changed. Open its actions again.", sticky: true }]);
+      dispose();
+    });
+  });
+
+  it("refuses when a saved session started running", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut({ state: "paused" }));
+      const dialog = session({ state: "paused" });
+      a.applyBatch(batchOf({ upserts: [rowOut({ state: "running" })] }));
+      await a.forget(dialog, opened());
+      expect(mocked.runAction).not.toHaveBeenCalled();
+      expect(a.notices()).toMatchObject([{ text: "The session state changed. Open its actions again.", sticky: true }]);
+      dispose();
+    });
+  });
+
+  it("refuses a scoped forget when the run or conversation changed", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut(oc));
+      const dialog = session(oc);
+      a.applyBatch(batchOf({ upserts: [rowOut({ ...oc, run_id: "run-2" })] }));
+      await a.forget(dialog, opened({ binding: true }));
+      expect(mocked.runAction).not.toHaveBeenCalled();
+      expect(a.notices()).toMatchObject([{ text: "The session state changed. Open its actions again.", sticky: true }]);
+      dispose();
+    });
+  });
+
+  it("makes no call and no notice offline or when the row vanished", async () => {
+    await createRoot(async (dispose) => {
+      const off = setup(rowOut({ state: "paused" }), () => false);
+      await off.forget(session({ state: "paused" }), opened());
+      const gone = setup(rowOut({ state: "paused" }));
+      gone.applyBatch(batchOf({ removes: [{ computer: "", key: "run:a" }] }));
+      await gone.forget(session({ state: "paused" }), opened());
+      expect(mocked.runAction).not.toHaveBeenCalled();
+      expect(off.notices()).toEqual([]);
+      dispose();
+    });
+  });
+});

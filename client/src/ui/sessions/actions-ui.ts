@@ -99,7 +99,7 @@ export interface MenuOptions {
   interrupting?: boolean;
 }
 
-export const FORGET_LATER = "Forgetting sessions arrives in a later version.";
+export const FORGET_ARCHIVE_LATER = "Forgetting archived sessions arrives with the Archive view.";
 export const RESTORE_LATER = "Restoring sessions arrives in a later version.";
 const NO_REASON = "This native adapter does not support this action in the current session state.";
 const WORKING = ["working", "tool", "compacting"];
@@ -111,8 +111,8 @@ export function allowedOp(s: Pick<ActionRow, "allowed" | "cmd">, op: string, det
   return s.cmd !== "opencode" || op === "rename" || op === "forget";
 }
 
-const reasonFor = (s: ActionRow, op: "archive" | "terminate", details?: Details) =>
-  details?.action_reasons?.[op] || (op === "archive" ? s.archiveReason : s.terminateReason) || NO_REASON;
+const reasonFor = (s: ActionRow, op: "archive" | "terminate" | "forget", details?: Details) =>
+  details?.action_reasons?.[op] || (op === "archive" ? s.archiveReason : op === "terminate" ? s.terminateReason : undefined) || NO_REASON;
 
 /** An OpenCode session that allows forget and not terminate: Forget removes only its Zerus binding. */
 export const forgetsBindingOnly = (s: Pick<ActionRow, "allowed" | "cmd">, details?: Details) =>
@@ -135,7 +135,9 @@ export function menuState(s: ActionRow, online: boolean, updating: boolean, deta
 
   const end: MenuState["end"] = terminates(s, details)
     ? { label: "Terminate session…", enabled: available && allowedOp(s, "terminate", details), reason: allowedOp(s, "terminate", details) ? undefined : reasonFor(s, "terminate", details) }
-    : { label: archived ? "Forget archived session…" : "Forget saved session…", enabled: false, reason: FORGET_LATER };
+    : archived
+      ? { label: "Forget archived session…", enabled: false, reason: FORGET_ARCHIVE_LATER }
+      : { label: "Forget saved session…", enabled: available && allowedOp(s, "forget", details), reason: allowedOp(s, "forget", details) ? undefined : reasonFor(s, "forget", details) };
 
   // Stop follows the inspected turn (Qt's m_details); without details it stays off.
   const phase = details?.phase || s.phase || "";
@@ -180,6 +182,21 @@ export function terminateCopy(s: Pick<ActionRow, "tracked" | "cmd" | "name" | "m
     detail: `Computer: ${s.machine}`,
     confirm: archives ? "Stop and archive" : "Terminate session",
     action: archives ? "terminate" : "kill",
+  };
+}
+
+/**
+ * The Forget saved session confirmation (terminateSession, 5767-5780): a
+ * plain saved session, or an OpenCode binding that only Zerus forgets.
+ */
+export function forgetCopy(s: Pick<ActionRow, "name" | "machine">, binding: boolean): { title: string; text: string; detail: string; confirm: string } {
+  return {
+    title: "Forget saved session?",
+    text: binding
+      ? `Forget ${s.name} in Zerus? The conversation stays in OpenCode; only Zerus forgets it.`
+      : `Remove ${s.name} from HGS? The agent’s native conversation history is kept.`,
+    detail: `Computer: ${s.machine}`,
+    confirm: "Forget saved session",
   };
 }
 
@@ -312,13 +329,15 @@ export function freshStillValid(live: ActionRow, shown: ActionRow, online: boole
     && canStartStopped(live, online, updating, batchRunning);
 }
 
-export type DialogKind = "rename" | "terminate" | "fresh";
-export type DialogState = { kind: DialogKind; row: ActionRow } | undefined;
-export type DialogEvent = { type: "open"; kind: DialogKind; row: ActionRow } | { type: "close" };
+export type DialogKind = "rename" | "terminate" | "fresh" | "forget";
+/** What a forget dialog named: whether it forgets an OpenCode binding, and the run and conversation then in view. */
+export interface ForgetScope { binding: boolean; run: string; conversation: string }
+export type DialogState = { kind: DialogKind; row: ActionRow; bound?: ForgetScope } | undefined;
+export type DialogEvent = { type: "open"; kind: DialogKind; row: ActionRow; bound?: ForgetScope } | { type: "close" };
 
 /** One dialog at a time: opening replaces whatever is open, closing clears it. */
 export function dialogReducer(_state: DialogState, event: DialogEvent): DialogState {
-  return event.type === "open" ? { kind: event.kind, row: event.row } : undefined;
+  return event.type === "open" ? (event.bound ? { kind: event.kind, row: event.row, bound: event.bound } : { kind: event.kind, row: event.row }) : undefined;
 }
 
 /** A disabled menu item neither closes the menu nor runs its action. */

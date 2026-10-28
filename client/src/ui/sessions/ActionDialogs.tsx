@@ -1,11 +1,11 @@
 import { For, Show, createEffect, createMemo, createSignal, untrack } from "solid-js";
 import { Icon } from "../lib/icons";
 import { catalog, computerOffline } from "../../store/catalog";
-import { change, copyCommand, copyFolder, copyName, copyReference, dismiss, end, interrupting, notices, notify, perform, stillListed, pendingNotifications, toggleMute, updating } from "../../store/actions";
+import { change, copyCommand, copyFolder, copyName, copyReference, dismiss, end, forget, interrupting, notices, notify, perform, stillListed, pendingNotifications, toggleMute, updating } from "../../store/actions";
 import type { MenuEntry } from "../../store/ui";
 import type { Details } from "../../types";
 import type { Session } from "./types";
-import { FRESH_CHANGED, FRESH_TIP, copyState, dialogReducer, freshCopy, freshEntry, freshStillValid, menuState, notificationsState, renameParts, renameProblem, snapshotOf, terminateCopy, type ActionRow, type DialogEvent } from "./actions-ui";
+import { FRESH_CHANGED, FRESH_TIP, copyState, dialogReducer, freshCopy, freshEntry, freshStillValid, menuState, notificationsState, renameParts, renameProblem, forgetCopy, forgetsBindingOnly, snapshotOf, terminateCopy, terminates, type ForgetScope, type ActionRow, type DialogEvent } from "./actions-ui";
 
 // The guarded session actions: the entries both menus share, the Rename and
 // Terminate dialogs, and the notices the action store raises.
@@ -43,7 +43,13 @@ export function actionEntries(s: Session, details?: Details, options: { context?
       : undefined,
     end: {
       label: m.end.label, icon: m.end.label === "Terminate session…" ? "circle-stop" : "trash", danger: true, disabled: !m.end.enabled, hint: hint(m.end.enabled, m.end.reason),
-      action: () => send({ type: "open", kind: "terminate", row }),
+      action: () => {
+        // Qt's click-time GONE pre-check first; a forget names the run and conversation in view.
+        if (terminates(row, details)) { send({ type: "open", kind: "terminate", row }); return; }
+        if (!stillListed(row)) return;
+        const binding = row.state !== "archived" && forgetsBindingOnly(row, details);
+        send({ type: "open", kind: "forget", row, bound: { binding, run: details ? details.run_id : row.runId ?? "", conversation: details ? details.conversation_id : row.conversationId ?? "" } });
+      },
     },
   };
 }
@@ -152,6 +158,24 @@ function TerminateDialog(props: { row: ActionRow; close: () => void }) {
   );
 }
 
+function ForgetDialog(props: { row: ActionRow; bound: ForgetScope; close: () => void }) {
+  const copy = forgetCopy(props.row, props.bound.binding);
+  return (
+    <>
+      <div class="dlg-head"><Icon name="triangle-alert" size={18} class="accent" /><h2 id="action-dlg-title">{copy.title}</h2></div>
+      <div class="dlg-body">
+        <div class="confirm-body" id="action-dlg-body">{copy.text}</div>
+        <div class="dlg-detail">{copy.detail}</div>
+      </div>
+      <div class="dlg-foot">
+        <span class="spacer" />
+        <button type="button" class="btn primary" data-initial autofocus onClick={props.close}>Cancel</button>
+        <button type="button" class="btn solid-danger" onClick={() => { props.close(); void forget(props.row, props.bound); }}>{copy.confirm}</button>
+      </div>
+    </>
+  );
+}
+
 function FreshDialog(props: { row: ActionRow; close: () => void }) {
   const copy = freshCopy(props.row);
   const confirm = () => {
@@ -197,10 +221,10 @@ export function ActionDialogs() {
   });
   return (
     <dialog class="dlg" ref={el} role={open()?.kind === "rename" || !open() ? "dialog" : "alertdialog"} aria-labelledby="action-dlg-title"
-      aria-describedby={open()?.kind === "terminate" || open()?.kind === "fresh" ? "action-dlg-body" : undefined} style={{ width: "460px" }} onClose={closeDialog}>
+      aria-describedby={open()?.kind === "terminate" || open()?.kind === "fresh" || open()?.kind === "forget" ? "action-dlg-body" : undefined} style={{ width: "460px" }} onClose={closeDialog}>
       <Show when={open()} keyed>
         {(p) => (p.kind === "rename" ? <RenameDialog row={p.row} close={closeDialog} />
-          : p.kind === "fresh" ? <FreshDialog row={p.row} close={closeDialog} /> : <TerminateDialog row={p.row} close={closeDialog} />)}
+          : p.kind === "fresh" ? <FreshDialog row={p.row} close={closeDialog} /> : p.kind === "forget" && p.bound ? <ForgetDialog row={p.row} bound={p.bound} close={closeDialog} /> : <TerminateDialog row={p.row} close={closeDialog} />)}
       </Show>
     </dialog>
   );

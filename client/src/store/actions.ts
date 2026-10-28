@@ -3,7 +3,7 @@ import { createStore } from "solid-js/store";
 import * as bridge from "../bridge";
 import { catalog as appCatalog, computerOffline, type CatalogState } from "./catalog";
 import { marks as appMarks, type Marks } from "./marks";
-import { copyState, detailsFromInspection, MUTE_PENDING, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type PendingNotifications } from "../ui/sessions/actions-ui";
+import { copyState, detailsFromInspection, MUTE_PENDING, forgetsBindingOnly, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type ForgetScope, type PendingNotifications } from "../ui/sessions/actions-ui";
 import type { Action, Details, Outcome, Target } from "../types";
 
 // Guarded session actions. Every action is one call to the Rust side; a call
@@ -39,7 +39,7 @@ const failed = (detail: string): Outcome => ({ outcome: "failed", detail });
  * it they have no target. The other actions name the session only.
  */
 export function targetOf(s: Pick<ActionRow, "computer" | "name" | "runId" | "conversationId">, kind: Action["kind"]): Target | undefined {
-  const identity = kind === "interrupt" || kind === "mark_read" || kind === "terminate";
+  const identity = kind === "interrupt" || kind === "mark_read" || kind === "terminate" || kind === "forget_binding";
   if (identity && (!s.runId || (kind !== "terminate" && !s.conversationId))) return undefined;
   return { computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.conversationId ?? "" };
 }
@@ -88,6 +88,7 @@ export function createActions(
       return;
     }
     if (out.outcome === "failed") { notify("error", out.detail, true); return; }
+    if (action.kind === "forget_binding") { notify("info", `Zerus forgot ${row.name}. The conversation stays in OpenCode.`); return; }
     if (action.kind === "rename") notify("info", "Session renamed. Refreshing…");
     else notify("info", "Session updated. Refreshing…");
     const cleanup = out.cleanup;
@@ -146,6 +147,37 @@ export function createActions(
       return failed(STATE_CHANGED);
     }
     return perform(row, { kind: action });
+  }
+
+  /**
+   * The Forget saved session confirmation's click (terminateSession,
+   * 5799-5818). The row must be as when the dialog opened: running-and-not-a-
+   * binding and binding-only both unchanged, and a scoped forget also the same
+   * run and conversation (the selected row's details win over the row);
+   * otherwise nothing runs and the sticky notice says so. A scoped forget
+   * (a binding with a run) is `forget_binding`, any other is `kill`.
+   * An offline computer or a vanished row ends silently, as in Qt.
+   */
+  async function forget(row: ActionRow, opened: ForgetScope): Promise<Outcome> {
+    if (!online(row.computer)) return failed("offline");
+    const live = catalog.rows[row.key];
+    if (!live) return failed("gone");
+    const now = selectedDetails(live);
+    const binding = forgetsBindingOnly(live, now);
+    if ((live.state === "running" && !binding) || binding !== opened.binding) {
+      notify("error", STATE_CHANGED, true);
+      return failed(STATE_CHANGED);
+    }
+    if (opened.binding && opened.run) {
+      const run = now ? now.run_id : live.runId ?? "";
+      const conversation = now ? now.conversation_id : live.conversationId ?? "";
+      if (run !== opened.run || conversation !== opened.conversation) {
+        notify("error", STATE_CHANGED, true);
+        return failed(STATE_CHANGED);
+      }
+      return perform({ ...row, runId: run, conversationId: conversation }, { kind: "forget_binding" });
+    }
+    return perform(row, { kind: "forget" });
   }
 
   /**
@@ -339,7 +371,7 @@ export function createActions(
     return out;
   }
 
-  return { perform, end, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify };
+  return { perform, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify };
 }
 
 type FollowSource = { target(): { id: string } | undefined; summary(): Record<string, unknown> | undefined; loaded(): boolean; ended(): boolean; error(): unknown };
@@ -360,4 +392,4 @@ let selection: () => Selection = () => ({});
 export function bindSelection(source: () => Selection) { selection = source; }
 
 const app = createActions(appCatalog, (computer) => !computerOffline(computer), () => selection());
-export const { perform, end, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify } = app;
+export const { perform, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify } = app;

@@ -19,6 +19,7 @@ pub mod paths;
 pub mod processes;
 pub mod readmarks;
 pub mod reads;
+pub mod repository;
 pub mod run;
 pub mod shell;
 pub mod state;

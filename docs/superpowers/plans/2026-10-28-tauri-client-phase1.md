@@ -237,9 +237,9 @@ if __name__ == "__main__":
 
 | Phase | Scope | Beads |
 |---|---|---|
-| 2 | Guarded actions through `hgs` (send, interrupt, mark read, pause, rename, archive, terminate) with the same confirmations and idempotent request identities as Qt | zerus-5wmh.7 |
+| 2 | Guarded session actions through `hgs` (interrupt, mark read, pause, resume, rename, archive, terminate) with Qt's enablement, confirmations, notices and request identities; send moves to phase 4 with the full composer; plan: `docs/superpowers/plans/2026-10-28-tauri-client-phase2-actions.md` | zerus-5wmh.7 |
 | 3 | Screens: Overview, Projects, Machines, Accounts, Settings (read and write through `hgs`) | zerus-5wmh.8 |
-| 4 | Composer, attachments, voice and video, Terminal (xterm.js, PTY in Rust), Processes, Native UI | zerus-5wmh.9 |
+| 4 | Composer and Send (Qt's block reasons, cold cache confirmation, resume-then-send, local failed messages, durable drafts), attachments, voice and video, Terminal (xterm.js, PTY in Rust), Processes, Native UI | zerus-5wmh.9 |
 | 5 | Tasks and the side panel; New session and worktree flows | zerus-5wmh.10 |
 | 6 | Skins v1 loader in Settings with user import and validation; i18n; accessibility pass | zerus-5wmh.11 |
 | 7 | Packaging and signing per platform (macOS notarised bundle, Arch package, Windows later), updates, Dev channel | zerus-5wmh.12 |

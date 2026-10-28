@@ -153,11 +153,84 @@ impl Change {
     }
 }
 
-/// The `hgs` the client runs: `ZERUS_CLIENT_HGS` when set, otherwise `hgs` on
-/// `PATH`.
+/// The `hgs` the client runs: `ZERUS_CLIENT_HGS` when set, otherwise the first
+/// `hgs` on `PATH` or in the folders the installers use. An app started from
+/// Finder or a desktop launcher gets a short `PATH` without `~/.local/bin`.
+/// Falls back to the bare name, so a missing `hgs` reports as not found.
 pub fn default_hgs() -> PathBuf {
     std::env::var_os("ZERUS_CLIENT_HGS")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("hgs"))
+        .or_else(|| find_hgs(std::env::var_os("PATH"), std::env::var_os("HOME")))
+        .unwrap_or_else(|| PathBuf::from(HGS))
+}
+
+const HGS: &str = if cfg!(windows) { "hgs.exe" } else { "hgs" };
+
+/// The first `hgs` in `path`, then in `~/.local/bin` and the Homebrew and
+/// `/usr/local` folders.
+fn find_hgs(path: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let mut folders: Vec<PathBuf> = path
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+    if let Some(home) = home.filter(|home| !home.is_empty()) {
+        folders.push(PathBuf::from(home).join(".local").join("bin"));
+    }
+    if !cfg!(windows) {
+        folders.push(PathBuf::from("/opt/homebrew/bin"));
+        folders.push(PathBuf::from("/usr/local/bin"));
+    }
+    folders
+        .into_iter()
+        .map(|folder| folder.join(HGS))
+        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(test)]
+mod hgs_tests {
+    use super::*;
+
+    fn folder(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("zerus-client-core-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn path_comes_before_the_install_folders() {
+        let home = folder("home");
+        let bin = folder("path-bin");
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        std::fs::write(home.join(".local/bin").join(HGS), b"").unwrap();
+        std::fs::write(bin.join(HGS), b"").unwrap();
+        let path = std::env::join_paths([bin.clone()]).unwrap();
+        assert_eq!(
+            find_hgs(Some(path), Some(home.clone().into())),
+            Some(bin.join(HGS))
+        );
+    }
+
+    #[test]
+    fn a_finder_path_still_finds_the_local_bin() {
+        let home = folder("finder-home");
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        std::fs::write(home.join(".local/bin").join(HGS), b"").unwrap();
+        let empty = folder("finder-path");
+        let path = std::env::join_paths([empty]).unwrap();
+        assert_eq!(
+            find_hgs(Some(path), Some(home.clone().into())),
+            Some(home.join(".local/bin").join(HGS))
+        );
+    }
+
+    #[test]
+    fn a_folder_named_hgs_is_not_a_program() {
+        let bin = folder("dir-bin");
+        std::fs::create_dir_all(bin.join(HGS)).unwrap();
+        let path = std::env::join_paths([bin]).unwrap();
+        let found = find_hgs(Some(path), None);
+        assert!(found.is_none_or(|found| found.is_file()));
+    }
 }

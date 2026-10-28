@@ -419,9 +419,16 @@ page built by `client/scripts/measure-report.py`):
   the Activity scroll are still to be measured.
 - **Linux: WebKitGTK paces at 60 Hz on the owner's 144 Hz KDE Wayland desktop**
   (NVIDIA and AMD GPUs), in the synthetic harness and in the client alike.
-  Decision: WebKitGTK stays first while the cause is investigated
-  (`zerus-5wmh.14`); if it cannot pace at the display rate there, the CEF
-  fallback is evaluated with the same harness.
+  The WebKitGTK 2.54.1 sources explain it (`zerus-5wmh.14`, `client/bench/README.md`):
+  its DRM vblank monitor only accepts a connector whose physical size equals the
+  compositor's exactly, KWin and the kernel differ by a few millimetres, so it
+  falls back to a fixed 60 Hz timer; NVIDIA's `nvidia-drm` also runs without
+  vblank support by default, and the near-60 feature is on for GTK too.
+  Decision: WebKitGTK stays first; after the real-display check the owner
+  chooses between fixing this machine (driver vblank support plus a
+  size-tolerant match in WebKit) and evaluating the CEF fallback with the same
+  harness. The client honours the Qt settings Animate working sessions and
+  Reduce motion.
 - Session open (median 98 ms on the Mac, 136 ms on arch) and input-to-frame
   latency (below one frame) do not block the next screens. Idle CPU on Linux is
   too high in the first build and is being fixed before the rerun.

@@ -1,7 +1,7 @@
 # Tauri client phase 3b: Settings (zerus-5wmh.24)
 
-Status: plan for review (design, webui). No code before the storage ruling in
-section 1 and the touch points in section 2 are agreed.
+Status: design ruled on 2026-10-28 (storage, switch set, Automatic
+approvals). The touch points in section 2 are with webui.
 
 Qt is the reference: `tray/src/SettingsPage.h` builds the screen (section list
 at `:43`, pages `:46-155`, entry points `:159-172`, refresh on open `:157`).
@@ -10,33 +10,28 @@ already lays out all 13 sections in Qt's order; the views port it onto live
 data. Texts, controls, order, ranges and defaults are Qt's. No dot separators
 in the UI.
 
-## 1. Storage: one ruling needed
+## 1. Storage (ruled)
 
-Two instructions conflict:
+Coordinator ruling, 2026-10-28: "the read-only seed. Use the client's own
+<data_dir>/settings.json, keyed by Qt's QSettings names. Seed it once from
+Qt's values with Qt's types and defaults, and never write Qt's store."
 
-- design (2026-10-28): under the switch identity, read Qt's QSettings keys as
-  Qt wrote them and write only what Qt writes, in Qt's format.
-- webui, citing the earlier coordinator ruling: never write Qt's store
-  (`com.hgdev.hgs-tray` is both identities' preference domain on macOS, and
-  rollback snapshots and checks those keys, Mac plan Task 7). Settings start
-  at their defaults at the switch.
-
-Proposal, which keeps rollback safe and still carries the owner's choices
-over:
-
-- The client keeps its local preferences in `<data_dir>/settings.json`. It
-  is written atomically on a core worker thread, and its keys are Qt's
+- The client keeps its local preferences in `<data_dir>/settings.json`.
+  It is written atomically on a core worker thread, and its keys are Qt's
   QSettings names (`workspace/theme`, `processes/activeSeconds`, ...).
-- At the first start under the switch identity, the store is seeded **once**
-  from Qt's values for the keys the client has. The read is read-only (macOS
-  plist, Linux `~/.config/hgdev/hgs-tray.conf`, Windows
-  `%APPDATA%/hgdev/hgs-tray.ini`), with Qt's types and defaults. A seed
-  marker in `settings.json` stops a second seed.
+- At the first start under the switch identity (`com.hgdev.hgs-tray`), the
+  store is seeded once from Qt's values for the keys the client has. The read
+  is read-only and uses Qt's types and defaults. The sources are:
+  - macOS: the preference plist;
+  - Linux: `~/.config/hgdev/hgs-tray.conf`;
+  - Windows: `%APPDATA%/hgdev/hgs-tray.ini`.
+- `settings.json` records that it was seeded, when, and from which source,
+  so a second seed never happens. A Qt edit after the seed is not imported.
+  The dev identity never seeds.
 - Qt's store is never written, so a rollback finds Qt exactly as it was.
 
 Settings that live on a computer (recovery policy, mobile delivery, worktree
-policy, speech provider, analytics) are written through `hgs`, as Qt does. The
-ruling does not affect them.
+policy, speech provider, analytics) are written through `hgs`, as Qt does.
 
 ## 2. Page shell and touch points (webui)
 
@@ -120,33 +115,37 @@ By how often the owner changes them, most often first:
 12. Automatic approvals
 13. About
 
-Required for the switch: every page holding a setting that exists only in the
-GUI, since nothing else can change those settings once Qt is gone:
+Coordinator ruling: the seed carries the owner's current values over, so at
+the switch a page is needed only to change a value, not to keep it.
 
-- Appearance, Sessions, Voice input, Keyboard, Processes, Files and Updates;
-- About, because it is trivial;
-- Worktrees, Recovery and Mobile connection with phone pairing. `hgs` can
-  change these, but the owner does it from the GUI today.
+- Required for the switch: Appearance, Sessions, Voice input, Keyboard and
+  About, plus Processes (webui's Task 11).
+- After the switch: Files, Updates, Worktrees (with W2), Automatic recovery,
+  Mobile connection with phone pairing, and Private analytics. The
+  `hgs`-backed ones keep working through the CLI meanwhile.
 
-Analytics can follow the switch, since `hgs analytics` covers it.
+Automatic approvals:
 
-Automatic approvals needs a decision. The client has no approval delivery
-worker yet. The setting is a dangerous opt-in, and a switch without the
-worker cannot honour it. I propose to show the page with Qt's texts and the
-journal, and to disable the switch with Qt's unavailable wording until the
-worker exists, filed as its own task.
+- The page shows Qt's texts and the journal, with the switch disabled under
+  Qt's unavailable wording.
+- At the switch, the client checks whether Qt had the opt-in enabled
+  (`automaticApprovals/enabled`) and says so on the page, so the feature
+  never goes quiet without notice.
+- The delivery worker is its own task, zerus-5wmh.54 (P2).
 
 ## 5. Slices
 
 Each slice is reviewed by webui and merged into `integrate/client-core-2` after
-the local gates (arch, Windows-target clippy, Mac):
+the local gates (arch, Windows-target clippy, Mac). The switch set comes
+first:
 
 1. The core settings store: key table, clamps, atomic writes, the one-time
    seed from Qt's formats, plus the shell, Appearance and Sessions.
-2. Voice input and Keyboard (with webui's shortcut registry).
-3. Files, Updates (on webui's updater state) and About.
-4. Worktrees (W2 view), Automatic recovery, Mobile connection and Phones.
-5. Private analytics and Automatic approvals.
+2. Voice input, Keyboard (with webui's shortcut registry) and About.
+3. After the switch:
+   - Files, Updates (on webui's updater state);
+   - Worktrees (W2 view), Automatic recovery, Mobile connection with phones;
+   - Private analytics, and Automatic approvals (page and notice).
 
 Tests:
 

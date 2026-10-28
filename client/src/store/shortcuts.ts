@@ -154,8 +154,10 @@ const printable = (key: string) => /^[\x21-\x7e]$/.test(key);
 
 /**
  * The key of an event in Qt's names, or undefined for a modifier or an
- * unknown key. With Shift (or Option on macOS), a digit or symbol key is its
- * base key, as Qt's first candidate is; otherwise a printable ASCII
+ * unknown key. With Shift (or Option on macOS), a digit or symbol key that
+ * does not type a letter is its base key, as Qt's first candidate is (a
+ * layout's letter there, AZERTY's M or Dvorak's W, stays the letter);
+ * otherwise a printable ASCII
  * character is the key the layout names (AZERTY, Dvorak), and another
  * script (Cyrillic) falls back to the Latin key at that position, as Qt
  * does, so Ctrl+б is Ctrl+, on a Russian layout.
@@ -164,7 +166,7 @@ export function keyOf(e: Pick<KeyboardEvent, "key" | "code" | "altKey" | "shiftK
   if (e.code === "NumpadEnter") return "Enter";
   if (/^F([1-9]|[12][0-9]|3[0-5])$/.test(e.key)) return e.key;
   if (e.key in NAMED) return NAMED[e.key];
-  if (e.shiftKey || (on === "macos" && e.altKey)) {
+  if ((e.shiftKey || (on === "macos" && e.altKey)) && !/^[A-Za-z]$/.test(e.key)) {
     if (/^Digit[0-9]$/.test(e.code)) return e.code.slice(5);
     if (e.code in CODE_SYMBOLS) return CODE_SYMBOLS[e.code];
   }
@@ -402,14 +404,20 @@ interface Handler { run: () => void; root?: Root }
 // and removing it restores the one before.
 const handlers = new Map<string, Handler[]>();
 
-/** The handler that runs `id` for a key aimed at `target`. */
+/**
+ * The handler that runs `id` for a key aimed at `target`: of those whose
+ * root holds the target, the innermost root's, then the newest.
+ */
 export function handlerFor(id: string, target: EventTarget | null): (() => void) | undefined {
   const stack = handlers.get(id) ?? [];
+  let best: Handler | undefined;
   for (let i = stack.length - 1; i >= 0; i--) {
-    const root = stack[i].root;
-    if (!root || root.contains(target as Node | null)) return stack[i].run;
+    const entry = stack[i];
+    if (entry.root && !entry.root.contains(target as Node | null)) continue;
+    const inner = !best || (entry.root && (!best.root || (best.root !== entry.root && best.root.contains(entry.root as unknown as Node))));
+    if (inner) best = entry;
   }
-  return undefined;
+  return best?.run;
 }
 
 /**

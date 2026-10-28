@@ -146,6 +146,10 @@ describe("key events", () => {
     // A layout's own shifted symbol on another key is also tried without Shift.
     expect(tried({ key: "|", code: "IntlBackslash", ctrlKey: true, shiftKey: true })).toEqual(["Ctrl+Shift+|", "Ctrl+|"]);
     expect(tried({ key: "A", code: "KeyA", ctrlKey: true, shiftKey: true })).toEqual(["Ctrl+Shift+A"]);
+    // A layout's letter on a US symbol key stays the letter: AZERTY M, Dvorak W and Z.
+    expect(tried({ key: "M", code: "Semicolon", ctrlKey: true, shiftKey: true })).toEqual(["Ctrl+Shift+M"]);
+    expect(tried({ key: "W", code: "Comma", ctrlKey: true, shiftKey: true })).toEqual(["Ctrl+Shift+W"]);
+    expect(tried({ key: "Z", code: "Slash", ctrlKey: true, shiftKey: true })).toEqual(["Ctrl+Shift+Z"]);
   });
   it("records what Qt records, so Terminal's Ctrl+Shift digits and ⌃⇧` keep their ✓", () => {
     const one = comboFromEvent(key({ key: "!", code: "Digit1", ctrlKey: true, shiftKey: true }), "linux")!;
@@ -284,6 +288,19 @@ describe("composer commands in the one map", () => {
     handlerFor("message.send", fieldA)!();
     handlerFor("message.send", fieldB)!();
     expect(ran).toEqual(["A", "B"]);
+    // A field inside another field's root: the innermost root's handler runs,
+    // even when the outer one registered later.
+    const inner = focus({ marked: "composer", tag: "TEXTAREA", selection: [0, 0] });
+    const innerRoot = root(inner);
+    const outerRoot = { contains: (node: Node | null) => [inner, fieldA, innerRoot].includes(node as unknown as EventTarget) };
+    const nested = [
+      onCommand("message.push", () => ran.push("inner"), innerRoot),
+      onCommand("message.push", () => ran.push("outer"), outerRoot),
+    ];
+    handlerFor("message.push", inner)!();
+    handlerFor("message.push", fieldA)!();
+    expect(ran.slice(-2)).toEqual(["inner", "outer"]);
+    nested.forEach((f) => f());
     // Outside a message field the window command keeps the chord.
     expect(route(send(focus()), state, "linux")).toEqual({ run: "go.anywhere", consume: true });
     off.forEach((f) => f());

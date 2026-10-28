@@ -1,11 +1,17 @@
-//! Settings > Mobile connection, read only for now: the workspace and its
-//! connector as `zerus-mobile-connector --workspace status` reports them
-//! (WorkspaceSettings.h), the phones each computer's mobile connection lists
-//! (`hgs [@host] mobile phones --json`, PhonePairing.cpp) and the shared phone
-//! notification timing (`hgs swarm preference`, MobileDeliverySettings.h).
-//! Every read is bounded in time and size and runs off the main thread. No
-//! read changes the connector, its service or the workspace; the actions
-//! that do are separate work.
+//! Settings > Mobile connection, without its live actions for now: the
+//! workspace and its connector as `zerus-mobile-connector --workspace status`
+//! reports them (WorkspaceSettings.h), the phones each computer's mobile
+//! connection lists (`hgs [@host] mobile phones --json`, PhonePairing.cpp)
+//! and the shared phone notification timing (`hgs swarm preference`,
+//! MobileDeliverySettings.h). Every call is bounded in time and size and runs
+//! off the main thread; [`page`] lets one of each kind run at a time.
+//!
+//! The status read writes nothing and opens no connection. The phones read
+//! is Qt's: on an encrypted workspace that computer's connector lists its
+//! devices, holding its private workspace state while it asks the relay,
+//! and may refresh its saved activation. No call here starts or stops the
+//! connector, changes its service or the workspace, pairs or revokes a
+//! phone; the actions that do are separate work.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -15,6 +21,8 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::actions::{Exit, Invocation};
+
+pub mod page;
 
 /// The help line that shows `hgs mobile` exists; an older `hgs` would read
 /// "mobile" as an agent to launch.
@@ -242,6 +250,45 @@ pub struct Workspace {
     /// A saved connection waiting for its result.
     pub pending: Option<String>,
     pub running: bool,
+    /// The connection's revision; a change refreshes the phones.
+    pub config_revision: String,
+    pub controls: Controls,
+}
+
+/// WorkspaceSettings::controls: which of the workspace's actions the page
+/// shows in this state. This client shows them disabled for now.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Controls {
+    pub change: bool,
+    /// Create or join a workspace.
+    pub enrollment: bool,
+    pub start: bool,
+    pub stop: bool,
+    /// The pending connection's action: Check connection, Continue
+    /// connecting or Disconnect legacy locally and switch….
+    pub check: Option<String>,
+    /// Give, copy and cancel a computer code.
+    pub invitations: bool,
+}
+
+fn controls(state: &str, running: bool, pending: Option<&Value>) -> Controls {
+    let active = state == "active";
+    let pending_state = pending.and_then(|pending| pending["state"].as_str());
+    Controls {
+        change: active || state == "legacy" || state == "retired",
+        enrollment: !active && state != "retired" && state != "legacy",
+        start: active,
+        stop: active || (state == "retired" && running),
+        check: pending.map(|_| {
+            match pending_state {
+                Some("legacy-retirement-unconfirmed") => "Disconnect legacy locally and switch…",
+                Some(state) if state.starts_with("migration-") => "Continue connecting",
+                _ => "Check connection",
+            }
+            .to_owned()
+        }),
+        invitations: active,
+    }
 }
 
 /// WorkspaceSettings::render, the summary in the client's words where Qt
@@ -294,7 +341,8 @@ pub fn workspace(value: &Map<String, Value>) -> Workspace {
             "Create a workspace or use a computer invitation from an enrolled computer.".to_owned(),
         ),
     };
-    let pending = value.get("pending").filter(|pending| pending.is_object()).map(|pending| {
+    let pending_value = value.get("pending").filter(|pending| pending.is_object());
+    let pending = pending_value.map(|pending| {
         if pending["state"] == "legacy-retirement-unconfirmed" {
             "The new encrypted workspace is ready. The old relay has not confirmed retirement. You can explicitly disconnect its local configuration before switching."
         } else {
@@ -312,6 +360,8 @@ pub fn workspace(value: &Map<String, Value>) -> Workspace {
         connection,
         pending,
         running,
+        config_revision: text(value, "config_revision").to_owned(),
+        controls: controls(state, running, pending_value),
     }
 }
 
@@ -341,10 +391,22 @@ pub fn status(exit: Option<Exit>) -> Result<Workspace, String> {
 
 /// Reads the workspace's status. Blocks; never on the main thread.
 pub fn read_status(connector: &Path, config: &Path) -> Result<Workspace, String> {
+    read_status_in(connector, config, &[])
+}
+
+/// [`read_status`] from a parent environment holding `parent_env`: the
+/// terminal's variables and the agent's attribution never reach the
+/// connector, whatever the parent has.
+pub fn read_status_in(
+    connector: &Path,
+    config: &Path,
+    parent_env: &[(&str, &str)],
+) -> Result<Workspace, String> {
     status(
         crate::run::run_without(
             connector,
             &status_invocation(config),
+            parent_env,
             &CONNECTOR_UNSET,
             STATUS_BYTES,
         )
@@ -353,8 +415,8 @@ pub fn read_status(connector: &Path, config: &Path) -> Result<Workspace, String>
 }
 
 /// HgsClient's failureDetail for an `hgs` call that did not finish cleanly;
-/// None for a clean exit.
-fn failure(hgs: &Path, exit: &Option<Exit>) -> Option<String> {
+/// None for a clean exit. No exit means output past `limit`.
+fn failure(hgs: &Path, exit: &Option<Exit>, limit: usize) -> Option<String> {
     match exit {
         Some(Exit::Code { code: 0, .. }) => None,
         Some(Exit::TimedOut) => Some("timed out".into()),
@@ -373,13 +435,13 @@ fn failure(hgs: &Path, exit: &Option<Exit>) -> Option<String> {
             Some(stderr.trim().chars().take(4000).collect())
         }
         Some(_) => Some("exit code -1".into()),
-        None => Some(format!("reply exceeds {REPLY_BYTES} bytes")),
+        None => Some(format!("reply exceeds {limit} bytes")),
     }
 }
 
 /// A clean reply's object; `invalid` names an unreadable one.
 fn object(hgs: &Path, exit: Option<Exit>, invalid: &str) -> Result<Map<String, Value>, String> {
-    if let Some(error) = failure(hgs, &exit) {
+    if let Some(error) = failure(hgs, &exit, REPLY_BYTES) {
         return Err(error);
     }
     let Some(Exit::Code { stdout, .. }) = exit else {
@@ -452,6 +514,8 @@ pub struct Phone {
     pub last_seen_at: Option<f64>,
     /// The computer it was added from; None when not recorded.
     pub added_from: Option<String>,
+    /// The command that revokes it, pinned as Qt pins it.
+    pub revoke: String,
 }
 
 /// One workspace's phones, as one computer's mobile connection lists them.
@@ -462,7 +526,47 @@ pub struct PhoneList {
     pub workspace_id: String,
     pub workspace_name: String,
     pub encrypted: bool,
+    pub server_url: String,
+    /// The command that pairs a phone, pinned as Qt pins it.
+    pub invite: String,
     pub phones: Vec<Phone>,
+}
+
+/// One shell word: as it is when nothing in it needs quoting.
+fn shell_word(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.:/@=+,%".contains(c));
+    if plain {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+}
+
+/// The `hgs` command Qt's panel runs for `action` (PhonePairing.cpp
+/// `pinned`): the workspace and relay the person saw are pinned, so a
+/// computer whose connection changed meanwhile refuses it.
+pub fn pinned(host: &str, action: &str, id: &str, workspace: &str, server: &str) -> String {
+    let mut words = vec!["hgs".to_owned()];
+    if !host.is_empty() {
+        words.push(shell_word(&format!("@{host}")));
+    }
+    words.extend(["mobile".to_owned(), action.to_owned()]);
+    if !id.is_empty() {
+        words.push(shell_word(id));
+    }
+    if !workspace.is_empty() && !server.is_empty() {
+        words.extend([
+            "--workspace".to_owned(),
+            shell_word(workspace),
+            "--server".to_owned(),
+            shell_word(server),
+        ]);
+    }
+    words.push("--json".to_owned());
+    words.join(" ")
 }
 
 fn seconds(value: &Value) -> Option<f64> {
@@ -498,7 +602,7 @@ pub fn phones(hgs: &Path, host: &str) -> Result<Option<PhoneList>, String> {
         HELP_BYTES,
     )
     .ok();
-    if let Some(error) = failure(hgs, &help) {
+    if let Some(error) = failure(hgs, &help, HELP_BYTES) {
         return Err(strip(error));
     }
     let marked = matches!(&help, Some(Exit::Code { stdout, .. }) if String::from_utf8_lossy(stdout).contains(PHONES_MARKER));
@@ -525,6 +629,8 @@ pub fn phones(hgs: &Path, host: &str) -> Result<Option<PhoneList>, String> {
     if reply.get("configured") != Some(&Value::Bool(true)) {
         return Ok(None);
     }
+    let workspace_id = text(&reply, "workspace_id");
+    let server_url = text(&reply, "server_url");
     let phones = reply
         .get("devices")
         .and_then(Value::as_array)
@@ -546,13 +652,22 @@ pub fn phones(hgs: &Path, host: &str) -> Result<Option<PhoneList>, String> {
                         .unwrap_or("")
                         .to_owned()
                 }),
+            revoke: pinned(
+                host,
+                "revoke-phone",
+                device["id"].as_str().unwrap_or(""),
+                workspace_id,
+                server_url,
+            ),
         })
         .collect();
     Ok(Some(PhoneList {
         host: host.to_owned(),
-        workspace_id: text(&reply, "workspace_id").to_owned(),
+        workspace_id: workspace_id.to_owned(),
         workspace_name: text(&reply, "workspace_name").to_owned(),
         encrypted: reply.get("encrypted") == Some(&Value::Bool(true)),
+        server_url: server_url.to_owned(),
+        invite: pinned(host, "invite", "", workspace_id, server_url),
         phones,
     }))
 }

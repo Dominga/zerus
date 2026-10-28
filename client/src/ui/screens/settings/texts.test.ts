@@ -228,20 +228,21 @@ const WORKTREES_CORE = [
 
 const mobileQt = ["tray/src/WorkspaceSettings.h", "tray/src/PhonePairing.cpp", "tray/src/MobileDeliverySettings.h", "tray/src/SettingsPage.h", "tray/src/HgsClient.cpp"]
   .map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");
-const mobileCore = fs.readFileSync(new URL("client/core/src/mobile.rs", repo), "utf8");
+const mobileCore = ["client/core/src/mobile.rs", "client/core/src/mobile/page.rs"]
+  .map((path) => fs.readFileSync(new URL(path, repo), "utf8")).join("\n");
 const MOBILE = [
   "Mobile connection", "Workspace",
   "Connect your computers and phones to one workspace. Session content is encrypted between your devices; the relay keeps routing and delivery metadata.",
   "Workspace: checking…", "Workspace status is unconfirmed", "Change workspace…", "Start connector", "Stop connector",
-  "Refresh status", "Give computer code", "Copy computer code", "Cancel code",
+  "Refresh status", "Give computer code", "Copy computer code", "Cancel code", "Create workspace",
+  "Advanced: legacy connector configuration",
   "Phones",
   "Phone", "Platform", "Paired", "Last active", "Added from", "Pair a phone…", "Revoke…", "Refresh", "Checking phones…",
   "Verified device membership. Private device names are not stored by the relay.",
   "Paired with an administrator invitation, or before Zerus recorded it",
   "Phone notifications", "When I'm not at a computer, send notifications to my phone",
   "Immediately, even if I'm at a computer", "As soon as I'm away", "After 5 minutes away", "After 10 minutes away",
-  "After 15 minutes away", "After 30 minutes away", "Saving…",
-  "Saved. Your other computers and the phone receive it with the next sync.",
+  "After 15 minutes away", "After 30 minutes away",
   "You count as away after two minutes without keyboard or mouse input on every computer running Zerus, or while their screens are locked. Your computers and the phone share this choice.",
 ];
 const MOBILE_CORE = [
@@ -258,6 +259,9 @@ const MOBILE_CORE = [
   "Open Settings → Mobile connection to create a workspace or join one by code, then start the connector and refresh Phones.",
   "No computer here has a mobile connection. Set one up in Settings → Mobile connection on a computer with local sessions enabled, then refresh Phones.",
   "1 phone", "this computer", "Invalid phone management response", "mobile phones|invite|revoke-phone",
+  "Check connection", "Continue connecting", "Disconnect legacy locally and switch…",
+  "Saving…", "Saved. Your other computers and the phone receive it with the next sync.",
+  "launchctl kickstart -k gui/$(id -u)/com.hgdev.hgs-swarm", "systemctl --user restart hgs-swarm.service",
 ];
 
 describe("Settings texts", () => {
@@ -320,9 +324,15 @@ describe("Settings texts", () => {
     expect(mobileQt).toContain('"%1 (via %2)"');
     expect(source("Mobile.tsx")).toContain("(via ${list.host})");
     expect(mobileQt).toContain('"Could not save: %1"');
-    expect(source("Mobile.tsx")).toContain("`Could not save: ${");
+    expect(mobileCore).toContain('"Could not save: {}"');
     expect(mobileQt).toContain('"Could not read the shared setting: %1"');
-    expect(source("Mobile.tsx")).toContain("`Could not read the shared setting: ${");
+    expect(mobileCore).toContain('"Could not read the shared setting: {}"');
+    expect(mobileQt).toContain('"Update Zerus on %1, a computer this one synchronizes with directly. Until then it keeps syncing projects but does not receive this choice."');
+    expect(mobileCore).toContain('"Update Zerus on {one}, a computer this one synchronizes with directly. Until then it keeps syncing projects but does not receive this choice."');
+    expect(mobileQt).toContain('"Update Zerus on these computers this one synchronizes with directly: %1. Until then they keep syncing projects but do not receive this choice."');
+    expect(mobileCore).toContain('"Update Zerus on these computers this one synchronizes with directly: {}. Until then they keep syncing projects but do not receive this choice."');
+    expect(mobileQt).toContain('"The sync service on this computer is outdated and must be restarted (%1, or sign out and back in). Until then this computer may stop syncing projects and this choice."');
+    expect(mobileCore).toContain('"The sync service on this computer is outdated and must be restarted ({}, or sign out and back in). Until then this computer may stop syncing projects and this choice."');
   });
   it.each(FILES)("Files shows Qt's %s", (text) => {
     expect(filesQt).toContain(`"${text}"`);

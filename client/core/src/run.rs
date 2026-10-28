@@ -87,14 +87,16 @@ pub fn run_cancellable(
 }
 
 /// [`run_limited`] of another program (a connector) that also leaves out
-/// the variables in `remove`, such as the terminal's.
+/// the variables in `remove`, such as the terminal's, even when
+/// `parent_env` sets them.
 pub fn run_without(
     program: &Path,
     inv: &Invocation,
+    parent_env: &[(&str, &str)],
     remove: &[&str],
     stdout_cap: usize,
 ) -> Result<Exit, TooLarge> {
-    match run_inner(program, inv, &[], remove, stdout_cap, None) {
+    match run_inner(program, inv, parent_env, remove, stdout_cap, None) {
         Ok(exit) => Ok(exit),
         Err(Stopped::TooLarge(too_large)) => Err(too_large),
         Err(Stopped::Cancelled) => Ok(Exit::Abnormal {

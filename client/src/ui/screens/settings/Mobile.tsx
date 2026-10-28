@@ -1,19 +1,18 @@
-import { For, Show, createSignal, onMount } from "solid-js";
+import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { inTauri } from "../../../bridge";
 import { Icon } from "../../lib/icons";
 import { Actions, Group, Lines, SectionHead, Select, Status, Table } from "./ui";
+import { createMobile, type MobileState, type View } from "./mobile-page";
 
-// Settings > Mobile connection, read only for now (WorkspaceSettings.h,
-// PhonePairing.cpp, MobileDeliverySettings.h) in the approved mockup's
-// layout. The workspace's actions stay with their own work (zerus-5wmh.24.4
-// to .24.8): they are shown, disabled, with what to use meanwhile. Only the
-// shared notification timing changes here, through hgs, as in Qt.
-
-interface Workspace { state: string; encrypted: boolean; summary: string; connection: string; pending: string | null; running: boolean }
-interface Phone { id: string; name: string; platform: string; paired_at: number | null; last_seen_at: number | null; added_from: string | null }
-interface PhoneList { host: string; workspace_id: string; workspace_name: string; encrypted: boolean; phones: Phone[] }
-interface Phones { lists: PhoneList[]; lines: string[] }
+// Settings > Mobile connection (WorkspaceSettings.h, PhonePairing.cpp,
+// MobileDeliverySettings.h, SettingsPage.h:124-139) in the approved
+// mockup's layout. The reads and their answers live in the app, one of each
+// kind at a time, for the window's life. The workspace's actions stay with
+// their own work (zerus-5wmh.24.4 to .24.8): they are shown as Qt shows
+// them for the workspace's state, disabled, with what to use meanwhile.
+// Only the shared notification timing changes here, through hgs, as in Qt.
 
 const DELIVERY: { value: string; label: string }[] = [
   { value: "immediate", label: "Immediately, even if I'm at a computer" },
@@ -32,66 +31,53 @@ const when = (seconds: number | null) =>
 export const listTitle = (list: { host: string; workspace_name: string }) =>
   list.host ? `${list.workspace_name} (via ${list.host})` : `${list.workspace_name} (this computer)`;
 
-function WorkspacePanel() {
-  const [workspace, setWorkspace] = createSignal<Workspace | undefined>();
-  const [checking, setChecking] = createSignal(false);
-  const [notice, setNotice] = createSignal<string | undefined>();
-  const refresh = () => {
-    if (!inTauri() || checking()) return;
-    setChecking(true);
-    void invoke<Workspace>("mobile_workspace").then(
-      (read) => { setWorkspace(read); setNotice(undefined); setChecking(false); },
-      (error) => { setWorkspace(undefined); setNotice(String(error)); setChecking(false); },
-    );
-  };
-  onMount(refresh);
-  const active = () => workspace()?.state === "active";
+function WorkspacePanel(props: { view?: View; refresh: () => void }) {
+  const read = () => props.view?.workspace ?? undefined;
+  const busy = () => !!props.view?.workspace_busy;
+  const controls = () => read()?.controls;
   return (
     <Group title="Workspace">
       <p class="set-group-hint">Connect your computers and phones to one workspace. Session content is encrypted between your devices; the relay keeps routing and delivery metadata.</p>
-      <Show when={!checking()} fallback={<Status kind="busy">Workspace: checking…</Status>}>
-        <Show when={workspace()} fallback={<Lines text="Workspace status is unconfirmed" />}>
-          {(read) => (
-            <>
-              <Lines text={read().summary} />
-              <span class="muted">{read().connection}</span>
-              <Show when={read().pending}>{(text) => <Status kind="warn">{text()}</Status>}</Show>
-            </>
-          )}
+      <Show when={read()} fallback={
+        <Show when={props.view?.workspace_error} fallback={<Status kind="busy">Workspace: checking…</Status>}>
+          <Lines text="Workspace status is unconfirmed" />
         </Show>
+      }>
+        {(workspace) => (
+          <>
+            <Lines text={workspace().summary} />
+            <span class="muted">{workspace().connection}</span>
+            <Show when={workspace().pending}>{(text) => <Status kind="warn">{text()}</Status>}</Show>
+          </>
+        )}
       </Show>
-      <Show when={notice()}>{(text) => <Status kind="error">{text()}</Status>}</Show>
+      <Show when={props.view?.workspace_error}>{(text) => <Status kind="error">{text()}</Status>}</Show>
       <Actions>
-        <button type="button" class="btn" disabled>Change workspace…</button>
-        <button type="button" class="btn" disabled><Icon name="play" size={13} />Start connector</button>
-        <button type="button" class="btn" disabled><Icon name="square" size={12} />Stop connector</button>
-        <button type="button" class="btn" disabled={checking()} onClick={refresh}><Icon name="refresh-cw" size={13} />Refresh status</button>
+        <Show when={controls()?.change}><button type="button" class="btn" disabled>Change workspace…</button></Show>
+        <Show when={controls()?.enrollment}><button type="button" class="btn" disabled>Create workspace</button></Show>
+        <Show when={controls()?.start}><button type="button" class="btn" disabled><Icon name="play" size={13} />Start connector</button></Show>
+        <Show when={controls()?.stop}><button type="button" class="btn" disabled><Icon name="square" size={12} />Stop connector</button></Show>
+        <button type="button" class="btn" disabled={busy() || !props.view} onClick={props.refresh}><Icon name="refresh-cw" size={13} />Refresh status</button>
       </Actions>
-      <Show when={active()}>
+      <Show when={controls()?.check}>{(text) => <Actions><button type="button" class="btn" disabled>{text()}</button></Actions>}</Show>
+      <Show when={controls()?.invitations}>
         <Actions>
           <button type="button" class="btn" disabled><Icon name="key-round" size={13} />Give computer code</button>
           <button type="button" class="btn" disabled><Icon name="copy" size={13} />Copy computer code</button>
           <button type="button" class="btn" disabled>Cancel code</button>
         </Actions>
       </Show>
-      <p class="set-group-hint">Changing the workspace, starting or stopping the connector and computer invitation codes are not available in this client yet.</p>
+      <Actions>
+        <button type="button" class="btn ghost" disabled><Icon name="chevron-right" size={13} />Advanced: legacy connector configuration</button>
+      </Actions>
+      <p class="set-group-hint">Changing the workspace, starting or stopping the connector, checking a saved connection, computer invitation codes and the legacy connector configuration are not available in this client yet.</p>
     </Group>
   );
 }
 
-function PhonesPanel() {
-  const [phones, setPhones] = createSignal<Phones | undefined>();
-  const [checking, setChecking] = createSignal(false);
-  const [failure, setFailure] = createSignal<string | undefined>();
-  const refresh = () => {
-    if (!inTauri() || checking()) return;
-    setChecking(true);
-    void invoke<Phones>("mobile_phones").then(
-      (read) => { setPhones(read); setFailure(undefined); setChecking(false); },
-      (error) => { setFailure(String(error)); setChecking(false); },
-    );
-  };
-  onMount(refresh);
+function PhonesPanel(props: { view?: View; refresh: () => void }) {
+  const phones = () => props.view?.phones ?? undefined;
+  const busy = () => !!props.view?.phones_busy;
   return (
     <Group title="Phones" hint="Phones paired with your computers. A phone can control every computer of its workspace; revoke one you no longer use.">
       <For each={phones()?.lists ?? []}>
@@ -110,20 +96,22 @@ function PhonesPanel() {
                     : "Paired with an administrator invitation, or before Zerus recorded it"}>—</span>
                 ) },
               ]} />
+            <div class="set-group-hint mobile-commands">
+              <div>To pair a phone with this workspace, run <code>{list.invite}</code> in a terminal.</div>
+              <For each={list.phones}>
+                {(phone) => <div>To revoke {phone.name}, run <code>{phone.revoke}</code>.</div>}
+              </For>
+            </div>
           </>
         )}
       </For>
       <Actions>
         <button type="button" class="btn" disabled><Icon name="plus" size={14} />Pair a phone…</button>
         <button type="button" class="btn" disabled>Revoke…</button>
-        <button type="button" class="btn" disabled={checking()} onClick={refresh}><Icon name="refresh-cw" size={13} />Refresh</button>
+        <button type="button" class="btn" disabled={busy() || !props.view} onClick={props.refresh}><Icon name="refresh-cw" size={13} />Refresh</button>
       </Actions>
-      <p class="set-group-hint">
-        To pair or revoke a phone, run <code>hgs [@computer] mobile invite --json</code> or{" "}
-        <code>hgs [@computer] mobile revoke-phone ID --json</code> in a terminal.
-      </p>
-      <Show when={checking()} fallback={
-        <Show when={failure() ?? phones()?.lines.join("\n")}>{(text) => <Lines class="muted" text={text()} />}</Show>
+      <Show when={busy()} fallback={
+        <Show when={phones()?.lines.join("\n")}>{(text) => <Lines class="muted" text={text()} />}</Show>
       }>
         <Status kind="busy">Checking phones…</Status>
       </Show>
@@ -131,44 +119,56 @@ function PhonesPanel() {
   );
 }
 
-function DeliveryPanel() {
-  const [value, setValue] = createSignal<string | undefined>();
-  const [busy, setBusy] = createSignal(false);
-  const [status, setStatus] = createSignal("");
-  onMount(() => {
-    if (!inTauri()) return;
-    void invoke<string>("mobile_delivery").then(setValue, (error) =>
-      setStatus(`Could not read the shared setting: ${String(error) || "unexpected response from hgs"}`));
-  });
-  const save = (next: string) => {
-    if (busy() || next === value()) return;
-    const previous = value();
-    setValue(next);
-    setBusy(true);
-    setStatus("Saving…");
-    void invoke<string>("mobile_delivery_set", { value: next }).then(
-      (saved) => { setValue(saved); setBusy(false); setStatus("Saved. Your other computers and the phone receive it with the next sync."); },
-      (error) => { setValue(previous); setBusy(false); setStatus(`Could not save: ${String(error) || "unexpected response from hgs"}`); },
-    );
-  };
+function DeliveryPanel(props: { view?: View; set: (value: string) => void }) {
+  const value = () => props.view?.delivery ?? "";
+  const busy = () => !!props.view?.delivery_busy;
+  // Made again when the value or its call changes, so a choice that was not
+  // saved never stays shown.
+  const shown = () => `${value()}|${busy()}`;
   return (
     <Group title="Phone notifications">
       <label class="set-label" for="mobile-delivery">When I'm not at a computer, send notifications to my phone</label>
-      <Select id="mobile-delivery" label="When I'm not at a computer, send notifications to my phone" value={value() ?? ""}
-        disabled={busy() || value() === undefined} onChange={save} options={DELIVERY} />
-      <Show when={status()}>{(text) => <Status kind={busy() ? "busy" : "muted"}>{text()}</Status>}</Show>
+      <Show when={shown()} keyed>
+        <Select id="mobile-delivery" label="When I'm not at a computer, send notifications to my phone" value={value()}
+          disabled={busy() || !props.view?.delivery} onChange={props.set} options={DELIVERY} />
+      </Show>
+      <Show when={props.view?.delivery_status}>{(text) => <Status kind={busy() ? "busy" : "muted"}>{text()}</Status>}</Show>
+      <Show when={props.view?.delivery_outdated}>{(text) => <Status kind="warn">{text()}</Status>}</Show>
+      <Show when={props.view?.delivery_worker}>{(text) => <Status kind="warn">{text()}</Status>}</Show>
       <p class="set-group-hint">You count as away after two minutes without keyboard or mouse input on every computer running Zerus, or while their screens are locked. Your computers and the phone share this choice.</p>
     </Group>
   );
 }
 
 export function MobileSection() {
+  const [state, setState] = createSignal<MobileState>({});
+  const page = createMobile({
+    view: () => invoke<View>("mobile_view"),
+    open: () => invoke<View>("mobile_open"),
+    refreshWorkspace: () => invoke<View>("mobile_refresh_workspace"),
+    refreshPhones: () => invoke<View>("mobile_refresh_phones"),
+    setDelivery: (value) => invoke<View>("mobile_delivery_set", { value }),
+  }, setState);
+  onMount(() => {
+    if (!inTauri()) return;
+    let gone = false;
+    let stop: (() => void) | undefined;
+    // Read again once listening: an answer in between would otherwise wait.
+    listen("mobile-changed", () => page.changed())
+      .then((off) => { if (gone) off(); else { stop = off; page.changed(); } }, () => {});
+    page.open();
+    // The 5-second swarm read keeps the timing and its notices current.
+    const timer = setInterval(() => page.changed(), 5000);
+    onCleanup(() => { gone = true; stop?.(); clearInterval(timer); });
+  });
+  const view = () => state().view;
   return (
     <>
       <SectionHead title="Mobile connection" />
-      <WorkspacePanel />
-      <PhonesPanel />
-      <DeliveryPanel />
+      <Show when={state().error}>{(text) => <Status kind="error">{text()}</Status>}</Show>
+      <WorkspacePanel view={view()} refresh={() => page.refreshWorkspace()} />
+      <PhonesPanel view={view()} refresh={() => page.refreshPhones()} />
+      <DeliveryPanel view={view()} set={(value) => page.setDelivery(value)} />
     </>
   );
 }

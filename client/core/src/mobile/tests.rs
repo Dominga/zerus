@@ -110,8 +110,86 @@ fn the_workspace_status_reads_as_qt_checks_it() {
 }
 
 #[test]
+fn the_workspace_actions_shown_follow_qt_controls() {
+    let shown = |value: Value| status(code(0, &value.to_string(), "")).unwrap().controls;
+    assert_eq!(
+        shown(active()),
+        Controls {
+            change: true,
+            enrollment: false,
+            start: true,
+            stop: true,
+            check: None,
+            invitations: true,
+        }
+    );
+    let none = shown(json!({"state": "unconfigured", "encrypted": false, "config_revision": ""}));
+    assert_eq!(
+        none,
+        Controls {
+            enrollment: true,
+            ..Controls::default()
+        }
+    );
+    let mut legacy = json!({"state": "legacy", "encrypted": false, "config_revision": "", "server_url": "https://relay.example.com"});
+    assert_eq!(
+        shown(legacy.clone()),
+        Controls {
+            change: true,
+            ..Controls::default()
+        }
+    );
+    // A saved connection: its action is named by its state.
+    legacy["pending"] = json!({"state": "pending"});
+    assert_eq!(
+        shown(legacy.clone()).check.as_deref(),
+        Some("Check connection")
+    );
+    legacy["pending"] = json!({"state": "legacy-retirement-unconfirmed"});
+    assert_eq!(
+        shown(legacy.clone()).check.as_deref(),
+        Some("Disconnect legacy locally and switch…")
+    );
+    legacy["pending"] = json!({"state": "migration-draining"});
+    legacy["migration"] = json!({"phase": "draining", "retryable": true, "reason": "draining"});
+    assert_eq!(shown(legacy).check.as_deref(), Some("Continue connecting"));
+    // A retired computer shows Stop only while its connector drains.
+    let mut retired = active();
+    retired["state"] = json!("retired");
+    let draining = shown(retired.clone());
+    assert!(draining.stop && !draining.start && draining.change && !draining.invitations);
+    retired["running"] = json!(false);
+    retired["connector_state"] = json!("stopped");
+    retired["generation"] = Value::Null;
+    assert!(!shown(retired).stop);
+    let read = status(code(0, &active().to_string(), "")).unwrap();
+    assert_eq!(read.config_revision, "a".repeat(64));
+}
+
+#[test]
+fn pair_and_revoke_name_the_pinned_commands_qt_runs() {
+    assert_eq!(
+        pinned("", "invite", "", "ws-1", "https://relay.example.com"),
+        "hgs mobile invite --workspace ws-1 --server https://relay.example.com --json"
+    );
+    assert_eq!(
+        pinned("mac", "revoke-phone", "p1", "ws-1", "https://relay.example.com"),
+        "hgs @mac mobile revoke-phone p1 --workspace ws-1 --server https://relay.example.com --json"
+    );
+    // Without both pins Qt sends neither; odd words are quoted.
+    assert_eq!(
+        pinned("", "invite", "", "ws-1", ""),
+        "hgs mobile invite --json"
+    );
+    assert_eq!(
+        pinned("", "revoke-phone", "it's mine", "", ""),
+        "hgs mobile revoke-phone 'it'\\''s mine' --json"
+    );
+}
+
+#[test]
 fn relay_addresses_are_checked_as_qt_checks_them() {
-    assert!(valid_relay("https://relay.zerus.dev"));
+    assert!(valid_relay("https://relay.example.net"));
     assert!(valid_relay("https://relay.example.com:8443/base"));
     for bad in [
         "",
@@ -136,12 +214,15 @@ fn phones_list_one_workspace_once_this_computer_first() {
         paired_at: Some(1_800_000_000.0),
         last_seen_at: None,
         added_from: None,
+        revoke: String::new(),
     };
     let list = |host: &str, workspace: &str, phones: Vec<Phone>| PhoneList {
         host: host.into(),
         workspace_id: workspace.into(),
         workspace_name: format!("Team {workspace}"),
         encrypted: true,
+        server_url: "https://relay.example.com".into(),
+        invite: String::new(),
         phones,
     };
     let view = phones_view(
@@ -210,7 +291,7 @@ impl Scratch {
     fn program(&self, name: &str, cases: &[(&str, &str)]) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let mut script = format!(
-            "#!/bin/sh\nhere=$(dirname \"$0\")\necho \"$* tmux=${{TMUX:-unset}} session=${{HGS_SESSION:-unset}}\" >> \"$here/{name}.calls\"\ncat >/dev/null\ncase \"$*\" in\n"
+            "#!/bin/sh\nhere=$(dirname \"$0\")\necho \"$* tmux=${{TMUX:-unset}} pane=${{TMUX_PANE:-unset}} session=${{HGS_SESSION:-unset}} run=${{HGS_RUN_ID:-unset}}\" >> \"$here/{name}.calls\"\ncat >/dev/null\ncase \"$*\" in\n"
         );
         for (pattern, answer) in cases {
             script.push_str(&format!("  {pattern}) {answer};;\n"));
@@ -244,7 +325,18 @@ fn the_connector_is_only_asked_for_its_status() {
         &[("*--workspace\\ status*", &format!("echo \"{reply}\""))],
     );
     let config = scratch.0.join("connector.json");
-    let workspace = read_status(&connector, &config).unwrap();
+    // As if this client ran in a terminal of an agent's session.
+    let workspace = read_status_in(
+        &connector,
+        &config,
+        &[
+            ("TMUX", "/tmp/tmux-1000/default,1,0"),
+            ("TMUX_PANE", "%1"),
+            ("HGS_SESSION", "claude/sample/agent"),
+            ("HGS_RUN_ID", "run-1"),
+        ],
+    )
+    .unwrap();
     assert_eq!(workspace.connection, "Connector: running");
     let calls = scratch.calls("zerus-mobile-connector");
     assert_eq!(calls.lines().count(), 1);
@@ -252,7 +344,10 @@ fn the_connector_is_only_asked_for_its_status() {
         calls.starts_with(&format!("--workspace status --config {}", config.display())),
         "{calls}"
     );
-    assert!(calls.contains("tmux=unset session=unset"), "{calls}");
+    assert!(
+        calls.contains("tmux=unset pane=unset session=unset run=unset"),
+        "{calls}"
+    );
     // Found beside an absolute hgs before anything else.
     let hgs = scratch.0.join("hgs");
     std::fs::write(&hgs, "").unwrap();
@@ -293,6 +388,14 @@ fn phones_are_read_after_the_help_says_the_command_exists() {
         (list.workspace_name.as_str(), list.phones.len()),
         ("Example team", 1)
     );
+    assert_eq!(
+        list.invite,
+        "hgs mobile invite --workspace ws-1 --server https://relay.example.com --json"
+    );
+    assert_eq!(
+        list.phones[0].revoke,
+        "hgs mobile revoke-phone p1 --workspace ws-1 --server https://relay.example.com --json"
+    );
     let phone = &list.phones[0];
     assert_eq!(
         (
@@ -310,9 +413,17 @@ fn phones_are_read_after_the_help_says_the_command_exists() {
     let calls = scratch.calls("hgs");
     assert!(!calls.contains("@mac mobile"), "{calls}");
     assert!(
-        calls.lines().all(|line| line.ends_with("session=unset")),
+        calls
+            .lines()
+            .all(|line| line.ends_with("session=unset run=unset")),
         "{calls}"
     );
+    // A help past its own limit says so.
+    let long = scratch.program(
+        "long",
+        &[("--help", "head -c 300000 /dev/zero | tr '\\0' x")],
+    );
+    assert_eq!(phones(&long, "").unwrap_err(), "reply exceeds 262144 bytes");
     // The shared notification timing: only Qt's values are ever sent.
     assert_eq!(delivery(&hgs, None).unwrap(), "away_5");
     assert_eq!(delivery(&hgs, Some("away_10")).unwrap(), "away_10");

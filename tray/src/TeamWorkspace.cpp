@@ -2067,6 +2067,9 @@ QWidget *TeamWorkspace::phaseGraph(const Team &team, const PhaseGroup &group, co
     area->setWidget(view); area->setWidgetResizable(false);
     view->setMinimumWidth(view->width());
     new SideBarFit(area, view);
+    // Owner, 2026-10-28: a phase scrolled sideways keeps its place; every poll
+    // rebuilt it at the left edge.
+    keepScroll(area, QStringLiteral("phasegraph/%1/%2").arg(team.id).arg(group.n));
     // Spec 1.2: the thin 8 px bar without arrows here too, also outside a
     // window that styles its bars.
     area->setStyleSheet(QStringLiteral("QScrollArea#teamPhaseGraphArea{background:transparent;} QScrollArea#teamPhaseGraphArea > QWidget > QWidget{background:transparent;}")

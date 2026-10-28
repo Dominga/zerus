@@ -4339,6 +4339,26 @@ void TestTeamsUi::graphNodesInTwoLinesWithDraftEdits()
     QVERIFY(sideways);
     QTRY_VERIFY(sideways->horizontalScrollBar()->isVisible());
     QCOMPARE(sideways->horizontalScrollBar()->sizeHint().height(), 8);
+    // Owner, 2026-10-28: the place survives the rebuild of a poll. A render
+    // rebuilds the phase, so the area is looked up each time.
+    {
+        const auto area = [&]() -> QScrollArea * {
+            auto *phase = phaseScrollOf(&workspace, 2);
+            return phase ? qobject_cast<QScrollArea *>(phase->findChild<QWidget *>("teamPhaseGraphArea")) : nullptr;
+        };
+        // A narrow window, so the phase graph needs its sideways bar.
+        workspace.resize(760, 900);
+        QTRY_VERIFY(area() && area()->horizontalScrollBar()->maximum() > 0);
+        const int place = qMin(120, area()->horizontalScrollBar()->maximum());
+        area()->horizontalScrollBar()->setValue(place);
+        QCOMPARE(area()->horizontalScrollBar()->value(), place);
+        workspace.render();
+        QTest::qWait(200);
+        QTRY_COMPARE(area()->horizontalScrollBar()->value(), place);
+        workspace.resize(1500, 900);
+        QTRY_VERIFY(([&] { graph = phaseGraphOf(&workspace, 2); draft = phaseGraphOf(&workspace, 3); return graph && draft && graph->nodeRect(6).width() > 0; })());
+        sideways = area();
+    }
     const auto nodeIn = [](TeamUi::TaskView *view, int id) { for (const auto &n : view->nodes) if (n.id == id) return n; return TeamUi::TaskView::Node{}; };
     const auto nodeOf = [&](int id) { return nodeIn(graph, id); };
     // Only the dependencies from other phases show on the node; the edge

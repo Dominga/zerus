@@ -717,8 +717,12 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             }
         }
     }
-    // C2: one message lists the new items, at most once per interval.
-    if lead_ready {
+    // C2: one message lists the new items, at most once per interval. The
+    // owner (2026-10-28): it reaches a lead in its own turn too, which takes
+    // queued input between its tool calls (a permission waited 8 minutes
+    // otherwise); a question or dialog on the lead's screen still holds it.
+    let lead_reachable = lead_ready || lead.is_some_and(|found| found.live && !found.asking && found.activity == "busy");
+    if lead_reachable {
         let new = inbox::items(team).into_iter().filter(|item| !team.inbox.told.contains(&item.key)).count();
         let interval = team.settings.inbox_interval_seconds as f64;
         if new > 0 && (team.inbox.told_at == 0.0 || now - team.inbox.told_at >= interval) {
@@ -4818,11 +4822,16 @@ mod tests {
         let late = 5.0 + report_team.settings.remind_lead_minutes as f64 * 60.0 + 60.0;
         let found = steps(&report_team, &[lead.clone()], late);
         assert!(found.iter().any(|step| matches!(step, Step::RemindReport { task: 1 })), "{found:?}");
-        // A lead in its own turn gets neither.
+        // A lead in its own turn gets the inbox (it takes queued input between
+        // tool calls), not the reminder; one asking on its screen gets neither.
         let mut busy = lead;
         busy.background = false;
         busy.activity = "busy".into();
         busy.phase = "working".into();
+        let found = steps(&report_team, &[busy.clone()], late);
+        assert!(found.iter().any(|step| matches!(step, Step::Inbox)), "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::RemindReport { .. })), "{found:?}");
+        busy.asking = true;
         let found = steps(&report_team, &[busy], late);
         assert!(!found.iter().any(|step| matches!(step, Step::Inbox | Step::RemindReport { .. })), "{found:?}");
     }

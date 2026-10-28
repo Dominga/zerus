@@ -5456,6 +5456,64 @@ git commit -m "feat(client): the guarded send with the cold cache question and l
 
 ### Task 5: Continuations: resume-then-send, compact-to-send and Clear context
 
+**As built** (`9ca0a201` and its review fix round 1). Where the steps below differ, the code and this list win (Qt wins over the brief; `SessionsWindow.cpp` and `MessageComposer.cpp` lines). Tasks 6 and 7 bind to this list:
+- **`WriteKind::Clear`.** `begin` marks a running `ClearContext` as `Clear` under its own computer and name, though it blocks no other session. `write_kind` answers the session's own `Terminate` or `Clear` first, then `Update` for any other mark; another session's `Clear` is no update anywhere. `session_write` keeps a running `Clear` ahead of a retained termination, as `messageBlockReason` reads `m_clearKey` first (4390). `context()` sets `clearing` from `Clear` or from the hub's own reset (`Hub.clearing`), and `start_send_waiting` and `compacting` from the hub's continuations.
+- **`Hub`** gains `start: Option<(Pending, StartSend)>`, `compacts: HashMap<String, (Pending, CompactSend)>`, `last_poll` and `clearing: Option<String>`. `clearing` is Qt's `m_clearKey` while `m_clearRequest` runs: one reset at a time across all sessions.
+- **`Pending`** is `{key, session, run, conversation, retry, revision, evidence, polling}`:
+  - `run` and `conversation` are what its call names. A start names the stopped run (`resumeSession`, `startFreshSession`, 4759-4760). A compaction names the conversation it compacts (`requestCompactContext`, 4561), and after a start that is the new run's.
+  - `evidence` holds the details its session last showed (Qt's pending send evidence).
+  - `polling` keeps its poll to one inspect at a time.
+- **The revision rule (Task 4b review M1).** `wait` (`prepareWaitingToSendAsync`) saves the waiting draft durably under the next save revision. That revision is the continuation's `Pending.revision`, and `Composer.delivering` holds it while the draft waits.
+  - Every step, call outcome and cancel names that revision. A late one finds nothing and changes nothing.
+  - A poll's answer uses the revision only to free its `polling` mark. Its reading then goes to whatever continuation of that key waits, as Qt feeds every inspection to both continuations (3607). This is harmless: S3 compares the run, the conversation and the draft again.
+  - The call's thread checks the continuation again before it calls, as Qt asks inside the save's callback (4762, 4561). A Cancel send or Stop that lands between the save's answer and the call leaves no call.
+  - A cancel ends the composer only while `delivering` still holds its revision. A cancel that arrives after the continuation's send began never ends that delivery.
+- **`Composer.digests`** caches the SHA-256 digests of one attachment list (`attachments_rev`). `mark` builds S3's `DraftMark` from them. Each digest covers the name, type, reference and bytes, as Qt's `draftMatches` compares them (`MessageComposer.cpp:668-676`).
+- **`Prompt`** gains `rules: Option<Session>` and `mark: DraftMark`, both set only by `ask_start`, for the start question. `ask(hub, ctx, retry)` is unchanged. A cold answer to a start question, and a start answer to a cold question, answer `Busy`.
+- **The start question.** `send_message` asks it after Task 4b's composer checks and before the block reason, and only while Qt's Send is enabled (`view.can_send`). It passes R1's Context chip text (`session_usage::context(&details["session_usage"], ctx.recorded()).text`, 4709).
+  - A start answer skips the cold question's quiet identity check. S3's `StartSend::begin` compares the catalog's session instead (4730-4734).
+  - Its refusals are notices in Qt's tones: "The session changed…" is an error, "Draft changed…" is plain.
+  - The view's availability for a stopped session follows 3987-3989: `available` stays true with "Session stopped. Send asks whether to resume it or start fresh.", and `block_reason` still holds the block reason.
+- **Compact and continue** (4844-4847, 4536-4564) answers:
+  - `Busy` without `compact_context_supported` or while this session already compacts;
+  - "Draft changed" (plain) unless the draft is the question's message, a Retry's message too;
+  - "Compaction was cancelled…" (error) for an uncertain draft, whose uncertain mark stays. Qt's `deliveryFinished` would clear the mark there; that is not ported.
+- **Clear context** in the cold question answers `SendReply::ClearContext { token }` (4843), which opens the Clear session dialog. Its choice is disabled while any reset runs (4825).
+- **The calls.** Each Resume, StartFresh and CompactContext call runs on the hub's blocking threads with its own request id. S3 ends the continuation on any failure, and its message is never sent:
+  - A taken write lane (`actions::BUSY`, refused before anything ran) is a definite failure. Its text is Qt's "Starting was cancelled. Your draft was kept without sending." (4756) or "Compaction was cancelled. Your draft was kept without sending." (4559), in the error tone.
+  - Any other `Err`, or a panic, is uncertain.
+  - The send at the end is an ordinary `deliver`: consent, its durable "sending" save, its own request id and `still_valid`.
+  - `Delivery.evidence` is the reading that showed the session ready (Qt passes `data`, 4623 and 4801).
+  - A delivery that `deliver` refuses ends the waiting draft with "The session changed…".
+  - After each call's outcome, the open session's followed details are read again (`continue_open`), and an accepted compaction is polled at once (975).
+- **Readings and polls.** Every Activity state of the open session (`after_observe`), every `refresh_details` answer and every poll feeds S3's `inspected`, the compaction's first (3607). A reading without fields is ignored.
+  - The tick ends continuations past 180 s or 600 s. Every 2.5 s it polls the start, and each compaction whose request was accepted, whatever is open (4566-4590).
+  - The open session is polled through `refresh_details`, which reads nothing while the stream keeps its details: the stream's state carries `compact_context_request` (`hgs` `state_value`).
+  - Another session gets its own `deps.inspect`, one at a time and only while its computer is online. Only the continuation sees that answer.
+  - The ticker runs while a continuation waits, even with no composer open.
+- **Cancel send and Stop** act only on the open composer's handle (Qt's `m_selectedKey`, 964-965 and 1188-1191). They cancel its compaction, then its start. Qt's other interrupt checks (`interrupt_supported`, one interrupt at a time, 1189) stay with the Stop entry, which calls `send_interrupted` only when it interrupts.
+- **`ComposerView`** gains `cancel_send`, `compacting` and `clear: ClearControl`. `SessionView` carries `clear` too, so the tick notices its changes.
+- **`ClearControl`** is `{enabled, dismiss, title, text, confirm, run, conversation, cache_enabled, running, reason, cache_reason}`:
+  - `enabled` is Qt's `canClear` (3798): online, not archived, no reset running anywhere, no send of this session, no inspect error, and `actions::clearable`.
+  - `cache_enabled` is the cache popover's Clear context (3792): online, no reset running, and `clear_context_supported`. A chooser alone does not enable it.
+  - `running` drives the "Clearing…" label (646, 3804).
+  - `reason` and `cache_reason` are the tooltips' reason sentences (`explainContextAction`, 3795-3803), empty for the usual tooltip. `reason` is empty while a chooser allows Dismiss and clear.
+  - Task 6's popover button uses `cache_enabled`, not `enabled`.
+- **`clear_context(handle, run, conversation, dismiss)` blocks** until the reset ends. It answers `Busy` when the confirmed identity or variant no longer holds, or when it is not enabled (4660-4664). It reads the session again (1026).
+  - Once the call ends it answers Qt's notice (1021-1028): "Context cleared. Your draft is ready to send." for a confirmed receipt, otherwise "Clear command sent. Waiting for the agent to confirm the new conversation…"; a failure is an error notice with its detail.
+  - It answers `Sending` when another session is open by then, since Qt shows nothing.
+  - The target is the run and conversation the dialog showed (`m_details`, 4668).
+  - A taken write lane is a definite refusal with Qt's block reason, in the error tone: "The session is terminating. Your draft stays here." while the session's own termination runs (4391), else "Wait for the session update to finish." (4395). It never shows "busy".
+- **Every Clear goes through `clear_context`.** This covers Task 6's header and popover buttons and Task 7's session menu "Clear session…" (Qt's `SessionMenuAction::Clear`, 5339-5340, which calls `clearContext()` at 5490). Nothing dispatches `ClearContext` through `run_action`: that would skip the one-reset-at-a-time rule (`Hub.clearing`) and the dialog's identity check.
+- **The start question keeps the epoch, as the cold question does.** Neither a `Start` reply nor its answer or close changes `text_epoch`. Task 6 unlocks the editor when the dialog closes, and flushes the editor before answering.
+- **Commands:**
+  - `send_cancel(handle)` and `send_interrupted(handle)`;
+  - the async `clear_context(handle, run, conversation, dismiss) -> SendReply`;
+  - `send_answer`, now async: it runs on `spawn_blocking`, since Compact and continue hashes the draft's files (at most 20 MiB) the first time.
+
+  All four are registered in the live handler.
+- **Not ported.** Qt's Windows session-host question before a start (`LocalSessionHost::confirmLaunch`, 4728) has no client counterpart yet, as for Resume elsewhere (`client/src/store/batch.ts`).
+
 **Depends on:**
 - S3 `zerus-5wmh.9.9` (branch `work-ba0ed9fd-continuation`): `send::{Session, can_start_stopped, start_question, StartChoice, StartQuestion, StartSend, CompactSend, Step, DraftMark, CANCELLED_BY_USER, INTERRUPTED}`, `Action::StartFresh`;
 - C1 `zerus-5wmh.9.18` (branch `work-ba0ed9fd-context`): `Action::{ClearContext, CompactContext}`, `actions::clearable`;

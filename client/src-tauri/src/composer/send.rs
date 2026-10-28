@@ -19,10 +19,30 @@
 //!   epoch its text is based on), a question's answer, Retry, and the last
 //!   gate before the save (`deliver`).
 //!
+//! The continuations (`startToSend`, `compactToSend`, S3): a stopped
+//! session asks how to start, then sends the exact draft once the new run
+//! is ready; a cold cache can compact first and send after the compaction
+//! completes. They keep the delivery's rules:
+//! - the waiting draft is saved durably before the start or compaction is
+//!   asked for, and only that save's answer can ask; a closed hub asks for
+//!   nothing;
+//! - every call has its own request id; an `Err` or a panic is an uncertain
+//!   outcome, which ends the continuation: its message is never sent;
+//! - every step, outcome and cancel names the continuation's revision (the
+//!   revision of its waiting save), so a late one never ends a newer
+//!   continuation or the delivery that followed it;
+//! - the send at the end is an ordinary delivery: its durable "sending"
+//!   save, its one request id and `still_valid` all apply.
+//!
+//! Clear context (`clearContext`): the identity the dialog showed must still
+//! hold, and one reset runs at a time across all sessions.
+//!
 //! The ticker recomputes the open composer's session part once a second, as
-//! Qt's cache chip refreshes, and sleeps while none is open. It wakes the
-//! pump only when that part changed: the chip's minute, or a row or status
-//! no batch announced. A write mark wakes it at once (`Actions::on_writes`).
+//! Qt's cache chip refreshes, and sleeps while none is open and no
+//! continuation waits. It wakes the pump only when that part changed: the
+//! chip's minute, or a row or status no batch announced. A write mark wakes
+//! it at once (`Actions::on_writes`). It also ends a continuation past its
+//! limit and polls the continuations every 2.5 s (`pollCompactContinuations`).
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -36,7 +56,11 @@ use tauri::State;
 use zerus_client_core::attachments::{self, Attachment, StoredFile};
 use zerus_client_core::cache::{self, Chip, ColdAction, ColdPrompt};
 use zerus_client_core::local_messages::{self, Inspect, LocalMessage, LocalMessages, Status};
-use zerus_client_core::send::{block_reason, BlockFacts};
+use zerus_client_core::send::{
+    self as rules, block_reason, BlockFacts, CompactSend, DraftMark, Session, StartChoice,
+    StartQuestion, StartSend, Step,
+};
+use zerus_client_core::session_usage;
 use zerus_client_core::terminal::{self, TerminalFacts};
 use zerus_client_core::{Action, Exit, Outcome, Target, TooLarge, ViewRow};
 
@@ -50,6 +74,12 @@ const DETAILS_WAIT: f64 = 3.0;
 const RETRY_WAIT: f64 = 2.5;
 /// The ticker's period: Qt's cache chip refreshes once a second.
 const TICK: Duration = Duration::from_secs(1);
+/// How often a waiting continuation reads its session (Qt's `m_compactTimer`,
+/// `SessionsWindow.cpp:979`).
+const POLL: f64 = 2.5;
+/// The composer's availability while Send can start a stopped session
+/// (`SessionsWindow.cpp:3987-3988`).
+const STOPPED: &str = "Session stopped. Send asks whether to resume it or start fresh.";
 
 /// The session's state for the composer view.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -65,6 +95,7 @@ pub(crate) struct SessionView {
     pub(crate) cache: Chip,
     pub(crate) cache_warning: String,
     pub(crate) cache_details: String,
+    pub(crate) clear: ClearControl,
 }
 
 /// What Qt's session hint reads (`SessionsWindow.cpp:3913-3922, 3955-3958`).
@@ -252,9 +283,11 @@ impl Composers {
         };
         let write = (self.0.deps.facts)(&session.computer, &session.name);
         let facts = BlockFacts {
-            start_send_waiting: false,
-            compacting: false,
-            clearing: false,
+            // Qt's `m_startSend.key`, `m_compacts` and `m_clearKey`
+            // (`messageBlockReason`, 4388-4390): this session's own.
+            start_send_waiting: hub.start.as_ref().is_some_and(|(p, _)| p.key == key),
+            compacting: hub.compacts.contains_key(&key),
+            clearing: write == Some(WriteKind::Clear) || hub.clearing.as_ref() == Some(&key),
             terminating: write == Some(WriteKind::Terminate),
             settings_changing: false,
             online,
@@ -366,9 +399,10 @@ impl Composers {
         }
     }
 
-    /// Once a second while a composer is open: the session part of its view
-    /// (the cache chip's minute, and a write, row or status no batch
-    /// announced), and the inspect fallback.
+    /// Once a second while a composer is open or a continuation waits: the
+    /// session part of its view (the cache chip's minute, and a write, row or
+    /// status no batch announced), the inspect fallback, and the
+    /// continuations' limits and polls.
     pub fn tick(&self) {
         let now = self.now();
         let mut hub = self.lock();
@@ -387,6 +421,7 @@ impl Composers {
         if changed {
             self.changed();
         }
+        self.tick_continuations(now);
     }
 
     /// Ticks once a second while a composer is open, until the app quits.
@@ -407,14 +442,19 @@ impl Composers {
             .expect("the composer ticker starts")
     }
 
-    /// Sleeps while no composer is open, so a closed composer never wakes
-    /// the app; false once the app quits.
+    /// Sleeps while no composer is open and no continuation waits, so a
+    /// closed composer never wakes the app; false once the app quits. A
+    /// continuation's poll belongs to its accepted send, whatever is open
+    /// (`SessionsWindow.cpp:4586-4587`).
     fn wait_open(&self) -> bool {
         let hub = self
             .0
             .opened
             .wait_while(self.lock(), |hub| {
-                let waiting = hub.open.is_none() && !hub.closed;
+                let waiting = hub.open.is_none()
+                    && hub.start.is_none()
+                    && hub.compacts.is_empty()
+                    && !hub.closed;
                 #[cfg(test)]
                 self.0
                     .parked
@@ -439,6 +479,18 @@ pub(crate) fn session_view(composers: &Composers, hub: &Hub, composer: &Composer
     let details = ctx.details.as_deref().unwrap_or(&Value::Null);
     let now = composers.now();
     let reason = ctx.reason();
+    // A stopped session that Send can start stays available
+    // (`SessionsWindow.cpp:3987-3989`); its block reason still stands.
+    let can_start = reason.is_some()
+        && rules::can_start_stopped(
+            &Composers::rules_session(&ctx),
+            Composers::start_busy(hub, &ctx),
+        );
+    let (available, unavailable_reason) = match &reason {
+        Some(_) if can_start => (true, STOPPED.to_owned()),
+        Some(reason) => (false, reason.clone()),
+        None => (true, String::new()),
+    };
     let status = session_status(
         &HintFacts {
             terminating: ctx.facts.terminating,
@@ -474,8 +526,9 @@ pub(crate) fn session_view(composers: &Composers, hub: &Hub, composer: &Composer
         _ => local_time(seconds),
     };
     SessionView {
-        available: reason.is_none(),
-        unavailable_reason: reason.clone().unwrap_or_default(),
+        available,
+        unavailable_reason,
+        clear: clear_control(hub, &ctx, details),
         block_reason: reason,
         attachments_available,
         attachments_reason,
@@ -544,13 +597,45 @@ pub enum SendReply {
     Notice { text: String, error: bool },
     /// Ask "Continue with a cold cache?"; answer with `token`.
     Cold { token: u64, prompt: ColdPrompt },
+    /// Ask "Start the session to send?"; answer with `token`.
+    Start { token: u64, question: StartQuestion },
+    /// The cold cache's Clear context: open the Clear session dialog with
+    /// the view's `clear` (`sendMessage` 4843).
+    ClearContext { token: u64 },
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Answer {
     Cold { action: ColdAction },
+    Start { choice: StartChoice },
     Cancel,
+}
+
+/// Clear session and the cache popover's Clear context, with the dialog
+/// the confirmation shows (`clearContext`, `renderDetails` 3790-3804).
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ClearControl {
+    /// Clear session (the header and the details, Qt's `canClear`, 3798).
+    pub enabled: bool,
+    /// The Claude chooser variant: Esc first, then the clear.
+    pub dismiss: bool,
+    pub title: String,
+    pub text: String,
+    pub confirm: String,
+    /// The identity the dialog shows; the confirmation sends it back.
+    pub run: String,
+    pub conversation: String,
+    /// The cache popover's Clear context (3792): native clear support, no
+    /// chooser.
+    pub cache_enabled: bool,
+    /// A context reset runs (Qt's "Clearing…" label, 3804).
+    pub running: bool,
+    /// Why the host cannot clear now, as a sentence for the tooltip
+    /// (`explainContextAction`, 3795-3803): `reason` for Clear session,
+    /// `cache_reason` for the popover; empty for the usual tooltip.
+    pub reason: String,
+    pub cache_reason: String,
 }
 
 /// A Retry between its checks and the read of its cached files.
@@ -583,6 +668,34 @@ pub(crate) struct Prompt {
     pub(crate) text: String,
     pub(crate) attachments: Vec<Attachment>,
     pub(crate) retry: Option<Retry>,
+    /// The start question's session as the catalog showed it (S3's
+    /// `Session`); None for the cold cache question.
+    pub(crate) rules: Option<Session>,
+    /// The start question's draft mark.
+    pub(crate) mark: DraftMark,
+}
+
+/// A continuation's own part: the session it waits for, the identity its
+/// call names and the message it sends at the end.
+#[derive(Clone, Debug)]
+pub(crate) struct Pending {
+    pub(crate) key: String,
+    pub(crate) session: SessionRef,
+    /// The run and conversation its call names: the stopped run for a start
+    /// (Qt's `resumeSession` and `startFreshSession` with `target`, 4759-4760),
+    /// the compacted conversation for a compaction (`requestCompactContext`,
+    /// 4561).
+    pub(crate) run: String,
+    pub(crate) conversation: String,
+    /// The failed row a compaction sends again; its message, not the draft.
+    pub(crate) retry: Option<Retry>,
+    /// The revision of its waiting save, which `Composer.delivering` holds
+    /// while it waits.
+    pub(crate) revision: u64,
+    /// The details its session last showed (Qt's pending send evidence).
+    pub(crate) evidence: Option<Arc<Value>>,
+    /// Its poll's inspect runs: one at a time.
+    pub(crate) polling: bool,
 }
 
 /// One delivery: what is sent, to which run, with which consent.
@@ -613,6 +726,10 @@ pub(crate) struct Delivery {
 
 fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+fn flag(value: &Value, key: &str) -> bool {
+    value.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
 /// Qt's `draftMatches`: the same text and the same files, in order.
@@ -664,8 +781,22 @@ impl Composers {
             text,
             attachments,
             retry,
+            rules: None,
+            mark: DraftMark::default(),
         };
         hub.prompts.insert(token, prompt);
+        token
+    }
+
+    /// Asks the start question (`startToSend`): it holds the session as the
+    /// catalog shows it and the draft's mark, which the answer compares.
+    fn ask_start(&self, hub: &mut Hub, ctx: &Context, session: Session) -> u64 {
+        let token = self.ask(hub, ctx, None);
+        let mark = Self::draft_mark(hub, &ctx.key);
+        if let Some(prompt) = hub.prompts.get_mut(&token) {
+            prompt.rules = Some(session);
+            prompt.mark = mark;
+        }
         token
     }
 
@@ -710,6 +841,24 @@ impl Composers {
         {
             return SendReply::Busy;
         }
+        // A stopped session asks how to start before its block reason
+        // (`sendMessage` 4809, `startToSend` 4707), while Qt's Send is
+        // enabled (`updateControls`, `MessageComposer.cpp:1185`).
+        let session = Self::rules_session(&ctx);
+        if rules::can_start_stopped(&session, Self::start_busy(hub, &ctx)) {
+            if !self
+                .view_of(hub, &ctx.key)
+                .is_some_and(|view| view.can_send)
+            {
+                return SendReply::Busy;
+            }
+            // The Context chip's text (`m_contextUsage->text()`, 4709).
+            let details = ctx.details.as_deref().unwrap_or(&Value::Null);
+            let usage = session_usage::context(&details["session_usage"], ctx.recorded());
+            let question = rules::start_question(&session, &usage.text);
+            let token = self.ask_start(hub, &ctx, session);
+            return SendReply::Start { token, question };
+        }
         if let Some(reason) = ctx.reason() {
             if let Some(composer) = hub.composers.get_mut(&ctx.key) {
                 composer.show_error(reason.clone());
@@ -743,10 +892,12 @@ impl Composers {
         let details = ctx.details.as_deref().unwrap_or(&Value::Null);
         let now = self.now();
         if cache::expired(details, now) {
+            // Qt's dialog offers Clear context while no reset runs anywhere
+            // (`m_clearRequest`, 4825).
             let prompt = cache::cold_prompt(
                 details,
                 self.compacting(hub, &ctx.key),
-                ctx.facts.clearing,
+                ctx.facts.clearing || hub.clearing.is_some(),
                 now,
             );
             let token = self.ask(hub, ctx, retry);
@@ -760,9 +911,9 @@ impl Composers {
         }
     }
 
-    /// Whether a compaction waits to send for `key` (Task 5 fills it in).
-    pub(crate) fn compacting(&self, _hub: &Hub, _key: &str) -> bool {
-        false
+    /// Whether a compaction waits to send for `key` (Qt's `m_compacts`).
+    pub(crate) fn compacting(&self, hub: &Hub, key: &str) -> bool {
+        hub.compacts.contains_key(key)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -810,18 +961,27 @@ impl Composers {
         let Some(prompt) = hub.prompts.remove(&token) else {
             return SendReply::Busy;
         };
-        let Answer::Cold { action } = answer else {
-            return SendReply::Busy;
+        // The cold cache question takes cold answers, the start question
+        // start answers.
+        let start = match answer {
+            Answer::Cancel => return SendReply::Busy,
+            Answer::Cold { .. } if prompt.rules.is_some() => return SendReply::Busy,
+            Answer::Start { .. } if prompt.rules.is_none() => return SendReply::Busy,
+            Answer::Start { choice } => Some(choice),
+            Answer::Cold { .. } => None,
         };
         let Some(ctx) = self.context(&hub) else {
             return SendReply::Busy;
         };
-        // Qt returns quietly when the question's session changed meanwhile.
-        if ctx.key != prompt.key
-            || ctx.session.computer != prompt.session.computer
-            || ctx.session.name != prompt.session.name
-            || ctx.run() != prompt.run
-            || ctx.conversation() != prompt.conversation
+        // Qt returns quietly when the cold question's session changed
+        // meanwhile (4841-4842). The start question compares the catalog's
+        // session instead, with a notice (`startToSend` 4730-4733).
+        if start.is_none()
+            && (ctx.key != prompt.key
+                || ctx.session.computer != prompt.session.computer
+                || ctx.session.name != prompt.session.name
+                || ctx.run() != prompt.run
+                || ctx.conversation() != prompt.conversation)
         {
             return SendReply::Busy;
         }
@@ -839,6 +999,11 @@ impl Composers {
         {
             return SendReply::Busy;
         }
+        let action = match (start, &answer) {
+            (Some(choice), _) => return self.start_to_send(&mut hub, &ctx, prompt, choice),
+            (None, Answer::Cold { action }) => *action,
+            _ => return SendReply::Busy,
+        };
         match action {
             ColdAction::Send => {
                 if let Some(reason) = ctx.reason() {
@@ -870,8 +1035,9 @@ impl Composers {
                     SendReply::Busy
                 }
             }
-            // Task 5 runs these.
-            ColdAction::Compact | ColdAction::Clear => SendReply::Busy,
+            ColdAction::Compact => self.compact_to_send(&mut hub, &ctx, prompt),
+            // `clearContext()` (4843): the Clear session dialog.
+            ColdAction::Clear => SendReply::ClearContext { token },
         }
     }
 
@@ -1493,6 +1659,950 @@ impl Composers {
     }
 }
 
+/// S3's cancel texts this side gives itself (`SessionsWindow.cpp:4559, 4756`).
+const COMPACT_CANCELLED: &str = "Compaction was cancelled. Your draft was kept without sending.";
+const START_CANCELLED: &str = "Starting was cancelled. Your draft was kept without sending.";
+/// Clear session refused by another write of its session (4391, 4395).
+const TERMINATING: &str = "The session is terminating. Your draft stays here.";
+const UPDATING: &str = "Wait for the session update to finish.";
+/// The end of a start or compaction call whose thread died.
+const ABNORMAL: &str = "The request ended abnormally.";
+/// Clear session's notices (`SessionsWindow.cpp:1025`).
+const CLEARED: &str = "Context cleared. Your draft is ready to send.";
+const CLEAR_SENT: &str =
+    "Clear command sent. Waiting for the agent to confirm the new conversation…";
+
+/// A call's outcome: a lane already taken (`actions::BUSY`) is a definite
+/// refusal with `refused` as its text; any other `Err` (the call's thread
+/// died) and a panic are uncertain.
+fn outcome_of(called: std::thread::Result<Result<Outcome, String>>, refused: &str) -> Outcome {
+    match called {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(error)) if error == crate::actions::BUSY => Outcome::Failed {
+            detail: refused.into(),
+        },
+        Ok(Err(error)) => Outcome::Uncertain { detail: error },
+        Err(_) => Outcome::Uncertain {
+            detail: ABNORMAL.into(),
+        },
+    }
+}
+
+/// The text and attachment digests S3 compares at every step. Each digest
+/// covers what Qt's `draftMatches` compares (`MessageComposer.cpp:668-676`):
+/// the name, type, reference and bytes. They are computed once per
+/// attachment list, not per check: while a continuation waits, every
+/// Activity state and poll compares the mark.
+fn mark(composer: &mut Composer) -> DraftMark {
+    let digests = match &composer.digests {
+        Some((list, digests)) if *list == composer.attachments_rev => digests.clone(),
+        _ => {
+            let digests: Vec<String> = composer.draft.attachments.iter().map(digest).collect();
+            composer.digests = Some((composer.attachments_rev, digests.clone()));
+            digests
+        }
+    };
+    DraftMark {
+        text: composer.draft.text.clone(),
+        attachments: digests,
+    }
+}
+
+fn digest(attachment: &Attachment) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for part in [
+        attachment.name.as_bytes(),
+        attachment.mime.as_bytes(),
+        attachment.reference.as_bytes(),
+        &attachment.bytes,
+    ] {
+        hash.update((part.len() as u64).to_le_bytes());
+        hash.update(part);
+    }
+    hash.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A session row as S3 reads it (`Session`).
+fn rules_of_row(
+    key: &str,
+    session: &SessionRef,
+    row: &ViewRow,
+    online: bool,
+    terminating: bool,
+) -> Session {
+    Session {
+        key: key.to_owned(),
+        host: session.computer.clone(),
+        name: row.name.clone(),
+        created: row.created,
+        run_id: row.run_id.clone().unwrap_or_default(),
+        conversation_id: row.conversation_id.clone().unwrap_or_default(),
+        state: row.state.clone(),
+        online,
+        terminating,
+        tracked: row.tracked,
+        cmd: cmd(row),
+        resumable: row.resumable,
+    }
+}
+
+/// The continuation of `key` named by `revision`: the start or the compaction.
+fn pending_mut<'a>(
+    hub: &'a mut Hub,
+    key: &str,
+    start: bool,
+    revision: u64,
+) -> Option<&'a mut Pending> {
+    let pending = if start {
+        hub.start.as_mut().map(|(p, _)| p).filter(|p| p.key == key)
+    } else {
+        hub.compacts.get_mut(key).map(|(p, _)| p)
+    };
+    pending.filter(|p| p.revision == revision)
+}
+
+/// Takes the continuation `revision` of `key` out of the hub.
+fn take_pending(hub: &mut Hub, key: &str, start: bool, revision: u64) -> Option<Pending> {
+    pending_mut(hub, key, start, revision)?;
+    if start {
+        hub.start.take().map(|(p, _)| p)
+    } else {
+        hub.compacts.remove(key).map(|(p, _)| p)
+    }
+}
+
+/// Clear session and the cache popover's Clear context for the open
+/// session (`renderDetails` 3790-3804, `clearContext` 4638-4655).
+fn clear_control(hub: &Hub, ctx: &Context, details: &Value) -> ClearControl {
+    // A Claude chooser hides the native composer: clearing first dismisses it.
+    let supported = flag(details, "clear_context_supported");
+    let dismiss = !supported;
+    let (name, machine) = (&ctx.session.name, &ctx.row.machine);
+    // Qt's `m_clearRequest`: one reset at a time across all sessions.
+    let running = hub.clearing.is_some() || ctx.facts.clearing;
+    let sending = hub.composers.get(&ctx.key).is_some_and(|c| c.sending);
+    let reason = rules::context_action_reason(details, "clear");
+    ClearControl {
+        enabled: ctx.online
+            && ctx.row.state != "archived"
+            && !running
+            && !sending
+            && !ctx.facts.inspect_error
+            && zerus_client_core::actions::clearable(details),
+        dismiss,
+        title: "Clear session?".into(),
+        text: if dismiss {
+            format!("Claude in {name} on {machine} is waiting for a choice in Terminal. Dismiss it and clear the conversation context?\n\nThis presses Esc once, as in Terminal: a pending approval is denied and a question stays unanswered. Then the agent’s native clear command runs. Your unsent draft will be kept.")
+        } else {
+            format!("Clear the conversation context in {name} on {machine}?\n\nThis runs the agent’s native clear command. Future messages will start without the current conversation context. Your unsent draft will be kept.")
+        },
+        confirm: if dismiss {
+            "Dismiss and clear"
+        } else {
+            "Clear session"
+        }
+        .into(),
+        run: ctx.run(),
+        conversation: ctx.conversation(),
+        cache_enabled: ctx.online && !running && supported,
+        running,
+        // An offline computer's last inspection no longer explains it, and a
+        // chooser still allows Dismiss and clear (3795-3803).
+        reason: if ctx.online && !flag(details, "clear_context_dismiss") {
+            rules::reason_sentence(&reason)
+        } else {
+            String::new()
+        },
+        cache_reason: if ctx.online {
+            rules::reason_sentence(&reason)
+        } else {
+            String::new()
+        },
+    }
+}
+
+impl Composers {
+    /// The catalog's view of the open session for S3.
+    fn rules_session(ctx: &Context) -> Session {
+        rules_of_row(
+            &ctx.key,
+            &ctx.session,
+            &ctx.row,
+            ctx.online,
+            ctx.facts.terminating,
+        )
+    }
+
+    /// A continuation's session as the catalog shows it now, open or not
+    /// (Qt finds it in `m_entries` by key).
+    fn rules_of(&self, key: &str, session: &SessionRef) -> Option<Session> {
+        let (row, online) = (self.0.deps.rows)(&session.computer, &session.key, &session.name)?;
+        let write = (self.0.deps.facts)(&session.computer, &session.name);
+        Some(rules_of_row(
+            key,
+            session,
+            &row,
+            online,
+            write == Some(WriteKind::Terminate),
+        ))
+    }
+
+    /// `canStartStopped`'s busy part (4677-4679): an update runs, another
+    /// start waits anywhere, or this session compacts or sends.
+    fn start_busy(hub: &Hub, ctx: &Context) -> bool {
+        ctx.facts.updating
+            || hub.start.is_some()
+            || hub.compacts.contains_key(&ctx.key)
+            || hub.composers.get(&ctx.key).is_some_and(|c| c.sending)
+    }
+
+    fn draft_mark(hub: &mut Hub, key: &str) -> DraftMark {
+        hub.composers.get_mut(key).map(mark).unwrap_or_default()
+    }
+
+    /// The followed details of `key` when it is the open session.
+    fn open_details(hub: &Hub, key: &str) -> Option<Arc<Value>> {
+        let open = hub.open.as_ref()?;
+        let followed = hub.followed.computer == open.computer && hub.followed.key == open.key;
+        if hub.open_key.as_deref() != Some(key) || !followed {
+            return None;
+        }
+        hub.followed.details.clone()
+    }
+
+    /// "Start the session to send?" answered (`startToSend` 4727-4764):
+    /// S3 compares the session and the draft again, then the draft waits.
+    fn start_to_send(
+        &self,
+        hub: &mut Hub,
+        ctx: &Context,
+        prompt: Prompt,
+        choice: StartChoice,
+    ) -> SendReply {
+        let Some(original) = prompt.rules else {
+            return SendReply::Busy;
+        };
+        let current = Self::rules_session(ctx);
+        let now_mark = Self::draft_mark(hub, &prompt.key);
+        let begun = StartSend::begin(
+            &original,
+            Some(&current),
+            Self::start_busy(hub, ctx),
+            choice,
+            prompt.mark,
+            &now_mark,
+            self.now(),
+        );
+        let (start, waiting) = match begun {
+            Ok(begun) => begun,
+            // "The session changed" is an error notice, "Draft changed" a
+            // plain one (4732, 4734).
+            Err(text) => {
+                let error = text != DRAFT_CHANGED;
+                return SendReply::Notice { text, error };
+            }
+        };
+        let pending = Pending {
+            key: prompt.key.clone(),
+            session: ctx.session.clone(),
+            run: original.run_id.clone(),
+            conversation: original.conversation_id.clone(),
+            retry: None,
+            revision: 0,
+            evidence: ctx.details.clone(),
+            polling: false,
+        };
+        hub.start = Some((pending, start));
+        if self.wait(hub, &prompt.key, waiting, true) {
+            SendReply::Sending
+        } else {
+            hub.start = None;
+            SendReply::Busy
+        }
+    }
+
+    /// The cold cache's "Compact and continue" (`sendMessage` 4844-4847,
+    /// `compactToSend` 4536-4564).
+    fn compact_to_send(&self, hub: &mut Hub, ctx: &Context, prompt: Prompt) -> SendReply {
+        let details = ctx.details.as_deref().unwrap_or(&Value::Null);
+        // Qt's dialog offers it only with native support and no compaction
+        // waiting for this session (4822); `compactToSend` returns
+        // while one waits (4539).
+        if !flag(details, "compact_context_supported") || hub.compacts.contains_key(&prompt.key) {
+            return SendReply::Busy;
+        }
+        let Some(composer) = hub.composers.get(&prompt.key) else {
+            return SendReply::Busy;
+        };
+        // The draft must still be the message, a Retry's too (4845, 4539).
+        if !matches_draft(composer, &prompt.text, &prompt.attachments) {
+            return SendReply::Notice {
+                text: DRAFT_CHANGED.into(),
+                error: false,
+            };
+        }
+        // An uncertain draft never waits (`prepareWaitingToSendAsync`,
+        // `MessageComposer.cpp:708`). Qt then ends the continuation through
+        // `deliveryFinished`, which clears the uncertain mark; here it stays.
+        if composer.uncertain {
+            return SendReply::Notice {
+                text: COMPACT_CANCELLED.into(),
+                error: true,
+            };
+        }
+        let mark = Self::draft_mark(hub, &prompt.key);
+        let (compact, waiting) = CompactSend::begin(
+            &Self::rules_session(ctx),
+            &prompt.run,
+            &prompt.conversation,
+            mark,
+            prompt.retry.as_ref().map(|r| r.id.clone()),
+            self.now(),
+        );
+        let key = prompt.key.clone();
+        let pending = Pending {
+            key: prompt.key,
+            session: ctx.session.clone(),
+            run: prompt.run,
+            conversation: prompt.conversation,
+            retry: prompt.retry,
+            revision: 0,
+            evidence: ctx.details.clone(),
+            polling: false,
+        };
+        hub.compacts.insert(key.clone(), (pending, compact));
+        if self.wait(hub, &key, waiting, false) {
+            SendReply::Sending
+        } else {
+            hub.compacts.remove(&key);
+            SendReply::Busy
+        }
+    }
+
+    /// `prepareWaitingToSendAsync` (`MessageComposer.cpp:706-720`): the
+    /// composer holds the draft as waiting and saves it durably through its
+    /// save revision; only that save's answer can start the continuation's
+    /// call. The continuation is named by that revision from here on.
+    /// False when the composer cannot wait (Qt's `done(false)`).
+    fn wait(&self, hub: &mut Hub, key: &str, waiting: String, start: bool) -> bool {
+        if hub.closed {
+            return false;
+        }
+        let Some(composer) = hub.composers.get_mut(key) else {
+            return false;
+        };
+        if !composer.loaded
+            || composer.sending
+            || composer.uncertain
+            || composer.attaching
+            || composer.renaming
+        {
+            return false;
+        }
+        composer.waiting = Some(waiting);
+        composer.saves += 1;
+        composer.saving = true;
+        let (handle, revision) = (composer.handle, composer.saves);
+        composer.delivering = Some(revision);
+        let stored = composer.stored();
+        let pending = if start {
+            hub.start.as_mut().map(|(p, _)| p).filter(|p| p.key == key)
+        } else {
+            hub.compacts.get_mut(key).map(|(p, _)| p)
+        };
+        if let Some(pending) = pending {
+            pending.revision = revision;
+        }
+        // Like a delivery, a waiting send drops its key's open questions.
+        hub.prompts.retain(|_, prompt| prompt.key != key);
+        let me = self.clone();
+        let owned = key.to_owned();
+        self.0.store.save_durable(key, stored, move |saved| {
+            me.waiting_saved(&owned, handle, revision, start, saved)
+        });
+        // The ticker polls while a continuation waits.
+        self.0.opened.notify_all();
+        self.changed();
+        true
+    }
+
+    /// The waiting draft's durable save answered (on the store's writer):
+    /// S3's `prepared` decides whether the start or compaction is asked
+    /// for (`startToSend` 4741-4762, `compactToSend` 4547-4563). A closed
+    /// hub (the app quits) asks for nothing; the draft reloads as saved.
+    fn waiting_saved(
+        &self,
+        key: &str,
+        handle: u64,
+        revision: u64,
+        start: bool,
+        saved: Result<(), String>,
+    ) {
+        let mut hub = self.lock();
+        let mut ok = saved.is_ok();
+        let mut failed = false;
+        match hub.composers.get_mut(key).filter(|c| c.handle == handle) {
+            Some(composer) if composer.saves == revision => {
+                composer.saving = false;
+                composer.save_failed = saved.is_err();
+                composer.storage_error = saved.err();
+                failed = composer.save_failed;
+            }
+            // A newer save went meanwhile (`MessageComposer.cpp:713`).
+            _ => ok = false,
+        }
+        if hub.closed {
+            return;
+        }
+        let pending = pending_mut(&mut hub, key, start, revision).map(|p| p.clone());
+        let step = match pending {
+            None => Step::Idle,
+            Some(pending) => {
+                let current = self.rules_of(key, &pending.session);
+                let open = Self::open_details(&hub, key);
+                let evidence = if hub.open_key.as_deref() == Some(key) {
+                    open.clone()
+                } else {
+                    pending.evidence.clone()
+                };
+                let write = (self.0.deps.facts)(&pending.session.computer, &pending.session.name);
+                // Qt's `m_pending` (and its rename).
+                let busy = write == Some(WriteKind::Update);
+                if start {
+                    hub.start.as_mut().map_or(Step::Idle, |(_, start)| {
+                        start.prepared(ok, current.as_ref(), evidence.as_deref(), busy)
+                    })
+                } else {
+                    hub.compacts
+                        .get_mut(key)
+                        .map_or(Step::Idle, |(_, compact)| {
+                            compact.prepared(
+                                ok,
+                                current.as_ref(),
+                                evidence.as_deref(),
+                                open.as_deref(),
+                                busy,
+                            )
+                        })
+                }
+            }
+        };
+        drop(hub);
+        if failed {
+            self.retry_save(key.to_owned(), handle, revision);
+        }
+        self.step(key, start, revision, step, None);
+        self.changed();
+    }
+
+    /// Carries out S3's answer for the continuation `revision` of `key`.
+    /// `read` is the reading the answer came from (`inspected`): the
+    /// compaction after a start and the send at the end name its identity.
+    fn step(&self, key: &str, start: bool, revision: u64, step: Step, read: Option<&Arc<Value>>) {
+        match step {
+            Step::Idle => {}
+            Step::Cancelled(text) => self.cancel(key, start, revision, &text),
+            Step::Run(action) => self.request(key, start, revision, action),
+            Step::Compact(compact, waiting) => {
+                if let Some(read) = read {
+                    self.compact_after_start(key, revision, compact, waiting, read);
+                }
+            }
+            Step::Send {
+                run_id,
+                conversation_id,
+                compaction_id,
+            } => self.send_after(
+                key,
+                start,
+                revision,
+                (run_id, conversation_id, compaction_id),
+                read,
+            ),
+        }
+    }
+
+    /// The start or compaction call (Qt's `resumeSession`,
+    /// `startFreshSession` and `requestCompactContext`) off the UI thread,
+    /// with its own request id. A taken lane is a definite refusal; any
+    /// other `Err` or a panic is uncertain. Either way S3 ends the
+    /// continuation, and its message is never sent.
+    fn request(&self, key: &str, start: bool, revision: u64, action: Action) {
+        let target = {
+            let mut hub = self.lock();
+            if hub.closed {
+                return;
+            }
+            let Some(pending) = pending_mut(&mut hub, key, start, revision) else {
+                return;
+            };
+            Target {
+                computer: pending.session.computer.clone(),
+                name: pending.session.name.clone(),
+                run_id: pending.run.clone(),
+                conversation_id: pending.conversation.clone(),
+            }
+        };
+        let me = self.clone();
+        let owned = key.to_owned();
+        (self.0.deps.spawn)(Box::new(move || {
+            // Qt asks right in the save's callback (4762, 4561): a Cancel
+            // send or Stop that came in between leaves nothing to ask for.
+            {
+                let mut hub = me.lock();
+                if hub.closed || pending_mut(&mut hub, &owned, start, revision).is_none() {
+                    return;
+                }
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            let dispatch = &me.0.deps.dispatch;
+            let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                dispatch(target, action, id)
+            }));
+            // A taken lane refused before anything ran: Qt's cancel text
+            // (4756, 4559), never an uncertain end.
+            let refused = if start {
+                START_CANCELLED
+            } else {
+                COMPACT_CANCELLED
+            };
+            let outcome = outcome_of(called, refused);
+            let (next, polling) = {
+                let mut hub = me.lock();
+                let live = pending_mut(&mut hub, &owned, start, revision).is_some();
+                match (live, start) {
+                    (false, _) => (Step::Idle, false),
+                    (true, true) => match hub.start.as_mut() {
+                        Some((_, start)) => (start.start_finished(&outcome), false),
+                        None => (Step::Idle, false),
+                    },
+                    (true, false) => match hub.compacts.get_mut(&owned) {
+                        Some((_, compact)) => {
+                            let next = compact.compact_finished(&outcome);
+                            (next, compact.polling())
+                        }
+                        None => (Step::Idle, false),
+                    },
+                }
+            };
+            me.step(&owned, start, revision, next, None);
+            // What the open session showed while the call ran counts, and
+            // an accepted compaction is read at once (975).
+            me.continue_open();
+            if polling {
+                me.poll(&owned, false, revision);
+            }
+            me.changed();
+        }));
+    }
+
+    /// "Resume, compact and send" once the new run is ready
+    /// (`continueAfterStart` 4796-4800): the start ends, and the compaction
+    /// of the conversation it opened waits for its own durable save.
+    fn compact_after_start(
+        &self,
+        key: &str,
+        revision: u64,
+        compact: CompactSend,
+        waiting: String,
+        read: &Arc<Value>,
+    ) {
+        let mut hub = self.lock();
+        let Some(mut pending) = take_pending(&mut hub, key, true, revision) else {
+            return;
+        };
+        // The waiting draft ended meanwhile: nothing more runs.
+        if hub
+            .composers
+            .get(key)
+            .is_none_or(|c| c.delivering != Some(revision))
+        {
+            return;
+        }
+        pending.run = text(read, "run_id").to_owned();
+        pending.conversation = text(read, "conversation_id").to_owned();
+        pending.evidence = Some(Arc::clone(read));
+        pending.polling = false;
+        hub.compacts.insert(key.to_owned(), (pending, compact));
+        if !self.wait(&mut hub, key, waiting, false) {
+            hub.compacts.remove(key);
+            drop(hub);
+            self.finish(key, Some(revision), false, COMPACT_CANCELLED, false, false);
+        }
+    }
+
+    /// The continuation's send (`deliverMessage` with full-context consent,
+    /// 4801 and 4623). The continuation goes first, so a repeated reading
+    /// never sends twice (4619-4622); then the ordinary delivery runs with
+    /// its durable "sending" save, its own request id and `still_valid`.
+    fn send_after(
+        &self,
+        key: &str,
+        start: bool,
+        revision: u64,
+        (run, conversation, compaction): (String, String, Option<String>),
+        read: Option<&Arc<Value>>,
+    ) {
+        let mut hub = self.lock();
+        let Some(pending) = take_pending(&mut hub, key, start, revision) else {
+            return;
+        };
+        if hub.closed {
+            return;
+        }
+        // Only the draft that waits for this continuation goes.
+        let Some(composer) = hub
+            .composers
+            .get(key)
+            .filter(|c| c.delivering == Some(revision))
+        else {
+            return;
+        };
+        let (text, attachments) = match &pending.retry {
+            Some(retry) => (retry.text.clone(), retry.attachments.clone()),
+            None => (
+                composer.draft.text.clone(),
+                composer.draft.attachments.clone(),
+            ),
+        };
+        // A Retry's message is not the draft: a newer draft stays.
+        let preserve = pending.retry.is_some() && !matches_draft(composer, &text, &attachments);
+        let session = match (&hub.open, hub.open_key.as_deref()) {
+            (Some(open), Some(open_key)) if open_key == key => open.clone(),
+            _ => pending.session.clone(),
+        };
+        let Some((row, _)) = (self.0.deps.rows)(&session.computer, &session.key, &session.name)
+        else {
+            drop(hub);
+            return self.finish(key, Some(revision), false, CHANGED, false, false);
+        };
+        let delivery = Delivery {
+            key: key.to_owned(),
+            session,
+            created: row.created,
+            row_run: row.run_id.unwrap_or_default(),
+            row_conversation: row.conversation_id.unwrap_or_default(),
+            run,
+            conversation,
+            // The reading that showed the session ready (Qt's `data`).
+            evidence: read.cloned().or(pending.evidence),
+            text,
+            attachments,
+            retry_id: pending.retry.map(|r| r.id),
+            compaction,
+            consent: true,
+            preserve,
+            revision: 0,
+        };
+        if !self.deliver(&mut hub, delivery) {
+            drop(hub);
+            self.finish(key, Some(revision), false, CHANGED, false, false);
+        }
+    }
+
+    /// Ends the continuation `revision` without sending
+    /// (`cancelStartContinuation`, `cancelCompactContinuation`): the draft
+    /// stays and shows `text`. A continuation already gone ends nothing
+    /// (4531, 4768), and the composer ends only while it still waits for
+    /// this one, so a late cancel never ends a newer continuation or the
+    /// delivery that followed.
+    fn cancel(&self, key: &str, start: bool, revision: u64, text: &str) {
+        if take_pending(&mut self.lock(), key, start, revision).is_none() {
+            return;
+        }
+        self.finish(key, Some(revision), false, text, false, false);
+    }
+
+    /// Every reading of a continuation's session (an Activity state of the
+    /// open session, an inspect, a poll): S3's `inspected`, the
+    /// compaction's first, as Qt calls `continueAfterCompact` before
+    /// `continueAfterStart` (3607).
+    fn continue_with(&self, key: &str, details: &Arc<Value>) {
+        if !details.as_object().is_some_and(|fields| !fields.is_empty()) {
+            return;
+        }
+        let now = self.now();
+        let (compact, start) = {
+            let mut hub = self.lock();
+            let session = hub
+                .compacts
+                .get(key)
+                .map(|(p, _)| p.session.clone())
+                .or_else(|| {
+                    hub.start
+                        .as_ref()
+                        .filter(|(p, _)| p.key == key)
+                        .map(|(p, _)| p.session.clone())
+                });
+            let Some(session) = session.filter(|_| !hub.closed) else {
+                return;
+            };
+            let draft_now = Self::draft_mark(&mut hub, key);
+            let write = (self.0.deps.facts)(&session.computer, &session.name);
+            // Qt's `m_terminating` and `m_pending` (4618, 4787).
+            let terminating = write == Some(WriteKind::Terminate);
+            let updating = write == Some(WriteKind::Update);
+            let compact = hub.compacts.get_mut(key).map(|(pending, compact)| {
+                pending.evidence = Some(Arc::clone(details));
+                let step = compact.inspected(details, &draft_now, terminating, now);
+                (pending.revision, step)
+            });
+            let start = match hub.start.as_mut() {
+                Some((pending, start)) if pending.key == key => {
+                    pending.evidence = Some(Arc::clone(details));
+                    let step = start.inspected(details, &draft_now, updating, terminating, now);
+                    Some((pending.revision, step))
+                }
+                _ => None,
+            };
+            (compact, start)
+        };
+        if let Some((revision, step)) = compact {
+            self.step(key, false, revision, step, Some(details));
+        }
+        if let Some((revision, step)) = start {
+            self.step(key, true, revision, step, Some(details));
+        }
+    }
+
+    /// The open session's followed details to its continuations.
+    pub(crate) fn continue_open(&self) {
+        let open = {
+            let hub = self.lock();
+            hub.open_key
+                .clone()
+                .and_then(|key| Self::open_details(&hub, &key).map(|details| (key, details)))
+        };
+        if let Some((key, details)) = open {
+            self.continue_with(&key, &details);
+        }
+    }
+
+    /// The continuations' limits (180 s for a start, 600 s for a
+    /// compaction) and their 2.5 s poll (`pollCompactContinuations`,
+    /// 4566-4590): a start always, a compaction once its request was
+    /// accepted.
+    fn tick_continuations(&self, now: f64) {
+        let ended: Vec<(String, bool, u64, Step)> = {
+            let hub = self.lock();
+            hub.start
+                .iter()
+                .map(|(p, s)| (p.key.clone(), true, p.revision, s.tick(now)))
+                .chain(
+                    hub.compacts
+                        .iter()
+                        .map(|(key, (p, c))| (key.clone(), false, p.revision, c.tick(now))),
+                )
+                .filter(|(.., step)| *step != Step::Idle)
+                .collect()
+        };
+        for (key, start, revision, step) in ended {
+            self.step(&key, start, revision, step, None);
+        }
+        let due: Vec<(String, bool, u64)> = {
+            let mut hub = self.lock();
+            if hub.closed || now - hub.last_poll < POLL {
+                return;
+            }
+            hub.last_poll = now;
+            hub.start
+                .iter()
+                .map(|(p, _)| (p.key.clone(), true, p.revision))
+                .chain(
+                    hub.compacts
+                        .iter()
+                        .filter(|(_, (_, c))| c.polling())
+                        .map(|(key, (p, _))| (key.clone(), false, p.revision)),
+                )
+                .collect()
+        };
+        for (key, start, revision) in due {
+            self.poll(&key, start, revision);
+        }
+    }
+
+    /// One reading of a continuation's session. The open one reads through
+    /// `refresh_details`, so its details are the ones the send is checked
+    /// against; nothing reads it while the stream keeps them, since their
+    /// states feed the continuation. Another session gets its own inspect,
+    /// one at a time per continuation, whose details only the continuation
+    /// sees. An offline computer is not read (4573, 4585).
+    fn poll(&self, key: &str, start: bool, revision: u64) {
+        let target = {
+            let mut hub = self.lock();
+            if hub.closed {
+                return;
+            }
+            let open = hub.open_key.as_deref() == Some(key);
+            let rows = &self.0.deps.rows;
+            let Some(pending) = pending_mut(&mut hub, key, start, revision) else {
+                return;
+            };
+            if open {
+                None
+            } else {
+                let session = &pending.session;
+                let online = rows(&session.computer, &session.key, &session.name)
+                    .is_some_and(|(_, online)| online);
+                if pending.polling || !online {
+                    return;
+                }
+                pending.polling = true;
+                Some(Target {
+                    computer: session.computer.clone(),
+                    name: session.name.clone(),
+                    run_id: pending.run.clone(),
+                    conversation_id: pending.conversation.clone(),
+                })
+            }
+        };
+        let Some(target) = target else {
+            return self.refresh_details();
+        };
+        let me = self.clone();
+        let owned = key.to_owned();
+        (self.0.deps.spawn)(Box::new(move || {
+            let read = (me.0.deps.inspect)(&target, None);
+            if let Some(pending) = pending_mut(&mut me.lock(), &owned, start, revision) {
+                pending.polling = false;
+            }
+            if let Ok(mut details) = read {
+                if let Some(fields) = details.as_object_mut() {
+                    fields.remove("events");
+                }
+                me.continue_with(&owned, &Arc::new(details));
+                me.changed();
+            }
+        }));
+    }
+
+    /// Cancel send (`SessionsWindow.cpp:963-968`): the open session's
+    /// waiting send ends and its draft unlocks. The start or compaction
+    /// itself goes on; a delivery already under way is not a waiting send.
+    pub fn cancel_send(&self, handle: u64) {
+        self.cancel_open(handle, rules::CANCELLED_BY_USER);
+    }
+
+    /// The composer's Stop, before it interrupts the turn (1187-1191): a
+    /// waiting send ends first. The Stop entry keeps Qt's other checks
+    /// (`interrupt_supported`, one interrupt at a time).
+    pub fn interrupted(&self, handle: u64) {
+        self.cancel_open(handle, rules::INTERRUPTED);
+    }
+
+    fn cancel_open(&self, handle: u64, text: &str) {
+        let (key, waiting) = {
+            let hub = self.lock();
+            let Some(key) = hub.open_key.clone() else {
+                return;
+            };
+            if !hub.composers.get(&key).is_some_and(|c| c.handle == handle) {
+                return;
+            }
+            let compact = hub.compacts.get(&key).map(|(p, _)| (false, p.revision));
+            let start = hub
+                .start
+                .as_ref()
+                .filter(|(p, _)| p.key == key)
+                .map(|(p, _)| (true, p.revision));
+            (key, [compact, start])
+        };
+        for (start, revision) in waiting.into_iter().flatten() {
+            self.cancel(&key, start, revision, text);
+        }
+    }
+
+    /// Clear session confirmed (`clearContext` 4638-4670): the identity the
+    /// dialog showed (run, conversation, the dismiss variant) must still
+    /// hold, as Qt checks after its dialog (4660-4664), and no reset runs
+    /// anywhere. Blocking: it answers with Qt's notice once the call ended
+    /// (1021-1028), while the session is still open; `Sending` when another
+    /// session is open by then, as Qt shows nothing.
+    pub fn clear_context(
+        &self,
+        handle: u64,
+        run: &str,
+        conversation: &str,
+        dismiss: bool,
+    ) -> SendReply {
+        let (key, target) = {
+            let mut hub = self.lock();
+            let Some(ctx) = self.context(&hub) else {
+                return SendReply::Busy;
+            };
+            if hub.closed
+                || !hub
+                    .composers
+                    .get(&ctx.key)
+                    .is_some_and(|c| c.handle == handle)
+            {
+                return SendReply::Busy;
+            }
+            let details = ctx.details.as_deref().unwrap_or(&Value::Null);
+            let control = clear_control(&hub, &ctx, details);
+            if !control.enabled
+                || control.run != run
+                || control.conversation != conversation
+                || control.dismiss != dismiss
+            {
+                return SendReply::Busy;
+            }
+            hub.clearing = Some(ctx.key.clone());
+            let target = Target {
+                computer: ctx.session.computer.clone(),
+                name: ctx.session.name.clone(),
+                run_id: control.run,
+                conversation_id: control.conversation,
+            };
+            (ctx.key, target)
+        };
+        self.changed();
+        let dispatch = &self.0.deps.dispatch;
+        let action = Action::ClearContext {
+            dismiss_prompt: dismiss,
+        };
+        let (computer, name) = (target.computer.clone(), target.name.clone());
+        let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dispatch(target, action, uuid::Uuid::new_v4().to_string())
+        }));
+        // A taken lane refused before anything ran: the block reason Qt
+        // would show for that write (`messageBlockReason`, 4391 and 4395).
+        let refused = if (self.0.deps.facts)(&computer, &name) == Some(WriteKind::Terminate) {
+            TERMINATING
+        } else {
+            UPDATING
+        };
+        let outcome = outcome_of(called, refused);
+        let open = {
+            let mut hub = self.lock();
+            hub.clearing = None;
+            hub.open_key.as_deref() == Some(key.as_str()) && !hub.closed
+        };
+        self.changed();
+        if !open {
+            return SendReply::Sending;
+        }
+        // Qt reads the session again (`inspect()`, 1026).
+        self.refresh_details();
+        match outcome {
+            Outcome::Done { receipt, .. } => SendReply::Notice {
+                text: if text(&receipt, "status") == "confirmed" {
+                    CLEARED
+                } else {
+                    CLEAR_SENT
+                }
+                .into(),
+                error: false,
+            },
+            Outcome::Failed { detail } | Outcome::Uncertain { detail } => SendReply::Notice {
+                text: detail,
+                error: true,
+            },
+        }
+    }
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn send_message(
     state: State<'_, Composers>,
@@ -1511,9 +2621,18 @@ pub async fn send_message(
     .map_err(|e| e.to_string())
 }
 
+/// Off the main thread: Compact and continue hashes the draft's files
+/// (at most 20 MiB) the first time.
 #[tauri::command]
-pub fn send_answer(state: State<'_, Composers>, token: u64, answer: Answer) -> SendReply {
-    state.answer(token, answer)
+pub async fn send_answer(
+    state: State<'_, Composers>,
+    token: u64,
+    answer: Answer,
+) -> Result<SendReply, String> {
+    let composers = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || composers.answer(token, answer))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1538,6 +2657,33 @@ pub fn local_inspect(state: State<'_, Composers>, handle: u64, id: String) -> Op
     state.inspect_local(handle, &id)
 }
 
+#[tauri::command]
+pub fn send_cancel(state: State<'_, Composers>, handle: u64) {
+    state.cancel_send(handle);
+}
+
+#[tauri::command]
+pub fn send_interrupted(state: State<'_, Composers>, handle: u64) {
+    state.interrupted(handle);
+}
+
+/// Blocking: it answers once the reset ended (`Composers::clear_context`).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn clear_context(
+    state: State<'_, Composers>,
+    handle: u64,
+    run: String,
+    conversation: String,
+    dismiss: bool,
+) -> Result<SendReply, String> {
+    let composers = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        composers.clear_context(handle, &run, &conversation, dismiss)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1554,6 +2700,8 @@ pub(crate) mod tests {
 
     /// What the fake `dispatch` answers a call with.
     type Answers = Box<dyn Fn(&Action, &str) -> Outcome + Send>;
+    /// Which calls the fake `dispatch` finds their lane taken for.
+    type Taken = Box<dyn Fn(&Action) -> bool + Send>;
 
     /// The session, clock, inspect and calls a test controls.
     pub(crate) struct Fake {
@@ -1565,6 +2713,9 @@ pub(crate) mod tests {
         pub(crate) write: Mutex<Option<WriteKind>>,
         pub(crate) calls: Mutex<Vec<(Target, Action, String)>>,
         pub(crate) outcome: Mutex<Answers>,
+        /// The calls whose lane is taken: `dispatch` refuses them with
+        /// `actions::BUSY` before anything runs, as `dispatch_with` does.
+        pub(crate) taken: Mutex<Taken>,
     }
 
     pub(crate) fn row(name: &str) -> ViewRow {
@@ -1589,7 +2740,7 @@ pub(crate) mod tests {
     }
 
     /// `send_hub_on` with the test's own `spawn`.
-    fn send_hub_with(store: &Arc<DraftStore>, spawn: Spawn) -> (Composers, Arc<Fake>) {
+    pub(crate) fn send_hub_with(store: &Arc<DraftStore>, spawn: Spawn) -> (Composers, Arc<Fake>) {
         let fake = Arc::new(Fake {
             row: Mutex::new(row("claude/sample-project/review")),
             now: Mutex::new(1_793_000_100.0),
@@ -1599,6 +2750,7 @@ pub(crate) mod tests {
             write: Mutex::new(None),
             calls: Mutex::new(Vec::new()),
             outcome: Mutex::new(Box::new(receipt)),
+            taken: Mutex::new(Box::new(|_| false)),
         });
         let (f1, f2, f3, f4) = (fake.clone(), fake.clone(), fake.clone(), fake.clone());
         let f5 = fake.clone();
@@ -1620,6 +2772,9 @@ pub(crate) mod tests {
                         .ok_or_else(|| "timed out".to_owned())
                 }),
                 dispatch: Arc::new(move |target, action, id| {
+                    if (lock(&f5.taken))(&action) {
+                        return Err(crate::actions::BUSY.into());
+                    }
                     let out = (lock(&f5.outcome))(&action, &id);
                     lock(&f5.calls).push((target, action, id));
                     Ok(out)
@@ -1759,7 +2914,7 @@ pub(crate) mod tests {
     }
 
     /// Waits until `done` holds, within five seconds.
-    fn eventually(done: impl Fn() -> bool) {
+    pub(crate) fn eventually(done: impl Fn() -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !done() {
             assert!(std::time::Instant::now() < deadline, "timed out");
@@ -2018,7 +3173,7 @@ pub(crate) mod tests {
         });
     }
 
-    fn ended() -> Batch {
+    pub(crate) fn ended() -> Batch {
         Batch {
             activity: vec![ActivityOut {
                 computer: ComputerId::from("studio"),
@@ -2950,9 +4105,9 @@ pub(crate) mod tests {
     // is caught even where another guard stands behind it.
 
     /// Jobs the hub spawns, held until the test runs them.
-    type Held = Arc<Mutex<Vec<Job>>>;
+    pub(crate) type Held = Arc<Mutex<Vec<Job>>>;
 
-    fn held_spawn() -> (Spawn, Held) {
+    pub(crate) fn held_spawn() -> (Spawn, Held) {
         let jobs: Held = Arc::default();
         let queue = Arc::clone(&jobs);
         (Arc::new(move |job: Job| lock(&queue).push(job)), jobs)
@@ -2966,7 +4121,7 @@ pub(crate) mod tests {
     }
 
     /// The oldest held job, once one is there (within five seconds).
-    fn next_job(jobs: &Held) -> Job {
+    pub(crate) fn next_job(jobs: &Held) -> Job {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             let job = {
@@ -2981,7 +4136,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn other_session() -> SessionRef {
+    pub(crate) fn other_session() -> SessionRef {
         SessionRef {
             key: "run:run-2".into(),
             name: "claude/sample-project/other".into(),
@@ -2990,7 +4145,7 @@ pub(crate) mod tests {
     }
 
     /// A definite failure of `text`, sent from the open composer: its row id.
-    fn failed_send(c: &Composers, fake: &Fake, text: &str) -> String {
+    pub(crate) fn failed_send(c: &Composers, fake: &Fake, text: &str) -> String {
         *lock(&fake.outcome) = Box::new(|_, _| Outcome::Failed {
             detail: "hgs: refused".into(),
         });
@@ -3753,5 +4908,1545 @@ pub(crate) mod tests {
         c.delete_local(view.handle, &again);
         assert!(c.current().unwrap().local.is_empty());
         assert_eq!(sent(&fake).len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod continuations {
+    use super::tests::{
+        ended, eventually, failed_send, held_spawn, next_job, opened, other_session, ready,
+        receipt, send_hub, send_hub_on, send_hub_with, state, Fake, Held,
+    };
+    use super::*;
+    use crate::composer::tests::{dir, drafts, hold, until, KEY};
+    use crate::composer::{lock, Job};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use zerus_client_core::{ActivityOut, Batch, ComputerId};
+
+    const WAITING_START: &str = "Waiting for the session to start. This exact message will be sent automatically when ready. Cancel send to edit.";
+    const WAITING_COMPACT: &str = "Waiting for compaction. This exact message will be sent automatically after it completes. Cancel send to edit.";
+    const OTHER: &str = "studio\nclaude/sample-project/other";
+
+    fn stopped(fake: &Fake) {
+        let mut row = lock(&fake.row);
+        row.state = "paused".into();
+        row.resumable = true;
+    }
+
+    fn called(fake: &Fake, action: &Action) -> bool {
+        lock(&fake.calls).iter().any(|(_, a, _)| a == action)
+    }
+
+    /// The messages sent: their target and the compaction they waited for.
+    fn sends(fake: &Fake) -> Vec<(Target, Option<String>)> {
+        lock(&fake.calls)
+            .iter()
+            .filter_map(|(target, action, _)| match action {
+                Action::Send {
+                    expected_compaction_id,
+                    ..
+                } => Some((target.clone(), expected_compaction_id.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The call of `action`, once it was made.
+    fn call_of(fake: &Fake, action: &Action) -> Target {
+        lock(&fake.calls)
+            .iter()
+            .find(|(_, a, _)| a == action)
+            .map(|(target, ..)| target.clone())
+            .expect("called")
+    }
+
+    /// Compactions answer with this request id.
+    fn compacts_as(fake: &Fake, id: &'static str) {
+        *lock(&fake.outcome) = Box::new(move |action, request| match action {
+            Action::CompactContext => Outcome::Done {
+                receipt: json!({"status": "submitted", "request_id": id}),
+                cleanup: None,
+            },
+            _ => receipt(action, request),
+        });
+    }
+
+    fn cold() -> Value {
+        let mut details = ready();
+        details["cache_hint"] = json!({"status": "cold"});
+        details
+    }
+
+    /// A state of the other session (`other_session`).
+    fn other_state(details: Value) -> Batch {
+        Batch {
+            activity: vec![ActivityOut {
+                computer: ComputerId::from("studio"),
+                key: "run:run-2".into(),
+                kind: "state".into(),
+                payload: json!({"value": details, "rev": 1}),
+            }],
+            ..Batch::default()
+        }
+    }
+
+    fn revision(c: &Composers, start: bool) -> u64 {
+        let hub = c.lock();
+        if start {
+            hub.start.as_ref().map(|(p, _)| p.revision).unwrap()
+        } else {
+            hub.compacts.get(KEY).map(|(p, _)| p.revision).unwrap()
+        }
+    }
+
+    #[test]
+    fn a_stopped_session_asks_how_to_start_and_sends_once_ready() {
+        let root = dir("start");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        let mut details = ready();
+        details["runtime_state"] = json!("stopped");
+        details["process_state"] = json!("exited");
+        details["session_usage"] = json!({"context": {"used": 85_300, "limit": 200_000}});
+        let view = opened(&c, details);
+        assert!(view.available, "Send stays enabled to ask");
+        assert_eq!(
+            view.unavailable_reason,
+            "Session stopped. Send asks whether to resume it or start fresh."
+        );
+        assert_eq!(
+            view.block_reason.as_deref(),
+            Some("Resume the session to send a message.")
+        );
+        let SendReply::Start { token, question } = c.send_message(
+            view.handle,
+            1,
+            view.text_epoch,
+            "after start".into(),
+            11,
+            11,
+        ) else {
+            panic!("no question")
+        };
+        assert_eq!(question.title, "Start the session to send?");
+        assert!(
+            question
+                .informative
+                .contains("full context (43% (85.3k/200k))."),
+            "{}",
+            question.informative
+        );
+        assert_eq!(
+            c.answer(
+                token,
+                Answer::Start {
+                    choice: StartChoice::Resume
+                }
+            ),
+            SendReply::Sending
+        );
+        let view = until(&c, |v| v.waiting.is_some());
+        assert!(view.cancel_send && !view.can_send && !view.compacting);
+        // Another start waits: Send asks nothing more (`canStartStopped`).
+        assert!(!view.available);
+        assert_eq!(view.unavailable_reason, WAITING_START);
+        until(&c, |_| called(&fake, &Action::Resume));
+        // The resume names the stopped run.
+        assert_eq!(call_of(&fake, &Action::Resume).run_id, "run-1");
+        // The new run reports ready: the exact draft goes out, once.
+        {
+            let mut row = lock(&fake.row);
+            row.state = "running".into();
+            row.run_id = Some("run-2".into());
+        }
+        let mut after = ready();
+        after["run_id"] = json!("run-2");
+        c.observe(&state(after.clone()));
+        c.observe(&state(after));
+        until(&c, |v| v.waiting.is_none() && !v.sending);
+        let sends = sends(&fake);
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].0.run_id, "run-2");
+        let view = c.current().unwrap();
+        assert!(view.text.is_empty() && !view.cancel_send);
+    }
+
+    #[test]
+    fn a_compaction_must_complete_before_the_send() {
+        let root = dir("compact");
+        let (c, fake) = send_hub(&root);
+        compacts_as(&fake, "cmp-1");
+        let mut details = cold();
+        let view = opened(&c, details.clone());
+        let SendReply::Cold { token, prompt } =
+            c.send_message(view.handle, 1, view.text_epoch, "compact me".into(), 0, 0)
+        else {
+            panic!()
+        };
+        assert!(prompt
+            .choices
+            .iter()
+            .any(|ch| ch.action == ColdAction::Compact && ch.enabled));
+        assert_eq!(
+            c.answer(
+                token,
+                Answer::Cold {
+                    action: ColdAction::Compact
+                }
+            ),
+            SendReply::Sending
+        );
+        let view = until(&c, |v| v.compacting && v.cancel_send);
+        assert_eq!(view.waiting.as_deref(), Some(WAITING_COMPACT));
+        assert_eq!(view.block_reason.as_deref(), Some(WAITING_COMPACT));
+        until(&c, |_| called(&fake, &Action::CompactContext));
+        let target = call_of(&fake, &Action::CompactContext);
+        assert_eq!(
+            (target.run_id.as_str(), target.conversation_id.as_str()),
+            ("run-1", "conv-1")
+        );
+        details["compact_context_request"] = json!({"request_id": "cmp-1", "status": "running"});
+        c.observe(&state(details.clone()));
+        // A reading without details is no evidence of a changed conversation.
+        c.observe(&state(json!({})));
+        assert!(sends(&fake).is_empty());
+        assert!(c.current().unwrap().compacting);
+        details["compact_context_request"] = json!({"request_id": "cmp-1", "status": "completed"});
+        c.observe(&state(details.clone()));
+        c.observe(&state(details));
+        until(&c, |v| !v.sending && !v.compacting);
+        let sends = sends(&fake);
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].1.as_deref(), Some("cmp-1"));
+    }
+
+    #[test]
+    fn cancel_send_keeps_the_draft_and_an_interrupt_names_itself() {
+        let root = dir("cancel");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        let view = opened(&c, ready());
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "kept".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Start {
+                choice: StartChoice::Fresh,
+            },
+        );
+        until(&c, |v| v.waiting.is_some());
+        // Another composer's Cancel send is not this one's.
+        c.cancel_send(view.handle + 100);
+        assert!(c.current().unwrap().waiting.is_some());
+        c.cancel_send(view.handle);
+        let view = until(&c, |v| v.waiting.is_none());
+        assert_eq!(
+            view.status,
+            "Pending send cancelled. Your draft is unchanged."
+        );
+        assert!(view.status_error && !view.cancel_send);
+        assert_eq!(view.text, "kept");
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 2, view.text_epoch, "kept".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Start {
+                choice: StartChoice::Resume,
+            },
+        );
+        until(&c, |v| v.waiting.is_some());
+        c.interrupted(view.handle);
+        assert_eq!(
+            until(&c, |v| v.waiting.is_none()).status,
+            "Interrupted. Your draft was kept without sending."
+        );
+        assert!(sends(&fake).is_empty());
+    }
+
+    #[test]
+    fn a_start_that_never_becomes_ready_gives_up_after_180_s() {
+        let root = dir("timeout");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        let view = opened(&c, ready());
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "late".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Start {
+                choice: StartChoice::Resume,
+            },
+        );
+        until(&c, |v| v.waiting.is_some());
+        *lock(&fake.now) += 179.0;
+        c.tick();
+        assert!(c.current().unwrap().waiting.is_some(), "still within 180 s");
+        *lock(&fake.now) += 2.0;
+        c.tick();
+        let view = until(&c, |v| v.waiting.is_none());
+        assert_eq!(
+            view.status,
+            "The agent did not become ready. Check Terminal; your draft was kept without sending."
+        );
+        assert!(sends(&fake).is_empty());
+    }
+
+    #[test]
+    fn a_compaction_that_never_completes_gives_up_after_600_s() {
+        let root = dir("compact-timeout");
+        let (c, fake) = send_hub(&root);
+        compacts_as(&fake, "cmp-1");
+        let view = opened(&c, cold());
+        let SendReply::Cold { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "slow".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Cold {
+                action: ColdAction::Compact,
+            },
+        );
+        until(&c, |_| called(&fake, &Action::CompactContext));
+        *lock(&fake.now) += 601.0;
+        c.tick();
+        let view = until(&c, |v| !v.compacting);
+        assert_eq!(
+            view.status,
+            "Compaction was not confirmed. Check Terminal; your draft was kept without sending."
+        );
+        assert_eq!(view.text, "slow");
+        assert!(sends(&fake).is_empty());
+    }
+
+    #[test]
+    fn clear_context_runs_with_the_identity_the_dialog_showed() {
+        let root = dir("clear");
+        let (c, fake) = send_hub(&root);
+        lock(&fake.row).machine = "studio".into();
+        let view = opened(&c, ready());
+        assert!(view.clear.enabled && !view.clear.dismiss && view.clear.cache_enabled);
+        assert_eq!(view.clear.title, "Clear session?");
+        assert_eq!(view.clear.confirm, "Clear session");
+        assert_eq!(view.clear.text, "Clear the conversation context in claude/sample-project/review on studio?\n\nThis runs the agent’s native clear command. Future messages will start without the current conversation context. Your unsent draft will be kept.");
+        assert_eq!(
+            (view.clear.run.as_str(), view.clear.conversation.as_str()),
+            ("run-1", "conv-1")
+        );
+        // Qt answers once the call ended (`sessionActionFinished`, 1025).
+        assert_eq!(
+            c.clear_context(view.handle, "run-1", "conv-1", false),
+            SendReply::Notice {
+                text: CLEAR_SENT.into(),
+                error: false
+            }
+        );
+        let (target, action, _) = lock(&fake.calls).last().cloned().unwrap();
+        assert_eq!(
+            action,
+            Action::ClearContext {
+                dismiss_prompt: false
+            }
+        );
+        assert_eq!(
+            (target.run_id.as_str(), target.conversation_id.as_str()),
+            ("run-1", "conv-1")
+        );
+        *lock(&fake.outcome) = Box::new(|_, id| Outcome::Done {
+            receipt: json!({"status": "confirmed", "request_id": id}),
+            cleanup: None,
+        });
+        assert_eq!(
+            c.clear_context(view.handle, "run-1", "conv-1", false),
+            SendReply::Notice {
+                text: CLEARED.into(),
+                error: false
+            }
+        );
+        *lock(&fake.outcome) = Box::new(|_, _| Outcome::Failed {
+            detail: "hgs: refused".into(),
+        });
+        assert_eq!(
+            c.clear_context(view.handle, "run-1", "conv-1", false),
+            SendReply::Notice {
+                text: "hgs: refused".into(),
+                error: true
+            }
+        );
+        // A call whose thread died is no success either, and runs once.
+        let tries = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&tries);
+        *lock(&fake.outcome) = Box::new(move |_, _| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            panic!("the call's thread died")
+        });
+        assert_eq!(
+            c.clear_context(view.handle, "run-1", "conv-1", false),
+            SendReply::Notice {
+                text: ABNORMAL.into(),
+                error: true
+            }
+        );
+        assert_eq!(tries.load(Ordering::SeqCst), 1, "one call, not repeated");
+        assert!(
+            c.current().unwrap().clear.enabled,
+            "one ended, the next may run"
+        );
+    }
+
+    /// A taken write lane refuses before anything runs: Qt's block reason
+    /// for that write, in the error tone (4391, 4395), never "busy".
+    #[test]
+    fn a_clear_refused_by_a_taken_lane_names_the_write() {
+        let root = dir("clear-busy");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.taken) = Box::new(|action| matches!(action, Action::ClearContext { .. }));
+        let view = opened(&c, ready());
+        assert_eq!(
+            c.clear_context(view.handle, "run-1", "conv-1", false),
+            SendReply::Notice {
+                text: "Wait for the session update to finish.".into(),
+                error: true
+            }
+        );
+        // The session's own termination holds the lane (Qt's `canClear`
+        // does not look at it, 3798-3799).
+        *lock(&fake.write) = Some(WriteKind::Terminate);
+        assert_eq!(
+            c.clear_context(view.handle, "run-1", "conv-1", false),
+            SendReply::Notice {
+                text: "The session is terminating. Your draft stays here.".into(),
+                error: true
+            }
+        );
+        *lock(&fake.write) = None;
+        let view = c.current().unwrap();
+        assert!(!view.uncertain && view.clear.enabled && !view.clear.running);
+        assert!(lock(&fake.calls).is_empty());
+    }
+
+    #[test]
+    fn a_clear_confirmed_for_another_conversation_does_nothing() {
+        let root = dir("clear-moved");
+        let (c, fake) = send_hub(&root);
+        let view = opened(&c, ready());
+        let shown = view.clear.clone();
+        let mut moved = ready();
+        moved["conversation_id"] = json!("conv-2");
+        c.observe(&state(moved));
+        assert_eq!(
+            c.clear_context(view.handle, &shown.run, &shown.conversation, shown.dismiss),
+            SendReply::Busy
+        );
+        // Nor for another run, or the other variant of the dialog.
+        assert_eq!(
+            c.clear_context(view.handle, "run-0", "conv-2", false),
+            SendReply::Busy
+        );
+        assert_eq!(
+            c.clear_context(view.handle, "run-1", "conv-2", true),
+            SendReply::Busy
+        );
+        assert!(
+            lock(&fake.calls).is_empty(),
+            "Qt returns quietly when the session changed under its dialog"
+        );
+        assert_eq!(
+            c.clear_context(view.handle, "run-1", "conv-2", false),
+            SendReply::Notice {
+                text: CLEAR_SENT.into(),
+                error: false
+            }
+        );
+    }
+
+    #[test]
+    fn clear_session_follows_qts_rules() {
+        let root = dir("clear-rules");
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        lock(&fake.row).machine = "studio".into();
+        let view = opened(&c, ready());
+        assert!(view.clear.enabled && view.clear.reason.is_empty());
+        // A Claude chooser: Dismiss and clear, never from the cache popover.
+        let mut chooser = ready();
+        chooser["clear_context_supported"] = json!(false);
+        chooser["clear_context_dismiss"] = json!(true);
+        chooser["clear_context_reason"] = json!("a   question waits");
+        c.observe(&state(chooser.clone()));
+        let clear = c.current().unwrap().clear;
+        assert!(clear.enabled && clear.dismiss && !clear.cache_enabled);
+        assert_eq!(clear.confirm, "Dismiss and clear");
+        assert_eq!(clear.text, "Claude in claude/sample-project/review on studio is waiting for a choice in Terminal. Dismiss it and clear the conversation context?\n\nThis presses Esc once, as in Terminal: a pending approval is denied and a question stays unanswered. Then the agent’s native clear command runs. Your unsent draft will be kept.");
+        assert_eq!(
+            (clear.reason.as_str(), clear.cache_reason.as_str()),
+            ("", "a question waits.")
+        );
+        // Neither: nothing clears, and both say why.
+        chooser["clear_context_dismiss"] = json!(false);
+        c.observe(&state(chooser));
+        let clear = c.current().unwrap().clear;
+        assert!(!clear.enabled && !clear.cache_enabled);
+        assert_eq!(clear.reason, "a question waits.");
+        assert_eq!(
+            c.clear_context(view.handle, "run-1", "conv-1", true),
+            SendReply::Busy
+        );
+        c.observe(&state(ready()));
+        // Offline: nothing clears, and the last reading explains nothing.
+        *lock(&fake.online) = false;
+        c.tick();
+        let clear = c.current().unwrap().clear;
+        assert!(!clear.enabled && !clear.cache_enabled && clear.cache_reason.is_empty());
+        *lock(&fake.online) = true;
+        // An archived session.
+        lock(&fake.row).state = "archived".into();
+        c.tick();
+        assert!(!c.current().unwrap().clear.enabled);
+        lock(&fake.row).state = "running".into();
+        c.tick();
+        assert!(c.current().unwrap().clear.enabled);
+        // A reset of this session marked by the actions (`WriteKind::Clear`).
+        *lock(&fake.write) = Some(WriteKind::Clear);
+        c.tick();
+        let view = c.current().unwrap();
+        assert!(view.clear.running && !view.clear.enabled);
+        assert_eq!(
+            view.block_reason.as_deref(),
+            Some("Wait for the context reset to finish. Your draft stays here.")
+        );
+        *lock(&fake.write) = None;
+        c.tick();
+        // While its own message is sent (Qt's `isSending`).
+        let release = hold(&store);
+        let view = c.current().unwrap();
+        c.send_message(view.handle, 1, view.text_epoch, "hello".into(), 5, 5);
+        let view = until(&c, |v| v.sending);
+        assert!(!view.clear.enabled && view.clear.cache_enabled);
+        assert_eq!(
+            c.clear_context(view.handle, "run-1", "conv-1", false),
+            SendReply::Busy
+        );
+        release.send(()).unwrap();
+        until(&c, |v| !v.sending);
+        // After a failed read (`m_inspectError`).
+        c.observe(&ended());
+        *lock(&fake.now) += 1.0;
+        c.tick();
+        let view = until(&c, |v| !v.session_status.is_empty());
+        assert!(!view.clear.enabled);
+        assert!(!lock(&fake.calls)
+            .iter()
+            .any(|(_, a, _)| matches!(a, Action::ClearContext { .. })));
+    }
+
+    #[test]
+    fn a_reset_blocks_its_session_and_runs_one_at_a_time() {
+        let root = dir("clear-running");
+        let (c, fake) = send_hub(&root);
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = Mutex::new(gate);
+        *lock(&fake.outcome) = Box::new(move |action, id| {
+            if matches!(action, Action::ClearContext { .. }) {
+                let _ = lock(&gate).recv_timeout(std::time::Duration::from_secs(5));
+            }
+            receipt(action, id)
+        });
+        let view = opened(&c, ready());
+        let worker = {
+            let c = c.clone();
+            let handle = view.handle;
+            std::thread::spawn(move || c.clear_context(handle, "run-1", "conv-1", false))
+        };
+        let view = until(&c, |v| v.clear.running);
+        assert!(!view.clear.enabled && !view.clear.cache_enabled);
+        assert_eq!(
+            view.block_reason.as_deref(),
+            Some("Wait for the context reset to finish. Your draft stays here.")
+        );
+        // Another session: no reset while one runs anywhere, and its cold
+        // cache question offers none (`m_clearRequest`, 4825).
+        c.open(Some(other_session()));
+        c.observe(&other_state(cold()));
+        let other = until(&c, |v| v.loaded && v.key == OTHER);
+        assert!(other.clear.running && !other.clear.enabled);
+        assert!(other.block_reason.is_none(), "the reset is not its own");
+        assert_eq!(
+            c.clear_context(other.handle, "run-1", "conv-1", false),
+            SendReply::Busy
+        );
+        let SendReply::Cold { token, prompt } =
+            c.send_message(other.handle, 1, other.text_epoch, "elsewhere".into(), 0, 0)
+        else {
+            panic!("no cold question")
+        };
+        assert!(prompt
+            .choices
+            .iter()
+            .any(|ch| ch.action == ColdAction::Clear && !ch.enabled));
+        c.answer(token, Answer::Cancel);
+        release.send(()).unwrap();
+        // Its notice is for its own session only (1024).
+        assert_eq!(worker.join().unwrap(), SendReply::Sending);
+        let other = until(&c, |v| !v.clear.running);
+        assert!(other.clear.enabled);
+        assert_eq!(
+            lock(&fake.calls)
+                .iter()
+                .filter(|(_, a, _)| matches!(a, Action::ClearContext { .. }))
+                .count(),
+            1
+        );
+    }
+
+    /// Task 4b review M1: a cancel names the revision it cancels. Every
+    /// cancel that arrives once the continuation's send began ends nothing.
+    #[test]
+    fn a_late_cancel_never_ends_the_delivery_that_followed() {
+        let root = dir("late-cancel");
+        let (c, fake) = send_hub(&root);
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = Mutex::new(gate);
+        *lock(&fake.outcome) = Box::new(move |action, id| match action {
+            Action::CompactContext => Outcome::Done {
+                receipt: json!({"status": "submitted", "request_id": "cmp-1"}),
+                cleanup: None,
+            },
+            Action::Send { .. } => {
+                let _ = lock(&gate).recv_timeout(std::time::Duration::from_secs(5));
+                receipt(action, id)
+            }
+            _ => receipt(action, id),
+        });
+        let mut details = cold();
+        let view = opened(&c, details.clone());
+        let SendReply::Cold { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "goes once".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Cold {
+                action: ColdAction::Compact,
+            },
+        );
+        until(&c, |_| called(&fake, &Action::CompactContext));
+        let waited = revision(&c, false);
+        details["compact_context_request"] = json!({"request_id": "cmp-1", "status": "completed"});
+        c.observe(&state(details));
+        let view = until(&c, |v| v.sending);
+        assert!(!view.compacting && !view.cancel_send);
+        c.cancel_send(view.handle);
+        c.interrupted(view.handle);
+        c.cancel(KEY, false, waited, rules::CANCELLED_BY_USER);
+        c.step(
+            KEY,
+            false,
+            waited,
+            Step::Cancelled("Compaction was not confirmed.".into()),
+            None,
+        );
+        assert!(c.current().unwrap().sending, "the delivery goes on");
+        release.send(()).unwrap();
+        let view = until(&c, |v| !v.sending);
+        assert!(view.text.is_empty() && !view.status_error && !view.uncertain);
+        assert_eq!(sends(&fake).len(), 1);
+    }
+
+    #[test]
+    fn a_stale_step_never_touches_a_newer_continuation() {
+        let root = dir("stale-step");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        let view = opened(&c, ready());
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "first".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Start {
+                choice: StartChoice::Resume,
+            },
+        );
+        until(&c, |v| v.waiting.is_some());
+        let first = revision(&c, true);
+        c.cancel_send(view.handle);
+        let view = until(&c, |v| v.waiting.is_none());
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 2, view.text_epoch, "first".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Start {
+                choice: StartChoice::Fresh,
+            },
+        );
+        until(&c, |v| v.waiting.is_some());
+        let second = revision(&c, true);
+        assert_ne!(first, second);
+        // The first continuation's late answers.
+        c.step(
+            KEY,
+            true,
+            first,
+            Step::Cancelled(rules::INTERRUPTED.into()),
+            None,
+        );
+        let ready_run = Arc::new(ready());
+        c.step(
+            KEY,
+            true,
+            first,
+            Step::Send {
+                run_id: "run-9".into(),
+                conversation_id: "conv-9".into(),
+                compaction_id: None,
+            },
+            Some(&ready_run),
+        );
+        c.cancel(KEY, true, first, rules::CANCELLED_BY_USER);
+        let view = c.current().unwrap();
+        assert_eq!(view.waiting.as_deref(), Some(WAITING_START));
+        assert_eq!(revision(&c, true), second);
+        assert!(sends(&fake).is_empty());
+    }
+
+    #[test]
+    fn resume_compact_and_send_compacts_the_new_conversation_first() {
+        let root = dir("resume-compact");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        compacts_as(&fake, "cmp-2");
+        let view = opened(&c, ready());
+        let SendReply::Start { token, question } = c.send_message(
+            view.handle,
+            1,
+            view.text_epoch,
+            "summarize first".into(),
+            0,
+            0,
+        ) else {
+            panic!()
+        };
+        assert!(question.options.iter().all(|option| option.enabled));
+        c.answer(
+            token,
+            Answer::Start {
+                choice: StartChoice::ResumeCompact,
+            },
+        );
+        let view = until(&c, |v| v.waiting.is_some());
+        assert_eq!(view.waiting.as_deref(), Some("Waiting for the session to start, then compact. This exact message will be sent automatically after compaction. Cancel send to edit."));
+        until(&c, |_| called(&fake, &Action::Resume));
+        {
+            let mut row = lock(&fake.row);
+            row.state = "running".into();
+            row.run_id = Some("run-2".into());
+        }
+        let mut after = ready();
+        after["run_id"] = json!("run-2");
+        c.observe(&state(after.clone()));
+        let view = until(&c, |v| v.compacting);
+        assert_eq!(view.waiting.as_deref(), Some(WAITING_COMPACT));
+        until(&c, |_| called(&fake, &Action::CompactContext));
+        let target = call_of(&fake, &Action::CompactContext);
+        assert_eq!(
+            (target.run_id.as_str(), target.conversation_id.as_str()),
+            ("run-2", "conv-1")
+        );
+        assert!(sends(&fake).is_empty());
+        after["compact_context_request"] = json!({"request_id": "cmp-2", "status": "completed"});
+        c.observe(&state(after));
+        until(&c, |v| !v.sending && !v.compacting && v.waiting.is_none());
+        let sends = sends(&fake);
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].0.run_id, "run-2");
+        assert_eq!(sends[0].1.as_deref(), Some("cmp-2"));
+    }
+
+    #[test]
+    fn an_answer_of_the_other_kind_does_nothing() {
+        let root = dir("answer-kind");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        let view = opened(&c, cold());
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "which".into(), 0, 0)
+        else {
+            panic!()
+        };
+        assert_eq!(
+            c.answer(
+                token,
+                Answer::Cold {
+                    action: ColdAction::Send
+                }
+            ),
+            SendReply::Busy
+        );
+        lock(&fake.row).state = "running".into();
+        c.tick();
+        let view = c.current().unwrap();
+        let SendReply::Cold { token, prompt } =
+            c.send_message(view.handle, 2, view.text_epoch, "which".into(), 0, 0)
+        else {
+            panic!()
+        };
+        assert_eq!(
+            c.answer(
+                token,
+                Answer::Start {
+                    choice: StartChoice::Fresh
+                }
+            ),
+            SendReply::Busy
+        );
+        // Clear context opens the Clear session dialog.
+        let view = c.current().unwrap();
+        let SendReply::Cold { token, .. } =
+            c.send_message(view.handle, 3, view.text_epoch, "which".into(), 0, 0)
+        else {
+            panic!()
+        };
+        assert_eq!(
+            c.answer(
+                token,
+                Answer::Cold {
+                    action: ColdAction::Clear
+                }
+            ),
+            SendReply::ClearContext { token }
+        );
+        // Compact and continue is refused where Qt's dialog disables it.
+        assert!(prompt
+            .choices
+            .iter()
+            .any(|ch| ch.action == ColdAction::Compact && ch.enabled));
+        let mut unsupported = cold();
+        unsupported["compact_context_supported"] = json!(false);
+        c.observe(&state(unsupported));
+        let view = c.current().unwrap();
+        let SendReply::Cold { token, .. } =
+            c.send_message(view.handle, 4, view.text_epoch, "which".into(), 0, 0)
+        else {
+            panic!()
+        };
+        assert_eq!(
+            c.answer(
+                token,
+                Answer::Cold {
+                    action: ColdAction::Compact
+                }
+            ),
+            SendReply::Busy
+        );
+        assert!(lock(&fake.calls).is_empty());
+        assert!(c.current().unwrap().waiting.is_none());
+    }
+
+    #[test]
+    fn a_start_answer_after_a_change_keeps_the_draft_with_qts_notice() {
+        let root = dir("start-changed");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        let view = opened(&c, ready());
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "one".into(), 0, 0)
+        else {
+            panic!()
+        };
+        lock(&fake.row).run_id = Some("run-7".into());
+        assert_eq!(
+            c.answer(
+                token,
+                Answer::Start {
+                    choice: StartChoice::Resume
+                }
+            ),
+            SendReply::Notice {
+                text: CHANGED.into(),
+                error: true
+            }
+        );
+        lock(&fake.row).run_id = Some("run-1".into());
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 2, view.text_epoch, "one".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.edit(view.handle, 3, view.text_epoch, "two".into(), 3, 3);
+        assert_eq!(
+            c.answer(
+                token,
+                Answer::Start {
+                    choice: StartChoice::Resume
+                }
+            ),
+            SendReply::Notice {
+                text: DRAFT_CHANGED.into(),
+                error: false
+            }
+        );
+        let view = c.current().unwrap();
+        assert!(view.waiting.is_none() && view.text == "two");
+        // Another session was opened meanwhile: Qt names the change too.
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 4, view.text_epoch, "two".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.open(Some(other_session()));
+        assert_eq!(
+            c.answer(
+                token,
+                Answer::Start {
+                    choice: StartChoice::Fresh
+                }
+            ),
+            SendReply::Notice {
+                text: CHANGED.into(),
+                error: true
+            }
+        );
+        assert!(lock(&fake.calls).is_empty());
+    }
+
+    #[test]
+    fn a_start_whose_waiting_save_answers_after_the_exit_asks_for_nothing() {
+        let root = dir("start-exit");
+        let store = drafts(&root);
+        let (spawn, jobs) = held_spawn();
+        let (c, fake) = send_hub_with(&store, spawn);
+        stopped(&fake);
+        let view = opened(&c, ready());
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "on quit".into(), 0, 0)
+        else {
+            panic!()
+        };
+        let release = hold(&store);
+        assert_eq!(
+            c.answer(
+                token,
+                Answer::Start {
+                    choice: StartChoice::Resume
+                }
+            ),
+            SendReply::Sending
+        );
+        c.flush();
+        release.send(()).unwrap();
+        // The waiting save answered (the store writes in order): no call
+        // was handed to a thread.
+        store.flush();
+        assert!(lock(&jobs).is_empty());
+        assert!(lock(&fake.calls).is_empty());
+    }
+
+    #[test]
+    fn an_uncertain_start_ends_the_wait_and_never_sends() {
+        let root = dir("start-uncertain");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        *lock(&fake.outcome) = Box::new(|action, id| match action {
+            Action::Resume => Outcome::Uncertain {
+                detail: "hgs: lost".into(),
+            },
+            _ => receipt(action, id),
+        });
+        let view = opened(&c, ready());
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "maybe".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Start {
+                choice: StartChoice::Resume,
+            },
+        );
+        let view = until(&c, |v| v.waiting.is_none() && v.status == "hgs: lost");
+        assert!(view.status_error && !view.uncertain && view.text == "maybe");
+        // A panicking call ends it too, after its one call.
+        let tries = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&tries);
+        *lock(&fake.outcome) = Box::new(move |_, _| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            panic!("the call's thread died")
+        });
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 2, view.text_epoch, "maybe".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Start {
+                choice: StartChoice::Resume,
+            },
+        );
+        let view = until(&c, |v| v.waiting.is_none() && v.status == ABNORMAL);
+        assert!(view.status_error && !view.uncertain);
+        // A new run that reports ready afterwards sends nothing.
+        {
+            let mut row = lock(&fake.row);
+            row.state = "running".into();
+            row.run_id = Some("run-2".into());
+        }
+        let mut after = ready();
+        after["run_id"] = json!("run-2");
+        // A send would begin within `observe` (its delivery marks the
+        // composer sending before it returns).
+        c.observe(&state(after));
+        assert!(!c.current().unwrap().sending && c.lock().start.is_none());
+        assert!(sends(&fake).is_empty());
+        assert_eq!(tries.load(Ordering::SeqCst), 1, "one call, not repeated");
+    }
+
+    #[test]
+    fn an_uncertain_draft_never_waits_for_a_compaction() {
+        let root = dir("compact-uncertain");
+        let (c, fake) = send_hub(&root);
+        opened(&c, ready());
+        let id = failed_send(&c, &fake, "same");
+        // Another message ends uncertain; the draft is then edited back to
+        // the failed one, and stays uncertain.
+        *lock(&fake.outcome) = Box::new(|_, _| Outcome::Uncertain {
+            detail: "lost".into(),
+        });
+        let view = c.current().unwrap();
+        c.send_message(
+            view.handle,
+            view.rev + 1,
+            view.text_epoch,
+            "other".into(),
+            0,
+            0,
+        );
+        let view = until(&c, |v| !v.sending && v.uncertain);
+        *lock(&fake.outcome) = Box::new(receipt);
+        c.edit(
+            view.handle,
+            view.rev + 1,
+            view.text_epoch,
+            "same".into(),
+            4,
+            4,
+        );
+        let view = until(&c, |v| v.text == "same" && v.uncertain);
+        c.observe(&state(cold()));
+        let SendReply::Cold { token, .. } = c.retry(view.handle, &id) else {
+            panic!("no cold question")
+        };
+        assert_eq!(
+            c.answer(
+                token,
+                Answer::Cold {
+                    action: ColdAction::Compact
+                }
+            ),
+            SendReply::Notice {
+                text: COMPACT_CANCELLED.into(),
+                error: true
+            }
+        );
+        let view = c.current().unwrap();
+        assert!(view.uncertain && !view.compacting && view.waiting.is_none());
+        assert!(!called(&fake, &Action::CompactContext));
+    }
+
+    #[test]
+    fn a_retry_compacts_only_its_own_draft_and_its_row_must_stay() {
+        let root = dir("compact-retry");
+        let (c, fake) = send_hub(&root);
+        compacts_as(&fake, "cmp-3");
+        let mut details = ready();
+        opened(&c, details.clone());
+        let id = failed_send(&c, &fake, "again");
+        compacts_as(&fake, "cmp-3");
+        details["cache_hint"] = json!({"status": "cold"});
+        c.observe(&state(details.clone()));
+        // The draft is another message: Qt's compaction needs the retried
+        // one (`draftMatches`, 4844).
+        let view = c.current().unwrap();
+        c.edit(
+            view.handle,
+            view.rev + 1,
+            view.text_epoch,
+            "newer".into(),
+            5,
+            5,
+        );
+        let SendReply::Cold { token, .. } = c.retry(view.handle, &id) else {
+            panic!()
+        };
+        assert_eq!(
+            c.answer(
+                token,
+                Answer::Cold {
+                    action: ColdAction::Compact
+                }
+            ),
+            SendReply::Notice {
+                text: DRAFT_CHANGED.into(),
+                error: false
+            }
+        );
+        let view = c.current().unwrap();
+        c.edit(
+            view.handle,
+            view.rev + 1,
+            view.text_epoch,
+            "again".into(),
+            5,
+            5,
+        );
+        let SendReply::Cold { token, .. } = c.retry(view.handle, &id) else {
+            panic!()
+        };
+        assert_eq!(
+            c.answer(
+                token,
+                Answer::Cold {
+                    action: ColdAction::Compact
+                }
+            ),
+            SendReply::Sending
+        );
+        let view = until(&c, |v| v.compacting);
+        until(&c, |_| called(&fake, &Action::CompactContext));
+        // The failed row goes before the compaction completes.
+        c.delete_local(view.handle, &id);
+        details["compact_context_request"] = json!({"request_id": "cmp-3", "status": "completed"});
+        c.observe(&state(details));
+        let view = until(&c, |v| !v.compacting && v.waiting.is_none());
+        assert_eq!(view.status, CHANGED);
+        assert_eq!(view.text, "again");
+        assert_eq!(sends(&fake).len(), 1, "only the first, failed send");
+    }
+
+    #[test]
+    fn a_compaction_for_a_session_no_longer_open_is_polled_and_sent_there() {
+        let root = dir("compact-away");
+        let (spawn, jobs) = held_spawn();
+        let (c, fake) = send_hub_with(&drafts(&root), spawn);
+        compacts_as(&fake, "cmp-4");
+        let details = cold();
+        let view = opened(&c, details.clone());
+        let SendReply::Cold { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "away".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Cold {
+                action: ColdAction::Compact,
+            },
+        );
+        // The waiting save answers on the store's writer; the compaction's
+        // call is the first job.
+        let call = next_job(&jobs);
+        c.open(Some(other_session()));
+        c.observe(&other_state(ready()));
+        call();
+        assert!(called(&fake, &Action::CompactContext));
+        // Accepted: its session is read at once (975), one read at a time.
+        let mut done = details;
+        done["compact_context_request"] = json!({"request_id": "cmp-4", "status": "completed"});
+        *lock(&fake.inspected) = Some(done);
+        eventually(|| lock(&jobs).len() == 1);
+        for _ in 0..2 {
+            *lock(&fake.now) += 3.0;
+            c.tick();
+        }
+        assert_eq!(lock(&jobs).len(), 1, "one read at a time");
+        // An offline computer is not read.
+        *lock(&fake.online) = false;
+        *lock(&fake.inspected) = None;
+        next_job(&jobs)();
+        *lock(&fake.now) += 3.0;
+        c.tick();
+        assert!(lock(&jobs).is_empty());
+        *lock(&fake.online) = true;
+        let mut done = cold();
+        done["compact_context_request"] = json!({"request_id": "cmp-4", "status": "completed"});
+        *lock(&fake.inspected) = Some(done);
+        *lock(&fake.now) += 3.0;
+        c.tick();
+        assert_eq!(lock(&jobs).len(), 1);
+        // The poll's reading sends the waiting draft to its own session.
+        run_all(&jobs);
+        eventually(|| {
+            run_all(&jobs);
+            sends(&fake).len() == 1
+        });
+        let (target, compaction) = sends(&fake).remove(0);
+        assert_eq!(target.name, "claude/sample-project/review");
+        assert_eq!(compaction.as_deref(), Some("cmp-4"));
+        eventually(|| {
+            run_all(&jobs);
+            c.lock()
+                .composers
+                .get(KEY)
+                .is_some_and(|composer| !composer.sending && composer.draft.text.is_empty())
+        });
+    }
+
+    /// `canStartStopped`'s busy part: a session that stopped while its own
+    /// compaction waits or its message is sent does not offer a start.
+    #[test]
+    fn a_stopped_session_busy_with_its_own_send_offers_no_start() {
+        let root = dir("start-busy");
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        compacts_as(&fake, "cmp-6");
+        let view = opened(&c, cold());
+        let SendReply::Cold { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "busy".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Cold {
+                action: ColdAction::Compact,
+            },
+        );
+        until(&c, |v| v.compacting);
+        stopped(&fake);
+        c.tick();
+        let view = c.current().unwrap();
+        assert!(!view.available);
+        assert_eq!(view.unavailable_reason, WAITING_COMPACT);
+        c.cancel_send(view.handle);
+        let view = until(&c, |v| !v.compacting);
+        assert!(view.available, "stopped and idle: Send asks again");
+        // Its own message under way.
+        lock(&fake.row).state = "running".into();
+        c.observe(&state(ready()));
+        let view = c.current().unwrap();
+        let release = hold(&store);
+        c.send_message(view.handle, 2, view.text_epoch, "busy".into(), 4, 4);
+        until(&c, |v| v.sending);
+        stopped(&fake);
+        c.tick();
+        let view = c.current().unwrap();
+        assert!(!view.available);
+        assert_eq!(
+            view.unavailable_reason,
+            "Resume the session to send a message."
+        );
+        release.send(()).unwrap();
+        until(&c, |v| !v.sending);
+    }
+
+    /// The draft mark holds each file's name, type, reference and bytes
+    /// (`draftMatches`), hashed once per attachment list.
+    #[test]
+    fn a_start_answer_compares_the_files_by_name_and_bytes() {
+        let root = dir("start-files");
+        let (a, b) = (root.join("a.txt"), root.join("b.txt"));
+        std::fs::write(&a, "same bytes").unwrap();
+        std::fs::write(&b, "same bytes").unwrap();
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        let at = zerus_client_core::attachments::Selection { start: 0, end: 0 };
+        let view = opened(&c, ready());
+        c.attach_paths(view.handle, vec![a], at);
+        let view = until(&c, |v| v.attachments.len() == 1 && !v.attaching);
+        // The message keeps the file without its mention.
+        c.edit(
+            view.handle,
+            view.rev + 1,
+            view.text_epoch,
+            "files".into(),
+            5,
+            5,
+        );
+        let view = until(&c, |v| v.text == "files");
+        let SendReply::Start { token, .. } = c.send_message(
+            view.handle,
+            view.rev + 1,
+            view.text_epoch,
+            "files".into(),
+            5,
+            5,
+        ) else {
+            panic!()
+        };
+        // Another file with the same bytes takes its place, and the text is
+        // the same again.
+        c.remove(view.handle, 0);
+        let view = until(&c, |v| v.attachments.is_empty());
+        c.attach_paths(view.handle, vec![b], at);
+        let view = until(&c, |v| v.attachments.len() == 1 && !v.attaching);
+        c.edit(
+            view.handle,
+            view.rev + 1,
+            view.text_epoch,
+            "files".into(),
+            5,
+            5,
+        );
+        until(&c, |v| v.text == "files");
+        assert_eq!(
+            c.answer(
+                token,
+                Answer::Start {
+                    choice: StartChoice::Resume
+                }
+            ),
+            SendReply::Notice {
+                text: DRAFT_CHANGED.into(),
+                error: false
+            }
+        );
+        assert!(lock(&fake.calls).is_empty());
+    }
+
+    /// A taken write lane refuses the call before anything runs: Qt's cancel
+    /// texts (4756, 4559) in the error tone, and nothing uncertain.
+    #[test]
+    fn a_taken_lane_ends_a_continuation_with_qts_cancel_text() {
+        let root = dir("lane-taken");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        *lock(&fake.taken) =
+            Box::new(|action| matches!(action, Action::Resume | Action::CompactContext));
+        let view = opened(&c, ready());
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "taken".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Start {
+                choice: StartChoice::Resume,
+            },
+        );
+        let view = until(&c, |v| v.status == START_CANCELLED);
+        assert!(view.waiting.is_none() && view.status_error && !view.uncertain);
+        assert_eq!(view.text, "taken");
+        lock(&fake.row).state = "running".into();
+        c.observe(&state(cold()));
+        let view = c.current().unwrap();
+        let SendReply::Cold { token, .. } =
+            c.send_message(view.handle, 2, view.text_epoch, "taken".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Cold {
+                action: ColdAction::Compact,
+            },
+        );
+        let view = until(&c, |v| v.status == COMPACT_CANCELLED);
+        assert!(!view.compacting && view.waiting.is_none());
+        assert!(view.status_error && !view.uncertain);
+        assert!(lock(&fake.calls).is_empty());
+    }
+
+    /// Qt asks in the waiting save's callback (4762, 4561): a Cancel send or
+    /// Stop between that answer and the call's thread leaves no call.
+    #[test]
+    fn a_cancel_before_the_call_asks_for_nothing() {
+        let root = dir("cancel-before-call");
+        let (spawn, jobs) = held_spawn();
+        let (c, fake) = send_hub_with(&drafts(&root), spawn);
+        stopped(&fake);
+        let view = opened(&c, ready());
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "not yet".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Start {
+                choice: StartChoice::Resume,
+            },
+        );
+        let call = next_job(&jobs);
+        c.cancel_send(view.handle);
+        let view = until(&c, |v| v.waiting.is_none());
+        call();
+        assert!(lock(&fake.calls).is_empty());
+        lock(&fake.row).state = "running".into();
+        c.observe(&state(cold()));
+        let SendReply::Cold { token, .. } =
+            c.send_message(view.handle, 2, view.text_epoch, "not yet".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Cold {
+                action: ColdAction::Compact,
+            },
+        );
+        let call = next_job(&jobs);
+        c.interrupted(view.handle);
+        let view = until(&c, |v| !v.compacting);
+        assert_eq!(view.status, rules::INTERRUPTED);
+        call();
+        assert!(lock(&fake.calls).is_empty());
+        assert!(lock(&jobs).is_empty());
+    }
+
+    #[test]
+    fn a_start_for_a_session_no_longer_open_is_polled_and_sent_there() {
+        let root = dir("start-away");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        let view = opened(&c, ready());
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "away".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Start {
+                choice: StartChoice::Resume,
+            },
+        );
+        until(&c, |_| called(&fake, &Action::Resume));
+        c.open(Some(other_session()));
+        c.observe(&other_state(ready()));
+        // The new run reports ready to the poll only.
+        {
+            let mut row = lock(&fake.row);
+            row.state = "running".into();
+            row.run_id = Some("run-2".into());
+        }
+        let mut after = ready();
+        after["run_id"] = json!("run-2");
+        *lock(&fake.inspected) = Some(after);
+        assert!(sends(&fake).is_empty());
+        *lock(&fake.now) += 3.0;
+        c.tick();
+        eventually(|| sends(&fake).len() == 1);
+        let (target, compaction) = sends(&fake).remove(0);
+        assert_eq!(
+            (target.name.as_str(), target.run_id.as_str()),
+            ("claude/sample-project/review", "run-2")
+        );
+        assert_eq!(compaction, None);
+        eventually(|| {
+            c.lock()
+                .composers
+                .get(KEY)
+                .is_some_and(|composer| !composer.sending && composer.draft.text.is_empty())
+        });
+        assert!(c.lock().start.is_none());
+    }
+
+    /// Runs the held jobs, those they hold included.
+    fn run_all(jobs: &Held) {
+        loop {
+            let taken: Vec<Job> = std::mem::take(&mut *lock(jobs));
+            if taken.is_empty() {
+                return;
+            }
+            for job in taken {
+                job();
+            }
+        }
+    }
+
+    /// Task 4b's refeed: an outcome that arrives after the session's state
+    /// still reads it.
+    #[test]
+    fn a_compaction_accepted_after_its_completion_showed_still_sends() {
+        let root = dir("compact-refeed");
+        let (spawn, jobs) = held_spawn();
+        let (c, fake) = send_hub_with(&drafts(&root), spawn);
+        compacts_as(&fake, "cmp-5");
+        let mut details = cold();
+        let view = opened(&c, details.clone());
+        let SendReply::Cold { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "in order".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Cold {
+                action: ColdAction::Compact,
+            },
+        );
+        let call = next_job(&jobs);
+        details["compact_context_request"] = json!({"request_id": "cmp-5", "status": "completed"});
+        c.observe(&state(details));
+        assert!(sends(&fake).is_empty());
+        call();
+        eventually(|| {
+            run_all(&jobs);
+            sends(&fake).len() == 1
+        });
+        assert_eq!(sends(&fake)[0].1.as_deref(), Some("cmp-5"));
+    }
+
+    #[test]
+    fn the_ticker_keeps_a_waiting_send_alive_while_no_composer_is_open() {
+        let root = dir("start-closed");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        let view = opened(&c, ready());
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "later".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Start {
+                choice: StartChoice::Resume,
+            },
+        );
+        until(&c, |v| v.waiting.is_some());
+        c.open(None);
+        let ticker = c.start_ticker_every(std::time::Duration::from_millis(5));
+        *lock(&fake.now) += 181.0;
+        eventually(|| c.lock().start.is_none());
+        assert_eq!(
+            c.lock().composers.get(KEY).map(|composer| composer.notice.clone()),
+            Some(
+                "The agent did not become ready. Check Terminal; your draft was kept without sending."
+                    .into()
+            )
+        );
+        // Nothing waits any more: it sleeps again.
+        eventually(|| c.0.parked.load(std::sync::atomic::Ordering::SeqCst));
+        c.flush();
+        let (done, ended) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            ticker.join().unwrap();
+            let _ = done.send(());
+        });
+        ended
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the ticker ends when the app quits");
     }
 }

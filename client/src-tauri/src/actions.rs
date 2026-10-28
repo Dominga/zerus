@@ -142,12 +142,16 @@ impl Drop for Claim {
 pub enum WriteKind {
     Update,
     Terminate,
+    /// A context reset (Qt's `m_clearKey` while `m_clearRequest` runs): it
+    /// blocks only the session it resets, never another one.
+    Clear,
 }
 
 impl WriteKind {
     pub fn of(action: &Action) -> Self {
         match action {
             Action::Terminate | Action::Kill => Self::Terminate,
+            Action::ClearContext { .. } => Self::Clear,
             _ => Self::Update,
         }
     }
@@ -191,9 +195,10 @@ pub(crate) struct Running {
 /// window-wide `m_pending` (`SessionsWindow.h:554`; set at
 /// `SessionsWindow.cpp:2876, 2881, 4699, 4758, 5554, 5575, 5693, 5752, 5808,
 /// 5815`). A context reset and a compaction have their own per-session block
-/// (`m_clearKey`, `m_compacts`, 4668 and 4544; Task 5), and a Terminal file
-/// drop (`m_terminalDropRequest`, 2657) blocks nothing, though all three
-/// share the write lane.
+/// (`m_clearKey`, `m_compacts`, 4668 and 4544): `begin` marks a reset as
+/// `WriteKind::Clear` for its own session, and compact-to-send keeps its
+/// own fact in the composer. A Terminal file drop (`m_terminalDropRequest`,
+/// 2657) blocks nothing, though all three share the write lane.
 fn blocks_messages(action: &Action) -> bool {
     Lane::of(action) == Lane::Write
         && !matches!(
@@ -250,12 +255,20 @@ impl Actions {
     /// (`isTerminating`), and any other message-blocking write, of any
     /// session or computer, is an update, since Qt's `m_pending` is one
     /// window-wide flag (`messageBlockReason`, `SessionsWindow.cpp:4394`).
+    /// A context reset is the session's own (Qt keys it by `m_clearKey`) and
+    /// comes first, as `messageBlockReason` reads it first (4390); another
+    /// session's reset is no update anywhere.
     pub fn write_kind(&self, computer: &str, name: &str) -> Option<WriteKind> {
         let writes = self.writes.lock().unwrap_or_else(PoisonError::into_inner);
-        if writes.get(&(computer.to_owned(), name.to_owned())) == Some(&WriteKind::Terminate) {
-            return Some(WriteKind::Terminate);
+        if let Some(own @ (WriteKind::Terminate | WriteKind::Clear)) =
+            writes.get(&(computer.to_owned(), name.to_owned()))
+        {
+            return Some(*own);
         }
-        (!writes.is_empty()).then_some(WriteKind::Update)
+        writes
+            .values()
+            .any(|kind| *kind != WriteKind::Clear)
+            .then_some(WriteKind::Update)
     }
 
     fn mark_write(&self, computer: &str, name: &str, action: &Action) -> WriteMark {
@@ -275,12 +288,14 @@ impl Actions {
     }
 
     /// Claims `key`'s lane for `action`, None while a call already runs in
-    /// it. A message-blocking write also marks its kind (`write_kind`) under
-    /// the claimed computer and name.
+    /// it. A message-blocking write, and a context reset for its own
+    /// session, also marks its kind (`write_kind`) under the claimed
+    /// computer and name.
     pub(crate) fn begin(&self, key: Key, action: &Action) -> Option<Running> {
         let (computer, name) = (key.0.clone(), key.1.clone());
         let claim = self.flight.claim(key)?;
-        let write = blocks_messages(action).then(|| self.mark_write(&computer, &name, action));
+        let marked = blocks_messages(action) || WriteKind::of(action) == WriteKind::Clear;
+        let write = marked.then(|| self.mark_write(&computer, &name, action));
         Some(Running {
             _write: write,
             _claim: claim,
@@ -330,7 +345,7 @@ impl Actions {
         live: impl FnOnce() -> (Option<ViewRow>, bool),
     ) -> Option<WriteKind> {
         let running = self.write_kind(computer, name);
-        if running == Some(WriteKind::Terminate) {
+        if matches!(running, Some(WriteKind::Terminate | WriteKind::Clear)) {
             return running;
         }
         let Some(run) = self
@@ -842,7 +857,7 @@ async fn dispatch_with(
         return match Lane::of(&action) {
             Lane::Send => Ok(failed(ALREADY_SENDING)),
             Lane::Answer => Ok(failed(ALREADY_ANSWERING)),
-            _ => Err("busy".into()),
+            _ => Err(BUSY.into()),
         };
     };
     if let Action::MarkRead {
@@ -1094,6 +1109,10 @@ impl Drop for ActivitySlot<'_> {
 /// The text the frontend ignores: a read of that row is already running.
 pub const ACTIVITY_BUSY: &str = "busy";
 
+/// `dispatch`'s `Err` when the session's lane is taken: refused before any
+/// call ran, so a definite refusal, never an uncertain outcome.
+pub const BUSY: &str = "busy";
+
 /// The recorded Activity of one archived session after cursor `after`
 /// (`hgs [@alias] inspect NAME --after N --skip-processes --archive ID`).
 /// One read per computer, name and archive id: a second answers `Err("busy")`
@@ -1206,6 +1225,12 @@ mod tests {
         drop(guard);
         assert_eq!(actions.write_kind("", "claude/sample-project/review"), None);
         assert_eq!(WriteKind::of(&Action::Pause), WriteKind::Update);
+        assert_eq!(
+            WriteKind::of(&Action::ClearContext {
+                dismiss_prompt: false
+            }),
+            WriteKind::Clear
+        );
     }
 
     fn review() -> Target {
@@ -1254,8 +1279,8 @@ mod tests {
         let renaming = actions.begin(Lane::key(&target, &rename), &rename).unwrap();
         assert_eq!(kind(), Some(WriteKind::Update));
         drop(renaming);
-        // Other lanes block no message, nor do the three writes with a block
-        // of their own or none: a context reset, a compaction, a file drop.
+        // Other lanes block no message, nor do the two writes with a block
+        // of their own or none: a compaction and a file drop.
         for action in [
             Action::Interrupt { turn_started: 1.0 },
             Action::MarkRead {
@@ -1271,15 +1296,64 @@ mod tests {
                 paths: vec![],
                 expected_created: None,
             },
-            Action::ClearContext {
-                dismiss_prompt: false,
-            },
             Action::CompactContext,
         ] {
             let running = actions.begin(Lane::key(&target, &action), &action).unwrap();
             assert_eq!(kind(), None, "{action:?}");
             drop(running);
         }
+        // A context reset blocks its own session only (`m_clearKey`).
+        let clear = Action::ClearContext {
+            dismiss_prompt: true,
+        };
+        let clearing = actions.begin(Lane::key(&target, &clear), &clear).unwrap();
+        assert_eq!(kind(), Some(WriteKind::Clear));
+        drop(clearing);
+        assert_eq!(kind(), None);
+    }
+
+    #[test]
+    fn a_context_reset_is_its_own_sessions_and_no_update_elsewhere() {
+        let actions = Actions::new(std::env::temp_dir().join("zerus-clear-test-marks.json"));
+        let mine = || actions.write_kind("studio", "claude/sample-project/review");
+        let theirs = || actions.write_kind("studio", "claude/sample-project/other");
+        let clear = Action::ClearContext {
+            dismiss_prompt: false,
+        };
+        let clearing = actions.begin(Lane::key(&other(), &clear), &clear).unwrap();
+        assert_eq!(mine(), None, "another session's reset blocks nothing here");
+        assert_eq!(theirs(), Some(WriteKind::Clear));
+        // Its own reset comes before another session's update, as Qt's
+        // `messageBlockReason` reads `m_clearKey` before `m_pending`.
+        let pause = actions
+            .begin(Lane::key(&review(), &Action::Pause), &Action::Pause)
+            .unwrap();
+        assert_eq!(mine(), Some(WriteKind::Update));
+        assert_eq!(theirs(), Some(WriteKind::Clear));
+        // A retained termination does not hide the reset either.
+        let done = Outcome::Done {
+            receipt: serde_json::Value::Null,
+            cleanup: None,
+        };
+        actions.finished(&other(), &Action::Terminate, &done);
+        assert_eq!(
+            actions.session_write("studio", "claude/sample-project/other", || (
+                live("running", "run-2"),
+                true
+            )),
+            Some(WriteKind::Clear)
+        );
+        drop((clearing, pause));
+        assert_eq!(theirs(), None);
+        assert_eq!(
+            actions.session_write("studio", "claude/sample-project/other", || (
+                live("running", "run-2"),
+                true
+            )),
+            Some(WriteKind::Terminate),
+            "the retained one stays"
+        );
+        assert_eq!(mine(), None);
     }
 
     #[test]

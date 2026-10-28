@@ -38,6 +38,7 @@ use zerus_client_core::attachments::{self, Attachment, Draft, FileRead, Selectio
 use zerus_client_core::cache::Chip;
 use zerus_client_core::drafts::{DraftStore, IndexPage, Loaded, StoredDraft, ALREADY_EXISTS};
 use zerus_client_core::local_messages::{LocalMessage, LocalMessages};
+use zerus_client_core::send::{CompactSend, StartSend};
 use zerus_client_core::{Action, Batch, Outcome, Target, ViewRow};
 
 use crate::actions::WriteKind;
@@ -170,6 +171,13 @@ pub struct ComposerView {
     /// The session's local message rows (at most 50): what was sent until
     /// the agent's own history shows it, and what failed.
     pub local: Vec<LocalMessage>,
+    /// "Cancel send": a start or a compaction waits to send this draft
+    /// (`SessionsWindow.cpp:3763`).
+    pub cancel_send: bool,
+    /// A compaction waits to send this draft (compact-to-send).
+    pub compacting: bool,
+    /// Clear session and the cache popover's Clear context (`clearContext`).
+    pub clear: send::ClearControl,
 }
 
 /// One composer's draft and state (`MessageComposer::Draft` plus its sets).
@@ -208,7 +216,12 @@ pub(crate) struct Composer {
     pub(crate) kept: Option<(bool, String)>,
     /// The delivery under way, by the revision of its "sending" save: only
     /// that delivery may call or end; an older one's late steps do nothing.
+    /// A continuation's waiting draft holds the revision of its waiting save
+    /// here, so its cancel never ends the delivery that followed it.
     pub(crate) delivering: Option<u64>,
+    /// The SHA-256 digests of one attachment list (`attachments_rev`), for
+    /// the continuations' draft marks: each list is hashed once.
+    pub(crate) digests: Option<(u64, Vec<String>)>,
 }
 
 impl Composer {
@@ -239,6 +252,7 @@ impl Composer {
             save_failed: false,
             kept: None,
             delivering: None,
+            digests: None,
         }
     }
 
@@ -353,6 +367,15 @@ pub(crate) struct Hub {
     /// oldest go first.
     opened: HashMap<(String, String), String>,
     opened_order: VecDeque<(String, String)>,
+    /// Resume-then-send: one at a time across all sessions (Qt's `m_startSend`).
+    pub(crate) start: Option<(send::Pending, StartSend)>,
+    /// Compact-to-send, by draft key (Qt's `m_compacts`).
+    pub(crate) compacts: HashMap<String, (send::Pending, CompactSend)>,
+    /// When the continuations were last polled (every 2.5 s).
+    pub(crate) last_poll: f64,
+    /// The draft key whose context reset runs: one at a time across all
+    /// sessions (Qt's `m_clearKey` while `m_clearRequest`).
+    pub(crate) clearing: Option<String>,
 }
 
 impl Hub {
@@ -514,6 +537,14 @@ impl Composers {
             };
         }
         hub.remember((session.computer.clone(), session.key.clone()), &key);
+        // A start reopened under its new run's catalog key: its continuation
+        // follows (the webview hands the selection to the new run).
+        if let Some((pending, _)) = hub.start.as_mut().filter(|(p, _)| p.key == key) {
+            pending.session = session.clone();
+        }
+        if let Some((pending, _)) = hub.compacts.get_mut(&key) {
+            pending.session = session.clone();
+        }
         hub.open = Some(session);
         hub.open_key = Some(key.clone());
         self.0.opened.notify_all();
@@ -1206,10 +1237,12 @@ impl Composers {
     }
 
     /// What a change of the followed session's Activity sets off: the
-    /// local rows it shows go (`reconcileMessages`); Task 5 adds the
-    /// continuations.
+    /// local rows it shows go (`reconcileMessages`), and a continuation
+    /// waiting for the open session reads the new details (Qt's
+    /// `continueAfterCompact` and `continueAfterStart`, 3607).
     fn after_observe(&self) {
         self.reconcile();
+        self.continue_open();
         self.changed();
     }
 
@@ -1345,6 +1378,10 @@ impl Composers {
             cache_warning: session.cache_warning,
             cache_details: session.cache_details,
             local: hub.local.rows(&composer.key).to_vec(),
+            cancel_send: hub.compacts.contains_key(key)
+                || hub.start.as_ref().is_some_and(|(p, _)| p.key == key),
+            compacting: hub.compacts.contains_key(key),
+            clear: session.clear,
         })
     }
 }

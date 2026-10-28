@@ -132,7 +132,7 @@ if __name__ == "__main__":
 - [ ] **Step 2:** `tauri.conf.json`: product name `Zerus Next (dev)`, identifier `dev.zerus.next` (distinct from the installed app), no updater, no tray, one window created in code (not in config) so Task 7 can pass the configuration.
 - [ ] **Step 3:** `lib.rs` builds the app and creates the main window with `WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))`, title `Zerus Next`, size 1440×900.
 - [ ] **Step 4:** Frontend renders the mockup's rail and an empty list placeholder with the Zerus Dark skin.
-- [ ] **Step 5:** Build and run headless on arch: `env -u WAYLAND_DISPLAY xvfb-run -a -s "-screen 0 1440x900x24" npm run tauri dev`; capture a screenshot with `import -window root` (ImageMagick) or the WebKit inspector; the window must appear only inside Xvfb.
+- [ ] **Step 5:** Build and run headless on arch: `env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 xvfb-run -a -s "-screen 0 1440x900x24" npm run tauri dev` (unsetting `WAYLAND_DISPLAY` alone lets GTK fall back to `wayland-0`, the desktop); capture a screenshot with `import -window root` (ImageMagick) or the WebKit inspector; the window must appear only inside Xvfb.
 - [ ] **Step 6:** Commit: `feat(client): scaffold the Tauri client`.
 
 ### Task 3: Stream and state in Rust, tested on synthetic streams

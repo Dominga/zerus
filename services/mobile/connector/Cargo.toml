@@ -19,6 +19,7 @@ test-hooks = []
 # limits, without the relay's HTTP server, database or TLS stack.
 zerus-relay = { path = "../relay", default-features = false }
 zerus-mobile-crypto = { path = "../crypto" }
+zerus-watch-protocol = { path = "../../../crates/watch-protocol" }
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 # The journal stays the SQLite file the Python connector writes; bundled like hgs.

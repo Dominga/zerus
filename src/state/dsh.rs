@@ -1000,6 +1000,10 @@ pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
     // Internal recovery/input checks never need a process inventory.
     inspect_with_processes(name, agent_id, false)
 }
+/// `hgs inspect NAME` with its process inventory, for `hgs watch`.
+pub(crate) fn inspect_processes(name: &str) -> Result<Value> {
+    inspect_with_processes(name, None, true)
+}
 fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes: bool) -> Result<Value> {
     let record = binding(name)?;
     let inspected = rpc(

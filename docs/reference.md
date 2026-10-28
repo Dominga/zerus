@@ -4033,7 +4033,7 @@ Kimi, DeepSeek and OpenCode messages arrive only through `state`.
 
 A session that leaves the catalog ends its subscription with the error
 `subscription_ended`. Unsubscribe stops it. A stream follows at most 16 sessions;
-more fail with `too_many_subscriptions`. Other topics (`processes`, `tasks`)
+more fail with `too_many_subscriptions`. Other topics (such as `tasks`)
 fail with `unsupported_topic`; read them with their commands.
 
 ```json
@@ -4059,6 +4059,18 @@ at least every 30 s. Checks of one folder start at least 1 s apart. Subscribing
 a followed folder again sends its state again. A stream follows at most 64
 folders (`limits.git_subscriptions`); more fail with `too_many_subscriptions`,
 and a missing or relative path fails with `bad_request`.
+
+The `processes` topic follows one session's processes, subscribed like Activity
+(`{"op":"subscribe","topic":"processes","session":{...}}`) and keyed by its
+catalog key. Its `state` value is `{processes, process_work}` exactly as
+`hgs inspect NAME` reports them. The first follows the subscription; later ones
+only when the value changed apart from both `sampled_at` fields. Two worker
+threads run the inspection, so a slow `ps` or native host delays no other frame.
+A session is read again when its catalog row changes and at least every 10 s;
+reads of one session start at least 2 s apart. A session that leaves the
+catalog ends with `subscription_ended`, and an inspection that fails sends a
+non-fatal `inspect_failed`. A stream follows the processes of at most 16
+sessions (`limits.processes_subscriptions`).
 
 The stream checks its sources every 250 ms. It stats the bindings, read marks,
 notification preferences, waits, launches, renames, name routes, the archive

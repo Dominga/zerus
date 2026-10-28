@@ -1,0 +1,15 @@
+[package]
+name = "zerus-client-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.99"
+license = "MIT"
+description = "Watch streams, catalog state and per-frame batches of the Zerus desktop client"
+publish = false
+
+# Pure Rust and fast to test: no Tauri, no async runtime. The Tauri app in
+# client/src-tauri depends on this crate by path.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zerus-watch-protocol = { path = "../../crates/watch-protocol" }

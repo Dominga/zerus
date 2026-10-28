@@ -43,6 +43,7 @@ pub mod session_projects;
 pub mod speech;
 pub mod url;
 pub mod validate;
+pub mod watch_listing;
 #[cfg(windows)]
 pub mod windows_management;
 pub mod workspace;

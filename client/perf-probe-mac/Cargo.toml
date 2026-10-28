@@ -1,0 +1,22 @@
+# Window-less macOS probe for client/src-tauri/src/platform/macos.rs: finds the WebKit
+# feature, prints its value before and after setting it, and the macOS version.
+#   cargo +1.99.1 run --manifest-path client/perf-probe-mac/Cargo.toml
+[package]
+name = "zerus-client-perf-probe-mac"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.99"
+publish = false
+
+[dependencies]
+serde_json = "1"
+
+# The same bindings and features as client/src-tauri (Tauri 2 and wry use objc2 0.6
+# and objc2-web-kit 0.3, so the configuration type is the one the builder takes).
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+objc2 = { version = "0.6.4", features = ["exception"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSProcessInfo"] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "WKPreferences", "WKWebViewConfiguration"] }
+
+[workspace]

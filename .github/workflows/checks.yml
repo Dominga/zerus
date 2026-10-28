@@ -82,6 +82,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - run: python3 scripts/ci/check-source.py
+      - name: No dot separators in the web UI
+        run: python3 scripts/check-ui-separators.py
+      - name: Desktop client measurement page
+        run: python3 -m unittest discover -s client/scripts -p 'test_*.py' -v
       - name: Standalone speech HTTP contracts
         run: |
           python3 -m venv "$RUNNER_TEMP/speech-http-venv"
@@ -165,6 +169,11 @@ jobs:
           cargo +1.99.1 fmt --check --manifest-path crates/watch-protocol/Cargo.toml
           cargo +1.99.1 clippy --locked --manifest-path crates/watch-protocol/Cargo.toml --target-dir target/watch-protocol --all-targets -- -D warnings
           cargo +1.99.1 test --locked --manifest-path crates/watch-protocol/Cargo.toml --target-dir target/watch-protocol
+      - name: Desktop client core crate (format, lints, tests)
+        run: |
+          cargo +1.99.1 fmt --check --manifest-path client/core/Cargo.toml
+          cargo +1.99.1 clippy --locked --manifest-path client/core/Cargo.toml --target-dir target/client-core --all-targets -- -D warnings
+          cargo +1.99.1 test --locked --manifest-path client/core/Cargo.toml --target-dir target/client-core
       # Packages fail without a notice for every shipped crate; find out here.
       - name: Rust license notices
         run: python3 scripts/collect-licenses.py "$RUNNER_TEMP/rust-licenses"

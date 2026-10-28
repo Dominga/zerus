@@ -1,0 +1,374 @@
+{
+  "client": "qt",
+  "created_at": "2026-10-27T22:06:14Z",
+  "harness": "client/bench/qt/qt_bench.cpp",
+  "platform": {
+    "cpu_threads": 10,
+    "dpr": 2,
+    "label": "mac-promotion",
+    "os": "macos",
+    "os_version": "27.0.1",
+    "qpa": "cocoa",
+    "qt": "6.12.0",
+    "representative": true,
+    "screen": "1728x1117",
+    "screen_hz": 120,
+    "window_exposed": true
+  },
+  "scenarios": [
+    {
+      "id": "list-scroll",
+      "kind": "frame-work",
+      "metric": "wall_ms",
+      "runs": [
+        {
+          "frames": 2478,
+          "gui_cpu_ms": {
+            "count": 2478,
+            "max": 7.649,
+            "mean": 4.014,
+            "median": 2.883,
+            "p95": 6.586,
+            "p99": 6.975
+          },
+          "wall_ms": {
+            "count": 2478,
+            "max": 8.47,
+            "mean": 4.035,
+            "median": 2.904,
+            "p95": 6.604,
+            "p99": 6.986
+          }
+        },
+        {
+          "frames": 2533,
+          "gui_cpu_ms": {
+            "count": 2533,
+            "max": 7.545,
+            "mean": 3.93,
+            "median": 2.885,
+            "p95": 6.263,
+            "p99": 6.696
+          },
+          "wall_ms": {
+            "count": 2533,
+            "max": 12.983,
+            "mean": 3.947,
+            "median": 2.909,
+            "p95": 6.272,
+            "p99": 6.756
+          }
+        },
+        {
+          "frames": 2546,
+          "gui_cpu_ms": {
+            "count": 2546,
+            "max": 7.678,
+            "mean": 3.909,
+            "median": 2.877,
+            "p95": 6.185,
+            "p99": 6.805
+          },
+          "wall_ms": {
+            "count": 2546,
+            "max": 9.807,
+            "mean": 3.929,
+            "median": 2.901,
+            "p95": 6.207,
+            "p99": 6.911
+          }
+        }
+      ],
+      "window_exposed": true,
+      "worst": {
+        "frames": 2478,
+        "gui_cpu_ms": {
+          "count": 2478,
+          "max": 7.649,
+          "mean": 4.014,
+          "median": 2.883,
+          "p95": 6.586,
+          "p99": 6.975
+        },
+        "wall_ms": {
+          "count": 2478,
+          "max": 8.47,
+          "mean": 4.035,
+          "median": 2.904,
+          "p95": 6.604,
+          "p99": 6.986
+        }
+      },
+      "worst_index": 0
+    },
+    {
+      "id": "activity-scroll",
+      "kind": "frame-work",
+      "metric": "wall_ms",
+      "runs": [
+        {
+          "frames": 1171,
+          "gui_cpu_ms": {
+            "count": 1171,
+            "max": 14.074,
+            "mean": 8.397,
+            "median": 8.183,
+            "p95": 10.704,
+            "p99": 11.691
+          },
+          "wall_ms": {
+            "count": 1171,
+            "max": 14.301,
+            "mean": 8.54,
+            "median": 8.33,
+            "p95": 10.877,
+            "p99": 11.893
+          }
+        },
+        {
+          "frames": 1183,
+          "gui_cpu_ms": {
+            "count": 1183,
+            "max": 13.204,
+            "mean": 8.308,
+            "median": 8.162,
+            "p95": 10.529,
+            "p99": 11.47
+          },
+          "wall_ms": {
+            "count": 1183,
+            "max": 18.711,
+            "mean": 8.452,
+            "median": 8.307,
+            "p95": 10.689,
+            "p99": 11.689
+          }
+        },
+        {
+          "frames": 1174,
+          "gui_cpu_ms": {
+            "count": 1174,
+            "max": 13.776,
+            "mean": 8.371,
+            "median": 8.19,
+            "p95": 10.544,
+            "p99": 11.973
+          },
+          "wall_ms": {
+            "count": 1174,
+            "max": 23.498,
+            "mean": 8.523,
+            "median": 8.33,
+            "p95": 10.698,
+            "p99": 12.052
+          }
+        }
+      ],
+      "window_exposed": true,
+      "worst": {
+        "frames": 1171,
+        "gui_cpu_ms": {
+          "count": 1171,
+          "max": 14.074,
+          "mean": 8.397,
+          "median": 8.183,
+          "p95": 10.704,
+          "p99": 11.691
+        },
+        "wall_ms": {
+          "count": 1171,
+          "max": 14.301,
+          "mean": 8.54,
+          "median": 8.33,
+          "p95": 10.877,
+          "p99": 11.893
+        }
+      },
+      "worst_index": 0
+    },
+    {
+      "id": "session-open",
+      "kind": "timing",
+      "metric": "wall_ms",
+      "runs": [
+        {
+          "opens": 7,
+          "wall_ms": {
+            "count": 7,
+            "max": 1489.065,
+            "mean": 1466.338,
+            "median": 1464.047,
+            "p95": 1489.065,
+            "p99": 1489.065
+          }
+        },
+        {
+          "opens": 7,
+          "wall_ms": {
+            "count": 7,
+            "max": 1472.655,
+            "mean": 1460.544,
+            "median": 1460.817,
+            "p95": 1472.655,
+            "p99": 1472.655
+          }
+        },
+        {
+          "opens": 7,
+          "wall_ms": {
+            "count": 7,
+            "max": 1494.597,
+            "mean": 1463.748,
+            "median": 1461.146,
+            "p95": 1494.597,
+            "p99": 1494.597
+          }
+        }
+      ],
+      "window_exposed": true,
+      "worst": {
+        "opens": 7,
+        "wall_ms": {
+          "count": 7,
+          "max": 1494.597,
+          "mean": 1463.748,
+          "median": 1461.146,
+          "p95": 1494.597,
+          "p99": 1494.597
+        }
+      },
+      "worst_index": 2
+    },
+    {
+      "id": "input-latency",
+      "kind": "latency",
+      "metric": "latency_ms",
+      "runs": [
+        {
+          "inputs": 120,
+          "latency_ms": {
+            "count": 120,
+            "max": 7.811,
+            "mean": 3.158,
+            "median": 3.2,
+            "p95": 5.8,
+            "p99": 7.329
+          }
+        },
+        {
+          "inputs": 132,
+          "latency_ms": {
+            "count": 132,
+            "max": 9.902,
+            "mean": 3.299,
+            "median": 3.139,
+            "p95": 6.464,
+            "p99": 9.229
+          }
+        },
+        {
+          "inputs": 126,
+          "latency_ms": {
+            "count": 126,
+            "max": 9.032,
+            "mean": 3.262,
+            "median": 3.215,
+            "p95": 6.538,
+            "p99": 7.691
+          }
+        }
+      ],
+      "window_exposed": true,
+      "worst": {
+        "inputs": 126,
+        "latency_ms": {
+          "count": 126,
+          "max": 9.032,
+          "mean": 3.262,
+          "median": 3.215,
+          "p95": 6.538,
+          "p99": 7.691
+        }
+      },
+      "worst_index": 2
+    },
+    {
+      "id": "idle",
+      "kind": "resources",
+      "worst": {
+        "cpu_percent": 4.754,
+        "footprint_bytes": 293323976,
+        "rss_bytes": 346800128,
+        "window_ms": 10002
+      }
+    }
+  ],
+  "schema": "zerus-perf-v1",
+  "settings": {
+    "activity_events": 1000,
+    "list_rows": 2000,
+    "run_ms": 10000,
+    "runs": 3,
+    "step_px": 16,
+    "warmup_ms": 2000,
+    "window": "1440x900"
+  },
+  "startup": {
+    "process_cpu_ms": 1337.319,
+    "wall_ms": 1269.611
+  },
+  "resources": {
+    "running_gui": {
+      "window_ms": 60059,
+      "source": "ps",
+      "app": {
+        "cpu_percent": 14.586,
+        "rss_bytes": 257228800,
+        "pss_bytes": null
+      },
+      "tree": {
+        "processes": 4,
+        "cpu_percent": 15.302,
+        "rss_bytes": 277184512,
+        "pss_bytes": null
+      },
+      "processes": [
+        {
+          "role": "app",
+          "name": "hgs-tray",
+          "cpu_percent": 14.586,
+          "rss_bytes": 257228800,
+          "pss_bytes": null
+        },
+        {
+          "role": "child",
+          "name": "hgs",
+          "cpu_percent": 0.683,
+          "rss_bytes": 11993088,
+          "pss_bytes": null
+        },
+        {
+          "role": "child",
+          "name": "hgs",
+          "cpu_percent": 0.0,
+          "rss_bytes": 5111808,
+          "pss_bytes": null
+        },
+        {
+          "role": "child",
+          "name": "ssh",
+          "cpu_percent": 0.033,
+          "rss_bytes": 2850816,
+          "pss_bytes": null
+        }
+      ],
+      "platform": {
+        "os": "macos",
+        "label": "mac-live",
+        "representative": true
+      },
+      "created_at": "2026-10-27T22:07:23Z",
+      "harness": "client/bench/sample-running-gui.py"
+    }
+  }
+}

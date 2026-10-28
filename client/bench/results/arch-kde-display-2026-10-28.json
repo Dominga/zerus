@@ -1,0 +1,38 @@
+{
+  "schema": "zerus-perf-v1",
+  "client": "display",
+  "created_at": "2026-10-27T22:09:06Z",
+  "platform": {
+    "os": "linux",
+    "label": "arch-kde",
+    "displays": {
+      "source": "kscreen-doctor --json",
+      "outputs": [
+        {
+          "name": "DP-2",
+          "priority": 1,
+          "mode": "2560x1440",
+          "refresh_hz": 144,
+          "scale": 1,
+          "rotation": 1,
+          "vrr_policy": null
+        },
+        {
+          "name": "DP-3",
+          "priority": 2,
+          "mode": "3440x1440",
+          "refresh_hz": 144,
+          "scale": 1,
+          "rotation": 1,
+          "vrr_policy": null
+        }
+      ],
+      "locked": true,
+      "dpms": {
+        "DP-2": "off",
+        "DP-3": "off"
+      }
+    }
+  },
+  "note": "Real-display runs refused: the graphical session is locked and both displays are in DPMS standby, so KWin suspends new windows (a Qt Wayland smoke window was exposed for about 5 ms, then unexposed, and painted nothing). Rerun with ZERUS_BENCH_DISPLAY=wayland once the owner has unlocked the session."
+}

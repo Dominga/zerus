@@ -237,7 +237,14 @@ One tokio `current_thread` runtime runs two loops, as Python's two tasks do:
   on two live tracked Codex sessions per heartbeat and `mobile_capabilities`.
   Every other listing key is forwarded, as Python forwards it;
   `test_bb_heartbeat` fails on any key nobody reviewed. A heartbeat beyond the
-  relay's 1 MiB or JSON limits is not sent.
+  relay's 1 MiB or JSON limits is not sent. On a computer whose `hgs --help`
+  shows `Event stream ABI: watch-v1` and paged archives, the main connector
+  follows one `hgs watch --json` (`watch_listing.rs`) and takes the listing
+  from its catalog rows and `catalog.meta`, composed as
+  `ls --json --local --no-archives` prints them, while the stream is live
+  (a frame within 30 s). Before then, after the stream ends (restarted after
+  5, 15 and 60 s, then every 5 minutes), for peers and for requests routed to
+  this computer, it runs `ls` as before. Windows hosts keep `ls`.
 - **Requests**: upload undelivered receipts, then long-poll
   (`wait=1` until the first capability probe, else 25) and run each claimed
   request in claim order, then upload again. The probe reads `hgs --help`

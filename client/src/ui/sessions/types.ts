@@ -95,6 +95,31 @@ export interface Session {
   terminalReported: boolean;
   terminalAttachSupported: boolean;
   terminalAttachReported: boolean;
+  // The row as the host lists it, before this device's marks: store/marks.ts
+  // derives status, caption, attention, unread, reviewLater, summary and muted
+  // from these (Qt's FleetState::updateUnread).
+  /** `created`, whole seconds since the Unix epoch (0 when unknown). */
+  created: number;
+  /** What a local attention mark acknowledges (Qt's `attentionFingerprint`); "" when not reported. */
+  fingerprint: string;
+  needsAction: boolean;
+  /** Status and caption with the attention acknowledged. */
+  ackStatus: Status;
+  ackCaption: string;
+  /** A finished reply of a live conversation; undefined for a projection without it. */
+  unreadCandidate?: boolean;
+  baseStatus: Status;
+  baseCaption: string;
+  baseAttention?: "question" | "approval" | "reply";
+  baseUnread: boolean;
+  baseSummary: string;
+  baseMuted: boolean;
+  /** The host's read mark of this conversation. */
+  readReplyId?: string;
+  readAttentionSignature?: string;
+  /** The notification preferences pass Qt's validation, and their revision. */
+  sharedNotifications: boolean;
+  notificationRevision?: number;
 }
 
 export interface ActivityItem {

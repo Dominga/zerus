@@ -170,6 +170,33 @@ export async function pendingReadMarks(): Promise<ReadMark[]> {
   return invoke<ReadMark[]>("pending_read_marks");
 }
 
+/** One attention mark of this device (client/core `marks.rs`); a missing field reads as false or "". */
+export interface Mark { review: boolean; acknowledged: string }
+/** This device's attention marks and the replies it read on hosts without shared read state, by key. */
+export interface AttentionSnapshot { marks: Record<string, Mark>; replies: Record<string, string> }
+
+// The commands below exist only in the live app. Outside Tauri there are no
+// marks, an update does nothing and nothing is queued; a build without the live
+// feature rejects them, and the marks store falls back the same way.
+
+/** The stored marks; the store awaits them before its first update. */
+export async function attentionMarks(): Promise<AttentionSnapshot> {
+  if (!inTauri()) return { marks: {}, replies: {} };
+  return invoke<AttentionSnapshot>("attention_marks");
+}
+
+/** Writes or removes (null) only the changed entries; both maps are always sent. */
+export async function updateAttentionMarks(marks: Record<string, Mark | null>, replies: Record<string, string | null>): Promise<void> {
+  if (!inTauri()) return;
+  await invoke<null>("update_attention_marks", { marks, replies });
+}
+
+/** Merges read marks into the pending ones and wakes the Rust delivery worker; answers every pending mark. */
+export async function queueReadMarks(marks: ReadMark[]): Promise<ReadMark[]> {
+  if (!inTauri()) return [];
+  return invoke<ReadMark[]>("queue_read_marks", { marks });
+}
+
 /** `hgs reference` for a session: its `zerus://session?...` URI. */
 export async function sessionReference(target: Target, archiveId: string | null): Promise<string> {
   if (!inTauri()) throw "Actions need the desktop app.";

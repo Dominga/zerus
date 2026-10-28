@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pump, type PumpHost, type Source } from "./bridge";
+import { attentionMarks, pendingReadMarks, pump, queueReadMarks, updateAttentionMarks, type PumpHost, type Source } from "./bridge";
 import { emptyBatch, type Batch } from "./types";
 
 /** A source whose `next` answers are resolved by the test. */
@@ -125,5 +125,14 @@ describe("pump", () => {
     page.runFrames(); // the frame that finally comes does not apply it twice
     expect(applied.length).toBe(1);
     expect(src.calls()).toBe(1);
+  });
+});
+
+describe("marks outside the app", () => {
+  it("falls back to no marks, ignores updates and queues nothing", async () => {
+    expect(await attentionMarks()).toEqual({ marks: {}, replies: {} });
+    await expect(updateAttentionMarks({ k: { review: true, acknowledged: "" } }, { k: "r1" })).resolves.toBeUndefined();
+    expect(await queueReadMarks([{ computer: "", name: "claude/p/a", run_id: "r", conversation_id: "c", reply_id: "x", attention_signature: null }])).toEqual([]);
+    expect(await pendingReadMarks()).toEqual([]);
   });
 });

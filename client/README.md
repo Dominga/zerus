@@ -126,19 +126,36 @@ Outcome rules:
   row's run and conversation. Only when the subscription answered without one
   does the client run one read-only `inspect`, refetched when the run,
   conversation or state changes, and never while the computer is offline.
-- Mark as read sends the reply and attention the menu showed; if a newer reply
-  or question arrived meanwhile, nothing runs and the notice says "A new reply
-  or question arrived. Open the menu again to mark it as read." The row shows
-  read once the host's snapshot reports it. The mark is saved before the call
-  in `read-marks.json` in the app data directory (`app_data_dir`, e.g.
-  `~/.local/share/<bundle id>/` on Linux; a replay uses
-  `read-marks-replay.json`) so a restart keeps it. It is dropped once a row
-  shows the host settled it, or when a complete snapshot of its computer no
-  longer lists the session. While a mark is pending and a batch (an upsert or
-  a snapshot) shows its row unread again for the same reply and attention
-  signature, the call is retried quietly, at most once per 5 s per session
-  (a person's Mark as read counts too). A host without shared read state keeps
-  the entry disabled.
+- Read state is local first, as Qt's FleetState keeps it (`src/store/marks.ts`).
+  This device keeps attention marks (marked for review, the acknowledged
+  attention) and, for hosts without shared read state, the replies it read.
+  Each row is shown with them applied: a reply is unread until the host's
+  read mark or a pending read mark of the same run and conversation names it
+  (on an older host, until this device read it); an attention the host signs
+  is acknowledged by the host's mark or a pending one, and one without a
+  signature by this device's mark for its fingerprint. Acknowledged attention
+  shows its acknowledged status, and an unread reply blanks the current action
+  unless the session needs action. A mark names the reply, request and
+  attention it was made for, so a newer one shows again. The store's Mark as
+  read, Mark needs attention and Mark all as read change the rows at once, save
+  only the changed entries (`update_attention_marks`, after the stored marks
+  have loaded) and queue read marks for hosts with shared read state
+  (`queue_read_marks`). A host that starts sharing read state gets this
+  device's older marks for its current replies and attention queued once.
+- The menu's Mark as read still sends the reply and attention it showed with
+  one `hgs read` call; if a newer reply or question arrived meanwhile, nothing
+  runs and the notice says "A new reply or question arrived. Open the menu
+  again to mark it as read." The call saves its mark among the pending ones
+  first. A host without shared read state keeps the entry disabled.
+- Pending read marks are kept in `read-marks.json` in the app data directory
+  (`app_data_dir`, e.g. `~/.local/share/<bundle id>/` on Linux; a replay uses
+  `read-marks-replay.json`), so a restart keeps them. A mark is settled, and
+  dropped, once a row shows another run or conversation, or each of its parts
+  unset, no longer current or read by the host; a complete snapshot of its
+  computer that no longer lists the session drops it too (an empty one never
+  does). The window keeps a copy for the rows: loaded at start, replaced by
+  each `queue_read_marks` answer (an older answer never undoes a newer mark)
+  and settled by the same rules. Nothing in the window sends a mark again.
 - Read marks reach their hosts through a worker in the Rust app, as Qt's
   `ReadMarkSync` does. `queue_read_marks` merges marks in memory and wakes it;
   otherwise it wakes every 5 s. Each wake first writes new marks to
@@ -151,16 +168,17 @@ Outcome rules:
   wake. A delivery shows no notice. Once this computer's listing names its
   peers, marks for a computer it no longer names are dropped (this computer's
   stay). A replay without `ZERUS_CLIENT_HGS` sends nothing.
-- This device's attention marks (marked for review, the acknowledged
-  attention) and the read replies of hosts without shared read state are kept
-  in `attention-marks.json` (a replay uses `attention-marks-replay.json`).
-  `update_attention_marks` writes or removes entries in memory; each map keeps
-  its 20 000 newest written entries. A writer thread reads the file at start
-  and saves the latest state after each change, listing entries in write
-  order, so the window never waits for the disk.
+- This device's attention marks and the read replies of hosts without shared
+  read state are kept in `attention-marks.json` (a replay uses
+  `attention-marks-replay.json`). `update_attention_marks` writes or removes
+  entries in memory; each map keeps its 20 000 newest written entries, in the
+  window too. A writer thread reads the file at start and saves the latest
+  state after each change, listing entries in write order, so the window never
+  waits for the disk. The computers whose older marks were queued are
+  remembered in the webview's local storage.
 
-Forgetting, restoring, attention marks and sending arrive in later phases; their
-entries are disabled with a reason. The copy entries below are live.
+Forgetting, restoring, Mark needs attention and sending arrive in later phases;
+their entries are disabled with a reason. The copy entries below are live.
 
 ### Copy actions
 

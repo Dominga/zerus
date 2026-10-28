@@ -9,6 +9,9 @@ vi.mock("../bridge", () => ({
   runAction: vi.fn(),
   inspectSession: vi.fn(),
   pendingReadMarks: vi.fn(),
+  attentionMarks: vi.fn(async () => ({ marks: {}, replies: {} })),
+  updateAttentionMarks: vi.fn(async () => {}),
+  queueReadMarks: vi.fn(async () => []),
   sessionReference: vi.fn(),
   copyCommand: vi.fn(),
   copyText: vi.fn(),
@@ -198,6 +201,21 @@ describe("perform", () => {
     });
   });
 
+  it("lets other stores raise notices through notify", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      a.notify("info", "1 reply marked as read.");
+      a.notify("error", "This session is no longer available. Open its actions again.", true);
+      expect(a.notices()).toMatchObject([
+        { tone: "info", text: "1 reply marked as read.", sticky: false },
+        { tone: "error", text: "This session is no longer available. Open its actions again.", sticky: true },
+      ]);
+      vi.advanceTimersByTime(6000);
+      expect(a.notices().map((n) => n.tone)).toEqual(["error"]);
+      dispose();
+    });
+  });
+
   it("caps the notices at 5, dropping non-sticky ones before a sticky warning", async () => {
     await createRoot(async (dispose) => {
       const a = setup();
@@ -308,8 +326,11 @@ describe("rechecks after a confirmation", () => {
       expect(a.notices()).toMatchObject([{ tone: "error", sticky: true, text: "A new reply or question arrived. Open the menu again to mark it as read." }]);
       mocked.runAction.mockResolvedValue(done());
       const fresh = session({ unread: true, reply_id: "r2", attention_signature: "s1", shared_read: true });
+      mocked.pendingReadMarks.mockClear();
       await a.perform(fresh, { kind: "mark_read", reply_id: "r2", attention_signature: "s1" });
       expect(mocked.runAction.mock.calls[0][1]).toEqual({ kind: "mark_read", reply_id: "r2", attention_signature: "s1" });
+      // The rows read the pending marks again, now holding the one the call saved.
+      expect(mocked.pendingReadMarks).toHaveBeenCalledTimes(1);
       dispose();
     });
   });
@@ -384,125 +405,6 @@ describe("detailsFor", () => {
       finish(details());
       await flush();
       expect(mocked.inspectSession).toHaveBeenCalledTimes(2);
-      dispose();
-    });
-  });
-});
-
-describe("read-mark retry", () => {
-  const mark = { computer: "", name: "claude/sample-project/a", run_id: "run-1", conversation_id: "conv-1", reply_id: "r1", attention_signature: null };
-
-  it("retries a pending mark on a batch that still shows unread, at most once per 5 s", async () => {
-    await createRoot(async (dispose) => {
-      mocked.pendingReadMarks.mockResolvedValue([mark]);
-      mocked.runAction.mockResolvedValue({ outcome: "failed", detail: "offline" });
-      const a = setup();
-      await a.loadReadMarks();
-      const unread = rowOut({ unread: true, reply_id: "r1" });
-      const b = batchOf({ upserts: [unread] });
-      a.applyBatch(b);
-      a.observeBatch(b);
-      await flush();
-      expect(mocked.runAction).toHaveBeenCalledTimes(1);
-      expect(mocked.runAction.mock.calls[0][1]).toEqual({ kind: "mark_read", reply_id: "r1", attention_signature: null });
-      a.observeBatch(b);
-      vi.advanceTimersByTime(4000);
-      a.observeBatch(b);
-      await flush();
-      expect(mocked.runAction).toHaveBeenCalledTimes(1);
-      vi.advanceTimersByTime(1500);
-      a.observeBatch(b);
-      await flush();
-      expect(mocked.runAction).toHaveBeenCalledTimes(2);
-      dispose();
-    });
-  });
-
-  it("also retries for rows inside a computer's snapshot", async () => {
-    await createRoot(async (dispose) => {
-      mocked.pendingReadMarks.mockResolvedValue([mark]);
-      mocked.runAction.mockResolvedValue(done());
-      const a = setup();
-      await a.loadReadMarks();
-      const b = batchOf({ replaces: [{ computer: "", rows: [rowOut({ unread: true, reply_id: "r1" })] }] });
-      a.applyBatch(b);
-      a.observeBatch(b);
-      await flush();
-      expect(mocked.runAction).toHaveBeenCalledTimes(1);
-      dispose();
-    });
-  });
-
-  it("does not retry a row that no longer shows unread", async () => {
-    await createRoot(async (dispose) => {
-      mocked.pendingReadMarks.mockResolvedValue([mark]);
-      const a = setup();
-      await a.loadReadMarks();
-      const b = batchOf({ upserts: [rowOut({ unread: false })] });
-      a.applyBatch(b);
-      a.observeBatch(b);
-      await flush();
-      expect(mocked.runAction).not.toHaveBeenCalled();
-      dispose();
-    });
-  });
-
-  it("retries quietly: no notice and no Updating, and a write still runs meanwhile", async () => {
-    await createRoot(async (dispose) => {
-      mocked.pendingReadMarks.mockResolvedValue([mark]);
-      let finish: (o: Outcome) => void = () => {};
-      mocked.runAction.mockReturnValueOnce(new Promise((r) => { finish = r; }));
-      const a = setup();
-      await a.loadReadMarks();
-      const b = batchOf({ upserts: [rowOut({ unread: true, reply_id: "r1" })] });
-      a.applyBatch(b);
-      a.observeBatch(b);
-      await flush();
-      expect(a.reading("", "claude/sample-project/a")).toBe(true);
-      expect(a.updating("", "claude/sample-project/a")).toBe(false);
-      mocked.runAction.mockResolvedValue(done());
-      await a.perform(session({ unread: true, reply_id: "r1" }), { kind: "terminate" });
-      expect(mocked.runAction.mock.calls.map((c) => c[1].kind)).toEqual(["mark_read", "terminate"]);
-      finish({ outcome: "failed", detail: "offline" });
-      await flush();
-      expect(a.reading("", "claude/sample-project/a")).toBe(false);
-      expect(a.notices().map((n) => n.text)).toEqual(["Session updated. Refreshing…"]);
-      dispose();
-    });
-  });
-
-  it("a user's mark read fails loudly and holds off the quiet retry for 5 s", async () => {
-    await createRoot(async (dispose) => {
-      const a = setup(rowOut({ unread: true, reply_id: "r1", shared_read: true }));
-      await a.loadReadMarks();
-      mocked.runAction.mockResolvedValue({ outcome: "failed", detail: "offline" });
-      mocked.pendingReadMarks.mockResolvedValue([mark]);
-      await a.perform(session({ unread: true, reply_id: "r1", shared_read: true }), { kind: "mark_read", reply_id: "r1", attention_signature: null });
-      expect(a.notices()).toMatchObject([{ tone: "error", text: "offline" }]);
-      expect(mocked.runAction).toHaveBeenCalledTimes(1);
-      const b = batchOf({ upserts: [rowOut({ unread: true, reply_id: "r1", shared_read: true })] });
-      a.applyBatch(b);
-      a.observeBatch(b);
-      await flush();
-      expect(mocked.runAction).toHaveBeenCalledTimes(1);
-      vi.advanceTimersByTime(5000);
-      a.observeBatch(b);
-      await flush();
-      expect(mocked.runAction).toHaveBeenCalledTimes(2);
-      dispose();
-    });
-  });
-
-  it("does not retry an older mark against a newer reply", async () => {
-    await createRoot(async (dispose) => {
-      mocked.pendingReadMarks.mockResolvedValue([mark]);
-      const a = setup();
-      await a.loadReadMarks();
-      const b = batchOf({ upserts: [rowOut({ unread: true, reply_id: "r2" })] });
-      a.applyBatch(b);
-      a.observeBatch(b);
-      await flush();
-      expect(mocked.runAction).not.toHaveBeenCalled();
       dispose();
     });
   });

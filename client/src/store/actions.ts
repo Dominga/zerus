@@ -1,19 +1,20 @@
 import { createSignal, untrack } from "solid-js";
 import { createStore } from "solid-js/store";
 import * as bridge from "../bridge";
-import { catalog as appCatalog, computerOffline, rowId, type CatalogState } from "./catalog";
+import { catalog as appCatalog, computerOffline, type CatalogState } from "./catalog";
+import { loadPending } from "./marks";
 import { copyState, detailsFromInspection, snapshotOf, terminates, type ActionRow } from "../ui/sessions/actions-ui";
-import type { Action, Batch, Details, Outcome, ReadMark, Target } from "../types";
+import type { Action, Details, Outcome, Target } from "../types";
 
 // Guarded session actions. Every action is one call to the Rust side; a call
 // is never repeated. A rejected call is an unknown outcome and is shown as a
-// failure. The only repeat is a read mark whose delivery is still pending,
-// and only when a batch shows the row unread again.
+// failure. Read marks are local first (store/marks.ts) and the Rust worker
+// delivers them; this store never repeats one.
 //
 // Writes, interrupts and read marks run in separate lanes (as the Rust
 // in-flight guard does): one write per session shows "Updating…" on its
 // entries; Stop waits only for its own interrupt, as Qt's m_interruptRequest;
-// a read mark, the user's or a quiet retry, never holds up a write.
+// a read mark never holds up a write.
 
 export interface Notice { id: number; tone: "error" | "warn" | "info"; text: string; sticky: boolean }
 
@@ -22,7 +23,6 @@ export interface Followed { value: Record<string, unknown> | undefined; settled:
 
 const MAX_NOTICES = 5;
 const INFO_MS = 6000;
-const RETRY_MS = 5000;
 const CHANGED = "This session changed. Open its actions again.";
 const STATE_CHANGED = "The session state changed. Open its actions again.";
 const NEW_REPLY = "A new reply or question arrived. Open the menu again to mark it as read.";
@@ -132,11 +132,10 @@ export function createActions(
       notify("error", NEW_REPLY, true);
       return failed(NEW_REPLY);
     }
-    // A user's mark counts against the quiet retry's 5 s window too.
-    if (action.kind === "mark_read") lastTry.set(sessionId(target.computer, target.name), Date.now());
     const { out, busy } = await call(target, action);
     if (!busy) report(action, out, row);
-    if (action.kind === "mark_read") await loadReadMarks();
+    // The call saved its mark among the pending ones the rows read.
+    if (action.kind === "mark_read") await loadPending();
     return out;
   }
 
@@ -301,43 +300,7 @@ export function createActions(
     return out;
   }
 
-  // Read-mark retry.
-  let marks: ReadMark[] = [];
-  const lastTry = new Map<string, number>();
-
-  async function loadReadMarks() {
-    try { marks = await bridge.pendingReadMarks(); } catch { marks = []; }
-  }
-
-  async function retry(target: Target, mark: ReadMark) {
-    const { busy } = await call(target, { kind: "mark_read", reply_id: mark.reply_id, attention_signature: mark.attention_signature });
-    if (!busy) await loadReadMarks();
-  }
-
-  function observeBatch(b: Batch) {
-    if (!marks.length) return;
-    const rows = b.replaces.length ? [...b.upserts, ...b.replaces.flatMap((r) => r.rows)] : b.upserts;
-    for (const u of rows) {
-      const row = u.row;
-      if (!row.unread) continue;
-      const mark = marks.find((m) => m.computer === u.computer && m.name === row.name && m.run_id === row.run_id && m.conversation_id === (row.conversation_id ?? ""));
-      if (!mark) continue;
-      // An older mark is not retried against a newer reply or attention.
-      if (mark.reply_id && row.reply_id && mark.reply_id !== row.reply_id) continue;
-      if (mark.attention_signature && row.attention_signature && mark.attention_signature !== row.attention_signature) continue;
-      const id = sessionId(u.computer, row.name);
-      const now = Date.now();
-      const last = lastTry.get(id);
-      if (last !== undefined && now - last < RETRY_MS) continue;
-      if (reads[id]) continue;
-      // Only a call that is certain to be made counts against the 5 s window.
-      if (catalog.rows[rowId(u.computer, u.key)]?.runId !== row.run_id) continue;
-      lastTry.set(id, now);
-      void retry({ computer: u.computer, name: row.name, run_id: mark.run_id, conversation_id: mark.conversation_id }, mark);
-    }
-  }
-
-  return { perform, end, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices: list, dismiss, loadReadMarks, observeBatch };
+  return { perform, end, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices: list, dismiss, notify };
 }
 
 type FollowSource = { target(): { id: string } | undefined; summary(): Record<string, unknown> | undefined; loaded(): boolean; ended(): boolean; error(): unknown };
@@ -358,5 +321,4 @@ let selection: () => Selection = () => ({});
 export function bindSelection(source: () => Selection) { selection = source; }
 
 const app = createActions(appCatalog, (computer) => !computerOffline(computer), () => selection());
-export const { perform, end, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices, dismiss, loadReadMarks, observeBatch } = app;
-void loadReadMarks();
+export const { perform, end, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices, dismiss, notify } = app;

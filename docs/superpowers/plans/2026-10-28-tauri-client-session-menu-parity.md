@@ -349,10 +349,10 @@ Rules:
   - It sets the mark to `review = false, acknowledged = fingerprint`.
 - **`markNeedsAttention`:** the same match, then `review = true` (`FleetState.cpp:196-202`).
 - **`unreadReplies` and `markAllRead`** (`FleetState.cpp:234-262`):
-  - `unreadReplies` lists every row whose reply shows unread and that is not marked for review, hidden rows included.
+  - `unreadReplies` lists every row whose reply is unread (Qt's `unreadReply`, so a reply still in progress counts though it does not show yet) and that is not marked for review, hidden rows included.
   - `markAllRead` marks each of them whose reply is still the snapshot's, skipping an older host's row already in `replies`, and queues the reply marks. It returns the count.
 - **Pending mirror:** the store keeps the pending read marks the overlay reads: loaded at start, replaced by `queue_read_marks`' answer, and a mark is dropped when a batch row shows it settled or a non-empty snapshot of its computer no longer lists the session (the same rules as `ReadMarks::settle` and `Actions::observe`). Phase 2's frontend quiet retry (`observeBatch`'s retry) is removed; the worker owns delivery.
-- **Persistence:** every change saves through `update_attention_marks` (only the changed keys) and queues read marks through `queue_read_marks`. A host that starts sharing read state gets its legacy marks queued once (`legacyReadMarks`, `TrayAgent.cpp:570-572`).
+- **Persistence:** every change saves through `update_attention_marks` (only the changed keys, after `attention_marks` has answered; a change made before that is kept and sent then) and queues read marks through `queue_read_marks`; an answer older than the latest local change is ignored. A host that starts sharing read state gets its legacy marks queued once (`legacyReadMarks`, `TrayAgent.cpp:570-572`); the computers already done are kept in the webview's local storage, as the client settings are until the QSettings migration.
 
 - [ ] Tests (vitest, mocked bridge): each overlay branch; a pending mark for another run is ignored; a newer reply after `markRead` shows unread again; `markRead` refuses a changed fingerprint; `markAllRead` skips review rows and counts; the fallback key migrates; the cap.
 - [ ] Commit `feat(client): local attention marks and read state, Qt's overlay`.

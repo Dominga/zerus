@@ -22,6 +22,20 @@ export interface ViewRow {
   attention?: string | boolean | null;
   unread?: boolean;
   muted?: boolean;
+  /** The row's notification preferences pass Qt's validation, and their revision. */
+  shared_notifications?: boolean;
+  notification_revision?: number | null;
+  /** `created`, in whole seconds (it keys a conversation-less attention mark). */
+  created?: number;
+  /** What a local attention mark compares (Qt's `attentionFingerprint`). */
+  attention_fingerprint?: string;
+  /** The session needs the person's action (approval, input, error, recovery). */
+  needs_action?: boolean;
+  /** `status` and `caption` with the attention acknowledged. */
+  acknowledged_status?: string;
+  acknowledged_caption?: string;
+  /** A finished reply of a live conversation; the marks decide whether it shows unread. */
+  unread_candidate?: boolean;
   machine?: string;
   project?: string;
   /** The folder people know the checkout by (a name, not a path). */

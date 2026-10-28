@@ -11,7 +11,7 @@ import type { Session } from "./types";
 export type ActionRow = Pick<Session,
   | "key" | "computer" | "name" | "machine" | "cmd" | "state" | "tracked" | "resumable" | "activity" | "processState"
   | "archiveId" | "attention" | "unread" | "sharedRead" | "allowed" | "archiveReason" | "terminateReason" | "phase"
-  | "runId" | "conversationId" | "replyId" | "attentionSignature"
+  | "runId" | "conversationId" | "replyId" | "attentionSignature" | "created" | "fingerprint"
   | "cwdPath" | "terminalSupported" | "terminalReported" | "terminalAttachSupported" | "terminalAttachReported">;
 
 /** A plain copy of the action fields, as they were when a menu or dialog opened. */
@@ -21,6 +21,7 @@ export function snapshotOf(s: ActionRow): ActionRow {
     resumable: s.resumable, activity: s.activity, processState: s.processState, archiveId: s.archiveId, attention: s.attention,
     unread: s.unread, sharedRead: s.sharedRead, allowed: s.allowed, archiveReason: s.archiveReason, terminateReason: s.terminateReason,
     phase: s.phase, runId: s.runId, conversationId: s.conversationId, replyId: s.replyId, attentionSignature: s.attentionSignature,
+    created: s.created, fingerprint: s.fingerprint,
     cwdPath: s.cwdPath, terminalSupported: s.terminalSupported, terminalReported: s.terminalReported,
     terminalAttachSupported: s.terminalAttachSupported, terminalAttachReported: s.terminalAttachReported,
   };

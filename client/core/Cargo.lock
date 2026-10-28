@@ -193,6 +193,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "infer",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

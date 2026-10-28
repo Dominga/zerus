@@ -10,19 +10,27 @@
 pub mod actions;
 pub mod attachments;
 pub mod batch;
+pub mod cache;
 pub mod details;
+pub mod drafts;
 pub mod fleet;
+pub mod legacy;
 pub mod machine;
 pub mod organization;
+pub mod process_view;
 pub mod processes;
+#[cfg(unix)]
+mod pty;
 pub mod readmarks;
 pub mod reads;
 pub mod run;
+pub mod send;
 pub mod shell;
 pub mod state;
 pub mod stream;
 pub mod tasks;
 pub mod tasks_write;
+pub mod terminal;
 pub mod view;
 pub mod views;
 
@@ -82,7 +90,13 @@ pub enum ComputerStatus {
     /// Checking `hgs [@host] -h` for the watch-v1 marker before the first stream.
     Probing,
     /// Its CLI lacks the marker: no stream runs; it is probed again every 10 min.
+    /// Until a listing of it succeeds it has no rows.
     Unsupported,
+    /// Its CLI lacks the marker, and it is polled as the Qt client does: its
+    /// listing every 60 s and followed sessions every few seconds (see
+    /// [`legacy`]). A failed listing makes it `Reconnecting` with its rows
+    /// kept; the next listing is the retry.
+    Polled,
     /// A stream delivered its catalog snapshot.
     Live,
     /// The stream ended, failed or stayed silent; `attempt` counts the failures
@@ -99,6 +113,7 @@ impl ComputerStatus {
         match self {
             Self::Probing => "probing",
             Self::Unsupported => "unsupported",
+            Self::Polled => "polled",
             Self::Live => "live",
             Self::Reconnecting { .. } => "reconnecting",
             Self::Ended => "ended",

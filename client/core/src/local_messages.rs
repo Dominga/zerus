@@ -120,6 +120,11 @@ impl LocalMessages {
         self.rows.get(key).map_or(&[], Vec::as_slice)
     }
 
+    /// The keys of the sessions that have rows, at most [`MAX_SESSIONS`].
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.rows.keys().map(String::as_str)
+    }
+
     fn touch(&mut self, key: &str) {
         self.clock += 1;
         self.touched.insert(key.to_owned(), self.clock);
@@ -428,6 +433,34 @@ mod tests {
 
     fn send(messages: &mut LocalMessages, id: &str, text: &str, files: &[StoredFile]) {
         messages.sending(KEY, id, None, text, files, "run-1", "conv-1", 100.0);
+    }
+
+    #[test]
+    fn keys_name_every_session_with_rows_and_follow_its_bound() {
+        let mut messages = LocalMessages::default();
+        assert_eq!(messages.keys().count(), 0);
+        for n in 0..MAX_SESSIONS + 3 {
+            let key = format!("studio\nclaude/sample-project/s{n}");
+            messages.sending(&key, "1", None, "hi", &[], "run-1", "conv-1", 100.0);
+            messages.finished(
+                &key,
+                "1",
+                &Outcome::Failed {
+                    detail: "refused".into(),
+                },
+            );
+        }
+        let keys: Vec<String> = messages.keys().map(str::to_owned).collect();
+        assert_eq!(keys.len(), MAX_SESSIONS);
+        assert!(keys.iter().all(|key| !messages.rows(key).is_empty()));
+        assert!(
+            !keys
+                .iter()
+                .any(|key| key == "studio\nclaude/sample-project/s0"),
+            "the oldest went"
+        );
+        messages.forget(&keys[0]);
+        assert_eq!(messages.keys().count(), MAX_SESSIONS - 1);
     }
 
     #[test]

@@ -26,7 +26,7 @@
 pub mod files;
 pub mod send;
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -37,7 +37,8 @@ use serde_json::{Map, Value};
 use zerus_client_core::attachments::{self, Attachment, Draft, FileRead, Selection};
 use zerus_client_core::cache::Chip;
 use zerus_client_core::drafts::{DraftStore, IndexPage, Loaded, StoredDraft, ALREADY_EXISTS};
-use zerus_client_core::{Batch, Target, ViewRow};
+use zerus_client_core::local_messages::{LocalMessage, LocalMessages};
+use zerus_client_core::{Action, Batch, Outcome, Target, ViewRow};
 
 use crate::actions::WriteKind;
 
@@ -53,6 +54,9 @@ pub type Facts = Arc<dyn Fn(&str, &str) -> Option<WriteKind> + Send + Sync>;
 /// One `hgs inspect` of the session (with its archive id); blocking. The
 /// error is Qt's detail for "Could not refresh activity: %1" (`send::inspection`).
 pub type Inspect = Arc<dyn Fn(&Target, Option<&str>) -> Result<Value, String> + Send + Sync>;
+/// One guarded call (`actions::dispatch_as`); blocking. The String is the
+/// request id the delivery made for it.
+pub type Dispatch = Arc<dyn Fn(Target, Action, String) -> Result<Outcome, String> + Send + Sync>;
 
 const COMPOSERS: usize = 64;
 /// Attachment bytes the idle composers in memory may hold; their drafts stay on disk.
@@ -66,6 +70,12 @@ const EXCERPT_CHARS: usize = 1200;
 const EXIT_WAIT: Duration = Duration::from_secs(2);
 /// A failed save is tried again after this long (Qt's `retrySave` timer).
 const SAVE_RETRY: Duration = Duration::from_secs(2);
+/// Events of the followed session kept for the local rows' reconcile, as
+/// many as Qt keeps in `m_events` (`SessionsWindow.cpp:3651`).
+const EVENTS: usize = 500;
+/// Sessions whose draft key the hub remembers by catalog key, as S4 keeps
+/// the local rows of at most 512 sessions.
+const OPENED: usize = 512;
 
 pub struct Deps {
     pub spawn: Spawn,
@@ -74,6 +84,7 @@ pub struct Deps {
     pub rows: Rows,
     pub facts: Facts,
     pub inspect: Inspect,
+    pub dispatch: Dispatch,
 }
 
 /// Where the hub keeps its files.
@@ -156,6 +167,9 @@ pub struct ComposerView {
     pub cache: Chip,
     pub cache_warning: String,
     pub cache_details: String,
+    /// The session's local message rows (at most 50): what was sent until
+    /// the agent's own history shows it, and what failed.
+    pub local: Vec<LocalMessage>,
 }
 
 /// One composer's draft and state (`MessageComposer::Draft` plus its sets).
@@ -189,6 +203,12 @@ pub(crate) struct Composer {
     pub(crate) saving: bool,
     /// The newest save failed; it is tried again (`m_failedSaves`).
     pub(crate) save_failed: bool,
+    /// A Retry that leaves this draft as it is (Qt's `m_preservedDrafts`):
+    /// its error mark and notice, given back when the delivery ends.
+    pub(crate) kept: Option<(bool, String)>,
+    /// The delivery under way, by the revision of its "sending" save: only
+    /// that delivery may call or end; an older one's late steps do nothing.
+    pub(crate) delivering: Option<u64>,
 }
 
 impl Composer {
@@ -217,6 +237,8 @@ impl Composer {
             saves: 0,
             saving: false,
             save_failed: false,
+            kept: None,
+            delivering: None,
         }
     }
 
@@ -290,6 +312,9 @@ pub(crate) struct Followed {
     pub(crate) streamed: bool,
     /// The row's run, conversation and state when the last inspect started.
     pub(crate) inspected: Option<send::Basis>,
+    /// Its last 500 Activity events (Qt's `m_events`), for the local rows'
+    /// reconcile.
+    pub(crate) events: VecDeque<Value>,
 }
 
 #[derive(Default)]
@@ -316,6 +341,32 @@ pub(crate) struct Hub {
     pub(crate) seen: Option<send::SessionView>,
     /// Numbers the inspects, so a late answer of another session's is dropped.
     next_inspect: u64,
+    /// The local message rows of every session, by draft key (S4).
+    pub(crate) local: LocalMessages,
+    /// Draft keys whose Retry reads its cached files (`m_retryReads`).
+    pub(crate) retry_reads: HashSet<String>,
+    /// The questions waiting for an answer, by token.
+    pub(crate) prompts: HashMap<u64, send::Prompt>,
+    pub(crate) next_token: u64,
+    /// Computer and catalog key to draft key of the sessions opened, so a
+    /// session that leaves the catalog drops its rows; at most 512, the
+    /// oldest go first.
+    opened: HashMap<(String, String), String>,
+    opened_order: VecDeque<(String, String)>,
+}
+
+impl Hub {
+    /// Remembers which draft key the catalog row `entry` opened.
+    fn remember(&mut self, entry: (String, String), key: &str) {
+        self.opened_order.retain(|known| known != &entry);
+        self.opened_order.push_back(entry.clone());
+        self.opened.insert(entry, key.to_owned());
+        while self.opened_order.len() > OPENED {
+            if let Some(oldest) = self.opened_order.pop_front() {
+                self.opened.remove(&oldest);
+            }
+        }
+    }
 }
 
 pub(crate) struct Shared {
@@ -462,6 +513,7 @@ impl Composers {
                 ..Followed::default()
             };
         }
+        hub.remember((session.computer.clone(), session.key.clone()), &key);
         hub.open = Some(session);
         hub.open_key = Some(key.clone());
         self.0.opened.notify_all();
@@ -566,6 +618,9 @@ impl Composers {
                     composer.save_failed = false;
                 }
                 hub.stored_keys.retain(|k| k != old);
+                // The session's local rows follow its draft (Qt moves
+                // `m_localMessages` with a rename, 1946 and 3312).
+                hub.local.rename(old, new);
                 // Qt (`MessageComposer.cpp:803-806`): the composer open at the
                 // old key (a rename back while this one was pending) follows
                 // the draft to the new key. The old key's composer has not
@@ -1059,8 +1114,11 @@ impl Composers {
             let hub = self.lock();
             (hub.followed.computer.clone(), hub.followed.key.clone())
         };
-        // The followed session's last state (or end) in this batch.
+        // The followed session's last state (or end) in this batch, and its
+        // events in order: "replace" starts the window anew.
         let mut last = None;
+        let mut replaced = false;
+        let mut events: Vec<&Value> = Vec::new();
         for out in batch
             .activity
             .iter()
@@ -1069,15 +1127,51 @@ impl Composers {
             match out.kind.as_str() {
                 "state" => last = Some(Some(&out.payload["value"])),
                 "ended" => last = Some(None),
+                kind @ ("events" | "replace") => {
+                    if kind == "replace" {
+                        replaced = true;
+                        events.clear();
+                    }
+                    events.extend(out.payload["events"].as_array().into_iter().flatten());
+                }
                 _ => {}
             }
         }
+        // Only the last 500 are kept, so only those are copied.
+        let events: Vec<Value> = events[events.len().saturating_sub(EVENTS)..]
+            .iter()
+            .map(|&event| event.clone())
+            .collect();
+        let new_events = replaced || !events.is_empty();
         // Formatted before the lock is taken: local time may read files.
         let update =
             last.map(|state| state.map(|value| (Arc::new(value.clone()), send::expiry(value))));
         let mut hub = self.lock();
+        // A session that left the catalog drops its local rows; a replaced
+        // key (the same session under its run's key) keeps them.
+        for out in batch
+            .removes
+            .iter()
+            .filter(|out| out.reason.as_deref() != Some("replaced"))
+        {
+            let entry = (out.computer.0.clone(), out.key.clone());
+            if let Some(gone) = hub.opened.remove(&entry) {
+                hub.opened_order.retain(|known| known != &entry);
+                hub.local.forget(&gone);
+            }
+        }
         let followed = hub.followed.computer == computer && hub.followed.key == key;
-        let changed = match update.filter(|_| followed) {
+        if followed && new_events {
+            let kept = &mut hub.followed.events;
+            if replaced {
+                kept.clear();
+            }
+            kept.extend(events);
+            while kept.len() > EVENTS {
+                kept.pop_front();
+            }
+        }
+        let state_changed = match update.filter(|_| followed) {
             Some(Some((details, expiry))) => {
                 hub.followed.details = Some(details);
                 hub.followed.expiry = expiry;
@@ -1099,16 +1193,23 @@ impl Composers {
         };
         let touched = hub.open.as_ref().is_some_and(|open| touches(batch, open));
         drop(hub);
-        if changed {
+        if state_changed {
             self.after_observe();
+        } else if new_events {
+            // New events alone change the view only when they reconcile a row.
+            if self.reconcile() || touched {
+                self.changed();
+            }
         } else if touched {
             self.changed();
         }
     }
 
-    /// What a change of the followed session's Activity sets off (Task 4b
-    /// adds the reconcile and Task 5 the continuations).
+    /// What a change of the followed session's Activity sets off: the
+    /// local rows it shows go (`reconcileMessages`); Task 5 adds the
+    /// continuations.
     fn after_observe(&self) {
+        self.reconcile();
         self.changed();
     }
 
@@ -1243,6 +1344,7 @@ impl Composers {
             cache: session.cache,
             cache_warning: session.cache_warning,
             cache_details: session.cache_details,
+            local: hub.local.rows(&composer.key).to_vec(),
         })
     }
 }
@@ -1463,6 +1565,7 @@ pub(crate) mod tests {
                 rows: Arc::new(|_, _, _| None),
                 facts: Arc::new(|_, _| None),
                 inspect: Arc::new(|_, _| Err("timed out".into())),
+                dispatch: Arc::new(|_, _, _| Err("no call in these tests".into())),
             },
         );
         (composers, notified)

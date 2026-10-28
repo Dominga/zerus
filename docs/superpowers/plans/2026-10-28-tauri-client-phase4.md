@@ -87,7 +87,7 @@ These surfaces are missing from the core section. This plan does not build them;
   - the attachment cache 512 MiB, least recently used first (`attachments::CACHE_LIMIT`);
   - local message rows 50 per session and 512 sessions;
   - Saved drafts pages at most 200;
-  - the composer hub keeps at most 200 events of the followed session, and at most 64 composers and 128 MiB of their attachments in memory;
+  - the composer hub keeps at most 500 events of the followed session (Qt's `m_events`, `SessionsWindow.cpp:3651`), and at most 64 composers and 128 MiB of their attachments in memory;
   - process output as `hgs` bounds it.
 - All `hgs` calls, file reads and draft writes run off the UI thread (Tauri's blocking pool or the hubs' own threads).
 - The composer's block reason is computed in Rust whenever the followed Activity's details or a fact change and is pushed with the Activity update; the composer's session part, the cache chip included, is recomputed once a second and pushed only when it changed; `local_time` is formatted in src-tauri.
@@ -4612,6 +4612,28 @@ git commit -m "feat(client): the composer's block reasons, cache chip and inspec
 
 ### Task 4b: The delivery: the guarded send, the cold cache question and local rows
 
+**As built** (`71a2f63d` and its review fix round 1). Where the steps below differ, the code and this list win (Qt wins over the brief; `SessionsWindow.cpp` and `MessageComposer.cpp` lines):
+- **Send's checks.** `send_message` also refuses (`Busy`) when the editor's text is not the draft's after its own edit, and when Qt's Send would be disabled (`view.can_send`: content, 64 KiB, files the agent takes; `MessageComposer.cpp:1185`, `send` 814). Every `Busy` or `Blocked` answer hands the text back under a new epoch. `Cold` does not: the question holds the send, as Qt's modal dialog does.
+- **The last gate.** `deliver` returns `bool` and refuses (Qt's `prepareSendingAsync`, 731): a closed hub, a composer that is not loaded or is sending, attaching or renaming, an uncertain draft unless the delivery preserves it, and a Retry whose row is no longer a definite failure (`deliverMessage`, 4862-4869). It does not refuse `waiting` (Task 5 delivers from a waiting continuation; Qt drops `m_waitingSends`, 732). Callers answer `Busy` when it refuses.
+- **The save revision.** The durable save takes the next `saves` and sets `saving`. `prepared(delivery, handle, revision, saved)` ignores a stale answer (741). A failed one ends the send, sets `save_failed`, schedules `retry_save` and hands the text back. A successful one clears the storage error and bumps `text_epoch` (Qt clears the editor, 751).
+- **Undo.** `deliver` clears `removed` for every delivery, a Retry's included.
+- **Preserve.** A Retry that keeps the draft keeps its error mark and notice in `Composer.kept` and gives them back at the end (Qt's `m_preservedDrafts`, `MessageComposer.cpp:758-763`).
+- **`Delivery`** gains `row_run`, `row_conversation` (Qt's `observedIdentityMatches`, 147-154) and `evidence` (the details checked at Send, Qt's send evidence). Task 5 builds deliveries with `delivery()` or fills these in its literal.
+- **`still_valid`** follows `observedIdentityMatches` (the row's run at Send, or the details' run). Without consent, a cache that expired in the evidence or in the current details is invalid (4881). For a session no longer open, the evidence stands in for its details.
+- **`Prompt`** gains `handle`, `text` and `attachments`, the message asked about, filled by `ask(hub, ctx, retry)` (its signature is unchanged). A new question replaces its composer's older one. A non-retry answer sends only while the draft still holds that message; otherwise it answers `Notice` with Qt's "Draft changed. Send it when you are ready." (4845).
+- **`SendReply::Notice { text, error }`** carries Qt's `showNotice(text, error)` tone (`SessionsWindow.h:299`), not stickiness: block reasons (4486, 4850) and read errors (4500) are errors, "Draft changed" (4845) is plain. Task 5's notices pass the tone of the Qt call they port; Task 6 shows `error` as the error tone and the rest as information.
+- **The delivery under way.** `Composer.delivering` holds the revision of the live delivery's "sending" save and `Delivery.revision` its own. `prepared`, `send_now` and every end of a delivery (`ended`) act only while they match, so a delivery that a cancel ended, or that a newer one replaced, neither calls nor ends anything. `delivery_finished` (no revision) ends whatever runs: Task 5's cancels and the reconcile use it.
+- **Retry's seam.** `retry` is `retry_begin` (the checks and `retry_reads`, before the read), the read, then `retry_finish(begun, read)`. Tests drive the two halves around a session switch.
+- **Retry's pins** come from S4's rows: the core's `LocalMessages::keys()` (added here), not `opened`, which only serves forgetting a session that left the catalog. `Hub::local_keys` is gone. `retry_files` copies only the definite failures under the hub lock and reads their files after it.
+- **`SendReply::ClearContext`** is not in 4b: nothing constructs it before Task 5, and clippy's `dead_code` refuses it. Task 5 adds it with the Clear answer.
+- **The call.** `send_now` treats a panicked dispatch like an `Err`: uncertain. After the end it calls `refresh_details` for the open key (`finishMessage`'s `inspect()`, 4956).
+- **Retry after the read** (`messageAction`, 4497-4523): Qt's quiet checks (identity, online, no write, live and running evidence, the row unchanged, the composer not busy). For the open session, a block reason becomes the composer's error (`Blocked`), then the cold question. For a session no longer open, a warm retry is delivered there and a cold one is dropped. Unreadable file entries answer `Notice` with `read_stored`'s text.
+- **`inspect_local`** answers only for the id of a failed row (4475-4481).
+- **Events.** `Followed.events` keeps Qt's 500 (`EVENTS`, 3651). `refresh_details` keeps the inspected `events` and merges them into `Followed.events` by `seq` (3639-3651; `replace_events` replaces). `observe` reconciles on events-only batches too and wakes the view when a row went or when the batch touches the open row (`touches`). `reconcile` returns whether a row went and runs with null details when none are known.
+- **Not done, by Qt:** a send is not a write mark in `Actions`. Qt's `m_pending` is set by writes only; a send lives in `m_pendingMessages` and blocks only its own session (`isSending`, 4808, 4858). `still_valid` refuses while any write runs (`facts`, Qt's `m_pending` at 4889).
+- **Tests.** `send_hub_with(store, spawn)` takes the test's spawn, and `held_spawn`/`next_job` hold the hub's jobs so a test orders them; the brief's `dir("retry")` became `dir("retry-row")`, since Task 3a's `a_failed_save_is_retried_until_it_succeeds` uses that folder.
+- **`Cache::prune_later`** sets `again` before it claims `pruning`, and the job checks `again` once more after its release, so a store that meets a prune about to end is never lost.
+
 **Depends on:**
 - A2 `zerus-5wmh.9.4` (#404): `Action::Send`, `Outcome::Uncertain`, `actions::dispatch` in src-tauri, `Lane::Send`;
 - S2 `zerus-5wmh.9.8` (#408, on main): `cache::{cold_prompt, ColdPrompt, ColdAction}`;
@@ -4651,7 +4673,7 @@ pub local: Vec<LocalMessage>,
 impl Cache { pub fn prune_later(self: &Arc<Self>, spawn: &Spawn, extra: Arc<dyn Fn() -> HashSet<PathBuf> + Send + Sync>); }
 // composer/send.rs
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SendReply { Sending, Busy, Blocked { reason: String }, Notice { text: String },
+pub enum SendReply { Sending, Busy, Blocked { reason: String }, Notice { text: String, error: bool },
                      Cold { token: u64, prompt: ColdPrompt }, ClearContext { token: u64 } }
 #[serde(tag = "kind", rename_all = "snake_case")] pub enum Answer { Cold { action: ColdAction }, Cancel }
 impl Composers {
@@ -4884,10 +4906,10 @@ Expected: compile errors.
 
 - [ ] **Step 4: Extend `composer/mod.rs`.**
   - `Deps` gains `dispatch: Dispatch`.
-  - `Followed` gains `events: VecDeque<Value>`, the last 200 events of the followed session.
+  - `Followed` gains `events: VecDeque<Value>`, the last 500 events of the followed session (Qt's 3651).
   - `Hub` gains `local: LocalMessages`, `retry_reads: HashSet<String>`, `prompts: HashMap<u64, send::Prompt>`, `next_token: u64`, and `opened: HashMap<(String, String), String>` with `opened_order: VecDeque<(String, String)>` (computer and catalog key to draft key; `open` records it and drops the oldest entry past 512, matching S4's 512 sessions).
   - `renamed` also calls `hub.local.rename(old, new)` when the store moved the draft.
-  - `observe` also keeps the events (`"events"` appends, `"replace"` clears first; at most 200, oldest dropped). It forgets the local rows of a session that left the catalog: for `batch.removes` with a reason other than `replaced`, `hub.local.forget(key)` through `opened`.
+  - `observe` also keeps the events (`"events"` appends, `"replace"` clears first; at most 500, oldest dropped). It forgets the local rows of a session that left the catalog: for `batch.removes` with a reason other than `replaced`, `hub.local.forget(key)` through `opened`.
   - `after_observe` becomes `self.reconcile()` followed by `self.changed()`.
   - `ComposerView` gains `local`, which `view_of` fills with `hub.local.rows(&composer.key).to_vec()` (at most 50).
   - `impl Hub { pub(crate) fn local_keys(&self) -> Vec<String> { self.opened.values().cloned().collect() } }`, since S4 exposes rows per key only.
@@ -6035,6 +6057,7 @@ git commit -m "feat(client): resume-then-send, compact-to-send and Clear context
 
 **Interfaces:**
 - Consumes: Tasks 3a-5's commands and the serde shapes of `ComposerView`, `SendReply`, `Answer`, `ColdPrompt`, `StartQuestion`, `ClearControl`, `LocalMessage` and `Chip`.
+- Flushing (Task 4b review ruling): while the view has an error, an uncertain mark or a failed local row, the editor flushes `composer_edit` on every keystroke, not 250 ms later, since Rust may then change the text itself (a reconciled delivery clears it) and Qt has no such window (its editor is the draft).
 - The session status (Decisions, Task 4a ruling 1): the editor is read-only while `session_blocks_input`, with `session_status` as its tooltip (`MessageComposer.cpp:1153, 1161-1164`). Refresh (311) shows while `session_status` is shown as an error (1194) and calls a `composer_refresh` command, which runs `Composers::refresh_details` (Qt's `sessionRefreshRequested`: `refreshRequested` and `inspect()`, `SessionsWindow.cpp:1031-1034`).
 - Produces:
 
@@ -6055,7 +6078,7 @@ export interface ColdChoice { action: "send" | "compact" | "clear"; label: strin
 export interface ColdPrompt { title: string; text: string; informative: string; choices: ColdChoice[] }
 export interface StartOption { choice: "resume" | "resume_compact" | "fresh"; label: string; enabled: boolean; tooltip: string }
 export interface StartQuestion { title: string; text: string; informative: string; options: StartOption[] }
-export type SendReply = { kind: "sending" } | { kind: "busy" } | { kind: "blocked"; reason: string } | { kind: "notice"; text: string }
+export type SendReply = { kind: "sending" } | { kind: "busy" } | { kind: "blocked"; reason: string } | { kind: "notice"; text: string; error: boolean }
   | { kind: "cold"; token: number; prompt: ColdPrompt } | { kind: "clear_context"; token: number } | { kind: "start"; token: number; question: StartQuestion };
 export type Answer = { kind: "cold"; action: ColdChoice["action"] } | { kind: "start"; choice: StartOption["choice"] } | { kind: "cancel" };
 export type Inspect = { kind: "native_ui" } | { kind: "terminal" } | { kind: "refresh"; notice: string };
@@ -6357,7 +6380,7 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
       case "cold": setDialog({ kind: "cold", token: r.token, prompt: r.prompt }); break;
       case "start": setDialog({ kind: "start", token: r.token, question: r.question }); break;
       case "clear_context": { const control = view()?.clear; if (control) setDialog({ kind: "clear", control, token: r.token }); break; }
-      case "notice": notify("error", r.text, true); break;
+      case "notice": notify(r.error ? "error" : "info", r.text, true); break;
       default: break;
     }
   }

@@ -16,20 +16,26 @@
 //! `convertFileSrc` encodes it whole. A response names the type `sniff`
 //! finds in the bytes, never one a webview would run as a page.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tauri::http::{header, response::Builder, Method, Request, Response, StatusCode};
 use zerus_client_core::attachments;
 
-use super::Composers;
+use super::{Composers, Spawn};
 
 /// The private attachment cache: `{root}/{sha256}/{name}`, as
 /// `attachments::store_at` writes it.
 pub struct Cache {
     root: PathBuf,
+    /// A prune runs on the blocking pool.
+    pruning: AtomicBool,
+    /// A store arrived during the prune: one more runs after it.
+    again: AtomicBool,
 }
 
 pub(crate) fn canonical(path: &Path) -> PathBuf {
@@ -41,7 +47,42 @@ impl Cache {
         let _ = std::fs::create_dir_all(&root);
         Arc::new(Cache {
             root: canonical(&root),
+            pruning: AtomicBool::new(false),
+            again: AtomicBool::new(false),
         })
+    }
+
+    /// One prune after a store, on the blocking pool; a store during a prune
+    /// runs exactly one more. `extra` names the copies Retry still needs.
+    pub fn prune_later(
+        self: &Arc<Self>,
+        spawn: &Spawn,
+        extra: Arc<dyn Fn() -> HashSet<PathBuf> + Send + Sync>,
+    ) {
+        // Asked for before the claim: a prune that ends between the two
+        // still sees it.
+        self.again.store(true, Ordering::SeqCst);
+        if self.pruning.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let cache = Arc::clone(self);
+        spawn(Box::new(move || loop {
+            cache.again.store(false, Ordering::SeqCst);
+            let kept: HashSet<PathBuf> = extra().iter().map(|path| canonical(path)).collect();
+            attachments::prune(&cache.root, attachments::CACHE_LIMIT, |path| {
+                kept.contains(&canonical(path))
+            });
+            if cache.again.load(Ordering::SeqCst) {
+                continue;
+            }
+            cache.pruning.store(false, Ordering::SeqCst);
+            // A store between the check and the release saw a prune running
+            // and left it to this one: run once more, unless another job
+            // took over meanwhile.
+            if !cache.again.load(Ordering::SeqCst) || cache.pruning.swap(true, Ordering::SeqCst) {
+                break;
+            }
+        }));
     }
 
     /// The canonical root.
@@ -1122,5 +1163,38 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn a_store_during_a_prune_runs_exactly_one_more() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Mutex;
+        let root = dir("prune-later");
+        let cache = Cache::new(root.join("cache"));
+        let jobs: Arc<Mutex<Vec<crate::composer::Job>>> = Arc::default();
+        let queue = Arc::clone(&jobs);
+        let spawn: Spawn = Arc::new(move |job| queue.lock().unwrap().push(job));
+        let asked = Arc::new(AtomicUsize::new(0));
+        let (counted, me, again) = (Arc::clone(&asked), Arc::clone(&cache), Arc::clone(&spawn));
+        // The first prune meets a store of its own while it runs.
+        let extra: Arc<dyn Fn() -> HashSet<PathBuf> + Send + Sync> = Arc::new(move || {
+            if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                me.prune_later(&again, Arc::new(HashSet::new));
+            }
+            HashSet::new()
+        });
+        cache.prune_later(&spawn, Arc::clone(&extra));
+        cache.prune_later(&spawn, Arc::clone(&extra));
+        assert_eq!(jobs.lock().unwrap().len(), 1, "one prune at a time");
+        let job = jobs.lock().unwrap().pop().unwrap();
+        job();
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            2,
+            "the store during it ran one more"
+        );
+        assert!(jobs.lock().unwrap().is_empty());
+        cache.prune_later(&spawn, extra);
+        assert_eq!(jobs.lock().unwrap().len(), 1, "a later store prunes again");
     }
 }

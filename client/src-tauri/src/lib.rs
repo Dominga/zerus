@@ -353,6 +353,20 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                                 },
                             )
                         },
+                        // The guarded send: it runs on the hub's blocking
+                        // threads, never on an async worker.
+                        dispatch: {
+                            let actions = app.state::<actions::Actions>().inner().clone();
+                            std::sync::Arc::new(
+                                move |target: zerus_client_core::Target,
+                                      action: zerus_client_core::Action,
+                                      id: String| {
+                                    tauri::async_runtime::block_on(actions::dispatch_as(
+                                        &actions, target, action, id,
+                                    ))
+                                },
+                            )
+                        },
                     },
                 ));
                 // A write mark shows in the composer at once.
@@ -620,6 +634,11 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::composer_remove,
         composer::composer_undo_remove,
         composer::composer_allow_retry,
+        composer::send::send_message,
+        composer::send::send_answer,
+        composer::send::local_retry,
+        composer::send::local_delete,
+        composer::send::local_inspect,
         #[cfg(feature = "media")]
         voice::voice_open,
         #[cfg(feature = "media")]
@@ -746,6 +765,7 @@ mod tests {
                 rows: Arc::new(|_, _, _| None),
                 facts: Arc::new(|_, _| None),
                 inspect: Arc::new(|_, _| Err("timed out".into())),
+                dispatch: Arc::new(|_, _, _| Err("no call in these tests".into())),
             },
         );
         composers.open(Some(session()));

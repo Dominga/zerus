@@ -95,7 +95,18 @@ pub fn on_event(app: &AppHandle, event: &RunEvent) {
 pub fn show_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let window = match app.get_webview_window(MAIN_WINDOW) {
         Some(window) => window,
-        None => crate::create_main_window(app)?,
+        None => {
+            let window = crate::create_main_window(app)?;
+            // The stored Keep above, once the store loads; an unattended
+            // measurement keeps its own window in front instead.
+            #[cfg(feature = "live")]
+            if !std::env::var("ZERUS_CLIENT_PERF").is_ok_and(|mode| mode == "auto") {
+                if let Some(store) = app.try_state::<crate::settings::Store>() {
+                    crate::settings::apply_stored_window_layer(&store, window.clone());
+                }
+            }
+            window
+        }
     };
     if window.is_minimized()? {
         window.unminimize()?;

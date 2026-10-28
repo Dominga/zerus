@@ -140,7 +140,9 @@ fn every_key_has_qt_s_default_and_range() {
     // The opt-in itself is not a client setting.
     assert!(find("automaticApprovals/enabled").is_none());
     assert!(find("shortcuts/").is_none() && find("shortcuts/a/b").is_none());
-    assert_eq!(default("client/skin"), "zerus-dark");
+    assert_eq!(default("client/darkSkin"), "zerus-dark");
+    assert_eq!(default("client/lightSkin"), "zerus-light");
+    assert!(find("client/skin").is_none());
     assert_eq!(default("client/overviewWidth"), 1200);
     assert_eq!(default("client/overviewFullWidth"), false);
     // The client's own keys are never seeded from Qt.
@@ -375,8 +377,11 @@ fn set_normalizes_persists_and_tells_listeners() {
     let settings = Settings::open(path.clone(), None);
     let heard = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&heard);
-    settings.subscribe(Box::new(move |name, value| {
+    let revisions = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&revisions);
+    settings.subscribe(Box::new(move |name, value, revision| {
         sink.lock().unwrap().push((name.to_owned(), value.clone()));
+        seen.lock().unwrap().push(revision);
     }));
     assert_eq!(
         settings.set("workspace/theme", json!("dark")),
@@ -404,12 +409,21 @@ fn set_normalizes_persists_and_tells_listeners() {
         settings.set("shortcuts/message.push", json!([])),
         Ok(json!([]))
     );
-    // Null removes an override: the defaults apply again.
+    // Null removes an override: the defaults apply again, told as null.
     assert_eq!(
         settings.set("shortcuts/message.push", Value::Null),
-        Ok(json!([]))
+        Ok(Value::Null)
     );
+    assert!(!settings.all().contains_key("shortcuts/message.push"));
     assert_eq!(heard.lock().unwrap().len(), 6);
+    // The load reads the revision under the same lock.
+    assert_eq!(settings.all_tracked().1, 6);
+    // Each change takes the next revision; the answer carries it too.
+    assert_eq!(*revisions.lock().unwrap(), vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(
+        settings.set_tracked("workspace/language", json!("ru")),
+        Ok((json!("ru"), 7))
+    );
     assert_eq!(
         heard.lock().unwrap()[1],
         ("processes/activeSeconds".to_owned(), json!(1.0))
@@ -477,5 +491,26 @@ fn seed_values_take_only_what_qt_stored() {
         ]
         .into_iter()
         .collect()
+    );
+}
+
+/// The web client imports every setting's default from
+/// `client/src/store/settings-defaults.json`; this keeps that file equal to
+/// the table. `ZERUS_UPDATE_SETTINGS_DEFAULTS=1` rewrites it.
+#[test]
+fn the_web_client_defaults_equal_the_table() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/store/settings-defaults.json");
+    let table: serde_json::Map<String, Value> = KEYS
+        .iter()
+        .map(|key| (key.name.to_owned(), effective(key.kind, None)))
+        .collect();
+    let expected = serde_json::to_string_pretty(&table).unwrap() + "\n";
+    if std::env::var_os("ZERUS_UPDATE_SETTINGS_DEFAULTS").is_some() {
+        fs::write(&path, &expected).unwrap();
+    }
+    assert_eq!(
+        fs::read_to_string(&path).unwrap_or_default(),
+        expected,
+        "regenerate with ZERUS_UPDATE_SETTINGS_DEFAULTS=1 cargo test --test settings"
     );
 }

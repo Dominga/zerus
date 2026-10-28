@@ -339,6 +339,10 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 eprintln!("zerus-client: ZERUS_CLIENT_HEADLESS=1 but the display is {display:?}, not an X server; no window opens (set GDK_BACKEND=x11)");
                 std::process::exit(3);
             }
+            // Keep above is decided once from the display; the stored value
+            // applies when the main window is created (`lifecycle::show_main`).
+            #[cfg(feature = "live")]
+            settings::init_window_layer(display.as_deref());
             if lifecycle::window_at_start(opens_sessions, menu_bar) {
                 let window = lifecycle::show_main(app.handle())?;
                 // An unattended measurement needs frames: keep its window in front
@@ -487,6 +491,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         settings::settings_get,
         settings::settings_set,
         desk::desk_take_pending,
+        settings::window_layer_supported,
         actions::run_action,
         actions::set_notifications,
         actions::inspect_session,

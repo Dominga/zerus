@@ -8,6 +8,7 @@ import "./ui/styles/client.css";
 import "./ui/styles/screens.css";
 import "./ui/styles/machines.css";
 import "./ui/styles/motion.css";
+import "./ui/styles/settings.css";
 import "./skin/runtime";
 import { App } from "./App";
 import { inTauri, startBridge, type BridgeMode } from "./bridge";

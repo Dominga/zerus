@@ -28,8 +28,8 @@ Qt's values with Qt's types and defaults, and never write Qt's store."
   On macOS the domain is read through cfprefsd (`/usr/bin/defaults export
   com.hgdev.hgs-tray -`), which may hold values the plist file does not
   have yet, and the file only when that fails.
-- Settings Qt does not have use a `client/` prefix (`client/skin`,
-  `client/overviewWidth`, `client/overviewFullWidth`), so a key Qt adds
+- Settings Qt does not have use a `client/` prefix (`client/darkSkin`,
+  `client/lightSkin`, `client/overviewWidth`, `client/overviewFullWidth`), so a key Qt adds
   later never collides with them; they are never seeded. Webview-only
   layout such as panel widths starts at its defaults.
 - `settings.json` records that it was seeded, when, and from which source,
@@ -84,8 +84,8 @@ policy, speech provider, analytics) are written through `hgs`, as Qt does.
 
 | Section | Qt source | Data | Owner |
 |---|---|---|---|
-| Appearance | SettingsPage.h:46-95, UiLanguage.h, ContentScale.h, ActivityWidth.h | local: `workspace/theme` (system), `workspace/language`, `workspace/usageIndicator` (rails), `workspace/contentScale` (75-200 %, 5 % steps), `workspace/activityWidth`, `workspace/activityFullWidth`; Keep above other windows | events |
-| Sessions | :97-107, QuestionNotificationSettings.h | local: `workspace/compact`, `workspace/expandSessionsOnHover`, `workspace/hideEmptyProjects`, `workspace/animateActivity`, `workspace/showCompletedSubagents`, `notifications/optionalQuestions` | events |
+| Appearance | SettingsPage.h:46-95, UiLanguage.h, ContentScale.h, ActivityWidth.h, WindowLayer.cpp | local: `workspace/theme` (system), `workspace/language`, `workspace/usageIndicator` (rails), `workspace/contentScale` (75-200 %, 5 % steps), `workspace/activityWidth`, `workspace/activityFullWidth`, `workspace/alwaysOnTop` (not on Wayland yet, zerus-5wmh.24.2); the client's skins (import later, zerus-5wmh.24.1) and Overview width | events |
+| Sessions | :97-107, QuestionNotificationSettings.h | local: `workspace/compact` (deferred: the client has no compact rows yet, zerus-5wmh.24.3; the seeded value is kept), `workspace/expandSessionsOnHover`, `workspace/hideEmptyProjects`, `workspace/animateActivity`, `workspace/showCompletedSubagents`, `notifications/optionalQuestions` | events |
 | Automatic recovery | RecoverySettings.h, RecoveryWidgets.h | `hgs` recovery per computer (`requestRecovery`), 15 s refresh; local `recovery/sharedPolicy` | events |
 | Processes | :109-121, ProcessSettings.h | local `processes/*` | webui (Task 11) |
 | Updates | UpdatesWidget.h, UpdateController.cpp | client updater (webui); seeded `updates/*` | events page, webui state |

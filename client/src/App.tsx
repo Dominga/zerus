@@ -9,10 +9,11 @@ import { OverviewScreen } from "./ui/screens/Overview";
 import { MachinesScreen } from "./ui/screens/Machines";
 import { AccountsScreen } from "./ui/screens/Accounts";
 import { ProjectsScreen } from "./ui/screens/Projects";
-import { SettingsScreen } from "./ui/components/SettingsScreen";
+import { SettingsScreen } from "./ui/screens/Settings";
 import { applySkin, skin } from "./skin/runtime";
 import { catalog } from "./store/catalog";
 import { contentScale, page, setContentScale, setPage, toast } from "./store/ui";
+import { num, setSetting } from "./store/settings";
 import type { BridgeMode } from "./bridge";
 
 // The client shell: the rail, the pages and the status bar.
@@ -48,16 +49,23 @@ function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
   );
 }
 
+/** Keyboard zoom changes Settings > Appearance > Content scale (Qt's syncContentScale). */
+function zoom(scale: number) {
+  setContentScale(scale);
+  void setSetting("workspace/contentScale", scale);
+}
+
 export function App(props: { mode: () => BridgeMode | "starting" }) {
   createEffect(() => applySkin(skin()));
+  createEffect(() => setContentScale(num("workspace/contentScale")));
   const keys = (e: KeyboardEvent) => {
     const mod = e.ctrlKey || e.metaKey;
     if (!mod) return;
     if (/^[1-5]$/.test(e.key)) { e.preventDefault(); setPage((["dashboard", "sessions", "projects", "machines", "accounts"] as const)[Number(e.key) - 1]); }
     else if (e.key === ",") { e.preventDefault(); setPage("settings"); }
-    else if (e.key === "=" || e.key === "+") { e.preventDefault(); setContentScale(Math.min(2, +(contentScale() + 0.1).toFixed(2))); toast("Content scale", `${Math.round(contentScale() * 100)}%`); }
-    else if (e.key === "-") { e.preventDefault(); setContentScale(Math.max(0.75, +(contentScale() - 0.1).toFixed(2))); toast("Content scale", `${Math.round(contentScale() * 100)}%`); }
-    else if (e.key === "0") { e.preventDefault(); setContentScale(1); }
+    else if (e.key === "=" || e.key === "+") { e.preventDefault(); zoom(Math.min(2, +(contentScale() + 0.1).toFixed(2))); toast("Content scale", `${Math.round(contentScale() * 100)}%`); }
+    else if (e.key === "-") { e.preventDefault(); zoom(Math.max(0.75, +(contentScale() - 0.1).toFixed(2))); toast("Content scale", `${Math.round(contentScale() * 100)}%`); }
+    else if (e.key === "0") { e.preventDefault(); zoom(1); }
   };
   onMount(() => addEventListener("keydown", keys));
   onCleanup(() => removeEventListener("keydown", keys));

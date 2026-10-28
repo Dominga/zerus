@@ -648,6 +648,10 @@ QString timeText(const QJsonObject &event)
 
 QString messageRole(const QJsonObject &event)
 {
+    if (event.value("source") == "zerus_task" && event.value("type") == "TaskEntry") {
+        const auto role = event.value("task_role").toString();
+        return role == "person" ? QStringLiteral("user") : role == "agent" ? QStringLiteral("assistant") : QString();
+    }
     if (event.value("source") == "hgs_voice" && event.value("voice").isObject()) return "user";
     if (!event.value("agent_id").toString().isEmpty() || (event.value("detail").toString().isEmpty() && event.value("attachments").toArray().isEmpty())) return {};
     // Claude starts a turn for finished background work; nobody wrote it.
@@ -1020,7 +1024,8 @@ struct ActivityRenderResult {
         agentTheme.chip.setAlphaF(0.33f); pageTheme.chip.setAlphaF(0.33f);
     }
     QString html = QString("<html><head><style>body{color:%1;font-size:13px;}p{margin:6px 0;line-height:135%;}h1,h2,h3,h4{font-size:14px;margin:10px 0 6px;}pre{white-space:pre-wrap;}a{color:%2;text-decoration:none;}li{margin-bottom:4px;}</style></head><body>").arg(fg, accent);
-    html += QString("<p style='font-size:10px;color:%1;margin-bottom:12px;'>%2</p>").arg(muted, searching ? tr("SEARCH RESULT — Saved message") : tr("RECORDED ACTIVITY — Messages and tool excerpts"));
+    if (!details.value("task_journal").toBool())
+        html += QString("<p style='font-size:10px;color:%1;margin-bottom:12px;'>%2</p>").arg(muted, searching ? tr("SEARCH RESULT — Saved message") : tr("RECORDED ACTIVITY — Messages and tool excerpts"));
     if (details.value("history_truncated").toBool())
         html += QString("<p style='color:%1;font-size:11px;'>%2</p>").arg(muted, tr("Older events have expired from the journal."));
     if (searching && m_searchResult.value("content_truncated").toBool())
@@ -1255,6 +1260,20 @@ struct ActivityRenderResult {
     m_toggleKeys.clear();m_processLinks.clear();
     for (int i = 0; i < events.size();) {
         const auto event = events[i]; const auto role = messageRole(event);
+        const bool taskEntry = event.value("source") == "zerus_task" && event.value("type") == "TaskEntry";
+        if (taskEntry && event.value("task_role") == "document") {
+            html += QString("<h3 style='color:%1;margin:16px 0 10px;'>%2</h3>")
+                .arg(fg, escaped(event.value("task_label").toString()));
+            html += markdown(event.value("detail").toString(), pageTheme, m_fileLinks);
+            html += attachmentCards(event.value("attachments").toArray(), eventKey(event));
+            if (event.value("task_editable").toBool()) html += QString("<p style='font-size:12px;margin:10px 0 20px;'><a href='hgs-task:edit' style='color:%1;'>%2</a></p>").arg(accent, escaped(tr("Edit description")));
+            ++i; continue;
+        }
+        if (taskEntry && role.isEmpty()) {
+            html += QString("<p style='font-size:11px;color:%1;margin:10px 0;'><span>%2</span> &nbsp; <b>%3</b> · %4</p>")
+                .arg(muted, escaped(timeText(event)), escaped(event.value("task_author").toString()), escaped(event.value("detail").toString()));
+            ++i; continue;
+        }
         if (event.value("type") == "SessionCleared") {
             // Earlier activity stays readable above; the agent no longer has it.
             html += card(eventKey(event), tr("Session cleared"), timeText(event),
@@ -1357,7 +1376,7 @@ struct ActivityRenderResult {
                 ++i;continue;
             }
             // WhiteWh fork: agent teams. A team message reads as a plaque.
-            if (role == "user" && replies.isEmpty() && event.value("type") != "QuestionAnswered") {
+            if (role == "user" && !taskEntry && replies.isEmpty() && event.value("type") != "QuestionAnswered") {
                 if (const auto team = teamMessage(text); team.valid) {
                     const QString edge = teamRoleColor(team.from, m_dark);
                     const auto chip = [&](const QString &content, const QString &color = {}) {
@@ -1413,15 +1432,17 @@ struct ActivityRenderResult {
                     ++i; continue;
                 }
             }
-            const QString label = role == "user" ? (event.value("type") == "UserPromptQueued" ? tr("You (queued)") :
+            const QString label = taskEntry ? event.value("task_author").toString() + QStringLiteral(" · ") + event.value("task_label").toString()
+                : role == "user" ? (event.value("type") == "UserPromptQueued" ? tr("You (queued)") :
                 event.value("type") == "QuestionAnswered" || !replies.isEmpty() ? tr("You (answer)") : tr("You")) : tr("Agent");
             auto stamp=timeText(event);
+            if (taskEntry && !event.value("task_delivery").toString().isEmpty()) stamp += "  " + event.value("task_delivery").toString();
             // OpenCode reports its inbox: a waiting message is queued, and after
             // Stop it stays there, not delivered, until it is sent or removed.
             const auto delivery=role=="user"?event.value("delivery_state").toString():QString();
             const bool inbox=delivery=="queued"||delivery=="not_delivered";
             if (inbox) stamp += "  " + (delivery == "queued" ? tr("Queued") : tr("Not delivered"));
-            else if (role == "user" && event["type"] != "LocalMessage") {
+            else if (role == "user" && event["type"] != "LocalMessage" && !taskEntry) {
                 bool accepted = event["type"] != "UserPromptQueued";
                 if (!accepted) for (int j=i+1;j<events.size();++j) {
                     const auto next = events[j];
@@ -1432,6 +1453,10 @@ struct ActivityRenderResult {
             QStringList media;
             auto body = role == "user" ? (replies.isEmpty() ? userMessage(text) : questionReplyBody(replies, muted, accent, codeSurface, border))
                                        : markdown(text, agentTheme, m_fileLinks, &media);
+            if (taskEntry && role == "user") {
+                auto theme = MarkdownTheme::github(m_dark, QColor(userSurface), m_scale); theme.subtle = QColor(codeSurface);
+                body = markdown(text, theme, m_fileLinks);
+            }
             if(event.value("type")=="LocalMessage") {
                 const auto state=event.value("status").toString();stamp=state=="sending"?tr("Sending…"):state=="error"?tr("Not sent"):tr("Submitted to terminal");
                 if(state=="error" && event.value("uncertain").toBool())stamp=tr("Delivery not confirmed");
@@ -1731,6 +1756,11 @@ ActivityView::ActivityView(QWidget *parent) : QWidget(parent)
 
 void ActivityView::setSessionKey(const QString &key)
 {
+    resetSessionKey(key, false);
+}
+
+void ActivityView::resetSessionKey(const QString &key, bool preserveDocument)
+{
     if (key == m_sessionKey) return;
     if(m_videoDialog)m_videoDialog->close();
     if(m_voicePlayer)m_voicePlayer->stop();
@@ -1745,7 +1775,9 @@ void ActivityView::setSessionKey(const QString &key)
     m_initial = true; m_followLatest = true; m_unseen = 0; m_html.clear(); m_activityInput = {};
     ++m_renderGeneration; m_renderDirty = false; m_pendingContentUpdate = false;
     m_details = {}; m_events = {}; m_fallbackPrompt.clear();
-    clearDocument(); updateJumpButton();
+    m_taskJournalReset = preserveDocument;
+    if (!preserveDocument) clearDocument();
+    updateJumpButton();
     m_compaction->hide(); m_queue->hide();
 }
 
@@ -1810,6 +1842,25 @@ void ActivityView::setTimeline(const QJsonObject &details, const QJsonArray &eve
     // inputs together so the document never contains both generations.
     if (m_localMessages != localMessages) { m_localMessages = localMessages; m_activityInput = {}; }
     setActivity(details, events, fallbackPrompt, tracked);
+}
+
+void ActivityView::setTaskJournal(const QString &key, const QJsonArray &entries, bool followLatest)
+{
+    const bool changed = key != m_sessionKey;
+    // Task selection keeps its painted document until the prepared replacement
+    // is committed. Normal session navigation still clears identities immediately.
+    resetSessionKey(key, !key.isEmpty());
+    if (changed && !followLatest) { m_initial = false; m_followLatest = false; }
+    QJsonArray events;
+    for (const auto &value : entries) {
+        const auto entry = value.toObject();
+        events.append(QJsonObject{{"source", "zerus_task"}, {"type", "TaskEntry"}, {"activity_key", entry.value("id")},
+            {"at", entry.value("at").toDouble() / 1000.0}, {"detail", entry.value("text")},
+            {"task_author", entry.value("author")}, {"task_label", entry.value("label")}, {"task_role", entry.value("role")},
+            {"task_editable", entry.value("editable")}, {"task_delivery", entry.value("delivery")},
+            {"attachments", entry.value("attachments")}});
+    }
+    setActivity({{"task_journal", true}}, events);
 }
 
 void ActivityView::setTheme(bool dark)
@@ -2133,6 +2184,7 @@ bool ActivityView::eventFilter(QObject *watched, QEvent *event)
 
 void ActivityView::activateLink(const QUrl &url)
 {
+    if (url == QUrl("hgs-task:edit")) { emit taskDocumentEditRequested(); return; }
     if (url.scheme() == "hgs-activity" && m_toggleKeys.contains(url.path())) {
         const auto key = url.path();
         bool follow = false;
@@ -2550,8 +2602,12 @@ void ActivityView::commitRender(const std::shared_ptr<ActivityRenderResult> &res
     const int length = m_browser->document()->characterCount();
     QTextCursor restored(m_browser->document()); restored.setPosition(selectionStart.restored(updatedAnchors, length));
     restored.setPosition(selectionEnd.restored(updatedAnchors, length), QTextCursor::KeepAnchor);
+    if (m_taskJournalReset) restored.setPosition(0);
     m_browser->setTextCursor(restored);
-    if (!follow) {
+    if (m_taskJournalReset) {
+        if (!follow) m_browser->verticalScrollBar()->setValue(0);
+        m_taskJournalReset = false;
+    } else if (!follow) {
         QTextCursor restoredTop(m_browser->document()); restoredTop.setPosition(topPosition.restored(updatedAnchors, length));
         auto *bar = m_browser->verticalScrollBar();
         bar->setValue(bar->value() + m_browser->cursorRect(restoredTop).top() - topY);

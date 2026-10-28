@@ -67,10 +67,9 @@ private slots:
         for (const auto &value : contract.value("cases").toArray()) {
             const auto example = value.toObject(); auto raw = example.value("raw").toObject();
             raw["name"] = "codex/contract/" + example.value("name").toString();
-            QString error;
-            const auto box = HgsClient::parseBox(QJsonDocument(QJsonObject{{"host", "fixture"}, {"ok", true},
-                {"sessions", QJsonArray{raw}}}).toJson(), &error);
-            QVERIFY2(error.isEmpty(), qPrintable(error)); QCOMPARE(box.sessions.size(), 1);
+            const auto box = HgsClient::box(QJsonObject{{"host", "fixture"}, {"ok", true},
+                {"sessions", QJsonArray{raw}}});
+            QCOMPARE(box.sessions.size(), 1);
             auto session = box.sessions.first(); const bool online = example.value("online").toBool();
             // Desktop overlays these device/read marks after parsing CLI rows.
             session.reviewLater = raw.value("review_later").toBool();
@@ -92,15 +91,14 @@ private slots:
         const auto contract = QJsonDocument::fromJson(file.readAll()).object();
         const auto parse = [](QJsonObject raw, const QString &name) {
             raw["name"] = "codex/contract/" + name;
-            QString error;
-            const auto box = HgsClient::parseBox(QJsonDocument(QJsonObject{{"host", "fixture"}, {"ok", true},
-                {"sessions", QJsonArray{raw}}}).toJson(), &error);
-            return std::pair{box, error};
+            const auto box = HgsClient::box(QJsonObject{{"host", "fixture"}, {"ok", true},
+                {"sessions", QJsonArray{raw}}});
+            return std::pair{box, QString()};
         };
         for (const auto &value : contract.value("cases").toArray()) {
             const auto example = value.toObject(); const auto name = example.value("name").toString();
             const auto [box, error] = parse(example.value("raw").toObject(), name);
-            QVERIFY2(error.isEmpty(), qPrintable(error)); QCOMPARE(box.sessions.size(), 1);
+            QCOMPARE(box.sessions.size(), 1);
             const int count = SessionPresentation::optionalQuestionCount(box.sessions.first(), example.value("online").toBool());
             QVERIFY2(count == example.value("count").toInt(), qPrintable(name));
             const QString label = count > 0 ? OptionalQuestionBadge::countText(count) : QString();

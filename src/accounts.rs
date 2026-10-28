@@ -1,5 +1,6 @@
 //! Named, per-machine native agent profiles. The catalog contains labels, never credentials.
 mod inspection;
+mod model_defaults;
 mod claude;
 mod claude_settings;
 mod mcp_servers;
@@ -43,6 +44,8 @@ struct Catalog {
     permission_modes: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     defaults: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    model_defaults: BTreeMap<String, model_defaults::Defaults>,
 }
 fn read(config: &Config) -> Result<Vec<u8>> {
     match fs::read(config.dir.join("accounts.json")) {
@@ -88,6 +91,7 @@ fn decode(bytes: &[u8]) -> Result<Catalog> {
             return Err(Error::new(1, "Invalid default account profile."));
         }
     }
+    model_defaults::validate_catalog(&catalog)?;
     Ok(catalog)
 }
 pub fn default_account(config: &Config, provider: &str) -> Result<Option<String>> {
@@ -344,6 +348,7 @@ fn list(config: &Config) -> Result<Value> {
         let mode = catalog.permission_modes.get(row["id"].as_str().unwrap_or("")).map(String::as_str).unwrap_or("provider");
         permission_status::describe(config, row, mode);
         row["permission_modes"] = json!(permission_modes(&provider));
+        model_defaults::describe(row, &catalog);
     }
     // The connector forwards at most 128 KiB of accounts; this row keeps within 32 KiB.
     #[cfg(unix)]
@@ -561,6 +566,8 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     match operation {
         "ls"=>{println!("{}",list(config)?);},
         "inspect"=>{println!("{}",inspection::inspect(config,args)?);},
+        "model-settings"=>{println!("{}",model_defaults::inspect(config,id)?);},
+        "model-defaults"=>{println!("{}",model_defaults::set(config,args,dry)?);},
         "set-key"=>{println!("{}",deepseek::set_key(config,args,dry)?);},
         "install"=>return install::run(id,dry),
         "start"=>{
@@ -1107,6 +1114,11 @@ pub fn run_environment(account: &str, provider: &str, home: &str) -> Vec<String>
         }
     }
     environment
+}
+
+/// Apply saved model defaults only when creating a new conversation.
+pub fn apply_model_defaults(config: &Config, account: &str, provider: &str, argv: &mut Vec<String>) -> Result<()> {
+    model_defaults::apply(config, account, provider, argv)
 }
 
 #[cfg(test)]

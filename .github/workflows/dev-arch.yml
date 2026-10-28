@@ -1,0 +1,118 @@
+name: Dev Arch package
+
+# Build the actual distributable; regression suites run in CI regression.
+on:
+  workflow_call:
+    inputs:
+      save_caches:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+cache-mode: read
+
+jobs:
+  arch-package:
+    name: Arch Dev package
+    if: >-
+      !cancelled() && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' &&
+      github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true'
+    cache-mode: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: archlinux@sha256:996c3a1d6b0d87b01242f6fcd8cfa3ad3eece1a67ab5c8f108e20af1d7b97bdd
+    env:
+      ZERUS_DEV_BUILD_NUMBER: ${{ github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.DEV_UPDATES_ENABLED == 'true' && github.run_number || '' }}
+      CCACHE_DIR: /home/user/.cache/ccache
+      CCACHE_MAXSIZE: 100M
+    steps:
+      - name: Bootstrap Git before checkout
+        run: pacman -Syu --noconfirm --needed git
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      # The makepkg ccache drop-in exists only in this disposable container; the
+      # published recipes are unchanged. Its compiler flags differ from the
+      # desktop build, so it has a cache family of its own.
+      - name: Arch packaging dependencies and unprivileged builder
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git rust cmake ninja qt6-base qt6-tools qt6-webengine qt6-multimedia qt6-svg kstatusnotifieritem kwindowsystem kidletime tmux openssh python ccache namcap desktop-file-utils
+          grep -qx 'BUILDENV=(!distcc color !ccache check !sign)' /etc/makepkg.conf ||
+            { echo 'The default makepkg BUILDENV changed; review the ccache drop-in.' >&2; exit 1; }
+          echo 'BUILDENV=(!distcc color ccache check !sign)' > /etc/makepkg.conf.d/ccache.conf
+          useradd -m user
+          chown -R user:user "$GITHUB_WORKSPACE"
+      - name: Cache epoch
+        id: epoch
+        run: echo "month=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+      - name: Restore Cargo registry
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            /home/user/.cargo/registry
+            /home/user/.cargo/git
+          key: arch-cargo-v1-${{ steps.epoch.outputs.month }}-${{ hashFiles('Cargo.lock', 'services/mobile/connector/Cargo.lock') }}
+          restore-keys: arch-cargo-v1-${{ steps.epoch.outputs.month }}-
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /home/user/.cache/ccache
+          key: arch-package-ccache-v1-${{ github.run_id }}
+          restore-keys: arch-package-ccache-v1-
+      - name: Reset ccache statistics
+        id: ccache-start
+        run: |
+          chown -R user:user /home/user
+          runuser -u user -- ccache -z
+          echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
+      - name: Build and validate the Dev package
+        id: build
+        run: runuser -u user -- env ZERUS_RELEASE_CHANNEL=dev bash scripts/build-arch-package.sh --build-only
+      - name: ccache statistics
+        id: ccache
+        if: ${{ !cancelled() }}
+        env:
+          SAVE: ${{ inputs.save_caches && steps.build.outcome == 'success' }}
+          STARTED: ${{ steps.ccache-start.outputs.started }}
+        run: |
+          runuser -u user -- ccache -sv
+          misses=$(runuser -u user -- ccache --print-stats | awk -F'\t' '$1 == "cache_miss" { print $2 + 0 }')
+          if [ "$SAVE" = true ] && [ "${misses:-0}" -gt 0 ]; then
+            runuser -u user -- ccache --evict-older-than "$(( $(date +%s) - STARTED + 60 ))s"
+            echo save=true >> "$GITHUB_OUTPUT"
+          fi
+      - name: Save ccache
+        if: inputs.save_caches && steps.ccache.outputs.save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /home/user/.cache/ccache
+          key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
+      - name: Save Cargo registry
+        if: inputs.save_caches && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            /home/user/.cargo/registry
+            /home/user/.cargo/git
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      - name: Verify installed system bundle in disposable home
+        shell: bash
+        run: |
+          set -euo pipefail
+          pacman -U --noconfirm artifacts/*.pkg.tar.zst
+          runuser -u user -- python3 scripts/check-installed-package.py 2>&1 | tee artifacts/test-results/installed-package.log
+      # Dev, nightly and release assembly download this artifact from the same run.
+      - name: Retain Arch package and test logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: arch-x86_64-${{ github.sha }}
+          path: artifacts
+          retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}

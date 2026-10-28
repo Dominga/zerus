@@ -67,6 +67,41 @@ job durations live in ignored `artifacts/test-results/`. Set
 stable Rust: `rust-version` and the toolchain pinned in CI follow the latest
 stable release, and raising them is routine maintenance. Run
 `cargo +1.99.1 test --locked` for that pinned toolchain.
+The replica crate has its own lockfile: run
+`cargo +1.99.1 test --locked --manifest-path crates/replica/Cargo.toml`; its
+golden vectors must keep decoding, and `ZERUS_BLESS=1` only adds new ones.
+The event stream's frame crate has one too: run
+`cargo +1.99.1 test --locked --manifest-path crates/watch-protocol/Cargo.toml --target-dir target/watch-protocol`.
+
+On Linux, the three worktree modules run through `scripts/ci/worktree-tests.py`
+in a fresh PID/mount namespace, including their live process blockers and private
+tmux servers. Production cleanup retains folders when a host process cannot be
+inspected, so a shared host cannot establish the positive removal controls.
+Local isolation requires `unshare` and `setpriv`; hosted disposable runners use
+passwordless sudo only for namespace creation, then run fixtures as the original
+user with no capabilities or supplementary groups. A real nondumpable child
+checks that inspection restrictions still apply. Failed namespace admission fails
+the tests without an uncontained retry. For a focused local run, use
+`PYTHONPATH=tests python3 scripts/ci/worktree-tests.py test_worktrees test_worktree_lifecycle test_worktree_maintenance`.
+On macOS these three complete modules run sequentially after the other Python
+integration jobs. Exec/exit fixtures can briefly leave a live owned process
+without readable BSD metadata, and production must retain folders in that case.
+Disposable upstream GitHub macOS runners can also own protected service processes
+whose metadata is permanently unreadable. `scripts/ci/macos-worktree-tests.py`
+creates one locked, unprivileged temporary user for each complete module there.
+The normal CLI, all fixtures, real process blockers and private tmux servers run
+under that UID with a clean environment and private home. A kernel UID inventory
+and real interpreter preflight establish this scope; no process is filtered from
+an individual CLI call. After the tests, lingering fixture processes receive
+TERM, then bounded KILL if necessary, as that unprivileged user with both real and
+effective UID pinned and its directory-service identity rechecked before each
+signal. The harness also closes only that private user's launchd domain, proven
+absent before allocation, so per-user OS services stop respawning. The account is
+removed only after the domain is absent, the UID inventory is empty and the
+directory-service identity matches. Uncertain cleanup fails and retains the
+scope for VM disposal. Owner Macs and other hosts refuse account creation before
+allocation or sudo; local macOS checks continue under the current user. No test is
+excluded and the production guard remains strict.
 
 `check-source.py` keeps the desktop's Unix children from inheriting its descriptors
 ([ChildProcess.h](tray/src/ChildProcess.h)): in `tray/src` it rejects
@@ -76,6 +111,25 @@ parameter there, in the function that creates it (for a member, a constructor of
 class) and before it starts.
 `CHILD_PROCESS_EXEMPT` in the script names the files that may start children
 otherwise, each with its reason.
+
+The desktop parses JSON only through [JsonParse.h](tray/src/JsonParse.h), off
+the GUI thread: `hgs` output in a `ProcessRunner` prepare step, other data
+through `ProcessRunner::post` or an existing worker, and QSettings values
+through [SettingsJson.h](tray/src/SettingsJson.h), which the tray parses before
+its windows exist and whose writers record what they store
+(`SettingsJson::store`). The GUI thread has no exception: owner decision,
+2026-10-27, the list of files allowed to parse small values there was empty at
+the end of M2, so `JsonParse::local()` is gone. A value the GUI thread needs at
+once is prepared before it is read, or kept in a form that needs no parse, such
+as a `QDataStream` for drag data that stays in the process. `check-source.py`
+rejects `QJsonDocument::fromJson` and `QCborValue::fromCbor` in `tray/src`
+outside `JsonParse.cpp`, and any `JsonParse::local()` call.
+Every Qt suite runs with `ZERUS_GUI_THREAD_CHECKS=fatal`, so a parse on the GUI
+thread, or a GUI-thread read of a JSON setting nobody parsed, aborts the test
+with its call site. A GUI suite that checks a parser directly calls it through
+`offGuiThread()` (`tray/tests/support/OffGuiThread.h`); one that stores a JSON
+setting for a widget to read uses `SettingsJson::store`, or `SettingsJson::warm`
+followed by a `ProcessRunner::post` barrier.
 
 A change to tmux or `ps` call sites must keep Unix behaviour unchanged: compare a
 [tmux census](docs/ci-and-aur.md#unix-tmux-census) of the branch with one of main.
@@ -190,7 +244,11 @@ source collaboration. An ignored local database still becomes remote data when
 
 Quick checks run Gitleaks with its default rules on the working tree and all Git
 history of every push and pull request; findings are redacted from the public log
-and `gitleaks:allow` comments do not hide them. For release preparation, also run
+and `gitleaks:allow` comments do not hide them. `.gitleaksignore` exempts only two
+reviewed immutable commit/path/rule/line fingerprints where the generic API-key
+rule crosses adjacent synthetic session-name literals. The workflow security test
+pins that exact list; new commits and all other findings still fail. Do not add
+broad path, rule or value exclusions. For release preparation, also run
 Gitleaks on the candidate source archive and Beads data, and review binary assets
 and dependency notices. The local privacy script catches common accidental machine
 paths and keys; it is not a complete secret scanner.
@@ -281,7 +339,8 @@ the installed Kimi. Each case runs a private copy, disables automatic updates,
 uses its loopback model and platform fixture, proves the child image and private
 environment, and retains uncertain cleanup. The macOS cases compile one exec
 shim per case, so they require both native and compiler resources. A current
-latest-release campaign runs nine native cases. Historical two-version receipts
+latest-release campaign runs twelve native cases, including long Other answers,
+explicit recovery of a retained editor, and preservation of a mismatching draft. Historical two-version receipts
 do not define current selection. The seventeen R2 and seven question-fixture
 controls use stand-ins and loopback
 servers and establish fixture behavior only. `test_kimi_trust` and
@@ -306,9 +365,15 @@ endpoints are not configured; the fixtures' model and platform are loopback
 only. This is not a kernel network enclosure or Windows Kimi qualification.
 The historical NP50 owner-Mac campaigns are separate and are not replayed.
 The [latest Kimi approval workflow](.github/workflows/kimi-approvals.yml) similarly
-runs one selected release and seven exact approval cases on macOS and Windows,
-including its existing Windows environment preflight. These workflows remain
-path-filtered PR/manual qualifications; they do not add Kimi to every main run.
+runs one selected release on macOS and Windows, including its existing Windows
+environment preflight. Its native inventory is the unchanged seven exact Bash
+approval cases plus exactly these four CreateGoal cases:
+`test_goal_manual_starts_in_manual`,
+`test_goal_yolo_auto_switches_to_never_ask`,
+`test_goal_yolo_cancel_does_not_start`,
+`test_goal_yolo_keeps_ask_when_needed`, and the single ExitPlanMode case
+`test_plan_review_approve`. These workflows remain path-filtered PR/manual
+qualifications; they do not add Kimi to every main run.
 `scripts/fetch-conpty.py` downloads the ConPTY package pinned in
 `packaging/windows/conpty.json` from nuget.org and writes only its checked
 `conpty.dll` and `OpenConsole.exe`; `package-windows.py` puts them next to

@@ -16,7 +16,8 @@
 
 // WhiteWh fork, U25 part 6 (spec 6): the session inspector as one column of
 // collapsible cards instead of tabs - Environment, Context, Team, Tasks, Iron
-// rules, Worktrees, Changes (and the optional SocratiCode extension). Each
+// rules, Worktrees, Changes, Project tasks (upstream's durable Zerus tasks,
+// its Tasks tab) and the optional SocratiCode extension. Each
 // card has radius 12 on the skin's card colour, 8 px between cards and no
 // divider on the panel's left. A card folds by its "Title ▾" header and keeps
 // its state under "ui/collapsed/inspector/<key>"; a short value sits on the
@@ -24,7 +25,7 @@
 // from outside (Open team panel, N iron rules, the git chips).
 class InspectorCards : public QScrollArea {
 public:
-    enum Card { Environment, Context, Team, Tasks, IronRules, Worktrees, Changes, SocratiCode };
+    enum Card { Environment, Context, Team, Tasks, IronRules, Worktrees, Changes, SocratiCode, ProjectTasks };
 
     explicit InspectorCards(QWidget *parent = nullptr) : QScrollArea(parent)
     {
@@ -45,6 +46,7 @@ public:
         add(IronRules, "rules", QStringLiteral("Iron rules"), false);
         add(Worktrees, "worktrees", QStringLiteral("Worktrees"), false);
         add(Changes, "changes", QStringLiteral("Changes"), false);
+        add(ProjectTasks, "projecttasks", QStringLiteral("Project tasks"), false);
         add(SocratiCode, "socraticode", QStringLiteral("SocratiCode"), true);
         m_column->addStretch(1);
         setWidget(column);
@@ -53,7 +55,7 @@ public:
 
     static QString key(Card card)
     {
-        static const char *keys[] = {"environment", "context", "team", "tasks", "rules", "worktrees", "changes", "socraticode"};
+        static const char *keys[] = {"environment", "context", "team", "tasks", "rules", "worktrees", "changes", "socraticode", "projecttasks"};
         return QString::fromLatin1(keys[card]);
     }
 

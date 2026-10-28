@@ -34,6 +34,7 @@ public:
     // Embedded installed identity, independent of update channel/catalog selection.
     static QJsonObject buildInfo();
     static QString installedVersion();
+    // Parses JSON: off the GUI thread only (JsonParse.h), as installerRecord() too.
     static DesktopUpdateFeed parseFeed(const QByteArray &data,const QString &channel);
     static bool isArchLinux(const QByteArray &osRelease);
     static QString updateCommand(const DesktopInstallation &installation,const QString &channel="stable");
@@ -148,7 +149,7 @@ private:
     std::function<QNetworkReply *(const QNetworkRequest &)> m_fetch;
     qint64 m_lastSuccess=0;
     bool m_busy=false,m_startCheck=false;
-    quint64 m_checkGeneration=0;
+    quint64 m_checkGeneration=0,m_restoreGeneration=0;
     QString m_executable,m_startedRelease;
     bool m_restartRequired=false;
     bool m_loginItemDeprioritized=false;

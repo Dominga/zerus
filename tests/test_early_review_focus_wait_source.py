@@ -272,7 +272,8 @@ class EarlyReviewFocusWaitSource(unittest.TestCase):
 
 class DisclosureRevealBindingSource(unittest.TestCase):
     def setUp(self):
-        self.fixture = (ROOT / FIXTURE).read_text()
+        self.current = (ROOT / FIXTURE).read_text()
+        self.fixture = _focus_projection.reverse_scroll_idle(self.current)
         self.before = reverse_disclosure_reveal(self.fixture)
 
     def test_later_exact_projection_preserves_prior_patch_and_every_other_fixture_statement(self):
@@ -280,7 +281,7 @@ class DisclosureRevealBindingSource(unittest.TestCase):
                          '48e42224d7358f2f9bd98758a19bb1ba66d42b756aa8bc77ce7cfb5f9d8a3f2a')
         self.assertEqual(hashlib.sha256(_focus_projection.PATCH.read_bytes()).hexdigest(),
                          '36aba7369aff6650774184d1283ed80f47af9d32aa79ea836f76fc81475720d4')
-        self.assertEqual(hashlib.sha256(reverse_focus_wait(FIXTURE, self.fixture).encode()).hexdigest(), BASELINES[FIXTURE])
+        self.assertEqual(hashlib.sha256(reverse_focus_wait(FIXTURE, self.current).encode()).hexdigest(), BASELINES[FIXTURE])
         for start, end in [('    private fun bindDisclosureScroll(', '    private fun screenshot('),
                            ('    private fun await(', '    private fun find('),
                            ('            tap("Approve for this session"); reviewed()\n            proveBroaderDraft()',
@@ -329,18 +330,20 @@ class DisclosureRevealBindingSource(unittest.TestCase):
             self.assertEqual(self.fixture.count(new), 1)
             for changed in (new + '// changed reviewed preparation\n', '', new + new):
                 with self.subTest(hunk=new[:80], replacement=changed[:80]), self.assertRaises(AssertionError):
-                    reverse_focus_wait(FIXTURE, self.fixture.replace(new, changed, 1))
+                    self.assertEqual(hashlib.sha256(reverse_disclosure_reveal(self.fixture.replace(new, changed, 1)).encode()).hexdigest(),
+                                     "48e42224d7358f2f9bd98758a19bb1ba66d42b756aa8bc77ce7cfb5f9d8a3f2a")
 
 
 class ConfirmationObservationOrderSource(unittest.TestCase):
     def setUp(self):
-        self.fixture = (ROOT / FIXTURE).read_text()
+        self.current = (ROOT / FIXTURE).read_text()
+        self.fixture = _focus_projection.reverse_scroll_idle(self.current)
         self.before = reverse_confirmation_order(self.fixture)
 
     def test_exact_permutation_preserves_all_old_oracles_and_establishes_owned_early_read_first(self):
         self.assertEqual(hashlib.sha256(self.before.encode()).hexdigest(),
                          '6d4ff021aad9da5cf4be6dee18eb3f25b6ed50f761d2999882a8110484687160')
-        self.assertEqual(hashlib.sha256(reverse_focus_wait(FIXTURE, self.fixture).encode()).hexdigest(), BASELINES[FIXTURE])
+        self.assertEqual(hashlib.sha256(reverse_focus_wait(FIXTURE, self.current).encode()).hexdigest(), BASELINES[FIXTURE])
         begin = '                // BEGIN LIFECYCLE_READ_DIAGNOSTIC confirm-retire-begin\n'
         end = '                // END LIFECYCLE_READ_DIAGNOSTIC confirm-retire-passed\n'
         moved = begin + self.before.split(begin, 1)[1].split(end, 1)[0] + end
@@ -389,7 +392,8 @@ class ConfirmationObservationOrderSource(unittest.TestCase):
             self.assertEqual(self.fixture.count(new), 1)
             for changed in (new + '// changed reviewed observation\n', '', new + new):
                 with self.subTest(hunk=new[:80], replacement=changed[:80]), self.assertRaises(AssertionError):
-                    reverse_focus_wait(FIXTURE, self.fixture.replace(new, changed, 1))
+                    self.assertEqual(hashlib.sha256(reverse_confirmation_order(self.fixture.replace(new, changed, 1)).encode()).hexdigest(),
+                                     "6d4ff021aad9da5cf4be6dee18eb3f25b6ed50f761d2999882a8110484687160")
 
 
 if __name__ == '__main__':

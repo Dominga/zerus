@@ -18,6 +18,7 @@
 #include "KeyboardSettings.h"
 #include "AnalyticsSettings.h"
 #include "Extensions.h"
+#include "WorktreeSettings.h"
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDesktopServices>
@@ -161,7 +162,7 @@ public:
             auto *check=new QCheckBox(option[2]);check->setObjectName(option[0]);check->setChecked(QSettings().value(option[1],option[3]=="true").toBool());sessions->addWidget(check);connect(check,&QCheckBox::toggled,this,[this,key=option[1]](bool on){QSettings().setValue(key,on);if(appearanceChanged)appearanceChanged();});
         }
         auto *completed=new QCheckBox(tr("Show completed subagents"));completed->setObjectName("workspaceShowCompletedSubagents");completed->setChecked(QSettings().value("workspace/showCompletedSubagents",false).toBool());sessions->addWidget(completed);
-        auto *completedHint=new QLabel(tr("Include agents whose latest turn has finished in the session list and its counts. Tasks & agents always shows all reported agents. Agents with unknown status remain visible."));completedHint->setWordWrap(true);sessions->addWidget(completedHint);
+        auto *completedHint=new QLabel(tr("Include agents whose latest turn has finished in the session list and its counts. Plan & agents always shows all reported agents. Agents with unknown status remain visible."));completedHint->setWordWrap(true);sessions->addWidget(completedHint);
         connect(completed,&QCheckBox::toggled,this,[this](bool on){QSettings().setValue("workspace/showCompletedSubagents",on);if(appearanceChanged)appearanceChanged();});
         auto *optionalQuestions=new QCheckBox(tr("Notify about optional questions"));optionalQuestions->setObjectName("notifyOptionalQuestions");optionalQuestions->setChecked(QuestionNotificationSettings::enabled());sessions->addWidget(optionalQuestions);
         auto *optionalHint=new QLabel(tr("Off by default. Shows a system notification once for each new optional question, which the agent keeps working without. It is withdrawn when the questions are answered or skipped, or the session is marked as read. Questions that need an answer always notify."));optionalHint->setWordWrap(true);sessions->addWidget(optionalHint);
@@ -226,8 +227,11 @@ public:
         legacy->setEnabled(false);legacy->hide();mobileLayout->addWidget(legacy);
         connect(legacyToggle,&QToolButton::toggled,this,[legacy,legacyToggle](bool show){legacy->setVisible(show);legacyToggle->setArrowType(show?Qt::DownArrow:Qt::RightArrow);});
         workspaceConnection->protectionChanged=[legacy,legacyToggle](bool encrypted){legacy->setEnabled(!encrypted);legacyToggle->setEnabled(!encrypted);if(encrypted){legacyToggle->setChecked(false);legacy->hide();}};
-        mobileLayout->addWidget(new PhonePairing::Panel(executable));mobileDelivery=new MobileDeliverySettings(executable);mobileLayout->addWidget(mobileDelivery);mobileLayout->addStretch();addPage(mobile);
+        auto *phones=new PhonePairing::Panel(executable);mobileLayout->addWidget(phones);
+        workspaceConnection->connectionChanged=[phones]{phones->refresh();};
+        mobileDelivery=new MobileDeliverySettings(executable);mobileLayout->addWidget(mobileDelivery);mobileLayout->addStretch();addPage(mobile);
         files=new DownloadCacheSettings;addPage(files);
+        worktreeSection=pages->count();nav->insertItem(worktreeSection,tr("Worktrees"));worktrees=new WorktreeSettings(executable);addPage(worktrees);
         approvalSection=pages->count();approvals=new AutomaticApprovalSettings(executable);addPage(approvals);
         speechSection=pages->count();speech=new SpeechSettings(executable);speech->setMaximumWidth(850);addPage(speech);
         keyboardSection=pages->count();keyboard=new KeyboardSettings(ShortcutRegistry::instance());keyboard->setMaximumWidth(850);addPage(keyboard);
@@ -281,7 +285,7 @@ public:
         refreshForkUpdate();
         about->addStretch();
         connect(nav,&QListWidget::currentRowChanged,pages,&QStackedWidget::setCurrentIndex);nav->setCurrentRow(0);
-        connect(nav,&QListWidget::currentRowChanged,this,[this](int row){if(row==aboutSection)refreshCliVersion();if(row==speechSection)speech->refresh();if(row==6)files->refresh();if(row==approvalSection)approvals->refresh();if(row==analyticsSection)analytics->refresh();});
+        connect(nav,&QListWidget::currentRowChanged,this,[this](int row){if(row==worktreeSection)worktrees->refresh();if(row==aboutSection)refreshCliVersion();if(row==speechSection)speech->refresh();if(row==6)files->refresh();if(row==approvalSection)approvals->refresh();if(row==analyticsSection)analytics->refresh();});
     }
     // WhiteWh fork: the About page's update from the fork's releases.
     void refreshForkUpdate(){
@@ -292,7 +296,7 @@ public:
         forkUpdate->setToolTip(updater->manualAvailable()?QString():tr("Updates from the fork run in its portable Windows build"));
         forkStatus->setText(updater->status());
     }
-    void setPeers(const QStringList &peers){sync->setPeers(peers);speech->setPeers(peers);analytics->setPeers(peers);}
+    void setPeers(const QStringList &peers){sync->setPeers(peers);speech->setPeers(peers);analytics->setPeers(peers);worktrees->setPeers(peers);}
     // A control-only computer keeps no recovery policy of its own.
     void setLocalSessions(bool enabled,bool offered=false){sync->setLocalSessions(enabled);sync->setLocalSessionsOffered(offered);}
     // Workspace enrollment is available before a local gateway starts.
@@ -342,6 +346,8 @@ private:
     AutomaticApprovalSettings *approvals;
     KeyboardSettings *keyboard;
     AnalyticsSettings *analytics;
+    WorktreeSettings *worktrees;
+    int worktreeSection=-1;
     int speechSection=-1,keyboardSection=-1,aboutSection=-1,approvalSection=-1,analyticsSection=-1;
     // An icon button restoring a slider's default, shown only after a change.
     // It keeps its space while hidden, so the rows below do not move. Focus

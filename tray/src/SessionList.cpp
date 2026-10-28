@@ -3,6 +3,8 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDrag>
+#include <QDataStream>
+#include <QIODevice>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFontMetrics>
@@ -54,6 +56,7 @@ SessionList::SessionList(QWidget *parent) : WorkspaceList(parent), m_token(QUuid
     connect(model(), &QAbstractItemModel::dataChanged, this, &SessionList::scheduleRowExpandButtons);
     connect(model(), &QAbstractItemModel::rowsInserted, this, &SessionList::scheduleRowExpandButtons);
     connect(model(), &QAbstractItemModel::rowsRemoved, this, &SessionList::scheduleRowExpandButtons);
+    connect(model(), &QAbstractItemModel::rowsMoved, this, &SessionList::scheduleRowExpandButtons);
     connect(model(), &QAbstractItemModel::modelReset, this, &SessionList::scheduleRowExpandButtons);
     connect(model(), &QAbstractItemModel::layoutChanged, this, &SessionList::scheduleRowExpandButtons);
     m_elapsedTimer.setInterval(1000);
@@ -358,7 +361,7 @@ void SessionList::mousePressEvent(QMouseEvent *e)
         e->accept(); return;
     }
     if (e->button() == Qt::LeftButton) { m_bulkSelecting = false; emit bulkSelectionChanged(); }
-    if (item && !item->data(SessionRoles::LaunchId).toString().isEmpty()) { e->accept(); return; }
+    if (item && !item->data(SessionRoles::LaunchId).toString().isEmpty()&&!item->flags().testFlag(Qt::ItemIsSelectable)) { e->accept(); return; }
     m_pressedTeam.clear();
     if (e->button() == Qt::LeftButton && item && !item->data(SessionRoles::TeamLead).toMap().isEmpty()
         && teamStripRect(visualItemRect(item)).contains(m_press)) {
@@ -563,19 +566,29 @@ QMimeData *SessionList::mimeData(const QList<QListWidgetItem *> &items) const
     if (items.size() != 1) return mime;
     const auto *item = items.first(); const bool group = item->data(SessionRoles::Header).toBool();
     if (!item->data(SessionRoles::ChildId).toString().isEmpty()) return mime;
-    const QJsonObject data{{"token", m_token}, {"group", group},
-        {"id", item->data(group ? SessionRoles::Group : SessionRoles::Identity).toString()}};
-    mime->setData(Mime, QJsonDocument(data).toJson(QJsonDocument::Compact));
+    QByteArray data;
+    QDataStream stream(&data, QIODevice::WriteOnly); stream.setVersion(QDataStream::Qt_6_0);
+    stream << m_token << group << item->data(group ? SessionRoles::Group : SessionRoles::Identity).toString();
+    mime->setData(Mime, data);
     return mime;
+}
+
+std::optional<SessionList::Dragged> SessionList::dragged(const QMimeData *mime)
+{
+    if (!mime || !mime->hasFormat(Mime)) return std::nullopt;
+    QDataStream stream(mime->data(Mime)); stream.setVersion(QDataStream::Qt_6_0);
+    Dragged drag;
+    stream >> drag.token >> drag.group >> drag.id;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd()) return std::nullopt;
+    return drag;
 }
 
 bool SessionList::validDrop(const QMimeData *mime) const
 {
-    if (!mime->hasFormat(Mime)) return false;
-    const auto data = QJsonDocument::fromJson(mime->data(Mime)).object();
-    if (data.value("token").toString() != m_token || data.value("id").toString().isEmpty()) return false;
-    const int role = data.value("group").toBool() ? SessionRoles::Group : SessionRoles::Identity;
-    for (int row = 0; row < count(); ++row) if (item(row)->data(role).toString() == data.value("id").toString()) return true;
+    const auto data = dragged(mime);
+    if (!data || data->token != m_token || data->id.isEmpty()) return false;
+    const int role = data->group ? SessionRoles::Group : SessionRoles::Identity;
+    for (int row = 0; row < count(); ++row) if (item(row)->data(role).toString() == data->id) return true;
     return false;
 }
 
@@ -630,31 +643,61 @@ SessionList::Placement SessionList::placement(const QPoint &point, bool movingGr
     return target;
 }
 
+const QListWidgetItem *SessionList::taskDropItem(const TaskDrag &task, const QPoint &point) const
+{
+    if (task.stage != QLatin1String("todo") && task.stage != QLatin1String("backlog")) return nullptr;
+    const auto *over = itemAt(point);
+    if (!over || over->isHidden() || over->data(SessionRoles::Group).toString() != task.projectId) return nullptr;
+    if (over->data(SessionRoles::Header).toBool()) return task.targetSession.isEmpty() ? nullptr : over;
+    const auto target = over->data(SessionRoles::TaskTarget).toStringList();
+    if (target.size() != 2) return nullptr;
+    const bool already = task.targetKnown && task.targetHost == target[0] && task.targetSession == target[1];
+    return already ? nullptr : over;
+}
+
 void SessionList::dragEnterEvent(QDragEnterEvent *e)
 {
-    if (validDrop(e->mimeData())) { e->setDropAction(Qt::MoveAction); e->accept(); } else e->ignore();
+    if (validDrop(e->mimeData()) || TaskDrag::from(e->mimeData())) { e->setDropAction(Qt::MoveAction); e->accept(); } else e->ignore();
 }
 void SessionList::dragMoveEvent(QDragMoveEvent *e)
 {
+    if (const auto task = TaskDrag::from(e->mimeData())) {
+        QListWidget::dragMoveEvent(e);   // Qt's edge auto-scroll
+        const auto *item = taskDropItem(*task, e->position().toPoint());
+        m_indicator = item ? visualItemRect(item).adjusted(3, 1, -3, -1) : QRect(); m_onGroup = m_taskDrop = item; viewport()->update();
+        if (item) { e->setDropAction(Qt::MoveAction); e->accept(); } else e->ignore();
+        return;
+    }
     if (!validDrop(e->mimeData())) { e->ignore(); return; }
     // Retain Qt's edge auto-scroll; the base drop mutation is deliberately unused.
     QListWidget::dragMoveEvent(e);
-    const auto target = placement(e->position().toPoint(), QJsonDocument::fromJson(e->mimeData()->data(Mime)).object().value("group").toBool());
+    const auto target = placement(e->position().toPoint(), dragged(e->mimeData())->group);
     m_indicator = target.indicator; m_onGroup = target.onGroup; viewport()->update();
     e->setDropAction(Qt::MoveAction); e->accept();
 }
 void SessionList::dragLeaveEvent(QDragLeaveEvent *e)
 {
-    m_indicator = {}; viewport()->update(); QListWidget::dragLeaveEvent(e);
+    m_indicator = {}; m_taskDrop = false; viewport()->update(); QListWidget::dragLeaveEvent(e);
 }
 void SessionList::dropEvent(QDropEvent *e)
 {
+    // The base drop, which would end Qt's edge scrolling, is not used.
+    stopAutoScroll();
+    if (const auto task = TaskDrag::from(e->mimeData())) {
+        const auto *item = taskDropItem(*task, e->position().toPoint());
+        m_indicator = {}; m_onGroup = m_taskDrop = false; viewport()->update();
+        if (!item) { e->ignore(); return; }
+        const auto target = item->data(SessionRoles::TaskTarget).toStringList();
+        e->setDropAction(Qt::MoveAction); e->accept();
+        emit taskDropped(*task, target.value(0), target.value(1));
+        return;
+    }
     if (!validDrop(e->mimeData())) { e->ignore(); return; }
-    const auto data = QJsonDocument::fromJson(e->mimeData()->data(Mime)).object();
-    const auto target = placement(e->position().toPoint(), data.value("group").toBool());
+    const auto data = *dragged(e->mimeData());
+    const auto target = placement(e->position().toPoint(), data.group);
     m_indicator = {}; viewport()->update();
-    if (data.value("group").toBool()) emit groupMoved(data.value("id").toString(), target.before);
-    else emit sessionMoved(data.value("id").toString(), target.group, target.before);
+    if (data.group) emit groupMoved(data.id, target.before);
+    else emit sessionMoved(data.id, target.group, target.before);
     e->setDropAction(Qt::MoveAction); e->accept();
 }
 void SessionList::keyPressEvent(QKeyEvent *e)
@@ -715,6 +758,7 @@ void SessionList::paintEvent(QPaintEvent *e)
     QPainter p(viewport()); p.setRenderHint(QPainter::Antialiasing);
     const QColor accent(property("hgsDark").toBool() ? "#8bdfc0" : "#167357");
     p.setPen(QPen(accent, 2));
+    if (m_taskDrop) p.setPen(QPen(accent, 2, Qt::DashLine));
     if (m_onGroup) { p.setBrush(Qt::NoBrush); p.drawRoundedRect(m_indicator, 5, 5); }
     else p.drawLine(m_indicator.topLeft(), m_indicator.topRight());
 }

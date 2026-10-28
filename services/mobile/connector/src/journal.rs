@@ -65,9 +65,14 @@ pub const READ_SQL: &str = "('inspect','process_output','terminal_snapshot','cat
 pub const SPEECH_READ_SQL: &str = "('speech_profiles','speech_stats','speech_status')";
 pub const SPEECH_CONFIG_READ_SQL: &str = "('speech_config','speech_config_status')";
 pub const VOICE_READ_SQL: &str = "('voice_profiles','voice_status')";
+/// Delivered exchanges older than the short-read window, found by their
+/// operation: the age index would walk every delivered mutation tombstone.
+pub const TASK_READ_PRUNE: &str = "DELETE FROM requests INDEXED BY journal_operation WHERE operation IN ('task_exchange','task_done') AND delivered=1 AND state!='running' AND delivered_at<?";
 
-/// Additive Rust-only reads stay outside the frozen Python class predicate.
-pub const GIT_STATUS_COUNT_SQL: &str = "SELECT count(*) FROM requests WHERE operation IN ('git_status','repository_check','repository_status')";
+/// Additive Rust-only reads stay outside the frozen Python class predicate:
+/// Git status, repository checks, and the phone's task exchange and Done list.
+pub const GIT_STATUS_COUNT_SQL: &str =
+    "SELECT count(*) FROM requests WHERE operation IN ('git_status','repository_check','repository_status','task_exchange','task_done')";
 pub const GIT_STATUS_PRUNE_SQL: &str = "DELETE FROM requests WHERE request_id IN (SELECT request_id FROM requests INDEXED BY journal_operation WHERE operation IN ('git_status','repository_check','repository_status') AND delivered=1 AND state IN ('completed','failed','uncertain') AND delivered_at<? ORDER BY delivered_at,request_id LIMIT 5000)";
 
 /// Delivered short-lived reads go after two minutes, other reads after an
@@ -283,6 +288,7 @@ impl Journal {
             &format!("DELETE FROM requests WHERE operation='attachment_read' AND {delivered}"),
             [short],
         )?;
+        tx.execute(TASK_READ_PRUNE, [short])?;
         tx.execute(
             &format!("DELETE FROM requests WHERE operation='archive_list' AND {delivered}"),
             [now - 3600.0],

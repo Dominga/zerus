@@ -15,12 +15,18 @@
 #include <QScrollBar>
 #include <QTreeWidget>
 #include <QUuid>
+#include "JsonSettings.h"
 #include "NewSessionDialog.h"
 #include "CloneRepositoryDialog.h"
 #include "OpenCodeModelPicker.h"
 #include "AccountUsageStore.h"
 #include "AccountUsage.h"
 #include "SessionsWindow.h"
+#include "SessionCreationController.h"
+#include "SessionList.h"
+#include "SessionSearch.h"
+#include <QPointer>
+#include <QPlainTextEdit>
 #include "FakeCli.h"
 #include "IdentityBadge.h"
 #include "AccountCatalog.h"
@@ -92,6 +98,9 @@ class TestNewSessionDialog : public QObject {
     }
 private slots:
     void initTestCase() {
+        // Workspace checks read Sessions rows right after an action: rows are prepared
+        // on the preparation thread while the GUI thread waits (SessionsWindow.h).
+        SessionsWindow::setRowPreparationForTests(SessionsWindow::RowPreparation::Blocking);
         QVERIFY(m_settings.isValid());QCoreApplication::setOrganizationName("hgs-tests");QCoreApplication::setApplicationName("new-session-dialog");
         QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,m_settings.path());
     }
@@ -99,8 +108,9 @@ private slots:
         QSettings().clear();
         for(const auto &name:{"fail","removed","slow-mac","released","missing","ended","quota-probes","mac-started","duplicates","other-scope","machine-accounts","slow-catalog-mac","catalog-started","empty-catalog","opencode","uncached","hold-probes","opencode-models","opencode-stopped","service-started","opencode-ids",
             "model-calls","favorite-calls","favorite-fails","models-stopped","old-hgs","favorites","slow-models","slow-favorite","favorite-started",
-            "hold-next-models","models-held","project-inference","canonical-directory","clone-calls","clone-worktree","clone-uncertain","clone-receipt","prefill-linked",
+            "hold-next-models","models-held","project-inference","canonical-directory","clone-calls","clone-worktree","clone-uncertain","clone-receipt","prefill-linked","hold-creation-folder","creation-folder-started","release-creation-folder",
             "ux","ux-calls"})flag(name,false);
+        QFile::remove(QSettings().fileName()+".creations.json");
         QVERIFY(FakeCli::install(m_fixture.filePath("hgs"),R"PY(#!/usr/bin/env python3
 import json,pathlib,sys,time
 root=pathlib.Path(__file__).parent
@@ -261,6 +271,9 @@ elif a[:2]==['account','favorite']:
  (root/'favorites').write_text(json.dumps(starred))
  print(json.dumps({'status':'applied','request_id':a[a.index('--request-id')+1],'model':model,'favorite':on,'favorites':starred}))
 elif a and a[0]=='dirs':
+ if (root/'hold-creation-folder').exists():
+  (root/'creation-folder-started').touch()
+  while not (root/'release-creation-folder').exists():time.sleep(.01)
  answer={'path':(root/'canonical-directory').read_text() if (root/'canonical-directory').exists() else a[-1],'directories':[]}
  if (root/'project-inference').exists():answer['project_inference']={'schema':1,'swarm_id':'swarm-fixture','project_id':(root/'project-inference').read_text()}
  print(json.dumps(answer))
@@ -281,6 +294,60 @@ elif a and a[0]=='worktrees':
         QTest::addColumn<QString>("host");QTest::addColumn<bool>("worktree");
         QTest::newRow("local-folder")<<QString()<<false;QTest::newRow("remote-folder")<<QString("mac")<<false;
         QTest::newRow("local-worktree")<<QString()<<true;QTest::newRow("remote-worktree")<<QString("mac")<<true;
+    }
+    void workspaceCreatesSelectableCardBeforeFolderCheckCompletes_data(){
+        QTest::addColumn<QString>("theme");QTest::addColumn<double>("scale");
+        QTest::newRow("dark")<<QString("dark")<<1.0;QTest::newRow("light-large")<<QString("light")<<1.5;
+    }
+    void editAcquiredCloneKeepsItsConfirmedFolder(){
+        NewSessionDialog dialog(program(),fleet());
+        const QJsonObject plan{{"id",QUuid::createUuid().toString(QUuid::WithoutBraces)},{"tag","retained-clone"},
+            {"account","work"},{"repository",true},{"clone_done",true},{"auto",false},
+            {"target","/workspace/fresh"},{"source","/workspace/previous-choice"}};
+        dialog.restoreCreationChoices(plan);
+        QCOMPARE(dialog.findChild<QLabel *>("launchFolderPath")->text(),QString("/workspace/fresh"));
+    }
+    void workspaceCreatesSelectableCardBeforeFolderCheckCompletes(){
+        QFETCH(QString,theme);QFETCH(double,scale);QSettings().setValue("workspace/theme",theme);QSettings().setValue("workspace/contentScale",scale);
+        SessionOrganization projects;const auto project=projects.createGroup("Creation fixture");projects.addFolder(project,"pc","/workspace/example");
+        setJsonSetting("workspace/organization",QJsonDocument(projects.toJson()).toJson(QJsonDocument::Compact));
+        SessionsWindow window(program());window.resize(900,650);window.setFleet(fleet());window.show();
+        const auto originalSearch=theme=="light"?QString("an existing search scope"):QString();
+        window.findChild<QLineEdit *>("search")->setText(originalSearch);
+        QPointer<NewSessionDialog> submitted;QString request;
+        QTimer::singleShot(0,&window,[&]{
+            submitted=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget());QVERIFY(submitted);
+            QTimer::singleShot(20000,submitted,&QDialog::reject);
+            submitted->selectPath("/workspace/example",false);
+            QTRY_VERIFY(row(*submitted,"work")>=0);choices(*submitted)->setCurrentRow(row(*submitted,"work"));
+            auto *start=submitted->findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());
+            flag("hold-creation-folder");
+            connect(submitted,&NewSessionDialog::creationRequested,&window,[&](const QJsonObject &){
+                const auto ops=window.findChild<SessionCreationController *>()->operations();QVERIFY(!ops.isEmpty());request=ops.begin().key();
+            });
+            start->click();
+        });
+        window.findChild<QPushButton *>("sessionPanelNewSession")->click();
+        QVERIFY(!submitted);QVERIFY(!request.isEmpty());
+        auto *list=window.findChild<SessionList *>("sessionList");QVERIFY(list);
+        QListWidgetItem *pending=nullptr;for(int i=0;i<list->count();++i)if(list->item(i)->data(SessionRoles::LaunchId)==request)pending=list->item(i);
+        QVERIFY(pending);QVERIFY(pending->flags().testFlag(Qt::ItemIsSelectable));QCOMPARE(list->currentItem(),pending);
+        QTRY_VERIFY(QFile::exists(m_fixture.filePath("creation-folder-started")));
+        QVERIFY(list->isVisible());QCOMPARE(window.findChild<QLineEdit *>("search")->text(),originalSearch);
+        QVERIFY(window.findChild<QWidget *>("creationDetailPanel")->isVisible());
+        auto *progress=window.findChild<QPlainTextEdit *>("creationDetails");QVERIFY(progress);
+        QTRY_COMPARE(progress->font().pixelSize(),qRound(13*scale));
+        auto *panel=window.findChild<QWidget *>("creationDetailPanel");QVERIFY(panel->rect().contains(progress->geometry()));
+        const auto preview=qEnvironmentVariable("ZERUS_PREVIEW_DIR");if(!preview.isEmpty())QVERIFY(window.grab().save(preview+"/session-creation-"+theme+".png"));
+        auto *stop=window.findChild<QPushButton *>("creationStop");QVERIFY(stop->isVisible());stop->click();
+        flag("release-creation-folder");
+        auto *controller=window.findChild<SessionCreationController *>();QTRY_COMPARE(controller->operation(request)["state"].toString(),QString("stopped"));
+        QVERIFY(window.findChild<QPlainTextEdit *>("creationDetails")->toPlainText().contains("Setup stopped"));
+        window.findChild<QLineEdit *>("search")->setText(controller->operation(request)["tag"].toString());
+        auto *search=window.findChild<QListWidget *>("searchResults");QVERIFY(search);
+        const auto hasCreation=[&]{for(int i=0;i<search->count();++i)if(SessionSearch::creationId(search->item(i))==request)return true;return false;};
+        QTRY_VERIFY(hasCreation());QVERIFY(window.findChild<QWidget *>("creationDetailPanel")->isVisible());
+        QTRY_VERIFY(window.findChild<QPushButton *>("creationEdit")->isVisible());
     }
     void cloneCreatesProjectAndStartsOnSelectedComputer(){
         QFETCH(QString,host);QFETCH(bool,worktree);if(worktree)flag("clone-worktree");SessionOrganization projects;const auto initial=projects.createGroup("Existing");
@@ -404,7 +471,7 @@ elif a and a[0]=='worktrees':
             const QJsonArray source{program(),QString()};
             const auto key="workspace/repositoryClone/"+QString::fromLatin1(QJsonDocument(source).toJson(QJsonDocument::Compact).toHex());
             const QJsonObject pending{{"request_id",QUuid::createUuid().toString(QUuid::WithoutBraces)},{"url","git@example.invalid:team/fresh.git"},{"parent","/workspace"},{"name","fresh"},{"path","/workspace/fresh"}};
-            QSettings().setValue(key+"/pending",QJsonDocument(pending).toJson(QJsonDocument::Compact));
+            setJsonSetting(key+"/pending",QJsonDocument(pending).toJson(QJsonDocument::Compact));
         }
         SessionOrganization projects;const auto project=projects.createGroup("Example");projects.addFolder(project,"pc","/workspace/example");
         SessionsWindow workspace(program());workspace.setFleet(fleet());
@@ -893,7 +960,7 @@ elif a and a[0]=='worktrees':
         if(inferred)QVERIFY(launched[0][7].toString().isEmpty());
     }
     void rememberedAndExplicitMissingAccounts() {
-        QSettings().setValue("workspace/launchAccounts",QByteArray(R"({"":{"codex":"gone"}})"));
+        setJsonSetting("workspace/launchAccounts",QByteArray(R"({"":{"codex":"gone"}})"));
         NewSessionDialog dialog(program(),fleet(),{},"codex");dialog.selectPath("/workspace/example",false);dialog.show();
         QTRY_VERIFY(row(dialog,"work")>=0);QTRY_COMPARE(choices(dialog)->count(),5);QCOMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),QString("other"));
         dialog.selectAccount("gone");QVERIFY(!choices(dialog)->currentItem());QVERIFY(!dialog.findChild<QPushButton *>("primary")->isEnabled());
@@ -940,7 +1007,7 @@ elif a and a[0]=='worktrees':
         QTRY_COMPARE(choices(dialog)->count(),5);QTRY_VERIFY(row(dialog,"claude-copy")>=0);
         QCOMPARE(row(dialog,"claude"),-1);QCOMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),QString("claude-copy"));
         // Another form changing remembered defaults cannot retarget this form.
-        QSettings().setValue("workspace/launchAccounts",QByteArray(R"({"":{"claude":"claude"}})"));
+        setJsonSetting("workspace/launchAccounts",QByteArray(R"({"":{"claude":"claude"}})"));
         for(auto *timer:dialog.findChildren<QTimer *>())if(timer->interval()==60000)QMetaObject::invokeMethod(timer,"timeout");
         QCOMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),QString("claude-copy"));
         dialog.selectAccount("claude");QVERIFY(row(dialog,"claude")>=0);QCOMPARE(row(dialog,"claude-copy"),-1);

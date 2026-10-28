@@ -715,18 +715,23 @@ class Sessions(Contract):
         self.assertTrue(self.resolves(name))
 
     def test_terminate_waits_for_the_agent_then_archives_the_session(self):
-        # Agents take a moment to exit; terminate must wait for it.
-        self.configure(ON_EOF="ignore", ON_SIGNAL=",".join(f"{event}=delay:300" for event in sorted(CLOSE_SIGNALS)))
+        # Unix Terminate fences and forcibly ends the verified tree, even when
+        # native callbacks ignore shutdown. Windows retains its graceful delay.
+        response = "ignore" if BACKEND == "tmux" else "delay:300"
+        self.configure(ON_EOF="ignore", ON_SIGNAL=",".join(f"{event}={response}" for event in sorted(CLOSE_SIGNALS)))
         name, row, agent = self.launch()
         kept, kept_row, kept_agent = self.launch("kept")
         pid = agent["pid"]
         result = self.hgs("terminate", name)
         self.assertTrue(result.stdout.startswith(f"hgs: terminated and archived {name} ("), result.stdout)
-        exit_event, = self.events(pid, "exit")
-        signals = self.events(pid, "signal")
-        self.assertTrue(signals and {event["signal"] for event in signals} <= CLOSE_SIGNALS, signals)
-        self.assertEqual(exit_event["cause"], "signal:" + signals[0]["signal"])
-        self.assertGreaterEqual(exit_event["t"] - signals[0]["t"], 0.3)
+        if BACKEND == "tmux":
+            self.assertEqual(self.events(pid, "exit"), [], "Forced exit must not depend on a native exit callback")
+        else:
+            exit_event, = self.events(pid, "exit")
+            signals = self.events(pid, "signal")
+            self.assertTrue(signals and {event["signal"] for event in signals} <= CLOSE_SIGNALS, signals)
+            self.assertEqual(exit_event["cause"], "signal:" + signals[0]["signal"])
+            self.assertGreaterEqual(exit_event["t"] - signals[0]["t"], 0.3)
         self.assertEqual(self.tokens(pid), [])
         self.assertFalse(self.alive(pid, agent["process_start"]))
         archived = self.sessions()[name]
@@ -736,6 +741,10 @@ class Sessions(Contract):
         self.assertEqual(self.sessions()[kept]["run_id"], kept_row["run_id"])
         self.assertTrue(self.alive(kept_agent["pid"], kept_agent["process_start"]))
         self.assertEqual(self.events(kept_agent["pid"], "signal"), [])
+        if BACKEND == "tmux":
+            # Both agents deliberately ignore hangup. After proving isolation,
+            # explicitly terminate the retained fixture before socket teardown.
+            self.hgs("terminate", kept, "--expected-run-id", kept_row["run_id"])
 
     def test_kill_ends_the_agent_and_forgets_the_session_but_not_its_history(self):
         name, row, agent = self.launch()

@@ -1,3 +1,4 @@
+#include "JsonParse.h"
 #include "ComposerDraftStore.h"
 
 #include <QCryptographicHash>
@@ -17,6 +18,15 @@
 #include <memory>
 
 namespace {
+const QString QuestionPrefix = QStringLiteral("question\n");
+// The session key in each stored question-answer draft key, which holds it in a
+// compact JSON array (QuestionCard::identity). The draft index decodes them off
+// the GUI thread, and owner() reads them here: Saved drafts names only drafts
+// that index listed. Each index replaces them, so they stay as many as the
+// question-answer drafts on disk.
+QMutex s_questionsMutex;
+QHash<QString, QString> s_questionSessions;
+
 const auto PrivateDirectory = QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner;
 const auto PrivateFile = QFile::ReadOwner | QFile::WriteOwner;
 QString hash(const QByteArray &bytes) { return QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex()); }
@@ -138,9 +148,13 @@ void ComposerDraftStore::saveAsync(const QString &key, const ComposerDraft &draf
         owner, std::move(done));
 }
 
+// The blocking fixture API reads on the writer thread too, after every queued
+// write, so no draft file is parsed on the GUI thread.
 ComposerDraft ComposerDraftStore::load(const QString &key) const
 {
-    flushWrites(); return loadDirect(key);
+    const auto store = *this; ComposerDraft draft;
+    DraftWrites::instance()->sync([&] { draft = store.loadDirect(key); return WriteResult{true, {}}; });
+    return draft;
 }
 
 ComposerDraft ComposerDraftStore::loadDirect(const QString &key) const
@@ -152,9 +166,9 @@ ComposerDraft ComposerDraftStore::loadDirect(const QString &key) const
         draft.storageError = QObject::tr("Could not restore this draft completely. Saved files have been kept locally.");
     };
     if (!file.open(QIODevice::ReadOnly)) { invalid(); return draft; }
-    QJsonParseError error;
-    const auto object = QJsonDocument::fromJson(file.readAll(), &error).object();
-    if (error.error != QJsonParseError::NoError || object.value("version").toInt() != 1 || object.value("key").toString() != key) {
+    QString error;
+    const auto object = JsonParse::parse(file.readAll(), &error).object();
+    if (!error.isEmpty() || object.value("version").toInt() != 1 || object.value("key").toString() != key) {
         invalid(); return draft;
     }
     draft.text = object.value("text").toString();
@@ -218,7 +232,9 @@ bool ComposerDraftStore::saveDirect(const QString &key, ComposerDraft &draft) co
 
 QStringList ComposerDraftStore::keys() const
 {
-    flushWrites(); auto result = indexDirect().keys(); result.sort(); return result;
+    const auto store = *this; QStringList result;
+    DraftWrites::instance()->sync([&] { result = store.indexDirect().keys(); return WriteResult{true, {}}; });
+    result.sort(); return result;
 }
 
 QHash<QString, ComposerDraftSummary> ComposerDraftStore::indexDirect() const
@@ -227,7 +243,7 @@ QHash<QString, ComposerDraftSummary> ComposerDraftStore::indexDirect() const
     for (const auto &name : QDir(root()).entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
         QFile file(root() + '/' + name + "/draft.json");
         if (!file.open(QIODevice::ReadOnly)) continue;
-        const auto object = QJsonDocument::fromJson(file.readAll()).object();
+        const auto object = JsonParse::parse(file.readAll()).object();
         const auto key = object.value("key").toString();
         const auto text = object.value("text").toString();
         const auto attachments = object.value("attachments").toArray();
@@ -240,20 +256,37 @@ QHash<QString, ComposerDraftSummary> ComposerDraftStore::indexDirect() const
         for (const auto &line : text.split('\n')) if (!line.trimmed().isEmpty()) { summary.preview = line.simplified().left(200); break; }
         result.insert(key, summary);
     }
+    QHash<QString, QString> questions;
+    for (auto it = result.cbegin(); it != result.cend(); ++it) {
+        if (!it.key().startsWith(QuestionPrefix)) continue;
+        // A question identity is a compact JSON array, so it holds no line break.
+        const auto identity = JsonParse::array(it.key().mid(QuestionPrefix.size()).section('\n', 0, 0).toUtf8());
+        questions.insert(it.key(), identity.at(0).toString());
+    }
+    QMutexLocker lock(&s_questionsMutex);
+    s_questionSessions = std::move(questions);
     return result;
 }
 
 ComposerDraftOwner ComposerDraftStore::owner(const QString &key)
 {
-    static const QString Voice = QStringLiteral("voice-message-draft\n"), Question = QStringLiteral("question\n");
-    if (key.startsWith(Voice)) {
-        auto result = owner(key.mid(Voice.size()));
-        if (result.kind == ComposerDraftOwner::Kind::Message) { result.kind = ComposerDraftOwner::Kind::Voice; return result; }
+    static const QString Voice = QStringLiteral("voice-message-draft\n");
+    static const QString Task = QStringLiteral("task-draft\n");
+    for (const auto &[prefix, kind] : {std::pair{QStringLiteral("task-description\n"), ComposerDraftOwner::Kind::TaskDescription}, std::pair{QStringLiteral("task-comment\n"), ComposerDraftOwner::Kind::TaskComment}}) {
+        if (!key.startsWith(prefix)) continue;
+        const auto parts = key.mid(prefix.size()).split('\n');
+        if (parts.size() != 2 || parts[0].isEmpty() || parts[1].isEmpty()) return {};
+        ComposerDraftOwner result; result.kind = kind; result.project = parts[0]; result.task = parts[1]; return result;
     }
-    if (key.startsWith(Question)) {
-        // A question identity is a compact JSON array, so it holds no line break.
-        const auto identity = QJsonDocument::fromJson(key.mid(Question.size()).section('\n', 0, 0).toUtf8()).array();
-        auto result = owner(identity.at(0).toString());
+    for (const auto &[prefix, kind] : {std::pair{Voice, ComposerDraftOwner::Kind::Voice}, std::pair{Task, ComposerDraftOwner::Kind::Task}}) {
+        if (!key.startsWith(prefix)) continue;
+        auto result = owner(key.mid(prefix.size()));
+        if (result.kind == ComposerDraftOwner::Kind::Message || (prefix == Voice && (result.kind == ComposerDraftOwner::Kind::TaskDescription || result.kind == ComposerDraftOwner::Kind::TaskComment))) { result.kind = kind; return result; }
+    }
+    if (key.startsWith(QuestionPrefix)) {
+        QString session;
+        { QMutexLocker lock(&s_questionsMutex); session = s_questionSessions.value(key); }
+        auto result = owner(session);
         if (result.kind != ComposerDraftOwner::Kind::Unknown) { result.kind = ComposerDraftOwner::Kind::Question; return result; }
     }
     const auto parts = key.split('\n');
@@ -320,11 +353,11 @@ void ComposerDraftStore::renameAsync(const QString &oldKey, const QString &newKe
 
 QString ComposerDraftStore::label(const QString &key) const
 {
-    flushWrites();
-    QFile file(folder(key) + "/draft.json");
-    if (file.open(QIODevice::ReadOnly)) {
-        const auto label = QJsonDocument::fromJson(file.readAll()).object().value("label").toString();
-        if (!label.isEmpty()) return label;
-    }
-    return QString(key).replace('\n', " / ");
+    const auto path = folder(key) + "/draft.json"; QString label;
+    DraftWrites::instance()->sync([&] {
+        QFile file(path);
+        if (file.open(QIODevice::ReadOnly)) label = JsonParse::parse(file.readAll()).object().value("label").toString();
+        return WriteResult{true, {}};
+    });
+    return label.isEmpty() ? QString(key).replace('\n', " / ") : label;
 }

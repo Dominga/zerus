@@ -43,7 +43,35 @@ forward secrecy. See the [wire contract](../../services/mobile/crypto/README.md)
 
 Shared protocol fixtures and HTTP tests cover signature/key substitution,
 membership history, exact ciphertext retry and receipt-only recovery. The
-emulator-only `WorkspaceJournalSmokeInstrumentation` separately exercises real
+activity and history reads first poll their retained receipt after 100 ms,
+then at 200 ms through the first eight polls, returning to the ordinary 800 ms
+cadence. The maximum
+poll count remains bounded; a pending receipt never resubmits its request.
+Encrypted receipt HTTP overlaps a fresh signed membership check, but the app
+requires the original protected request and active enrollment before fetching,
+and verifies current membership before decrypting or settling any result.
+
+For a privately signed diagnostic preview, `-PzerusReadTiming=true` enables the
+`ZerusReadTiming` logcat tag. It contains only fixed operation/stage names,
+process-local sequence numbers and monotonic durations. It records no request
+IDs, workspace identities, paths, bodies, keys or error strings. Ordinary builds
+leave it disabled; do not use a diagnostic preview's local measurements as
+evidence of a published version or an end-to-end latency guarantee.
+
+Catalog history-head probes pause while a conversation is selected, so unseen
+chat metadata does not queue ahead of its visible inspection and history. An
+already submitted probe keeps its request identity and may finish; explicit
+read-evidence preparation remains available. Returning to the list resumes the
+bounded fair head scheduler.
+
+While an ordinary conversation is visible, automatic inspection waits for the
+current read to finish, with a two-second minimum cycle and at least a 200 ms
+pause after a slower read. Errors, catalog views and native-input review keep
+their five-second pacing. The timer waits on the existing read job; navigation
+and journal handling keep their current behavior. Manual refresh still shares
+any in-flight read.
+
+The emulator-only `WorkspaceJournalSmokeInstrumentation` separately exercises real
 Keystore/SQLite recovery with private state and ciphertext larger than 2 MiB.
 Compiling its test APK does not qualify that native runtime path; running it
 requires an isolated emulator and separately authorized installation.
@@ -190,9 +218,16 @@ uncertain messages.
 An unopened conversation immediately shows “Loading conversation…” while its
 messages load. A resolved empty conversation keeps “No messages yet.” during
 background reads instead of returning to the initial placeholder. Opening cached
-messages immediately animates the existing **Refresh** action until the initial
-inspection and history reads settle. Cached messages remain readable, and the
-indicator never inserts a row or moves the transcript. Later background reads
+messages immediately shows a pinned status beneath the session tools, distinguishing
+saved messages from checking activity and loading history. The status remains outside
+the scrolling transcript; its two lines and indicator slot retain their geometry as
+reads settle. The Refresh action remains in place. Opening starts exact-target
+inspection and canonical history independently instead of serializing their relay
+round trips. Either may finish first; a complete page already covered by the opening
+inspection is not immediately fetched again. Cached messages remain readable, and
+only the fresh inspection permits actions. The periodic loop does not start another
+inspection while that verified opening is still waiting for its first history page;
+explicit refresh remains available. Later background reads
 show progress only after five seconds; manual refresh shows it immediately and
 reuses any matching in-flight read. Catalogs retain their thin progress bar.
 Pulling a conversation up past its newest
@@ -360,6 +395,44 @@ Opening a project shows its folder details; View sessions opens a scoped Session
 view. Back returns to project details and preserves the normal Sessions query
 and filter. Archives are assigned by their UUID, so an archived and live session
 with the same name can belong to different projects.
+
+### Project tasks
+
+The phone keeps a replica of every catalogued project's tasks (the project
+document, every task that is not Done and any task it already holds) below
+`noBackupFilesDir/task-replicas-v1`, one folder per relay connection and swarm,
+without further encryption; backups and device transfer never include it, and
+removing a connection removes its replicas. While the app is visible it checks
+every 15 seconds, on every tab, with the catalog's tasks digests, or with its own
+read of the computers when the catalog has not been read for 20 seconds. It
+exchanges a project with every online computer that advertises `task_exchange`
+(on its relay too) and names a digest other than the phone's own, one computer
+at a time; a computer whose exchange failed waits a minute. The Rust exchange
+(`zerus-replica`'s `phone` module through `TaskExchange`) decides each request:
+ranges of task UUIDs that fit the relay, large documents in parts, and the
+phone's own changes the computer lacks; `TaskSync.kt` only carries its JSON.
+
+The Tasks button in a conversation's tools row, after Terminal, opens the
+project's tasks full-screen (`TasksUi.kt`, modelled by `TasksPresentation.kt`);
+its badge counts the tasks In review. Edits are made in the phone's replica and
+exchanged with the project's computers at once. Send now first exchanges the
+project with the session's computer, then asks it for `task_send`, then
+exchanges again; a failed first exchange sends nothing. A task pinned to a
+session goes to the computer that runs it, an Any session task to the session
+chosen in the chips. A receipt the computer cannot confirm, or a lost answer
+from the relay, says the task may have been sent, and Send now for it waits
+until an exchange with that computer completes. Cancel goes to
+the session's computer, or, while it is out of reach, to another online
+computer of the project, which cancels it there without the cancel message;
+the dialog says which. A session whose computer does not report its native ID
+takes no tasks: the input says why. Done comes from a computer in
+pages of 50 through `task_done`: the last 7 days, then "Show older (N)",
+and with Only this session only the tasks sent to that session;
+opening a Done task fetches it into the replica, where it stays. Tasks sends
+no notifications. See "Phone" in
+`docs/superpowers/specs/2026-10-18-task-replication-loro-design.md` and
+"Android interface" in
+`docs/superpowers/specs/2026-10-13-project-task-queue-design.md`.
 
 ## Conversation history and native controls
 
@@ -630,8 +703,15 @@ the complete voice request and result between enrolled endpoints.
 
 ## Build and install
 
-Install JDK 17 or 21 and Android SDK platform 36 / build tools 35.0.0. Set
-`JAVA_HOME` and `ANDROID_HOME` for those tools, then run:
+Install JDK 17 or 21, Android SDK platform 36 / build tools 36.0.0 and NDK
+28.2.13676358, Rust 1.99.1 with the targets `aarch64-linux-android`,
+`armv7-linux-androideabi` and `x86_64-linux-android`, and
+`cargo install cargo-ndk --version 4.1.2 --locked`. Set `JAVA_HOME` and
+`ANDROID_HOME` for those tools. The build compiles the task replica
+(`crates/replica-ffi`) for each packaged ABI (arm64-v8a, armeabi-v7a, x86_64),
+generates its Kotlin bindings with UniFFI from the host library, which the unit
+tests load, and collects the Rust crates' licence notices into Third-party
+notices. Then run:
 
 ```sh
 cd mobile/android

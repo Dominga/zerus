@@ -439,7 +439,8 @@ fn capture(record: &Value) -> Result<String> {
     {
         return Err("invalid tracked pane".into());
     }
-    let output = backend::current().capture(pane, backend::Capture::Plain)?;
+    // A status summary shares this screen with its terminal choosers.
+    let output = kimi_tui_choice::plain(pane)?;
     Ok(String::from_utf8_lossy(&output).into_owned())
 }
 
@@ -766,6 +767,13 @@ fn catalog(record: &Value) -> Vec<ModelOption> {
     result
 }
 
+pub(super) fn account_models(provider: &str, home: &Path) -> Value {
+    let models = catalog(&json!({"agent":provider,"agent_home":home}));
+    json!({"models":models.iter().take(64).map(|m| json!({"id":m.id,"label":m.label,
+        "effort_options":m.efforts,"default_effort":m.default_effort})).collect::<Vec<_>>(),
+        "truncated":models.len()>64})
+}
+
 fn settings_reason(record: &Value, models: &[ModelOption]) -> &'static str {
     if record.get("archive_id").is_some() || string(record, "state") == "archived" {
         return "Restore the archived session before changing its settings";
@@ -1010,8 +1018,12 @@ fn cursor(record: &Value) -> Result<backend::PaneInfo> {
     )
 }
 
-fn wait_until<T>(mut read: impl FnMut() -> Result<Option<T>>) -> Result<T> {
-    let deadline = Instant::now() + Duration::from_secs(2);
+fn wait_until<T>(read: impl FnMut() -> Result<Option<T>>) -> Result<T> {
+    wait_until_for(Duration::from_secs(2), read)
+}
+
+fn wait_until_for<T>(timeout: Duration, mut read: impl FnMut() -> Result<Option<T>>) -> Result<T> {
+    let deadline = Instant::now() + timeout;
     loop {
         if let Some(value) = read()? {
             reacted();
@@ -1047,7 +1059,10 @@ fn codex_change(
         }
         let next = if target > index { index + 1 } else { index - 1 };
         send_key(&record, if target > index { "M-." } else { "M-," })?;
-        wait_until(|| {
+        // Released Codex hides its model/effort footer for a 2.5-second Max or
+        // Ultra status-line animation. Wait for the exact footer; never repeat
+        // the step or treat the animation label as confirmation.
+        wait_until_for(Duration::from_secs(5), || {
             let record = checked(name, request, false)?;
             Ok(
                 (footer("codex", &current.model, &capture(&record)?).as_deref()
@@ -1207,7 +1222,9 @@ fn command_ready(record: &Value, command: &str) -> Result<bool> {
                     completion.split_whitespace().next() == command.strip_prefix('/')
                 })
         }
-        _ => before.trim() == format!("› {command}") && after.trim().is_empty(),
+        "codex" => input::codex_prompt(before.trim()).is_some_and(|text| text.trim() == command)
+            && after.trim().is_empty(),
+        _ => false,
     })
 }
 
@@ -1397,7 +1414,7 @@ fn codex_model(name: &str, request: &Request, model: &ModelOption) -> Result<()>
         }
         send_key(&checked(name, request, false)?, "s")?;
     }
-    wait_until(|| {
+    wait_until_for(Duration::from_secs(5), || {
         let r = checked(name, request, false)?;
         Ok(
             (target_footer(&r, model, &capture(&r)?).as_deref() == Some(request.effort.as_str()))

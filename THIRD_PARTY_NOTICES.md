@@ -41,10 +41,25 @@ LobeHub. Its license is retained in `tray/resources/agent-icons/LICENSE`, also i
 the embedded Qt resource; the Ollama logo is recolored to `#e6e8eb`, and the team views
 paint the monochrome parts of the Kimi and OpenCode logos in the theme's text color.
 
+## Web client design mockup
+
+The design mockup in `design/webui` is not shipped with Zerus packages. It
+embeds the outline paths of two [Tabler Icons](https://github.com/tabler/tabler-icons)
+3.50.0 glyphs (`brand-apple`, `brand-windows`) as operating system marks in
+`design/webui/src/lib/os-icons.ts`, under MIT; the complete license and copyright
+notice are retained in `design/webui/licenses/tabler-icons-LICENSE.txt`. Its
+Linux mark is original Zerus artwork. `design/webui/src/lib/icons.generated.ts`
+contains static markup generated from the installed `lucide-solid` package (ISC).
+
 ## Dependencies obtained during build
 
 Rust dependencies and versions are locked in `Cargo.lock` and, for the mobile
 connector that Linux packages also ship, `services/mobile/connector/Cargo.lock`.
+hgs links Loro (MIT) through `crates/replica`; Loro in turn links `im`,
+`bitmaps` and `sized-chunks` under MPL-2.0, unmodified from crates.io, where
+their source code is available. Packages carry their MPL-2.0 license texts.
+Crates that publish no license file get the upstream notices kept in
+`packaging/rust-licenses`.
 The license expressions and source repositories of the first are recorded in
 `docs/rust-dependencies.json`; packages carry the notices of both.
 This inventory is metadata, not a replacement for dependency license texts.

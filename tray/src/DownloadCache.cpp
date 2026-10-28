@@ -1,3 +1,4 @@
+#include "JsonParse.h"
 #include "DownloadCache.h"
 #include "LocalFile.h"
 #include <QCoreApplication>
@@ -138,10 +139,9 @@ struct Ledger {
         QFile file(QDir(root).filePath(Index));
         if (!occupied(file.fileName())) return;
         if (!ordinary(QFileInfo(file)) || file.size() > 32 * 1024 * 1024 || !file.open(QIODevice::ReadOnly)) { error = text("Cannot read the downloaded files index."); return; }
-        QJsonParseError parse;
-        const auto document = QJsonDocument::fromJson(file.readAll(), &parse);
-        const auto object = document.object();
-        if (parse.error != QJsonParseError::NoError || object.value("version") != 1 || !object.value("files").isArray()) { error = text("The downloaded files index is invalid. Existing files were preserved."); return; }
+        QString parse;
+        const auto object = JsonParse::parse(file.readAll(), &parse).object();
+        if (!parse.isEmpty() || object.value("version") != 1 || !object.value("files").isArray()) { error = text("The downloaded files index is invalid. Existing files were preserved."); return; }
         entries = object.value("files").toArray();
         QSet<QString> names;
         for (const auto &value : entries) {

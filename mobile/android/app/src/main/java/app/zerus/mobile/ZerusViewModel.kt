@@ -11,6 +11,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
@@ -27,10 +28,21 @@ import android.net.Uri
 import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
+import app.zerus.mobile.replica.SessionRef
+import app.zerus.mobile.replica.TaskInfo
+import app.zerus.mobile.replica.TaskPosition
+import app.zerus.mobile.replica.TaskSettings
+import app.zerus.mobile.replica.TaskStage
+import app.zerus.mobile.replica.TaskStore
+import app.zerus.mobile.replica.TaskTarget
 
 class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val store = PrivateStore(application)
     private val api = RelayApi(workspace = store.workspaceJournal)
+    override fun onCleared() {
+        api.closeResultStreams()
+        super.onCleared()
+    }
     private val gitStatusRelay = GitStatusRelay(api)
     private fun gitStatusCatalog() = GitStatusCatalog(connections, machines, relayOperations, machineOperations, demo, storageReady)
     private fun gitStatusAccess(key: MachineKey) = gitStatusCatalog().access(key)
@@ -157,6 +169,13 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val previewAccounts by lazy { AccountSnapshots.demo(System.currentTimeMillis()/1000.0) }
     var projects by mutableStateOf<List<ProjectSummary>>(emptyList()); private set
     var projectWarnings by mutableStateOf<List<String>>(emptyList()); private set
+    // The phone's task replicas and their sync (TaskSync.kt); tasks have no screen yet.
+    private val taskReplicas by lazy { TaskReplicas(java.io.File(getApplication<Application>().noBackupFilesDir, "task-replicas-v1")) }
+    private val taskSync by lazy { TaskSync({ api }, taskReplicas) }
+    private var taskDigests: Map<ProjectKey, Map<String, String>> = emptyMap()
+    private var taskDigestsAt = 0L
+    private var taskSyncRunning = false
+    private var taskSyncJob: Job? = null
     var selectedProject by mutableStateOf<ProjectSummary?>(null); private set
     var sessionProjectScope by mutableStateOf<ProjectSummary?>(null); private set
     var sessionFilter by mutableStateOf(SessionFilter.All); private set
@@ -366,6 +385,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private var pendingHistoryPosition=""
     private var pendingHistoryPublication=""
     private var lastHistoryObservation=0L
+    private var lastHistoryReadCompletedAt=0L
     private fun historyNetworkReason(target:Target):String = when {
         target.run.isBlank() || target.conversation.isBlank() -> "History is still starting."
         connections.none { it.id==target.connectionId } -> "No connection. Showing saved conversation."
@@ -413,7 +433,13 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if(selected?.target != target) return
         if(!readPositionReady) pendingHistoryPosition=target.key
         pendingHistoryPublication=target.key
-        val head=frames[target.key] ?: activeFrame?.takeIf { it.target==target } ?: return
+        val head=frames[target.key] ?: activeFrame?.takeIf { it.target==target }
+        if (head == null) {
+            // The opening history and inspection run independently. Retain this
+            // verified page's metadata until the matching inspection arrives.
+            historyComplete=complete;historyIndexing=indexing
+            return
+        }
         installFrame(head.copy(events=window.displayed,presentation=null,truncated=head.truncated || window.hasBefore || window.hasAfter,window=window,indexComplete=complete,indexing=indexing,unreadBoundary=boundary),activityVerified)
     }
     /** Projection responses are display evidence only: never call observeHistoryHead,
@@ -494,6 +520,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 if(aliases.isNotEmpty()) readWriter?.let { readState=it.edit { state -> state.supersede(target,aliases) } }
                 observeHistoryHead(page,verifiedPage)
                 if(selected?.target != target || navigationId != navigation) return@launch
+                if(verifiedPage && page.complete) lastHistoryReadCompletedAt=System.currentTimeMillis()
                 if(mode=="" && verifiedPage && !page.complete) {
                     androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
                         historyIndexing=page.indexing;historyComplete=false;olderLoading=false;readPositionReady=true
@@ -535,18 +562,22 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private fun restoreSavedWindow(target:Target,navigation:Long) {
         val saved=readState.record(target)?.viewport ?: return
         if(saved.cursor.isBlank()) return
+        val originalWindow=historyWindows[target.key]
         readPositionReady=false
         viewModelScope.launch {
             var published=false
             try {
                 val page=HistoryReadPaths.saved(target) { pageCache.read(target,"around",saved.cursor) } ?: return@launch
-                if(selected?.target==target && navigationId==navigation && conversationEvents.none { it.id==saved.eventId }) {
+                if(selected?.target==target && navigationId==navigation && historyWindows[target.key]===originalWindow && conversationEvents.none { it.id==saved.eventId }) {
                     publishWindow(target,HistoryWindow.from(page));restoreHistoryAttempt=target.key+saved.cursor;published=true
                 }
-            } finally { if(!published && selected?.target==target && navigationId==navigation) readPositionReady=true }
+            } finally { if(!published && selected?.target==target && navigationId==navigation && !olderLoading && pendingHistoryPublication!=target.key) readPositionReady=true }
         }
     }
     private fun watchHistoryHeads(priority:Target?=null) {
+        // Catalog-wide probes yield the serial relay queue to the visible read.
+        // Explicit read-evidence preparation keeps its existing priority path.
+        if(priority==null && selected!=null) return
         if(historyHeadJob?.isActive==true || !readTrackingReady) return
         historyHeadJob=viewModelScope.launch {
             val rows=sessions;val state=readState;val hosts=machines;val workspaces=connections
@@ -572,6 +603,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             // Continue only when this pass selected work; an empty catalog must settle.
             if(priority==null) coroutineContext[Job]?.invokeOnCompletion { cause -> if(cause==null) viewModelScope.launch { watchHistoryHeads() } }
             chosen.forEach { target ->
+                // Navigation may occur while the prior retained probe is in flight.
+                if(priority==null && selected!=null) return@launch
                 val result=runCatching {
                     val page=historyOnce(target,"","",1)
                     if(sessions.none { it.target==target } || historyNetworkReason(target).isNotBlank() ||
@@ -1007,7 +1040,11 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 val window=historyWindows[frame.target.key]
                 if(window?.atHead==true && !olderLoading && frame.observedAt>0 && frame.observedAt!=lastHistoryObservation) {
                     lastHistoryObservation=frame.observedAt
-                    HistoryRequests.refreshAtHead(window)?.let { (direction,cursor) -> loadHistory(frame.target,direction,cursor) }
+                    // A complete page received during this inspection already
+                    // supplies its opening history. New canonical evidence still
+                    // invalidates completeness and requires the ordinary repair.
+                    if(!historyComplete || frame.observedAt>=lastHistoryReadCompletedAt)
+                        HistoryRequests.refreshAtHead(window)?.let { (direction,cursor) -> loadHistory(frame.target,direction,cursor) }
                 }
             }
             if (activityVerified && messages.any { it.requestId in merged.recordedRequestIds && it.status != "recorded" }) {
@@ -2250,6 +2287,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 ConnectionRemoval.forget(connection,current,{ store.workspaceJournal.forget(it) },store::saveConnections)
             }
             connections = next
+            api.closeResultStreams(connection.id)
             pendingEncryptedPairings-=connection.id
             sharedReadRetries.forget(connection.id); scheduleSharedReadRetries()
             if (catalogErrorOwner == connection.id || detailReadErrorOwner?.first?.connectionId == connection.id) error = ""
@@ -2268,6 +2306,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             historyFlights.values.filter { it.first.connectionId==connection.id }.forEach { it.second.cancel() }
             historyFlights.entries.removeAll { it.value.first.connectionId==connection.id }
             runCatching { historyCache.purgeWorkspace(connection.id);pageCache.purgeWorkspace(connection.id) }
+            taskDigests = taskDigests.filterKeys { it.connectionId != connection.id }
+            // A merge is idempotent: the running exchange stops here, and the replicas go.
+            taskSyncJob?.cancelAndJoin()
+            runCatching { taskSync.purge(connection.id) }
             attachments.clear()
             computerFiles.clear()
             catalogSessions = catalogSessions.filterNot { it.target.connectionId == connection.id }
@@ -2301,6 +2343,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val successfulConnections=mutableSetOf<String>()
         var published=false
         val newProjects = mutableListOf<ProjectSummary>(); val newOperations = mutableMapOf<MachineKey, Set<String>>(); val newFeatures = mutableMapOf<MachineKey, Set<String>>(); val warnings = mutableListOf<String>()
+        val newDigests = mutableMapOf<ProjectKey, Map<String, String>>()
         try {
             pushStatuses = withContext(Dispatchers.IO) { originalConnections.associate { it.id to store.pushStatus(it.id) } }
             for (connection in originalConnections) {
@@ -2324,7 +2367,11 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
                     catalogRefresh=catalogRefresh.stage(operation.id,connection.id,CatalogRefreshStage.Reports)
                     val computers = api.computers(connection)
-                    if(connection.protocolVersion==2) pendingEncryptedPairings-=connection.id
+                    if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
+                    if(connection.protocolVersion==2) {
+                        pendingEncryptedPairings-=connection.id
+                        AppTelemetry.encryptedWorkspaceReady(getApplication(),connection)
+                    }
                     val retained=catalogSessions;val actions=messageState.sessionActions
                     val previousMachines=machines;val previousProjects=projects;val previousAccounts=accountCatalogs
                     val prepared = withContext(Dispatchers.Default) {
@@ -2337,6 +2384,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     newOperations += prepared.operations; newFeatures += prepared.features
                     val catalog = prepared.projects
                     newSessions += catalog.sessions; newProjects += catalog.projects; warnings += catalog.unavailableComputers
+                    newDigests += catalog.taskDigests
                     successfulConnections += connection.id
                     catalogRefresh=catalogRefresh.stage(operation.id,connection.id,CatalogRefreshStage.Applying)
                     if (catalogGate.owns(operation.id) && connections == originalConnections && catalogErrorOwner == connection.id) error = ""
@@ -2367,6 +2415,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 if(version!=notificationPreferenceRevision || retained!==catalogSessions || reads!==readState || ready!=readTrackingReady || heads!==currentHistoryHeads) continue
                 preparedSessions=merged;break
             }
+            taskDigests = newDigests + taskDigests.filterKeys { it.connectionId in unavailable }
+            taskDigestsAt = android.os.SystemClock.elapsedRealtime()
             accountsWriter?.edit { old -> AccountSnapshots.merge(old,newAccounts,successfulConnections,originalConnections.map { it.id }.toSet()) }
             androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
                 sessions = preparedSessions; machines = newMachines.map { MachineNames.apply(it,messageState.machineAliases) }; machineOperations = newOperations; machineFeatures = newFeatures
@@ -2393,10 +2443,358 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         }
         }
     }
+    /**
+     * Exchanges every catalogued project's tasks with each computer whose digest differs
+     * (TaskSync); the activity calls it every 15 s while started. With no catalog read
+     * for 20 s, as while a conversation is open, it reads the computers itself.
+     */
+    fun syncTasks() {
+        if (demo || taskSyncRunning) return
+        taskSyncRunning = true
+        val original = connections
+        taskSyncJob = viewModelScope.launch {
+            try {
+                var digests = taskDigests; var operations = machineOperations; var known = machines
+                if (android.os.SystemClock.elapsedRealtime() - taskDigestsAt > 20_000) {
+                    val fresh = mutableMapOf<ProjectKey, Map<String, String>>(); val freshOperations = mutableMapOf<MachineKey, Set<String>>()
+                    val seen = mutableListOf<Machine>()
+                    for (connection in original) {
+                        try {
+                            val computers = api.computers(connection)
+                            val prepared = withContext(Dispatchers.Default) {
+                                SessionCatalogParser.parse(connection, computers.optJSONArray("computers")?.objects().orEmpty())
+                            }
+                            fresh += prepared.projects.taskDigests; freshOperations += prepared.operations; seen += prepared.machines
+                        } catch (e: CancellationException) { throw e }
+                        catch (_: Exception) { /* That connection syncs once it answers again. */ }
+                    }
+                    digests = fresh; operations = freshOperations; known = seen
+                }
+                val names = projects.associate { it.key to it.name }
+                for ((key, peers) in TaskSyncPlan.peers(digests, relayOperations, operations, known)) {
+                    if (connections != original) return@launch
+                    val connection = original.find { it.id == key.connectionId } ?: continue
+                    taskSync.sync(connection, key, names[key] ?: "Project", peers)
+                    refreshReviewCount(key)
+                    if (tasksKey == key) refreshTasks()
+                }
+                // A Send now that may have happened waits for an exchange with its computer.
+                for (connection in original) {
+                    if (connections != original) return@launch
+                    taskSync.settleSends(connection) { key -> names[key] ?: "Project" }
+                }
+                heldSends = taskSync.heldTasks()
+                refreshTasks()
+            } catch (e: CancellationException) { throw e }
+            // Failures wait in TaskSync's backoff; tasks have no screen to report them yet.
+            catch (_: Exception) { }
+            finally { taskSyncRunning = false }
+        }
+    }
+    /** Nothing syncs in the background: the activity stops the running exchange when it stops; merges are idempotent. */
+    fun stopTaskSync() { taskSyncJob?.cancel(); projectSyncs.toList().forEach { it.cancel() } }
+    /** The exchanges that edits and opening Tasks start; they stop with the app too. */
+    private val projectSyncs = java.util.concurrent.ConcurrentHashMap.newKeySet<Job>()
+    private fun launchProjectSync(key: ProjectKey, then: suspend () -> Unit = {}) {
+        val job = viewModelScope.launch { syncProject(key); then() }
+        projectSyncs += job
+        job.invokeOnCompletion { projectSyncs -= job }
+    }
+
+    // The Tasks screen (TasksUi.kt) over the phone's replica of a project.
+    var tasksKey by mutableStateOf<ProjectKey?>(null); private set
+    var tasksChosen by mutableStateOf<ChosenSession?>(null); private set
+    var taskListing by mutableStateOf<List<TaskInfo>>(emptyList()); private set
+    var taskTab by mutableStateOf(TaskTab.TODO)
+    var tasksOnlyThisSession by mutableStateOf(false); private set
+    /** The snackbar's next message on the Tasks screen. */
+    var taskNotice by mutableStateOf<String?>(null)
+    var taskBusy by mutableStateOf(false); private set
+    var doneRows by mutableStateOf<List<DoneRow>>(emptyList()); private set
+    var doneTotal by mutableStateOf(0); private set
+    var doneRecent by mutableStateOf(0); private set
+    var doneNext by mutableStateOf<DoneCursor?>(null); private set
+    var doneExpanded by mutableStateOf(false); private set
+    var doneLoading by mutableStateOf(false); private set
+    var doneError by mutableStateOf(""); private set
+    /** The tasks In review of each project, for the badge on the Tasks button. */
+    var reviewCounts by mutableStateOf<Map<ProjectKey, Int>>(emptyMap()); private set
+    /** TaskSync's held Send nows, as state, so a card follows their release. */
+    private var heldSends by mutableStateOf<Set<String>>(emptySet())
+
+    fun taskProjectName(key: ProjectKey) = projects.find { it.key == key }?.name ?: "Project"
+    /** Only catalogued projects have tasks. */
+    fun taskProject(session: Session) = session.projectKey?.takeIf { key -> projects.any { it.key == key && it.catalogued } }
+    fun projectSessions(key: ProjectKey) = sessions.filter { it.projectKey == key && it.target.archiveId.isBlank() && it.target.agentId.isBlank() }
+    fun taskChips(key: ProjectKey) = TasksPresentation.chips(projectSessions(key), machines)
+    /** An operation counts when both the relay and the computer offer it. */
+    private fun taskOperations(machine: Machine) =
+        machineOperations[MachineKey(machine.connectionId, machine.id)].orEmpty() intersect relayOperations[machine.connectionId].orEmpty()
+    /** The computers that list the project; every computer of its connection before the catalog names them. */
+    private fun projectMachines(key: ProjectKey): List<Machine> {
+        val listed = taskDigests[key]?.keys.orEmpty()
+        return machines.filter { it.connectionId == key.connectionId && (listed.isEmpty() || it.id in listed) }
+    }
+    fun sendRoute(task: TaskInfo): RouteState {
+        val key = tasksKey ?: return RouteState.Blocked("No project")
+        if (taskBusy) return RouteState.Blocked("Another task action is running")
+        if (task.uuid in heldSends) return RouteState.Blocked("It may have been sent already; its stage arrives with the next sync")
+        return TasksPresentation.route(task, tasksChosen, machines, key.connectionId, ::taskOperations, projectSessions(key))
+    }
+    fun cancelRoute(task: TaskInfo): RouteState {
+        val key = tasksKey ?: return RouteState.Blocked("No project")
+        if (taskBusy) return RouteState.Blocked("Another task action is running")
+        return TasksPresentation.cancelRoute(task, projectMachines(key), ::taskOperations)
+    }
+
+    fun openTasks(session: Session) {
+        val key = taskProject(session) ?: return
+        val machine = machines.firstOrNull { it.connectionId == session.target.connectionId && it.id == session.target.computerId }
+        showTasks(key, ChosenSession(session.target.session, session.target.computerId, machine?.machineId.orEmpty()))
+    }
+    /** Another session for Tasks only, keeping the tab; one of another project shows that project's tasks. */
+    fun chooseTaskSession(key: ProjectKey, chosen: ChosenSession) {
+        if (key != tasksKey) showTasks(key, chosen, selectDefault = false)
+        else { tasksChosen = chosen; if (tasksOnlyThisSession) loadDone(more = false) }
+    }
+    /** Only this session: Done then lists and counts only the tasks sent to it. */
+    fun setOnlyThisSession(on: Boolean) {
+        tasksOnlyThisSession = on
+        loadDone(more = false)
+    }
+    private fun showTasks(key: ProjectKey, chosen: ChosenSession, selectDefault: Boolean = true) {
+        tasksKey = key; tasksChosen = chosen; taskListing = emptyList(); doneRows = emptyList(); doneNext = null
+        doneTotal = 0; doneRecent = 0; doneExpanded = false; doneError = ""; doneLoaded = false; taskNotice = null
+        refreshTasks(selectDefault)
+        loadDone(more = false)
+        launchProjectSync(key)
+    }
+    fun closeTasks() { tasksKey = null; taskNotice = null }
+    /** Done lists from a computer each time it is opened, so tasks accepted since show. */
+    fun selectTaskTab(tab: TaskTab) {
+        taskTab = tab
+        if (tab == TaskTab.DONE && !doneLoading) loadDone(more = false)
+    }
+    /** A page of Done arrived, so its count is known. */
+    var doneLoaded by mutableStateOf(false); private set
+
+    fun refreshTasks(selectDefault: Boolean = false) {
+        val key = tasksKey ?: return
+        viewModelScope.launch {
+            // An import may hold the project for a moment; the listing waits once, then keeps what it shows.
+            var failure = ""
+            var read: app.zerus.mobile.replica.TaskListing? = null
+            for (attempt in 0..1) {
+                try { read = withContext(Dispatchers.IO) { taskReplicas.store(key, taskProjectName(key)).use { it.list() } }; break }
+                catch (e: CancellationException) { throw e }
+                catch (e: Exception) { failure = e.message.orEmpty(); if (attempt == 0) delay(500) }
+            }
+            val listing = read ?: run {
+                if (tasksKey == key && (selectDefault || taskListing.isEmpty())) taskNotice = failure.ifBlank { "The tasks could not be read." }
+                return@launch
+            }
+            if (tasksKey != key) return@launch
+            taskListing = listing.tasks
+            reviewCounts = reviewCounts + (key to listing.tasks.count { it.stage == TaskStage.REVIEW })
+            if (selectDefault) taskTab = TasksPresentation.defaultTab(TasksPresentation.counts(listing.tasks, tasksChosen, tasksOnlyThisSession))
+        }
+    }
+    fun refreshReviewCount(key: ProjectKey) {
+        viewModelScope.launch {
+            val count = try {
+                withContext(Dispatchers.IO) {
+                    taskReplicas.store(key, taskProjectName(key)).use { store -> store.list().tasks.count { it.stage == TaskStage.REVIEW } }
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { return@launch }
+            reviewCounts = reviewCounts + (key to count)
+        }
+    }
+
+    /** A local edit, then the project's exchange with its computers, so the edit reaches them. */
+    private fun editTasks(change: (TaskStore) -> Unit) {
+        val key = tasksKey ?: return
+        viewModelScope.launch {
+            try { withContext(Dispatchers.IO) { taskReplicas.store(key, taskProjectName(key)).use(change) } }
+            catch (e: CancellationException) { throw e }
+            catch (e: Exception) { taskNotice = e.message.orEmpty().ifBlank { "The task could not be changed." }; return@launch }
+            refreshTasks()
+            launchProjectSync(key) { if (tasksKey == key && taskTab == TaskTab.DONE) loadDone(more = false, keepExpanded = true) }
+        }
+    }
+    /** One sync of the project with its computers now; failures wait in TaskSync's backoff. */
+    private suspend fun syncProject(key: ProjectKey) {
+        if (demo) return
+        val connection = connections.find { it.id == key.connectionId } ?: return
+        val peers = TaskSyncPlan.peers(mapOf(key to taskDigests[key].orEmpty()), relayOperations, machineOperations, machines)[key].orEmpty()
+        if (peers.isEmpty()) return
+        try { taskSync.sync(connection, key, taskProjectName(key), peers) }
+        catch (e: CancellationException) { throw e }
+        catch (_: Exception) { }
+        if (tasksKey == key) refreshTasks()
+    }
+
+    /** New tasks go to To do, or to Backlog while Backlog is open, pinned to the chosen session. */
+    fun addTask(text: String) {
+        val chosen = tasksChosen
+        TasksPresentation.addReason(chosen).takeIf { it.isNotEmpty() }?.let { taskNotice = it; return }
+        val stage = if (taskTab == TaskTab.BACKLOG) TaskStage.BACKLOG else TaskStage.TODO
+        val target = TaskTarget.Session(SessionRef(chosen!!.machineId, chosen.name))
+        editTasks { it.add(text, stage, target, TaskPosition.End) }
+    }
+    private fun computerName(key: ProjectKey, computerId: String) =
+        machines.firstOrNull { it.connectionId == key.connectionId && it.id == computerId }?.name ?: computerId
+    /** The task settings' Save: the prompt and the session, whichever changed. */
+    fun saveTask(uuid: String, text: String?, target: TaskTarget?) = editTasks { store ->
+        if (text != null) store.editText(uuid, text)
+        if (target != null) store.setTarget(uuid, target)
+    }
+    fun commentTask(uuid: String, text: String) = editTasks { it.comment(uuid, text) }
+    /** Only the fields changed here, onto the replica's current settings, so a change that arrived meanwhile stays. */
+    fun saveTaskSettings(original: TaskSettings, edited: TaskSettings) = editTasks { store ->
+        val current = store.settings()
+        fun <T> pick(field: (TaskSettings) -> T) = if (field(edited) != field(original)) field(edited) else field(current)
+        store.setSettings(TaskSettings(pick { it.taskTemplate }, pick { it.cancelTemplate }, pick { it.agentsOther }, pick { it.agentLimit }))
+    }
+    suspend fun taskSettings(): TaskSettings? {
+        val key = tasksKey ?: return null
+        return try { withContext(Dispatchers.IO) { taskReplicas.store(key, taskProjectName(key)).use { it.settings() } } }
+        catch (e: CancellationException) { throw e }
+        catch (e: Exception) { taskNotice = e.message; null }
+    }
+
+    /** The task settings' action: their unsaved prompt and session first, then the action. */
+    fun saveThen(task: TaskInfo, text: String?, target: TaskTarget?, action: TaskAction) {
+        if (text == null && target == null) return taskAction(task, action)
+        val key = tasksKey ?: return
+        viewModelScope.launch {
+            val saved = try {
+                withContext(Dispatchers.IO) {
+                    taskReplicas.store(key, taskProjectName(key)).use { store ->
+                        if (text != null) store.editText(task.uuid, text)
+                        if (target != null) store.setTarget(task.uuid, target)
+                        store.get(task.uuid)
+                    }
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { taskNotice = e.message.orEmpty().ifBlank { "The task could not be changed." }; return@launch }
+            refreshTasks()
+            taskAction(saved, action)
+        }
+    }
+    /** A stage action of a card or the task settings; Cancel goes through its dialog. */
+    fun taskAction(task: TaskInfo, action: TaskAction) {
+        when (action) {
+            TaskAction.TO_BACKLOG -> editTasks { it.setStage(task.uuid, TaskStage.BACKLOG) }
+            TaskAction.TO_TODO, TaskAction.BACK_TO_TODO -> editTasks { it.setStage(task.uuid, TaskStage.TODO) }
+            TaskAction.ACCEPT -> editTasks { it.setStage(task.uuid, TaskStage.DONE) }
+            TaskAction.TO_TOP -> editTasks { it.moveTask(task.uuid, TaskPosition.Top) }
+            TaskAction.SEND -> sendTask(task)
+            TaskAction.EDIT, TaskAction.CANCEL -> {}
+        }
+    }
+    private fun sendTask(task: TaskInfo) {
+        val key = tasksKey ?: return
+        val route = when (val state = sendRoute(task)) {
+            is RouteState.Blocked -> { taskNotice = state.reason; return }
+            is RouteState.Ready -> state.route
+        }
+        val connection = connections.find { it.id == key.connectionId } ?: return
+        taskBusy = true
+        viewModelScope.launch {
+            try {
+                taskNotice = when (val outcome = taskSync.send(connection, key, taskProjectName(key), route.computerId, task.uuid, route.session,
+                    computerName(key, route.computerId))) {
+                    TaskOutcome.Done -> "Sent to ${route.session}"
+                    is TaskOutcome.Refused -> outcome.reason
+                    is TaskOutcome.Uncertain -> "It may have been sent: ${outcome.reason}"
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { taskNotice = e.message.orEmpty().ifBlank { "The task could not be sent." } }
+            finally { taskBusy = false; heldSends = taskSync.heldTasks() }
+            refreshTasks()
+        }
+    }
+    fun cancelTask(task: TaskInfo, reason: String) {
+        val key = tasksKey ?: return
+        val route = when (val state = cancelRoute(task)) {
+            is RouteState.Blocked -> { taskNotice = state.reason; return }
+            is RouteState.Ready -> state.route
+        }
+        val connection = connections.find { it.id == key.connectionId } ?: return
+        taskBusy = true
+        viewModelScope.launch {
+            try {
+                taskNotice = when (val outcome = taskSync.cancel(connection, key, taskProjectName(key), route.computerId, task.uuid, reason,
+                    computerName(key, route.computerId))) {
+                    TaskOutcome.Done -> "Cancelled; it is In review"
+                    is TaskOutcome.Refused -> outcome.reason
+                    is TaskOutcome.Uncertain -> "It may have been cancelled: ${outcome.reason}"
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { taskNotice = e.message.orEmpty().ifBlank { "The task could not be cancelled." } }
+            finally { taskBusy = false }
+            refreshTasks()
+        }
+    }
+
+    /** The computer that lists Done: the chosen session's, or any of the project's that offers it. */
+    private fun doneComputer(key: ProjectKey): Machine? {
+        val able = projectMachines(key).filter { it.online && !it.lastKnown && "task_done" in taskOperations(it) }
+        return able.firstOrNull { it.id == tasksChosen?.computerId } ?: able.firstOrNull()
+    }
+    /** The latest first-page read; an older one's answer is dropped. */
+    private var doneRequest = 0
+    /** The first page, or with `more` the next one; "Show older" also shows the older rows already loaded.
+     * A reload after an edit keeps the older rows shown. */
+    fun loadDone(more: Boolean, keepExpanded: Boolean = false) {
+        val key = tasksKey ?: return
+        if (more && doneLoading) return
+        // The first page may already hold older tasks; showing them needs no read.
+        if (more && (!doneExpanded && doneRows.size > doneRecent || doneNext == null)) { doneExpanded = true; return }
+        doneExpanded = more || keepExpanded && doneExpanded
+        val chosen = tasksChosen
+        val session = if (!tasksOnlyThisSession) null else {
+            TasksPresentation.addReason(chosen).takeIf { it.isNotEmpty() }?.let { doneError = it; return }
+            SessionRef(chosen!!.machineId, chosen.name)
+        }
+        val machine = doneComputer(key) ?: run { doneError = "No computer of this project lists Done tasks now"; return }
+        val connection = connections.find { it.id == key.connectionId } ?: return
+        val request = ++doneRequest
+        doneLoading = true
+        viewModelScope.launch {
+            try {
+                val page = taskSync.donePage(connection, key, machine.id, if (more) doneNext else null, session = session)
+                if (tasksKey != key || request != doneRequest) return@launch
+                doneRows = if (more) doneRows + page.rows else page.rows
+                doneNext = page.next; doneTotal = page.total; doneRecent = page.recent; doneError = ""; doneLoaded = true
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { if (request == doneRequest) doneError = e.message.orEmpty().ifBlank { "The Done list could not be read." } }
+            finally { if (request == doneRequest) doneLoading = false }
+        }
+    }
+    /** Fetches a Done task from that computer into the replica, then hands it over. */
+    fun openDoneTask(row: DoneRow, opened: (TaskInfo) -> Unit) {
+        val key = tasksKey ?: return
+        val machine = doneComputer(key) ?: run { taskNotice = "No computer of this project is online"; return }
+        val connection = connections.find { it.id == key.connectionId } ?: return
+        taskBusy = true
+        viewModelScope.launch {
+            try {
+                taskSync.exchangeNow(connection, key, taskProjectName(key), machine.id, fetch = listOf(row.uuid))
+                val task = withContext(Dispatchers.IO) { taskReplicas.store(key, taskProjectName(key)).use { it.get(row.uuid) } }
+                refreshTasks()
+                opened(task)
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { taskNotice = e.message.orEmpty().ifBlank { "The task could not be opened." } }
+            finally { taskBusy = false }
+        }
+    }
     fun openProject(project: ProjectSummary) { selectedProject = project }
     fun clearProject() { selectedProject = null }
     fun open(session: Session, preserveProject: Boolean = false) {
-        contextNotice="";actionResultNotice="";firstUnreadEventId="";unreadBoundaryCaptured=false;restoreHistoryAttempt="";pendingHistoryPosition="";pendingHistoryPublication="";lastHistoryObservation=0L
+        RelayReadTiming.point(RelayReadTiming.Stage.OpenConversation)
+        contextNotice="";actionResultNotice="";firstUnreadEventId="";unreadBoundaryCaptured=false;restoreHistoryAttempt="";pendingHistoryPosition="";pendingHistoryPublication="";lastHistoryObservation=0L;lastHistoryReadCompletedAt=0L
         hasOlder=false;hasNewer=false;historyEpoch="";historyIndexing=false;historyComplete=false;olderError=""
         if(session.target.agentId.isBlank()) parentSelection=null
         cancelCompactContinuation(); clearExpectation = null
@@ -2425,6 +2823,11 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if(!demo && readTrackingReady) {
             if(historyReason(session.target).isBlank() && readState.record(session.target)?.viewport==null) readPositionReady=false
             restoreSavedWindow(session.target,navigationId)
+            // Both RPCs bind the exact run/conversation and validate their own
+            // response. History need not wait for the inspection round trip.
+            restoreHistory(session.target)
+            historyWindows[session.target.key]?.takeIf { it.atHead && !olderLoading && historyNetworkReason(session.target).isBlank() }
+                ?.let { HistoryRequests.refreshAtHead(it) }?.let { (direction,cursor) -> loadHistory(session.target,direction,cursor) }
         }
         if (demo) { conversationEvents = Demo.events; conversationQuestions = emptyList() }
         else refreshActivity()
@@ -2499,13 +2902,21 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         flushDrafts()
         if (selected != null) { navigationId++; cancelDetail(); selected = null; activity = null; activeFrame = null; activityVerified = false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-back */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.BACK) /* END QUESTION_AVAILABILITY_PROBE writer-back */ }
         else selectedProject = null
+        if(!demo) watchHistoryHeads()
     }
     fun refreshActivity(explicit: Boolean = false) {
         refreshActivity(explicit,freshInspection=false)
     }
+    /** Cancelling a visible timer only stops its wait, never the retained read. */
+    internal suspend fun awaitActivityRead() { detailJob?.join() }
+
     private fun refreshActivity(explicit: Boolean, freshInspection: Boolean, ownerCurrent: () -> Boolean = { true }) {
         if (demo || terminalVisible) return
         val original = selected ?: return
+        // Background refresh must not start another inspection
+        // while the opening inspection is already verified and its first
+        // history page is still arriving. Explicit refresh stays available.
+        if(!explicit && !freshInspection && activityVerified && olderLoading && lastHistoryObservation==0L) return
         pendingActionResult(original.target)?.let { action -> openSessionActionResult(action);return }
         val connection = connections.find { it.id == original.target.connectionId } ?: return
         val navigation = navigationId

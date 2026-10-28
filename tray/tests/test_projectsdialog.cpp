@@ -1,4 +1,5 @@
 #include <QtTest>
+#include "JsonSettings.h"
 #include "ProjectsDialog.h"
 #include "CloneRepositoryDialog.h"
 #include "PopupMouse.h"
@@ -492,7 +493,7 @@ void TestProjectsDialog::folderTransfersKeepMenuTargetsAndPersist()
     const auto original = projects.addFolder(source, machine, path, "Transfer this");
     const auto keep = projects.addFolder(source, machine, "/workspace/keep", "Keep this");
     projects.moveSession(projects.observe(machine, "agent/session", "run-1"), source);
-    QSettings().setValue("workspace/organization", QJsonDocument(projects.toJson()).toJson(QJsonDocument::Compact));
+    setJsonSetting("workspace/organization", QJsonDocument(projects.toJson()).toJson(QJsonDocument::Compact));
     HgsClient client("/nonexistent/hgs"); ProjectsDialog dialog(&client); dialog.selectProject(source); dialog.show();
     auto *menu = folderMenu(dialog, original); QVERIFY(menu);
     QVERIFY(!folderTarget(menu, source, copy));

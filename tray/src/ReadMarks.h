@@ -1,5 +1,6 @@
 #pragma once
 
+#include "SettingsJson.h"
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -51,10 +52,10 @@ struct ReadMark {
 // restart keeps retrying; the root agent and the workspace window share it.
 namespace ReadMarkStore {
 inline QJsonObject load() {
-    return QJsonDocument::fromJson(QSettings().value("attention/pendingReads").toByteArray()).object();
+    return SettingsJson::object("attention/pendingReads");
 }
 inline void save(const QJsonObject &marks) {
-    QSettings().setValue("attention/pendingReads", QJsonDocument(marks).toJson(QJsonDocument::Compact));
+    SettingsJson::store(QStringLiteral("attention/pendingReads"), QJsonDocument(marks));
 }
 inline void add(const QList<ReadMark> &marks) {
     if (marks.isEmpty()) return;
@@ -73,12 +74,12 @@ inline void remove(const QList<ReadMark> &marks) {
     save(stored);
 }
 inline QJsonArray migratedHosts() {
-    return QJsonDocument::fromJson(QSettings().value("attention/sharedReadMigrated").toByteArray()).array();
+    return SettingsJson::array("attention/sharedReadMigrated");
 }
 inline bool migrated(const QString &host) { return migratedHosts().contains(host); }
 inline void setMigrated(const QString &host) {
     auto hosts = migratedHosts();
     if (!hosts.contains(host)) hosts.append(host);
-    QSettings().setValue("attention/sharedReadMigrated", QJsonDocument(hosts).toJson(QJsonDocument::Compact));
+    SettingsJson::store(QStringLiteral("attention/sharedReadMigrated"), QJsonDocument(hosts));
 }
 } // namespace ReadMarkStore

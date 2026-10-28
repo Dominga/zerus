@@ -3,6 +3,7 @@
 #include <QWidget>
 #include <QHash>
 #include <QJsonObject>
+#include <QSet>
 #include "FleetState.h"
 class QComboBox; class QListWidget; class QLabel; class QPushButton; class QLayout; class QStackedLayout;
 class QTreeWidget;
@@ -20,6 +21,7 @@ public:
     void reload();
     void ensureCatalogs(bool force = false);
     QJsonArray profiles(bool includeRemoved = false) const;
+    QJsonArray catalogProfiles() const;
     void setTheme(bool dark);
     void refreshAppearance();
     // U25 part 7 (spec 9): the teams whose members use a profile, for "Used
@@ -52,10 +54,14 @@ private:
     QJsonArray savedForAccount(const QString &host) const;
     void rename();
     void permissions();
+    void modelDefaults();
+    void editModelDefaults(const QJsonObject &profile, const QJsonObject &data);
     void inspectSelected(bool refresh = false);
     void inspectProfiles(bool refresh = false);
     void renameNext();
     void request(const QString &host, const QStringList &args);
+    void requestQueuedCatalog(const QString &host);
+    QJsonObject m_modelProfile;
     QJsonObject selected() const;
     QJsonObject selectedAccount() const;
     bool online(const QString &host) const;
@@ -78,8 +84,8 @@ private:
     QJsonArray m_displayProfiles;
     bool m_hasSnapshot = false;
     IdentityBadge *m_providerBadge;
-    QLabel *m_summary, *m_title, *m_detail, *m_identity, *m_permissionState;
-    QPushButton *m_add, *m_login, *m_copy, *m_remove, *m_rename, *m_install, *m_permissions, *m_default, *m_startOpenCode;
+    QLabel *m_summary, *m_title, *m_detail, *m_identity, *m_permissionState, *m_modelState;
+    QPushButton *m_add, *m_login, *m_copy, *m_remove, *m_rename, *m_install, *m_permissions, *m_default, *m_startOpenCode, *m_modelDefaults;
     // OpenCode's connected providers and their notes, read-only text from that machine's catalog.
     QTreeWidget *m_openCodeProviders;
     QLabel *m_openCodeProvidersNote;
@@ -89,6 +95,7 @@ private:
     AccountUsage::Panel *m_usage;
     AccountUsageStore *m_usageStore;
     QHash<QString,qint64> m_catalogChecked;
+    QSet<QString> m_catalogRefreshQueued;
     QString m_requestedProfile;
     QString m_activeProfile, m_machineSignature;
     QList<QJsonObject> m_renameQueue;

@@ -1,4 +1,7 @@
 #include "TrayAgent.h"
+#include "EventStream.h"
+#include "ProcessRunner.h"
+#include "SettingsJson.h"
 #include "QuestionNotificationSettings.h"
 #include "AutomaticApprovals.h"
 #include "CacheKeepalive.h"
@@ -60,10 +63,17 @@ std::unique_ptr<TrayIcon> makeTrayIcon()
 // совпал с открытием меню) -- дублирующий вызов requestPeer() для уже летящего запроса
 // не создаёт второй процесс: HgsClient сам игнорирует его (m_peerInFlight), эта функция
 // вызывающего кода не гейтит.
+// A computer with a live event stream (EventStream.h) needs no periodic poll.
 void pollAllKnownPeers(HgsClient &client, const FleetState &state)
 {
+    const auto *streams = EventStreams::instance();
     for (const QString &alias : state.peerNames())
-        client.requestPeer(alias);
+        if (!streams || !streams->live(alias)) client.requestPeer(alias);
+}
+void pollLocal(HgsClient &client)
+{
+    const auto *streams = EventStreams::instance();
+    if (!streams || !streams->live({})) client.requestLocal();
 }
 
 // Терминал выбирается один раз на запуск. Явный шаблон в конфиге побеждает выбор
@@ -147,7 +157,7 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     , m_notifier(makeAttentionNotifier())
 #endif
     , m_badge(makeApplicationBadge())
-    , m_attention(QJsonDocument::fromJson(QSettings().value("attention/observed").toByteArray()).object())
+    , m_attention(SettingsJson::object("attention/observed"))
     , m_localTimer(this)
     , m_peerTimer(this)
 {
@@ -174,27 +184,30 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
 #endif
             return;
         }
-        const auto target = AttentionTracker::target(token);
-        if (target.isEmpty()) return;
-        m_pendingAttention = token;
-        showSessions();
+        // The token is decoded off the GUI thread (JsonParse.h).
+        ProcessRunner::post(this, [token] { return AttentionTracker::target(token); },
+                            [this, token, activationToken](const QJsonObject &target) {
+            if (target.isEmpty()) return;
+            m_pendingAttention = token; m_pendingTarget = target;
+            showSessions();
 #ifdef Q_OS_LINUX
-        if (!activationToken.isEmpty()) KWindowSystem::setCurrentXdgActivationToken(activationToken);
-        KWindowSystem::activateWindow(m_sessionsWindow->windowHandle());
+            if (!activationToken.isEmpty()) KWindowSystem::setCurrentXdgActivationToken(activationToken);
+            KWindowSystem::activateWindow(m_sessionsWindow->windowHandle());
 #else
-        Q_UNUSED(activationToken);
+            Q_UNUSED(activationToken);
 #endif
-        resolveAttentionClick();
-        if (m_pendingAttention.isEmpty()) return;
-        const auto host = target.value("host").toString();
-        if (host.isEmpty()) m_client.requestLocal(); else m_client.requestPeer(host);
-        QTimer::singleShot(16000, this, [this, token] { if (m_pendingAttention == token) resolveAttentionClick(true); });
+            resolveAttentionClick();
+            if (m_pendingAttention.isEmpty()) return;
+            const auto host = target.value("host").toString();
+            if (host.isEmpty()) m_client.requestLocal(); else m_client.requestPeer(host);
+            QTimer::singleShot(16000, this, [this, token] { if (m_pendingAttention == token) resolveAttentionClick(true); });
+        });
     });
     connect(m_notifier.get(), &AttentionNotifier::failed, this, [this](const QString &token, const QString &detail) {
         qWarning().noquote() << "Zerus: notification:" << detail;
         if(UpdateController::isUpdateToken(token)||token.startsWith(QLatin1String("zerus-fork-update:"))||token.startsWith(QLatin1String("zerus-team-attention:")))return;
         m_attention.deliveryFailed(token);
-        QSettings().setValue("attention/observed", QJsonDocument(m_attention.state()).toJson(QJsonDocument::Compact));
+        SettingsJson::store(QStringLiteral("attention/observed"), QJsonDocument(m_attention.state()));
         if (m_sessionsWindow) m_sessionsWindow->showNotificationNotice(tr("System notification was not delivered: %1").arg(detail));
     });
 
@@ -215,7 +228,7 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     connect(&m_menu, &TrayMenu::openModeChosen, this, &TrayAgent::setOpenMode);
     connect(&m_menu, &TrayMenu::sessionsRequested, this, &TrayAgent::showSessions);
     connect(&m_menu, &TrayMenu::refreshRequested, this, [this]() {
-        m_client.requestLocal();
+        pollLocal(m_client);
         pollAllKnownPeers(m_client, m_state);
     });
     connect(&m_menu, &TrayMenu::quitRequested, qApp, &QCoreApplication::quit);
@@ -254,9 +267,18 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     // Локальный тик: опрашивает только этот бокс, никакого ssh, миллисекунды. Стартует
     // сразу же, не дожидаясь ни peerPollMs, ни обнаружения пиров ниже -- та часть, что
     // отвечает "тик и первая отрисовка не должны ждать пиров" из задания.
+    // One long-lived event stream per computer replaces its periodic polls
+    // while live; polling continues for a computer without one.
+    if (EventStreams::enabled()) {
+        m_streams = new EventStreams(m_client.executable(), this);
+        connect(m_streams, &EventStreams::listingReady, this, [this](const QString &host, const BoxState &box) {
+            if (host.isEmpty()) onLocalReady(box); else onPeerReady(box);
+        });
+        m_streams->setHosts({QString()});
+    }
     m_localTimer.setInterval(cfg.localPollMs);
     connect(&m_localTimer, &QTimer::timeout, this, [this] {
-        m_client.requestLocal();
+        pollLocal(m_client);
         // Short-lived remote permission prompts must not wait for the ordinary
         // minute-long peer cadence. The client coalesces reads already in flight.
         const int interval = AutomaticApprovalPolicy::enabled() ? qMin(m_cfg.peerPollMs, 5000) : m_cfg.peerPollMs;
@@ -339,10 +361,13 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
         *done = true;
 
         if (status == QProcess::NormalExit && exitCode == 0) {
-            QString err;
-            const QList<BoxState> fleet =
-                HgsClient::parseFleet(discover->readAllStandardOutput(), &err);
-            if (err.isEmpty()) {
+            // The whole fleet's listing is parsed off the GUI thread (ProcessRunner.h).
+            struct Fleet { QList<BoxState> boxes; QString error; };
+            ProcessRunner::post(this, [bytes = discover->readAllStandardOutput()] {
+                Fleet parsed; parsed.boxes = HgsClient::parseFleet(bytes, &parsed.error); return parsed;
+            }, [this](const Fleet &parsed) {
+            const QList<BoxState> &fleet = parsed.boxes;
+            if (parsed.error.isEmpty()) {
                 // The first box is this computer (onLocalReady brings its state) and
                 // its "peers" are the aliases to poll; requestPeer() below brings their
                 // sessions. A reachable peer's own entry carries the name it reports
@@ -358,6 +383,7 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
                 m_peerTimer.start();
                 pollAllKnownPeers(m_client, m_state);
             }
+            });
         }
         discover->deleteLater();
     });
@@ -377,13 +403,67 @@ TrayAgent::~TrayAgent()
     delete m_sessionsWindow;
 }
 
+QStringList TrayAgent::jsonSettings()
+{
+    return {QStringLiteral("attention/observed"), QStringLiteral("attention/readReplies"), QStringLiteral("attention/sessionMarks"),
+            QStringLiteral("attention/pendingReads"), QStringLiteral("attention/sharedReadMigrated"), QStringLiteral("attention/linuxTokens"),
+            QStringLiteral("workspace/organization"), QStringLiteral("workspace/pendingLaunches"), QStringLiteral("workspace/launchAccounts"),
+            QStringLiteral("workspace/worktreeSnapshots"), QStringLiteral("workspace/repositoryClone/*/pending"),
+            QStringLiteral("swarm/observedOrganization"), QStringLiteral("swarm/observedVersions"),
+            QStringLiteral("recovery/sharedPolicy"), QStringLiteral("speech/providerOperation"),
+            QStringLiteral("tasks/pendingExecutorLaunches"), QStringLiteral("tasks/newCard/*/request")};
+}
+
+TrayAgent::ReadState TrayAgent::storedReadState()
+{
+    return {SettingsJson::object("attention/readReplies"), SettingsJson::object("attention/sessionMarks"), ReadMarkStore::load(), true};
+}
+
+bool TrayAgent::readStateApplied(const ReadState &stored) const
+{
+    // Unchanged stored values share their parsed objects (SettingsJson), so these compare at once.
+    return m_appliedReadState.valid && stored.replies == m_appliedReadState.replies
+        && stored.marks == m_appliedReadState.marks && stored.pending == m_appliedReadState.pending;
+}
+
+void TrayAgent::updateLocalPoll(const BoxState &box)
+{
+    if (box.peersKnown && !m_peerTimer.isActive()) m_peerTimer.start();
+    // A control-only computer reports no sessions; its answer only carries the
+    // machine list and metrics. Every poll is a process start on Windows, so it
+    // polls less often, as does an enabled one until its host can push changes.
+    const int localPoll = AppConfig::localPollInterval(m_cfg.localPollMs, box.localSessions,
+                                                       MachinePlatform::of(box.metrics, true));
+    if (m_localTimer.interval() != localPoll) m_localTimer.setInterval(localPoll);
+}
+
+// A listing equal to the last one but for its observation fields: unread and
+// attention results, read marks, peers and the menu stay as they are. What
+// depends on poll times, metrics or the clock is refreshed.
+void TrayAgent::listingRefreshed(const QString &host)
+{
+    m_automaticApprovals->setFleet(m_state);
+    observeAttention(host, host.isEmpty() ? m_state.local() : *m_state.peer(host));
+    if (m_sessionsWindow) {
+        if (host.isEmpty()) m_sessionsWindow->setConnectionError(m_localReadError);
+        m_sessionsWindow->refreshFleet(m_state);
+        m_sessionsWindow->setPollingHosts(m_client.pollingHosts());
+    }
+    refreshIcon();
+}
+
 void TrayAgent::onLocalReady(const BoxState &box)
 {
     m_localReadError = box.ok ? QString() : (box.error.isEmpty() ? tr("Could not read local sessions") : box.error);
-    m_state.setReadReplies(QJsonDocument::fromJson(QSettings().value("attention/readReplies").toByteArray()).object());
-    m_state.setAttentionMarks(QJsonDocument::fromJson(QSettings().value("attention/sessionMarks").toByteArray()).object());
-    m_state.setPendingReads(ReadMarkStore::load());
     m_lastError.clear();
+    const auto stored = storedReadState();
+    if (readStateApplied(stored) && m_state.refreshListing({}, box, QDateTime::currentMSecsSinceEpoch())) {
+        updateLocalPoll(box);
+        listingRefreshed({});
+        return;
+    }
+    m_appliedReadState.valid = false;
+    m_state.setReadState(stored.replies, stored.marks, stored.pending);
     const auto previousPeers = m_state.peerNames();
     m_state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
     m_automaticApprovals->setFleet(m_state);
@@ -393,13 +473,8 @@ void TrayAgent::onLocalReady(const BoxState &box)
     }
     for (const auto &peer : m_state.peerNames())
         if (!previousPeers.contains(peer)) m_client.requestPeer(peer);
-    if (box.peersKnown && !m_peerTimer.isActive()) m_peerTimer.start();
-    // A control-only computer reports no sessions; its answer only carries the
-    // machine list and metrics. Every poll is a process start on Windows, so it
-    // polls less often, as does an enabled one until its host can push changes.
-    const int localPoll = AppConfig::localPollInterval(m_cfg.localPollMs, box.localSessions,
-                                                       MachinePlatform::of(box.metrics, true));
-    if (m_localTimer.interval() != localPoll) m_localTimer.setInterval(localPoll);
+    if (m_streams && previousPeers != m_state.peerNames()) m_streams->setHosts(QStringList{QString()} + m_state.peerNames());
+    updateLocalPoll(box);
     observeAttention({}, m_state.local());
     if (m_sessionsWindow) { m_sessionsWindow->setConnectionError(m_localReadError); m_sessionsWindow->setFleet(m_state); m_sessionsWindow->setPollingHosts(m_client.pollingHosts()); }
     refreshIcon();
@@ -409,15 +484,21 @@ void TrayAgent::onLocalReady(const BoxState &box)
     // rebuildMenu() (см. onMenuAboutToShow), так что к тому моменту данные уже свежие.
     if (!m_menu.isOpen())
         rebuildMenu();
+    m_appliedReadState = storedReadState();
 }
 
 void TrayAgent::onPeerReady(const BoxState &box)
 {
     // box.host is the alias this answer was polled under (see HgsClient::requestPeer).
     if (m_sessionsWindow) m_sessionsWindow->setPollingHosts(m_client.pollingHosts());
-    m_state.setReadReplies(QJsonDocument::fromJson(QSettings().value("attention/readReplies").toByteArray()).object());
-    m_state.setAttentionMarks(QJsonDocument::fromJson(QSettings().value("attention/sessionMarks").toByteArray()).object());
-    m_state.setPendingReads(ReadMarkStore::load());
+    const auto stored = storedReadState();
+    if (readStateApplied(stored) && m_state.refreshListing(box.host, box, QDateTime::currentMSecsSinceEpoch())) {
+        m_lastError.clear();
+        listingRefreshed(box.host);
+        return;
+    }
+    m_appliedReadState.valid = false;
+    m_state.setReadState(stored.replies, stored.marks, stored.pending);
     if (m_state.local().peersKnown && !m_state.local().peers.contains(box.host)) return;
     m_lastError.clear();
     m_state.setPeer(box, QDateTime::currentMSecsSinceEpoch());
@@ -431,6 +512,7 @@ void TrayAgent::onPeerReady(const BoxState &box)
     // позволить перерисовать меню безусловно: это и есть "строка заменяется, когда
     // пришёл ответ" из задания, а не расплывчатое обновление когда-нибудь потом.
     rebuildMenu();
+    m_appliedReadState = storedReadState();
 }
 
 void TrayAgent::onFailed(const QString &what, const QString &detail)
@@ -483,13 +565,12 @@ void TrayAgent::observeAttention(const QString &host, const BoxState &box)
     m_attention.setOptionalQuestions(QuestionNotificationSettings::enabled());
     const auto changes = m_attention.observe(host, box);
     if (m_attention.state() != before)
-        QSettings().setValue("attention/observed", QJsonDocument(m_attention.state()).toJson(QJsonDocument::Compact));
+        SettingsJson::store(QStringLiteral("attention/observed"), QJsonDocument(m_attention.state()));
     for (const auto &token : changes.cleared) m_notifier->withdraw(token);
     for (const auto &notice : changes.raised) m_notifier->post(notice.token, notice.title, notice.body);
     if (m_sessionsWindow && !m_pendingAttention.isEmpty()) {
         m_sessionsWindow->setFleet(m_state);
-        const auto target = AttentionTracker::target(m_pendingAttention);
-        resolveAttentionClick(box.ok && target.value("host").toString() == host);
+        resolveAttentionClick(box.ok && m_pendingTarget.value("host").toString() == host);
     }
 }
 
@@ -535,7 +616,7 @@ void TrayAgent::publishReadMarks()
 void TrayAgent::resolveAttentionClick(bool final)
 {
     if (m_pendingAttention.isEmpty() || !m_sessionsWindow) return;
-    const auto target = AttentionTracker::target(m_pendingAttention);
+    const auto target = m_pendingTarget;
     const auto host = target.value("host").toString();
     const auto *box = host.isEmpty() ? &m_state.local() : m_state.peer(host);
     if (box) for (const auto &session : box->sessions) {
@@ -608,10 +689,11 @@ void TrayAgent::copyText(const QString &text)
         notify(tr("Zerus: could not copy"), error, QSystemTrayIcon::Warning, 8000);
 }
 
-void TrayAgent::launchSession(const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &permissions, const QString &localModel)
+void TrayAgent::launchSession(const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &permissions, const QString &localModel, const QString &expectedMachine)
 {
     QStringList args;
     if (!host.isEmpty()) args << QLatin1Char('@') + host;
+    if(!expectedMachine.isEmpty())args<<"--expect-machine"<<expectedMachine;
     args << cmd << target << QStringLiteral("--new") << QStringLiteral("-n") << name;
     args << QStringLiteral("--launch-id") << launchId;
     if (!account.isEmpty()) args << QStringLiteral("--account") << account;
@@ -635,7 +717,7 @@ void TrayAgent::showSessions()
     if (!m_sessionsWindow) {
         m_sessionsWindow = new SessionsWindow(m_cfg.hgsPath);
         const auto publishReadState = [this]() {
-            QSettings().setValue("attention/readReplies", QJsonDocument(m_state.readReplies()).toJson(QJsonDocument::Compact));
+            SettingsJson::store(QStringLiteral("attention/readReplies"), QJsonDocument(m_state.readReplies()));
             publishReadMarks();
             m_sessionsWindow->setFleet(m_state); refreshIcon();
             if (!m_menu.isOpen()) rebuildMenu();
@@ -648,7 +730,7 @@ void TrayAgent::showSessions()
         });
         connect(m_sessionsWindow, &SessionsWindow::attentionMarksChanged, this, [this, publishReadState](const QJsonObject &marks, const QJsonObject &read) {
             m_state.setAttentionMarks(marks); m_state.setReadReplies(read);
-            QSettings().setValue("attention/sessionMarks", QJsonDocument(marks).toJson(QJsonDocument::Compact));
+            SettingsJson::store(QStringLiteral("attention/sessionMarks"), QJsonDocument(marks));
             // Consume muted events and withdraw current banners immediately.
             // Unmute keeps the recorded edge, so it never replays an old event.
             observeAttention({}, m_state.local());
@@ -726,7 +808,7 @@ void TrayAgent::showSessions()
             else m_client.requestPeer(host);
         });
         connect(m_sessionsWindow, &SessionsWindow::refreshRequested, this, [this]() {
-            m_client.requestLocal(); pollAllKnownPeers(m_client, m_state);
+            pollLocal(m_client); pollAllKnownPeers(m_client, m_state);
         });
     }
     m_sessionsWindow->setFleet(m_state);

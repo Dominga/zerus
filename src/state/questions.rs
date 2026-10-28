@@ -364,13 +364,21 @@ fn collect(record: &Value, deadline: Option<std::time::Instant>) -> Result<Optio
 }
 
 pub(super) fn wire_response(record: &Value, question_id: &str) -> Result<Option<Value>> {
-    Ok(wire_events(record)?.into_iter().rev().find(|event| {
-        string(event, "id") == question_id
-            && matches!(
-                string(event, "type"),
-                "interaction.resolved" | "interaction.cancelled" | "interaction.dismissed"
-            )
-    }))
+    // A closure belongs only to the latest request with this ID, never a reused one.
+    for event in wire_events(record)?.into_iter().rev() {
+        if string(&event, "id") != question_id {
+            continue;
+        }
+        match string(&event, "type") {
+            "interaction.request" => return Ok(None),
+            "interaction.resolved" | "interaction.cancelled" | "interaction.dismissed" => {
+                return Ok(Some(event));
+            }
+            kind if kind.starts_with("interaction.") => return Ok(None),
+            _ => {}
+        }
+    }
+    Ok(None)
 }
 
 pub(super) fn response(record: &Value, card: &Value) -> Result<Option<Value>> {
@@ -1035,6 +1043,27 @@ mod tests {
         assert_eq!((approvals[0]["question_id"].clone(), approvals[0]["tool_call_id"].clone()),
             (json!("approval_test"), json!("tool_bash")));
     }
+    #[test]
+    fn a_reused_request_id_never_acknowledges_the_new_request_with_the_old_resolution() {
+        let home = tempfile::tempdir().unwrap();
+        let wire = home.path().join("sessions/workspace/session_test/agents/main");
+        fs::create_dir_all(&wire).unwrap();
+        let path = wire.join("wire.jsonl");
+        let request = json!({"type":"interaction.request","agentId":"main","id":"approval_reused"});
+        let old = json!({"type":"interaction.resolved","agentId":"main","id":"approval_reused","response":{"selectedLabel":"old"}});
+        let new = json!({"type":"interaction.resolved","agentId":"main","id":"approval_reused","response":{"selectedLabel":"new"}});
+        let record = json!({"agent":"kimi","agent_home":home.path(),"run_id":"run","conversation_id":"session_test"});
+        fs::write(&path, format!("{request}\n{old}\n{request}\n")).unwrap();
+        assert!(wire_response(&record, "approval_reused").unwrap().is_none());
+        fs::write(&path, format!("{request}\n{old}\n{request}\n{new}\n")).unwrap();
+        assert_eq!(
+            wire_response(&record, "approval_reused").unwrap().unwrap()["response"]["selectedLabel"],
+            "new"
+        );
+        fs::write(&path, format!("{request}\n{old}\n{request}\n{}\n", json!({"type":"interaction.unknown","agentId":"main","id":"approval_reused"}))).unwrap();
+        assert!(wire_response(&record, "approval_reused").unwrap().is_none());
+    }
+
     #[test]
     fn acknowledgement_must_contain_exact_answers() {
         let card = card(

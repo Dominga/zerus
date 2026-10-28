@@ -1,0 +1,106 @@
+import { describe, expect, it } from "vitest";
+import { createComputed, createRoot } from "solid-js";
+import { createCatalog, rowId, statusOf, toSession } from "./catalog";
+import { emptyBatch, type Batch, type RowOut, type ViewRow } from "../types";
+
+const view = (name: string, extra: Partial<ViewRow> = {}): ViewRow => ({
+  name, title: name.split("/").pop(), agent: "claude", status: "ready", phase: "idle", attention: false, unread: false,
+  machine: "workstation", project: "sample-project", folder: "/home/example/sample-project", branch: "main",
+  model: "opus", effort: "high", summary: "", updated_at: 1_790_000_000, ...extra,
+});
+const row = (key: string, name: string, extra: Partial<ViewRow> = {}, computer = ""): RowOut => ({ computer, key, row: view(name, extra) });
+const batchOf = (part: Partial<Batch>): Batch => ({ ...emptyBatch(), ...part });
+
+describe("applyBatch", () => {
+  it("keeps the identity of unchanged rows and updates a changed row in place", () => {
+    createRoot((dispose) => {
+      const { catalog, applyBatch } = createCatalog();
+      applyBatch(batchOf({ replaces: [{ computer: "", rows: [row("run:a", "claude/sample-project/a"), row("run:b", "claude/sample-project/b")] }] }));
+      const a = catalog.rows[rowId("", "run:a")];
+      const b = catalog.rows[rowId("", "run:b")];
+      let aReads = 0;
+      createComputed(() => { void catalog.rows[rowId("", "run:a")].summary; aReads++; });
+      aReads = 0;
+
+      applyBatch(batchOf({ upserts: [row("run:b", "claude/sample-project/b", { summary: "Bash: cargo test", status: "working", phase: "tool" })] }));
+
+      expect(catalog.rows[rowId("", "run:a")]).toBe(a);
+      expect(catalog.rows[rowId("", "run:b")]).toBe(b);
+      expect(b.summary).toBe("Bash: cargo test");
+      expect(b.status).toBe("working");
+      expect(b.caption).toBe("Using a tool");
+      expect(aReads).toBe(0);
+      expect(catalog.order).toEqual([rowId("", "run:a"), rowId("", "run:b")]);
+      dispose();
+    });
+  });
+
+  it("replaces one computer's rows in one update without an empty list in between", () => {
+    createRoot((dispose) => {
+      const { catalog, applyBatch } = createCatalog();
+      applyBatch(batchOf({
+        replaces: [
+          { computer: "", rows: [row("run:a", "claude/p/a"), row("run:b", "claude/p/b")] },
+          { computer: "mac", rows: [row("run:m", "codex/p/m", {}, "mac")] },
+        ],
+      }));
+      const kept = catalog.rows[rowId("", "run:b")];
+      const mac = catalog.rows[rowId("mac", "run:m")];
+      const seen: number[] = [];
+      createComputed(() => seen.push(catalog.order.length));
+      seen.length = 0;
+
+      applyBatch(batchOf({ replaces: [{ computer: "", rows: [row("run:b", "claude/p/b"), row("run:c", "claude/p/c")] }] }));
+
+      expect(seen).toEqual([3]);
+      expect(Object.keys(catalog.rows).sort()).toEqual([rowId("", "run:b"), rowId("", "run:c"), rowId("mac", "run:m")].sort());
+      expect(catalog.rows[rowId("", "run:a")]).toBeUndefined();
+      expect(catalog.rows[rowId("", "run:b")]).toBe(kept);
+      expect(catalog.rows[rowId("mac", "run:m")]).toBe(mac);
+      expect(catalog.order).toEqual([rowId("", "run:b"), rowId("mac", "run:m"), rowId("", "run:c")]);
+      dispose();
+    });
+  });
+
+  it("removes rows and carries a replaced run's selection to the new run of the same name", () => {
+    createRoot((dispose) => {
+      const { catalog, applyBatch, onReplaced } = createCatalog();
+      applyBatch(batchOf({ replaces: [{ computer: "", rows: [row("run:old", "claude/p/review"), row("run:x", "claude/p/x")] }] }));
+      const moves: [string, string][] = [];
+      onReplaced((from, to) => moves.push([from, to]));
+
+      applyBatch(batchOf({ removes: [{ computer: "", key: "run:old", reason: "replaced" }, { computer: "", key: "run:x", reason: "archived" }] }));
+      expect(catalog.order).toEqual([]);
+      applyBatch(batchOf({ upserts: [row("run:new", "claude/p/review")] }));
+
+      expect(moves).toEqual([[rowId("", "run:old"), rowId("", "run:new")]]);
+      expect(catalog.order).toEqual([rowId("", "run:new")]);
+      dispose();
+    });
+  });
+
+  it("records computer status", () => {
+    createRoot((dispose) => {
+      const { catalog, applyBatch } = createCatalog();
+      applyBatch(batchOf({ computers: [{ computer: "mac", status: "reconnecting", attempt: 2 }] }));
+      expect(catalog.computers.mac).toEqual({ id: "mac", status: "reconnecting", attempt: 2 });
+      dispose();
+    });
+  });
+});
+
+describe("toSession", () => {
+  it("derives the presentation status from status kinds and raw phases", () => {
+    expect(statusOf(view("a", { status: "working" }))).toBe("working");
+    expect(statusOf(view("a", { status: "", phase: "approval" }))).toBe("attention");
+    expect(statusOf(view("a", { status: "busy", phase: "" }))).toBe("working");
+    expect(statusOf(view("a", { status: "", phase: "tool" }))).toBe("working");
+    expect(statusOf(view("a", { attention: true }))).toBe("attention");
+    expect(toSession("", "run:a", view("a", { unread: true })).caption).toBe("New reply");
+    expect(toSession("", "run:a", view("a", { status: "Retry in 5 s", phase: "" })).caption).toBe("Retry in 5 s");
+    expect(toSession("", "run:a", view("claude/p/a", { title: "" })).title).toBe("claude/p/a");
+    // The core's own fields: its caption, the attention reason and the run identity for follow.
+    const asking = toSession("", "run:a", view("a", { status: "attention", attention: "question", caption: "Needs input", run_id: "a", conversation_id: "c", turn_started: 5 }));
+    expect([asking.status, asking.attention, asking.caption, asking.runId, asking.conversationId, asking.turnStarted]).toEqual(["attention", "question", "Needs input", "a", "c", 5]);
+  });
+});

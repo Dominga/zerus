@@ -119,6 +119,23 @@ top-level ignored entries reported by `git status --ignored`; sizes are measured
 with a bounded walk (`complete:false` when cut short). Activity is the newest
 modification time of the checkout's `HEAD`, `index` and `logs/HEAD` metadata.
 
+Linux manual cleanup has one explicit process-coverage exception: when the
+entire bounded roster was inspected and only cwd/executable access denials on
+stable live processes remain, the blocked row may carry `process_fingerprint`.
+It hashes the worktree fingerprint and sorted unreadable PID/boot/start/path
+identities. A kernel-verified ancestor of the current CLI invocation instead
+binds its invocation role, boot ID, command and denied-path shape, preserving multiplicity;
+otherwise a new protected SSH launcher would invalidate every remote removal.
+The bounded full ancestry is read before and after the roster; changed ancestry
+or missing/unstable identity refuses the proof. This uses no program-name whitelist.
+All non-ancestor identities remain exact. Readable paths, including ancestors',
+continue to protect their folders. The unchecked
+manual confirmation passes `--process-fingerprint HASH`; removal rechecks this
+proof and refuses every other blocker or automatic request. No timeout, roster,
+identity, unsupported-platform or other IO failure produces this proof. This is
+personal acceptance of incomplete coverage, not evidence of disuse, and never
+adds Git `--force` or bypasses local-file consent.
+
 The fingerprint is a SHA-256 over path, head, branch, lock/prunable state,
 status entries, nested paths, bound session names, and ignored entry names.
 Sizes, activity and process samples are not part of it.
@@ -132,14 +149,15 @@ entries or two seconds per ignored size walk.
 
 ```
 hgs [@host] worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH
-    [--delete-branch] [--request-id ID] [--json]
+    [--process-fingerprint HASH] [--delete-branch] [--request-id ID] [--json]
 ```
 
 1. Canonicalize; refuse relative paths and `--dry-run` (as `create` does).
 2. Take the repository lock shared with `worktrees create`.
 3. Re-run the review for exactly this worktree. Refuse when the repository
    differs from `--common-dir`, the worktree is not a linked entry of it, the
-   verdict is `blocked`, or the fingerprint changed (`Worktree changed since the
+   verdict is `blocked` without the exact manual process proof above (or explicit
+   content-bound discard), or the fingerprint changed (`Worktree changed since the
    review. Review it again.`).
 4. Run `git worktree remove -- WORKTREE` from the main checkout (or the common
    directory). Never `--force`.

@@ -27,7 +27,9 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
     .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).build(),
     internal val workspace: WorkspaceJournal? = null,
     internal val catalogNowSeconds: () -> Long = { System.currentTimeMillis()/1000 }) {
-    suspend fun call(url: String, token: String, path: String, body: JSONObject? = null, delete: Boolean = false): JSONObject = withContext(Dispatchers.IO) {
+    private val resultStream = RelayResultStream(client)
+    internal fun closeResultStreams(connectionId: String? = null) = resultStream.close(connectionId)
+    suspend fun call(url: String, token: String, path: String, body: JSONObject? = null, delete: Boolean = false): JSONObject = RelayReadTiming.measure(RelayReadTiming.httpStage(path, body != null)) { withContext(Dispatchers.IO) {
         val request = Request.Builder().url(ManagedRelay.transport(url) + path).header("Accept", "application/json")
         if (token.isNotBlank()) request.header("Authorization", "Bearer $token")
         if (delete) request.delete() else if (body != null) request.post(JsonRequestBody(body, when(path) { "/v1/requests" -> 30_408_704L; "/v2/requests" -> 41L*1024*1024; else -> 1_048_576L }))
@@ -61,7 +63,7 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
                 }
             })
         }
-    }
+    } }
 
     suspend fun pair(url: String, code: String): Connection {
         require(!WorkspaceProtocol.encryptedInvitationCode(code.trim())) { "Use the encrypted phone invitation pairing flow." }
@@ -71,8 +73,14 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
         return Connection(UUID.randomUUID().toString(), result.string("workspace_name").ifBlank { URI(normalized).host ?: "Workspace" }, normalized, result.getString("device_token"))
     }
     /** Safe on the UI dispatcher: encrypted CPU work and blocking journal access choose their workers. */
-    suspend fun computers(connection: Connection) = if(connection.protocolVersion==2) encryptedComputers(connection) else call(connection.url, connection.token, "/v1/computers")
-    suspend fun capabilities(connection: Connection) = call(connection.url, connection.token, if(connection.protocolVersion==2) "/v2/capabilities" else "/v1/capabilities")
+    suspend fun computers(connection: Connection) = RelayReadTiming.read(RelayReadTiming.Operation.Catalog) {
+        if(connection.protocolVersion==2) encryptedComputers(connection) else call(connection.url, connection.token, "/v1/computers")
+    }
+    suspend fun capabilities(connection: Connection) = call(connection.url, connection.token, if(connection.protocolVersion==2) "/v2/capabilities" else "/v1/capabilities").also { value ->
+        val stream = value.optJSONObject("encrypted_transport")?.optJSONObject("result_stream")
+        resultStream.configure(connection, connection.protocolVersion == 2 && stream?.optInt("version") == 1 &&
+            stream.optString("path") == "/v2/stream" && stream.optInt("max_requests") >= 16)
+    }
     suspend fun revoke(connection:Connection):JSONObject {
         check(connection.protocolVersion==1) { "Encrypted connections are forgotten locally. Remove this phone from an enrolled computer to revoke it globally." }
         return call(connection.url,connection.token,"/v1/device",delete=true)
@@ -125,23 +133,39 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
     suspend fun receipt(connection: Connection, id: String) = (if(connection.protocolVersion==2) encryptedReceipt(connection,id) else call(connection.url, connection.token, "/v1/requests/$id")).also {
         check(it.string("request_id") == id) { "Gateway returned a mismatched receipt. Delivery remains unconfirmed." }
     }
-    suspend fun await(connection: Connection, initial: JSONObject, maxPolls: Int = 35, pollDelayMs:Long = 800): JSONObject {
-        var result = initial
-        repeat(maxPolls) {
-            if (result.string("state") !in listOf("queued", "claimed")) return result
-            delay(pollDelayMs.coerceIn(50,1000))
-            result = receipt(connection, result.getString("request_id"))
+    suspend fun await(connection: Connection, initial: JSONObject, maxPolls: Int = 35, pollDelayMs:Long = 800,
+        firstPollDelayMs:Long = pollDelayMs): JSONObject {
+        var current = initial
+        var polls = maxPolls
+        if (connection.protocolVersion == 2 && resultStream.available(connection) && maxPolls > 0 && current.string("state") in listOf("queued", "claimed")) {
+            val id = current.getString("request_id")
+            prepareReceiptWatch(connection, id)
+            val ordinary = pollDelayMs.coerceIn(50, 1000)
+            val started = System.nanoTime()
+            // A readiness hint never bypasses fresh membership, signature,
+            // request/route binding or journal settlement in receipt().
+            val signaled = RelayReadTiming.measure(RelayReadTiming.Stage.ResultSignalWait) {
+                resultStream.ready(connection, id, minOf(25_000L, maxPolls * ordinary))
+            }
+            RelayReadTiming.point(if (signaled) RelayReadTiming.Stage.ResultSignalReady else RelayReadTiming.Stage.ResultSignalFallback)
+            // Also reconcile once after a dropped/unsupported/silent stream.
+            // The elapsed stream wait consumes the EXISTING wait budget rather
+            // than adding another complete polling campaign after a timeout.
+            polls = (maxPolls - 1 - (System.nanoTime() - started) / 1_000_000 / ordinary).coerceAtLeast(0).toInt()
+            current = receipt(connection, id)
         }
-        return result
+        return ReceiptPolling.await(current,polls,pollDelayMs,firstPollDelayMs,
+            pause={ RelayReadTiming.measure(RelayReadTiming.Stage.PollDelay) { delay(it) } },
+            receipt={ receipt(connection,it) })
     }
-    suspend fun inspect(connection: Connection, target: Target): JSONObject {
+    suspend fun inspect(connection: Connection, target: Target): JSONObject = RelayReadTiming.read(RelayReadTiming.Operation.Inspect) {
         val payload = JSONObject().also {
             if (target.archiveId.isNotBlank()) it.put("archive_id", target.archiveId)
             if (target.agentId.isNotBlank()) it.put("agent_id",target.agentId).put("expected_run_id",target.run).put("expected_conversation_id",target.parentConversation)
         }
-        val result = await(connection, submit(connection, target, "inspect", payload, UUID.randomUUID().toString()))
+        val result = await(connection, submit(connection, target, "inspect", payload, UUID.randomUUID().toString()),firstPollDelayMs=100)
         check(result.string("state") == "completed") { result.string("error").ifBlank { "Computer has not returned its activity yet. Refresh to check again." } }
-        return result.getJSONObject("result").also { activity ->
+        result.getJSONObject("result").also { activity ->
             if(target.agentId.isNotBlank()) check(activity.string("agent_id") == target.agentId && activity.string("parent_conversation_id") == target.parentConversation && activity.string("run_id") == target.run && activity.string("name") == target.session) { "Computer returned a different child conversation." }
             else check(activity.string("agent_id").isBlank()) { "Computer returned a child conversation for the parent." }
             if (target.archiveId.isNotBlank()) check(activity.string("archive_id") == target.archiveId && activity.string("name") == target.session) { "Computer returned a different archived conversation." }
@@ -149,22 +173,22 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
                 (activity.string("name").isBlank() || activity.string("name") == target.session)) { "Computer returned a different conversation for this session." }
         }
     }
-    suspend fun history(connection:Connection,target:Target,direction:String="",cursor:String="",limit:Int=100):HistoryPage {
+    suspend fun history(connection:Connection,target:Target,direction:String="",cursor:String="",limit:Int=100):HistoryPage = RelayReadTiming.read(RelayReadTiming.Operation.History) {
         require(target.run.isNotBlank() && target.conversation.isNotBlank() && limit in 1..100)
         require(direction in setOf("","before","after","around","unread") && (direction.isEmpty() == cursor.isEmpty()) && cursor.length<=8192)
         val id=UUID.randomUUID().toString()
         val payload=HistoryRequests.payload(target,id,direction,cursor,limit)
-        val receipt=await(connection,submit(connection,target,"history",payload,id))
+        val receipt=await(connection,submit(connection,target,"history",payload,id),firstPollDelayMs=100)
         check(receipt.string("state")=="completed") { receipt.string("error").ifBlank { "History is not available yet. Try again." } }
-        return withContext(Dispatchers.Default) { HistoryPage.parse(target,id,receipt.getJSONObject("result")) }
+        withContext(Dispatchers.Default) { HistoryPage.parse(target,id,receipt.getJSONObject("result")) }
     }
     /** Read-only projection repair. The applied display marker belongs to the client cache only. */
-    suspend fun historyProjection(connection:Connection,target:Target,epoch:String,after:Long,until:Long):HistoryProjection.Page {
+    suspend fun historyProjection(connection:Connection,target:Target,epoch:String,after:Long,until:Long):HistoryProjection.Page = RelayReadTiming.read(RelayReadTiming.Operation.Projection) {
         val id=UUID.randomUUID().toString()
         val payload=HistoryProjection.payload(target,id,epoch,after,until)
-        val receipt=await(connection,submit(connection,target,"history_projection",payload,id))
+        val receipt=await(connection,submit(connection,target,"history_projection",payload,id),firstPollDelayMs=100)
         check(receipt.string("state")=="completed") { receipt.string("error").ifBlank { "History changes are not available yet." } }
-        return withContext(Dispatchers.Default) { HistoryProjection.parse(target,id,epoch,after,until,receipt.getJSONObject("result")) }
+        withContext(Dispatchers.Default) { HistoryProjection.parse(target,id,epoch,after,until,receipt.getJSONObject("result")) }
     }
     /** Shared read mark; the computer applies only current values, so each attempt has its own request ID. */
     suspend fun markRead(connection: Connection, target: Target, payload: JSONObject): JSONObject {

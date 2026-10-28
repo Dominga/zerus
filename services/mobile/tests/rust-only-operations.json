@@ -25,10 +25,32 @@
       "operation": "repository_status",
       "marker": "repository",
       "class": "read"
+    },
+    {
+      "operation": "task_exchange",
+      "marker": "task_exchange",
+      "class": "read"
+    },
+    {
+      "operation": "task_send",
+      "marker": "task_actions",
+      "class": "mutation"
+    },
+    {
+      "operation": "task_cancel",
+      "marker": "task_actions",
+      "class": "mutation"
+    },
+    {
+      "operation": "task_done",
+      "marker": "task_actions",
+      "class": "read"
     }
   ],
   "markers": {
     "git_status": "Mobile Git status ABI: git-status-v1",
-    "repository": "Mobile repository acquisition ABI: repository-acquisition-v1"
+    "repository": "Mobile repository acquisition ABI: repository-acquisition-v1",
+    "task_exchange": "hgs task exchange|digests --json",
+    "task_actions": "hgs task mobile-send|mobile-cancel|mobile-done --json"
   }
 }

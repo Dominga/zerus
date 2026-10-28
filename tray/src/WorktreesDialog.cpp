@@ -275,8 +275,8 @@ void WorktreesDialog::setContext(const SessionOrganization &projects, const Flee
             const auto common=source.catalog["common_dir"].toString(), repository=key(source.host,common);
             const auto review=m_client->worktreeReview(source.host,common,3600);
             if(source.fresh&&!review.isEmpty()) {
-                m_reviews[repository]=review;m_reviewAttempted.insert(repository);
-                for(const auto &path:review["targeted_paths"].toArray())m_reviewAttempted.insert(key(repository,path.toString()));
+                m_reviews[repository]=review;m_reviewAttempted[repository].insert(QString());
+                for(const auto &path:review["targeted_paths"].toArray())m_reviewAttempted[repository].insert(path.toString());
             }
         }
         const auto project = m_project->currentData().toString(), computer = m_computer->currentData().toString();
@@ -415,7 +415,7 @@ void WorktreesDialog::render()
         const auto common = source.catalog["common_dir"].toString(); repositories[key(source.host, common.isEmpty() ? source.path : common)].append(it.key());
     }
     m_tree->setColumnHidden(3,scopeMachines.size()==1);
-    QJsonArray rendered; int linked = 0, checked = 0, candidates = 0; qint64 candidateBytes = 0; bool candidateComplete = true, partial = false;
+    QJsonArray rendered; int linked = 0, processed = 0, unavailable = 0, candidates = 0; qint64 candidateBytes = 0; bool candidateComplete = true, partial = false;
     for (const auto &links : repositories) {
         auto sourceKey = links.first(); for (const auto &link : links) if (m_sources[link].fresh && m_sources[link].error.isEmpty()) { sourceKey = link; break; }
         const auto &source = m_sources[sourceKey]; QStringList projects;
@@ -427,7 +427,15 @@ void WorktreesDialog::render()
             const bool valid = !reviewed.isEmpty(); QJsonObject detail = valid ? reviewed : row;
             int group = WorktreeReviewUi::category(detail, valid);
             if (row["kind"] == "folder" && source.catalog["state"] != "not_repo") group = 3;
-            if (row["kind"] == "linked") { ++linked; if (valid && group != 3) ++checked; }
+            if (row["kind"] == "linked") {
+                ++linked;
+                const auto repository = key(source.host, source.catalog["common_dir"].toString());
+                const bool failed = m_reviewErrors.contains(repository);
+                const bool deferred = valid && WorktreeReviewUi::hasReason(detail, {"status_unavailable"})
+                    && (!reviewAttempted(repository, path)
+                        || (m_reviewRequest && m_reviewKey==repository && m_reviewWorktree==path));
+                if ((valid && !deferred) || failed) { ++processed; if (group == 3 || failed) ++unavailable; }
+            }
             if (group == 4 && !m_showMain->isChecked()) continue;
             if (m_category->currentData().toInt() >= 0 && group != m_category->currentData().toInt()) continue;
             const auto related = sessions(source, row);
@@ -486,15 +494,19 @@ void WorktreesDialog::render()
         const auto at=qint64(source.catalog["received_at"].toDouble(source.catalog["sampled_at"].toDouble()));
         if(at>0&&(oldest==0||at<oldest))oldest=at;
     }
+    // Schedule the next bounded read before publishing progress. Fleet polls
+    // must not expose an idle gap between sequential review callbacks.
+    pump(); reviewSelection();
     const bool checking = !m_requests.isEmpty() || m_reviewRequest;
     m_status->setText(m_sources.isEmpty() ? tr("Add a project folder to see its worktrees.") :
-        tr("%1 of %2 worktrees checked · %3 repositories%4").arg(checked).arg(linked).arg(repositories.size()).arg(checking ? tr(" · Checking…") : QString())
+        tr("%1 of %2 worktrees processed · %3 repositories%4").arg(processed).arg(linked).arg(repositories.size()).arg(checking ? tr(" · Checking…") : QString())
+        + tr(" · %1 incomplete · %2 pending").arg(unavailable).arg(linked-processed)
         + (scopeMachines.size()==1 ? " · "+*scopeMachines.cbegin() : QString())
         + tr(" · %1 cleanup candidates · %2%3 estimated").arg(candidates).arg(candidateComplete ? QString() : tr("at least "), QLocale().formattedDataSize(candidateBytes))
         + (partial ? tr(" · Catalog is incomplete; some folders are not shown.") : QString()));
     if(oldest>0) m_status->setText(m_status->text()+tr(" · Updated %1").arg(QLocale().toString(QDateTime::fromSecsSinceEpoch(oldest).time(),QLocale::ShortFormat)));
-    m_status->setToolTip(tr("Browsing data is cached for one hour. Refresh after external Git changes or when cleanup checks expire (five minutes). Cleanup rechecks each folder before removal."));
-    showDetails(); reviewSelection();
+    m_status->setToolTip(tr("Processed includes completed reads whose safety checks were incomplete. Those folders still require review. Browsing data is cached for one hour. Refresh after external Git changes or when cleanup checks expire (five minutes). Cleanup rechecks each folder before removal."));
+    showDetails();
 }
 
 void WorktreesDialog::showDetails()
@@ -551,18 +563,17 @@ void WorktreesDialog::reviewSelection()
     for (const auto &source : m_sources) {
         if (!canClean(source)) continue;
         const auto common = source.catalog["common_dir"].toString(), repository = key(source.host, common);
-        QString focus, attempt = repository;
-        if (m_reviewAttempted.contains(repository)) {
+        QString focus;
+        if (reviewAttempted(repository)) {
             if (!m_reviews.contains(repository)) continue;
             for (const auto &value : source.catalog["worktrees"].toArray()) {
                 const auto row = value.toObject(); if (row["kind"] != "linked") continue;
                 const auto reviewed = reviewedRow(source, row); const auto path = row["path"].toString();
-                const auto candidate = key(repository, path);
-                if ((reviewed.isEmpty() || WorktreeReviewUi::hasReason(reviewed, {"status_unavailable"})) && !m_reviewAttempted.contains(candidate)) { focus = path; attempt = candidate; break; }
+                if ((reviewed.isEmpty() || WorktreeReviewUi::hasReason(reviewed, {"status_unavailable"})) && !reviewAttempted(repository, path)) { focus = path; break; }
             }
             if (focus.isEmpty()) continue;
         }
-        m_reviewAttempted.insert(attempt); m_reviewKey = repository; m_reviewWorktree = focus; m_reviewGeneration = m_generation;
+        m_reviewAttempted[repository].insert(focus); m_reviewKey = repository; m_reviewWorktree = focus; m_reviewGeneration = m_generation;
         m_reviewRequest = m_client->reviewWorktrees(source.host, common, focus); updateActions(); return;
     }
 }
@@ -586,8 +597,4 @@ void WorktreesDialog::cleanUp()
 void WorktreesDialog::invalidateReview(const QString &repository)
 {
     m_reviews.remove(repository); m_reviewErrors.remove(repository); m_reviewAttempted.remove(repository);
-    for (auto it = m_reviewAttempted.begin(); it != m_reviewAttempted.end();) {
-        const auto parts = QJsonDocument::fromJson(it->toUtf8()).array();
-        if (!parts.isEmpty() && parts.first().toString() == repository) it = m_reviewAttempted.erase(it); else ++it;
-    }
 }

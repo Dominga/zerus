@@ -88,6 +88,14 @@ Mac's build. [Connect a computer](mobile-deployment.md#connect-a-computer) sets 
 its service, and [Move a computer to the Rust connector](mobile-deployment.md#move-a-computer-to-the-rust-connector)
 switches one that runs the Python connector.
 
+To install an already qualified standalone connector without building or updating
+the CLI, use `./install.sh --connector-only /absolute/path/to/zerus-mobile-connector SHA256`.
+Pass the artifact's verified lowercase SHA256. This mode checks the artifact and
+installation directories, replaces only the connector atomically and performs no
+service action. `HGS_INSTALL_PREFIX` selects the prefix as usual. Coordinate any
+subsequent connector service transition separately; the running process retains
+its previous executable until it exits.
+
 Open the workspace from the command line:
 
 ```sh

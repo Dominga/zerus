@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The seven Kimi Bash approval contracts in a private Windows ConPTY host.
+"""The seven Kimi Bash, four CreateGoal and one ExitPlanMode approval contracts in a private Windows ConPTY host.
 
 Only the sealed selected official latest win32-x64 image qualifies. No tmux, shared Kimi,
 user profile, real provider or relaxed screen predicate is used. A separate
@@ -65,7 +65,7 @@ class WindowsEnvironmentOracle(unittest.TestCase):
 
 
 @unittest.skipUnless(os.name == 'nt', 'native Kimi approvals require Windows')
-class NativeWindowsKimiApprovals(approvals.ApprovalCases, unittest.TestCase):
+class NativeWindowsKimiApprovals(approvals.ApprovalCases, approvals.GoalCases, approvals.PlanCases, unittest.TestCase):
     command = approvals.MARKER
     rows = None
     card = approvals.NativeKimiApprovals.card
@@ -101,7 +101,12 @@ class NativeWindowsKimiApprovals(approvals.ApprovalCases, unittest.TestCase):
         shutil.copyfile(self.image, self.bin / 'kimi.exe')
         # The actual image that hgs finds is a separate, equally pinned copy.
         self.image = self.bin / 'kimi.exe'
-        self.server = approvals.serve(self.command)
+        self.goal_mode = approvals.goal_mode(self._testMethodName)
+        self.plan_scenario = self._testMethodName.startswith('test_plan_')
+        arguments = dict(objective=approvals.GOAL_OBJECTIVE,
+                         completionCriterion=approvals.GOAL_CRITERION) if self.goal_mode else None
+        self.server = approvals.serve(self.command, 'CreateGoal' if self.goal_mode else 'Bash', arguments,
+                                      plan=self.plan_scenario)
         self.env = approvals.private_environment(self.profile, self.home, self.bin,
             'http://127.0.0.1:%d%s' % (self.server.server_port, approvals.PLATFORM),
             dict(HGS_CONFIG_DIR=str(self.profile / '.config/hgs'), HGS_STATE_DIR=str(self.state),
@@ -120,10 +125,7 @@ class NativeWindowsKimiApprovals(approvals.ApprovalCases, unittest.TestCase):
                          os.path.normcase(str(bash)), 'only the exact installed Git Bash may resolve')
         approvals.make_private_folders(self.env)
         (self.home / 'config.toml').write_text(
-            'default_model = "fixture"\ntelemetry = false\ndefault_permission_mode = "default"\n'
-            '[providers.fixture]\ntype = "openai"\nbase_url = "http://127.0.0.1:%d/v1"\napi_key = "fixture-key"\n'
-            '[models.fixture]\nprovider = "fixture"\nmodel = "fixture"\nmax_context_size = 32768\n'
-            '[loop_control]\nmax_attempts_per_step = 1\n' % self.server.server_port)
+            approvals.model_config(self.server.server_port, self.goal_mode or 'default'))
         (self.home / 'tui.toml').write_text('[upgrade]\nauto_install = false\n')
         portable = self.root / 'portable'
         portable.mkdir()
@@ -149,14 +151,18 @@ class NativeWindowsKimiApprovals(approvals.ApprovalCases, unittest.TestCase):
         self.assert_process('initial')
         self.trust()
         ready = self.until(lambda: self.inspect().get('first_message_can_send') and self.inspect())
-        payload = dict(request_id=str(uuid.uuid4()), text='Run the fixture command.',
+        text = 'Start the fixture goal.' if self.goal_mode else 'Run the fixture command.'
+        marker = '1. Switch to Never Ask and start' if self.goal_mode else '1. Approve once'
+        if self.plan_scenario:
+            text, marker = approvals.PLAN_PROMPT, 'Ready to build with this plan?'
+        payload = dict(request_id=str(uuid.uuid4()), text=text,
                        expected_run_id=ready['run_id'], expected_conversation_id=ready.get('conversation_id') or '')
         self.assertEqual(self.call('send', payload)['status'], 'submitted')
 
         def asked():
             files = list(self.home.glob('sessions/*/*/agents/main/wire.jsonl'))
             return files[0] if len(files) == 1 and '"kind":"approval"' in files[0].read_text(encoding='utf-8') \
-                and '1. Approve once' in self.screen() else None
+                and marker in self.screen() else None
         self.wire = self.until(asked)
         self.assert_process('approval')
         if self.rows:

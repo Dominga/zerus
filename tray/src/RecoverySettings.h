@@ -1,4 +1,5 @@
 #pragma once
+#include "SettingsJson.h"
 #include "HgsClient.h"
 #include <QCheckBox>
 #include <QComboBox>
@@ -20,7 +21,7 @@ class RecoverySync : public QObject {
 public:
     std::function<void()> changed;
     explicit RecoverySync(const QString &executable,QObject *parent):QObject(parent),client(executable,this) {
-        best=QJsonDocument::fromJson(QSettings().value("recovery/sharedPolicy").toByteArray()).object();
+        best=SettingsJson::object("recovery/sharedPolicy");
         if(!best.value("policy").isObject()||best.value("order").toArray().size()!=2)best={};
         connect(&client,&HgsClient::recoveryFinished,this,[this](quint64 id,bool ok,const QJsonObject &data,const QString &error){
             if(!pending.contains(id))return;const auto request=pending.take(id);
@@ -81,7 +82,7 @@ private:
     QStringList hosts()const{QStringList result;if(local)result<<QString();result.append(machines);return result;}
     QString label(const QString &host)const{return host.isEmpty()?tr("this machine"):host;}
     void send(const QString &host,const QString &op,const QJsonObject &data={}){pending.insert(client.requestRecovery(host,op,data),{host,op});}
-    void persist(){QSettings().setValue("recovery/sharedPolicy",QJsonDocument(best).toJson(QJsonDocument::Compact));}
+    void persist(){SettingsJson::store(QStringLiteral("recovery/sharedPolicy"),QJsonDocument(best));}
     void reconcile(){
         if(best.isEmpty())return;
         for(const auto &host:hosts())if(!errors.contains(host)&&copies.contains(host)&&compare(copies[host],best)<0)

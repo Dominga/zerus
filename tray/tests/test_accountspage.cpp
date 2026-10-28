@@ -61,6 +61,7 @@ private slots:
     void accountRowsDrawNoNativeFocusFrame();
     void init();
     void nativeDefaultsAndMachineScopedActions();
+    void modelDefaultsUseTheSelectedMachineAndNativeCatalog();
     void openCodeNativeConfigurationDoesNotOfferUnsupportedAccountMutations();
     void openCodeReasonsAndExplicitStart();
     void openCodeProvidersShowConnectionAndCounts();
@@ -85,6 +86,8 @@ private slots:
     void refreshPreservesRowsAndShowsPendingUsage();
     void summaryCountsReadInSingularAndPlural();
     void initialLoadingPublishesOnlyGroupedAccounts();
+    void hiddenStartupWarmsAndPublishesVerifiedIdentities();
+    void hiddenPageKeepsItsCatalogAndRendersWhenShown();
     void loadingFinishesWithPartialOrUnavailableResults_data();
     void loadingFinishesWithPartialOrUnavailableResults();
     void permissionsStayBoundToSelectedMachine();
@@ -127,6 +130,9 @@ if args[0]=='account':
   while (root/'hold-remote-catalog').exists():time.sleep(.02)
  if args[1]=='ls' and host and (root/'fail-catalog').exists():sys.exit(1)
  if args[1]=='ls' and (root/'empty-catalog').exists():print(json.dumps({'profiles':[]}));sys.exit(0)
+ if args[1]=='model-settings':
+  print(json.dumps({'account_id':args[2],'revision':'model-rev','defaults':{'model':'','effort':''},'provider_defaults':{'model':'fixture-smart','effort':'low'},'effort_supported':True,'models':[{'id':'fixture-smart','label':'Fixture smart','effort_options':['low','xhigh']}]}));sys.exit(0)
+ if args[1]=='model-defaults':publish('model-defaults-action',json.dumps({'host':host,'args':args}))
  if args[1]=='inspect':
   while (root/'hold-inspect').exists() or (host and (root/'hold-remote-inspect').exists()):time.sleep(.02)
   if (root/'fail-inspect').exists():sys.exit(1)
@@ -164,6 +170,7 @@ if args[0]=='account':
  profiles.append({'id':'work-'+(host or 'local'),'provider':'codex','label':'Work','home':'~/.config/hgs/accounts/work','native':False,'installed':True,'portable':True,'credential_file':True})
  if (root/'one-account').exists():profiles=profiles[:1]
  for p in profiles:
+  p['model_defaults_supported']=True;p['model_defaults']={'model':'','effort':''}
   chosen=(root/('default-'+(host or 'local')))
   p['is_default']=p['id']==(chosen.read_text() if chosen.exists() and p['provider']=='codex' else 'native-'+p['provider'])
  if (root/'deepseek').exists():
@@ -198,6 +205,39 @@ elif args[0]=='project': print(json.dumps([{'name':'sample','dir':'/tmp/sample',
 else: print('{}')
 )"); script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
 }
+void TestAccountsPage::modelDefaultsUseTheSelectedMachineAndNativeCatalog()
+{
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet());page.show();
+    page.showAccount("mac","native-codex");
+    auto *list=page.findChild<QListWidget *>("accountProfiles");
+    const auto selectedRemote=[&] {
+        if(!list->currentItem())return false;
+        const auto members=list->currentItem()->data(Qt::UserRole).toJsonObject()["members"].toArray();
+        return std::any_of(members.cbegin(),members.cend(),[](const QJsonValue &value){
+            const auto p=value.toObject();return p["host"]=="mac" && p["id"]=="native-codex";
+        });
+    };
+    QTRY_VERIFY(selectedRemote());
+    auto *button=page.findChild<QPushButton *>("accountModelDefaults");
+    QTRY_VERIFY(button->isVisible() && button->isEnabled());
+    QTimer poll;
+    connect(&poll,&QTimer::timeout,&page,[&]{
+        auto *dialog=page.findChild<QDialog *>("accountModelDefaultsDialog");if(!dialog)return;
+        poll.stop();const auto close=qScopeGuard([&]{if(dialog->isVisible())dialog->reject();});
+        auto *model=dialog->findChild<QComboBox *>("defaultModel"),*effort=dialog->findChild<QComboBox *>("defaultEffort");
+        QVERIFY(model && effort);QCOMPARE(model->count(),2);QVERIFY(!effort->isEnabled());
+        QVERIFY(dialog->findChild<QLabel *>("nativeModelDefaults")->text().contains("low"));
+        model->setCurrentIndex(model->findData("fixture-smart"));QVERIFY(effort->isEnabled());
+        QCOMPARE(effort->count(),3);effort->setCurrentIndex(effort->findData("xhigh"));
+        dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Save)->click();
+    });
+    poll.start(10);button->click();
+    QTRY_VERIFY(QFile::exists(m_dir.filePath("model-defaults-action")));
+    QFile action(m_dir.filePath("model-defaults-action"));QVERIFY(action.open(QIODevice::ReadOnly));
+    const auto call=QJsonDocument::fromJson(action.readAll()).object();QCOMPARE(call["host"].toString(),QString("mac"));
+    QCOMPARE(call["args"].toArray(),QJsonArray({"account","model-defaults","native-codex","--model","fixture-smart","--effort","xhigh","--revision","model-rev"}));
+}
+
 void TestAccountsPage::openCodeNativeConfigurationDoesNotOfferUnsupportedAccountMutations()
 {
     QFile original(m_script);QVERIFY(original.open(QIODevice::ReadOnly));
@@ -1064,6 +1104,42 @@ void TestAccountsPage::aSlowPeerListingDoesNotHoldAddAccount()
     QVERIFY(QFile::remove(hold.fileName())); QTRY_COMPARE(page.profiles().size(),8); QVERIFY(add->isEnabled());
 }
 
+void TestAccountsPage::hiddenStartupWarmsAndPublishesVerifiedIdentities()
+{
+    QFile shared(m_dir.filePath("shared-identity"));QVERIFY(shared.open(QIODevice::WriteOnly));shared.close();
+    AccountsPage page(FakeCli::program(m_script));QSignalSpy changed(&page,&AccountsPage::catalogChanged);
+    page.setFleet(fleet());QVERIFY(!page.isVisible());
+    QTRY_COMPARE(page.profiles().size(),8);
+    const auto identified=[&] {
+        const auto profiles=page.profiles();
+        return std::all_of(profiles.cbegin(),profiles.cend(),[](const QJsonValue &value){return !value.toObject()["usage"].toObject()["identity"].toObject()["email"].toString().isEmpty();});
+    };
+    QTRY_VERIFY(identified());QVERIFY(changed.size()>2);
+    const auto grouped=AccountCatalog::group(page.profiles());QCOMPARE(grouped.size(),7);
+    const auto sharedAccount=std::find_if(grouped.cbegin(),grouped.cend(),[](const QJsonValue &value){return value.toObject()["members"].toArray().size()==2;});
+    QVERIFY(sharedAccount!=grouped.cend());QCOMPARE((*sharedAccount).toObject()["provider"].toString(),QString("codex"));
+    QVERIFY(!page.isVisible());
+    const auto calls=[&]{QFile file(m_dir.filePath("calls"));if(!file.open(QIODevice::ReadOnly))return QByteArray();return file.readAll();};
+    const auto before=calls();page.setFleet(fleet());QTest::qWait(60);QCOMPARE(calls(),before); // Ordinary fleet polls do not restart the warm-up.
+}
+
+void TestAccountsPage::hiddenPageKeepsItsCatalogAndRendersWhenShown()
+{
+    QFile shared(m_dir.filePath("shared-identity"));QVERIFY(shared.open(QIODevice::WriteOnly));shared.close();
+    AccountsPage page(FakeCli::program(m_script));page.resize(1000,700);
+    auto *list=page.findChild<QListWidget *>("accountProfiles");
+    page.setFleet(fleet());QVERIFY(!page.isVisible());
+    // Sessions read the catalog of the hidden page; its rows wait until it is shown.
+    QTRY_COMPARE(page.catalogProfiles().size(),8);
+    for(int i=0;i<3;++i)page.setFleet(fleet());
+    QCOMPARE(list->count(),0);
+    page.show();QCOMPARE(list->count(),7);QVERIFY(list->currentItem());
+    // A fleet change while hidden is rendered on the next show.
+    page.hide();page.setFleet(fleet(false));
+    QCOMPARE(page.catalogProfiles().size(),4);QCOMPARE(list->count(),7);
+    page.show();QCOMPARE(list->count(),4);
+}
+
 void TestAccountsPage::initialLoadingPublishesOnlyGroupedAccounts()
 {
     QFile shared(m_dir.filePath("shared-identity")); QVERIFY(shared.open(QIODevice::WriteOnly)); shared.close();
@@ -1079,15 +1155,18 @@ void TestAccountsPage::initialLoadingPublishesOnlyGroupedAccounts()
     QVERIFY(QFile::remove(catalogHold.fileName()));
     QTRY_COMPARE(page.profiles().size(),8);QTest::qWait(100);
     QCOMPARE(list->count(),0);QVERIFY(loading->isVisible());QVERIFY(refresh->property("refreshing").toBool());
+    QVERIFY(page.catalogProfiles().isEmpty());
     int maximumRows=0;connect(list->model(),&QAbstractItemModel::rowsInserted,&page,[&]{maximumRows=qMax(maximumRows,list->count());});
     const auto preview=qEnvironmentVariable("HGS_ACCOUNTS_PREVIEW");
     if(!preview.isEmpty()){QDir().mkpath(preview);page.setTheme(true);QVERIFY(page.grab().save(preview+"/loading-dark.png"));page.setTheme(false);QVERIFY(page.grab().save(preview+"/loading-light.png"));}
     QFile remoteHold(m_dir.filePath("hold-remote-inspect"));QVERIFY(remoteHold.open(QIODevice::WriteOnly));remoteHold.close();
     QVERIFY(QFile::remove(hold.fileName()));QTRY_COMPARE(list->count(),4);
+    QCOMPARE(page.catalogProfiles().size(),4);
     QVERIFY(content->isVisible());QVERIFY(!loading->isVisible());QVERIFY(refresh->property("refreshing").toBool());
     for(int i=0;i<list->count();++i)for(const auto &member:list->item(i)->data(Qt::UserRole).toJsonObject()["members"].toArray())QCOMPARE(member.toObject()["host"].toString(),QString());
     const QPersistentModelIndex localRow(list->model()->index(0,0));
     QVERIFY(QFile::remove(remoteHold.fileName()));QTRY_COMPARE(list->count(),7);QTRY_VERIFY(refresh->isEnabled());
+    QCOMPARE(page.catalogProfiles().size(),8);QCOMPARE(AccountCatalog::group(page.catalogProfiles()).size(),list->count());
     QVERIFY(localRow.isValid());
     QVERIFY(!loading->isVisible());QVERIFY(content->isVisible());QCOMPARE(maximumRows,7);
     QCOMPARE(list->currentItem()->data(Qt::UserRole).toJsonObject()["members"].toArray().size(),2);

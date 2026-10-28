@@ -27,6 +27,8 @@
 #include <unistd.h>
 #endif
 #include "ChildProcess.h"
+#include "OffGuiThread.h"
+#include "ProcessRunner.h"
 
 namespace {
 // <link> pointing at <target>: a junction on Windows, as a versioned fork root has.
@@ -37,6 +39,11 @@ bool makeDirectoryLink(const QString &link,const QString &target){
     return QFile::link(target,link);
 #endif
 }
+// The parsers parse JSON, which production does off the GUI thread (JsonParse.h).
+DesktopUpdateFeed parsedFeed(const QByteArray &data,const QString &channel){return offGuiThread([&]{return UpdateController::parseFeed(data,channel);});}
+bool isInstallerRecord(const QByteArray &data){return offGuiThread([&]{return UpdateController::installerRecord(data);});}
+// Applies after every prepare step posted before it, such as a catalog restore (ProcessRunner.h).
+void preparationBarrier(){QObject owner;bool done=false;ProcessRunner::post(&owner,[]{return true;},[&done](bool){done=true;});QTRY_VERIFY(done);}
 #ifdef Q_OS_UNIX
 // A request's pipe ProcessRunner's macOS worker is still creating: pipe() made it
 // and close-on-exec follows only afterwards. High numbers keep its ends apart from
@@ -127,7 +134,7 @@ class TestUpdates : public QObject {
         return value;
     }
     DesktopUpdateFeed nightlyCatalog(const QString &version) const {
-        return UpdateController::parseFeed(QJsonDocument(nightlyRaw(version)).toJson(),"nightly");
+        return parsedFeed(QJsonDocument(nightlyRaw(version)).toJson(),"nightly");
     }
     QJsonObject withMacos(QJsonObject value) const {
         const QString version=value["versionName"].toString();
@@ -171,13 +178,13 @@ private slots:
     }
     void devVersionSequenceIsVisibleAndMatchesTheFeed(){
         auto value=devRaw();
-        auto legacy=UpdateController::parseFeed(QJsonDocument(value).toJson(),"dev");
+        auto legacy=parsedFeed(QJsonDocument(value).toJson(),"dev");
         QVERIFY(legacy.valid);QCOMPARE(legacy.version,value["versionName"].toString()+"-dev.50");
         value["versionName"]="0.42.1-dev.50";
-        auto numbered=UpdateController::parseFeed(QJsonDocument(value).toJson(),"dev");
+        auto numbered=parsedFeed(QJsonDocument(value).toJson(),"dev");
         QVERIFY(numbered.valid);QCOMPARE(numbered.version,QString("0.42.1-dev.50"));
         for(const auto &bad:{"0.42.1-dev.49","0.42.1-dev.050","0.42.1-dev.51"}){
-            value["versionName"]=bad;QVERIFY(!UpdateController::parseFeed(QJsonDocument(value).toJson(),"dev").valid);
+            value["versionName"]=bad;QVERIFY(!parsedFeed(QJsonDocument(value).toJson(),"dev").valid);
         }
         const auto identity=UpdateController::buildInfo();const auto version=UpdateController::installedVersion();
         QSettings settings;const auto previous=settings.value("updates/channel");
@@ -192,8 +199,8 @@ private slots:
         value["artifacts"]=QJsonArray{
             QJsonObject{{"kind","arch-package"},{"name","zerus.pkg.tar.zst"},{"url","https://zerus.dev/downloads/dev-desktop-12345/zerus.pkg.tar.zst"},{"sha256",QString(64,'b')},{"size",100},{"os","linux"},{"arch","x86_64"}},
             QJsonObject{{"kind","source"},{"name","zerus-source.tar.gz"},{"url","https://zerus.dev/downloads/dev-desktop-12345/zerus-source.tar.gz"},{"sha256",QString(64,'c')},{"size",100},{"os","any"},{"arch","source"}}};
-        auto feed=UpdateController::parseFeed(QJsonDocument(value).toJson(),"dev");QVERIFY(feed.valid);QCOMPARE(feed.buildNumber,50);QCOMPARE(feed.releaseId,12345);
-        QVERIFY(!UpdateController::parseFeed(QJsonDocument(value).toJson(),"stable").valid);
+        auto feed=parsedFeed(QJsonDocument(value).toJson(),"dev");QVERIFY(feed.valid);QCOMPARE(feed.buildNumber,50);QCOMPARE(feed.releaseId,12345);
+        QVERIFY(!parsedFeed(QJsonDocument(value).toJson(),"stable").valid);
         QVERIFY(UpdateController::devBuildIsNewer(feed,49,QString(40,'d')));
         QVERIFY(!UpdateController::devBuildIsNewer(feed,51,QString(40,'d')));
         QVERIFY(!UpdateController::devBuildIsNewer(feed,0,QString(40,'a')));
@@ -203,8 +210,8 @@ private slots:
         QVERIFY(!UpdateController::isUpdateToken("zerus-update:v2:stable:12345"));
         QCOMPARE(UpdateController::automaticInterval("dev"),15*60);QCOMPARE(UpdateController::automaticInterval("stable"),24*60*60);
         DesktopInstallation installation{"package","zerus-ade-bin","0.39.0-1",true,"yay"};QVERIFY(UpdateController::updateCommand(installation,"dev").isEmpty());
-        for(QString key:{"buildId","buildNumber","channelTag","buildUrl","sourceCommit"}){auto bad=value;bad[key]="bad";QVERIFY(!UpdateController::parseFeed(QJsonDocument(bad).toJson(),"dev").valid);}
-        value["sourceDirty"]=false;QVERIFY(!UpdateController::parseFeed(QJsonDocument(value).toJson(),"dev").valid);
+        for(QString key:{"buildId","buildNumber","channelTag","buildUrl","sourceCommit"}){auto bad=value;bad[key]="bad";QVERIFY(!parsedFeed(QJsonDocument(bad).toJson(),"dev").valid);}
+        value["sourceDirty"]=false;QVERIFY(!parsedFeed(QJsonDocument(value).toJson(),"dev").valid);
     }
     void devChannelPersistsAndChecksItsIndependentFeed(){
         QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);QString requested;
@@ -217,28 +224,28 @@ private slots:
     // (the next test, deferred work) go to empty settings that outlive the test
     // run instead of recreating a removed folder.
     void cleanup(){QVERIFY(m_settings.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,m_settings.path());QSettings().clear();}
-    void validCatalog(){auto value=UpdateController::parseFeed(QJsonDocument(raw()).toJson(),"stable");QVERIFY(value.valid);QCOMPARE(value.version,QString("0.37.0"));QCOMPARE(value.packages["zerus-git"].toString(),QString("0.37.0.r10.gaaaaaaa-1"));}
+    void validCatalog(){auto value=parsedFeed(QJsonDocument(raw()).toJson(),"stable");QVERIFY(value.valid);QCOMPARE(value.version,QString("0.37.0"));QCOMPARE(value.packages["zerus-git"].toString(),QString("0.37.0.r10.gaaaaaaa-1"));}
     void maliciousCatalog(){
-        for(QString key:{"schemaVersion","product","platform","channel","releaseUrl","sourceCommit","publishedAt"}){auto value=raw();value[key]=key=="schemaVersion"?QJsonValue(2):QJsonValue("evil");QVERIFY2(!UpdateController::parseFeed(QJsonDocument(value).toJson(),"stable").valid,qPrintable(key));}
-        for(QString key:{"name","url","sha256","size","os","arch","kind"}){auto value=raw();auto artifact=value["artifacts"].toArray()[0].toObject();artifact[key]=key=="size"?QJsonValue(1e30):QJsonValue("../evil");value["artifacts"]=QJsonArray{artifact};QVERIFY2(!UpdateController::parseFeed(QJsonDocument(value).toJson(),"stable").valid,qPrintable(key));}
-        auto value=raw();value["sourceDirty"]=true;QVERIFY(!UpdateController::parseFeed(QJsonDocument(value).toJson(),"stable").valid);
-        value=raw();auto array=value["artifacts"].toArray();array.append(array[0]);value["artifacts"]=array;QVERIFY(!UpdateController::parseFeed(QJsonDocument(value).toJson(),"stable").valid);
-        QVERIFY(!UpdateController::parseFeed(QByteArray(256*1024+1,' '),"stable").valid);
+        for(QString key:{"schemaVersion","product","platform","channel","releaseUrl","sourceCommit","publishedAt"}){auto value=raw();value[key]=key=="schemaVersion"?QJsonValue(2):QJsonValue("evil");QVERIFY2(!parsedFeed(QJsonDocument(value).toJson(),"stable").valid,qPrintable(key));}
+        for(QString key:{"name","url","sha256","size","os","arch","kind"}){auto value=raw();auto artifact=value["artifacts"].toArray()[0].toObject();artifact[key]=key=="size"?QJsonValue(1e30):QJsonValue("../evil");value["artifacts"]=QJsonArray{artifact};QVERIFY2(!parsedFeed(QJsonDocument(value).toJson(),"stable").valid,qPrintable(key));}
+        auto value=raw();value["sourceDirty"]=true;QVERIFY(!parsedFeed(QJsonDocument(value).toJson(),"stable").valid);
+        value=raw();auto array=value["artifacts"].toArray();array.append(array[0]);value["artifacts"]=array;QVERIFY(!parsedFeed(QJsonDocument(value).toJson(),"stable").valid);
+        QVERIFY(!parsedFeed(QByteArray(256*1024+1,' '),"stable").valid);
     }
-    void wrongChannelAndMissing(){auto value=raw();value.remove("artifacts");QVERIFY(!UpdateController::parseFeed(QJsonDocument(value).toJson(),"stable").valid);QVERIFY(!UpdateController::parseFeed(QJsonDocument(raw()).toJson(),"nightly").valid);}
+    void wrongChannelAndMissing(){auto value=raw();value.remove("artifacts");QVERIFY(!parsedFeed(QJsonDocument(value).toJson(),"stable").valid);QVERIFY(!parsedFeed(QJsonDocument(raw()).toJson(),"nightly").valid);}
     void safeInstructions(){
         DesktopInstallation package{"package","zerus-ade-bin","0.36.2-1",true,"paru"};QCOMPARE(UpdateController::updateCommand(package),QString("paru -Syu zerus-ade-bin"));
         package.package="zerus-git";QCOMPARE(UpdateController::updateCommand(package),QString("paru -Syu --devel"));
         package.package="unrecognized; sudo command";QVERIFY(UpdateController::updateCommand(package).isEmpty());
         package.kind="source";package.package="zerus";QCOMPARE(UpdateController::updateCommand(package),QString("paru -Syu zerus-ade-bin"));
-        auto catalog=UpdateController::parseFeed(QJsonDocument(raw()).toJson(),"stable");
+        auto catalog=parsedFeed(QJsonDocument(raw()).toJson(),"stable");
         DesktopInstallation unknown{"unknown",{},"0.99.0"};
         DesktopInstallation actual{"package","zerus-ade-bin","0.9.0-1"};
 #ifdef Q_OS_MACOS
         const QString cask="brew install --cask ufna/zerus/zerus";
         QVERIFY(UpdateController::comparisonMessage(unknown,catalog,"0.99.0",0,false).contains("No macOS build"));
         QVERIFY(!UpdateController::comparisonMessage(unknown,catalog,"0.99.0",0,false).contains(cask));
-        catalog=UpdateController::parseFeed(QJsonDocument(withMacos(raw())).toJson(),"stable");
+        catalog=parsedFeed(QJsonDocument(withMacos(raw())).toJson(),"stable");
         QVERIFY(UpdateController::comparisonMessage(unknown,catalog,"0.99.0",0,false).contains("unconfirmed"));
         QVERIFY(UpdateController::comparisonMessage(unknown,catalog,"0.99.0",0,false).contains(cask));
         QVERIFY(UpdateController::comparisonMessage(unknown,catalog,"0.9.0",0,false).contains("Update available"));
@@ -252,10 +259,10 @@ private slots:
 #endif
     }
     void portableWindowsBuildFollowsStableAndNightlyReleases(){
-        auto stable=UpdateController::parseFeed(QJsonDocument(stableRaw("0.42.3")).toJson(),"stable");QVERIFY(stable.valid);
-        auto last=UpdateController::parseFeed(QJsonDocument(stableRaw("0.42.2")).toJson(),"stable");QVERIFY(last.valid);
-        auto older=UpdateController::parseFeed(QJsonDocument(raw()).toJson(),"stable");QVERIFY(older.valid);
-        auto nightly=UpdateController::parseFeed(QJsonDocument(nightlyRaw("0.38.0.r10.gaaaaaaa.n5")).toJson(),"nightly");QVERIFY(nightly.valid);
+        auto stable=parsedFeed(QJsonDocument(stableRaw("0.42.3")).toJson(),"stable");QVERIFY(stable.valid);
+        auto last=parsedFeed(QJsonDocument(stableRaw("0.42.2")).toJson(),"stable");QVERIFY(last.valid);
+        auto older=parsedFeed(QJsonDocument(raw()).toJson(),"stable");QVERIFY(older.valid);
+        auto nightly=parsedFeed(QJsonDocument(nightlyRaw("0.38.0.r10.gaaaaaaa.n5")).toJson(),"nightly");QVERIFY(nightly.valid);
         DesktopInstallation portable{"portable",{},{}};
         // Stable releases after 0.42.2 carry the zip, which knows only its product version.
         QVERIFY(UpdateController::stableHasWindowsBuild("0.42.3"));QVERIFY(UpdateController::stableHasWindowsBuild("0.43.0"));QVERIFY(UpdateController::stableHasWindowsBuild("1.0.0"));
@@ -281,7 +288,7 @@ private slots:
             const QString tag=value["releaseUrl"].toString().section('/',-1),channel=value["channel"].toString();
             auto artifacts=value["artifacts"].toArray();
             artifacts.append(QJsonObject{{"kind","windows-zip"},{"name","zerus-windows-x86_64.zip"},{"url","https://zerus.dev/downloads/"+tag+"/zerus-windows-x86_64.zip"},{"sha256",QString(64,'c')},{"size",100},{"os","windows"},{"arch","x86_64"}});
-            value["artifacts"]=artifacts;QVERIFY2(!UpdateController::parseFeed(QJsonDocument(value).toJson(),channel).valid,qPrintable(channel));
+            value["artifacts"]=artifacts;QVERIFY2(!parsedFeed(QJsonDocument(value).toJson(),channel).valid,qPrintable(channel));
         }
     }
     void portableBuildDefaultsToStableAndFollowsNightlyNeverDev(){
@@ -324,14 +331,14 @@ private slots:
         // installation.json as scripts/windows_installer.py writes it.
         const QByteArray record="{\n  \"schema\": 1,\n  \"kind\": \"installer\",\n  \"product\": \"Zerus\",\n  \"version\": \"0.45.0\",\n"
                                 "  \"product_version\": \"0.45.0\",\n  \"source_commit\": \"cccccccccccccccccccccccccccccccccccccccc\"\n}\n";
-        QVERIFY(UpdateController::installerRecord(record));
+        QVERIFY(isInstallerRecord(record));
         for(const QByteArray &other:{QByteArray(),QByteArray("[]"),QByteArray("{\"schema\":2,\"kind\":\"installer\",\"product\":\"Zerus\"}"),
                                      QByteArray("{\"schema\":1,\"kind\":\"portable\",\"product\":\"Zerus\"}"),QByteArray("{\"schema\":1,\"kind\":\"installer\",\"product\":\"Other\"}"),
                                      QByteArray("{\"schema\":\"1\",\"kind\":\"installer\",\"product\":\"Zerus\"}"),record.left(record.size()-3),
                                      QByteArray("{\"schema\":1,\"kind\":\"installer\",\"product\":\"Zerus\",\"pad\":\"")+QByteArray(UpdateController::installerRecordLimit,'x')+"\"}"})
-            QVERIFY2(!UpdateController::installerRecord(other),other.left(80).constData());
-        auto stable=UpdateController::parseFeed(QJsonDocument(stableRaw("0.42.3")).toJson(),"stable");QVERIFY(stable.valid);
-        auto nightly=UpdateController::parseFeed(QJsonDocument(nightlyRaw("0.43.0.r10.gaaaaaaa.n5")).toJson(),"nightly");QVERIFY(nightly.valid);
+            QVERIFY2(!isInstallerRecord(other),other.left(80).constData());
+        auto stable=parsedFeed(QJsonDocument(stableRaw("0.42.3")).toJson(),"stable");QVERIFY(stable.valid);
+        auto nightly=parsedFeed(QJsonDocument(nightlyRaw("0.43.0.r10.gaaaaaaa.n5")).toJson(),"nightly");QVERIFY(nightly.valid);
         DesktopUpdateFeed dev;dev.valid=true;dev.buildNumber=50;dev.version="0.42.0 (dev 50)";
         const DesktopInstallation installer{"installer",{},{}};
         // Like the portable zip: release page links only, no command, no download, no Dev builds.
@@ -401,8 +408,8 @@ private slots:
                                  QString("C:\\WinGet\\Packages\\other.App_Microsoft.Winget.Source\\hgs-tray.exe"),
                                  QString("C:\\Packages\\WinGet\\ufna.Zerus_Microsoft.Winget.Source\\hgs-tray.exe"),QString()})
             QVERIFY2(UpdateController::wingetPackage(path).isEmpty(),qPrintable(path));
-        auto stable=UpdateController::parseFeed(QJsonDocument(stableRaw("0.42.3")).toJson(),"stable");QVERIFY(stable.valid);
-        auto nightly=UpdateController::parseFeed(QJsonDocument(nightlyRaw("0.43.0.r10.gaaaaaaa.n5")).toJson(),"nightly");QVERIFY(nightly.valid);
+        auto stable=parsedFeed(QJsonDocument(stableRaw("0.42.3")).toJson(),"stable");QVERIFY(stable.valid);
+        auto nightly=parsedFeed(QJsonDocument(nightlyRaw("0.43.0.r10.gaaaaaaa.n5")).toJson(),"nightly");QVERIFY(nightly.valid);
         DesktopInstallation winget{"portable","ufna.Zerus",{}},portable{"portable",{},{}};
         // winget carries stable releases only: the command exists on Stable and nowhere else.
         QCOMPARE(UpdateController::updateCommand(winget,"stable"),QString("winget upgrade --id ufna.Zerus --exact"));
@@ -489,20 +496,20 @@ private slots:
         QCOMPARE(UpdateController::updateCommand(nightly,"stable"),QString("brew uninstall --cask zerus@nightly && brew install --cask ufna/zerus/zerus"));
         QCOMPARE(UpdateController::updateCommand(stable,"dev"),QString("brew uninstall --cask zerus && brew install --cask ufna/zerus/zerus@dev"));
         QVERIFY(UpdateController::updateCommand({"homebrew-cask","zerus; sudo command","0.36.0"}).isEmpty());
-        auto catalog=UpdateController::parseFeed(QJsonDocument(withMacos(raw())).toJson(),"stable");
+        auto catalog=parsedFeed(QJsonDocument(withMacos(raw())).toJson(),"stable");
         QVERIFY(UpdateController::comparisonMessage(stable,catalog,"0.36.0",0,false).contains("brew upgrade --cask zerus"));
         auto current=stable;current.version="0.37.0";QVERIFY(UpdateController::comparisonMessage(current,catalog,"0.37.0",0,false).contains("at least as new"));
         QVERIFY(UpdateController::comparisonMessage(nightly,catalog,"0.37.0",0,false).contains("brew install --cask ufna/zerus/zerus"));
-        auto daily=UpdateController::parseFeed(QJsonDocument(withMacos(nightlyRaw("0.37.0.r61.gbbbbbbb.n8"))).toJson(),"nightly");QVERIFY(daily.valid);
+        auto daily=parsedFeed(QJsonDocument(withMacos(nightlyRaw("0.37.0.r61.gbbbbbbb.n8"))).toJson(),"nightly");QVERIFY(daily.valid);
         QVERIFY(UpdateController::comparisonMessage(nightly,daily,"0.37.0",0,false).contains("brew upgrade --cask zerus@nightly"));
         auto newest=nightly;newest.version="0.37.0.r61.gbbbbbbb.n8";QVERIFY(UpdateController::comparisonMessage(newest,daily,"0.37.0",0,false).contains("at least as new"));
         QVERIFY(UpdateController::comparisonMessage(stable,daily,"0.37.0",0,false).contains("ufna/zerus/zerus@nightly"));
         auto dev=devRaw();dev["versionName"]="0.38.0-dev.50";
-        auto development=UpdateController::parseFeed(QJsonDocument(withMacos(dev)).toJson(),"dev");
+        auto development=parsedFeed(QJsonDocument(withMacos(dev)).toJson(),"dev");
         QVERIFY(UpdateController::comparisonMessage(stable,development,"0.37.0",0,false).contains("zerus@dev"));
     }
     void installationGuidesNameTheirPackageManager(){
-        const auto feed=UpdateController::parseFeed(QJsonDocument(withMacos(nightlyRaw("0.37.0.r60.gaaaaaaa.n7"))).toJson(),"nightly");
+        const auto feed=parsedFeed(QJsonDocument(withMacos(nightlyRaw("0.37.0.r60.gaaaaaaa.n7"))).toJson(),"nightly");
         auto cask=UpdateController::installationGuide({"homebrew-cask","zerus@nightly","0.37.0.r60.gaaaaaaa.n7"},"nightly",feed);
         QVERIFY(cask.ownership.contains("Homebrew cask: zerus@nightly"));QVERIFY(cask.ownership.contains("0.37.0.r60.gaaaaaaa.n7"));
         QCOMPARE(cask.command,QString("Homebrew: brew upgrade --cask zerus@nightly"));
@@ -519,16 +526,16 @@ private slots:
         auto dev=devRaw();dev["versionName"]="0.38.0-dev.50";
         for(auto value:{withMacos(raw()),withMacos(nightlyRaw("0.37.0.r61.gbbbbbbb.n8")),withMacos(dev)}){
             const auto channel=value["channel"].toString();
-            const auto feed=UpdateController::parseFeed(QJsonDocument(value).toJson(),channel);QVERIFY(feed.valid);
+            const auto feed=parsedFeed(QJsonDocument(value).toJson(),channel);QVERIFY(feed.valid);
             QVERIFY(feed.macosDmgUrl.endsWith("-macos-arm64.dmg"));
             QCOMPARE(UpdateController::downloadUrl({"macos-bundle",{},"0.37.0"},feed,"macos"),QUrl(feed.macosDmgUrl));
             QVERIFY(UpdateController::downloadUrl({"portable",{},{}},feed,"windows").isEmpty());
             for(const auto &key:{"url","name","size","sha256"}){
                 auto bad=value;auto mac=bad["macos"].toObject();auto rows=mac["downloads"].toArray();auto row=rows[1].toObject();row[key]=QString("https://example.invalid/foreign.dmg");rows[1]=row;mac["downloads"]=rows;bad["macos"]=mac;
-                QVERIFY2(!UpdateController::parseFeed(QJsonDocument(bad).toJson(),channel).valid,key);
+                QVERIFY2(!parsedFeed(QJsonDocument(bad).toJson(),channel).valid,key);
             }
         }
-        auto feed=UpdateController::parseFeed(QJsonDocument(withMacos(dev)).toJson(),"dev");
+        auto feed=parsedFeed(QJsonDocument(withMacos(dev)).toJson(),"dev");
         for(const auto &kind:{"homebrew-cask","macos-bundle"}){
             DesktopInstallation installed{kind,"zerus@dev","0.38.0-dev.49"};
             QVERIFY(UpdateController::macosUpdateAvailable(installed,feed));
@@ -539,7 +546,7 @@ private slots:
         const DesktopInstallation manual{"macos-bundle",{},"0.38.0-dev.49"};
         auto guide=UpdateController::installationGuide(manual,"dev",feed);
         QVERIFY(guide.command.isEmpty());QVERIFY(guide.instructions.contains("DMG"));QVERIFY(guide.instructions.contains("Quit Zerus"));QVERIFY(guide.instructions.contains("open Zerus again"));
-        const auto noMac=UpdateController::parseFeed(QJsonDocument(raw()).toJson(),"stable");
+        const auto noMac=parsedFeed(QJsonDocument(raw()).toJson(),"stable");
         for(const auto &installation:{manual,DesktopInstallation{"homebrew-cask","zerus@dev","0.38.0-dev.49"}}){
             QVERIFY(!UpdateController::macosUpdateAvailable(installation,noMac));
             QVERIFY(UpdateController::downloadUrl(installation,noMac,"macos").isEmpty());
@@ -767,8 +774,14 @@ private slots:
     }
     void verifiedCatalogSurvivesRestartAndRejectsCorruption(){
         QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);QSettings().setValue("updates/channel","stable");QSettings().setValue("updates/catalog/stable",QJsonDocument(raw()).toJson());QSettings().setValue("updates/lastSuccess/stable",QDateTime::currentSecsSinceEpoch()-30);
-        UpdateController restored(nullptr,dir.path()+"/missing");QVERIFY(restored.feed().valid);QVERIFY(restored.message().contains("cached"));restored.setChannel("nightly");QVERIFY(!restored.feed().valid);restored.setChannel("stable");QVERIFY(restored.feed().valid);
-        QSettings().setValue("updates/catalog/stable",QByteArray("malformed"));UpdateController corrupt(nullptr,dir.path()+"/missing");QVERIFY(!corrupt.feed().valid);
+        // The saved catalog is parsed off the GUI thread after startup (every suite fails on a GUI-thread parse).
+        UpdateController restored(nullptr,dir.path()+"/missing");QSignalSpy changed(&restored,&UpdateController::changed);
+        QTRY_VERIFY(restored.feed().valid);QVERIFY(restored.message().contains("cached"));QVERIFY(!changed.isEmpty());QCOMPARE(restored.feed().version,QString("0.37.0"));
+        restored.setChannel("nightly");QVERIFY(!restored.feed().valid);preparationBarrier();QVERIFY(!restored.feed().valid);
+        restored.setChannel("stable");QTRY_VERIFY(restored.feed().valid);QVERIFY(restored.message().contains("cached"));
+        // A channel change before the restore applies drops it.
+        UpdateController switched(nullptr,dir.path()+"/missing");switched.setChannel("nightly");preparationBarrier();QVERIFY(!switched.feed().valid);switched.setChannel("stable");
+        QSettings().setValue("updates/catalog/stable",QByteArray("malformed"));UpdateController corrupt(nullptr,dir.path()+"/missing");preparationBarrier();QVERIFY(!corrupt.feed().valid);
     }
     void archVersionComparisonUsesEpochAndPackageRelease(){
 #ifdef Q_OS_LINUX

@@ -44,6 +44,17 @@ reverse_focus_wait = _focus_projection.reverse_focus_wait
 BASELINES = _focus_projection.BASELINES
 
 
+def without_native_tool_preparation(source):
+    """Reverse only the exact three additive CI setup regions; retain the original UI driver pin."""
+    pattern = re.compile(r'^([ ]*)# BEGIN NATIVE_TOOL_PREPARATION ([a-z-]+)\n[\s\S]*?'
+                         r'^\1# END NATIVE_TOOL_PREPARATION \2\n', re.M)
+    expected = {'environment': '49fab68cc8d71b606afe8b6b7208d32c41c46b385c58fa766251c413054b9356', 'clean-env': 'c58d49ffa7706370446a921cceabdaf83ca674bc3a379fd8fa14ed21e2134c95', 'versions': 'a50cf2b520b2759368ec46bfb151f52dd64e4aaebc17589ab71d56fd68d114c4'}
+    matches = list(pattern.finditer(source))
+    assert [match[2] for match in matches] == list(expected)
+    assert all(hashlib.sha256(match[0].encode()).hexdigest() == expected[match[2]] for match in matches)
+    return pattern.sub('', source)
+
+
 def without_android_focus_diagnostics(source):
     """Remove only the two explicitly additive failure-diagnostic regions for parent equivalence."""
     pattern = re.compile(r'^([ ]*)# BEGIN APPROVAL_FOCUS_DIAGNOSTIC ([a-z-]+)\n[\s\S]*?'
@@ -1157,12 +1168,37 @@ class ApprovalHarnessTests(unittest.TestCase):
             self.assertIn("github.event_name == 'pull_request' && '" + value + "' || inputs." + manual, workflow)
         for path in (".github/workflows/ios-approval-ui.yml", "mobile/ios/ApprovalUIFixture/**", "scripts/ci/ios-approval-ui*.py",
                      "tests/test_approval_ui_harness.py", "mobile/ios/Zerus/Conversation/QuestionCard.swift", "mobile/ios/Zerus/App/Theme.swift",
-                     "mobile/ios/Zerus/Common/MarkdownView.swift", "mobile/ios/ZerusKit/**"):
+                     "mobile/ios/Zerus/Common/MarkdownView.swift", "mobile/ios/ZerusKit/**",
+                     "mobile/ios/scripts/build-replica.sh", "crates/replica/**", "crates/replica-ffi/**"):
             self.assertIn("      - '" + path + "'", workflow)
         self.assertIn("permissions:\n  contents: read", workflow)
         self.assertIn("cache-mode: none", workflow)
         self.assertIn('test "$RUNNER_ENVIRONMENT" = github-hosted', workflow)
         self.assertNotIn("secrets.", workflow)
+
+    def test_ios_native_fixture_builds_the_local_replica_before_xcode(self):
+        workflow = (ROOT / ".github/workflows/ios-approval-ui.yml").read_text()
+        steps = re.split(r"(?m)^(?=      - )", workflow.split("\n    steps:\n", 1)[1])[1:]
+        install = next(step for step in steps if "run: rustup toolchain install" in step)
+        build = next(step for step in steps if "bash mobile/ios/scripts/build-replica.sh" in step)
+        campaign = next(step for step in steps if "run: python3 -I -B scripts/ci/ios-approval-ui.py" in step)
+        self.assertLess(steps.index(install), steps.index(build))
+        self.assertLess(steps.index(build), steps.index(campaign))
+        targets = "aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,aarch64-apple-darwin,x86_64-apple-darwin"
+        self.assertIn("rustup toolchain install 1.99.1 --profile minimal --target " + targets, install)
+        replica = (ROOT / "mobile/ios/scripts/build-replica.sh").read_text()
+        self.assertEqual(re.search(r"^targets=\(([^\n]+)\)$", replica, re.M)[1].split(), targets.split(","))
+        self.assertIn('CARGO_BUILD_JOBS: "2"', build)
+        self.assertIn('CARGO_PROFILE_RELEASE_LTO: "false"', build)
+        self.assertIn('CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"', build)
+        self.assertIn("run: RUSTUP_TOOLCHAIN=1.99.1 bash mobile/ios/scripts/build-replica.sh\n", build)
+        # Preparation does not renew or enlarge the owned simulator campaign's limits.
+        self.assertIn("    timeout-minutes: 25\n", workflow)
+        self.assertIn("        timeout-minutes: 3\n", install)
+        self.assertIn("        timeout-minutes: 10\n", build)
+        for step in (install, build):
+            for forbidden in ("continue-on-error", "if:", "secrets.", "--bindings-only", "cache", "DEVELOPER_DIR"):
+                self.assertNotIn(forbidden, step)
 
     def test_non_arm64_process_refuses_before_allocation_or_tool_execution(self):
         ios = module("ios_approval_ui", "scripts/ci/ios-approval-ui.py")
@@ -1230,10 +1266,36 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual(re.findall(r'boundary\("(begin|complete)", "([a-z_]+)"\)', fixture), expected)
         self.assertEqual(re.findall(r'cases \+= "([a-z_]+)"', fixture), self.ui.CASES.split(","))
 
+    def test_native_preparation_reverse_rejects_changed_missing_or_duplicate_regions(self):
+        source = (ROOT / "scripts/ci/android-project-ui.py").read_text()
+        without_native_tool_preparation(source)
+        begin = source.index("# BEGIN NATIVE_TOOL_PREPARATION environment")
+        end = source.index("# END NATIVE_TOOL_PREPARATION environment\n", begin) + len("# END NATIVE_TOOL_PREPARATION environment\n")
+        region = source[begin:end]
+        for altered in (source.replace(region, region.replace('"CARGO_BUILD_JOBS": "2"', '"CARGO_BUILD_JOBS": "8"')),
+                        source.replace(region, ""), source.replace(region, region + region)):
+            self.assertNotEqual(altered, source)
+            with self.assertRaises(AssertionError):
+                without_native_tool_preparation(altered)
+
+    def test_disclosure_idle_projection_refuses_changed_missing_or_duplicate_observation(self):
+        source = (ROOT / _focus_projection.FIXTURE).read_text()
+        original = _focus_projection.reverse_scroll_idle(source)
+        self.assertNotIn('uiAutomation.waitForIdle(500, 2000)', original)
+        # Pre-tap observation may not remove or repeat any original touch/case assertion.
+        old_tap = original.split('    private fun tap(label: String)', 1)[1].split('    private fun reveal(', 1)[0]
+        new_tap = source.split('    private fun tap(label: String)', 1)[1].split('    private fun reveal(', 1)[0]
+        self.assertEqual(old_tap, new_tap)
+        for altered in (source.replace('uiAutomation.waitForIdle(500, 2000)', 'uiAutomation.waitForIdle(0, 2000)'),
+                        source.replace('        var stableBounds: Rect? = null\n', ''),
+                        source.replace('        var stableBounds: Rect? = null\n', '        var stableBounds: Rect? = null\n' * 2)):
+            with self.assertRaises(AssertionError):
+                _focus_projection.reverse_scroll_idle(altered)
+
     def test_android_focus_diagnostics_project_to_exact_reviewed_driver_and_unchanged_ui(self):
         source = (ROOT / "scripts/ci/android-project-ui.py").read_text()
-        self.assertEqual(hashlib.sha256(without_android_focus_diagnostics(source).encode()).hexdigest(),
-                         "f71a2bfe21b1803897c3aec3297bdb29971d5c5dbb9521486b68a4405bc5f770")
+        self.assertEqual(hashlib.sha256(without_android_focus_diagnostics(without_native_tool_preparation(source)).encode()).hexdigest(),
+                         "49c3814a3ef8cdb7be01e3a4792a6f5045559fb7c89db87fd53784feb4e76450")
         for path, digest in {
             "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt": "73cee450f08e33c007ad6f3188a6a69135674e2503f80ea48582ba8aa394a9f7",
             "mobile/android/app/src/main/java/app/zerus/mobile/QuestionUiProbe.kt": "beb6a3caf6ae07ca3a062f4f30286aad3b19b71427eed7c9e8d662f7d5ae85be",

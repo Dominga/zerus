@@ -1,4 +1,5 @@
 #pragma once
+#include "TaskDrag.h"
 #include "WorkspaceList.h"
 #include <QTimer>
 #include <QElapsedTimer>
@@ -36,11 +37,19 @@ enum Role { Key = Qt::UserRole, Title, Meta, Status, Detail, Agent, Host, Childr
             ProjectFolder,
             Muted = Qt::UserRole + 50, RowCollapsed = Qt::UserRole + 51,
             // U30 (#508): the facts of the session's state (SessionStates::facts).
-            SessionState = Qt::UserRole + 52 };
+            SessionState = Qt::UserRole + 52,
+            // {host, name} of a live session a dragged task can be pinned to; empty for other rows.
+            // The fork's own roles fill UserRole + 1 to 49, so it follows them explicitly.
+            TaskTarget = Qt::UserRole + 53,
+            // Of the prepared row last written to the item (SessionsWindow::applyListRows);
+            // empty after a role is written elsewhere, so the next applied rows rewrite it.
+            Digest = Qt::UserRole + 54 };
 }
 class QToolButton;
 
 // Drops express placement relative to an identity, never a filtered row number.
+// A task dragged from the Tasks tab drops on a live session of its project, or on
+// the project's header for Any session.
 class SessionList : public WorkspaceList {
     Q_OBJECT
 public:
@@ -76,6 +85,9 @@ signals:
     // U30 (#508): a cold card's + New ("new") or Resume ("resume").
     void coldActionRequested(const QString &key, const QString &action);
     void dragFinished();
+    // A task was dropped on a session (host "" for this computer) or, with an empty
+    // session, on its project's header.
+    void taskDropped(const TaskDrag &task, const QString &host, const QString &session);
 protected:
     QStringList mimeTypes() const override { return {QStringLiteral("application/x-hgs-session-placement")}; }
     QMimeData *mimeData(const QList<QListWidgetItem *> &) const override;
@@ -122,7 +134,13 @@ private:
     QTimer m_activityTimer, m_elapsedTimer;
     QElapsedTimer m_activityClock;
     bool m_animateActivity = true;
+    // A session or group this list dragged: a QDataStream, which stays in this process.
+    struct Dragged { QString token; bool group = false; QString id; };
+    static std::optional<Dragged> dragged(const QMimeData *mime);
     bool validDrop(const QMimeData *) const;
+    // The row a dragged task would change: a live session of its project other than
+    // its own, or the project's header for a pinned task; null elsewhere.
+    const QListWidgetItem *taskDropItem(const TaskDrag &task, const QPoint &point) const;
     struct Placement { QString group, before; QRect indicator; bool onGroup = false; };
     Placement placement(const QPoint &point, bool group) const;
     QPoint m_press;
@@ -131,7 +149,7 @@ private:
     QString m_pressedParent;
     bool m_dragging = false;
     QRect m_indicator;
-    bool m_onGroup = false;
+    bool m_onGroup = false, m_taskDrop = false;
     QString m_token;
     bool m_bulkSelecting = false, m_togglePress = false;
     QWidget *m_selectionBar = nullptr;

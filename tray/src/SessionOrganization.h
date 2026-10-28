@@ -21,11 +21,11 @@ public:
     // Indices into the caller's list, in project order. Unknown identities stay
     // first in the default project; ties keep the caller's original order.
     QHash<QString, QList<int>> orderedMembers(const QStringList &sessions) const;
-    QString createGroup(const QString &name);
+    QString createGroup(const QString &name, const QString &reservedId = {});
     void renameGroup(const QString &id, const QString &name);
     bool removeGroup(const QString &id, const QString &destination = {});
     QString defaultProject() const { return m_default; }
-    void setDefaultProject(const QString &id) { if (group(id)) m_default = id; }
+    void setDefaultProject(const QString &id) { if (group(id)) { m_default = id; changed(); } }
     void setCollapsed(const QString &id, bool collapsed);
     void moveGroup(const QString &id, const QString &before = {});
     void moveSession(const QString &session, const QString &group, const QString &before = {});
@@ -42,14 +42,20 @@ public:
     QString moveFolder(const QString &project, const QString &folder, const QString &destination);
     QString copyFolder(const QString &project, const QString &folder, const QString &destination);
     bool hasImported(const QString &machine) const { return m_imported.contains(machine); }
-    void markImported(const QString &machine) { if (!m_imported.contains(machine)) m_imported.append(machine); }
+    void markImported(const QString &machine) { if (!m_imported.contains(machine)) { m_imported.append(machine); changed(); } }
     void renameSession(const QString &oldId, const QString &newId);
     // A run token recognizes an external rename; machine/name survives pause/resume.
     // First observation gives a local fallback row, not a shared assignment.
     QString observe(const QString &machine, const QString &name, const QString &run,
                     const QString &archive = {});
     QJsonObject toJson() const;
+    // Changes with every edit that may change toJson(), and only then: observe()
+    // of a known session keeps it. Values are unique across all organizations,
+    // so an equal revision means an unchanged copy (SessionsWindow::saveOrganization).
+    quint64 revision() const { return m_revision; }
 private:
+    void changed();
+    quint64 m_revision = 0;
     void indexGroups();
     void indexSessions();
     void appendSession(const QString &session, const QString &group);

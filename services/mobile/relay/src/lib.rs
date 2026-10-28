@@ -1,5 +1,7 @@
 //! The API v1 codec, envelope validation and error type always build. The
 //! relay server modules need the default `server` feature.
+#[cfg(all(test, feature = "server"))]
+extern crate self as zerus_relay;
 pub mod alerts;
 #[cfg(feature = "server")]
 pub mod config;
@@ -20,6 +22,8 @@ pub mod repositories;
 mod speech_config;
 #[cfg(feature = "server")]
 pub mod store;
+#[cfg(all(test, feature = "server"))]
+mod test_backend;
 pub mod voice_rejection;
 mod voice_video;
 

@@ -1,3 +1,4 @@
+#include "SettingsJson.h"
 #include "NewSessionDialog.h"
 #include "RepositoryClone.h"
 #include "WorkspaceIcons.h"
@@ -515,7 +516,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
         m_creationCatalog["worktrees"]=entries;m_verifiedWorktrees[host()+'\n'+path]=m_creationCatalog;
         m_autoPreferred=false;selectPath(path);launch(path,m_creationFolder);
     });
-    setGroups(SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object()),project);
+    setGroups(SessionOrganization(SettingsJson::object("workspace/organization")),project);
 }
 void NewSessionDialog::reject(){if(!m_creation&&(!m_repository||!m_repository->cloning())){m_cloneLaunchPending=false;if(m_repository)m_repository->cancelCheck();QDialog::reject();}}
 QString NewSessionDialog::host() const {return m_machine->currentData().toString();}
@@ -808,13 +809,75 @@ void NewSessionDialog::updateForm()
 }
 void NewSessionDialog::start()
 {
-    if(!m_start->isEnabled())return;
+    if(!m_start->isEnabled()||m_creationSubmitted)return;
     // Spec D5: ask before this computer's session host of another Windows session
     // starts the agent. Cancel keeps the form; no folder check or worktree starts.
     if(!LocalSessionHost::confirmLaunch(this,m_fleet.local(),host())||!m_start->isEnabled())return;
+    if(m_backgroundCreation){
+        m_creationSubmitted=true;
+        const auto path=m_folder->currentData(Qt::UserRole+2).toString();
+        const auto model=agent()=="opencode"?m_model->currentData().toString():QString();
+        const auto *machine=host().isEmpty()?&m_fleet.local():m_fleet.peer(host());
+        QJsonObject plan{{"host",host()},{"machine",machine?machine->host:host()},
+            {"cmd",agent()},{"account",account()},{"tag",m_name->text()},
+            {"group",m_project->currentData().toString()},{"implicit_inbox",implicitInbox()},
+            {"swarm",m_projectCatalogSwarm},{"target",path},{"source",path},
+            {"auto",m_autoPreferred&&(m_repositorySource||automaticWorktreeAvailable())},
+            {"branch",m_generatedBranch},{"catalog",m_worktreeCatalog},
+            {"add_folder",m_folder->currentData().toString().isEmpty()&&!projectWorktree(path)},
+            {"model",model},{"effort",model.isEmpty()?QString():m_effort->currentData().toString()},
+            {"terminal",m_openTerminal->isChecked()&&agent()!="dsh"&&agent()!="opencode"},
+            {"repository",m_repositorySource}};
+        // WhiteWh fork: this session's permission mode and a local model
+        // account's model (hgs --permissions, --local-model) travel in the plan.
+        if(const auto permissions=m_permissions->currentData().toString();!permissions.isEmpty())plan["permissions"]=permissions;
+        if(const auto localModel=agent()=="opencode"?QString():denseLocalModel();!localModel.isEmpty())plan["local_model"]=localModel;
+        if(!m_repositorySource&&plan["auto"].toBool())plan["destination"]=automaticWorktreePath();
+        plan["group_name"]=m_project->currentText();
+        if(m_repositorySource&&m_repository){
+            plan["url"]=m_repository->url();plan["parent"]=m_repository->parentFolder();
+            plan["repository_name"]=m_repository->folderName();plan["target"]=m_repository->destination();
+            plan["new_project"]=m_project->currentData(NewRepositoryProjectRole).toBool();
+            plan["project_name"]=m_newProjectName->text().trimmed();
+        }
+        if(m_repositorySource&&m_repository&&!m_repository->createdPath().isEmpty()){
+            plan["clone_done"]=true;plan["target"]=m_repository->createdPath();plan["add_folder"]=false;
+            plan["acquisition_confirmed"]=true;
+        }
+        if(!m_creationPredecessor.isEmpty())plan["predecessor"]=m_creationPredecessor;
+        emit creationRequested(plan);if(m_creationSubmitted)accept();return;
+    }
     if(m_repositorySource){if(m_repository)m_repository->begin();return;}
     m_startWithWorktree=m_autoPreferred&&automaticWorktreeAvailable();
     m_error->setText(tr("Checking folder…"));m_validation=m_client.requestDirectories(host(),m_folder->currentData(Qt::UserRole+2).toString());updateForm();
+}
+void NewSessionDialog::creationAdmissionFailed(const QString &error)
+{
+    m_creationSubmitted=false;m_error->setText(error);updateForm();
+}
+void NewSessionDialog::restoreCreationChoices(const QJsonObject &plan)
+{
+    m_creationPredecessor=plan["id"].toString();
+    m_name->setText(plan["tag"].toString());m_openTerminal->setChecked(plan["terminal"].toBool());
+    selectAccount(plan["account"].toString());
+    if(plan["repository"].toBool()&&!plan["clone_done"].toBool()){
+        setRepositorySource(true);m_repositoryUrl->setText(plan["url"].toString());
+        m_repositoryDestination->setText(plan["target"].toString());m_customDestination=true;
+        if(plan["new_project"].toBool()){
+            m_project->setCurrentIndex(m_project->findData(true,NewRepositoryProjectRole));
+            m_newProjectName->setText(plan["project_name"].toString());
+        }
+    }else selectPath((plan["worktree_done"].toBool()||plan["clone_done"].toBool())?plan["target"].toString():plan["source"].toString(plan["target"].toString()),
+        plan["auto"].toBool()&&!plan["worktree_done"].toBool());
+    if(!plan["model"].toString().isEmpty()){
+        const auto effort=plan["effort"].toString();
+        m_chosenModel=QJsonObject{{"value",plan["model"]},{"label",plan["model"]},
+            {"effort_options",effort.isEmpty()?QJsonArray():QJsonArray{effort}},{"effort_labels",effort.isEmpty()?QJsonArray():QJsonArray{effort}}};
+        m_chosenHost=host();m_chosenKey=modelKey();updateModels();
+    }
+    if(const int index=m_permissions->findData(plan["permissions"].toString());index>=0)m_permissions->setCurrentIndex(index);
+    if(const int index=m_localModel->findText(plan["local_model"].toString());!plan["local_model"].toString().isEmpty()&&index>=0)m_localModel->setCurrentIndex(index);
+    updateForm();
 }
 bool NewSessionDialog::automaticWorktreeAvailable() const
 {
@@ -857,9 +920,9 @@ void NewSessionDialog::launch(const QString &target,const QString &addFolder)
     // The next dialog starts with this agent and, per machine and agent, this account.
     settings.setValue("workspace/launchAgent",agent());
     if(const auto selectedAccount=account();!selectedAccount.isEmpty()){
-        auto accounts=QJsonDocument::fromJson(settings.value("workspace/launchAccounts").toByteArray()).object();
+        auto accounts=SettingsJson::object("workspace/launchAccounts");
         auto machine=accounts.value(host()).toObject();machine[agent()]=selectedAccount;accounts[host()]=machine;
-        settings.setValue("workspace/launchAccounts",QJsonDocument(accounts).toJson(QJsonDocument::Compact));
+        SettingsJson::store(settings,QStringLiteral("workspace/launchAccounts"),QJsonDocument(accounts));
     }
     // A local model account takes this session's model (hgs --local-model).
     const auto model=agent()=="opencode"?m_model->currentData().toString():denseLocalModel();
@@ -906,7 +969,7 @@ void NewSessionDialog::updateAccounts()
         }
         m_accountGroups=AccountCatalog::group(localProfiles);
     }
-    const auto remembered=QJsonDocument::fromJson(QSettings().value("workspace/launchAccounts").toByteArray()).object().value(host()).toObject();
+    const auto remembered=SettingsJson::object("workspace/launchAccounts").value(host()).toObject();
     const auto current=m_account->currentItem()?m_account->currentItem()->data(ProfileRole).toJsonObject():QJsonObject();
     const auto currentId=current["host"].toString()==host()&&current["provider"]==m_preferredAgent?current["id"].toString():QString();
     QList<QJsonObject> profiles;QList<QJsonArray> members;
@@ -931,7 +994,7 @@ void NewSessionDialog::updateAccounts()
     const bool dark=m_account->property("hgsDark").toBool();
     const QColor iconColor(dark?"#a1adbb":"#647386");
     int defaultIndex=-1,lastIndex=-1,explicitIndex=-1,currentIndex=-1;
-    const auto lastAccount=QJsonDocument::fromJson(QSettings().value("workspace/launchAccounts").toByteArray()).object()
+    const auto lastAccount=SettingsJson::object("workspace/launchAccounts")
         .value(host()).toObject().value(m_preferredAgent).toString();
     for(int row=0;row<profiles.size();++row){
         const auto profile=profiles[row];const auto provider=profile["provider"].toString(),id=profile["id"].toString();

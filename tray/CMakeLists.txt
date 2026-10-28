@@ -99,7 +99,7 @@ endif()
 add_library(hgs-updates STATIC src/UpdateController.cpp src/UpdateController.h
     src/WindowsUpdateTrust.cpp src/WindowsUpdateTrust.h src/ForkUpdater.cpp src/ForkUpdater.h)
 target_include_directories(hgs-updates PUBLIC src)
-target_link_libraries(hgs-updates PUBLIC Qt6::Widgets Qt6::Network)
+target_link_libraries(hgs-updates PUBLIC Qt6::Widgets Qt6::Network hgs-tray-core)
 if(WIN32)
     # WindowsUpdateTrust: CNG for the update manifest, WinVerifyTrust for installers.
     target_link_libraries(hgs-updates PRIVATE bcrypt wintrust crypt32)
@@ -170,13 +170,14 @@ endif()
 # link; tests/CMakeLists.txt fails when a suite lists a source that one of them
 # builds. Each layer adds Qt modules, so a suite that links the lowest layer
 # covering its code keeps its QTEST_MAIN application type.
-add_library(hgs-tray-core STATIC src/ProcessRunner.cpp src/HgsClient.cpp src/FleetState.cpp
+add_library(hgs-tray-core STATIC src/ProcessRunner.cpp src/JsonParse.cpp src/SettingsJson.cpp src/HgsClient.cpp src/EventStream.cpp src/FleetState.cpp
+    src/SessionCreationController.cpp
     src/AnalyticsClient.cpp src/AnalyticsData.cpp
     src/ReadMarkSync.cpp src/AppConfig.cpp src/AccountUsageStore.cpp src/ComposerDraftStore.cpp
     src/SwarmController.cpp src/DesktopPresence.cpp src/AttentionNotifier.h src/CommandBackend.cpp
     # WhiteWh fork: agent teams (hgs team).
     src/TeamModel.cpp src/TeamController.cpp
-    src/LocalSessionHost.cpp src/DownloadCache.cpp src/AutomaticApprovals.cpp src/CacheKeepalive.cpp
+    src/LocalSessionHost.cpp src/DownloadCache.cpp src/AutomaticApprovals.cpp src/CacheKeepalive.cpp src/TaskBoard.cpp
     # Main-thread watchdog (MainThreadWatchdog.h): every platform, prompted by macOS.
     src/MainThreadWatchdog.cpp)
 if(NOT WIN32)
@@ -206,10 +207,10 @@ target_include_directories(hgs-qrcodegen PUBLIC vendor/qrcodegen)
 
 add_library(hgs-tray-ui STATIC src/SessionOrganization.cpp src/SessionList.cpp src/DashboardPage.cpp
     src/AnalyticsSettings.cpp
-    src/MachineFilter.cpp src/ProjectFilter.cpp src/SessionSearch.cpp src/MachinesPage.cpp src/AccountsPage.cpp
+    src/MachineFilter.cpp src/ProjectFilter.cpp src/AccountFilter.cpp src/SessionSearch.cpp src/MachinesPage.cpp src/AccountsPage.cpp
     src/ComposerToolbar.cpp src/MessageComposer.cpp src/QuestionCard.cpp src/DirectoryDialog.cpp
     src/RepositoryClone.cpp src/CloneRepositoryDialog.cpp src/NewSessionDialog.cpp src/ProjectsDialog.cpp src/WorktreesDialog.cpp src/SwarmDialog.cpp src/SwarmConflictReview.cpp
-    src/ProcessView.cpp src/TrayMenu.cpp src/IconFactory.cpp src/Shortcuts.cpp src/DownloadCacheSettings.cpp src/GoToDialog.cpp
+    src/ProcessView.cpp src/TaskRow.cpp src/TasksView.cpp src/TaskDialogs.cpp src/TaskInspector.cpp src/TrayMenu.cpp src/IconFactory.cpp src/Shortcuts.cpp src/DownloadCacheSettings.cpp src/GoToDialog.cpp
     src/KeyboardSettings.cpp src/ShortcutsDialog.cpp src/AutomaticApprovalSettings.cpp src/PhonePairing.cpp
     src/OpenCodeModels.cpp src/OpenCodeModelPicker.cpp
     # WhiteWh fork: agent teams, the inspector's Team tab.
@@ -224,9 +225,10 @@ target_link_libraries(hgs-tray-ui PUBLIC hgs-tray-activity)
 
 add_library(hgs-tray-activity STATIC src/ActivityView.cpp)
 target_include_directories(hgs-tray-activity PUBLIC src)
-target_link_libraries(hgs-tray-activity PUBLIC Qt6::Widgets Qt6::Multimedia PRIVATE hgs-markdown hgs-round-video)
+target_link_libraries(hgs-tray-activity PUBLIC Qt6::Widgets Qt6::Multimedia PRIVATE hgs-tray-core hgs-markdown hgs-round-video)
+target_link_libraries(hgs-tray-ui PRIVATE hgs-tray-activity)
 
-add_library(hgs-tray-views STATIC src/ArchiveDatePicker.cpp src/ArchiveDatePicker.h src/ArchiveBrowser.cpp src/ArchiveBrowser.h src/SessionsWindow.cpp src/WindowTitleBar.cpp src/SessionsWindowShortcuts.cpp src/SessionsWindowGoTo.cpp src/SessionSelection.cpp src/NativeUiView.cpp
+add_library(hgs-tray-views STATIC src/ArchiveDatePicker.cpp src/ArchiveDatePicker.h src/ArchiveBrowser.cpp src/ArchiveBrowser.h src/SessionsWindow.cpp src/SessionsWindowRows.cpp src/SessionRows.h src/SessionTooltip.h src/WindowTitleBar.cpp src/SessionsWindowShortcuts.cpp src/SessionsWindowGoTo.cpp src/SessionSelection.cpp src/NativeUiView.cpp
     src/NativeBrowserPlugin.cpp src/NativeBrowser.h)
 target_link_libraries(hgs-tray-views PUBLIC hgs-tray-ui hgs-tray-activity
     PRIVATE hgs-terminal hgs-markdown hgs-window-layer hgs-speech hgs-external-file hgs-updates)
@@ -294,10 +296,12 @@ if(APPLE)
     set(CMAKE_OBJCXX_STANDARD 17)
     set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
     add_library(hgs-tray-mac STATIC src/MacBackend.cpp src/QtTrayIcon.cpp src/MacTrayMenu.mm
-        src/MacAttentionNotifier.mm src/MacAppVisibility.mm src/MacApplicationBadge.mm src/MacPresenceSource.cpp)
+        src/MacAttentionNotifier.mm src/MacAppVisibility.mm src/MacApplicationBadge.mm src/MacPresenceSource.cpp
+        src/MacSystemPower.cpp)
     set_source_files_properties(src/MacAttentionNotifier.mm src/MacAppVisibility.mm src/MacApplicationBadge.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(hgs-tray-mac PUBLIC hgs-tray-core Qt6::Widgets
-        PRIVATE "-framework AppKit" "-framework UserNotifications" "-framework CoreGraphics")
+        PRIVATE "-framework AppKit" "-framework UserNotifications" "-framework CoreGraphics"
+        "-framework IOKit")
 endif()
 
 # Qt finalization imports macOS permission plugins selected by our Info.plist.

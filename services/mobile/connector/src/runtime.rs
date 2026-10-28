@@ -45,6 +45,8 @@ pub const REFUSED_SPACING: f64 = 30.0;
 pub const PRESENCE_RETRY: f64 = 300.0;
 pub const PROJECT_SECONDS: f64 = 15.0;
 pub const SWARM_TIMEOUT: f64 = 3.0;
+/// `hgs task digests --json`, read with the catalog (seconds).
+pub const TASK_DIGESTS_TIMEOUT: f64 = 5.0;
 
 pub const RETIRED: &str = "Relay retired a result claim; preserving local outcome";
 pub const REJECTED: &str = "Relay rejected a stored result; preserving local outcome";
@@ -159,6 +161,8 @@ pub struct Connector<N: Native> {
     pub fleet: Option<Fleet>,
     /// A peer context: its native layer is the gateway's peer envelope.
     pub peer: bool,
+    /// The local listing as `hgs watch --json` keeps it (main connector only).
+    watch: crate::watch_listing::WatchListing,
     started: tokio::time::Instant,
     wall: Rc<dyn Fn() -> f64>,
 }
@@ -205,6 +209,7 @@ impl<N: Native + 'static> Connector<N> {
             stopping: Rc::default(),
             fleet: Some(Fleet::new(gateway)),
             peer: false,
+            watch: Default::default(),
             started: tokio::time::Instant::now(),
             wall: Rc::from(wall),
         }
@@ -227,6 +232,7 @@ impl<N: Native + 'static> Connector<N> {
             stopping: self.stopping.clone(),
             fleet: None,
             peer: true,
+            watch: Default::default(),
             started: self.started,
             wall: self.wall.clone(),
         }
@@ -372,6 +378,25 @@ impl<N: Native + 'static> Connector<N> {
         self.probed.set();
     }
 
+    /// The local `ls --json --local --no-archives` listing from the event
+    /// stream while it is live, which it starts on first use; None for a peer,
+    /// a host without paged archives or watch-v1, and a request routed to this
+    /// computer, whose calls take the guarded entry point.
+    fn streamed_listing(&self, paged: bool) -> Option<Value> {
+        let guarded = LOCAL_MACHINE.try_with(|_| ()).is_ok()
+            || ENCRYPTED_LOCAL_MACHINE.try_with(|_| ()).is_ok();
+        if self.peer || !paged || !self.flags.get().watch || guarded || self.stopping.is_set() {
+            return None;
+        }
+        let native = Rc::clone(&self.native);
+        native.command()?;
+        self.watch.follow(
+            move || native.command().expect("the native CLI is a process"),
+            self.stopping.clone(),
+        );
+        self.watch.listing()
+    }
+
     /// `Connector.snapshot()`: the listing as phones may see it.
     pub async fn snapshot(self: &Rc<Self>) -> Result<Value, String> {
         // The archive marker decides the listing's shape, so it is current first.
@@ -381,11 +406,14 @@ impl<N: Native + 'static> Connector<N> {
         if paged {
             argv.push("--no-archives");
         }
-        let listing = self
-            .native(Call::new(argv))
-            .await
-            .map_err(native_text)?
-            .json();
+        let listing = match self.streamed_listing(paged) {
+            Some(listing) => listing,
+            None => self
+                .native(Call::new(argv))
+                .await
+                .map_err(native_text)?
+                .json(),
+        };
         let Value::Object(mut snapshot) = listing else {
             return Err(INVALID_SNAPSHOT.into());
         };
@@ -624,13 +652,23 @@ impl<N: Native + 'static> Connector<N> {
         };
         if due {
             let snapshot = json!({"host": host.unwrap_or(Value::Null)});
-            let fresh = self
+            let mut fresh = self
                 .native(Call::new(["swarm", "get"]).timeout(SWARM_TIMEOUT))
                 .await
                 .ok()
                 .and_then(|native| {
                     projects::normalize(&native.json(), &snapshot, &self.settings.binding).ok()
                 });
+            // Each project's phone-view digest; a failed read leaves them out.
+            let digests = |catalog: &&mut Value| {
+                self.flags.get().task_exchange && catalog["available"] == json!(true)
+            };
+            if let Some(catalog) = fresh.as_mut().filter(digests) {
+                let call = Call::new(["task", "digests", "--json"]).timeout(TASK_DIGESTS_TIMEOUT);
+                if let Ok(native) = self.native(call).await {
+                    projects::apply_task_digests(catalog, &native.json());
+                }
+            }
             let mut state = self.state.borrow_mut();
             let cache = match fresh {
                 Some(fresh) => fresh,

@@ -1,4 +1,6 @@
 #include <QtTest>
+#include <QJsonArray>
+#include <QSignalSpy>
 #include <QTemporaryDir>
 #include "FakeCli.h"
 #include "WorkspaceSettings.h"
@@ -10,14 +12,33 @@ class TestWorkspaceSettings : public QObject {
     }
     static QJsonObject unconfigured(){return {{"state","unconfigured"},{"encrypted",false},{"config_revision",""}};}
     static bool reply(const QString &directory,const QJsonObject &responses){return FakeCli::replace(directory+"/responses",QJsonDocument(responses).toJson());}
+    static QJsonObject legacyStatus(){return {{"state","legacy"},{"encrypted",false},{"config_revision",QString(64,'a')},{"server_url","https://relay.example.test"}};}
+    static QJsonObject draining(){return {{"state","migration-draining"},{"encrypted",false},{"node_id","candidate-fixture"},{"config_revision",QString(64,'a')},{"migration",QJsonObject{{"phase","draining"},{"reason","draining"},{"retryable",true}}}};}
+    static QJsonObject savedDraining(){
+        auto value=legacyStatus();value.insert("pending",QJsonObject{{"action","switch-join"},{"node_id","candidate-fixture"},{"state","migration-draining"}});
+        value.insert("migration",draining().value("migration"));return value;
+    }
+    static QJsonObject step(const QString &action,const QJsonObject &result){return {{"action",action},{"result",result}};}
+    static bool sequence(const QString &directory,const QJsonArray &steps){return reply(directory,{{"sequence",steps}});}
+    static bool observeAutomaticCommandWindow(){
+        QTimer boundary;boundary.setSingleShot(true);QSignalSpy elapsed(&boundary,&QTimer::timeout);
+        boundary.start(1250);return elapsed.wait(3000);
+    }
     static bool install(const QString &script){return FakeCli::install(script,R"PY(#!/usr/bin/env python3
 import json,pathlib,sys
 root=pathlib.Path(__file__).parent
 payload=json.load(sys.stdin)
 action=sys.argv[2]
-with (root/'calls').open('a') as out:out.write(json.dumps({'argv':sys.argv[1:],'payload':payload})+'\n')
+with (root/'calls').open('a+') as out:
+    out.seek(0)
+    index=sum(1 for _ in out)
+    out.write(json.dumps({'argv':sys.argv[1:],'payload':payload})+'\n')
 responses=json.loads((root/'responses').read_text())
-result=responses.get(action,responses.get('status',{}))
+if 'sequence' in responses:
+    steps=responses['sequence']
+    result=steps[index]['result'] if index<len(steps) and steps[index]['action']==action else {'ok':False,'error':'Unexpected synthetic fixture action'}
+else:
+    result=responses.get(action,responses.get('status',{}))
 print(json.dumps(result))
 sys.exit(1 if result.get('ok') is False else 0)
 )PY");}
@@ -26,6 +47,20 @@ sys.exit(1 if result.get('ok') is False else 0)
         QList<QJsonObject> result;for(const auto &line:file.readAll().split('\n'))if(!line.isEmpty())result.append(QJsonDocument::fromJson(line).object());return result;
     }
 private slots:
+    void confirmedWorkspaceChangesInvalidateThePhoneList() {
+        QTemporaryDir directory; QVERIFY(directory.isValid());
+        const auto fixture=directory.path()+"/connector"; QVERIFY(install(fixture));
+        QVERIFY(reply(directory.path(),{{"status",unconfigured()}}));
+        WorkspaceSettings::Panel panel(FakeCli::program(fixture),directory.path()+"/connector.json");
+        auto *refresh=panel.findChild<QPushButton*>("refreshWorkspaceStatus"); QTRY_VERIFY(refresh->isEnabled());
+        int changes=0; panel.connectionChanged=[&]{++changes;};
+        QVERIFY(reply(directory.path(),{{"status",active()}})); refresh->click();
+        QTRY_COMPARE(changes,1); QTRY_VERIFY(refresh->isEnabled());
+        refresh->click(); QTRY_VERIFY(refresh->isEnabled()); QCOMPARE(changes,1);
+        QVERIFY(reply(directory.path(),{{"status",active(false,QString(64,'c'))}})); refresh->click();
+        QTRY_COMPARE(changes,2); QTRY_VERIFY(refresh->isEnabled());
+        for(const auto &call:calls(directory.path())) QCOMPARE(call.value("argv").toArray().at(1).toString(),QString("status"));
+    }
     void openingIsReadOnlyAndJoinSecretsUseOnlyStdin(){
         QTemporaryDir directory;QVERIFY(directory.isValid());const auto fixture=directory.path()+"/connector";QVERIFY(install(fixture));
         QVERIFY(reply(directory.path(),{{"status",unconfigured()}}));
@@ -55,6 +90,138 @@ private slots:
         copy->click();QCOMPARE(QApplication::clipboard()->text(),code);
         panel.findChild<QPushButton*>("cancelComputerWorkspaceCode")->click();QTRY_VERIFY(!copy->isEnabled());
         const auto log=calls(directory.path());for(const auto &call:log)QVERIFY(!QJsonDocument(call).toJson().contains(code.toUtf8()));
+    }
+    void failedActivationRecoversSavedEnrollmentWithoutRepeatingCreate(){
+        QTemporaryDir directory;const auto fixture=directory.path()+"/connector";QVERIFY(install(fixture));
+        QJsonObject legacy{{"state","legacy"},{"encrypted",false},{"config_revision",QString(64,'a')},{"server_url","https://relay.example.test"}};
+        QVERIFY(reply(directory.path(),{{"status",legacy}}));
+        WorkspaceSettings::Panel panel(FakeCli::program(fixture),directory.path()+"/connector.json");
+        auto *change=panel.findChild<QPushButton*>("changeMobileWorkspace");QTRY_VERIFY(change->isEnabled());change->click();
+        legacy.insert("pending",QJsonObject{{"action","switch-create"},{"state","ready"}});
+        QVERIFY(reply(directory.path(),{{"status",legacy},{"switch-create",QJsonObject{{"ok",false},{"error","Saved connection is waiting for the current request to finish."}}},{"check",active()}}));
+        panel.findChild<QPushButton*>("submitWorkspaceEnrollment")->click();
+        auto *dialog=panel.findChild<QMessageBox*>("confirmWorkspaceChange");QVERIFY(dialog);dialog->button(QMessageBox::Yes)->click();
+        auto *check=panel.findChild<QPushButton*>("checkWorkspaceEnrollment");QTRY_VERIFY(check->isVisibleTo(&panel)&&check->isEnabled());
+        const auto log=calls(directory.path());QCOMPARE(log.size(),3);
+        QCOMPARE(log.at(1).value("argv").toArray().at(1).toString(),QString("switch-create"));
+        QCOMPARE(log.at(2).value("argv").toArray().at(1).toString(),QString("status"));
+        QVERIFY(panel.findChild<QLabel*>("workspaceNotice")->text().contains("Saved connection"));
+        QVERIFY(reply(directory.path(),{{"status",active()},{"check",active()}}));
+        check->click();QTRY_VERIFY(panel.findChild<QPushButton*>("startWorkspaceConnector")->isVisibleTo(&panel));
+        QVERIFY(panel.findChild<QWidget*>("workspaceEnrollment")->isHidden());
+        QVERIFY(change->isVisibleTo(&panel));
+        const auto resumed=calls(directory.path());QCOMPARE(resumed.at(3).value("argv").toArray().at(1).toString(),QString("check"));
+        QCOMPARE(resumed.at(3).value("payload").toObject().value("expected_revision").toString(),QString(64,'a'));
+    }
+    void lostCreateReplyUsesCommittedStatusWithoutRepeatingMutation(){
+        QTemporaryDir directory;const auto fixture=directory.path()+"/connector";QVERIFY(install(fixture));
+        const QJsonObject legacy{{"state","legacy"},{"encrypted",false},{"config_revision",QString(64,'a')}};
+        QVERIFY(reply(directory.path(),{{"status",legacy}}));
+        WorkspaceSettings::Panel panel(FakeCli::program(fixture),directory.path()+"/connector.json");
+        auto *change=panel.findChild<QPushButton*>("changeMobileWorkspace");QTRY_VERIFY(change->isEnabled());change->click();
+        panel.findChild<QLineEdit*>("workspaceRelayUrl")->setText("https://relay.example.test");
+        QVERIFY(reply(directory.path(),{{"status",active(false,QString(64,'c'))},{"switch-create",QJsonObject{{"ok",false},{"error","The operation result could not be confirmed."}}}}));
+        panel.findChild<QPushButton*>("submitWorkspaceEnrollment")->click();
+        auto *dialog=panel.findChild<QMessageBox*>("confirmWorkspaceChange");QVERIFY(dialog);dialog->button(QMessageBox::Yes)->click();
+        QTRY_VERIFY(change->isVisibleTo(&panel)&&change->isEnabled());
+        QVERIFY(panel.findChild<QWidget*>("workspaceEnrollment")->isHidden());
+        const auto log=calls(directory.path());QCOMPARE(log.size(),3);
+        QCOMPARE(log.at(1).value("argv").toArray().at(1).toString(),QString("switch-create"));
+        QCOMPARE(log.at(2).value("argv").toArray().at(1).toString(),QString("status"));
+    }
+    void failedJoinClearsConsumedCodeAfterSavedPendingIsConfirmed(){
+        QTemporaryDir directory;const auto fixture=directory.path()+"/connector";QVERIFY(install(fixture));
+        QJsonObject legacy{{"state","legacy"},{"encrypted",false},{"config_revision",QString(64,'a')}};
+        QVERIFY(reply(directory.path(),{{"status",legacy}}));
+        WorkspaceSettings::Panel panel(FakeCli::program(fixture),directory.path()+"/connector.json");
+        auto *change=panel.findChild<QPushButton*>("changeMobileWorkspace");QTRY_VERIFY(change->isEnabled());change->click();
+        panel.findChild<QLineEdit*>("workspaceRelayUrl")->setText("https://relay.example.test");
+        panel.findChild<QComboBox*>("workspaceEnrollmentMode")->setCurrentIndex(1);
+        auto *code=panel.findChild<QLineEdit*>("joinComputerWorkspaceCode");code->setText("ze1.synthetic-consumed-invitation");
+        legacy.insert("pending",QJsonObject{{"action","switch-join"},{"state","ready"}});
+        QVERIFY(reply(directory.path(),{{"status",legacy},{"switch-join",QJsonObject{{"ok",false},{"error","The saved connection needs to finish switching."}}}}));
+        panel.findChild<QPushButton*>("submitWorkspaceEnrollment")->click();
+        auto *dialog=panel.findChild<QMessageBox*>("confirmWorkspaceChange");QVERIFY(dialog);dialog->button(QMessageBox::Yes)->click();
+        QTRY_VERIFY(panel.findChild<QPushButton*>("checkWorkspaceEnrollment")->isEnabled());
+        QVERIFY(code->text().isEmpty());QVERIFY(panel.findChild<QWidget*>("workspaceEnrollment")->isHidden());
+        QCOMPARE(calls(directory.path()).size(),3);
+    }
+    void ordinaryStatusRefreshPreservesUnsubmittedJoinForm(){
+        QTemporaryDir directory;const auto fixture=directory.path()+"/connector";QVERIFY(install(fixture));
+        QVERIFY(reply(directory.path(),{{"status",active()}}));
+        WorkspaceSettings::Panel panel(FakeCli::program(fixture),directory.path()+"/connector.json");
+        auto *change=panel.findChild<QPushButton*>("changeMobileWorkspace");QTRY_VERIFY(change->isEnabled());change->click();
+        panel.findChild<QComboBox*>("workspaceEnrollmentMode")->setCurrentIndex(1);
+        auto *code=panel.findChild<QLineEdit*>("joinComputerWorkspaceCode");code->setText("ze1.synthetic-unsubmitted-invitation");
+        auto *reload=panel.findChild<QPushButton*>("refreshWorkspaceStatus");reload->click();QTRY_VERIFY(reload->isEnabled());
+        QCOMPARE(code->text(),QString("ze1.synthetic-unsubmitted-invitation"));
+        QVERIFY(panel.findChild<QWidget*>("workspaceEnrollment")->isVisibleTo(&panel));QVERIFY(change->isHidden());
+        const auto log=calls(directory.path());QCOMPARE(log.size(),2);
+        for(const auto &call:log)QCOMPARE(call.value("argv").toArray().at(1).toString(),QString("status"));
+    }
+    void openingSavedMigrationDoesNotAuthorizeHandover(){
+        QTemporaryDir directory;const auto fixture=directory.path()+"/connector";QVERIFY(install(fixture));
+        QVERIFY(reply(directory.path(),{{"status",savedDraining()}}));
+        WorkspaceSettings::Panel panel(FakeCli::program(fixture),directory.path()+"/connector.json");
+        auto *check=panel.findChild<QPushButton*>("checkWorkspaceEnrollment");QTRY_VERIFY(check->isVisibleTo(&panel)&&check->isEnabled());
+        QCOMPARE(check->text(),QString("Continue connecting"));
+        QVERIFY(observeAutomaticCommandWindow());QVERIFY(check->isEnabled());
+        const auto log=calls(directory.path());QCOMPARE(log.size(),1);
+        QCOMPARE(log.first().value("argv").toArray().at(1).toString(),QString("status"));
+        QVERIFY(log.first().value("payload").toObject().isEmpty());
+    }
+    void confirmedLegacySwitchContinuesWithSavedCheckOnly(){
+        QTemporaryDir directory;const auto fixture=directory.path()+"/connector";QVERIFY(install(fixture));
+        const auto connected=active(false,QString(64,'c'));
+        QVERIFY(sequence(directory.path(),{step("status",legacyStatus()),step("switch-join",draining()),step("status",savedDraining()),step("check",connected),step("status",connected)}));
+        WorkspaceSettings::Panel panel(FakeCli::program(fixture),directory.path()+"/connector.json");
+        auto *change=panel.findChild<QPushButton*>("changeMobileWorkspace");QTRY_VERIFY(change->isEnabled());change->click();
+        panel.findChild<QComboBox*>("workspaceEnrollmentMode")->setCurrentIndex(1);
+        auto *code=panel.findChild<QLineEdit*>("joinComputerWorkspaceCode");code->setText("ze1.synthetic-handover-invitation");
+        panel.findChild<QPushButton*>("submitWorkspaceEnrollment")->click();
+        auto *dialog=panel.findChild<QMessageBox*>("confirmWorkspaceChange");QVERIFY(dialog);dialog->button(QMessageBox::Yes)->click();
+        QTRY_VERIFY(change->isVisibleTo(&panel)&&change->isEnabled());
+        QVERIFY(panel.findChild<QPushButton*>("startWorkspaceConnector")->isVisibleTo(&panel));
+        QVERIFY(panel.findChild<QWidget*>("workspaceEnrollment")->isHidden());QVERIFY(code->text().isEmpty());
+        const auto log=calls(directory.path());QCOMPARE(log.size(),5);
+        const QStringList expected{"status","switch-join","status","check","status"};
+        for(int index=0;index<log.size();++index)QCOMPARE(log.at(index).value("argv").toArray().at(1).toString(),expected.at(index));
+        for(int index:{1,3}){
+            const auto payload=log.at(index).value("payload").toObject();
+            QCOMPARE(payload.value("expected_revision").toString(),QString(64,'a'));
+            QCOMPARE(payload.value("allow_legacy_service_handover"),QJsonValue(true));
+        }
+        QCOMPARE(log.at(1).value("payload").toObject().value("code").toString(),QString("ze1.synthetic-handover-invitation"));
+        QVERIFY(!log.at(3).value("payload").toObject().contains("code"));
+        QVERIFY(!log.at(3).value("payload").toObject().contains("allow_unconfirmed_legacy_retirement"));
+        for(int index:{0,2,4})QVERIFY(log.at(index).value("payload").toObject().isEmpty());
+    }
+    void invalidMigrationStatusStopsContinuation_data(){
+        QTest::addColumn<bool>("missing");
+        QTest::newRow("missing-migration")<<true;
+        QTest::newRow("non-boolean-retryable")<<false;
+    }
+    void invalidMigrationStatusStopsContinuation(){
+        QFETCH(bool,missing);
+        QTemporaryDir directory;const auto fixture=directory.path()+"/connector";QVERIFY(install(fixture));
+        auto invalid=savedDraining();
+        if(missing)invalid.remove("migration");
+        else{auto metadata=invalid.value("migration").toObject();metadata.insert("retryable","true");invalid.insert("migration",metadata);}
+        QVERIFY(sequence(directory.path(),{step("status",legacyStatus()),step("switch-create",draining()),step("status",invalid)}));
+        WorkspaceSettings::Panel panel(FakeCli::program(fixture),directory.path()+"/connector.json");
+        auto *change=panel.findChild<QPushButton*>("changeMobileWorkspace");QTRY_VERIFY(change->isEnabled());change->click();
+        panel.findChild<QPushButton*>("submitWorkspaceEnrollment")->click();
+        auto *dialog=panel.findChild<QMessageBox*>("confirmWorkspaceChange");QVERIFY(dialog);dialog->button(QMessageBox::Yes)->click();
+        QTRY_VERIFY(panel.findChild<QLabel*>("workspaceSummary")->text().contains("unconfirmed"));
+        auto *reload=panel.findChild<QPushButton*>("refreshWorkspaceStatus");QTRY_VERIFY(reload->isEnabled());
+        QVERIFY(observeAutomaticCommandWindow());QVERIFY(reload->isEnabled());
+        QVERIFY(!panel.findChild<QPushButton*>("checkWorkspaceEnrollment")->isEnabled());
+        QVERIFY(!panel.findChild<QPushButton*>("submitWorkspaceEnrollment")->isEnabled());
+        const auto log=calls(directory.path());QCOMPARE(log.size(),3);
+        QCOMPARE(log.at(1).value("argv").toArray().at(1).toString(),QString("switch-create"));
+        QCOMPARE(log.at(1).value("payload").toObject().value("allow_legacy_service_handover"),QJsonValue(true));
+        QCOMPARE(log.at(2).value("argv").toArray().at(1).toString(),QString("status"));
+        QVERIFY(log.at(2).value("payload").toObject().isEmpty());
     }
     void malformedStatusCannotUnlockMutations(){
         QTemporaryDir directory;const auto fixture=directory.path()+"/connector";QVERIFY(install(fixture));QVERIFY(reply(directory.path(),{{"status",QJsonObject{}}}));

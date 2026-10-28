@@ -1,3 +1,4 @@
+#include "SettingsJson.h"
 #include "SwarmController.h"
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -90,8 +91,8 @@ void SwarmController::start(const QJsonObject &organization)
     if(m_started)return;m_started=true;m_desired=organization;
     QSettings settings;
     if(!settings.contains("workspace/organizationBeforeSwarm"))settings.setValue("workspace/organizationBeforeSwarm",QJsonDocument(organization).toJson(QJsonDocument::Compact));
-    m_base=QJsonDocument::fromJson(settings.value("swarm/observedOrganization").toByteArray()).object();
-    m_versions=QJsonDocument::fromJson(settings.value("swarm/observedVersions").toByteArray()).object();
+    m_base=SettingsJson::object("swarm/observedOrganization");
+    m_versions=SettingsJson::object("swarm/observedVersions");
     m_ready=!m_base.isEmpty();
     if(!m_ready)m_base=organization;
     m_poll.start();
@@ -132,6 +133,8 @@ void SwarmController::persist()
     QSettings settings;
     settings.setValue("swarm/observedOrganization", organization);
     settings.setValue("swarm/observedVersions", versions);
+    SettingsJson::remember("swarm/observedOrganization", organization, QJsonDocument(m_base));
+    SettingsJson::remember("swarm/observedVersions", versions, QJsonDocument(m_versions));
     settings.sync();
     if (settings.status() == QSettings::NoError) {
         m_persistedOrganization = organization;

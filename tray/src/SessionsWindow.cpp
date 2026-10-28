@@ -1,9 +1,12 @@
+#include "SettingsJson.h"
 #include "ArchiveBrowser.h"
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
 #include "AgentWorking.h"
+#include "EventStream.h"
 #include <QStandardPaths>
 #include "WorktreeBatchCleanupDialog.h"
+#include "WorktreeCleanupStatus.h"
 #include "SessionNotifications.h"
 #include "DownloadCache.h"
 #include "SessionFileDrop.h"
@@ -26,6 +29,7 @@
 #include "SessionStatusBadge.h"
 #include "SessionElapsed.h"
 #include "SessionTag.h"
+#include "SessionTooltip.h"
 #include "ProjectsDialog.h"
 #include "SwarmController.h"
 #include "SwarmDialog.h"
@@ -49,8 +53,12 @@
 #include "HeldInputBar.h"
 #include "MediaViewer.h"
 #include "NewSessionDialog.h"
+#include "SessionCreationController.h"
+#include <QPlainTextEdit>
 #include "ActivityView.h"
 #include "ProcessView.h"
+#include "TasksView.h"
+#include "TaskInspector.h"
 #include "AttachmentViewer.h"
 #include "NativeBrowserPlugin.h"
 #include "NativeUiView.h"
@@ -81,6 +89,7 @@
 #include "MachinesPage.h"
 #include "MachineFilter.h"
 #include "ProjectFilter.h"
+#include "AccountFilter.h"
 #include "MachineAppearance.h"
 #include "MachinePlatform.h"
 #include "LocalLaunchWarning.h"
@@ -124,6 +133,8 @@
 #include <QSettings>
 #include <QShortcut>
 #include <QSplitter>
+#include <QSplitterHandle>
+#include <QMouseEvent>
 #include <QStackedWidget>
 #include <QStyledItemDelegate>
 #include <QStyle>
@@ -228,45 +239,9 @@ QString htmlText(const QString &text)
     return text.toHtmlEscaped().replace('\n', "<br>");
 }
 
-struct SessionTooltip { QString plain, html; };
-
 SessionTooltip sessionTooltip(const QStringList &fields, int width)
 {
-    // Tool excerpts can contain minified JSON, base64 or a single very long
-    // command. Explicit measured lines also bound unbreakable tokens: a CSS
-    // width on its own does not stop Qt rich-text tooltips from expanding.
-    const QFont font = QToolTip::font();
-    const QFontMetrics metrics(font);
-    QStringList lines;
-    bool truncated = false;
-    constexpr int MaxLines = 11, MaxFieldLines = 2, MaxFieldCharacters = 600;
-    for (const auto &raw : fields) {
-        const QString field = raw.simplified();
-        if (field.isEmpty()) continue;
-        if (lines.size() >= MaxLines) { truncated = true; break; }
-        const QString text = field.left(MaxFieldCharacters);
-        QTextLayout layout(text, font);
-        QTextOption option; option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
-        layout.setTextOption(option); layout.beginLayout();
-        int end = 0, fieldLines = 0;
-        while (fieldLines < MaxFieldLines && lines.size() < MaxLines) {
-            auto line = layout.createLine();
-            if (!line.isValid()) break;
-            line.setLineWidth(width);
-            end = line.textStart() + line.textLength();
-            lines.append(text.mid(line.textStart(), line.textLength()).trimmed());
-            ++fieldLines;
-        }
-        layout.endLayout();
-        if (end < field.size()) {
-            truncated = true;
-            if (!lines.isEmpty()) lines.last() = metrics.elidedText(lines.last() + QChar(0x2026), Qt::ElideRight, width);
-        }
-    }
-    if (truncated) lines.append(QObject::tr("Open Activity for details."));
-    const QString plain = lines.join('\n');
-    return {plain, QString("<qt><table width='%1' cellspacing='0' cellpadding='0'><tr><td>%2</td></tr></table></qt>")
-                       .arg(width).arg(htmlText(plain))};
+    return sessionTooltip(fields, width, QToolTip::font());
 }
 
 void updateBrowser(QTextBrowser *browser, const QString &html, QString &previous, bool preservePosition = true)
@@ -324,11 +299,12 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_expandedSessions = QSet<QString>(expanded.begin(), expanded.end());
     m_sessionRowPreferences = SessionRowPreferences(settings.value("workspace/collapsedSessionRows").toByteArray());
     m_savedOrganization = settings.value("workspace/organization").toByteArray();
-    const auto savedProjects = QJsonDocument::fromJson(m_savedOrganization).object();
+    const auto savedProjects = SettingsJson::object("workspace/organization");
     if (!savedProjects.isEmpty() && !savedProjects.contains("projects") && !settings.contains("workspace/organizationBeforeProjects"))
         settings.setValue("workspace/organizationBeforeProjects", m_savedOrganization);
     m_organization = SessionOrganization(savedProjects);
-    m_pendingLaunches = QJsonDocument::fromJson(settings.value("workspace/pendingLaunches").toByteArray()).object();
+    m_pendingLaunches = SettingsJson::object("workspace/pendingLaunches");
+    m_creations=new SessionCreationController(m_client.executable(),this);
     if (!settings.value("sessions/geometry").toByteArray().isEmpty()) restoreGeometry(settings.value("sessions/geometry").toByteArray());
     // WhiteWh fork: a skin may put its own title bar above the rail and the pages.
     auto *frame = new QVBoxLayout(this); frame->setContentsMargins(0, 0, 0, 0); frame->setSpacing(0);
@@ -366,7 +342,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_attentionBadge->setAlignment(Qt::AlignCenter); m_attentionBadge->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_attentionBadge->setGeometry(24, 3, 17, 16); m_attentionBadge->hide();
     connect(m_sessionsNav, &QPushButton::clicked, this, [this] {
-        if (m_pages->currentIndex() == 0) { m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_projectFilters.clear(); m_search->clear(); }
+        if (m_pages->currentIndex() == 0) { m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_projectFilters.clear(); m_accountFilters.clear(); m_search->clear(); }
         showSessionList();
     });
     connect(m_projectsNav, &QPushButton::clicked, this, [this]() { showProjects(selectedHostTarget()); });
@@ -449,6 +425,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_search = new QLineEdit; m_search->setObjectName("search"); m_search->setPlaceholderText(tr("Search sessions, IDs and messages…"));
     m_search->setClearButtonEnabled(true); m_search->setAccessibleName(tr("Search sessions"));
     connect(m_search, &QLineEdit::textChanged, this, [this]() {
+        m_revealCreation.clear();m_creationSessionToSelect.clear();
         m_archiveSearchRows.clear();
         m_archiveBrowser->setQuery(m_search->text());
         m_searchResults->setQuery(m_filter=="archived"?QString():m_search->text());
@@ -471,15 +448,18 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         button->setCheckable(true); button->setChecked(pair.first == "all"); button->setAccessibleName(pair.second);
         filterRow->addWidget(button, 1); m_filters.append(button);
         connect(button, &QPushButton::clicked, this, [this, id = pair.first]() {
+            m_revealCreation.clear();m_creationSessionToSelect.clear();
             m_restoreKey.clear(); m_renameKey.clear(); m_pages->setCurrentIndex(0); m_projectsNav->setChecked(false); m_filter = id; m_searchResults->setQuery(id=="archived"?QString():m_search->text());m_listStack->setCurrentIndex(m_searchResults->active()?1:0);if(id=="archived")m_archiveBrowser->setQuery(m_search->text()); if(id=="all")m_folderFilterPath.clear(); rebuild();
         });
     }
     m_machineFilter = new MachineFilter;
-    m_projectFilter = new ProjectFilter;
-    filterRow->addWidget(m_machineFilter->button()); filterRow->addWidget(m_projectFilter->button());
-    listLayout->addLayout(filterRow); listLayout->addWidget(m_machineFilter); listLayout->addWidget(m_projectFilter);
-    connect(m_projectFilter, &ProjectFilter::selectionChanged, this, [this](const QSet<QString> &projects) { m_projectFilters = projects; rebuild(); });
-    connect(m_machineFilter, &MachineFilter::selectionChanged, this, [this](const QSet<QString> &hosts) { m_hostFilters = hosts; rebuild(); });
+    m_projectFilter = new ProjectFilter; m_accountFilter = new AccountFilter;
+    filterRow->addWidget(m_machineFilter->button()); filterRow->addWidget(m_projectFilter->button()); filterRow->addWidget(m_accountFilter->button());
+    listLayout->addLayout(filterRow); listLayout->addWidget(m_machineFilter); listLayout->addWidget(m_projectFilter); listLayout->addWidget(m_accountFilter);
+    connect(m_projectFilter, &ProjectFilter::selectionChanged, this, [this](const QSet<QString> &projects) { m_revealCreation.clear();m_creationSessionToSelect.clear();m_projectFilters = projects; rebuild(); });
+    connect(m_accountFilter, &AccountFilter::selectionChanged, this, [this](const QSet<QString> &accounts) { m_revealCreation.clear();m_creationSessionToSelect.clear();m_accountFilters = accounts; rebuild(); });
+    connect(m_accountFilter, &AccountFilter::opened, this, [this] { m_accountsPage->ensureCatalogs(true); });
+    connect(m_machineFilter, &MachineFilter::selectionChanged, this, [this](const QSet<QString> &hosts) { m_revealCreation.clear();m_creationSessionToSelect.clear();m_hostFilters = hosts; rebuild(); });
     m_archiveBrowser=new ArchiveBrowser(m_client,this);listLayout->addWidget(m_archiveBrowser);
     connect(m_archiveBrowser,&ArchiveBrowser::changed,this,[this]{if(m_filter=="archived")rebuild();});
     connect(m_archiveBrowser,&ArchiveBrowser::windowChanged,this,[this]{if(m_filter=="archived")m_sessions->scrollToTop();});
@@ -521,8 +501,29 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             if (!event.isEmpty()) m_activityView->showSearchResult(event, query);
             else m_activityView->clearSearchResult();
         });
+    connect(m_searchResults,&SessionSearch::creationActivated,this,[this](const QString &id){
+        selectCreation(id);
+    });
     m_count = label({}, "listSummary"); m_count->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     auto *summary = new QHBoxLayout; summary->addWidget(m_count, 1);
+    auto *creationStatus=iconButton("clock",tr("Session creation status"),"creationStatus");summary->addWidget(creationStatus);
+    connect(creationStatus,&QPushButton::clicked,this,[this,creationStatus]{
+        auto *menu=new QMenu(this);const auto operations=m_creations->operations();
+        auto ids=operations.keys();std::sort(ids.begin(),ids.end(),[&](const QString &a,const QString &b){const auto left=operations[a].toObject()["created"].toInteger(),right=operations[b].toObject()["created"].toInteger();return left==right?a<b:left>right;});
+        auto *page=menu;int count=0;
+        for(const auto &id:ids){
+            const auto value=operations[id].toObject();if(value["state"]=="bound")continue;
+            if(count&&count%50==0)page=page->addMenu(tr("Older creations…"));++count;
+            auto *action=page->addAction(value["tag"].toString()+" · "+SessionCreationController::caption(value));
+            connect(action,&QAction::triggered,this,[this,id]{
+                if(!m_creations->owns(id)||m_creations->operation(id)["state"]=="bound"){showNotice(tr("This creation has already been resolved."));return;}
+                m_revealCreation=id;m_creationSessionToSelect.clear();selectCreation(id);
+                m_creations->show(id);m_listStack->setCurrentIndex(0);showSessionList();rebuild();renderCreation();
+            });
+        }
+        if(menu->isEmpty())menu->addAction(tr("No pending session creations"))->setEnabled(false);
+        connect(menu,&QMenu::aboutToHide,menu,&QObject::deleteLater);menu->popup(creationStatus->mapToGlobal(QPoint(0,creationStatus->height())));
+    });
     m_markAllReadButton = iconButton("read-all", tr("Mark all as read"), "markAllReadButton"); m_markAllReadButton->setAutoDefault(false);
     m_markAllReadButton->setEnabled(false); summary->addWidget(m_markAllReadButton);
     connect(m_markAllReadButton, &QPushButton::clicked, this, &SessionsWindow::markAllRepliesRead);
@@ -548,6 +549,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             auto *menu = new QMenu(this); menu->setObjectName("pendingLaunchMenu");
             auto *dismiss = menu->addAction(tr("Hide launch status"));
             connect(dismiss, &QAction::triggered, this, [this, id] {
+                if(m_creations->owns(id)){m_creations->hide(id);return;}
                 if (!m_pendingLaunches.contains(id)) return;
                 auto launch = m_pendingLaunches.value(id).toObject(); launch["show_pending"] = false;
                 m_pendingLaunches[id] = launch; savePendingLaunches(); rebuild();
@@ -564,7 +566,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     connect(m_sessions, &SessionList::childrenToggled, this, [this](const QString &key) {
         // A team's lead folds and unfolds its members (and its subagents with them).
-        if (m_teams) for (const auto &entry : m_entries) if (entry.key == key) {
+        if (m_teams) for (const auto &entry : std::as_const(m_entries)) if (entry.key == key) {
             const auto *team = m_teams->teamOfSession(entry.host, entry.session.name);
             const auto *member = team ? team->memberOfSession(entry.host, entry.session.name) : nullptr;
             if (!member || !member->lead || team->status == "archived") break;
@@ -624,6 +626,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         m_organization.moveGroup(id, before); saveOrganization(); rebuild();
     });
     connect(m_sessions, &SessionList::dragFinished, this, &SessionsWindow::rebuild);
+    connect(m_sessions, &SessionList::taskDropped, this, [this](const TaskDrag &task, const QString &host, const QString &session) {
+        m_tasks->retarget(task, host, session);
+    });
     connect(m_sessions, &QListWidget::currentRowChanged, this, [this]() { if (!m_rebuilding) selectSession(); });
     connect(m_sessions, &QListWidget::itemActivated, this, &SessionsWindow::jumpToLatestActivity);
 
@@ -1261,6 +1266,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         m_detailTabs->setCurrentWidget(m_terminal); m_terminal->connectSession();
     });
     connect(&m_client, &HgsClient::nativeSessionLaunched, this, [this](const QString &id, bool ok, const QString &error) {
+        if(!m_creations->forLaunch(id).isEmpty()){
+            m_creations->launchFinished(id,ok,error);emit refreshRequested();return;
+        }
         // A listing can report the launch ended before its command returns; its
         // notice stays and nothing waits to open a session that never appears.
         if (ok) {
@@ -1347,8 +1355,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     const auto draftChanged = [this](const QString &key) {
         for (int row = 0; row < m_sessions->count(); ++row) {
             auto *item = m_sessions->item(row);
-            if (item->data(SessionRoles::Key).toString() == key && item->data(SessionRoles::ChildId).toString().isEmpty())
-                item->setData(SessionRoles::Draft, m_composer->hasDraft(key));
+            if (item->data(SessionRoles::Key).toString() == key && item->data(SessionRoles::ChildId).toString().isEmpty()) {
+                // The next applied rows rewrite an item changed here (applyListRows).
+                item->setData(SessionRoles::Draft, m_composer->hasDraft(key)); item->setData(SessionRoles::Digest, QByteArray());
+            }
         }
         // Presence changes once when typing starts or the draft clears, rather
         // than on each keystroke. Defer list rebuilding until the editor returns.
@@ -1447,8 +1457,13 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if (url.scheme() == "hgs-fold") toggleInspectorSection(url.path(QUrl::FullyDecoded));
     });
     tabs->addTab(m_activityStack, tr("Activity")); tabs->addTab(m_terminal, tr("Terminal"));
+    // The right inspector owns the only board surface. Keep its shared
+    // controller hidden; a selection opens the central Task View.
+    m_tasks = new TasksView(&m_client, this); m_tasks->hide();
+    m_tasks->setOpenInInspector(true);
+    connect(m_tasks, &TasksView::notice, this, [this](const QString &message, bool error) { showNotice(message, error); });
     m_nativeUi = new NativeUiView(&m_client, [] { return NativeBrowserPlugin::factory(); });
-    tabs->addTab(m_nativeUi, tr("Native UI")); tabs->setTabVisible(2, false);
+    tabs->addTab(m_nativeUi, tr("Native UI")); tabs->setTabVisible(tabs->indexOf(m_nativeUi), false);
     m_processes=new ProcessView(&m_client);tabs->addTab(m_processes,tr("Processes"));tabs->setTabVisible(tabs->indexOf(m_processes),ProcessSettings::enabled());
     connect(m_processes,&ProcessView::refreshRequested,this,&SessionsWindow::inspect);
     connect(m_activityView,&ActivityView::teamTaskActivated,this,&SessionsWindow::openTeamTask);   // WhiteWh fork: agent teams
@@ -1553,7 +1568,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         rebuild();updateLeadPanel();
     };
     m_leadPanel->open=[this](const QString &identity){
-        for(const auto &entry:m_entries)if(entry.identity==identity){showSession(entry.host,entry.session.name);return;}
+        for(const auto &entry:std::as_const(m_entries))if(entry.identity==identity){showSession(entry.host,entry.session.name);return;}
     };
     m_leadPanel->sendReport=[this]{sendReportToLead();};
     m_inspector->body(InspectorCards::Worktrees)->addWidget(m_worktrees);
@@ -1591,7 +1606,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_teamPanel=new TeamPanel(m_teams);
     m_teamPanel->openSession=[this](const QString &host,const QString &name){showSession(host,name);};
     m_teamPanel->sendMessage=[this](const QString &host,const QString &name,const QString &text){
-        for(const auto &entry:m_entries)if(entry.host==host&&entry.session.name==name&&entry.session.state!="archived"){
+        for(const auto &entry:std::as_const(m_entries))if(entry.host==host&&entry.session.name==name&&entry.session.state!="archived"){
             m_client.requestSendMessage(host,name,text,{},entry.session.runId,entry.session.conversationId);showNotice(tr("Reminder sent to %1").arg(name));return;}
         showNotice(tr("%1 is not listed; open it to send the reminder").arg(name),true);
     };
@@ -1608,7 +1623,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // member of a team that is still going.
     m_teamPanel->sessionChoices=[this]{
         QList<Teams::SessionChoice> choices;
-        for(const auto &entry:m_entries){
+        for(const auto &entry:std::as_const(m_entries)){
             if(entry.session.state!="running")continue;
             if(const auto *team=m_teams->teamOfSession(entry.host,entry.session.name))
                 if(team->status=="planning"||team->status=="running"||team->status=="paused")continue;
@@ -1630,7 +1645,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         const Entry entry=*found;
         if(action=="new"){
             const QString name=sessionLabel(entry.session);
-            showNewSession(entry.session.cmd,m_organization.groupFor(entry.identity),entry.host,{},entry.session.cwd,{},name+QStringLiteral("-2"));
+            showNewSession(entry.session.cmd,m_organization.groupFor(entry.identity),entry.host,{},entry.session.cwd,{},{},{},{},name+QStringLiteral("-2"));
             return;
         }
         for(int row=0;row<m_sessions->count();++row)if(m_sessions->item(row)->data(KeyRole).toString()==key){m_sessions->setCurrentRow(row);break;}
@@ -1689,6 +1704,106 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         for(const auto &token:changes.cleared)emit teamAttentionCleared(token);
         for(const auto &notice:changes.raised)emit teamAttentionRaised(notice.token,notice.title,notice.body);
     });
+    const auto taskLaunchBytes = settings.value("tasks/pendingExecutorLaunches").toByteArray();
+    const auto taskLaunchDoc = SettingsJson::document(QStringLiteral("tasks/pendingExecutorLaunches"), 65536);
+    m_taskLaunches = taskLaunchDoc.object();
+    bool validLaunches = taskLaunchBytes.isEmpty() || taskLaunchDoc.isObject();
+    if (m_taskLaunches.size() > 16) validLaunches = false;
+    for (auto it = m_taskLaunches.constBegin(); it != m_taskLaunches.constEnd() && validLaunches; ++it) {
+        const auto record = it.value().toObject();
+        validLaunches = !QUuid(it.key()).isNull() && !record.value("task").toString().isEmpty() && !record.value("project").toString().isEmpty()
+            && !record.value("parent").toString().isEmpty() && !record.value("cmd").toString().isEmpty()
+            && QStringList{"waiting", "reserved", "review"}.contains(record.value("phase").toString());
+    }
+    if (!validLaunches) { m_taskLaunches = {}; m_taskLaunchRecoveryBlocked = true; }
+    m_tasks->setExecutorLaunches(m_taskLaunches);
+    connect(m_tasks, &TasksView::newExecutorRequested, this, [this](const TaskItem &task, const QString &project) {
+        if (task.targetId.isEmpty() || task.targetMachine.isEmpty()) { showNotice(tr("Choose a parent with a confirmed computer and session identity."), true); return; }
+        if (m_taskLaunchRecoveryBlocked) { showNotice(tr("The saved executor launch records could not be read. Review them before creating another task executor."), true); return; }
+        if (m_taskLaunches.size() >= 16) { showNotice(tr("Finish or review the pending task executor launches first."), true); return; }
+        for (const auto &value : m_taskLaunches) if (value.toObject().value("task").toString() == task.uuid) {
+            showNotice(tr("This task already has an executor launch pending. Check its session and task history before starting it again."), true); return;
+        }
+        showNewSession(task.targetSession.section('/', 0, 0), project, task.targetHost, {}, {}, {}, {}, task.uuid, task.targetMachine + QLatin1Char('/') + task.targetId);
+    });
+    connect(m_tasks, &TasksView::executorLaunchReviewRequested, this, [this](const QString &uuid) {
+        for (auto it = m_taskLaunches.constBegin(); it != m_taskLaunches.constEnd(); ++it) {
+            const auto record = it.value().toObject(); if (record.value("task").toString() != uuid) continue;
+            const auto launch = it.key();
+            QMessageBox review(QMessageBox::Information, tr("Task executor launch"),
+                tr("Session: %1\nLaunch: %2\nState: %3\n%4\n\nCheck the task history and this executor before allowing another launch. Releasing the launch record does not stop an agent or retry delivery.")
+                    .arg(record.value("session").toString(record.value("tag").toString()), launch, record.value("phase").toString(), record.value("error").toString()),
+                QMessageBox::Close, this);
+            review.setTextFormat(Qt::PlainText); review.setObjectName("taskExecutorLaunchReviewDialog");
+            auto *release = review.addButton(tr("I reviewed it · allow another launch"), QMessageBox::ActionRole);
+            release->setEnabled(record.value("phase") != "waiting"); review.exec();
+            if (review.clickedButton() == release && m_taskLaunches.value(launch).toObject() == record) {
+                m_taskLaunches.remove(launch);
+                if (!saveTaskLaunches()) { m_taskLaunches[launch] = record; m_tasks->setExecutorLaunches(m_taskLaunches); showNotice(tr("Could not release the executor launch record."), true); }
+            }
+            return;
+        }
+    });
+    connect(&m_client, &HgsClient::taskReady, this, [this](quint64 id, const QJsonObject &reply) {
+        const auto launch = m_taskLaunchRequests.take(id); if (launch.isEmpty()) return;
+        auto record = m_taskLaunches.value(launch).toObject(); const auto task = reply.value("task").toObject();
+        const auto receipt = reply.value("receipt").toObject().value("request_id").toString();
+        QString recorded; for (const auto &value : task.value("log").toArray()) if (value.toObject().value("kind") == "sent") recorded = value.toObject().value("request_id").toString();
+        const auto owner = task.value("session").toObject();
+        if (task.value("uuid").toString() != record.value("task").toString() || task.value("stage") != "active"
+            || owner.value("session_id").toString() != QStringLiteral("launch_id:") + launch || owner.value("host") != record.value("host")
+            || receipt.isEmpty() || recorded != receipt) {
+            record["phase"] = "review"; record["error"] = tr("Task delivery reply did not confirm this exact executor and receipt");
+            m_taskLaunches[launch] = record; saveTaskLaunches();
+            showNotice(record.value("error").toString(), true); return;
+        }
+        m_taskLaunches.remove(launch); saveTaskLaunches(); m_tasks->refresh();
+    });
+    connect(&m_client, &HgsClient::taskFailed, this, [this](quint64 id, const QString &error) {
+        const auto launch = m_taskLaunchRequests.take(id); if (launch.isEmpty()) return;
+        auto record = m_taskLaunches.value(launch).toObject(); record["error"] = error.left(2048); record["phase"] = "review";
+        m_taskLaunches[launch] = record; saveTaskLaunches();
+        showNotice(tr("The executor was created, but task delivery needs review: %1. Check task history before retrying.").arg(error), true);
+    });
+    m_taskInspector = new TaskInspector(&m_client, m_tasks);
+    // Upstream's Tasks tab is a card here, after Changes: the fork's inspector
+    // has no tabs, and its Tasks card holds the agent's plan and subagents.
+    m_inspector->body(InspectorCards::ProjectTasks)->addWidget(m_taskInspector);
+    m_taskView = m_taskInspector->takeDetailsPane();
+    new SpeechComposer(m_client.executable(), m_taskInspector->composer(), [this] {
+        SpeechComposer::Target target; target.key = m_taskInspector->composer()->sessionKey(); target.draftOnly = true;
+        target.session = m_taskInspector->selectedTask(); target.available = m_taskInspector->canDictate(); return target;
+    });
+    const int taskViewIndex = m_detailTabs->addTab(m_taskView, tr("Task View"));
+    m_detailTabs->setTabVisible(taskViewIndex, false);
+    connect(m_taskInspector, &TaskInspector::taskViewRequested, this, [this] {
+        m_detailTabs->setTabVisible(m_detailTabs->indexOf(m_taskView), true); m_detailTabs->setCurrentWidget(m_taskView);
+    });
+    connect(m_taskInspector, &TaskInspector::subagentRequested, this, [this](const QString &host, const QString &name, const QString &parentId, const QString &conversation, const QString &child) {
+        for (const auto &entry : std::as_const(m_entries)) {
+            const QString retained = entry.session.launchId.isEmpty() ? QStringLiteral("run_id:") + entry.session.runId : QStringLiteral("launch_id:") + entry.session.launchId;
+            if (entry.host != host || retained != parentId || entry.session.conversationId != conversation) continue;
+            const auto task = m_taskInspector->selectedTask();
+            openRelatedSession(host, entry.session.name, {}); closeSubagent(); openSubagent(child); m_taskInspector->selectTask(task); return;
+        }
+        showNotice(tr("This worker belongs to an earlier or unavailable parent conversation. Open the coordinator's history to inspect it."), true);
+    });
+    connect(m_taskInspector, &TaskInspector::executorRequested, this, [this](const QString &host, const QString &name, const QString &id) {
+        // Recheck the retained identity before following a mutable display name.
+        for (const auto &entry : std::as_const(m_entries)) {
+            const QString retained = entry.session.launchId.isEmpty()
+                ? (entry.session.runId.isEmpty() ? QString() : QStringLiteral("run_id:") + entry.session.runId)
+                : QStringLiteral("launch_id:") + entry.session.launchId;
+            if (entry.host != host || (id.isEmpty() ? entry.session.name != name : retained != id)) continue;
+            const QString task = m_taskInspector->selectedTask();
+            openRelatedSession(entry.host, entry.session.name, {}); closeSubagent();
+            m_detailTabs->setCurrentWidget(m_activityStack); m_taskInspector->selectTask(task); return;
+        }
+        showNotice(tr("The task's session identity is no longer available."), true);
+    });
+    connect(m_tasks, &TasksView::taskSelected, this, [this](const QString &uuid) {
+        openInspectorCard(InspectorCards::ProjectTasks); m_taskInspector->openTask(uuid);
+    });
     inspectorLayout->addWidget(m_inspector);
     // In the scrolling column the two text views are as tall as their text.
     for(auto *text:{m_children,m_info}){
@@ -1701,17 +1816,25 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_sessions,&SessionList::gitActivated,this,[this](const QString &key){
         Q_UNUSED(key);openInspectorCard(InspectorCards::Changes);});
     m_workSplitter->addWidget(m_inspectorPanel);
+    m_workSplitter->installEventFilter(this);
+    m_workSplitter->handle(1)->installEventFilter(this);
+    m_workSplitter->handle(1)->setToolTip(tr("Drag to resize the side panel. Double-click to reset its width."));
     m_workSplitter->setStretchFactor(0, 1); m_workSplitter->setStretchFactor(1, 0);
     m_inspectorToggle = new QPushButton; m_inspectorToggle->setObjectName("toggleInspector");
     m_inspectorToggle->setProperty("glyph", "inspector"); m_inspectorToggle->setCheckable(true);
     m_inspectorToggle->setProperty("sessionHeaderAction", true);
-    configureWorkspaceIconButton(m_inspectorToggle, "inspector", tr("Show tasks, agents, details and worktrees"), m_dark);
-    tabs->setCornerWidget(m_inspectorToggle);
+    configureWorkspaceIconButton(m_inspectorToggle, "inspector", tr("Show tasks, plan, agents, details and worktrees"), m_dark);
+    m_inspectorCorner = new QWidget; m_inspectorCorner->setObjectName("inspectorCorner");
+    auto *cornerLayout = new QHBoxLayout(m_inspectorCorner); cornerLayout->setContentsMargins(4, 4, 6, 4);
+    cornerLayout->addWidget(m_inspectorToggle, 0, Qt::AlignVCenter);
+    tabs->setCornerWidget(m_inspectorCorner);
     connect(m_inspectorToggle, &QPushButton::toggled, this, &SessionsWindow::setInspectorVisible);
     connect(m_workSplitter, &QSplitter::splitterMoved, this, [this] {
         if (!m_inspectorPanel->isHidden()) { m_inspectorWidth = m_inspectorPanel->width(); QSettings().setValue("workspace/inspectorWidth", m_inspectorWidth); }
     });
-    m_inspectorWidth = qBound(240, settings.value("workspace/inspectorWidth", 290).toInt(), 600);
+    bool widthValid = false;
+    const int savedWidth = settings.value("workspace/inspectorWidth", DefaultInspectorWidth).toInt(&widthValid);
+    m_inspectorWidth = widthValid && savedWidth > 0 ? qBound(240, savedWidth, QWIDGETSIZE_MAX) : DefaultInspectorWidth;
     m_inspectorPanel->hide();
     if (settings.value("workspace/inspectorVisible", false).toBool())
         QTimer::singleShot(0, this, [this] { setInspectorVisible(true); });
@@ -1722,11 +1845,100 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if(m_detailTabs->currentWidget()!=m_terminal && m_detailTabs->currentWidget()!=m_nativeUi)inspect();
     });
     detail->addWidget(m_workSplitter, 1); m_detailStack->addWidget(details); m_splitter->addWidget(m_detailStack);
+    m_creationPanel=new QWidget;m_creationPanel->setObjectName("creationDetailPanel");
+    auto *creationLayout=new QVBoxLayout(m_creationPanel);
+    m_creationTitle=label({},"creationTitle");m_creationTitle->setWordWrap(true);m_creationTitle->setMinimumWidth(0);
+    m_creationTitle->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);creationLayout->addWidget(m_creationTitle);
+    m_creationText=new QPlainTextEdit;m_creationText->setObjectName("creationDetails");m_creationText->setReadOnly(true);
+    m_creationText->setAccessibleName(tr("Session creation progress"));creationLayout->addWidget(m_creationText,1);
+    auto *creationActions=new QGridLayout;
+    m_creationContinue=new QPushButton(tr("Continue setup"));m_creationContinue->setObjectName("creationContinue");
+    m_creationCheck=new QPushButton(tr("Check result"));m_creationCheck->setObjectName("creationCheck");
+    m_creationStop=new QPushButton(tr("Stop creating"));m_creationStop->setObjectName("creationStop");
+    auto *creationHide=new QPushButton(tr("Hide status"));creationHide->setObjectName("creationHide");
+    auto *creationReturn=new QPushButton(tr("Return to filters"));creationReturn->setObjectName("creationReturnToFilters");
+    m_creationEdit=new QPushButton(tr("Edit choices…"));m_creationEdit->setObjectName("creationEdit");
+    creationActions->addWidget(m_creationContinue,0,0);creationActions->addWidget(m_creationCheck,0,1);
+    creationActions->addWidget(m_creationStop,1,0,1,2);creationActions->addWidget(m_creationEdit,2,0);creationActions->addWidget(creationHide,2,1);
+    creationActions->addWidget(creationReturn,3,0,1,2);creationLayout->addLayout(creationActions);m_detailStack->addWidget(m_creationPanel);
+    connect(m_creationEdit,&QPushButton::clicked,this,[this]{
+        if(!m_creations->canEdit(m_selectedCreation))return;const auto plan=m_creations->operation(m_selectedCreation);
+        showNewSession(plan["cmd"].toString(),plan["group"].toString(),plan["host"].toString(),{},{},plan["account"].toString(),plan);
+    });
+    connect(creationReturn,&QPushButton::clicked,this,[this]{
+        m_revealCreation.clear();m_creationSessionToSelect.clear();m_searchResults->setQuery(m_filter=="archived"?QString():m_search->text());
+        m_listStack->setCurrentIndex(m_searchResults->active()?1:0);rebuild();
+    });
+    connect(m_creationContinue,&QPushButton::clicked,this,[this]{m_creations->resume(m_selectedCreation);});
+    connect(m_creationCheck,&QPushButton::clicked,this,[this]{m_creations->check(m_selectedCreation);emit refreshRequested();});
+    connect(m_creationStop,&QPushButton::clicked,this,[this]{m_creations->stop(m_selectedCreation);});
+    connect(creationHide,&QPushButton::clicked,this,[this]{m_creations->hide(m_selectedCreation);});
+    connect(m_creations,&SessionCreationController::clockTick,this,[this]{if(!m_selectedCreation.isEmpty())renderCreation();});
+    connect(m_creations,&SessionCreationController::removed,this,[this](const QString &id){m_pendingLaunches.remove(id);});
+    m_creations->resolvePlacement=[this](QJsonObject &plan,const QJsonObject &evidence,QString &error){
+        auto group=plan["group"].toString();
+        if(evidence["cloned"].toBool()&&plan["new_project"].toBool()){
+            group=m_organization.createGroup(plan["project_name"].toString(),plan["reserved_project"].toString());
+            plan["group"]=group;plan["new_project"]=false;
+        }
+        if(plan["implicit_inbox"].toBool()&&group=="ungrouped"){
+            const auto hint=evidence["project_inference"].toObject();
+            if(hint["schema"]==1&&!plan["swarm"].toString().isEmpty()&&hint["swarm_id"]==plan["swarm"]
+                &&m_organization.group(hint["project_id"].toString())){
+                group=hint["project_id"].toString();plan["group"]=group;plan["add_folder"]=false;
+            }
+            if(!evidence.contains("project_inference")){
+                QSet<QString> matches;const auto path=evidence["path"].toString();
+                const auto style=MachinePlatform::windowsShaped(path)?MachinePlatform::Style::Windows:MachinePlatform::Style::Posix;
+                for(const auto &project:m_organization.groups())for(const auto &folder:project.folders)
+                    if(folder.machine==plan["machine"].toString()&&MachinePlatform::same(folder.path,path,style))matches.insert(project.id);
+                if(matches.size()==1){group=*matches.begin();plan["group"]=group;plan["add_folder"]=false;}
+            }
+        }
+        if(!m_organization.group(group)){
+            error=tr("The selected project changed. Prepared files are kept. Choose a project before continuing.");return false;
+        }
+        if(evidence["cloned"].toBool()){
+            const auto path=evidence["path"].toString();
+            m_organization.addFolder(group,plan["machine"].toString(),path,{},MachinePlatform::windowsShaped(path)?MachinePlatform::Style::Windows:MachinePlatform::Style::Posix);
+            saveOrganization();
+        }
+        plan["group_name"]=m_organization.group(group)->name;
+        return true;
+    };
+    connect(m_creations,&SessionCreationController::changed,this,[this](const QString &id,const QJsonObject &operation){
+        if(operation["state"]=="bound")m_pendingLaunches.remove(id);
+        else m_pendingLaunches[id]=operation;
+        if(!operation["show_pending"].toBool()){
+            if(m_revealCreation==id)m_revealCreation.clear();
+            if(m_selectedCreation==id)m_selectedCreation.clear();
+        }
+        if(m_rebuilding||m_admittingCreation)return;
+        rebuild();if(m_selectedCreation==id)renderCreation();
+        const auto state=operation["state"].toString();
+        if(state=="failed"||state=="unknown"||state=="storage_error"){
+            const auto notice=state+'\n'+operation["error"].toString();
+            if(m_creationNotices.value(id)!=notice){
+                m_creationNotices[id]=notice;if(m_creationNotices.size()>128)m_creationNotices.erase(m_creationNotices.begin());
+                showNotice(tr("Creation %1: %2\n%3").arg(operation["tag"].toString(),SessionCreationController::caption(operation),operation["error"].toString()),true);
+            }
+        }
+    });
+    connect(m_creations,&SessionCreationController::launchRequested,this,[this](const QString &,const QJsonObject &plan){
+        const auto host=plan["host"].toString(),cmd=plan["cmd"].toString(),target=plan["target"].toString();
+        const auto name=plan["tag"].toString(),account=plan["account"].toString(),launch=plan["launch_id"].toString();
+        // WhiteWh fork: the session's permission mode and a local model account's model.
+        const auto permissions=plan["permissions"].toString(),localModel=cmd=="claude"?plan["local_model"].toString():QString();
+        if(plan["terminal"].toBool())emit newSessionRequested(host,cmd,target,name,account,launch,permissions,localModel,plan["expected_machine"].toString());
+        else m_client.launchDetachedSession(host,cmd,target,name,account,launch,cmd=="claude"?localModel:plan["model"].toString(),plan["effort"].toString(),permissions,plan["expected_machine"].toString());
+        emit refreshRequested();
+    });
     m_fileDrop=new SessionFileDrop(details,[this]()->MessageComposer *{
-        if(!selected()||m_detailTabs->currentWidget()==m_terminal)return nullptr;
+        if (m_detailTabs->currentWidget() == m_taskView) return m_taskInspector->composer();
+        if(!selected()||m_detailTabs->currentWidget()==m_terminal||m_detailTabs->currentWidget()==m_tasks)return nullptr;
         if(m_detailTabs->currentIndex()==0&&!m_subagentId.isEmpty())return m_subagentComposer->isInputVisible()?m_subagentComposer:nullptr;
         return m_composer;
-    },[this](MessageComposer *composer){if(composer==m_composer)closeSubagent();m_detailTabs->setCurrentIndex(0);},
+    },[this](MessageComposer *composer){if(composer==m_taskInspector->composer()){m_detailTabs->setCurrentWidget(m_taskView);return;}if(composer==m_composer)closeSubagent();m_detailTabs->setCurrentIndex(0);},
     [this]{return terminalDropTarget();},[this](const QStringList &paths){dropTerminalFiles(paths);});
     connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &result,const QString &error) {
         if(id!=m_terminalDropRequest)return;
@@ -1773,6 +1985,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_swarm=new SwarmController(projectClient,this);
     connect(m_projectsPage,&ProjectsDialog::catalogDraftEditing,m_swarm,&SwarmController::setDraftEditing);
     connect(m_swarm,&SwarmController::organizationReady,this,[this](const QJsonObject &organization){
+        // The controller now holds the catalog's form; the next save sends this desktop's again.
+        m_savedOrganizationRevision = 0;
         const SessionOrganization updated(organization);
         if(updated.toJson()==m_organization.toJson())return;
         m_organization=updated;saveOrganization();m_projectsPage->refresh();rebuild();
@@ -1799,7 +2013,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     m_projectsPage->setSessionsProvider([this](const QString &project){
         QList<ProjectsDialog::ProjectSession> rows;
-        for(const auto &entry:m_entries){
+        for(const auto &entry:std::as_const(m_entries)){
             if(m_organization.groupFor(entry.identity)!=project||entry.session.state=="archived")continue;
             const auto &s=entry.session;
             ProjectsDialog::ProjectSession row;
@@ -1827,7 +2041,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_machinesPage, &MachinesPage::machinesChanged, this, &SessionsWindow::refreshRequested);
     connect(m_machinesPage, &MachinesPage::sshTerminalRequested, this, &SessionsWindow::machineSshRequested);
     connect(m_machinesPage, &MachinesPage::viewSessionsRequested, this, [this](const QString &host) {
-        m_filter = "all"; m_folderFilterPath.clear(); m_projectFilters.clear(); m_hostFilters = {host.isEmpty() ? QStringLiteral("@local") : host}; m_search->clear(); showSessionList();
+        m_filter = "all"; m_folderFilterPath.clear(); m_projectFilters.clear(); m_accountFilters.clear(); m_hostFilters = {host.isEmpty() ? QStringLiteral("@local") : host}; m_search->clear(); showSessionList();
     });
     m_dashboard = new DashboardPage; m_pages->addWidget(m_dashboard);
     connect(m_dashboard,&DashboardPage::refreshRequested,this,[this]{emit refreshRequested();updateDashboardAccounts(true,true);});
@@ -1836,7 +2050,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_dashboard,&DashboardPage::sessionRequested,this,&SessionsWindow::showAttentionSession);
     connect(m_dashboard,&DashboardPage::machinesRequested,this,[this](const QString &host) { m_pages->setCurrentIndex(2); m_machinesPage->selectMachine(host); });
     connect(m_dashboard,&DashboardPage::filterRequested,this,[this](const QString &host,const QString &filter) {
-        m_filter=filter; m_folderFilterPath.clear(); m_projectFilters.clear(); m_hostFilters = host == "@all" ? QSet<QString>() : QSet<QString>{host.isEmpty()?QStringLiteral("@local"):host}; m_search->clear(); showSessionList();
+        m_filter=filter; m_folderFilterPath.clear(); m_projectFilters.clear(); m_accountFilters.clear(); m_hostFilters = host == "@all" ? QSet<QString>() : QSet<QString>{host.isEmpty()?QStringLiteral("@local"):host}; m_search->clear(); showSessionList();
     });
     m_accountsPage = new AccountsPage(hgsPath,nullptr,m_usageStore); m_pages->addWidget(m_accountsPage);
     m_settingsPage=new SettingsPage(hgsPath);m_pages->addWidget(m_settingsPage);
@@ -1881,8 +2095,12 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_accountsPage,&AccountsPage::loginRequested,this,&SessionsWindow::accountLoginRequested);
     connect(m_accountsPage,&AccountsPage::installRequested,this,&SessionsWindow::accountInstallRequested);
     connect(m_accountsPage,&AccountsPage::accountsChanged,this,&SessionsWindow::refreshRequested);
-    connect(m_accountsPage,&AccountsPage::notice,this,&SessionsWindow::showNotice);
-    connect(m_accountsPage,&AccountsPage::catalogChanged,this,[this]{updateDashboardAccounts(m_pages->currentIndex()==3);});
+    connect(m_accountsPage,&AccountsPage::notice,this,[this](const QString &message, bool error){showNotice(message,error);});
+    connect(m_accountsPage,&AccountsPage::catalogChanged,this,[this]{
+        updateDashboardAccounts(m_pages->currentIndex()==3);
+        const auto profiles=m_accountsPage->catalogProfiles(), details=m_accountsPage->profiles(true);
+        if(profiles!=m_sessionAccountProfiles || details!=m_sessionAccountDetailsProfiles){m_sessionAccountProfiles=profiles;m_sessionAccountDetailsProfiles=details;QTimer::singleShot(0,this,[this]{rebuild();});}
+    });
     // U25 part 7 (spec 9): "Used by teams" - the teams whose members run with
     // this profile (its agent on its machine; no account means the default).
     m_accountsPage->setTeamUses([this](const QJsonObject &profile){
@@ -1919,6 +2137,14 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     auto *workspace = new QVBoxLayout; workspace->setContentsMargins(0, 0, 0, 0); workspace->setSpacing(0);
     workspace->addWidget(m_pages, 1);
+    m_terminationCleanup = new WorktreeCleanupStatus(&m_client, this);
+    workspace->addWidget(m_terminationCleanup);
+    m_terminationCleanup->foldersRemoved = [this](const QList<QJsonObject> &entries) {
+        for(const auto &entry:entries)
+            if(m_archivedWorktree.size()==4 && entry["host"]==m_archivedWorktree[0] && entry["row"].toObject()["path"]==m_archivedWorktree[2])
+                {m_archivedWorktree.clear();m_worktreeCleanupOffered=false;m_worktreeCleanup->hide();}
+        emit refreshRequested();updateWorktrees();
+    };
     auto *statusBar = new QFrame; statusBar->setObjectName("workspaceStatus"); statusBar->setFixedHeight(28);
     auto *statusLayout = m_statusLayout = new QHBoxLayout(statusBar); statusLayout->setContentsMargins(12, 3, 12, 3);
     m_connectionStatus = new StatusMessage; m_connectionStatus->setObjectName("workspaceConnectionStatus");
@@ -2048,10 +2274,31 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(&m_client, &HgsClient::queueSendFinished, this, [this](quint64 request, bool ok, const QJsonObject &, const QString &error) {
         if (request != m_queueSendRequest) return;
         const bool current = m_queueSendKey == m_selectedKey; m_queueSendRequest = 0; m_queueSendKey.clear();
-        if (current) { m_details.remove("input_queue"); showNotice(ok ? tr("Send now requested. Waiting for the agent to accept the queue.") : error, !ok); renderDetails(); inspect(); }
+        if (current) {
+            m_details.remove("input_queue");
+            const QString detail = error.trimmed();
+            const bool staleQueue = !ok && (detail == "hgs: The native queue is no longer visible; nothing was sent"
+                || detail == "The native queue is no longer visible; nothing was sent");
+            const QString message = ok ? tr("Send now requested. Waiting for the agent to accept the queue.")
+                : staleQueue ? tr("The native queue is no longer visible; nothing was sent. Activity is being refreshed; check Terminal or the current queue before retrying.") : error;
+            showNotice(message, !ok, staleQueue); renderDetails(); inspect();
+        }
         emit refreshRequested();
     });
     connect(&m_client, &HgsClient::inspectionReady, this, &SessionsWindow::acceptInspection);
+    if (auto *streams = EventStreams::instance()) {
+        connect(streams, &EventStreams::activityReady, this, [this](const QString &host, const QString &name, const QJsonObject &inspection) {
+            acceptInspection(host, name, inspection, {});
+        });
+        // The stream stopped following this run (it ended or changed): poll it instead.
+        connect(streams, &EventStreams::activityEnded, this, [this](const QString &host, const QString &name) {
+            if (const auto *entry = selected(); entry && entry->host == host && entry->session.name == name) {
+                m_streamEnded.insert(host + '\n' + name + '\n' + entry->session.runId); inspect();
+            }
+        });
+        // Followed checkout folders replace their git-status polls (updateGitWatch).
+        connect(streams, &EventStreams::gitStatusReady, &m_client, &HgsClient::acceptGitStatus);
+    }
     connect(&m_client, &HgsClient::subagentInspectionReady, this,
         [this](const QString &host,const QString &name,const QString &id,const QString &archive,const QJsonObject &data) {
             const auto *entry = selected();
@@ -2096,7 +2343,16 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if (finishSelectionAction(operation, ok, detail)) {if(!m_selectionRunning)m_archiveBrowser->refresh();return;}
         if(ok&&(operation.startsWith("archive ")||operation.startsWith("restore ")||operation.startsWith("forget archive ")||operation.startsWith("rename ")))m_archiveBrowser->refresh();
         if (m_archivedWorktree.size() == 4 && (operation == QStringLiteral("archive %1").arg(m_archivedWorktree[1]) || operation == QStringLiteral("terminate %1").arg(m_archivedWorktree[1]))) {
-            if (ok) offerWorktreeCleanup(); else m_archivedWorktree.clear();
+            const auto offer=m_archivedWorktree;const auto cleanupOffer=offer+QStringList{m_archivedWorktreeOwnerId};
+            const bool requested=m_removeTerminatedWorktree && operation==QStringLiteral("terminate %1").arg(offer[1]);
+            m_removeTerminatedWorktree=false;
+            if (ok) {
+                if(requested && !offer[2].isEmpty() && !offer[3].isEmpty()) {
+                    m_worktreeCleanupOffered=false;m_worktreeCleanup->hide();
+                    m_terminationCleanupResults.insert(offer[0]+'\n'+offer[1]+'\n'+offer[2],{});
+                    QTimer::singleShot(0,this,[this,cleanupOffer]{reviewTerminatedWorktrees({cleanupOffer});});
+                } else if(!m_worktreeCleanupOffered)offerWorktreeCleanup();
+            } else m_archivedWorktree.clear();
         }
         // U3: hgs refused a stale resume; the owner chooses how to continue.
         // L5: a queued start-and-send must survive that refusal - the choice's
@@ -2128,7 +2384,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             } else m_renameKey.clear();
         }
         if (ok && !m_forkKey.isEmpty()) {
-            m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_projectFilters.clear(); m_search->clear(); m_pages->setCurrentIndex(0); m_projectsNav->setChecked(false);
+            m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_projectFilters.clear(); m_accountFilters.clear(); m_search->clear(); m_pages->setCurrentIndex(0); m_projectsNav->setChecked(false);
         }
         if (!ok && !m_forkKey.isEmpty()) { m_forkKey.clear(); m_forkGroup.clear(); m_forkBefore.clear(); }
         if (auto restore = m_restores.find(m_restoreWriteKey); restore != m_restores.end()
@@ -2148,11 +2404,17 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         emit refreshRequested(); rebuild(); inspect();
     });
     connect(&m_client, &HgsClient::worktreeCleanupFinished, this, [this](const QString &host, const QString &operation, const QJsonObject &result) {
+        const auto pending=host+'\n'+operation.mid(QStringLiteral("terminate ").size())+'\n'+result["path"].toString();
+        if(operation.startsWith("terminate ") && m_terminationCleanupResults.contains(pending)) {
+            m_terminationCleanupResults[pending]=result;return;
+        }
         if (m_archivedWorktree.size() != 4 || m_archivedWorktree[0] != host || (!m_archivedWorktree[2].isEmpty() && m_archivedWorktree[2] != result["path"].toString())
             || (!m_archivedWorktree[3].isEmpty() && m_archivedWorktree[3] != result["common_dir"].toString())
             || (operation != "archive " + m_archivedWorktree[1] && operation != "terminate " + m_archivedWorktree[1])) return;
         m_archivedWorktree[2] = result["path"].toString(); m_archivedWorktree[3] = result["common_dir"].toString();
         if (result["status"] == "removed") {
+            m_removeTerminatedWorktree=false;
+            if(m_selectionCleanupTarget.size()>=4 && m_selectionCleanupTarget[0]==host && m_selectionCleanupTarget[2]==result["path"].toString())m_selectionCleanupTarget.clear();
             m_worktreeCleanupOffered = false; m_worktreeCleanup->hide(); m_archivedWorktree.clear();
             showNotice(tr("Worktree removed automatically. The branch and archived conversation are kept.")); updateWorktrees();
         } else {
@@ -2164,14 +2426,17 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     connect(&m_client, &HgsClient::gitStatusChanged, this, [this](const QString &host, const QString &path) {
         // Update only the Git role. Asynchronous repository reads must not run
-        // session selection/inspection or move composer focus.
+        // session selection/inspection or move composer focus. Rows prepared
+        // from the previous status are prepared again rather than applied.
+        if (m_rowsPending) requestRows();
         for (int i = 0; i < m_sessions->count(); ++i) {
             auto *item = m_sessions->item(i);
             if (item->data(SessionRoles::GitPath).toString() != path || item->data(SessionRoles::GitHost).toString() != host) continue;
-            for (const auto &entry : m_entries) if (entry.key == item->data(KeyRole).toString()) {
+            for (const auto &entry : std::as_const(m_entries)) if (entry.key == item->data(KeyRole).toString()) {
                 const auto data = SessionPresentation::gitStatus(entry.session, m_client.gitStatusSnapshot(host, path), entry.online);
                 item->setData(SessionRoles::GitStatus, data);
                 item->setData(Qt::AccessibleDescriptionRole, GitStatusBadge::tooltip(data));
+                item->setData(SessionRoles::Digest, QByteArray());
                 break;
             }
         }
@@ -2184,7 +2449,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if (m_teams) m_teams->setActive(isVisible());   // WhiteWh fork: agent teams poll while shown
         if (++m_tick % 10 == 0) {
             emit refreshRequested();
-            for (const auto &entry : m_entries) {
+            updateGitWatch();
+            for (const auto &entry : std::as_const(m_entries)) {
                 const auto path = SessionPresentation::gitStatusPath(entry.session);
                 if (entry.online && !path.isEmpty()) m_client.requestGitStatus(entry.host, path);
             }
@@ -2203,6 +2469,7 @@ void SessionsWindow::applyContentScale()
 {
     const double scale = ContentScale::factor();
     for (auto *view : {m_activityView, m_subagentView}) view->setContentScale(scale);
+    m_taskInspector->setContentScale(scale);
     for (auto *composer : {m_composer, m_subagentComposer}) composer->setContentScale(scale);
     m_question->setContentScale(scale); m_terminal->setContentScale(scale);
     applyActivityWidth();
@@ -2213,6 +2480,7 @@ void SessionsWindow::applyActivityWidth()
     const int column = ActivityWidth::column(ContentScale::factor());
     for (auto *view : {m_activityView, m_subagentView}) view->setColumnWidth(column);
     for (auto *layout : m_activityColumns) layout->setColumnWidth(column);
+    m_taskInspector->setColumnWidth(column);
 }
 
 void SessionsWindow::updateWindowPinAppearance()
@@ -2272,7 +2540,22 @@ void SessionsWindow::applyTheme()
     setStyleSheet(QString(R"(
         QWidget#settingsPage, QWidget#recoverySettingsPage, QWidget#sessionsWindow, QWidget#machinesPage, QWidget#accountsPage, QDialog#accountDialog, QDialog#accountPermissionsDialog, QDialog#machineSetupDialog, QDialog#projectsPage, QDialog#projectColorDialog, QDialog#projectFolderDialog, QDialog#deleteProjectDialog, QDialog#newSessionDialog, QDialog#folderBrowser, QDialog#forkSessionDialog, QDialog#renameSessionDialog, QDialog#workspaceSettingsDialog, QDialog#sessionFileDialog, QDialog#swarmDialog, QDialog#speechProfileEditor { background:%1; color:%2; }
         QColorDialog#workspaceColorDialog { background:%1; color:%2; }
+        QDialog#worktreeBatchCleanupDialog, QDialog#cleanupFileInspection { background:%1; color:%2; }
+        QFrame#terminationCleanupStatus { background:%3; border:0; border-top:1px solid %4; }
+        QPlainTextEdit#worktreeCleanupDecision, QDialog#cleanupFileInspection QPlainTextEdit, QDialog#cleanupFileInspection QTreeWidget, QDialog#cleanupFileInspection QListWidget { background:%3; color:%2; border:1px solid %4; border-radius:7px; selection-background-color:%10; selection-color:%2; }
+        QDialog#phonePairingDialog { background:%1; color:%2; }
+        QDialog#phonePairingDialog QScrollArea { background:transparent; border:0; }
+        QPlainTextEdit#phonePairingCodeText { background:%3; color:%2; border:1px solid %4; border-radius:7px; padding:4px; selection-background-color:%10; selection-color:%2; }
         QDialog#savedDraftsDialog { background:%1; color:%2; }
+        QDialog#taskDialog, QDialog#taskCancelDialog, QDialog#taskSettingsDialog { background:%1; color:%2; }
+        QPlainTextEdit#taskPrompt, QPlainTextEdit#taskTemplate, QPlainTextEdit#cancelTemplate { background:%11; color:%2; border:1px solid %4; border-radius:9px; padding:6px; selection-background-color:%10; selection-color:%2; }
+        QPlainTextEdit#taskPrompt:focus, QPlainTextEdit#taskTemplate:focus, QPlainTextEdit#cancelTemplate:focus { border-color:%5; }
+        QScrollArea#taskSessionChoices, QScrollArea#taskSessionChoices > QWidget, QScrollArea#taskSessionChoices > QWidget > QWidget { background:transparent; }
+        QPushButton[taskSessionChoice="true"] { padding:4px 10px; min-height:18px; font-size:12px; }
+        QPushButton[taskSessionChoice="true"]:checked { background:%10; color:%5; border-color:%5; font-weight:600; }
+        QLabel[taskSection="true"] { color:%6; }
+        QLabel#taskCancelText { background:%3; border-radius:8px; padding:9px 11px; }
+        QPushButton#confirmTaskCancel { color:%12; border-color:%12; font-weight:600; }
         QWidget#automaticApprovalSettings { background:transparent; color:%2; }
         QPlainTextEdit#approvalJournalDetail { background:%3; color:%2; border:1px solid %4; border-radius:8px; padding:10px; selection-background-color:%10; selection-color:%2; }
         QTableWidget#approvalJournal::item { padding:7px 10px; border-bottom:1px solid %4; }
@@ -2301,9 +2584,9 @@ void SessionsWindow::applyTheme()
         QToolButton#manageLaunchProject:disabled { color:%6; }
         QPushButton:focus[keyboardFocus="true"] { border:1px solid %5; }
         QPushButton:disabled { color:%6; background:%1; border-color:%4; }
-        QPushButton#primary, QPushButton[archiveRestore="true"] { background:%5; color:%8; border-color:%5; font-weight:600; }
-        QPushButton#primary:hover, QPushButton[archiveRestore="true"]:hover { background:%9; }
-        QPushButton#primary:disabled, QPushButton[archiveRestore="true"]:disabled { color:%6; background:%1; border-color:%4; }
+        QPushButton#primary, QPushButton[archiveRestore="true"], QPushButton[primaryAction="true"] { background:%5; color:%8; border-color:%5; font-weight:600; }
+        QPushButton#primary:hover, QPushButton[archiveRestore="true"]:hover, QPushButton[primaryAction="true"]:hover { background:%9; }
+        QPushButton#primary:disabled, QPushButton[archiveRestore="true"]:disabled, QPushButton[primaryAction="true"]:disabled { color:%6; background:%1; border-color:%4; }
         QPushButton#nav { text-align:left; border:1px solid transparent; padding:10px 9px; background:transparent; }
         QPushButton#nav:hover { background:%7; }
         QPushButton#nav:checked { background:%10; color:%5; font-weight:600; }
@@ -2329,13 +2612,16 @@ void SessionsWindow::applyTheme()
         QPushButton#newSession, QPushButton#sessionPanelNewSession, QPushButton#batchActions, QPushButton#sessionPanelToggle, QPushButton#savedDrafts, QPushButton#markAllReadButton { padding:0; background:transparent; border-color:transparent; }
         QPushButton#newSession:hover, QPushButton#sessionPanelNewSession:hover, QPushButton#batchActions:hover, QPushButton#sessionPanelToggle:hover, QPushButton#sessionStripSearch:hover, QPushButton#savedDrafts:hover, QPushButton#markAllReadButton:hover { background:%7; }
         QPushButton#sessionStripSearch { padding:0; background:%3; border:1px solid %4; }
+        )" R"(
         QWidget#sessionListPanel { background:%1; }
         QPushButton#newSession { background:%10; }
-        QPushButton#machineFilter::menu-indicator, QPushButton#projectFilter::menu-indicator, QPushButton#batchActions::menu-indicator { image:none; width:0; }
+        QPushButton#machineFilter::menu-indicator, QPushButton#projectFilter::menu-indicator, QPushButton#accountFilter::menu-indicator, QPushButton#batchActions::menu-indicator { image:none; width:0; }
         QPushButton#hostFilterChip { padding:3px 8px; font-size:11px; text-align:left; color:%5; background:%10; }
         QPushButton[sessionHeaderAction="true"], QPushButton[settingReset="true"] { background:transparent; border:1px solid transparent; border-radius:6px; padding:0; }
         QPushButton[sessionHeaderAction="true"]:hover, QPushButton[settingReset="true"]:hover { background:%7; }
         QPushButton[sessionHeaderAction="true"]:checked, QPushButton[sessionHeaderAction="true"]:pressed, QPushButton[settingReset="true"]:pressed { background:%10; }
+        QPushButton#toggleInspector:checked { background:transparent; border-color:transparent; }
+        QPushButton#toggleInspector:hover { background:%7; }
         QPushButton[sessionHeaderAction="true"]:disabled { background:transparent; border-color:transparent; }
         QPushButton[sessionHeaderAction="true"]:focus[keyboardFocus="true"], QPushButton[settingReset="true"]:focus[keyboardFocus="true"] { border-color:%5; }
         QPushButton[sessionHeaderAction="true"]::menu-indicator { image:none; width:0; }
@@ -2353,7 +2639,7 @@ void SessionsWindow::applyTheme()
         QComboBox::drop-down { border:0; width:24px; }
         QComboBox::down-arrow { image:url(:/hgs/chevron-down.svg); width:14px; height:14px; }
         QComboBox QAbstractItemView { background:%3; color:%2; selection-background-color:%10; selection-color:%2; }
-        QTableWidget, QTreeWidget#worktreeCatalog, QTreeWidget#processList, QListWidget#folderList { background:%3; color:%2; border:1px solid %4; border-radius:8px; gridline-color:%4; selection-background-color:%10; selection-color:%2; }
+        QTableWidget, QTreeWidget#worktreeCatalog, QTreeWidget#batchCleanupList, QTreeWidget#processList, QListWidget#folderList { background:%3; color:%2; border:1px solid %4; border-radius:8px; gridline-color:%4; selection-background-color:%10; selection-color:%2; }
         QHeaderView::section { background:%3; color:%6; border:0; border-bottom:1px solid %4; padding:10px; }
         QListWidget#folderList::item { padding:9px 12px; }
         QListWidget#logicalProjects, QListWidget#swarmConflicts { background:%3; color:%2; border:1px solid %4; border-radius:8px; padding:5px; outline:0; }
@@ -2362,7 +2648,7 @@ void SessionsWindow::applyTheme()
         QListWidget#logicalProjects::item:hover, QListWidget#swarmConflicts::item:hover { background:%10; }
         QSplitter#swarmConflictSplit::handle { width:14px; }
         QTableWidget#swarmConflictChoices::item { padding:8px 10px; }
-        QTreeWidget#worktreeCatalog::item, QTreeWidget#processList::item { padding:6px 4px; }
+        QTreeWidget#worktreeCatalog::item, QTreeWidget#batchCleanupList::item, QTreeWidget#processList::item { padding:6px 4px; }
         QTableWidget#projectFolders::item { padding:0 10px; }
         QSpinBox, QDoubleSpinBox#downloadCacheSize { background:%3; color:%2; border:1px solid %4; border-radius:7px; padding:8px 10px; }
         QDoubleSpinBox#downloadCacheSize:disabled { color:%6; background:%1; }
@@ -2372,7 +2658,7 @@ void SessionsWindow::applyTheme()
         QListWidget#machineProfiles::item:selected, QListWidget#accountProfiles::item:selected, QListWidget#speechProfiles::item:selected, QListWidget#launchAccount::item:selected { background:%10; color:%2; }
         QListWidget#launchAccount::item:hover { background:%7; }
         QPlainTextEdit#machineSetupLog, QPlainTextEdit#processOutput { background:%3; color:%2; border:1px solid %4; border-radius:7px; }
-        QPushButton#machineFilter, QPushButton#projectFilter { padding:0; border-color:transparent; background:transparent; }
+        QPushButton#machineFilter, QPushButton#projectFilter, QPushButton#accountFilter { padding:0; border-color:transparent; background:transparent; }
         QCheckBox { color:%2; spacing:8px; }
         QSlider#workspaceContentScale, QSlider#workspaceActivityWidth { min-height:22px; }
         QSlider#workspaceContentScale::groove:horizontal, QSlider#workspaceActivityWidth::groove:horizontal { height:4px; background:%4; border-radius:2px; }
@@ -2388,6 +2674,9 @@ void SessionsWindow::applyTheme()
         QStackedWidget#detail { background:%3; border:1px solid %4; border-radius:12px; }
         QTabWidget::pane { border:0; border-top:1px solid %4; }
         QTabBar::tab { background:transparent; color:%6; padding:8px 9px; border-bottom:2px solid transparent; }
+        /* Qt sizes corner hosts from the tab size hint, ignoring a bar's
+           minimumHeight. These headers must fit the 34px control and its inset. */
+        QTabWidget#sessionDetailTabs QTabBar::tab, QTabWidget#sessionInspector QTabBar::tab { min-height:26px; }
         QTabBar::tab:selected { color:%2; border-bottom:2px solid %5; }
         QTabBar::tab:focus { color:%5; }
         QTextBrowser { background:transparent; color:%2; border:0; padding-top:12px; selection-background-color:%10; }
@@ -2441,7 +2730,7 @@ void SessionsWindow::applyTheme()
     m_fileDrop->setTheme(m_dark);
     m_recovery->setStyleSheet(QStringLiteral("QFrame#recoveryPanel {background:transparent;border:0;} QLabel {border:0;background:transparent;}"));
     m_archiveBrowser->setTheme(m_dark);
-    m_machineFilter->setTheme(m_dark); m_projectFilter->setTheme(m_dark); m_dashboard->setTheme(m_dark); m_searchResults->setTheme(m_dark); m_activityView->setTheme(m_dark); m_composer->setTheme(m_dark); m_question->setTheme(m_dark); m_terminal->setTheme(m_dark);
+    m_machineFilter->setTheme(m_dark); m_projectFilter->setTheme(m_dark); m_accountFilter->setTheme(m_dark); m_dashboard->setTheme(m_dark); m_searchResults->setTheme(m_dark); m_activityView->setTheme(m_dark); m_composer->setTheme(m_dark); m_question->setTheme(m_dark); m_terminal->setTheme(m_dark);
     m_subagentView->setTheme(m_dark); m_subagentComposer->setTheme(m_dark);
     if (m_teamPanel) m_teamPanel->setTheme(m_dark);   // WhiteWh fork: agent teams
     if (m_teamCatalog) m_teamCatalog->setDark(m_dark);
@@ -2449,6 +2738,7 @@ void SessionsWindow::applyTheme()
     if (m_teamDesignerPage) m_teamDesignerPage->setDark(m_dark);
     if (m_teamNewForm) m_teamNewForm->setDark(m_dark);
     m_processes->setTheme(m_dark);
+    m_tasks->setTheme(m_dark); m_taskInspector->setTheme(m_dark);
     m_childrenHtml.clear(); m_sessions->viewport()->update(); renderDetails();
     applyWorkspaceView();
 }
@@ -2550,7 +2840,7 @@ void SessionsWindow::applySessionStrip()
         if (strip && !(m_stripLayout & 2)) {
             // Measured before hiding, while these rows still have their docked height.
             int reserve = 0, rows = 0;
-            for (QWidget *row : {static_cast<QWidget *>(m_machineFilter), static_cast<QWidget *>(m_projectFilter), static_cast<QWidget *>(m_folderFilterClear)})
+            for (QWidget *row : {static_cast<QWidget *>(m_machineFilter), static_cast<QWidget *>(m_projectFilter), static_cast<QWidget *>(m_accountFilter), static_cast<QWidget *>(m_folderFilterClear)})
                 if (row->isVisible()) { reserve += row->height(); ++rows; }
             m_stripReserve = rows ? reserve + (rows - 1) * m_stripSpacer->parentWidget()->layout()->spacing() : 0;
         }
@@ -2569,13 +2859,13 @@ void SessionsWindow::applySessionStrip()
     // and a row still to go would hold the list a row lower until the next layout.
     const bool folder = !strip && !m_folderFilterPath.isEmpty(), spacer = strip && m_stripReserve > 0;
     (strip ? static_cast<QWidget *>(m_search) : m_stripSearch)->hide();
-    if (strip) { m_machineFilter->setConcealed(true); m_projectFilter->setConcealed(true); }
+    if (strip) { m_machineFilter->setConcealed(true); m_projectFilter->setConcealed(true); m_accountFilter->setConcealed(true); }
     if (!folder) m_folderFilterClear->hide();
     if (!spacer) m_stripSpacer->hide();
     m_stripSpacer->setFixedHeight(m_stripReserve);
     (strip ? static_cast<QWidget *>(m_stripSearch) : m_search)->show();
     if (spacer) m_stripSpacer->show();
-    if (!strip) { m_machineFilter->setConcealed(false); m_projectFilter->setConcealed(false); }
+    if (!strip) { m_machineFilter->setConcealed(false); m_projectFilter->setConcealed(false); m_accountFilter->setConcealed(false); }
     if (folder) m_folderFilterClear->show();
     // Narrow filters keep the active one and the most urgent beside it: sessions
     // that need attention, otherwise active ones, otherwise all of them.
@@ -2599,8 +2889,8 @@ void SessionsWindow::applySessionStrip()
         else { button->setMinimumWidth(0); button->setMaximumWidth(QWIDGETSIZE_MAX); }
         if (m_filterRow->itemAt(m_filterRow->indexOf(button))->alignment() != align) m_filterRow->setAlignment(button, align);
     }
-    m_machineFilter->button()->setVisible(!filters); m_projectFilter->button()->setVisible(!filters);
-    m_listStack->setCurrentIndex(!strip && m_searchResults->active() ? 1 : 0);
+    m_machineFilter->button()->setVisible(!filters); m_projectFilter->button()->setVisible(!filters); m_accountFilter->button()->setVisible(!filters);
+    m_listStack->setCurrentIndex(!strip&&m_searchResults->active()&&m_revealCreation.isEmpty()&&m_creationSessionToSelect.isEmpty()?1:0);
     m_count->setText(strip ? m_countShort : m_countFull);
     m_count->setAlignment(strip ? Qt::AlignCenter : Qt::AlignLeft | Qt::AlignVCenter);
     m_count->setVisible(strip || !m_searchResults->active());
@@ -2626,34 +2916,42 @@ void SessionsWindow::updateInspectorMinimum()
             +m_detailTabs->minimumWidth()+header);
     }
     setMinimumWidth(minimum);
+    applyInspectorWidth();
 }
 
 void SessionsWindow::setInspectorVisible(bool visible)
 {
-    if (!visible && !m_inspectorPanel->isHidden()) m_inspectorWidth = m_inspectorPanel->width();
     // One control follows the right edge, rather than offering two hide actions.
     const bool restoreFocus = m_inspectorToggle->hasFocus();
     const bool keyboardFocus = m_inspectorToggle->property("keyboardFocus").toBool();
-    // The cards have no tab bar: the toggle stays in the session's tab corner.
-    if (m_detailTabs->cornerWidget() != m_inspectorToggle) m_detailTabs->setCornerWidget(m_inspectorToggle);
+    // The cards have no tab bar: the corner (the toggle) stays in the session's tab corner.
+    if (m_detailTabs->cornerWidget() != m_inspectorCorner) m_detailTabs->setCornerWidget(m_inspectorCorner);
     m_inspectorPanel->setVisible(visible);
     const QSignalBlocker blocker(m_inspectorToggle); m_inspectorToggle->setChecked(visible);
     m_inspectorToggle->setProperty("glyph", visible ? "collapse-panel" : "inspector");
     m_inspectorToggle->setIcon(workspaceIcon(m_inspectorToggle->property("glyph").toString(), QColor(m_muted)));
-    m_inspectorToggle->setAccessibleName(visible ? tr("Collapse side panel") : tr("Show tasks, agents, details and worktrees"));
+    m_inspectorToggle->setAccessibleName(visible ? tr("Collapse side panel") : tr("Show tasks, plan, agents, details and worktrees"));
     m_inspectorToggle->setToolTip(ShortcutRegistry::instance().tooltip(m_inspectorToggle->accessibleName(), "panel.toggle"));
-    m_inspectorToggle->show();
+    m_inspectorCorner->show(); m_inspectorToggle->show();
     if (restoreFocus) m_inspectorToggle->setFocus(keyboardFocus ? Qt::TabFocusReason : Qt::MouseFocusReason);
     if (visible) {
         m_inspectorPanel->setMinimumWidth(240);
-        const int available = m_workSplitter->width() - m_workSplitter->handleWidth();
-        const int side = qBound(240, m_inspectorWidth, qMax(240, available - 280));
-        m_workSplitter->setSizes({qMax(280, available - side), side});
+        applyInspectorWidth();
     }
     updateInspectorMinimum();
     QSettings settings; settings.setValue("workspace/inspectorVisible", visible);
     settings.setValue("workspace/inspectorWidth", m_inspectorWidth);
     updateWorktrees();
+}
+
+void SessionsWindow::applyInspectorWidth()
+{
+    if (!m_inspectorPanel || m_inspectorPanel->isHidden()) return;
+    const int available = m_workSplitter->width() - m_workSplitter->handleWidth();
+    const int minimum = m_inspectorPanel->minimumWidth();
+    const int side = qBound(minimum, m_inspectorWidth, qMax(minimum, available - m_detailTabs->minimumWidth()));
+    if (m_workSplitter->sizes().value(1) != side)
+        m_workSplitter->setSizes({qMax(m_detailTabs->minimumWidth(), available - side), side});
 }
 
 void SessionsWindow::saveSessionRowPreferences()
@@ -2674,8 +2972,10 @@ void SessionsWindow::setSessionRowCollapsed(const Entry &entry, bool collapsed)
 
 void SessionsWindow::updateSessionRowPresentation()
 {
+    // Rows prepared before this density change are prepared again.
+    if (m_rowsPending) requestRows();
     QHash<QString, bool> collapsed;
-    for (const auto &entry : m_entries) collapsed.insert(entry.key, m_sessionRowPreferences.collapsed(entry.host, entry.session));
+    for (const auto &entry : std::as_const(m_entries)) collapsed.insert(entry.key, m_sessionRowPreferences.collapsed(entry.host, entry.session));
     for (int i = 0; i < m_sessions->count(); ++i) {
         auto *item = m_sessions->item(i);
         if (item->data(SessionRoles::Header).toBool() || !item->data(SessionRoles::ChildId).toString().isEmpty()
@@ -2684,6 +2984,7 @@ void SessionsWindow::updateSessionRowPresentation()
         item->setData(SessionRoles::RowCollapsed, value);
         item->setData(Qt::AccessibleDescriptionRole, value ? tr("Collapsed session row. Press Right to expand.")
             : GitStatusBadge::tooltip(item->data(SessionRoles::GitStatus).toJsonObject()));
+        item->setData(SessionRoles::Digest, QByteArray());
     }
     // A density edit changes no selection, native state, inspection or read mark.
     m_sessions->doItemsLayout(); m_sessions->syncRowExpandButtons(); m_sessions->syncActivityAnimation(); m_sessions->viewport()->update();
@@ -2692,11 +2993,17 @@ void SessionsWindow::updateSessionRowPresentation()
 
 void SessionsWindow::saveOrganization()
 {
-    if(m_swarm)m_swarm->edit(m_organization.toJson());
-    const auto data = QJsonDocument(m_organization.toJson()).toJson(QJsonDocument::Compact);
-    if (data == m_savedOrganization) return;
+    // Every rebuild saves; an organization unchanged since its last save is
+    // neither serialized nor sent to the swarm again.
+    const auto revision = m_organization.revision();
+    if (revision == m_savedOrganizationRevision) return;
+    const auto organization = m_organization.toJson();
+    if(m_swarm)m_swarm->edit(organization);
+    const auto data = QJsonDocument(organization).toJson(QJsonDocument::Compact);
+    if (data == m_savedOrganization) { m_savedOrganizationRevision = revision; return; }
     QSettings settings; settings.setValue("workspace/organization", data); settings.sync();
-    if (settings.status() == QSettings::NoError) m_savedOrganization = data;
+    SettingsJson::remember("workspace/organization", data, QJsonDocument(organization));
+    if (settings.status() == QSettings::NoError) { m_savedOrganization = data; m_savedOrganizationRevision = revision; }
     else showNotice(tr("Could not save the session layout. Check the settings file permissions."), true);
 }
 
@@ -2752,7 +3059,7 @@ void SessionsWindow::updateSessionFeedback()
 
 void SessionsWindow::revealSession(const QString &key)
 {
-    for (const auto &entry : m_entries) if (entry.key == key) {
+    for (const auto &entry : std::as_const(m_entries)) if (entry.key == key) {
         const auto id = m_organization.groupFor(entry.identity);
         if (const auto *group = m_organization.group(id); group && group->collapsed) {
             m_organization.setCollapsed(id, false); saveOrganization(); rebuild();
@@ -2807,7 +3114,7 @@ void SessionsWindow::showGroupMenu(const QString &id, const QPoint &position)
     auto *sort = menu->addAction(tr("Sort sessions by name"));
     connect(sort, &QAction::triggered, this, [this, id]() {
         QList<Entry> members;
-        for (const auto &e : m_entries) if (m_organization.groupFor(e.identity) == id) members.append(e);
+        for (const auto &e : std::as_const(m_entries)) if (m_organization.groupFor(e.identity) == id) members.append(e);
         std::stable_sort(members.begin(), members.end(), [](const Entry &a, const Entry &b) {
             const int compared = QString::localeAwareCompare(sessionLabel(a.session), sessionLabel(b.session));
             return compared ? compared < 0 : a.identity < b.identity;
@@ -2871,7 +3178,13 @@ void SessionsWindow::showWorkspaceSettings()
     m_pages->setCurrentIndex(5);m_settingsPage->refresh();
 }
 
-void SessionsWindow::setFleet(const FleetState &fleet) {
+void SessionsWindow::setFleet(const FleetState &fleet) { applyFleet(fleet, false); }
+void SessionsWindow::refreshFleet(const FleetState &fleet) { applyFleet(fleet, true); }
+void SessionsWindow::applyFleet(const FleetState &fleet, bool refresh) {
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    // A refresh changed observation fields only. A peer whose poll age crossed
+    // FleetState::kPeerStaleMs since the rows were rendered changes reachability.
+    if (refresh && (!m_fleet.refreshObservations(fleet) || m_fleet.freshness(now) != m_renderedFreshness)) refresh = false;
     // A native clean exit may remove its managed checkout without a GUI write.
     // Expire only repositories whose exact live run has newly reached Archive.
     QSet<QString> expired;
@@ -2885,19 +3198,49 @@ void SessionsWindow::setFleet(const FleetState &fleet) {
             }
         }
     };
-    completed(m_fleet.local(),fleet.local(),{});
-    for (const auto &host : fleet.peerNames()) if (const auto *before=m_fleet.peer(host)) completed(*before,*fleet.peer(host),host);
+    if (!refresh) {
+        completed(m_fleet.local(),fleet.local(),{});
+        for (const auto &host : fleet.peerNames()) if (const auto *before=m_fleet.peer(host)) completed(*before,*fleet.peer(host),host);
+    }
     if (auto *launch=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget()); launch && launch->parentWidget()==this) launch->setFleet(fleet);
     m_settingsPage->setLocalSessions(fleet.local().localSessions, LocalSessionHost::canEnable(fleet.local())); m_settingsPage->setPeers(fleet.peerNames());
     m_settingsPage->setMobileGateway(fleet.local().localSessions||MachinePlatform::of(fleet.local().metrics,true)==MachinePlatform::Style::Windows);
-    m_fleet = fleet; m_fleet.setTeamMembers(m_teamMembers); m_fleet.setAttentionMarks(QJsonDocument::fromJson(QSettings().value("attention/sessionMarks").toByteArray()).object()); m_fleet.setPendingReads(ReadMarkStore::load()); reconcileTerminations();m_usageStore->setFleet(fleet); m_accountsPage->setFleet(fleet); updateDashboard(); m_projectsPage->setFleet(fleet); m_machinesPage->setFleet(fleet); if (isVisible()) rebuild(); applyQueuedModelSettings();
+    if (!refresh) { m_fleet = fleet; m_fleet.setTeamMembers(m_teamMembers); m_fleet.setReadState(m_fleet.readReplies(), SettingsJson::object("attention/sessionMarks"), ReadMarkStore::load()); }
+    reconcileTerminations();m_usageStore->setFleet(fleet); m_accountsPage->setFleet(fleet); updateDashboard(); m_projectsPage->setFleet(fleet); m_machinesPage->setFleet(fleet);
+    // Unchanged rows keep their entries unless the clock or the selected
+    // session's latest inspection changes what they show.
+    if (isVisible() && (!refresh || now >= m_rowsChangeAt || !refreshEntries())) rebuild();
+    else if (refresh && isVisible()) { m_searchResults->refreshFleet(m_fleet); updateWorktreeCleanupOffer(); }
+    m_renderedFreshness = m_fleet.freshness(now);
+    applyQueuedModelSettings();
     updateConnectionStatus();
     if (!m_nativeLaunchToOpen.isEmpty()) {
-        for (const auto &entry : m_entries) if (entry.session.launchId==m_nativeLaunchToOpen) {
+        for (const auto &entry : std::as_const(m_entries)) if (entry.session.launchId==m_nativeLaunchToOpen) {
             const QString host=entry.host, name=entry.session.name;
             m_nativeLaunchToOpen.clear();showSession(host,name);break;
         }
     }
+}
+// After a refresh: each entry takes its row's new observation times. False when
+// one would read differently from its rendering, as rebuild() makes it: the
+// selected session merges its latest inspection, which may also have changed.
+bool SessionsWindow::refreshEntries()
+{
+    QHash<QString, const SessionInfo *> rows;
+    const auto collect = [&rows](const QString &host, const BoxState &box) {
+        for (const auto &s : box.sessions) if (s.state != "archived") rows.insert(host + '\n' + s.name, &s);
+    };
+    collect({}, m_fleet.local());
+    for (const auto &peer : m_fleet.peerNames()) collect(peer, *m_fleet.peer(peer));
+    for (auto &entry : m_entries) {
+        if (entry.session.state == "archived") continue;
+        const auto *row = rows.value(entry.key);
+        if (!row) return false;
+        const auto current = entry.key == m_selectedKey && m_inspectError.isEmpty() ? SessionPresentation::inspected(*row, m_details) : *row;
+        if (!SessionPresentation::sameInspection(current, entry.session)) return false;
+        entry.session.backgroundObservedAt = current.backgroundObservedAt; entry.session.providerStatusAt = current.providerStatusAt;
+    }
+    return true;
 }
 void SessionsWindow::setClipboardMode(bool clipboard) { m_clipboard = clipboard; renderDetails(); }
 void SessionsWindow::updateDashboard()
@@ -3001,13 +3344,10 @@ void SessionsWindow::showSessionList()
 
 void SessionsWindow::showSession(const QString &host, const QString &name)
 {
-    m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_projectFilters.clear(); m_search->clear(); showSessionList();
+    m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_projectFilters.clear(); m_accountFilters.clear(); m_search->clear(); showSessionList();
     const QString key = host + '\n' + name;
     revealSession(key);
-    for (int row = 0; row < m_sessions->count(); ++row)
-        if (m_sessions->item(row)->data(KeyRole).toString() == key) {
-            m_sessions->setCurrentRow(row); m_sessions->scrollToItem(m_sessions->item(row)); return;
-        }
+    revealRow(key, true);
 }
 
 void SessionsWindow::showAttentionSession(const QString &host, const QString &name)
@@ -3068,7 +3408,7 @@ void SessionsWindow::populateBatchActions(QMenu *menu)
     menu->addAction(m_clearArchiveAction);
 }
 
-void SessionsWindow::showNewSession(const QString &agent, const QString &project, const QString &host, const QString &folder, const QString &path, const QString &account, const QString &name)
+void SessionsWindow::showNewSession(const QString &agent, const QString &project, const QString &host, const QString &folder, const QString &path, const QString &account, const QJsonObject &recipe, const QString &taskUuid, const QString &taskParentId, const QString &name)
 {
     QString group = m_organization.defaultProject();
     if (const auto *row = m_sessions->currentItem()) group = row->data(SessionRoles::Group).toString();
@@ -3081,6 +3421,18 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     const bool sessionRow=!row||(!row->data(SessionRoles::Header).toBool()&&row->data(SessionRoles::LaunchId).toString().isEmpty());
     const auto *context=sessionRow&&project.isEmpty()&&folder.isEmpty()&&path.isEmpty()&&account.isNull()?selected():nullptr;
     NewSessionDialog dialog(m_client.executable(), m_fleet, context?context->host:host, agent, launchProject, this, m_usageStore, &m_organization);
+    // Task executors retain the reviewed launch/delivery reservation path.
+    // Generic creation uses the independent background controller from main.
+    dialog.setBackgroundCreation(taskUuid.isEmpty());
+    connect(&dialog,&NewSessionDialog::creationRequested,this,[this,&dialog](const QJsonObject &plan){
+        m_admittingCreation=true;const auto id=m_creations->submit(plan);m_admittingCreation=false;
+        if(id.isEmpty()){dialog.creationAdmissionFailed(m_creations->admissionError());return;}
+        const auto predecessor=plan["predecessor"].toString();
+        if(!predecessor.isEmpty()&&m_creations->canEdit(predecessor))m_creations->hide(predecessor);
+        m_revealCreation=id;selectCreation(id);
+        m_organization.setCollapsed(plan["group"].toString(),false);showSessionList();m_listStack->setCurrentIndex(0);renderCreation();
+        revealRow("#launch\n"+id,true);
+    });
     connect(&dialog,&NewSessionDialog::organizationChanged,this,[this]{saveOrganization();rebuild();});
     dialog.setProjectExplicit(!project.isEmpty());
     dialog.setProjectCatalogSwarm(m_swarm ? m_swarm->snapshot().value("swarm_id").toString() : QString());
@@ -3089,17 +3441,23 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     if(!folder.isEmpty()&&!dialog.selectFolder(folder)){showNotice(tr("This project folder changed. Select it again."),true);return;}
     if(!path.isEmpty())dialog.selectPath(path, false);
     if(!account.isNull())dialog.selectAccount(account);
+    if(!recipe.isEmpty())dialog.restoreCreationChoices(recipe);
     if(!name.isEmpty())dialog.setSessionName(name);
     connect(&dialog, &NewSessionDialog::launchRequested, this,
-        [this,&dialog](const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &group, bool openTerminal, const QString &addFolder, const QString &model, const QString &effort, const QString &permissions) {
+        [this,&dialog,taskUuid,taskParentId,launchProject](const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &group, bool openTerminal, const QString &addFolder, const QString &model, const QString &effort, const QString &permissions) {
             const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            if (!taskUuid.isEmpty()) {
+                if (group != launchProject || taskParentId.isEmpty()) { showNotice(tr("Choose the task's project and a confirmed parent session."), true); return; }
+                m_taskLaunches[id] = QJsonObject{{"task", taskUuid}, {"project", launchProject}, {"host", host}, {"cmd", cmd}, {"tag", name},
+                    {"parent", taskParentId}, {"phase", "waiting"}, {"created", QDateTime::currentSecsSinceEpoch()}};
+                if (!saveTaskLaunches()) { m_taskLaunches.remove(id); showNotice(tr("Could not save the task executor launch. Nothing was started."), true); return; }
+            }
             m_pendingLaunches.insert(id, QJsonObject{{"host", host}, {"cmd", cmd}, {"tag", name}, {"group", group},
                 {"target", target}, {"implicit_inbox", dialog.implicitInbox()}, {"add_folder", !addFolder.isEmpty()}, {"folder", addFolder}, {"show_pending", true}, {"created", QDateTime::currentSecsSinceEpoch()}});
             savePendingLaunches();
             m_organization.setCollapsed(group, false);
-            m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_projectFilters.clear(); m_search->clear(); showSessionList();
-            for (int row = 0; row < m_sessions->count(); ++row)
-                if (m_sessions->item(row)->data(SessionRoles::LaunchId).toString() == id) m_sessions->scrollToItem(m_sessions->item(row));
+            m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_projectFilters.clear(); m_accountFilters.clear(); m_search->clear(); showSessionList();
+            revealRow("#launch\n" + id, false);
             // Refresh soon after terminal creation, while the placeholder already
             // gives feedback. Stop these extra polls once the launch is observed.
             for (int delay : {750, 2000}) QTimer::singleShot(delay, this, [this, id] {
@@ -3136,9 +3494,38 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     dialog.exec();
 }
 
+bool SessionsWindow::saveTaskLaunches() {
+    QSettings settings; SettingsJson::store(settings, QStringLiteral("tasks/pendingExecutorLaunches"), QJsonDocument(m_taskLaunches));
+    settings.sync();
+    if (m_tasks) m_tasks->setExecutorLaunches(m_taskLaunches);
+    return settings.status() == QSettings::NoError;
+}
+
+void SessionsWindow::dispatchTaskLaunches() {
+    for (auto it = m_taskLaunches.begin(); it != m_taskLaunches.end(); ++it) {
+        auto record = it.value().toObject();
+        if (record.value("phase") != QLatin1String("waiting") || QUuid(it.key()).isNull()) continue;
+        for (const auto &entry : std::as_const(m_entries)) {
+            if (!entry.online || entry.host != record.value("host").toString() || entry.session.launchId != it.key()
+                || entry.session.cmd != record.value("cmd").toString() || entry.session.name.section('/', 2) != record.value("tag").toString()
+                || m_organization.groupFor(entry.identity) != record.value("project").toString()) continue;
+            // Reserve before transport. Restart/uncertain delivery cannot authorize a replay.
+            record["phase"] = "reserved"; record["session"] = entry.session.name; it.value() = record;
+            if (!saveTaskLaunches()) { record["phase"] = "review"; it.value() = record; showNotice(tr("Could not reserve task delivery. Check this task before retrying."), true); break; }
+            QStringList args{"send", record.value("task").toString(), "--project", record.value("project").toString(),
+                "--session", entry.session.name, "--session-id", QStringLiteral("launch_id:") + entry.session.launchId,
+                "--expect-new-session-parent", record.value("parent").toString()};
+            if (!entry.host.isEmpty()) args << "--host" << entry.host;
+            m_taskLaunchRequests.insert(m_client.requestTask(args), it.key()); break;
+        }
+    }
+}
+
 void SessionsWindow::savePendingLaunches()
 {
-    QSettings settings; settings.setValue("workspace/pendingLaunches", QJsonDocument(m_pendingLaunches).toJson(QJsonDocument::Compact)); settings.sync();
+    auto legacy=m_pendingLaunches;
+    for(auto it=legacy.begin();it!=legacy.end();)if(it.value().toObject()["creation_schema"]==1)it=legacy.erase(it);else ++it;
+    QSettings settings; SettingsJson::store(settings, QStringLiteral("workspace/pendingLaunches"), QJsonDocument(legacy)); settings.sync();
 }
 
 bool SessionsWindow::takeEndedLaunch(const QString &launchId, QJsonObject *launch)
@@ -3151,8 +3538,13 @@ bool SessionsWindow::takeEndedLaunch(const QString &launchId, QJsonObject *launc
 
 void SessionsWindow::newSessionLaunchFailed(const QString &launchId, const QString &error)
 {
+    if(!m_creations->forLaunch(launchId).isEmpty()){m_creations->launchFinished(launchId,false,error);return;}
     // A listing that reported the launch ended already showed its reason and last
     // lines. A hidden launch status showed nothing, so its failure still names it.
+    if (m_taskLaunches.contains(launchId)) {
+        auto record = m_taskLaunches.value(launchId).toObject(); record["phase"] = "review"; record["error"] = error.left(2048);
+        m_taskLaunches[launchId] = record; saveTaskLaunches();
+    }
     QJsonObject ended;
     if (takeEndedLaunch(launchId, &ended) && ended.value("show_pending").toBool()) return;
     const QString name = (ended.isEmpty() ? m_pendingLaunches.value(launchId).toObject() : ended).value("tag").toString();
@@ -3171,12 +3563,18 @@ void SessionsWindow::placeLaunchedSessions()
         const auto launch = it.value().toObject();
         // Failed commands never produce this token. Expire abandoned intents,
         // while allowing an SSH password prompt or app restart to take its time.
-        bool consumed = QUuid(it.key()).isNull() || now - launch.value("created").toInteger() > 7 * 24 * 60 * 60;
-        for (const auto &entry : m_entries) {
+        const bool creation=launch["creation_schema"]==1;
+        const auto expectedLaunch=launch.value("launch_id").toString(it.key());
+        bool consumed = QUuid(it.key()).isNull() || (!creation&&now - launch.value("created").toInteger() > 7 * 24 * 60 * 60);
+        for (const auto &entry : std::as_const(m_entries)) {
             const auto &session = entry.session;
             if (consumed || !entry.online || session.state == "archived" || entry.host != launch.value("host").toString()
-                || session.launchId != it.key() || session.cmd != launch.value("cmd").toString()
+                || session.launchId != expectedLaunch || session.cmd != launch.value("cmd").toString()
                 || session.name.section('/', 2) != launch.value("tag").toString()) continue;
+            if(creation){
+                if(m_selectedCreation==it.key()){m_selectedCreation.clear();m_selectedKey.clear();m_creationSessionToSelect=entry.key;}
+                const auto id=it.key();QTimer::singleShot(0,this,[this,id]{m_creations->complete(id);});
+            }
             const QString requested = launch.value("group").toString();
             const QString group = m_organization.group(requested) ? requested : m_organization.defaultProject();
             // Only new, strictly marked implicit Inbox intents are passive.
@@ -3197,9 +3595,19 @@ void SessionsWindow::placeLaunchedSessions()
         // never appears: its machine reports how the launch ended instead.
         const QString host = launch.value("host").toString();
         const BoxState *box = host.isEmpty() ? &m_fleet.local() : m_fleet.peer(host);
-        const auto end = !consumed && box && box->ok ? box->endedLaunches.value(it.key()) : QJsonObject();
+        const auto end = !consumed && box && box->ok ? box->endedLaunches.value(expectedLaunch) : QJsonObject();
         if (!end.isEmpty() && std::none_of(m_entries.cbegin(), m_entries.cend(), [&](const Entry &entry) {
-                return entry.host == host && entry.session.launchId == it.key(); })) {
+                return entry.host == host && entry.session.launchId == expectedLaunch; })) {
+            if(creation){
+                const auto id=it.key();const auto code=end["code"];
+                const auto reason=(code.isDouble()?tr("Session %1 ended before it appeared (exit code %2).").arg(launch["tag"].toString()).arg(code.toInteger())
+                    :tr("Session %1 ended before it appeared.").arg(launch["tag"].toString()))+'\n'+end["output"].toString().left(4000);
+                QTimer::singleShot(0,this,[this,id,expectedLaunch,reason]{m_creations->ended(id,expectedLaunch,reason);});++it;continue;
+            }
+            if (m_taskLaunches.contains(expectedLaunch)) {
+                auto record = m_taskLaunches.value(expectedLaunch).toObject(); record["phase"] = "review"; record["error"] = tr("Session ended before task delivery");
+                m_taskLaunches[expectedLaunch] = record; saveTaskLaunches();
+            }
             consumed = true; m_endedLaunches.append({it.key(), launch});
             // Terminal launches and launches restored after a restart never
             // report a result, so only the newest ended launches are kept.
@@ -3222,6 +3630,7 @@ void SessionsWindow::placeLaunchedSessions()
         if (consumed) { it = m_pendingLaunches.erase(it); changed = true; } else ++it;
     }
     if (changed) { saveOrganization(); savePendingLaunches(); }
+    dispatchTaskLaunches();
     if (!ended.isEmpty()) showNotice(ended, true);
 }
 
@@ -3260,7 +3669,7 @@ QString SessionsWindow::selectedHostTarget() const {
 
 const SessionsWindow::Entry *SessionsWindow::selected() const
 {
-    for (const auto &entry : m_entries) if (entry.key == m_selectedKey) return &entry;
+    for (const auto &entry : std::as_const(m_entries)) if (entry.key == m_selectedKey) return &entry;
     // Archive and live catalog reads finish independently. Keep the opened
     // archived view while its exact restore is awaiting the live row/draft.
     for (auto restore = m_restores.cbegin(); restore != m_restores.cend(); ++restore)
@@ -3275,7 +3684,7 @@ bool SessionsWindow::awaitingRestoredInspection(const Entry &entry) const
 
 bool SessionsWindow::archiveNameOccupied(const Entry &archive) const
 {
-    for (const auto &entry : m_entries)
+    for (const auto &entry : std::as_const(m_entries))
         if (entry.host == archive.host && entry.session.name == archive.session.name && entry.session.state != "archived")
             return true;
     return false;
@@ -3285,28 +3694,15 @@ namespace {
 QString childState(const QJsonObject &child) {
     return SessionPresentation::childState(child);
 }
-bool childAction(const QJsonObject &child) {
-    const auto state = childState(child);
-    // Routine results and failures belong to the parent agent. Escalate only
-    // explicit requests for user intervention.
-    return state == "approval" || state == "input" || state == "attention";
-}
 QString childStatus(const QJsonObject &child) {
     return SessionPresentation::childStatus(child);
 }
-QString childName(const QJsonObject &child, const QString &id) {
-    auto name = child.value("label").toString(child.value("name").toString());
-    return name.isEmpty() ? id : name;
-}
+using SessionRows::childAction;
+using SessionRows::childName;
 }
 QJsonObject SessionsWindow::childRoster(const Entry &entry) const
 {
-    if (entry.session.subagentSource == "hook_profiles") return {};
-    if (entry.key == m_selectedKey && m_details.contains("subagents")
-        && (entry.session.conversationId.isEmpty() || entry.session.conversationId == m_details.value("conversation_id").toString())
-        && m_details.value("last_event_at").toDouble() >= entry.session.lastEventAt)
-        return m_details.value("subagents").toObject();
-    return entry.session.subagents;
+    return SessionRows::roster(entry, rowSelection());
 }
 QString SessionsWindow::childKey(const Entry &entry, const QString &id) const
 {
@@ -3315,145 +3711,44 @@ QString SessionsWindow::childKey(const Entry &entry, const QString &id) const
 }
 bool SessionsWindow::showChild(const Entry &entry, const QString &id, const QJsonObject &child, bool countsComplete, bool includeCompleted) const
 {
-    const auto conversation = !entry.session.conversationId.isEmpty() ? entry.session.conversationId :
-        entry.key == m_selectedKey ? m_details.value("conversation_id").toString() : QString();
-    const auto draftKey = entry.machine + '\n' + entry.session.name + '\n' + conversation + '\n' + id;
-    return includeCompleted
-        || (entry.key == m_selectedKey && id == m_subagentId && !id.isEmpty()
-            && m_subagentConversation == conversation)
-        || (!child.value("group").toBool() && m_subagentComposer->hasDraft(draftKey))
-        || !SessionPresentation::inactiveChild(child, countsComplete);
+    return SessionRows::showChild(entry, id, child, countsComplete, includeCompleted, rowSelection(),
+                                  [this](const QString &key) { return m_subagentComposer->hasDraft(key); });
 }
 bool SessionsWindow::childNeedsAction(const Entry &entry) const
 {
-    if (!currentActivity(entry.session, entry.online)) return false;
-    const auto roster = childRoster(entry);
-    for (const auto &child : roster) if (childAction(child.toObject())) return true;
-    return false;
+    return SessionRows::childNeedsAction(entry, rowSelection());
 }
 bool SessionsWindow::entryNeedsAttention(const Entry &entry) const
 {
-    return SessionPresentation::needsAttention(entry.session, entry.online)
-        || (entry.online && !entry.session.attentionAcknowledged && childNeedsAction(entry));
+    return SessionRows::needsAttention(entry, rowSelection());
 }
 bool SessionsWindow::entryHasDraft(const Entry &entry) const
 {
-    if (entry.session.state == "archived") return false;
-    if (m_composer->hasDraft(entry.key)) return true;
-    const auto children = childRoster(entry);
-    const auto conversation = !entry.session.conversationId.isEmpty() ? entry.session.conversationId :
-        entry.key == m_selectedKey ? m_details.value("conversation_id").toString() : QString();
-    for (auto it = children.begin(); it != children.end(); ++it)
-        if (!it.value().toObject().value("group").toBool()
-            && m_subagentComposer->hasDraft(entry.machine + '\n' + entry.session.name + '\n' + conversation + '\n' + it.key())) return true;
-    return false;
-}
-QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e) const
-{
-    QMap<int, QVariant> roles;
-    const auto &s = e.session;
-    const bool includeCompleted = QSettings().value("workspace/showCompletedSubagents", false).toBool();
-    const bool terminating=isTerminating(e);
-    const QString rowStatus=terminating?tr("Terminating…"):status(s,e.online);
-    const QString desc = terminating?tr("Waiting for the session to stop"):currentAction(s, e.online).simplified();
-    roles.insert(SessionRoles::Model, s.model.isEmpty() ? (s.cmd == "sh" ? QString() : tr("Model unknown")) : s.model);
-    roles.insert(SessionRoles::Effort, s.effort.isEmpty() ? QStringLiteral("—") : s.effort);
-    roles.insert(TitleRole, sessionLabel(s)); roles.insert(AgentRole, s.cmd);
-    // F4: the Team designer keeps its fixed name, whatever hgs called the session.
-    const bool designer = Teams::isDesignerSession(e.host, s.name);
-    if (designer) roles.insert(TitleRole, Teams::designerTitle());
-    // WhiteWh fork: a team member's card names its role (its id where the
-    // role repeats), not the team's long session name.
-    if (m_teams) for (const auto &team : m_teams->teams()) {
-        const auto *member = team.status == "archived" ? nullptr : team.memberOfSession(e.host, s.name);
-        if (!member || member->lead) continue;
-        const QString role = team.roleOf(member->id);
-        const bool repeated = std::count_if(team.members.cbegin(), team.members.cend(), [&](const auto &m) { return team.roleOf(m.id) == role; }) > 1;
-        roles.insert(TitleRole, repeated || role.isEmpty() ? member->id : role);
-        break;
-    }
-    QString meta = SessionPresentation::checkoutLine(s);
-    roles.insert(SessionRoles::MetaIcon, SessionPresentation::checkoutIcon(s));
-    if (s.state == "archived" && s.archivedAt > 0) {
-        if (!meta.isEmpty()) meta += QStringLiteral(" / ");
-        meta += QDateTime::fromSecsSinceEpoch(qint64(s.archivedAt)).toLocalTime().toString("d MMM HH:mm");
-    }
-    roles.insert(MetaRole, meta); roles.insert(StatusRole, rowStatus); roles.insert(DetailRole, desc);
-    const auto gitPath = SessionPresentation::gitStatusPath(s);
-    const auto git = SessionPresentation::gitStatus(s, m_client.gitStatusSnapshot(e.host, gitPath), e.online);
-    roles.insert(SessionRoles::GitHost, e.host); roles.insert(SessionRoles::GitPath, gitPath);
-    roles.insert(SessionRoles::GitStatus, git);
-    roles.insert(Qt::AccessibleDescriptionRole, GitStatusBadge::tooltip(git));
-    roles.insert(SessionRoles::Attention, !terminating && (s.reviewLater || (e.online && !s.attentionAcknowledged && (s.needsAction() || childNeedsAction(e)))));
-    roles.insert(SessionRoles::ReviewLater, s.reviewLater);
-    roles.insert(SessionRoles::Muted, s.muted);
-    roles.insert(SessionRoles::Failure, s.phase=="error");
-    roles.insert(SessionRoles::Draft, m_composer->hasDraft(e.key));
-    roles.insert(SessionRoles::Unread, !terminating && s.visibleUnreadReply(e.online));
-    roles.insert(SessionRoles::Working, !isTerminating(e) && SessionPresentation::working(s, e.online));
-    roles.insert(SessionRoles::WorkingSince, SessionPresentation::backgroundIdle(s) ? s.backgroundStarted : s.phase == "compacting" ? s.compactionStarted : s.turnStarted);
-    roles.insert(SessionRoles::Scheduled, !isTerminating(e) && scheduled(s, e.online));
-    roles.insert(SessionRoles::CoordinationWait, !terminating && SessionPresentation::currentActivity(s,e.online) && s.hasCoordinationWait() ? s.coordinationWait : QJsonObject());
-    roles.insert(SessionRoles::Waiting, !terminating && e.online && SessionPresentation::waitingIdle(s));
-    roles.insert(SessionRoles::OptionalQuestions, terminating ? 0 : SessionPresentation::optionalQuestionCount(s, e.online));
-    // G7: the services the session runs, apart from Background work.
-    QVariantList services;
-    for (const auto &service : s.services)
-        services.append(QVariantMap{{"name", service.name}, {"command", service.command}, {"since", service.since}});
-    roles.insert(SessionRoles::Services, services);
-    // U25 (spec 2.2): only confirmed current commands of a live session.
-    const bool jobs = !terminating && SessionPresentation::currentActivity(s, e.online) && s.backgroundProcesses > 0;
-    roles.insert(SessionRoles::BackgroundJobs, jobs ? s.backgroundProcesses : 0);
-    roles.insert(SessionRoles::BackgroundCommand, jobs ? s.backgroundCommand : QString());
-    roles.insert(SessionRoles::TeamMuted, s.muted && s.teamMuted);
-    roles.insert(SessionRoles::MachineName, e.machine);
-    roles.insert(SessionRoles::MachineColor, MachineAppearance::color(e.machine));
-    roles.insert(HostRole, e.machine + (e.online ? QString() : tr(" (offline)"))); roles.insert(ChildrenRole, childCount(s, false, e.online, includeCompleted));
-    if (const auto *group = m_organization.group(m_organization.groupFor(e.identity))) {
-        roles.insert(SessionRoles::ProjectColor, QColor(group->color));
-        roles.insert(SessionRoles::ProjectVivid, group->vivid);
-    }
-    // F4: and its own colour, so nobody takes it for a work session.
-    if (designer) { roles.insert(SessionRoles::ProjectColor, QColor(Teams::designerColor())); roles.insert(SessionRoles::ProjectVivid, true); }
-    // U30 (#508): the session's state; Keep cache warm counts its hours.
-    roles.insert(SessionRoles::SessionState, SessionStates::facts(s, e.online, CacheKeepalive::hours(e.host, s) * 3600.0));
-    return roles;
-}
-
-QMap<int,QVariant> SessionsWindow::childCardRoles(const Entry &e,const QString &id,const QJsonObject &child) const
-{
-    const auto &s=e.session;
-    return {{TitleRole,childName(child,id)},{AgentRole,child.value("provider").toString(s.cmd)},
-        {StatusRole,currentActivity(s,e.online)?childStatus(child):tr("Recorded")},
-        {DetailRole,child.value("detail").toString(child.value("task").toString()).simplified()},
-        {SessionRoles::Working,!isTerminating(e)&&currentActivity(s,e.online)&&childState(child)=="working"},
-        {SessionRoles::Attention,currentActivity(s,e.online)&&childAction(child)},
-        {SessionRoles::Unread,false},{SessionRoles::Muted,s.muted},{SessionRoles::ChildId,id},
-        {SessionRoles::MachineName,e.machine},{SessionRoles::MachineColor,MachineAppearance::color(e.machine)},{HostRole,e.machine}};
+    return SessionRows::hasDraft(entry, rowSelection(), [this](const QString &key) { return m_composer->hasDraft(key); },
+                                 [this](const QString &key) { return m_subagentComposer->hasDraft(key); });
 }
 
 void SessionsWindow::rebuild()
 {
+    // Reconciles the window's own state with the listing here, on the GUI
+    // thread: entries and their organization identities, launched sessions,
+    // row preferences, restores, forks and renames. What the rows show is then
+    // prepared off the GUI thread (requestRows, SessionsWindowRows.cpp).
     if (m_sessions->dragging()) return;
-    QSet<QString> selectedKeys;
-    for (const auto *item : m_sessions->selectedItems()) selectedKeys.insert(item->data(KeyRole).toString());
-    if (!m_sessions->currentItem() && selectedKeys.isEmpty() && !m_selectedKey.isEmpty()) selectedKeys.insert(m_selectedKey);
     m_rebuilding = true;
-    QString requestedSelection = m_selectedKey;
-    m_entries.clear(); int online = 0, attention = 0, saved = 0, archived = 0, total = 0, active = 0;
-    QSet<QString> drafts;
-    const bool includeCompleted = QSettings().value("workspace/showCompletedSubagents", false).toBool();
+    // The row to select is chosen when prepared rows are applied; a choice
+    // made here (a placed creation, fork, restore or rename) waits for them.
+    const auto overrideSelection = [this](const QString &key) { m_rowSelection = key; };
+    m_entries.clear();
     auto append = [&](const QString &host, const BoxState &box) {
         if (box.host.isEmpty()) return;
         const bool reachable = box.ok && (host.isEmpty() ? m_connectionError.isEmpty() :
             QDateTime::currentMSecsSinceEpoch() - m_fleet.peerPolledAt(host) < FleetState::kPeerStaleMs);
-        if (reachable) ++online;
         for (const auto &stored : box.sessions) {
             auto s=stored;
             const QString key = host + '\n' + s.name + (s.state == "archived" ? '\n' + s.archiveId : QString());
             if(key == m_selectedKey && m_inspectError.isEmpty())s=SessionPresentation::inspected(s,m_details);
             m_entries.append({host, host.isEmpty() ? box.host : host, key, {}, s, reachable});
-            if (entryHasDraft(m_entries.last())) drafts.insert(key);
         }
     };
     QMap<QString,QString> archiveHosts;
@@ -3470,6 +3765,11 @@ void SessionsWindow::rebuild()
     };
     withArchive({},m_fleet.local());
     for(const auto &peer:m_fleet.peerNames())withArchive(peer,*m_fleet.peer(peer));
+    // A refreshed listing (refreshFleet) renders these rows again by then.
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    m_renderedFreshness = m_fleet.freshness(now);
+    m_rowsChangeAt = m_pendingLaunches.isEmpty() ? std::numeric_limits<qint64>::max() : now;
+    for (const auto &entry : std::as_const(m_entries)) m_rowsChangeAt = qMin(m_rowsChangeAt, SessionPresentation::textChangesAt(entry.session, now));
     updateWorktreeCleanupOffer();
     m_archiveBrowser->configure(archiveHosts,m_filter=="archived"&&m_pages->currentIndex()==0);
     updateAttentionIndicator();
@@ -3486,26 +3786,33 @@ void SessionsWindow::rebuild()
             pending.value() = {current->session.runId, current->session.conversationId};
     }
     bool rowPreferencesChanged = false;
-    for (const auto &entry : m_entries) rowPreferencesChanged |= m_sessionRowPreferences.observe(entry.host, entry.session);
+    for (const auto &entry : std::as_const(m_entries)) rowPreferencesChanged |= m_sessionRowPreferences.observe(entry.host, entry.session);
     if (rowPreferencesChanged) saveSessionRowPreferences();
+    const auto creationBeforePlacement=m_selectedCreation;
     placeLaunchedSessions();
+    if(!creationBeforePlacement.isEmpty()&&m_selectedCreation.isEmpty()){overrideSelection(m_creationSessionToSelect);m_rowCreationPlaced=true;}
     saveOrganization();
     // Entries, attention and the organization above stay current for other pages.
     // A hidden Sessions list and its details render once, when the page is shown.
     if (m_pages->currentIndex() != 0 && m_forkKey.isEmpty() && m_restores.isEmpty() && m_renameKey.isEmpty()) {
         m_sessionsNav->setChecked(false); m_machinesNav->setChecked(m_pages->currentIndex() == 2);
-        m_sessionsStale = true; m_rebuilding = false; return;
+        m_sessionsStale = true; m_rebuilding = false;
+        // Rows requested or still being prepared for the list are dropped:
+        // showing the page rebuilds it.
+        m_rowRequestQueued = false;
+        if (m_rowsPending) { ++m_rowGeneration; m_rowsPending = false; }
+        return;
     }
     m_sessionsStale = false;
     if (!m_pending && !m_forkKey.isEmpty()) {
-        for (const auto &entry : m_entries) if (entry.key == m_forkKey && entry.session.state == "running") {
-            requestedSelection = m_forkKey;
+        for (const auto &entry : std::as_const(m_entries)) if (entry.key == m_forkKey && entry.session.state == "running") {
+            overrideSelection(m_forkKey);
             const auto *group = m_organization.group(m_forkGroup);
             const QString groupId = group ? m_forkGroup : m_organization.defaultProject();
             const QString before = group && group->sessions.contains(m_forkBefore) ? m_forkBefore : QString();
             m_organization.moveSession(entry.identity, groupId, before); m_organization.setCollapsed(groupId, false); saveOrganization();
-            const QString key = m_forkKey; m_forkKey.clear(); m_forkGroup.clear(); m_forkBefore.clear();
-            QTimer::singleShot(0, this, [this, key] { if (m_selectedKey == key) { m_detailTabs->setCurrentWidget(m_terminal); m_terminal->connectSession(); } });
+            // Its terminal opens once the applied rows have selected it (applyRows).
+            m_forkTerminalKey = m_forkKey; m_forkKey.clear(); m_forkGroup.clear(); m_forkBefore.clear();
             break;
         }
     }
@@ -3531,7 +3838,7 @@ void SessionsWindow::rebuild()
                 // A canceled follow must not be revived by renameDraft's
                 // asynchronous editor continuation, even if archive paging
                 // still retains the old row. No newer selection is changed.
-                m_selectedKey.clear(); requestedSelection.clear();
+                m_selectedKey.clear(); overrideSelection({});
                 m_details = {}; m_events = {}; m_cursor = 0; m_inspectError.clear(); m_childrenHtml.clear();
                 m_activityView->setSessionKey({}); m_composer->setSessionKey({});
             }
@@ -3544,7 +3851,7 @@ void SessionsWindow::rebuild()
                 m_localMessages.insert(entry.key, m_localMessages.take(oldKey));
             if (follow) {
                 m_activityView->continueSession(oldKey, entry.key);
-                m_selectedKey = entry.key; requestedSelection = entry.key;
+                m_selectedKey = entry.key; overrideSelection(entry.key);
                 m_composer->setSessionKey(entry.key);
                 // Keep the visible history, but no old-run controls are
                 // enabled before a fresh inspection of the resumed run.
@@ -3556,9 +3863,9 @@ void SessionsWindow::rebuild()
         } else if (follow) {
             // Missing/different native identity is not a draft migration.
             // The archived draft remains recoverable in Saved drafts.
-            if (entry.session.conversationId.isEmpty()) requestedSelection = entry.key;
+            if (entry.session.conversationId.isEmpty()) overrideSelection(entry.key);
             else {
-                requestedSelection.clear();
+                overrideSelection({});
                 showNotice(tr("The restored conversation could not be verified. Your archived draft remains in Saved drafts."), true);
             }
         }
@@ -3566,435 +3873,39 @@ void SessionsWindow::rebuild()
         restore = m_restores.erase(restore);
     }
     if (!m_pending && !m_renameKey.isEmpty()) {
-        for (const auto &entry : m_entries) if (entry.key == m_renameKey) {
-            requestedSelection = m_renameKey; m_renameKey.clear(); break;
+        for (const auto &entry : std::as_const(m_entries)) if (entry.key == m_renameKey) {
+            overrideSelection(m_renameKey); m_renameKey.clear(); break;
         }
     }
-    QSet<QString> projectKeys;
-    for (const auto &entry : m_entries) {
-        if (!m_projectFilters.isEmpty() && !m_projectFilters.contains(m_organization.groupFor(entry.identity))) continue;
-        projectKeys.insert(entry.key);
-        if (!m_hostFilters.isEmpty() && !m_hostFilters.contains(entry.host.isEmpty() ? "@local" : entry.host)) continue;
-        const auto &s = entry.session;
-        if (!m_folderFilterPath.isEmpty() && (entry.host != m_folderFilterHost || !MachinePlatform::same(
-            m_folderFilterCheckout ? s.gitRoot : s.canonicalCwd, m_folderFilterPath, MachinePlatform::of(m_fleet.metricsOf(entry.host), entry.host.isEmpty())))) continue;
-        if (s.state == "archived") { ++archived; continue; }
-        ++total;
-        const bool needsAttention = entryNeedsAttention(entry);
-        if (needsAttention && !s.muted) ++attention;
-        if (needsAttention || SessionPresentation::active(s, entry.online, drafts.contains(entry.key))) ++active;
-        if (s.state != "running") ++saved;
-    }
-    m_heading->setText(m_filter == "archived" ? tr("Archive") : tr("Sessions"));
-    const int unreadCount = m_fleet.unreadReplies().size();
-    m_markAllReadAction->setEnabled(unreadCount > 0);
-    m_markAllReadAction->setText(unreadCount ? tr("Mark all as read (%1)").arg(unreadCount) : tr("Mark all as read"));
-    m_markAllReadAction->setIcon(workspaceIcon("read-all", QColor(m_muted)));
-    m_markAllReadButton->setEnabled(unreadCount > 0); m_markAllReadButton->setAccessibleName(m_markAllReadAction->text());
-    m_markAllReadButton->setToolTip(m_markAllReadAction->text() + '\n' + m_markAllReadAction->toolTip());
-    const QMap<QString, int> counts{{"all", total}, {"active", active}, {"attention", attention}, {"paused", saved}, {"archived", archived}};
-    QString countCaption;
-    for (auto *button : m_filters) {
-        const auto id = button->property("filter").toString(); button->setChecked(m_pages->currentIndex() == 0 && id == m_filter);
-        if (id == m_filter) countCaption = button->property("caption").toString();
-        const bool pagedArchive=id=="archived"&&m_archiveBrowser->paged();
-        const bool partial=pagedArchive&&(!m_archiveBrowser->totalsKnown()||m_archiveBrowser->hasMore());
-        button->setText(pagedArchive&&!m_archiveBrowser->totalsKnown()&&!counts.value(id)?QStringLiteral("…"):QString::number(counts.value(id))+(partial?QStringLiteral("+"):QString())); button->setProperty("count", counts.value(id));
-        button->setToolTip(button->property("caption").toString() + (pagedArchive?tr(" / %1 loaded%2").arg(counts.value(id)).arg(partial?tr("; more can be loaded in Archive"):QString()):QString(" / %1").arg(counts.value(id))));
-        button->setIcon(workspaceIcon(id, QColor(id == "attention" && attention > 0 ? (m_dark ? "#f0c77b" : "#885400") : id == m_filter ? m_accent : m_muted)));
-    }
-    m_sessionsNav->setChecked(m_pages->currentIndex() == 0);
-    m_machinesNav->setChecked(m_pages->currentIndex() == 2);
-    m_searchResults->setProjectScope(projectKeys, !m_projectFilters.isEmpty());
-    m_searchResults->setFolderScope(m_folderFilterHost,m_folderFilterPath,m_folderFilterCheckout);
-    m_searchResults->setHostsScope(m_fleet, m_filter, m_hostFilters, drafts);
-    m_search->setPlaceholderText(m_filter=="archived"?tr("Search archive names and IDs…"):tr("Search sessions, IDs and messages…"));
-    const QString query; // Archive metadata search is paged; other text searches have a separate result list.
-    QList<Entry> visible;
-    QMap<QString, int> machineCounts, projectCounts;
-    for (const auto &e : m_entries) {
-        const auto &s = e.session;
-        if ((s.state == "archived") != (m_filter == "archived")) continue;
-        if(s.state=="archived"&&!m_archiveBrowser->includes(s.archivedAt))continue;
-        if (m_filter == "attention" && !entryNeedsAttention(e)
-            && !(e.key == m_selectedKey && e.key == m_readSelectionKey)) continue;
-        if (m_filter == "active" && !entryNeedsAttention(e) && !SessionPresentation::active(s, e.online, drafts.contains(e.key))
-            && !(e.key == m_selectedKey && e.key == m_readSelectionKey)) continue;
-        if (m_filter == "paused" && s.state == "running") continue;
-        if (!(s.name + ' ' + e.machine + ' ' + s.prompt + ' ' + s.currentTool + ' ' + s.gitBranch + ' ' + s.gitWorktreeName + ' ' + s.activitySummary + ' ' + s.activityDetail).contains(query, Qt::CaseInsensitive)) continue;
-        if(!m_folderFilterPath.isEmpty()&&(e.host!=m_folderFilterHost||!MachinePlatform::same(m_folderFilterCheckout?s.gitRoot:s.canonicalCwd,m_folderFilterPath,MachinePlatform::of(m_fleet.metricsOf(e.host), e.host.isEmpty()))))continue;
-        const QString machine = e.host.isEmpty() ? QStringLiteral("@local") : e.host;
-        const auto project = m_organization.groupFor(e.identity);
-        if (m_hostFilters.isEmpty() || m_hostFilters.contains(machine)) ++projectCounts[project];
-        if (!projectKeys.contains(e.key)) continue;
-        ++machineCounts[machine];
-        if (!m_hostFilters.isEmpty() && !m_hostFilters.contains(machine)) continue;
-        visible.append(e);
-    }
-    if (!m_folderFilterPath.isEmpty()) countCaption += tr(" / selected folder");
-    { const QSignalBlocker block(m_machineFilter); m_machineFilter->setSelection(m_hostFilters); m_machineFilter->setFleet(m_fleet);
-        m_machineFilter->setSessionCounts(machineCounts, countCaption + (m_projectFilters.isEmpty() ? QString() : tr(" / selected projects"))); }
-    { const QSignalBlocker block(m_projectFilter); m_projectFilter->setSelection(m_projectFilters); m_projectFilter->setProjects(m_organization.groups());
-        m_projectFilter->setSessionCounts(projectCounts, countCaption + (m_hostFilters.isEmpty() ? QString() : tr(" / selected machines"))); }
-    struct Row { QString group; int entry = -1; bool hidden = false; QString child, launch; };
-    QList<Row> rows;
-    QSet<int> subordinateRows;   // WhiteWh fork: visible entries listed under their lead
-    QSet<int> teamMemberRows, teamHiddenRows, lastMemberRows;
-    QHash<int, int> teamDepth;
-    QHash<int, QVariantList> teamLines;
-    QHash<int, QString> leadTeams;   // WhiteWh fork: lead rows and their teams
-    const bool hasGroups = m_organization.groups().size() > 1;
-    const bool filtering = !m_projectFilters.isEmpty() || !m_folderFilterPath.isEmpty() || !query.isEmpty() || !m_hostFilters.isEmpty() || m_filter != "all";
-    const bool hideEmptyProjects = QSettings().value("workspace/hideEmptyProjects", true).toBool();
-    QStringList visibleIdentities;
-    visibleIdentities.reserve(visible.size());
-    for (const auto &entry : visible) visibleIdentities.append(entry.identity);
-    auto projectMembers = m_organization.orderedMembers(visibleIdentities);
-    // A team's members stand under its lead, in whichever project they were filed.
-    // G1: parents come before their sub-teams, so a sub-team lead is indented
-    // under the lead it works for.
-    QList<Teams::Team> orderedTeams = m_teams ? m_teams->teams() : QList<Teams::Team>{};
-    const auto teamById = [&](const QString &id) -> const Teams::Team * {
-        for (const auto &team : orderedTeams) if (team.id == id) return &team;
-        return nullptr;
-    };
-    const auto depthOf = [&](const Teams::Team &team) {
-        int depth = 0; const Teams::Team *at = &team;
-        QSet<QString> seen;
-        while (at && at->parent.known && depth < 32 && !seen.contains(at->id)) {
-            seen.insert(at->id);
-            at = teamById(at->parent.team);
-            if (!at) break;
-            ++depth;
-        }
-        return depth;
-    };
-    std::stable_sort(orderedTeams.begin(), orderedTeams.end(), [&](const Teams::Team &a, const Teams::Team &b) {
-        return depthOf(a) < depthOf(b);
-    });
-    const auto collapsedDeep = [&](const Teams::Team &team) {
-        const Teams::Team *at = &team; int guard = 0;
-        while (at && guard++ < 32) {
-            if (m_collapsedTeams.contains(at->id) && query.isEmpty()) return true;
-            at = at->parent.known ? teamById(at->parent.team) : nullptr;
-        }
-        return false;
-    };
-    const auto subtreeCounts = [&](const Teams::Team &team, int &sessions, int &open) {
-        sessions = 0; open = 0;
-        QSet<QString> seenSessions;
-        std::function<void(const Teams::Team &)> walk = [&](const Teams::Team &current) {
-            for (const auto &member : current.members)
-                if (!member.session.isEmpty() && !seenSessions.contains(member.session)) {
-                    seenSessions.insert(member.session);
-                    ++sessions;
-                }
-            for (const auto &task : current.tasks) if (!task.finished()) ++open;
-            for (const auto &child : current.children) if (const auto *found = teamById(child.team)) walk(*found);
-        };
-        walk(team);
-    };
-    if (m_teams && !orderedTeams.isEmpty()) {
-        QHash<int, QString> groupOf;
-        for (auto it = projectMembers.cbegin(); it != projectMembers.cend(); ++it) for (int i : it.value()) groupOf.insert(i, it.key());
-        for (const auto &team : orderedTeams) {
-            if (team.status == "archived") continue;
-            int lead = -1; QList<int> follow;
-            for (int i = 0; i < visible.size(); ++i) {
-                const auto *member = team.memberOfSession(visible[i].host, visible[i].session.name);
-                if (!member) continue;
-                if (member->lead) lead = i; else follow.append(i);
-            }
-            if (lead < 0 || !groupOf.contains(lead)) continue;
-            const QString target = groupOf.value(lead);
-            for (int i : follow) {
-                const QString from = groupOf.value(i);
-                if (from.isEmpty() || from == target) continue;
-                projectMembers[from].removeAll(i); projectMembers[target].append(i); groupOf[i] = target;
-            }
-        }
-    }
-    const auto leads = SessionLeads::all();   // WhiteWh fork: read once per rebuild
-    for (const auto &group : m_organization.groups()) {
-        if (!m_projectFilters.isEmpty() && !m_projectFilters.contains(group.id)) continue;
-        auto members = projectMembers.value(group.id);
-        QStringList launches;
-        if (m_filter == "all"&&m_folderFilterPath.isEmpty()) for (auto it = m_pendingLaunches.begin(); it != m_pendingLaunches.end(); ++it) {
-            const auto launch = it.value().toObject();
-            // Older versions kept mapping receipts for a week. Those abandoned
-            // intents must not suddenly become visible launches after an upgrade.
-            if (!launch.value("show_pending").toBool()) continue;
-            const QString requested = launch.value("group").toString();
-            const QString destination = m_organization.group(requested) ? requested : m_organization.defaultProject();
-            const QString host = launch.value("host").toString();
-            if (destination == group.id && (m_hostFilters.isEmpty() || m_hostFilters.contains(host.isEmpty() ? "@local" : host))) launches.append(it.key());
-        }
-        if (!leads.isEmpty()) {
-            // WhiteWh fork: a subordinate follows its lead when both are listed
-            // here and the lead reports to no one. One pass: a project can list
-            // thousands of sessions.
-            QHash<QString, int> at;
-            for (int i : members) if (!at.contains(visible[i].identity)) at.insert(visible[i].identity, i);
-            QHash<int, QList<int>> followers;
-            QSet<int> following;
-            for (int i : members) {
-                const auto lead = leads.value(visible[i].identity).toString();
-                const int j = lead.isEmpty() ? -1 : at.value(lead, -1);
-                if (j < 0 || j == i || !leads.value(lead).toString().isEmpty()) continue;
-                followers[j].append(i); following.insert(i);
-            }
-            if (!following.isEmpty()) {
-                QList<int> ordered;
-                for (int i : members) {
-                    if (following.contains(i)) continue;
-                    ordered.append(i);
-                    for (int j : followers.value(i)) { ordered.append(j); subordinateRows.insert(j); }
-                }
-                members = ordered;
-            }
-        }
-        // WhiteWh fork: agent teams. A team's members listed here follow its
-        // lead, indented; the lead's card carries the team. A folded team
-        // keeps only members with a problem.
-        if (m_teams) for (const auto &team : orderedTeams) {
-            if (team.status == "archived") continue;
-            int lead = -1; QList<int> follow;
-            for (int i : members) {
-                const auto *member = team.memberOfSession(visible[i].host, visible[i].session.name);
-                if (!member) continue;
-                if (member->lead) lead = i; else follow.append(i);
-            }
-            if (lead < 0 || leadTeams.contains(lead)) continue;
-            // G1: a sub-team's lead sits indented under its parent's lead.
-            if (team.parent.known) subordinateRows.insert(lead);
-            const bool collapsed = collapsedDeep(team);
-            // Spec 2.5: the members follow the team's tree - each sub-lead
-            // followed by its reports - over the rows still shown.
-            QHash<QString, int> rowOf;
-            for (int i : follow) rowOf.insert(team.memberOfSession(visible[i].host, visible[i].session.name)->id, i);
-            for (int i : follow) {
-                const auto *member = team.memberOfSession(visible[i].host, visible[i].session.name);
-                if (collapsed && !Teams::memberStatus(team, *member, teamLive(*member)).problem) teamHiddenRows.insert(i);
-            }
-            const auto tree = team.memberTree([&](const QString &id) { return rowOf.contains(id) && !teamHiddenRows.contains(rowOf.value(id)); });
-            QList<int> treeOrder;
-            for (const auto &node : tree) {
-                const int i = rowOf.value(node.member->id, -1);
-                if (i < 0 || node.depth < 1) continue;
-                treeOrder.append(i);
-                teamDepth.insert(i, node.depth);
-                QVariantList lines; for (bool on : node.through) lines.append(on);
-                teamLines.insert(i, lines);
-                if (node.last) lastMemberRows.insert(i);
-            }
-            for (int i : follow) if (!treeOrder.contains(i)) treeOrder.append(i);
-            follow = treeOrder;
-            const QSet<int> following(follow.cbegin(), follow.cend());
-            QList<int> ordered;
-            for (int i : members) {
-                if (following.contains(i)) continue;
-                ordered.append(i);
-                if (i == lead) ordered += follow;
-            }
-            members = ordered;
-            leadTeams.insert(lead, team.id);
-            for (int i : follow) teamMemberRows.insert(i);
-        }
-        if (members.isEmpty() && launches.isEmpty() && (filtering || hideEmptyProjects || !group.accessible)) continue;
-        if (hasGroups) rows.append({group.id, -1, false});
-        for (int i : members) {
-            const bool hidden = hasGroups && group.collapsed && query.isEmpty();
-            rows.append({group.id, i, hidden || teamHiddenRows.contains(i), {}});
-            if (m_expandedSessions.contains(visible[i].key)) {
-                const auto roster = childRoster(visible[i]);
-                // Stable ID order avoids moving a row under the pointer when a child finishes.
-                for (auto it = roster.begin(); it != roster.end(); ++it)
-                    if (showChild(visible[i], it.key(), it.value().toObject(), visible[i].session.subagentCountsComplete, includeCompleted))
-                        rows.append({group.id, i, hidden, it.key()});
-            }
-        }
-        for (const auto &id : launches) rows.append({group.id, -1, hasGroups && group.collapsed, {}, id});
-    }
-    const auto rowKey = [&](const Row &row) { return !row.launch.isEmpty() ? "#launch\n" + row.launch : row.entry < 0 ? "#group\n" + row.group : visible[row.entry].key + (row.child.isEmpty() ? QString() : "\n#child\n" + row.child); };
-    bool sameRows = m_sessions->count() == rows.size();
-    for (int i = 0; sameRows && i < rows.size(); ++i) sameRows = m_sessions->item(i)->data(KeyRole).toString() == rowKey(rows[i]);
-    const int scroll = m_sessions->verticalScrollBar()->value();
-    if (!sameRows) m_sessions->clear();
-    int selectedRow = -1, firstSession = -1, firstVisible = -1;
-    for (int i = 0; i < rows.size(); ++i) {
-        const auto row = rows[i];
-        auto *item = sameRows ? m_sessions->item(i) : new QListWidgetItem(m_sessions);
-        // Session cards already expose their status; details belong in Activity
-        // and Details, not a hover popup covering neighbouring rows.
-        item->setToolTip({});
-        item->setData(KeyRole, rowKey(row)); item->setData(SessionRoles::Group, row.group);
-        item->setData(SessionRoles::ChildId, row.child);
-        item->setData(SessionRoles::ParentKey, row.entry >= 0 ? visible[row.entry].key : QString());
-        item->setData(SessionRoles::Subordinate, row.entry >= 0 && row.child.isEmpty() && row.launch.isEmpty() && subordinateRows.contains(row.entry));
-        item->setData(SessionRoles::LaunchId, row.launch);
-        item->setData(SessionRoles::WorkingSince, 0.0);
-        item->setData(SessionRoles::Scheduled, false);
-        item->setData(SessionRoles::OptionalQuestions, 0);
-        item->setData(SessionRoles::RowCollapsed, false);
-        item->setData(SessionRoles::GitStatus, QJsonObject());
-        item->setData(SessionRoles::MetaIcon, QString());
-        item->setData(SessionRoles::GitHost, QString()); item->setData(SessionRoles::GitPath, QString());
-        item->setData(Qt::AccessibleDescriptionRole, QString());
-        item->setData(SessionRoles::Header, row.entry < 0 && row.launch.isEmpty()); item->setHidden(row.hidden);
-        item->setData(SessionRoles::TeamMember, row.entry >= 0 && row.child.isEmpty() && teamMemberRows.contains(row.entry)
-                                                    ? (lastMemberRows.contains(row.entry) ? 2 : 1) : 0);
-        item->setData(SessionRoles::TeamDepth, row.entry >= 0 && row.child.isEmpty() ? teamDepth.value(row.entry, 1) : 0);
-        item->setData(SessionRoles::TeamLines, row.entry >= 0 && row.child.isEmpty() ? teamLines.value(row.entry) : QVariantList());
-        if (!row.launch.isEmpty()) {
-            const auto launch = m_pendingLaunches.value(row.launch).toObject();
-            const QString name = launch.value("tag").toString(), host = launch.value("host").toString();
-            const QString machine = host.isEmpty() ? m_fleet.local().host : host;
-            const bool waiting = QDateTime::currentSecsSinceEpoch() - launch.value("created").toInteger() > 120;
-            const QString state = waiting ? tr("Waiting for session") : tr("Starting…");
-            const QString detail = waiting ? tr("Check the terminal for startup progress") : tr("Waiting for the session to appear");
-            item->setFlags(Qt::ItemIsEnabled);
-            item->setData(TitleRole, name); item->setData(StatusRole, state); item->setData(DetailRole, detail);
-            item->setData(MetaRole, launch.value("target").toString()); item->setData(AgentRole, launch.value("cmd").toString());
-            item->setData(HostRole, machine); item->setData(SessionRoles::MachineName, machine); item->setData(SessionRoles::MachineColor, MachineAppearance::color(machine));
-            item->setData(Qt::AccessibleTextRole, QString("%1, %2, %3").arg(name, machine, state));
-            continue;
-        }
-        if (row.entry < 0) {
-            const auto *group = m_organization.group(row.group);
-            int total = 0, alerts = 0, busy = 0, unread = 0;
-            for (const auto &e : visible) if (m_organization.groupFor(e.identity) == row.group) ++total;
-            for (const auto &candidate : rows) if (candidate.group == row.group && !candidate.launch.isEmpty()) ++total;
-            // Attention remains visible even when a search or state filter hides a member.
-            for (const auto &e : m_entries) if (m_organization.groupFor(e.identity) == row.group) {
-                if (!e.session.muted && (e.session.reviewLater || (e.online && !e.session.attentionAcknowledged && (e.session.needsAction() || childNeedsAction(e))))) ++alerts;
-                if (!e.session.muted && e.session.visibleUnreadReply(e.online)) ++unread;
-                if (SessionPresentation::working(e.session, e.online)) ++busy;
-            }
-            item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsDropEnabled | Qt::ItemIsDragEnabled);
-            item->setData(TitleRole, group->name);
-            item->setData(SessionRoles::ProjectColor, QColor(group->color));
-            item->setData(SessionRoles::ProjectVivid, group->vivid);
-            item->setData(SessionRoles::Collapsed, group->collapsed && query.isEmpty());
-            item->setData(SessionRoles::Total, total); item->setData(SessionRoles::Attention, alerts); item->setData(SessionRoles::Working, busy); item->setData(SessionRoles::Unread, unread);
-            item->setData(SessionRoles::ProjectFolder, group->folders.isEmpty() ? QString() : QDir::toNativeSeparators(group->folders.first().path));
-            const QString description = tr("%1: %2 shown, %3 need a response, %4 working, %5 unread replies. Click to collapse or expand; drag to reorder.")
-                .arg(group->name).arg(total).arg(alerts).arg(busy).arg(unread);
-            item->setToolTip(sessionTooltip({description}, 330).html); item->setData(Qt::AccessibleTextRole, description);
-            continue;
-        }
-        const auto &e = visible[row.entry]; const auto &s = e.session;
-        if (!row.child.isEmpty()) {
-            const auto child = childRoster(e).value(row.child).toObject();
-            item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
-            const auto roles=childCardRoles(e,row.child,child);for(auto it=roles.cbegin();it!=roles.cend();++it)item->setData(it.key(),it.value());
-            item->setData(Qt::AccessibleTextRole, tr("Subagent %1, %2").arg(childName(child, row.child), childStatus(child)));
-            if (e.key == requestedSelection && row.child == m_subagentId) selectedRow = i;
-            continue;
-        }
-        const auto roster = childRoster(e);
-        bool hasChildren = false;
-        for (auto it = roster.begin(); it != roster.end(); ++it)
-            if (showChild(e, it.key(), it.value().toObject(), s.subagentCountsComplete, includeCompleted)) { hasChildren = true; break; }
-        // A team's lead folds its members as a session folds its subagents.
-        const QString leadTeam = leadTeams.value(row.entry);
-        QVariantMap teamStrip;
-        if (const auto *team = leadTeam.isEmpty() || !m_teams ? nullptr : m_teams->team(leadTeam)) {
-            const auto live = [this](const Teams::Member &member) { return teamLive(member); };
-            const QString status = Teams::displayStatus(*team, live);
-            // G6: two compact bars — the phase in work (or the next draft) and
-            // the phases — replace one bar over every task of every phase.
-            const auto bars = Teams::phaseProgress(*team);
-            // G1: a parent's row rolls up its whole subtree (sessions and open
-            // tasks), not only its own members.
-            int subtreeSessions = 0, subtreeOpen = 0;
-            subtreeCounts(*team, subtreeSessions, subtreeOpen);
-            const QString rollup = team->children.isEmpty() ? QString()
-                : tr("%1 sessions \u00b7 %2 open").arg(subtreeSessions).arg(subtreeOpen);
-            teamStrip = {{"id", team->id}, {"name", team->name}, {"status", status}, {"label", Teams::statusLabel(status)},
-                         {"tone", int(Teams::statusTone(status))},
-                         {"phaseText", bars.phaseText()}, {"phasesText", bars.phasesText()},
-                         {"phaseDone", bars.done}, {"phaseTotal", bars.total},
-                         {"phasesDone", bars.phasesDone}, {"phasesTotal", bars.phasesTotal},
-                         {"phaseDraft", bars.draft}, {"phaseNumber", bars.phase},
-                         {"progressTooltip", bars.tooltip()},
-                         {"rollup", rollup}, {"openTasks", subtreeOpen}, {"subtreeSessions", subtreeSessions},
-                         {"members", QString::number(team->members.size())}, {"answers", Teams::answers(*team, live)}};
-        }
-        item->setData(SessionRoles::TeamLead, teamStrip.isEmpty() ? QVariant() : QVariant(teamStrip));
-        item->setData(SessionRoles::HasChildren, hasChildren || !leadTeam.isEmpty());
-        item->setData(SessionRoles::Expanded, leadTeam.isEmpty() ? m_expandedSessions.contains(e.key) : !m_collapsedTeams.contains(leadTeam));
-        if (firstSession < 0) firstSession = i;
-        if (!row.hidden && firstVisible < 0) firstVisible = i;
-        item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled | Qt::ItemIsDropEnabled);
-        item->setData(SessionRoles::Identity, e.identity);
-        item->setData(SessionRoles::RowCollapsed, m_sessionRowPreferences.collapsed(e.host, s));
-        const auto roles = sessionCardRoles(e);
-        for (auto role = roles.cbegin(); role != roles.cend(); ++role) item->setData(role.key(), role.value());
-        if (item->data(SessionRoles::RowCollapsed).toBool()) item->setData(Qt::AccessibleDescriptionRole, tr("Collapsed session row. Press Right to expand."));
-        const auto rowStatus = roles.value(StatusRole).toString(), desc = roles.value(DetailRole).toString();
-        const auto meta = roles.value(MetaRole).toString(), gitPath = roles.value(SessionRoles::GitPath).toString();
-        if (e.online && !gitPath.isEmpty()) m_client.requestGitStatus(e.host, gitPath);
-        QStringList accessibleFields{s.name, e.machine + QStringLiteral(" / ") + s.cmd + QStringLiteral(" / ") + rowStatus, meta};
-        if (item->data(SessionRoles::Working).toBool() && item->data(SessionRoles::WorkingSince).toDouble() > 0)
-            accessibleFields << tr("%1 since %2").arg(SessionPresentation::backgroundIdle(s) ? tr("Background") : s.phase == "compacting" ? tr("Compacting") : tr("Working"), QDateTime::fromSecsSinceEpoch(qint64(item->data(SessionRoles::WorkingSince).toDouble())).toLocalTime().toString("d MMM HH:mm:ss"));
-        if (!s.cwd.isEmpty()) accessibleFields << s.cwd;
-        accessibleFields << (s.model + (s.effort.isEmpty() ? QString() : "  " + s.effort));
-        if (s.visibleUnreadReply(e.online)) accessibleFields << tr("New reply (not viewed yet)");
-        const int optionalQuestions = roles.value(SessionRoles::OptionalQuestions).toInt();
-        if (optionalQuestions > 0) accessibleFields << SessionPresentation::optionalQuestionsLabel(optionalQuestions);
-        if (s.reviewLater) accessibleFields << tr("Marked needs attention: review later");
-        if (s.muted) accessibleFields << (s.sharedNotifications && e.online ? tr("Muted on all devices") : tr("Muted on all devices (last confirmed)"));
-        accessibleFields << desc;
-        if (!childCount(s, false, e.online, includeCompleted).isEmpty()) accessibleFields << tr("Subagents: %1").arg(childCount(s, true, e.online, includeCompleted));
-        if (!currentActivity(s, e.online) && !s.currentTool.isEmpty()) accessibleFields << tr("Last recorded: %1").arg(s.currentTool + " / " + s.toolDetail);
-        if (s.gitMetadataState == "unavailable") accessibleFields << tr("Git information unavailable");
-        const int availableWidth = m_sessions->screen() ? m_sessions->screen()->availableGeometry().width() : 460;
-        item->setData(Qt::AccessibleTextRole, sessionTooltip(accessibleFields, qBound(160, availableWidth - 40, 420)).plain);
-        if (e.key == requestedSelection) selectedRow = i;
-    }
-    // List scopes do not choose a replacement for a conversation that still exists.
-    const bool preserveConversation = selected();
-    // Choose a first row only on initial load. A removed conversation leaves an
-    // empty selection until an explicit choice, even after later fleet updates.
-    if (!m_selectedKey.isEmpty()) m_initialSelectionPending = false;
-    if (selectedRow < 0 && !preserveConversation && m_initialSelectionPending) selectedRow = firstVisible < 0 ? firstSession : firstVisible;
-    if (selectedRow >= 0) m_initialSelectionPending = false;
-    if (m_sessions->bulkSelecting()
-        || (selectedRow >= 0 && m_sessions->item(selectedRow)->data(KeyRole).toString() == m_selectedKey)) {
-        m_sessions->setCurrentRow(selectedRow, QItemSelectionModel::NoUpdate);
-        QItemSelection selection;
-        for (int i = 0; i < m_sessions->count(); ++i) {
-            auto *item = m_sessions->item(i);
-            if (!item->isHidden() && selectedKeys.contains(item->data(KeyRole).toString())) {
-                const auto index = m_sessions->model()->index(i, 0); selection.select(index, index);
-            }
-        }
-        m_sessions->selectionModel()->select(selection, QItemSelectionModel::ClearAndSelect);
-    } else {
-        m_sessions->clearBulkSelection(); m_sessions->setCurrentRow(selectedRow);
-    }
-    m_sessions->verticalScrollBar()->setValue(scroll);
-    int visibleWorking = 0, visibleAttention = 0;
-    for (const auto &e : visible) {
-        if (!e.session.muted && entryNeedsAttention(e)) ++visibleAttention;
-        if (SessionPresentation::working(e.session, e.online)) ++visibleWorking;
-    }
-    m_count->setText(visible.isEmpty() ? tr("No matching sessions") : tr("%1 shown, %2 working, %3 attention").arg(visible.size()).arg(visibleWorking).arg(visibleAttention));
-    const int starting = std::count_if(rows.cbegin(), rows.cend(), [](const Row &row) { return !row.launch.isEmpty(); });
-    if (starting) m_count->setText(visible.isEmpty() ? tr("%1 starting").arg(starting) : m_count->text() + tr(", %1 starting").arg(starting));
-    m_countFull = m_count->text(); m_countShort = QString::number(visible.size() + starting);
-    // The strip keeps this row hidden (applySessionStrip()).
-    m_folderFilterClear->setVisible(!m_folderFilterPath.isEmpty() && !(m_sessionDock && m_sessionDock->chromeNarrow()));
-    const auto folderStyle=MachinePlatform::of(m_fleet.metricsOf(m_folderFilterHost), m_folderFilterHost.isEmpty());
-    m_folderFilterClear->setText(tr("Folder: %1   ×").arg(MachinePlatform::leaf(m_folderFilterPath,folderStyle)));m_folderFilterClear->setToolTip(MachinePlatform::native(m_folderFilterPath,folderStyle)+tr("\nClear folder filter"));
-    m_count->setToolTip(m_countFull);
-    m_count->setVisible(!m_searchResults->active());
-    applySessionStrip();
+    // The account catalog, filters, counts and every row are prepared from a copy.
+    m_sessionAccountProfiles = m_accountsPage->catalogProfiles();
+    m_sessionAccountDetailsProfiles = m_accountsPage->profiles(true);
     m_rebuilding = false;
-    updateSelectionActions();
-    m_sessions->syncActivityAnimation();
-    // A vanished target also clears while search results own the list.
-    if ((selectedRow < 0 && !preserveConversation) || (selectedRow >= 0 && !m_searchResults->active())) selectSession(); else renderDetails();
+    requestRows();
+}
+
+void SessionsWindow::updateGitWatch()
+{
+    auto *streams = EventStreams::instance();
+    if (!streams) return;
+    QSet<QString> online, seen;
+    for (const auto &entry : std::as_const(m_entries)) {
+        const auto path = SessionPresentation::gitStatusPath(entry.session);
+        if (entry.online && !path.isEmpty()) online.insert(entry.host + '\n' + path);
+    }
+    QHash<QString, QStringList> paths;
+    const auto add = [&](const QString &host, const QString &path) {
+        const auto key = host + '\n' + path;
+        if (path.isEmpty() || !online.contains(key) || seen.contains(key)) return;
+        seen.insert(key); paths[host].append(path);
+    };
+    if (const auto *entry = selected()) add(entry->host, SessionPresentation::gitStatusPath(entry->session));
+    for (int i = 0; i < m_sessions->count(); ++i) {
+        const auto *item = m_sessions->item(i);
+        if (!item->isHidden()) add(item->data(SessionRoles::GitHost).toString(), item->data(SessionRoles::GitPath).toString());
+    }
+    for (const auto &entry : std::as_const(m_entries)) add(entry.host, SessionPresentation::gitStatusPath(entry.session));
+    streams->watchGit(paths);
 }
 
 void SessionsWindow::updateAttentionIndicator()
@@ -4061,7 +3972,12 @@ void SessionsWindow::checkViewedReply()
 void SessionsWindow::selectSession()
 {
     const auto *item = m_sessions->currentItem();
+    if(item&&!item->data(SessionRoles::LaunchId).toString().isEmpty()&&m_creations->owns(item->data(SessionRoles::LaunchId).toString())){
+        selectCreation(item->data(SessionRoles::LaunchId).toString());return;
+    }
     if (item && (item->data(SessionRoles::Header).toBool() || !item->data(SessionRoles::LaunchId).toString().isEmpty())) return;
+    if(item)m_selectedCreation.clear();
+    if(item&&item->data(KeyRole).toString()!=m_creationSessionToSelect)m_creationSessionToSelect.clear();
     const QString child = item ? item->data(SessionRoles::ChildId).toString() : QString();
     const QString key = item ? item->data(child.isEmpty() ? KeyRole : SessionRoles::ParentKey).toString() : QString();
     if (key != m_selectedKey) {
@@ -4097,7 +4013,19 @@ void SessionsWindow::inspect()
     if (!isVisible() || m_pages->currentIndex() != 0 || !entry || !entry->online) return;
     const int processInterval=m_detailTabs->currentWidget()==m_processes?ProcessSettings::activeMs():ProcessSettings::backgroundMs();
     const bool processes=ProcessSettings::enabled() && (!m_processPollAge.isValid() || m_processPollAge.elapsed()>=processInterval);
-    if(m_client.requestInspection(entry->host, entry->session.name, m_cursor, entry->session.archiveId,processes)) {
+    // A live event stream brings Activity as it happens (EventStream.h); only
+    // the process section is still polled, at its own interval.
+    auto *streams = EventStreams::instance();
+    const bool streamed = streams && streams->live(entry->host) && entry->session.archiveId.isEmpty()
+        && !m_streamEnded.contains(entry->host + '\n' + entry->session.name + '\n' + entry->session.runId);
+    if (streams) {
+        if (streamed) streams->follow(entry->host, entry->session.name, entry->session.runId, entry->session.conversationId, m_cursor);
+        else streams->unfollowAll();
+    }
+    if (streamed) {
+        m_inspectionAge.start();
+        if (processes && m_client.requestInspection(entry->host, entry->session.name, m_cursor, entry->session.archiveId, true)) m_processPollAge.start();
+    } else if(m_client.requestInspection(entry->host, entry->session.name, m_cursor, entry->session.archiveId,processes)) {
         m_inspectionAge.start();if(processes)m_processPollAge.start();
     }
     refreshAccountUsage();
@@ -4214,7 +4142,7 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
         m_restoredInspections.remove(restoredKey);
     }
     if (archiveId.isEmpty()) {
-        for (const auto &entry : m_entries)
+        for (const auto &entry : std::as_const(m_entries))
             if (entry.host == host && entry.session.name == name && entry.session.archiveId.isEmpty())
                 if (m_pendingSendEvidence.contains(entry.key)) m_pendingSendEvidence.insert(entry.key, sendEvidence(data));
         continueAfterCompact(host, name, data); continueAfterStart(host, name, data);
@@ -4414,12 +4342,88 @@ void SessionsWindow::setKeepWarm(int hours)
     CacheKeepalive::setHours(entry->host,entry->session,hours);
 }
 
+void SessionsWindow::updateTasks(const Entry *entry)
+{
+    if (!entry || entry->session.state == "archived") {
+        m_tasks->setContext({}, {}, {}, {}, {}, {}); m_taskInspector->setContext({}, {}, {}, {}); return;
+    }
+    // Sessions outside every catalog project have no tasks.
+    const QString projectId = m_organization.groupFor(entry->identity);
+    const auto *project = m_organization.group(projectId);
+    const bool real = project && projectId != QLatin1String("ungrouped");
+    QList<TaskSession> sessions;
+    for (const auto &other : std::as_const(m_entries)) {
+        if (other.session.state == "archived" || m_organization.groupFor(other.identity) != projectId) continue;
+        TaskSession session{other.host, other.session.name, status(other.session, other.online), {}, true};
+        session.conversation = other.session.conversationId;
+        session.id = other.session.launchId.isEmpty() ? (other.session.runId.isEmpty() ? QString() : QStringLiteral("run_id:") + other.session.runId)
+                                                     : QStringLiteral("launch_id:") + other.session.launchId;
+        session.running = other.online && other.session.state == "running" && other.session.processState != "exited";
+        session.working = SessionPresentation::working(other.session, other.online);
+        // In progress rows show its state as the session list does.
+        const bool attention = other.online && other.session.needsAction(), error = other.online && other.session.phase == "error";
+        session.kind = attention ? SessionStatusBadge::Attention : error ? SessionStatusBadge::Error
+            : session.working ? (session.status == tr("Background") ? SessionStatusBadge::Background : SessionStatusBadge::Working)
+            : session.status == tr("Paused") ? SessionStatusBadge::Paused : SessionStatusBadge::Neutral;
+        if (session.kind == SessionStatusBadge::Working && session.status != tr("Compacting")) session.status = tr("Working");
+        if (!session.running) session.blocker = tr("The agent is not running. Resume it before sending.");
+        else if (other.session.needsAction()) session.blocker = tr("agent is waiting for input, approval, or has an unknown state; open Terminal");
+        sessions << session;
+    }
+    m_tasks->setContext(real ? projectId : QString(), real ? project->name : QString(), entry->host, entry->session.name, entry->key, sessions);
+    m_taskInspector->setContext(real ? projectId : QString(), entry->host, entry->session.name, sessions);
+}
+
+void SessionsWindow::selectCreation(const QString &id)
+{
+    if(!m_creations->owns(id)||m_creations->operation(id)["state"]=="bound")return;
+    if(m_selectedCreation!=id||!m_selectedKey.isEmpty()){
+        if(!m_subagentId.isEmpty())closeSubagent();pushSelectionChanged({});
+        m_subagentComposer->setFileReferenceTarget({}, {}, {});m_readCandidate.clear();m_readSelectionKey.clear();
+        m_selectedCreation=id;m_selectedKey.clear();m_initialSelectionPending=false;
+        m_details={};m_events={};m_cursor=0;m_inspectError.clear();
+        m_composer->setSessionKey({});m_activityView->setSessionKey({});m_terminal->setSession(m_client.executable(),{},{});
+    }
+    renderCreation();
+}
+void SessionsWindow::renderCreation()
+{
+    const auto operation=m_creations->operation(m_selectedCreation);
+    if(operation.isEmpty())return;
+    m_detailStack->setCurrentWidget(m_creationPanel);
+    const auto scale=ContentScale::factor();const auto appearance=QString::number(m_dark)+':'+QString::number(scale);
+    if(m_creationText->property("creationAppearance").toString()!=appearance){
+        m_creationText->setProperty("creationAppearance",appearance);
+        setWorkspaceStyle(m_creationText,QString("QPlainTextEdit{background:%1;color:%2;border:1px solid %3;border-radius:6px;padding:10px;font-size:%4px;}")
+            .arg(m_dark?"#151b22":"#ffffff",m_dark?"#e8edf4":"#1a2733",m_dark?"#34414b":"#d7dfe5").arg(ContentScale::px(13,scale)));
+        setWorkspaceStyle(m_creationTitle,QString("QLabel{font-size:%1px;font-weight:600;}").arg(ContentScale::px(18,scale)));
+    }
+    const auto elapsed=qMax<qint64>(0,QDateTime::currentSecsSinceEpoch()-operation["created"].toInteger());
+    m_creationTitle->setText(tr("%1 · %2 · %3:%4").arg(operation["tag"].toString(),SessionCreationController::caption(operation))
+        .arg(elapsed/60).arg(elapsed%60,2,10,QLatin1Char('0')));
+    const auto text=SessionCreationController::details(operation);
+    if(m_creationText->toPlainText()!=text){
+        const auto scroll=m_creationText->verticalScrollBar()->value();m_creationText->setPlainText(text);
+        m_creationText->verticalScrollBar()->setValue(scroll);
+    }
+    m_creationContinue->setVisible(SessionCreationController::canResume(operation));
+    m_creationEdit->setVisible(m_creations->canEdit(m_selectedCreation));
+    const auto state=operation["state"].toString();
+    m_creationCheck->setVisible(state=="unknown"||state=="recover"||state=="confirming");
+    m_creationStop->setVisible(!operation["launch_dispatched"].toBool()&&state!="stopped"&&state!="failed"&&state!="storage_error");
+    m_creationStop->setEnabled(!operation["stop_requested"].toBool());
+    m_creationStop->setText((state=="cloning"||(state=="worktree"&&!operation["worktree_receipts"].toBool()))?tr("Stop after preparation"):tr("Stop creating"));
+}
+
 void SessionsWindow::renderDetails()
 {
+    if(!m_selectedCreation.isEmpty()){renderCreation();return;}
     updateWorktreeCleanupOffer();
     updateSessionLoading();
     m_compactCancel->setVisible(m_compacts.contains(m_selectedKey) || (m_startSend.key == m_selectedKey && !m_startSend.key.isEmpty()));
     const auto *entry = selected(); m_detailStack->setCurrentIndex(entry ? 1 : 0);
+    updateTasks(entry);
+    if (entry && m_inspectorPanel->isVisible() && m_inspector->block(InspectorCards::Context)->isExpanded()) m_accountsPage->ensureCatalogs();   // the account lines sit in the Context card
     if (entry && awaitingRestoredInspection(*entry) && m_inspectError.isEmpty())
         m_inspectError = tr("Session restored. Refreshing its current state…");
     const auto recoveryDetails=entry && entry->session.state != "archived"
@@ -4496,7 +4500,10 @@ void SessionsWindow::renderDetails()
         s.conversationState = m_details.value("conversation_state").toString(s.conversationState);
         s.runtimeState = m_details.value("runtime_state").toString(s.runtimeState);
         s.activitySummary = m_details.value("activity_summary").toString(s.activitySummary);
-        s.activityDetail = m_details.value("activity_detail").toString(s.activityDetail);
+        if (m_details.value("activity_detail").isString()) {
+            s.activityDetail = m_details.value("activity_detail").toString();
+            s.activityAnswers = QuestionReply::prepared(m_details, QStringLiteral("activity_detail"));
+        }
         s.providerError = m_details.value("provider_error").toObject();
         s.currentTool = m_details.value("current_tool").toString(s.currentTool);
         s.toolDetail = m_details.value("tool_detail").toString(s.toolDetail);
@@ -4750,10 +4757,11 @@ void SessionsWindow::renderDetails()
     const bool terminalTab = terminalAvailable && m_subagentId.isEmpty();
     // Loads the optional plugin on the first DeepSeek session, not at startup.
     const bool nativeTab = s.cmd == "dsh" && m_subagentId.isEmpty() && NativeBrowserPlugin::factory();
-    if (m_detailTabs->isTabVisible(1) != terminalTab) m_detailTabs->setTabVisible(1, terminalTab);
-    if (m_detailTabs->isTabVisible(2) != nativeTab) m_detailTabs->setTabVisible(2, nativeTab);
-    if (!terminalTab && m_detailTabs->currentIndex() == 1) m_detailTabs->setCurrentIndex(0);
-    if (!nativeTab && m_detailTabs->currentIndex() == 2) m_detailTabs->setCurrentIndex(0);
+    const int terminalIndex = m_detailTabs->indexOf(m_terminal), nativeIndex = m_detailTabs->indexOf(m_nativeUi);
+    if (m_detailTabs->isTabVisible(terminalIndex) != terminalTab) m_detailTabs->setTabVisible(terminalIndex, terminalTab);
+    if (m_detailTabs->isTabVisible(nativeIndex) != nativeTab) m_detailTabs->setTabVisible(nativeIndex, nativeTab);
+    if (!terminalTab && m_detailTabs->currentIndex() == terminalIndex) m_detailTabs->setCurrentIndex(0);
+    if (!nativeTab && m_detailTabs->currentIndex() == nativeIndex) m_detailTabs->setCurrentIndex(0);
     m_terminal->setAvailable(entry->online && s.state == "running" && terminalAvailable && !restoredPending,
         !entry->online ? tr("Machine unavailable. Reconnect when it is online.") :
         restoredPending ? tr("Refresh the restored session before opening Terminal.") :
@@ -4967,7 +4975,12 @@ void SessionsWindow::renderDetails()
     m_copyHeaderId->setEnabled(!identity.isEmpty()); m_copyHeaderId->setToolTip(copyCaption); m_copyHeaderId->setAccessibleName(copyCaption);
     // U25 part 6: the Environment card shows the session, folder, branch,
     // model and last event; this keeps the usage it reports.
-    QString info;
+    SessionAccounts::Catalog detailsAccounts;
+    detailsAccounts.reset(m_sessionAccountDetailsProfiles);
+    detailsAccounts.observe(entry->host, entry->machine, s);
+    QString info = QString("<h3>%1</h3><p>%2</p>").arg(tr("Account"), htmlText(detailsAccounts.description(entry->host, s)));
+    if (!s.accountId.isEmpty()) info += QString("<h3>%1</h3><p>%2</p>").arg(tr("Account profile"), htmlText(s.accountId));
+    if (!s.accountHome.isEmpty()) info += QString("<h3>%1</h3><p>%2</p>").arg(tr("Agent home"), htmlText(s.accountHome));
     updateEnvironmentCard();
     if (!m_subagentId.isEmpty()) info = QString("<h3>%1</h3><p>%2</p><h3>%3</h3><p>%4</p><h3>%5</h3><p>%6</p>")
         .arg(tr("Subagent"), htmlText(m_subagentId), tr("Parent session"), htmlText(s.name), tr("Directory"), htmlText(m_subagentCwd));
@@ -5023,7 +5036,7 @@ void SessionsWindow::updateLeadPanel()
     SessionLeadPanel::Session lead;
     QList<SessionLeadPanel::Session> subordinates, candidates;
     const auto leadId = SessionLeads::lead(entry->identity);
-    for (const auto &other : m_entries) {
+    for (const auto &other : std::as_const(m_entries)) {
         if (other.identity == entry->identity) continue;
         if (other.identity == leadId) lead = {other.identity, nameOf(other)};
         if (SessionLeads::lead(other.identity) == entry->identity) subordinates.append({other.identity, nameOf(other)});
@@ -5041,7 +5054,7 @@ void SessionsWindow::sendReportToLead()
     if (!entry) return;
     const auto leadId = SessionLeads::lead(entry->identity);
     const Entry *lead = nullptr;
-    for (const auto &other : m_entries) if (other.identity == leadId) lead = &other;
+    for (const auto &other : std::as_const(m_entries)) if (other.identity == leadId) lead = &other;
     if (!lead) { showNotice(tr("The lead session is not open."), true); return; }
     QString reply;
     for (int at = m_events.size(); at-- > 0 && reply.isEmpty();) {
@@ -5066,7 +5079,7 @@ QString SessionsWindow::teamProjectRules() const
 
 QString SessionsWindow::projectOfKey(const QString &key) const
 {
-    for (const auto &entry : m_entries) if (entry.key == key) return m_organization.groupFor(entry.identity);
+    for (const auto &entry : std::as_const(m_entries)) if (entry.key == key) return m_organization.groupFor(entry.identity);
     return {};
 }
 
@@ -6165,7 +6178,7 @@ void SessionsWindow::openExternalFile(const QString &path, bool otherMachine)
     }
 }
 
-void SessionsWindow::showNotice(const QString &message, bool error)
+void SessionsWindow::showNotice(const QString &message, bool error, bool transient)
 {
     m_notice->show();
     m_noticeDismiss->show();
@@ -6177,7 +6190,7 @@ void SessionsWindow::showNotice(const QString &message, bool error)
     const int revision=m_notice->property("noticeRevision").toInt()+1;
     m_notice->setProperty("noticeRevision",revision);
     updateSessionFeedback();
-    if (!error) QTimer::singleShot(m_noticeMs, this, [this,revision] {
+    if (!error || transient) QTimer::singleShot(m_noticeMs, this, [this,revision] {
         if (m_notice->property("noticeRevision").toInt()==revision) clearNotice();
     });
 }
@@ -6407,8 +6420,8 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
         }
         ReadMarkStore::add(m_fleet.takeNewReadMarks());
         const auto marks = m_fleet.attentionMarks(), read = m_fleet.readReplies();
-        QSettings().setValue("attention/sessionMarks", QJsonDocument(marks).toJson(QJsonDocument::Compact));
-        QSettings().setValue("attention/readReplies", QJsonDocument(read).toJson(QJsonDocument::Compact));
+        SettingsJson::store(QStringLiteral("attention/sessionMarks"), QJsonDocument(marks));
+        SettingsJson::store(QStringLiteral("attention/readReplies"), QJsonDocument(read));
         if (current.key == m_selectedKey) m_readSelectionKey = current.key;
         rebuild(); updateDashboard(); emit attentionMarksChanged(marks, read); return;
     }
@@ -6546,6 +6559,7 @@ void SessionsWindow::archiveSession()
     const auto *e = selected();
     if (!e || !e->online || m_pending || !m_renameKey.isEmpty() || (e->session.state != "paused" && e->session.state != "stopped")) return;
     const QString host = e->host, name = e->session.name;
+    m_removeTerminatedWorktree=false;
     ++m_worktreeCleanupRevision; m_worktreeCleanupOffered = false; m_worktreeCleanup->hide();
     m_archivedWorktreeRun = e->session.runId;
     const bool inspected = m_details.value("git_worktree").toBool() && !m_details.value("git_root").toString().isEmpty();
@@ -6578,7 +6592,7 @@ void SessionsWindow::updateWorktreeCleanupOffer()
     };
     const auto *box = host.isEmpty() ? &m_fleet.local() : m_fleet.peer(host);
     if (box) for (const auto &session : box->sessions) if (inUse(session)) { m_worktreeCleanup->hide(); return; }
-    for (const auto &entry : m_entries)
+    for (const auto &entry : std::as_const(m_entries))
         if (entry.host == host && inUse(entry.session)) { m_worktreeCleanup->hide(); return; }
     // acceptInspection binds details to the selected host/name. Only its exact
     // current tracked run/conversation can add newer checkout occupancy here.
@@ -6616,6 +6630,24 @@ void SessionsWindow::cleanUpArchivedWorktree()
         {"row",QJsonObject{{"path",offer[2]}, {"kind","linked"}}}}}, this);
     dialog.exec();
     if (dialog.changed()) { emit refreshRequested(); updateWorktrees(); }
+}
+
+void SessionsWindow::reviewTerminatedWorktrees(const QList<QStringList> &offers)
+{
+    QList<QJsonObject> entries;
+    for(const auto &offer:offers) {
+        if(offer.size()<4 || offer[2].isEmpty() || offer[3].isEmpty())continue;
+        auto entry=QJsonObject{{"host",offer[0]},{"machine",offer[0].isEmpty()?m_fleet.local().host:offer[0]},
+            {"common_dir",offer[3]},{"exit_cleanup",true},{"expected_owner_id",offer.value(4)},{"row",QJsonObject{{"path",offer[2]},{"kind","linked"}}}};
+        const auto outcome=m_terminationCleanupResults.take(offer[0]+'\n'+offer[1]+'\n'+offer[2]);
+        if(!outcome.isEmpty() && (outcome["common_dir"]!=offer[3] || outcome["status"]!="kept")) {
+            entry["cleanup_status"]=outcome["common_dir"]==offer[3] && outcome["status"]=="removed"?QStringLiteral("removed"):QStringLiteral("unconfirmed");
+            entry["cleanup_detail"]=outcome["reason"];
+        }
+        entries<<entry;
+    }
+    if(entries.isEmpty())return;
+    m_terminationCleanup->add(entries);
 }
 
 void SessionsWindow::forkSession()
@@ -6695,7 +6727,7 @@ void SessionsWindow::renameSession()
     save->setDefault(true); layout->addWidget(buttons);
     const auto problem = [this, original, archived, prefix](const QString &tag) {
         const QString invalid = SessionTag::problem(tag); if (!invalid.isEmpty()) return invalid;
-        if (!archived) for (const auto &other : m_entries)
+        if (!archived) for (const auto &other : std::as_const(m_entries))
             if (other.host == original.host && other.key != original.key && other.session.state != "archived" && other.session.name == prefix + tag)
                 return tr("This name is already in use on %1.").arg(original.machine);
         return QString();
@@ -6772,8 +6804,24 @@ void SessionsWindow::terminateSession()
              : tr("Remove %1 from HGS? The agent’s native conversation history is kept.").arg(name), QMessageBox::Yes | QMessageBox::Cancel, this);
     confirm.setObjectName("terminateSessionConfirm"); confirm.setTextFormat(Qt::PlainText);
     confirm.setInformativeText(tr("Computer: %1").arg(original.machine));
+    QCheckBox *removeWorktree=nullptr;
+    const bool exactInspection=m_details.value("run_id").toString()==run
+        && m_details.value("conversation_id").toString()==conversation;
+    const bool linked=original.session.gitWorktree || (exactInspection && m_details.value("git_worktree").toBool());
+    if(live && keepArchive && linked) {
+        removeWorktree=new QCheckBox(tr("Remove the working folder after stopping"),&confirm);
+        removeWorktree->setObjectName("removeTerminatedWorktree");
+        removeWorktree->setChecked(QSettings().value("workspace/removeWorktreeAfterTermination",false).toBool());
+        removeWorktree->setToolTip(tr("Cleanup runs in the background. Unsaved work, unknown local files and folders in use are kept for review."));
+        confirm.setCheckBox(removeWorktree);
+        confirm.setInformativeText(tr("Computer: %1\nThe conversation and branch are kept. Folders that need review stay on disk.").arg(original.machine));
+    }
     confirm.button(QMessageBox::Yes)->setText(live ? (keepArchive ? tr("Stop and archive") : tr("Terminate session"))
         : archived ? tr("Forget archived session") : tr("Forget saved session"));
+    if(removeWorktree){
+        const auto update=[&confirm](bool checked){confirm.button(QMessageBox::Yes)->setText(checked?tr("Stop and remove folder"):tr("Stop and archive"));};
+        connect(removeWorktree,&QCheckBox::toggled,&confirm,update);update(removeWorktree->isChecked());
+    }
     confirm.setDefaultButton(QMessageBox::Cancel); confirm.setEscapeButton(QMessageBox::Cancel);
     if (confirm.exec() != QMessageBox::Yes) return;
     // U1: the fleet polls while the dialog is open; a lost selection says so.
@@ -6792,11 +6840,14 @@ void SessionsWindow::terminateSession()
         m_forgetBindingRequest = m_client.requestForgetBinding(host, name, run, conversation);
         renderDetails(); return;
     }
+    m_removeTerminatedWorktree=removeWorktree && removeWorktree->isChecked();
+    m_archivedWorktreeOwnerId=original.session.worktreeOwnerId;
+    if(removeWorktree)QSettings().setValue("workspace/removeWorktreeAfterTermination",removeWorktree->isChecked());
     m_pending = true; m_restoreKey.clear();
     if(live){
         ++m_worktreeCleanupRevision; m_worktreeCleanupOffered = false; m_worktreeCleanup->hide();
         m_archivedWorktreeRun = original.session.runId;
-        const bool inspected=m_details.value("git_worktree").toBool() && !m_details.value("git_root").toString().isEmpty();
+        const bool inspected=exactInspection && m_details.value("git_worktree").toBool() && !m_details.value("git_root").toString().isEmpty();
         m_archivedWorktree = keepArchive ? QStringList{host,name,inspected ? m_details.value("git_root").toString() : original.session.gitWorktree ? original.session.gitRoot : QString(),
             inspected ? m_details.value("git_common_dir").toString() : original.session.gitWorktree ? original.session.gitCommonDir : QString()} : QStringList{};
         m_terminationFinished.remove(original.key);m_terminating.insert(original.key,original);m_terminationCommand=original.key;
@@ -6883,7 +6934,7 @@ void SessionsWindow::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event);
     if (m_framelessMain) FramelessWindow::apply(this); rebuild(); if (m_dashboardStale) updateDashboard();
-    m_timer.start(); m_readTimer.start(); emit refreshRequested(); inspect();
+    m_timer.start(); m_readTimer.start(); emit refreshRequested(); inspect(); m_tasks->setPolling(true);
 }
 // U25 part 6 (spec 6): links from outside (Open team panel, N iron rules,
 // the git chips, the context and cache indicators) open the inspector and
@@ -7027,6 +7078,16 @@ void SessionsWindow::showDiff(const QJsonObject &data, const QString &error)
 
 bool SessionsWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    if (m_workSplitter && watched == m_workSplitter->handle(1) && event->type() == QEvent::MouseButtonDblClick
+        && static_cast<QMouseEvent *>(event)->button() == Qt::LeftButton) {
+        m_inspectorWidth = DefaultInspectorWidth;
+        QSettings().setValue("workspace/inspectorWidth", m_inspectorWidth);
+        applyInspectorWidth(); return true;
+    }
+    if (watched == m_workSplitter && event->type() == QEvent::Resize && !m_inspectorWidthPending) {
+        m_inspectorWidthPending = true;
+        QTimer::singleShot(0, this, [this] { m_inspectorWidthPending = false; applyInspectorWidth(); });
+    }
 
     if (m_children && watched == m_children->viewport() && event->type() == QEvent::Resize)
         QTimer::singleShot(0, this, &SessionsWindow::renderDetails);
@@ -7044,7 +7105,7 @@ bool SessionsWindow::eventFilter(QObject *watched, QEvent *event)
     }
     return QWidget::eventFilter(watched, event);
 }
-void SessionsWindow::hideEvent(QHideEvent *event) { m_readTimer.stop(); m_readCandidate.clear(); m_timer.stop(); m_terminal->disconnectSession(); QWidget::hideEvent(event); }
+void SessionsWindow::hideEvent(QHideEvent *event) { m_readTimer.stop(); m_readCandidate.clear(); m_timer.stop(); m_tasks->setPolling(false); m_terminal->disconnectSession(); QWidget::hideEvent(event); }
 void SessionsWindow::closeEvent(QCloseEvent *event)
 {
     QSettings settings; settings.setValue("sessions/geometry", saveGeometry()); settings.setValue("workspace/splitter", m_splitter->saveState());
@@ -7175,7 +7236,7 @@ void SessionsWindow::setNewTeamTab(bool shown)
 Teams::Live SessionsWindow::teamLive(const Teams::Member &member) const
 {
     Teams::Live live;
-    for(const auto &entry:m_entries)if(entry.host==member.host&&entry.session.name==member.session&&entry.session.state!="archived"){
+    for(const auto &entry:std::as_const(m_entries))if(entry.host==member.host&&entry.session.name==member.session&&entry.session.state!="archived"){
         const auto &s=entry.session;
         live.known=true;live.offline=!entry.online;
         live.attention=entry.online&&s.needsAction();
@@ -7195,7 +7256,7 @@ TeamNewDialog *SessionsWindow::teamNewForm(QWidget *parent)
     }
     QList<TeamNewDialog::Session> sessions;
     // F4: the Team designer is offered to no team.
-    for(const auto &e:m_entries)if(e.session.state!="archived"&&e.online&&!Teams::isDesignerSession(e.host,e.session.name))sessions.append({e.host,e.session.name,e.session.cmd});
+    for(const auto &e:std::as_const(m_entries))if(e.session.state!="archived"&&e.online&&!Teams::isDesignerSession(e.host,e.session.name))sessions.append({e.host,e.session.name,e.session.cmd});
     const auto *entry=selected();
     QString folder,project;
     if(entry){if(entry->host.isEmpty())folder=entry->session.cwd;project=m_organization.groupFor(entry->identity);
@@ -7291,22 +7352,22 @@ void SessionsWindow::showTeam(const QString &team)
 }
 void SessionsWindow::filterFolder(const QString &host,const QString &path,bool checkout)
 {
-    m_projectFilters.clear(); m_folderFilterHost=host;m_folderFilterPath=path;m_folderFilterCheckout=checkout;
+    m_projectFilters.clear(); m_accountFilters.clear(); m_folderFilterHost=host;m_folderFilterPath=path;m_folderFilterCheckout=checkout;
     if(path.isEmpty()){m_filter="all";m_hostFilters.clear();m_search->clear();}
     showSessionList();
 }
 void SessionsWindow::openRelatedSession(const QString &host,const QString &name,const QString &archive)
 {
-    m_folderFilterPath.clear();m_filter=archive.isEmpty()?"all":"archived";m_hostFilters.clear(); m_projectFilters.clear();m_search->clear();showSessionList();
+    m_folderFilterPath.clear();m_filter=archive.isEmpty()?"all":"archived";m_hostFilters.clear(); m_projectFilters.clear(); m_accountFilters.clear();m_search->clear();showSessionList();
     const auto key=host+'\n'+name+(archive.isEmpty()?QString():'\n'+archive);revealSession(key);
-    for(int i=0;i<m_sessions->count();++i)if(m_sessions->item(i)->data(KeyRole).toString()==key){m_sessions->setCurrentRow(i);m_sessions->scrollToItem(m_sessions->item(i));return;}
+    revealRow(key,true);
 }
 // WhiteWh fork: agent teams. The Team designer mode shows the catalog and the
 // designer session, which proposes catalog changes; its draft waits for Apply.
 QString SessionsWindow::teamDesignerSession() const
 {
     // One designer conversation, outside the projects: hgs starts it in its own folder.
-    for(const auto &e:m_entries)if(e.session.state=="running"&&Teams::isDesignerSession(e.host,e.session.name))return e.session.name;
+    for(const auto &e:std::as_const(m_entries))if(e.session.state=="running"&&Teams::isDesignerSession(e.host,e.session.name))return e.session.name;
     return {};
 }
 void SessionsWindow::showTeamDesigner()

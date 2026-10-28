@@ -1,3 +1,4 @@
+#include "SettingsJson.h"
 #include "ProjectsDialog.h"
 #include "CloneRepositoryDialog.h"
 #include "WorktreePanel.h"
@@ -143,7 +144,7 @@ public:
 
 ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded, SessionOrganization *projects)
     : QDialog(parent), m_client(client),
-      m_ownedProjects(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object()),
+      m_ownedProjects(SettingsJson::object("workspace/organization")),
       m_projects(projects ? projects : &m_ownedProjects)
 {
     setObjectName("projectsPage"); setWindowTitle(tr("Projects")); resize(850, 560);
@@ -564,7 +565,10 @@ QHash<QString,ProjectsDialog::FolderKind> ProjectsDialog::folderKinds() const
 }
 void ProjectsDialog::changed()
 {
-    if (m_projects == &m_ownedProjects) QSettings().setValue("workspace/organization",QJsonDocument(m_projects->toJson()).toJson(QJsonDocument::Compact));
+    if (m_projects == &m_ownedProjects) {
+        const QJsonDocument document(m_projects->toJson()); const auto bytes = document.toJson(QJsonDocument::Compact);
+        QSettings().setValue("workspace/organization", bytes); SettingsJson::remember("workspace/organization", bytes, document);
+    }
     emit organizationChanged(); refresh(); m_status->setText(tr("Saved"));
 }
 void ProjectsDialog::selectProject(const QString &id)

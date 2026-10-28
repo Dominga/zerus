@@ -24,6 +24,7 @@
 #include <unistd.h>
 #endif
 #include "ChildProcess.h"
+#include "EventStream.h"
 #include "FakeCli.h"
 #include "FleetState.h"
 #include "HgsClient.h"
@@ -42,11 +43,15 @@ private slots:
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_settings->path());
     }
     void parsesBox();
+    void listingDigestIgnoresOnlyObservationFields();
+    void listingPollsCarryTheirDigest();
     void parsesSharedReadState();
     void parsesSharedNotificationsAndRejectsMalformedPreferences();
     void notificationsUseStdinAndRequireExactCasConfirmation();
     void notificationsRequireLocalCapabilityEvenForANewPeer();
     void readMarksUseStdinAndAcceptOnlyHostAnswers();
+    void taskCommandsUseStdinAndReportFailures();
+    void sendsAndCancelsWaitForAnotherComputer();
     void cliVersionUsesConfiguredExecutableAndRefreshes();
     void parsesSavedSessions();
     void parsesActivityMetadata();
@@ -110,6 +115,7 @@ private slots:
     void cachedDownloadReuseCoalescesAndForceKeepsPriorCopy();
     void cachedDownloadFanoutStopsWhenOwnerIsDestroyed();
     void gitStatusReadsAreSharedAndScopedToMachineAndFolder();
+    void liveStreamGitStatusReplacesPollsUntilItStops();
     void pollsLaunchOffTheGuiThreadAndReportOnIt();
     void destroyedClientKillsItsPolls();
     void directChildrenSkipPipesTheRunnerIsCreating();
@@ -442,6 +448,75 @@ void TestHgsClient::gitStatusReadsAreSharedAndScopedToMachineAndFolder()
     QVERIFY(lines.contains("@peer git-status --path /repo --json"));
 }
 
+void TestHgsClient::liveStreamGitStatusReplacesPollsUntilItStops()
+{
+    QTemporaryDir fixture; QVERIFY(fixture.isValid());
+    const auto script = fixture.filePath("hgs");
+    QVERIFY(FakeCli::install(script, R"PY(#!/usr/bin/env python3
+import json, sys
+if sys.argv[1:] == ['--help']:
+    print('usage: hgs ...\n       Event stream ABI: watch-v1')
+    sys.exit(0)
+if sys.argv[1:2] == ['git-status']:
+    open(__file__ + '.calls', 'a').write(' '.join(sys.argv[1:]) + '\n')
+    print(json.dumps({'state': 'ok', 'root': '/repo', 'branch': 'main', 'changed_files': 9, 'remote_state': 'verified', 'remote_age_seconds': 0}))
+    sys.exit(0)
+if sys.argv[1:] != ['watch', '--json']:
+    sys.exit(2)
+seq = 0
+def send(t, **fields):
+    global seq
+    seq += 1
+    print(json.dumps(dict(v=1, seq=seq, t=t, **fields)), flush=True)
+send('hello', machine_id=None, host='fixture', hgs_version='1.57.0', stream='s', heartbeat_ms=10000, max_frame_bytes=1048576,
+     topics=['catalog', 'catalog.meta', 'activity', 'git'], limits={'git_subscriptions': 64})
+send('snapshot', topic='catalog', items=[], page=0, last=True, cursor=1)
+send('snapshot', topic='catalog.meta', value={'host': 'fixture', 'ok': True}, page=0, last=True, cursor=1)
+for text in sys.stdin:
+    op = json.loads(text)
+    if op.get('topic') == 'git' and op.get('op') == 'subscribe':
+        send('state', topic='git', key=op['path'], rev=1, value={'state': 'ok', 'path': op['path'], 'root': op['path'],
+             'branch': 'main', 'changed_files': 4, 'ahead': 0, 'behind': 0, 'remote_state': 'verified',
+             'remote_checked_at': 100.0, 'remote_age_seconds': 10.0, 'sampled_at': 1.0})
+)PY"));
+    HgsClient::setGitStatusIntervalForTests(300);
+    EventStreams streams(FakeCli::program(script));
+    HgsClient client(FakeCli::program(script));
+    connect(&streams, &EventStreams::gitStatusReady, &client, &HgsClient::acceptGitStatus);
+    QSignalSpy changed(&client, &HgsClient::gitStatusChanged);
+    streams.setHosts({QString()});
+    streams.watchGit({{QString(), {QStringLiteral("/repo")}}});
+    QTRY_VERIFY(streams.live({}));
+    QVERIFY(streams.coversGit({}, "/repo")); QVERIFY(!streams.coversGit({}, "/other")); QVERIFY(!streams.coversGit("peer", "/repo"));
+    // The stream's state lands where a poll's would, with no git-status child.
+    QTRY_COMPARE(client.gitStatusSnapshot({}, "/repo")["changed_files"].toInt(), 4);
+    QCOMPARE(changed.size(), 1);
+    const auto streamed = client.gitStatusSnapshot({}, "/repo");
+    QVERIFY(streamed["received_at_ms"].toDouble() > 0);
+    client.requestGitStatus({}, "/repo");
+    QCOMPARE(changed.size(), 1);
+    // A covered value is dated anew each interval; the remote's age keeps
+    // counting, so verification still lapses 60 s after the remote check.
+    QTest::qWait(400);
+    client.requestGitStatus({}, "/repo");
+    QCOMPARE(changed.size(), 2);
+    const auto refreshed = client.gitStatusSnapshot({}, "/repo");
+    const double moved = refreshed["received_at_ms"].toDouble() - streamed["received_at_ms"].toDouble();
+    QVERIFY(moved >= 300);
+    QCOMPARE(refreshed["remote_age_seconds"].toDouble(), 10.0 + moved / 1000.);
+    QCOMPARE(refreshed["changed_files"].toInt(), 4);
+    QTest::qWait(200);
+    QVERIFY(!QFile::exists(script + ".calls"));
+
+    // Without a live stream, polling resumes.
+    streams.stream({})->stop();
+    QVERIFY(!streams.coversGit({}, "/repo"));
+    QTRY_VERIFY((client.requestGitStatus({}, "/repo"), client.gitStatusSnapshot({}, "/repo")["changed_files"].toInt() == 9));
+    QFile calls(script + ".calls"); QVERIFY(calls.open(QIODevice::ReadOnly));
+    QCOMPARE(calls.readAll(), QByteArray("git-status --path /repo --json\n"));
+    HgsClient::setGitStatusIntervalForTests(15000);
+}
+
 void TestHgsClient::questionReplyPreviews_data()
 {
     QTest::addColumn<QString>("prompt");
@@ -468,20 +543,38 @@ void TestHgsClient::questionReplyPreviews_data()
 void TestHgsClient::questionReplyPreviews()
 {
     QFETCH(QString, prompt); QFETCH(QString, preview);
-    SessionInfo session;session.tracked=true;session.phase="working";session.activity="busy";
-    session.prompt=prompt;session.activitySummary="Working";
-    session.activityDetail=prompt.left(240)+QChar(0x2026);
-    QCOMPARE(SessionPresentation::currentAction(session),"Working: "+preview);
-    session.activityDetail=prompt;
-    QCOMPARE(SessionPresentation::currentAction(session),"Working: "+preview);
-    session.phase="input";
-    QCOMPARE(SessionPresentation::currentAction(session),"Needs input: "+preview);
-    session.phase="working";session.activitySummary.clear();session.activityDetail.clear();
-    QCOMPARE(SessionPresentation::currentAction(session),"Working: "+preview);
+    // The answers are prepared with the row, off the GUI thread (QuestionReply.h).
+    const auto row = [&prompt](const QJsonObject &fields) {
+        QJsonObject raw{{"name", "codex/demo"}, {"tracked", true}, {"phase", "working"}, {"activity", "busy"},
+                        {"prompt", prompt}, {"activity_summary", "Working"}};
+        for (auto it = fields.begin(); it != fields.end(); ++it) raw[it.key()] = it.value();
+        return HgsClient::box(QJsonObject{{"host", "local"}, {"ok", true}, {"sessions", QJsonArray{raw}}}).sessions.first();
+    };
+    QCOMPARE(SessionPresentation::currentAction(row({{"activity_detail", prompt.left(240) + QChar(0x2026)}})), "Working: " + preview);
+    QCOMPARE(SessionPresentation::currentAction(row({{"activity_detail", prompt}})), "Working: " + preview);
+    QCOMPARE(SessionPresentation::currentAction(row({{"activity_detail", prompt}, {"phase", "input"}})), "Needs input: " + preview);
+    QCOMPARE(SessionPresentation::currentAction(row({{"activity_summary", ""}})), "Working: " + preview);
     // A previous question reply must not replace a subsequent tool excerpt.
-    session.activitySummary="Read";session.currentTool="Read";session.toolDetail="src/example.rs";session.activityDetail=session.toolDetail;
-    QCOMPARE(SessionPresentation::currentAction(session),QString("Read: src/example.rs"));
-    QCOMPARE(session.prompt,prompt);
+    const auto tool = row({{"activity_summary", "Read"}, {"current_tool", "Read"}, {"tool_detail", "src/example.rs"}, {"activity_detail", "src/example.rs"}});
+    QCOMPARE(SessionPresentation::currentAction(tool), QString("Read: src/example.rs"));
+    QCOMPARE(tool.prompt, prompt);
+    // An inspection's detail carries the preview its prepare step recorded.
+    auto running = row({{"state", "running"}, {"run_id", "run-one"}, {"conversation_id", "conversation-one"}, {"last_event_at", 1},
+                        {"prompt", "Earlier request"}, {"activity_detail", "Reading"}});
+    QCOMPARE(SessionPresentation::currentAction(running), QString("Working: Reading"));
+    QJsonObject details{{"tracked", true}, {"run_id", "run-one"}, {"conversation_id", "conversation-one"}, {"last_event_at", 2},
+                        {"activity_summary", "Working"}, {"activity_detail", prompt}};
+    QuestionReply::annotate(details);
+    QVERIFY(details.contains(QuestionReply::previewKey("activity_detail")));
+    running = SessionPresentation::inspected(running, details);
+    QCOMPARE(running.activityDetail, prompt); QCOMPARE(running.activityAnswers, preview);
+    QCOMPARE(SessionPresentation::currentAction(running), "Working: " + preview);
+    // Search and archive rows a GUI-thread conversion reads carry theirs too.
+    QJsonArray rows{QJsonObject{{"name", "codex/demo"}, {"prompt", prompt}}, QJsonObject{{"name", "codex/plain"}, {"prompt", "Plain"}}};
+    QuestionReply::annotateRows(rows);
+    QCOMPARE(rows[0].toObject().value(QuestionReply::previewKey("prompt")).toString(), preview);
+    QVERIFY(!rows[1].toObject().contains(QuestionReply::previewKey("prompt")));
+    QCOMPARE(HgsClient::parseSessions(rows).first().promptAnswers, preview);
 }
 
 void TestHgsClient::unrecognizedQuestionPreviewsStayLiteral()
@@ -1721,6 +1814,76 @@ void TestHgsClient::missingBinaryEmitsFailed()
 // уже "в полёте" -- независимо от того, успела ли ОС вообще стартовать процесс первого
 // вызова. Поэтому фейковый hgs ниже не спит вовсе: он сразу пишет метку в лог-файл и
 // отвечает валидным JSON, и дедупликация проверяется без единой искусственной паузы.
+namespace {
+QJsonObject digestListing()
+{
+    const QJsonObject row{{"name", "codex/p/one"}, {"cmd", "codex"}, {"run_id", "run-1"}, {"phase", "idle"},
+        {"goal_observed_at", 10.5}, {"process_work", QJsonObject{{"count", 1}, {"started_at", 4.0}, {"sampled_at", 10.5}}}};
+    return {{"host", "arch"}, {"ok", true}, {"peers", QJsonArray{"mac"}}, {"projects", QJsonObject{{"p", "/projects/p"}}},
+        {"metrics", QJsonObject{{"cpu_percent", 5.0}, {"sampled_at", 10.5}}},
+        {"desktop_presence", QJsonObject{{"idle_seconds", 3.0}}}, {"sessions", QJsonArray{row, QJsonObject{{"name", "sh/p"}}}}};
+}
+QJsonObject withRow(QJsonObject listing, int index, const QString &key, const QJsonValue &value)
+{
+    auto rows = listing["sessions"].toArray(); auto row = rows[index].toObject(); row[key] = value;
+    rows[index] = row; listing["sessions"] = rows; return listing;
+}
+}
+
+void TestHgsClient::listingDigestIgnoresOnlyObservationFields()
+{
+    const auto base = digestListing();
+    const auto digest = HgsClient::listingDigest(base);
+    QCOMPARE(digest.size(), 32);
+    // Observation fields that change on every read without news.
+    auto observed = withRow(base, 0, "goal_observed_at", 11.5);
+    observed = withRow(observed, 0, "process_work", QJsonObject{{"count", 1}, {"started_at", 4.0}, {"sampled_at", 12.5}});
+    observed["metrics"] = QJsonObject{{"cpu_percent", 70.0}, {"sampled_at", 12.5}};
+    observed["desktop_presence"] = QJsonObject{{"idle_seconds", 9.0}, {"locked", true}};
+    QCOMPARE(HgsClient::listingDigest(observed), digest);
+    // Everything else counts, including the rest of the process sample and row order.
+    QVERIFY(HgsClient::listingDigest(withRow(base, 0, "phase", "working")) != digest);
+    QVERIFY(HgsClient::listingDigest(withRow(base, 0, "process_work", QJsonObject{{"count", 2}, {"started_at", 4.0}, {"sampled_at", 10.5}})) != digest);
+    QVERIFY(HgsClient::listingDigest(withRow(base, 1, "goal", QJsonObject{{"text", "ship"}})) != digest);
+    auto reordered = base; reordered["sessions"] = QJsonArray{base["sessions"].toArray()[1], base["sessions"].toArray()[0]};
+    QVERIFY(HgsClient::listingDigest(reordered) != digest);
+    auto meta = base; meta["peers"] = QJsonArray{"mac", "air"};
+    QVERIFY(HgsClient::listingDigest(meta) != digest);
+    meta = base; meta["ok"] = false;
+    QVERIFY(HgsClient::listingDigest(meta) != digest);
+
+    QString error;
+    const auto parsed = HgsClient::parseListing(QJsonDocument(observed).toJson(), &error);
+    QVERIFY(error.isEmpty()); QCOMPARE(parsed.digest, digest); QCOMPARE(parsed.sessions.size(), 2);
+    QCOMPARE(parsed.metrics.value("cpu_percent").toDouble(), 70.0);
+    QVERIFY(HgsClient::parseBox(QJsonDocument(base).toJson(), &error).digest.isEmpty());
+    QVERIFY(HgsClient::parseListing("{", &error).digest.isEmpty()); QVERIFY(!error.isEmpty());
+}
+
+void TestHgsClient::listingPollsCarryTheirDigest()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const auto path = dir.filePath("hgs"), counter = dir.filePath("count");
+    // Each call answers with a later observation time; the third one with news.
+    QVERIFY(FakeCli::install(path, "#!/usr/bin/env python3\nimport json,os\n"
+        "p=" + FakeCli::pythonString(counter) + "\nn=int(open(p).read()) if os.path.exists(p) else 0\nopen(p,'w').write(str(n+1))\n"
+        "row={'name':'codex/p/one','cmd':'codex','phase':'working' if n>=2 else 'idle','goal_observed_at':n,"
+        "'process_work':{'count':0,'sampled_at':n}}\n"
+        "print(json.dumps({'host':'zpeer','ok':True,'metrics':{'sampled_at':n},'sessions':[row]}))\n"));
+    HgsClient client(FakeCli::program(path));
+    QList<BoxState> local, peer;
+    connect(&client, &HgsClient::localReady, this, [&local](const BoxState &box) { local << box; });
+    connect(&client, &HgsClient::peerReady, this, [&peer](const BoxState &box) { peer << box; });
+    client.requestLocal(); QTRY_COMPARE(local.size(), 1);
+    client.requestPeer("mac"); QTRY_COMPARE(peer.size(), 1);
+    client.requestLocal(); QTRY_COMPARE(local.size(), 2);
+    QCOMPARE(local[0].digest.size(), 32);
+    QCOMPARE(peer[0].digest, local[0].digest);
+    QCOMPARE(peer[0].host, QString("mac")); QCOMPARE(peer[0].reportedHost, QString("zpeer"));
+    QVERIFY(local[1].digest != local[0].digest);
+    QCOMPARE(local[0].sessions[0].backgroundObservedAt, 0.0); QCOMPARE(peer[0].sessions[0].backgroundObservedAt, 1.0);
+}
+
 void TestHgsClient::localPollingReportsStartAndRecoversFromFailure()
 {
     QTemporaryDir dir; const auto path = dir.filePath("hgs");
@@ -2166,6 +2329,35 @@ void TestHgsClient::parsesSharedReadState()
     QVERIFY(!box.sessions[2].sharedRead);
 }
 
+void TestHgsClient::taskCommandsUseStdinAndReportFailures()
+{
+    QTemporaryDir directory; QFile script(directory.filePath("hgs")); QVERIFY(script.open(QIODevice::WriteOnly));
+    script.write(R"(#!/usr/bin/env python3
+import json,pathlib,sys
+text=sys.stdin.read()
+pathlib.Path(__file__).with_name('task.json').write_text(json.dumps({'argv':sys.argv[1:],'stdin':text}))
+if sys.argv[2]=='fail': print('no task T-zz in this project',file=sys.stderr);sys.exit(1)
+if sys.argv[2]=='garbage': print('not json');sys.exit(0)
+print(json.dumps({'task':{'id':'T-1'}}))
+)");
+    script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName()));
+    QSignalSpy ready(&client, &HgsClient::taskReady), failed(&client, &HgsClient::taskFailed);
+    const QString prompt = "Fix '$HOME' and `quotes`\nsecond line";
+    const auto id = client.requestTask({"add", "--project", "orchard"}, prompt);
+    QTRY_COMPARE(ready.size(), 1); QCOMPARE(ready[0][0].toULongLong(), id);
+    QCOMPARE(ready[0][1].toJsonObject().value("task").toObject().value("id").toString(), QString("T-1"));
+    QFile log(directory.filePath("task.json")); QVERIFY(log.open(QIODevice::ReadOnly));
+    const auto call = QJsonDocument::fromJson(log.readAll()).object();
+    QCOMPARE(call.value("argv").toArray(), QJsonArray({"task", "add", "--project", "orchard"}));
+    QCOMPARE(call.value("stdin").toString(), prompt);
+    const auto missing = client.requestTask({"fail"});
+    QTRY_COMPARE(failed.size(), 1); QCOMPARE(failed[0][0].toULongLong(), missing);
+    QCOMPARE(failed[0][1].toString(), QString("no task T-zz in this project"));
+    client.requestTask({"garbage"});
+    QTRY_COMPARE(failed.size(), 2); QCOMPARE(failed[1][1].toString(), QString("Invalid task response"));
+}
+
 void TestHgsClient::readMarksUseStdinAndAcceptOnlyHostAnswers()
 {
     QTemporaryDir directory; QFile script(directory.filePath("hgs")); QVERIFY(script.open(QIODevice::WriteOnly));
@@ -2233,6 +2425,14 @@ print('{"ok":true}')
     client.setPresence(5, false);
     QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 3, 10000);
     QVERIFY(finished[2][0].toString().contains("presence unavailable"));
+}
+
+void TestHgsClient::sendsAndCancelsWaitForAnotherComputer() {
+    // A send or cancel may run on another computer of the swarm, after exchanging its tasks.
+    QCOMPARE(HgsClient::taskTimeoutMs({"send", "uuid-1", "--project", "project-1"}), 90000);
+    QCOMPARE(HgsClient::taskTimeoutMs({"cancel", "uuid-1", "--project", "project-1"}), 90000);
+    QCOMPARE(HgsClient::taskTimeoutMs({"list", "--project", "project-1"}), 30000);
+    QCOMPARE(HgsClient::taskTimeoutMs({"edit", "uuid-1", "--project", "project-1"}), 30000);
 }
 
 QTEST_GUILESS_MAIN(TestHgsClient)

@@ -372,6 +372,143 @@ class EncryptedRelayTest {
         }
     }
 
+    @Test fun receiptFetchOverlapsFreshMembershipButOnlyVerifiedActiveMembershipCanOpenIt()=runBlocking {
+        for(mode in listOf("active","revoked","forked","cancelled")) MockWebServer().use { server ->
+            val membershipEntered=java.util.concurrent.CountDownLatch(1)
+            val receiptFetched=java.util.concurrent.CountDownLatch(1)
+            val release=java.util.concurrent.CountDownLatch(1)
+            val now=System.currentTimeMillis()/1000
+            val header=WorkspaceHeader(roster.workspaceId,phone.device.deviceId,gateway.device.deviceId,
+                phone.device.keyGeneration,gateway.device.keyGeneration,gateway.device.deviceId,"route-fixture",
+                "receipt-fixture","request","read",now+300,roster.revision,roster.head)
+            val request=WorkspaceEnvelope.seal(phone,gateway.device,header,"{}".toByteArray())
+            val replyHeader=header.copy(senderDeviceId=gateway.device.deviceId,recipientDeviceId=phone.device.deviceId,
+                senderKeyGeneration=gateway.device.keyGeneration,recipientKeyGeneration=phone.device.keyGeneration,kind="result")
+            val reply=WorkspaceEnvelope.seal(gateway,phone.device,replyHeader,
+                """{"request_id":"receipt-fixture","state":"completed","result":{"ok":true}}""".toByteArray())
+            server.dispatcher=object:Dispatcher() {
+                override fun dispatch(r:RecordedRequest):MockResponse {
+                    assertEquals("GET",r.method)
+                    if(r.path!!.startsWith("/v2/membership")) {
+                        membershipEntered.countDown();check(release.await(5,java.util.concurrent.TimeUnit.SECONDS))
+                        val page=history()
+                        if(mode=="revoked") {
+                            val unsigned=WorkspaceMembershipChange(roster.workspaceId,roster.revision+1,roster.head,
+                                gateway.device.deviceId,gateway.device.keyGeneration,"revoke",null,phone.device.deviceId,"")
+                            val change=unsigned.copy(signature=WorkspaceProtocol.encode(WorkspaceCrypto.sign(gateway.keys,unsigned.frame())))
+                            page.put("changes",JSONArray().put(change.json())).put("membership_revision",change.revision).put("membership_head",change.head())
+                        }
+                        if(mode=="forked") page.put("membership_head",WorkspaceProtocol.encode(ByteArray(32)))
+                        return MockResponse().setBody(page.toString())
+                    }
+                    assertEquals("/v2/requests/receipt-fixture",r.path);receiptFetched.countDown()
+                    return MockResponse().setBody(JSONObject().put("request_id","receipt-fixture").put("state","completed").put("envelope",reply.json()).toString())
+                }
+            }
+            server.start();val connection=Connection("receipt-$mode","Fixture",server.url("/").toString().trimEnd('/'),"fixture-token",2)
+            val store=MemoryWorkspaceJournal();store.create(connection,state());store.reserve(connection,"receipt-fixture","fixture-hash",request)
+            val opened=java.util.concurrent.atomic.AtomicInteger();val settled=java.util.concurrent.atomic.AtomicInteger()
+            val guarded=object:WorkspaceJournal by store {
+                override fun open(connection:Connection,envelope:WorkspaceEnvelope,expected:WorkspaceHeader):ByteArray {
+                    opened.incrementAndGet();return store.open(connection,envelope,expected)
+                }
+                override fun settle(connection:Connection,id:String) { settled.incrementAndGet();store.settle(connection,id) }
+            }
+            val pending=async { runCatching { RelayApi(workspace=guarded).receipt(connection,"receipt-fixture") } }
+            try {
+                assertTrue(withContext(Dispatchers.IO) { membershipEntered.await(3,java.util.concurrent.TimeUnit.SECONDS) })
+                assertTrue("Receipt HTTP must overlap the held fresh membership check",withContext(Dispatchers.IO) { receiptFetched.await(3,java.util.concurrent.TimeUnit.SECONDS) })
+                assertEquals(0,opened.get());assertEquals(0,settled.get())
+                if(mode=="cancelled") pending.cancelAndJoin()
+            } finally { release.countDown() }
+            if(mode=="cancelled") {
+                assertTrue(pending.isCancelled);assertEquals(0,opened.get());assertEquals(0,settled.get());assertEquals(header,store.request(connection,"receipt-fixture"))
+            } else {
+                val result=pending.await()
+                if(mode=="active") { assertEquals("completed",result.getOrThrow().string("state"));assertEquals(1,opened.get());assertEquals(1,settled.get()) }
+                else { assertTrue(result.isFailure);assertEquals(0,opened.get());assertEquals(0,settled.get());assertEquals(header,store.request(connection,"receipt-fixture")) }
+            }
+            assertEquals(2,server.requestCount)
+        }
+    }
+    @Test fun websocketReadinessFetchesOneReceiptButStillRequiresFreshActiveMembership()=runBlocking {
+        for (revoked in listOf(false, true)) MockWebServer().use { server ->
+            val id=java.util.UUID.randomUUID().toString();val now=System.currentTimeMillis()/1000
+            val header=WorkspaceHeader(roster.workspaceId,phone.device.deviceId,gateway.device.deviceId,
+                phone.device.keyGeneration,gateway.device.keyGeneration,gateway.device.deviceId,"route-fixture",
+                id,"request","read",now+300,roster.revision,roster.head)
+            val request=WorkspaceEnvelope.seal(phone,gateway.device,header,"{}".toByteArray())
+            val reply=WorkspaceEnvelope.seal(gateway,phone.device,header.copy(senderDeviceId=gateway.device.deviceId,
+                recipientDeviceId=phone.device.deviceId,kind="result"),
+                JSONObject().put("request_id",id).put("state","completed").put("result",JSONObject().put("ok",true)).toString().toByteArray())
+            val readySent=java.util.concurrent.CountDownLatch(1);val receiptEntered=java.util.concurrent.CountDownLatch(1)
+            val release=java.util.concurrent.CountDownLatch(1);val posts=java.util.concurrent.atomic.AtomicInteger()
+            server.dispatcher=object:Dispatcher() {
+                override fun dispatch(r:RecordedRequest):MockResponse {
+                    if(r.method!="GET") { posts.incrementAndGet();return MockResponse().setResponseCode(500) }
+                    if(r.path=="/v2/capabilities") return MockResponse().setBody("""{"encrypted_transport":{"result_stream":{"version":1,"path":"/v2/stream","max_requests":16}}}""")
+                    if(r.path=="/v2/stream") return MockResponse().withWebSocketUpgrade(object:okhttp3.WebSocketListener() {
+                        override fun onMessage(socket:okhttp3.WebSocket,text:String) {
+                            if(JSONObject(text).getJSONArray("request_ids").length()==0) return
+                            socket.send(JSONObject().put("type","ready").put("request_id",id).put("state","completed").toString())
+                            readySent.countDown()
+                        }
+                    })
+                    if(r.path=="/v2/requests/$id") {
+                        receiptEntered.countDown()
+                        return MockResponse().setBody(JSONObject().put("request_id",id).put("state","completed").put("envelope",reply.json()).toString())
+                    }
+                    check(r.path!!.startsWith("/v2/membership"));check(release.await(5,java.util.concurrent.TimeUnit.SECONDS))
+                    val page=history()
+                    if(revoked) {
+                        val unsigned=WorkspaceMembershipChange(roster.workspaceId,roster.revision+1,roster.head,
+                            gateway.device.deviceId,gateway.device.keyGeneration,"revoke",null,phone.device.deviceId,"")
+                        val change=unsigned.copy(signature=WorkspaceProtocol.encode(WorkspaceCrypto.sign(gateway.keys,unsigned.frame())))
+                        page.put("changes",JSONArray().put(change.json())).put("membership_revision",change.revision).put("membership_head",change.head())
+                    }
+                    return MockResponse().setBody(page.toString())
+                }
+            }
+            server.start();val connection=Connection("stream-$revoked","Fixture",server.url("/").toString().trimEnd('/'),"fixture-token",2)
+            val journal=MemoryWorkspaceJournal();journal.create(connection,state());journal.reserve(connection,id,"fixture-hash",request)
+            val opened=java.util.concurrent.atomic.AtomicInteger()
+            val guarded=object:WorkspaceJournal by journal {
+                override fun open(connection:Connection,envelope:WorkspaceEnvelope,expected:WorkspaceHeader):ByteArray {
+                    opened.incrementAndGet();return journal.open(connection,envelope,expected)
+                }
+            }
+            val client=okhttp3.OkHttpClient();val api=RelayApi(client,guarded)
+            api.capabilities(connection)
+            val outcome=async { runCatching { api.await(connection,JSONObject().put("request_id",id).put("state","queued"),3,1000) } }
+            try {
+                assertTrue(withContext(Dispatchers.IO) { readySent.await(3,java.util.concurrent.TimeUnit.SECONDS) })
+                assertTrue("A WS hint must bypass the one-second poll sleep",withContext(Dispatchers.IO) { receiptEntered.await(700,java.util.concurrent.TimeUnit.MILLISECONDS) })
+                assertEquals(0,opened.get());release.countDown()
+                val result=outcome.await()
+                if(revoked) { assertTrue(result.isFailure);assertEquals(0,opened.get()) }
+                else { assertEquals("completed",result.getOrThrow().string("state"));assertEquals(1,opened.get()) }
+                assertEquals(0,posts.get());assertEquals(4,server.requestCount)
+            } finally { release.countDown();api.closeResultStreams();client.connectionPool.evictAll();client.dispatcher.executorService.shutdown() }
+        }
+    }
+    @Test fun advertisedStreamStillRequiresProtectedStateBeforeOpeningASocket()=runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""{"encrypted_transport":{"result_stream":{"version":1,"path":"/v2/stream","max_requests":16}}}"""))
+            server.start();val connection=Connection("missing-stream","Fixture",server.url("/").toString().trimEnd('/'),"synthetic",2)
+            val api=RelayApi();api.capabilities(connection)
+            assertTrue(runCatching { api.await(connection,JSONObject().put("request_id","retained").put("state","queued"),1,50) }.isFailure)
+            assertEquals(1,server.requestCount) // public capabilities only
+        }
+    }
+    @Test fun missingReceiptStateOrOriginalRequestRefusesBeforeNetwork()=runBlocking {
+        MockWebServer().use { server ->
+            server.start();val connection=Connection("missing-receipt","Fixture",server.url("/").toString().trimEnd('/'),"fixture-token",2)
+            assertTrue(runCatching { RelayApi().receipt(connection,"receipt-fixture") }.isFailure)
+            val store=MemoryWorkspaceJournal();store.create(connection,state())
+            assertTrue(runCatching { RelayApi(workspace=store).receipt(connection,"receipt-fixture") }.isFailure)
+            assertEquals(0,server.requestCount)
+        }
+    }
     @Test fun ciphertextRetryKeepsExactEnvelopeAndReceiptRecoveryNeverPosts()=runBlocking {
         MockWebServer().use { server ->
             val saved=mutableListOf<String>();var outerOnly=true;var wrongRoute=false;var header:WorkspaceHeader?=null

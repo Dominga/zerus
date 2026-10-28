@@ -390,6 +390,15 @@ IDs survive. Do not replace an existing custom LaunchAgent automatically.
 
 ## Configure the connector from the desktop
 
+For encrypted workspaces, use Create workspace or Join by code at the top of
+Settings → Mobile connection. The computer name is supplied automatically;
+phones can set their own display name with Rename machine. Change workspace
+requires confirmation and resumes an already saved enrollment after an
+interrupted result. See [encrypted workspace switching](encrypted-workspaces.md#persistence-and-switching)
+for automatic handover of a verified Linux Rust connector service and its
+refusal conditions. Existing SSH peers do not need separate enrollment.
+
+The following controls are under **Advanced: legacy connector configuration**.
 Settings → Mobile connection edits the computer's existing connector file at
 `$XDG_CONFIG_HOME/hgs/mobile/connector.json`, or
 `$HOME/.config/hgs/mobile/connector.json` when `XDG_CONFIG_HOME` is unset.

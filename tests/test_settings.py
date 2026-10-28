@@ -10,6 +10,7 @@ import test_input
 import test_effort
 
 AGENT = test_effort.AGENT.replace("selected = 1\n", "selected = 1\nmodel = 'GPT-6-Astra'; stage = ''; choice = 0; effort_choice = 2\n")
+AGENT = AGENT.replace("'\\x1b[2J\\x1b[27;1H\\x1b[48;5;234m› '", "'\\x1b[2J\\x1b[27;1H\\x1b[48;5;234m' + ('» ' if effort == 'ultra' else '› ')")
 AGENT = AGENT.replace("if agent == 'codex':\n        screen =", "if agent == 'codex':\n        screen =", 1)
 AGENT = AGENT.replace("'\\x1b[28;1H   \\x1b[49m\\x1b[29;1H  GPT-6-Astra ' + effort", "'\\x1b[28;1H   \\x1b[49m\\x1b[29;1H  ' + model + ' ' + effort")
 AGENT = AGENT.replace("    os.write(1, screen.encode())", r'''
@@ -134,6 +135,11 @@ class SessionSettings(test_effort.EffortTransport):
         self.assertEqual(self.inspect()['effort'],'ultra')
         self.assertTrue(self.received().endswith(b's'))
         self.assertNotIn('ultra',self.inspect()['effort_options']) # legacy hotkey API stays guarded
+        self.assertIn('»', self.tmux('capture-pane', '-p', '-t', self.pane).splitlines())
+        self.assertNotIn('settings_unconfirmed_at', json.loads(self.record_path.read_text()))
+        lower=self.payload('high');lower['model']='gpt-6-sol'
+        self.assertEqual(self.settings(lower)['status'], 'applied')
+        self.assertEqual(self.inspect()['effort'], 'high')
 
     def test_busy_schedule_then_explicit_ready_apply(self):
         self.record.update(activity='busy',phase='working');self.write_record()

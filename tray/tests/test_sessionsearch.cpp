@@ -11,6 +11,7 @@
 #include <QVBoxLayout>
 #include "FakeCli.h"
 #include "SessionSearch.h"
+#include "SessionAccounts.h"
 
 class TestSessionSearch : public QObject {
     Q_OBJECT
@@ -23,6 +24,7 @@ private slots:
     void staleQueriesCannotReplaceCurrentResults();
     void multipleMachinesScopeSearch();
     void projectScopeKeepsExactLiveArchiveAndRemoteMembership();
+    void accountScopeKeepsLiveArchivedAndContentHitsExact();
     void folderScopeFollowsTheMachinePathStyle();
     void selectionSurvivesFleetPollsAndExplicitRefresh();
     void errorsFollowHostScopeAndRecoverWhenPeerConnects();
@@ -125,6 +127,24 @@ void TestSessionSearch::projectScopeKeepsExactLiveArchiveAndRemoteMembership()
     search.setProjectScope({},false); QCOMPARE(list(search)->count(),3);
     search.setProjectScope({"\ncodex/docs/live"},true); QCOMPARE(list(search)->count(),1);
     QVERIFY(!list(search)->item(0)->data(Qt::AccessibleTextRole).toString().contains("Archive"));
+}
+
+void TestSessionSearch::accountScopeKeepsLiveArchivedAndContentHitsExact()
+{
+    auto state=fleet();auto box=state.local();box.sessions[0].accountId="work";box.sessions[1].accountId="personal";box.sessions[2].accountId="personal";
+    state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    auto peer=*state.peer("mac");peer.sessions[0].accountId="work";state.setPeer(peer,QDateTime::currentMSecsSinceEpoch());
+    SessionSearch search(FakeCli::program(script()));search.setScope(state,"all",{});search.setQuery("needle");
+    const auto work=SessionAccounts::binding({},box.sessions[0]),personal=SessionAccounts::binding({},box.sessions[1]),remote=SessionAccounts::binding("mac",peer.sessions[0]);
+    search.setAccountScope({work});QTRY_COMPARE(list(search)->count(),1);QTRY_VERIFY(!calls().isEmpty());
+    QTRY_VERIFY(status(search)->text().contains("1 messages"));
+    search.setAccountScope({personal});QCOMPARE(list(search)->count(),2);
+    bool archived=false;for(int i=0;i<list(search)->count();++i)archived|=list(search)->item(i)->data(Qt::AccessibleTextRole).toString().contains("Archive");QVERIFY(archived);
+    search.setProjectScope({"\ncodex/docs/saved"},true);QCOMPARE(list(search)->count(),1);
+    search.setAccountScope({work});QCOMPARE(list(search)->count(),0);search.setProjectScope({},false);
+    search.setAccountScope({remote});QTRY_COMPARE(list(search)->count(),1);
+    search.setHostsScope(state,"all",{"@local"});QCOMPARE(list(search)->count(),0);
+    search.setAccountScope({});QCOMPARE(list(search)->count(),3);
 }
 
 void TestSessionSearch::resultsKeepArchivesRunsAndRemoteIdentities()

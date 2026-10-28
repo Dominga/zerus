@@ -1,3 +1,4 @@
+#include "JsonParse.h"
 #include "AnalyticsClient.h"
 #include "AnalyticsData.h"
 #include "ProcessRunner.h"
@@ -58,8 +59,8 @@ void AnalyticsClient::request(const QString &host, const QString &verb, const QJ
                 if (mutation) {
                     // Mutations return metadata with the default range. Only a
                     // fresh explicit summary repopulates the controls/view.
-                    QJsonParseError error; const auto json = QJsonDocument::fromJson(bytes,&error);
-                    if (error.error == QJsonParseError::NoError && json.isObject() && json.object().value("schema") == 1
+                    QString error; const auto json = JsonParse::parse(bytes,&error);
+                    if (error.isEmpty() && json.isObject() && json.object().value("schema") == 1
                         && json.object().value("source") == "agent" && !json.object().contains("error")) safe = QJsonObject{{"schema",1}};
                 } else safe = verb == "speech" ? AnalyticsData::speech(bytes,from,through) : AnalyticsData::summary(bytes,from,through);
                 if (guard) QMetaObject::invokeMethod(guard,[guard,safe,done,mutation] {

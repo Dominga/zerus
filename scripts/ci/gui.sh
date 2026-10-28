@@ -63,6 +63,8 @@ if [ "$phase" = build ]; then
     exit 0
 fi
 export QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software
+# JSON parsed on the GUI thread fails the suite (tray/src/JsonParse.h).
+export ZERUS_GUI_THREAD_CHECKS=fatal
 export QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu
 rm -rf artifacts/test-results/qt-functions
 mkdir -p artifacts/test-results/qt-functions

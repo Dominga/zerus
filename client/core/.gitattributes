@@ -1,0 +1,2 @@
+# One 500 KB synthetic frame; regenerate rather than review it line by line.
+tests/fixtures/burst.ndjson -diff linguist-generated

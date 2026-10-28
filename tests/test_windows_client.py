@@ -10,11 +10,13 @@ import ctypes
 import json
 import os
 from pathlib import Path
+import queue
 import re
 import shlex
 import subprocess
 import tarfile
 import tempfile
+import threading
 import time
 import unittest
 
@@ -609,6 +611,50 @@ class WindowsClient(unittest.TestCase):
             worker.kill()
             worker.communicate(timeout=10)
         self.assertEqual(self.json('swarm', 'get', env=env)['worker'], dict(running=False, current=False))
+
+    def test_a_watch_stream_runs_both_ways_until_its_input_ends(self):
+        # `hgs @peer watch --json` holds stdin open for hours: control lines and
+        # frames must pass as they are written, not when input ends, and the end
+        # of input must reach the peer's watcher (zerus-604d.9). A desktop client
+        # gives hgs synchronous pipes, which hgs relays rather than pass on.
+        streams = self.root / 'streams.jsonl'
+        env = dict(self.env, FAKE_SSH_MODE='stream', FAKE_SSH_STREAMS=str(streams))
+        process = subprocess.Popen([str(HGS), '@peer', 'watch', '--json'], env=env, stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        lines = queue.Queue()
+        reader = threading.Thread(target=lambda: [lines.put(line) for line in process.stdout] + [lines.put(None)], daemon=True)
+        reader.start()
+        def frame(seconds=10):
+            line = lines.get(timeout=seconds)
+            if line is None:
+                # Read only once hgs ended: stderr stays open while it runs.
+                self.fail('the stream ended early: ' + process.stderr.read().decode(errors='replace'))
+            return json.loads(line)
+        try:
+            self.assertEqual(frame(20), {'t': 'hello'})
+            for index in range(3):
+                started = time.monotonic()
+                process.stdin.write(b'{"op":"ping","id":%d}\n' % index)
+                process.stdin.flush()
+                self.assertEqual(frame(), {'t': 'echo', 'line': '{"op":"ping","id":%d}' % index})
+                self.assertLess(time.monotonic() - started, 5)
+            process.stdin.close()
+            self.assertEqual(frame(), {'t': 'end'})
+            self.assertEqual(process.wait(timeout=10), 0)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+            reader.join(timeout=10)
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if not pipe.closed:
+                    pipe.close()
+        self.assertEqual(json.loads(streams.read_text().splitlines()[-1]), dict(stdin='pipe', stdout='pipe', stderr='pipe'))
+        argv = self.calls()[-1]
+        self.assertIn('ServerAliveInterval=10', argv)
+        remote = argv[-1]
+        self.assertIn('Event stream ABI: watch-v1', remote)
+        self.assertIn('exec ~/.local/bin/hgs watch --json', remote)
 
     def test_a_stopped_hgs_takes_its_ssh_client_along(self):
         pid = self.root / 'ssh.pid'

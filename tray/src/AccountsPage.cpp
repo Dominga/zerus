@@ -326,6 +326,12 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
     m_permissions = new QPushButton(tr("Change…")); m_permissions->setObjectName("accountPermissions");
     permissionRow->addWidget(m_permissionState);permissionRow->addWidget(m_permissions);permissionRow->addStretch();machineLayout->addLayout(permissionRow);
     connect(m_permissions, &QPushButton::clicked, this, &AccountsPage::permissions);
+    auto *modelRow = new QHBoxLayout; modelRow->setSpacing(12);
+    m_modelState = label(); m_modelState->setObjectName("accountModelState");
+    m_modelDefaults = new QPushButton(tr("Model and effort…")); m_modelDefaults->setObjectName("accountModelDefaults");
+    modelRow->addWidget(m_modelState); modelRow->addWidget(m_modelDefaults); modelRow->addStretch();
+    machineLayout->addLayout(modelRow);
+    connect(m_modelDefaults, &QPushButton::clicked, this, &AccountsPage::modelDefaults);
     m_default=new QPushButton; m_default->setObjectName("defaultAccount");machineLayout->addWidget(m_default,0,Qt::AlignLeft);
     connect(m_default,&QPushButton::clicked,this,[this]{
         const auto p=selected();if(p.isEmpty()||p["is_default"].toBool())return;
@@ -373,16 +379,25 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
     connect(&m_client, &HgsClient::accountsReady, this, [this](quint64 id, const QString &host, const QJsonObject &data) {
         if (!m_requests.contains(id)) return;
         const QString op = m_requests.take(id).second;
-        if (!host.isEmpty() && !m_fleet.peerNames().contains(host) && host != m_explicitHost) { render(); return; }
+        if (!host.isEmpty() && !m_fleet.peerNames().contains(host) && host != m_explicitHost) { m_catalogRefreshQueued.remove(host); render(); return; }
+        if (op == "model-settings") {
+            const auto profile = m_modelProfile; m_modelProfile = {};
+            render();
+            if (profile["host"].toString() == host && profile["id"] == data["account_id"]
+                && AccountCatalog::profileKey(selected()) == AccountCatalog::profileKey(profile))
+                editModelDefaults(profile, data);
+            return;
+        }
         if (op == "start") {
             // The answer is OpenCode's catalog, not the account list: read the list again.
             emit notice(tr("OpenCode started on %1.").arg(host.isEmpty() ? m_fleet.local().host : host));
             request(host, {"ls"}); render(); return;
         }
-        if (op == "ls" || op == "add" || op == "rename" || op == "rm" || op == "restore" || op == "set-key" || op == "permissions" || op == "default") m_catalogs[host] = data;
+        if (op == "ls" || op == "add" || op == "rename" || op == "rm" || op == "restore" || op == "set-key" || op == "permissions" || op == "default" || op == "model-defaults") m_catalogs[host] = data;
+        if (op == "ls") requestQueuedCatalog(host);
         if (op == "rename" && !m_renameQueue.isEmpty()) { renameNext(); render(); return; }
         if (op != "ls") {
-            emit notice(op == "default" ? tr("Default account saved for new sessions on %1.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "permissions" ? tr("Permission mode saved for new and resumed sessions on %1.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "set-key" ? tr("DeepSeek API key saved on %1.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "restore" ? tr("Account added on %1 using its saved sign-in.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "rename" ? tr("Account name updated.") : op == "copy" ? tr("Account copied into a new profile. It is available in New session on that machine.") : op == "rm" ? tr("Account removed from %1. Add it again whenever you need it.").arg(host.isEmpty() ? m_fleet.local().host : host) : tr("Account profile created. Sign in to use it."));
+            emit notice(op == "model-defaults" ? tr("Model defaults saved for new sessions on %1.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "default" ? tr("Default account saved for new sessions on %1.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "permissions" ? tr("Permission mode saved for new and resumed sessions on %1.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "set-key" ? tr("DeepSeek API key saved on %1.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "restore" ? tr("Account added on %1 using its saved sign-in.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "rename" ? tr("Account name updated.") : op == "copy" ? tr("Account copied into a new profile. It is available in New session on that machine.") : op == "rm" ? tr("Account removed from %1. Add it again whenever you need it.").arg(host.isEmpty() ? m_fleet.local().host : host) : tr("Account profile created. Sign in to use it."));
             emit accountsChanged();
             if (op == "add" && !m_loginAfterAddId.isEmpty()) {
                 bool installed = false;
@@ -394,17 +409,20 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
             if (op == "copy") ensureCatalogs(true);
             if (op == "set-key") inspectProfiles(true);
         }
-        render();emit catalogChanged(); if (isVisible()) inspectProfiles();
+        render();emit catalogChanged(); inspectProfiles();
     });
     connect(&m_client, &HgsClient::accountsFailed, this, [this](quint64 id, const QString &host, const QString &error) {
         if (!m_requests.contains(id)) return;
         const auto op = m_requests.take(id).second;
-        if (!host.isEmpty() && !m_fleet.peerNames().contains(host) && host != m_explicitHost) { render(); return; }
-        m_loginAfterAddId.clear(); m_renameQueue.clear(); emit notice((host.isEmpty() ? tr("This machine") : host) + ": " + error,true); render();emit catalogChanged();
+        if (!host.isEmpty() && !m_fleet.peerNames().contains(host) && host != m_explicitHost) { m_catalogRefreshQueued.remove(host); render(); return; }
+        m_loginAfterAddId.clear(); m_renameQueue.clear();
+        if (op == "ls") requestQueuedCatalog(host);
+        if (op != "ls" || isVisible()) emit notice((host.isEmpty() ? tr("This machine") : host) + ": " + error,true);
+        render();emit catalogChanged();
     });
     connect(m_usageStore,&AccountUsageStore::changed,this,[this](const QString &){
         if (m_renderQueued) return; m_renderQueued = true;
-        QTimer::singleShot(0, this, [this] { m_renderQueued = false; render(); });
+        QTimer::singleShot(0, this, [this] { m_renderQueued = false; render(); emit catalogChanged(); });
     });
     auto *timer=new QTimer(this);timer->setInterval(30000);connect(timer,&QTimer::timeout,this,[this]{if(isVisible()){ensureCatalogs();inspectProfiles();}});timer->start();
     setTheme(false); selectionChanged();
@@ -428,6 +446,13 @@ void AccountsPage::setFleet(const FleetState &fleet)
 {
     m_fleet = fleet;m_usageStore->setFleet(fleet); const QString selectedHost = m_machine->currentData().toString();
     const auto desired = accountHosts(fleet, m_explicitHost);
+    for (auto it = m_catalogRefreshQueued.begin(); it != m_catalogRefreshQueued.end();) {
+        if (!desired.contains(*it)) it = m_catalogRefreshQueued.erase(it); else ++it;
+    }
+    // Warm each newly configured machine once, even before Accounts is opened.
+    // Normal navigation/refresh handles later reads; fleet polling must not
+    // repeatedly probe all accounts in the background.
+    for (const auto &host : desired) if (!m_catalogChecked.contains(host)) request(host, {"ls"});
     bool same = m_machine->count() == desired.size() + 1;
     for (int i = 0; same && i < desired.size(); ++i)
         same = m_machine->itemData(i + 1).toString() == desired[i] && m_machine->itemText(i + 1) == machineChoice(fleet, desired[i]);
@@ -504,10 +529,18 @@ void AccountsPage::ensureCatalogs(bool force)
     const auto now=QDateTime::currentMSecsSinceEpoch();
     for(const auto &host:hosts) {
         bool pending=false;for(const auto &r:m_requests)if(r.first==host && r.second=="ls")pending=true;
+        if (pending) { if (force) m_catalogRefreshQueued.insert(host); continue; }
         if(!pending && (force || !m_catalogChecked.contains(host) || now-m_catalogChecked[host]>=30000)) {
             m_catalogChecked[host]=now;request(host,{"ls"});
         }
     }
+}
+void AccountsPage::requestQueuedCatalog(const QString &host)
+{
+    // Only an explicit refresh can queue this one follow-up. A failed read alone
+    // never retries. Wait for every older read so none can overwrite the refresh.
+    for (const auto &pending : m_requests) if (pending.first == host && pending.second == "ls") return;
+    if (m_catalogRefreshQueued.remove(host) && accountHosts(m_fleet, m_explicitHost).contains(host)) request(host, {"ls"});
 }
 QJsonArray AccountsPage::profiles(bool includeRemoved) const
 {
@@ -576,6 +609,9 @@ void AccountsPage::render()
     }
     m_displayProfiles=ready;
     if(!ready.isEmpty() || !pendingAccounts())m_hasSnapshot=true;
+    // Other views read the profiles above (catalogProfiles); the list renders
+    // when the page is shown (showEvent).
+    if(!isVisible())return;
     m_bodyStack->setCurrentIndex(m_hasSnapshot?1:0);
     const auto old = selected(); const QString oldKey = AccountCatalog::profileKey(old);
     const auto desiredKey=m_requestedProfile.isEmpty()?oldKey:m_requestedProfile;
@@ -583,12 +619,7 @@ void AccountsPage::render()
     const int scroll = m_list->verticalScrollBar()->value();
     QListWidgetItem *selection = nullptr;
     int row = 0;
-    QJsonArray displayed;
-    for (const auto &value : m_displayProfiles) {
-        const auto host=value.toObject()["host"].toString();
-        if (host.isEmpty() || m_fleet.peerNames().contains(host) || host==m_explicitHost) displayed.append(value);
-    }
-    const auto groups = AccountCatalog::group(displayed);
+    const auto groups = AccountCatalog::group(catalogProfiles());
     m_totalAccounts = groups.size();
     int signedIn = 0, signedOut = 0;
     for (const auto &entry : groups) {
@@ -651,6 +682,15 @@ bool AccountsPage::changing() const
     for (const auto &request : m_requests) if (request.second != "ls") return true;
     return false;
 }
+QJsonArray AccountsPage::catalogProfiles() const
+{
+    QJsonArray result;
+    for (const auto &value : m_displayProfiles) {
+        const auto host = value.toObject()["host"].toString();
+        if (host.isEmpty() || m_fleet.peerNames().contains(host) || host == m_explicitHost) result.append(value);
+    }
+    return result;
+}
 void AccountsPage::selectionChanged()
 {
     const auto p = selected(); const bool has = !p.isEmpty(); const bool idle = !changing();
@@ -669,6 +709,13 @@ void AccountsPage::selectionChanged()
     m_permissionState->setToolTip(permissionHint(p));
     m_permissionState->setStyleSheet(mode == "bypass" ? QString("color:%1;font-weight:600;").arg(m_dark ? "#ffa0aa" : "#a7243b") : QString());
     m_permissions->setToolTip(tr("Change permission defaults on %1").arg(p["machine"].toString()));
+    const bool modelSupported = has && p["model_defaults_supported"].toBool();
+    m_modelDefaults->setVisible(modelSupported); m_modelState->setVisible(modelSupported);
+    m_modelDefaults->setEnabled(modelSupported && idle && online(p["host"].toString()));
+    const auto defaults = p["model_defaults"].toObject();
+    m_modelState->setText(defaults["model"].toString().isEmpty() ? tr("New sessions: Provider settings")
+        : tr("New sessions: %1%2").arg(defaults["model"].toString(), defaults["effort"].toString().isEmpty() ? QString() : " · " + defaults["effort"].toString()));
+
     m_login->setEnabled(has && idle && online(p["host"].toString()) && p["installed"].toBool() && !nativeConfig
         && p["usage"].toObject()["identity"].toObject()["auth_method"] != "Ollama"); m_remove->setEnabled(has && idle && online(p["host"].toString()));
     const bool machines = !accountHosts(m_fleet, m_explicitHost).isEmpty();
@@ -1214,4 +1261,59 @@ void AccountsPage::permissions()
     dialog.adjustSize();
     if(dialog.exec()!=QDialog::Accepted || mode->currentData().toString() == p["permission_mode"].toString("provider"))return;
     request(p["host"].toString(),{"permissions",p["id"].toString(),"--mode",mode->currentData().toString(),"--revision",revision});
+}
+
+void AccountsPage::modelDefaults()
+{
+    const auto p = selected();
+    if (p.isEmpty() || !m_requests.isEmpty() || !online(p["host"].toString()) || !p["model_defaults_supported"].toBool()) return;
+    m_modelProfile = p;
+    request(p["host"].toString(), {"model-settings", p["id"].toString(), "--json"});
+}
+
+void AccountsPage::editModelDefaults(const QJsonObject &p, const QJsonObject &data)
+{
+    if (!online(p["host"].toString())) return;
+    QDialog dialog(this); dialog.setObjectName("accountModelDefaultsDialog"); dialog.setWindowTitle(tr("Default model and effort")); dialog.setMinimumWidth(480);
+    auto *layout = new QVBoxLayout(&dialog); layout->setContentsMargins(18,18,18,18); layout->setSpacing(12);
+    layout->addWidget(label(tr("%1 on %2").arg(p["label"].toString(), p["machine"].toString())));
+    auto *form = new QFormLayout;
+    auto *model = new QComboBox; model->setObjectName("defaultModel"); model->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    model->addItem(tr("Provider settings"), QString());
+    const auto models = data["models"].toArray();
+    for (const auto &value : models) {const auto entry=value.toObject(); model->addItem(entry["label"].toString(entry["id"].toString()),entry["id"].toString());}
+    const auto saved = data["defaults"].toObject();
+    int index = model->findData(saved["model"].toString());
+    if (index < 0) {model->addItem(tr("%1 (currently unavailable)").arg(saved["model"].toString()),saved["model"].toString()); index=model->count()-1;}
+    model->setCurrentIndex(index); form->addRow(tr("Model"), model);
+    auto *effort = new QComboBox; effort->setObjectName("defaultEffort"); effort->setSizeAdjustPolicy(QComboBox::AdjustToContents); form->addRow(tr("Effort"), effort);
+    layout->addLayout(form);
+    const auto native = data["provider_defaults"].toObject();
+    if (!native["model"].toString().isEmpty() || !native["effort"].toString().isEmpty()) {
+        auto *current=label(tr("Account settings: %1%2").arg(native["model"].toString(tr("Provider model")),native["effort"].toString().isEmpty()?QString():" · "+native["effort"].toString()));
+        current->setObjectName("nativeModelDefaults");layout->addWidget(current);
+    }
+    auto *hint=label();hint->setObjectName("modelDefaultsHint");layout->addWidget(hint);
+    layout->addWidget(label(tr("New conversations with this account on this machine. Existing conversations keep their model and effort. Explicit launch choices take precedence.")));
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel); layout->addWidget(buttons);
+    const auto update = [=] {
+        const auto id=model->currentData().toString(); QJsonObject chosen;
+        for (const auto &value:models) if(value.toObject()["id"]==id) {chosen=value.toObject();break;}
+        const QSignalBlocker blocker(effort);effort->clear();effort->addItem(tr("Provider default"),QString());
+        const bool supported=data["effort_supported"].toBool();
+        if(supported) for(const auto &value:chosen["effort_options"].toArray()) effort->addItem(value.toString(),value.toString());
+        if(id==saved["model"].toString()) {const int found=effort->findData(saved["effort"].toString());if(found>=0)effort->setCurrentIndex(found);}
+        effort->setEnabled(supported && !id.isEmpty() && effort->count()>1);
+        hint->setText(!supported ? tr("Kimi manages effort in its native settings. This choice sets the model for new conversations.")
+            : models.isEmpty() ? tr("Open this account's agent once, then refresh to load its models.")
+            : !id.isEmpty() && chosen.isEmpty() ? tr("This model is absent from the current account catalog. Choose another model or Provider settings.")
+            : tr("Choose the reasoning effort for the selected model, or keep its provider default."));
+        buttons->button(QDialogButtonBox::Save)->setEnabled(id.isEmpty() || !chosen.isEmpty());
+    };
+    connect(model,&QComboBox::currentIndexChanged,&dialog,update);update();
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted) return;
+    const auto chosenModel=model->currentData().toString(), chosenEffort=effort->currentData().toString();
+    if(chosenModel==saved["model"].toString() && chosenEffort==saved["effort"].toString())return;
+    request(p["host"].toString(),{"model-defaults",p["id"].toString(),"--model",chosenModel,"--effort",chosenEffort,"--revision",data["revision"].toString()});
 }

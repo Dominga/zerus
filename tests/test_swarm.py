@@ -2,13 +2,16 @@
 """Catalog replication through the real CLI, with isolated nodes and fake SSH."""
 import copy
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import time
 import unittest
+import uuid
 
 REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get('HGS_TEST_BIN', REPO / 'target/debug/hgs')).resolve()
@@ -21,6 +24,16 @@ if (root / ('offline-' + alias)).exists():
 env = dict(os.environ, HGS_CONFIG_DIR=str(root / alias), HGS_STATE_DIR=str(root / alias / 'state'))
 args = shlex.split(sys.argv[-1])[1:]
 with (root / 'calls').open('a') as file: file.write(alias + ' ' + ' '.join(args) + '\\n')
+if (root / ('noreplica-' + alias)).exists():
+    # A member from before task replication: its hello has no replica field and
+    # it knows no replica commands.
+    if args[1:2] in (['replica-inventory'], ['replica-exchange']):
+        print('usage: hgs swarm get | initialize', file=sys.stderr); sys.exit(1)
+    result = subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=sys.stdin.read(), env=env, text=True, capture_output=True)
+    sys.stderr.write(result.stderr)
+    if result.returncode: sys.exit(result.returncode)
+    output = json.loads(result.stdout); output.pop('replica', None)
+    print(json.dumps(output)); sys.exit(0)
 if (root / ('preference-' + alias)).exists():
     # A member from before the shared project order: it lists the kinds it
     # accepts, without "order", and rejects that kind.
@@ -51,6 +64,14 @@ print(json.dumps(output))
 '''
 
 
+def noise(seed, length):
+    """Text that does not compress, as task documents are compressed."""
+    out = ''
+    while len(out) < length:
+        out += hashlib.sha256(f'{seed}-{len(out)}'.encode()).hexdigest()
+    return out[:length]
+
+
 def project(id, name, machine, path):
     return dict(id=id, name=name, color='#123456', vivid=False,
                 folders=[dict(id='folder-' + id, machine=machine, path=path, name='')], sessions=[])
@@ -65,7 +86,8 @@ class Swarm(unittest.TestCase):
         ssh = self.root / 'bin/ssh'; ssh.write_text(SSH); ssh.chmod(0o755)
         self.env = dict(os.environ, SWARM_TEST_ROOT=str(self.root), SWARM_TEST_HGS=str(HGS),
                         PATH=str(self.root / 'bin') + ':' + os.environ['PATH'], HGS_TAB='0')
-        for key in ['HGS_SELF', 'HGS_PEERS', 'HGS_EXECUTABLE']:
+        # Commands of the test are the person's, never the agent's that runs it.
+        for key in ['HGS_SELF', 'HGS_PEERS', 'HGS_EXECUTABLE', 'HGS_SESSION', 'HGS_RUN_ID']:
             self.env.pop(key, None)
         for node, peers in [('a', 'b'), ('b', 'a c'), ('c', 'b')]:
             (self.root / node).mkdir()
@@ -82,6 +104,20 @@ class Swarm(unittest.TestCase):
             return json.loads(result.stdout)
         self.assertNotEqual(result.returncode, 0)
         return result.stderr
+
+    def task(self, node, *args, text=None):
+        env = dict(self.env, HGS_CONFIG_DIR=str(self.root / node), HGS_STATE_DIR=str(self.root / node / 'state'))
+        result = subprocess.run([str(HGS), 'task', *args], input=text, env=env, text=True, capture_output=True, timeout=40)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def tasks(self, node):
+        return sorted(t['text'] for t in self.task(node, 'list', '--project', 'a')['tasks'])
+
+    def exchanges(self, alias=''):
+        calls = self.root / 'calls'
+        lines = calls.read_text().splitlines() if calls.exists() else []
+        return sum('replica-exchange' in line and line.startswith(alias) for line in lines)
 
     def join(self, node, peer, mapping=None, prefer_peer=False):
         preview = self.call(node, 'preview', peer)
@@ -396,6 +432,167 @@ class Swarm(unittest.TestCase):
             worker.terminate(); worker.communicate(timeout=5)
         self.assertEqual(self.call('a', 'get')['worker'], {'running': False, 'current': False})
         self.assertFalse((self.root / 'service-calls').exists())
+
+    def test_task_feedback_forwards_its_original_identity_and_recovers_read_only(self):
+        from tests.test_tasks import agent_record
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c'); self.converge()
+        # Native input is deliberately unavailable on these synthetic nodes.
+        # Prove forwarded persistence/refusal without addressing a real agent.
+        tmux = self.root / 'bin/tmux'; tmux.write_text('#!/bin/sh\nexit 1\n'); tmux.chmod(0o755)
+        state = self.root / 'b/state'; state.mkdir(exist_ok=True)
+        run = str(uuid.uuid4()); name = 'codex/fixture-worker'
+        env = dict(self.env, HGS_CONFIG_DIR=str(self.root/'b'), HGS_STATE_DIR=str(state), HGS_SESSION=name, HGS_RUN_ID=run)
+        agent_record(state, env, name, run)
+        task = self.task('b','add','--project','b','--target',name,text='Remote feedback contract')['task']
+        started = subprocess.run([str(HGS),'task','start',task['uuid'],'--project','b','--json'],env=env,text=True,capture_output=True)
+        self.assertEqual(started.returncode,0,started.stderr)
+        task = json.loads(started.stdout)['task']; self.converge()
+        identity = str(uuid.uuid4()); content = json.dumps(dict(text='Feedback across computers',attachments=[]))
+        args = ['message',task['uuid'],'--project','b','--request-id',identity,'--mode','send','--expect-dispatch',task['dispatch_id'],'--content-json']
+        reply = self.task('a',*args,text=content)
+        self.assertEqual(reply['message']['request_id'],identity)
+        self.assertEqual(reply['message']['delivery']['state'],'failed')
+        checked = self.task('a',*args,'--recover-only',text=content)
+        self.assertEqual(checked['message']['delivery']['state'],'failed')
+        original = self.task('b','get',task['uuid'],'--project','b')['task']
+        messages = [e for e in original['log'] if e['kind']=='message']
+        self.assertEqual(len(messages),1); self.assertEqual(messages[0]['text'],'Feedback across computers')
+
+    def test_tasks_replicate_after_the_catalog(self):
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        first = self.task('a', 'add', '--project', 'a', text='Add rate limiting')['task']
+        self.task('a', 'add', '--project', 'a', text='Document the setup')
+        # b fetches them from a, and c from b.
+        self.call('b', 'sync'); self.call('c', 'sync')
+        for node in 'bc':
+            self.assertEqual(self.tasks(node), ['Add rate limiting', 'Document the setup'], node)
+        # Changes made on two members at once merge everywhere.
+        self.task('c', 'comment', first['id'], '--project', 'a', text='Use the config value.')
+        self.task('a', 'stage', first['id'], 'backlog', '--project', 'a')
+        self.converge()
+        for node in 'abc':
+            view = self.task(node, 'get', first['id'], '--project', 'a')['task']
+            self.assertEqual(view['stage'], 'backlog', node)
+            self.assertIn('Use the config value.', [entry.get('text') for entry in view['log']], node)
+        hellos = [self.call(node, 'hello')['replica'] for node in 'abc']
+        self.assertEqual(len({json.dumps(h['projects'], sort_keys=True) for h in hellos}), 1)
+        self.assertEqual({(h['protocol'], h['schema']) for h in hellos}, {(1, 1)})
+        # Equal digests: a sync exchanges no project.
+        before = self.exchanges(); self.call('a', 'sync'); self.call('b', 'sync')
+        self.assertEqual(self.exchanges(), before)
+
+    def test_a_large_project_travels_in_pages(self):
+        self.join('a', 'b'); self.join('b', 'a')
+        self.call('a', 'sync'); self.call('b', 'sync')
+        for n in range(20):
+            self.task('a', 'add', '--project', 'a', text=noise(n, 60000))
+        before = self.exchanges()
+        self.assertTrue(self.call('b', 'sync')['a']['ok'])
+        self.assertEqual(len(self.tasks('b')), 20)
+        self.assertGreaterEqual(self.exchanges() - before, 3)
+
+    def test_members_without_task_replication_are_skipped_and_named(self):
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        self.task('b', 'add', '--project', 'a', text='Add rate limiting')
+        (self.root / 'noreplica-c').touch()  # c now answers like a release without task replication
+        self.assertTrue(self.call('b', 'sync')['c']['ok'])
+        self.assertEqual(self.tasks('c'), [])
+        peers = self.call('b', 'get')['peers']
+        self.assertTrue(peers['c']['tasks_outdated'])
+        self.assertNotIn('tasks_outdated', peers['a'])
+        # After the update it receives the tasks and the notice clears.
+        (self.root / 'noreplica-c').unlink()
+        self.assertTrue(self.call('b', 'sync')['c']['ok'])
+        self.assertEqual(self.tasks('c'), ['Add rate limiting'])
+        self.assertNotIn('tasks_outdated', self.call('b', 'get')['peers']['c'])
+
+    def test_the_worker_sends_a_new_task_within_seconds(self):
+        self.join('a', 'b'); self.join('b', 'a')
+        self.call('a', 'sync'); self.call('b', 'sync')
+        env = dict(self.env, HGS_CONFIG_DIR=str(self.root / 'a'), HGS_STATE_DIR=str(self.root / 'a/state'))
+        worker = subprocess.Popen([str(HGS), 'swarm', 'worker'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            # Its first round is over; the next scheduled one is 30 s away.
+            synced = self.call('a', 'get')['peers']['b']['last_sync']
+            deadline = time.monotonic() + 10
+            while self.call('a', 'get')['peers']['b']['last_sync'] == synced and time.monotonic() < deadline:
+                time.sleep(.1)
+            self.task('a', 'add', '--project', 'a', text='Add rate limiting')
+            deadline = time.monotonic() + 10
+            while self.tasks('b') != ['Add rate limiting'] and time.monotonic() < deadline:
+                time.sleep(.2)
+            self.assertEqual(self.tasks('b'), ['Add rate limiting'])
+        finally:
+            worker.terminate(); worker.communicate(timeout=5)
+
+    def test_a_task_store_that_cannot_be_read_never_stops_the_catalog(self):
+        self.join('a', 'b'); self.join('b', 'a')
+        self.call('a', 'sync'); self.call('b', 'sync')
+        self.task('a', 'add', '--project', 'a', text='Add rate limiting')
+        # A directory of a's replicas that names no valid project.
+        broken = self.root / 'a/state/replica' / ('0' * 64)
+        broken.mkdir(parents=True); (broken / 'project-id').write_text('')
+        before = self.call('a', 'get'); desired = copy.deepcopy(before['organization'])
+        next(p for p in desired['projects'] if p['id'] == 'a')['name'] = 'Renamed beside a broken store'
+        self.patch('a', before, desired)
+        self.assertEqual(set(self.call('a', 'hello')['replica']['projects']), {'a'})
+        self.assertTrue(self.call('b', 'sync')['a']['ok'])
+        names = [p['name'] for p in self.call('b', 'get')['organization']['projects'] if p['id'] == 'a']
+        self.assertEqual(names, ['Renamed beside a broken store'])
+        self.assertEqual(self.tasks('b'), ['Add rate limiting'])
+
+    def test_refused_tasks_neither_stall_an_exchange_nor_stop_other_projects(self):
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        # a holds more than a page of project b's tasks under project a too; b refuses them there.
+        for n in range(20):
+            self.task('a', 'add', '--project', 'b', text=noise(n, 60000))
+        replica = self.root / 'a/state/replica'
+        project_a = replica / hashlib.sha256(b'a').hexdigest()
+        (project_a / 'tasks').mkdir(parents=True, exist_ok=True)
+        (project_a / 'project-id').write_text('a')
+        for file in (replica / hashlib.sha256(b'b').hexdigest() / 'tasks').iterdir():
+            shutil.copy(file, project_a / 'tasks' / file.name)
+        self.task('a', 'add', '--project', 'c', text='Still replicated')
+        before = self.exchanges('a ')
+        self.assertTrue(self.call('b', 'sync')['a']['ok'])
+        # Project b's pages arrive; the refused page of project a is not asked for again and again.
+        self.assertLessEqual(self.exchanges('a ') - before, 6)
+        self.assertEqual(len(self.task('b', 'list', '--project', 'b')['tasks']), 20)
+        self.assertEqual([t['text'] for t in self.task('b', 'list', '--project', 'c')['tasks']], ['Still replicated'])
+
+    def test_replica_requests_name_their_swarm_and_known_projects(self):
+        self.join('a', 'b'); self.join('b', 'a')
+        self.call('a', 'sync')
+        self.task('a', 'add', '--project', 'a', text='Add rate limiting')
+        hello = self.call('a', 'hello')
+        swarm = hello['swarm_id']
+        # Answers name their computer; a later hgs may add fields to a request.
+        reply = self.call('a', 'replica-inventory', data={'swarm_id': swarm, 'project': 'a', 'stage': 'live'})
+        self.assertEqual(reply['node_id'], hello['node_id'])
+        self.assertEqual(len(reply['inventory']['tasks']), 1)
+        # A request from another swarm, or for a project nobody here knows, is refused.
+        self.assertIn('another swarm', self.call('a', 'replica-inventory', data={'swarm_id': 'elsewhere', 'project': 'a'}, ok=False))
+        self.assertIn('swarm_id', self.call('a', 'replica-inventory', data={'project': 'a'}, ok=False))
+        replica = self.root / 'a/state/replica'
+        before = sorted(p.name for p in replica.iterdir())
+        self.assertIn('no project', self.call('a', 'replica-exchange', data={'swarm_id': swarm, 'project': 'nowhere', 'inventory': {'project': {}, 'tasks': {}}}, ok=False))
+        self.assertEqual(sorted(p.name for p in replica.iterdir()), before)
+        # Only hello reads the task digests.
+        self.assertNotIn('replica', self.call('a', 'inventory'))
+
+    def test_a_held_project_does_not_hold_up_hello(self):
+        self.task('a', 'add', '--project', 'a', text='Add rate limiting')
+        lock = self.root / 'a/state/replica' / hashlib.sha256(b'a').hexdigest() / '.lock'
+        with lock.open('a') as file:
+            fcntl.flock(file, fcntl.LOCK_EX)
+            started = time.monotonic()
+            hello = self.call('a', 'hello')
+            self.assertLess(time.monotonic() - started, 10)
+            self.assertNotIn('a', hello['replica']['projects'])
+        self.assertIn('a', self.call('a', 'hello')['replica']['projects'])
 
     def test_initial_join_can_keep_existing_swarm_session_placement(self):
         for node in ['a', 'b']:

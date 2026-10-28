@@ -1,6 +1,6 @@
 use super::{
     catalog::{self, Catalog, Key, Operation},
-    service,
+    replica, service,
     store::{LockedStore, Peer},
 };
 use crate::{config::Config, platform};
@@ -35,6 +35,12 @@ pub struct Exchange {
 }
 
 pub fn remote(config: &Config, alias: &str, action: &str, input: Option<&Value>) -> Result<Value> {
+    run(config, alias, &["swarm", action], input)
+}
+
+/// `hgs WORDS…` on the member behind `alias`, with `input` as JSON on its
+/// standard input; its JSON answer.
+pub fn run(config: &Config, alias: &str, words: &[&str], input: Option<&Value>) -> Result<Value> {
     ensure!(
         config.peers.iter().any(|p| p == alias) && !config.is_self(alias),
         "choose a locally configured remote machine"
@@ -62,7 +68,10 @@ pub fn remote(config: &Config, alias: &str, action: &str, input: Option<&Value>)
         ])
         .args(crate::machines::ssh_options(config, alias))
         .arg(alias)
-        .arg(crate::windows_peer::hgs(config, alias, &["swarm".into(), action.into()]).map_err(|e| anyhow::anyhow!(e.message.clone()))?);
+        .arg(
+            crate::windows_peer::hgs(config, alias, &words.iter().map(|word| word.to_string()).collect::<Vec<_>>())
+                .map_err(|e| anyhow::anyhow!(e.message.clone()))?,
+        );
     let ssh = platform::spawn_ssh(&mut command, true, true, true).context("start swarm connection")?;
     let mut child = ssh.child;
     let mut stdin = ssh.stdin.unwrap();
@@ -124,6 +133,16 @@ pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
     let mut result = json!({"schema":1,"node_id":store.data.node_id,"swarm_id":store.data.catalog.swarm_id,"digest":store.data.catalog.digest(),"initialized":store.data.imported,"kinds":catalog::kinds()});
     if inventory {
         result["known"] = json!(store.data.catalog.operations.keys().collect::<Vec<_>>());
+    }
+    // Project stores are opened after the catalog lock is released. Tasks
+    // that cannot be read never stop the catalog. Only hello reads them.
+    drop(store);
+    if inventory {
+        return Ok(result);
+    }
+    match replica::hello(config) {
+        Ok(replica) => result["replica"] = replica,
+        Err(error) => eprintln!("hgs swarm: tasks: {error:#}"),
     }
     Ok(result)
 }
@@ -238,6 +257,7 @@ pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
     } else {
         drop(local);
     }
+    replica::sync_peer(config, alias, &identity)?;
     let mut local = LockedStore::load(config)?;
     if let Some(peer) = local.data.peers.get_mut(alias) {
         peer.last_sync = now();
@@ -489,10 +509,12 @@ pub fn worker() -> Result<()> {
             .and_then(|config| {
                 let mut store = LockedStore::load(&config)?;
                 store.save()?;
-                let digest = store.data.catalog.digest();
-                let changed = digest != last_digest;
+                let catalog = store.data.catalog.digest();
                 let peers: Vec<_> = store.data.peers.keys().cloned().collect();
                 drop(store);
+                // A local change to the catalog or to any task syncs at once.
+                let digest = catalog + &replica::fingerprint(&config).unwrap_or_default();
+                let changed = digest != last_digest;
                 for alias in peers {
                     let (due, failures) = schedule.get(&alias).copied().unwrap_or_default();
                     if now() < due && !(changed && failures == 0) {
@@ -514,7 +536,7 @@ pub fn worker() -> Result<()> {
                         }
                     }
                 }
-                last_digest = LockedStore::load(&config)?.data.catalog.digest();
+                last_digest = LockedStore::load(&config)?.data.catalog.digest() + &replica::fingerprint(&config).unwrap_or_default();
                 Ok(())
             }) {
             Ok(()) => {}

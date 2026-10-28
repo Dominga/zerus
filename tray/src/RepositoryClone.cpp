@@ -1,3 +1,4 @@
+#include "SettingsJson.h"
 #include "RepositoryClone.h"
 #include "HgsClient.h"
 #include <QJsonArray>
@@ -29,7 +30,7 @@ RepositoryClone::RepositoryClone(HgsClient *client,const QString &host,MachinePl
 {
     connect(m_client,&HgsClient::repositoryFinished,this,&RepositoryClone::finish);
     m_parent=QSettings().value(settingsKey()+"/parent","~").toString();
-    const auto saved=QJsonDocument::fromJson(QSettings().value(settingsKey()+"/pending").toByteArray()).object();
+    const auto saved=SettingsJson::object(settingsKey()+"/pending");
     if(!saved.isEmpty()){
         m_url=saved["url"].toString();m_parent=saved["parent"].toString();m_name=saved["name"].toString();
         m_token=saved["request_id"].toString();m_expected=saved["path"].toString();m_uncertain=true;
@@ -78,7 +79,7 @@ void RepositoryClone::finish(quint64 request,bool ok,const QJsonObject &data,con
         }
         m_parent=data["parent"].toString();m_expected=data["path"].toString();m_token=QUuid::createUuid().toString(QUuid::WithoutBraces);
         const QJsonObject pending{{"request_id",m_token},{"url",m_url.trimmed()},{"parent",m_parent},{"name",m_name},{"path",m_expected}};
-        QSettings settings;settings.setValue(settingsKey()+"/pending",QJsonDocument(pending).toJson(QJsonDocument::Compact));settings.sync();
+        QSettings settings;SettingsJson::store(settings,settingsKey()+"/pending",QJsonDocument(pending));settings.sync();
         if(settings.status()!=QSettings::NoError){m_status=tr("Could not save clone recovery information.");emit changed();return;}
         m_action="clone";m_uncertain=true;m_status=tr("Cloning repository…");
         m_request=m_client->repositoryOperation(m_host,m_action,m_url.trimmed(),m_parent,m_name,m_token);emit changed();return;

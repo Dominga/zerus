@@ -191,6 +191,7 @@ private slots:
     void unsupportedAttachmentsPreserveTextAndAllowExplicitRemoval();
     void compactComposerAppliesMenuChoicesAtOnce();
     void compactComposerRowHasThreeZones();
+    void taskModeAddsAttachmentsWithTheStageButton();
     void initTestCase();
     void voiceInsertionRequiresUnchangedDraftAndNavigation();
     void init() { ComposerDraftStore::flushWrites(); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); QSettings().remove("workspace/messageEditorHeight"); }
@@ -593,6 +594,27 @@ void TestMessageComposer::unsupportedAttachmentsPreserveTextAndAllowExplicitRemo
     composer.setRecording(true);QVERIFY(!send->isEnabled());composer.setRecording(false);QVERIFY(send->isEnabled());
 }
 
+void TestMessageComposer::taskModeAddsAttachmentsWithTheStageButton()
+{
+    // Saved drafts names a task prompt by the session it is for.
+    const auto owner=ComposerDraftStore::owner("task-draft\nmac\ncodex/api");
+    QCOMPARE(int(owner.kind),int(ComposerDraftOwner::Kind::Task));QCOMPARE(owner.machine,QString("mac"));QCOMPARE(owner.session,QString("codex/api"));
+    MessageComposer composer;composer.setTaskMode(true);composer.setSendLabel("Backlog");composer.setPlaceholder("Task prompt for orchard / codex/api…");
+    composer.resize(600,160);composer.show();
+    composer.setSessionKey("task-draft\n\ncodex/api");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));composer.setAvailability(true);
+    QVERIFY(!composer.toolbar()->isHidden());
+    for(const char *name:{"sessionModelSettings","interruptAgent"})QVERIFY2(composer.findChild<QPushButton *>(name)->isHidden(),name);
+    auto *send=composer.findChild<QPushButton *>("sendMessage");QCOMPARE(send->text(),QString("Backlog"));QVERIFY(!send->isEnabled());
+    QCOMPARE(composer.editor()->placeholderText(),QString("Task prompt for orchard / codex/api…"));
+    QVERIFY(composer.canAttachFiles());QVERIFY(composer.addAttachment("image.png","image/png","image data"));
+    QVERIFY(composer.findChild<QPushButton *>("attachMessageFile")->isVisible());
+    QSignalSpy requested(&composer,&MessageComposer::sendRequested);
+    composer.editor()->setFocus();QTest::keyClicks(composer.editor(),"Add rate limiting");QVERIFY(send->isEnabled());
+    QTest::keyClick(composer.editor(),Qt::Key_Return);
+    QTRY_COMPARE(requested.size(),1);QVERIFY(requested[0][1].toString().contains("Add rate limiting"));
+    QCOMPARE(requested[0][2].value<QList<MessageAttachment>>().size(),1);
+}
+
 void TestMessageComposer::initTestCase()
 {
     QVERIFY(m_settings.isValid());
@@ -837,6 +859,14 @@ void TestMessageComposer::savedDraftsNameAndOpenTheirSession()
     save(remote, "  \n  Review   the deployment  ");
     save(child, "Ask the worker"); save(question, "Answer the question");
     save("voice-message-draft\n" + remote, {}, true); save("legacy", "Kept under an old key");
+    // A question-answer key keeps its JSON identity on disk. The draft index
+    // decodes it off the GUI thread; owner() then names its session at once.
+    QVERIFY(ComposerDraftStore().keys().contains(question));
+    const auto owner = ComposerDraftStore::owner(question);
+    QCOMPARE(int(owner.kind), int(ComposerDraftOwner::Kind::Question));
+    QCOMPARE(owner.machine, QString("mac")); QCOMPARE(owner.session, QString("claude/infra/review"));
+    const auto unlisted = "question\n" + QString::fromUtf8(QJsonDocument(QJsonArray{local, "question-two", "hash"}).toJson(QJsonDocument::Compact)) + "\nrun\nconversation";
+    QVERIFY(ComposerDraftStore::owner(unlisted).kind != ComposerDraftOwner::Kind::Question);
     // Newest first: the remote draft becomes the oldest.
     QFile manifest(ComposerDraftStore::directory() + '/' + QCryptographicHash::hash(remote.toUtf8(), QCryptographicHash::Sha256).toHex() + "/draft.json");
     QVERIFY(manifest.open(QIODevice::ReadWrite));

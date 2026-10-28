@@ -123,6 +123,24 @@ with open(home / "argv.jsonl", "a") as f:''').replace('"codex_home": os.environ.
         fresh=self.start('claude','fresh','--new')
         self.assertEqual(self.binding(fresh)['account_id'],'next')
 
+    def test_model_defaults_apply_once_and_existing_conversations_keep_their_choices(self):
+        self.hgs('account','add','work','--provider','codex')
+        home=self.root/'cfg/accounts/work'
+        (home/'models_cache.json').write_text(json.dumps({'models':[
+            dict(slug=model,visibility='list',supported_reasoning_levels=[dict(effort='low'),dict(effort='xhigh')])
+            for model in ['fixture-one','fixture-two']]}))
+        self.hgs('account','model-defaults','work','--model','fixture-one','--effort','xhigh')
+        original=self.start('codex','model-original','--new','--account','work')
+        def calls():return [v for v in map(json.loads,(self.root/'argv.jsonl').read_text().splitlines()) if v['agent']=='codex']
+        self.assertIn('fixture-one',calls()[-1]['argv']);self.assertIn('model_reasoning_effort="xhigh"',calls()[-1]['argv'])
+        self.hgs('account','model-defaults','work','--model','fixture-two','--effort','low')
+        self.hgs('pause',original);self.resume(original)
+        self.assertIn('fixture-one',calls()[-1]['argv']);self.assertNotIn('fixture-two',calls()[-1]['argv'])
+        self.start('codex','model-fresh','--new','--account','work')
+        self.assertIn('fixture-two',calls()[-1]['argv']);self.assertIn('model_reasoning_effort="low"',calls()[-1]['argv'])
+        self.start('codex','model-explicit','--new','--account','work','--','--model','explicit-choice')
+        self.assertIn('explicit-choice',calls()[-1]['argv']);self.assertNotIn('fixture-two',calls()[-1]['argv'])
+
     def test_permission_modes_start_resume_and_fork_without_baking_in_flags(self):
         self.script('shell', '#!/bin/sh\nshift\nexec /bin/bash -c "$@"\n')
         for provider,flag in [('codex','--dangerously-bypass-approvals-and-sandbox'),('claude','--permission-mode'),('kimi','--auto')]:

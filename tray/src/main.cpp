@@ -26,6 +26,7 @@
 #include <QPushButton>
 #include "HgsClient.h"
 #include "MainThreadWatchdog.h"
+#include "SettingsJson.h"
 #include "TrayAgent.h"
 #include "WorkspaceStyle.h"
 #include "WorkspaceFocus.h"
@@ -36,6 +37,7 @@
 #endif
 #ifdef Q_OS_MACOS
 #include "MacAppVisibility.h"
+#include "MacSystemPower.h"
 #include "MessageBoxIcons.h"
 #include "speech/SpeechRecorder.h"
 #include <pthread/qos.h>
@@ -421,6 +423,9 @@ int main(int argc, char *argv[])
     // Once this instance owns the tray: a second one never stages anything.
     cfg.hgsPath = stableHgs(cfg.hgsPath, hgsConfigured ? cfg.hgsPath : QString());
 #endif
+    // Nothing is shown yet: parse the saved JSON values the tray and its windows
+    // read first, so the GUI thread finds them parsed (SettingsJson.h).
+    SettingsJson::preload(TrayAgent::jsonSettings());
     // KSNI derives its persistent tray ID from the initial display name. Rename
     // the UI only after constructing the icon to preserve Plasma's visibility setting.
     TrayAgent agent(cfg);
@@ -475,6 +480,12 @@ int main(int argc, char *argv[])
         std::fflush(stderr);
         std::abort();
     });
+#ifdef Q_OS_MACOS
+    // macOS does not schedule the main thread while it goes to sleep or in a dark
+    // wake on battery; the watchdog holds its check around those (MainThreadWatchdog.h).
+    MacSystemPower systemPower([&watchdog]() { watchdog.systemWillSleep(); },
+                               [&watchdog]() { watchdog.systemPoweredOn(); });
+#endif
     const auto takeActivation = [&server, &agent]() {
         QLocalSocket *c = server.nextPendingConnection();
         QObject::connect(c, &QLocalSocket::disconnected, c, &QLocalSocket::deleteLater);

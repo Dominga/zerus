@@ -124,15 +124,24 @@ function(zerus_check_tests)
 endfunction()
 # Windows test programs find the Qt DLLs through PATH. The offscreen platform
 # reads fonts from QT_QPA_FONTDIR there; without it text has no glyphs or size.
+# Every suite fails on JSON parsed on the GUI thread (JsonParse.h), whatever
+# ENVIRONMENT it sets itself.
 function(zerus_test_environment)
+    if(CMAKE_VERSION VERSION_LESS 3.22)
+        if(WIN32)
+            message(FATAL_ERROR "Windows tests need CMake 3.22 or later (ENVIRONMENT_MODIFICATION)")
+        endif()
+        message(WARNING "CMake 3.22 or later runs the Qt suites with ZERUS_GUI_THREAD_CHECKS=fatal; scripts/ci/gui.sh sets it too")
+        return()
+    endif()
+    get_property(tests DIRECTORY PROPERTY TESTS)
+    foreach(test IN LISTS tests)
+        set_property(TEST ${test} APPEND PROPERTY ENVIRONMENT_MODIFICATION "ZERUS_GUI_THREAD_CHECKS=set:fatal")
+    endforeach()
     if(NOT WIN32)
         return()
     endif()
-    if(CMAKE_VERSION VERSION_LESS 3.22)
-        message(FATAL_ERROR "Windows tests need CMake 3.22 or later (ENVIRONMENT_MODIFICATION)")
-    endif()
     file(TO_CMAKE_PATH "$ENV{SystemRoot}/Fonts" fonts)
-    get_property(tests DIRECTORY PROPERTY TESTS)
     foreach(test IN LISTS tests)
         set_property(TEST ${test} APPEND PROPERTY ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>" "QT_QPA_FONTDIR=set:${fonts}")
@@ -250,16 +259,50 @@ target_include_directories(test_readmarksync PRIVATE ../src)
 target_link_libraries(test_readmarksync PRIVATE Qt6::Test Qt6::Core hgs-tray-core)
 zerus_add_test(readmarksync test_readmarksync)
 
+add_executable(test_eventstream test_eventstream.cpp)
+target_include_directories(test_eventstream PRIVATE ../src)
+target_link_libraries(test_eventstream PRIVATE Qt6::Test Qt6::Gui hgs-tray-core)
+zerus_add_test(eventstream test_eventstream)
+
+add_executable(test_jsonparse test_jsonparse.cpp)
+target_include_directories(test_jsonparse PRIVATE ../src)
+target_link_libraries(test_jsonparse PRIVATE Qt6::Test Qt6::Gui hgs-tray-core)
+zerus_add_test(jsonparse test_jsonparse)
+
 add_executable(test_processrunner test_processrunner.cpp)
 target_include_directories(test_processrunner PRIVATE ../src)
 target_link_libraries(test_processrunner PRIVATE Qt6::Test Qt6::Core hgs-tray-core)
 zerus_add_test(processrunner test_processrunner)
+add_executable(test_sessioncreation test_sessioncreation.cpp)
+target_include_directories(test_sessioncreation PRIVATE ../src)
+target_link_libraries(test_sessioncreation PRIVATE Qt6::Test Qt6::Core hgs-tray-core)
+zerus_add_test(sessioncreation test_sessioncreation)
 
 add_executable(test_swarmcontroller test_swarmcontroller.cpp)
 target_include_directories(test_swarmcontroller PRIVATE ../src)
 target_link_libraries(test_swarmcontroller PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
 zerus_add_test(swarmcontroller test_swarmcontroller)
 set_tests_properties(swarmcontroller PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# The Tasks tab over a fake `hgs task` (support/FakeTasksCli.h).
+add_executable(test_tasksview test_tasksview.cpp)
+target_include_directories(test_tasksview PRIVATE ../src)
+target_link_libraries(test_tasksview PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(tasksview test_tasksview)
+set_tests_properties(tasksview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(test_taskdialogs test_taskdialogs.cpp)
+target_include_directories(test_taskdialogs PRIVATE ../src)
+target_link_libraries(test_taskdialogs PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(taskdialogs test_taskdialogs)
+set_tests_properties(taskdialogs PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# Dragging tasks out of the Tasks tab (TaskDrag.h).
+add_executable(test_taskdrag test_taskdrag.cpp)
+target_include_directories(test_taskdrag PRIVATE ../src)
+target_link_libraries(test_taskdrag PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(taskdrag test_taskdrag)
+set_tests_properties(taskdrag PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(test_processview test_processview.cpp)
 target_include_directories(test_processview PRIVATE ../src)
@@ -271,6 +314,12 @@ add_executable(test_fleetstate test_fleetstate.cpp)
 target_include_directories(test_fleetstate PRIVATE ../src)
 target_link_libraries(test_fleetstate PRIVATE Qt6::Test Qt6::Core hgs-tray-core)
 zerus_add_test(fleetstate test_fleetstate)
+
+# Project tasks as the Tasks tab shows them (TaskBoard.h).
+add_executable(test_taskboard test_taskboard.cpp)
+target_include_directories(test_taskboard PRIVATE ../src)
+target_link_libraries(test_taskboard PRIVATE Qt6::Test Qt6::Core hgs-tray-core)
+zerus_add_test(taskboard test_taskboard)
 
 # Folder paths per machine (MachinePlatform.h, header-only): both styles everywhere.
 add_executable(test_machineplatform test_machineplatform.cpp)
@@ -506,6 +555,12 @@ target_compile_definitions(test_questioncard PRIVATE ZERUS_OPENCODE_FORM_CONTRAC
 zerus_add_test(questioncard test_questioncard)
 set_tests_properties(questioncard PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+add_executable(test_worktreesettings test_worktreesettings.cpp)
+target_include_directories(test_worktreesettings PRIVATE ../src)
+target_link_libraries(test_worktreesettings PRIVATE Qt6::Test Qt6::Widgets hgs-tray-core)
+zerus_add_test(worktreesettings test_worktreesettings)
+set_tests_properties(worktreesettings PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(test_workspace test_workspace.cpp)
 target_include_directories(test_workspace PRIVATE ../src)
 target_link_libraries(test_workspace PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
@@ -559,6 +614,12 @@ target_include_directories(test_accountspage PRIVATE ../src)
 target_link_libraries(test_accountspage PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
 zerus_add_test(accountspage test_accountspage)
 set_tests_properties(accountspage PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(test_accountfilter test_accountfilter.cpp)
+target_include_directories(test_accountfilter PRIVATE ../src)
+target_link_libraries(test_accountfilter PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(accountfilter test_accountfilter)
+set_tests_properties(accountfilter PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(test_accountusage test_accountusage.cpp)
 target_include_directories(test_accountusage PRIVATE ../src)
@@ -646,19 +707,19 @@ target_link_libraries(test_traymenu PRIVATE hgs-updates)
 
 add_executable(test_windowsmobilesettings test_windowsmobilesettings.cpp)
 target_include_directories(test_windowsmobilesettings PRIVATE ../src)
-target_link_libraries(test_windowsmobilesettings PRIVATE Qt6::Test Qt6::Widgets)
+target_link_libraries(test_windowsmobilesettings PRIVATE Qt6::Test Qt6::Widgets hgs-tray-core)
 zerus_add_test(windowsmobilesettings test_windowsmobilesettings)
 set_tests_properties(windowsmobilesettings PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(test_relaysettings test_relaysettings.cpp)
 target_include_directories(test_relaysettings PRIVATE ../src)
-target_link_libraries(test_relaysettings PRIVATE Qt6::Test Qt6::Widgets)
+target_link_libraries(test_relaysettings PRIVATE Qt6::Test Qt6::Widgets hgs-tray-core)
 zerus_add_test(relaysettings test_relaysettings)
 set_tests_properties(relaysettings PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(test_workspacesettings test_workspacesettings.cpp)
 target_include_directories(test_workspacesettings PRIVATE ../src)
-target_link_libraries(test_workspacesettings PRIVATE Qt6::Test Qt6::Widgets)
+target_link_libraries(test_workspacesettings PRIVATE Qt6::Test Qt6::Widgets hgs-tray-core)
 zerus_add_test(workspacesettings test_workspacesettings)
 set_tests_properties(workspacesettings PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 

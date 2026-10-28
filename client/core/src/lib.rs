@@ -8,6 +8,7 @@
 //! and the "Event stream" section of `docs/reference.md`.
 
 pub mod actions;
+pub mod attachments;
 pub mod batch;
 pub mod cache;
 pub mod details;

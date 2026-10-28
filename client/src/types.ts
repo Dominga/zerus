@@ -131,6 +131,8 @@ export type Action =
   | { kind: "start_fresh" }
   | { kind: "forget" }
   | { kind: "forget_binding" }
+  | { kind: "restore"; archive_id: string }
+  | { kind: "forget_archive"; archive_id: string }
   /** Computer-wide: the target's session name is empty and ignored. */
   | { kind: "pause_all"; count: number }
   | { kind: "resume_all"; count: number };

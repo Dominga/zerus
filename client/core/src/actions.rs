@@ -48,6 +48,16 @@ pub enum Action {
     /// `hgs session-action NAME --json` with `"action":"forget"`: the OpenCode
     /// binding forget (`requestForgetBinding`).
     ForgetBinding,
+    /// `hgs resume NAME --archive ID -d`: Restore an archived session
+    /// (`restoreArchive`). An empty id is refused before any call.
+    Restore {
+        archive_id: String,
+    },
+    /// `hgs kill NAME --archive ID`: Forget an archived session
+    /// (`forgetArchive`). An empty id is refused before any call.
+    ForgetArchive {
+        archive_id: String,
+    },
     /// `hgs pause --all`: every live session of the computer (`pauseAll`).
     /// `count` is the live sessions the menu counted; it sets the timeout.
     /// Computer-wide: the target's session name is empty and ignored.
@@ -237,6 +247,26 @@ pub fn invocation(
             }
             args.push("-d".to_owned());
             (args, None, 30, 30, None)
+        }
+        Action::Restore { archive_id } | Action::ForgetArchive { archive_id } => {
+            // Archive identity must never collapse to a generic resume or
+            // kill of a reused name (`restoreArchive`, `forgetArchive`).
+            if archive_id.is_empty() {
+                return Err("Missing archive identity".into());
+            }
+            let restore = matches!(action, Action::Restore { .. });
+            let mut args = vec![
+                if restore { "resume" } else { "kill" }.to_owned(),
+                name,
+                "--archive".to_owned(),
+                archive_id.clone(),
+            ];
+            if restore {
+                args.push("-d".to_owned());
+                (args, None, 30, 30, None)
+            } else {
+                (args, None, 5, 15, None)
+            }
         }
         Action::PauseAll { count } => {
             let secs = 15 + 30 * u64::from((*count).clamp(1, 10000));
@@ -1192,6 +1222,72 @@ mod tests {
                 detail: "timed out".into()
             }
         );
+    }
+
+    #[test]
+    fn restore_and_forget_archive_name_the_archive() {
+        let restore = Action::Restore {
+            archive_id: "a1".into(),
+        };
+        let forget = Action::ForgetArchive {
+            archive_id: "a1".into(),
+        };
+        let inv = invocation(&target(""), &restore, "u").unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "resume",
+                "claude/sample-project/review",
+                "--archive",
+                "a1",
+                "-d"
+            ]
+        );
+        assert_eq!(inv.stdin, None);
+        assert_eq!(inv.timeout.as_secs(), 30);
+        let inv = invocation(&target("mac"), &restore, "u").unwrap();
+        assert_eq!(inv.args[..2], ["@mac", "resume"]);
+        assert_eq!(inv.args.last().unwrap(), "-d");
+        assert_eq!(inv.timeout.as_secs(), 30);
+        let inv = invocation(&target(""), &forget, "u").unwrap();
+        assert_eq!(
+            inv.args,
+            ["kill", "claude/sample-project/review", "--archive", "a1"]
+        );
+        assert_eq!(inv.timeout.as_secs(), 5);
+        let inv = invocation(&target("mac"), &forget, "u").unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "@mac",
+                "kill",
+                "claude/sample-project/review",
+                "--archive",
+                "a1"
+            ]
+        );
+        assert_eq!(inv.timeout.as_secs(), 15);
+        assert_eq!(
+            serde_json::to_value(&restore).unwrap(),
+            json!({"kind": "restore", "archive_id": "a1"})
+        );
+        assert_eq!(
+            serde_json::to_value(&forget).unwrap(),
+            json!({"kind": "forget_archive", "archive_id": "a1"})
+        );
+        for action in [
+            Action::Restore {
+                archive_id: String::new(),
+            },
+            Action::ForgetArchive {
+                archive_id: String::new(),
+            },
+        ] {
+            assert_eq!(
+                invocation(&target("mac"), &action, "u").unwrap_err(),
+                "Missing archive identity"
+            );
+        }
     }
 
     #[test]

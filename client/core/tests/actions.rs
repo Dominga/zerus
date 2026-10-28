@@ -471,3 +471,75 @@ fn a_cancelled_archive_page_ends_its_child_promptly() {
         started.elapsed()
     );
 }
+
+#[test]
+fn restore_and_forget_archive_run_their_hgs_arguments_and_report_outcomes() {
+    let restore = Action::Restore {
+        archive_id: "a1".into(),
+    };
+    let forget = Action::ForgetArchive {
+        archive_id: "a1".into(),
+    };
+    for (action, argv) in [
+        (
+            &restore,
+            serde_json::json!([
+                "resume",
+                "claude/sample-project/review",
+                "--archive",
+                "a1",
+                "-d"
+            ]),
+        ),
+        (
+            &forget,
+            serde_json::json!(["kill", "claude/sample-project/review", "--archive", "a1"]),
+        ),
+    ] {
+        let t = target();
+        let fake = Fake::new(r#"{"reply":{"exit":0}}"#);
+        let inv = invocation(&t, action, "r").unwrap();
+        assert!(matches!(
+            classify(&t, action, &inv, run(&fake.hgs, &inv)),
+            Outcome::Done { .. }
+        ));
+        assert_eq!(fake.log()[0]["argv"], argv);
+
+        let fake = Fake::new(r#"{"reply":{"exit":2,"stderr":"archive is gone\n"}}"#);
+        assert_eq!(
+            classify(&t, action, &inv, run(&fake.hgs, &inv)),
+            Outcome::Failed {
+                detail: "archive is gone".into()
+            }
+        );
+
+        let fake = Fake::new(r#"{"reply":{"exit":0,"sleep":30}}"#);
+        let mut slow = invocation(&t, action, "r").unwrap();
+        slow.timeout = std::time::Duration::from_millis(500);
+        assert_eq!(
+            classify(&t, action, &slow, run(&fake.hgs, &slow)),
+            Outcome::Failed {
+                detail: "timed out".into()
+            }
+        );
+    }
+}
+
+#[test]
+fn an_empty_archive_identity_makes_no_call() {
+    let fake = Fake::new(r#"{"reply":{"exit":0}}"#);
+    for action in [
+        Action::Restore {
+            archive_id: String::new(),
+        },
+        Action::ForgetArchive {
+            archive_id: String::new(),
+        },
+    ] {
+        assert_eq!(
+            invocation(&target(), &action, "r").unwrap_err(),
+            "Missing archive identity"
+        );
+    }
+    assert!(fake.log().is_empty());
+}

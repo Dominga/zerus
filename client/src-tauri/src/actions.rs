@@ -1057,6 +1057,12 @@ mod tests {
             Action::StartFresh,
             Action::Forget,
             Action::ForgetBinding,
+            Action::Restore {
+                archive_id: "a1".into(),
+            },
+            Action::ForgetArchive {
+                archive_id: "a1".into(),
+            },
             Action::PauseAll { count: 1 },
             Action::ResumeAll { count: 1 },
         ] {

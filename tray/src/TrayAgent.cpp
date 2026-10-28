@@ -831,6 +831,11 @@ void TrayAgent::showSessions()
         connect(m_sessionsWindow, &SessionsWindow::refreshRequested, this, [this]() {
             pollLocal(m_client); pollAllKnownPeers(m_client, m_state);
         });
+        // A created session being confirmed: read its computer now, even one
+        // with a live event stream, which would otherwise not be polled.
+        connect(m_sessionsWindow, &SessionsWindow::hostRefreshRequested, this, [this](const QString &host) {
+            if (host.isEmpty()) m_client.requestLocal(); else m_client.requestPeer(host);
+        });
     }
     m_sessionsWindow->setFleet(m_state);
     m_sessionsWindow->setConnectionError(m_localReadError);

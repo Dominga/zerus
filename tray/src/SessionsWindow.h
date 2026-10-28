@@ -192,6 +192,8 @@ signals:
     void notificationPreferencesChanged(const QString &host, const QString &name, const QString &run,
                                         const QString &conversation, const QJsonObject &preferences);
     void refreshRequested();
+    // One computer's listing now: a created session waits to be confirmed there.
+    void hostRefreshRequested(const QString &host);
     void sessionActivated(const QString &host, const QString &name, const QString &tty);
     void terminalOpenRequested(const QString &host, const QString &name, const QString &tty);
     void folderShellRequested(const QString &host, const QString &directory);
@@ -273,6 +275,8 @@ private:
     bool m_rowsPending = false, m_rowRequestQueued = false;
     // One row preparation in flight; requests meanwhile fold into one more.
     bool m_rowPreparing = false, m_rowsAgain = false;
+    QTimer *m_confirmPoll = nullptr; QElapsedTimer m_confirmPollAge;
+    void pollConfirmingCreations();
     int m_droppedRowPreparations = 0, m_postedRowPreparations = 0;
     // One-time choices rebuild() made for the next applied rows: the row to
     // select instead of the selected session, a placed creation, a fork whose

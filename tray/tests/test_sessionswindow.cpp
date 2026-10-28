@@ -647,6 +647,7 @@ private slots:
     void rowPreparationNeverRunsOnTheGuiThread();
     void rowPreparationDropsStaleResults();
     void rowPreparationsNeverQueueBehindEachOther();
+    void aConfirmingCreationReadsItsComputerUntilListed();
     void rowPreparationKeepsItemsSelectionAndScroll();
     void rowPreparationRevealsSessionsAfterFilterChanges();
 private:
@@ -16830,6 +16831,34 @@ void TestSessionsWindow::rowPreparationDropsStaleResults()
 // queued its own row preparation on the one preparation thread, stale ones
 // included, and the selected session's inspection reply waited behind them.
 // Rebuilds while a preparation runs fold into one more.
+// User report 2026-10-28: a new session on a peer stayed "Confirming session"
+// for a minute: peers are listed once a minute (or only through their event
+// stream), and the one refresh after the launch came before the session was
+// listed. Its computer is read every 2 s until the session is placed.
+void TestSessionsWindow::aConfirmingCreationReadsItsComputerUntilListed()
+{
+    const auto id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QJsonObject operation{{"id", id}, {"launch_id", id}, {"creation_schema", 1}, {"state", "confirming"},
+        {"created", QDateTime::currentSecsSinceEpoch()}, {"launch_dispatched", true}, {"host", "peer"}, {"cmd", "claude"},
+        {"tag", "confirm-me"}, {"target", "/work/confirm"}, {"group", ""}};
+    { QFile file(QSettings().fileName() + ".creations.json"); QVERIFY(file.open(QIODevice::WriteOnly));
+      file.write(QJsonDocument(QJsonObject{{"schema", 1}, {"operations", QJsonObject{{id, operation}}}}).toJson(QJsonDocument::Compact)); }
+    SessionsWindow window(program()); keepDetailsPollsOut(window);
+    QSignalSpy reads(&window, &SessionsWindow::hostRefreshRequested);
+    window.setFleet(fleet()); window.show();
+    QTRY_VERIFY_WITH_TIMEOUT(reads.size() >= 2, 7000);
+    for (const auto &read : reads) QCOMPARE(read.at(0).toString(), QString("peer"));
+    // Listed: the creation is placed and the reads stop.
+    auto state = fleet(); BoxState peer; peer.host = "peer"; peer.ok = true;
+    auto listed = state.local().sessions.first(); listed.name = "claude/project/confirm-me"; listed.cmd = "claude"; listed.launchId = id;
+    listed.state = "running"; listed.tag = "confirm-me"; listed.project = "project";
+    peer.sessions.append(listed); state.setPeer(peer, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    QTRY_VERIFY(!window.findChild<SessionCreationController *>()->owns(id)
+                || window.findChild<SessionCreationController *>()->operation(id).value("state") == "bound");
+    QTest::qWait(2500); const auto settled = reads.size(); QTest::qWait(2500);
+    QCOMPARE(reads.size(), settled);
+}
+
 void TestSessionsWindow::rowPreparationsNeverQueueBehindEachOther()
 {
     AsyncRows async;

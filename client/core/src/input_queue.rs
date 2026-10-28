@@ -7,6 +7,10 @@
 //! The queue is the inspection's `input_queue`: `{id, text, can_send_now,
 //! hint}`, as `hgs` reads it off the agent's terminal. A push never resends
 //! text: it only sends the queue snapshot that holds its message.
+//!
+//! One deviation from Qt: `messageStart` counts the first 24 characters in
+//! UTF-16 units and may cut a surrogate pair at that limit; [`message_start`]
+//! counts the same units but keeps such a character whole.
 
 use crate::actions::Outcome;
 use serde::Serialize;

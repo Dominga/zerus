@@ -123,3 +123,38 @@ fn the_agent_attribution_is_not_inherited() {
         serde_json::json!({"HGS_SESSION": null, "HGS_RUN_ID": null})
     );
 }
+
+#[test]
+fn output_survives_a_grandchild_that_keeps_the_pipes_open() {
+    let fake =
+        Fake::new(r#"{"reply":{"exit":0,"stdout":{"status":"ok"},"stderr":"note","linger":5}}"#);
+    let inv = invocation(&target(), &Action::Pause, "u").unwrap();
+    let started = std::time::Instant::now();
+    match run(&fake.hgs, &inv) {
+        Exit::Code {
+            code: 0,
+            stdout,
+            stderr,
+        } => {
+            assert_eq!(stdout, br#"{"status": "ok"}"#);
+            assert_eq!(stderr, "note");
+        }
+        other => panic!("{other:?}"),
+    }
+    // One 2 s drain budget, not one per pipe; the grandchild ends by itself.
+    assert!(started.elapsed() < std::time::Duration::from_millis(3500));
+}
+
+#[test]
+fn an_early_exit_without_reading_stdin_reports_its_real_exit() {
+    let fake =
+        Fake::new(r#"{"reply":{"exit":1,"stderr":"hgs: no such session\n","read_stdin":false}}"#);
+    let mut inv = invocation(&target(), &Action::Pause, "u").unwrap();
+    inv.stdin = Some(vec![b'x'; 256 * 1024]);
+    match run(&fake.hgs, &inv) {
+        Exit::Code {
+            code: 1, stderr, ..
+        } => assert!(stderr.contains("no such session")),
+        other => panic!("{other:?}"),
+    }
+}

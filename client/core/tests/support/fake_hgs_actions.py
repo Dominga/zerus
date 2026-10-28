@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """A fake `hgs` for the client action tests. Reads `config.json` beside itself:
-{"reply": {"exit": 0, "stdout": <object or "echo_interrupt">, "stderr": "", "sleep": 0, "log_env": []}}
+{"reply": {"exit": 0, "stdout": <object or "echo_interrupt">, "stderr": "", "sleep": 0, "log_env": [], "read_stdin": true, "linger": 0}}
 Appends {"argv": [...], "stdin": "...", "env": {...}} to `log.ndjson` beside itself."""
 import json, os, sys, time
 
 here = os.path.dirname(os.path.abspath(__file__))
 config = json.load(open(os.path.join(here, "config.json")))["reply"]
-data = sys.stdin.read()
+data = sys.stdin.read() if config.get("read_stdin", True) else ""
 entry = {"argv": sys.argv[1:], "stdin": data}
 if config.get("log_env"):
     entry["env"] = {k: os.environ.get(k) for k in config["log_env"]}
@@ -22,4 +22,11 @@ if out == "echo_interrupt":
 if out is not None:
     sys.stdout.write(json.dumps(out))
 sys.stderr.write(config.get("stderr", ""))
+sys.stdout.flush()
+sys.stderr.flush()
+if config.get("linger"):
+    # A background grandchild that keeps the inherited pipes open after we exit.
+    if os.fork() == 0:
+        time.sleep(config["linger"])
+        os._exit(0)
 sys.exit(config.get("exit", 0))

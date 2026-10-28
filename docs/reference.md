@@ -4095,6 +4095,31 @@ changed. A list that cannot be read, such as an unknown project, sends a
 non-fatal `tasks_failed`. A stream follows at most 8 projects
 (`limits.tasks_subscriptions`).
 
+The `organization` topic follows the shared project catalog as `hgs swarm get`
+prints it: `{"op":"subscribe","topic":"organization"}`, one per stream. A
+worker thread reads the stored catalog without its lock, never saving it and
+never restarting the catalog worker. It reads again when a stat of the
+catalog, its member lists or the worker's marker changes and at least every
+30 s, at most once a second. The catalog travels as keyed rows that a client
+applies like the catalog topic's:
+
+- `organization` is the snapshot without `versions`, `written` and the
+  projects' contents. Its `organization.projects` lists the project IDs in
+  order, and it carries `digest` and `worker`.
+- `project:<id>` is a project without `sessions`, with `session_chunks`, the
+  number of its member rows.
+- `members:<id>:<n>` is `{sessions}`, at most 1000 sessions in order.
+- `version:<token>` is one `versions` entry.
+
+The first rows go out as a paged `snapshot`. A later change sends one `delta`
+with only the changed rows and removed keys, or a new snapshot when that would
+not fit one frame, so every frame leaves a client consistent. Rebuilding the
+rows gives `swarm get`'s object without `written`. An unreadable catalog sends
+a non-fatal `organization_failed`. The topic reports `worker.current` but never
+supervises the worker; a client that sees `false` runs one `hgs swarm get`,
+which restarts an outdated worker as before. Writes, including the first
+`swarm initialize`, stay with `hgs swarm`.
+
 The stream checks its sources every 250 ms. It stats the bindings, read marks,
 notification preferences, waits, launches, renames, name routes, the archive
 folder and the DeepSeek and OpenCode bindings, and holds a read-only connection

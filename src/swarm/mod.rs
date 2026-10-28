@@ -79,6 +79,22 @@ pub(crate) fn worker_status(config: &Config) -> Value {
     service::status(config).json()
 }
 
+/// The catalog as `swarm get` shows it, with `worker`, read without the
+/// catalog lock, without saving and without supervising the worker.
+pub(crate) fn organization(config: &Config) -> Result<Value> {
+    let mut snapshot = store::read_snapshot(config)?;
+    snapshot["worker"] = service::status(config).json();
+    Ok(snapshot)
+}
+
+/// The files [`organization`] reads, for a reader that follows changes,
+/// with the worker's marker, which a restarted worker rewrites.
+pub(crate) fn organization_files(config: &Config) -> Vec<std::path::PathBuf> {
+    let mut files = store::snapshot_files(config);
+    files.push(config.dir.join("swarm").join(service::MARKER));
+    files
+}
+
 pub(crate) fn preferences(config: &Config) -> Value {
     std::fs::read(config.dir.join("swarm/catalog.json"))
         .ok()

@@ -96,7 +96,8 @@ export function groupRows(input: ListInput): Row[] {
     let attention = 0, unread = 0, working = 0;
     for (const s of all) {
       if (!s.muted && (s.reviewLater || s.status === "attention")) attention++;
-      if (!s.muted && s.unread && s.status !== "offline") unread++;
+      // An offline computer's unread replies count too (visibleUnreadReply, HgsClient.h:104-105).
+      if (!s.muted && s.unread) unread++;
       if (s.status === "working" || s.status === "background") working++;
     }
     out.push({ type: "header", id: `h:${h.id}`, project: h.id, name: h.name, color: h.color, palette: h.palette,

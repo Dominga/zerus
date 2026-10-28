@@ -2,7 +2,7 @@ import { createMemo, createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import * as bridge from "../bridge";
 import { rowId } from "./catalog";
-import { notify } from "./actions";
+import { clearNotice, notify } from "./actions";
 import type { Batch, EditOutcome, GroupingOut, HeaderOut } from "../types";
 import type { Session } from "../ui/sessions/types";
 
@@ -14,24 +14,28 @@ import type { Session } from "../ui/sessions/types";
 // on the next tick as Qt's SwarmController does; the webview never repeats a
 // call, also not a rejected one.
 
+/** The reserved Inbox project; a drop on the list's blank area goes there (SessionList.cpp:484). */
+export const INBOX = "ungrouped";
+/** Project sync's notices replace each other and a success clears them, as Qt's one status line. */
+export const SYNC_NOTICE = "project-sync";
 export const STARTING = "Project sync is starting.";
 export const GONE = "This project is no longer listed. Open the menu again.";
 export const conflictsText = (n: number) => `${n} project conflict(s) need review in Swarm.`;
 export const unavailable = (detail: string) => `Project sync unavailable: ${detail}`;
 
 export const emptyGrouping = (): GroupingOut => ({
-  loaded: false, default_project: "ungrouped", headers: [], ready: false, reason: STARTING,
+  loaded: false, default_project: INBOX, headers: [], ready: false, reason: STARTING,
   busy: false, status: "", status_error: false, conflicts: 0,
 });
 
-/** A session's member key, as the catalog names it (`swarm::member`). */
-export const memberOf = (s: Pick<Session, "machine" | "name">) => `${s.machine}\n${s.name}`;
+/** A session's member key, as the catalog names it (`swarm::member`): the row's own machine, "" before this computer's hello. */
+export const memberOf = (s: Pick<Session, "rawMachine" | "name">) => `${s.rawMachine}\n${s.name}`;
 
-type Say = (tone: "error" | "warn" | "info", text: string, sticky?: boolean) => void;
-type Row = Pick<Session, "machine" | "name">;
+type Say = (tone: "error" | "warn" | "info", text: string, sticky?: boolean, key?: string) => void;
+type Row = Pick<Session, "rawMachine" | "name">;
 export type Assignment = { group: string; rank: number };
 
-export function createOrganization(say: Say) {
+export function createOrganization(say: Say, unsay: (key: string) => void = () => {}) {
   const [grouping, setGrouping] = createSignal<GroupingOut>(emptyGrouping());
   const [groups, setGroups] = createStore<Record<string, Assignment | undefined>>({});
   const defaultProject = createMemo(() => grouping().default_project);
@@ -77,9 +81,10 @@ export function createOrganization(say: Say) {
 
   function report(out: EditOutcome) {
     switch (out.outcome) {
-      case "done": if (out.conflicts > 0) say("warn", conflictsText(out.conflicts), true); return;
+      // One project sync notice, as Qt's status line: the next outcome replaces it, a clean success clears it.
+      case "done": if (out.conflicts > 0) say("warn", conflictsText(out.conflicts), true, SYNC_NOTICE); else unsay(SYNC_NOTICE); return;
       // Qt's status line for the failure (SwarmController.cpp:69, 195); the Rust side resends.
-      case "kept": say("error", out.detail, true); return;
+      case "kept": say("error", out.detail, true, SYNC_NOTICE); return;
       case "refused": say("info", out.detail); return;
     }
   }
@@ -117,7 +122,7 @@ export function createOrganization(say: Say) {
 
 export type Organization = ReturnType<typeof createOrganization>;
 
-const app = createOrganization(notify);
+const app = createOrganization(notify, clearNotice);
 export const { grouping, groups, defaultProject, applyGrouping, groupOf, headerOf, refusal, moveToProject, createProject,
                renameProject, deleteProject, moveProject, sortProject, setProjectCollapsed } = app;
 

@@ -1,7 +1,7 @@
 import { batch, createSignal } from "solid-js";
 import { listRows, type Row } from "./model";
 import { catalog } from "../../store/catalog";
-import { grouping, groupOf, moveProject, moveToProject } from "../../store/organization";
+import { grouping, groupOf, headerOf, INBOX, moveProject, moveToProject } from "../../store/organization";
 import { multi, setMulti, selectedKey } from "../../store/ui";
 
 // Bulk selection and drag-and-drop organisation of the session list, after
@@ -51,15 +51,12 @@ export const [dragItem, setDragItem] = createSignal<DragItem>();
 export const [drop, setDrop] = createSignal<Drop>();
 export const endDrag = () => batch(() => { setDragItem(undefined); setDrop(undefined); });
 
-// The blank area after the list ends the default project.
-const defaultProject = () => grouping().default_project;
-
 /** SessionList::placement for a pointer at content offset `y` over row `overId`. */
 export function placement(rows: Row[], offsets: number[], heights: number[], overId: string | undefined, y: number, item: DragItem): Drop {
   const end = rows.length ? offsets[rows.length - 1] + heights[rows.length - 1] : 0;
   let i = overId ? rows.findIndex((r) => r.id === overId) : -1;
-  // The blank area after the list moves a session to the default project's end.
-  if (i < 0) return item.kind === "group" ? { group: "", line: end, inset: 8 } : { group: defaultProject(), line: end, inset: 12 };
+  // The blank area after the list is an explicit move to the end of the Inbox, whichever project is the default (SessionList.cpp:482-484).
+  if (i < 0) return item.kind === "group" ? { group: "", line: end, inset: 8 } : { group: INBOX, line: end, inset: 12 };
   // A subagent row is not a target of its own: the whole family is one session.
   while (i > 0 && rows[i].type === "child") i--;
   const over = rows[i];
@@ -93,6 +90,7 @@ export function applyDrop(item: DragItem, d: Drop) {
   if (d.before === item.id) return;
   if (item.kind === "group") { void moveProject(item.id, d.before); return; }
   const moving = catalog.rows[item.id];
-  if (!moving) return;
+  // Qt's moveSession ignores a project that is not listed (SessionOrganization.cpp:188-189), such as the Inbox once it is deleted.
+  if (!moving || (grouping().loaded && !headerOf(d.group))) return;
   void moveToProject([moving], d.group, d.before ? catalog.rows[d.before] : undefined);
 }

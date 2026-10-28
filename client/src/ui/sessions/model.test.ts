@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { createComputed, createMemo, createRoot } from "solid-js";
 import { createStore } from "solid-js/store";
-import { applyBatch, toSession } from "../../store/catalog";
+import { applyBatch, catalog, toSession } from "../../store/catalog";
 import { applyGrouping } from "../../store/organization";
 import { rowOut } from "../../store/testing";
-import { groupMembers, groupRows, membersByGroup, type ListInput } from "./model";
+import { groupMembers, groupRows, membersByGroup, projectChoices, type ListInput } from "./model";
 import { emptyBatch, type Batch, type GroupingOut, type ViewRow } from "../../types";
 import type { Session } from "./types";
 
@@ -27,6 +27,8 @@ describe("grouped rows", () => {
   it("one project shows no header and nothing collapses", () => {
     const members = new Map([["alpha", [session(1), session(2)]]]);
     expect(shape(groupRows(input(grouping([header("alpha", true)]), members)))).toEqual(["s1", "s2"]);
+    // The project filter still applies without headers.
+    expect(shape(groupRows(input(grouping([header("alpha")]), members, { projects: ["other"] })))).toEqual([]);
   });
 
   it("follows the organization's order, hides empty projects and collapses only members", () => {
@@ -37,10 +39,11 @@ describe("grouped rows", () => {
   });
 
   it("counts every member of a project in its header, never muted ones", () => {
-    const members = new Map([["alpha", [session(1, { status: "attention" }), session(2, { unread: true }), session(3, { status: "working" }), session(4, { status: "attention", muted: true })]], ["ungrouped", [session(5)]]]);
+    // s1 both needs attention and has an unread reply: it counts in both (Qt counts them separately).
+    const members = new Map([["alpha", [session(1, { status: "attention", unread: true }), session(2, { unread: true }), session(3, { status: "working" }), session(4, { status: "attention", muted: true })]], ["ungrouped", [session(5)]]]);
     const rows = groupRows(input(grouping([header("alpha"), header("ungrouped")]), members, { visible: (s) => s.name.endsWith("s3") || s.name.endsWith("s5") }));
     const alpha = rows[0];
-    expect(alpha.type === "header" && [alpha.total, alpha.attention, alpha.unread, alpha.working]).toEqual([1, 1, 1, 1]);
+    expect(alpha.type === "header" && [alpha.total, alpha.attention, alpha.unread, alpha.working]).toEqual([1, 1, 2, 1]);
   });
 
   it("orders members by rank, keeps arrival order for ties and puts unassigned rows in the default project", () => {
@@ -78,6 +81,21 @@ describe("grouped rows", () => {
     applyGrouping(batchOf({ groups: [{ computer: "", key: "run:1", group: "alpha", rank: 0 }] }));
     expect(runs).toBe(1);
     expect(membersByGroup().get("alpha")?.map((s) => s.key)).toEqual(["\nrun:1", "\nrun:2"]);
+    dispose();
+  }));
+
+  it("offers the projects with members in the organization's order, by id with the header's name", () => createRoot((dispose) => {
+    applyBatch(batchOf({ upserts: [rowOut("", 11), rowOut("", 12), rowOut("", 13)] }));
+    const all = catalog.order.map((id) => id.slice(1));
+    applyGrouping(batchOf({
+      grouping: grouping([header("beta"), header("ungrouped"), header("alpha"), header("gamma")]),
+      groups: all.map((key, i) => ({ computer: "", key, group: key === "run:13" ? "alpha" : "beta", rank: i })),
+    }));
+    // The empty Inbox and gamma are left out.
+    expect(projectChoices()).toEqual([
+      { id: "beta", label: "BETA", count: all.length - 1 },
+      { id: "alpha", label: "ALPHA", count: 1 },
+    ]);
     dispose();
   }));
 });

@@ -98,6 +98,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow): Sessio
     name: text(v.name),
     title: text(v.title) || text(v.name),
     machine: text(v.machine) || computer || "this computer",
+    rawMachine: text(v.machine),
     project: text(v.project) || "Inbox",
     agent: agentKind(v.agent),
     model: text(v.model),

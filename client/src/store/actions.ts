@@ -15,7 +15,11 @@ import type { Action, Batch, Details, Outcome, ReadMark, Target } from "../types
 // entries; Stop waits only for its own interrupt, as Qt's m_interruptRequest;
 // a read mark, the user's or a quiet retry, never holds up a write.
 
-export interface Notice { id: number; tone: "error" | "warn" | "info"; text: string; sticky: boolean }
+export interface Notice {
+  id: number; tone: "error" | "warn" | "info"; text: string; sticky: boolean;
+  /** Notices with one key replace each other, as one status line does. */
+  key?: string;
+}
 
 /** The followed session's Activity `state` value, and whether its subscription has answered. */
 export interface Followed { value: Record<string, unknown> | undefined; settled: boolean }
@@ -59,12 +63,17 @@ export function createActions(
   let nextId = 1;
 
   function dismiss(id: number) { setList((all) => all.filter((n) => n.id !== id)); }
+  /** Dismisses the notice with this key, if one shows. */
+  function clearNotice(key: string) { setList((all) => all.filter((n) => n.key !== key)); }
 
-  /** Adds a notice; over the cap, the oldest non-sticky one goes first, then the oldest. */
-  function notify(tone: Notice["tone"], text: string, sticky = false) {
+  /**
+   * Adds a notice; over the cap, the oldest non-sticky one goes first, then
+   * the oldest. A notice with a key takes the place of the one with that key.
+   */
+  function notify(tone: Notice["tone"], text: string, sticky = false, key?: string) {
     const id = nextId++;
     setList((all) => {
-      const next = [...all, { id, tone, text, sticky }];
+      const next = [...(key === undefined ? all : all.filter((n) => n.key !== key)), { id, tone, text, sticky, key }];
       while (next.length > MAX_NOTICES) {
         const loose = next.findIndex((n) => !n.sticky);
         next.splice(loose < 0 ? 0 : loose, 1);
@@ -337,7 +346,7 @@ export function createActions(
     }
   }
 
-  return { perform, end, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices: list, notify, dismiss, loadReadMarks, observeBatch };
+  return { perform, end, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices: list, notify, clearNotice, dismiss, loadReadMarks, observeBatch };
 }
 
 type FollowSource = { target(): { id: string } | undefined; summary(): Record<string, unknown> | undefined; loaded(): boolean; ended(): boolean; error(): unknown };
@@ -358,5 +367,5 @@ let selection: () => Selection = () => ({});
 export function bindSelection(source: () => Selection) { selection = source; }
 
 const app = createActions(appCatalog, (computer) => !computerOffline(computer), () => selection());
-export const { perform, end, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices, notify, dismiss, loadReadMarks, observeBatch } = app;
+export const { perform, end, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices, notify, clearNotice, dismiss, loadReadMarks, observeBatch } = app;
 void loadReadMarks();

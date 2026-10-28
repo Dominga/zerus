@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createRoot } from "solid-js";
 import * as bridge from "../bridge";
-import { createOrganization, memberOf } from "./organization";
+import { createOrganization, memberOf, SYNC_NOTICE } from "./organization";
+import { toSession } from "./catalog";
 import { rowOut } from "./testing";
 import { emptyBatch, type Batch, type GroupingOut } from "../types";
 
@@ -9,7 +10,7 @@ vi.mock("../bridge", () => ({
   moveToProject: vi.fn(), createProject: vi.fn(), renameProject: vi.fn(), deleteProject: vi.fn(),
   moveProject: vi.fn(), sortProject: vi.fn(), setProjectCollapsed: vi.fn(() => Promise.resolve()),
 }));
-vi.mock("./actions", () => ({ notify: vi.fn() }));
+vi.mock("./actions", () => ({ notify: vi.fn(), clearNotice: vi.fn() }));
 
 const mocked = vi.mocked(bridge);
 const header = (id: string, name: string) => ({ id, name, color: null, accessible: true, collapsed: false, is_default: id === "ungrouped", palette: 0 });
@@ -18,13 +19,14 @@ const ready = (extra: Partial<GroupingOut> = {}): GroupingOut => ({
   ready: true, reason: null, busy: false, status: "", status_error: false, conflicts: 0, ...extra,
 });
 const batchOf = (part: Partial<Batch>): Batch => ({ ...emptyBatch(), ...part });
-const rows = [{ machine: "workstation", name: "claude/sample-project/review" }, { machine: "studio", name: "codex/aurora/orders-v3" }];
+const rows = [{ rawMachine: "workstation", name: "claude/sample-project/review" }, { rawMachine: "studio", name: "codex/aurora/orders-v3" }];
 
 function setup(grouping = ready()) {
   const say = vi.fn();
-  const org = createOrganization(say);
+  const unsay = vi.fn();
+  const org = createOrganization(say, unsay);
   org.applyGrouping(batchOf({ grouping }));
-  return { org, say };
+  return { org, say, unsay };
 }
 
 beforeEach(() => {
@@ -79,6 +81,17 @@ describe("the organization store", () => {
     expect(memberOf(rows[0])).toBe("workstation\nclaude/sample-project/review");
   });
 
+  it("builds member keys from the row's own machine, empty before this computer's hello", async () => {
+    const { org } = setup();
+    // The card shows "this computer"; the Rust member is "\n<name>" (`swarm::member` with the row's machine).
+    const local = toSession("", "run:1", { name: "claude/sample-project/review", machine: "" });
+    expect(local.machine).toBe("this computer");
+    expect(memberOf(local)).toBe("\nclaude/sample-project/review");
+    mocked.moveToProject.mockResolvedValue({ outcome: "done", conflicts: 0 });
+    await org.moveToProject([local], "alpha", toSession("studio", "run:2", { name: "codex/aurora/orders-v3", machine: "studio" }));
+    expect(mocked.moveToProject).toHaveBeenCalledWith(["\nclaude/sample-project/review"], "alpha", "studio\ncodex/aurora/orders-v3");
+  });
+
   it("refuses before the catalog is ready and for a project that is gone, without a call", async () => {
     const { org, say } = setup(ready({ ready: false, reason: "Project sync is starting." }));
     expect(await org.moveToProject(rows, "alpha")).toEqual({ outcome: "refused", detail: "Project sync is starting." });
@@ -105,7 +118,7 @@ describe("the organization store", () => {
       await Promise.resolve();
       expect(mocked.sortProject).toHaveBeenCalledTimes(1);
       expect(say).toHaveBeenCalledTimes(1);
-      expect(say).toHaveBeenCalledWith("error", "Project sync unavailable: lost the answer", true);
+      expect(say).toHaveBeenCalledWith("error", "Project sync unavailable: lost the answer", true, SYNC_NOTICE);
     } finally {
       vi.useRealTimers();
     }
@@ -115,15 +128,34 @@ describe("the organization store", () => {
     const { org, say } = setup();
     mocked.deleteProject.mockResolvedValue({ outcome: "done", conflicts: 2 });
     await org.deleteProject("alpha", "ungrouped");
-    expect(say).toHaveBeenCalledWith("warn", "2 project conflict(s) need review in Swarm.", true);
+    expect(say).toHaveBeenCalledWith("warn", "2 project conflict(s) need review in Swarm.", true, SYNC_NOTICE);
     mocked.moveProject.mockResolvedValue({ outcome: "kept", detail: "Project sync unavailable: hgs did not answer in time" });
     await org.moveProject("alpha", undefined);
     expect(mocked.moveProject).toHaveBeenCalledWith("alpha", null);
     expect(mocked.moveProject).toHaveBeenCalledTimes(1);
-    expect(say).toHaveBeenCalledWith("error", "Project sync unavailable: hgs did not answer in time", true);
+    expect(say).toHaveBeenCalledWith("error", "Project sync unavailable: hgs did not answer in time", true, SYNC_NOTICE);
     mocked.renameProject.mockResolvedValue({ outcome: "kept", detail: "Project sync needs an updated HGS installation." });
     await org.renameProject("alpha", "Alpha two");
-    expect(say).toHaveBeenCalledWith("error", "Project sync needs an updated HGS installation.", true);
+    expect(say).toHaveBeenCalledWith("error", "Project sync needs an updated HGS installation.", true, SYNC_NOTICE);
+  });
+
+  it("keeps project sync to one notice that a clean success clears, as Qt's status line", async () => {
+    const { org, say, unsay } = setup();
+    mocked.sortProject.mockResolvedValueOnce({ outcome: "kept", detail: "Project sync unavailable: hgs did not answer in time" });
+    mocked.sortProject.mockRejectedValueOnce("lost the answer");
+    mocked.sortProject.mockResolvedValueOnce({ outcome: "done", conflicts: 1 });
+    for (let i = 0; i < 3; i++) await org.sortProject("alpha");
+    // Kept, rejected and conflicts all speak with the one key, so each replaces the last.
+    expect(say.mock.calls.map((call) => call[3])).toEqual([SYNC_NOTICE, SYNC_NOTICE, SYNC_NOTICE]);
+    expect(unsay).not.toHaveBeenCalled();
+    mocked.sortProject.mockResolvedValueOnce({ outcome: "done", conflicts: 0 });
+    await org.sortProject("alpha");
+    expect(unsay).toHaveBeenCalledWith(SYNC_NOTICE);
+    // A refusal is not a sync outcome: it neither replaces nor clears the line.
+    org.applyGrouping(batchOf({ grouping: ready({ ready: false, reason: "Project sync is starting." }) }));
+    await org.sortProject("alpha");
+    expect(say).toHaveBeenLastCalledWith("info", "Project sync is starting.");
+    expect(unsay).toHaveBeenCalledTimes(1);
   });
 
   it("shows the hub's notice once as a sticky warning, and again only after it cleared", () => createRoot((dispose) => {

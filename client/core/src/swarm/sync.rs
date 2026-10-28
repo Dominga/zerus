@@ -179,6 +179,10 @@ struct Sent {
     desired: Value,
     /// The edits this apply carries; each is answered by it.
     tickets: Vec<Ticket>,
+    /// The state held when the apply went out. The source read it before
+    /// hgs took the lock for this apply, so it is older than the reply and
+    /// goes with it; a failed apply gives it back.
+    held: Option<Observation>,
 }
 
 /// SwarmController's state (SwarmController.h:37-46).
@@ -220,7 +224,8 @@ pub struct Controller {
     /// reads the catalog once base and desired match (100); a state the
     /// guard held back is adopted when the guard ends, unless a state that
     /// shows the write came first. The source re-reads well inside the
-    /// guard, so by then the held state is the newest it has.
+    /// guard, so by then the held state is the newest it has. An apply that
+    /// goes out takes it along (`Sent::held`): its reply is newer.
     held: Option<Observation>,
     /// A state already moved this failure streak's tick to now; the next
     /// ones wait for the 5 s tick, as Qt resends at most once per tick.
@@ -474,6 +479,7 @@ impl Controller {
         self.sent = Some(Sent {
             desired: desired.clone(),
             tickets,
+            held: self.held.take(),
         });
         Due::Apply(invocation(&input))
     }
@@ -520,14 +526,15 @@ impl Controller {
             .collect();
         self.tick_pulled = false;
         // hgs answers from the store it saved under the write's lock
-        // (src/swarm/mod.rs:225-250): a held state that shows the write was
-        // read after it and is at least as new as the reply. One without it
-        // is older or superseded the write; the guard holds it back until the
-        // source re-reads or the guard ends. Without a write there is no
-        // guard, and the reply is the newer state, as Qt adopts it.
-        if written.is_empty() {
-            self.held = None;
-        }
+        // (src/swarm/mod.rs:225-250). A state held when the apply went out
+        // was read before that lock and goes with `sent`. One seen while it
+        // ran may be older or newer than the reply: another writer may save
+        // after the lock is released (an apply, a session assignment, a
+        // peer's merge), and its heads need not list this write, since `shows`
+        // checks heads, not history (src/swarm/catalog.rs:340-357). It stays
+        // held: behind the guard after a write until the source's re-read or
+        // the guard's end, and adopted at once without one, where Qt's next
+        // `get` would read it (SwarmController.cpp:96-101).
         if self.desired.as_ref() == Some(&sent.desired) {
             self.desired = None;
             self.desired_membership = None;
@@ -557,6 +564,11 @@ impl Controller {
     fn kept(&mut self, sent: Sent, status: String, now: u64) -> Vec<(Ticket, EditOutcome)> {
         self.status = Some((status.clone(), true));
         self.refresh_at = Some(now + REFRESH_MS);
+        // Nothing was written: the state from before the apply is still the
+        // newest unless one came while it ran. Edits that settle take it.
+        if self.held.is_none() {
+            self.held = sent.held;
+        }
         sent.tickets
             .into_iter()
             .map(|ticket| {
@@ -1718,5 +1730,101 @@ mod tests {
             matches!(sync.due(1_800), Due::Apply(_)),
             "a new streak: the state is the tick"
         );
+    }
+
+    /// `value` with alpha renamed to "Alpha 2" by another writer, whose name
+    /// field has heads `[op]`.
+    fn with_alpha2(mut value: Value, op: &str) -> Value {
+        value["organization"]["projects"][0]["name"] = json!("Alpha 2");
+        value["versions"][alpha_name().as_str()] = json!([op]);
+        value
+    }
+
+    // Fix round 3 (i): the source read a state held when the apply went out
+    // before hgs took the apply's lock, so the reply is newer and the state
+    // goes with it, even when the source then ends.
+    #[test]
+    fn a_state_read_before_the_apply_never_outlives_its_reply() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let older = with_alpha2(state("d1b", "alpha", &["op-1"]), "op-a2");
+        assert!(!sync.observe(observation(older), 50), "edits are pending");
+        let _ = input(sync.due(120));
+        let answer = with_alpha2(state("d2", "beta", &["op-2"]), "op-a2");
+        sync.finish(reply(answer.clone(), &["op-2"]), 300);
+        sync.source_ended();
+        assert_eq!(sync.next_due(), None, "nothing held");
+        assert!(matches!(sync.due(300 + GUARD_MS), Due::Nothing));
+        assert_eq!((sync.digest(), place(&sync).as_str()), ("d2", "beta"));
+        assert!(
+            sync.observe(observation(answer), 20_000),
+            "the source is back"
+        );
+        assert_eq!((sync.digest(), place(&sync).as_str()), ("d2", "beta"));
+    }
+
+    // Fix round 3 (i): a state seen during the first apply, with edits made
+    // meanwhile, goes with the second apply, whose reply is newer.
+    #[test]
+    fn a_state_seen_during_an_apply_gives_way_to_the_next_apply_s_reply() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let _ = input(sync.due(120));
+        assert!(!sync.observe(observation(state("d3", "ungrouped", &["op-3"])), 200));
+        sync.edit(&to("alpha"), 250).unwrap();
+        sync.finish(reply(state("d2", "beta", &["op-2"]), &["op-2"]), 300);
+        let _ = input(sync.due(420));
+        let settled = sync.finish(
+            reply(state("d4", "alpha", &["op-3", "op-4"]), &["op-4"]),
+            500,
+        );
+        assert_eq!(settled, [(2, EditOutcome::Done { conflicts: 0 })]);
+        assert_eq!(sync.next_due(), None, "nothing held");
+        assert!(matches!(sync.due(500 + GUARD_MS), Due::Nothing));
+        assert_eq!((sync.digest(), place(&sync).as_str()), ("d4", "alpha"));
+    }
+
+    // Fix round 3 (ii): without a write there is no guard; a state seen while
+    // the apply ran may be newer (another writer saved after hgs released the
+    // lock), and the source does not send it again, so it is adopted, where
+    // Qt's next `get` would read it (SwarmController.cpp:96-101).
+    #[test]
+    fn a_newer_state_seen_during_an_apply_that_wrote_nothing_is_adopted() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let _ = input(sync.due(120));
+        let newer = with_alpha2(state("d3", "beta", &["op-x"]), "op-a2");
+        assert!(!sync.observe(observation(newer), 200), "an apply runs");
+        // Another device had moved the session to beta already: nothing written.
+        sync.finish(reply(state("d2", "beta", &["op-x"]), &[]), 300);
+        assert_eq!((sync.digest(), alpha(&sync)), ("d3", "Alpha 2".to_owned()));
+        assert_eq!(sync.next_due(), None);
+    }
+
+    // Fix round 3: a failed apply gives back the state held when it went
+    // out, so edits that settle afterwards still take it (review I1); one
+    // seen while the failed apply ran is newer and stays instead.
+    #[test]
+    fn a_failed_apply_gives_back_the_state_it_took() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let renamed = with_alpha2(state("d2", "alpha", &["op-1"]), "op-a2");
+        assert!(!sync.observe(observation(renamed), 50));
+        let _ = input(sync.due(120));
+        sync.finish(Exit::TimedOut, 1_000);
+        sync.edit(&to("alpha"), 1_100).unwrap();
+        assert!(matches!(sync.due(1_220), Due::Settled(_)));
+        assert_eq!((sync.digest(), alpha(&sync)), ("d2", "Alpha 2".to_owned()));
+
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        assert!(!sync.observe(observation(state("d2", "alpha", &["op-1"])), 50));
+        let _ = input(sync.due(120));
+        let newer = with_alpha2(state("d3", "alpha", &["op-1"]), "op-a3");
+        assert!(!sync.observe(observation(newer), 500), "an apply runs");
+        sync.finish(Exit::TimedOut, 1_000);
+        sync.edit(&to("alpha"), 1_100).unwrap();
+        assert!(matches!(sync.due(1_220), Due::Settled(_)));
+        assert_eq!((sync.digest(), alpha(&sync)), ("d3", "Alpha 2".to_owned()));
     }
 }

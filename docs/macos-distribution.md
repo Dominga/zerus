@@ -549,7 +549,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
      - allow the one-time prompt for the dev app;
      - a session waiting for approval posts "Zerus — Needs attention";
      - answering withdraws it;
-     - clicking a banner opens that session;
+     - clicking a banner opens that session (a click while Zerus is not running is step 8's: started by a click, the dev app runs without the variables above);
      - nothing posts while the window is focused.
    - **Defaults:** `defaults read dev.zerus.next` lists only Cocoa and WebKit keys (`NS…`, `Apple…`, `WebKit…`). Report the list; it shows what Cocoa or WebKit writes into a client's domain.
    - **Watchdog:** Terminal shows `main-thread watchdog on (30 s)`. Open the menu-bar menu and leave it open for 60 s, then close it: the app keeps running and no `main thread unresponsive` line appears (the heartbeat runs in the common run-loop modes).
@@ -619,6 +619,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    - one menu-bar item;
    - notifications post without a new permission prompt (when step 2 matched);
    - a click on a banner Qt delivered before the switch opens its session;
+   - a click while Zerus is not running: quit Zerus from its menu (launchd leaves a clean exit alone), then click one of its banners in Notification Center. Zerus starts and opens that session. If it starts but the session stays closed, the click that launched it was lost: the notification delegate is set during setup, and the fix is to set it in `applicationWillFinishLaunching` (Task 6); file a bead and tell webui. The instance the click started runs outside launchd, so quit it and run `launchctl kickstart gui/$(id -u)/com.hgdev.hgs-tray` to bring back the supervised one;
    - the owner's sessions, drafts in Qt's store and settings are where they were. Qt drafts and the dev app's drafts appear in the client (the import of step 7); the client's own settings start at their defaults;
    - after the Mac's next sleep and wake, `launchctl print gui/$(id -u)/com.hgdev.hgs-tray | grep 'pid ='` shows the same pid as before, and `~/Library/Logs/hgs-tray.log` has no `main thread unresponsive` line.
 9. **Later Dev rollouts.** Run the same `bash tray/install.sh` with the new `N` and without `HGS_MAC_GUI`. The installed client is kept, and Qt stays the rollback copy: there is no second slot. A new client that does not start is replaced by the client it replaced, automatically. The numbered Dev guard refuses a run without `ZERUS_DEV_BUILD_NUMBER` or a local preview label.

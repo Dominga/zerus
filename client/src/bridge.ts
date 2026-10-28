@@ -228,23 +228,25 @@ export async function copyCommand(computer: string, name: string, archiveId: str
 }
 
 /**
- * One checked page of a computer's archive (`archive_page`, `hgs [@alias] archives --json`).
- * Rejects with Qt's text for an invalid page, "superseded" when a newer
- * request of that computer replaced it, or the hgs failure.
+ * One checked page of a computer's archive (`archive_page`, `hgs [@alias] archives --json`);
+ * `request` is the archive store's request number. Rejects with Qt's text for
+ * an invalid page, "superseded" when a newer request of that computer or a
+ * cancel replaced it, or the hgs failure.
  */
-export async function archivePage(computer: string, from: number, until: number, cursor: string, query: string): Promise<ArchivePage> {
+export async function archivePage(computer: string, from: number, until: number, cursor: string, query: string, request: number): Promise<ArchivePage> {
   if (!inTauri()) throw "Archive pages need the desktop app.";
-  return invoke<ArchivePage>("archive_page", { computer, from, until, cursor, query });
+  return invoke<ArchivePage>("archive_page", { computer, from, until, cursor, query, request });
 }
 
 /**
- * Cancels every computer's archive page request (Qt's cancelArchivePages):
- * their `hgs` ends and they answer "superseded". Outside the app, and in a
- * build without archive reads, there is nothing to cancel.
+ * Cancels every archive page request numbered `through` or lower (Qt's
+ * cancelArchivePages), also one that has not started yet: their `hgs` ends
+ * and they answer "superseded". Outside the app, and in a build without
+ * archive reads, there is nothing to cancel.
  */
-export async function cancelArchivePages(): Promise<void> {
+export async function cancelArchivePages(through: number): Promise<void> {
   if (!inTauri()) return;
-  await invoke<null>("cancel_archive_pages").catch(() => {});
+  await invoke<null>("cancel_archive_pages", { through }).catch(() => {});
 }
 
 /** Puts text on the clipboard: from Rust in the app, the page's clipboard in a browser. */

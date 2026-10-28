@@ -570,7 +570,43 @@ pub fn archive_page_cancellable(
                 Stopped::Cancelled => ReadError::Superseded,
             }
         })?;
+    if let Some(error) = archive_failure(hgs, &exit) {
+        return Err(error);
+    }
     Ok(page(&decode(&request, exit)?))
+}
+
+/// Standard error an archive page failure shows, at most (Qt's `left(4000)`).
+const ARCHIVE_FAILURE_CHARS: usize = 4000;
+
+/// Qt's `failureDetail` (HgsClient.cpp 466-479) for an archive page whose
+/// `hgs` did not end with exit 0: "timed out", "cannot start '{hgs}':
+/// {error}", or the trimmed standard error, else "exit code {n}". Only the
+/// archive read words its failures so; the other reads keep theirs.
+fn archive_failure(hgs: &Path, exit: &Exit) -> Option<ReadError> {
+    let detail = |stderr: &str| -> Option<String> {
+        let text: String = stderr.trim().chars().take(ARCHIVE_FAILURE_CHARS).collect();
+        (!text.is_empty()).then_some(text)
+    };
+    match exit {
+        Exit::Code { code: 0, .. } => None,
+        Exit::TimedOut => Some(ReadError::Failed {
+            code: None,
+            message: "timed out".into(),
+        }),
+        Exit::StartFailed(error) => Some(ReadError::StartFailed {
+            message: format!("cannot start '{}': {error}", hgs.display()),
+        }),
+        Exit::Code { code, stderr, .. } => Some(ReadError::Failed {
+            code: Some(*code),
+            message: detail(stderr).unwrap_or_else(|| format!("exit code {code}")),
+        }),
+        Exit::Abnormal { stderr } => detail(stderr).map(|message| ReadError::Failed {
+            code: None,
+            message,
+        }),
+        Exit::WriteFailed => None,
+    }
 }
 
 /// The typed page of a reply [`check_archive_page`] accepted.
@@ -971,6 +1007,37 @@ mod tests {
             p["total"] = json!(0);
         });
         assert_eq!(verdict("", end), None);
+    }
+
+    #[test]
+    fn archive_failures_give_qt_texts() {
+        let hgs = Path::new("/x/hgs");
+        let text = |exit: Exit| archive_failure(hgs, &exit).map(|error| error.to_string());
+        assert_eq!(text(code("{}")), None);
+        assert_eq!(text(Exit::TimedOut).as_deref(), Some("timed out"));
+        assert_eq!(
+            text(Exit::StartFailed("No such file or directory".into())).as_deref(),
+            Some("cannot start '/x/hgs': No such file or directory")
+        );
+        let failed = |code: i32, stderr: &str| Exit::Code {
+            code,
+            stdout: Vec::new(),
+            stderr: stderr.to_owned(),
+        };
+        assert_eq!(
+            text(failed(2, "  no archive here \n")).as_deref(),
+            Some("no archive here")
+        );
+        assert_eq!(text(failed(2, " \n")).as_deref(), Some("exit code 2"));
+        let long = text(failed(1, &"\u{e9}".repeat(5000))).unwrap();
+        assert_eq!(long.chars().count(), 4000);
+        assert_eq!(
+            text(Exit::Abnormal {
+                stderr: "killed".into()
+            })
+            .as_deref(),
+            Some("killed")
+        );
     }
 
     #[test]

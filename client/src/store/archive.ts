@@ -194,16 +194,24 @@ export function archiveListRows(rows: readonly ArchivedSession[], scope: ListSco
 }
 
 export interface ArchiveDeps {
-  /** One page of a computer's archive; rejects with Qt's text, "superseded" or the hgs failure. */
-  read(computer: ComputerId, from: number, until: number, cursor: string, query: string): Promise<ArchivePage>;
-  /** Ends every read in flight (Qt's cancelArchivePages); their answers are discarded by token anyway. */
-  cancel(): void;
+  /**
+   * One page of a computer's archive; `request` is the store's request
+   * number (its token). Rejects with Qt's text, "superseded" or the hgs failure.
+   */
+  read(computer: ComputerId, from: number, until: number, cursor: string, query: string, request: number): Promise<ArchivePage>;
+  /**
+   * Ends every read numbered `through` or lower, also one not started yet
+   * (Qt's cancelArchivePages); their answers are discarded by token anyway.
+   */
+  cancel(through: number): void;
   /** The Archive filter shows the list. */
   active(): boolean;
   /** The search text; the archive query is it trimmed. */
   query(): string;
   computers(): PagingComputer[];
   now?(): Date;
+  /** Request numbers start after this; the app passes its start time, so a reload never reuses a cancelled number. */
+  firstRequest?: number;
 }
 
 const sameHosts = (a: readonly PagingComputer[], b: readonly PagingComputer[]) =>
@@ -221,7 +229,8 @@ export function createArchive(deps: ArchiveDeps) {
   let active = false;
   let query = "";
   let delay: ReturnType<typeof setTimeout> | undefined;
-  let requests = 0;
+  /** The highest request number issued (Qt's m_archiveRequest). */
+  let requests = deps.firstRequest ?? 0;
 
   const bounds = () => rangeBounds(range(), now());
   const includes = (at: number) => { const [from, until] = bounds(); return at >= from && at < until; };
@@ -249,7 +258,7 @@ export function createArchive(deps: ArchiveDeps) {
       setPages(all);
       for (const [computer, id, cursor] of calls) {
         let reply: Promise<ArchivePage>;
-        try { reply = deps.read(computer, from, until, cursor, query); } catch (error) { reply = Promise.reject(error); }
+        try { reply = deps.read(computer, from, until, cursor, query, id); } catch (error) { reply = Promise.reject(error); }
         reply.then((page) => answer(computer, id, page), (error) => fail(computer, id, error));
       }
     });
@@ -280,7 +289,7 @@ export function createArchive(deps: ArchiveDeps) {
   function refresh() {
     clearTimeout(delay);
     delay = undefined;
-    deps.cancel();
+    deps.cancel(requests);
     dropPages();
     navigate(false);
   }
@@ -288,7 +297,7 @@ export function createArchive(deps: ArchiveDeps) {
   function setQuery(text: string) {
     if (text === query) return;
     query = text;
-    deps.cancel();
+    deps.cancel(requests);
     dropPages();
     clearTimeout(delay);
     delay = setTimeout(() => { delay = undefined; refresh(); }, QUERY_DELAY_MS);
@@ -303,12 +312,12 @@ export function createArchive(deps: ArchiveDeps) {
     const different = !sameHosts(next, untrack(hosts));
     batch(() => {
       if (!show && active) {
-        deps.cancel();
+        deps.cancel(requests);
         setPages((all) => Object.fromEntries(Object.entries(all).map(([id, p]) => [id, p.request ? { ...p, request: 0 } : p])));
       }
       active = show;
       if (different) {
-        deps.cancel();
+        deps.cancel(requests);
         setHosts(next);
         dropPages();
       }
@@ -383,8 +392,9 @@ function* catalogRows(): Iterable<Session> {
  */
 export const { archive, archiveRows, archiveCount, archiveTip } = createRoot(() => {
   const archive = createArchive({
-    read: (computer, from, until, cursor, query) => bridge.archivePage(computer, from, until, cursor, query),
-    cancel: () => { void bridge.cancelArchivePages(); },
+    read: (computer, from, until, cursor, query, request) => bridge.archivePage(computer, from, until, cursor, query, request),
+    cancel: (through) => { void bridge.cancelArchivePages(through); },
+    firstRequest: Date.now(),
     active: () => stateFilter() === "archived" && page() === "sessions",
     query: search,
     computers: () => pagingComputers(catalog.computers, catalogRows(), machineFilter()),

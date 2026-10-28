@@ -423,6 +423,23 @@ fn an_archive_page_through_the_fake_is_checked_and_typed() {
 }
 
 #[test]
+fn a_failed_archive_page_reads_as_qt_words_it() {
+    use zerus_client_core::reads::archive_page;
+    use zerus_client_core::ComputerId;
+    let text = |reply: Value| {
+        let fake = Fake::new(&serde_json::json!({ "reply": reply }).to_string());
+        archive_page(&fake.hgs, &ComputerId::from("studio"), 1.0, 2.0, "", "")
+            .unwrap_err()
+            .to_string()
+    };
+    assert_eq!(
+        text(serde_json::json!({"exit": 3, "stderr": "  no archive here \n"})),
+        "no archive here"
+    );
+    assert_eq!(text(serde_json::json!({"exit": 4})), "exit code 4");
+}
+
+#[test]
 fn a_cancelled_archive_page_ends_its_child_promptly() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use zerus_client_core::reads::{archive_page_cancellable, ReadError};

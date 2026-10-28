@@ -50,7 +50,7 @@ describe("the Archive view in the app", () => {
     expect(archiveCount()).toBe("…");
 
     setStateFilter("archived");
-    expect(mocked.archivePage).toHaveBeenCalledWith("", 0, 253402300800, "", "");
+    expect(mocked.archivePage).toHaveBeenCalledWith("", 0, 253402300800, "", "", expect.any(Number));
     expect(listRows()).toEqual([]);
     pending.shift()!({ rows: [archived(1, 100), archived(2, 200)], next_cursor: "next", previous_cursor: null, total: 3, position: 0 });
     await flush();
@@ -60,6 +60,8 @@ describe("the Archive view in the app", () => {
     expect(archiveCount()).toBe("2+");
     expect(archiveTip()).toBe("Archive / 2 loaded; more can be loaded in Archive");
     expect(mocked.cancelArchivePages).toHaveBeenCalled();
+    // The app numbers its requests from its start time, so a reload never reuses a cancelled number.
+    expect(mocked.archivePage.mock.calls[0][5]).toBeGreaterThan(1_700_000_000_000);
     const key = `\narchive:${uuid(2)}`;
     expect(rows[0].id).toBe(key);
     if (rows[0].type === "card") expect(matchesFilter(rows[0].session, "archived")).toBe(true);
@@ -72,7 +74,7 @@ describe("the Archive view in the app", () => {
     setSearch("a1");
     expect(listRows()).toEqual([]);
     vi.advanceTimersByTime(300);
-    expect(mocked.archivePage).toHaveBeenLastCalledWith("", 0, 253402300800, "", "a1");
+    expect(mocked.archivePage).toHaveBeenLastCalledWith("", 0, 253402300800, "", "a1", expect.any(Number));
     setSearch("");
     vi.advanceTimersByTime(300);
     pending.splice(0).forEach((answer) => answer({ rows: [archived(1, 100)], next_cursor: "", previous_cursor: null, total: 1, position: 0 }));

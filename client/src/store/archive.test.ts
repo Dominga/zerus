@@ -45,16 +45,16 @@ const BOX: PagingComputer = { computer: "box", machine: "box" };
 
 interface Call { computer: string; from: number; until: number; cursor: string; query: string; resolve(p: ArchivePage): void; reject(e: unknown): void }
 
-function setup(options: { active?: boolean; computers?: PagingComputer[] } = {}) {
+function setup(options: { active?: boolean; computers?: PagingComputer[]; firstRequest?: number } = {}) {
   const calls: Call[] = [];
-  const read = vi.fn((computer: string, from: number, until: number, cursor: string, query: string) =>
+  const read = vi.fn((computer: string, from: number, until: number, cursor: string, query: string, _request: number) =>
     new Promise<ArchivePage>((resolve, reject) => { calls.push({ computer, from, until, cursor, query, resolve, reject }); }));
   const [active, setActive] = createSignal(options.active ?? true);
   const [query, setQuery] = createSignal("");
   const [computers, setComputers] = createSignal<PagingComputer[]>(options.computers ?? [LOCAL]);
-  const cancel = vi.fn();
+  const cancel = vi.fn((_through: number) => {});
   let archive!: ReturnType<typeof createArchive>;
-  const dispose = createRoot((d) => { archive = createArchive({ read, cancel, active, query, computers, now: () => new Date(NOW) }); return d; });
+  const dispose = createRoot((d) => { archive = createArchive({ read, cancel, active, query, computers, now: () => new Date(NOW), firstRequest: options.firstRequest }); return d; });
   /** Answers the call at `i` (default: the latest) and lets its handlers run. */
   const answer = async (page: ArchivePage, i = calls.length - 1) => { calls[i].resolve(page); await flush(); };
   const fail = async (error: unknown, i = calls.length - 1) => { calls[i].reject(error); await flush(); };
@@ -236,6 +236,24 @@ describe("names and cancelling (ArchiveBrowser::configure, cancelArchivePages)",
     t.dispose();
   });
 
+  it("passes its request number to every read and cancels through the highest one issued", () => {
+    const t = setup({ computers: [LOCAL, BOX] });
+    expect(t.read.mock.calls.map((c) => c[5])).toEqual([1, 2]);
+    expect(t.cancel.mock.calls).toEqual([[0]]);
+    t.archive.refresh();
+    expect(t.cancel.mock.calls.at(-1)).toEqual([2]);
+    expect(t.read.mock.calls.slice(2).map((c) => c[5])).toEqual([3, 4]);
+    t.setActive(false);
+    expect(t.cancel.mock.calls.at(-1)).toEqual([4]);
+    t.dispose();
+  });
+
+  it("numbers its requests from the first number it is given (the app's start time)", () => {
+    const t = setup({ firstRequest: 1_790_000_000_000 });
+    expect(t.read.mock.calls.map((c) => c[5])).toEqual([1_790_000_000_001]);
+    t.dispose();
+  });
+
   it("cancels the reads in flight on leaving, a computers change, a query change and Refresh, and not on a plain re-configure", () => {
     const t = setup({ active: false });
     // The paging computers changed from none.
@@ -257,6 +275,11 @@ describe("names and cancelling (ArchiveBrowser::configure, cancelArchivePages)",
     t.archive.refresh();
     expect(t.cancel).toHaveBeenCalledTimes(5);
     expect(t.cancel.mock.invocationCallOrder[4]).toBeLessThan(t.read.mock.invocationCallOrder[before]);
+    // A date-range change refreshes (Qt's rangeChanged); an unchanged range does nothing.
+    t.archive.setRange({ ...t.archive.range() });
+    expect(t.cancel).toHaveBeenCalledTimes(5);
+    t.archive.setRange({ ...t.archive.range(), period: 2 });
+    expect(t.cancel).toHaveBeenCalledTimes(6);
     t.dispose();
   });
 });

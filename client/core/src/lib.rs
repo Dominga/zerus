@@ -8,20 +8,26 @@
 //! and the "Event stream" section of `docs/reference.md`.
 
 pub mod actions;
+pub mod attachments;
 pub mod batch;
+pub mod cache;
 #[cfg(windows)]
 mod conpty;
 pub mod details;
+pub mod drafts;
 pub mod fleet;
 pub mod legacy;
 pub mod machine;
 pub mod organization;
+pub mod process_view;
 pub mod processes;
 #[cfg(unix)]
 mod pty;
 pub mod readmarks;
 pub mod reads;
 pub mod run;
+pub mod send;
+pub mod session_usage;
 pub mod shell;
 pub mod state;
 pub mod stream;
@@ -29,6 +35,7 @@ pub mod tasks;
 pub mod terminal;
 pub mod view;
 pub mod views;
+pub mod voice;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

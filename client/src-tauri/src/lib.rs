@@ -13,6 +13,7 @@ mod metrics;
 mod platform;
 #[cfg(feature = "live")]
 mod pump;
+pub mod renderer;
 #[cfg(feature = "live")]
 mod replay;
 #[cfg(feature = "live")]
@@ -82,6 +83,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::display_hz,
         commands::exit_app,
         commands::perf_away,
+        renderer::renderer_frame,
         actions::run_action,
         actions::inspect_session,
         actions::pending_read_marks,
@@ -111,6 +113,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::display_hz,
         commands::exit_app,
         commands::perf_away,
+        renderer::renderer_frame,
         clipboard::copy_text,
     ]
 }

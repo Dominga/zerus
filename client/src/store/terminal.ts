@@ -9,8 +9,8 @@ import type { TerminalConnected, TerminalFinished, TerminalStatus, TerminalTarge
 // acknowledges at once and drops the bytes: Rust keeps what it delivered and a
 // view shown again redraws from it. Writes run one at a time, in order.
 // A hidden or minimised window disconnects (Qt SessionsWindow::hideEvent calls
-// disconnectSession) and showing it again resumes an attach that was running
-// or connecting then, while the tab shows. "Hidden" is the app window's state
+// disconnectSession); showing it again connects nothing (Qt's showEvent does
+// not). "Hidden" is the app window's state
 // reported by src-tauri (hide or minimize), not the webview's occlusion.
 // connect, disconnect and retarget go to Rust through one chain, so it sees
 // them in the order they were issued.
@@ -70,8 +70,14 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
     ops = next.then(() => undefined, () => undefined);
     return next;
   };
-  /** Whether a window shown again resumes the attach (it was running or connecting when hidden). */
-  let resume = false;
+  /**
+   * Whether Rust may hold an attach for the view: set when a connect is issued,
+   * cleared by a confirmed disconnect, a target change or a finish, unless a
+   * newer connect was issued meanwhile. The view's phase alone is not enough:
+   * leaveSession() idles it while the attach still runs.
+   */
+  let rustHolds = false;
+  let issued = 0;
   /** Set when the Sessions page was left: coming back does not connect (Qt's page switch only disconnects). */
   let held = false;
   /** Bumps on every connect, disconnect and target change: older Channels are ignored. */
@@ -88,8 +94,8 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
     if (m instanceof ArrayBuffer || ArrayBuffer.isView(m)) {
       const view = m as ArrayBufferView;
       const bytes = m instanceof ArrayBuffer ? new Uint8Array(m) : new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-      const gen = generation;
-      const ack = () => { if (gen !== 0) port.ack(VIEW, gen); else if (mine === serial) owed++; };
+      // xterm calls back in a later task: use the generation current by then.
+      const ack = () => { if (mine !== serial) return; if (generation !== 0) port.ack(VIEW, generation); else owed++; };
       if (screen) screen.write(bytes, ack);
       else ack();
       return;
@@ -97,6 +103,7 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
     if (m.kind === "finished") {
       serial++;
       generation = 0;
+      rustHolds = false;
       setPhase("idle");
       setStatus(m.status);
     }
@@ -113,6 +120,8 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
     owed = 0;
     const { cols, rows } = screen.size();
     const sent = target!;
+    const ticket = ++issued;
+    rustHolds = true;
     try {
       const c = await queue(() => port.connect(VIEW, sent, cols, rows, handler(mine)));
       if (mine !== serial) return;
@@ -124,24 +133,34 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
       const now = screen?.size();
       if (now && (now.cols !== cols || now.rows !== rows)) resized(now.cols, now.rows);
     } catch (error) {
+      if (ticket === issued) rustHolds = false;
       if (mine !== serial) return;
       setPhase("idle");
       setStatus(message(error));
     }
   }
 
+  /** Ends Rust's attach through the ordered chain; the flag clears only if no newer connect was issued. */
+  function hangUp(): Promise<string | null> {
+    const ticket = issued;
+    return queue(() => port.disconnect(VIEW)).then(
+      (text) => { if (ticket === issued) rustHolds = false; return text; },
+      () => null,
+    );
+  }
+
   async function disconnect() {
-    if (phase() === "idle") return;
+    if (phase() === "idle" && !rustHolds) return;
     const mine = ++serial;
     generation = 0;
     owed = 0;
     setPhase("idle");
-    const text = await queue(() => port.disconnect(VIEW)).catch(() => null);
+    const text = await hangUp();
     // A connect issued meanwhile owns the status now.
     if (mine === serial) setStatus(text ?? texts()?.disconnected ?? "");
   }
 
-  /** Drops the running attach's state at once, so nothing reaches it; Rust ends it in the next retarget or disconnect. */
+  /** Drops the view's state at once so nothing reaches the attach; Rust still holds it until the next retarget or disconnect (`rustHolds`). */
   function leaveSession() {
     serial++;
     generation = 0;
@@ -163,19 +182,20 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
     }, wait);
   }
 
-  const same = (a: TerminalTarget | undefined, b: TerminalTarget) =>
-    !!a && a.computer === b.computer && a.name === b.name && a.run_id === b.run_id && a.machine === b.machine;
+  /** Mirrors the core's `target_changed` (one endpoint per view, so the computer stands for it). */
+  const changedTarget = (old: TerminalTarget | undefined, next: TerminalTarget) => {
+    if (!old) return true;
+    const sameRun = old.run_id !== "" && old.run_id === next.run_id;
+    return old.computer !== next.computer
+      || (old.name !== next.name && !sameRun)
+      || (old.run_id !== "" && next.run_id !== "" && old.run_id !== next.run_id);
+  };
 
-  // Qt's hideEvent: a hidden or minimised window drops the attach; shown again
-  // with the tab visible, it connects as showing the tab does.
+  // Qt's hideEvent: a hidden or minimised window drops the attach. Showing it
+  // again connects nothing (Qt's showEvent does not): the Terminal connects by
+  // a tab change, a selection change with the tab current, or the user.
   visibility.onChange(() => {
-    if (visibility.hidden()) {
-      resume = phase() !== "idle";
-      void disconnect();
-    } else if (resume) {
-      resume = false;
-      if (screen) void connect();
-    }
+    if (visibility.hidden()) void disconnect();
   });
 
   return {
@@ -186,11 +206,13 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
       setTexts(nextTexts);
       if (!next || !nextTexts) { await disconnect(); target = undefined; setStatus(""); return; }
       // Input stops reaching the previous session before the await.
-      const dropped = !same(target, next) && phase() !== "idle";
+      const dropped = changedTarget(target, next) && phase() !== "idle";
       if (dropped) leaveSession();
+      const ticket = issued;
       const changed = await queue(() => port.retarget(VIEW, next));
       target = next;
       if (changed) {
+        if (ticket === issued) rustHolds = false;
         serial++;
         generation = 0;
         setPhase("idle");
@@ -198,18 +220,18 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
         setStatus(nextTexts.available ? nextTexts.idle : nextTexts.reason);
       }
       if (!nextTexts.available) {
-        if (phase() !== "idle") { serial++; generation = 0; setPhase("idle"); await queue(() => port.disconnect(VIEW)).catch(() => null); }
+        if (phase() !== "idle" || rustHolds) { serial++; generation = 0; setPhase("idle"); await hangUp(); }
         setStatus(nextTexts.reason);
         return;
       }
-      if (screen && phase() === "idle" && (changed || dropped)) void connect();
+      if (screen && phase() === "idle" && (changed || dropped || rustHolds)) void connect();
     },
     /** The tab shows `s`: connect (Qt's currentChanged), or redraw a running attach. */
     show(s: Screen) { screen = s; if (!held) void connect(); },
     /** The user opened the Terminal tab: showing it connects (Qt's currentChanged). */
     opened() { held = false; },
     /** The Sessions page was left: disconnect, and coming back does not connect (Qt's page switch). */
-    async leavePage() { held = true; resume = false; await disconnect(); },
+    async leavePage() { held = true; await disconnect(); },
     leaveSession,
     texts,
     /** The tab hides; the attach keeps running. */

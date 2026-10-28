@@ -147,7 +147,7 @@ describe("terminal store", () => {
     });
   });
 
-  it("a hidden window disconnects and showing it connects again while the tab shows", async () => {
+  it("a hidden window disconnects and showing it again connects nothing", async () => {
     const f = fakes();
     await createRoot(async () => {
       const t = createTerminal(f.port, f.timers, f.visibility);
@@ -164,7 +164,9 @@ describe("terminal store", () => {
       expect(f.calls.filter((c) => c.startsWith("connect")).length).toBe(1);
       f.setHidden(false);
       await tick();
-      expect(f.calls.at(-1)).toBe("connect run-1 100x30");
+      expect(f.calls.filter((c) => c.startsWith("connect")).length).toBe(1);
+      expect(t.connected()).toBe(false);
+      await t.connect();
       expect(t.connected()).toBe(true);
     });
   });
@@ -264,7 +266,7 @@ describe("terminal store ordering", () => {
     });
   });
 
-  it("hide then show quickly: the late disconnect does not overwrite the new connect", async () => {
+  it("hide then show quickly ends disconnected, and the user's connect then works", async () => {
     const f = rustLike();
     await createRoot(async () => {
       const t = createTerminal(f.port, f.timers, f.visibility);
@@ -277,6 +279,9 @@ describe("terminal store ordering", () => {
       await tick();
       hold.resolve();
       await tick(); await tick(); await tick();
+      expect(t.connected()).toBe(false);
+      expect(f.views.size).toBe(0);
+      await t.connect();
       expect(t.connected()).toBe(true);
       expect(f.views.size).toBe(1);
       expect(t.status()).toBe("Connected");
@@ -294,6 +299,7 @@ describe("terminal store ordering", () => {
       f.setHidden(true);
       f.setHidden(false);
       const hold = f.holdConnect();
+      void t.connect();
       await tick();
       gate.resolve();
       await tick(); await tick();
@@ -373,18 +379,18 @@ describe("terminal store ordering", () => {
     });
   });
 
-  it("a window shown again resumes only an attach that was running or connecting", async () => {
+  it("showing the window again never reconnects, even after a running attach was hidden away", async () => {
     const f = rustLike();
     await createRoot(async () => {
       const t = createTerminal(f.port, f.timers, f.visibility);
       await t.setTarget(target(), ok);
       t.show(f.screen);
       await tick();
-      await t.disconnect();
       f.setHidden(true); await tick();
       f.setHidden(false); await tick();
       expect(f.calls.filter((c) => c.startsWith("connect")).length).toBe(1);
       expect(t.connected()).toBe(false);
+      expect(f.views.size).toBe(0);
     });
   });
 
@@ -491,6 +497,138 @@ describe("terminal paste", () => {
       t.paste("a\x1b[201~b\r\nc");
       t.paste("\x1b\x07");
       expect(f.pasted).toEqual(["a[201~b\nc"]);
+    });
+  });
+});
+
+describe("terminal store: Rust's attach and the view agree", () => {
+  const renamed = (name: string): TerminalTarget => ({ ...target(), name });
+
+  it("F: deselecting hangs up the running attach", async () => {
+    const f = rustLike();
+    await createRoot(async () => {
+      const t = createTerminal(f.port, f.timers, f.visibility);
+      await t.setTarget(target(), ok);
+      t.show(f.screen);
+      await tick();
+      expect(t.connected()).toBe(true);
+      t.leaveSession();
+      await t.setTarget(undefined, undefined);
+      expect(f.views.size).toBe(0);
+    });
+  });
+
+  it("G: A, B, A before B's status returns leaves A connected over its live attach", async () => {
+    const f = rustLike();
+    await createRoot(async () => {
+      const t = createTerminal(f.port, f.timers, f.visibility);
+      await t.setTarget(target("run-1"), ok);
+      t.show(f.screen);
+      await tick();
+      t.leaveSession();
+      t.leaveSession();
+      await t.setTarget(target("run-1"), ok);
+      await tick(); await tick();
+      expect(t.connected()).toBe(true);
+      expect(f.views.size).toBe(1);
+    });
+  });
+
+  it("H: a rename of the connected run leaves the attach and the screen alone", async () => {
+    const f = rustLike();
+    await createRoot(async () => {
+      const t = createTerminal(f.port, f.timers, f.visibility);
+      await t.setTarget(renamed("claude/p/old"), ok);
+      t.show(f.screen);
+      await tick();
+      const before = f.resets();
+      await t.setTarget(renamed("claude/p/new"), ok);
+      await tick();
+      expect(f.calls.filter((c) => c.startsWith("connect")).length).toBe(1);
+      expect(f.resets()).toBe(before);
+      expect(t.connected()).toBe(true);
+    });
+  });
+
+  it("J: after a rename with the tab hidden, hiding the window still hangs up", async () => {
+    const f = rustLike();
+    await createRoot(async () => {
+      const t = createTerminal(f.port, f.timers, f.visibility);
+      await t.setTarget(renamed("claude/p/old"), ok);
+      t.show(f.screen);
+      await tick();
+      t.hide();
+      await t.setTarget(renamed("claude/p/new"), ok);
+      f.setHidden(true);
+      await tick(); await tick();
+      expect(f.views.size).toBe(0);
+    });
+  });
+
+  it("J: after a rename with the tab hidden, leaving the page still hangs up", async () => {
+    const f = rustLike();
+    await createRoot(async () => {
+      const t = createTerminal(f.port, f.timers, f.visibility);
+      await t.setTarget(renamed("claude/p/old"), ok);
+      t.show(f.screen);
+      await tick();
+      t.hide();
+      await t.setTarget(renamed("claude/p/new"), ok);
+      await t.leavePage();
+      expect(f.views.size).toBe(0);
+    });
+  });
+
+  it("a machine label change keeps the attach (Rust's target_changed ignores it)", async () => {
+    const f = rustLike();
+    await createRoot(async () => {
+      const t = createTerminal(f.port, f.timers, f.visibility);
+      await t.setTarget(target(), ok);
+      t.show(f.screen);
+      await tick();
+      await t.setTarget({ ...target(), machine: "renamed-host" }, ok);
+      await tick();
+      expect(t.connected()).toBe(true);
+      expect(f.calls.filter((c) => c.startsWith("connect")).length).toBe(1);
+    });
+  });
+
+  it("an ack whose xterm callback runs after the connect resolved is sent with the real generation", async () => {
+    const f = rustLike();
+    const slow: Screen = { ...f.screen, write: (_b, done) => { setTimeout(done, 10); } };
+    await createRoot(async () => {
+      const t = createTerminal(f.port, f.timers, f.visibility);
+      await t.setTarget(target(), ok);
+      const hold = f.holdConnect();
+      t.show(slow);
+      await tick();
+      f.emit("replay"); f.emit("live");
+      hold.resolve();
+      await tick();
+      await new Promise((r) => setTimeout(r, 40));
+      expect(f.calls.filter((c) => c === "ack 1").length).toBe(2);
+      expect(f.calls).not.toContain("ack 0");
+    });
+  });
+
+  it("a late disconnect does not clear the flag of a connect issued behind it", async () => {
+    const f = rustLike();
+    await createRoot(async () => {
+      const t = createTerminal(f.port, f.timers, f.visibility);
+      await t.setTarget(target(), ok);
+      t.show(f.screen);
+      await tick();
+      const gate = f.holdDisconnect();
+      f.setHidden(true);
+      f.setHidden(false);
+      void t.connect();
+      await tick();
+      gate.resolve();
+      await tick(); await tick(); await tick();
+      expect(t.connected()).toBe(true);
+      t.leaveSession();
+      await t.setTarget(undefined, undefined);
+      expect(f.views.size).toBe(0);
     });
   });
 });

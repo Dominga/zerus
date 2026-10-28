@@ -7943,6 +7943,12 @@ The switch bundle is the Tauri build with Qt's Info.plist identity:
 
 `tray/install.sh` builds it when `HGS_MAC_GUI=client` is set or the installed bundle is already the client. It signs it through `tray/sign-local-macos.py` (Developer ID continuity, no hardened runtime, like Qt's local builds) and installs it through the updater of Task 7. `mac-install.sh` ships the client sources and forwards the choice. `scripts/check-macos-bundle.py --gui tauri` checks the bundle, and `scripts/sign-macos.py` signs it for release with the hardened runtime and `packaging/macos/Zerus.entitlements` (no JIT entitlement: WKWebView runs JavaScript out of process). The docs and the coordinator's runbook land here.
 
+As built (webui's rulings of 2026-10-28):
+- `mac-install.sh` also ships `crates/watch-protocol` (`Cargo.toml`, `src`) beside `client/`, because `client/core` and `client/src-tauri` take it by path (`../../crates`) and on the Mac the CLI's copy sits under `.rust-build`. Its tarball excludes every `client/*/target`.
+- `TrayInstallGui`'s installed-client fixture carries a `CFBundleIdentifier`: after Task 7's review, `--installed-gui` names a kind only for a complete bundle.
+- `Identity::cache_dir_now()` (Tauri's `app_cache_dir` formula with the running identifier) replaces `app_cache_dir` for the attachment cache, and a `build_info` Tauri command returns what `--build-info` prints, registered with and without `live`.
+- The docs and the runbook follow Task 7 as built: Qt waits aside until the client runs, the success line ends "the replaced GUI is the rollback copy in …", and kept copies live in `~/Applications/.hgs-tray-kept-*`. Runbook step 7 also checks the draft import marker.
+
 **Files:**
 - Create: `client/src-tauri/tauri.switch.conf.json`, `client/src-tauri/Info.switch.plist`, `client/scripts/switch-config.py`
 - Modify: `tray/install.sh` (macOS branch), `mac-install.sh`
@@ -8665,7 +8671,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
 
 **Before the merge (Task 7).** The numbered Dev guard also refuses unnumbered `tray/install.sh` and `mac-install.sh` runs over a numbered Dev install on arch and on the Mac, including `HGS_TRAY_RESTART=0`. Tell the events and menu-parity sessions before Task 7 reaches main: their ad hoc installs then need `ZERUS_DEV_BUILD_NUMBER` or a local preview label (`ZERUS_LOCAL_PREVIEW_LABEL`, `docs/reference.md`), both from a clean Git checkout. `mac-install.sh` ships a tarball without `.git`, so it can make neither; on a Mac with a numbered Dev install it then updates the CLI and stops at the GUI with the refusal.
 
-**What the switch does not carry over (coordinator ruling).** Settings start at their defaults and read marks start fresh; the hosts' read state stays authoritative. Qt's drafts and the dev app's drafts reach the client through the one-time import of `zerus-5wmh.13.1` (phase 4), which reads both stores read-only; until then they stay where they are. In-app update notices are missing after the switch, accepted until `zerus-5wmh.12.4`; the coordinator rolls Dev out by hand meanwhile.
+**What the switch does not carry over (coordinator ruling).** Settings start at their defaults and read marks start fresh; the hosts' read state stays authoritative. Qt's drafts and the dev app's drafts reach the client through its one-time import (`zerus-5wmh.13.1`) at its first start, which reads both stores read-only; step 7 checks its marker. In-app update notices are missing after the switch, accepted until `zerus-5wmh.12.4`; the coordinator rolls Dev out by hand meanwhile.
 
 1. **Prepare the clean checkout** (no display). In the clean clone used for Dev rollouts:
    ```sh
@@ -8676,8 +8682,9 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    ```sh
    cd client && npm ci --no-audit --no-fund
    python3 scripts/switch-config.py src-tauri/target/switch.conf.json
-   FEATURES=; grep -q '^media = ' src-tauri/Cargo.toml && FEATURES='--features media'
-   RUSTUP_TOOLCHAIN=1.99.1 npx tauri build --config src-tauri/target/switch.conf.json --bundles app $FEATURES
+   # Unquoted $(...) splits into words in zsh and bash alike; a variable would not in zsh.
+   RUSTUP_TOOLCHAIN=1.99.1 npx tauri build --config src-tauri/target/switch.conf.json --bundles app \
+     $(grep -q '^media = ' src-tauri/Cargo.toml && echo --features media)
    S="$(mktemp -d)"; ditto src-tauri/target/release/bundle/macos/Zerus.app "$S/hgs-tray.app"
    python3 ../scripts/check-macos-bundle.py --gui tauri --version "$(cat ../VERSION)" \
      --release "$(cat ../DEV_VERSION)-dev.$ZERUS_DEV_BUILD_NUMBER" --source-commit "$(git rev-parse HEAD)" --selftest "$S/hgs-tray.app"
@@ -8757,27 +8764,30 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    Expected lines:
    - quitting Zerus;
    - kept a copy of the Qt settings;
-   - `Zerus <DEV_VERSION>-dev.N runs as pid …; … nonempty drafts kept, … native processes untouched; previous GUI kept in …`;
+   - `Zerus <DEV_VERSION>-dev.N runs as pid …; … nonempty drafts kept, … native processes untouched; the replaced GUI is the rollback copy in …`;
    - possibly `Cocoa settings written since the switch: …`.
-   Any `hgs-tray update failed` line stops the runbook. The updater has already restored or kept the previous GUI and printed where its draft snapshot is.
+   Any `hgs-tray update failed` line stops the runbook. The updater has already restored or kept the previous GUI and printed where it and the draft snapshot are.
 7. **Verify** (no display):
    ```sh
    ~/Applications/hgs-tray.app/Contents/MacOS/hgs-tray --build-info
    cat ~/.local/share/hgs/build-provenance.json
    launchctl print gui/$(id -u)/com.hgdev.hgs-tray | grep -E 'state =|program ='
    ls ~/.local/share/hgs/desktop-previous/
+   ls -d ~/Applications/.hgs-tray-kept-* 2>/dev/null
    lsof -n -a -c hgs-tray -U -F n | grep '/hgs-tray$'
+   python3 -c 'import json, pathlib; m = json.loads((pathlib.Path.home() / "Library/Application Support/com.hgdev.hgs-tray/drafts/.imported-v1.json").read_text()); print(m["version"], m["report"].get("unfinished"))'
    ```
    Expected:
    - `--build-info` reports `devBuildNumber` N and the commit;
    - the agent is running `~/Applications/hgs-tray.app/Contents/MacOS/hgs-tray`;
-   - the rollback folder holds `hgs-tray.app` (Qt) and `com.hgdev.hgs-tray.plist`;
-   - the socket is at the path from step 3.
+   - the rollback folder holds `hgs-tray.app` (Qt) and `com.hgdev.hgs-tray.plist`, and no `.hgs-tray-kept-*` folder exists;
+   - the socket is at the path from step 3;
+   - the draft import marker, `<data dir>/drafts/.imported-v1.json` with the data directory `~/Library/Application Support/com.hgdev.hgs-tray`, prints `1 None`: version 1, with no `unfinished`. A missing marker or an `unfinished` list means the import runs again at the next start; report its line from `~/Library/Logs/hgs-tray.log` (`drafts import: …`).
 8. **Confirm** (**display**; the coordinator's job, done with the owner):
    - one menu-bar item;
    - notifications post without a new permission prompt (when step 2 matched);
    - a click on a banner Qt delivered before the switch opens its session;
-   - the owner's sessions, drafts in Qt's store and settings are where they were. Qt drafts and the dev app's drafts appear in the client once `zerus-5wmh.13.1` lands; the client's own settings start at their defaults;
+   - the owner's sessions, drafts in Qt's store and settings are where they were. Qt drafts and the dev app's drafts appear in the client (the import of step 7); the client's own settings start at their defaults;
    - after the Mac's next sleep and wake, `launchctl print gui/$(id -u)/com.hgdev.hgs-tray | grep 'pid ='` shows the same pid as before, and `~/Library/Logs/hgs-tray.log` has no `main thread unresponsive` line.
 9. **Later Dev rollouts.** Run the same `bash tray/install.sh` with the new `N` and without `HGS_MAC_GUI`. The installed client is kept, and Qt stays the rollback copy: there is no second slot. A new client that does not start is replaced by the client it replaced, automatically. The numbered Dev guard refuses a run without `ZERUS_DEV_BUILD_NUMBER` or a local preview label.
 10. **Rollback.** From the clean checkout, in Terminal:

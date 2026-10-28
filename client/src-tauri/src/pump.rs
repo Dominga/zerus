@@ -44,6 +44,12 @@ impl Pump {
         self.0 .1.notify_all();
     }
 
+    /// Wakes a parked `take` without a change: a hub's view changed.
+    pub fn poke(&self) {
+        self.lock().dirty = true;
+        self.0 .1.notify_all();
+    }
+
     /// Everything pending, waiting up to `park` while nothing is.
     pub fn take(&self, park: Duration) -> Batch {
         let inner = self.lock();
@@ -266,6 +272,20 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2));
         assert_eq!(batch.upserts.len(), 1);
         sender.join().unwrap();
+    }
+
+    #[test]
+    fn a_poke_wakes_a_parked_take() {
+        let pump = Pump::default();
+        let _ = pump.take(Duration::ZERO);
+        let waker = pump.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            waker.poke();
+        });
+        let started = Instant::now();
+        let batch = pump.take(Duration::from_secs(5));
+        assert!(started.elapsed() < Duration::from_secs(2) && batch.is_empty());
     }
 
     #[test]

@@ -147,19 +147,38 @@ async fn blocking<T: Send + 'static>(
         .map_err(|error| error.to_string())?
 }
 
-/// Starts the data source; "live" (hgs watch) or "replay" (a fixture).
+/// Starts the data source; "live" (hgs watch) or "replay" (a fixture). A
+/// reloaded webview gets the catalog, the composer's view and the draft keys
+/// again.
+#[cfg(feature = "live")]
+#[tauri::command]
+pub async fn start(
+    state: State<'_, AppState>,
+    composers: State<'_, crate::composer::Composers>,
+) -> Result<String, String> {
+    let live = Arc::clone(&state.live);
+    composers.resend();
+    blocking(move || live.start()).await
+}
+
+#[cfg(not(feature = "live"))]
 #[tauri::command]
 pub async fn start(state: State<'_, AppState>) -> Result<String, String> {
-    #[cfg(feature = "live")]
-    {
-        let live = Arc::clone(&state.live);
-        blocking(move || live.start()).await
-    }
-    #[cfg(not(feature = "live"))]
-    {
-        let _ = &state;
-        Err(NO_LIVE.into())
-    }
+    let _ = &state;
+    Err(NO_LIVE.into())
+}
+
+/// What `next_batch` returns: the core's batch, plus the hubs' projected views
+/// when they changed (latest value wins).
+#[cfg(feature = "live")]
+#[derive(serde::Serialize)]
+struct Envelope<'a> {
+    #[serde(flatten)]
+    batch: &'a zerus_client_core::Batch,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    composer: Option<crate::composer::ComposerView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    draft_keys: Option<Vec<String>>,
 }
 
 /// Everything pending since the last call; parks up to 250 ms while nothing is.
@@ -171,15 +190,22 @@ pub async fn start(state: State<'_, AppState>) -> Result<String, String> {
 pub async fn next_batch(
     state: State<'_, AppState>,
     actions: State<'_, crate::actions::Actions>,
+    composers: State<'_, crate::composer::Composers>,
 ) -> Result<tauri::ipc::Response, String> {
     let live = Arc::clone(&state.live);
     let actions = actions.inner().clone();
+    let composers = composers.inner().clone();
     let bytes = blocking(move || {
         let batch = live.pump.take(crate::pump::PARK);
         // The host's rows settle pending read marks, whether they arrive as
         // single upserts or inside a computer's snapshot.
         actions.observe(&batch);
-        serde_json::to_vec(&batch).map_err(|error| error.to_string())
+        let envelope = Envelope {
+            batch: &batch,
+            composer: composers.take_view(),
+            draft_keys: composers.take_draft_keys(),
+        };
+        serde_json::to_vec(&envelope).map_err(|error| error.to_string())
     })
     .await?;
     Ok(tauri::ipc::Response::new(bytes))

@@ -432,6 +432,7 @@ pub fn store_at(root: &Path, name: &str, bytes: &[u8]) -> Option<PathBuf> {
                 .is_ok()
                 && existing == bytes;
             if same {
+                touch(&path);
                 return Some(path);
             }
         }
@@ -465,6 +466,78 @@ pub fn store_at(root: &Path, name: &str, bytes: &[u8]) -> Option<PathBuf> {
     }
     let _ = fs::remove_file(&temporary);
     None
+}
+
+/// The cache's size bound.
+pub const CACHE_LIMIT: u64 = 512 * 1024 * 1024;
+
+/// Marks a cached copy as used now, for the least-recently-used order.
+pub fn touch(path: &Path) {
+    if let Ok(file) = File::options().write(true).open(path) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
+}
+
+/// What a prune did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pruned {
+    pub removed: usize,
+    /// What the cache holds afterwards.
+    pub bytes: u64,
+}
+
+/// Bounds the cache: removes the least recently used copies until it holds
+/// at most `limit` bytes. A copy `pinned` names (open for preview, or a
+/// failed message's file a retry still needs) is never removed; nor is
+/// anything that is not a plain file in a digest folder. Run it off the UI
+/// thread after storing.
+pub fn prune(root: &Path, limit: u64, pinned: impl Fn(&Path) -> bool) -> Pruned {
+    let mut copies = Vec::new();
+    let mut total = 0;
+    let Ok(folders) = fs::read_dir(root) else {
+        return Pruned::default();
+    };
+    for folder in folders.flatten() {
+        let name = folder.file_name().to_string_lossy().into_owned();
+        let digest =
+            name.len() == 64 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        if !digest || !folder.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Ok(files) = fs::read_dir(folder.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let Ok(metadata) = fs::symlink_metadata(file.path()) else {
+                continue;
+            };
+            if !metadata.is_file() || file.file_name().to_string_lossy().starts_with(".partial-") {
+                continue;
+            }
+            total += metadata.len();
+            let used = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+            copies.push((used, metadata.len(), file.path()));
+        }
+    }
+    copies.sort();
+    let mut removed = 0;
+    for (_, size, path) in copies {
+        if total <= limit {
+            break;
+        }
+        if pinned(&path) || fs::remove_file(&path).is_err() {
+            continue;
+        }
+        total -= size;
+        removed += 1;
+        if let Some(folder) = path.parent() {
+            let _ = fs::remove_dir(folder);
+        }
+    }
+    Pruned {
+        removed,
+        bytes: total,
+    }
 }
 
 /// A cached copy's canonical path, as `cachedAt`: only a regular file inside

@@ -352,7 +352,7 @@ impl Terminals {
     }
 
     /// Resizes applied to the view's attach so far.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn resizes(&self, view: &str) -> usize {
         lock(&self.0.views).get(view).map_or(0, |open| open.resizes)
     }

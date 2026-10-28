@@ -1,6 +1,7 @@
 //! Guarded session actions: the `hgs` calls the Qt client makes
 //! (`tray/src/HgsClient.cpp`) and the rules that turn their exits into outcomes.
 use crate::attachments::{self, Attachment};
+use crate::questions;
 use crate::view::ViewRow;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -34,6 +35,10 @@ pub enum Action {
     },
     Pause,
     Resume,
+    /// `hgs resume NAME --fresh [--expected-run-id RUN] -d`
+    /// (`startFreshSession`): a new conversation in the same folder, with the
+    /// same account and model.
+    StartFresh,
     Rename {
         new_name: String,
         archive_id: Option<String>,
@@ -65,6 +70,27 @@ pub enum Action {
         #[serde(default)]
         generation: Option<String>,
     },
+    /// `hgs clear-context NAME --json` (`requestClearContext`): start a new
+    /// context in the same session. `dismiss_prompt` first dismisses a
+    /// chooser the agent shows; it is sent only when set, since an older hgs
+    /// rejects the field.
+    ClearContext {
+        #[serde(default)]
+        dismiss_prompt: bool,
+    },
+    /// `hgs fork NAME -n TAG -d [--archive A] [--expected-run-id R]
+    /// [--expected-conversation-id C]` (`forkSession`): an independent
+    /// conversation from this saved context, in the same working folder, named
+    /// with the same agent and project and a new tag.
+    Fork {
+        tag: String,
+        #[serde(default)]
+        archive_id: Option<String>,
+    },
+    /// `hgs compact-context NAME --json` (`requestCompactContext`): the
+    /// agent's native /compact. Its receipt's `request_id` is the compaction
+    /// a waiting message names (compact-to-send).
+    CompactContext,
     /// Stage dropped files on the session's computer, as Qt's
     /// `requestStageFiles` (the `attachment` session action). The paths must
     /// be absolute paths of regular files; they are read when the call is
@@ -75,6 +101,28 @@ pub enum Action {
         /// session has neither a run nor a conversation.
         #[serde(default)]
         expected_created: Option<i64>,
+    },
+    /// `hgs send-now NAME --json` (`requestQueueSendNow`): the agent sends
+    /// its native queue now, when it still is the queue `queue_id` names.
+    /// Built in Rust from the inspected queue, never from webview JSON.
+    #[serde(skip_deserializing)]
+    SendNow {
+        queue_id: String,
+    },
+    /// `hgs session-action NAME --json` with `remove_queued`
+    /// (`requestRemoveQueued`): removes one OpenCode inbox message that was
+    /// not delivered. Built in Rust after the owner confirmed it.
+    #[serde(skip_deserializing)]
+    RemoveQueued {
+        message_id: String,
+    },
+    /// `hgs answer NAME --json` (`requestAnswerQuestion`): the answers to one
+    /// pending question, pinned to its exact id, hash, run and conversation.
+    /// Built in Rust from the inspected question and the held answer draft.
+    #[serde(skip_deserializing)]
+    Answer {
+        question: Value,
+        answers: Vec<questions::AnswerItem>,
     },
 }
 
@@ -165,6 +213,64 @@ pub fn tag_problem(tag: &str) -> Option<&'static str> {
     None
 }
 
+/// What Fork shows: whether it is available and its tooltip (the agent's
+/// reason, or Qt's default). `busy`: a session update, fork, settings change
+/// or send runs, or a restored session awaits its inspection.
+pub fn fork_available(
+    online: bool,
+    terminating: bool,
+    busy: bool,
+    details: &Value,
+) -> (bool, String) {
+    let tooltip = details["fork_reason"]
+        .as_str()
+        .unwrap_or("Create an independent conversation with the same context and working folder")
+        .to_owned();
+    let enabled =
+        online && !terminating && !busy && details["fork_supported"].as_bool() == Some(true);
+    (enabled, tooltip)
+}
+
+/// The fork's suggested tag: `fork`, or the session's tag with `-fork`, then
+/// `-2`, `-3`… while a session on the same computer has that name.
+pub fn fork_tag(tag: &str, occupied: impl Fn(&str) -> bool) -> String {
+    let base = if tag.is_empty() {
+        "fork".to_owned()
+    } else {
+        format!("{tag}-fork")
+    };
+    let mut candidate = base.clone();
+    let mut number = 2;
+    while occupied(&candidate) {
+        candidate = format!("{base}-{number}");
+        number += 1;
+    }
+    candidate
+}
+
+/// Why the fork dialog cannot take this tag, `None` when it can.
+pub fn fork_problem(tag: &str, occupied: impl Fn(&str) -> bool) -> Option<String> {
+    tag_problem(tag)
+        .map(str::to_owned)
+        .or_else(|| occupied(tag).then(|| "This session name is already in use.".to_owned()))
+}
+
+/// The fork dialog's texts.
+pub mod fork_texts {
+    pub const TITLE: &str = "Fork session";
+    pub const BUTTON: &str = "Fork session";
+
+    pub fn description(folder: &str) -> String {
+        format!(
+            "Create an independent conversation from this saved context.\nWorking folder: {folder}"
+        )
+    }
+
+    pub fn forking(machine: &str) -> String {
+        format!("Forking session on {machine}…")
+    }
+}
+
 /// The rename the Qt dialog makes: the agent and project of `old` stay, only
 /// the tag after them changes (`src/state/rename.rs` refuses anything else).
 fn rename_problem(old: &str, new: &str) -> Option<&'static str> {
@@ -232,6 +338,14 @@ pub fn invocation(
             30,
             None,
         ),
+        Action::StartFresh => {
+            let mut args = vec!["resume".to_owned(), name, "--fresh".to_owned()];
+            if !target.run_id.is_empty() {
+                args.extend(["--expected-run-id".to_owned(), target.run_id.clone()]);
+            }
+            args.push("-d".to_owned());
+            (args, None, 30, 30, None)
+        }
         Action::Rename {
             new_name,
             archive_id,
@@ -300,6 +414,106 @@ pub fn invocation(
             }
             (args, None, 45, 45, None)
         }
+        Action::SendNow { queue_id } => {
+            let input = json!({
+                "request_id": request_id,
+                "expected_run_id": target.run_id,
+                "expected_conversation_id": target.conversation_id,
+                "queue_id": queue_id,
+            });
+            (
+                vec!["send-now".to_owned(), name, "--json".to_owned()],
+                Some(serde_json::to_vec(&input).map_err(|error| error.to_string())?),
+                20,
+                35,
+                Some(request_id.to_owned()),
+            )
+        }
+        Action::Answer { question, answers } => {
+            let input = answer_input(&target.name, question, answers, request_id)?;
+            (
+                vec!["answer".to_owned(), name, "--json".to_owned()],
+                Some(input),
+                30,
+                45,
+                Some(request_id.to_owned()),
+            )
+        }
+        Action::RemoveQueued { message_id } => {
+            if !native_message_id(message_id) {
+                return Err("Choose the exact queued OpenCode message.".to_owned());
+            }
+            let input = json!({
+                "request_id": request_id,
+                "action": "remove_queued",
+                "expected_run_id": target.run_id,
+                "expected_conversation_id": target.conversation_id,
+                "message_id": message_id,
+            });
+            (
+                vec!["session-action".to_owned(), name, "--json".to_owned()],
+                Some(serde_json::to_vec(&input).map_err(|error| error.to_string())?),
+                15,
+                45,
+                Some(request_id.to_owned()),
+            )
+        }
+        Action::ClearContext { dismiss_prompt } => {
+            let mut input = json!({
+                "request_id": request_id,
+                "expected_run_id": target.run_id,
+                "expected_conversation_id": target.conversation_id,
+            });
+            if *dismiss_prompt {
+                input["dismiss_prompt"] = json!(true);
+            }
+            (
+                vec!["clear-context".to_owned(), name, "--json".to_owned()],
+                Some(serde_json::to_vec(&input).map_err(|error| error.to_string())?),
+                15,
+                45,
+                Some(request_id.to_owned()),
+            )
+        }
+        Action::Fork { tag, archive_id } => {
+            if let Some(problem) = tag_problem(tag) {
+                return Err(problem.into());
+            }
+            let mut args = vec![
+                "fork".to_owned(),
+                name,
+                "-n".to_owned(),
+                tag.clone(),
+                "-d".to_owned(),
+            ];
+            if let Some(archive) = archive_id.as_ref().filter(|id| !id.is_empty()) {
+                args.extend(["--archive".to_owned(), archive.clone()]);
+            }
+            if !target.run_id.is_empty() {
+                args.extend(["--expected-run-id".to_owned(), target.run_id.clone()]);
+            }
+            if !target.conversation_id.is_empty() {
+                args.extend([
+                    "--expected-conversation-id".to_owned(),
+                    target.conversation_id.clone(),
+                ]);
+            }
+            (args, None, 60, 90, None)
+        }
+        Action::CompactContext => {
+            let input = json!({
+                "request_id": request_id,
+                "expected_run_id": target.run_id,
+                "expected_conversation_id": target.conversation_id,
+            });
+            (
+                vec!["compact-context".to_owned(), name, "--json".to_owned()],
+                Some(serde_json::to_vec(&input).map_err(|error| error.to_string())?),
+                15,
+                45,
+                Some(request_id.to_owned()),
+            )
+        }
         Action::StageFiles {
             paths,
             expected_created,
@@ -340,6 +554,11 @@ pub fn invocation(
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// While a send to the same session and agent is in flight.
 pub const ALREADY_SENDING: &str = "A message to this session is already being sent.";
+/// The answer lane of a session is busy.
+pub const ALREADY_ANSWERING: &str = "An answer to this session is already being sent.";
+/// The largest answer `hgs answer` takes on standard input, and the largest
+/// acknowledgement it reads back.
+const MAXIMUM_ANSWER_BYTES: usize = 64 * 1024;
 
 /// `requestSendMessage`'s checks and standard input.
 fn send_input(
@@ -472,7 +691,7 @@ const REFERENCE_CHARS: usize = 8192;
 const FAILURE_STDERR_CHARS: usize = 4000;
 
 /// `failureDetail` (`HgsClient.cpp:466`): why a call failed.
-fn failure_detail(exit: Exit) -> String {
+pub(crate) fn failure_detail(exit: Exit) -> String {
     let (stderr, code) = match exit {
         Exit::TimedOut => return "timed out".to_owned(),
         Exit::StartFailed(error) => {
@@ -527,8 +746,12 @@ fn trimmed_stderr(stderr: &str) -> Option<String> {
 
 pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit: Exit) -> Outcome {
     match action {
-        Action::Interrupt { .. } => {
-            classify_session_action(target, invocation, exit, "submitted", None)
+        Action::Interrupt { .. } | Action::CompactContext => {
+            classify_session_action(target, invocation, exit, &["submitted"], None)
+        }
+        // A clear may be confirmed at once.
+        Action::ClearContext { .. } => {
+            classify_session_action(target, invocation, exit, &["submitted", "confirmed"], None)
         }
         Action::StageFiles {
             expected_created, ..
@@ -536,13 +759,18 @@ pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit:
             target,
             invocation,
             exit,
-            "staged",
+            &["staged"],
             stage_created(target, *expected_created),
         ),
         Action::Send { agent_id, .. } => {
             classify_send(target, invocation, agent_id.as_deref(), exit)
         }
         Action::StopProcess { process_id, .. } => classify_stop(target, process_id, exit),
+        Action::SendNow { queue_id } => classify_send_now(target, invocation, queue_id, exit),
+        Action::RemoveQueued { .. } => classify_remove_queued(target, invocation, exit),
+        Action::Answer { question, answers } => {
+            classify_answer(target, invocation, question, answers, exit)
+        }
         Action::MarkRead { .. } => classify_read(target, exit),
         Action::Archive | Action::Terminate => classify_write(exit, true),
         _ => classify_write(exit, false),
@@ -555,7 +783,7 @@ fn classify_session_action(
     target: &Target,
     invocation: &Invocation,
     exit: Exit,
-    state: &str,
+    states: &[&str],
     expected_created: Option<i64>,
 ) -> Outcome {
     match exit {
@@ -573,7 +801,7 @@ fn classify_session_action(
         Exit::Code { stdout, .. } => {
             let receipt: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
             let field = |key: &str| receipt.get(key).and_then(Value::as_str);
-            let matches = field("status") == Some(state)
+            let matches = field("status").is_some_and(|status| states.contains(&status))
                 && invocation.request_id.is_some()
                 && field("request_id") == invocation.request_id.as_deref()
                 && field("name") == Some(target.name.as_str())
@@ -586,6 +814,268 @@ fn classify_session_action(
                 done(receipt, None)
             } else {
                 failed("Invalid acknowledgement. Check Terminal before retrying.")
+            }
+        }
+    }
+}
+
+fn field<'a>(value: &'a Value, key: &str) -> &'a str {
+    value.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+/// A native startup request that may come before a conversation exists:
+/// folder trust, Claude's permission mode, Codex's hooks review and update.
+fn startup_request(question: &Value) -> bool {
+    let (source, transport, id, hash) = (
+        field(question, "source"),
+        field(question, "answer_transport"),
+        field(question, "question_id"),
+        field(question, "question_hash"),
+    );
+    if hash.len() != 64 {
+        return false;
+    }
+    let trust = ["claude", "codex", "kimi"].into_iter().any(|provider| {
+        source == format!("{provider}_folder_trust")
+            && transport == format!("{provider}_tui")
+            && id == format!("{provider}-trust:{hash}")
+    });
+    trust
+        || (source == "claude_permission_mode"
+            && transport == "claude_tui"
+            && id == format!("claude-permissions:{hash}"))
+        || (source == "codex_hooks_trust"
+            && transport == "codex_tui"
+            && id == format!("codex-hooks-trust:{hash}"))
+        || (source == "codex_update"
+            && transport == "codex_tui"
+            && id == format!("codex-update:{hash}"))
+}
+
+/// A Codex optional question answered asynchronously.
+fn async_question(question: &Value) -> bool {
+    field(question, "source") == "codex_async"
+        && question.get("optional").and_then(Value::as_bool) == Some(true)
+}
+
+/// Every answer is a Skip of a Codex optional question that allows it.
+fn skipping(question: &Value, answers: &[questions::AnswerItem]) -> bool {
+    async_question(question)
+        && question.get("can_skip").and_then(Value::as_bool) == Some(true)
+        && questions::all_skips(answers)
+}
+
+/// A request identity as `QUuid` reads one: 8-4-4-4-12 hexadecimal digits.
+fn uuid_shaped(id: &str) -> bool {
+    let parts: Vec<&str> = id.split('-').collect();
+    parts.len() == 5
+        && parts.iter().zip([8, 4, 4, 4, 12]).all(|(part, length)| {
+            part.len() == length && part.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+}
+
+/// `requestAnswerQuestion`'s refusals and standard input.
+fn answer_input(
+    name: &str,
+    question: &Value,
+    answers: &[questions::AnswerItem],
+    request_id: &str,
+) -> Result<Vec<u8>, String> {
+    const NOT_READY: &str =
+        "This request is not ready to answer. Wait for an updated request or open Terminal.";
+    let can_answer = question.get("can_answer").and_then(Value::as_bool) == Some(true);
+    if name.is_empty()
+        || field(question, "question_id").is_empty()
+        || field(question, "question_hash").is_empty()
+        || field(question, "run_id").is_empty()
+        || (field(question, "conversation_id").is_empty() && !startup_request(question))
+        || answers.is_empty()
+        || (!can_answer && !skipping(question, answers))
+    {
+        return Err(NOT_READY.to_owned());
+    }
+    if !uuid_shaped(request_id) {
+        return Err("The approval journal request identity is invalid.".to_owned());
+    }
+    let input = json!({
+        "request_id": request_id,
+        "question_id": field(question, "question_id"),
+        "expected_question_hash": field(question, "question_hash"),
+        "expected_run_id": field(question, "run_id"),
+        "expected_conversation_id": field(question, "conversation_id"),
+        "answers": answers,
+    });
+    let bytes = serde_json::to_vec(&input).map_err(|error| error.to_string())?;
+    if bytes.len() > MAXIMUM_ANSWER_BYTES {
+        return Err("The answers exceed 64 KiB.".to_owned());
+    }
+    Ok(bytes)
+}
+
+/// `requestAnswerQuestion`'s outcome. Only a failed start, or a plain exit 1
+/// without "delivery uncertain", is a definite failure; anything else may
+/// have answered. Success needs the receipt to echo the request, session,
+/// question, hash, run and conversation.
+fn classify_answer(
+    target: &Target,
+    invocation: &Invocation,
+    question: &Value,
+    answers: &[questions::AnswerItem],
+    exit: Exit,
+) -> Outcome {
+    const TIMED_OUT: &str = "Answer delivery timed out. Check Terminal before retrying.";
+    let detail = |stderr: &str, code: i32| {
+        let text: String = stderr.trim().chars().take(FAILURE_STDERR_CHARS).collect();
+        if text.is_empty() {
+            format!("Answer transfer failed (exit {code}).")
+        } else {
+            text
+        }
+    };
+    match exit {
+        Exit::StartFailed(error) => failed(format!("Cannot start hgs: {error}")),
+        // Qt's runner keeps waiting for its timeout after a broken transfer.
+        Exit::TimedOut | Exit::WriteFailed => uncertain(TIMED_OUT),
+        Exit::Abnormal { stderr } => uncertain(detail(&stderr, -1)),
+        Exit::Code { code, stderr, .. } if code != 0 => {
+            if code == 1 && !stderr.to_lowercase().contains("delivery uncertain") {
+                failed(detail(&stderr, code))
+            } else {
+                uncertain(detail(&stderr, code))
+            }
+        }
+        Exit::Code { stdout, .. } => {
+            if stdout.len() > MAXIMUM_ANSWER_BYTES {
+                return uncertain(
+                    "The answer acknowledgement is too large. Check Terminal before retrying.",
+                );
+            }
+            let receipt: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+            let status = field(&receipt, "status");
+            let submitted = async_question(question)
+                && !skipping(question, answers)
+                && status == "submitted"
+                && receipt.get("skipped").and_then(Value::as_bool) != Some(true);
+            let echoed = (status == "answered" || submitted)
+                && invocation.request_id.is_some()
+                && receipt.get("request_id").and_then(Value::as_str)
+                    == invocation.request_id.as_deref()
+                && field(&receipt, "name") == target.name
+                && field(&receipt, "question_id") == field(question, "question_id")
+                && field(&receipt, "question_hash") == field(question, "question_hash")
+                && field(&receipt, "run_id") == field(question, "run_id")
+                && receipt
+                    .get("conversation_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|conversation| conversation == field(question, "conversation_id"));
+            if echoed {
+                done(receipt, None)
+            } else {
+                uncertain("The answer acknowledgement is invalid. Check Terminal before retrying.")
+            }
+        }
+    }
+}
+
+/// OpenCode's message ID as `hgs` checks it: `msg_` and at most 128 ASCII
+/// letters, digits, `_` and `-`.
+fn native_message_id(id: &str) -> bool {
+    id.strip_prefix("msg_").is_some_and(|rest| {
+        (1..=124).contains(&rest.len())
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    })
+}
+
+/// `requestQueueSendNow`'s outcome. A start that failed sent nothing; a
+/// timeout, a broken transfer, an abnormal end or "delivery uncertain" may
+/// have sent the queue. Success needs the receipt to echo the request,
+/// session, run, conversation and queue.
+fn classify_send_now(
+    target: &Target,
+    invocation: &Invocation,
+    queue_id: &str,
+    exit: Exit,
+) -> Outcome {
+    const UNCONFIRMED: &str =
+        "Could not confirm sending the queue. Check Terminal before retrying.";
+    match exit {
+        Exit::StartFailed(error) => failed(error),
+        Exit::TimedOut => uncertain("Queue action timed out. Check Terminal before retrying."),
+        Exit::WriteFailed => uncertain("Queue action failed. Check Terminal before retrying."),
+        Exit::Abnormal { stderr } => {
+            uncertain(trimmed_stderr(&stderr).unwrap_or_else(|| UNCONFIRMED.to_owned()))
+        }
+        Exit::Code { code, stderr, .. } if code != 0 => {
+            let detail = trimmed_stderr(&stderr).unwrap_or_else(|| UNCONFIRMED.to_owned());
+            if stderr.to_lowercase().contains("delivery uncertain") {
+                uncertain(detail)
+            } else {
+                failed(detail)
+            }
+        }
+        Exit::Code { stdout, .. } => {
+            let receipt: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+            let field = |key: &str| receipt.get(key).and_then(Value::as_str);
+            let echoed = field("status") == Some("submitted")
+                && invocation.request_id.is_some()
+                && field("request_id") == invocation.request_id.as_deref()
+                && field("name") == Some(target.name.as_str())
+                && field("run_id") == Some(target.run_id.as_str())
+                && field("conversation_id") == Some(target.conversation_id.as_str())
+                && field("queue_id") == Some(queue_id);
+            if echoed {
+                done(receipt, None)
+            } else {
+                uncertain("Invalid queue acknowledgement. Check Terminal before retrying.")
+            }
+        }
+    }
+}
+
+/// The scoped `runSessionAction` for `remove_queued`. A durable receipt that
+/// echoes the request reports failed, uncertain or completed; nothing is
+/// retried, and what may have removed the message is uncertain.
+fn classify_remove_queued(target: &Target, invocation: &Invocation, exit: Exit) -> Outcome {
+    const INCOMPLETE: &str = "Could not complete the request. Check the session before retrying.";
+    match exit {
+        Exit::StartFailed(error) => failed(error),
+        Exit::WriteFailed => uncertain("Transfer failed. Check the session before retrying."),
+        Exit::TimedOut => uncertain("Request timed out. Check the session before retrying."),
+        Exit::Abnormal { stderr } => {
+            uncertain(trimmed_stderr(&stderr).unwrap_or_else(|| INCOMPLETE.to_owned()))
+        }
+        Exit::Code { code, stderr, .. } if code != 0 => {
+            failed(trimmed_stderr(&stderr).unwrap_or_else(|| INCOMPLETE.to_owned()))
+        }
+        Exit::Code { stdout, .. } => {
+            let receipt: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+            let field = |key: &str| receipt.get(key).and_then(Value::as_str);
+            let identity = invocation.request_id.is_some()
+                && field("request_id") == invocation.request_id.as_deref()
+                && field("name") == Some(target.name.as_str())
+                && field("run_id") == Some(target.run_id.as_str())
+                && field("conversation_id") == Some(target.conversation_id.as_str());
+            let reason: String = field("error")
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(STDERR_CHARS)
+                .collect();
+            match field("status") {
+                Some("failed") if identity => failed(if reason.is_empty() {
+                    "The queued message was not removed.".to_owned()
+                } else {
+                    reason
+                }),
+                Some("uncertain") if identity => uncertain(if reason.is_empty() {
+                    "The result was not confirmed. Refresh before trying again.".to_owned()
+                } else {
+                    format!("The result was not confirmed ({reason}). Refresh before trying again.")
+                }),
+                Some("completed") if identity => done(receipt, None),
+                _ => uncertain("Invalid acknowledgement. Check the session before retrying."),
             }
         }
     }
@@ -668,6 +1158,16 @@ fn classify_stop(target: &Target, process_id: &str, exit: Exit) -> Outcome {
         }
         exit => failed(failure_detail(exit)),
     }
+}
+
+/// Whether the inspected conversation can be cleared now, or after
+/// dismissing a chooser the agent shows (`clearableContext`).
+pub fn clearable(details: &Value) -> bool {
+    let text = |key: &str| details[key].as_str().unwrap_or("");
+    let flag = |key: &str| details[key].as_bool().unwrap_or(false);
+    !text("run_id").is_empty()
+        && !text("conversation_id").is_empty()
+        && (flag("clear_context_supported") || flag("clear_context_dismiss"))
 }
 
 /// `requestRead`: applied marks, or a session that is gone (nothing to mark).
@@ -769,6 +1269,15 @@ pub fn allowed(row: &ViewRow, operation: &str) -> bool {
     match &row.allowed_actions {
         Some(list) => list.iter().any(|action| action == operation),
         None => row.agent != "opencode" || matches!(operation, "rename" | "forget"),
+    }
+}
+
+/// `NativeSessionCapabilities::action` with the inspection: its
+/// `allowed_actions` list wins over the row's.
+pub fn allowed_with(row: &ViewRow, details: &Value, operation: &str) -> bool {
+    match details.get("allowed_actions").and_then(Value::as_array) {
+        Some(list) => list.iter().any(|action| action.as_str() == Some(operation)),
+        None => allowed(row, operation),
     }
 }
 
@@ -1163,6 +1672,187 @@ mod tests {
                 generation: None
             }
         );
+    }
+
+    #[test]
+    fn clear_and_compact_are_session_actions_with_receipts() {
+        let t = target("mac");
+        let clear = Action::ClearContext {
+            dismiss_prompt: false,
+        };
+        let inv = invocation(&t, &clear, "req-1").unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "@mac",
+                "clear-context",
+                "claude/sample-project/review",
+                "--json"
+            ]
+        );
+        assert_eq!(inv.timeout, Duration::from_secs(45));
+        let input: Value = serde_json::from_slice(inv.stdin.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            input,
+            json!({"request_id": "req-1", "expected_run_id": "run-1", "expected_conversation_id": "conv-1"})
+        );
+        let dismiss = invocation(
+            &target(""),
+            &Action::ClearContext {
+                dismiss_prompt: true,
+            },
+            "req-2",
+        )
+        .unwrap();
+        assert_eq!(dismiss.timeout, Duration::from_secs(15));
+        let input: Value = serde_json::from_slice(dismiss.stdin.as_ref().unwrap()).unwrap();
+        assert_eq!(input["dismiss_prompt"], json!(true));
+        let receipt = |status: &str| {
+            json!({"status": status, "request_id": "req-1", "name": "claude/sample-project/review",
+                   "run_id": "run-1", "conversation_id": "conv-1"})
+            .to_string()
+        };
+        let outcome = |action: &Action, status: &str| {
+            let inv = invocation(&t, action, "req-1").unwrap();
+            classify(&t, action, &inv, exit(0, receipt(status).as_bytes(), ""))
+        };
+        assert!(matches!(outcome(&clear, "confirmed"), Outcome::Done { .. }));
+        assert!(matches!(outcome(&clear, "submitted"), Outcome::Done { .. }));
+        assert!(matches!(
+            outcome(&Action::CompactContext, "submitted"),
+            Outcome::Done { .. }
+        ));
+        assert_eq!(
+            outcome(&Action::CompactContext, "confirmed"),
+            failed("Invalid acknowledgement. Check Terminal before retrying.")
+        );
+        let compact = invocation(&t, &Action::CompactContext, "req-9").unwrap();
+        assert_eq!(compact.args[1], "compact-context");
+        assert_eq!(compact.request_id.as_deref(), Some("req-9"));
+        let from_webview: Action =
+            serde_json::from_value(json!({"kind": "clear_context"})).unwrap();
+        assert_eq!(
+            from_webview,
+            Action::ClearContext {
+                dismiss_prompt: false
+            }
+        );
+        assert!(clearable(
+            &json!({"run_id": "r", "conversation_id": "c", "clear_context_dismiss": true})
+        ));
+        assert!(!clearable(
+            &json!({"run_id": "r", "conversation_id": "", "clear_context_supported": true})
+        ));
+        assert!(!clearable(&json!({"run_id": "r", "conversation_id": "c"})));
+    }
+
+    #[test]
+    fn a_fresh_start_names_the_run_it_replaces() {
+        let inv = invocation(&target("mac"), &Action::StartFresh, "u").unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "@mac",
+                "resume",
+                "claude/sample-project/review",
+                "--fresh",
+                "--expected-run-id",
+                "run-1",
+                "-d"
+            ]
+        );
+        assert_eq!(inv.timeout, Duration::from_secs(30));
+        let mut untracked = target("");
+        untracked.run_id.clear();
+        assert_eq!(
+            invocation(&untracked, &Action::StartFresh, "u")
+                .unwrap()
+                .args,
+            ["resume", "claude/sample-project/review", "--fresh", "-d"]
+        );
+    }
+
+    #[test]
+    fn a_fork_names_its_source_and_a_free_tag() {
+        let action = Action::Fork {
+            tag: "review-fork".into(),
+            archive_id: Some("a-7".into()),
+        };
+        let inv = invocation(&target("mac"), &action, "u").unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "@mac",
+                "fork",
+                "claude/sample-project/review",
+                "-n",
+                "review-fork",
+                "-d",
+                "--archive",
+                "a-7",
+                "--expected-run-id",
+                "run-1",
+                "--expected-conversation-id",
+                "conv-1"
+            ]
+        );
+        assert_eq!(inv.timeout, Duration::from_secs(90));
+        assert_eq!(
+            invocation(&target(""), &action, "u").unwrap().timeout,
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            invocation(
+                &target(""),
+                &Action::Fork {
+                    tag: "a/b".into(),
+                    archive_id: None
+                },
+                "u"
+            )
+            .unwrap_err(),
+            "Names cannot contain /, : or . or control characters."
+        );
+        assert!(matches!(
+            classify(&target(""), &action, &inv, exit(0, b"", "")),
+            Outcome::Done { .. }
+        ));
+        let taken = ["review-fork", "review-fork-2"];
+        assert_eq!(
+            fork_tag("review", |tag| taken.contains(&tag)),
+            "review-fork-3"
+        );
+        assert_eq!(fork_tag("", |_| false), "fork");
+        assert_eq!(
+            fork_problem("review-fork", |tag| taken.contains(&tag)).as_deref(),
+            Some("This session name is already in use.")
+        );
+        assert_eq!(
+            fork_problem("", |_| false).as_deref(),
+            Some("Enter a session name.")
+        );
+        assert_eq!(fork_problem("next", |_| false), None);
+        let (enabled, tooltip) =
+            fork_available(true, false, false, &json!({"fork_supported": true}));
+        assert!(enabled);
+        assert_eq!(
+            tooltip,
+            "Create an independent conversation with the same context and working folder"
+        );
+        let (enabled, tooltip) = fork_available(
+            true,
+            false,
+            false,
+            &json!({"fork_supported": false, "fork_reason": "No saved context yet."}),
+        );
+        assert!(!enabled);
+        assert_eq!(tooltip, "No saved context yet.");
+        assert!(!fork_available(false, false, false, &json!({"fork_supported": true})).0);
+        assert_eq!(
+            fork_texts::description("/home/example/project"),
+            "Create an independent conversation from this saved context.\nWorking folder: /home/example/project"
+        );
+        assert_eq!(fork_texts::forking("studio"), "Forking session on studio…");
     }
 
     #[test]
@@ -1627,5 +2317,466 @@ mod tests {
             parse_reference(Exit::WriteFailed),
             Err("exit code -1".to_owned())
         );
+    }
+
+    #[test]
+    fn send_now_input_and_outcomes() {
+        let t = target("studio");
+        let action = Action::SendNow {
+            queue_id: "q-1".into(),
+        };
+        let inv = invocation(&t, &action, "req-9").unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "@studio",
+                "send-now",
+                "claude/sample-project/review",
+                "--json"
+            ]
+        );
+        assert_eq!(inv.timeout, Duration::from_secs(35));
+        assert_eq!(
+            invocation(&target(""), &action, "r").unwrap().timeout,
+            Duration::from_secs(20)
+        );
+        let input: Value = serde_json::from_slice(inv.stdin.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            input,
+            json!({"request_id": "req-9", "expected_run_id": "run-1",
+                   "expected_conversation_id": "conv-1", "queue_id": "q-1"})
+        );
+        let outcome = |exit: Exit| classify(&t, &action, &inv, exit);
+        let receipt = json!({"status": "submitted", "request_id": "req-9", "name": "claude/sample-project/review",
+                             "run_id": "run-1", "conversation_id": "conv-1", "queue_id": "q-1"});
+        assert!(matches!(
+            outcome(exit(0, receipt.to_string().as_bytes(), "")),
+            Outcome::Done { .. }
+        ));
+        for (key, value) in [
+            ("status", "requested"),
+            ("request_id", "other"),
+            ("name", "other"),
+            ("run_id", "other"),
+            ("conversation_id", "other"),
+            ("queue_id", "q-2"),
+        ] {
+            let mut changed = receipt.clone();
+            changed[key] = json!(value);
+            assert_eq!(
+                outcome(exit(0, changed.to_string().as_bytes(), "")),
+                uncertain("Invalid queue acknowledgement. Check Terminal before retrying."),
+                "{key}"
+            );
+        }
+        assert_eq!(
+            outcome(Exit::StartFailed("no hgs".into())),
+            failed("no hgs")
+        );
+        assert_eq!(
+            outcome(Exit::TimedOut),
+            uncertain("Queue action timed out. Check Terminal before retrying.")
+        );
+        assert_eq!(
+            outcome(Exit::WriteFailed),
+            uncertain("Queue action failed. Check Terminal before retrying.")
+        );
+        assert_eq!(
+            outcome(Exit::Abnormal { stderr: "".into() }),
+            uncertain("Could not confirm sending the queue. Check Terminal before retrying.")
+        );
+        assert_eq!(
+            outcome(exit(
+                1,
+                b"",
+                "hgs: The native queue is no longer visible; nothing was sent\n"
+            )),
+            failed("hgs: The native queue is no longer visible; nothing was sent")
+        );
+        assert_eq!(
+            outcome(exit(1, b"", "Delivery uncertain: check Terminal")),
+            uncertain("Delivery uncertain: check Terminal")
+        );
+    }
+
+    #[test]
+    fn remove_queued_input_and_outcomes() {
+        let t = target("");
+        let action = Action::RemoveQueued {
+            message_id: "msg_01H-abc_9".into(),
+        };
+        let inv = invocation(&t, &action, "req-3").unwrap();
+        assert_eq!(
+            inv.args,
+            ["session-action", "claude/sample-project/review", "--json"]
+        );
+        assert_eq!(inv.timeout, Duration::from_secs(15));
+        assert_eq!(
+            invocation(&target("mac"), &action, "r").unwrap().timeout,
+            Duration::from_secs(45)
+        );
+        let input: Value = serde_json::from_slice(inv.stdin.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            input,
+            json!({"request_id": "req-3", "action": "remove_queued", "expected_run_id": "run-1",
+                   "expected_conversation_id": "conv-1", "message_id": "msg_01H-abc_9"})
+        );
+        let outcome = |exit: Exit| classify(&t, &action, &inv, exit);
+        let receipt = |status: &str, error: &str| {
+            json!({"status": status, "request_id": "req-3", "name": "claude/sample-project/review",
+                   "run_id": "run-1", "conversation_id": "conv-1", "error": error})
+            .to_string()
+        };
+        assert!(matches!(
+            outcome(exit(0, receipt("completed", "").as_bytes(), "")),
+            Outcome::Done { .. }
+        ));
+        assert_eq!(
+            outcome(exit(0, receipt("failed", "").as_bytes(), "")),
+            failed("The queued message was not removed.")
+        );
+        assert_eq!(
+            outcome(exit(0, receipt("failed", " already sent ").as_bytes(), "")),
+            failed("already sent")
+        );
+        assert_eq!(
+            outcome(exit(0, receipt("uncertain", "").as_bytes(), "")),
+            uncertain("The result was not confirmed. Refresh before trying again.")
+        );
+        assert_eq!(
+            outcome(exit(
+                0,
+                receipt("uncertain", "socket closed").as_bytes(),
+                ""
+            )),
+            uncertain("The result was not confirmed (socket closed). Refresh before trying again.")
+        );
+        let invalid = uncertain("Invalid acknowledgement. Check the session before retrying.");
+        assert_eq!(
+            outcome(exit(0, receipt("submitted", "").as_bytes(), "")),
+            invalid
+        );
+        let mut other: Value = serde_json::from_str(&receipt("completed", "")).unwrap();
+        other["run_id"] = json!("run-2");
+        assert_eq!(outcome(exit(0, other.to_string().as_bytes(), "")), invalid);
+        assert_eq!(outcome(Exit::StartFailed("gone".into())), failed("gone"));
+        assert_eq!(
+            outcome(Exit::WriteFailed),
+            uncertain("Transfer failed. Check the session before retrying.")
+        );
+        assert_eq!(
+            outcome(Exit::TimedOut),
+            uncertain("Request timed out. Check the session before retrying.")
+        );
+        assert_eq!(
+            outcome(exit(2, b"", "")),
+            failed("Could not complete the request. Check the session before retrying.")
+        );
+    }
+
+    #[test]
+    fn a_bad_message_id_is_refused() {
+        let refused = Err("Choose the exact queued OpenCode message.".to_owned());
+        for id in [
+            "",
+            "msg_",
+            "message_1",
+            "msg_a b",
+            "msg_a/b",
+            &format!("msg_{}", "x".repeat(125)),
+        ] {
+            let action = Action::RemoveQueued {
+                message_id: id.to_owned(),
+            };
+            assert_eq!(invocation(&target(""), &action, "r"), refused, "{id}");
+        }
+        let longest = Action::RemoveQueued {
+            message_id: format!("msg_{}", "x".repeat(124)),
+        };
+        assert!(invocation(&target(""), &longest, "r").is_ok());
+    }
+
+    #[test]
+    fn queue_actions_never_come_from_webview_json() {
+        assert!(
+            serde_json::from_value::<Action>(json!({"kind": "send_now", "queue_id": "q"})).is_err()
+        );
+        assert!(serde_json::from_value::<Action>(
+            json!({"kind": "remove_queued", "message_id": "msg_a"})
+        )
+        .is_err());
+        // The same shape still reads an ordinary action.
+        assert!(serde_json::from_value::<Action>(json!({"kind": "pause"})).is_ok());
+    }
+
+    #[test]
+    fn allowed_with_prefers_details() {
+        let opencode = ViewRow {
+            agent: "opencode".into(),
+            ..ViewRow::default()
+        };
+        assert!(!allowed_with(&opencode, &json!({}), "remove_queued"));
+        assert!(allowed_with(
+            &opencode,
+            &json!({"allowed_actions": ["remove_queued"]}),
+            "remove_queued"
+        ));
+        let reported = ViewRow {
+            allowed_actions: Some(vec!["remove_queued".into()]),
+            ..opencode.clone()
+        };
+        assert!(allowed_with(&reported, &json!({}), "remove_queued"));
+        assert!(!allowed_with(
+            &reported,
+            &json!({"allowed_actions": ["rename"]}),
+            "remove_queued"
+        ));
+    }
+
+    const REQUEST: &str = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+
+    fn asked() -> Value {
+        json!({"question_id": "q-1", "question_hash": "h-1", "run_id": "run-1",
+               "conversation_id": "conv-1", "source": "hook", "can_answer": true,
+               "questions": [{"id": "q_0"}]})
+    }
+
+    fn chosen() -> Vec<questions::AnswerItem> {
+        vec![questions::AnswerItem::Choice {
+            question_id: "q_0".into(),
+            selected_option_ids: vec!["pg".into()],
+            text: String::new(),
+        }]
+    }
+
+    #[test]
+    fn answer_input_is_qts() {
+        let t = target("studio");
+        let action = Action::Answer {
+            question: asked(),
+            answers: chosen(),
+        };
+        let inv = invocation(&t, &action, REQUEST).unwrap();
+        // The answers never go into the arguments.
+        assert_eq!(
+            inv.args,
+            [
+                "@studio",
+                "answer",
+                "claude/sample-project/review",
+                "--json"
+            ]
+        );
+        assert_eq!(inv.timeout, Duration::from_secs(45));
+        assert_eq!(
+            invocation(&target(""), &action, REQUEST).unwrap().timeout,
+            Duration::from_secs(30)
+        );
+        let input: Value = serde_json::from_slice(inv.stdin.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            input,
+            json!({"request_id": REQUEST, "question_id": "q-1", "expected_question_hash": "h-1",
+                   "expected_run_id": "run-1", "expected_conversation_id": "conv-1",
+                   "answers": [{"question_id": "q_0", "selected_option_ids": ["pg"], "text": ""}]})
+        );
+        // A startup request may come before the conversation.
+        let hash = "f".repeat(64);
+        let trust = json!({"question_id": format!("claude-trust:{hash}"), "question_hash": hash,
+            "run_id": "run-1", "conversation_id": "", "source": "claude_folder_trust",
+            "answer_transport": "claude_tui", "can_answer": true});
+        let action = Action::Answer {
+            question: trust,
+            answers: chosen(),
+        };
+        assert!(invocation(&t, &action, REQUEST).is_ok());
+        // A Skip of a Codex optional question that allows it.
+        let skip = json!({"question_id": "cx", "question_hash": "h", "run_id": "run-1",
+            "conversation_id": "conv-1", "source": "codex_async", "optional": true,
+            "can_skip": true, "can_answer": false});
+        let action = Action::Answer {
+            question: skip,
+            answers: vec![questions::AnswerItem::Skip {
+                question_id: "q_0".into(),
+                skip: true,
+            }],
+        };
+        let input: Value =
+            serde_json::from_slice(&invocation(&t, &action, REQUEST).unwrap().stdin.unwrap())
+                .unwrap();
+        assert_eq!(
+            input["answers"],
+            json!([{"question_id": "q_0", "skip": true}])
+        );
+    }
+
+    #[test]
+    fn answer_refusals() {
+        let t = target("");
+        let not_ready = Err(
+            "This request is not ready to answer. Wait for an updated request or open Terminal."
+                .to_owned(),
+        );
+        let refused = |question: Value, answers: Vec<questions::AnswerItem>| {
+            invocation(&t, &Action::Answer { question, answers }, REQUEST)
+        };
+        for key in ["question_id", "question_hash", "run_id", "conversation_id"] {
+            let mut question = asked();
+            question[key] = json!("");
+            assert_eq!(refused(question, chosen()), not_ready, "{key}");
+        }
+        assert_eq!(refused(asked(), Vec::new()), not_ready);
+        let mut closed = asked();
+        closed["can_answer"] = json!(false);
+        assert_eq!(refused(closed, chosen()), not_ready);
+        // A startup form needs its exact id and a 64-character hash.
+        let near = json!({"question_id": "claude-trust:abc", "question_hash": "abc", "run_id": "r",
+            "conversation_id": "", "source": "claude_folder_trust", "answer_transport": "claude_tui", "can_answer": true});
+        assert_eq!(refused(near, chosen()), not_ready);
+        assert_eq!(
+            invocation(
+                &t,
+                &Action::Answer {
+                    question: asked(),
+                    answers: chosen()
+                },
+                "not-a-uuid"
+            ),
+            Err("The approval journal request identity is invalid.".to_owned())
+        );
+        let huge = vec![questions::AnswerItem::Choice {
+            question_id: "q_0".into(),
+            selected_option_ids: Vec::new(),
+            text: "x".repeat(70_000),
+        }];
+        assert_eq!(
+            refused(asked(), huge),
+            Err("The answers exceed 64 KiB.".to_owned())
+        );
+        assert!(serde_json::from_value::<Action>(
+            json!({"kind": "answer", "question": {}, "answers": []})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn answer_outcomes() {
+        let t = target("");
+        let outcome = |question: Value, answers: Vec<questions::AnswerItem>, exit: Exit| {
+            let action = Action::Answer { question, answers };
+            let inv = invocation(&t, &action, REQUEST).unwrap();
+            classify(&t, &action, &inv, exit)
+        };
+        let receipt = json!({"status": "answered", "request_id": REQUEST, "name": "claude/sample-project/review",
+            "question_id": "q-1", "question_hash": "h-1", "run_id": "run-1", "conversation_id": "conv-1"});
+        let ok = |receipt: &Value| exit(0, receipt.to_string().as_bytes(), "");
+        assert!(matches!(
+            outcome(asked(), chosen(), ok(&receipt)),
+            Outcome::Done { .. }
+        ));
+        let invalid =
+            uncertain("The answer acknowledgement is invalid. Check Terminal before retrying.");
+        for key in [
+            "request_id",
+            "name",
+            "question_id",
+            "question_hash",
+            "run_id",
+            "conversation_id",
+        ] {
+            let mut changed = receipt.clone();
+            changed[key] = json!("other");
+            assert_eq!(outcome(asked(), chosen(), ok(&changed)), invalid, "{key}");
+        }
+        let mut missing = receipt.clone();
+        missing.as_object_mut().unwrap().remove("conversation_id");
+        assert_eq!(outcome(asked(), chosen(), ok(&missing)), invalid);
+        // Submitted only for a Codex optional question's real answer.
+        let mut submitted = receipt.clone();
+        submitted["status"] = json!("submitted");
+        assert_eq!(outcome(asked(), chosen(), ok(&submitted)), invalid);
+        let mut codex = asked();
+        codex["source"] = json!("codex_async");
+        codex["optional"] = json!(true);
+        codex["can_skip"] = json!(true);
+        assert!(matches!(
+            outcome(codex.clone(), chosen(), ok(&submitted)),
+            Outcome::Done { .. }
+        ));
+        let mut skipped = submitted.clone();
+        skipped["skipped"] = json!(true);
+        assert_eq!(outcome(codex.clone(), chosen(), ok(&skipped)), invalid);
+        let skip = vec![questions::AnswerItem::Skip {
+            question_id: "q_0".into(),
+            skip: true,
+        }];
+        assert_eq!(outcome(codex, skip, ok(&submitted)), invalid);
+        // Failures: only a failed start or a plain exit 1 is definite.
+        assert_eq!(
+            outcome(asked(), chosen(), Exit::StartFailed("no such file".into())),
+            failed("Cannot start hgs: no such file")
+        );
+        assert_eq!(
+            outcome(
+                asked(),
+                chosen(),
+                exit(1, b"", "hgs: the question changed\n")
+            ),
+            failed("hgs: the question changed")
+        );
+        assert_eq!(
+            outcome(asked(), chosen(), exit(1, b"", "")),
+            failed("Answer transfer failed (exit 1).")
+        );
+        assert_eq!(
+            outcome(
+                asked(),
+                chosen(),
+                exit(1, b"", "Delivery Uncertain: check Terminal")
+            ),
+            uncertain("Delivery Uncertain: check Terminal")
+        );
+        assert_eq!(
+            outcome(asked(), chosen(), exit(2, b"", "")),
+            uncertain("Answer transfer failed (exit 2).")
+        );
+        let timed_out = uncertain("Answer delivery timed out. Check Terminal before retrying.");
+        assert_eq!(outcome(asked(), chosen(), Exit::TimedOut), timed_out);
+        assert_eq!(outcome(asked(), chosen(), Exit::WriteFailed), timed_out);
+        assert_eq!(
+            outcome(
+                asked(),
+                chosen(),
+                Exit::Abnormal {
+                    stderr: String::new()
+                }
+            ),
+            uncertain("Answer transfer failed (exit -1).")
+        );
+        let big = vec![b' '; 70_000];
+        assert_eq!(
+            outcome(asked(), chosen(), exit(0, &big, "")),
+            uncertain("The answer acknowledgement is too large. Check Terminal before retrying.")
+        );
+    }
+
+    #[test]
+    fn an_uncertain_answer_is_never_retried() {
+        // An uncertain outcome is reported once; the card then locks Submit
+        // until Allow retry, and a new attempt is a new request identity.
+        let shown = questions::Question::from_value(&asked());
+        let mut draft = questions::AnswerDraft::default();
+        draft.begin_sending();
+        draft.set_error(
+            "Answer delivery timed out. Check Terminal before retrying.",
+            true,
+        );
+        let ctx = questions::CardContext {
+            available: true,
+            ..questions::CardContext::default()
+        };
+        assert!(!questions::card(&shown, &draft, &ctx).submit.enabled);
+        assert!(!draft.sending && draft.uncertain);
+        draft.allow_retry();
+        assert!(!draft.uncertain);
     }
 }

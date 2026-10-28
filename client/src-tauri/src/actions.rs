@@ -9,7 +9,9 @@
 //! answer busy. A message has its own lane per agent, as Qt's
 //! `m_messagesInFlight` keys it by host, name and agent. A process stop has
 //! its own lane too: Qt's Processes tab stops beside a pause or rename, one
-//! stop at a time per session.
+//! stop at a time per session. Send now and an OpenCode inbox removal have
+//! their own lanes, as Qt's `m_queueSendRequest` and `m_removeQueuedRequest`,
+//! and so does an answer, one per session (`m_answersInFlight`).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -17,7 +19,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use tauri::State;
 use zerus_client_core::actions::{
-    classify, invocation, parse_reference, reference_invocation, ALREADY_SENDING,
+    classify, invocation, parse_reference, reference_invocation, ALREADY_ANSWERING, ALREADY_SENDING,
 };
 use zerus_client_core::details::{details_invocation, parse_details, Details};
 use zerus_client_core::readmarks::{ReadMark, ReadMarks};
@@ -37,6 +39,9 @@ pub enum Lane {
     Read,
     Send,
     Process,
+    Queue,
+    Inbox,
+    Answer,
 }
 
 impl Lane {
@@ -46,6 +51,9 @@ impl Lane {
             Action::Interrupt { .. } => Self::Interrupt,
             Action::Send { .. } => Self::Send,
             Action::StopProcess { .. } => Self::Process,
+            Action::SendNow { .. } => Self::Queue,
+            Action::RemoveQueued { .. } => Self::Inbox,
+            Action::Answer { .. } => Self::Answer,
             _ => Self::Write,
         }
     }
@@ -181,7 +189,7 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
-fn blocked() -> bool {
+pub(crate) fn blocked() -> bool {
     !actions_allowed(
         env("ZERUS_CLIENT_REPLAY").as_deref(),
         env("ZERUS_CLIENT_HGS").as_deref(),
@@ -224,6 +232,7 @@ pub async fn dispatch(state: &Actions, target: Target, action: Action) -> Result
     let Some(_claim) = state.flight.claim(Lane::key(&target, &action)) else {
         return match Lane::of(&action) {
             Lane::Send => Ok(failed(ALREADY_SENDING)),
+            Lane::Answer => Ok(failed(ALREADY_ANSWERING)),
             _ => Err("busy".into()),
         };
     };
@@ -393,6 +402,13 @@ mod tests {
                 paths: vec![],
                 expected_created: None,
             },
+            // Clear and Compact start after the view's confirmation and run
+            // as session writes.
+            Action::ClearContext {
+                dismiss_prompt: true,
+            },
+            Action::CompactContext,
+            Action::StartFresh,
         ] {
             assert_eq!(Lane::of(&action), Lane::Write);
         }
@@ -447,6 +463,70 @@ mod tests {
         drop(first);
         assert!(flight.claim(Lane::key(&target, &stop("job-2"))).is_some());
         drop(pause);
+    }
+
+    #[test]
+    fn one_answer_per_session() {
+        let target = |computer: &str| Target {
+            computer: computer.into(),
+            name: "claude/sample-project/review".into(),
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+        };
+        let answer = |id: &str| Action::Answer {
+            question: serde_json::json!({"question_id": id}),
+            answers: Vec::new(),
+        };
+        assert_eq!(Lane::of(&answer("q-1")), Lane::Answer);
+        let flight = InFlight::default();
+        let send = flight
+            .claim(Lane::key(
+                &target("studio"),
+                &Action::Send {
+                    text: "hi".into(),
+                    attachments: Vec::new(),
+                    agent_id: None,
+                    expected_compaction_id: None,
+                },
+            ))
+            .unwrap();
+        let first = flight
+            .claim(Lane::key(&target("studio"), &answer("q-1")))
+            .unwrap();
+        // A second answer to the same session waits, whichever question.
+        assert!(flight
+            .claim(Lane::key(&target("studio"), &answer("q-2")))
+            .is_none());
+        assert!(flight
+            .claim(Lane::key(&target("mac"), &answer("q-2")))
+            .is_some());
+        drop((send, first));
+    }
+
+    #[test]
+    fn send_now_and_inbox_removal_take_their_own_lanes() {
+        let target = Target {
+            computer: "studio".into(),
+            name: "claude/sample-project/review".into(),
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+        };
+        let send_now = |id: &str| Action::SendNow {
+            queue_id: id.into(),
+        };
+        let remove = |id: &str| Action::RemoveQueued {
+            message_id: id.into(),
+        };
+        assert_eq!(Lane::of(&send_now("q-1")), Lane::Queue);
+        assert_eq!(Lane::of(&remove("msg_a")), Lane::Inbox);
+        let flight = InFlight::default();
+        let write = flight.claim(Lane::key(&target, &Action::Pause)).unwrap();
+        let queue = flight.claim(Lane::key(&target, &send_now("q-1"))).unwrap();
+        let inbox = flight.claim(Lane::key(&target, &remove("msg_a"))).unwrap();
+        // One Send now and one removal per session, whichever queue or message.
+        assert!(flight.claim(Lane::key(&target, &send_now("q-2"))).is_none());
+        assert!(flight.claim(Lane::key(&target, &remove("msg_b"))).is_none());
+        drop((write, queue, inbox));
     }
 
     #[test]

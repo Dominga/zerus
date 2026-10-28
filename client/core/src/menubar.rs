@@ -4,6 +4,8 @@
 //! (`tray/src/TrayMenu.cpp`). [`Desk`] mirrors the core's changes; [`Gate`]
 //! decides what reaches the status item (`tray/src/QuietTrayIcon.h`). Pure:
 //! the platform glue draws and shows it.
+use crate::marks::{self, Mark};
+use crate::readmarks::ReadMark;
 use crate::{Change, ComputerId, ComputerStatus, ViewRow};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -50,10 +52,146 @@ impl Computer {
     }
 }
 
-/// `SessionInfo::needsAttention` (`tray/src/HgsClient.h:107-108`) without
-/// the device-local Review later mark, which this client does not keep yet.
+/// `SessionInfo::needsAttention` (`tray/src/HgsClient.h:107-108`) of a row
+/// the marks overlay ([`overlay`]) has applied this device's marks to:
+/// `unread` is `visibleUnreadReply`.
 pub fn needs_attention(row: &ViewRow) -> bool {
-    (row.notify.needs_action && !row.notify.acknowledged) || (row.state != "archived" && row.unread)
+    (row.notify.needs_action && !row.notify.acknowledged)
+        || (row.state != "archived" && (row.unread || row.notify.review_later))
+}
+
+/// This device's read state, as `FleetState` keeps it: the attention marks
+/// and read replies of [`AttentionMarks`](crate::marks::AttentionMarks) and
+/// the read marks still waiting for their host
+/// ([`ReadMarks`](crate::readmarks::ReadMarks)). The overlay reads them;
+/// `store/marks.ts` writes them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DeviceMarks {
+    marks: BTreeMap<String, Mark>,
+    replies: BTreeMap<String, String>,
+    /// Pending read marks by computer, then session name (`ReadMarks`' key).
+    pending: BTreeMap<String, BTreeMap<String, ReadMark>>,
+}
+
+impl DeviceMarks {
+    /// From `AttentionMarks::snapshot` and `ReadMarks::pending`.
+    pub fn new(
+        marks: BTreeMap<String, Mark>,
+        replies: BTreeMap<String, String>,
+        pending: Vec<ReadMark>,
+    ) -> Self {
+        let mut by_computer: BTreeMap<String, BTreeMap<String, ReadMark>> = BTreeMap::new();
+        for mark in pending {
+            by_computer
+                .entry(mark.computer.clone())
+                .or_default()
+                .insert(mark.name.clone(), mark);
+        }
+        Self {
+            marks,
+            replies,
+            pending: by_computer,
+        }
+    }
+
+    fn queued(&self, computer: &str, name: &str) -> Option<&ReadMark> {
+        self.pending.get(computer)?.get(name)
+    }
+}
+
+/// What the overlay decides for one row: `reviewLater`, `unreadReply`,
+/// `visibleUnreadReply` and `attentionAcknowledged` after
+/// `FleetState::updateUnread`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReadState {
+    pub review_later: bool,
+    pub unread_reply: bool,
+    /// The unread reply, shown once the reply is finished.
+    pub unread: bool,
+    pub acknowledged: bool,
+}
+
+/// `FleetState::updateUnread` for one row (`tray/src/FleetState.cpp:131-170`),
+/// as `readState` in `store/marks.ts` applies it; the two read one shared
+/// fixture (`tests/fixtures/marks-overlay.json`). Pure: the host's values and
+/// this device's marks only.
+pub fn read_state(computer: &ComputerId, row: &ViewRow, device: &DeviceMarks) -> ReadState {
+    let conversation = row.conversation_id.as_deref().unwrap_or("");
+    let archived = row.state == "archived";
+    // Keys are built only when there are marks: this runs for every row.
+    let mark = if device.marks.is_empty() {
+        None
+    } else {
+        let key = marks::attention_key(
+            &computer.0,
+            &row.agent,
+            &row.name,
+            row.created,
+            conversation,
+        );
+        // A mark kept under the fallback key still applies until the
+        // frontend moves it (`FleetState.cpp:135-139`).
+        device.marks.get(&key).or_else(|| {
+            if conversation.is_empty() {
+                return None;
+            }
+            let fallback = marks::fallback_key(&computer.0, &row.agent, &row.name, row.created);
+            device.marks.get(&fallback)
+        })
+    };
+    let review_later = !archived && mark.is_some_and(|mark| mark.review);
+    let local_acknowledged = !row.attention_fingerprint.is_empty()
+        && mark.is_some_and(|mark| mark.acknowledged == row.attention_fingerprint);
+    let reply = row.reply_id.as_deref().unwrap_or("");
+    let current = !archived && !conversation.is_empty() && !reply.is_empty();
+    let (unread_reply, acknowledged) = if !row.shared_read {
+        // Hosts with an older hgs keep this device's own read state.
+        let read = !device.replies.is_empty()
+            && device
+                .replies
+                .get(&marks::reply_key(&computer.0, &row.agent, conversation))
+                .is_some_and(|read| read == reply);
+        (current && !read, local_acknowledged)
+    } else {
+        // A queued mark of this run and conversation reads the reply or the
+        // attention until the host shows it.
+        let queued = device.queued(&computer.0, &row.name).filter(|queued| {
+            !queued.run_id.is_empty()
+                && queued.run_id == row.run_id.as_deref().unwrap_or("")
+                && queued.conversation_id == conversation
+        });
+        let reply_read = row.read_reply_id.as_deref().unwrap_or("") == reply
+            || queued.is_some_and(|queued| queued.reply_id.as_deref().unwrap_or("") == reply);
+        let signature = row.attention_signature.as_deref().unwrap_or("");
+        // Recovery-only attention has no host signature and stays a local choice.
+        let acknowledged = if signature.is_empty() {
+            local_acknowledged
+        } else {
+            row.read_attention_signature.as_deref() == Some(signature)
+                || queued
+                    .is_some_and(|queued| queued.attention_signature.as_deref() == Some(signature))
+        };
+        (current && !reply_read, acknowledged)
+    };
+    ReadState {
+        review_later,
+        unread_reply,
+        // `visibleUnreadReply`: it waits while a reply is in progress.
+        unread: unread_reply && row.unread_candidate,
+        acknowledged,
+    }
+}
+
+/// Applies [`read_state`] to the fields the counts and the attention
+/// notifications read: `unread`, `notify.unread_reply`,
+/// `notify.acknowledged` and `notify.review_later`. It reads none of them,
+/// so it can be applied again.
+pub fn overlay(computer: &ComputerId, row: &mut ViewRow, device: &DeviceMarks) {
+    let state = read_state(computer, row, device);
+    row.unread = state.unread;
+    row.notify.unread_reply = state.unread_reply;
+    row.notify.acknowledged = state.acknowledged;
+    row.notify.review_later = state.review_later;
 }
 
 /// Qt's badge text: "0".."99", then "99+" (`IconFactory::countText`).
@@ -179,10 +317,12 @@ pub fn session_text(row: &ViewRow) -> String {
     }
 }
 
-/// The fleet as the menu bar sees it, kept from the core's changes.
+/// The fleet as the menu bar sees it, kept from the core's changes, with
+/// this device's marks applied to its rows as `FleetState` applies them.
 #[derive(Clone, Debug, Default)]
 pub struct Desk {
     computers: BTreeMap<ComputerId, Computer>,
+    marks: DeviceMarks,
 }
 
 impl Desk {
@@ -190,14 +330,28 @@ impl Desk {
     pub fn observe(&mut self, change: &Change) -> Option<ComputerId> {
         match change {
             Change::Upsert { computer, key, row } => {
-                self.entry(computer).rows.insert(key.clone(), row.clone());
+                let mut row = row.clone();
+                overlay(computer, &mut row, &self.marks);
+                self.computers
+                    .entry(computer.clone())
+                    .or_default()
+                    .rows
+                    .insert(key.clone(), row);
             }
             Change::Remove { computer, key, .. } => {
                 self.entry(computer).rows.remove(key);
             }
             Change::Replace { computer, rows } => {
-                let entry = self.entry(computer);
-                entry.rows = rows.iter().cloned().collect();
+                let marks = &self.marks;
+                let entry = self.computers.entry(computer.clone()).or_default();
+                entry.rows = rows
+                    .iter()
+                    .map(|(key, row)| {
+                        let mut row = row.clone();
+                        overlay(computer, &mut row, marks);
+                        (key.clone(), row)
+                    })
+                    .collect();
                 entry.listed = true;
             }
             Change::Computer {
@@ -219,8 +373,24 @@ impl Desk {
         Some(change.computer().clone())
     }
 
+    /// The computers, their rows with this device's marks applied.
     pub fn computers(&self) -> &BTreeMap<ComputerId, Computer> {
         &self.computers
+    }
+
+    /// Takes this device's marks and applies them to every row
+    /// (`FleetState::setReadState`). True when they changed.
+    pub fn set_marks(&mut self, marks: DeviceMarks) -> bool {
+        if marks == self.marks {
+            return false;
+        }
+        self.marks = marks;
+        for (computer, state) in &mut self.computers {
+            for row in state.rows.values_mut() {
+                overlay(computer, row, &self.marks);
+            }
+        }
+        true
     }
 
     fn entry(&mut self, computer: &ComputerId) -> &mut Computer {
@@ -252,21 +422,29 @@ impl Desk {
             .sum()
     }
 
+    /// `FleetState::attentionSessions` (`FleetState.cpp:421-435`): sessions
+    /// that are not muted and marked Review later, or that need attention on
+    /// a current computer. This computer is never stale (Qt counts its box
+    /// whenever the listing worked); a peer is current only while fresh, and
+    /// one that is not still counts its Review later marks.
     pub fn attention(&self) -> usize {
         self.computers
             .iter()
-            // This computer is never stale (Qt counts its box whenever the
-            // listing worked); a peer counts only while current.
-            .filter(|(id, c)| {
-                if id.is_local() {
-                    c.listed && !matches!(c.status, ComputerStatus::Reconnecting { .. })
+            .filter(|(_, c)| c.listed)
+            .map(|(id, c)| {
+                let current = if id.is_local() {
+                    !matches!(c.status, ComputerStatus::Reconnecting { .. })
                 } else {
                     c.fresh()
-                }
+                };
+                c.rows
+                    .values()
+                    .filter(|row| {
+                        !row.muted && (row.notify.review_later || (current && needs_attention(row)))
+                    })
+                    .count()
             })
-            .flat_map(|(_, c)| c.rows.values())
-            .filter(|row| !row.muted && needs_attention(row))
-            .count()
+            .sum()
     }
 
     /// A peer has not answered yet or is not current (`FleetState::isStale`);
@@ -478,8 +656,13 @@ mod tests {
         }
     }
 
+    /// A finished reply the host has not marked read (shared read state).
     fn unread(name: &str) -> ViewRow {
         ViewRow {
+            conversation_id: Some(format!("conv-{name}")),
+            reply_id: Some("reply-1".to_owned()),
+            shared_read: true,
+            unread_candidate: true,
             unread: true,
             ..row(name, "running")
         }
@@ -488,6 +671,15 @@ mod tests {
     fn asking(name: &str) -> ViewRow {
         let mut row = row(name, "running");
         row.notify.needs_action = true;
+        row
+    }
+
+    /// A request the host's read mark acknowledges.
+    fn acknowledged(name: &str) -> ViewRow {
+        let mut row = asking(name);
+        row.shared_read = true;
+        row.attention_signature = Some("sig".to_owned());
+        row.read_attention_signature = Some("sig".to_owned());
         row
     }
 
@@ -529,8 +721,7 @@ mod tests {
     #[test]
     fn counts_follow_qt_total_and_attention() {
         let mut desk = Desk::default();
-        let mut acknowledged = asking("claude/p/acknowledged");
-        acknowledged.notify.acknowledged = true;
+        let acknowledged = acknowledged("claude/p/acknowledged");
         let mut muted = asking("claude/p/muted");
         muted.muted = true;
         listed(
@@ -559,6 +750,262 @@ mod tests {
                 dot: false
             }
         );
+    }
+
+    /// The view fields `store/marks.ts`' overlay reads from a fixture row.
+    const OVERLAY_FIELDS: &[&str] = &[
+        "name",
+        "agent",
+        "state",
+        "created",
+        "run_id",
+        "conversation_id",
+        "reply_id",
+        "attention_signature",
+        "shared_read",
+        "read_reply_id",
+        "read_attention_signature",
+        "attention_fingerprint",
+        "needs_action",
+        "unread_candidate",
+        "unread",
+        "muted",
+    ];
+
+    /// The cases `store/marks.ts`' tests check its overlay against
+    /// (`tests/fixtures/marks-overlay.json`): the same rows, marks and answers.
+    #[test]
+    fn the_overlay_gives_the_shared_fixtures_answers() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/marks-overlay.json")).unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert!(cases.len() >= 30);
+        for case in cases {
+            let name = case["case"].as_str().unwrap();
+            let view = crate::view::row(&case["hgs"]);
+            // The frontend reads `view`: it is what this projection gives.
+            let projected = serde_json::to_value(&view).unwrap();
+            let listed = case["view"].as_object().unwrap();
+            for field in OVERLAY_FIELDS {
+                assert!(
+                    listed.contains_key(*field),
+                    "{name}: the fixture lists {field}"
+                );
+            }
+            for (field, value) in listed {
+                assert_eq!(&projected[field], value, "{name}: {field}");
+            }
+            let device = DeviceMarks::new(
+                serde_json::from_value(case["marks"].clone()).unwrap(),
+                serde_json::from_value(case["replies"].clone()).unwrap(),
+                serde_json::from_value(case["pending"].clone()).unwrap(),
+            );
+            let computer = ComputerId::from(case["computer"].as_str().unwrap());
+            let expect = |field: &str| case["expect"][field].as_bool().unwrap();
+            assert_eq!(
+                read_state(&computer, &view, &device),
+                ReadState {
+                    review_later: expect("review_later"),
+                    unread_reply: expect("unread_reply"),
+                    unread: expect("unread"),
+                    acknowledged: expect("acknowledged"),
+                },
+                "{name}"
+            );
+            let mut desk = Desk::default();
+            desk.set_marks(device);
+            desk.observe(&Change::Replace {
+                computer: computer.clone(),
+                rows: vec![("k".to_owned(), view)],
+            });
+            desk.observe(&Change::Computer {
+                computer: computer.clone(),
+                status: ComputerStatus::Live,
+            });
+            assert_eq!(
+                desk.attention(),
+                usize::from(expect("counts")),
+                "{name}: counts"
+            );
+            desk.observe(&Change::Computer {
+                computer,
+                status: ComputerStatus::Reconnecting { attempt: 1 },
+            });
+            assert_eq!(
+                desk.attention(),
+                usize::from(expect("counts_stale")),
+                "{name}: counts while not current"
+            );
+        }
+    }
+
+    /// An older host's reply, unread until this device reads it.
+    fn older_reply(name: &str) -> ViewRow {
+        ViewRow {
+            conversation_id: Some("conv-1".to_owned()),
+            reply_id: Some("r1".to_owned()),
+            unread_candidate: true,
+            agent: "claude".to_owned(),
+            ..row(name, "running")
+        }
+    }
+
+    #[test]
+    fn the_desk_applies_the_marks_to_rows_it_has_and_rows_that_come() {
+        let mut desk = Desk::default();
+        desk.observe(&Change::Upsert {
+            computer: ComputerId::local(),
+            key: "a".to_owned(),
+            row: older_reply("claude/p/a"),
+        });
+        assert_eq!(
+            desk.attention(),
+            0,
+            "this computer counts once it listed (m_haveLocal)"
+        );
+        listed(&mut desk, "", vec![("a", older_reply("claude/p/a"))]);
+        assert_eq!(desk.attention(), 1, "nothing read on this device yet");
+        assert!(
+            desk.computers()[&ComputerId::local()].rows["a"]
+                .notify
+                .unread_reply
+        );
+        let key = marks::reply_key("", "claude", "conv-1");
+        let read = DeviceMarks::new(
+            BTreeMap::new(),
+            BTreeMap::from([(key.clone(), "r1".to_owned())]),
+            Vec::new(),
+        );
+        assert!(desk.set_marks(read.clone()));
+        assert!(!desk.set_marks(read), "the same marks change nothing");
+        assert_eq!(desk.attention(), 0);
+        let row = &desk.computers()[&ComputerId::local()].rows["a"];
+        assert!(
+            !row.unread && !row.notify.unread_reply,
+            "the tracker reads the overlaid row"
+        );
+        desk.observe(&Change::Upsert {
+            computer: ComputerId::local(),
+            key: "b".to_owned(),
+            row: ViewRow {
+                reply_id: Some("r2".to_owned()),
+                ..older_reply("claude/p/b")
+            },
+        });
+        assert_eq!(desk.attention(), 1, "an upsert gets the overlay too");
+        desk.observe(&Change::Upsert {
+            computer: ComputerId::from("studio"),
+            key: "c".to_owned(),
+            row: older_reply("claude/p/c"),
+        });
+        assert_eq!(
+            desk.attention(),
+            1,
+            "a computer that never listed counts nothing (everPolled)"
+        );
+        let review = DeviceMarks::new(
+            BTreeMap::from([(
+                key,
+                Mark {
+                    review: true,
+                    acknowledged: String::new(),
+                },
+            )]),
+            BTreeMap::new(),
+            Vec::new(),
+        );
+        desk.set_marks(review);
+        assert_eq!(desk.attention(), 2);
+        assert!(
+            desk.computers()[&ComputerId::local()].rows["a"]
+                .notify
+                .review_later
+        );
+        assert_eq!(
+            desk.tooltip(),
+            "2 need attention, 2 sessions total\n2 here\nstudio: not polled yet"
+        );
+        assert_eq!(desk.badge().as_deref(), Some("2"));
+        desk.set_marks(DeviceMarks::default());
+        assert_eq!(
+            desk.attention(),
+            2,
+            "without marks both replies are unread again"
+        );
+    }
+
+    #[test]
+    fn a_review_only_mark_never_acknowledges_a_row_without_a_fingerprint() {
+        // A projected row always has one (`attentionFingerprint`); a mark from
+        // Mark needs attention alone has none (`store/marks.ts` guards the same).
+        let row = ViewRow {
+            conversation_id: Some("conv-1".to_owned()),
+            agent: "claude".to_owned(),
+            ..asking("claude/p/a")
+        };
+        let review = DeviceMarks::new(
+            BTreeMap::from([(
+                marks::reply_key("", "claude", "conv-1"),
+                Mark {
+                    review: true,
+                    acknowledged: String::new(),
+                },
+            )]),
+            BTreeMap::new(),
+            Vec::new(),
+        );
+        let state = read_state(&ComputerId::local(), &row, &review);
+        assert!(state.review_later && !state.acknowledged);
+    }
+
+    #[test]
+    fn a_peer_that_is_not_current_still_counts_review_later() {
+        let mut desk = Desk::default();
+        let marked = DeviceMarks::new(
+            BTreeMap::from([(
+                marks::reply_key("mac", "claude", "conv-1"),
+                Mark {
+                    review: true,
+                    acknowledged: String::new(),
+                },
+            )]),
+            BTreeMap::new(),
+            Vec::new(),
+        );
+        desk.set_marks(marked);
+        let mut muted = ViewRow {
+            conversation_id: Some("conv-1".to_owned()),
+            agent: "claude".to_owned(),
+            ..asking("claude/p/m")
+        };
+        muted.muted = true;
+        listed(
+            &mut desk,
+            "mac",
+            vec![
+                (
+                    "a",
+                    ViewRow {
+                        agent: "claude".to_owned(),
+                        conversation_id: Some("conv-1".to_owned()),
+                        ..asking("claude/p/a")
+                    },
+                ),
+                ("m", muted),
+            ],
+        );
+        assert_eq!(desk.attention(), 1, "the muted one never counts");
+        status(
+            &mut desk,
+            "mac",
+            ComputerStatus::Reconnecting { attempt: 1 },
+        );
+        assert_eq!(
+            desk.attention(),
+            1,
+            "Review later counts past the stale limit (FleetState.cpp:428-433)"
+        );
+        assert_eq!(desk.badge().as_deref(), Some("1"));
     }
 
     #[test]

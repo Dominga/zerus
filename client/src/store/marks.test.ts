@@ -4,6 +4,7 @@ import { createCatalog } from "./catalog";
 import { CAP, attentionKey, byCodePoint, createMarks, fallbackKey, replyKey, type AttentionSnapshot, type Mark, type MarksPort, type MigratedStorage, type RowsPort } from "./marks";
 import { snapshotOf } from "../ui/sessions/actions-ui";
 import { emptyBatch, type Batch, type ReadMark, type RowOut, type ViewRow } from "../types";
+import overlayFixture from "../../core/tests/fixtures/marks-overlay.json";
 
 // The marks store against Qt's FleetState (updateUnread, markSessionRead,
 // setReviewLater, unreadReplies, markRepliesRead, legacyReadMarks), with a
@@ -159,6 +160,31 @@ describe("overlay", () => {
   it("keeps the row's own values for a projection without the read fields", async () => {
     const old = rowOut({ unread_candidate: undefined, attention_fingerprint: undefined, acknowledged_status: undefined, acknowledged_caption: undefined, shared_read: false, reply_id: undefined, unread: true });
     expect((await setup([old])).row()).toMatchObject({ unread: true, status: "ready", caption: "Ready" });
+  });
+});
+
+describe("the shared overlay fixture", () => {
+  // client/core's menu-bar overlay (menubar::read_state) reads the same cases:
+  // the window and the menu bar count a session alike.
+  interface OverlayCase {
+    case: string;
+    computer: string;
+    view: Partial<ViewRow>;
+    marks: Record<string, Mark>;
+    replies: Record<string, string>;
+    pending: ReadMark[];
+    expect: { review_later: boolean; unread_reply: boolean; unread: boolean; acknowledged: boolean };
+  }
+  const cases = (overlayFixture as unknown as { cases: OverlayCase[] }).cases;
+
+  it("has the cases", () => expect(cases.length).toBeGreaterThanOrEqual(30));
+
+  it.each(cases.map((c) => [c.case, c] as const))("%s", async (_, c) => {
+    // This computer's older marks were queued once already (see "legacy read marks").
+    const s = await setup([{ computer: c.computer, key: "k", row: c.view as ViewRow }], fakePort({ marks: c.marks, replies: c.replies }, c.pending), memoryStorage([c.computer]));
+    const row = s.row("k", c.computer);
+    expect(s.marks.readState(row)).toEqual({ reviewLater: c.expect.review_later, unreadReply: c.expect.unread_reply, unread: c.expect.unread, ack: c.expect.acknowledged });
+    expect({ reviewLater: row.reviewLater, unread: row.unread }).toEqual({ reviewLater: c.expect.review_later, unread: c.expect.unread });
   });
 });
 

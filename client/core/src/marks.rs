@@ -1,6 +1,8 @@
 //! The device's attention marks and read replies (`m_attentionMarks` and
 //! `m_readReplies` in `tray/src/FleetState.cpp`), kept in a file so a restart
-//! keeps them. The frontend owns their rules; this keeps what it writes.
+//! keeps them. The frontend (`client/src/store/marks.ts`) writes them; this
+//! keeps what it writes, and the menu bar's overlay (`menubar::read_state`)
+//! reads them under the same keys.
 //!
 //! Qt keeps both maps without a bound. Here each holds at most [`CAP`]
 //! entries, the oldest written dropped first, and the file lists entries in
@@ -17,6 +19,37 @@ use crate::readmarks::write_atomically;
 
 /// At most this many entries per map (owner rule on bounded caches).
 pub const CAP: usize = 20_000;
+
+/// The reply key (`replyKey`, `FleetState.cpp:45-47`): computer, agent and
+/// conversation as compact JSON, as `store/marks.ts` writes it. The agent is
+/// the view row's `agent` (`deepseek` for `dsh`), the value the frontend keys
+/// by; Qt keys by the raw `cmd`, and its marks never reach this file.
+pub fn reply_key(computer: &str, agent: &str, conversation: &str) -> String {
+    serde_json::json!([computer, agent, conversation]).to_string()
+}
+
+/// The attention key of a row without a conversation
+/// (`attentionFallbackKey`, `FleetState.cpp:48-50`): computer, agent, name
+/// and `created`.
+pub fn fallback_key(computer: &str, agent: &str, name: &str, created: i64) -> String {
+    serde_json::json!([computer, agent, name, created]).to_string()
+}
+
+/// `attentionKey` (`FleetState.cpp:51-53`): the reply key, or the fallback
+/// key without a conversation.
+pub fn attention_key(
+    computer: &str,
+    agent: &str,
+    name: &str,
+    created: i64,
+    conversation: &str,
+) -> String {
+    if conversation.is_empty() {
+        fallback_key(computer, agent, name, created)
+    } else {
+        reply_key(computer, agent, conversation)
+    }
+}
 
 /// One session's attention mark: marked for review, and the attention
 /// fingerprint the person acknowledged.

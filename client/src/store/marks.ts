@@ -713,6 +713,8 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     reapply,
     /** The pending read marks the rows read (a copy). */
     pending: (): ReadMark[] => [...pending.values()],
+    /** FleetState::updateUnread for one row; the Rust overlay (menubar::read_state) reads the same fixture (tests). */
+    readState,
     /** Each map's keys, oldest written first (tests, diagnostics). */
     writeOrder: () => ({ marks: [...marks.keys()], replies: [...replies.keys()] }),
   };

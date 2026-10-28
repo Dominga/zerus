@@ -521,7 +521,8 @@ fn start_watchdog() -> std::io::Result<watchdog::Watchdog> {
 /// Before the app quits (`lifecycle::exit`, before the socket goes): the
 /// last settings change gets a bounded wait, pending project edits and the
 /// layout reach the disk, recordings under way are cancelled, the hubs take
-/// no more changes and every draft save already queued reaches the disk.
+/// no more changes, every draft save already queued reaches the disk, and
+/// the unsent read marks and the attention marks are saved (a bounded wait).
 #[cfg(feature = "live")]
 pub(crate) fn exit_work(app: &AppHandle) {
     use tauri::Manager;
@@ -541,6 +542,7 @@ pub(crate) fn exit_work(app: &AppHandle) {
             drafts.0.flush();
         }
     });
+    actions::flush_on_exit(app);
 }
 
 /// The composers close before the store's last flush: an attach read under

@@ -631,16 +631,13 @@ impl AttentionShared {
 }
 
 /// How long the exit waits for the attention writer.
-// Called from the Exit block once it lands (zerus-5wmh.53).
 #[cfg(feature = "live")]
-#[allow(dead_code)]
 const EXIT_FLUSH_LIMIT: Duration = Duration::from_millis(750);
 
 /// For the app's exit: Tauri ends the process after `RunEvent::Exit`, so
 /// `Attention`'s drop never runs. Saves the unsent read marks (a no-op when
 /// none), then waits a bounded time for the attention writer.
 #[cfg(feature = "live")]
-#[allow(dead_code)]
 pub fn flush_on_exit(app: &tauri::AppHandle) {
     use tauri::Manager;
     if let Some(actions) = app.try_state::<Actions>() {

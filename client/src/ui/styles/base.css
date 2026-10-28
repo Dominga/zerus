@@ -228,7 +228,14 @@
   .toast b { display: block; margin-bottom: 2px; }
 
   /* Skeleton and empty states */
-  .skeleton { background: linear-gradient(90deg, var(--z-color-hover) 0, var(--z-color-card-hover) 40%, var(--z-color-hover) 80%); background-size: 300% 100%; border-radius: var(--z-radius-sm); animation: shimmer 1.4s linear infinite; }
+  /* The shimmer moves by transform, not background-position, so no frame
+     repaints: the same gradient, tiled every three box widths, on a layer five
+     boxes wide that moves one tile per cycle. Every frame and the resting
+     state match the background-position version to within 1/255. */
+  .skeleton { position: relative; overflow: hidden; border-radius: var(--z-radius-sm); }
+  .skeleton::before { content: ""; position: absolute; top: 0; bottom: 0; left: -400%; width: 500%;
+    background: linear-gradient(90deg, var(--z-color-hover) 0, var(--z-color-card-hover) 40%, var(--z-color-hover) 80%) 50% 0 / 60% 100% repeat-x;
+    animation: shimmer 1.4s linear infinite; }
   .empty { display: grid; place-items: center; text-align: center; gap: 8px; padding: 32px 16px; color: var(--z-color-muted); }
   .empty svg { color: var(--z-color-dim); }
   .empty h3 { font-size: var(--fs-md); color: var(--z-color-text-2); font-weight: 600; }
@@ -256,13 +263,9 @@
 @keyframes pop { from { opacity: 0; scale: .97; } to { opacity: 1; scale: 1; } }
 @keyframes slideL { from { opacity: 0; translate: 14px 0; } to { opacity: 1; translate: 0 0; } }
 @keyframes grow { from { scale: 0 1; } to { scale: 1 1; } }
-@keyframes shimmer { from { background-position: 100% 0; } to { background-position: -50% 0; } }
+@keyframes shimmer { from { transform: translateX(20%); } to { transform: translateX(80%); } }
 @keyframes blink { 50% { opacity: 0; } }
 
-@media (prefers-reduced-motion: reduce) {
-  .status.working .dot, .skeleton { animation: none; }
-  .menu, dialog.dlg[open], .toast, .tab.on::after { animation-duration: 1ms; }
-}
 :root[data-motion="off"] *, :root[data-motion="off"] *::before, :root[data-motion="off"] *::after { animation: none !important; transition: none !important; }
 
 /* L1 variants */
@@ -271,4 +274,3 @@
   :root[data-status-badge="dot"] .status .dot { width: 7px; height: 7px; }
 }
 @keyframes mt-pulse { from { transform: scale(.7); opacity: .9; } to { transform: scale(1.5); opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .mtile.s-connecting .mtile-dot::after { animation: none; opacity: .6; } }

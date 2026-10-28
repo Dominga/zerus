@@ -1,6 +1,7 @@
 import { createMemo, createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
 import { catalog, orderedRows } from "./catalog";
+import { documentVisibility } from "./visibility";
 import type { Session, Status } from "../ui/sessions/types";
 
 // Interface state of the first screen: page, selection, filters, list layout,
@@ -18,7 +19,9 @@ export type LogoMotion = "spin";
 
 const params = new URLSearchParams(location.search);
 
-export const [page, setPage] = createSignal<Page>("sessions");
+const PAGES: Page[] = ["dashboard", "sessions", "projects", "machines", "accounts", "settings"];
+// `?page=settings` opens a screen (headless screenshots), as in the mockup.
+export const [page, setPage] = createSignal<Page>(PAGES.find((p) => p === params.get("page")) ?? "sessions");
 export const [selectedKey, setSelectedKey] = createSignal<string | undefined>();
 export const [stateFilter, setStateFilter] = createSignal<StateFilter>("all");
 export const [machineFilter, setMachineFilter] = createSignal<string[]>([]);
@@ -36,9 +39,20 @@ export const [contentScale, setContentScale] = createSignal(1);
 export const [toasts, setToasts] = createStore<{ items: { id: number; title: string; text: string }[] }>({ items: [] });
 export const logoMotion = (): LogoMotion => "spin";
 
-/** Seconds since the Unix epoch, ticking once a second: only Working clocks read it. */
+/**
+ * Seconds since the Unix epoch, ticking once a second: only Working clocks read
+ * it. The clock stops while the window is hidden or minimised, as Qt stops its
+ * elapsed timer in hideEvent, and catches up when the window shows again.
+ */
 export const [now, setNow] = createSignal(Date.now() / 1000);
-setInterval(() => setNow(Date.now() / 1000), 1000);
+let clock: ReturnType<typeof setInterval> | undefined;
+const tick = () => setNow(Date.now() / 1000);
+const syncClock = () => {
+  if (documentVisibility.hidden()) { clearInterval(clock); clock = undefined; }
+  else if (clock === undefined) { tick(); clock = setInterval(tick, 1000); }
+};
+syncClock();
+documentVisibility.onChange(syncClock);
 
 /** Project order set by dragging headers; projects not in it follow in arrival order. */
 const [projectMoves, setProjectMoves] = createSignal<string[]>([]);

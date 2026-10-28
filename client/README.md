@@ -37,7 +37,7 @@ Environment:
 | `ZERUS_CLIENT_HGS` | The `hgs` to run (default: the first `hgs` on `PATH`, then in `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`, since an app started from Finder or a launcher gets a short `PATH`) |
 | `ZERUS_CLIENT_REPLAY` | Replay synthetic watch streams instead of running `hgs`: a path list (`:` on Unix), the first file is this computer, `alias=file` entries are peers, e.g. `fixtures/replay.ndjson:mac=fixtures/replay-mac.ndjson` |
 | `ZERUS_CLIENT_REPLAY_INTERVAL_MS` | The pause per `heartbeat` frame of a replay (default 900) |
-| `ZERUS_CLIENT_QUERY` | URL parameters for the window, e.g. `select=claude/sample-project/api-refactor` opens that session |
+| `ZERUS_CLIENT_QUERY` | URL parameters for the window, e.g. `select=claude/sample-project/api-refactor` opens that session and `page=settings` that screen |
 
 A build without the `live` feature (`--no-default-features`) has no data source;
 the frontend then uses its built-in replay.
@@ -63,8 +63,12 @@ env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=
 writes the report to `ZERUS_CLIENT_PERF_OUT` and exits; every stage goes to
 stderr as `zerus-client perf: ...` (no session names). It picks a session whose
 Activity has events and scrolls, bounds each scenario at 60 s and the run at
-8 minutes, and ends with two 10 s idle windows: as displayed, and with Reduce
-motion. `ZERUS_CLIENT_PERF_LABEL` names the platform, `ZERUS_CLIENT_PERF_HZ`
+8 minutes, and ends with 10 s idle windows: as displayed, with Animate working
+sessions off, with Reduce motion (both only tried, not stored), with the window
+hidden and with it minimised (`perf_away`; a bare Xvfb has no window manager, so
+there the window stays shown and the log says `minimized false`), each of the
+last two followed by one as displayed again.
+`ZERUS_CLIENT_PERF_LABEL` names the platform, `ZERUS_CLIENT_PERF_HZ`
 overrides the display rate (`display_hz`), `ZERUS_CLIENT_PERF_REPRESENTATIVE=0`
 marks Xvfb runs and `ZERUS_CLIENT_PERF_PREFERENCE=default` keeps WebKit's
 near-60 fps preference on macOS (the control run). The page is cross-origin
@@ -84,11 +88,33 @@ unchanged rows keep their identity and DOM. Only the selected session's Activity
 is followed (newest 100 events); scrolling to the top reads earlier events with
 `after`.
 
+While the window is hidden or minimised the pump asks for nothing and schedules
+no frame; a batch that arrives meanwhile waits, the Rust side keeps folding
+changes into the next one, and the first frame after the window returns applies
+it. The Working clocks stop too, as Qt stops its timers when a window hides.
+
+## Settings and motion
+
+The Settings screen has, so far, the two motion settings of the Qt GUI with its
+QSettings keys and defaults: Animate working sessions
+(`workspace/animateActivity`, on) and Reduce motion (`workspace/reduceMotion`,
+off). They are stored per user in the webview's local storage, one JSON object
+under `zerus-client-settings` keyed by the QSettings names (`src/store/settings.ts`).
+`src/ui/motion.ts` turns them into root attributes, and `src/ui/styles/motion.css`
+lists every endless animation: Animate working sessions off stops the working
+indicators (halos, the project count, status and typing dots), Reduce motion or
+the system's reduced-motion preference stops all of them (also the Zerus mark,
+shimmer and spinners) and makes entrances instant, and a hidden or minimised
+window pauses everything. `src/ui/styles/motion.test.ts` checks that every
+keyframe animates only transforms and opacity and that every endless animation
+is in those lists.
+
 ## Rules
 
 - The UI never separates values with dots (U+00B7, U+2022, U+2219, U+22C5,
   U+2027, U+2981, U+30FB): use layout, commas or line breaks.
-- Motion uses transform and opacity only and honours reduced motion.
+- Motion uses transform and opacity only and honours Reduce motion, Animate
+  working sessions and the system's reduced-motion preference (`motion.css`).
 - `src/ui/lib/os-icons.ts` embeds two Tabler Icons outlines (MIT, see
   `licenses/`); `src/ui/lib/icons.generated.ts` is markup generated from
   `lucide-solid` (ISC).

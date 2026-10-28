@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emptyBatch, isEmptyBatch, type Batch, type ComputerId } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
+import { documentVisibility, type PageVisibility } from "./store/visibility";
 
 // The one path from the Rust side to the stores. The frontend asks for the next
 // batch from requestAnimationFrame with one call in flight; `next_batch`
@@ -11,7 +12,7 @@ import type { ActivityPort, FollowRequest } from "./store/activity";
 
 export type BridgeMode = "tauri" | "replay";
 
-interface Source extends ActivityPort {
+export interface Source extends ActivityPort {
   next(): Promise<Batch>;
 }
 
@@ -54,39 +55,83 @@ export async function startBridge(onBatch: (b: Batch) => void): Promise<BridgeMo
   return mode;
 }
 
+/** What the pump needs from the page; tests pass their own. */
+export interface PumpHost {
+  /** The next display frame (requestAnimationFrame). */
+  frame(callback: () => void): void;
+  /** A timer (setTimeout); returns its cancel. */
+  later(callback: () => void, ms: number): () => void;
+  visibility: PageVisibility;
+}
+
+const pageHost: PumpHost = {
+  frame: (callback) => { requestAnimationFrame(() => callback()); },
+  later: (callback, ms) => { const timer = setTimeout(callback, ms); return () => clearTimeout(timer); },
+  visibility: documentVisibility,
+};
+
+/** Calls, frames and batches of the pump since it started (Diagnostics and the hidden-window check read them). */
+export const pumpStats = { pulls: 0, frames: 0, applied: 0, held: 0 };
+
 /**
  * One `next_batch` in flight. A batch is applied in the next animation frame,
  * which then asks for the following one; an empty answer (the 250 ms park ran
  * out) asks again at once without a frame, so an idle window schedules no
- * frames. While the window is hidden no frame runs, nothing is asked, and the
- * Rust side keeps folding changes into the next batch.
+ * frames. While the window is hidden or minimised the pump stops: it asks for
+ * nothing and schedules no frame, a batch that arrives meanwhile waits
+ * unapplied, and the Rust side keeps folding changes into the next batch
+ * (bounded per key). Showing the window applies the waiting batch in its first
+ * frame and resumes.
  */
-function pump(from: Source, onBatch: (b: Batch) => void) {
+export function pump(from: Source, onBatch: (b: Batch) => void, host: PumpHost = pageHost) {
+  /** A batch that arrived while hidden. */
+  let held: Batch | undefined;
+  /** Stopped while hidden; nothing is in flight or scheduled. */
+  let stopped = false;
+  const hidden = () => host.visibility.hidden();
   const pull = () => {
+    if (hidden()) { stopped = true; return; }
+    pumpStats.pulls++;
     from.next().then(
       (reply) => {
         const b = normalize(reply ?? {});
         if (isEmptyBatch(b)) { pull(); return; }
-        // In the next frame; a window whose frames are throttled (occluded)
-        // still applies it within 250 ms, so the stores never fall far behind.
-        let applied = false;
-        const apply = () => {
-          if (applied) return;
-          applied = true;
-          clearTimeout(late);
-          try { onBatch(b); } catch (error) { console.error("Zerus Next: applying a batch failed", error); }
-          pull();
-        };
-        const late = setTimeout(apply, 250);
-        requestAnimationFrame(apply);
+        deliver(b);
       },
       (error) => {
         console.error("Zerus Next: next_batch failed", error);
-        setTimeout(pull, 1000);
+        host.later(pull, 1000);
       },
     );
   };
+  const deliver = (b: Batch) => {
+    if (hidden()) { held = b; stopped = true; pumpStats.held++; return; }
+    // In the next frame; a window whose frames are throttled (occluded)
+    // still applies it within 250 ms, so the stores never fall far behind.
+    let done = false;
+    const apply = () => {
+      if (done) return;
+      done = true;
+      cancel();
+      if (hidden()) { held = b; stopped = true; pumpStats.held++; return; }
+      pumpStats.applied++;
+      try { onBatch(b); } catch (error) { console.error("Zerus Next: applying a batch failed", error); }
+      pull();
+    };
+    const cancel = host.later(apply, 250);
+    pumpStats.frames++;
+    host.frame(apply);
+  };
+  const resume = () => {
+    if (hidden() || !stopped) return;
+    stopped = false;
+    const b = held;
+    held = undefined;
+    if (b) deliver(b); else pull();
+  };
+  const unsubscribe = host.visibility.onChange(resume);
   pull();
+  return unsubscribe;
 }
 
 /** Missing arrays default to empty, so a core that omits empty fields still applies. */

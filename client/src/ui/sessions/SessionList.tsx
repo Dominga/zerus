@@ -15,6 +15,7 @@ import {
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
 import type { Session } from "./types";
+import { motionReduced } from "../motion";
 import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem } from "./organize";
 
 /** The project band's colour: a palette slot per project until the listing carries project colours. */
@@ -57,7 +58,7 @@ function setRowCompact(key: string, compact: boolean) {
   if (!!compactRows[key] === compact) return;
   const row = document.querySelector<HTMLElement>(`.sp-scroll .vrow[data-key="${CSS.escape(key)}"]`);
   const card = row?.querySelector<HTMLElement>(".scard");
-  if (!row || !card || stripMode() || reducedMotion()) { setCompactRows(key, compact); return; }
+  if (!row || !card || stripMode() || motionReduced()) { setCompactRows(key, compact); return; }
   const before = FLIP.map((sel) => row.querySelector(sel)?.getBoundingClientRect());
   const from = card.getBoundingClientRect().height;
   const ghosts = compact ? [...card.querySelectorAll<HTMLElement>(DETAIL_LINES)].map((n) => n.cloneNode(true) as HTMLElement) : [];
@@ -254,7 +255,6 @@ function SelectionBar() {
 const STRIP_WIDTH = 98;
 const OPEN_MS = 220; // SessionPanelDock: 220 ms, OutCubic
 const OUT_CUBIC = "cubic-bezier(.33, 1, .68, 1)";
-const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches || document.documentElement.dataset.reduceMotion === "1";
 
 /**
  * Keeps one DOM node per row id. The virtualizer's items are new objects on
@@ -296,7 +296,7 @@ function useRows(strip: boolean) {
 
 /** Slides the full panel out from under the strip (transform only). */
 function slide(el: HTMLElement | undefined, width: number, opening: boolean, done?: () => void) {
-  if (!el || reducedMotion()) { done?.(); return; }
+  if (!el || motionReduced()) { done?.(); return; }
   const hidden = `translateX(${-(width - STRIP_WIDTH)}px)`;
   const a = el.animate(
     opening ? [{ transform: hidden, opacity: 0.6 }, { transform: "translateX(0)", opacity: 1 }] : [{ transform: "translateX(0)", opacity: 1 }, { transform: hidden, opacity: 0 }],

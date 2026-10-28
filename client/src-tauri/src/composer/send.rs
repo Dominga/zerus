@@ -1,27 +1,32 @@
 //! The open session's part of the composer, ported from `SessionsWindow`:
 //! the block reason (`messageBlockReason`, S1), the cache chip and its
-//! details (S2), and one inspect when no Activity state arrived. Task 4b adds
-//! the delivery to this module.
+//! details (S2), the session status Qt shows in the composer
+//! (`setSessionStatus`), and the inspect when no Activity state arrived.
+//! Task 4b adds the delivery to this module.
 //!
-//! The ticker looks at the open composer once a second, as Qt's cache chip
-//! refreshes, and sleeps while none is open. It wakes the pump only when the
-//! session part of the view changed: the chip's minute, or a write, row or
-//! computer status that no batch announced.
+//! The ticker recomputes the open composer's session part once a second, as
+//! Qt's cache chip refreshes, and sleeps while none is open. It wakes the
+//! pump only when that part changed: the chip's minute, or a row or status
+//! no batch announced. A write mark wakes it at once (`Actions::on_writes`).
 
-use std::sync::{Arc, MutexGuard, PoisonError};
+use std::path::Path;
+use std::sync::{Arc, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use serde_json::Value;
 use zerus_client_core::cache::{self, Chip};
 use zerus_client_core::send::{block_reason, BlockFacts};
-use zerus_client_core::{Target, ViewRow};
+use zerus_client_core::{Exit, Target, TooLarge, ViewRow};
 
 use super::{Composer, Composers, Hub, SessionRef};
 use crate::actions::WriteKind;
 
-/// No Activity state this long after opening: inspect once.
+/// No Activity state this long after opening: inspect.
 const DETAILS_WAIT: f64 = 3.0;
+/// A failed inspect is tried again this often while nothing streams (Qt's
+/// `m_activityPollMs`, `SessionsWindow.h:565`; its timer, 2013-2016).
+const RETRY_WAIT: f64 = 2.5;
 /// The ticker's period: Qt's cache chip refreshes once a second.
 const TICK: Duration = Duration::from_secs(1);
 
@@ -33,9 +38,106 @@ pub(crate) struct SessionView {
     pub(crate) block_reason: Option<String>,
     pub(crate) attachments_available: bool,
     pub(crate) attachments_reason: String,
+    pub(crate) session_status: String,
+    pub(crate) session_status_error: bool,
+    pub(crate) session_blocks_input: bool,
     pub(crate) cache: Chip,
     pub(crate) cache_warning: String,
     pub(crate) cache_details: String,
+}
+
+/// What Qt's session hint reads (`SessionsWindow.cpp:3913-3922, 3955-3958`).
+/// A2 fills `question_error` (`pending_questions_error`); Piece E fills
+/// `restore_error` (`last_restore_error`) and `occupied` (another session
+/// uses this archived session's name).
+#[derive(Default)]
+pub(crate) struct HintFacts<'a> {
+    pub(crate) terminating: bool,
+    pub(crate) online: bool,
+    pub(crate) archived: bool,
+    /// `m_inspectError`, its whole text.
+    pub(crate) inspect_error: Option<&'a str>,
+    pub(crate) question_error: &'a str,
+    pub(crate) restore_error: &'a str,
+    pub(crate) occupied: bool,
+}
+
+/// The composer's session status (`setSessionStatus(contextVisible ? hint
+/// : "", contextError, contextError && !messageProblem.isEmpty())`,
+/// `SessionsWindow.cpp:3984-3986`); `blocked`: a block reason stands.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SessionStatus {
+    pub(crate) text: String,
+    pub(crate) error: bool,
+    pub(crate) blocks_input: bool,
+}
+
+pub(crate) fn session_status(facts: &HintFacts<'_>, blocked: bool) -> SessionStatus {
+    let restore_failed = facts.archived && !facts.restore_error.is_empty();
+    let error = !facts.online
+        || facts.inspect_error.is_some()
+        || !facts.question_error.is_empty()
+        || restore_failed;
+    if !error && !(facts.archived && facts.occupied) {
+        return SessionStatus::default();
+    }
+    // The first six links of the hint chain: one of them holds whenever the
+    // status shows.
+    let text = if facts.terminating {
+        "Waiting for the session to stop. Its native conversation history is kept.".to_owned()
+    } else if !facts.online {
+        "Machine unavailable. Showing the last known state; actions will return when it reconnects."
+            .to_owned()
+    } else if restore_failed {
+        format!("Last restore failed: {}", facts.restore_error)
+    } else if let Some(error) = facts.inspect_error {
+        error.to_owned()
+    } else if !facts.question_error.is_empty() {
+        format!(
+            "Could not load agent questions: {}. Check Terminal.",
+            facts.question_error
+        )
+    } else {
+        "Another active or saved session uses this name. Restore becomes available when that name is free."
+            .to_owned()
+    };
+    SessionStatus {
+        text,
+        error,
+        blocks_input: error && blocked,
+    }
+}
+
+/// An inspect's answer as Qt reads it (`HgsClient::requestInspection` and
+/// `failureDetail`, `HgsClient.cpp:466-479, 931-944`): the JSON object, or
+/// the detail of "Could not refresh activity: %1". `run_limited`'s cap
+/// stands for Qt's unparseable reply.
+pub(crate) fn inspection(hgs: &Path, read: Result<Exit, TooLarge>) -> Result<Value, String> {
+    const INVALID: &str = "Invalid activity response";
+    let stderr = |text: &str, fallback: String| {
+        let text: String = text.trim().chars().take(4000).collect();
+        if text.is_empty() {
+            fallback
+        } else {
+            text
+        }
+    };
+    match read {
+        Err(_) => Err(INVALID.into()),
+        Ok(Exit::Code {
+            code: 0, stdout, ..
+        }) => match serde_json::from_slice::<Value>(&stdout) {
+            Ok(value) if value.is_object() => Ok(value),
+            _ => Err(INVALID.into()),
+        },
+        Ok(Exit::Code {
+            code, stderr: text, ..
+        }) => Err(stderr(&text, format!("exit code {code}"))),
+        Ok(Exit::Abnormal { stderr: text }) => Err(stderr(&text, "hgs ended abnormally".into())),
+        Ok(Exit::TimedOut) => Err("timed out".into()),
+        Ok(Exit::StartFailed(error)) => Err(format!("cannot start '{}': {error}", hgs.display())),
+        Ok(Exit::WriteFailed) => Err("could not send the request".into()),
+    }
 }
 
 /// The agent command the send rules read: the row says `deepseek` for `dsh`.
@@ -138,7 +240,7 @@ impl Composers {
             state: row.state.clone(),
             updating: write == Some(WriteKind::Update),
             cmd: cmd(&row),
-            inspect_error: followed && hub.followed.inspect_error,
+            inspect_error: followed && hub.followed.inspect_error.is_some(),
         };
         Some(Context {
             session,
@@ -154,15 +256,11 @@ impl Composers {
     /// stands in for the stream's state until the next state frame. As Qt's
     /// `inspect()` (`SessionsWindow.cpp:3467-3492`), it reads nothing while
     /// the stream keeps the details or the computer is offline, and one
-    /// inspect runs at a time. Tasks 4b and later call it after their
-    /// actions, where Qt calls `inspect()`.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// inspect runs at a time. The tick calls it for the fallback and its
+    /// retry; Tasks 4b and later call it after their actions, and Task 6's
+    /// Refresh, where Qt calls `inspect()`.
     pub(crate) fn refresh_details(&self) {
-        let hub = self.lock();
-        self.inspect_with(hub);
-    }
-
-    fn inspect_with(&self, mut hub: MutexGuard<'_, Hub>) {
+        let mut hub = self.lock();
         if hub.closed || hub.followed.inspecting.is_some() || hub.followed.streamed {
             return;
         }
@@ -178,6 +276,7 @@ impl Composers {
         let number = hub.next_inspect;
         hub.followed.inspecting = Some(number);
         hub.followed.inspected = Some(Basis::of(&ctx.row));
+        hub.followed.inspected_at = self.now();
         drop(hub);
         let target = Target {
             computer: ctx.session.computer.clone(),
@@ -197,7 +296,8 @@ impl Composers {
                 (Arc::new(value), expiry)
             });
             let mut hub = me.lock();
-            // Another session was opened meanwhile: this answer is not its.
+            // Another session was opened, or the follow ended, meanwhile:
+            // this answer is not the current one.
             if hub.followed.inspecting != Some(number) {
                 return;
             }
@@ -205,12 +305,15 @@ impl Composers {
             // A state frame that arrived meanwhile is newer.
             if !hub.followed.streamed {
                 match read {
-                    Some((details, expiry)) => {
-                        hub.followed.inspect_error = false;
+                    Ok((details, expiry)) => {
+                        hub.followed.inspect_error = None;
                         hub.followed.details = Some(details);
                         hub.followed.expiry = expiry;
                     }
-                    None => hub.followed.inspect_error = true,
+                    Err(detail) => {
+                        hub.followed.inspect_error =
+                            Some(format!("Could not refresh activity: {detail}"))
+                    }
                 }
             }
             drop(hub);
@@ -218,23 +321,23 @@ impl Composers {
         }));
     }
 
-    /// Whether the tick inspects: once when no Activity state arrived within
-    /// 3 s of opening (or after the follow ended), then again only when the
-    /// row's run, conversation or state changed.
+    /// Whether the tick inspects. Never read yet: once no Activity state
+    /// arrived within 3 s of opening, and at once after the follow ended.
+    /// Read: a failure again every 2.5 s, and any read again when the row's
+    /// run, conversation or state changed.
     fn wants_details(&self, hub: &Hub, now: f64) -> bool {
         let followed = &hub.followed;
         if hub.open.is_none() || followed.inspecting.is_some() || followed.streamed {
             return false;
         }
         match &followed.inspected {
-            None => {
-                followed.details.is_none()
-                    && !followed.inspect_error
-                    && now - followed.opened_at >= DETAILS_WAIT
+            None => followed.details.is_some() || now - followed.opened_at >= DETAILS_WAIT,
+            Some(basis) => {
+                (followed.inspect_error.is_some() && now - followed.inspected_at >= RETRY_WAIT)
+                    || self
+                        .context(hub)
+                        .is_some_and(|ctx| Basis::of(&ctx.row) != *basis)
             }
-            Some(basis) => self
-                .context(hub)
-                .is_some_and(|ctx| Basis::of(&ctx.row) != *basis),
         }
     }
 
@@ -251,10 +354,10 @@ impl Composers {
             .map(|composer| session_view(self, &hub, composer));
         let changed = hub.seen != seen;
         hub.seen = seen;
-        if self.wants_details(&hub, now) {
-            self.inspect_with(hub);
-        } else {
-            drop(hub);
+        let wants = self.wants_details(&hub, now);
+        drop(hub);
+        if wants {
+            self.refresh_details();
         }
         if changed {
             self.changed();
@@ -285,7 +388,14 @@ impl Composers {
         let hub = self
             .0
             .opened
-            .wait_while(self.lock(), |hub| hub.open.is_none() && !hub.closed)
+            .wait_while(self.lock(), |hub| {
+                let waiting = hub.open.is_none() && !hub.closed;
+                #[cfg(test)]
+                self.0
+                    .parked
+                    .store(waiting, std::sync::atomic::Ordering::SeqCst);
+                waiting
+            })
             .unwrap_or_else(PoisonError::into_inner);
         !hub.closed
     }
@@ -301,9 +411,23 @@ pub(crate) fn session_view(composers: &Composers, hub: &Hub, composer: &Composer
             ..SessionView::default()
         };
     };
-    let details = ctx.details.as_deref().cloned().unwrap_or_default();
+    let details = ctx.details.as_deref().unwrap_or(&Value::Null);
     let now = composers.now();
     let reason = ctx.reason();
+    let status = session_status(
+        &HintFacts {
+            terminating: ctx.facts.terminating,
+            online: ctx.online,
+            archived: ctx.row.state == "archived",
+            inspect_error: ctx
+                .facts
+                .inspect_error
+                .then_some(hub.followed.inspect_error.as_deref())
+                .flatten(),
+            ..HintFacts::default()
+        },
+        reason.is_some(),
+    );
     let attachments_available = ctx.facts.cmd != "opencode"
         && details
             .get("attachments_supported")
@@ -330,9 +454,12 @@ pub(crate) fn session_view(composers: &Composers, hub: &Hub, composer: &Composer
         block_reason: reason,
         attachments_available,
         attachments_reason,
-        cache: cache::chip(&details, now),
-        cache_warning: cache::warning(&details, now),
-        cache_details: cache::details(&details, recorded, local),
+        session_status: status.text,
+        session_status_error: status.error,
+        session_blocks_input: status.blocks_input,
+        cache: cache::chip(details, now),
+        cache_warning: cache::warning(details, now),
+        cache_details: cache::details(details, recorded, local),
     }
 }
 
@@ -346,6 +473,9 @@ pub(crate) mod tests {
     use std::sync::Mutex;
     use zerus_client_core::drafts::DraftStore;
     use zerus_client_core::{ActivityOut, Batch, ComputerId, RowOut};
+
+    const OFFLINE: &str =
+        "Machine unavailable. Showing the last known state; actions will return when it reconnects.";
 
     /// The session, clock and inspect a test controls.
     pub(crate) struct Fake {
@@ -394,7 +524,9 @@ pub(crate) mod tests {
                 facts: Arc::new(move |_, _| *lock(&f4.write)),
                 inspect: Arc::new(move |_, _| {
                     f3.inspects.fetch_add(1, Ordering::SeqCst);
-                    lock(&f3.inspected).clone()
+                    lock(&f3.inspected)
+                        .clone()
+                        .ok_or_else(|| "timed out".to_owned())
                 }),
             },
         );
@@ -626,17 +758,20 @@ pub(crate) mod tests {
                 }),
                 rows: Arc::new(|_, _, _| None),
                 facts: Arc::new(|_, _| None),
-                inspect: Arc::new(|_, _| None),
+                inspect: Arc::new(|_, _| Err("timed out".into())),
             },
         );
+        let parked = || c.0.parked.load(Ordering::SeqCst);
         let ticker = c.start_ticker_every(Duration::from_millis(5));
-        std::thread::sleep(Duration::from_millis(100));
+        eventually(parked);
+        std::thread::sleep(Duration::from_millis(50));
         assert_eq!(clocks.load(Ordering::SeqCst), 0, "nothing open: no tick");
         c.open(Some(session()));
         let opened = clocks.load(Ordering::SeqCst);
         eventually(|| clocks.load(Ordering::SeqCst) > opened + 3);
         c.open(None);
-        std::thread::sleep(Duration::from_millis(50));
+        // Parked again: from here on the ticker reads no clock.
+        eventually(parked);
         let closed = clocks.load(Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(
@@ -674,6 +809,8 @@ pub(crate) mod tests {
             Some("Machine unavailable. Your draft stays here.")
         );
         assert!(view.cache_details.ends_with("Last recorded session data."));
+        assert_eq!(view.status, OFFLINE);
+        assert!(view.status_error && view.session_blocks_input);
         assert_eq!(fake.inspects.load(Ordering::SeqCst), 0);
         *lock(&fake.online) = true;
         c.tick();
@@ -682,46 +819,62 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_inspect_is_read_again_only_when_the_run_conversation_or_state_changes() {
+    fn a_failed_inspect_is_retried_and_a_read_is_repeated_on_a_change() {
         let root = dir("inspect-again");
         let (c, fake) = send_hub(&root);
         c.open(Some(session()));
         until(&c, |v| v.loaded);
-        *lock(&fake.now) += 3.5;
-        c.tick();
-        until(&c, |v| {
-            v.block_reason.as_deref() == Some("Refresh the session before sending.")
-        });
-        for _ in 0..3 {
-            c.tick();
-        }
-        assert_eq!(
-            fake.inspects.load(Ordering::SeqCst),
-            1,
-            "a failure is not retried by itself"
-        );
-        *lock(&fake.inspected) = Some(ready());
-        lock(&fake.row).run_id = Some("run-2".into());
-        c.tick();
-        until(&c, |v| v.block_reason.is_none());
         // The n-th inspect has answered.
         let reads = |n| {
             eventually(|| {
                 fake.inspects.load(Ordering::SeqCst) == n && c.lock().followed.inspecting.is_none()
             })
         };
-        reads(2);
-        lock(&fake.row).conversation_id = Some("conv-2".into());
-        c.tick();
-        reads(3);
-        lock(&fake.row).state = "paused".into();
-        c.tick();
-        reads(4);
-        for _ in 0..3 {
+        let wait = |seconds: f64| {
+            *lock(&fake.now) += seconds;
             c.tick();
+        };
+        wait(3.5);
+        reads(1);
+        let view = c.current().unwrap();
+        assert_eq!(
+            view.block_reason.as_deref(),
+            Some("Refresh the session before sending.")
+        );
+        assert_eq!(view.status, "Could not refresh activity: timed out");
+        // Qt polls every 2.5 s while nothing streams.
+        wait(1.0);
+        wait(1.0);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), 1, "not before 2.5 s");
+        wait(0.5);
+        reads(2);
+        *lock(&fake.inspected) = Some(ready());
+        wait(2.5);
+        reads(3);
+        until(&c, |v| v.block_reason.is_none() && v.status.is_empty());
+        // A read is repeated only when the row's run, conversation or state changed.
+        wait(10.0);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            fake.inspects.load(Ordering::SeqCst),
+            3,
+            "a success is not polled"
+        );
+        lock(&fake.row).run_id = Some("run-2".into());
+        wait(0.1);
+        reads(4);
+        lock(&fake.row).conversation_id = Some("conv-2".into());
+        wait(0.1);
+        reads(5);
+        lock(&fake.row).state = "paused".into();
+        wait(0.1);
+        reads(6);
+        for _ in 0..3 {
+            wait(1.0);
         }
         std::thread::sleep(Duration::from_millis(50));
-        assert_eq!(fake.inspects.load(Ordering::SeqCst), 4);
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), 6);
     }
 
     #[test]
@@ -751,13 +904,149 @@ pub(crate) mod tests {
             }],
             ..Batch::default()
         });
-        assert_eq!(
-            c.current().unwrap().block_reason.as_deref(),
-            Some("Checking the session…")
+        assert!(
+            c.current().unwrap().block_reason.is_none(),
+            "the details stay, as in Qt"
         );
         c.tick();
-        until(&c, |v| v.block_reason.is_none());
-        assert_eq!(fake.inspects.load(Ordering::SeqCst), 1);
+        reads_settle(&c, &fake, 1);
+        assert!(c.current().unwrap().block_reason.is_none());
+    }
+
+    /// The n-th inspect has answered.
+    fn reads_settle(c: &Composers, fake: &Fake, n: usize) {
+        eventually(|| {
+            fake.inspects.load(Ordering::SeqCst) == n && c.lock().followed.inspecting.is_none()
+        });
+    }
+
+    fn ended() -> Batch {
+        Batch {
+            activity: vec![ActivityOut {
+                computer: ComputerId::from("studio"),
+                key: "run:run-1".into(),
+                kind: "ended".into(),
+                payload: Value::Null,
+            }],
+            ..Batch::default()
+        }
+    }
+
+    #[test]
+    fn an_end_after_states_reads_the_session_again() {
+        let root = dir("inspect-end");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.inspected) = Some(ready());
+        c.open(Some(session()));
+        until(&c, |v| v.loaded);
+        *lock(&fake.now) += 3.5;
+        c.tick();
+        reads_settle(&c, &fake, 1);
+        c.observe(&state(ready()));
+        c.observe(&state(ready()));
+        // The row is unchanged: only the end says to read again.
+        c.observe(&ended());
+        *lock(&fake.now) += 0.1;
+        c.tick();
+        reads_settle(&c, &fake, 2);
+        let view = c.current().unwrap();
+        assert!(view.block_reason.is_none(), "{view:?}");
+    }
+
+    /// The composers with an inspect that waits for the test's word before it
+    /// answers with `answer(n)` (n counts from 1) .
+    fn gated(
+        root: &Scratch,
+        answer: fn(usize) -> Value,
+    ) -> (
+        Composers,
+        Arc<Mutex<f64>>,
+        std::sync::mpsc::Sender<()>,
+        Arc<AtomicUsize>,
+    ) {
+        let now = Arc::new(Mutex::new(1_793_000_100.0));
+        let clock = now.clone();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = Mutex::new(gate);
+        let answered = Arc::new(AtomicUsize::new(0));
+        let counted = answered.clone();
+        let c = Composers::new(
+            drafts(root),
+            Config {
+                cache: root.join("cache"),
+            },
+            Deps {
+                spawn: Arc::new(|job: Job| {
+                    std::thread::spawn(job);
+                }),
+                notify: Arc::new(|| {}),
+                clock: Arc::new(move || *lock(&clock)),
+                rows: Arc::new(|_, _, name| Some((row(name), true))),
+                facts: Arc::new(|_, _| None),
+                inspect: Arc::new(move |_, _| {
+                    let _ = lock(&gate).recv_timeout(Duration::from_secs(5));
+                    Ok(answer(counted.fetch_add(1, Ordering::SeqCst) + 1))
+                }),
+            },
+        );
+        (c, now, release, answered)
+    }
+
+    fn approval() -> Value {
+        let mut details = ready();
+        details["phase"] = json!("approval");
+        details
+    }
+
+    #[test]
+    fn a_late_inspect_never_overwrites_a_newer_state() {
+        let root = dir("inspect-newer");
+        let (c, now, release, answered) = gated(&root, |_| ready());
+        c.open(Some(session()));
+        until(&c, |v| v.loaded);
+        *lock(&now) += 3.5;
+        c.tick();
+        assert!(c.lock().followed.inspecting.is_some());
+        c.observe(&state(approval()));
+        release.send(()).unwrap();
+        eventually(|| {
+            answered.load(Ordering::SeqCst) == 1 && c.lock().followed.inspecting.is_none()
+        });
+        assert_eq!(
+            c.current().unwrap().block_reason.as_deref(),
+            Some("Respond to the agent in the Terminal tab."),
+            "the state frame is newer than the inspect"
+        );
+    }
+
+    #[test]
+    fn an_end_drops_the_inspect_under_way() {
+        let root = dir("inspect-ended");
+        let (c, now, release, answered) =
+            gated(&root, |n| if n == 1 { ready() } else { approval() });
+        c.open(Some(session()));
+        until(&c, |v| v.loaded);
+        *lock(&now) += 3.5;
+        c.tick();
+        assert!(c.lock().followed.inspecting.is_some());
+        c.observe(&state(approval()));
+        c.observe(&ended());
+        assert!(c.lock().followed.inspecting.is_none());
+        release.send(()).unwrap();
+        eventually(|| answered.load(Ordering::SeqCst) == 1);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            c.current().unwrap().block_reason.as_deref(),
+            Some("Respond to the agent in the Terminal tab."),
+            "the answer started before the state is dropped"
+        );
+        // The end reads anew, and that answer counts.
+        c.tick();
+        release.send(()).unwrap();
+        until(&c, |v| {
+            v.block_reason.as_deref() == Some("Respond to the agent in the Terminal tab.")
+                && answered.load(Ordering::SeqCst) == 2
+        });
     }
 
     #[test]
@@ -794,7 +1083,7 @@ pub(crate) mod tests {
                     }
                     let mut details = ready();
                     details["run_id"] = json!(target.run_id);
-                    Some(details)
+                    Ok(details)
                 }),
             },
         );
@@ -910,9 +1199,11 @@ pub(crate) mod tests {
         );
         let view = until(&c, |v| v.attachments.len() == 1 && !v.attaching);
         assert!(view.can_send && view.attachments_available);
+        assert!(c.can_attach(view.handle));
         lock(&fake.row).agent = "opencode".into();
         let view = c.current().unwrap();
         assert!(!view.attachments_available && !view.can_send);
+        assert!(!c.can_attach(view.handle), "Qt's canAttachFiles");
         assert_eq!(view.status, "This native adapter does not support file attachments. Your existing files remain saved; remove them to send text.");
         assert_eq!(view.attachments_reason, view.status);
         lock(&fake.row).agent = "claude".into();
@@ -961,5 +1252,267 @@ pub(crate) mod tests {
             Some((1_793_000_640, text))
         );
         assert_eq!(expiry(&ready()), None);
+    }
+
+    #[test]
+    fn the_session_status_follows_qts_hint_chain() {
+        let status = |facts: HintFacts<'_>, blocked: bool| session_status(&facts, blocked);
+        let online = || HintFacts {
+            online: true,
+            ..HintFacts::default()
+        };
+        assert_eq!(status(online(), true), SessionStatus::default());
+        let offline = status(HintFacts::default(), true);
+        assert_eq!(
+            (offline.text.as_str(), offline.error, offline.blocks_input),
+            (OFFLINE, true, true)
+        );
+        assert!(
+            !status(HintFacts::default(), false).blocks_input,
+            "no block reason: no lock"
+        );
+        let text = |facts: HintFacts<'_>| status(facts, true).text;
+        assert_eq!(
+            text(HintFacts {
+                terminating: true,
+                ..HintFacts::default()
+            }),
+            "Waiting for the session to stop. Its native conversation history is kept."
+        );
+        assert_eq!(
+            text(HintFacts {
+                archived: true,
+                restore_error: "occupied",
+                inspect_error: Some("Could not refresh activity: timed out"),
+                ..HintFacts::default()
+            }),
+            OFFLINE,
+            "offline comes before every error"
+        );
+        assert_eq!(
+            text(HintFacts {
+                archived: true,
+                restore_error: "name taken",
+                inspect_error: Some("Could not refresh activity: timed out"),
+                question_error: "bad",
+                ..online()
+            }),
+            "Last restore failed: name taken"
+        );
+        assert_eq!(
+            text(HintFacts {
+                inspect_error: Some("Could not refresh activity: timed out"),
+                question_error: "bad",
+                ..online()
+            }),
+            "Could not refresh activity: timed out"
+        );
+        assert_eq!(
+            text(HintFacts {
+                question_error: "bad",
+                ..online()
+            }),
+            "Could not load agent questions: bad. Check Terminal."
+        );
+        let occupied = status(
+            HintFacts {
+                archived: true,
+                occupied: true,
+                ..online()
+            },
+            true,
+        );
+        assert_eq!(
+            occupied.text,
+            "Another active or saved session uses this name. Restore becomes available when that name is free."
+        );
+        assert!(
+            !occupied.error && !occupied.blocks_input,
+            "shown, not an error"
+        );
+        assert_eq!(
+            status(
+                HintFacts {
+                    occupied: true,
+                    restore_error: "x",
+                    ..online()
+                },
+                true
+            ),
+            SessionStatus::default(),
+            "only an archived session shows them"
+        );
+    }
+
+    #[test]
+    fn offline_the_status_locks_the_files_and_send() {
+        let root = dir("status-offline");
+        let files: Vec<std::path::PathBuf> = ["a", "b", "c"]
+            .iter()
+            .map(|name| {
+                let file = root.join(format!("{name}.txt"));
+                std::fs::write(&file, *name).unwrap();
+                file
+            })
+            .collect();
+        let (c, fake) = send_hub(&root);
+        let view = opened(&c, ready());
+        let at = zerus_client_core::attachments::Selection::default();
+        c.attach_paths(view.handle, files[..2].to_vec(), at);
+        let view = until(&c, |v| v.attachments.len() == 2 && !v.attaching);
+        assert!(view.can_send && !view.session_blocks_input && view.status.is_empty());
+        c.remove(view.handle, 1);
+        assert_eq!(c.current().unwrap().removed.as_deref(), Some("b.txt"));
+        *lock(&fake.online) = false;
+        let view = c.current().unwrap();
+        assert_eq!(view.status, OFFLINE);
+        assert!(view.status_error && view.session_blocks_input && !view.can_send);
+        assert_eq!(
+            view.unavailable_reason,
+            "Machine unavailable. Your draft stays here."
+        );
+        assert!(!c.can_attach(view.handle));
+        // Qt's `canEditAttachments`: no remove, Undo or attach while locked;
+        // each refusal hands the text back.
+        c.remove(view.handle, 0);
+        let after = c.current().unwrap();
+        assert_eq!(after.attachments.len(), 1, "no remove while locked");
+        assert!(
+            after.text_epoch > view.text_epoch,
+            "the text is handed back"
+        );
+        c.undo_remove(view.handle);
+        let undone = c.current().unwrap();
+        assert_eq!(undone.attachments.len(), 1, "no Undo while locked");
+        assert!(undone.text_epoch > after.text_epoch);
+        c.attach_paths(view.handle, vec![files[2].clone()], at);
+        let view = c.current().unwrap();
+        assert!(
+            !view.attaching && view.attachments.len() == 1,
+            "no attach while locked"
+        );
+        *lock(&fake.online) = true;
+        let view = c.current().unwrap();
+        assert!(view.status.is_empty() && !view.session_blocks_input && view.can_send);
+        assert!(c.can_attach(view.handle));
+        c.undo_remove(view.handle);
+        assert_eq!(c.current().unwrap().attachments.len(), 2);
+    }
+
+    #[test]
+    fn a_failed_read_shows_its_reason_and_locks() {
+        let root = dir("status-read");
+        let (c, _) = send_hub(&root);
+        let view = opened(&c, ready());
+        c.edit(view.handle, 1, view.text_epoch, "hi".into(), 2, 2);
+        assert!(c.current().unwrap().can_send);
+        c.lock().followed.inspect_error = Some("Could not refresh activity: timed out".into());
+        let view = c.current().unwrap();
+        assert_eq!(view.status, "Could not refresh activity: timed out");
+        assert_eq!(
+            view.block_reason.as_deref(),
+            Some("Refresh the session before sending.")
+        );
+        assert!(view.status_error && view.session_blocks_input && !view.can_send);
+    }
+
+    #[test]
+    fn inspection_reads_like_qt() {
+        let hgs = Path::new("hgs");
+        let code = |code: i32, stdout: &str, stderr: &str| {
+            inspection(
+                hgs,
+                Ok(Exit::Code {
+                    code,
+                    stdout: stdout.as_bytes().to_vec(),
+                    stderr: stderr.into(),
+                }),
+            )
+        };
+        assert_eq!(
+            code(0, r#"{"run_id": "run-1"}"#, ""),
+            Ok(json!({"run_id": "run-1"}))
+        );
+        let invalid = Err("Invalid activity response".to_owned());
+        assert_eq!(code(0, "[1]", ""), invalid);
+        assert_eq!(code(0, "not json", ""), invalid);
+        assert_eq!(
+            code(2, "", "  no such session \n"),
+            Err("no such session".into())
+        );
+        assert_eq!(code(3, "", " "), Err("exit code 3".into()));
+        assert_eq!(code(1, "", &"x".repeat(5000)), Err("x".repeat(4000)));
+        assert_eq!(inspection(hgs, Ok(Exit::TimedOut)), Err("timed out".into()));
+        assert_eq!(
+            inspection(hgs, Ok(Exit::StartFailed("not found".into()))),
+            Err("cannot start 'hgs': not found".into())
+        );
+        assert_eq!(
+            inspection(
+                hgs,
+                Ok(Exit::Abnormal {
+                    stderr: String::new()
+                })
+            ),
+            Err("hgs ended abnormally".into())
+        );
+        assert_eq!(
+            inspection(
+                hgs,
+                Err(TooLarge {
+                    cap: 8 << 20,
+                    stderr: String::new()
+                })
+            ),
+            invalid
+        );
+    }
+
+    #[test]
+    fn a_write_shows_at_once_without_the_tick() {
+        use crate::actions::{Actions, Lane};
+        let root = dir("write-hook");
+        let actions = Actions::new(root.join("marks.json"));
+        let facts = actions.clone();
+        let c = Composers::new(
+            drafts(&root),
+            Config {
+                cache: root.join("cache"),
+            },
+            Deps {
+                spawn: Arc::new(|job: Job| {
+                    std::thread::spawn(job);
+                }),
+                notify: Arc::new(|| {}),
+                clock: Arc::new(|| 1_793_000_100.0),
+                rows: Arc::new(|_, _, name| Some((row(name), true))),
+                facts: Arc::new(move |computer, name| {
+                    facts.session_write(computer, name, || (None, true))
+                }),
+                inspect: Arc::new(|_, _| Err("timed out".into())),
+            },
+        );
+        actions.on_writes(c.changed_hook());
+        opened(&c, ready());
+        assert!(c.take_view().unwrap().available);
+        let target = zerus_client_core::Target {
+            computer: "studio".into(),
+            name: "claude/sample-project/other".into(),
+            run_id: "run-2".into(),
+            conversation_id: "conv-2".into(),
+        };
+        let pause = actions
+            .begin(
+                Lane::key(&target, &zerus_client_core::Action::Pause),
+                &zerus_client_core::Action::Pause,
+            )
+            .unwrap();
+        assert_eq!(
+            c.take_view().unwrap().block_reason.as_deref(),
+            Some("Wait for the session update to finish."),
+            "another session's write, shown before any tick"
+        );
+        drop(pause);
+        assert!(c.take_view().unwrap().available);
     }
 }

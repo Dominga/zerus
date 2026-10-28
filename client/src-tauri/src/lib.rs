@@ -196,23 +196,24 @@ pub fn run() {
                             std::sync::Arc::new(
                                 move |target: &zerus_client_core::Target, archive: Option<&str>| {
                                     if !allowed {
-                                        return None;
+                                        return Err(actions::REPLAY_NEEDS_HGS.to_owned());
                                     }
                                     let inv = zerus_client_core::details::details_invocation(target, archive);
-                                    match zerus_client_core::run_limited(&hgs, &inv, &[], 8 << 20) {
-                                        Ok(zerus_client_core::Exit::Code { code: 0, stdout, .. }) => {
-                                            serde_json::from_slice(&stdout).ok()
-                                        }
-                                        _ => None,
-                                    }
+                                    composer::send::inspection(
+                                        &hgs,
+                                        zerus_client_core::run_limited(&hgs, &inv, &[], 8 << 20),
+                                    )
                                 },
                             )
                         },
                     },
                 ));
-                // The cache chip's minute and the inspect fallback; it sleeps
-                // while no composer is open.
-                app.state::<composer::Composers>().start_ticker();
+                // A write mark shows in the composer at once.
+                let composers = app.state::<composer::Composers>();
+                app.state::<actions::Actions>().on_writes(composers.changed_hook());
+                // The composer's session part once a second (the cache chip)
+                // and the inspect fallback; it sleeps while no composer is open.
+                composers.start_ticker();
             }
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             exit_on_signals(app.handle().clone());
@@ -506,7 +507,7 @@ mod tests {
                 clock: Arc::new(|| 1_793_000_100.0),
                 rows: Arc::new(|_, _, _| None),
                 facts: Arc::new(|_, _| None),
-                inspect: Arc::new(|_, _| None),
+                inspect: Arc::new(|_, _| Err("timed out".into())),
             },
         );
         composers.open(Some(session()));

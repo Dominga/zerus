@@ -309,18 +309,19 @@ pub fn run(args: &[String]) -> Result<()> {
         input.len() as u64 <= MAX_REQUEST_BYTES,
         "path-ref request exceeds 64 KiB"
     );
+    let input = crate::state::without_bom(&input);
     let path = match args[0].as_str() {
         "describe" => {
-            let request: DescribeRequest = serde_json::from_slice(&input)?;
+            let request: DescribeRequest = serde_json::from_slice(input)?;
             PathRef::describe(request.path, request.mapping.as_ref())?
         }
         "validate" => {
-            let request: ReferenceRequest = serde_json::from_slice(&input)?;
+            let request: ReferenceRequest = serde_json::from_slice(input)?;
             request.path.validate(request.mapping.as_ref())?;
             request.path
         }
         "map" => {
-            let request: ReferenceRequest = serde_json::from_slice(&input)?;
+            let request: ReferenceRequest = serde_json::from_slice(input)?;
             request
                 .mapping
                 .context("map requires an explicit mapping")?

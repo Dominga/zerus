@@ -726,6 +726,7 @@ void TestSessionsWindow::initTestCase()
     QCoreApplication::setApplicationVersion(QLatin1String(HGS_TRAY_VERSION));
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_dir->path());
+    WorkspaceSkin::preload();
     QVERIFY(FakeCli::install(script(), R"PY(#!/usr/bin/env python3
 import json,sys
 for value in sys.argv[1:]:print(value,file=sys.stderr)
@@ -1513,7 +1514,7 @@ void TestSessionsWindow::inspectorIsAColumnOfCards()
     QVERIFY(!contextValue->isVisible());
     for (const char *fold : {"environment", "context", "team"}) inspectorCard(window, fold)->findChild<QPushButton *>("collapsibleHeader")->click();
     QVERIFY(!inspectorCardOpen(window, "context"));
-    QTRY_VERIFY_WITH_TIMEOUT(contextValue->isVisible()); QCOMPARE(contextValue->text(), QString("36%"), 15000);
+    QTRY_VERIFY_WITH_TIMEOUT(contextValue->isVisible(), 15000); QCOMPARE(contextValue->text(), QString("36%"));
     QTest::qWait(50); inspector->verticalScrollBar()->setValue(0);
     shot("ux-6-inspector-collapsed");
     window.findChild<QPushButton *>("activityContext")->click();
@@ -1786,7 +1787,7 @@ void TestSessionsWindow::sessionStatesShowOnCardsAndHeader()
     cardShot("claude/orbit/checkout", "u30-10-working");
     cardShot("claude/orbit/migrate", "u30-12-user-approval");
     cardShot("claude/orbit/docs", "u30-14-user-reply");
-    cardShot("claude/orbit/api-refactor", "u30-20-deps-long-op");
+    cardShot("claude/orbit/api-refactor", "deps");
     cardShot("claude/orbit/ledger", "u30-25-build");
     cardShot("claude/orbit/release", "u30-30-cooling");
     cardShot("codex/orbit/staging", "u30-40-cold");

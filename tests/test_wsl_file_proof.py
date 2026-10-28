@@ -67,6 +67,12 @@ class WslFileProof(unittest.TestCase):
         self.assertFalse(result.stdout)
         return result.stderr.decode(errors='replace')
 
+    def test_bom_prefixed_proof_request(self):
+        data = b'\xef\xbb\xbf' + json.dumps({'selection': self.selection}).encode()
+        result = self.hgs('machine', 'file-proof', 'linux-tools', '--json', data=data, timeout=35)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+        self.assertEqual(json.loads(result.stdout)['sha256'], hashlib.sha256(self.file.read_bytes()).hexdigest())
+
     def test_exact_scope_content_and_recheck_preserve_originals(self):
         binding=self.binding.read_bytes();data=self.file.read_bytes()
         proof=self.proof()

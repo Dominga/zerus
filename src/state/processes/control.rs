@@ -340,6 +340,7 @@ mod tests {
     /// `cmd.exe /d /s /c npx ^-y^ ...`. The session's listing shows it as the
     /// plugin's service, not as Background work; an npx job beside it stays
     /// Background.
+    #[cfg(windows)] // This process inventory contains Windows-native executable paths.
     #[test]
     fn a_plugin_server_under_the_windows_npx_wrapper_is_a_service_not_work() {
         let profile = tempfile::tempdir().unwrap();

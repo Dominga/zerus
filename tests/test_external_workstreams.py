@@ -27,6 +27,15 @@ class ExternalWorkstreams(unittest.TestCase):
     def register(self):return self.hgs('external','register','--json',payload=self.req())
     def scope(self,row,**extra):return {**dict(request_id=str(uuid.uuid4()),expected_run_id=row['run_id'],expected_conversation_id=row['conversation_id']),**extra}
     def external(self,action,row,**extra):return self.hgs('external',action,'--json',payload=self.scope(row,name=row['name'],**extra))
+    def test_bom_prefixed_registration_and_list(self):
+        payload = self.req()
+        data = b'\xef\xbb\xbf' + json.dumps(payload).encode()
+        result = subprocess.run([str(BIN), 'external', 'register', '--json'], input=data, capture_output=True, env=self.env, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+        listed = subprocess.run([str(BIN), 'external', 'list', '--json'], input=b'\xef\xbb\xbf{}', capture_output=True, env=self.env, timeout=15)
+        self.assertEqual(listed.returncode, 0, listed.stderr.decode(errors='replace'))
+        self.assertEqual(json.loads(listed.stdout)['sessions'][0]['name'], payload['name'])
+
     def test_empty_listing_does_not_create_a_store(self):
         self.assertEqual(self.hgs('external','list','--json')['sessions'],[])
         self.assertFalse((self.root/'state/external-workstreams').exists())

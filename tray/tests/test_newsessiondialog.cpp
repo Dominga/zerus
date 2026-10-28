@@ -681,6 +681,7 @@ elif a and a[0]=='worktrees':
         QCOMPARE(parsed.view("newSession"),QString("dense"));
         QCOMPARE(WorkspaceSkin::parse(QJsonObject{{"schema",1},{"views",QJsonObject{{"newSession","classic"}}}},"c",{},false).view("newSession"),QString("classic"));
         const auto dir=WorkspaceSkin::directory();QDir(dir).removeRecursively();
+        WorkspaceSkin::preload();
         const auto cleanup=qScopeGuard([dir]{QDir(dir).removeRecursively();});
         QString error;QCOMPARE(WorkspaceSkin::duplicate(skins[1],"My Skin",&error),QString("my-skin"));QVERIFY(error.isEmpty());
         QCOMPARE(WorkspaceSkin::duplicate(skins[1],"My Skin",&error),QString("my-skin-2"));

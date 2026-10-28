@@ -233,7 +233,7 @@ pub fn run(config: &Config, alias: &str, dry: bool) -> Result<()> {
         input.len() as u64 <= INPUT_LIMIT,
         "File proof request exceeds 64 KiB"
     );
-    let request: Request = serde_json::from_slice(&input).context("Invalid file proof request")?;
+    let request: Request = serde_json::from_slice(crate::state::without_bom(&input)).context("Invalid file proof request")?;
     let source = request.selection.validate()?;
     ensure!(
         request.expected_preview.as_ref().is_none_or(|s| sha(s)),

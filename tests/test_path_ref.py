@@ -44,6 +44,14 @@ class PathRefCli(unittest.TestCase):
         ref["canonical_path"] = "c:/Other"
         self.assertNotEqual(self.run_cli("validate", {"path":ref}).returncode,0)
 
+    def test_utf8_bom_is_accepted_for_all_actions(self):
+        def bom(value): return b"\xef\xbb\xbf" + json.dumps(value, ensure_ascii=False).encode("utf-8")
+        ref = self.ok("describe", bom({"path": self.path}))
+        self.assertEqual(self.ok("validate", bom({"path": ref})), ref)
+        self.assertEqual(self.ok("map", bom({"path": ref, "mapping": self.mapping}))["native_path"],
+                         "/mnt/c/Projects/Orbit/世界 %20")
+        self.assertNotEqual(self.run_cli("describe", b"\xef\xbb\xbf" + b" " * (64*1024-2)).returncode, 0)
+
     def test_explicit_mapping_round_trip_and_wrong_namespace_denial(self):
         ref = self.ok("describe", {"path":self.path})
         wsl = self.ok("map", {"path":ref,"mapping":self.mapping})

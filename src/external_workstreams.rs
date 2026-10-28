@@ -103,7 +103,7 @@ fn input() -> anyhow::Result<Value> {
     if bytes.is_empty() {
         return Ok(json!({}));
     }
-    serde_json::from_slice(&bytes).context("Invalid external JSON")
+    serde_json::from_slice(crate::state::without_bom(&bytes)).context("Invalid external JSON")
 }
 fn db(config: &Config, write: bool) -> anyhow::Result<Option<Connection>> {
     let directory = config.state.join("external-workstreams");

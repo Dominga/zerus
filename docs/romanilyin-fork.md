@@ -11,7 +11,9 @@ The October 28, 2026 integration merges WhiteWh's `whitewh/main` through
 `bf2d05dee9ef92a353255e20e9bc9bea8c3c4063` with ordinary Git ancestry. It retains
 the fork's Windows/WSL transport, explicit path identity, existing OpenCode
 bindings and external workstreams alongside the incoming teams, tasks, watch
-protocol, desktop client and mobile changes. Fork update feeds remain disabled.
+protocol, desktop client and mobile changes. Automatic and manual fork update
+checks remain disabled until a fork-owned distribution channel is configured
+and verified.
 Engineering tracking remains in this fork's existing Dolt database; the source
 merge does not import another fork's task database or replace local deployments.
 
@@ -33,8 +35,10 @@ or replace symlink-aware filesystem checks.
 ## Distribution
 
 Initial development builds have no fork update feed. Keep `ZERUS_FORK_FEED_URL`
-unset when building this fork; the inherited WhiteWh publication workflow is
-repository-gated and does not publish here. Upstream download and package links
+unset when building this fork. Roman builds also disable the inherited WhiteWh
+updater, including its manual check, even if that variable is supplied; setting
+it alone does not establish a fork channel. The inherited WhiteWh publication
+workflow is repository-gated and does not publish here. Upstream download and package links
 elsewhere in the inherited documentation describe upstream releases, not this
 fork. A source checkpoint is not a signed release or a full platform qualification.
 

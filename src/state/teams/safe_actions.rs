@@ -107,22 +107,56 @@ fn compile(shape: &str) -> anyhow::Result<Regex> {
 /// A path a slot took: inside the member's folder, no `..`, and an existing
 /// path still inside once links are resolved.
 fn inside(path: &str, folder: &Path) -> bool {
+    if path.is_empty() || !folder.is_absolute() {
+        return false;
+    }
+    // These slots are unquoted shell text. On Unix a backslash can disguise
+    // a parent component (for example `\../other`) after shell unescaping.
+    #[cfg(not(windows))]
+    if path.contains('\\') {
+        return false;
+    }
     let candidate = Path::new(path);
-    let full = if candidate.is_absolute() || path.get(1..2) == Some(":") { candidate.to_path_buf() } else { folder.join(candidate) };
+    // A drive-relative Windows path depends on process state, not this folder.
+    #[cfg(windows)]
+    if candidate.components().any(|part| matches!(part, Component::Prefix(_))) && !candidate.is_absolute() {
+        return false;
+    }
+    let full = if candidate.is_absolute() { candidate.to_path_buf() } else { folder.join(candidate) };
     if full.components().any(|part| matches!(part, Component::ParentDir)) {
         return false;
     }
+    #[cfg(windows)]
     let normal = |p: &Path| p.to_string_lossy().replace('/', "\\").trim_start_matches(r"\\?\").trim_end_matches('\\').to_lowercase();
+    #[cfg(windows)]
     let within = |full: &Path, folder: &Path| {
         let (full, folder) = (normal(full), normal(folder));
         !folder.is_empty() && (full == folder || full.starts_with(&format!("{folder}\\")))
     };
+    // Unix paths are case sensitive; a backslash is a filename character.
+    #[cfg(not(windows))]
+    let within = |full: &Path, folder: &Path| full.starts_with(folder);
     if !within(&full, folder) {
         return false;
     }
-    match (std::fs::canonicalize(&full), std::fs::canonicalize(folder)) {
-        (Ok(real), Ok(base)) => within(&real, &base),
-        _ => true,
+    let Ok(base) = std::fs::canonicalize(folder) else { return false };
+    // New output paths may not exist yet, but their nearest existing ancestor
+    // must not be a link outside the member's folder. Other I/O errors deny.
+    let mut existing = full.as_path();
+    loop {
+        match std::fs::canonicalize(existing) {
+            Ok(real) => return within(&real, &base),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(parent) = existing.parent().filter(|parent| within(parent, folder)) else { return false };
+                // A dangling link must not become an allowed missing directory.
+                match std::fs::symlink_metadata(existing) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => return false,
+                }
+                existing = parent;
+            }
+            Err(_) => return false,
+        }
     }
 }
 
@@ -202,10 +236,6 @@ pub(crate) fn remove(team: &Team, id: &str) -> anyhow::Result<bool> {
 mod tests {
     use super::*;
 
-    fn folder() -> PathBuf {
-        PathBuf::from(r"D:\work\team-qa")
-    }
-
     #[test]
     fn a_shape_takes_names_and_paths_but_nothing_appended() {
         let shape = compile(r"cmd /c {path}\.ci-build\qa-qtbuild.bat {words}").unwrap();
@@ -228,37 +258,69 @@ mod tests {
 
     #[test]
     fn paths_stay_inside_the_members_folder() {
-        assert!(inside(r"D:\work\team-qa\.ci-build", &folder()));
-        assert!(inside(r".ci-build\gui", &folder()));
-        assert!(!inside(r"D:\work\other", &folder()));
-        assert!(!inside(r"D:\work\team-qa\..\other", &folder()));
-        assert!(!inside(r"D:\work\team-qa-evil\x", &folder()));
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("team-qa");
+        std::fs::create_dir(&folder).unwrap();
+        assert!(inside(folder.join(".ci-build").to_str().unwrap(), &folder));
+        assert!(inside(".ci-build/gui", &folder));
+        assert!(!inside(dir.path().join("other").to_str().unwrap(), &folder));
+        assert!(!inside(folder.join("../other").to_str().unwrap(), &folder));
+        assert!(!inside(dir.path().join("team-qa-evil/x").to_str().unwrap(), &folder));
+        assert!(!inside("../other", &folder));
+        assert!(!inside("", &folder));
+        #[cfg(not(windows))]
+        assert!(!inside(r"\../other", &folder));
+        #[cfg(windows)]
+        {
+            assert!(!inside(r"D:relative", &folder));
+            assert!(!inside(&format!(r"{}\..\other", folder.display()), &folder));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_case_and_links_cannot_escape_the_members_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("team-qa");
+        let other = dir.path().join("other");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        assert!(!inside(dir.path().join("TEAM-QA/new").to_str().unwrap(), &folder));
+        std::os::unix::fs::symlink(&other, folder.join("escape")).unwrap();
+        assert!(!inside("escape", &folder));
+        assert!(!inside("escape/missing/output", &folder));
+        std::os::unix::fs::symlink(dir.path().join("missing"), folder.join("dangling")).unwrap();
+        assert!(!inside("dangling/output", &folder));
+        std::os::unix::fs::symlink(&folder, folder.join("internal")).unwrap();
+        assert!(inside("internal/new-output", &folder));
     }
 
     #[test]
     fn a_recorded_action_allows_its_member_and_shape_only() {
         let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("team-qa");
+        std::fs::create_dir(&folder).unwrap();
         set_test_path(Some(dir.path().join("safe-actions.json")));
         let mut team = Team { id: "t1".into(), lead: "lead".into(), ..Default::default() };
         team.members.push(Member { id: "lead".into(), role: "QA tester".into(), ..Default::default() });
         team.members.push(Member { id: "qa".into(), role: "QA tester".into(), ..Default::default() });
         team.members.push(Member { id: "dev".into(), role: "Backend".into(), ..Default::default() });
-        let added = add(&team, &json!({"role":"QA tester","shape":r"cmd /c {path}\.ci-build\qa-qtbuild.bat {words}","reason":"builds its own test programs"}), "Lead").unwrap();
+        let added = add(&team, &json!({"role":"QA tester","shape":"cmake --build {path} --target {words}","reason":"builds its own test programs"}), "Lead").unwrap();
         assert!(added["id"].is_string());
         let qa = team.member("qa").unwrap().clone();
         let dev = team.member("dev").unwrap().clone();
-        let command = r"cmd /c D:\work\team-qa\.ci-build\qa-qtbuild.bat test_teams";
-        assert!(find(&team, &qa, "pwsh", command, &folder()).is_some());
+        let command = "cmake --build .ci-build --target test_teams";
+        assert!(find(&team, &qa, "shell", command, &folder).is_some());
         // Another role, another folder, another team: no.
-        assert!(find(&team, &dev, "pwsh", command, &folder()).is_none());
-        assert!(find(&team, &qa, "pwsh", r"cmd /c D:\work\other\.ci-build\qa-qtbuild.bat test_teams", &folder()).is_none());
+        assert!(find(&team, &dev, "shell", command, &folder).is_none());
+        assert!(find(&team, &qa, "shell", "cmake --build ../other --target test_teams", &folder).is_none());
         let other = Team { id: "t2".into(), ..team.clone() };
-        assert!(find(&other, &qa, "pwsh", command, &folder()).is_none());
+        assert!(find(&other, &qa, "shell", command, &folder).is_none());
         // A reason is required; the lead's own requests are never allowed this way.
         assert!(add(&team, &json!({"role":"QA tester","shape":"cargo test --locked {word}"}), "Lead").is_err());
         assert!(add(&team, &json!({"member":"lead","shape":"cargo test --locked {word}","reason":"x"}), "Lead").is_err());
         assert!(remove(&team, added["id"].as_str().unwrap()).unwrap());
-        assert!(find(&team, &qa, "pwsh", command, &folder()).is_none());
+        assert!(find(&team, &qa, "shell", command, &folder).is_none());
         set_test_path(None);
     }
 }

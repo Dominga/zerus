@@ -29,6 +29,8 @@ class DesktopSessionPaletteTest {
 
     @Test fun localReadReminderUsesDesktopPrecedence() {
         assertEquals(DesktopBadgeKind.Attention,DesktopSessionPalette.badge(session("""{"mobile_review_later":true}"""),false).kind)
+        assertEquals(DesktopBadgeKind.Attention,DesktopSessionPalette.badge(
+            session("""{"session_state":"cooling","mobile_review_later":true}"""),true).kind)
         assertEquals(DesktopBadgeKind.Unread,DesktopSessionPalette.badge(session("""{"activity":"idle","mobile_unread_reply":true}"""),true).kind)
         val busy=DesktopSessionPalette.badge(session("""{"activity":"busy","mobile_unread_reply":true}"""),true)
         assertEquals(DesktopBadgeKind.Working,busy.kind)
@@ -36,19 +38,25 @@ class DesktopSessionPaletteTest {
     }
 
     @Test fun desktopPairsAreExactForBothThemes() {
-        val dark = listOf(
-            DesktopBadgeColors(0xFF2B343E, 0xFFB6C2D0), DesktopBadgeColors(0xFF194D36, 0xFF97F0BA),
-            DesktopBadgeColors(0xFFFFDA76, 0xFF392900), DesktopBadgeColors(0xFFFFABB6, 0xFF46202A),
-            DesktopBadgeColors(0xFF443654, 0xFFDEC3FF), DesktopBadgeColors(0xFFFFDA76, 0xFF392900),
-            DesktopBadgeColors(0xFF173E48, 0xFF9FE0F0), DesktopBadgeColors(0xFF273544, 0xFFAAC0DF), DesktopBadgeColors(0xFF443A25, 0xFFEDD096))
-        val light = listOf(
-            DesktopBadgeColors(0xFFE7EDF2, 0xFF566575), DesktopBadgeColors(0xFFCCEFDC, 0xFF145B37),
-            DesktopBadgeColors(0xFFF4CE65, 0xFF392900), DesktopBadgeColors(0xFFB73750, 0xFFFFFFFF),
-            DesktopBadgeColors(0xFFE8DDF5, 0xFF634187), DesktopBadgeColors(0xFFF4CE65, 0xFF392900),
-            DesktopBadgeColors(0xFFD3EDF4, 0xFF165A6B), DesktopBadgeColors(0xFFE9F0F8, 0xFF466B99), DesktopBadgeColors(0xFFF5E8C7, 0xFF795913))
-        DesktopBadgeKind.entries.forEachIndexed { index, kind ->
-            assertEquals(dark[index], DesktopSessionPalette.colors(kind, true))
-            assertEquals(light[index], DesktopSessionPalette.colors(kind, false))
+        // Named keys keep new states from silently shifting the old tokens.
+        val expected = mapOf(
+            DesktopBadgeKind.Neutral to (DesktopBadgeColors(0xFF2B343E, 0xFFB6C2D0) to DesktopBadgeColors(0xFFE7EDF2, 0xFF566575)),
+            DesktopBadgeKind.Working to (DesktopBadgeColors(0xFF194D36, 0xFF97F0BA) to DesktopBadgeColors(0xFFCCEFDC, 0xFF145B37)),
+            DesktopBadgeKind.Building to (DesktopBadgeColors(0xFF1B3A4A, 0xFF7FD3F2) to DesktopBadgeColors(0xFFDFF0F8, 0xFF17627F)),
+            DesktopBadgeKind.Attention to (DesktopBadgeColors(0xFFFFDA76, 0xFF392900) to DesktopBadgeColors(0xFFF4CE65, 0xFF392900)),
+            DesktopBadgeKind.Error to (DesktopBadgeColors(0xFFFFABB6, 0xFF46202A) to DesktopBadgeColors(0xFFB73750, 0xFFFFFFFF)),
+            DesktopBadgeKind.Paused to (DesktopBadgeColors(0xFF443654, 0xFFDEC3FF) to DesktopBadgeColors(0xFFE8DDF5, 0xFF634187)),
+            DesktopBadgeKind.Unread to (DesktopBadgeColors(0xFFFFDA76, 0xFF392900) to DesktopBadgeColors(0xFFF4CE65, 0xFF392900)),
+            DesktopBadgeKind.Scheduled to (DesktopBadgeColors(0xFF173E48, 0xFF9FE0F0) to DesktopBadgeColors(0xFFD3EDF4, 0xFF165A6B)),
+            DesktopBadgeKind.Background to (DesktopBadgeColors(0xFF273544, 0xFFAAC0DF) to DesktopBadgeColors(0xFFE9F0F8, 0xFF466B99)),
+            DesktopBadgeKind.Waiting to (DesktopBadgeColors(0xFF443A25, 0xFFEDD096) to DesktopBadgeColors(0xFFF5E8C7, 0xFF795913)),
+            DesktopBadgeKind.Deps to (DesktopBadgeColors(0xFF1B2A44, 0xFF6FA8FF) to DesktopBadgeColors(0xFFE6EFFB, 0xFF2F66C9)),
+            DesktopBadgeKind.Cooling to (DesktopBadgeColors(0xFF12333B, 0xFF56C8E0) to DesktopBadgeColors(0xFFE1F3F8, 0xFF137F95)),
+            DesktopBadgeKind.Cold to (DesktopBadgeColors(0xFF2A3547, 0xFF8FA6C4) to DesktopBadgeColors(0xFFE9EEF5, 0xFF55708F)))
+        assertEquals(DesktopBadgeKind.entries.toSet(), expected.keys)
+        for ((kind, colors) in expected) {
+            assertEquals("$kind dark", colors.first, DesktopSessionPalette.colors(kind, true))
+            assertEquals("$kind light", colors.second, DesktopSessionPalette.colors(kind, false))
         }
     }
 

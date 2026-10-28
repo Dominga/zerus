@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(windows)]
 use std::process::{Command, Stdio};
 
 /// Runs `test` with a private state root of its own (the stores, the current
@@ -73,7 +74,12 @@ fn an_owned_folder_store_is_repaired_and_its_new_files_stay_private() {
         assert!(!platform::verify_private(&folder, Private::Directory).unwrap());
         assert!(ensure(&folder, Private::Directory).unwrap());
         assert!(platform::verify_private(&folder, Private::Directory).unwrap());
-        fs::write(folder.join("analytics.sqlite3"), b"x").unwrap();
+        // Windows inherits the repaired directory ACL; Unix callers must also
+        // request a private creation mode, as the actual store writers do.
+        let mut file = platform::private_open(fs::OpenOptions::new().write(true).create_new(true))
+            .open(folder.join("analytics.sqlite3")).unwrap();
+        file.write_all(b"x").unwrap();
+        drop(file);
         assert!(platform::verify_private(&folder.join("analytics.sqlite3"), Private::File).unwrap());
         assert_eq!(journal_lines(root)[0]["kind"], "folder");
     });

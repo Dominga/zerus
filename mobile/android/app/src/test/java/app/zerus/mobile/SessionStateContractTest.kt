@@ -62,7 +62,16 @@ class SessionStateContractTest {
             assertTrue("$name line 3", status.detail.isNotBlank())
             // Section 2: deps always names its reason, in the host's exact words; so does a build.
             if (expected.optString("session_state") in setOf("deps", "build")) {
-                assertEquals("$name reason", expected.optString("text"), status.detail)
+                if (expected.has("text")) {
+                    assertEquals("$name reason", expected.getString("text"), status.detail)
+                } else if (expected.has("text_prefix")) {
+                    assertTrue("$name reason", status.detail.startsWith(expected.getString("text_prefix")))
+                } else if (status.state == SessionState.Building) {
+                    // Partial fixture expectations omit the host's text. The
+                    // phone still names the build from its structured fields.
+                    val build = raw.getJSONObject("build")
+                    assertTrue("$name build", status.detail.contains(build.optString("label").ifEmpty { build.getString("command") }))
+                }
             }
             assertTrue("$name badge title", status.reason.isNotBlank())
         }

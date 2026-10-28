@@ -6,7 +6,7 @@
 //! (src/swarm/model.rs:126-201), so an edit only changes the lists the user
 //! asked for. The order of sessions inside a project is not shared
 //! (SwarmController.cpp:148-150): it lives in [`super::layout`].
-use super::{listed, members, project_id, projects, sessions, INBOX};
+use super::{listed, members, project_id, projects, sessions, INBOX, MAX_PROJECTS};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,6 +17,7 @@ pub const NAME_CHARS: usize = 80;
 pub const NEW_COLOR: &str = "#64b5f6";
 pub const GONE: &str = "This project is no longer listed. Open the menu again.";
 pub const NAME_NEEDED: &str = "Enter a project name.";
+pub const TOO_MANY: &str = "A catalog holds at most 500 projects.";
 pub const NOTHING: &str = "Choose the sessions to move.";
 
 /// One edit. Members are `"<host>\n<session name>"` keys ([`super::member`]).
@@ -25,7 +26,10 @@ pub const NOTHING: &str = "Choose the sessions to move.";
 pub enum Intent {
     /// Move to project, a drop and a selection's move: the members, in order,
     /// into `project` as explicit members (moveSession, 187-201). `before`
-    /// places them in the local order only.
+    /// places them in the local order only: `before` is not used for the
+    /// shared side, because the order inside a project is device-local and
+    /// the layout (Task 2) applies it, so a stale anchor still moves the
+    /// members.
     Move {
         members: Vec<String>,
         project: String,
@@ -128,6 +132,9 @@ pub fn apply(organization: &Value, intent: &Intent) -> Result<Value, String> {
         Intent::Create { id, name, members } => {
             let name = clean_name(name).ok_or(NAME_NEEDED)?;
             if !listed(&next, id) {
+                if projects(&next).len() >= MAX_PROJECTS {
+                    return Err(TOO_MANY.into());
+                }
                 let at = position(&next, INBOX).unwrap_or(projects(&next).len());
                 let project = json!({"id": id, "name": name, "color": NEW_COLOR, "accessible": true,
                                      "folders": [], "sessions": []});
@@ -208,7 +215,24 @@ pub fn apply(organization: &Value, intent: &Intent) -> Result<Value, String> {
 pub fn shared(organization: &Value) -> Value {
     let mut out = organization.clone();
     if let Some(object) = out.as_object_mut() {
-        object.remove("unassigned_sessions");
+        // Fallback placement stays local: filter those sessions out of every
+        // project, then drop the key (SwarmController.cpp:27-34).
+        let unassigned: BTreeSet<String> = object
+            .remove("unassigned_sessions")
+            .and_then(|value| value.as_array().cloned())
+            .into_iter()
+            .flatten()
+            .filter_map(|session| session.as_str().map(str::to_owned))
+            .collect();
+        if let Some(list) = object.get_mut("projects").and_then(Value::as_array_mut) {
+            for project in list {
+                let kept: Vec<Value> = sessions(project)
+                    .filter(|member| !unassigned.contains(*member))
+                    .map(|member| json!(member))
+                    .collect();
+                project["sessions"] = Value::Array(kept);
+            }
+        }
         object.insert("session_assignments_explicit".into(), json!(true));
         let order: Vec<Value> = projects(organization)
             .iter()
@@ -387,6 +411,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(projects(&next)[1]["name"], "Orders");
+        let long = apply(
+            &org(),
+            &Intent::Rename {
+                project: "beta".into(),
+                name: "y".repeat(120),
+            },
+        )
+        .unwrap();
+        assert_eq!(projects(&long)[1]["name"], "y".repeat(NAME_CHARS).as_str());
         assert_eq!(
             apply(
                 &org(),
@@ -574,5 +607,31 @@ mod tests {
         let mut cached = org();
         cached["unassigned_sessions"] = json!([N]);
         assert!(shared(&cached).get("unassigned_sessions").is_none());
+    }
+
+    #[test]
+    fn unassigned_sessions_never_leave_as_members() {
+        let mut cached = org();
+        cached["unassigned_sessions"] = json!([R]);
+        let request = shared(&cached);
+        assert!(request.get("unassigned_sessions").is_none());
+        assert_eq!(lists(&request)[0], ("alpha".to_owned(), vec![]));
+        assert_eq!(lists(&request)[1], ("beta".to_owned(), vec![O.to_owned()]));
+    }
+
+    #[test]
+    fn a_catalog_holds_at_most_max_projects() {
+        let many: Vec<Value> = (0..MAX_PROJECTS)
+            .map(|i| json!({"id": format!("p{i}"), "sessions": []}))
+            .collect();
+        let full = json!({"projects": many});
+        let intent = Intent::Create {
+            id: "extra".into(),
+            name: "Extra".into(),
+            members: vec![],
+        };
+        assert_eq!(apply(&full, &intent), Err(TOO_MANY.to_owned()));
+        let one_less = json!({"projects": full["projects"].as_array().unwrap()[1..].to_vec()});
+        assert!(apply(&one_less, &intent).is_ok());
     }
 }

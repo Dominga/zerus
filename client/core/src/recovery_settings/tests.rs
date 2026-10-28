@@ -376,10 +376,10 @@ fn a_card_that_never_comes_is_assumed_to_keep_local_sessions() {
     // No hgs, or a watch that keeps failing: after the wait the service goes
     // by Qt's default and reads this computer.
     let mut sync = RecoverySync::new("");
-    let before = assumed_card(None, CARD_WAIT - Duration::from_secs(1));
+    let before = assumed_card(None, CARD_WAIT - Duration::from_secs(1), false);
     assert!(before.is_none());
     assert!(tick(&mut sync, before.as_ref(), None, true).is_empty());
-    let after = assumed_card(None, CARD_WAIT);
+    let after = assumed_card(None, CARD_WAIT, false);
     let read = calls(&tick(&mut sync, after.as_ref(), None, true));
     assert_eq!(
         read.iter()
@@ -387,12 +387,14 @@ fn a_card_that_never_comes_is_assumed_to_keep_local_sessions() {
             .collect::<Vec<_>>(),
         [("", Op::Get)]
     );
-    // A card that arrives is always the one used.
+    // A card that arrives is always the one used, and one that came and
+    // went (the fleet stopping) is never replaced by the assumption.
     let console = card(Some(false));
     assert_eq!(
-        assumed_card(Some(console.clone()), CARD_WAIT),
+        assumed_card(Some(console.clone()), CARD_WAIT, true),
         Some(console)
     );
+    assert_eq!(assumed_card(None, CARD_WAIT * 10, true), None);
 }
 
 #[test]

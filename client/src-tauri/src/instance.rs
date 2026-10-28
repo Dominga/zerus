@@ -746,11 +746,37 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    fn scratch(name: &str) -> PathBuf {
+    /// A test's own folder, removed when the test ends (also on a panic).
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
         let dir = std::env::temp_dir().join(format!("zci-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        dir
+        Scratch(dir)
+    }
+
+    #[test]
+    fn a_tests_folder_goes_with_it() {
+        let dir = scratch("drop");
+        fs::write(dir.join("socket-like"), b"").unwrap();
+        let path = dir.to_path_buf();
+        drop(dir);
+        assert!(!path.exists(), "scratch folders are removed");
     }
 
     fn fast() -> Timing {

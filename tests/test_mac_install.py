@@ -1,7 +1,9 @@
 """Installer configuration checks with fake transports and an isolated home."""
+import json
 import os
 import shlex
 from pathlib import Path
+import plistlib
 import subprocess
 import tempfile
 import unittest
@@ -90,9 +92,23 @@ sys.exit(subprocess.run(['sh', '-c', command], input=data).returncode)
         commands = [line[len('remote '):] for line in (self.root / 'transport.log').read_text().splitlines()
                     if 'tray/install.sh' in line]
         self.assertEqual(len(commands), 1)
-        self.assertEqual(shlex.split(commands[0]), ['HGS_MACOS_SIGN_IDENTITY=' + selector,
+        self.assertEqual(shlex.split(commands[0]), ['HGS_MACOS_SIGN_IDENTITY=' + selector, 'HGS_MAC_GUI=',
                                                   'bash', '~/.local/src/hgs/tray/install.sh'])
         self.assertFalse((self.root / 'unexpected').exists())
+
+    def test_the_client_sources_travel_and_the_gui_choice_is_forwarded(self):
+        result = self.run_install('fixture-mac', HGS_MAC_GUI='client')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        tray = [line.split() for line in (self.root / 'transport.log.tar').read_text().splitlines()
+                if 'tray' in line.split()]
+        self.assertEqual(len(tray), 1)
+        for expected in ('client', 'VERSION', 'DEV_VERSION', '--exclude=client/node_modules',
+                         '--exclude=client/*/target', '--exclude=client/dist',
+                         # client/core and client/src-tauri take it by path (../../crates).
+                         'crates/watch-protocol/Cargo.toml', 'crates/watch-protocol/src'):
+            self.assertIn(expected, tray[0])
+        commands = [line for line in (self.root / 'transport.log').read_text().splitlines() if 'tray/install.sh' in line]
+        self.assertIn("HGS_MAC_GUI='client'", commands[0])
 
     def test_default_does_not_create_ssh_or_reverse_peer(self):
         result = self.run_install('fixture-mac', '--no-tray')
@@ -152,6 +168,61 @@ sys.exit(subprocess.run(['sh', '-c', command], input=data).returncode)
             with self.subTest(settings=settings):
                 self.assertEqual(self.run_install('fixture-mac', '--no-tray', **settings).returncode, 2)
         self.assertFalse((self.root / 'transport.log').exists())
+
+
+class TrayInstallGui(unittest.TestCase):
+    """The macOS desktop build chooses the Tauri client, stopped before signing."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='zerus-tray-gui-test-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        for name in ('tray/install.sh', 'tray/update-installed.py', 'client/scripts/switch-config.py',
+                     'client/src-tauri/tauri.switch.conf.json', 'VERSION'):
+            (self.root / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / name).write_bytes((REPO / name).read_bytes())
+        tools = self.root / 'bin'
+        tools.mkdir()
+        self.log = self.root / 'tools.log'
+        for name, text in {
+            'uname': '#!/bin/sh\necho Darwin\n',
+            'brew': '#!/bin/sh\necho /opt/fixture/qt\n',
+            'cmake': f'#!/bin/sh\necho "cmake $*" >> "{self.log}"\nexit 3\n',
+            # npm ci succeeds; the build stops the installer before signing.
+            'npm': f'#!/bin/sh\necho "npm $*" >> "{self.log}"\n[ "$1" = ci ] && exit 0\nexit 3\n',
+        }.items():
+            (tools / name).write_text(text)
+            (tools / name).chmod(0o755)
+        self.home = self.root / 'home'
+        self.env = dict(os.environ, HOME=str(self.home), PATH=str(tools) + os.pathsep + os.environ['PATH'])
+
+    def install(self, **settings):
+        return subprocess.run(['bash', str(self.root / 'tray/install.sh')], env=dict(self.env, **settings),
+                              text=True, capture_output=True, timeout=30)
+
+    def test_the_client_is_built_with_the_switch_configuration(self):
+        result = self.install(HGS_MAC_GUI='client')
+        self.assertEqual(result.returncode, 3, result.stderr)
+        log = self.log.read_text().splitlines()
+        config = self.root / 'client/src-tauri/target/switch.conf.json'
+        self.assertEqual(log, ['npm ci --no-audit --no-fund',
+                               f'npm exec -- tauri build --config {config} --bundles app'])
+        self.assertEqual(json.loads(config.read_text())['identifier'], 'com.hgdev.hgs-tray.local')
+
+    def test_an_installed_client_stays_the_client_and_qt_stays_qt(self):
+        app = self.home / 'Applications/hgs-tray.app/Contents'
+        app.mkdir(parents=True)
+        (app / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': 'com.hgdev.hgs-tray', 'ZerusGUI': 'tauri'}))
+        self.install()
+        self.assertTrue(self.log.read_text().startswith('npm ci'))
+        self.log.unlink()
+        (app / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': 'com.hgdev.hgs-tray'}))
+        self.install()
+        self.assertTrue(self.log.read_text().startswith('cmake'))
+        self.log.unlink()
+        self.install(HGS_MAC_GUI='qt')
+        self.assertTrue(self.log.read_text().startswith('cmake'))
+        self.assertEqual(self.install(HGS_MAC_GUI='other').returncode, 1)
 
 
 class TrayInstallCache(unittest.TestCase):

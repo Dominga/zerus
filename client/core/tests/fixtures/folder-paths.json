@@ -1,0 +1,2340 @@
+{
+  "description": "Folder paths in their computer's form (client/core/src/paths.rs) and New session's folder helpers (launch.rs matching_project_folder, prefill_target, restored_folder). The core test core/tests/folder_paths.rs and the TypeScript port client/src/ui/sessions/paths.ts (paths.test.ts) both check every answer; regenerate the answers with `cargo test --test folder_paths -- --ignored` after a core change. In styles, \"build\" is the platform the client was built for.",
+  "matching_project_folder": [
+    {
+      "answer": "/workspace/example-work-one",
+      "canonical": "",
+      "host": "",
+      "path": "/workspace/example-work-one/src",
+      "project": {
+        "folders": [
+          {
+            "machine": "",
+            "path": "/workspace"
+          },
+          {
+            "machine": "",
+            "path": "/workspace/example-work-one"
+          }
+        ],
+        "id": "p",
+        "name": "Example"
+      },
+      "style": "posix"
+    },
+    {
+      "answer": "/real",
+      "canonical": "/real/x",
+      "host": "",
+      "path": "/alias/x",
+      "project": {
+        "folders": [
+          {
+            "machine": "",
+            "path": "/real"
+          }
+        ],
+        "id": "p",
+        "name": "Example"
+      },
+      "style": "posix"
+    },
+    {
+      "answer": "/workspace/x",
+      "canonical": "",
+      "host": "",
+      "path": "/workspace/x",
+      "project": {
+        "folders": [
+          {
+            "machine": "mac",
+            "path": "/workspace"
+          }
+        ],
+        "id": "p",
+        "name": "Example"
+      },
+      "style": "posix"
+    },
+    {
+      "answer": "/workspace",
+      "canonical": "",
+      "host": "mac",
+      "path": "/workspace/x",
+      "project": {
+        "folders": [
+          {
+            "machine": "mac",
+            "path": "/workspace"
+          }
+        ],
+        "id": "p",
+        "name": "Example"
+      },
+      "style": "posix"
+    },
+    {
+      "answer": "/workspace/x",
+      "canonical": "",
+      "host": "",
+      "path": "/workspace/x",
+      "project": null,
+      "style": "posix"
+    },
+    {
+      "answer": "C:/Work/Example",
+      "canonical": "",
+      "host": "",
+      "path": "c:/work/example/sub",
+      "project": {
+        "folders": [
+          {
+            "machine": "",
+            "path": "C:\\Work\\Example\\"
+          }
+        ],
+        "id": "p",
+        "name": "Example"
+      },
+      "style": "windows"
+    },
+    {
+      "answer": "/workspace/example",
+      "canonical": "",
+      "host": "",
+      "path": "/workspace/example",
+      "project": {
+        "folders": [
+          {
+            "machine": "",
+            "path": "/workspace/x/../example/"
+          }
+        ],
+        "id": "p",
+        "name": "Example"
+      },
+      "style": "posix"
+    },
+    {
+      "answer": "/workspace/exampleother",
+      "canonical": "",
+      "host": "",
+      "path": "/workspace/exampleother",
+      "project": {
+        "folders": [
+          {
+            "machine": "",
+            "path": "/workspace/example"
+          }
+        ],
+        "id": "p",
+        "name": "Example"
+      },
+      "style": "posix"
+    },
+    {
+      "answer": "/é/x",
+      "canonical": "",
+      "host": "",
+      "path": "/é/x/y",
+      "project": {
+        "folders": [
+          {
+            "machine": "",
+            "path": "/éé"
+          },
+          {
+            "machine": "",
+            "path": "/é/x"
+          }
+        ],
+        "id": "p",
+        "name": "Example"
+      },
+      "style": "posix"
+    }
+  ],
+  "pairs": [
+    {
+      "folder": "/a",
+      "path": "/a/b",
+      "posix": {
+        "same": false,
+        "within": true
+      },
+      "windows": {
+        "same": false,
+        "within": false
+      }
+    },
+    {
+      "folder": "/a",
+      "path": "/a",
+      "posix": {
+        "same": true,
+        "within": true
+      },
+      "windows": {
+        "same": true,
+        "within": false
+      }
+    },
+    {
+      "folder": "/a",
+      "path": "/ab",
+      "posix": {
+        "same": false,
+        "within": false
+      },
+      "windows": {
+        "same": false,
+        "within": false
+      }
+    },
+    {
+      "folder": "/",
+      "path": "/a",
+      "posix": {
+        "same": false,
+        "within": true
+      },
+      "windows": {
+        "same": false,
+        "within": false
+      }
+    },
+    {
+      "folder": "a",
+      "path": "/a/b",
+      "posix": {
+        "same": false,
+        "within": false
+      },
+      "windows": {
+        "same": false,
+        "within": false
+      }
+    },
+    {
+      "folder": "/a",
+      "path": "/a/",
+      "posix": {
+        "same": false,
+        "within": true
+      },
+      "windows": {
+        "same": false,
+        "within": false
+      }
+    },
+    {
+      "folder": "c:\\work",
+      "path": "C:/Work/x",
+      "posix": {
+        "same": false,
+        "within": false
+      },
+      "windows": {
+        "same": false,
+        "within": true
+      }
+    },
+    {
+      "folder": "C:/work",
+      "path": "C:/workshop",
+      "posix": {
+        "same": false,
+        "within": false
+      },
+      "windows": {
+        "same": false,
+        "within": false
+      }
+    },
+    {
+      "folder": "C:/",
+      "path": "C:\\a",
+      "posix": {
+        "same": false,
+        "within": false
+      },
+      "windows": {
+        "same": false,
+        "within": true
+      }
+    },
+    {
+      "folder": "\\\\SERVER\\share",
+      "path": "//server/share/x",
+      "posix": {
+        "same": false,
+        "within": false
+      },
+      "windows": {
+        "same": false,
+        "within": true
+      }
+    },
+    {
+      "folder": "C:",
+      "path": "C:/a",
+      "posix": {
+        "same": false,
+        "within": false
+      },
+      "windows": {
+        "same": false,
+        "within": false
+      }
+    },
+    {
+      "folder": "/a/",
+      "path": "/a/b",
+      "posix": {
+        "same": false,
+        "within": false
+      },
+      "windows": {
+        "same": false,
+        "within": false
+      }
+    },
+    {
+      "folder": "\\\\?\\C:",
+      "path": "C:/x",
+      "posix": {
+        "same": false,
+        "within": false
+      },
+      "windows": {
+        "same": false,
+        "within": false
+      }
+    },
+    {
+      "folder": "x",
+      "path": "x",
+      "posix": {
+        "same": true,
+        "within": false
+      },
+      "windows": {
+        "same": true,
+        "within": false
+      }
+    },
+    {
+      "folder": "",
+      "path": "",
+      "posix": {
+        "same": true,
+        "within": false
+      },
+      "windows": {
+        "same": true,
+        "within": false
+      }
+    },
+    {
+      "folder": ":/x",
+      "path": ":/x/y",
+      "posix": {
+        "same": false,
+        "within": true
+      },
+      "windows": {
+        "same": false,
+        "within": false
+      }
+    },
+    {
+      "folder": "c:/äb",
+      "path": "C:/ÄB/x",
+      "posix": {
+        "same": false,
+        "within": false
+      },
+      "windows": {
+        "same": false,
+        "within": true
+      }
+    },
+    {
+      "folder": "//server/share/",
+      "path": "//server/share",
+      "posix": {
+        "same": false,
+        "within": false
+      },
+      "windows": {
+        "same": false,
+        "within": false
+      }
+    },
+    {
+      "folder": "C:/",
+      "path": "C:/",
+      "posix": {
+        "same": true,
+        "within": false
+      },
+      "windows": {
+        "same": true,
+        "within": true
+      }
+    },
+    {
+      "folder": "c:\\",
+      "path": "C:/a",
+      "posix": {
+        "same": false,
+        "within": false
+      },
+      "windows": {
+        "same": false,
+        "within": true
+      }
+    },
+    {
+      "folder": "/workspace/example",
+      "path": "/workspace/example/src",
+      "posix": {
+        "same": false,
+        "within": true
+      },
+      "windows": {
+        "same": false,
+        "within": false
+      }
+    },
+    {
+      "folder": "/workspace/example",
+      "path": "/workspace/example-work-one",
+      "posix": {
+        "same": false,
+        "within": false
+      },
+      "windows": {
+        "same": false,
+        "within": false
+      }
+    },
+    {
+      "folder": "c:/work/example",
+      "path": "C:\\Work\\Example",
+      "posix": {
+        "same": false,
+        "within": false
+      },
+      "windows": {
+        "same": true,
+        "within": true
+      }
+    },
+    {
+      "folder": "c:/İ",
+      "path": "C:/İ",
+      "posix": {
+        "same": false,
+        "within": false
+      },
+      "windows": {
+        "same": true,
+        "within": true
+      }
+    },
+    {
+      "folder": "C:/i",
+      "path": "C:/İ",
+      "posix": {
+        "same": false,
+        "within": false
+      },
+      "windows": {
+        "same": false,
+        "within": false
+      }
+    },
+    {
+      "folder": "c:/ß",
+      "path": "C:/ẞ/x",
+      "posix": {
+        "same": false,
+        "within": false
+      },
+      "windows": {
+        "same": false,
+        "within": true
+      }
+    },
+    {
+      "folder": "C:/work/",
+      "path": "c:/WORK/x",
+      "posix": {
+        "same": false,
+        "within": false
+      },
+      "windows": {
+        "same": false,
+        "within": true
+      }
+    },
+    {
+      "folder": "/a/😀",
+      "path": "/a/😀/b",
+      "posix": {
+        "same": false,
+        "within": true
+      },
+      "windows": {
+        "same": false,
+        "within": false
+      }
+    },
+    {
+      "folder": "//server/share",
+      "path": "//server/share/a",
+      "posix": {
+        "same": false,
+        "within": true
+      },
+      "windows": {
+        "same": false,
+        "within": true
+      }
+    },
+    {
+      "folder": "C:/x/",
+      "path": "C:/x",
+      "posix": {
+        "same": false,
+        "within": false
+      },
+      "windows": {
+        "same": false,
+        "within": false
+      }
+    }
+  ],
+  "paths": [
+    {
+      "path": "",
+      "posix": {
+        "absolute": false,
+        "clean": "",
+        "leaf": "",
+        "native": "",
+        "split": [
+          ".",
+          ""
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "",
+        "leaf": "",
+        "native": "",
+        "split": [
+          ".",
+          ""
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "/",
+      "posix": {
+        "absolute": true,
+        "clean": "/",
+        "leaf": "",
+        "native": "/",
+        "split": [
+          "/",
+          ""
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "/",
+        "leaf": "",
+        "native": "\\",
+        "split": [
+          "/",
+          ""
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "//",
+      "posix": {
+        "absolute": true,
+        "clean": "/",
+        "leaf": "",
+        "native": "//",
+        "split": [
+          "/",
+          ""
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "/",
+        "leaf": "",
+        "native": "\\\\",
+        "split": [
+          "/",
+          ""
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "/a/b/",
+      "posix": {
+        "absolute": true,
+        "clean": "/a/b",
+        "leaf": "",
+        "native": "/a/b/",
+        "split": [
+          "/a/b",
+          ""
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "/a/b",
+        "leaf": "",
+        "native": "\\a\\b\\",
+        "split": [
+          "/a/b",
+          ""
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "/a//b/./c/..",
+      "posix": {
+        "absolute": true,
+        "clean": "/a/b",
+        "leaf": "..",
+        "native": "/a//b/./c/..",
+        "split": [
+          "/a//b/./c",
+          ".."
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "/a/b",
+        "leaf": "..",
+        "native": "\\a\\\\b\\.\\c\\..",
+        "split": [
+          "/a//b/./c",
+          ".."
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "a/../..",
+      "posix": {
+        "absolute": false,
+        "clean": "..",
+        "leaf": "..",
+        "native": "a/../..",
+        "split": [
+          "a/..",
+          ".."
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "..",
+        "leaf": "..",
+        "native": "a\\..\\..",
+        "split": [
+          "a/..",
+          ".."
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "../a",
+      "posix": {
+        "absolute": false,
+        "clean": "../a",
+        "leaf": "a",
+        "native": "../a",
+        "split": [
+          "..",
+          "a"
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "../a",
+        "leaf": "a",
+        "native": "..\\a",
+        "split": [
+          "..",
+          "a"
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "./",
+      "posix": {
+        "absolute": false,
+        "clean": ".",
+        "leaf": "",
+        "native": "./",
+        "split": [
+          ".",
+          ""
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": ".",
+        "leaf": "",
+        "native": ".\\",
+        "split": [
+          ".",
+          ""
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "/..",
+      "posix": {
+        "absolute": true,
+        "clean": "/..",
+        "leaf": "..",
+        "native": "/..",
+        "split": [
+          "/",
+          ".."
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "/",
+        "leaf": "..",
+        "native": "\\..",
+        "split": [
+          "/",
+          ".."
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "/../a",
+      "posix": {
+        "absolute": true,
+        "clean": "/../a",
+        "leaf": "a",
+        "native": "/../a",
+        "split": [
+          "/..",
+          "a"
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "/a",
+        "leaf": "a",
+        "native": "\\..\\a",
+        "split": [
+          "/..",
+          "a"
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "/a/../..",
+      "posix": {
+        "absolute": true,
+        "clean": "/..",
+        "leaf": "..",
+        "native": "/a/../..",
+        "split": [
+          "/a/..",
+          ".."
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "/",
+        "leaf": "..",
+        "native": "\\a\\..\\..",
+        "split": [
+          "/a/..",
+          ".."
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "C:\\",
+      "posix": {
+        "absolute": false,
+        "clean": "C:\\",
+        "leaf": "C:\\",
+        "native": "C:\\",
+        "split": [
+          ".",
+          "C:\\"
+        ]
+      },
+      "windows": {
+        "absolute": true,
+        "clean": "C:/",
+        "leaf": "",
+        "native": "C:\\",
+        "split": [
+          "C:/",
+          ""
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": "c:/",
+      "posix": {
+        "absolute": false,
+        "clean": "c:",
+        "leaf": "",
+        "native": "c:/",
+        "split": [
+          "c:",
+          ""
+        ]
+      },
+      "windows": {
+        "absolute": true,
+        "clean": "c:/",
+        "leaf": "",
+        "native": "c:\\",
+        "split": [
+          "c:/",
+          ""
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": "C:",
+      "posix": {
+        "absolute": false,
+        "clean": "C:",
+        "leaf": "C:",
+        "native": "C:",
+        "split": [
+          ".",
+          "C:"
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "C:",
+        "leaf": "C:",
+        "native": "C:",
+        "split": [
+          ".",
+          "C:"
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "C:work",
+      "posix": {
+        "absolute": false,
+        "clean": "C:work",
+        "leaf": "C:work",
+        "native": "C:work",
+        "split": [
+          ".",
+          "C:work"
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "C:work",
+        "leaf": "C:work",
+        "native": "C:work",
+        "split": [
+          ".",
+          "C:work"
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "C:\\work\\..\\..",
+      "posix": {
+        "absolute": false,
+        "clean": "C:\\work\\..\\..",
+        "leaf": "C:\\work\\..\\..",
+        "native": "C:\\work\\..\\..",
+        "split": [
+          ".",
+          "C:\\work\\..\\.."
+        ]
+      },
+      "windows": {
+        "absolute": true,
+        "clean": "C:/",
+        "leaf": "..",
+        "native": "C:\\work\\..\\..",
+        "split": [
+          "C:/work/..",
+          ".."
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": "C:/a/./b/",
+      "posix": {
+        "absolute": false,
+        "clean": "C:/a/b",
+        "leaf": "",
+        "native": "C:/a/./b/",
+        "split": [
+          "C:/a/./b",
+          ""
+        ]
+      },
+      "windows": {
+        "absolute": true,
+        "clean": "C:/a/b",
+        "leaf": "",
+        "native": "C:\\a\\.\\b\\",
+        "split": [
+          "C:/a/./b",
+          ""
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": "\\\\server\\share",
+      "posix": {
+        "absolute": false,
+        "clean": "\\\\server\\share",
+        "leaf": "\\\\server\\share",
+        "native": "\\\\server\\share",
+        "split": [
+          ".",
+          "\\\\server\\share"
+        ]
+      },
+      "windows": {
+        "absolute": true,
+        "clean": "//server/share",
+        "leaf": "",
+        "native": "\\\\server\\share",
+        "split": [
+          "//server",
+          "share"
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": "//server/share/",
+      "posix": {
+        "absolute": true,
+        "clean": "/server/share",
+        "leaf": "",
+        "native": "//server/share/",
+        "split": [
+          "//server/share",
+          ""
+        ]
+      },
+      "windows": {
+        "absolute": true,
+        "clean": "//server/share",
+        "leaf": "",
+        "native": "\\\\server\\share\\",
+        "split": [
+          "//server/share",
+          ""
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": "//server",
+      "posix": {
+        "absolute": true,
+        "clean": "/server",
+        "leaf": "server",
+        "native": "//server",
+        "split": [
+          "/",
+          "server"
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "//server",
+        "leaf": "server",
+        "native": "\\\\server",
+        "split": [
+          "/",
+          "server"
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "//server/",
+      "posix": {
+        "absolute": true,
+        "clean": "/server",
+        "leaf": "",
+        "native": "//server/",
+        "split": [
+          "//server",
+          ""
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "//server",
+        "leaf": "",
+        "native": "\\\\server\\",
+        "split": [
+          "//server",
+          ""
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "\\\\?\\C:\\x",
+      "posix": {
+        "absolute": false,
+        "clean": "\\\\?\\C:\\x",
+        "leaf": "\\\\?\\C:\\x",
+        "native": "\\\\?\\C:\\x",
+        "split": [
+          ".",
+          "\\\\?\\C:\\x"
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "//?/C:/x",
+        "leaf": "x",
+        "native": "\\\\?\\C:\\x",
+        "split": [
+          "//?/C:",
+          "x"
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": "\\\\.\\pipe",
+      "posix": {
+        "absolute": false,
+        "clean": "\\\\.\\pipe",
+        "leaf": "\\\\.\\pipe",
+        "native": "\\\\.\\pipe",
+        "split": [
+          ".",
+          "\\\\.\\pipe"
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "//./pipe",
+        "leaf": "",
+        "native": "\\\\.\\pipe",
+        "split": [
+          "//.",
+          "pipe"
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": "\\work",
+      "posix": {
+        "absolute": false,
+        "clean": "\\work",
+        "leaf": "\\work",
+        "native": "\\work",
+        "split": [
+          ".",
+          "\\work"
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "/work",
+        "leaf": "work",
+        "native": "\\work",
+        "split": [
+          "/",
+          "work"
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "//server/share/../..",
+      "posix": {
+        "absolute": true,
+        "clean": "/",
+        "leaf": "..",
+        "native": "//server/share/../..",
+        "split": [
+          "//server/share/..",
+          ".."
+        ]
+      },
+      "windows": {
+        "absolute": true,
+        "clean": "//server/share",
+        "leaf": "..",
+        "native": "\\\\server\\share\\..\\..",
+        "split": [
+          "//server/share/..",
+          ".."
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": "x//y/",
+      "posix": {
+        "absolute": false,
+        "clean": "x/y",
+        "leaf": "",
+        "native": "x//y/",
+        "split": [
+          "x//y",
+          ""
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "x/y",
+        "leaf": "",
+        "native": "x\\\\y\\",
+        "split": [
+          "x//y",
+          ""
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "/a/b/..",
+      "posix": {
+        "absolute": true,
+        "clean": "/a",
+        "leaf": "..",
+        "native": "/a/b/..",
+        "split": [
+          "/a/b",
+          ".."
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "/a",
+        "leaf": "..",
+        "native": "\\a\\b\\..",
+        "split": [
+          "/a/b",
+          ".."
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "D:/x/../../y",
+      "posix": {
+        "absolute": false,
+        "clean": "y",
+        "leaf": "y",
+        "native": "D:/x/../../y",
+        "split": [
+          "D:/x/../..",
+          "y"
+        ]
+      },
+      "windows": {
+        "absolute": true,
+        "clean": "D:/y",
+        "leaf": "y",
+        "native": "D:\\x\\..\\..\\y",
+        "split": [
+          "D:/x/../..",
+          "y"
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": "\\\\server\\share\\dir\\..",
+      "posix": {
+        "absolute": false,
+        "clean": "\\\\server\\share\\dir\\..",
+        "leaf": "\\\\server\\share\\dir\\..",
+        "native": "\\\\server\\share\\dir\\..",
+        "split": [
+          ".",
+          "\\\\server\\share\\dir\\.."
+        ]
+      },
+      "windows": {
+        "absolute": true,
+        "clean": "//server/share",
+        "leaf": "..",
+        "native": "\\\\server\\share\\dir\\..",
+        "split": [
+          "//server/share/dir",
+          ".."
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": ".",
+      "posix": {
+        "absolute": false,
+        "clean": ".",
+        "leaf": ".",
+        "native": ".",
+        "split": [
+          ".",
+          "."
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": ".",
+        "leaf": ".",
+        "native": ".",
+        "split": [
+          ".",
+          "."
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "..",
+      "posix": {
+        "absolute": false,
+        "clean": "..",
+        "leaf": "..",
+        "native": "..",
+        "split": [
+          ".",
+          ".."
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "..",
+        "leaf": "..",
+        "native": "..",
+        "split": [
+          ".",
+          ".."
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "a/./b",
+      "posix": {
+        "absolute": false,
+        "clean": "a/b",
+        "leaf": "b",
+        "native": "a/./b",
+        "split": [
+          "a/.",
+          "b"
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "a/b",
+        "leaf": "b",
+        "native": "a\\.\\b",
+        "split": [
+          "a/.",
+          "b"
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "/../..",
+      "posix": {
+        "absolute": true,
+        "clean": "/../..",
+        "leaf": "..",
+        "native": "/../..",
+        "split": [
+          "/..",
+          ".."
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "/",
+        "leaf": "..",
+        "native": "\\..\\..",
+        "split": [
+          "/..",
+          ".."
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "a/..",
+      "posix": {
+        "absolute": false,
+        "clean": ".",
+        "leaf": "..",
+        "native": "a/..",
+        "split": [
+          "a",
+          ".."
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": ".",
+        "leaf": "..",
+        "native": "a\\..",
+        "split": [
+          "a",
+          ".."
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "../..",
+      "posix": {
+        "absolute": false,
+        "clean": "../..",
+        "leaf": "..",
+        "native": "../..",
+        "split": [
+          "..",
+          ".."
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "../..",
+        "leaf": "..",
+        "native": "..\\..",
+        "split": [
+          "..",
+          ".."
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "a/b/../../..",
+      "posix": {
+        "absolute": false,
+        "clean": "..",
+        "leaf": "..",
+        "native": "a/b/../../..",
+        "split": [
+          "a/b/../..",
+          ".."
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "..",
+        "leaf": "..",
+        "native": "a\\b\\..\\..\\..",
+        "split": [
+          "a/b/../..",
+          ".."
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "/a/./../b",
+      "posix": {
+        "absolute": true,
+        "clean": "/b",
+        "leaf": "b",
+        "native": "/a/./../b",
+        "split": [
+          "/a/./..",
+          "b"
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "/b",
+        "leaf": "b",
+        "native": "\\a\\.\\..\\b",
+        "split": [
+          "/a/./..",
+          "b"
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "C:/..",
+      "posix": {
+        "absolute": false,
+        "clean": ".",
+        "leaf": "..",
+        "native": "C:/..",
+        "split": [
+          "C:",
+          ".."
+        ]
+      },
+      "windows": {
+        "absolute": true,
+        "clean": "C:/",
+        "leaf": "..",
+        "native": "C:\\..",
+        "split": [
+          "C:/",
+          ".."
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": "C:/../x",
+      "posix": {
+        "absolute": false,
+        "clean": "x",
+        "leaf": "x",
+        "native": "C:/../x",
+        "split": [
+          "C:/..",
+          "x"
+        ]
+      },
+      "windows": {
+        "absolute": true,
+        "clean": "C:/x",
+        "leaf": "x",
+        "native": "C:\\..\\x",
+        "split": [
+          "C:/..",
+          "x"
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": "//server/share/a/../../..",
+      "posix": {
+        "absolute": true,
+        "clean": "/",
+        "leaf": "..",
+        "native": "//server/share/a/../../..",
+        "split": [
+          "//server/share/a/../..",
+          ".."
+        ]
+      },
+      "windows": {
+        "absolute": true,
+        "clean": "//server/share",
+        "leaf": "..",
+        "native": "\\\\server\\share\\a\\..\\..\\..",
+        "split": [
+          "//server/share/a/../..",
+          ".."
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": "\\\\server\\share\\a",
+      "posix": {
+        "absolute": false,
+        "clean": "\\\\server\\share\\a",
+        "leaf": "\\\\server\\share\\a",
+        "native": "\\\\server\\share\\a",
+        "split": [
+          ".",
+          "\\\\server\\share\\a"
+        ]
+      },
+      "windows": {
+        "absolute": true,
+        "clean": "//server/share/a",
+        "leaf": "a",
+        "native": "\\\\server\\share\\a",
+        "split": [
+          "//server/share",
+          "a"
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": "Ä/ß",
+      "posix": {
+        "absolute": false,
+        "clean": "Ä/ß",
+        "leaf": "ß",
+        "native": "Ä/ß",
+        "split": [
+          "Ä",
+          "ß"
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "Ä/ß",
+        "leaf": "ß",
+        "native": "Ä\\ß",
+        "split": [
+          "Ä",
+          "ß"
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "/a/b\\c",
+      "posix": {
+        "absolute": true,
+        "clean": "/a/b\\c",
+        "leaf": "b\\c",
+        "native": "/a/b\\c",
+        "split": [
+          "/a",
+          "b\\c"
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "/a/b/c",
+        "leaf": "c",
+        "native": "\\a\\b\\c",
+        "split": [
+          "/a/b",
+          "c"
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "/workspace/example",
+      "posix": {
+        "absolute": true,
+        "clean": "/workspace/example",
+        "leaf": "example",
+        "native": "/workspace/example",
+        "split": [
+          "/workspace",
+          "example"
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "/workspace/example",
+        "leaf": "example",
+        "native": "\\workspace\\example",
+        "split": [
+          "/workspace",
+          "example"
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "/workspace/example-work-one/",
+      "posix": {
+        "absolute": true,
+        "clean": "/workspace/example-work-one",
+        "leaf": "",
+        "native": "/workspace/example-work-one/",
+        "split": [
+          "/workspace/example-work-one",
+          ""
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "/workspace/example-work-one",
+        "leaf": "",
+        "native": "\\workspace\\example-work-one\\",
+        "split": [
+          "/workspace/example-work-one",
+          ""
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "C:/Work/Example",
+      "posix": {
+        "absolute": false,
+        "clean": "C:/Work/Example",
+        "leaf": "Example",
+        "native": "C:/Work/Example",
+        "split": [
+          "C:/Work",
+          "Example"
+        ]
+      },
+      "windows": {
+        "absolute": true,
+        "clean": "C:/Work/Example",
+        "leaf": "Example",
+        "native": "C:\\Work\\Example",
+        "split": [
+          "C:/Work",
+          "Example"
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": "c:\\work\\example\\",
+      "posix": {
+        "absolute": false,
+        "clean": "c:\\work\\example\\",
+        "leaf": "c:\\work\\example\\",
+        "native": "c:\\work\\example\\",
+        "split": [
+          ".",
+          "c:\\work\\example\\"
+        ]
+      },
+      "windows": {
+        "absolute": true,
+        "clean": "c:/work/example",
+        "leaf": "",
+        "native": "c:\\work\\example\\",
+        "split": [
+          "c:/work/example",
+          ""
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": "//Server/Share/Example",
+      "posix": {
+        "absolute": true,
+        "clean": "/Server/Share/Example",
+        "leaf": "Example",
+        "native": "//Server/Share/Example",
+        "split": [
+          "//Server/Share",
+          "Example"
+        ]
+      },
+      "windows": {
+        "absolute": true,
+        "clean": "//Server/Share/Example",
+        "leaf": "Example",
+        "native": "\\\\Server\\Share\\Example",
+        "split": [
+          "//Server/Share",
+          "Example"
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": "/a/😀",
+      "posix": {
+        "absolute": true,
+        "clean": "/a/😀",
+        "leaf": "😀",
+        "native": "/a/😀",
+        "split": [
+          "/a",
+          "😀"
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "/a/😀",
+        "leaf": "😀",
+        "native": "\\a\\😀",
+        "split": [
+          "/a",
+          "😀"
+        ]
+      },
+      "windows_shaped": false
+    },
+    {
+      "path": "C:/😀/../x",
+      "posix": {
+        "absolute": false,
+        "clean": "C:/x",
+        "leaf": "x",
+        "native": "C:/😀/../x",
+        "split": [
+          "C:/😀/..",
+          "x"
+        ]
+      },
+      "windows": {
+        "absolute": true,
+        "clean": "C:/x",
+        "leaf": "x",
+        "native": "C:\\😀\\..\\x",
+        "split": [
+          "C:/😀/..",
+          "x"
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": "\\\\server\\share\\",
+      "posix": {
+        "absolute": false,
+        "clean": "\\\\server\\share\\",
+        "leaf": "\\\\server\\share\\",
+        "native": "\\\\server\\share\\",
+        "split": [
+          ".",
+          "\\\\server\\share\\"
+        ]
+      },
+      "windows": {
+        "absolute": true,
+        "clean": "//server/share",
+        "leaf": "",
+        "native": "\\\\server\\share\\",
+        "split": [
+          "//server/share",
+          ""
+        ]
+      },
+      "windows_shaped": true
+    },
+    {
+      "path": "relative/../x/./y",
+      "posix": {
+        "absolute": false,
+        "clean": "x/y",
+        "leaf": "y",
+        "native": "relative/../x/./y",
+        "split": [
+          "relative/../x/.",
+          "y"
+        ]
+      },
+      "windows": {
+        "absolute": false,
+        "clean": "x/y",
+        "leaf": "y",
+        "native": "relative\\..\\x\\.\\y",
+        "split": [
+          "relative/../x/.",
+          "y"
+        ]
+      },
+      "windows_shaped": false
+    }
+  ],
+  "prefill_target": [
+    {
+      "answer": "/workspace/example",
+      "canonical": "",
+      "catalog": {
+        "common_dir": "/workspace/example/.git",
+        "path": "/workspace/example-work-one",
+        "selected_root": "/workspace/example-work-one",
+        "state": "ok",
+        "worktrees": [
+          {
+            "available": true,
+            "kind": "main",
+            "path": "/workspace/example"
+          },
+          {
+            "available": true,
+            "kind": "linked",
+            "path": "/workspace/example-work-one"
+          }
+        ]
+      },
+      "folder": "/workspace/example-work-one",
+      "host": "",
+      "project": {
+        "folders": [
+          {
+            "machine": "",
+            "path": "/workspace/example"
+          }
+        ],
+        "id": "p",
+        "name": "Example"
+      },
+      "style": "posix"
+    },
+    {
+      "answer": "/workspace/example",
+      "canonical": "",
+      "catalog": {
+        "common_dir": "/workspace/example/.git",
+        "path": "/workspace/example-work-one",
+        "selected_root": "/workspace/example-work-one",
+        "state": "ok",
+        "worktrees": [
+          {
+            "available": true,
+            "kind": "main",
+            "path": "/workspace/example"
+          },
+          {
+            "available": true,
+            "kind": "linked",
+            "path": "/workspace/example-work-one"
+          }
+        ]
+      },
+      "folder": "/workspace/example-work-one",
+      "host": "",
+      "project": null,
+      "style": "posix"
+    },
+    {
+      "answer": "/workspace",
+      "canonical": "",
+      "catalog": {
+        "common_dir": "/workspace/example/.git",
+        "path": "/workspace/example-work-one",
+        "selected_root": "/workspace/example-work-one",
+        "state": "ok",
+        "worktrees": [
+          {
+            "available": true,
+            "kind": "main",
+            "path": "/workspace/example"
+          },
+          {
+            "available": true,
+            "kind": "linked",
+            "path": "/workspace/example-work-one"
+          }
+        ]
+      },
+      "folder": "/workspace/example-work-one/src",
+      "host": "",
+      "project": {
+        "folders": [
+          {
+            "machine": "",
+            "path": "/workspace"
+          }
+        ],
+        "id": "p",
+        "name": "Example"
+      },
+      "style": "posix"
+    },
+    {
+      "answer": null,
+      "canonical": "",
+      "catalog": {
+        "common_dir": "/workspace/example/.git",
+        "path": "/workspace/example-work-one",
+        "selected_root": "/workspace/example-work-one",
+        "stale": true,
+        "state": "ok",
+        "worktrees": [
+          {
+            "available": true,
+            "kind": "main",
+            "path": "/workspace/example"
+          },
+          {
+            "available": true,
+            "kind": "linked",
+            "path": "/workspace/example-work-one"
+          }
+        ]
+      },
+      "folder": "/workspace/example-work-one",
+      "host": "",
+      "project": null,
+      "style": "posix"
+    },
+    {
+      "answer": null,
+      "canonical": "",
+      "catalog": {
+        "common_dir": "/workspace/example/.git",
+        "partial": true,
+        "path": "/workspace/example-work-one",
+        "selected_root": "/workspace/example-work-one",
+        "state": "ok",
+        "worktrees": [
+          {
+            "available": true,
+            "kind": "main",
+            "path": "/workspace/example"
+          },
+          {
+            "available": true,
+            "kind": "linked",
+            "path": "/workspace/example-work-one"
+          }
+        ]
+      },
+      "folder": "/workspace/example-work-one",
+      "host": "",
+      "project": null,
+      "style": "posix"
+    },
+    {
+      "answer": null,
+      "canonical": "",
+      "catalog": {
+        "common_dir": "",
+        "path": "/workspace/example-work-one",
+        "selected_root": "/workspace/example-work-one",
+        "state": "ok",
+        "worktrees": [
+          {
+            "available": true,
+            "kind": "main",
+            "path": "/workspace/example"
+          },
+          {
+            "available": true,
+            "kind": "linked",
+            "path": "/workspace/example-work-one"
+          }
+        ]
+      },
+      "folder": "/workspace/example-work-one",
+      "host": "",
+      "project": null,
+      "style": "posix"
+    },
+    {
+      "answer": null,
+      "canonical": "",
+      "catalog": {
+        "common_dir": "/workspace/example/.git",
+        "path": "/workspace/example-work-one",
+        "selected_root": "/workspace/example-work-one",
+        "state": "not_repo",
+        "worktrees": [
+          {
+            "available": true,
+            "kind": "main",
+            "path": "/workspace/example"
+          },
+          {
+            "available": true,
+            "kind": "linked",
+            "path": "/workspace/example-work-one"
+          }
+        ]
+      },
+      "folder": "/workspace/example-work-one",
+      "host": "",
+      "project": null,
+      "style": "posix"
+    },
+    {
+      "answer": null,
+      "canonical": "",
+      "catalog": {
+        "common_dir": "/workspace/example/.git",
+        "path": "/workspace/example",
+        "selected_root": "/workspace/example",
+        "state": "ok",
+        "worktrees": [
+          {
+            "available": true,
+            "kind": "main",
+            "path": "/workspace/example"
+          },
+          {
+            "available": true,
+            "kind": "linked",
+            "path": "/workspace/example-work-one"
+          }
+        ]
+      },
+      "folder": "/workspace/example",
+      "host": "",
+      "project": null,
+      "style": "posix"
+    },
+    {
+      "answer": null,
+      "canonical": "",
+      "catalog": {
+        "common_dir": "/workspace/example/.git",
+        "path": "/workspace/example-work-one",
+        "selected_root": "/workspace/example-work-one",
+        "state": "ok",
+        "worktrees": [
+          {
+            "available": true,
+            "kind": "main",
+            "path": "/workspace/example"
+          },
+          {
+            "available": true,
+            "kind": "main",
+            "path": "/workspace/other"
+          },
+          {
+            "available": true,
+            "kind": "linked",
+            "path": "/workspace/example-work-one"
+          }
+        ]
+      },
+      "folder": "/workspace/example-work-one",
+      "host": "",
+      "project": null,
+      "style": "posix"
+    },
+    {
+      "answer": "/workspace/example",
+      "canonical": "/workspace/example-work-one",
+      "catalog": {
+        "common_dir": "/workspace/example/.git",
+        "path": "/workspace/example-work-one",
+        "selected_root": "/workspace/example-work-one",
+        "state": "ok",
+        "worktrees": [
+          {
+            "available": true,
+            "kind": "main",
+            "path": "/workspace/example"
+          },
+          {
+            "available": true,
+            "kind": "linked",
+            "path": "/workspace/example-work-one"
+          }
+        ]
+      },
+      "folder": "/alias/one",
+      "host": "",
+      "project": null,
+      "style": "posix"
+    },
+    {
+      "answer": null,
+      "canonical": "",
+      "catalog": {
+        "common_dir": "/workspace/example/.git",
+        "path": "/workspace/example-work-one",
+        "selected_root": "/workspace/example-work-one",
+        "state": "ok",
+        "worktrees": [
+          {
+            "available": true,
+            "kind": "main",
+            "path": "/workspace/example"
+          },
+          {
+            "available": true,
+            "kind": "linked",
+            "path": "/workspace/example-work-one"
+          }
+        ]
+      },
+      "folder": "/alias/one",
+      "host": "",
+      "project": null,
+      "style": "posix"
+    },
+    {
+      "answer": null,
+      "canonical": "",
+      "catalog": {
+        "common_dir": "/workspace/example/.git",
+        "path": "/workspace/example-work-one",
+        "selected_root": "/workspace/example-work-one",
+        "state": "ok",
+        "worktrees": [
+          {
+            "available": false,
+            "kind": "main",
+            "path": "/workspace/example"
+          },
+          {
+            "available": true,
+            "kind": "linked",
+            "path": "/workspace/example-work-one"
+          }
+        ]
+      },
+      "folder": "/workspace/example-work-one",
+      "host": "",
+      "project": null,
+      "style": "posix"
+    },
+    {
+      "answer": null,
+      "canonical": "",
+      "catalog": {
+        "common_dir": "/workspace/example/.git",
+        "path": "/workspace/example-work-one",
+        "selected_root": "/workspace/example-work-one",
+        "state": "ok",
+        "worktrees": [
+          {
+            "available": true,
+            "kind": "main",
+            "path": "workspace/example"
+          },
+          {
+            "available": true,
+            "kind": "linked",
+            "path": "/workspace/example-work-one"
+          }
+        ]
+      },
+      "folder": "/workspace/example-work-one",
+      "host": "",
+      "project": null,
+      "style": "posix"
+    },
+    {
+      "answer": "C:/Work",
+      "canonical": "",
+      "catalog": {
+        "common_dir": "C:/Work/repo/.git",
+        "selected_root": "C:\\Work\\repo-wt",
+        "state": "ok",
+        "worktrees": [
+          {
+            "available": true,
+            "kind": "main",
+            "path": "C:\\Work\\Repo"
+          },
+          {
+            "available": true,
+            "kind": "linked",
+            "path": "c:/work/repo-wt/"
+          }
+        ]
+      },
+      "folder": "c:\\work\\repo-wt\\src",
+      "host": "",
+      "project": {
+        "folders": [
+          {
+            "machine": "",
+            "path": "C:/Work"
+          }
+        ],
+        "id": "p",
+        "name": "Example"
+      },
+      "style": "windows"
+    },
+    {
+      "answer": "/workspace/example",
+      "canonical": "",
+      "catalog": {
+        "common_dir": "/workspace/example/.git",
+        "path": "/workspace/example-work-one",
+        "selected_root": "/workspace/example-work-one",
+        "state": "ok",
+        "worktrees": [
+          {
+            "available": true,
+            "kind": "main",
+            "path": "/workspace/example"
+          },
+          {
+            "available": true,
+            "kind": "linked",
+            "path": "/workspace/example-work-one"
+          }
+        ]
+      },
+      "folder": "/workspace/example-work-one",
+      "host": "",
+      "project": {
+        "folders": [
+          {
+            "machine": "mac",
+            "path": "/workspace/example"
+          }
+        ],
+        "id": "p",
+        "name": "Example"
+      },
+      "style": "posix"
+    },
+    {
+      "answer": null,
+      "canonical": "",
+      "catalog": "not an object",
+      "folder": "/workspace/example-work-one",
+      "host": "",
+      "project": null,
+      "style": "posix"
+    }
+  ],
+  "restored_folder": [
+    {
+      "answer": [
+        "/a",
+        true
+      ],
+      "plan": {
+        "auto": true,
+        "source": "/a",
+        "target": "/b"
+      }
+    },
+    {
+      "answer": [
+        "/b-work",
+        false
+      ],
+      "plan": {
+        "auto": true,
+        "source": "/a",
+        "target": "/b-work",
+        "worktree_done": true
+      }
+    },
+    {
+      "answer": [
+        "/clone",
+        true
+      ],
+      "plan": {
+        "auto": true,
+        "clone_done": true,
+        "source": "/a",
+        "target": "/clone"
+      }
+    },
+    {
+      "answer": [
+        "/b",
+        false
+      ],
+      "plan": {
+        "auto": false,
+        "target": "/b"
+      }
+    },
+    {
+      "answer": [
+        "/b",
+        false
+      ],
+      "plan": {
+        "source": 7,
+        "target": "/b"
+      }
+    },
+    {
+      "answer": [
+        "",
+        false
+      ],
+      "plan": {
+        "auto": "yes",
+        "source": "",
+        "target": "/b"
+      }
+    },
+    {
+      "answer": [
+        "",
+        false
+      ],
+      "plan": {}
+    }
+  ],
+  "styles": [
+    {
+      "local": true,
+      "platform": null,
+      "style": "build"
+    },
+    {
+      "local": true,
+      "platform": "",
+      "style": "build"
+    },
+    {
+      "local": true,
+      "platform": "windows",
+      "style": "windows"
+    },
+    {
+      "local": true,
+      "platform": "linux",
+      "style": "posix"
+    },
+    {
+      "local": true,
+      "platform": "macos",
+      "style": "posix"
+    },
+    {
+      "local": false,
+      "platform": null,
+      "style": "posix"
+    },
+    {
+      "local": false,
+      "platform": "",
+      "style": "posix"
+    },
+    {
+      "local": false,
+      "platform": "windows",
+      "style": "posix"
+    },
+    {
+      "local": false,
+      "platform": "linux",
+      "style": "posix"
+    },
+    {
+      "local": false,
+      "platform": "macos",
+      "style": "posix"
+    }
+  ],
+  "version": 1
+}

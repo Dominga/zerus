@@ -237,7 +237,11 @@ export interface MachinesView {
   loaded: boolean; refreshing: boolean; error: string | null; local: string; environment_override: boolean;
   machines: MachineRow[]; effective: Effective | null; check: CheckResult | null; busy: boolean;
 }
-export interface Folder { id: string; name: string; path: string; computer: string; machine: string }
+export interface Folder {
+  id: string; name: string; path: string; computer: string; machine: string;
+  /** The computer's identity, "" for none (New session lists an identified folder's computer only when it is configured). */
+  machine_id?: string;
+}
 export interface Project { id: string; name: string; color: string | null; accessible: boolean; is_default: boolean; palette: number; folders: Folder[] }
 export interface ProjectsView {
   loaded: boolean; refreshing: boolean; status: string; status_error: boolean; conflicts: number;
@@ -299,6 +303,8 @@ export interface NewSessionFormInput {
   project: LaunchProject | null;
   /** This computer "" or the alias, as the project's folders name it. */
   host: string;
+  /** This computer's machine card: the core derives `can_enable_local_sessions` from it. */
+  local?: MachineMeta | null;
 }
 export interface NewSessionFormView { shown: LaunchShown; automatic_available: boolean; automatic_path: string; project_worktree: boolean }
 /** What Start does (core `launch::Start`). */
@@ -325,6 +331,8 @@ export interface LaunchPlan {
 export interface NewSessionContext {
   branch: string;
   own_windows_session: number | null;
+  /** The platform this client was built for: this computer's folder style before it reports a platform. */
+  build_style: PathStyle;
   remembered: { agent: string; accounts: Record<string, Record<string, string>>; open_terminal: boolean };
 }
 export interface RepositoryFields {

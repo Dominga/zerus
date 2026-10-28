@@ -21,6 +21,9 @@ pub struct Folder {
     /// The Computer column: `machine_name`, else `machine` (ProjectsDialog.cpp:303).
     pub computer: String,
     pub machine: String,
+    /// The computer's identity, empty for none: New session lists a folder's
+    /// computer that has one only when it is configured (NewSessionDialog 495).
+    pub machine_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -122,6 +125,7 @@ fn folder(value: &Value) -> Folder {
             machine_name
         },
         machine,
+        machine_id: text(value, "machine_id"),
         path,
     }
 }
@@ -269,6 +273,7 @@ mod tests {
             folders,
             [("sample-project", "workstation"), ("Docs", "Windows lab")]
         );
+        assert_eq!(view.projects[0].folders[1].machine_id, "m-4");
         assert_eq!(view.unconnected, ["build-01"]);
         assert_eq!(
             view.notice.as_deref(),

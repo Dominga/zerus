@@ -337,7 +337,7 @@ export function createActions(
     }
   }
 
-  return { perform, end, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices: list, dismiss, loadReadMarks, observeBatch };
+  return { perform, end, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices: list, dismiss, notify, loadReadMarks, observeBatch };
 }
 
 type FollowSource = { target(): { id: string } | undefined; summary(): Record<string, unknown> | undefined; loaded(): boolean; ended(): boolean; error(): unknown };
@@ -358,5 +358,5 @@ let selection: () => Selection = () => ({});
 export function bindSelection(source: () => Selection) { selection = source; }
 
 const app = createActions(appCatalog, (computer) => !computerOffline(computer), () => selection());
-export const { perform, end, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices, dismiss, loadReadMarks, observeBatch } = app;
+export const { perform, end, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices, dismiss, notify, loadReadMarks, observeBatch } = app;
 void loadReadMarks();

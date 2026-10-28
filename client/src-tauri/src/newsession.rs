@@ -442,6 +442,9 @@ pub struct Context {
     pub branch: String,
     /// This process's Windows session; None off Windows.
     pub own_windows_session: Option<u64>,
+    /// The platform this client was built for (`paths::build`): this
+    /// computer's folder style before it reports a platform.
+    pub build_style: Style,
     pub remembered: Remembered,
 }
 
@@ -450,6 +453,7 @@ pub fn context() -> Context {
     Context {
         branch: launch::generated_branch(&uuid::Uuid::new_v4().simple().to_string()),
         own_windows_session: launch::own_windows_session(),
+        build_style: paths::build(),
         remembered: Remembered {
             agent: String::new(),
             accounts: json!({}),
@@ -477,6 +481,10 @@ pub struct FormInput {
     /// This computer "" or the alias, as the project's folders name it.
     #[serde(default)]
     pub host: String,
+    /// This computer's machine card: with it, `can_enable_local_sessions`
+    /// is derived here (`LocalSessionHost::canEnable`, 729).
+    #[serde(default)]
+    pub local: Option<MachineMeta>,
 }
 
 /// The form's state with what the core derived for it.
@@ -496,7 +504,11 @@ fn derived(input: FormInput) -> Form {
         verified,
         project,
         host,
+        local,
     } = input;
+    if let Some(local) = &local {
+        form.can_enable_local_sessions = launch::can_enable_local_sessions(local);
+    }
     form.automatic_available = launch::automatic_worktree_available(
         &catalog,
         &form.path,
@@ -1024,6 +1036,7 @@ mod tests {
                 }],
             }),
             host: String::new(),
+            local: None,
         }
     }
 
@@ -1076,6 +1089,33 @@ mod tests {
         assert_eq!(new_session_start(busy, false), Start::Nothing);
     }
 
+    // updateForm 727-730: without a computer, a Windows console with a session
+    // host is told to enable local sessions; the view passes its card.
+    #[test]
+    fn the_form_derives_the_local_sessions_hint_from_this_computers_card() {
+        let mut none = input("", Value::Null, Value::Null);
+        none.form.no_machine = true;
+        let mut console = windows("stopped", None);
+        console.local_sessions = Some(false);
+        let mut with_card = none.clone();
+        with_card.local = Some(console.clone());
+        assert_eq!(
+            form_view(with_card).shown.notice.as_deref(),
+            Some(launch::ENABLE_OR_REMOTE)
+        );
+        assert_eq!(
+            form_view(none.clone()).shown.notice.as_deref(),
+            Some(launch::REMOTE_ONLY)
+        );
+        console.platform = Some("linux".into());
+        let mut linux = none;
+        linux.local = Some(console);
+        assert_eq!(
+            form_view(linux).shown.notice.as_deref(),
+            Some(launch::REMOTE_ONLY)
+        );
+    }
+
     #[test]
     fn a_dialog_starts_with_a_generated_branch_and_qt_defaults() {
         let first = context();
@@ -1093,6 +1133,7 @@ mod tests {
             }
         );
         assert_eq!(first.own_windows_session, launch::own_windows_session());
+        assert_eq!(first.build_style, paths::build());
     }
 
     #[test]

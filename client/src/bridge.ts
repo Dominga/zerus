@@ -264,6 +264,11 @@ export const newSessionForm = (input: NewSessionFormInput) => desktop<NewSession
 export const newSessionStart = (input: NewSessionFormInput, submitted: boolean) => desktop<LaunchStart>("new_session_start", { input, submitted });
 /** The plan at the click: the form's fields and what the core derives from them come from `input`, as Start reads them. */
 export const newSessionPlan = (input: NewSessionFormInput, choices: LaunchChoices) => desktop<LaunchPlan>("new_session_plan", { input, choices });
+/**
+ * Background creation's admission (Task 5's `creation_submit`): the admitted creation's id; a rejection is the
+ * refusal's text, which the dialog shows. Never retried.
+ */
+export const creationSubmit = (plan: LaunchPlan) => desktop<string>("creation_submit", { plan });
 /** The Windows-session warning's text when Start must ask first; `computer` is "" for this one. */
 export const launchWarning = (local: MachineMeta, computer: ComputerId) => desktop<string | null>("launch_warning", { local, computer });
 /** The repository fields; `fresh` (the old record's folder name, kept even when empty) starts them anew on another computer or style. */

@@ -49,6 +49,8 @@ Project and folder edits go through the organization stream's edit Controller (Q
 
 **Rules the core already has are called, never rewritten in TypeScript.** The form's derived state, Start, the plan, repository fields, the Windows warning, creation captions and details go through commands. TypeScript holds only what Qt keeps in its views: account ranking and labels, model lists, row building, card visibility and the request bookkeeping.
 
+One scoped exception (coordinator ruling, 2026-10-28): the pure path rules of `paths.rs` (`absolute`, `clean`, `same`, `within`, `leaf`, `native`, `split`, `join`, `windows_shaped`, and the style with the build platform) and three helpers of `launch.rs` (`matching_project_folder`, `prefill_target`, `restored_folder`) are ported line for line to `client/src/ui/sessions/paths.ts`. Qt changes the dialog's folder synchronously (`selectPath` → `loadFolders` → `updateWorktrees` in one turn), and its tests depend on the reset and fill in the same turn. The shared golden fixture `client/core/tests/fixtures/folder-paths.json` pins both copies: `client/core/tests/folder_paths.rs` checks the core's answers and `paths.test.ts` the port's.
+
 **Tech Stack:** Rust 1.99.1 (`client/core`, `client/src-tauri`, Tauri 2; `tauri-plugin-dialog` 2 for the local folder picker, ruling D3), SolidJS 1.9 + TypeScript + Vite, vitest, Python 3 stdlib for the fake `hgs`.
 
 **Base:** branch `work-1a04708c-newsession`, cut from `origin/integrate/client-core-2` at `0eaeb07f`. That integration (PR #424) carries N1-N3 and W1 (`f64925cc`, `a149081c`, `b86f7914`, `875cc6b1`, `91af1c07`). It is now at `f104a9b5`: `0eaeb07f` plus a draft import. This plan needs no rebase onto it.
@@ -212,6 +214,8 @@ client/src/store/newSession.ts (+test)       the open dialog: state, reads, tick
 client/src/store/creations.ts (+test)        creations, notices, card selection and reveal, withCreations, the status menu
 client/src/ui/sessions/newsession-ui.ts (+test)  rows: computers, projects, folders, accounts; usage text; folderLaunchProblem
 client/src/ui/sessions/opencode-models.ts (+test)  OpenCodeModels and the picker's list rules, OpenCodeEffort
+client/src/ui/sessions/paths.ts (+test)      the port of paths.rs and three launch.rs folder helpers (the scoped exception)
+client/core/tests/folder_paths.rs, tests/fixtures/folder-paths.json  the shared golden fixture both copies check
 client/src/ui/sessions/NewSessionDialog.tsx  the dialog and the Windows warning
 client/src/ui/sessions/ModelPicker.tsx       OpenCode's grouped picker and its popover
 client/src/ui/sessions/WorktreePicker.tsx    Choose an existing worktree (WorktreePanel, picker mode)
@@ -392,19 +396,25 @@ Rules:
 ## Task 2: the dialog store and its rules
 
 **Files:**
-- Create `client/src/store/newSession.ts` (+test), `client/src/ui/sessions/newsession-ui.ts` (+test), `client/src/ui/sessions/opencode-models.ts` (+test).
-- Touch points: `client/src/store/projects.ts` (`requestedProject`, `requestProject`), `client/src/store/actions.ts` (export `notify`), `client/src/store/catalog.ts` (`gitRoot`, `cwdCanonical`).
+- Create `client/src/store/newSession.ts` (+test), `client/src/ui/sessions/newsession-ui.ts` (+test), `client/src/ui/sessions/opencode-models.ts` (+test), `client/src/ui/sessions/paths.ts` (+test).
+- Create the shared fixture `client/core/tests/fixtures/folder-paths.json` and its core test `client/core/tests/folder_paths.rs` (regenerate with `cargo test --test folder_paths -- --ignored`).
+- Touch points: `client/src/store/projects.ts` (`requestedProject`, `requestProject`), `client/src/store/actions.ts` (export `notify`), `client/src/store/catalog.ts` and `client/src/ui/sessions/types.ts` (`gitRoot`, `cwdCanonical`), `client/src/bridge.ts` (`creationSubmit`, Task 5's `creation_submit`).
+- Rust, additive:
+  - `newsession.rs`: `Context.build_style` (`paths::build`, this computer's style before it reports a platform) and `FormInput.local` (this computer's card, from which the command derives `can_enable_local_sessions`, `LocalSessionHost::canEnable` 729);
+  - `views/projects.rs`: `Folder.machine_id`, so the computer list adds an identified folder's computer only when it is configured (495).
 
 **Interfaces:**
 
 ```ts
 export interface NewSessionOptions { agent?: string; project?: string; computer?: string; folder?: string; path?: string; account?: string | null; recipe?: Record<string, unknown> }
-export function openNewSession(options?: NewSessionOptions): void;        // SessionsWindow::showNewSession (2895-2928)
-export function openFolderSession(project: string, folder: Folder): void; // ProjectsDialog::newFolderSession (533-541)
-export function selectedHostTarget(): string;                             // SessionsWindow::selectedHostTarget (3128-3131)
-export const newSession: () => NewSessionState | undefined;               // one dialog at a time
-export function closeNewSession(): void;                                  // reject (476)
+export function openNewSession(options?: NewSessionOptions): Promise<void>;           // SessionsWindow::showNewSession (2895-2928); computer defaults to selectedHostTarget()
+export function openFolderSession(project: string, folder: Folder): Promise<string>; // ProjectsDialog::newFolderSession (533-541): "" when it opens, else the status text
+export function selectedHostTarget(): string;                                        // SessionsWindow::selectedHostTarget (3128-3131)
+export const newSession: () => NewSessionState | undefined;                          // one dialog at a time
+export const newSessionActions: NewSessionActions;                                   // the controls' slots, no-ops without a dialog
+export function closeNewSession(): void;                                             // reject (476)
 export function startNewSession(confirm: (text: string) => Promise<boolean>): Promise<void>;
+export function onCreationAdmitted(listener: (id: string, plan: LaunchPlan) => void): () => void; // store/creations.ts reveals the card
 ```
 
 The state mirrors `NewSessionDialog.h:98-175`; drop only the members of the foreground path (ruling D2).
@@ -467,7 +477,7 @@ Rules (each with its Qt lines; port the logic, not the widget code):
   - favorites: one request per star and late answers ignored; after a confirmed change, the computer's other folders' catalogs are dropped (423-453, 1306-1313);
   - the picker's All models ask (328-337);
   - "Use native default model" (338).
-- **The form:** the store assembles `FormInput` from its state and keeps the latest `FormView` for the latest revision.
+- **The form:** the store assembles `FormInput` from its state and keeps the latest `FormView` for the latest revision. The account status ("Loading accounts…", "Could not load accounts: %1", "Could not start OpenCode: %1") stays its own line beside Refresh, as Qt's `launchAccountStatus` label.
   - The error line takes `shown.notice` when there is one, which drops the error shown before (core `Shown.notice`, 719-731).
   - Otherwise it shows the last transient error: a refused admission, a favorite failure, "Worktree created at %1 on %2. Select that folder to start a session.", and the account status texts.
 - **Start** (`startNewSession`, 743-786):
@@ -958,7 +968,7 @@ New modules owned by this plan:
 
 **Trivial and additive, done in this plan** (the events stream reviews the core lines in the PR):
 - **G1:** `ViewRow.git_root`, `ViewRow.cwd_canonical` (`view.rs`) and `Details.cwd_canonical` (`details.rs`). The prefill uses the canonical folder (2924), and the worktree picker counts sessions by them (`WorktreePanel.h:135-139`).
-- **G2:** `ProjectsView.swarm_id` (`views/projects.rs`), the swarm the folder check's project inference must match (2922, 355-361).
+- **G2:** `ProjectsView.swarm_id` (`views/projects.rs`), the swarm the folder check's project inference must match (2922, 355-361); `Folder.machine_id` (Task 2), the folder's computer identity that `loadMachines` reads (495).
 - **G3:** `views::accounts::launchable` public (this computer without a platform takes the build's, `MachinePlatform::of`), `host_profiles(entry, catalog, state, agents)` returning one computer's launchable profiles with their raw rows, and `refresh_groups`, for `launch_accounts`.
 - **G4:** `launch::own_windows_session()`, this process's Windows session (`ProcessIdToSessionId`, `LocalSessionHost.cpp`; windows-sys feature `Win32_System_RemoteDesktop`), None on other systems. `other_windows_session` takes it as `own`.
 
@@ -999,6 +1009,8 @@ New modules owned by this plan:
 
 ## Owner rulings and deviations from Qt
 
+Ruled by the coordinator on 2026-10-28 (Task 2): option B, the scoped port of the pure path rules and the three folder helpers to `paths.ts`, pinned by a shared golden fixture that a core Rust test and vitest both check, with `Context.build_style` added in Rust; `creationSubmit(plan)` in `bridge.ts` calling `creation_submit` (Task 5 registers it), and a hook in `newSession.ts` that hands the admitted id to `store/creations.ts`.
+
 Ruled by the design session on 2026-10-28, verbatim:
 > D1 yes, the creation cards (rows, progress, Continue/Check/Stop/Hide/Edit, the status menu) go in the same milestone PR, since without them an admitted creation is invisible; D2 yes, five launch options now, the executor-only "Project changed…" path arrives with the Tasks view; D3 approved: the official tauri-plugin-dialog, Rust side only, pinned in Cargo.toml and Cargo.lock, with the license check passing (scripts/collect-licenses.py if it covers src-tauri, say which check), the dialog opened from Rust, never by giving the webview the plugin's JS permission; D4 approved: "Default, Favorite, Free" and "{provider} (this folder)"; D5 yes, keep " (offline)".
 
@@ -1024,6 +1036,8 @@ Deviations from Qt:
 4. The remembered launch choices live in the events core settings store under Qt's key names, never in QSettings (webui rule 4). Until that store is on the base, they are not remembered.
 5. The dot separators of ruling D4, and of D6 once ruled.
 6. Creation cards under a search query: kept in place when their details match (D6), since the client has no separate search results list.
+7. The folder path rules and three folder helpers have a TypeScript copy (`paths.ts`), the scoped exception above; the shared fixture keeps it equal to the core.
+8. The dialog keeps at most 64 verified worktree catalogs (Qt keeps them for the dialog's life without a bound).
 
 ## Order and handoff
 

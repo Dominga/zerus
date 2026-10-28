@@ -4,7 +4,8 @@ import { MachineLabel } from "../components/MachineLabel";
 import type { Project } from "../../types";
 import { projectsPage } from "../../store/projects";
 import { setMenu, type MenuEntry } from "../../store/ui";
-import { COPY_ACTIONS, NEW_SESSION, PROJECT_EDITING, WORKTREE_FLOWS } from "./reasons";
+import { NEW_SESSION, PROJECT_EDITING, WORKTREE_FLOWS } from "./reasons";
+import { copy } from "../../store/actions";
 import { nextSort, projectColor, shownProjects, sortFolders, type Sort, type SortColumn } from "./projects-ui";
 
 // Projects (ProjectsDialog.cpp), ported from design/webui/src/screens/Projects.tsx:
@@ -45,7 +46,8 @@ export function ProjectsScreen() {
     setMenu({ x: e.clientX, y: e.clientY, items: [
       disabled("New session…", "plus", NEW_SESSION),
       disabled("Open folder", "folder-open", PROJECT_EDITING),
-      disabled("Copy folder path", "copy", COPY_ACTIONS),
+      // ProjectsDialog.cpp:565-566: always enabled, copies the path the row shows.
+      { label: "Copy folder path", icon: "copy", hint: project()?.folders[index]?.path, action: () => { const path = project()?.folders[index]?.path; if (path) void copy(path); } },
       { separator: true },
       { heading: "Copy to" },
       ...others.map((p) => disabled(p.name, "folder", PROJECT_EDITING)),

@@ -5,4 +5,3 @@ export const ACCOUNT_MANAGEMENT = "Arrives with account management.";
 export const PROJECT_EDITING = "Arrives with project editing.";
 export const NEW_SESSION = "Arrives with the New session dialog.";
 export const WORKTREE_FLOWS = "Arrives with the worktree flows.";
-export const COPY_ACTIONS = "Arrives with the copy actions.";

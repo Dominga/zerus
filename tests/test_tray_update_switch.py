@@ -126,6 +126,13 @@ class Switch(Fixture):
         with self.assertRaisesRegex(updater.UpdateError, 'symbolic links'):
             updater.snapshot(self.root / 'again', roots)
 
+    def test_a_half_deleted_bundle_has_no_kind(self):
+        half = self.bundle('half', 'qt')
+        (half / 'Contents/Info.plist').unlink()
+        self.assertIsNone(updater.bundle_kind(half))
+        self.assertIsNone(updater.bundle_kind(self.root / 'missing.app'))
+        self.assertEqual(updater.bundle_kind(self.bundle('client', 'tauri')), 'tauri')
+
     def test_the_slot_keeps_qt_only_after_the_switch(self):
         self.assertTrue(updater.keeps_slot('tauri', 'qt', 'tauri'))
         for kinds in (('qt', 'qt', 'tauri'), ('tauri', 'tauri', 'tauri'), ('tauri', None, 'tauri'),
@@ -161,15 +168,18 @@ class Switch(Fixture):
             with mock.patch.object(updater, 'MAC', True):
                 with self.assertRaisesRegex(updater.UpdateError, 'needs the live update'):
                     updater.check_replace(client, installed)
+                # The installer's guard before a live update: the switch itself is the updater's.
+                self.assertEqual(updater.check_replace(client, installed, live=True), 0)
             self.assertEqual(updater.check_replace(built, self.root / 'missing.app'), 0, 'nothing installed yet')
 
     def test_settings_changes_separate_qt_keys_from_cocoa_keys(self):
         before = {'attention.observed': b'{}', 'workspace.reduceMotion': False, 'NSStatusItem Preferred Position Item-0': 900.0}
         after = {'attention.observed': b'{"x":1}', 'NSStatusItem Preferred Position Item-0': 880.0,
-                 'NSStatusItem Visible Item-0': True, 'surprise.key': 1}
+                 'NSStatusItem Visible Item-0': True, 'surprise.key': 1, 'WebContinuousSpellCheckingEnabled': True}
         self.assertEqual(updater.settings_changes(before, after),
                          (['attention.observed', 'workspace.reduceMotion'], ['surprise.key'],
-                          ['NSStatusItem Preferred Position Item-0', 'NSStatusItem Visible Item-0']))
+                          ['NSStatusItem Preferred Position Item-0', 'NSStatusItem Visible Item-0',
+                           'WebContinuousSpellCheckingEnabled']))
         self.assertEqual(updater.settings_changes(before, dict(before)), ([], [], []))
 
     def test_the_switch_keeps_and_checks_qt_settings_through_defaults(self):
@@ -185,7 +195,7 @@ class Switch(Fixture):
         self.assertEqual(updater.settings_report(),
                          ([], ['Cocoa settings written since the switch: NSStatusItem Visible Item-0, NSWindow Frame main']))
         domain.write_bytes(plistlib.dumps({'attention.observed': b'{"changed":1}'}))
-        problems, _ = updater.settings_report(rollback=True)
+        problems, _ = updater.settings_report(before_qt=True)
         self.assertIn('Qt settings changed or missing: attention.observed', problems[0])
         self.assertIn(f'defaults import com.hgdev.hgs-tray {updater.SETTINGS_SNAPSHOT}', problems[1])
 
@@ -222,6 +232,200 @@ class SlotAndRestore(Fixture):
         self.assertEqual((previous / 'Contents/MacOS/hgs-tray').read_text(), 'qt')
         log = (self.root / 'lsregister.log').read_text().splitlines()
         self.assertEqual(log, [f'-u {previous}', f'-f {installed}'])
+
+
+class UpdateFlow(Fixture):
+    """update() with MAC=True on any host: processes, launchd and codesign are
+    stubbed, so the slot, the restore and the settings checks run as on a Mac."""
+
+    def setUp(self):
+        super().setUp()
+        self.installed = self.root / 'Applications/hgs-tray.app'
+        self.slot = updater.ROLLBACK / 'hgs-tray.app'
+        self.running = True
+        # wait_started answers, in order; 200 once they run out.
+        self.starts = []
+        self.events = []
+        # What Qt or the client writes into the settings domain when it starts.
+        self.on_start = None
+        stubs = {
+            'MAC': True,
+            'run': lambda *a, **k: '',
+            'build_info': lambda path: {'version': '0.47.0', 'versionName': self.variant(path), 'devBuildNumber': 1413},
+            'gui_pids': lambda installed: [100] if self.running else [],
+            'quit_gui': lambda pid, installed: self.events.append('quit'),
+            'socket_path': lambda pid: None,
+            'native': dict,
+            'start': self.start,
+            'wait_started': lambda installed, path, old: self.starts.pop(0) if self.starts else 200,
+            'stop_started': lambda installed: None,
+            'running_image_matches': lambda pid, installed: True,
+            'provenance': lambda *a: None,
+        }
+        for name, value in stubs.items():
+            patcher = mock.patch.object(updater, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def start(self, installed):
+        self.events.append(('start', self.variant(installed)))
+        if self.on_start:
+            self.on_start()
+
+    def variant(self, path):
+        return (Path(path) / 'Contents/MacOS/hgs-tray').read_text()
+
+    def bundle(self, name, kind, identifier=TEST_ID):
+        app = self.root / 'bundles' / name / 'hgs-tray.app'
+        return app if app.exists() else super().bundle(name, kind, identifier)
+
+    def install(self, name, kind, path):
+        shutil.copytree(self.bundle(name, kind), path)
+
+    def domain(self, values):
+        (self.root / 'domain.plist').write_bytes(plistlib.dumps(values))
+
+    def test_a_client_that_does_not_start_brings_back_the_client_it_replaced(self):
+        self.install('client-1', 'tauri', self.installed)
+        self.install('qt', 'qt', self.slot)
+        self.starts = [None]
+        with self.assertRaisesRegex(updater.UpdateError, 'did not start; the previous GUI was restored'):
+            updater.update(self.bundle('client-2', 'tauri'), self.installed)
+        self.assertEqual(self.variant(self.installed), 'client-1', 'the replaced client, not the Qt copy')
+        self.assertEqual(self.variant(self.slot), 'qt', 'Qt stays the rollback copy')
+
+    def test_a_rollback_that_does_not_start_keeps_the_qt_copy(self):
+        self.install('client', 'tauri', self.installed)
+        self.install('qt', 'qt', self.slot)
+        self.starts = [None]
+        with self.assertRaisesRegex(updater.UpdateError, 'did not start; the previous GUI was restored'):
+            updater.roll_back_installed(self.installed)
+        self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('client', 'qt'))
+
+    def test_a_rollback_takes_the_slot_only_once_qt_runs(self):
+        self.install('client', 'tauri', self.installed)
+        self.install('qt', 'qt', self.slot)
+        self.assertEqual(updater.roll_back_installed(self.installed), 0)
+        self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('qt', 'client'))
+        self.assertEqual(updater.ROLLBACK.stat().st_mode & 0o777, 0o700)
+        self.assertIn(f'-u {self.slot}', (self.root / 'lsregister.log').read_text().splitlines())
+
+    def test_an_interrupted_rollback_keeps_the_qt_copy_and_the_client(self):
+        self.install('client', 'tauri', self.installed)
+        self.install('qt', 'qt', self.slot)
+        self.running = False
+        rename = os.rename
+
+        def interrupted(source, target, *args, **kwargs):
+            if Path(target) == self.installed and Path(source).parent.name.startswith('.hgs-tray-update-'):
+                raise KeyboardInterrupt
+            return rename(source, target, *args, **kwargs)
+
+        with mock.patch.object(updater.os, 'rename', interrupted), self.assertRaises(KeyboardInterrupt):
+            updater.roll_back_installed(self.installed)
+        self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('client', 'qt'))
+        self.assertEqual(list(self.installed.parent.glob('.hgs-tray-update-*')), [])
+
+    def test_an_install_over_nothing_leaves_the_slot_alone(self):
+        self.install('qt', 'qt', self.slot)
+        self.running = False
+        self.assertEqual(updater.update(self.bundle('client', 'tauri'), self.installed), 0)
+        self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('client', 'qt'))
+
+    def test_leaving_the_client_for_qt_checks_settings_before_qt_starts(self):
+        updater.ROLLBACK.mkdir(parents=True)
+        updater.SETTINGS_SNAPSHOT.write_bytes(plistlib.dumps({'attention.observed': b'{}'}))
+        for how, self.running in (('rollback', True), ('install', True), ('rollback', False), ('install', False)):
+            with self.subTest(how=how, running=self.running):
+                shutil.rmtree(self.installed, ignore_errors=True)
+                shutil.rmtree(self.slot, ignore_errors=True)
+                self.install('client', 'tauri', self.installed)
+                self.install('qt', 'qt', self.slot)
+                # The client changed a Qt key; Qt rewrites it as soon as it starts.
+                self.domain({'attention.observed': b'{"client":1}'})
+                self.on_start = lambda: self.domain({'attention.observed': b'{}'})
+                outcome = 'the new GUI runs, but ' if self.running else 'the new GUI is installed, but '
+                with self.assertRaisesRegex(updater.UpdateError, outcome + 'Qt settings changed or missing: attention.observed') as raised:
+                    if how == 'rollback':
+                        updater.roll_back_installed(self.installed)
+                    else:
+                        updater.update(self.bundle('qt-new', 'qt'), self.installed)
+                self.assertIn('defaults import com.hgdev.hgs-tray', str(raised.exception))
+                self.assertEqual(self.variant(self.installed), 'qt' if how == 'rollback' else 'qt-new')
+
+    def test_a_switch_to_the_client_checks_settings_once_it_runs(self):
+        self.install('qt', 'qt', self.installed)
+        self.domain({'attention.observed': b'{}'})
+        # The client writes a Qt key after it starts: the switch-time copy shows it.
+        self.on_start = lambda: self.domain({'attention.observed': b'{"client":1}'})
+        with self.assertRaisesRegex(updater.UpdateError, 'Qt settings changed or missing: attention.observed') as raised:
+            updater.update(self.bundle('client', 'tauri'), self.installed)
+        self.assertNotIn('defaults import', str(raised.exception), 'no restore line while the client runs')
+        self.assertTrue(updater.SETTINGS_SNAPSHOT.exists())
+
+    def test_qt_may_write_its_settings_once_it_runs_again(self):
+        updater.ROLLBACK.mkdir(parents=True)
+        updater.SETTINGS_SNAPSHOT.write_bytes(plistlib.dumps({'attention.observed': b'{}'}))
+        self.install('client', 'tauri', self.installed)
+        self.install('qt', 'qt', self.slot)
+        self.domain({'attention.observed': b'{}'})
+        self.on_start = lambda: self.domain({'attention.observed': b'{"qt":1}'})
+        self.assertEqual(updater.roll_back_installed(self.installed), 0)
+
+    def test_a_stopped_rollback_takes_the_slot_too(self):
+        self.install('client', 'tauri', self.installed)
+        self.install('qt', 'qt', self.slot)
+        self.running = False
+        self.assertEqual(updater.roll_back_installed(self.installed), 0)
+        self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('qt', 'client'))
+        self.assertEqual(self.events, [])
+
+    def test_an_update_interrupted_twice_keeps_its_copies(self):
+        # The new GUI cannot move in and the old one cannot move back: the
+        # update's folder is all that is left, so it stays.
+        self.install('client-1', 'tauri', self.installed)
+        self.install('qt', 'qt', self.slot)
+        self.running = False
+        rename = os.rename
+
+        def interrupted(source, target, *args, **kwargs):
+            if Path(target) == self.installed:
+                raise KeyboardInterrupt
+            return rename(source, target, *args, **kwargs)
+
+        with mock.patch.object(updater.os, 'rename', interrupted), self.assertRaises(KeyboardInterrupt):
+            updater.update(self.bundle('client-2', 'tauri'), self.installed)
+        self.assertFalse(self.installed.exists())
+        [folder] = self.installed.parent.glob('.hgs-tray-update-*')
+        self.assertEqual((self.variant(folder / 'hgs-tray.app'), self.variant(folder / 'previous/hgs-tray.app')),
+                         ('client-2', 'client-1'))
+        self.assertEqual(self.variant(self.slot), 'qt')
+
+    def test_rolling_back_to_the_client_again_does_not_report_qt_writes(self):
+        # After a rollback Qt ran and wrote its keys; going back to the client is a new switch.
+        updater.ROLLBACK.mkdir(parents=True)
+        updater.SETTINGS_SNAPSHOT.write_bytes(plistlib.dumps({'attention.observed': b'{}'}))
+        self.install('qt', 'qt', self.installed)
+        self.install('client', 'tauri', self.slot)
+        self.domain({'attention.observed': b'{"qt":1}'})
+        self.assertEqual(updater.roll_back_installed(self.installed), 0)
+        self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('client', 'qt'))
+
+    def test_symbolic_links_are_never_rolled_back(self):
+        self.install('client', 'tauri', self.installed)
+        updater.ROLLBACK.mkdir(parents=True)
+        self.slot.symlink_to(self.bundle('elsewhere', 'qt'))
+        with self.assertRaisesRegex(updater.UpdateError, 'symbolic link'):
+            updater.roll_back_installed(self.installed)
+        self.assertEqual(self.variant(self.installed), 'client')
+        self.slot.unlink()
+        self.install('qt', 'qt', self.slot)
+        shutil.rmtree(self.installed)
+        self.installed.symlink_to(self.bundle('linked', 'tauri'))
+        with self.assertRaisesRegex(updater.UpdateError, 'symbolic link'):
+            updater.roll_back_installed(self.installed)
+        self.assertTrue(self.installed.is_symlink())
+        self.assertEqual(self.variant(self.slot), 'qt')
 
 
 if __name__ == '__main__':

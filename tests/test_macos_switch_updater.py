@@ -41,6 +41,14 @@ class MacSwitch(unittest.TestCase):
             patcher = mock.patch.object(updater, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # The live path would quit and start the real com.hgdev.hgs-tray agent.
+        def refuse(*args):
+            raise AssertionError('the live path must not run in this test')
+        for name, value in {'gui_pids': lambda installed: [], 'quit_gui': refuse, 'start': refuse,
+                            'stop_started': refuse}.items():
+            patcher = mock.patch.object(updater, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.installed = self.root / 'Applications/hgs-tray.app'
 
     def bundle(self, name, kind, number=1413):

@@ -395,6 +395,7 @@ mod tests {
                 dismiss_prompt: true,
             },
             Action::CompactContext,
+            Action::StartFresh,
         ] {
             assert_eq!(Lane::of(&action), Lane::Write);
         }

@@ -103,7 +103,8 @@ export type Action =
   | { kind: "resume" }
   | { kind: "rename"; new_name: string; archive_id: string | null }
   | { kind: "archive" }
-  | { kind: "terminate" };
+  | { kind: "terminate" }
+  | { kind: "kill" };
 
 export interface WorktreeCleanup { status: string; path: string; common_dir: string; reason?: string | null }
 
@@ -120,6 +121,12 @@ export interface Details {
   resume_message_can_send: boolean;
   allowed_actions: string[] | null;
   action_reasons: Record<string, string>;
+  /** The host can interrupt this turn (Stop). */
+  interrupt_supported: boolean;
+  /** The turn an interrupt is pinned to. */
+  turn_started: number;
+  /** The inspected phase ("" when not reported). */
+  phase: string;
 }
 
 /** A read mark whose delivery is still pending (client/core `readmarks.rs`). */

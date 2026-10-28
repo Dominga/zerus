@@ -4,8 +4,9 @@ import { listRows } from "./sessions/model";
 import { orderedRows } from "../store/catalog";
 import { selectedKey, setSelectedKey } from "../store/ui";
 import { activity } from "../store/session";
-import { perform } from "../store/actions";
-import type { Action, RowOut } from "../types";
+import { end, perform } from "../store/actions";
+import { snapshotOf, terminateCopy, type ActionRow } from "./sessions/actions-ui";
+import type { Action, Outcome } from "../types";
 import { inTauri, metrics, pumpStats } from "../bridge";
 import { restoreSettings, setSetting } from "../store/settings";
 import type { ScenarioResult } from "../perf/scenarios";
@@ -274,10 +275,11 @@ async function autoRun(config: PerfConfig) {
 // `?actions-smoke=1` (ZERUS_CLIENT_QUERY=actions-smoke=1, with ZERUS_CLIENT_PERF
 // set to any value but auto so that exit_app is allowed) is the end-to-end check
 // of the guarded actions: with ZERUS_CLIENT_REPLAY supplying the catalog and
-// ZERUS_CLIENT_HGS a fake hgs, it runs pause, resume, rename, archive and
-// terminate once each on the replay session through `perform`, then exits 0
-// (1 when an outcome failed). The Terminate dialog's confirmation is the click
-// that calls `perform`, so the check calls it directly.
+// ZERUS_CLIENT_HGS a fake hgs, it selects the replay session (its details come
+// from the Activity state value, or one inspect), runs pause, resume, rename,
+// archive, the end call the Terminate dialog picks for it through the
+// dialog's confirmation (`end`), then the other end call (terminate or kill)
+// once each, and exits 0 (1 when an outcome failed).
 const SMOKE_SESSION = "claude/sample-project/review";
 const SMOKE_RENAMED = "claude/sample-project/review-renamed";
 
@@ -288,23 +290,26 @@ async function actionsSmoke(allowed: boolean) {
     return;
   }
   try {
-    await until(() => orderedRows().some((s) => s.name === SMOKE_SESSION && s.view?.run_id), 30_000, "the replay session did not appear");
-    const entry = (): RowOut => {
+    await until(() => orderedRows().some((s) => s.name === SMOKE_SESSION && s.runId), 30_000, "the replay session did not appear");
+    const row = (): ActionRow => {
       const s = orderedRows().find((r) => r.name === SMOKE_SESSION);
-      if (!s?.view) throw new Error("the replay session is gone");
-      return { computer: s.computer, key: s.catalogKey, row: s.view };
+      if (!s) throw new Error("the replay session is gone");
+      return snapshotOf(s);
     };
-    const steps: Action[] = [
-      { kind: "pause" },
-      { kind: "resume" },
-      { kind: "rename", new_name: SMOKE_RENAMED, archive_id: null },
-      { kind: "archive" },
-      { kind: "terminate" },
+    setSelectedKey(row().key);
+    const chosen = terminateCopy(row()).action;
+    log(`actions-smoke end call the Terminate dialog picks: ${chosen}`);
+    const steps: [string, () => Promise<Outcome>][] = [
+      ...([{ kind: "pause" }, { kind: "resume" }, { kind: "rename", new_name: SMOKE_RENAMED, archive_id: null }, { kind: "archive" }] as Action[])
+        .map((action): [string, () => Promise<Outcome>] => [action.kind, () => perform(row(), action)]),
+      [chosen, () => end(row(), chosen)],
+      ...(["terminate", "kill"] as const).filter((kind) => kind !== chosen)
+        .map((kind): [string, () => Promise<Outcome>] => [kind, () => perform(row(), { kind })]),
     ];
     let bad = 0;
-    for (const action of steps) {
-      const out = await perform(entry(), action);
-      log(`actions-smoke ${action.kind}: ${out.outcome}${out.outcome === "failed" ? ` (${out.detail})` : ""}`);
+    for (const [kind, step] of steps) {
+      const out = await step();
+      log(`actions-smoke ${kind}: ${out.outcome}${out.outcome === "failed" ? ` (${out.detail})` : ""}`);
       if (out.outcome === "failed") bad++;
     }
     await exit(bad ? 1 : 0);

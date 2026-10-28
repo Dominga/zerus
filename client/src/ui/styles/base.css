@@ -230,9 +230,12 @@
   .toast.error { border-color: color-mix(in srgb, var(--z-color-danger) 45%, transparent); }
   .toast.warn { border-color: var(--z-color-border); }
   .toast .dismiss { float: right; margin: -4px -6px 0 8px; }
+  .toast .note { white-space: pre-line; }
   .dlg-input { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-sm); background: var(--z-color-pane); }
   .dlg-error { margin-top: 6px; color: var(--z-color-danger); font-size: var(--fs-sm); }
   .dlg-detail { margin-top: 8px; color: var(--z-color-dim); font-size: var(--fs-sm); }
+  .dlg-detail.dlg-context { margin-top: 0; }
+  .dlg-label { display: block; margin: 12px 0 4px; font-size: var(--fs-sm); font-weight: 500; }
 
   /* Skeleton and empty states */
   /* The shimmer moves by transform, not background-position, so no frame

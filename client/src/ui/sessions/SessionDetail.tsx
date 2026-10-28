@@ -4,8 +4,9 @@ import { ActivityView, columnStyle } from "./Activity";
 import { AgentBadge, MachineBadge, statusOf, folderOf } from "./SessionCard";
 import { selected, setMenu, subagentOpen, toast, type MenuEntry } from "../../store/ui";
 import { activity } from "../../store/session";
-import { detailsFor } from "../../store/actions";
-import { actionEntries, entryOf } from "./ActionDialogs";
+import { computerOffline } from "../../store/catalog";
+import { detailsFor, type Followed } from "../../store/actions";
+import { actionEntries } from "./ActionDialogs";
 
 // The session header and its Activity, after design/webui SessionDetail. The
 // composer, Terminal, Processes and the side panel move in with later phases;
@@ -33,26 +34,31 @@ const copy = (text: string, what: string) => {
 function Header() {
   const s = () => selected()!;
   const tone = () => (statusOf(s()) === "attention" ? "attention" : statusOf(s()));
-  const act = createMemo(() => {
-    const entry = entryOf(s());
-    return actionEntries(s(), entry ? detailsFor(entry) : undefined);
-  });
+  // Details come from the followed session's Activity state value; the store
+  // inspects only once that subscription answered without one.
+  const followed = (): Followed => {
+    const mine = activity.target()?.id === s().key;
+    const value = mine ? activity.summary() : undefined;
+    return { value, settled: mine && (value !== undefined || activity.loaded() || activity.ended() || !!activity.error()) };
+  };
+  const details = createMemo(() => detailsFor(s(), !computerOffline(s().computer), followed()));
+  const act = createMemo(() => actionEntries(s(), details()));
   const actions = (): MenuEntry[] => [
     { label: "Open folder", icon: "folder-open", disabled: true },
     { label: "Open shell in session folder", icon: "square-terminal", disabled: true },
     { label: "Copy session name", icon: "copy", action: () => copy(s().name, "The session name is on the clipboard") },
     { separator: true },
-    act()?.rename ?? { label: "Rename…", icon: "pencil", disabled: true },
+    act().rename,
     { label: "Fork session…", icon: "git-fork", disabled: true },
     { separator: true },
     { label: "Copy connect command", icon: "link", disabled: true },
-    act()?.change ?? { label: "Pause session", icon: "pause", disabled: true },
-    ...(act()?.stop && !act()!.stop.disabled ? [act()!.stop] : []),
-    ...(act()?.markRead ? [act()!.markRead] : []),
+    act().change,
+    ...(act().stop.disabled ? [] : [act().stop]),
+    act().markRead,
     { separator: true },
     { label: "Clear session…", icon: "clear", disabled: true },
-    ...(act() ? (act()!.archive ? [act()!.archive!] : []) : [{ label: "Move to archive", icon: "archive", disabled: true }]),
-    act()?.end ?? { label: "Terminate session…", icon: "circle-stop", danger: true, disabled: true },
+    ...(act().archive ? [act().archive!] : []),
+    act().end,
   ];
   return (
     <header class="detail-head">
@@ -61,15 +67,13 @@ function Header() {
         <Show when={s().computer !== "" && statusOf(s()) === "working" && !activity.loaded()}><span class="busy-arc" title="Waiting for the remote read" /></Show>
         <span class="grow" />
         <span class={`hbadge t-${tone()}`}>{headerCaption()}</span>
-        <Show when={act()}>
-          {(a) => (
-            <>
-              <Show when={!a().stop.disabled}><button class="icon-btn" data-tip="Stop the current turn" onClick={() => a().stop.action()}><Icon name="circle-stop" size={16} /></button></Show>
-              <button class="icon-btn" data-tip={a().change.hint ?? a().change.label} disabled={a().change.disabled} aria-label={a().change.label}
-                onClick={() => a().change.action()}><Icon name={a().change.icon!} size={16} /></button>
-            </>
-          )}
+        {/* Qt's composer Stop: shown while the turn works, enabled when the host can interrupt it. */}
+        <Show when={act().stop.shown}>
+          <button class="icon-btn" data-tip={act().stop.hint ?? "Stop the current turn"} aria-label="Stop the current turn" disabled={act().stop.disabled}
+            onClick={() => act().stop.action()}><Icon name="circle-stop" size={16} /></button>
         </Show>
+        <button class="icon-btn" data-tip={act().change.hint ?? act().change.label} disabled={act().change.disabled} aria-label={act().change.label}
+          onClick={() => act().change.action()}><Icon name={act().change.icon!} size={16} /></button>
         <button class="icon-btn" data-tip="Open session folder in file manager" disabled><Icon name="folder-open" size={16} /></button>
         <button class="icon-btn" data-tip="Open shell in session folder" disabled><Icon name="square-terminal" size={16} /></button>
         <button class="icon-btn" data-tip="Copy session name" onClick={() => copy(s().name, "The session name is on the clipboard")}><Icon name="copy" size={15} /></button>

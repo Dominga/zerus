@@ -16,11 +16,20 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::sync::{Mutex, OnceLock};
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "used only by the Linux choose()")
+)]
 const DMABUF_VAR: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "used only by the Linux choose()")
+)]
 const NV_SYNC_VAR: &str = "__NV_DISABLE_EXPLICIT_SYNC";
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "used only by the Linux choose()")
+)]
 const MODE_VAR: &str = "ZERUS_CLIENT_RENDERER";
 /// The client's identifier (tauri.conf.json); its data directory is named by it.
 #[cfg(target_os = "linux")]
@@ -29,7 +38,10 @@ const IDENTIFIER: &str = "dev.zerus.next";
 pub const MARKER_FILE: &str = "renderer-marker.json";
 
 /// The environment the decision reads.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "used only by the Linux choose()")
+)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Env {
     /// `ZERUS_CLIENT_RENDERER`.
@@ -41,7 +53,10 @@ pub struct Env {
 }
 
 /// What the machine looks like.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "used only by the Linux choose()")
+)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Facts {
     pub nvidia: bool,
@@ -51,7 +66,10 @@ pub struct Facts {
 }
 
 /// The crash marker: a DMA-BUF start that has not reached a frame yet.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "used only by the Linux choose()")
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Marker {
     pub renderer: String,
@@ -59,7 +77,10 @@ pub struct Marker {
     pub written_at: u64,
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "used only by the Linux choose()")
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MarkerAction {
@@ -73,7 +94,10 @@ pub enum MarkerAction {
     Keep,
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "used only by the Linux choose()")
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Decision {
     /// `default` (WebKit's own choice), `dmabuf` or `shm`.
@@ -93,7 +117,10 @@ pub struct Decision {
 }
 
 /// The pure decision. `marker` is what the marker file holds now.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "used only by the Linux choose()")
+)]
 pub fn decide(env: &Env, facts: &Facts, marker: Option<&Marker>) -> Decision {
     let mut log = Vec::new();
     let mode = match env.mode.as_deref().map(str::trim) {

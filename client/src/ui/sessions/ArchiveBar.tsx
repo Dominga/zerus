@@ -1,8 +1,9 @@
 import { For, Show, createEffect, createSignal, on, onCleanup } from "solid-js";
+import { Portal } from "solid-js/web";
 import { Icon } from "../lib/icons";
 import { archive, buttonText } from "../../store/archive";
 import {
-  MAX_DAY, MIN_DAY, PERIODS, applyDraft, draftHint, draftValid, editDraft, pickerLabel, rangeCaption, stageDraft, type Draft, type Period,
+  MAX_DAY, MIN_DAY, PERIODS, applyDraft, draftHint, draftReversed, draftValid, editDraft, panelPlace, pickerLabel, rangeCaption, stageDraft, type Draft, type Period,
 } from "./archive-dates";
 
 // The Archive bar above the list under the Archive filter (Qt's
@@ -69,22 +70,17 @@ function DatePicker() {
     close();
     archive.setRange(out.range);
   };
+  const viewport = () => ({ width: innerWidth, height: innerHeight });
   const show = () => {
     stage(archive.range().period);
-    const r = button!.getBoundingClientRect();
-    const width = Math.min(480, innerWidth - 16);
-    setPlace({ left: Math.max(8, Math.min(r.left, innerWidth - width - 8)), top: r.bottom + 6, width });
+    setPlace(panelPlace(button!.getBoundingClientRect(), 0, viewport()));
     setOpen(true);
   };
 
   createEffect(() => {
     if (!open() || !panel || !button) return;
     // Below the button when it fits, else above it; inside the window.
-    const r = button.getBoundingClientRect();
-    const height = panel.offsetHeight;
-    const below = r.bottom + 6;
-    const top = below + height <= innerHeight - 8 ? below : r.top - height - 6;
-    setPlace((p) => ({ ...p, top: Math.max(8, Math.min(top, innerHeight - height - 8)) }));
+    setPlace(panelPlace(button.getBoundingClientRect(), panel.offsetHeight, viewport()));
     panel.querySelector<HTMLInputElement>("input")?.focus();
     // The press only closes the panel and focus returns to the picker, as Qt's popup consumes it.
     const outside = (e: MouseEvent) => {
@@ -104,9 +100,12 @@ function DatePicker() {
         <span class="ell">{rangeCaption(archive.range())}</span>
         <Icon name="chevron-down" size={14} />
       </button>
+      {/* In the page's body: a transformed list panel (the strip's peek) would otherwise place a fixed panel. */}
       <Show when={open()}>
+        <Portal>
         <div class="archive-pop" ref={panel} role="dialog" aria-label="Archived date"
           style={{ left: `${place().left}px`, top: `${place().top}px`, width: `${place().width}px` }}
+          onPointerDown={(e) => e.stopPropagation()}
           onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } }}>
           <div class="archive-pop-title">Archived date</div>
           <div class="archive-pop-body">
@@ -117,7 +116,7 @@ function DatePicker() {
               <label class="archive-pop-label" for="archive-until">Through</label>
               <input id="archive-until" class="field" type="date" min={MIN_DAY} max={MAX_DAY} aria-label="Archived through, inclusive"
                 value={draft().until} onInput={(e) => edit("until", e.currentTarget.value)} />
-              <div class="hint archive-pop-hint" classList={{ invalid: !draftValid(draft()) }}>{draftHint(draft())}</div>
+              <div class="hint archive-pop-hint" classList={{ invalid: draftReversed(draft()) }}>{draftHint(draft())}</div>
               <div class="archive-pop-actions">
                 <button type="button" class="btn primary" disabled={!draftValid(draft())} onClick={apply}>Apply range</button>
                 <button type="button" class="btn" onClick={close}>Cancel</button>
@@ -133,6 +132,7 @@ function DatePicker() {
             </div>
           </div>
         </div>
+        </Portal>
       </Show>
     </>
   );

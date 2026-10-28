@@ -6,7 +6,8 @@ import { selectedKey, setSelectedKey, setStateFilter } from "../store/ui";
 import { archive, archiveRows } from "../store/archive";
 import { activity } from "../store/session";
 import { markAllRead, markNeedsAttention, markRead } from "../store/marks";
-import { copyFolder, copyName, copyCommand, lastCopied, copyReference, end, perform, notices } from "../store/actions";
+import { copyFolder, copyName, copyCommand, detailsFor, followedFor, lastCopied, copyReference, end, perform, notices } from "../store/actions";
+import { panelPlace } from "./sessions/archive-dates";
 import { run, running, runMachine } from "../store/batch";
 import { machineEntries } from "./sessions/machine-batch";
 import { computerOffline } from "../store/catalog";
@@ -291,7 +292,9 @@ async function autoRun(config: PerfConfig) {
 // as needing attention last; `?actions-smoke=marks` then only waits for the
 // session and reports whether that review mark survived a restart. Before them it
 // switches to the Archive filter, logs the archive page's status text and row count,
-// and selects the archived row so that the details are read with `inspect --archive ID`.
+// checks that the date panel opens in the page's body at its button while the list
+// panel is transformed, and selects the archived row, waiting for its details
+// (`inspect --archive ID`).
 const SMOKE_SESSION = "claude/sample-project/review";
 const SMOKE_RENAMED = "claude/sample-project/review-renamed";
 
@@ -310,6 +313,36 @@ async function marksAfterRestart(allowed: boolean) {
   } catch (error) {
     log(`actions-smoke failed: ${String(error)}`);
     await exit(1);
+  }
+}
+
+/**
+ * Opens the Archive bar's date panel while the list panel carries a transform
+ * (as the strip's peek overlay does): the panel must be in the page's body,
+ * placed at the picker button in viewport coordinates, and Escape must close
+ * it with the focus back on the button.
+ */
+async function datePanelPlacement(): Promise<{ ok: boolean; text: string }> {
+  const list = document.querySelector<HTMLElement>(".sp-panel");
+  const picker = document.querySelector<HTMLButtonElement>(".archive-bar .archive-period");
+  if (!list || !picker) return { ok: false, text: "failed (no Archive bar)" };
+  list.style.transform = "translateX(37px)";
+  try {
+    picker.click();
+    const pop = () => document.querySelector<HTMLElement>(".archive-pop");
+    const want = () => panelPlace(picker.getBoundingClientRect(), pop()?.getBoundingClientRect().height ?? 0, { width: innerWidth, height: innerHeight });
+    const at = () => { const r = pop()?.getBoundingClientRect(); return r ? { left: r.left, top: r.top } : undefined; };
+    const placed = await until(() => { const r = at(), w = want(); return !!r && Math.abs(r.left - w.left) < 1 && Math.abs(r.top - w.top) < 1; }, 3000, "misplaced")
+      .then(() => true, () => false);
+    const outside = !!pop() && !pop()!.closest(".sp-panel");
+    const r = at(), w = want();
+    pop()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    const closed = await until(() => !pop(), 2000, "still open").then(() => true, () => false);
+    const focused = document.activeElement === picker;
+    const ok = placed && outside && closed && focused;
+    return { ok, text: `${ok ? "done" : "failed"} (in the body ${outside}, at ${r ? `${Math.round(r.left)},${Math.round(r.top)}` : "none"} for ${Math.round(w.left)},${Math.round(w.top)}, closed ${closed}, focus on the picker ${focused})` };
+  } finally {
+    list.style.transform = "";
   }
 }
 
@@ -333,14 +366,22 @@ async function actionsSmoke(allowed: boolean) {
     // Its status text and row count are logged, then the row is selected so that its
     // details are read with `inspect --archive ID` (the argv is in the fake's log.ndjson).
     const keep = row().key;
+    let bad = 0;
     setStateFilter("archived");
     await until(() => archive.pages()[archive.computers()[0]?.computer ?? ""]?.loaded === true, 15_000, "the archive page did not load");
     log(`actions-smoke archive-page: ${archive.status().summary} (${archiveRows().length} rows)`);
     const archivedKey = archive.rows()[0]?.key;
     if (!archivedKey) throw new Error("the archive page has no row");
+    const panel = await datePanelPlacement();
+    log(`actions-smoke archive-date-panel: ${panel.text}`);
+    if (!panel.ok) bad++;
     setSelectedKey(archivedKey);
-    await new Promise((done) => setTimeout(done, 1500));
-    log(`actions-smoke archive-inspect: selected ${archive.rows()[0]?.archiveId ?? "(no id)"}`);
+    // The details the header and the menus read, from `inspect --archive ID`; bounded.
+    const archived = archive.row(archivedKey)!;
+    const inspected = await until(() => !!detailsFor(archived, !computerOffline(archived.computer), followedFor(archivedKey)), 15_000, "no details")
+      .then(() => true, () => false);
+    log(`actions-smoke archive-inspect: ${inspected ? "done" : "failed (no details within 15 s)"} ${archived.archiveId ?? "(no id)"}`);
+    if (!inspected) bad++;
     setStateFilter("all");
     setSelectedKey(keep);
     const local = (ok: boolean): Outcome => (ok ? { outcome: "done", receipt: null, cleanup: null } : { outcome: "failed", detail: "the row changed" });
@@ -361,7 +402,6 @@ async function actionsSmoke(allowed: boolean) {
       ...(["terminate", "kill"] as const).filter((kind) => kind !== chosen)
         .map((kind): [string, () => Promise<Outcome>] => [kind, () => perform(row(), { kind })]),
     ];
-    let bad = 0;
     // Batch steps go through the store the selection bar uses and the helper the batch menu uses.
     const live = () => {
       const s = orderedRows().find((r) => r.name === SMOKE_SESSION);

@@ -97,7 +97,7 @@ describe("menuState rename, archive, end, read", () => {
   });
   it("keeps the archived forget disabled until the Archive view", () => {
     expect(menuState(row({ state: "archived", archive_id: "a1" }), true, false).end).toMatchObject({ label: "Forget archived session…", enabled: false, reason: FORGET_ARCHIVE_LATER });
-    expect(FORGET_ARCHIVE_LATER).toBe("Forgetting archived sessions arrives with the Archive view.");
+    expect(FORGET_ARCHIVE_LATER).toBe("Forgetting archived sessions arrives in a later version.");
   });
 });
 

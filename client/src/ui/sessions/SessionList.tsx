@@ -98,7 +98,7 @@ function setRowCompact(key: string, compact: boolean) {
   morphTimer = window.setTimeout(() => setMorphing(false), MORPH.duration + 40);
 }
 
-function sessionMenu(s: Session): MenuEntry[] {
+export function sessionMenu(s: Session): MenuEntry[] {
   // The selected row's menu reads the same details as the header (Qt's m_details).
   const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
   const act = actionEntries(s, undefined, { context: true });
@@ -106,20 +106,20 @@ function sessionMenu(s: Session): MenuEntry[] {
   const mute = muteEntry(s);
   const mark = markEntry(s);
   const fresh = freshActionEntry(s);
+  const archived = s.state === "archived";
   return [
     { label: compactRows[s.key] ? "Expand session row" : "Compact session row", icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setRowCompact(s.key, !compactRows[s.key]) },
     { label: "Expand all collapsed", icon: "expand-row", disabled: !Object.values(compactRows).some(Boolean), action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
     { separator: true },
-    s.agent === "deepseek" ? { label: "Open native DeepSeek UI", icon: "external-link", disabled: LATER } : { label: "Open terminal", icon: "square-terminal", disabled: LATER },
+    // An archived row has no terminal, and no Mute or Mark group (Qt's `if (!archived)`).
+    ...(archived ? [] : [s.agent === "deepseek" ? { label: "Open native DeepSeek UI", icon: "external-link", disabled: LATER } : { label: "Open terminal", icon: "square-terminal", disabled: LATER }]),
     { label: "Open folder", icon: "folder-open", disabled: LATER },
     { label: "Open shell in session folder", icon: "terminal", disabled: LATER },
     cp.command,
-    { separator: true },
-    ...(mute ? [mute] : []),
-    ...(mark ? [mark] : []),
+    ...(archived ? [] : [{ separator: true } as const, ...(mute ? [mute] : []), ...(mark ? [mark] : [])]),
     { separator: true },
     act.change,
-    ...(fresh ? [fresh] : s.state === "archived" ? [] : [{ label: "Clear session…", icon: "clear", disabled: LATER }]),
+    ...(fresh ? [fresh] : archived ? [] : [{ label: "Clear session…", icon: "clear", disabled: LATER }]),
     act.rename,
     { label: "Fork session…", icon: "git-fork", disabled: LATER },
     ...(act.archive ? [act.archive] : []),

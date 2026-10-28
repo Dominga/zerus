@@ -95,11 +95,22 @@ export function editDraft(d: Draft, edited: "from" | "until", value: string, now
   return next;
 }
 
-export const draftValid = (d: Draft) => d.period === 0 || (!!d.from && !!d.until && d.from <= d.until);
+/**
+ * A day the picker's QDateEdit can hold: a four-digit year inside its range.
+ * A typed date input can hold others (an empty field, year 0099, 1970-01-01);
+ * QDateEdit cannot, so those only keep Apply off.
+ */
+export const dayInRange = (day: string) => /^\d{4}-\d{2}-\d{2}$/.test(day) && day >= MIN_DAY && day <= MAX_DAY;
 
+export const draftValid = (d: Draft) => d.period === 0 || (dayInRange(d.from) && dayInRange(d.until) && d.from <= d.until);
+
+/** Two days the edits can hold, the end before the start (Qt's invalid hint). */
+export const draftReversed = (d: Draft) => d.period !== 0 && dayInRange(d.from) && dayInRange(d.until) && d.from > d.until;
+
+/** Qt's hints; a day Qt's edits cannot hold keeps the neutral one (Apply stays off). */
 export function draftHint(d: Draft): string {
   if (d.period === 0) return "All archived dates (no date limits)";
-  return draftValid(d) ? "Both dates included (local time)" : "End date must be on or after the start date.";
+  return draftReversed(d) ? "End date must be on or after the start date." : "Both dates included (local time)";
 }
 
 /** Apply: the range it commits and whether that changed it; undefined for an invalid custom range (Apply is off). */
@@ -108,4 +119,21 @@ export function applyDraft(d: Draft, applied: DateRange): { range: DateRange; ch
   const custom = d.period === 4;
   const changed = applied.period !== d.period || (custom && (applied.first !== d.from || applied.last !== d.until));
   return { range: custom ? { period: 4, first: d.from, last: d.until } : { ...applied, period: d.period }, changed };
+}
+
+/** The picker button's box in viewport coordinates (getBoundingClientRect). */
+export interface ButtonBox { left: number; top: number; bottom: number }
+
+/**
+ * Where the panel goes (ArchiveDatePicker::openPanel), in viewport
+ * coordinates for a fixed panel outside any transformed container: 480 px
+ * wide at most, at the button's left, 6 px below it, or above it when it does
+ * not fit, always 8 px inside the window.
+ */
+export function panelPlace(button: ButtonBox, height: number, viewport: { width: number; height: number }): { left: number; top: number; width: number } {
+  const width = Math.min(480, viewport.width - 16);
+  const left = Math.max(8, Math.min(button.left, viewport.width - width - 8));
+  const below = button.bottom + 6;
+  const top = below + height <= viewport.height - 8 ? below : button.top - height - 6;
+  return { left, top: Math.max(8, Math.min(top, viewport.height - height - 8)), width };
 }

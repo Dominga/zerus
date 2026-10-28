@@ -353,8 +353,10 @@ live catalog.
   drops the pages and loads the first. Pages load only while the Archive filter
   shows the Sessions list and are kept when it is left, as Qt keeps them.
   Leaving the filter, a change of the computers or their names, a change of
-  the search text and Refresh archive cancel the reads that are running; an
-  answer that arrives afterwards is dropped.
+  the search text, a change of the date range and Refresh archive cancel the
+  reads that are running, also one sent before the cancel that has not started
+  yet; an answer that arrives afterwards is dropped. Each read carries the
+  store's request number, so a late older read never cancels a newer one.
 - The search text is the archive query, applied 300 ms after the last change.
   It does not filter the loaded rows.
 - The date picker offers All dates (the default), Today, Last 7 days, Last 30
@@ -365,8 +367,11 @@ live catalog.
   with a window, "{shown} loaded of {total}" once every total is known and
   "{shown} loaded" before. Each computer's window is in its tooltip. An
   error reads "{machine}: {error}" (240 characters shown, the full text in
-  the tooltip). Older and Newer lose their text below 310 px. The count chip
-  of the filter shows "…" until a total is known and a "+" while more can be
+  the tooltip). A read that fails reads as Qt words it: "timed out",
+  "cannot start '{hgs}': {error}", the standard error (4000 characters at
+  most) or "exit code {n}". Older and Newer lose their text below 310 px. The
+  count chip of the filter shows "…" while some computer's total is unknown and
+  no archived row is counted, otherwise the count with a "+" while more can be
   loaded; its tooltip says how many are loaded.
 - The list shows the loaded archived rows as flat cards, newest archived first
   (Qt groups them by project: `zerus-5wmh.40`). Selecting one shows its header
@@ -403,7 +408,7 @@ standard input and fails on writes that have none). The fake logs each call to
 
 ```sh
 S=$(mktemp -d); cp core/tests/support/fake_hgs_actions.py $S/hgs
-echo '{"reply":{"exit":0},"replies":[{"match":["reference"],"exit":0,"stdout":{"uri":"zerus://session?machine=m&name=claude%2Fsample-project%2Freview"}},{"match":["session-action"],"exit":0,"stdout":"echo_session_action","receipt_status":"completed"}]}' > $S/config.json
+echo '{"reply":{"exit":0},"replies":[{"match":["reference"],"exit":0,"stdout":{"uri":"zerus://session?machine=m&name=claude%2Fsample-project%2Freview"}},{"match":["session-action"],"exit":0,"stdout":"echo_session_action","receipt_status":"completed"},{"match":["archives"],"exit":0,"stdout":{"version":1,"from":0,"until":253402300800,"query":"","next_cursor":"","previous_cursor":"","total":1,"position":0,"sessions":[{"name":"claude/sample-project/archived","state":"archived","archive_id":"00000000-0000-4000-8000-000000000001","archived_at":1700000000}]}},{"match":["inspect","claude/sample-project/archived"],"exit":0,"stdout":{}}]}' > $S/config.json
 env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=1 \
   WEBKIT_DISABLE_DMABUF_RENDERER=1 ZERUS_CLIENT_REPLAY=$PWD/fixtures/replay.ndjson \
   ZERUS_CLIENT_HGS=$S/hgs ZERUS_CLIENT_QUERY=actions-smoke=1 ZERUS_CLIENT_PERF=smoke \
@@ -411,14 +416,21 @@ env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=
 cat $S/log.ndjson
 ```
 
-For the Archive step add `{"match":["archives"],"exit":0,"stdout":{"version":1,"from":0,"until":253402300800,"query":"","next_cursor":"","previous_cursor":"","total":1,"position":0,"sessions":[{"name":"claude/sample-project/archived","state":"archived","archive_id":"00000000-0000-4000-8000-000000000001","archived_at":1700000000}]}}` to `replies` (the page echoes the All dates range and an empty query).
+The `archives` entry answers the Archive step with one archived row (the page
+echoes the All dates range and an empty query); the `inspect` entry for that
+row answers its details (an object with no run or conversation, as the row has
+none).
 
 The hook first switches to the Archive filter, waits for the page and logs
-`actions-smoke archive-page: <status text> (<row count> rows)`, selects the archived row
-and logs `actions-smoke archive-inspect: selected <archive id>`; the fake's
-`log.ndjson` then holds `archives --json` (with the page query on standard
-input) and an `inspect NAME ... --archive ID` call. It returns to the All
-filter and the replay session. The hook selects `claude/sample-project/review` (its details come from the
+`actions-smoke archive-page: <status text> (<row count> rows)`. It then opens
+the date panel while the list panel carries a transform (as the strip's peek
+does) and logs `actions-smoke archive-date-panel: done (...)` when the panel is
+in the page's body at the picker button and Escape closed it with the focus
+back on the button. It selects the archived row, waits up to 15 s for its
+details and logs `actions-smoke archive-inspect: done <archive id>` (or
+`failed`); the fake's `log.ndjson` then holds `archives --json` (with the page
+query on standard input) and an `inspect NAME ... --archive ID` call. It
+returns to the All filter and the replay session. The hook selects `claude/sample-project/review` (its details come from the
 replay's Activity state value or, as here, one `inspect` of the fake), first
 marks it as read, marks all as read (logging `actions-smoke mark-all-as-read:
 N marked`) and marks it as needing attention, through the marks store the menus

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  ALL_UNTIL, addDays, applyDraft, draftHint, draftValid, editDraft, initialRange, localDay, pickerLabel, rangeBounds, rangeCaption,
+  ALL_UNTIL, addDays, applyDraft, draftHint, draftValid, editDraft, initialRange, localDay, panelPlace, pickerLabel, rangeBounds, rangeCaption,
   stageDraft, startOfDay, type DateRange,
 } from "./archive-dates";
 
@@ -79,6 +79,19 @@ describe("the draft (presets and dates change only the draft; Apply commits)", (
     expect(draftValid({ period: 4, from: "", until: TODAY })).toBe(false);
   });
 
+  it("takes only days QDateEdit can hold: a four-digit year from 1970-01-02 through 9999-12-30", () => {
+    const custom = (from: string, until: string) => ({ period: 4 as const, from, until });
+    expect(draftValid(custom("1970-01-02", "9999-12-30"))).toBe(true);
+    for (const [from, until] of [["0099-10-15", TODAY], ["1970-01-01", TODAY], [TODAY, "9999-12-31"], ["", TODAY], [TODAY, ""], ["", ""], ["+12026-01-01", TODAY]]) {
+      const d = custom(from, until);
+      expect(draftValid(d), `${from} ${until}`).toBe(false);
+      // Qt's edits cannot hold such a day: Apply stays off with the neutral hint, never the order error.
+      expect(draftHint(d)).toBe("Both dates included (local time)");
+      expect(applyDraft(d, applied)).toBeUndefined();
+    }
+    expect(draftHint(custom("2026-10-15", "2026-10-14"))).toBe("End date must be on or after the start date.");
+  });
+
   it("applies a valid draft and says whether the range changed", () => {
     expect(applyDraft({ period: 0, from: "", until: "" }, applied)).toEqual({ range: applied, changed: false });
     expect(applyDraft({ period: 2, from: "2026-10-22", until: TODAY }, applied)).toEqual({ range: { ...applied, period: 2 }, changed: true });
@@ -86,5 +99,21 @@ describe("the draft (presets and dates change only the draft; Apply commits)", (
     expect(custom).toEqual({ range: { period: 4, first: "2026-10-18", last: TODAY }, changed: true });
     expect(applyDraft({ period: 4, from: "2026-10-18", until: TODAY }, custom!.range)?.changed).toBe(false);
     expect(applyDraft({ period: 4, from: "2026-10-15", until: "2026-10-14" }, applied)).toBeUndefined();
+  });
+});
+
+describe("the picker panel's place (openPanel), in viewport coordinates", () => {
+  const view = { width: 1440, height: 900 };
+  const button = { left: 64.5, top: 120, bottom: 152 };
+
+  it("sits at the button's left, 6 px below it, 480 px wide", () => {
+    expect(panelPlace(button, 300, view)).toEqual({ left: 64.5, top: 158, width: 480 });
+  });
+
+  it("goes above the button when it does not fit below, and stays inside the window", () => {
+    expect(panelPlace({ left: 64, top: 700, bottom: 732 }, 300, view)).toEqual({ left: 64, top: 394, width: 480 });
+    expect(panelPlace({ left: 1300, top: 120, bottom: 152 }, 300, view).left).toBe(952);
+    expect(panelPlace({ left: 2, top: 10, bottom: 40 }, 880, view)).toEqual({ left: 8, top: 8, width: 480 });
+    expect(panelPlace(button, 300, { width: 400, height: 900 })).toEqual({ left: 8, top: 158, width: 384 });
   });
 });

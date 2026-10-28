@@ -105,7 +105,7 @@ export interface MenuOptions {
   batchRunning?: boolean;
 }
 
-export const FORGET_ARCHIVE_LATER = "Forgetting archived sessions arrives with the Archive view.";
+export const FORGET_ARCHIVE_LATER = "Forgetting archived sessions arrives in a later version.";
 export const RESTORE_LATER = "Restoring sessions arrives in a later version.";
 const NO_REASON = "This native adapter does not support this action in the current session state.";
 const WORKING = ["working", "tool", "compacting"];

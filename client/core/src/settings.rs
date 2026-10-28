@@ -57,6 +57,19 @@ const fn key(name: &'static str, kind: Kind) -> Key {
     }
 }
 
+/// A setting of the client's own that Qt does not have: its `client/`
+/// prefix keeps it apart from any key Qt adds later, and it is never seeded.
+const fn client(name: &'static str, kind: Kind) -> Key {
+    Key {
+        name,
+        kind,
+        seeded: false,
+    }
+}
+
+/// The prefix of the client's own settings.
+pub const CLIENT: &str = "client/";
+
 /// The group of shortcut overrides (`shortcuts/<command id>`, Shortcuts.h).
 pub const SHORTCUTS: &str = "shortcuts/";
 
@@ -159,6 +172,17 @@ pub const KEYS: &[Key] = &[
     key("updates/automatic", Kind::Flag(true)),
     // Automatic approvals: Qt's choice, for the notice only.
     key(QT_AUTOMATIC_APPROVALS, Kind::Flag(false)),
+    // The client's own: its skin and the Overview column (design round 7).
+    client("client/skin", Kind::Text("zerus-dark")),
+    client(
+        "client/overviewWidth",
+        Kind::Whole {
+            default: 1200,
+            min: 720,
+            max: 2400,
+        },
+    ),
+    client("client/overviewFullWidth", Kind::Flag(false)),
 ];
 
 /// The setting called `name`: a listed key, or a shortcut override.
@@ -248,11 +272,23 @@ pub fn from_qt(kind: Kind, value: &QtValue) -> Value {
 /// Where Qt keeps its settings: the format, read-only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum QtStore {
-    /// macOS: the preference plist of `com.hgdev.hgs-tray`.
-    Plist(PathBuf),
+    /// macOS: Qt's preference domain, read through cfprefsd (`defaults
+    /// export`), which may hold values its plist file does not have yet;
+    /// the file only when that fails.
+    Plist {
+        domain: Option<String>,
+        path: PathBuf,
+    },
     /// Linux `hgs-tray.conf` and Windows `hgs-tray.ini`.
     Ini(PathBuf),
 }
+
+/// macOS's preference tool, by its full path.
+const DEFAULTS: &str = "/usr/bin/defaults";
+
+/// What a read of Qt's store found, and from where: `qt-defaults`
+/// (cfprefsd), `qt-plist` (the plist file) or `qt-ini`.
+pub type QtValues = (BTreeMap<String, QtValue>, &'static str);
 
 impl QtStore {
     /// Qt's store on this computer (tray/src/main.cpp:178, :276-277).
@@ -267,8 +303,9 @@ impl QtStore {
                 .filter(|path| !path.is_empty())
                 .map(|path| QtStore::Ini(PathBuf::from(path).join("hgdev").join("hgs-tray.ini")))
         } else if cfg!(target_os = "macos") {
-            home().map(|home| {
-                QtStore::Plist(home.join("Library/Preferences/com.hgdev.hgs-tray.plist"))
+            home().map(|home| QtStore::Plist {
+                domain: Some("com.hgdev.hgs-tray".into()),
+                path: home.join("Library/Preferences/com.hgdev.hgs-tray.plist"),
             })
         } else {
             std::env::var_os("XDG_CONFIG_HOME")
@@ -281,29 +318,50 @@ impl QtStore {
 
     pub fn path(&self) -> &Path {
         match self {
-            QtStore::Plist(path) | QtStore::Ini(path) => path,
+            QtStore::Plist { path, .. } | QtStore::Ini(path) => path,
         }
     }
 
-    fn format(&self) -> &'static str {
-        match self {
-            QtStore::Plist(_) => "qt-plist",
-            QtStore::Ini(_) => "qt-ini",
+    /// Every value of the store by Qt name and where it was read;
+    /// `Ok(None)` when the store does not exist.
+    pub fn read(&self) -> Result<Option<QtValues>, String> {
+        if let QtStore::Plist {
+            domain: Some(domain),
+            ..
+        } = self
+        {
+            if let Some(values) = export_domain(domain) {
+                return Ok(Some((values, "qt-defaults")));
+            }
         }
-    }
-
-    /// Every value of the store by Qt name; `Ok(None)` when it does not
-    /// exist.
-    fn read(&self) -> Result<Option<BTreeMap<String, QtValue>>, String> {
         let bytes = match read_bounded(self.path(), MAX_QT_STORE) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.to_string()),
         };
         match self {
-            QtStore::Plist(_) => qt::read_plist(&bytes).map(Some),
-            QtStore::Ini(_) => Ok(Some(qt::read_ini(&bytes))),
+            QtStore::Plist { .. } => {
+                qt::read_plist(&bytes).map(|values| Some((values, "qt-plist")))
+            }
+            QtStore::Ini(_) => Ok(Some((qt::read_ini(&bytes), "qt-ini"))),
         }
+    }
+}
+
+/// `defaults export DOMAIN -`: the domain as cfprefsd holds it, read-only,
+/// or `None` when the tool is missing, fails or prints no dictionary.
+fn export_domain(domain: &str) -> Option<BTreeMap<String, QtValue>> {
+    let invocation = crate::actions::Invocation {
+        args: vec!["export".into(), domain.into(), "-".into()],
+        stdin: None,
+        timeout: Duration::from_secs(10),
+        request_id: None,
+    };
+    match crate::run::run_limited(Path::new(DEFAULTS), &invocation, &[], MAX_QT_STORE as usize) {
+        Ok(crate::actions::Exit::Code {
+            code: 0, stdout, ..
+        }) => qt::read_plist(&stdout).ok(),
+        _ => None,
     }
 }
 
@@ -688,15 +746,20 @@ fn seed_from(store: &QtStore) -> Result<(BTreeMap<String, Value>, Value), String
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
     let (values, source) = match store.read()? {
-        Some(values) => {
+        Some((values, source)) => {
             let names = seed_names(&values);
             let names: Vec<&str> = names.iter().map(String::as_str).collect();
-            (seed_values(&values, &names), store.format())
+            (seed_values(&values, &names), source)
         }
         None => (BTreeMap::new(), "none"),
     };
+    let domain = match store {
+        QtStore::Plist { domain, .. } => domain.clone(),
+        QtStore::Ini(_) => None,
+    };
     let record = json!({
         "source": source,
+        "domain": domain,
         "path": store.path().to_string_lossy(),
         "at": at,
         "keys": values.keys().collect::<Vec<_>>(),

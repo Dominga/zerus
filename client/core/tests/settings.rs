@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use zerus_client_core::settings::qt::{qt_key, read_ini, read_plist, QtValue};
 use zerus_client_core::settings::{
-    effective, find, from_qt, seed_values, Kind, QtStore, Settings, KEYS, QT_AUTOMATIC_APPROVALS,
+    effective, find, from_qt, seed_values, Kind, QtStore, Settings, CLIENT, KEYS,
+    QT_AUTOMATIC_APPROVALS,
 };
 
 struct Scratch(PathBuf);
@@ -139,6 +140,13 @@ fn every_key_has_qt_s_default_and_range() {
     // The opt-in itself is not a client setting.
     assert!(find("automaticApprovals/enabled").is_none());
     assert!(find("shortcuts/").is_none() && find("shortcuts/a/b").is_none());
+    assert_eq!(default("client/skin"), "zerus-dark");
+    assert_eq!(default("client/overviewWidth"), 1200);
+    assert_eq!(default("client/overviewFullWidth"), false);
+    // The client's own keys are never seeded from Qt.
+    for key in KEYS.iter().filter(|key| key.name.starts_with(CLIENT)) {
+        assert!(!key.seeded, "{}", key.name);
+    }
     let clamp = |name: &str, value: Value| effective(find(name).unwrap().kind, Some(&value));
     assert_eq!(clamp("workspace/contentScale", json!(5)), 2.0);
     assert_eq!(clamp("workspace/activityWidth", json!(100)), 480);
@@ -263,7 +271,11 @@ fn the_plist_seed_reads_qt_s_mac_store() {
     let scratch = Scratch::new("seed-plist");
     let qt = scratch.0.join("com.hgdev.hgs-tray.plist");
     fs::copy(fixture("mac.plist"), &qt).unwrap();
-    let settings = Settings::open(scratch.0.join("settings.json"), Some(QtStore::Plist(qt)));
+    let store = QtStore::Plist {
+        domain: None,
+        path: qt,
+    };
+    let settings = Settings::open(scratch.0.join("settings.json"), Some(store));
     assert_eq!(settings.get("workspace/theme"), "light");
     assert_eq!(settings.get("workspace/contentScale"), 1.5);
     assert_eq!(settings.get("workspace/activityWidth"), 1000);
@@ -276,6 +288,40 @@ fn the_plist_seed_reads_qt_s_mac_store() {
         json!(["Ctrl+Return"])
     );
     assert_eq!(settings.seed_record().unwrap()["source"], "qt-plist");
+}
+
+#[test]
+fn the_plist_file_is_the_fallback_when_cfprefsd_cannot_be_asked() {
+    if Path::new("/usr/bin/defaults").exists() {
+        return; // macOS: covered by the export test below.
+    }
+    let store = QtStore::Plist {
+        domain: Some("com.example.zerus-settings-test".into()),
+        path: fixture("mac.plist"),
+    };
+    let (values, source) = store.read().unwrap().unwrap();
+    assert_eq!(source, "qt-plist");
+    assert_eq!(values["workspace/theme"], QtValue::Text("light".into()));
+}
+
+#[test]
+fn an_exported_xml_plist_reads_like_the_binary_file() {
+    let binary = read_plist(&fs::read(fixture("mac.plist")).unwrap()).unwrap();
+    let xml = read_plist(&fs::read(fixture("mac-export.plist")).unwrap()).unwrap();
+    assert_eq!(xml, binary);
+}
+
+/// cfprefsd answers for a domain, read-only (the global domain always
+/// exists).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_domain_reads_through_defaults_export() {
+    let store = QtStore::Plist {
+        domain: Some("NSGlobalDomain".into()),
+        path: PathBuf::from("/nonexistent/NSGlobalDomain.plist"),
+    };
+    let (_, source) = store.read().unwrap().unwrap();
+    assert_eq!(source, "qt-defaults");
 }
 
 #[test]

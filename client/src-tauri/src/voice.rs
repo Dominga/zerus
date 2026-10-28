@@ -7,13 +7,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
-use tauri::ipc::Channel;
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
 use zerus_client_core::default_hgs;
 use zerus_client_core::drafts::DraftStore;
 use zerus_client_core::voice_composer::{Inserted, Preferences, Target};
 use zerus_client_core::voice_driver::{Input, Out, VoiceDriver};
-use zerus_client_media::{microphones, video_available, MediaCapture};
+use zerus_client_media::{microphones, video_reason, MediaCapture};
 
 /// Voice drivers open at once; a composer closes its own when it goes.
 pub const MAX_DRIVERS: usize = 32;
@@ -130,13 +130,15 @@ impl From<VoiceInput> for Input {
 }
 
 /// Opens the voice driver of a composer, replacing an earlier one for the
-/// same key; its outputs go to `events`. A replay reaches only an explicit
-/// `ZERUS_CLIENT_HGS`, never the real CLI.
+/// same key; its outputs go to `events`, a round video's preview frames to
+/// `frames` as raw JPEG bytes (the latest only, at most 15 a second). A
+/// replay reaches only an explicit `ZERUS_CLIENT_HGS`, never the real CLI.
 #[tauri::command]
 pub async fn voice_open(
     state: State<'_, Voices>,
     key: String,
     events: Channel<Out>,
+    frames: Channel<InvokeResponseBody>,
 ) -> Result<(), String> {
     if crate::actions::blocked() {
         return Err(REPLAY_NEEDS_HGS.into());
@@ -153,6 +155,9 @@ pub async fn voice_open(
         Box::new(MediaCapture::default()),
         Box::new(move |out| {
             let _ = events.send(out);
+        }),
+        Box::new(move |jpeg| {
+            let _ = frames.send(InvokeResponseBody::Raw(jpeg));
         }),
         || uuid::Uuid::new_v4().to_string(),
     );
@@ -218,8 +223,24 @@ pub async fn voice_microphones() -> Result<Vec<MicrophoneRow>, String> {
         .collect())
 }
 
-/// Whether this build records round video; the Video mode hides without.
+/// Whether this build records round video here, and why not.
+#[derive(Clone, Debug, Serialize)]
+pub struct VideoSupport {
+    pub available: bool,
+    /// Video's tooltip while unavailable: a missing encoder, or a build
+    /// without video.
+    pub reason: Option<String>,
+}
+
+/// Round video's availability: Video shows only while available. One
+/// probe per process; the first can take a moment.
 #[tauri::command]
-pub fn voice_video_available() -> bool {
-    video_available()
+pub async fn voice_video() -> Result<VideoSupport, String> {
+    let reason = tauri::async_runtime::spawn_blocking(video_reason)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(VideoSupport {
+        available: reason.is_none(),
+        reason,
+    })
 }

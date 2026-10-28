@@ -18,9 +18,11 @@ pub use zerus_client_core::voice_composer::Failure;
 mod capture;
 mod device;
 pub mod permission;
+pub mod video;
 
-pub use capture::{video_available, MediaCapture, VIDEO_UNAVAILABLE};
+pub use capture::{driver_event, video_available, MediaCapture, VIDEO_UNAVAILABLE};
 pub use device::{microphones, Microphone};
+pub use video::video_reason;
 
 /// The longest recording, in seconds.
 pub const MAX_SECONDS: u32 = 120;
@@ -164,6 +166,11 @@ impl Session {
     /// The recording must stop: 120 s, or the PCM buffer is full.
     pub fn full(&self) -> bool {
         self.seconds >= MAX_SECONDS || self.converter.full()
+    }
+
+    /// The PCM so far, whatever its length.
+    pub fn into_pcm(self) -> Vec<u8> {
+        self.converter.finish()
     }
 
     /// The recording, or why it is not kept.

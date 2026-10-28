@@ -1,22 +1,48 @@
-//! The voice driver's recorder: [`Recorder`] for voice. Round video comes
-//! with the per-platform recorders (M2-M4); until then a video recording
-//! fails with [`VIDEO_UNAVAILABLE`] and the view hides Video while
-//! [`video_available`] is false.
+//! The voice driver's recorder: [`Recorder`] for voice and, where this build
+//! records round video ([`video_available`]), the platform's video
+//! recorder. Elsewhere a video recording fails with the reason and the view
+//! hides Video.
+use crate::video::{video_reason, VideoEvent};
 use crate::{Event, Recorder};
+use zerus_client_core::voice_composer::Video;
 use zerus_client_core::voice_driver::{Capture, RecorderEvent};
 
 /// Why a video recording does not start in this build.
-pub const VIDEO_UNAVAILABLE: &str = "Video messages are not available in this version yet.";
+pub use crate::video::UNAVAILABLE as VIDEO_UNAVAILABLE;
 
-/// Whether this build records round video.
+/// Whether this build records round video here.
 pub fn video_available() -> bool {
-    false
+    video_reason().is_none()
 }
 
-/// cpal capture for the voice driver.
+/// The recording under way.
+enum Active {
+    Voice(Recorder),
+    #[cfg(all(target_os = "linux", feature = "video"))]
+    Video(crate::video::linux::VideoRecorder),
+}
+
+/// The voice driver's capture: cpal for voice, the platform recorder for
+/// round video.
 #[derive(Default)]
 pub struct MediaCapture {
-    recorder: Option<Recorder>,
+    active: Option<Active>,
+}
+
+/// A video recorder's event as the driver takes it.
+pub fn driver_event(event: VideoEvent) -> RecorderEvent {
+    match event {
+        VideoEvent::Started => RecorderEvent::Started,
+        VideoEvent::Elapsed(seconds) => RecorderEvent::Elapsed(seconds),
+        VideoEvent::Level { rms, peak } => RecorderEvent::Level { rms, peak },
+        VideoEvent::Frame { jpeg, mirrored } => RecorderEvent::Frame { jpeg, mirrored },
+        VideoEvent::Preparing => RecorderEvent::Preparing,
+        VideoEvent::Completed { pcm, mp4, meta } => RecorderEvent::Recorded {
+            pcm,
+            video: Some(Video { mp4, meta }),
+        },
+        VideoEvent::Failed(error) => RecorderEvent::VideoFailed(error),
+    }
 }
 
 impl Capture for MediaCapture {
@@ -26,11 +52,24 @@ impl Capture for MediaCapture {
         microphone: &str,
         events: Box<dyn Fn(RecorderEvent) + Send + Sync>,
     ) {
-        self.recorder = None;
+        self.active = None;
         if video {
-            return events(RecorderEvent::VideoFailed(VIDEO_UNAVAILABLE.into()));
+            #[cfg(all(target_os = "linux", feature = "video"))]
+            {
+                self.active = Some(Active::Video(crate::video::linux::VideoRecorder::start(
+                    crate::video::linux::Source::Camera,
+                    microphone,
+                    move |event| events(driver_event(event)),
+                )));
+            }
+            #[cfg(not(all(target_os = "linux", feature = "video")))]
+            {
+                let reason = video_reason().unwrap_or_else(|| VIDEO_UNAVAILABLE.to_owned());
+                events(RecorderEvent::VideoFailed(reason));
+            }
+            return;
         }
-        self.recorder = Some(Recorder::start(microphone, move |event| {
+        self.active = Some(Active::Voice(Recorder::start(microphone, move |event| {
             events(match event {
                 Event::Started => RecorderEvent::Started,
                 Event::Elapsed(seconds) => RecorderEvent::Elapsed(seconds),
@@ -38,17 +77,20 @@ impl Capture for MediaCapture {
                 Event::Recorded(pcm) => RecorderEvent::Recorded { pcm, video: None },
                 Event::Failed(failure, error) => RecorderEvent::Failed(failure, error),
             })
-        }));
+        })));
     }
 
     fn stop(&mut self, _video: bool) {
-        if let Some(recorder) = &self.recorder {
-            recorder.stop();
+        match &self.active {
+            Some(Active::Voice(recorder)) => recorder.stop(),
+            #[cfg(all(target_os = "linux", feature = "video"))]
+            Some(Active::Video(recorder)) => recorder.stop(),
+            None => {}
         }
     }
 
     fn cancel(&mut self) {
         // Dropping the recorder cancels it; nothing it reports later arrives.
-        self.recorder = None;
+        self.active = None;
     }
 }

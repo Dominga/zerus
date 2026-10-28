@@ -110,7 +110,7 @@ export function ProjectsScreen() {
           <label class="check" title="Include projects on computers without a configured connection here.">
             <input type="checkbox" checked={allSwarm()} onChange={(e) => setAllSwarm(e.currentTarget.checked)} />All swarm projects
           </label>
-          <span class="muted" style={view().status_error ? { color: "var(--z-color-danger)" } : undefined}>{view().status}</span>
+          <span class="muted" classList={{ danger: view().status_error }}>{view().status}</span>
         </div>
 
         <div class="proj-split">

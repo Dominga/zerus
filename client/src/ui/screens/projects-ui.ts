@@ -13,7 +13,7 @@ export function sortFolders(folders: readonly Folder[], sort: Sort): { folder: F
     .map((folder, index) => ({ folder, index }))
     .sort((a, b) => {
       const ka = key(a.folder), kb = key(b.folder);
-      return (ka < kb ? -1 : ka > kb ? 1 : a.index - b.index) * direction;
+      return ka < kb ? -direction : ka > kb ? direction : a.index - b.index;
     });
 }
 

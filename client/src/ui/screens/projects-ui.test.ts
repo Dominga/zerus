@@ -16,6 +16,12 @@ describe("projects page", () => {
     expect(nextSort({ column: "name", ascending: false }, "path")).toEqual({ column: "path", ascending: true });
   });
 
+  it("keeps equal keys in their original order in both directions", () => {
+    const folders = [folder("a", "m", "/x"), folder("b", "m", "/y"), folder("c", "n", "/z")];
+    expect(sortFolders(folders, { column: "machine", ascending: false }).map((x) => x.index)).toEqual([2, 0, 1]);
+    expect(sortFolders(folders, { column: "machine", ascending: true }).map((x) => x.index)).toEqual([0, 1, 2]);
+  });
+
   it("lists remote projects only with All swarm projects and colours by the project", () => {
     const view = { ...emptyProjects(), loaded: true, projects: [project("a", true, "#3fb950"), project("b", false)] };
     expect(shownProjects(view, false).map((p) => p.id)).toEqual(["a"]);

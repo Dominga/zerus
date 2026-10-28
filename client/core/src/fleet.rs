@@ -209,6 +209,33 @@ impl Fleet {
             .unwrap_or_default()
     }
 
+    /// Follows a computer's shared project catalog (see
+    /// [`crate::organization`]), usually only this computer's. It stays
+    /// followed across reconnects until [`Self::unfollow_organization`].
+    pub fn follow_organization(&self, computer: &ComputerId) -> Result<(), FollowError> {
+        let streams = guard(&self.shared.streams);
+        let handle = streams.get(computer).ok_or(FollowError::UnknownComputer)?;
+        handle.follow_organization()
+    }
+
+    /// Stops following a computer's organization; false when it was not.
+    pub fn unfollow_organization(&self, computer: &ComputerId) -> bool {
+        guard(&self.shared.streams)
+            .get(computer)
+            .is_some_and(StreamHandle::unfollow_organization)
+    }
+
+    /// The organization the view shows and the versions observed with it, for
+    /// one digest: what `swarm apply {base, desired, versions}` starts from.
+    pub fn organization_snapshot(
+        &self,
+        computer: &ComputerId,
+    ) -> Option<crate::OrganizationSnapshot> {
+        guard(&self.shared.streams)
+            .get(computer)
+            .and_then(StreamHandle::organization_snapshot)
+    }
+
     /// Writes a control line (a `ping`, say) to one computer's stream.
     pub fn send(&self, computer: &ComputerId, control: Control) -> bool {
         guard(&self.shared.streams)

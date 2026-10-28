@@ -20,6 +20,7 @@ mod windows_peer;
 mod peer_channel;
 mod platform;
 mod presence;
+mod private_stores;
 mod screen;
 mod speech;
 mod status;

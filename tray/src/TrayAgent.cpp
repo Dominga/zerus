@@ -470,12 +470,14 @@ void TrayAgent::onLocalReady(const BoxState &box)
     migrateReadMarks({}); publishReadMarks(); warmCaches({}, m_state.local());
     for (const auto &peer : previousPeers) if (!m_state.peerNames().contains(peer)) {
         BoxState removed; removed.host = peer; removed.ok = true; observeAttention(peer, removed);
+        m_privateStores.forget(peer);
     }
     for (const auto &peer : m_state.peerNames())
         if (!previousPeers.contains(peer)) m_client.requestPeer(peer);
     if (m_streams && previousPeers != m_state.peerNames()) m_streams->setHosts(QStringList{QString()} + m_state.peerNames());
     updateLocalPoll(box);
     observeAttention({}, m_state.local());
+    observePrivateStores({}, m_state.local());
     if (m_sessionsWindow) { m_sessionsWindow->setConnectionError(m_localReadError); m_sessionsWindow->setFleet(m_state); m_sessionsWindow->setPollingHosts(m_client.pollingHosts()); }
     refreshIcon();
     // Тик раз в 2с не должен перестраивать меню, пока оно открыто под курсором --
@@ -505,6 +507,7 @@ void TrayAgent::onPeerReady(const BoxState &box)
     m_automaticApprovals->setFleet(m_state);
     migrateReadMarks(box.host); publishReadMarks(); warmCaches(box.host, *m_state.peer(box.host));
     observeAttention(box.host, *m_state.peer(box.host));
+    observePrivateStores(box.host, *m_state.peer(box.host));
     if (m_sessionsWindow) m_sessionsWindow->setFleet(m_state);
     refreshIcon();
     // В отличие от локального тика (каждые 2с) ответы пиров редки -- минутный фон или
@@ -557,6 +560,15 @@ void TrayAgent::refreshIcon()
     }
     m_tray->setIcon(m_icons.forCounts(m_state.totalSessions(), attention, m_state.isStale(now)));
     m_tray->setToolTip(m_state.tooltip(now));
+}
+
+void TrayAgent::observePrivateStores(const QString &host, const BoxState &box)
+{
+    // The listing digest covers "private_stores": an unchanged listing changes none.
+    const auto before = m_privateStores.known();
+    for (const auto &notice : m_privateStores.observe(host, host.isEmpty() ? box.host : host, box.ok, box.privateStores))
+        notify(notice.title, notice.body, QSystemTrayIcon::Warning, 20000);
+    if (m_privateStores.known() != before) QSettings().setValue(QStringLiteral("privateStores/notified"), m_privateStores.known());
 }
 
 void TrayAgent::observeAttention(const QString &host, const BoxState &box)

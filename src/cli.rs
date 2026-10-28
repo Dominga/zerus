@@ -1235,6 +1235,14 @@ fn run_with_input(ssh: &mut std::process::Command, mut flags: Vec<String>, targe
 }
 
 pub(crate) fn local_json(config: &Config) -> Result<Value> { local_json_archives(config, true) }
+/// #569: the private stores refused now (path, reason, fix), read from the
+/// small current set only; absent when none is refused.
+fn private_stores(raw: &mut Value) {
+    let stores = crate::private_stores::refused();
+    if !stores.is_empty() {
+        raw["private_stores"] = json!(stores);
+    }
+}
 /// `ls --json --local --no-archives`, which `hgs watch` streams.
 pub(crate) fn local_listing(config: &Config) -> Result<Value> { local_json_archives(config, false) }
 fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
@@ -1246,6 +1254,7 @@ fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
             raw["desktop_presence"] = presence;
         }
         raw["preferences"] = crate::swarm::preferences(config);
+        private_stores(&mut raw);
         #[cfg(windows)]
         {
             raw["local_host"] = crate::host::admin::local_host(&config.state);
@@ -1268,6 +1277,7 @@ fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
         raw["desktop_presence"] = presence;
     }
     raw["preferences"] = crate::swarm::preferences(config);
+    private_stores(&mut raw);
     // Windows: the session host as found, never started (spec D2). Unix
     // listings stay as they were.
     #[cfg(windows)]

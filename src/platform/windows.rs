@@ -2,7 +2,7 @@
 //! machines through the system OpenSSH client and, once local sessions are
 //! enabled, runs agent sessions in its session host (spec D2, D8).
 use super::{
-    capture, ExitInfo, FileIdentity, Presence, Private, ProcessIdentity, ProcessImage, ProcessRow,
+    capture, ExitInfo, FileIdentity, Presence, Private, PrivateRepair, ProcessIdentity, ProcessImage, ProcessRow,
     RunError,
 };
 use crate::{
@@ -1599,6 +1599,173 @@ mod process {
             }
         }
         Ok(true)
+    }
+    /// #569: makes the entry at `path` private when it is this user's and only
+    /// too open. A protected DACL that grants this user FullControl (inherited
+    /// by a folder's new entries) replaces the open one, through a handle that
+    /// never follows a link; the content and the owner stay. Another owner, a
+    /// reparse point, another kind of entry or a second link is refused and the
+    /// entry is left as it is.
+    pub fn repair_private(path: &Path, kind: Private) -> io::Result<PrivateRepair> {
+        use windows_sys::Win32::Security::{Authorization::SetSecurityInfo, PROTECTED_DACL_SECURITY_INFORMATION};
+        let open = |access: u32| {
+            fs::OpenOptions::new()
+                .access_mode(access)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path)
+        };
+        // Looked at first through a handle that changes nothing.
+        let entry = open(READ_CONTROL | FILE_READ_ATTRIBUTES)?;
+        let info = file_information(&entry)?;
+        let attributes = info.dwFileAttributes;
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Ok(PrivateRepair::Refused("it is a link or reparse point".into()));
+        }
+        let directory = attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+        match kind {
+            Private::Directory if !directory => return Ok(PrivateRepair::Refused("it is not a folder".into())),
+            Private::File if directory => return Ok(PrivateRepair::Refused("it is a folder, not a file".into())),
+            Private::File if info.nNumberOfLinks != 1 => {
+                return Ok(PrivateRepair::Refused(format!("the file has {} links", info.nNumberOfLinks)));
+            }
+            _ => {}
+        }
+        let user = current_user().ok_or_else(|| io::Error::other("this user's identity is unavailable"))?;
+        let (owner, open_aces) = security(entry.as_raw_handle() as HANDLE, user)?;
+        match owner {
+            Some(owner) if owner == user => {}
+            Some(owner) => return Ok(PrivateRepair::Refused(format!("it is owned by {}", account_label(&owner)))),
+            None => return Ok(PrivateRepair::Refused("it has no owner".into())),
+        }
+        if open_aces.is_empty() {
+            return Ok(PrivateRepair::Private);
+        }
+        // Changed through a second handle that names the same file: never one
+        // renamed into its place meanwhile.
+        let writer = match open(READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES) {
+            Ok(writer) => writer,
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                return Ok(PrivateRepair::Refused(format!("this user cannot change its permissions ({error})")));
+            }
+            Err(error) => return Err(error),
+        };
+        let same = file_information(&writer)?;
+        if (same.dwVolumeSerialNumber, same.nFileIndexHigh, same.nFileIndexLow)
+            != (info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow)
+            || same.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Ok(PrivateRepair::Refused("it changed while it was checked".into()));
+        }
+        let handle = writer.as_raw_handle() as HANDLE;
+        let acl = owner_only_acl(kind == Private::Directory)?;
+        let code = unsafe {
+            SetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                acl.0,
+                std::ptr::null(),
+            )
+        };
+        if code != ERROR_SUCCESS {
+            let error = io::Error::from_raw_os_error(code as i32);
+            return Ok(PrivateRepair::Refused(format!("its permissions could not be changed ({error})")));
+        }
+        if !private_security(handle)? {
+            return Ok(PrivateRepair::Refused("it is still open after the repair".into()));
+        }
+        Ok(PrivateRepair::Repaired(open_aces))
+    }
+    /// The owner of the entry behind `handle` and the accesses its DACL grants
+    /// anyone but this user, SYSTEM, Administrators and OWNER RIGHTS.
+    fn security(handle: HANDLE, user: &[u8]) -> io::Result<(Option<Vec<u8>>, Vec<String>)> {
+        let mut owner: PSID = std::ptr::null_mut();
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let code = unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        if code != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(code as i32));
+        }
+        let _descriptor = Descriptor(descriptor);
+        let owner = if owner.is_null() { None } else { Some(unsafe { sid_bytes(owner) }.to_vec()) };
+        Ok((owner, unsafe { open_aces(dacl, user) }?))
+    }
+    /// The accesses a DACL grants anyone but this user, SYSTEM, Administrators
+    /// and OWNER RIGHTS, by account; a missing DACL grants everyone everything.
+    ///
+    /// # Safety
+    /// `dacl` is null or points to a valid ACL.
+    unsafe fn open_aces(dacl: *mut ACL, user: &[u8]) -> io::Result<Vec<String>> {
+        if dacl.is_null() {
+            return Ok(vec!["Everyone (no DACL)".into()]);
+        }
+        let mut open = Vec::new();
+        for index in 0..u32::from((*dacl).AceCount) {
+            let mut ace = std::ptr::null_mut();
+            if GetAce(dacl, index, &mut ace) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let header = &*(ace as *const ACE_HEADER);
+            if u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0 || header.AceType == ACCESS_DENIED_ACE_TYPE {
+                continue;
+            }
+            if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
+                open.push(format!("an access entry of type {}", header.AceType));
+                continue;
+            }
+            let sid = std::ptr::addr_of!((*(ace as *const ACCESS_ALLOWED_ACE)).SidStart) as PSID;
+            let trusted = sid_bytes(sid) == user
+                || IsWellKnownSid(sid, WinLocalSystemSid) != 0
+                || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
+                || IsWellKnownSid(sid, WinCreatorOwnerRightsSid) != 0;
+            if !trusted {
+                let label = account_label(sid_bytes(sid));
+                if !open.contains(&label) {
+                    open.push(label);
+                }
+            }
+        }
+        Ok(open)
+    }
+    /// `DOMAIN\name (S-1-...)`, or the SID alone when no account is found.
+    fn account_label(sid: &[u8]) -> String {
+        use windows_sys::Win32::Security::{LookupAccountSidW, SID_NAME_USE};
+        let text = sid_string(sid);
+        let mut name = [0u16; 256];
+        let mut domain = [0u16; 256];
+        let (mut name_len, mut domain_len) = (name.len() as u32, domain.len() as u32);
+        let mut kind: SID_NAME_USE = 0;
+        let found = unsafe {
+            LookupAccountSidW(
+                std::ptr::null(),
+                sid.as_ptr() as PSID,
+                name.as_mut_ptr(),
+                &mut name_len,
+                domain.as_mut_ptr(),
+                &mut domain_len,
+                &mut kind,
+            )
+        } != 0;
+        if !found {
+            return text;
+        }
+        let name = String::from_utf16_lossy(&name[..name_len as usize]);
+        let domain = String::from_utf16_lossy(&domain[..domain_len as usize]);
+        if domain.is_empty() { format!("{name} ({text})") } else { format!("{domain}\\{name} ({text})") }
     }
     /// # Safety
     /// `sid` points to a valid SID.

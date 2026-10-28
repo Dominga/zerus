@@ -39,7 +39,9 @@ fn load_writable(path: &Path) -> Result<Value> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(json!({})),
         Err(error) => return Err(format!("Shared read marks could not be read: {error}")),
     };
-    if !crate::platform::verify_private_file(&file).map_err(|error| error.to_string())? {
+    // #569: a store only too open is made private again; one that stays
+    // refused is reported (hgs status, the desktop) with its fix.
+    if !crate::private_stores::ensure_file(path, &file).map_err(|error| error.to_string())? {
         return Err("Shared read marks could not be read; the store must be a private regular file".into());
     }
     let mut text = String::new();
@@ -459,7 +461,10 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         insert_with_owners(&mut sessions, &owner, &request.conversation, next.clone(), || {
             records().map(|records| records.iter().map(|record| journal::journal_name(record).to_owned()).collect())
         }, |key| dsh::exists(key) || opencode::exists(key))?;
-        atomic_private(&path(), &format!("{}\n", json!({"version": 1, "sessions": sessions})))?;
+        let path = path();
+        atomic_private(&path, &format!("{}\n", json!({"version": 1, "sessions": sessions}))).inspect_err(|error| {
+            crate::private_stores::write_failed(&path, crate::platform::Private::File, error);
+        })?;
     }
     println!("{}", json!({"ok": true, "applied": {"reply_id": reply, "attention_signature": attention}, "read": next}));
     Ok(0)

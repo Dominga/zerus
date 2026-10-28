@@ -4141,6 +4141,26 @@ from the screen first, so its old signature is no longer acknowledged. It prints
 an unknown session prints `{"ok": false, "error": "not_found"}` and exits with
 status 1. Marks live in `read-marks.json` in the hgs state directory, at most
 eight conversations per session, and follow `hgs rename`.
+
+Private stores (read marks, the analytics store, the approval journal, the
+history index, voice storage and the Windows mobile configuration) are checked
+before use. A store that is this user's, lies in the hgs state or configuration
+folder and is only too open (another tool added a group to its ACL, or Unix mode
+bits wider than 0600/0700) is made private again in place: on Windows a
+protected DACL granting this user FullControl through a handle that never
+follows a link, on Unix `fchmod`; the content and the owner stay. Each repair
+adds one line to the session host's `host.log` and to `private-stores.jsonl`
+(owner-only, the newest 200 lines or 64 KiB: path, kind, the removed accounts
+or the reason, time, never content). A store owned by another account, a link
+or reparse point, another kind of entry or a path outside those folders is
+never changed; it and a store a write failed on are kept in
+`private-stores.json` and reported until the store is next found private: in
+`hgs status` (with the one-line `icacls`/`chmod` fix), in `hgs inspect --json`
+as `private_stores` (empty when none) and in `hgs ls --json` as
+`private_stores` (absent when none), from which the desktop raises one notice
+per computer, path and reason. The session host checks the known store paths
+when it starts, and `hgs status` does too; the listing only reads the current
+set.
 Repeating an already-stored current mark reports it as applied without changing
 its timestamp or rewriting the file. Existing-owner writes retain other owners;
 admitting a new owner prunes abandoned entries using the current binding set.

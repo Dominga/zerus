@@ -37,6 +37,7 @@ pub mod task_view;
 pub mod tasks;
 pub mod tasks_write;
 pub mod terminal;
+pub mod termination_cleanup;
 pub mod view;
 pub mod views;
 pub mod voice;

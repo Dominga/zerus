@@ -9112,9 +9112,10 @@ else:print('{}')
 )PY");
     fixture.close(); QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
     { QFile behind(temp.filePath("behind")); QVERIFY(behind.open(QIODevice::WriteOnly)); behind.write("1"); }
+    const QJsonObject savedDetails{{"tracked", true}, {"run_id", "run-l5"}, {"conversation_id", "conversation-l5"},
+        {"runtime_state", "saved"}, {"process_state", "exited"}, {"resumable", true}};
     { QFile details(temp.filePath("details.json")); QVERIFY(details.open(QIODevice::WriteOnly));
-      details.write(QJsonDocument(QJsonObject{{"tracked", true}, {"run_id", "run-l5"}, {"conversation_id", "conversation-l5"},
-          {"runtime_state", "saved"}, {"process_state", "exited"}, {"resumable", true}}).toJson()); }
+      details.write(QJsonDocument(savedDetails).toJson()); }
     const QJsonObject readyDetails{{"tracked", true}, {"run_id", "run-l5b"}, {"conversation_id", "conversation-l5"},
         {"runtime_state", "live"}, {"process_state", "running"}, {"phase", "idle"}, {"activity", "idle"}};
     { QFile ready(temp.filePath("ready.json")); QVERIFY(ready.open(QIODevice::WriteOnly));
@@ -9131,6 +9132,8 @@ else:print('{}')
     auto *client = window.findChild<HgsClient *>(); QVERIFY(client);
     QSignalSpy writes(client, &HgsClient::writeDone);
     QTRY_VERIFY(composer->sessionKey().endsWith("codex/hgs/dashboard"));
+    // Resume is enabled by the listing; its async guard also needs inspected identity.
+    settleSelectedInspection(composer, client, {}, QStringLiteral("codex/hgs/dashboard"), savedDetails);
     setComposerText(composer, QStringLiteral("carry on"));
     auto *send = composer->findChild<QPushButton *>("sendMessage"); QVERIFY(send);
     QTRY_VERIFY(send->isEnabled());

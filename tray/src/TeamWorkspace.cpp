@@ -310,6 +310,22 @@ void TeamWorkspace::render()
         m_leftHost->addWidget(left); left->show(); m_left = left;
         // Members keep their scroll position.
         const int scroll = m_members->verticalScrollBar()->value();
+        // A poll may rebuild Members just after Answer focused Allow. Keep a
+        // decision button focused only for the exact same pending question;
+        // Enter must never transfer to another member or a newer request.
+        QString focusTeam, focusMember, focusQuestion, focusHash, focusControl;
+        if (const auto *focused = QApplication::focusWidget(); focused && m_members->isAncestorOf(focused)
+            && (focused->objectName() == "teamMemberPermissionAllow" || focused->objectName() == "teamMemberPermissionDeny")) {
+            for (auto *box = focused->parentWidget(); box; box = box->parentWidget()) {
+                if (box->objectName() != "teamMemberPermission") continue;
+                focusTeam = box->property("team").toString();
+                focusMember = box->property("member").toString();
+                focusQuestion = box->property("question").toString();
+                focusHash = box->property("questionHash").toString();
+                focusControl = focused->objectName();
+                break;
+            }
+        }
         auto *list = new QWidget; list->setObjectName("teamWorkspaceSide");
         {auto *sv = new QVBoxLayout(list); sv->setContentsMargins(0, 0, 0, 0); sv->setSpacing(0);
          if (auto *lists = sideLists(*team, status)) sv->addWidget(lists);
@@ -317,6 +333,15 @@ void TeamWorkspace::render()
         retire(m_members->takeWidget());
         m_members->setWidget(list); m_membersContent = list;
         m_members->verticalScrollBar()->setValue(scroll);
+        if (!focusControl.isEmpty() && focusTeam == team->id && !focusQuestion.isEmpty() && !focusHash.isEmpty()) {
+            for (auto *box : list->findChildren<QFrame *>("teamMemberPermission")) {
+                if (box->property("member").toString() != focusMember || box->property("question").toString() != focusQuestion
+                    || box->property("questionHash").toString() != focusHash) continue;
+                if (auto *control = box->findChild<QPushButton *>(focusControl); control && control->isEnabled() && control->isVisible())
+                    control->setFocus(Qt::OtherFocusReason);
+                break;
+            }
+        }
         renderCoordinator(*team);
     }
     if (m_top) { m_topHost->removeWidget(m_top); retire(m_top); }
@@ -2664,6 +2689,7 @@ QWidget *TeamWorkspace::members(const Team &team)
         // native answers array; a deny's reason travels as the answer text.
         if (m.permission.permission()) {
             auto *box = new QFrame; box->setObjectName("teamMemberPermission"); box->setProperty("member", m.id);
+            box->setProperty("team", team.id); box->setProperty("question", m.permission.id); box->setProperty("questionHash", m.permission.hash);
             box->setStyleSheet(QStringLiteral("QFrame#teamMemberPermission{background:%1;border:1px solid %2;border-radius:7px;}")
                                    .arg(alpha(c.warn, .10).name(QColor::HexArgb), alpha(c.warn, .40).name(QColor::HexArgb)));
             auto *pv = new QVBoxLayout(box); pv->setContentsMargins(8, 5, 8, 6); pv->setSpacing(3);

@@ -2674,6 +2674,15 @@ void TestTeamsUi::permissionAttentionNamesTheMemberAndAnswers()
     workspace.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&workspace));
     workspace.findChild<QPushButton *>("teamAttentionAnswer")->click();
     QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(workspace.findChild<QPushButton *>("teamMemberPermissionAllow")));
+    // A newer request must not inherit Allow focus (and a following Enter).
+    auto changedQuestion = backend["question"].toObject();
+    changedQuestion["question_hash"] = QStringLiteral("new-request-hash");
+    changedQuestion["command"] = QStringLiteral("cargo test --new-request");
+    backend["question"] = changedQuestion; members[1] = backend; team["members"] = members;
+    setTeam(team);
+    QTRY_VERIFY(([&] { controller.refresh(); auto *line = workspace.findChild<QLabel *>("teamMemberPermissionCommand");
+                       return line && line->text() == QStringLiteral("cargo test --new-request"); })());
+    QVERIFY(QApplication::focusWidget() != workspace.findChild<QPushButton *>("teamMemberPermissionAllow"));
     // No answer box from this hgs: the command goes to the clipboard.
     backend.remove("question"); members[1] = backend; team["members"] = members;
     setTeam(team);
@@ -8083,6 +8092,12 @@ void TestTeamsUi::leadAnswersAMembersSubagentRequest()
     // The attention strip's Answer brings the lead to the same box.
     workspace.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&workspace));
     workspace.findChild<QPushButton *>("teamAttentionAnswer")->click();
+    QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(workspace.findChild<QPushButton *>("teamMemberPermissionAllow")));
+    // A status/feed refresh can arrive immediately after Answer. Rebuild
+    // deterministically: the new button for this request keeps keyboard focus.
+    const QPointer<QPushButton> oldAllow = workspace.findChild<QPushButton *>("teamMemberPermissionAllow");
+    workspace.render();
+    QVERIFY(workspace.findChild<QPushButton *>("teamMemberPermissionAllow") != oldAllow.data());
     QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(workspace.findChild<QPushButton *>("teamMemberPermissionAllow")));
     shot(&workspace, "u19-lead-subagents-three-dark");
     workspace.setTheme(false); lightShot(&workspace, "u19-lead-subagents-three-light"); darkPalette(); workspace.setTheme(true);

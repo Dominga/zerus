@@ -27,6 +27,21 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::UNIX_EPOCH;
 
+/// The app's drafts folder, in its data folder: one store the composers
+/// share, so every draft key has one writer.
+pub const DIR: &str = "drafts";
+/// A replay's drafts folder, so a replay never touches the real drafts.
+pub const REPLAY_DIR: &str = "drafts-replay";
+
+/// The drafts folder for a run, [`REPLAY_DIR`] in replay mode.
+pub fn dir(replay: bool) -> &'static str {
+    if replay {
+        REPLAY_DIR
+    } else {
+        DIR
+    }
+}
+
 pub const NOT_RESTORED: &str =
     "Could not restore this draft completely. Saved files have been kept locally.";
 pub const INTERRUPTED: &str =

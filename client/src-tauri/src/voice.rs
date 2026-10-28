@@ -15,8 +15,10 @@ use zerus_client_core::voice_composer::{Inserted, Preferences, Target};
 use zerus_client_core::voice_driver::{Input, Out, VoiceDriver};
 use zerus_client_media::{microphones, video_available, MediaCapture};
 
-/// The drafts folder in the app's data: the store the composers share.
-pub const DRAFTS: &str = "drafts";
+/// Voice drivers open at once; a composer closes its own when it goes.
+pub const MAX_DRIVERS: usize = 32;
+const TOO_MANY: &str = "Too many voice composers are open. Close one and try again.";
+const REPLAY_NEEDS_HGS: &str = "Voice in replay mode needs ZERUS_CLIENT_HGS.";
 
 /// The open voice drivers, by composer key.
 pub struct Voices {
@@ -32,6 +34,21 @@ impl Voices {
             hgs: default_hgs(),
             drafts,
             drivers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// At exit: closes every driver, cancelling recordings under way and
+    /// waiting until their draft saves are queued. Blocks, bounded.
+    pub fn close_all(&self) {
+        let drivers: Vec<VoiceDriver> = self
+            .drivers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain()
+            .map(|(_, driver)| driver)
+            .collect();
+        for driver in drivers {
+            driver.close();
         }
     }
 }
@@ -113,13 +130,23 @@ impl From<VoiceInput> for Input {
 }
 
 /// Opens the voice driver of a composer, replacing an earlier one for the
-/// same key; its outputs go to `events`.
+/// same key; its outputs go to `events`. A replay reaches only an explicit
+/// `ZERUS_CLIENT_HGS`, never the real CLI.
 #[tauri::command]
 pub async fn voice_open(
     state: State<'_, Voices>,
     key: String,
     events: Channel<Out>,
 ) -> Result<(), String> {
+    if crate::actions::blocked() {
+        return Err(REPLAY_NEEDS_HGS.into());
+    }
+    {
+        let drivers = state.drivers.lock().unwrap_or_else(PoisonError::into_inner);
+        if !drivers.contains_key(&key) && drivers.len() >= MAX_DRIVERS {
+            return Err(TOO_MANY.into());
+        }
+    }
     let driver = VoiceDriver::start(
         state.hgs.clone(),
         Arc::clone(&state.drafts),
@@ -134,7 +161,7 @@ pub async fn voice_open(
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .insert(key, driver);
-    // Its thread finishes off this one.
+    // Dropping never waits: the replaced driver's thread ends on its own.
     drop(previous);
     Ok(())
 }
@@ -154,8 +181,8 @@ pub async fn voice_input(
     Ok(())
 }
 
-/// Closes a composer's voice driver; a recording under way is cancelled,
-/// a saved one stays in its draft.
+/// Closes a composer's voice driver without waiting; a recording under way
+/// is cancelled, a saved one stays in its draft.
 #[tauri::command]
 pub async fn voice_close(state: State<'_, Voices>, key: String) -> Result<(), String> {
     let driver = state

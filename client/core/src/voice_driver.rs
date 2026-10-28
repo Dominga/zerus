@@ -130,7 +130,9 @@ enum Message {
     Quit,
 }
 
-/// A composer's voice driver; dropping it cancels a recording under way.
+/// A composer's voice driver. Dropping it cancels a recording under way
+/// without waiting: its thread finishes on its own. [`VoiceDriver::close`]
+/// waits, for the app's exit.
 pub struct VoiceDriver {
     inbox: mpsc::Sender<Message>,
     thread: Option<JoinHandle<()>>,
@@ -173,14 +175,21 @@ impl VoiceDriver {
     pub fn input(&self, input: Input) {
         let _ = self.inbox.send(Message::Input(input));
     }
+
+    /// Cancels a recording under way and waits until the driver's thread
+    /// ended, so every draft save it issued is queued in the store before
+    /// the store is flushed. Blocks; bounded by the driver's current step.
+    pub fn close(mut self) {
+        let _ = self.inbox.send(Message::Quit);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 impl Drop for VoiceDriver {
     fn drop(&mut self) {
         let _ = self.inbox.send(Message::Quit);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
     }
 }
 

@@ -157,7 +157,7 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
-fn blocked() -> bool {
+pub(crate) fn blocked() -> bool {
     !actions_allowed(
         env("ZERUS_CLIENT_REPLAY").as_deref(),
         env("ZERUS_CLIENT_HGS").as_deref(),

@@ -216,7 +216,7 @@ fn a_recording_is_saved_previewed_sent_once_and_cleared() {
         .draft
         .attachments
         .is_empty());
-    drop(driver);
+    driver.close();
     assert_eq!(
         calls.lock().unwrap().last().map(String::as_str),
         Some("cancel")

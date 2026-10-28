@@ -48,6 +48,7 @@ fn live_smoke() {
                 }
                 Change::Activity { .. } => "activity",
                 Change::Processes { .. } => "processes",
+                Change::Tasks { .. } => "tasks",
             };
             *kinds.entry(kind).or_default() += 1;
             coalescer.push(change);

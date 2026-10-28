@@ -16,6 +16,7 @@ pub mod readmarks;
 pub mod run;
 pub mod state;
 pub mod stream;
+pub mod tasks;
 pub mod view;
 
 use serde::{Deserialize, Serialize};
@@ -24,12 +25,14 @@ use std::path::PathBuf;
 
 pub use actions::{Action, Exit, Invocation, Outcome, Target, WorktreeCleanup};
 pub use batch::ProcessesOut;
+pub use batch::TasksOut;
 pub use batch::{ActivityOut, Batch, Coalescer, ComputerOut, KeyOut, ReplaceOut, RowOut};
 pub use fleet::{Fleet, FollowError};
 pub use processes::{ProcessesState, ProcessesUpdate};
 pub use run::{run, run_with_env};
 pub use state::{ActivityState, CatalogState};
 pub use stream::{StreamEvent, StreamHandle, Timing};
+pub use tasks::{TasksState, TasksUpdate};
 pub use view::ViewRow;
 pub use zerus_watch_protocol::SessionRef;
 
@@ -154,6 +157,12 @@ pub enum Change {
         key: String,
         update: ProcessesUpdate,
     },
+    /// A followed project's task list, keyed by its project ID; see [`tasks`].
+    Tasks {
+        computer: ComputerId,
+        key: String,
+        update: TasksUpdate,
+    },
 }
 
 impl Change {
@@ -164,7 +173,8 @@ impl Change {
             | Self::Replace { computer, .. }
             | Self::Computer { computer, .. }
             | Self::Activity { computer, .. }
-            | Self::Processes { computer, .. } => computer,
+            | Self::Processes { computer, .. }
+            | Self::Tasks { computer, .. } => computer,
         }
     }
 }

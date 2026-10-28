@@ -4,9 +4,11 @@
 //! snapshot pages are staged until the page with `last` and then replace the
 //! rows at once, so a `gap` never empties the list; a delta gives one upsert or
 //! removal per item; Activity frames of followed sessions become
-//! [`Change::Activity`] and processes frames [`Change::Processes`]. Frame types
-//! and topics it does not know change nothing.
-use crate::{view, ActivityUpdate, Change, ComputerId, ComputerStatus, ProcessesState, ViewRow};
+//! [`Change::Activity`], processes frames [`Change::Processes`] and tasks frames
+//! [`Change::Tasks`]. Frame types and topics it does not know change nothing.
+use crate::{
+    view, ActivityUpdate, Change, ComputerId, ComputerStatus, ProcessesState, TasksState, ViewRow,
+};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
@@ -135,6 +137,7 @@ pub struct CatalogState {
     meta: Option<Value>,
     activity: HashMap<String, ActivityState>,
     processes: ProcessesState,
+    tasks: TasksState,
     live: bool,
     failed: bool,
     failures: u32,
@@ -297,6 +300,12 @@ impl CatalogState {
                         .state(computer, &state.key, &state.value, state.rev),
                 );
             }
+            Body::Snapshot(snapshot) if snapshot.topic == topic::TASKS => {
+                changes.extend(self.tasks.snapshot(computer, snapshot));
+            }
+            Body::Gap(gap) if gap.topic == topic::TASKS => {
+                self.tasks.gap(gap.key.as_deref().unwrap_or(""));
+            }
             Body::Gap(gap) if gap.topic == topic::CATALOG => {
                 // The rows stay until the snapshot that follows is complete.
                 self.staged = None;
@@ -312,6 +321,9 @@ impl CatalogState {
             }
             Body::Error(error) if error.topic.as_deref() == Some(topic::PROCESSES) => {
                 changes.extend(self.processes.error(computer, error));
+            }
+            Body::Error(error) if error.topic.as_deref() == Some(topic::TASKS) => {
+                changes.extend(self.tasks.error(computer, error));
             }
             Body::Error(error) => {
                 let ended = matches!(
@@ -349,6 +361,7 @@ impl CatalogState {
         for activity in self.activity.values_mut() {
             activity.staged = None;
         }
+        self.tasks.begin();
     }
 
     /// The stream ended, failed or stayed silent: the computer reconnects and
@@ -448,6 +461,25 @@ impl CatalogState {
             .iter()
             .any(|name| name == topic::PROCESSES)
             .then_some(hello.limits.processes_subscriptions)
+    }
+
+    /// The followed task lists; see [`crate::tasks`].
+    pub fn tasks(&self) -> &TasksState {
+        &self.tasks
+    }
+
+    pub fn tasks_mut(&mut self) -> &mut TasksState {
+        &mut self.tasks
+    }
+
+    /// The tasks limit of the latest `hello`; None when it lacks the topic.
+    pub fn tasks_limit(&self) -> Option<usize> {
+        let hello = self.hello.as_ref()?;
+        hello
+            .topics
+            .iter()
+            .any(|name| name == topic::TASKS)
+            .then_some(hello.limits.tasks_subscriptions)
     }
 
     /// The name rows carry: a peer's alias, or this computer's host name.

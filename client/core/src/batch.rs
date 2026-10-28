@@ -4,7 +4,9 @@
 //! requests a [`Coalescer`] folds every [`Change`] so that a burst of thousands
 //! of deltas costs one batch with the latest row per key, and its memory stays
 //! bounded by the number of distinct keys.
-use crate::{ActivityUpdate, Change, ComputerId, ComputerStatus, ProcessesUpdate, ViewRow};
+use crate::{
+    ActivityUpdate, Change, ComputerId, ComputerStatus, ProcessesUpdate, TasksUpdate, ViewRow,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -69,11 +71,25 @@ pub struct ProcessesOut {
     pub payload: Value,
 }
 
+/// The latest change of a followed project's task list, keyed by the project
+/// ID as followed. `kind` and `payload`: `list` carries `{tasks, project,
+/// damaged, digest, truncated}` (the whole list, `tasks` as `hgs task list
+/// --json` lists them), `failed` `{code, message}` (the last list stays) and
+/// `ended` null (the follow ended).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TasksOut {
+    pub computer: ComputerId,
+    pub key: String,
+    pub kind: String,
+    pub payload: Value,
+}
+
 /// Everything that changed since the previous batch. The view applies, in
-/// order: `computers`, `replaces`, `removes`, `upserts`, `activity`, then
-/// `processes`. Row changes of a computer with a replacement are already part
-/// of it; otherwise a key is in at most one of `removes` and `upserts`.
-/// `processes` holds at most one entry per key and is left out when empty.
+/// order: `computers`, `replaces`, `removes`, `upserts`, `activity`,
+/// `processes`, then `tasks`. Row changes of a computer with a replacement are
+/// already part of it; otherwise a key is in at most one of `removes` and
+/// `upserts`. `processes` and `tasks` hold at most one entry per key and are
+/// left out when empty.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Batch {
     pub upserts: Vec<RowOut>,
@@ -83,6 +99,8 @@ pub struct Batch {
     pub activity: Vec<ActivityOut>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub processes: Vec<ProcessesOut>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<TasksOut>,
 }
 
 impl Batch {
@@ -93,6 +111,7 @@ impl Batch {
             && self.computers.is_empty()
             && self.activity.is_empty()
             && self.processes.is_empty()
+            && self.tasks.is_empty()
     }
 }
 
@@ -117,8 +136,8 @@ type SessionKey = (ComputerId, String);
 ///   (into a pending window replacement too), a replacement drops the events
 ///   before it, the latest summary and the highest `rev` of an event id win,
 ///   and an end drops what was pending before it;
-/// - the latest processes change of a `(computer, key)` wins, except that a
-///   failure never replaces a pending state.
+/// - the latest processes or tasks change of a `(computer, key)` wins, except
+///   that a failure never replaces a pending state or list.
 ///
 /// Memory is bounded by the distinct keys, the computers and
 /// [`PENDING_EVENTS`] per followed session.
@@ -131,6 +150,7 @@ pub struct Coalescer {
     /// Activity keys in the order they first changed.
     order: Vec<SessionKey>,
     processes: BTreeMap<SessionKey, ProcessesUpdate>,
+    tasks: BTreeMap<SessionKey, TasksUpdate>,
 }
 
 impl Coalescer {
@@ -202,6 +222,18 @@ impl Coalescer {
                     self.processes.insert(id, update);
                 }
             }
+            Change::Tasks {
+                computer,
+                key,
+                update,
+            } => {
+                let id = (computer, key);
+                let keep = matches!(update, TasksUpdate::Failed { .. })
+                    && matches!(self.tasks.get(&id), Some(TasksUpdate::List { .. }));
+                if !keep {
+                    self.tasks.insert(id, update);
+                }
+            }
         }
     }
 
@@ -267,11 +299,37 @@ impl Coalescer {
                 payload,
             });
         }
+        for ((computer, key), update) in std::mem::take(&mut self.tasks) {
+            let (kind, payload) = match update {
+                TasksUpdate::List {
+                    tasks,
+                    project,
+                    damaged,
+                    digest,
+                    truncated,
+                } => (
+                    "list",
+                    json!({"tasks": tasks, "project": project, "damaged": damaged,
+                           "digest": digest, "truncated": truncated}),
+                ),
+                TasksUpdate::Failed { code, message } => {
+                    ("failed", json!({"code": code, "message": message}))
+                }
+                TasksUpdate::Ended => ("ended", Value::Null),
+            };
+            batch.tasks.push(TasksOut {
+                computer,
+                key,
+                kind: kind.to_owned(),
+                payload,
+            });
+        }
         batch
     }
 
     /// Pending entries: rows (a replacement counts each row), computers,
-    /// Activity updates, with events counted one by one, and processes changes.
+    /// Activity updates, with events counted one by one, and processes and
+    /// tasks changes.
     pub fn pending(&self) -> usize {
         let replaced: usize = self.replaces.values().map(|rows| rows.len().max(1)).sum();
         let activity: usize =
@@ -284,7 +342,12 @@ impl Coalescer {
                     _ => 1,
                 })
                 .sum();
-        self.computers.len() + replaced + self.rows.len() + activity + self.processes.len()
+        self.computers.len()
+            + replaced
+            + self.rows.len()
+            + activity
+            + self.processes.len()
+            + self.tasks.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -293,6 +356,7 @@ impl Coalescer {
             && self.rows.is_empty()
             && self.activity.is_empty()
             && self.processes.is_empty()
+            && self.tasks.is_empty()
     }
 }
 
@@ -828,6 +892,56 @@ mod tests {
             serde_json::to_value(&only).unwrap()["processes"][0]["kind"],
             ""
         );
+    }
+
+    #[test]
+    fn the_latest_task_list_of_a_project_wins_and_a_failure_keeps_it() {
+        let list = |digest: &str| TasksUpdate::List {
+            tasks: vec![json!({"text": digest})],
+            project: json!({"id": "p1"}),
+            damaged: json!([]),
+            digest: digest.into(),
+            truncated: false,
+        };
+        let failed = TasksUpdate::Failed {
+            code: "tasks_failed".into(),
+            message: "unknown project".into(),
+        };
+        let tasks = |key: &str, update: TasksUpdate| Change::Tasks {
+            computer: local(),
+            key: key.to_owned(),
+            update,
+        };
+        let mut coalescer = Coalescer::new();
+        coalescer.push(tasks("p1", list("d1")));
+        coalescer.push(tasks("p1", list("d2")));
+        coalescer.push(tasks("p1", failed.clone()));
+        coalescer.push(tasks("p2", failed));
+        coalescer.push(tasks("p3", list("d3")));
+        coalescer.push(tasks("p3", TasksUpdate::Ended));
+        assert_eq!(coalescer.pending(), 3);
+        let batch = coalescer.take();
+        let kinds: Vec<_> = batch
+            .tasks
+            .iter()
+            .map(|out| (out.key.as_str(), out.kind.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![("p1", "list"), ("p2", "failed"), ("p3", "ended")]
+        );
+        assert_eq!(
+            batch.tasks[0].payload,
+            json!({"tasks": [{"text": "d2"}], "project": {"id": "p1"}, "damaged": [],
+                   "digest": "d2", "truncated": false})
+        );
+        let value = serde_json::to_value(&batch).unwrap();
+        assert_eq!(value["tasks"][1]["payload"]["code"], "tasks_failed");
+        assert!(value.get("processes").is_none());
+        assert!(serde_json::to_value(Batch::default())
+            .unwrap()
+            .get("tasks")
+            .is_none());
     }
 
     #[test]

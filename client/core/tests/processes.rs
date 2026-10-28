@@ -196,3 +196,50 @@ fn a_cli_without_the_topic_stays_quiet() {
     fleet.stop();
     assert!(controls(&fake).is_empty());
 }
+
+#[test]
+fn a_new_stream_with_a_lower_limit_ends_only_the_follows_beyond_it() {
+    let rows = [
+        ("r1", "claude/sample-project/one"),
+        ("r2", "claude/sample-project/two"),
+        ("r3", "claude/sample-project/three"),
+    ];
+    let fake = FakeHgs::new(
+        "processes_lower_limit",
+        json!({"": {"runs": [
+            [{"lines": [hello_with_processes(16), catalog(&rows)]}, {"await_file": "followed"}],
+            [{"lines": [hello_with_processes(2), catalog(&rows)]}, {"serve": true}]
+        ]}}),
+    );
+    let (tx, rx) = channel();
+    let mut seen = Seen::new(rx);
+    let fleet = Fleet::start_local(fake.path(), tx, quick());
+    let local = ComputerId::local();
+    seen.until("live", live);
+    for (run, name) in rows {
+        assert!(fleet.follow_processes(&local, session(run, name)).is_ok());
+    }
+    fake.touch("followed");
+    seen.until("the end beyond the new limit", |change| {
+        processes(change, "run:r3") == Some(&ProcessesUpdate::Ended)
+    });
+    assert_eq!(
+        fleet.followed_processes(&local),
+        vec!["run:r1".to_owned(), "run:r2".to_owned()]
+    );
+    eventually("the subscriptions of the new stream", || {
+        controls(&fake).len() == 2
+    });
+    assert_eq!(
+        controls(&fake),
+        vec![
+            ("subscribe".into(), "r1".into()),
+            ("subscribe".into(), "r2".into())
+        ]
+    );
+    assert!(seen.all.iter().all(|change| {
+        processes(change, "run:r1") != Some(&ProcessesUpdate::Ended)
+            && processes(change, "run:r2") != Some(&ProcessesUpdate::Ended)
+    }));
+    fleet.stop();
+}

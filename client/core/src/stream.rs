@@ -807,8 +807,8 @@ impl Supervisor {
         let Some(limit) = self.state.processes_limit() else {
             return;
         };
-        let subscribed = self.state.processes().keys().count();
-        if (self.state.live() && !self.state.rows().contains_key(key)) || subscribed > limit {
+        let beyond = self.state.processes().keys().position(|known| known == key) >= Some(limit);
+        if (self.state.live() && !self.state.rows().contains_key(key)) || beyond {
             if let Some(change) = self.state.processes_mut().end(&self.computer, key) {
                 lock(&self.processes).remove(key);
                 self.emit(change);

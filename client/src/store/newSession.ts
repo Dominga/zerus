@@ -9,9 +9,9 @@ import {
   accountRows, computerChoice, computerRows, folderLaunchProblem, folderRows, projectChoice, projectRows, refreshRows,
   type AccountChoice, type AccountRow, type ComputerRow, type Fleet, type FolderRow, type ProjectRow,
 } from "../ui/sessions/newsession-ui";
-import {
-  addModelOptions, catalogSupported, markCatalogFavorite, markFavorite, ModelPicker, updateText, type ModelOption, type PickerView,
-} from "../ui/sessions/opencode-models";
+import { markFavorite } from "../ui/sessions/opencode-models";
+import { array, object, string, type Json } from "../ui/lib/json";
+import { createOpenCode, type OpenCodeView } from "./newSessionOpencode";
 import { absolute, clean, matchingProjectFolder, native, of, prefillTarget, restoredFolder } from "../ui/sessions/paths";
 import { catalog, computerOffline } from "./catalog";
 import { machineCards, requestMachine } from "./machines";
@@ -30,8 +30,6 @@ import { snapshotOf } from "../ui/sessions/actions-ui";
 // an answer for a dialog, computer, folder or request that has moved on is
 // dropped. Opening, choosing and reading never create anything; only Start
 // submits, once (`creation_submit`). Nothing outlives the dialog.
-
-type Json = Record<string, unknown>;
 
 /** What New session is opened with (`showNewSession`'s arguments). */
 export interface NewSessionOptions {
@@ -80,10 +78,10 @@ export interface NewSessionDeps {
   now(): number;
 }
 
-export interface EffortOption { value: string; label: string }
+export type { EffortOption, OpenCodeView } from "./newSessionOpencode";
 
-/** What the dialog shows (Task 3 renders it). */
-export interface NewSessionState {
+/** What the dialog shows (Task 3 renders it); its OpenCode part is `OpenCodeView`. */
+export interface NewSessionState extends OpenCodeView {
   projects: ProjectRow[];
   project: number;
   /** The New project name field shows (a repository going to New project…). */
@@ -123,18 +121,6 @@ export interface NewSessionState {
   /** The selected row's agent, else the intended one; its account, "" for none. */
   agent: string;
   accountId: string;
-  models: ModelOption[];
-  /** The selected model, "" for the native default. */
-  model: string;
-  modelVisible: boolean;
-  modelButton: string;
-  modelEnabled: boolean;
-  pickerOpen: boolean;
-  picker: PickerView;
-  efforts: EffortOption[];
-  effort: string;
-  effortVisible: boolean;
-  service: { visible: boolean; reason: string; offer: boolean; text: string; enabled: boolean; tooltip: string };
   name: string;
   branch: string;
   openTerminal: boolean;
@@ -200,8 +186,6 @@ const ACTION_KEYS: Record<keyof NewSessionActions, true> = {
 };
 const ACTIONS = Object.keys(ACTION_KEYS) as (keyof NewSessionActions)[];
 const EMPTY: Json = Object.freeze({}) as Json;
-const NATIVE_MODEL: ModelOption = { value: "", text: "Native default model", label: "", efforts: [], effortLabels: [] };
-const DEFAULT_EFFORT: EffortOption = { value: "", label: "Default" };
 const AGENTS = ["codex", "claude", "kimi", "dsh", "opencode"];
 const INBOX = "ungrouped";
 const FOLDER_CHANGED = "This project folder changed. Select it again.";
@@ -209,12 +193,7 @@ const FOLDER_CHANGED = "This project folder changed. Select it again.";
 const VERIFIED = 64;
 const USAGE_MS = 60_000;
 
-const string = (value: unknown) => (typeof value === "string" ? value : "");
-const array = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
-const object = (value: unknown): Json => (value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Json) : {});
 const errorText = (error: unknown) => (typeof error === "string" ? error : error instanceof Error ? error.message : String(error));
-const ready = (catalog: Json | undefined) => catalog?.catalog_state === "ready";
-const valueOf = (entry: unknown) => { const o = object(entry); return typeof o.value === "string" ? o.value : string(o.id); };
 
 function emptyMeta(): MachineMeta {
   return {
@@ -224,8 +203,16 @@ function emptyMeta(): MachineMeta {
   };
 }
 
+/** Where the dialog's two leaving buttons go once it closed (281-282, 2955-2956). */
+interface Leave {
+  /** Manage this project's folders. */
+  folders(project: string): void;
+  /** Open Machines. */
+  machines(): void;
+}
+
 /** One open dialog: Qt's NewSessionDialog members and slots. */
-function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { host: string; agent: string; project: string }, emit: () => void) {
+function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { host: string; agent: string; project: string }, emit: () => void, leave: Leave) {
   const b = deps.bridge;
   let closed = false;
   let ticket = 0;
@@ -281,26 +268,6 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
   /** The newest rows read for new limits; an older answer is dropped. */
   let usageRequest = 0;
 
-  // OpenCode models.
-  const picker = new ModelPicker();
-  let models: ModelOption[] = [NATIVE_MODEL];
-  let modelValue = "";
-  let efforts: EffortOption[] = [DEFAULT_EFFORT];
-  let effortValue = "";
-  let effortVisible = false;
-  let pickerOpen = false;
-  let modelContext = "";
-  let chosenModel: Json | undefined;
-  let chosenHost = "", chosenKey = "", pickerAvailability = "", favoriteError = "";
-  let shownCatalog: Json | undefined = EMPTY;
-  const folderCatalogs = new Map<string, Json>();
-  let folderOrder: string[] = [];
-  const folderRequests = new Map<number, string>();
-  const folderLatest = new Map<string, number>();
-  const favoriteRequests = new Map<number, { key: string; value: string; favorite: boolean; machine: string }>();
-  let serviceStart = 0;
-  let serviceHost = "";
-
   // Worktrees and the prefill.
   let autoPreferred = true;
   let worktreeCatalog: Json = {};
@@ -339,7 +306,6 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
   const folderId = () => folders[folderIndex]?.id ?? "";
   const agent = () => rows[accountIndex]?.provider ?? preferredAgent;
   const account = () => rows[accountIndex]?.id ?? "";
-  const modelKey = () => `${host()}\n${path()}`;
   const implicitInbox = () => !projectExplicit && projectId() === INBOX;
   const machineName = () => host() || localHostName();
 
@@ -820,12 +786,7 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
 
   function refreshAccounts() {
     // Refresh asks again for folders whose last answer was not a ready catalog.
-    for (const key of [...folderOrder]) {
-      if (key.startsWith(`${host()}\n`) && !ready(folderCatalogs.get(key))) {
-        folderOrder = folderOrder.filter((k) => k !== key);
-        folderCatalogs.delete(key);
-      }
-    }
+    oc.dropUnready();
     loadAccounts(true);
   }
 
@@ -836,282 +797,32 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     return accounts.find((p) => p.provider === "opencode" && p.id === account()) ?? EMPTY;
   }
 
-  const currentOption = () => models.find((m) => m.value === modelValue);
-
-  function updateModels() {
-    const enabled = agent() === "opencode";
-    const row = openCodeProfile();
-    const key = modelKey();
-    const contextKey = enabled ? key : "";
-    const changed = contextKey !== modelContext;
-    if (changed) {
-      modelContext = contextKey;
-      pickerOpen = false;
-      picker.setCatalog({});
-      shownCatalog = EMPTY;
-      // A choice belongs to its computer; another folder keeps it only when its ready catalog lists it.
-      const chosen = string(chosenModel?.value);
-      const stored = folderCatalogs.get(key);
-      const listed = () => [stored?.models, stored?.model_options].some((list) => array(list).some((entry) => valueOf(entry) === chosen));
-      if (chosenHost !== host()) chosenModel = undefined;
-      else if (enabled && chosen && chosenKey !== key) {
-        if (ready(stored) && listed()) chosenKey = key;
-        else chosenModel = undefined;
-      }
-    }
-    // A new context starts from the choice it accepted above, else the native
-    // default; within one context the selected model stays, listed or not.
-    const selectedModel = changed ? string(chosenModel?.value) : modelValue;
-    const current = currentOption();
-    const kept = { value: selectedModel, label: current?.label ?? "", effort_options: current?.efforts ?? [], effort_labels: current?.effortLabels ?? [] };
-    const catalog = folderCatalogs.get(key) ?? EMPTY;
-    const isReady = enabled && ready(catalog);
-    let options = [NATIVE_MODEL];
-    if (enabled) {
-      options = addModelOptions(options, row.model_options);
-      if (isReady) options = addModelOptions(options, catalog.model_options);
-      if (chosenModel) options = addModelOptions(options, [chosenModel]);
-      if (!changed && selectedModel) options = addModelOptions(options, [kept]);
-      const shortList = isReady ? catalog : row;
-      picker.setShortList(shortList.model_options, shortList.model_options_truncated === true);
-      // Another answer (a stopped service, a failure) shows its reason over the row's list.
-      if (catalog !== shownCatalog) {
-        shownCatalog = catalog;
-        if ("failure" in catalog) picker.setCatalogFailed(string(catalog.failure));
-        else if (Object.keys(catalog).length) picker.setCatalog(catalog);
-      }
-      const machine = machineName();
-      const supported = catalogSupported(row), on = online(host());
-      const availability = `${supported}${on}${machine}`;
-      if (changed || availability !== pickerAvailability) {
-        pickerAvailability = availability;
-        picker.setAllModelsAvailable(supported, updateText(machine));
-        picker.setFavoritesAvailable(supported && on, supported ? `${machine} is offline.` : updateText(machine));
-      }
-    }
-    models = options;
-    modelValue = options.some((m) => m.value === selectedModel) ? selectedModel : "";
-    updateEfforts();
-    updateModelButton();
-  }
-
-  /** A changed model keeps the chosen effort only when it offers that variant too. */
-  function updateEfforts() {
-    const selectedEffort = effortValue;
-    const current = currentOption();
-    const offered = current?.efforts ?? [];
-    const enabled = agent() === "opencode" && modelValue !== "" && offered.length > 0;
-    efforts = [DEFAULT_EFFORT, ...(enabled ? offered.map((value, i) => ({ value, label: current?.effortLabels[i] ?? value })) : [])];
-    effortValue = efforts.some((e) => e.value === selectedEffort) ? selectedEffort : "";
-    effortVisible = enabled;
-  }
-
-  const modelEnabled = () => agent() === "opencode" && Object.keys(openCodeProfile()).length > 0;
-
-  /** The picker opens only with this computer's OpenCode row: until then its context is not complete. */
-  function updateModelButton() {
-    if (!modelEnabled()) pickerOpen = false;
-    picker.setCurrent(modelValue);
-  }
-
-  function chooseModelOption(value: string) {
-    if (value === modelValue || !models.some((m) => m.value === value)) return;
-    modelValue = value;
-    updateEfforts();
-    updateModelButton();
-    updateForm();
-  }
-
-  function openModelPicker() {
-    if (!modelEnabled()) return;
-    pickerOpen = true;
-    // Opening asks once per computer and folder; a stored answer is shown again.
-    requestFolderCatalog(false);
-    emit();
-  }
-
-  const pendingFor = (key: string) => [...folderRequests.values()].includes(key);
-
-  /** `account models` for the folder, only from an hgs that has it on an online computer; nothing starts OpenCode. */
-  function requestFolderCatalog(refresh: boolean) {
-    const folder = path(), key = modelKey();
-    if (agent() !== "opencode" || !folder || !online(host()) || !catalogSupported(openCodeProfile())) return;
-    if (!refresh && (folderCatalogs.has(key) || pendingFor(key))) return;
-    const request = next();
-    folderRequests.set(request, key);
-    folderLatest.set(key, request);
-    b.openCodeModels(host(), folder, machineName()).then((answer) => folderAnswered(request, object(answer), undefined), (failure) => folderAnswered(request, undefined, errorText(failure)));
-  }
-
-  /** Only the newest request issued for a folder answers it; a late answer stays with its own folder. */
-  function folderAnswered(request: number, answer: Json | undefined, failure: string | undefined) {
-    if (closed || !folderRequests.has(request)) return;
-    const key = folderRequests.get(request) as string;
-    folderRequests.delete(request);
-    const latest = folderLatest.get(key) === request;
-    // With nothing pending for this folder, no older answer can arrive any more.
-    if (!pendingFor(key)) folderLatest.delete(key);
-    if (!latest) return;
-    if (answer) {
-      storeFolderCatalog(key, answer);
-      if (key === modelKey() && agent() === "opencode") updateModels();
-    } else {
-      // A failed refresh keeps a ready catalog; otherwise the failure is shown again, not asked again.
-      const kept = ready(folderCatalogs.get(key));
-      if (!kept) storeFolderCatalog(key, { failure });
-      if (key === modelKey() && agent() === "opencode") {
-        if (kept) picker.setCatalogFailed(failure ?? "");
-        else updateModels();
-      }
-    }
-    emit();
-  }
-
-  /** Answers of at most four folders: a catalog can be large. The current one stays. */
-  function storeFolderCatalog(key: string, answer: Json) {
-    folderOrder = [...folderOrder.filter((k) => k !== key), key];
-    folderCatalogs.set(key, answer);
-    while (folderOrder.length > 4) {
-      const oldest = folderOrder[0] === modelKey() ? folderOrder[1] : folderOrder[0];
-      folderOrder = folderOrder.filter((k) => k !== oldest);
-      folderCatalogs.delete(oldest);
-    }
-  }
-
-  /** The picker's choice is the only way its model becomes the selection. */
-  function chooseModel(value: string) {
-    const model = picker.model(value);
-    if (!model || agent() !== "opencode") return;
-    chosenModel = { value: model.value, label: model.label, effort_options: model.efforts, effort_labels: model.effortLabels };
-    chosenHost = host();
-    chosenKey = modelKey();
-    models = addModelOptions(models, [chosenModel]);
-    pickerOpen = false;
-    const index = models.findIndex((m) => m.value === value);
-    const target = models[Math.max(0, index)].value;
-    if (target !== modelValue) { modelValue = target; updateEfforts(); updateModelButton(); }
-    updateForm();
-  }
-
-  /** The picker's All models: it reads the folder again unless a ready catalog is here. */
-  function catalogRequested() {
-    const machine = machineName();
-    const stored = folderCatalogs.get(modelKey());
-    if (!path()) picker.setCatalogFailed("Choose a working folder to list all of its models.");
-    else if (!online(host())) picker.setCatalogFailed(`${machine} is offline.`);
-    else if (ready(stored)) picker.setCatalog(stored as Json);
-    else if (!pendingFor(modelKey())) requestFolderCatalog(true);
-  }
-
-  /** One request identity per star click; a failure is shown, never retried. */
-  function changeFavorite(value: string, favorite: boolean) {
-    if (agent() !== "opencode" || !online(host()) || !catalogSupported(openCodeProfile())) return;
-    if (favoriteError && error === favoriteError) error = "";
-    favoriteError = "";
-    picker.setFavoritePending(value, true);
-    const request = next();
-    const machine = host();
-    favoriteRequests.set(request, { key: modelKey(), value, favorite, machine });
-    b.openCodeFavorite(machine, value, favorite, machine || localHostName()).then(() => favoriteDone(request), (failure) => favoriteFailed(request, errorText(failure)));
-  }
-
-  function favoriteDone(request: number) {
-    const change = favoriteRequests.get(request);
-    if (closed || !change) return;
-    favoriteRequests.delete(request);
-    // Favorites belong to the computer: its other folders' catalogs are stale now.
-    for (const key of [...folderOrder]) {
-      if (key.startsWith(`${change.machine}\n`) && key !== modelKey()) {
-        folderOrder = folderOrder.filter((k) => k !== key);
-        folderCatalogs.delete(key);
-      }
-    }
-    if (change.machine !== host()) { emit(); return; }
-    loadAccounts(true);
-    // The answer for another folder or agent leaves this picker as it is.
-    if (change.key !== modelKey() || agent() !== "opencode") { emit(); return; }
-    // The stored catalog and the account row carry the confirmed change, or the
-    // picker's next short list would bring back the state before it.
-    const stored = folderCatalogs.get(change.key);
-    if (ready(stored)) folderCatalogs.set(change.key, markCatalogFavorite(stored as Json, change.value, change.favorite));
-    accounts = accounts.map((profile) => (profile.provider === "opencode" && profile.id === account() && "model_options" in profile
-      ? { ...profile, model_options: markFavorite(profile.model_options, change.value, change.favorite) } : profile));
-    picker.setFavorite(change.value, change.favorite);
-    requestFolderCatalog(true);
-    emit();
-  }
-
-  function favoriteFailed(request: number, failure: string) {
-    const change = favoriteRequests.get(request);
-    if (closed || !change) return;
-    favoriteRequests.delete(request);
-    if (change.machine !== host() || change.key !== modelKey() || agent() !== "opencode") return;
-    picker.setFavoritePending(change.value, false);
-    favoriteError = `Could not change the favorite on ${change.machine || localHostName()}: ${failure}`;
-    setError(favoriteError);
-    emit();
-  }
-
-  picker.onChosen = chooseModel;
-  picker.onFavoriteRequested = changeFavorite;
-  picker.onCatalogRequested = catalogRequested;
-
-  const serviceEnabled = () => online(host()) && !(serviceStart && serviceHost === host()) && !accountRequest;
-
-  function service(): NewSessionState["service"] {
-    const profile = openCodeProfile();
-    const state = string(profile.catalog_state);
-    const starting = serviceStart !== 0 && serviceHost === host();
-    const present = Object.keys(profile).length > 0;
-    const installed = profile.installed !== false;
-    let reason = "";
-    if (present && !installed) reason = string(profile.install_reason);
-    else if (present && state && state !== "ready") reason = string(profile.catalog_reason);
-    const offer = starting || (state === "not_running" && installed);
-    const machine = machineName();
-    const on = online(host());
-    return {
-      visible: offer || reason !== "", reason, offer,
-      text: starting ? "Starting OpenCode…" : `Start OpenCode on ${machine}`,
-      enabled: serviceEnabled(),
-      tooltip: on ? "Start the shared OpenCode service on this computer. Zerus never stops it." : `${machine} is offline.`,
-    };
-  }
-
-  /** Explicit only: hgs starts the shared service when none is registered and alive. */
-  function startOpenCode() {
-    if (serviceStart || !serviceEnabled() || string(openCodeProfile().catalog_state) !== "not_running") return;
-    serviceHost = host();
-    accountStatus = "";
-    const request = next();
-    serviceStart = request;
-    const computer = serviceHost;
-    b.openCodeStart(computer).then(() => {
-      if (closed || serviceStart !== request) return;
-      serviceStart = 0;
-      // The service answered with its catalog: read this computer's accounts again.
-      if (computer === host()) loadAccounts(true);
-      emit();
-    }, (failure) => {
-      if (closed || serviceStart !== request) return;
-      serviceStart = 0;
-      if (computer === host()) accountStatus = `Could not start OpenCode: ${errorText(failure)}`;
-      emit();
-    });
-    emit();
-  }
+  // OpenCode's models, folder catalogs, favorites and service (1145-1313).
+  const oc = createOpenCode({
+    bridge: b, host, path, agent, machineName, openCodeProfile, online, emit, updateForm,
+    accountsLoading: () => accountRequest !== 0,
+    reloadAccounts: () => loadAccounts(true),
+    markRowFavorite(value, favorite) {
+      accounts = accounts.map((profile) => (profile.provider === "opencode" && profile.id === account() && "model_options" in profile
+        ? { ...profile, model_options: markFavorite(profile.model_options, value, favorite) } : profile));
+    },
+    setAccountStatus: (text) => { accountStatus = text; },
+    showError: (text) => setError(text),
+    clearError: (text) => { if (error === text) error = ""; },
+  });
+  const updateModels = () => oc.updateModels();
 
   // Start (743-786).
 
   function choices(): LaunchChoices {
     const card = cards()[host()];
     const fields = repository?.fields;
-    const model = agent() === "opencode" ? modelValue : "";
+    const model = oc.model();
     return {
       host: host(), machine: card?.host || host(), agent: agent(), account: account(), name, project: projectId(),
       project_name: projectRow()?.name ?? "", implicit_inbox: implicitInbox(), swarm, path: path(), auto_preferred: autoPreferred,
       automatic_available: false, branch, catalog: worktreeCatalog, automatic_path: "", listed_folder: folderId() !== "", project_worktree: false,
-      model, effort: model ? effortValue : "", open_terminal: openTerminal,
+      model, effort: model ? oc.effort() : "", open_terminal: openTerminal,
       repository: repositorySource ? {
         url: fields?.url ?? url, parent: fields?.parent ?? "", name: fields?.name ?? "", destination: fields?.destination ?? "",
         created_path: "", new_project: isNewProject(), project_name: newProjectName.trim(),
@@ -1188,13 +899,7 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
       const [folder, auto] = restoredFolder(plan);
       selectPath(folder, auto);
     }
-    if (string(plan.model)) {
-      const effort = string(plan.effort);
-      chosenModel = { value: plan.model, label: plan.model, effort_options: effort ? [effort] : [], effort_labels: effort ? [effort] : [] };
-      chosenHost = host();
-      chosenKey = modelKey();
-      updateModels();
-    }
+    if (string(plan.model)) oc.restore(string(plan.model), string(plan.effort));
     updateForm();
   }
 
@@ -1216,10 +921,7 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
       worktrees: { catalog: worktreeCatalog, chooseVisible: array(worktreeCatalog.worktrees).length > 0, createVisible: worktreeCatalog.state === "ok" },
       accounts: rows, account: accountIndex, accountStatus, refreshEnabled: machines.length > 0 && !accountRequest,
       agent: agent(), accountId: account(),
-      models, model: modelValue, modelVisible: agent() === "opencode",
-      modelButton: modelValue === "" ? "Native default model" : currentOption()?.label || modelValue,
-      modelEnabled: modelEnabled(), pickerOpen, picker: picker.view(),
-      efforts, effort: effortValue, effortVisible, service: service(),
+      ...oc.view(),
       name, branch, openTerminal, form: formView?.shown,
       error: notice && !(error && errorAt >= formAt) ? notice : error,
       starting, submitted,
@@ -1237,6 +939,7 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     closed = true;
     events();
     timer();
+    oc.dispose();
     void b.launchAccountsClose().catch(() => {});
   }
 
@@ -1268,21 +971,7 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     refreshAccounts,
     setName(text) { name = text; updateForm(); },
     setOpenTerminal(on) { openTerminal = on; updateForm(); },
-    chooseModel: chooseModelOption,
-    chooseEffort(value) { if (efforts.some((e) => e.value === value)) { effortValue = value; updateForm(); } },
-    openModelPicker,
-    closeModelPicker() { pickerOpen = false; emit(); },
-    useNativeModel() {
-      chosenModel = undefined;
-      pickerOpen = false;
-      if (modelValue !== "") { modelValue = ""; updateEfforts(); updateModelButton(); }
-      updateForm();
-    },
-    pickerClick(value, star) { picker.click(value, star); emit(); },
-    pickerSelect(value) { picker.select(value); emit(); },
-    pickerToggleAll() { picker.toggleAll(); emit(); },
-    pickerSearch(text) { picker.setQuery(text); emit(); },
-    startOpenCode,
+    ...oc.actions,
     async browseLocal() {
       if (host() !== "") return;
       const target = host(), project = projectId();
@@ -1295,8 +984,8 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     applyBrowsedFolder: (target, project, chosen) => { applyBrowsedFolder(target, project, chosen); emit(); },
     chooseExistingWorktree: (target, project, chosen) => { chooseExistingWorktree(target, project, chosen); emit(); },
     worktreeCreated: (target, project, created, catalog) => worktreeCreated(target, project, created, catalog),
-    manageFolders() {},
-    openMachines() {},
+    manageFolders() { leave.folders(projectId()); },
+    openMachines() { leave.machines(); },
   };
 
   return {
@@ -1304,7 +993,6 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     selectPath: (target: string, automaticWorktree?: boolean) => selectPath(target, automaticWorktree),
     setProjectExplicit: (explicit: boolean) => { projectExplicit = explicit; },
     setSwarm: (id: string) => { swarm = id; },
-    projectId,
     closed: () => closed,
   };
 }
@@ -1354,7 +1042,10 @@ export function createNewSessionStore(deps: NewSessionDeps) {
       const computer = context ? context.row.computer : options.computer ?? selectedHostTarget();
       const started = await deps.bridge.newSessionContext();
       buildStyle = started.build_style;
-      const open = createDialog(deps, started, { host: computer, agent: options.agent ?? "", project: launchProject }, emit);
+      const open = createDialog(deps, started, { host: computer, agent: options.agent ?? "", project: launchProject }, emit, {
+        folders: (project) => { closeNewSession(); deps.openProjects(project); },
+        machines: () => { closeNewSession(); deps.openMachines(); },
+      });
       made = open;
       open.setProjectExplicit(!!options.project);
       open.setSwarm(view.swarm_id);
@@ -1373,8 +1064,6 @@ export function createNewSessionStore(deps: NewSessionDeps) {
       if (options.path) open.selectPath(options.path, false);
       if (options.account != null) open.selectAccount(options.account);
       if (options.recipe) open.restoreCreationChoices(options.recipe);
-      open.actions.manageFolders = () => { const id = open.projectId(); closeNewSession(); deps.openProjects(id); };
-      open.actions.openMachines = () => { closeNewSession(); deps.openMachines(); };
       dialog = open;
       emit();
     } catch (failure) {

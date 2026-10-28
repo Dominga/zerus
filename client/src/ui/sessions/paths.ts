@@ -1,4 +1,5 @@
 import type { LaunchProject, PathStyle } from "../../types";
+import { array, object, string, type Json } from "../lib/json";
 
 // Folder paths in the form of the computer they belong to, and New session's
 // folder helpers: a line-for-line port of client/core/src/paths.rs (`of`,
@@ -159,22 +160,11 @@ export function native(path: string, style: Style): string {
 
 // launch.rs
 
-type Json = Record<string, unknown>;
+const text = (value: unknown, key: string) => string(object(value)[key]);
 
-const object = (value: unknown): Json | undefined =>
-  value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Json) : undefined;
+const flag = (value: unknown, key: string) => object(value)[key] === true;
 
-function text(value: unknown, key: string): string {
-  const field = object(value)?.[key];
-  return typeof field === "string" ? field : "";
-}
-
-const flag = (value: unknown, key: string) => object(value)?.[key] === true;
-
-function entries(catalog: unknown): unknown[] {
-  const list = object(catalog)?.worktrees;
-  return Array.isArray(list) ? list : [];
-}
+const entries = (catalog: unknown) => array(object(catalog).worktrees);
 
 /** A catalog whose Git answer is current: `state` ok, not stale, with a common directory. */
 const current = (catalog: unknown) => text(catalog, "state") === "ok" && !flag(catalog, "stale") && text(catalog, "common_dir") !== "";

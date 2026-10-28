@@ -7,7 +7,7 @@
 // validated and bounded, never trusted. Qt counts text in UTF-16 units, as
 // JavaScript strings do.
 
-type Json = Record<string, unknown>;
+import { array, object, string, type Json } from "../lib/json";
 
 export interface Model {
   value: string; label: string; provider: string; providerLabel: string;
@@ -17,9 +17,6 @@ export interface Model {
 export interface Provider { id: string; label: string; kind: string; activeLabel: string; credentials: number; models: number; folder: boolean }
 export interface Group { provider: string; label: string; folder: boolean; models: Model[] }
 
-const object = (value: unknown): Json => (value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Json) : {});
-const array = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
-const string = (value: unknown): string => (typeof value === "string" ? value : "");
 /** QJsonValue::toString(fallback): a string, else the fallback. */
 const stringOr = (value: unknown, fallback: string) => (typeof value === "string" ? value : fallback);
 /** QJsonValue::toInt(fallback): an integral number, else the fallback. */

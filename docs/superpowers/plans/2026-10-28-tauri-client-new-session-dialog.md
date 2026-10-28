@@ -211,6 +211,9 @@ client/src-tauri/src/lib.rs                  registers the commands; manages New
 client/src-tauri/Cargo.toml, Cargo.lock      tauri-plugin-dialog 2, pinned (ruling D3)
 client/src/types.ts, bridge.ts               the new types and commands (additive)
 client/src/store/newSession.ts (+test)       the open dialog: state, reads, tickets, openNewSession, openFolderSession
+client/src/store/newSessionOpencode.ts (+test)  its OpenCode part: models, folder catalogs, favorites, the service start
+client/src/store/newSessionFake.ts           the store tests' recorded bridge and fake world
+client/src/ui/lib/json.ts                    the shared JSON readers (object, array, string)
 client/src/store/creations.ts (+test)        creations, notices, card selection and reveal, withCreations, the status menu
 client/src/ui/sessions/newsession-ui.ts (+test)  rows: computers, projects, folders, accounts; usage text; folderLaunchProblem
 client/src/ui/sessions/opencode-models.ts (+test)  OpenCodeModels and the picker's list rules, OpenCodeEffort
@@ -958,7 +961,7 @@ All additive; approved by webui on 2026-10-28 for the dialog. Send the creation-
 | `client/core/src/swarm/edit.rs` (organization stream) | `Intent::AddFolder`, sent through its Controller |
 
 New modules owned by this plan:
-- `store/newSession.ts`, `store/creations.ts`;
+- `store/newSession.ts`, `store/newSessionOpencode.ts`, `store/creations.ts`;
 - `ui/sessions/newsession-ui.ts`, `ui/sessions/opencode-models.ts`;
 - `NewSessionDialog.tsx`, `ModelPicker.tsx`, `WorktreePicker.tsx`, `NewWorktreeDialog.tsx`, `CreationCard.tsx`, `CreationPanel.tsx`;
 - `ui/components/FolderBrowser.tsx`, `ui/styles/newsession.css`;

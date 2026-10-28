@@ -115,8 +115,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     ]
 }
 
-/// Creates the main window. Platform webview configuration (macOS: the
-/// display-rate preference) is applied to the builder here, before `build`.
+/// Creates the main window and applies the platform display-rate preference:
+/// macOS before the webview is built, Linux through its public settings API.
 pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     // ZERUS_CLIENT_QUERY opens a given state (`select=<session name>`) for
     // headless screenshots and scripted measurements, as the mockup's URL
@@ -150,11 +150,20 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
                 builder.with_webview_configuration(platform::macos::webview_configuration(mtm));
         }
     }
-    builder.build()
+    let window = builder.build()?;
+    #[cfg(target_os = "linux")]
+    if !keep_default_preference() {
+        window.with_webview(|webview| {
+            if let Err(error) = platform::linux::disable_near_60fps(&webview.inner()) {
+                eprintln!("zerus-client: could not disable the near-60 fps preference: {error}");
+            }
+        })?;
+    }
+    Ok(window)
 }
 
-/// `ZERUS_CLIENT_PERF_PREFERENCE=default` leaves the macOS WebKit frame-rate
-/// preference at its default: the must-fail control run of the measurement.
+/// `ZERUS_CLIENT_PERF_PREFERENCE=default` leaves the macOS and Linux WebKit
+/// frame-rate preference at its default: the must-fail control run of the measurement.
 pub fn keep_default_preference() -> bool {
     std::env::var("ZERUS_CLIENT_PERF_PREFERENCE").is_ok_and(|value| value == "default")
 }

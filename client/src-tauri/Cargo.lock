@@ -4681,6 +4681,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-clipboard-manager",
  "uuid",
+ "webkit2gtk",
  "zerus-client-core",
  "zerus-watch-protocol",
 ]

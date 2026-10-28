@@ -5,8 +5,9 @@ import { AgentBadge, MachineBadge, statusOf, folderOf } from "./SessionCard";
 import { selected, setMenu, subagentOpen, type MenuEntry } from "../../store/ui";
 import { activity } from "../../store/session";
 import { computerOffline } from "../../store/catalog";
-import { copy, detailsFor, followedFor } from "../../store/actions";
+import { copyName, detailsFor, followedFor } from "../../store/actions";
 import { actionEntries } from "./ActionDialogs";
+import { snapshotOf } from "./actions-ui";
 
 // The session header and its Activity, after design/webui SessionDetail. The
 // composer, Terminal, Processes and the side panel move in with later phases;
@@ -37,7 +38,7 @@ function Header() {
   const actions = (): MenuEntry[] => [
     { label: "Open folder", icon: "folder-open", disabled: true },
     { label: "Open shell in session folder", icon: "square-terminal", disabled: true },
-    { label: "Copy session name", icon: "copy", action: () => { void copy(s().name); } },
+    { label: "Copy session name", icon: "copy", action: () => { void copyName(snapshotOf(s())); } },
     { separator: true },
     act().rename,
     { label: "Fork session…", icon: "git-fork", disabled: true },
@@ -67,7 +68,7 @@ function Header() {
           onClick={() => act().change.action()}><Icon name={act().change.icon!} size={16} /></button>
         <button class="icon-btn" data-tip="Open session folder in file manager" disabled><Icon name="folder-open" size={16} /></button>
         <button class="icon-btn" data-tip="Open shell in session folder" disabled><Icon name="square-terminal" size={16} /></button>
-        <button class="icon-btn" data-tip="Copy session name" onClick={() => { void copy(s().name); }}><Icon name="copy" size={15} /></button>
+        <button class="icon-btn" data-tip="Copy session name" onClick={() => { void copyName(snapshotOf(s())); }}><Icon name="copy" size={15} /></button>
         <button class="icon-btn" data-tip="Clear session" disabled><Icon name="clear" size={15} /></button>
         <button class="icon-btn" data-tip="Session actions" onClick={(e) => setMenu({ x: e.clientX - 200, y: e.clientY + 12, items: actions() })}><Icon name="ellipsis" size={16} /></button>
       </div>

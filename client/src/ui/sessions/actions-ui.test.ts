@@ -293,10 +293,10 @@ describe("copyState", () => {
     expect(copyState(row(), true).reference).toBe(true);
   });
   it("copies the details folder first, else the row's, and is off when empty", () => {
-    expect(copyState(row({ cwd: "/w/row" }), true).folder).toEqual({ enabled: true, path: "/w/row" });
-    expect(copyState(row({ cwd: "/w/row" }), true, details({ cwd: "/w/detail" })).folder.path).toBe("/w/detail");
-    expect(copyState(row({ cwd: "/w/row" }), true, details({ cwd: null })).folder.path).toBe("/w/row");
-    expect(copyState(row({ cwd: "/w/row" }), true, details({ cwd: "" })).folder).toEqual({ enabled: false, path: "" });
+    expect(copyState(row({ cwd: "/home/example/row" }), true).folder).toEqual({ enabled: true, path: "/home/example/row" });
+    expect(copyState(row({ cwd: "/home/example/row" }), true, details({ cwd: "/home/example/detail" })).folder.path).toBe("/home/example/detail");
+    expect(copyState(row({ cwd: "/home/example/row" }), true, details({ cwd: null })).folder.path).toBe("/home/example/row");
+    expect(copyState(row({ cwd: "/home/example/row" }), true, details({ cwd: "" })).folder).toEqual({ enabled: false, path: "" });
     expect(copyState(row(), true).folder).toEqual({ enabled: false, path: "" });
   });
   it("keeps a present empty cwd empty and an absent one null", () => {
@@ -304,7 +304,7 @@ describe("copyState", () => {
     expect(detailsFromInspection({})?.cwd).toBeNull();
   });
   it("reads the inspection cwd and terminal flags", () => {
-    expect(detailsFromInspection({ cwd: "/w/x", terminal_supported: false, terminal_attach_supported: true }))
-      .toMatchObject({ cwd: "/w/x", terminal_supported: false, terminal_attach_supported: true });
+    expect(detailsFromInspection({ cwd: "/home/example/x", terminal_supported: false, terminal_attach_supported: true }))
+      .toMatchObject({ cwd: "/home/example/x", terminal_supported: false, terminal_attach_supported: true });
   });
 });

@@ -673,6 +673,13 @@ Ruled by the design session on 2026-10-28:
 2. Copy session name shows no notice, as Qt; phase 1's "Copied" toast goes (Task A3).
 3. Batch Move to project belongs to the organization stream (`zerus-5wmh.18`, branch `work-e94411a3-org`). The batch runner offers the entry, but the write calls that stream's move function with its swarm apply rules; the organization is never written separately. Until that piece is merged, batch Move stays disabled with "Arrives with project organisation." (Task F1).
 
+Controller rulings during Piece A:
+- The browser build (no Tauri) copies through `navigator.clipboard` with the same two checks and no notice on success.
+- The details header's Copy connect command stays disabled: it is Qt's `m_openAction` (Open terminal family, phase 4, `zerus-5wmh.9`), not the context menu's copy entry.
+- Task A4 added the README part and the smoke steps for PR 1.
+- "Session reference copied" appears only after the clipboard accepted the text; Qt shows it unconditionally and reports a copy failure separately.
+- The click-time recheck compares the conversation id; `created` joins it when Piece B adds it to the row.
+
 Deviations from Qt, both from owner rules:
 - Attention marks and read replies are capped at 20 000 entries per map (bounded caches); Qt keeps them without a bound.
 - "Deselect all (Esc)" is "Deselect all" (no obvious keyboard hints).

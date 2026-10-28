@@ -6,6 +6,7 @@
 
 #[cfg(feature = "live")]
 mod actions;
+mod clipboard;
 mod commands;
 mod display;
 mod metrics;
@@ -76,7 +77,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::pending_read_marks,
         actions::session_reference,
         actions::copy_command,
-        actions::copy_text,
+        clipboard::copy_text,
     ]
 }
 
@@ -94,6 +95,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::display_hz,
         commands::exit_app,
         commands::perf_away,
+        clipboard::copy_text,
     ]
 }
 

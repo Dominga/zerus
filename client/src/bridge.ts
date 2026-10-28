@@ -185,6 +185,8 @@ export async function copyCommand(computer: string, name: string, archiveId: str
 /** Puts text on the clipboard: from Rust in the app, the page's clipboard in a browser. */
 export async function copyText(text: string): Promise<void> {
   if (inTauri()) return invoke<void>("copy_text", { text });
+  if (!text.trim()) throw "nothing to copy: the command is empty";
+  if (/[\r\n]/.test(text)) throw "the command has a newline in it -- copying that is dangerous: the shell would run it the moment you paste";
   if (!navigator.clipboard) throw "The clipboard is unavailable.";
   await navigator.clipboard.writeText(text);
 }

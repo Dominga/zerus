@@ -1,9 +1,9 @@
 import { createEffect, createRoot, on } from "solid-js";
 import { activityPort } from "../bridge";
 import { applyBatch, onReplaced, orderedRows } from "./catalog";
-import { bindActivity, observeBatch } from "./actions";
+import { bindActivity, bindSelection, observeBatch } from "./actions";
 import { createActivity } from "./activity";
-import { compactRows, selected, selectedKey, setCompactRows, setSelectedKey } from "./ui";
+import { compactRows, selected, selectedKey, setCompactRows, setSelectedKey, subagentOpen } from "./ui";
 import type { Batch } from "../types";
 
 // Wires the stores together: batches go to the catalog and the followed
@@ -12,6 +12,7 @@ import type { Batch } from "../types";
 
 export const activity = createActivity(activityPort);
 bindActivity(activity);
+bindSelection(() => ({ key: selectedKey(), subagent: subagentOpen() }));
 
 /** Applies one batch from the bridge. */
 export function receive(b: Batch) {

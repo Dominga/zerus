@@ -305,10 +305,10 @@ mod tests {
         );
         let some = parse_details(
             &t,
-            exit(r#"{"run_id":"r","conversation_id":"c","cwd":"/w/x","terminal_supported":false,"terminal_attach_supported":true}"#),
+            exit(r#"{"run_id":"r","conversation_id":"c","cwd":"/home/example/x","terminal_supported":false,"terminal_attach_supported":true}"#),
         )
         .unwrap();
-        assert_eq!(some.cwd.as_deref(), Some("/w/x"));
+        assert_eq!(some.cwd.as_deref(), Some("/home/example/x"));
         let empty =
             parse_details(&t, exit(r#"{"run_id":"r","conversation_id":"c","cwd":""}"#)).unwrap();
         assert_eq!(empty.cwd.as_deref(), Some(""));

@@ -1046,8 +1046,8 @@ mod tests {
 
     #[test]
     fn terminal_and_cwd_fields_follow_the_qt_client() {
-        let plain = row(&json!({"cmd": "claude", "cwd": "/w/sample/project"}));
-        assert_eq!(plain.cwd, "/w/sample/project");
+        let plain = row(&json!({"cmd": "claude", "cwd": "/home/example/sample/project"}));
+        assert_eq!(plain.cwd, "/home/example/sample/project");
         assert_eq!(plain.folder, "project");
         assert!(plain.terminal_supported && !plain.terminal_reported);
         assert!(!plain.terminal_attach_supported && !plain.terminal_attach_reported);

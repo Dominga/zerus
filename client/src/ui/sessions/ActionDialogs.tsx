@@ -1,7 +1,7 @@
 import { For, Show, createEffect, createMemo, createSignal, untrack } from "solid-js";
 import { Icon } from "../lib/icons";
 import { catalog, computerOffline } from "../../store/catalog";
-import { change, copy, copyCommand, copyReference, dismiss, end, interrupting, notices, perform, reading, updating } from "../../store/actions";
+import { change, copyCommand, copyFolder, copyName, copyReference, dismiss, end, interrupting, notices, perform, reading, updating } from "../../store/actions";
 import type { MenuEntry } from "../../store/ui";
 import type { Details } from "../../types";
 import type { Session } from "./types";
@@ -62,9 +62,9 @@ export function copyEntries(s: Session, details?: Details): { command: Item; nam
   const c = copyState(row, !computerOffline(s.computer), details);
   return {
     command: { label: c.command.label, icon: "link", disabled: !c.command.enabled, action: () => { void copyCommand(row); } },
-    name: { label: "Copy session name", icon: "copy", action: () => { void copy(row.name); } },
+    name: { label: "Copy session name", icon: "copy", action: () => { void copyName(row); } },
     reference: { label: "Copy session reference", icon: "link", disabled: !c.reference, action: () => { void copyReference(row, details); } },
-    folder: { label: "Copy folder path", icon: "copy", disabled: !c.folder.enabled, action: () => { void copy(c.folder.path); } },
+    folder: { label: "Copy folder path", icon: "copy", disabled: !c.folder.enabled, action: () => { void copyFolder(row, details); } },
   };
 }
 

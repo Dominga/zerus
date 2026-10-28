@@ -4,7 +4,7 @@ import { listRows } from "./sessions/model";
 import { orderedRows } from "../store/catalog";
 import { selectedKey, setSelectedKey } from "../store/ui";
 import { activity } from "../store/session";
-import { copy, copyCommand, copyReference, end, perform } from "../store/actions";
+import { copyFolder, copyName, copyCommand, lastCopied, copyReference, end, perform } from "../store/actions";
 import { snapshotOf, terminateCopy, type ActionRow } from "./sessions/actions-ui";
 import type { Action, Outcome } from "../types";
 import { inTauri, metrics, pumpStats } from "../bridge";
@@ -302,7 +302,8 @@ async function actionsSmoke(allowed: boolean) {
     const steps: [string, () => Promise<Outcome>][] = [
       ["copy session reference", () => copyReference(row())],
       ["copy connect command", () => copyCommand(row())],
-      ["copy session name", () => copy(row().name)],
+      ["copy session name", () => copyName(row())],
+      ["copy folder path", () => copyFolder(row())],
       ...([{ kind: "pause" }, { kind: "resume" }, { kind: "rename", new_name: SMOKE_RENAMED, archive_id: null }, { kind: "archive" }] as Action[])
         .map((action): [string, () => Promise<Outcome>] => [action.kind, () => perform(row(), action)]),
       [chosen, () => end(row(), chosen)],
@@ -312,7 +313,8 @@ async function actionsSmoke(allowed: boolean) {
     let bad = 0;
     for (const [kind, step] of steps) {
       const out = await step();
-      log(`actions-smoke ${kind}: ${out.outcome}${out.outcome === "failed" ? ` (${out.detail})` : ""}`);
+      const text = kind.startsWith("copy ") && out.outcome === "done" ? ` ${lastCopied()}` : "";
+      log(`actions-smoke ${kind.startsWith("copy ") ? `copy-${kind.slice(5).replace(/ /g, "-")}` : kind}: ${out.outcome}${out.outcome === "failed" ? ` (${out.detail})` : ""}${text}`);
       if (out.outcome === "failed") bad++;
     }
     await exit(bad ? 1 : 0);

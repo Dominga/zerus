@@ -167,7 +167,12 @@ clipboard. They are not writes: they need no row lock and show no "Updating…".
 - The clipboard is written from Rust (tauri-plugin-clipboard-manager). A text
   that is empty or holds a line break is refused with Qt's texts. A failure
   shows "Zerus: could not copy" with the error. A success shows no notice,
-  except for Copy session reference.
+  except for Copy session reference. The browser build (no Tauri) copies
+  through `navigator.clipboard` with the same two checks.
+- Each copy rechecks its row when it runs, as Qt does: a session that is gone
+  or whose conversation changed copies nothing and shows "This session is no
+  longer available. Open its actions again."; otherwise the current name,
+  archive id, folder and run are copied.
 
 ### Actions smoke run
 
@@ -176,7 +181,7 @@ perf hooks) checks the actions end to end without the real `hgs`. It starts only
 when the native side reports replay mode (`ZERUS_CLIENT_REPLAY`), an explicit
 `ZERUS_CLIENT_HGS` and `ZERUS_CLIENT_PERF` (any value but `auto`; `exit_app` is
 allowed only in a measurement run); otherwise it logs why and does nothing. In
-replay mode `run_action` and `inspect_session` refuse unless
+replay mode `run_action`, `inspect_session` and `session_reference` refuse unless
 `ZERUS_CLIENT_HGS` is set ("Actions in replay mode need ZERUS_CLIENT_HGS."), so
 a replay never drives the real CLI.
 
@@ -200,9 +205,10 @@ cat $S/log.ndjson
 
 The hook selects `claude/sample-project/review` (its details come from the
 replay's Activity state value or, as here, one `inspect` of the fake), first
-copies the session reference, the connect command and the session name through
-the store the menus use (the first calls `reference`; the fake's URI is the
-clipboard text), then runs pause, resume, rename (to `claude/sample-project/review-renamed`) and archive,
+copies the session reference, the connect command, the session name and the
+folder path through the store the menus use (the first calls `reference`; the
+fake's URI is the clipboard text), logging each as
+`actions-smoke copy-<entry>: done <the exact clipboard text>`, then runs pause, resume, rename (to `claude/sample-project/review-renamed`) and archive,
 then the end call the Terminate dialog picks for the row through the dialog's
 confirmation (`kill`, since the replay row is not tracked), then the other end
 call (`terminate`), once each through the store the menus use. It logs each

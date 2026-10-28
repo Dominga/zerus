@@ -1,0 +1,1311 @@
+{
+  "schema": "zerus-perf-v1",
+  "client": "tauri",
+  "created_at": "2026-10-28T06:15:03.727Z",
+  "platform": {
+    "os": "linux",
+    "label": "arch-kde-webkitgtk-live-3",
+    "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/60.5 Safari/605.1.15",
+    "hz": 144,
+    "hz_source": "native",
+    "T_ms": 6.944444444444445,
+    "dpr": 1,
+    "cross_origin_isolated": true,
+    "timer_resolution_ms": 1,
+    "reduced_motion": false,
+    "representative": true
+  },
+  "settings": {
+    "warmupMs": 2000,
+    "runMs": 10000,
+    "runs": 3,
+    "stepPx": 16,
+    "opens": 20,
+    "openIndices": [
+      0,
+      1
+    ],
+    "syntheticInput": true
+  },
+  "scenarios": [
+    {
+      "id": "raf-light",
+      "label": "rAF on a light page",
+      "kind": "pacing",
+      "metric": "interval_ms",
+      "runs": [
+        {
+          "frames": 623,
+          "interval_ms": {
+            "count": 623,
+            "mean": 16.06099518459069,
+            "median": 16,
+            "p95": 17,
+            "p99": 17,
+            "over1_5T": 1,
+            "over2_5T": 0,
+            "band60": 1,
+            "max": 17
+          },
+          "verdict": {
+            "mean": false,
+            "median": false,
+            "within1_5T": false,
+            "over2_5T": true,
+            "band60": false,
+            "all": false
+          }
+        },
+        {
+          "frames": 623,
+          "interval_ms": {
+            "count": 623,
+            "mean": 16.06099518459069,
+            "median": 16,
+            "p95": 17,
+            "p99": 17,
+            "over1_5T": 1,
+            "over2_5T": 0,
+            "band60": 1,
+            "max": 17
+          },
+          "verdict": {
+            "mean": false,
+            "median": false,
+            "within1_5T": false,
+            "over2_5T": true,
+            "band60": false,
+            "all": false
+          }
+        },
+        {
+          "frames": 623,
+          "interval_ms": {
+            "count": 623,
+            "mean": 16.062600321027286,
+            "median": 16,
+            "p95": 17,
+            "p99": 17,
+            "over1_5T": 1,
+            "over2_5T": 0,
+            "band60": 1,
+            "max": 17
+          },
+          "verdict": {
+            "mean": false,
+            "median": false,
+            "within1_5T": false,
+            "over2_5T": true,
+            "band60": false,
+            "all": false
+          }
+        }
+      ],
+      "worst_index": 2,
+      "worst": {
+        "frames": 623,
+        "interval_ms": {
+          "count": 623,
+          "mean": 16.062600321027286,
+          "median": 16,
+          "p95": 17,
+          "p99": 17,
+          "over1_5T": 1,
+          "over2_5T": 0,
+          "band60": 1,
+          "max": 17
+        },
+        "verdict": {
+          "mean": false,
+          "median": false,
+          "within1_5T": false,
+          "over2_5T": true,
+          "band60": false,
+          "all": false
+        }
+      },
+      "verdict": {
+        "mean": false,
+        "median": false,
+        "within1_5T": false,
+        "over2_5T": true,
+        "band60": false,
+        "all": false
+      }
+    },
+    {
+      "id": "transform-animation",
+      "label": "rAF during a CSS transform animation",
+      "kind": "pacing",
+      "metric": "interval_ms",
+      "runs": [
+        {
+          "frames": 623,
+          "interval_ms": {
+            "count": 623,
+            "mean": 16.062600321027286,
+            "median": 16,
+            "p95": 17,
+            "p99": 17,
+            "over1_5T": 1,
+            "over2_5T": 0,
+            "band60": 1,
+            "max": 17
+          },
+          "verdict": {
+            "mean": false,
+            "median": false,
+            "within1_5T": false,
+            "over2_5T": true,
+            "band60": false,
+            "all": false
+          }
+        },
+        {
+          "frames": 623,
+          "interval_ms": {
+            "count": 623,
+            "mean": 16.062600321027286,
+            "median": 16,
+            "p95": 17,
+            "p99": 17,
+            "over1_5T": 1,
+            "over2_5T": 0,
+            "band60": 1,
+            "max": 17
+          },
+          "verdict": {
+            "mean": false,
+            "median": false,
+            "within1_5T": false,
+            "over2_5T": true,
+            "band60": false,
+            "all": false
+          }
+        },
+        {
+          "frames": 623,
+          "interval_ms": {
+            "count": 623,
+            "mean": 16.059390048154093,
+            "median": 16,
+            "p95": 17,
+            "p99": 17,
+            "over1_5T": 1,
+            "over2_5T": 0,
+            "band60": 1,
+            "max": 17
+          },
+          "verdict": {
+            "mean": false,
+            "median": false,
+            "within1_5T": false,
+            "over2_5T": true,
+            "band60": false,
+            "all": false
+          }
+        }
+      ],
+      "worst_index": 0,
+      "worst": {
+        "frames": 623,
+        "interval_ms": {
+          "count": 623,
+          "mean": 16.062600321027286,
+          "median": 16,
+          "p95": 17,
+          "p99": 17,
+          "over1_5T": 1,
+          "over2_5T": 0,
+          "band60": 1,
+          "max": 17
+        },
+        "verdict": {
+          "mean": false,
+          "median": false,
+          "within1_5T": false,
+          "over2_5T": true,
+          "band60": false,
+          "all": false
+        }
+      },
+      "verdict": {
+        "mean": false,
+        "median": false,
+        "within1_5T": false,
+        "over2_5T": true,
+        "band60": false,
+        "all": false
+      }
+    },
+    {
+      "id": "left-animation",
+      "label": "rAF during a non-accelerated animation (left)",
+      "kind": "pacing",
+      "metric": "interval_ms",
+      "runs": [
+        {
+          "frames": 623,
+          "interval_ms": {
+            "count": 623,
+            "mean": 16.06099518459069,
+            "median": 16,
+            "p95": 17,
+            "p99": 17,
+            "over1_5T": 1,
+            "over2_5T": 0,
+            "band60": 1,
+            "max": 17
+          },
+          "verdict": {
+            "mean": false,
+            "median": false,
+            "within1_5T": false,
+            "over2_5T": true,
+            "band60": false,
+            "all": false
+          }
+        },
+        {
+          "frames": 623,
+          "interval_ms": {
+            "count": 623,
+            "mean": 16.06099518459069,
+            "median": 16,
+            "p95": 17,
+            "p99": 17,
+            "over1_5T": 1,
+            "over2_5T": 0,
+            "band60": 1,
+            "max": 17
+          },
+          "verdict": {
+            "mean": false,
+            "median": false,
+            "within1_5T": false,
+            "over2_5T": true,
+            "band60": false,
+            "all": false
+          }
+        },
+        {
+          "frames": 623,
+          "interval_ms": {
+            "count": 623,
+            "mean": 16.06099518459069,
+            "median": 16,
+            "p95": 17,
+            "p99": 17,
+            "over1_5T": 1,
+            "over2_5T": 0,
+            "band60": 1,
+            "max": 17
+          },
+          "verdict": {
+            "mean": false,
+            "median": false,
+            "within1_5T": false,
+            "over2_5T": true,
+            "band60": false,
+            "all": false
+          }
+        }
+      ],
+      "worst_index": 0,
+      "worst": {
+        "frames": 623,
+        "interval_ms": {
+          "count": 623,
+          "mean": 16.06099518459069,
+          "median": 16,
+          "p95": 17,
+          "p99": 17,
+          "over1_5T": 1,
+          "over2_5T": 0,
+          "band60": 1,
+          "max": 17
+        },
+        "verdict": {
+          "mean": false,
+          "median": false,
+          "within1_5T": false,
+          "over2_5T": true,
+          "band60": false,
+          "all": false
+        }
+      },
+      "verdict": {
+        "mean": false,
+        "median": false,
+        "within1_5T": false,
+        "over2_5T": true,
+        "band60": false,
+        "all": false
+      }
+    },
+    {
+      "id": "list-scroll",
+      "label": "Session list scroll",
+      "kind": "pacing",
+      "metric": "interval_ms",
+      "runs": [
+        {
+          "frames": 623,
+          "interval_ms": {
+            "count": 623,
+            "mean": 16.06099518459069,
+            "median": 16,
+            "p95": 17,
+            "p99": 17,
+            "over1_5T": 1,
+            "over2_5T": 0.0032102728731942215,
+            "band60": 0.9967897271268058,
+            "max": 19
+          },
+          "verdict": {
+            "mean": false,
+            "median": false,
+            "within1_5T": false,
+            "over2_5T": false,
+            "band60": false,
+            "all": false
+          },
+          "scroll_event_ms": {
+            "count": 623,
+            "mean": 16.06099518459069,
+            "median": 16,
+            "p95": 17,
+            "p99": 17,
+            "max": 18
+          }
+        },
+        {
+          "frames": 623,
+          "interval_ms": {
+            "count": 623,
+            "mean": 16.062600321027286,
+            "median": 16,
+            "p95": 17,
+            "p99": 17,
+            "over1_5T": 1,
+            "over2_5T": 0,
+            "band60": 1,
+            "max": 17
+          },
+          "verdict": {
+            "mean": false,
+            "median": false,
+            "within1_5T": false,
+            "over2_5T": true,
+            "band60": false,
+            "all": false
+          },
+          "scroll_event_ms": {
+            "count": 623,
+            "mean": 16.062600321027286,
+            "median": 16,
+            "p95": 17,
+            "p99": 17,
+            "max": 17
+          }
+        },
+        {
+          "frames": 623,
+          "interval_ms": {
+            "count": 623,
+            "mean": 16.06099518459069,
+            "median": 16,
+            "p95": 17,
+            "p99": 17,
+            "over1_5T": 1,
+            "over2_5T": 0,
+            "band60": 1,
+            "max": 17
+          },
+          "verdict": {
+            "mean": false,
+            "median": false,
+            "within1_5T": false,
+            "over2_5T": true,
+            "band60": false,
+            "all": false
+          },
+          "scroll_event_ms": {
+            "count": 623,
+            "mean": 16.062600321027286,
+            "median": 16,
+            "p95": 17,
+            "p99": 17,
+            "max": 17
+          }
+        }
+      ],
+      "worst_index": 0,
+      "worst": {
+        "frames": 623,
+        "interval_ms": {
+          "count": 623,
+          "mean": 16.06099518459069,
+          "median": 16,
+          "p95": 17,
+          "p99": 17,
+          "over1_5T": 1,
+          "over2_5T": 0.0032102728731942215,
+          "band60": 0.9967897271268058,
+          "max": 19
+        },
+        "verdict": {
+          "mean": false,
+          "median": false,
+          "within1_5T": false,
+          "over2_5T": false,
+          "band60": false,
+          "all": false
+        },
+        "scroll_event_ms": {
+          "count": 623,
+          "mean": 16.06099518459069,
+          "median": 16,
+          "p95": 17,
+          "p99": 17,
+          "max": 18
+        }
+      },
+      "verdict": {
+        "mean": false,
+        "median": false,
+        "within1_5T": false,
+        "over2_5T": false,
+        "band60": false,
+        "all": false
+      }
+    },
+    {
+      "id": "activity-scroll",
+      "label": "Activity scroll",
+      "kind": "pacing",
+      "metric": "interval_ms",
+      "runs": [
+        {
+          "frames": 695,
+          "interval_ms": {
+            "count": 695,
+            "mean": 14.397122302158273,
+            "median": 16,
+            "p95": 17,
+            "p99": 18,
+            "over1_5T": 0.8071942446043165,
+            "over2_5T": 0.03597122302158273,
+            "band60": 0.7654676258992805,
+            "max": 19
+          },
+          "verdict": {
+            "mean": false,
+            "median": false,
+            "within1_5T": false,
+            "over2_5T": false,
+            "band60": false,
+            "all": false
+          },
+          "scroll_event_ms": {
+            "count": 695,
+            "mean": 14.397122302158273,
+            "median": 16,
+            "p95": 17,
+            "p99": 18,
+            "max": 19
+          }
+        },
+        {
+          "frames": 622,
+          "interval_ms": {
+            "count": 622,
+            "mean": 16.091639871382636,
+            "median": 16,
+            "p95": 17,
+            "p99": 18,
+            "over1_5T": 0.9967845659163987,
+            "over2_5T": 0.028938906752411574,
+            "band60": 0.9726688102893891,
+            "max": 39
+          },
+          "verdict": {
+            "mean": false,
+            "median": false,
+            "within1_5T": false,
+            "over2_5T": false,
+            "band60": false,
+            "all": false
+          },
+          "scroll_event_ms": {
+            "count": 622,
+            "mean": 16.091639871382636,
+            "median": 16,
+            "p95": 17,
+            "p99": 18,
+            "max": 39
+          }
+        },
+        {
+          "frames": 622,
+          "interval_ms": {
+            "count": 622,
+            "mean": 16.083601286173632,
+            "median": 16,
+            "p95": 18,
+            "p99": 19,
+            "over1_5T": 0.9790996784565916,
+            "over2_5T": 0.10289389067524116,
+            "band60": 0.8987138263665595,
+            "max": 21
+          },
+          "verdict": {
+            "mean": false,
+            "median": false,
+            "within1_5T": false,
+            "over2_5T": false,
+            "band60": false,
+            "all": false
+          },
+          "scroll_event_ms": {
+            "count": 622,
+            "mean": 16.083601286173632,
+            "median": 16,
+            "p95": 18,
+            "p99": 19,
+            "max": 21
+          }
+        }
+      ],
+      "worst_index": 2,
+      "worst": {
+        "frames": 622,
+        "interval_ms": {
+          "count": 622,
+          "mean": 16.083601286173632,
+          "median": 16,
+          "p95": 18,
+          "p99": 19,
+          "over1_5T": 0.9790996784565916,
+          "over2_5T": 0.10289389067524116,
+          "band60": 0.8987138263665595,
+          "max": 21
+        },
+        "verdict": {
+          "mean": false,
+          "median": false,
+          "within1_5T": false,
+          "over2_5T": false,
+          "band60": false,
+          "all": false
+        },
+        "scroll_event_ms": {
+          "count": 622,
+          "mean": 16.083601286173632,
+          "median": 16,
+          "p95": 18,
+          "p99": 19,
+          "max": 21
+        }
+      },
+      "verdict": {
+        "mean": false,
+        "median": false,
+        "within1_5T": false,
+        "over2_5T": false,
+        "band60": false,
+        "all": false
+      }
+    },
+    {
+      "id": "session-open",
+      "label": "Session open to first Activity paint",
+      "kind": "timing",
+      "metric": "wall_ms",
+      "runs": [
+        {
+          "count": 20,
+          "wall_ms": {
+            "count": 20,
+            "mean": 123.6,
+            "median": 131.5,
+            "p95": 138,
+            "p99": 314,
+            "max": 314
+          }
+        },
+        {
+          "count": 20,
+          "wall_ms": {
+            "count": 20,
+            "mean": 114.75,
+            "median": 131.5,
+            "p95": 140,
+            "p99": 142,
+            "max": 142
+          }
+        },
+        {
+          "count": 20,
+          "wall_ms": {
+            "count": 20,
+            "mean": 131.1,
+            "median": 131.5,
+            "p95": 155,
+            "p99": 406,
+            "max": 406
+          }
+        }
+      ],
+      "worst_index": 2,
+      "worst": {
+        "count": 20,
+        "wall_ms": {
+          "count": 20,
+          "mean": 131.1,
+          "median": 131.5,
+          "p95": 155,
+          "p99": 406,
+          "max": 406
+        }
+      }
+    },
+    {
+      "id": "input-latency",
+      "label": "Input to frame latency",
+      "kind": "latency",
+      "metric": "latency_ms",
+      "runs": [
+        {
+          "count": 131,
+          "latency_ms": {
+            "count": 131,
+            "mean": 0.17557251908396945,
+            "median": 0,
+            "p95": 1,
+            "p99": 1,
+            "max": 1
+          },
+          "to_paint_ms": {
+            "count": 131,
+            "mean": 1.3206106870229009,
+            "median": 1,
+            "p95": 2,
+            "p99": 2,
+            "max": 3
+          }
+        },
+        {
+          "count": 127,
+          "latency_ms": {
+            "count": 127,
+            "mean": 0.33858267716535434,
+            "median": 0,
+            "p95": 1,
+            "p99": 1,
+            "max": 1
+          },
+          "to_paint_ms": {
+            "count": 127,
+            "mean": 1.5590551181102361,
+            "median": 1,
+            "p95": 3,
+            "p99": 4,
+            "max": 4
+          }
+        },
+        {
+          "count": 132,
+          "latency_ms": {
+            "count": 132,
+            "mean": 0.5,
+            "median": 0.5,
+            "p95": 1,
+            "p99": 1,
+            "max": 1
+          },
+          "to_paint_ms": {
+            "count": 132,
+            "mean": 1.8409090909090908,
+            "median": 2,
+            "p95": 3,
+            "p99": 3,
+            "max": 4
+          }
+        }
+      ],
+      "worst_index": 0,
+      "worst": {
+        "count": 131,
+        "latency_ms": {
+          "count": 131,
+          "mean": 0.17557251908396945,
+          "median": 0,
+          "p95": 1,
+          "p99": 1,
+          "max": 1
+        },
+        "to_paint_ms": {
+          "count": 131,
+          "mean": 1.3206106870229009,
+          "median": 1,
+          "p95": 2,
+          "p99": 2,
+          "max": 3
+        }
+      }
+    }
+  ],
+  "resources": {
+    "idle": {
+      "pid": 3490991,
+      "processes": [
+        {
+          "cpu_percent": 19.948,
+          "cpu_seconds": 54.88,
+          "name": "zerus-client",
+          "pid": 3490991,
+          "ppid": 3490990,
+          "pss_bytes": 111953920,
+          "role": "app",
+          "rss_bytes": 206020608
+        },
+        {
+          "cpu_percent": 0,
+          "cpu_seconds": 0.07,
+          "name": "WebKitNetworkPr",
+          "pid": 3491010,
+          "ppid": 3490991,
+          "pss_bytes": 34428928,
+          "role": "network",
+          "rss_bytes": 70619136
+        },
+        {
+          "cpu_percent": 9.476,
+          "cpu_seconds": 65.61,
+          "name": "WebKitWebProces",
+          "pid": 3491013,
+          "ppid": 3490991,
+          "pss_bytes": 190105600,
+          "role": "web",
+          "rss_bytes": 249667584
+        },
+        {
+          "cpu_percent": 4.189,
+          "cpu_seconds": 23.86,
+          "name": "hgs",
+          "pid": 3491119,
+          "ppid": 3490991,
+          "pss_bytes": 54118400,
+          "role": "child",
+          "rss_bytes": 67780608
+        },
+        {
+          "cpu_percent": 0,
+          "cpu_seconds": 0,
+          "name": "hgs",
+          "pid": 3491231,
+          "ppid": 3490991,
+          "pss_bytes": 2670592,
+          "role": "child",
+          "rss_bytes": 8499200
+        },
+        {
+          "cpu_percent": 0,
+          "cpu_seconds": 0.01,
+          "name": "ssh",
+          "pid": 3491234,
+          "ppid": 3491231,
+          "pss_bytes": 2272256,
+          "role": "child",
+          "rss_bytes": 14110720
+        }
+      ],
+      "sampled_at_ms": 1793168123784,
+      "source": "procfs",
+      "total": {
+        "cpu_percent": 33.613,
+        "cpu_seconds": 144.43,
+        "processes": 6,
+        "pss_bytes": 395549696,
+        "rss_bytes": 616697856
+      },
+      "window_ms": 10026
+    },
+    "idle_still_working": {
+      "pid": 3490991,
+      "processes": [
+        {
+          "cpu_percent": 0.399,
+          "cpu_seconds": 54.96,
+          "name": "zerus-client",
+          "pid": 3490991,
+          "ppid": 3490990,
+          "pss_bytes": 109356032,
+          "role": "app",
+          "rss_bytes": 206012416
+        },
+        {
+          "cpu_percent": 0,
+          "cpu_seconds": 0.07,
+          "name": "WebKitNetworkPr",
+          "pid": 3491010,
+          "ppid": 3490991,
+          "pss_bytes": 34444288,
+          "role": "network",
+          "rss_bytes": 70619136
+        },
+        {
+          "cpu_percent": 0.299,
+          "cpu_seconds": 65.65,
+          "name": "WebKitWebProces",
+          "pid": 3491013,
+          "ppid": 3490991,
+          "pss_bytes": 189790208,
+          "role": "web",
+          "rss_bytes": 249331712
+        },
+        {
+          "cpu_percent": 3.991,
+          "cpu_seconds": 24.26,
+          "name": "hgs",
+          "pid": 3491119,
+          "ppid": 3490991,
+          "pss_bytes": 54118400,
+          "role": "child",
+          "rss_bytes": 67780608
+        },
+        {
+          "cpu_percent": 0,
+          "cpu_seconds": 0,
+          "name": "hgs",
+          "pid": 3491231,
+          "ppid": 3490991,
+          "pss_bytes": 2671616,
+          "role": "child",
+          "rss_bytes": 8499200
+        },
+        {
+          "cpu_percent": 0,
+          "cpu_seconds": 0.01,
+          "name": "ssh",
+          "pid": 3491234,
+          "ppid": 3491231,
+          "pss_bytes": 2380800,
+          "role": "child",
+          "rss_bytes": 14110720
+        }
+      ],
+      "sampled_at_ms": 1793168134832,
+      "source": "procfs",
+      "total": {
+        "cpu_percent": 4.689,
+        "cpu_seconds": 144.95,
+        "processes": 6,
+        "pss_bytes": 392761344,
+        "rss_bytes": 616353792
+      },
+      "window_ms": 10023
+    },
+    "idle_reduced_motion": {
+      "pid": 3490991,
+      "processes": [
+        {
+          "cpu_percent": 0.499,
+          "cpu_seconds": 55.05,
+          "name": "zerus-client",
+          "pid": 3490991,
+          "ppid": 3490990,
+          "pss_bytes": 109335552,
+          "role": "app",
+          "rss_bytes": 206016512
+        },
+        {
+          "cpu_percent": 0,
+          "cpu_seconds": 0.07,
+          "name": "WebKitNetworkPr",
+          "pid": 3491010,
+          "ppid": 3490991,
+          "pss_bytes": 32319488,
+          "role": "network",
+          "rss_bytes": 68575232
+        },
+        {
+          "cpu_percent": 0.399,
+          "cpu_seconds": 65.69,
+          "name": "WebKitWebProces",
+          "pid": 3491013,
+          "ppid": 3490991,
+          "pss_bytes": 183395328,
+          "role": "web",
+          "rss_bytes": 242962432
+        },
+        {
+          "cpu_percent": 3.491,
+          "cpu_seconds": 24.61,
+          "name": "hgs",
+          "pid": 3491119,
+          "ppid": 3490991,
+          "pss_bytes": 53772288,
+          "role": "child",
+          "rss_bytes": 67780608
+        },
+        {
+          "cpu_percent": 0,
+          "cpu_seconds": 0,
+          "name": "hgs",
+          "pid": 3491231,
+          "ppid": 3490991,
+          "pss_bytes": 2454528,
+          "role": "child",
+          "rss_bytes": 8499200
+        },
+        {
+          "cpu_percent": 0,
+          "cpu_seconds": 0.01,
+          "name": "ssh",
+          "pid": 3491234,
+          "ppid": 3491231,
+          "pss_bytes": 2220032,
+          "role": "child",
+          "rss_bytes": 14110720
+        }
+      ],
+      "sampled_at_ms": 1793168145883,
+      "source": "procfs",
+      "total": {
+        "cpu_percent": 4.389,
+        "cpu_seconds": 145.43,
+        "processes": 6,
+        "pss_bytes": 383497216,
+        "rss_bytes": 607944704
+      },
+      "window_ms": 10026
+    },
+    "idle_away": {
+      "hide": {
+        "how": "hide",
+        "minimized": false,
+        "sample": {
+          "pid": 3490991,
+          "processes": [
+            {
+              "cpu_percent": 0.299,
+              "cpu_seconds": 55.3,
+              "name": "zerus-client",
+              "pid": 3490991,
+              "ppid": 3490990,
+              "pss_bytes": 106744832,
+              "role": "app",
+              "rss_bytes": 200822784
+            },
+            {
+              "cpu_percent": 0,
+              "cpu_seconds": 0.07,
+              "name": "WebKitNetworkPr",
+              "pid": 3491010,
+              "ppid": 3490991,
+              "pss_bytes": 32353280,
+              "role": "network",
+              "rss_bytes": 68575232
+            },
+            {
+              "cpu_percent": 0.2,
+              "cpu_seconds": 65.82,
+              "name": "WebKitWebProces",
+              "pid": 3491013,
+              "ppid": 3490991,
+              "pss_bytes": 176094208,
+              "role": "web",
+              "rss_bytes": 235651072
+            },
+            {
+              "cpu_percent": 3.392,
+              "cpu_seconds": 25.14,
+              "name": "hgs",
+              "pid": 3491119,
+              "ppid": 3490991,
+              "pss_bytes": 54118400,
+              "role": "child",
+              "rss_bytes": 67780608
+            },
+            {
+              "cpu_percent": 0,
+              "cpu_seconds": 0,
+              "name": "hgs",
+              "pid": 3491231,
+              "ppid": 3490991,
+              "pss_bytes": 2670592,
+              "role": "child",
+              "rss_bytes": 8499200
+            },
+            {
+              "cpu_percent": 0,
+              "cpu_seconds": 0.01,
+              "name": "ssh",
+              "pid": 3491234,
+              "ppid": 3491231,
+              "pss_bytes": 2282496,
+              "role": "child",
+              "rss_bytes": 14110720
+            }
+          ],
+          "sampled_at_ms": 1793168158432,
+          "source": "procfs",
+          "total": {
+            "cpu_percent": 3.89,
+            "cpu_seconds": 146.34,
+            "processes": 6,
+            "pss_bytes": 374263808,
+            "rss_bytes": 595439616
+          },
+          "window_ms": 10024
+        },
+        "page": {
+          "visibility": "hidden",
+          "animations": "paused 15",
+          "hidden_ms": 11572,
+          "pump": {
+            "pulls": 0,
+            "frames": 0,
+            "applied": 0,
+            "held": 0
+          }
+        },
+        "returned": {
+          "pid": 3490991,
+          "processes": [
+            {
+              "cpu_percent": 19.853,
+              "cpu_seconds": 57.52,
+              "name": "zerus-client",
+              "pid": 3490991,
+              "ppid": 3490990,
+              "pss_bytes": 109365248,
+              "role": "app",
+              "rss_bytes": 206032896
+            },
+            {
+              "cpu_percent": 0,
+              "cpu_seconds": 0.07,
+              "name": "WebKitNetworkPr",
+              "pid": 3491010,
+              "ppid": 3490991,
+              "pss_bytes": 32356352,
+              "role": "network",
+              "rss_bytes": 68575232
+            },
+            {
+              "cpu_percent": 10.076,
+              "cpu_seconds": 66.99,
+              "name": "WebKitWebProces",
+              "pid": 3491013,
+              "ppid": 3490991,
+              "pss_bytes": 172923904,
+              "role": "web",
+              "rss_bytes": 232476672
+            },
+            {
+              "cpu_percent": 3.891,
+              "cpu_seconds": 25.56,
+              "name": "hgs",
+              "pid": 3491119,
+              "ppid": 3490991,
+              "pss_bytes": 54118400,
+              "role": "child",
+              "rss_bytes": 67780608
+            },
+            {
+              "cpu_percent": 0,
+              "cpu_seconds": 0,
+              "name": "hgs",
+              "pid": 3491231,
+              "ppid": 3490991,
+              "pss_bytes": 2671616,
+              "role": "child",
+              "rss_bytes": 8499200
+            },
+            {
+              "cpu_percent": 0,
+              "cpu_seconds": 0.01,
+              "name": "ssh",
+              "pid": 3491234,
+              "ppid": 3491231,
+              "pss_bytes": 2380800,
+              "role": "child",
+              "rss_bytes": 14110720
+            }
+          ],
+          "sampled_at_ms": 1793168169511,
+          "source": "procfs",
+          "total": {
+            "cpu_percent": 33.82,
+            "cpu_seconds": 150.15,
+            "processes": 6,
+            "pss_bytes": 373816320,
+            "rss_bytes": 597475328
+          },
+          "window_ms": 10024
+        }
+      },
+      "minimize": {
+        "how": "minimize",
+        "minimized": false,
+        "sample": {
+          "pid": 3490991,
+          "processes": [
+            {
+              "cpu_percent": 0.499,
+              "cpu_seconds": 57.7,
+              "name": "zerus-client",
+              "pid": 3490991,
+              "ppid": 3490990,
+              "pss_bytes": 111944704,
+              "role": "app",
+              "rss_bytes": 206020608
+            },
+            {
+              "cpu_percent": 0,
+              "cpu_seconds": 0.07,
+              "name": "WebKitNetworkPr",
+              "pid": 3491010,
+              "ppid": 3490991,
+              "pss_bytes": 32356352,
+              "role": "network",
+              "rss_bytes": 68575232
+            },
+            {
+              "cpu_percent": 0.299,
+              "cpu_seconds": 67.07,
+              "name": "WebKitWebProces",
+              "pid": 3491013,
+              "ppid": 3490991,
+              "pss_bytes": 172399616,
+              "role": "web",
+              "rss_bytes": 231952384
+            },
+            {
+              "cpu_percent": 3.891,
+              "cpu_seconds": 25.97,
+              "name": "hgs",
+              "pid": 3491119,
+              "ppid": 3490991,
+              "pss_bytes": 54118400,
+              "role": "child",
+              "rss_bytes": 67780608
+            },
+            {
+              "cpu_percent": 0,
+              "cpu_seconds": 0,
+              "name": "hgs",
+              "pid": 3491231,
+              "ppid": 3490991,
+              "pss_bytes": 2670592,
+              "role": "child",
+              "rss_bytes": 8499200
+            },
+            {
+              "cpu_percent": 0,
+              "cpu_seconds": 0.01,
+              "name": "ssh",
+              "pid": 3491234,
+              "ppid": 3491231,
+              "pss_bytes": 2379776,
+              "role": "child",
+              "rss_bytes": 14110720
+            }
+          ],
+          "sampled_at_ms": 1793168181060,
+          "source": "procfs",
+          "total": {
+            "cpu_percent": 4.689,
+            "cpu_seconds": 150.82,
+            "processes": 6,
+            "pss_bytes": 375869440,
+            "rss_bytes": 596938752
+          },
+          "window_ms": 10023
+        },
+        "page": {
+          "visibility": "visible"
+        },
+        "returned": {
+          "pid": 3490991,
+          "processes": [
+            {
+              "cpu_percent": 0.499,
+              "cpu_seconds": 57.77,
+              "name": "zerus-client",
+              "pid": 3490991,
+              "ppid": 3490990,
+              "pss_bytes": 111913984,
+              "role": "app",
+              "rss_bytes": 205996032
+            },
+            {
+              "cpu_percent": 0,
+              "cpu_seconds": 0.07,
+              "name": "WebKitNetworkPr",
+              "pid": 3491010,
+              "ppid": 3490991,
+              "pss_bytes": 32350208,
+              "role": "network",
+              "rss_bytes": 68575232
+            },
+            {
+              "cpu_percent": 0.299,
+              "cpu_seconds": 67.1,
+              "name": "WebKitWebProces",
+              "pid": 3491013,
+              "ppid": 3490991,
+              "pss_bytes": 172608512,
+              "role": "web",
+              "rss_bytes": 232169472
+            },
+            {
+              "cpu_percent": 3.392,
+              "cpu_seconds": 26.31,
+              "name": "hgs",
+              "pid": 3491119,
+              "ppid": 3490991,
+              "pss_bytes": 54118400,
+              "role": "child",
+              "rss_bytes": 67780608
+            },
+            {
+              "cpu_percent": 0,
+              "cpu_seconds": 0,
+              "name": "hgs",
+              "pid": 3491231,
+              "ppid": 3490991,
+              "pss_bytes": 2670592,
+              "role": "child",
+              "rss_bytes": 8499200
+            },
+            {
+              "cpu_percent": 0,
+              "cpu_seconds": 0.01,
+              "name": "ssh",
+              "pid": 3491234,
+              "ppid": 3491231,
+              "pss_bytes": 2237440,
+              "role": "child",
+              "rss_bytes": 14110720
+            }
+          ],
+          "sampled_at_ms": 1793168192109,
+          "source": "procfs",
+          "total": {
+            "cpu_percent": 4.19,
+            "cpu_seconds": 151.26,
+            "processes": 6,
+            "pss_bytes": 375899136,
+            "rss_bytes": 597131264
+          },
+          "window_ms": 10024
+        }
+      }
+    }
+  },
+  "preference": "display-rate"
+}

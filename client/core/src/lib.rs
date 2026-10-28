@@ -38,6 +38,7 @@ pub mod repository;
 pub mod run;
 pub mod send;
 pub mod session_usage;
+pub mod settings;
 pub mod shell;
 pub mod state;
 pub mod stream;

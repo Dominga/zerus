@@ -20,6 +20,8 @@ pub mod renderer;
 mod replay;
 #[cfg(feature = "live")]
 mod screens;
+#[cfg(feature = "live")]
+pub mod settings;
 #[cfg(feature = "media")]
 mod voice;
 
@@ -51,6 +53,7 @@ pub fn run() {
                 use tauri::Manager;
                 let dir = app.path().app_data_dir()?;
                 std::fs::create_dir_all(&dir)?;
+                app.manage(settings::open(app.handle(), &dir));
                 // A replay never touches the real read or attention marks.
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
@@ -93,11 +96,15 @@ pub fn run() {
         });
 }
 
-/// Before the app quits: recordings under way are cancelled and every
-/// draft save already queued reaches the disk.
+/// Before the app quits: recordings under way are cancelled, every draft
+/// save already queued reaches the disk, and the last settings change gets
+/// a bounded wait.
 #[cfg(feature = "live")]
 fn exit(app: &AppHandle) {
     use tauri::Manager;
+    if let Some(settings) = app.try_state::<settings::Store>() {
+        settings.0.flush_within(settings::EXIT_FLUSH);
+    }
     #[cfg(feature = "media")]
     if let Some(voices) = app.try_state::<voice::Voices>() {
         voices.close_all();
@@ -124,6 +131,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::exit_app,
         commands::perf_away,
         renderer::renderer_frame,
+        settings::settings_get,
+        settings::settings_set,
         actions::run_action,
         actions::set_notifications,
         actions::inspect_session,

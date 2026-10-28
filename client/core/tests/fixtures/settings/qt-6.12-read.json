@@ -1,0 +1,435 @@
+{
+    "General key": {
+        "bool": true,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "top level"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "top level",
+        "valid": true
+    },
+    "automaticApprovals/enabled": {
+        "bool": true,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "true"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "true",
+        "valid": true
+    },
+    "downloads/cacheBytes": {
+        "bool": true,
+        "double": 5368709120,
+        "double_ok": true,
+        "int": 1073741824,
+        "int_ok": true,
+        "list": [
+            "5368709120"
+        ],
+        "long": "5368709120",
+        "long_ok": true,
+        "string": "5368709120",
+        "valid": true
+    },
+    "downloads/folder": {
+        "bool": true,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "/srv/Загрузки, общие"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "/srv/Загрузки, общие",
+        "valid": true
+    },
+    "notifications/optionalQuestions": {
+        "bool": true,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "true"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "true",
+        "valid": true
+    },
+    "processes/activeSeconds": {
+        "bool": true,
+        "double": 99.5,
+        "double_ok": true,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "99.5"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "99.5",
+        "valid": true
+    },
+    "processes/backgroundSeconds": {
+        "bool": true,
+        "double": 2,
+        "double_ok": true,
+        "int": 2,
+        "int_ok": true,
+        "list": [
+            "2"
+        ],
+        "long": "2",
+        "long_ok": true,
+        "string": "2",
+        "valid": true
+    },
+    "processes/enabled": {
+        "bool": true,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "true"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "true",
+        "valid": true
+    },
+    "processes/loadingSeconds": {
+        "bool": true,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "abc"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "abc",
+        "valid": true
+    },
+    "shortcuts/app.find": {
+        "bool": false,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            ""
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "",
+        "valid": true
+    },
+    "shortcuts/app.settings": {
+        "bool": true,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "Ctrl+,"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "Ctrl+,",
+        "valid": true
+    },
+    "shortcuts/message.push": {
+        "bool": false,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "",
+        "valid": false
+    },
+    "shortcuts/queue.sendNow": {
+        "bool": false,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "Ctrl+Return",
+            "Meta+Return"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "",
+        "valid": true
+    },
+    "speech/host": {
+        "bool": true,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "studio"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "studio",
+        "valid": true
+    },
+    "speech/machine_id": {
+        "bool": true,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "  spaced, \"quoted\"\tand\nnew line  "
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "  spaced, \"quoted\"\tand\nnew line  ",
+        "valid": true
+    },
+    "speech/microphone": {
+        "bool": true,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "mic-id",
+        "valid": true
+    },
+    "speech/preview_before_send": {
+        "bool": false,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "False"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "False",
+        "valid": true
+    },
+    "speech/profile": {
+        "bool": true,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "@profile"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "@profile",
+        "valid": true
+    },
+    "speech/profile_revision": {
+        "bool": true,
+        "double": 7,
+        "double_ok": true,
+        "int": 7,
+        "int_ok": true,
+        "list": [
+            "7"
+        ],
+        "long": "7",
+        "long_ok": true,
+        "string": "7",
+        "valid": true
+    },
+    "speech/video_mode": {
+        "bool": true,
+        "double": 1,
+        "double_ok": true,
+        "int": 1,
+        "int_ok": true,
+        "list": [
+            "1"
+        ],
+        "long": "1",
+        "long_ok": true,
+        "string": "1",
+        "valid": true
+    },
+    "updates/automatic": {
+        "bool": false,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "false"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "false",
+        "valid": true
+    },
+    "updates/channel": {
+        "bool": true,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "dev"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "dev",
+        "valid": true
+    },
+    "workspace/activityFullWidth": {
+        "bool": true,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "true"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "true",
+        "valid": true
+    },
+    "workspace/activityWidth": {
+        "bool": true,
+        "double": 1300,
+        "double_ok": true,
+        "int": 1300,
+        "int_ok": true,
+        "list": [
+            "1300"
+        ],
+        "long": "1300",
+        "long_ok": true,
+        "string": "1300",
+        "valid": true
+    },
+    "workspace/alwaysOnTop": {
+        "bool": false,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "false"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "false",
+        "valid": true
+    },
+    "workspace/compact": {
+        "bool": true,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "true"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "true",
+        "valid": true
+    },
+    "workspace/contentScale": {
+        "bool": true,
+        "double": 1.25,
+        "double_ok": true,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "1.25"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "1.25",
+        "valid": true
+    },
+    "workspace/hideEmptyProjects": {
+        "bool": false,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "false"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "false",
+        "valid": true
+    },
+    "workspace/language": {
+        "bool": true,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "ru"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "ru",
+        "valid": true
+    },
+    "workspace/theme": {
+        "bool": true,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "dark"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "dark",
+        "valid": true
+    },
+    "workspace/usageIndicator": {
+        "bool": true,
+        "double": 0,
+        "double_ok": false,
+        "int": 0,
+        "int_ok": false,
+        "list": [
+            "marker-countdown"
+        ],
+        "long": "0",
+        "long_ok": false,
+        "string": "marker-countdown",
+        "valid": true
+    }
+}

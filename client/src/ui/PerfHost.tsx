@@ -4,6 +4,7 @@ import { listRows } from "./sessions/model";
 import { orderedRows } from "../store/catalog";
 import { selectedKey, setSelectedKey } from "../store/ui";
 import { activity } from "../store/session";
+import { markAllRead, markNeedsAttention, markRead } from "../store/marks";
 import { copyFolder, copyName, copyCommand, lastCopied, copyReference, end, perform } from "../store/actions";
 import { snapshotOf, terminateCopy, type ActionRow } from "./sessions/actions-ui";
 import type { Action, Outcome } from "../types";
@@ -279,9 +280,30 @@ async function autoRun(config: PerfConfig) {
 // from the Activity state value, or one inspect), runs pause, resume, rename,
 // archive, the end call the Terminate dialog picks for it through the
 // dialog's confirmation (`end`), then the other end call (terminate or kill)
-// once each, and exits 0 (1 when an outcome failed).
+// once each, and exits 0 (1 when an outcome failed). Before the writes it marks
+// the session read, marks all as read (logging the count) and marks the session
+// as needing attention last; `?actions-smoke=marks` then only waits for the
+// session and reports whether that review mark survived a restart.
 const SMOKE_SESSION = "claude/sample-project/review";
 const SMOKE_RENAMED = "claude/sample-project/review-renamed";
+
+async function marksAfterRestart(allowed: boolean) {
+  const exit = (code: number) => invoke("exit_app", { code }).catch(() => {});
+  if (!allowed) {
+    log("actions-smoke not started: it needs ZERUS_CLIENT_REPLAY, ZERUS_CLIENT_HGS and ZERUS_CLIENT_PERF");
+    return;
+  }
+  try {
+    await until(() => orderedRows().some((s) => s.name === SMOKE_SESSION && s.runId), 30_000, "the replay session did not appear");
+    // The stored marks load a moment after the catalog; give them time to apply.
+    const review = await until(() => !!orderedRows().find((s) => s.name === SMOKE_SESSION)?.reviewLater, 5_000, "no review mark").then(() => true, () => false);
+    log(`actions-smoke marks-after-restart: review ${review}`);
+    await exit(review ? 0 : 1);
+  } catch (error) {
+    log(`actions-smoke failed: ${String(error)}`);
+    await exit(1);
+  }
+}
 
 async function actionsSmoke(allowed: boolean) {
   const exit = (code: number) => invoke("exit_app", { code }).catch(() => {});
@@ -299,7 +321,11 @@ async function actionsSmoke(allowed: boolean) {
     setSelectedKey(row().key);
     const chosen = terminateCopy(row()).action;
     log(`actions-smoke end call the Terminate dialog picks: ${chosen}`);
+    const local = (ok: boolean): Outcome => (ok ? { outcome: "done", receipt: null, cleanup: null } : { outcome: "failed", detail: "the row changed" });
     const steps: [string, () => Promise<Outcome>][] = [
+      ["mark as read", async () => local(markRead(row()))],
+      ["mark all as read", async () => { log(`actions-smoke mark-all-as-read: ${markAllRead()} marked`); return local(true); }],
+      ["mark needs attention", async () => local(markNeedsAttention(row()))],
       ["copy session reference", () => copyReference(row())],
       ["copy connect command", () => copyCommand(row())],
       ["copy session name", () => copyName(row())],
@@ -314,7 +340,7 @@ async function actionsSmoke(allowed: boolean) {
     for (const [kind, step] of steps) {
       const out = await step();
       const text = kind.startsWith("copy ") && out.outcome === "done" ? ` ${lastCopied()}` : "";
-      log(`actions-smoke ${kind.startsWith("copy ") ? `copy-${kind.slice(5).replace(/ /g, "-")}` : kind}: ${out.outcome}${out.outcome === "failed" ? ` (${out.detail})` : ""}${text}`);
+      log(`actions-smoke ${kind.startsWith("copy ") ? `copy-${kind.slice(5).replace(/ /g, "-")}` : kind.replace(/ /g, "-")}: ${out.outcome}${out.outcome === "failed" ? ` (${out.detail})` : ""}${text}`);
       if (out.outcome === "failed") bad++;
     }
     await exit(bad ? 1 : 0);
@@ -346,7 +372,9 @@ export function PerfHost() {
       const native = await invoke<PerfConfig>("perf_config").catch(() => undefined);
       if (native) setConfig({ ...native, mode: native.mode ?? urlMode });
     }
-    if (new URLSearchParams(location.search).get("actions-smoke") === "1" && inTauri()) void actionsSmoke(!!config().actions_smoke);
+    const smoke = new URLSearchParams(location.search).get("actions-smoke");
+    if (smoke === "1" && inTauri()) void actionsSmoke(!!config().actions_smoke);
+    if (smoke === "marks" && inTauri()) void marksAfterRestart(!!config().actions_smoke);
     if (config().mode === "auto") {
       setOpen(true);
       void autoRun(config());

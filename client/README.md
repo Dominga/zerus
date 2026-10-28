@@ -70,6 +70,8 @@ the child's own environment: the agent attribution (`HGS_SESSION`,
 | --- | --- | --- | --- |
 | Stop (interrupt) | `interrupt NAME --json` | JSON: `request_id`, `expected_run_id`, `expected_conversation_id`, `expected_turn_started` | 15 s, 45 s |
 | Mark as read | `read NAME --json` | JSON: `run_id`, `conversation_id`, `reply_id`, `attention_signature` | 15 s, 35 s |
+| Mute or Unmute, probe (always on this computer) | `--help` | none | 5 s |
+| Mute or Unmute | `notifications NAME --json` | JSON: `run_id`, `conversation_id`, `muted`, `expected_revision` | 15 s, 35 s |
 | Pause | `pause NAME` | none | 45 s, 45 s |
 | Resume | `resume NAME -d` | none | 30 s, 30 s |
 | Rename | `rename NAME NEW [--archive ID]` | none | 5 s, 15 s |
@@ -105,9 +107,9 @@ Outcome rules:
   the session only.
 - One write per session at a time. While it runs the session's entries show
   "Updating…"; another write for that session is a silent no-op (the Rust side
-  answers `busy`). Stop and read marks each run in their own lane: Stop waits
-  only for its own interrupt, as in Qt, and a read mark never holds up a write.
-  Mark as read stays available while a write runs.
+  answers `busy`). Stop, Mute and the Rust worker's read marks each run in their own
+  lane: Stop waits only for its own interrupt, as in Qt, and neither a Mute nor
+  a read mark holds up a write. Mark as read stays available while a write runs.
 - Terminate stops a tracked Codex, Claude or Kimi session into Archive and
   kills any other live session; the confirmation says which. After the
   confirmation (and after a menu's Pause or Resume) the session must still be
@@ -181,8 +183,49 @@ Outcome rules:
   marks were queued are remembered in the webview's local storage. Outside the
   app (a browser) there is no pending list, and the window keeps its own.
 
-Forgetting, restoring, Mark needs attention and sending arrive in later phases;
-their entries are disabled with a reason. The copy entries below are live.
+- Mark as read, Mark needs attention and Mark all as read are local first:
+  they change this device's attention marks and read replies at once
+  (`attention-marks.json`, or `attention-marks-replay.json` in a replay; at
+  most 20 000 entries per map, the oldest written dropped first, where Qt keeps
+  them unbounded). A host that shares read state also gets a queued read mark
+  (`read-marks.json`), which the Rust worker delivers with Qt's ReadMarkSync
+  rules: at most 4 calls at once, the computer with the fewest first, backoff
+  from 10 s to 300 s, a resend after 120 s and, while only part of a mark is
+  applied, up to 960 s. Marks for computers no longer configured are dropped,
+  and a delivery shows no notice. In the overlay a pending mark counts as read
+  for the same run and conversation, so the row changes before the host
+  answers; a newer reply or question shows again.
+
+Forgetting and restoring arrive in later phases; their entries are disabled
+with a reason. Sending, the Mark read chip of the composer toolbar and the
+Open terminal entries arrive with phase 4. The copy entries below are live.
+
+### Mute and Unmute
+
+The entry changes the notification preferences a host shares with all devices.
+It first runs `hgs --help` on this computer (5 s) and refuses unless a line
+of its output is exactly `session-notifications-v1`; it then runs
+`hgs [@alias] notifications NAME --json` with `run_id`, `conversation_id`,
+`muted` and `expected_revision` on standard input (15 s here, 35 s on a peer).
+The change counts only when the reply is exactly `ok`, `applied`, `run_id`,
+`conversation_id` and `preferences`, names this session's run and
+conversation, carries the requested `muted`, and has revision
+`expected_revision + 1` when applied or the same revision when not. The
+entry is disabled, with its reason in this order, when the computer is offline,
+the host does not share notifications, the row's identity is missing, the
+preferences conflict or a change is already pending. There is one pending
+change per conversation and 16 in all. The change has its own lane: it never
+waits for a write, Stop or a read mark. A confirmed answer is kept as an
+override of the listed row until a listing shows a higher revision; a late
+answer for a replaced run or conversation is dropped.
+
+### Mark all as read
+
+The entry "Mark all as read (N)" is in the batch menu, the list footer button
+and the Rail Sessions menu. N counts every unread reply on every computer,
+hidden sessions included, except sessions marked for review; at 0 the entry is
+disabled. A run marks those replies read and shows "1 reply marked as read."
+or "N replies marked as read."
 
 ### Copy actions
 
@@ -246,7 +289,10 @@ cat $S/log.ndjson
 
 The hook selects `claude/sample-project/review` (its details come from the
 replay's Activity state value or, as here, one `inspect` of the fake), first
-copies the session reference, the connect command, the session name and the
+marks it as read, marks all as read (logging `actions-smoke mark-all-as-read:
+N marked`) and marks it as needing attention, through the marks store the menus
+use (`actions-smoke mark-as-read: done`, `mark-needs-attention: done`; they run
+no `hgs`), then copies the session reference, the connect command, the session name and the
 folder path through the store the menus use (the first calls `reference`; the
 fake's URI is the clipboard text), logging each as
 `actions-smoke copy-<entry>: done <the exact clipboard text>`, then runs pause, resume, rename (to `claude/sample-project/review-renamed`) and archive,
@@ -255,6 +301,15 @@ confirmation (`kill`, since the replay row is not tracked), then the other end
 call (`terminate`), once each through the store the menus use. It logs each
 outcome to stderr (`zerus-client perf: actions-smoke ...`) and exits 0, or 1
 when an outcome failed.
+
+The marks must survive a restart. Mark needs attention runs last of the three
+so the first run ends with the session marked for review, and the replay keeps
+its marks in `attention-marks-replay.json` in the app data directory. A second
+run with `ZERUS_CLIENT_QUERY=actions-smoke=marks` (same command, the same
+`XDG_DATA_HOME` or app data directory as the first) only waits for the replay
+session and logs `actions-smoke marks-after-restart: review true` (exit 0) or
+`review false` (exit 1) once the stored marks have applied. Give both runs one
+scratch `XDG_DATA_HOME` so a smoke run never touches the real marks files.
 
 ## Measurement run
 

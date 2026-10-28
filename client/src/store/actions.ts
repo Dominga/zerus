@@ -11,10 +11,11 @@ import type { Action, Details, Outcome, Target } from "../types";
 // failure. Read marks are local first (store/marks.ts) and the Rust worker
 // delivers them; this store never repeats one.
 //
-// Writes, interrupts and read marks run in separate lanes (as the Rust
-// in-flight guard does): one write per session shows "Updating…" on its
-// entries; Stop waits only for its own interrupt, as Qt's m_interruptRequest;
-// a read mark never holds up a write.
+// Writes and interrupts run in separate lanes (as the Rust in-flight guard
+// does): one write per session shows "Updating…" on its entries; Stop waits
+// only for its own interrupt, as Qt's m_interruptRequest. Shared notification
+// changes are tracked apart too. There is no read lane here: the Rust worker
+// claims the Read lane when it delivers a mark.
 
 export interface Notice { id: number; tone: "error" | "warn" | "info"; text: string; sticky: boolean }
 

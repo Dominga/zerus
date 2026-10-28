@@ -689,6 +689,13 @@ Controller rulings during Piece A:
 - "Session reference copied" appears only after the clipboard accepted the text; Qt shows it unconditionally and reports a copy failure separately.
 - The click-time recheck compares the conversation id; `created` joins it when Piece B adds it to the row.
 
+Controller rulings during Piece B:
+- Attention marks are saved as deltas (`update_attention_marks`) by a background writer; `attention_marks` returns each map's write order.
+- Read marks for computers no longer configured are dropped once the local listing names its peers, as Qt's `publishReadMarks`.
+- Mark all as read is also wired to the existing list footer button and the rail menu, as Qt has both.
+- The Mark read chip waits for phase 4's composer toolbar; only its state exists now.
+- The muted override guards only this client's own confirmed changes; Qt also guards every row against stale polls.
+
 Deviations from Qt, both from owner rules:
 - Attention marks and read replies are capped at 20 000 entries per map (bounded caches); Qt keeps them without a bound.
 - "Deselect all (Esc)" is "Deselect all" (no obvious keyboard hints).

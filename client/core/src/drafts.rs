@@ -847,14 +847,22 @@ pub struct ImportReport {
     pub imported: usize,
     /// Copies whose content this store already holds under the same key.
     pub identical: usize,
-    /// Keys under which a different draft already exists here, or whose newer
-    /// copy in another source won: those copies stay in their source, where
+    /// Copies not written because a different draft already exists here
+    /// under their key, or a newer copy won: they stay in their source, where
     /// Saved drafts can still recover them.
-    pub conflicts: Vec<String>,
+    pub conflicts: Vec<ImportConflict>,
     /// Copies that could not be read completely; they stay in their source.
     pub invalid: usize,
     /// The sources read, by name.
     pub sources: Vec<String>,
+}
+
+/// One copy the import left in its source: its key and source name only,
+/// never its text.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ImportConflict {
+    pub key: String,
+    pub source: String,
 }
 
 /// Marks this store's one-time import (`<root>/.imported-v1.json`).
@@ -891,6 +899,59 @@ pub fn dev_roots() -> Vec<PathBuf> {
         .collect()
 }
 
+/// `path` with its longest existing ancestor resolved, so a folder not
+/// created yet still compares by where it will be.
+fn resolved(path: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut existing = path;
+    loop {
+        if let Ok(real) = fs::canonicalize(existing) {
+            return missing
+                .iter()
+                .rev()
+                .fold(real, |path, part| path.join(part));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_owned());
+                existing = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+/// Whether two folders overlap: one is the other or lies inside it.
+fn overlaps(a: &Path, b: &Path) -> bool {
+    let (a, b) = (resolved(a), resolved(b));
+    a.starts_with(&b) || b.starts_with(&a)
+}
+
+/// The import's sources for the store at `own`: Qt's store (`qt`) and the
+/// dev app's stores (`dev`), without any that is, holds or lies inside `own`.
+pub fn import_sources(own: &Path, qt: Option<PathBuf>, dev: Vec<PathBuf>) -> Vec<ImportSource> {
+    qt.map(|root| ImportSource {
+        name: "qt".into(),
+        root,
+    })
+    .into_iter()
+    .chain(dev.into_iter().map(|root| ImportSource {
+        name: "dev".into(),
+        root,
+    }))
+    .filter(|source| !overlaps(&source.root, own))
+    .collect()
+}
+
+/// Queues the one-time import of Qt's and the dev app's drafts as the job
+/// the store runs next. Call it right after the store opens, before anything
+/// reads it: loads and pages run on the same writer after it, so every read
+/// sees the imported drafts. The report goes to the marker and a log line.
+pub fn import_at_start(store: &DraftStore) {
+    let sources = import_sources(store.root(), qt_root(), dev_roots());
+    store.import(sources, |_| {});
+}
+
 /// What makes two copies of a draft the same: the text, label, form state
 /// and attachments, not the cursor or delivery flags.
 fn content_hash(draft: &StoredDraft) -> String {
@@ -920,6 +981,7 @@ fn content_hash(draft: &StoredDraft) -> String {
 struct Candidate {
     loaded: Loaded,
     modified_ns: u64,
+    source: String,
 }
 
 /// The keys of the drafts under `root`: each folder's manifest names its key,
@@ -978,6 +1040,7 @@ pub fn import_once(root: &Path, sources: &[ImportSource]) -> ImportReport {
             candidates.entry(key).or_default().push(Candidate {
                 loaded,
                 modified_ns,
+                source: source.name.clone(),
             });
         }
     }
@@ -985,19 +1048,21 @@ pub fn import_once(root: &Path, sources: &[ImportSource]) -> ImportReport {
     keys.sort();
     for key in keys {
         let mut copies = candidates.remove(&key).unwrap_or_default();
-        copies.sort_by(|a, b| b.modified_ns.cmp(&a.modified_ns));
+        copies.sort_by_key(|copy| std::cmp::Reverse(copy.modified_ns));
         let here = loaded(load_once(root, &key));
         let mut kept = if here.storage_error.is_none() && here.draft.is_empty() {
             None
         } else {
             Some(content_hash(&here.draft))
         };
-        let mut conflict = false;
         for copy in copies {
             let hash = content_hash(&copy.loaded.draft);
             match &kept {
                 Some(existing) if *existing == hash => report.identical += 1,
-                Some(_) => conflict = true,
+                Some(_) => report.conflicts.push(ImportConflict {
+                    key: key.clone(),
+                    source: copy.source.clone(),
+                }),
                 None => match save_direct(root, &key, &copy.loaded.draft) {
                     Ok(()) => {
                         report.imported += 1;
@@ -1007,10 +1072,14 @@ pub fn import_once(root: &Path, sources: &[ImportSource]) -> ImportReport {
                 },
             }
         }
-        if conflict {
-            report.conflicts.push(key);
-        }
     }
+    eprintln!(
+        "zerus-client-core: drafts import: {} imported, {} identical, {} conflicts, {} invalid",
+        report.imported,
+        report.identical,
+        report.conflicts.len(),
+        report.invalid
+    );
     if fs::create_dir_all(root).is_ok() && private(root, 0o700) {
         let record = json!({
             "version": 1,

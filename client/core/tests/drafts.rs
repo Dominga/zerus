@@ -6,8 +6,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 use zerus_client_core::attachments::{Attachment, Draft};
 use zerus_client_core::drafts::{
-    import_once, read_draft, read_index, Cursor, DraftStore, ImportReport, ImportSource, IndexPage,
-    Loaded, Page, StoredDraft, Summary, ALREADY_EXISTS, IMPORT_MARKER, INTERRUPTED, NOT_RESTORED,
+    import_at_start, import_once, import_sources, qt_root, read_draft, read_index, Cursor,
+    DraftStore, ImportConflict, ImportReport, ImportSource, IndexPage, Loaded, Page, StoredDraft,
+    Summary, ALREADY_EXISTS, IMPORT_MARKER, INTERRUPTED, NOT_RESTORED,
 };
 
 struct Scratch(PathBuf);
@@ -542,9 +543,31 @@ fn the_newest_copy_wins_and_a_different_draft_here_is_kept() {
     assert_eq!(report.imported, 1);
     let mut conflicts = report.conflicts.clone();
     conflicts.sort();
-    let mut expected = vec![KEY.to_owned(), kept.to_owned()];
+    let mut expected = vec![
+        ImportConflict {
+            key: KEY.into(),
+            source: "qt".into(),
+        },
+        ImportConflict {
+            key: kept.into(),
+            source: "qt".into(),
+        },
+    ];
     expected.sort();
     assert_eq!(conflicts, expected);
+    // The marker keeps the counts and the conflicts' keys and sources, never
+    // a draft's text.
+    let marker = fs::read_to_string(here.join(IMPORT_MARKER)).unwrap();
+    let recorded: Value = serde_json::from_str(&marker).unwrap();
+    assert_eq!(recorded["report"]["conflicts"][0]["source"], "qt");
+    for text in [
+        "older in Qt",
+        "newer in the dev app",
+        "a Qt copy",
+        "typed here",
+    ] {
+        assert!(!marker.contains(text), "{text} leaked into the marker");
+    }
     let store = DraftStore::open(here.clone());
     assert_eq!(load(&store, KEY).draft.draft.text, "newer in the dev app");
     assert_eq!(load(&store, kept).draft.draft.text, "typed here");
@@ -611,4 +634,86 @@ fn the_import_runs_on_the_stores_writer() {
     let report = wait(|done| store.import(vec![source("qt", &qt)], done));
     assert_eq!(report.imported, 1);
     assert_eq!(load(&store, KEY).draft.draft.text, "from Qt");
+}
+
+#[test]
+fn the_import_never_reads_the_stores_own_folder() {
+    let scratch = Scratch::new("import-own");
+    let data = scratch.0.join("data");
+    let own = data.join("dev.zerus.next/drafts");
+    let (qt, phase2) = (
+        scratch.0.join("qt"),
+        data.join("dev.zerus.next.phase2/drafts"),
+    );
+    for root in [&own, &qt, &phase2] {
+        fs::create_dir_all(root).unwrap();
+    }
+    let roots = |sources: Vec<ImportSource>| -> Vec<PathBuf> {
+        sources.into_iter().map(|source| source.root).collect()
+    };
+    // The store's folder, a folder inside it and one holding it are never
+    // sources.
+    let dev = vec![own.clone(), own.join("old"), data.clone(), phase2.clone()];
+    assert_eq!(
+        roots(import_sources(&own, Some(qt.clone()), dev)),
+        vec![qt.clone(), phase2.clone()]
+    );
+    // Nor are they under another spelling of the path, even before the
+    // store's folder exists.
+    #[cfg(unix)]
+    {
+        let link = scratch.0.join("link");
+        std::os::unix::fs::symlink(&data, &link).unwrap();
+        let through_link = Some(link.join("dev.zerus.next/drafts"));
+        assert!(roots(import_sources(&own, through_link, vec![])).is_empty());
+        let later = link.join("later/drafts");
+        let inside = vec![data.join("later/drafts/old")];
+        assert!(roots(import_sources(&later, None, inside)).is_empty());
+    }
+}
+
+#[test]
+fn a_read_right_after_import_at_start_sees_the_imported_draft() {
+    const CHILD: &str = "ZERUS_TEST_IMPORT_AT_START";
+    const NAME: &str = "a_read_right_after_import_at_start_sees_the_imported_draft";
+    let other = "studio\nclaude/sample-project/other";
+    if let Some(scratch) = std::env::var_os(CHILD).map(PathBuf::from) {
+        // In the child, Qt's and the dev app's stores are under the scratch
+        // folder, wherever this platform keeps them.
+        seed(&qt_root().unwrap(), &[(KEY, draft("from Qt", &[]))]);
+        let data = if cfg!(windows) {
+            scratch.join("appdata")
+        } else if cfg!(target_os = "macos") {
+            scratch.join("home/Library/Application Support")
+        } else {
+            scratch.join("data")
+        };
+        let dev = data.join("dev.zerus.next/drafts");
+        seed(&dev, &[(other, draft("from the dev app", &[]))]);
+        let store = DraftStore::open(scratch.join("here"));
+        import_at_start(&store);
+        assert_eq!(load(&store, KEY).draft.draft.text, "from Qt");
+        assert_eq!(load(&store, other).draft.draft.text, "from the dev app");
+        return;
+    }
+    let scratch = Scratch::new("import-at-start");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([NAME, "--exact", "--nocapture", "--test-threads=1"])
+        .env(CHILD, &scratch.0)
+        .env("HOME", scratch.0.join("home"))
+        .env("XDG_CONFIG_HOME", scratch.0.join("config"))
+        .env("XDG_DATA_HOME", scratch.0.join("data"))
+        .env("APPDATA", scratch.0.join("appdata"))
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(output.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("1 passed"), "{stdout}");
+    assert!(
+        stderr.contains("drafts import: 2 imported, 0 identical, 0 conflicts, 0 invalid"),
+        "{stderr}"
+    );
 }

@@ -32,9 +32,11 @@ fn flag(details: &Value, key: &str) -> Option<bool> {
     details.get(key).and_then(Value::as_bool)
 }
 
-/// Whether the session has a terminal (`NativeSessionCapabilities::terminal`).
+/// Whether the session has a terminal (`NativeSessionCapabilities::terminal`,
+/// as the frontend's `terminal()` in `actions-ui.ts` reads it: DeepSeek under
+/// either command name has Native UI instead).
 pub fn supported(facts: &TerminalFacts, details: &Value) -> bool {
-    if facts.cmd == "dsh" {
+    if facts.cmd == "dsh" || facts.cmd == "deepseek" {
         return false;
     }
     if facts.cmd == "opencode" {
@@ -204,6 +206,7 @@ mod tests {
     fn support_follows_the_native_capabilities() {
         let none = json!({});
         assert!(supported(&facts("claude"), &none));
+        assert!(!supported(&facts("deepseek"), &none));
         assert!(!supported(
             &facts("dsh"),
             &json!({"terminal_supported": true})

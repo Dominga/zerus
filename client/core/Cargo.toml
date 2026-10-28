@@ -10,9 +10,31 @@ publish = false
 # Pure Rust and fast to test: no Tauri, no async runtime. The Tauri app in
 # client/src-tauri depends on this crate by path.
 [dependencies]
+base64 = "0.22"
+infer = { version = "0.22", default-features = false, features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 zerus-watch-protocol = { path = "../../crates/watch-protocol" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Konsole tabs and raising over the session D-Bus (libdbus); the Linux app
+# turns it on, while the crate's own checks build without it.
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus = { version = "0.9", optional = true }
+
+# macOS: the quarantine a file from another machine carries (external_file).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSDictionary", "NSError", "NSObject", "NSString", "NSURL"] }
+
+# Windows: the Terminal's attach client in a ConPTY pseudoconsole, the Mark
+# of the Web and the shell's dangerous types (external_file), and starting
+# terminals and console windows (terminal_launch).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell"] }
+
+[features]
+konsole = ["dep:dbus"]

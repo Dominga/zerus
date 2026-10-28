@@ -6,29 +6,42 @@
 //! session's actions while one runs (`tray/src/`). An interrupt and a read
 //! mark each have their own lane: Qt guards Stop only by its own request
 //! (`m_interruptRequest`), and a quiet retry never makes a confirmed write
-//! answer busy.
+//! answer busy. A message has its own lane per agent, as Qt's
+//! `m_messagesInFlight` keys it by host, name and agent. A process stop has
+//! its own lane too: Qt's Processes tab stops beside a pause or rename, one
+//! stop at a time per session. Send now and an OpenCode inbox removal have
+//! their own lanes, as Qt's `m_queueSendRequest` and `m_removeQueuedRequest`,
+//! and so does an answer, one per session (`m_answersInFlight`).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tauri::State;
-use zerus_client_core::actions::{classify, invocation, parse_reference, reference_invocation};
+use zerus_client_core::actions::{
+    classify, invocation, parse_reference, reference_invocation, ALREADY_ANSWERING, ALREADY_SENDING,
+};
 use zerus_client_core::details::{details_invocation, parse_details, Details};
 use zerus_client_core::readmarks::{ReadMark, ReadMarks};
 use zerus_client_core::shell::{current_shell, open_command};
 use zerus_client_core::{default_hgs, run, Action, Batch, Outcome, Target};
 
-/// A session by computer id and session name, and the action's lane.
-type Key = (String, String, Lane);
+/// A session by computer id and session name, the action's lane and, for a
+/// message, the agent it goes to ("" for the session's own agent).
+type Key = (String, String, Lane, String);
 
-/// Writes, interrupts and read marks run apart: at most one of each per
-/// session.
+/// Writes, interrupts, read marks, messages and process stops run apart: at
+/// most one of each per session (messages: per agent).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Lane {
     Write,
     Interrupt,
     Read,
+    Send,
+    Process,
+    Queue,
+    Inbox,
+    Answer,
 }
 
 impl Lane {
@@ -36,8 +49,27 @@ impl Lane {
         match action {
             Action::MarkRead { .. } => Self::Read,
             Action::Interrupt { .. } => Self::Interrupt,
+            Action::Send { .. } => Self::Send,
+            Action::StopProcess { .. } => Self::Process,
+            Action::SendNow { .. } => Self::Queue,
+            Action::RemoveQueued { .. } => Self::Inbox,
+            Action::Answer { .. } => Self::Answer,
             _ => Self::Write,
         }
+    }
+
+    /// The in-flight key of `action` on `target`.
+    pub fn key(target: &Target, action: &Action) -> Key {
+        let agent = match action {
+            Action::Send { agent_id, .. } => agent_id.clone().unwrap_or_default(),
+            _ => String::new(),
+        };
+        (
+            target.computer.clone(),
+            target.name.clone(),
+            Self::of(action),
+            agent,
+        )
     }
 }
 
@@ -157,7 +189,7 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
-fn blocked() -> bool {
+pub(crate) fn blocked() -> bool {
     !actions_allowed(
         env("ZERUS_CLIENT_REPLAY").as_deref(),
         env("ZERUS_CLIENT_HGS").as_deref(),
@@ -186,21 +218,25 @@ pub async fn run_action(
     target: Target,
     action: Action,
 ) -> Result<Outcome, String> {
+    dispatch(&state, target, action).await
+}
+
+/// The one dispatcher of session actions, for `run_action` and for commands
+/// that build an action in Rust (a message from the held draft). A message
+/// already in flight to the same agent fails with Qt's text; any other lane
+/// answers `Err("busy")`.
+pub async fn dispatch(state: &Actions, target: Target, action: Action) -> Result<Outcome, String> {
     if blocked() {
         return Ok(failed(REPLAY_NEEDS_HGS));
     }
-    let Some(_claim) = state.flight.claim((
-        target.computer.clone(),
-        target.name.clone(),
-        Lane::of(&action),
-    )) else {
-        return Err("busy".into());
+    let Some(_claim) = state.flight.claim(Lane::key(&target, &action)) else {
+        return match Lane::of(&action) {
+            Lane::Send => Ok(failed(ALREADY_SENDING)),
+            Lane::Answer => Ok(failed(ALREADY_ANSWERING)),
+            _ => Err("busy".into()),
+        };
     };
     let request_id = uuid::Uuid::new_v4().to_string();
-    let inv = match invocation(&target, &action, &request_id) {
-        Ok(inv) => inv,
-        Err(refusal) => return Ok(failed(refusal)),
-    };
     if let Action::MarkRead {
         reply_id,
         attention_signature,
@@ -220,12 +256,21 @@ pub async fn run_action(
                 attention_signature: attention_signature.clone(),
             });
     }
+    // Building the call may read dropped files, so it runs off the async
+    // workers with the call itself.
     let hgs = default_hgs();
-    let ran = inv.clone();
-    let exit = tauri::async_runtime::spawn_blocking(move || run(&hgs, &ran))
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(classify(&target, &action, &inv, exit))
+    let (call_target, call_action) = (target.clone(), action.clone());
+    let ran = tauri::async_runtime::spawn_blocking(move || {
+        let inv = invocation(&call_target, &call_action, &request_id)?;
+        let exit = run(&hgs, &inv);
+        Ok::<_, String>((inv, exit))
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    match ran {
+        Ok((inv, exit)) => Ok(classify(&target, &action, &inv, exit)),
+        Err(refusal) => Ok(failed(refusal)),
+    }
 }
 
 /// The session's read-only details, None when it cannot be read. Not guarded:
@@ -320,6 +365,7 @@ mod tests {
                 computer.to_owned(),
                 "claude/sample-project/review".to_owned(),
                 lane,
+                String::new(),
             )
         };
         let flight = InFlight::default();
@@ -348,9 +394,139 @@ mod tests {
             Lane::of(&Action::Interrupt { turn_started: 1.0 }),
             Lane::Interrupt
         );
-        for action in [Action::Pause, Action::Terminate, Action::Kill] {
+        for action in [
+            Action::Pause,
+            Action::Terminate,
+            Action::Kill,
+            Action::StageFiles {
+                paths: vec![],
+                expected_created: None,
+            },
+            // Clear and Compact start after the view's confirmation and run
+            // as session writes.
+            Action::ClearContext {
+                dismiss_prompt: true,
+            },
+            Action::CompactContext,
+            Action::StartFresh,
+        ] {
             assert_eq!(Lane::of(&action), Lane::Write);
         }
+    }
+
+    #[test]
+    fn a_message_takes_its_own_lane_per_agent() {
+        let target = Target {
+            computer: String::new(),
+            name: "claude/sample-project/review".into(),
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+        };
+        let send = |agent: Option<&str>| Action::Send {
+            text: "hi".into(),
+            attachments: vec![],
+            agent_id: agent.map(str::to_owned),
+            expected_compaction_id: None,
+        };
+        assert_eq!(Lane::of(&send(None)), Lane::Send);
+        let flight = InFlight::default();
+        let main = flight.claim(Lane::key(&target, &send(None))).unwrap();
+        assert!(flight.claim(Lane::key(&target, &send(None))).is_none());
+        // A subagent's message and the session's other lanes stay free.
+        assert!(flight
+            .claim(Lane::key(&target, &send(Some("agent-7"))))
+            .is_some());
+        assert!(flight.claim(Lane::key(&target, &Action::Pause)).is_some());
+        drop(main);
+        assert!(flight.claim(Lane::key(&target, &send(None))).is_some());
+    }
+
+    #[test]
+    fn a_process_stop_runs_beside_session_writes_one_at_a_time() {
+        let target = Target {
+            computer: "studio".into(),
+            name: "claude/sample-project/review".into(),
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+        };
+        let stop = |id: &str| Action::StopProcess {
+            process_id: id.into(),
+            archive_id: None,
+            generation: None,
+        };
+        assert_eq!(Lane::of(&stop("job-1")), Lane::Process);
+        let flight = InFlight::default();
+        let pause = flight.claim(Lane::key(&target, &Action::Pause)).unwrap();
+        let first = flight.claim(Lane::key(&target, &stop("job-1"))).unwrap();
+        // A second stop for the same session waits, whichever process it names.
+        assert!(flight.claim(Lane::key(&target, &stop("job-2"))).is_none());
+        drop(first);
+        assert!(flight.claim(Lane::key(&target, &stop("job-2"))).is_some());
+        drop(pause);
+    }
+
+    #[test]
+    fn one_answer_per_session() {
+        let target = |computer: &str| Target {
+            computer: computer.into(),
+            name: "claude/sample-project/review".into(),
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+        };
+        let answer = |id: &str| Action::Answer {
+            question: serde_json::json!({"question_id": id}),
+            answers: Vec::new(),
+        };
+        assert_eq!(Lane::of(&answer("q-1")), Lane::Answer);
+        let flight = InFlight::default();
+        let send = flight
+            .claim(Lane::key(
+                &target("studio"),
+                &Action::Send {
+                    text: "hi".into(),
+                    attachments: Vec::new(),
+                    agent_id: None,
+                    expected_compaction_id: None,
+                },
+            ))
+            .unwrap();
+        let first = flight
+            .claim(Lane::key(&target("studio"), &answer("q-1")))
+            .unwrap();
+        // A second answer to the same session waits, whichever question.
+        assert!(flight
+            .claim(Lane::key(&target("studio"), &answer("q-2")))
+            .is_none());
+        assert!(flight
+            .claim(Lane::key(&target("mac"), &answer("q-2")))
+            .is_some());
+        drop((send, first));
+    }
+
+    #[test]
+    fn send_now_and_inbox_removal_take_their_own_lanes() {
+        let target = Target {
+            computer: "studio".into(),
+            name: "claude/sample-project/review".into(),
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+        };
+        let send_now = |id: &str| Action::SendNow {
+            queue_id: id.into(),
+        };
+        let remove = |id: &str| Action::RemoveQueued {
+            message_id: id.into(),
+        };
+        assert_eq!(Lane::of(&send_now("q-1")), Lane::Queue);
+        assert_eq!(Lane::of(&remove("msg_a")), Lane::Inbox);
+        let flight = InFlight::default();
+        let write = flight.claim(Lane::key(&target, &Action::Pause)).unwrap();
+        let queue = flight.claim(Lane::key(&target, &send_now("q-1"))).unwrap();
+        let inbox = flight.claim(Lane::key(&target, &remove("msg_a"))).unwrap();
+        // One Send now and one removal per session, whichever queue or message.
+        assert!(flight.claim(Lane::key(&target, &send_now("q-2"))).is_none());
+        assert!(flight.claim(Lane::key(&target, &remove("msg_b"))).is_none());
+        drop((write, queue, inbox));
     }
 
     #[test]

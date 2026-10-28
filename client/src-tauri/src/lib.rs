@@ -19,9 +19,16 @@ mod replay;
 mod screens;
 #[cfg(feature = "live")]
 mod terminal;
+#[cfg(feature = "media")]
+mod voice;
 mod window_visibility;
 
 use tauri::{AppHandle, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+
+/// The app's one draft store, shared by the composers (and voice), so every
+/// draft key has one writer.
+#[cfg(feature = "live")]
+pub struct Drafts(pub std::sync::Arc<zerus_client_core::drafts::DraftStore>);
 
 /// The label of the one window this phase opens.
 pub const MAIN_WINDOW: &str = "main";
@@ -57,6 +64,13 @@ pub fn run() {
                         std::env::var("ZERUS_CLIENT_HGS").ok().as_deref(),
                     ),
                 ));
+                // A replay never touches the real drafts either.
+                let drafts = std::sync::Arc::new(zerus_client_core::drafts::DraftStore::open(
+                    dir.join(zerus_client_core::drafts::dir(replay)),
+                ));
+                #[cfg(feature = "media")]
+                app.manage(voice::Voices::new(std::sync::Arc::clone(&drafts)));
+                app.manage(Drafts(drafts));
             }
             let display = display::display_name();
             if !display::headless_allowed(std::env::var("ZERUS_CLIENT_HEADLESS").is_ok_and(|v| v == "1"), display.as_deref()) {
@@ -87,8 +101,28 @@ pub fn run() {
             #[cfg(not(feature = "live"))]
             let _ = (window, event);
         })
-        .run(tauri::generate_context!())
-        .expect("Zerus Next failed to start");
+        .build(tauri::generate_context!())
+        .expect("Zerus Next failed to start")
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                #[cfg(feature = "live")]
+                exit(_app);
+            }
+        });
+}
+
+/// Before the app quits: recordings under way are cancelled and every
+/// draft save already queued reaches the disk.
+#[cfg(feature = "live")]
+fn exit(app: &AppHandle) {
+    use tauri::Manager;
+    #[cfg(feature = "media")]
+    if let Some(voices) = app.try_state::<voice::Voices>() {
+        voices.close_all();
+    }
+    if let Some(drafts) = app.try_state::<Drafts>() {
+        drafts.0.flush();
+    }
 }
 
 /// The commands the frontend may call. The session actions need the core's
@@ -126,6 +160,16 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         terminal::terminal_disconnect,
         terminal::terminal_retarget,
         terminal::terminal_status,
+        #[cfg(feature = "media")]
+        voice::voice_open,
+        #[cfg(feature = "media")]
+        voice::voice_input,
+        #[cfg(feature = "media")]
+        voice::voice_close,
+        #[cfg(feature = "media")]
+        voice::voice_microphones,
+        #[cfg(feature = "media")]
+        voice::voice_video,
     ]
 }
 

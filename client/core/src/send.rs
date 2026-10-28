@@ -1,8 +1,13 @@
 //! The send flow's rules, ported from the Qt client: why the composer cannot
-//! send to a session now, and why a context action is unavailable.
+//! send to a session now, why a context action is unavailable, and the two
+//! continuations that send a waiting draft later: resume-then-send and
+//! compact-to-send.
 //!
 //! Reference: `tray/src/SessionsWindow.cpp` (`messageBlockReason`,
-//! `contextActionReason`, `contextReasonSentence`).
+//! `contextActionReason`, `contextReasonSentence`, `canStartStopped`,
+//! `startToSend`, `continueAfterStart`, `compactToSend`,
+//! `continueAfterCompact`, `pollCompactContinuations`).
+use crate::actions::{Action, Outcome};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -190,6 +195,537 @@ pub fn reason_sentence(reason: &str) -> String {
     }
 }
 
+/// The draft a continuation sends: its text and attachment digests. The
+/// composer's draft must still match it at every step.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftMark {
+    pub text: String,
+    pub attachments: Vec<String>,
+}
+
+/// A session as the catalog shows it now.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Session {
+    pub key: String,
+    pub host: String,
+    pub name: String,
+    pub created: i64,
+    pub run_id: String,
+    pub conversation_id: String,
+    pub state: String,
+    pub online: bool,
+    pub terminating: bool,
+    pub tracked: bool,
+    pub cmd: String,
+    pub resumable: bool,
+}
+
+/// The texts of a pending send's ends that the user or the session caused.
+pub const CANCELLED_BY_USER: &str = "Pending send cancelled. Your draft is unchanged.";
+pub const INTERRUPTED: &str = "Interrupted. Your draft was kept without sending.";
+const CHANGED: &str = "The session changed. Your draft was kept without sending.";
+const DRAFT_CHANGED: &str = "Draft changed. Send it when you are ready.";
+const NOT_READY: &str =
+    "The agent did not become ready. Check Terminal; your draft was kept without sending.";
+/// How long a start may take before its message is given up.
+pub const START_LIMIT: f64 = 180.0;
+/// How long a compaction may take before its message is given up.
+pub const COMPACT_LIMIT: f64 = 600.0;
+
+/// Whether a stopped session can start to take a message (`canStartStopped`).
+/// `busy`: a session update, rename or settings change runs, another
+/// start-to-send waits anywhere, or this session compacts or sends.
+pub fn can_start_stopped(session: &Session, busy: bool) -> bool {
+    session.online
+        && matches!(session.state.as_str(), "paused" | "stopped")
+        && session.tracked
+        && matches!(session.cmd.as_str(), "codex" | "claude" | "kimi")
+        && !session.terminating
+        && !busy
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartChoice {
+    Resume,
+    ResumeCompact,
+    Fresh,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartOption {
+    pub choice: StartChoice,
+    pub label: String,
+    pub enabled: bool,
+    pub tooltip: String,
+}
+
+/// "Start the session to send?": Cancel is the default and the escape answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartQuestion {
+    pub title: String,
+    pub text: String,
+    pub informative: String,
+    pub options: Vec<StartOption>,
+}
+
+/// The question before a stopped session takes a message. `context` is the
+/// composer's context usage text, empty when unknown.
+pub fn start_question(session: &Session, context: &str) -> StartQuestion {
+    let usage = if context.is_empty() {
+        String::new()
+    } else {
+        format!(" ({context})")
+    };
+    let option = |choice, label: &str, enabled, tooltip: &str| StartOption {
+        choice,
+        label: label.into(),
+        enabled,
+        tooltip: tooltip.into(),
+    };
+    StartQuestion {
+        title: "Start the session to send?".into(),
+        text: format!(
+            "{} is stopped. How should it start before your message is sent?",
+            session.name
+        ),
+        informative: format!(
+            "Resume continues the saved conversation, and the message is sent with its full context{usage}.\n\nStart fresh begins a new conversation with the same folder, account and model. Earlier messages stay readable in Activity.\n\nResume, compact and send summarizes the saved history first. Compaction uses tokens and may omit details."
+        ),
+        options: vec![
+            option(StartChoice::Resume, "Resume and send", session.resumable, ""),
+            option(
+                StartChoice::ResumeCompact,
+                "Resume, compact and send",
+                session.resumable,
+                "Resume the saved conversation, run native /compact when ready, then send this exact message after successful completion.",
+            ),
+            option(StartChoice::Fresh, "Start fresh and send", true, ""),
+        ],
+    }
+}
+
+/// What a continuation asks of its caller.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Step {
+    /// Nothing yet.
+    Idle,
+    /// Run this action for the session; report its outcome back.
+    Run(Action),
+    /// Send the waiting draft now with full-context consent, expecting this
+    /// run and conversation (and compaction).
+    Send {
+        run_id: String,
+        conversation_id: String,
+        compaction_id: Option<String>,
+    },
+    /// Compact before sending: keep this continuation and show its text.
+    Compact(CompactSend, String),
+    /// Ended without sending; the draft stays. Show this.
+    Cancelled(String),
+}
+
+fn evidence_differs(evidence: Option<&Value>, run: &str, conversation: &str) -> bool {
+    evidence.is_some_and(|evidence| {
+        evidence
+            .as_object()
+            .is_some_and(|object| !object.is_empty())
+            && (text(evidence, "run_id") != run
+                || text(evidence, "conversation_id") != conversation)
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartPhase {
+    Preparing,
+    Starting,
+    Waiting,
+}
+
+/// Resume-then-send: one at a time across all sessions, as in Qt.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StartSend {
+    session: Session,
+    draft: DraftMark,
+    choice: StartChoice,
+    started: f64,
+    phase: StartPhase,
+}
+
+impl StartSend {
+    /// The answer to the start question. `current` is the session again and
+    /// `draft_now` the composer's draft; the waiting text comes back with the
+    /// continuation, or a notice when nothing starts.
+    pub fn begin(
+        original: &Session,
+        current: Option<&Session>,
+        busy: bool,
+        choice: StartChoice,
+        draft: DraftMark,
+        draft_now: &DraftMark,
+        now: f64,
+    ) -> Result<(StartSend, String), String> {
+        let unchanged = current.is_some_and(|current| {
+            current.key == original.key
+                && current.run_id == original.run_id
+                && current.conversation_id == original.conversation_id
+                && can_start_stopped(current, busy)
+        });
+        if !unchanged {
+            return Err(CHANGED.into());
+        }
+        if *draft_now != draft {
+            return Err(DRAFT_CHANGED.into());
+        }
+        let waiting = if choice == StartChoice::ResumeCompact {
+            "Waiting for the session to start, then compact. This exact message will be sent automatically after compaction. Cancel send to edit."
+        } else {
+            "Waiting for the session to start. This exact message will be sent automatically when ready. Cancel send to edit."
+        };
+        Ok((
+            StartSend {
+                session: original.clone(),
+                draft,
+                choice,
+                started: now,
+                phase: StartPhase::Preparing,
+            },
+            waiting.into(),
+        ))
+    }
+
+    pub fn key(&self) -> &str {
+        &self.session.key
+    }
+
+    /// The composer holds the draft as waiting (`ok`): start the session if
+    /// it is still the one asked about. `busy`: a session update or rename
+    /// runs.
+    pub fn prepared(
+        &mut self,
+        ok: bool,
+        current: Option<&Session>,
+        evidence: Option<&Value>,
+        busy: bool,
+    ) -> Step {
+        if self.phase != StartPhase::Preparing {
+            return Step::Idle;
+        }
+        let original = &self.session;
+        let same = current.is_some_and(|current| {
+            current.host == original.host
+                && current.name == original.name
+                && current.created == original.created
+                && current.run_id == original.run_id
+                && current.conversation_id == original.conversation_id
+                && current.online
+                && !current.terminating
+                && current.state != "running"
+        });
+        if !ok
+            || !same
+            || busy
+            || evidence_differs(evidence, &original.run_id, &original.conversation_id)
+        {
+            return Step::Cancelled(
+                "Starting was cancelled. Your draft was kept without sending.".into(),
+            );
+        }
+        self.phase = StartPhase::Starting;
+        Step::Run(if self.choice == StartChoice::Fresh {
+            Action::StartFresh
+        } else {
+            Action::Resume
+        })
+    }
+
+    /// The start's outcome: a failure ends the continuation with its detail.
+    pub fn start_finished(&mut self, outcome: &Outcome) -> Step {
+        match outcome {
+            Outcome::Done { .. } => {
+                self.phase = StartPhase::Waiting;
+                Step::Idle
+            }
+            Outcome::Failed { detail } | Outcome::Uncertain { detail } => {
+                Step::Cancelled(detail.clone())
+            }
+        }
+    }
+
+    /// Every inspection of the session while it starts (`continueAfterStart`).
+    /// `pending`: the start itself still runs.
+    pub fn inspected(
+        &mut self,
+        details: &Value,
+        draft_now: &DraftMark,
+        pending: bool,
+        terminating: bool,
+        now: f64,
+    ) -> Step {
+        if self.phase == StartPhase::Preparing {
+            return Step::Idle;
+        }
+        if *draft_now != self.draft {
+            return Step::Cancelled(DRAFT_CHANGED.into());
+        }
+        if now - self.started > START_LIMIT {
+            return Step::Cancelled(NOT_READY.into());
+        }
+        let run = text(details, "run_id");
+        let conversation = text(details, "conversation_id");
+        if pending || run.is_empty() || run == self.session.run_id {
+            return Step::Idle;
+        }
+        let same_conversation = conversation == self.session.conversation_id;
+        let unexpected = if self.choice == StartChoice::Fresh {
+            same_conversation
+        } else {
+            !conversation.is_empty() && !same_conversation
+        };
+        if unexpected {
+            return Step::Cancelled(
+                "The agent opened an unexpected conversation. Your draft was kept without sending."
+                    .into(),
+            );
+        }
+        let ready = flag(details, "tracked")
+            && text(details, "runtime_state") == "live"
+            && text(details, "process_state") == "running"
+            && text(details, "error").is_empty()
+            && text(details, "phase") == "idle"
+            && text(details, "activity") == "idle"
+            && !terminating
+            && (text(details, "expected_id").is_empty()
+                || flag(details, "resume_message_can_send"))
+            && (!conversation.is_empty() || flag(details, "first_message_can_send"));
+        if !ready {
+            return Step::Idle;
+        }
+        if self.choice == StartChoice::ResumeCompact {
+            if conversation.is_empty() || !flag(details, "compact_context_supported") {
+                return Step::Idle;
+            }
+            let (compact, waiting) = CompactSend::begin(
+                &self.session,
+                run,
+                conversation,
+                self.draft.clone(),
+                None,
+                now,
+            );
+            return Step::Compact(compact, waiting);
+        }
+        Step::Send {
+            run_id: run.into(),
+            conversation_id: conversation.into(),
+            compaction_id: None,
+        }
+    }
+
+    /// The 2.5 s poll: past 180 s the message is given up.
+    pub fn tick(&self, now: f64) -> Step {
+        if now - self.started > START_LIMIT {
+            Step::Cancelled(NOT_READY.into())
+        } else {
+            Step::Idle
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CompactPhase {
+    Preparing,
+    Requesting,
+    Waiting(String),
+    Sent,
+}
+
+/// Compact-to-send for one session: native /compact, then this exact draft
+/// after the compaction completes. The send names the compaction, which the
+/// CLI verifies too.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompactSend {
+    key: String,
+    host: String,
+    name: String,
+    run_id: String,
+    conversation_id: String,
+    draft: DraftMark,
+    /// The failed local message this send retries, if any.
+    pub retry_id: Option<String>,
+    started: f64,
+    phase: CompactPhase,
+}
+
+impl CompactSend {
+    /// Starts waiting; the text is the composer's waiting notice.
+    pub fn begin(
+        session: &Session,
+        run_id: &str,
+        conversation_id: &str,
+        draft: DraftMark,
+        retry_id: Option<String>,
+        now: f64,
+    ) -> (CompactSend, String) {
+        (
+            CompactSend {
+                key: session.key.clone(),
+                host: session.host.clone(),
+                name: session.name.clone(),
+                run_id: run_id.into(),
+                conversation_id: conversation_id.into(),
+                draft,
+                retry_id,
+                started: now,
+                phase: CompactPhase::Preparing,
+            },
+            "Waiting for compaction. This exact message will be sent automatically after it completes. Cancel send to edit.".into(),
+        )
+    }
+
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// The composer holds the draft as waiting: ask for the compaction if the
+    /// session is still the same run and conversation. `details` is the
+    /// selected session's inspection when this is the selected session.
+    pub fn prepared(
+        &mut self,
+        ok: bool,
+        current: Option<&Session>,
+        evidence: Option<&Value>,
+        details: Option<&Value>,
+        busy: bool,
+    ) -> Step {
+        if self.phase != CompactPhase::Preparing {
+            return Step::Idle;
+        }
+        let same = current.is_some_and(|current| {
+            current.host == self.host
+                && current.name == self.name
+                && current.online
+                && !current.terminating
+        });
+        let moved = details.is_some_and(|details| {
+            text(details, "run_id") != self.run_id
+                || text(details, "conversation_id") != self.conversation_id
+        });
+        if !ok
+            || !same
+            || busy
+            || moved
+            || evidence_differs(evidence, &self.run_id, &self.conversation_id)
+        {
+            return Step::Cancelled(
+                "Compaction was cancelled. Your draft was kept without sending.".into(),
+            );
+        }
+        self.phase = CompactPhase::Requesting;
+        Step::Run(Action::CompactContext)
+    }
+
+    /// The compaction request's outcome: its receipt names the compaction.
+    pub fn compact_finished(&mut self, outcome: &Outcome) -> Step {
+        match outcome {
+            Outcome::Done { receipt, .. } => {
+                self.phase = CompactPhase::Waiting(text(receipt, "request_id").to_owned());
+                Step::Idle
+            }
+            Outcome::Failed { detail } | Outcome::Uncertain { detail } => {
+                Step::Cancelled(detail.clone())
+            }
+        }
+    }
+
+    /// Every inspection while it compacts (`continueAfterCompact`). The send
+    /// is returned once; later inspections give nothing.
+    pub fn inspected(
+        &mut self,
+        details: &Value,
+        draft_now: &DraftMark,
+        terminating: bool,
+        now: f64,
+    ) -> Step {
+        if matches!(self.phase, CompactPhase::Preparing | CompactPhase::Sent) {
+            return Step::Idle;
+        }
+        if text(details, "run_id") != self.run_id
+            || text(details, "conversation_id") != self.conversation_id
+        {
+            return Step::Cancelled(
+                "Conversation changed. Your draft was kept without sending.".into(),
+            );
+        }
+        if now - self.started > COMPACT_LIMIT {
+            return Step::Cancelled(
+                "Compaction was not confirmed. Check Terminal; your draft was kept without sending.".into(),
+            );
+        }
+        if *draft_now != self.draft {
+            return Step::Cancelled(DRAFT_CHANGED.into());
+        }
+        let CompactPhase::Waiting(command) = &self.phase else {
+            return Step::Idle;
+        };
+        if command.is_empty() {
+            return Step::Idle;
+        }
+        let result = &details["compact_context_request"];
+        if text(result, "request_id") != command {
+            return Step::Idle;
+        }
+        match text(result, "status") {
+            "unchanged" => {
+                return Step::Cancelled(
+                    "No history could be compacted. Your draft was kept without sending.".into(),
+                )
+            }
+            "failed" | "cancelled" | "uncertain" => return Step::Cancelled(
+                "Compaction did not complete. Check Terminal; your draft was kept without sending."
+                    .into(),
+            ),
+            _ => {}
+        }
+        let settled = text(result, "status") == "completed"
+            && text(details, "phase") == "idle"
+            && text(details, "activity") == "idle"
+            && text(details, "runtime_state") == "live"
+            && text(details, "process_state") == "running"
+            && flag(details, "tracked")
+            && text(details, "error").is_empty()
+            && text(details, "expected_id").is_empty()
+            && !terminating;
+        if !settled {
+            return Step::Idle;
+        }
+        let compaction = command.clone();
+        // The intent goes before the send: a repeated inspection never sends
+        // twice.
+        self.phase = CompactPhase::Sent;
+        Step::Send {
+            run_id: self.run_id.clone(),
+            conversation_id: self.conversation_id.clone(),
+            compaction_id: Some(compaction),
+        }
+    }
+
+    /// The 2.5 s poll: past 600 s the message is given up.
+    pub fn tick(&self, now: f64) -> Step {
+        if now - self.started > COMPACT_LIMIT {
+            Step::Cancelled("Compaction was not confirmed. Check Terminal; your draft was kept without sending.".into())
+        } else {
+            Step::Idle
+        }
+    }
+
+    /// Whether the compaction is accepted and the session should be polled
+    /// for its result.
+    pub fn polling(&self) -> bool {
+        matches!(&self.phase, CompactPhase::Waiting(command) if !command.is_empty())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,5 +907,436 @@ mod tests {
         assert_eq!(reason_sentence("Done!"), "Done!");
         assert_eq!(reason_sentence("Wait…"), "Wait…");
         assert_eq!(reason_sentence(""), "");
+    }
+}
+
+#[cfg(test)]
+mod continuation_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn stopped() -> Session {
+        Session {
+            key: "studio\nclaude/sample-project/review".into(),
+            host: "studio".into(),
+            name: "claude/sample-project/review".into(),
+            created: 1_700,
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+            state: "stopped".into(),
+            online: true,
+            terminating: false,
+            tracked: true,
+            cmd: "claude".into(),
+            resumable: true,
+        }
+    }
+
+    fn draft() -> DraftMark {
+        DraftMark {
+            text: "hello".into(),
+            attachments: vec![],
+        }
+    }
+
+    fn ready(run: &str, conversation: &str) -> Value {
+        json!({"run_id": run, "conversation_id": conversation, "tracked": true, "runtime_state": "live",
+               "process_state": "running", "phase": "idle", "activity": "idle", "compact_context_supported": true})
+    }
+
+    fn begun(choice: StartChoice) -> StartSend {
+        let session = stopped();
+        let (mut start, _) = StartSend::begin(
+            &session,
+            Some(&session),
+            false,
+            choice,
+            draft(),
+            &draft(),
+            0.0,
+        )
+        .unwrap();
+        start.prepared(true, Some(&session), None, false);
+        start.start_finished(&Outcome::Done {
+            receipt: Value::Null,
+            cleanup: None,
+        });
+        start
+    }
+
+    #[test]
+    fn a_stopped_session_is_asked_how_to_start() {
+        let session = stopped();
+        assert!(can_start_stopped(&session, false));
+        assert!(!can_start_stopped(&session, true));
+        assert!(!can_start_stopped(
+            &Session {
+                cmd: "opencode".into(),
+                ..session.clone()
+            },
+            false
+        ));
+        assert!(!can_start_stopped(
+            &Session {
+                state: "running".into(),
+                ..session.clone()
+            },
+            false
+        ));
+        let question = start_question(
+            &Session {
+                resumable: false,
+                ..session
+            },
+            "41% of 200K",
+        );
+        assert_eq!(question.title, "Start the session to send?");
+        assert_eq!(
+            question.text,
+            "claude/sample-project/review is stopped. How should it start before your message is sent?"
+        );
+        assert!(question.informative.starts_with(
+            "Resume continues the saved conversation, and the message is sent with its full context (41% of 200K)."
+        ));
+        let enabled: Vec<_> = question
+            .options
+            .iter()
+            .map(|o| (o.choice, o.enabled))
+            .collect();
+        assert_eq!(
+            enabled,
+            [
+                (StartChoice::Resume, false),
+                (StartChoice::ResumeCompact, false),
+                (StartChoice::Fresh, true)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_resumed_session_takes_the_message_once_it_is_ready() {
+        let session = stopped();
+        let (mut start, waiting) = StartSend::begin(
+            &session,
+            Some(&session),
+            false,
+            StartChoice::Resume,
+            draft(),
+            &draft(),
+            0.0,
+        )
+        .unwrap();
+        assert!(waiting.starts_with("Waiting for the session to start."));
+        assert_eq!(
+            start.inspected(&ready("run-2", "conv-1"), &draft(), false, false, 1.0),
+            Step::Idle,
+            "preparing"
+        );
+        assert_eq!(
+            start.prepared(true, Some(&session), None, false),
+            Step::Run(Action::Resume)
+        );
+        assert_eq!(
+            start.prepared(true, Some(&session), None, false),
+            Step::Idle,
+            "once"
+        );
+        start.start_finished(&Outcome::Done {
+            receipt: Value::Null,
+            cleanup: None,
+        });
+        assert_eq!(
+            start.inspected(&ready("run-2", "conv-1"), &draft(), true, false, 2.0),
+            Step::Idle,
+            "start pending"
+        );
+        assert_eq!(
+            start.inspected(&ready("run-1", "conv-1"), &draft(), false, false, 2.0),
+            Step::Idle,
+            "old run"
+        );
+        let mut busy = ready("run-2", "conv-1");
+        busy["activity"] = json!("busy");
+        assert_eq!(
+            start.inspected(&busy, &draft(), false, false, 3.0),
+            Step::Idle
+        );
+        assert_eq!(
+            start.inspected(&ready("run-2", "conv-1"), &draft(), false, false, 4.0),
+            Step::Send {
+                run_id: "run-2".into(),
+                conversation_id: "conv-1".into(),
+                compaction_id: None
+            }
+        );
+        // A resume that opens another conversation is refused.
+        let mut other = begun(StartChoice::Resume);
+        assert_eq!(
+            other.inspected(&ready("run-2", "conv-9"), &draft(), false, false, 4.0),
+            Step::Cancelled(
+                "The agent opened an unexpected conversation. Your draft was kept without sending."
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_fresh_start_must_open_a_new_conversation() {
+        let mut fresh = begun(StartChoice::Fresh);
+        assert_eq!(
+            fresh.inspected(&ready("run-2", "conv-1"), &draft(), false, false, 1.0),
+            Step::Cancelled(
+                "The agent opened an unexpected conversation. Your draft was kept without sending."
+                    .into()
+            )
+        );
+        let session = stopped();
+        let (mut fresh, _) = StartSend::begin(
+            &session,
+            Some(&session),
+            false,
+            StartChoice::Fresh,
+            draft(),
+            &draft(),
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(
+            fresh.prepared(true, Some(&session), None, false),
+            Step::Run(Action::StartFresh)
+        );
+        fresh.start_finished(&Outcome::Done {
+            receipt: Value::Null,
+            cleanup: None,
+        });
+        // Before its first message a fresh conversation has no ID; the agent
+        // must say it takes one.
+        let mut first = ready("run-2", "");
+        assert_eq!(
+            fresh.inspected(&first, &draft(), false, false, 1.0),
+            Step::Idle
+        );
+        first["first_message_can_send"] = json!(true);
+        assert_eq!(
+            fresh.inspected(&first, &draft(), false, false, 1.0),
+            Step::Send {
+                run_id: "run-2".into(),
+                conversation_id: String::new(),
+                compaction_id: None
+            }
+        );
+    }
+
+    #[test]
+    fn starts_are_refused_or_given_up_with_qt_texts() {
+        let session = stopped();
+        let renamed = Session {
+            run_id: "run-0".into(),
+            ..session.clone()
+        };
+        assert_eq!(
+            StartSend::begin(
+                &session,
+                Some(&renamed),
+                false,
+                StartChoice::Resume,
+                draft(),
+                &draft(),
+                0.0
+            )
+            .unwrap_err(),
+            "The session changed. Your draft was kept without sending."
+        );
+        let edited = DraftMark {
+            text: "hello!".into(),
+            attachments: vec![],
+        };
+        assert_eq!(
+            StartSend::begin(
+                &session,
+                Some(&session),
+                false,
+                StartChoice::Resume,
+                draft(),
+                &edited,
+                0.0
+            )
+            .unwrap_err(),
+            "Draft changed. Send it when you are ready."
+        );
+        let (mut start, _) = StartSend::begin(
+            &session,
+            Some(&session),
+            false,
+            StartChoice::Resume,
+            draft(),
+            &draft(),
+            0.0,
+        )
+        .unwrap();
+        let running = Session {
+            state: "running".into(),
+            ..session.clone()
+        };
+        assert_eq!(
+            start.prepared(true, Some(&running), None, false),
+            Step::Cancelled("Starting was cancelled. Your draft was kept without sending.".into())
+        );
+        let mut failed = begun(StartChoice::Resume);
+        assert_eq!(
+            failed.start_finished(&Outcome::Failed {
+                detail: "resume failed".into()
+            }),
+            Step::Cancelled("resume failed".into())
+        );
+        let mut slow = begun(StartChoice::Resume);
+        assert_eq!(slow.tick(180.0), Step::Idle);
+        assert_eq!(slow.tick(180.5), Step::Cancelled(NOT_READY.into()));
+        assert_eq!(
+            slow.inspected(&ready("run-2", "conv-1"), &edited, false, false, 5.0),
+            Step::Cancelled(DRAFT_CHANGED.into())
+        );
+    }
+
+    #[test]
+    fn compact_to_send_waits_for_its_compaction_and_sends_once() {
+        let mut start = begun(StartChoice::ResumeCompact);
+        let mut unsupported = ready("run-2", "conv-1");
+        unsupported["compact_context_supported"] = json!(false);
+        assert_eq!(
+            start.inspected(&unsupported, &draft(), false, false, 1.0),
+            Step::Idle
+        );
+        let Step::Compact(mut compact, waiting) =
+            start.inspected(&ready("run-2", "conv-1"), &draft(), false, false, 1.0)
+        else {
+            panic!("compact first")
+        };
+        assert!(waiting.starts_with("Waiting for compaction."));
+        let session = Session {
+            run_id: "run-2".into(),
+            state: "running".into(),
+            ..stopped()
+        };
+        assert_eq!(
+            compact.prepared(
+                true,
+                Some(&session),
+                None,
+                Some(&ready("run-2", "conv-1")),
+                false
+            ),
+            Step::Run(Action::CompactContext)
+        );
+        assert!(!compact.polling());
+        compact.compact_finished(&Outcome::Done {
+            receipt: json!({"request_id": "cmd-1"}),
+            cleanup: None,
+        });
+        assert!(compact.polling());
+        let mut details = ready("run-2", "conv-1");
+        assert_eq!(
+            compact.inspected(&details, &draft(), false, 2.0),
+            Step::Idle,
+            "no result yet"
+        );
+        details["compact_context_request"] = json!({"request_id": "cmd-0", "status": "completed"});
+        assert_eq!(
+            compact.inspected(&details, &draft(), false, 2.0),
+            Step::Idle,
+            "another compaction"
+        );
+        details["compact_context_request"] = json!({"request_id": "cmd-1", "status": "running"});
+        assert_eq!(
+            compact.inspected(&details, &draft(), false, 2.0),
+            Step::Idle
+        );
+        details["compact_context_request"] = json!({"request_id": "cmd-1", "status": "completed"});
+        assert_eq!(
+            compact.inspected(&details, &draft(), false, 3.0),
+            Step::Send {
+                run_id: "run-2".into(),
+                conversation_id: "conv-1".into(),
+                compaction_id: Some("cmd-1".into())
+            }
+        );
+        assert_eq!(
+            compact.inspected(&details, &draft(), false, 3.5),
+            Step::Idle,
+            "never twice"
+        );
+    }
+
+    #[test]
+    fn compactions_end_with_qt_texts() {
+        let session = Session {
+            state: "running".into(),
+            ..stopped()
+        };
+        let waiting = |status: &str| {
+            let (mut compact, _) =
+                CompactSend::begin(&session, "run-1", "conv-1", draft(), None, 0.0);
+            compact.prepared(true, Some(&session), None, None, false);
+            compact.compact_finished(&Outcome::Done {
+                receipt: json!({"request_id": "cmd"}),
+                cleanup: None,
+            });
+            let mut details = ready("run-1", "conv-1");
+            details["compact_context_request"] = json!({"request_id": "cmd", "status": status});
+            (compact, details)
+        };
+        let (mut compact, details) = waiting("unchanged");
+        assert_eq!(
+            compact.inspected(&details, &draft(), false, 1.0),
+            Step::Cancelled(
+                "No history could be compacted. Your draft was kept without sending.".into()
+            )
+        );
+        let (mut compact, details) = waiting("uncertain");
+        assert_eq!(
+            compact.inspected(&details, &draft(), false, 1.0),
+            Step::Cancelled(
+                "Compaction did not complete. Check Terminal; your draft was kept without sending."
+                    .into()
+            )
+        );
+        let (mut compact, _) = waiting("running");
+        assert_eq!(
+            compact.inspected(&ready("run-1", "conv-2"), &draft(), false, 1.0),
+            Step::Cancelled("Conversation changed. Your draft was kept without sending.".into())
+        );
+        let (compact, _) = waiting("running");
+        assert!(
+            matches!(compact.tick(600.5), Step::Cancelled(text) if text.starts_with("Compaction was not confirmed."))
+        );
+        let (mut refused, _) = CompactSend::begin(&session, "run-1", "conv-1", draft(), None, 0.0);
+        assert_eq!(
+            refused.prepared(
+                true,
+                Some(&session),
+                None,
+                Some(&ready("run-1", "conv-2")),
+                false
+            ),
+            Step::Cancelled(
+                "Compaction was cancelled. Your draft was kept without sending.".into()
+            )
+        );
+        let (mut failed, _) = CompactSend::begin(
+            &session,
+            "run-1",
+            "conv-1",
+            draft(),
+            Some("m-1".into()),
+            0.0,
+        );
+        failed.prepared(true, Some(&session), None, None, false);
+        assert_eq!(
+            failed.compact_finished(&Outcome::Failed {
+                detail: "Invalid acknowledgement. Check Terminal before retrying.".into()
+            }),
+            Step::Cancelled("Invalid acknowledgement. Check Terminal before retrying.".into())
+        );
+        assert_eq!(failed.retry_id.as_deref(), Some("m-1"));
     }
 }

@@ -10,6 +10,7 @@ reference is `design/webui`; its components moved here and are bound to live dat
 | `src/` | SolidJS frontend: `bridge.ts` (per-frame batches), `store/` (catalog, Activity, interface state), `ui/` (rail, session list, Activity, styles), `skin/` (skin format v1 and the built-in skins) |
 | `src-tauri/` | Tauri 2 app `zerus-client`: window creation, commands (`start`, `next_batch`, `follow`, `unfollow`, `metrics`), the change pump and the replay |
 | `core/` | `zerus-client-core`: watch streams, catalog state and the coalescer, pure Rust |
+| `media/` | `zerus-client-media`: microphone and round video capture for the `media` and `video` features (see its README) |
 | `fixtures/` | Synthetic replay streams (`scripts/make-fixture.py` writes them) |
 
 The app is a separate application (`dev.zerus.next`, "Zerus Next (dev)"). It only

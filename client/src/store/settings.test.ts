@@ -193,6 +193,30 @@ describe("answers and events in any order", () => {
 });
 
 describe("this window's own saves", () => {
+  it("show the stored value when a save made during the load is refused", async () => {
+    const core = fakeCore({ "workspace/theme": "dark" });
+    core.deferLoad();
+    const store = createSettings(core.backend);
+    await flush();
+    void store.set("workspace/theme", "light");
+    core.answerLoad();
+    await store.ready;
+    expect(store.settings["workspace/theme"]).toBe("light");
+    core.saves[0].answer(true);
+    await flush();
+    expect(store.settings["workspace/theme"]).toBe("dark");
+  });
+
+  it("confirm what a fresh store loads at revision 0", async () => {
+    const core = fakeCore({ "workspace/theme": "dark" });
+    const store = createSettings(core.backend);
+    await store.ready;
+    void store.set("workspace/theme", "light");
+    core.saves[0].answer(true);
+    await flush();
+    expect(store.settings["workspace/theme"]).toBe("dark");
+  });
+
   it("show the value the store put in effect although its event came first", async () => {
     const core = fakeCore();
     const store = createSettings(core.backend);

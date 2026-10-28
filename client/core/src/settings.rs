@@ -157,6 +157,10 @@ pub const KEYS: &[Key] = &[
     key("speech/preview_before_send", Kind::Flag(false)),
     key("speech/video_mode", Kind::Flag(false)),
     key("speech/manage_host", Kind::Text("")),
+    // The computer Use as default chose on, and a provider change not yet
+    // confirmed (speech_settings), as Qt stores them.
+    key("speech/host", Kind::Text("")),
+    key(crate::speech_settings::PENDING_KEY, Kind::Text("")),
     key("speech/machine_id", Kind::Text("")),
     key("speech/profile", Kind::Text("")),
     key("speech/profile_revision", Kind::Long { default: 0, min: 0 }),

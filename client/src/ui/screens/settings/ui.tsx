@@ -102,3 +102,21 @@ export function Slider(props: {
     </div>
   );
 }
+
+/** A status line from the mockup: muted, ok, warn, error, or busy with a spinner. */
+export function Status(props: { kind?: "ok" | "warn" | "error" | "busy" | "muted"; children: JSX.Element }) {
+  return (
+    <div class={`set-status k-${props.kind ?? "muted"}`} role="status">
+      <Show when={props.kind === "busy"}><span class="set-spinner" aria-hidden="true" /></Show>
+      <Show when={props.kind === "ok"}><Icon name="check" size={13} /></Show>
+      <Show when={props.kind === "warn"}><Icon name="triangle-alert" size={13} /></Show>
+      <Show when={props.kind === "error"}><Icon name="circle-alert" size={13} /></Show>
+      <span class="set-status-text">{props.children}</span>
+    </div>
+  );
+}
+
+/** A multi-line plain-text value, as Qt labels with \n show it. */
+export function Lines(props: { text: string; class?: string }) {
+  return <div class={`set-lines ${props.class ?? ""}`}><For each={props.text.split("\n")}>{(line) => <div>{line}</div>}</For></div>;
+}

@@ -221,6 +221,7 @@ fn the_ini_seed_takes_qt_s_values_once_and_never_writes_qt_s_store() {
     assert_eq!(get("processes/backgroundSeconds"), 5.0);
     assert_eq!(get("processes/loadingSeconds"), 0.0);
     assert_eq!(get("speech/manage_host"), "studio");
+    assert_eq!(get("speech/host"), "studio");
     assert_eq!(get("speech/profile"), "@profile");
     assert_eq!(
         get("speech/machine_id"),
@@ -469,6 +470,11 @@ fn seed_values_take_only_what_qt_stored() {
             "automaticApprovals/enabled".to_owned(),
             QtValue::Bool(false),
         ),
+        // SettingsJson stores the unconfirmed provider change as bytes.
+        (
+            "speech/providerOperation".to_owned(),
+            QtValue::Bytes(br#"{"request_id":"r"}"#.to_vec()),
+        ),
     ]
     .into_iter()
     .collect();
@@ -478,6 +484,8 @@ fn seed_values_take_only_what_qt_stored() {
             "workspace/theme",
             "workspace/compact",
             "speech/manage_host",
+            "speech/host",
+            "speech/providerOperation",
             QT_AUTOMATIC_APPROVALS,
             "speech/microphone",
         ],
@@ -486,7 +494,12 @@ fn seed_values_take_only_what_qt_stored() {
         seeded,
         [
             (QT_AUTOMATIC_APPROVALS.to_owned(), json!(false)),
+            ("speech/host".to_owned(), json!("old")),
             ("speech/manage_host".to_owned(), json!("old")),
+            (
+                "speech/providerOperation".to_owned(),
+                json!(r#"{"request_id":"r"}"#)
+            ),
             ("workspace/theme".to_owned(), json!("dark")),
         ]
         .into_iter()

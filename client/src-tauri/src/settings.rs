@@ -160,6 +160,12 @@ pub const REPOSITORY: &str = "https://github.com/ufna/zerus";
 /// Opens the repository in the default browser.
 #[tauri::command]
 pub fn open_repository() -> Result<(), String> {
+    open_url(REPOSITORY).map_err(|error| format!("Could not open {REPOSITORY}: {error}"))
+}
+
+/// Opens an address the client fixed (never one from the webview) in the
+/// default browser.
+pub fn open_url(url: &str) -> std::io::Result<()> {
     let program = if cfg!(target_os = "macos") {
         "/usr/bin/open"
     } else if cfg!(windows) {
@@ -168,12 +174,11 @@ pub fn open_repository() -> Result<(), String> {
         "xdg-open"
     };
     let mut child = std::process::Command::new(program)
-        .arg(REPOSITORY)
+        .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|error| format!("Could not open {REPOSITORY}: {error}"))?;
+        .spawn()?;
     // Reaped off the caller: the opener may stay until the browser starts.
     std::thread::spawn(move || {
         let _ = child.wait();

@@ -3,6 +3,7 @@ import { setPage } from "../../../store/ui";
 import { AppearanceSection } from "./Appearance";
 import { SessionsSection } from "./Sessions";
 import { KeyboardSection } from "./Keyboard";
+import { VoiceSection, refreshVoice } from "./Voice";
 import { AboutSection, refreshAbout } from "./About";
 
 // Settings sections in Qt's order (tray/src/SettingsPage.h:43, Worktrees
@@ -32,7 +33,7 @@ export const SECTIONS: readonly Section[] = [
   { id: "files", label: "Files", icon: "hard-drive" },
   { id: "worktrees", label: "Worktrees", icon: "folder-git-2" },
   { id: "approvals", label: "Automatic approvals", icon: "shield-check" },
-  { id: "voice", label: "Voice input", icon: "mic" },
+  { id: "voice", label: "Voice input", icon: "mic", component: VoiceSection, refresh: refreshVoice },
   { id: "keyboard", label: "Keyboard", icon: "keyboard", component: KeyboardSection },
   { id: "analytics", label: "Private analytics", icon: "gauge" },
   { id: "about", label: "About", icon: "info", component: AboutSection, refresh: refreshAbout },

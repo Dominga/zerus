@@ -168,9 +168,6 @@ export function createSettings(backend: SettingsBackend, options: { legacy?: Leg
   const revisions = new Map<string, number>();
   const tried = new Set<string>();
   const slots = new Map<string, Slot>();
-  // Bumped on every local change or event, so a load does not undo them.
-  const versions = new Map<string, number>();
-  const bump = (key: string) => versions.set(key, (versions.get(key) ?? 0) + 1);
 
   const show = (key: string, value: SettingValue | null | undefined) => {
     // Undefined removes the key: a shortcut's defaults apply again.
@@ -236,7 +233,6 @@ export function createSettings(backend: SettingsBackend, options: { legacy?: Leg
       return Promise.resolve(true);
     }
     tried.delete(key);
-    bump(key);
     show(key, value);
     return new Promise((resolve) => {
       let slot = slots.get(key);
@@ -257,7 +253,6 @@ export function createSettings(backend: SettingsBackend, options: { legacy?: Leg
   /** A change made elsewhere: shown unless one of ours is still being saved. */
   const changed = (key: string, change: Saved) => {
     if (!fresh(key, change.revision)) return;
-    bump(key);
     confirm(key, change.value);
     if (!slots.has(key)) { show(key, change.value); remember(key); }
   };
@@ -272,16 +267,17 @@ export function createSettings(backend: SettingsBackend, options: { legacy?: Leg
     const moves = options.legacy?.moves ?? {};
     const results = await Promise.all(Object.entries(moves).map(([key, value]) => set(key, value)));
     if (results.every(Boolean)) options.legacy?.clear();
-    const before = new Map(versions);
     try {
       const { values, revision } = await backend.load();
       for (const [key, value] of Object.entries(values)) {
-        // A change made since the load started is newer than the loaded value.
-        if ((versions.get(key) ?? 0) !== (before.get(key) ?? 0) || slots.has(key)) continue;
+        // A change answered at a newer revision is newer than the loaded
+        // value; an equal one is in it (a fresh store loads at revision 0).
         // Events older than the load can no longer show.
-        if (revision > (revisions.get(key) ?? 0)) revisions.set(key, revision);
+        if (revision < (revisions.get(key) ?? 0)) continue;
+        revisions.set(key, revision);
         confirm(key, value);
-        show(key, value);
+        // A save in flight keeps showing its value until it is answered.
+        if (!slots.has(key)) show(key, value);
       }
       complete = true;
       options.remember?.({ ...chosen });

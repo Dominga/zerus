@@ -980,13 +980,6 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
             matches!(actor, Actor::Human) || parent_approves(team, actor) || owner_word.is_some(),
             "The lead approves a phase only on the owner's word: pass \"owner_word\""
         );
-    } else {
-        // The lead adds drafts, so it may drop its own; the owner may too (F10).
-        ensure!(
-            matches!(actor, Actor::Human) || actor.is_lead(team) || parent_approves(team, actor),
-            "Only the lead or you discard a phase"
-        );
-        ensure_draft_revision(team, input)?;
     }
     ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
     let n = input["phase"]
@@ -994,18 +987,62 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
         .and_then(|phase| u32::try_from(phase).ok())
         .filter(|phase| *phase > 0)
         .context("A phase number is required")?;
-    // The lead discards its own draft, also one the owner sent back (F10, U25);
-    // only a plain draft waits for approval.
+    // Owner, 2026-10-28: a phase can be discarded in every state but done
+    // (U39: an approval the owner did not mean could not be taken back). A
+    // draft, also one sent back, is the lead's or yours to drop (F10, U25);
+    // an accepted phase (approved or queued) only yours, or the lead's on your
+    // word, and only while none of its work has started, so nothing done is
+    // erased. Only a plain draft waits for approval.
+    let draft = team.phases.iter().any(|phase| phase.n == n && phase.state.is_draft());
+    let accepted = !approve && team.phases.iter().any(|phase| phase.n == n && phase.state.is_accepted());
+    if !approve {
+        if draft {
+            ensure!(
+                matches!(actor, Actor::Human) || actor.is_lead(team) || parent_approves(team, actor),
+                "Only the lead or you discard a phase"
+            );
+            ensure_draft_revision(team, input)?;
+        } else if accepted {
+            ensure!(
+                matches!(actor, Actor::Human) || parent_approves(team, actor) || owner_word.is_some(),
+                "Only you discard an accepted phase; the lead does it on your word: pass \"owner_word\""
+            );
+        }
+    }
     let at = team
         .phases
         .iter()
-        .position(|phase| phase.n == n && if approve { phase.state == PhaseState::Draft } else { phase.state.is_draft() })
+        .position(|phase| phase.n == n && if approve { phase.state == PhaseState::Draft } else { phase.state.is_draft() || phase.state.is_accepted() })
         .with_context(|| match team.phases.iter().find(|phase| phase.n == n) {
-            Some(phase) if phase.state == PhaseState::Rejected => {
+            Some(phase) if approve && phase.state == PhaseState::Rejected => {
                 format!("Phase {n} was sent back to the lead; undo the send-back or wait for the rework")
             }
+            Some(_) if !approve => format!("Phase {n} cannot be discarded"),
             _ => format!("Phase {n} is not waiting for approval"),
         })?;
+    if accepted {
+        let tasks = &team.phases[at].tasks;
+        ensure!(
+            !tasks.is_empty() && !tasks.iter().all(|id| team.task(*id).is_none_or(|task| task.status.finished())),
+            "Phase {n} is done; a finished phase stays"
+        );
+        // Started or decided work stays: cancel it first.
+        let started: Vec<String> = tasks
+            .iter()
+            .filter_map(|id| team.task(*id))
+            .filter(|task| {
+                task.status.finished()
+                    || !matches!(task.status, TaskStatus::Pending | TaskStatus::Draft)
+                    || task.attempts.iter().any(|attempt| !matches!(attempt.state, AttemptState::Revoked | AttemptState::Refused))
+            })
+            .map(|task| format!("#{}", task.id))
+            .collect();
+        ensure!(
+            started.is_empty(),
+            "Phase {n} has started work ({}): cancel those tasks first, then discard the phase",
+            started.join(", ")
+        );
+    }
     let ids = team.phases[at].tasks.clone();
     let wanted: BTreeSet<u32> = ids.iter().copied().collect();
     if approve {
@@ -1039,7 +1076,7 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
         }
         events.push(Event::new(
             "phase_discarded",
-            json!({"by":label,"phase":n,"title":record.title,"tasks":titles}),
+            json!({"by":label,"phase":n,"title":record.title,"tasks":titles,"state":record.state,"owner_word":owner_word}),
         ));
         // F11: a discard invalidates the draft numbers a caller may hold.
         team.phase_numbers_revision = team.revision + 1;
@@ -3639,6 +3676,38 @@ mod tests {
         }
         let error = apply(&mut review, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
         assert_eq!(error, "Phase 3 opens after the previous phase is approved");
+    }
+
+    #[test]
+    fn an_accepted_phase_is_discarded_until_its_work_starts() {
+        // Owner, 2026-10-28 (U39): every state but done can be discarded; an
+        // accepted phase only by you or on your word, and only before its
+        // work starts.
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        for id in [3, 4] {
+            extend(&mut team, &json!({"tasks":[{"id":id,"title":"T","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        }
+        apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap();
+        assert!(team.phases.iter().all(|phase| phase.state.is_accepted()));
+        // The lead alone cannot drop an accepted phase.
+        let error = apply(&mut team, "discard-phase", &json!({"phase":3}), &Actor::Member("lead".into()), &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("Only you discard an accepted phase"), "{error}");
+        // You can, while nothing of it has started.
+        let discarded = apply(&mut team, "discard-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(discarded["tasks"], json!([4]));
+        assert!(team.task(4).is_none());
+        assert_eq!(events.last().unwrap().payload["state"], "queued");
+        // Started work stays: a phase with a task in work is refused.
+        team.task_mut(3).unwrap().status = TaskStatus::InProgress;
+        let error = apply(&mut team, "discard-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("has started work (#3)"), "{error}");
+        // A done phase stays.
+        team.task_mut(3).unwrap().status = TaskStatus::Accepted;
+        let error = apply(&mut team, "discard-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("is done"), "{error}");
     }
 
     #[test]

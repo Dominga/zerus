@@ -785,9 +785,15 @@ bool TeamWorkspace::discardPhase(const QString &id, int phase)
     const auto *team = currentTeam(id);
     if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
     int count = 0;
-    for (const auto &group : phaseGroups(*team)) if (group.n == phase) count = group.tasks.size();
+    QString state;
+    for (const auto &group : phaseGroups(*team)) if (group.n == phase) { count = group.tasks.size(); state = ownerPhaseState(*team, group); }
+    // U39: an accepted phase can be discarded too, while none of its work has
+    // started; the confirmation says it is already accepted.
+    const bool accepted = state == "queued" || state == "running";
     if (!m_panel->confirm("teamDiscardPhaseConfirm", tr("Discard phase?"),
-                          tr("Discard phase %1 and its %2 tasks?").arg(phase).arg(count), tr("Discard phase")))
+                          accepted ? tr("Phase %1 is already accepted. Discard it and its %2 tasks? Only a phase whose work has not started can go; this cannot be undone.").arg(phase).arg(count)
+                                   : tr("Discard phase %1 and its %2 tasks?").arg(phase).arg(count),
+                          tr("Discard phase")))
         return false;
     team = currentTeam(id);
     if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
@@ -1801,6 +1807,19 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         const QString text = record && !record->waiting.text.isEmpty() ? record->waiting.text : tr("Starts after phase %1").arg(group.n - 1);
         auto *waits = label(text, c.dim, 11, false, "teamPhaseQueued"); waits->setAttribute(Qt::WA_TransparentForMouseEvents);
         h->addWidget(waits);
+    }
+    // U39 (owner, 2026-10-28): an accepted phase can be discarded too, while
+    // its work has not started; hgs refuses it otherwise and names the tasks.
+    if ((state == "queued" || state == "running") && team.status != "planning") {
+        auto *more = new QToolButton; more->setObjectName("teamPhaseMore"); more->setProperty("phase", group.n);
+        more->setIcon(workspaceIcon("more", c.muted)); more->setAutoRaise(true); more->setToolTip(tr("Phase actions"));
+        QObject::connect(more, &QToolButton::clicked, this, [this, id = team.id, phase = group.n, more] {
+            auto *menu = new QMenu(this); menu->setObjectName("teamPhaseMenu"); menu->setAttribute(Qt::WA_DeleteOnClose);
+            auto *discard = menu->addAction(tr("Discard phase…")); discard->setObjectName("teamPhaseDiscard");
+            QObject::connect(discard, &QAction::triggered, this, [this, id, phase] { discardPhase(id, phase); });
+            menu->popup(more->mapToGlobal(QPoint(0, more->height())));
+        });
+        h->addWidget(more);
     }
     fv->addWidget(head);
     if (!open) return frame;

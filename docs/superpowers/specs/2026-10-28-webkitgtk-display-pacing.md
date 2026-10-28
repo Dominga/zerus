@@ -246,6 +246,11 @@ runs were also near 7 ms. The software virtual compositor introduced enough
 jitter for some intervals to fail the strict harness criteria, so this is
 callback-path evidence, not a physical-display qualification.
 
+A physical-display WebKit-only run then confirmed the first two fixes: its log
+reaches `drmWaitVBlank` after connector-name matching, and light rAF and
+transform animation meet the 144 Hz harness criteria at 6.94 ms. List scrolling
+remains at 16.67 ms without the GTK patch. `nvidia_drm.vblank=N` was unchanged.
+
 With a GDK shim reporting 144000 mHz, `webkit://gpu` reports `VBlank type Timer`
 and `VBlank refresh rate 144Hz`, while the same build's rAF interval remains
 about 16.67 ms. This is direct evidence of the downstream presentation gate and

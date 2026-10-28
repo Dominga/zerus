@@ -14,6 +14,7 @@ pub mod details;
 pub mod fleet;
 pub mod machine;
 pub mod organization;
+pub mod process_view;
 pub mod processes;
 pub mod readmarks;
 pub mod reads;

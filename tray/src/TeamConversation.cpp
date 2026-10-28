@@ -16,7 +16,11 @@
 #include <QMessageBox>
 #include <QScopedValueRollback>
 #include <algorithm>
+#include <QBuffer>
+#include <QImage>
+#include <QMimeData>
 #include <QMimeDatabase>
+#include <QPixmap>
 #include <QScrollBar>
 #include <QStyle>
 #include <QPlainTextEdit>
@@ -44,6 +48,44 @@ public:
     }
 private:
     std::function<void()> m_send;
+};
+
+// Owner, 2026-10-28: a pasted image or file became "[Image #1]" text and the
+// file was lost. As in the session's composer, a pasted or dropped image or
+// local file becomes an attachment; other text pastes as text.
+class ConversationInput : public QPlainTextEdit {
+public:
+    std::function<void(const QString &)> attachFile;
+    std::function<void(const QImage &)> attachImage;
+protected:
+    bool canInsertFromMimeData(const QMimeData *source) const override {
+        return !isReadOnly() && (source->hasImage() || source->hasUrls() || QPlainTextEdit::canInsertFromMimeData(source));
+    }
+    void insertFromMimeData(const QMimeData *source) override {
+        if (isReadOnly()) return;
+        if (source->hasUrls() && attachFile) {
+            const auto urls = source->urls();
+            bool local = !urls.isEmpty();
+            for (const auto &url : urls) local = local && url.isLocalFile();
+            if (local) { for (const auto &url : urls) attachFile(url.toLocalFile()); return; }
+        }
+        if (source->hasImage() && attachImage) {
+            const auto data = source->imageData();
+            QImage image = qvariant_cast<QImage>(data);
+            if (image.isNull() && data.canConvert<QPixmap>()) image = qvariant_cast<QPixmap>(data).toImage();
+            if (!image.isNull()) { attachImage(image); return; }
+        }
+        if (source->hasText()) insertPlainText(source->text());
+    }
+    void dropEvent(QDropEvent *event) override {
+        const auto *mime = event->mimeData();
+        if (!isReadOnly() && (mime->hasImage() || mime->hasUrls())) {
+            QDragLeaveEvent leave; QPlainTextEdit::dragLeaveEvent(&leave);
+            setTextCursor(cursorForPosition(event->position().toPoint()));
+            insertFromMimeData(mime); event->acceptProposedAction(); return;
+        }
+        QPlainTextEdit::dropEvent(event);
+    }
 };
 }
 
@@ -78,11 +120,22 @@ TeamConversation::TeamConversation(HgsClient *client, QWidget *parent) : QWidget
     auto *statusRow = new QHBoxLayout; statusRow->setSpacing(8);
     statusRow->addWidget(m_status, 1); statusRow->addWidget(m_openTerminal, 0, Qt::AlignTop);
     bv->addLayout(statusRow);
+    // The files to send, and Attach beside Send: every conversation takes
+    // files, not only the designer's (owner, 2026-10-28).
+    m_filesRow = new QWidget; m_filesRow->setObjectName("teamConversationFiles"); m_filesRow->setLayout(new FlowLayout(6)); m_filesRow->hide();
+    bv->addWidget(m_filesRow);
     m_composerRow = new QWidget;
     auto *row = new QHBoxLayout(m_composerRow); row->setContentsMargins(0, 0, 0, 0); row->setSpacing(6);
-    m_input = new QPlainTextEdit; m_input->setObjectName("teamConversationInput"); m_input->setFixedHeight(56);
+    auto *input = new ConversationInput; m_input = input; m_input->setObjectName("teamConversationInput"); m_input->setFixedHeight(56);
+    input->attachFile = [this](const QString &path) { addFile(path, true); };
+    input->attachImage = [this](const QImage &image) { addImage(image); };
     m_send = button(tr("Send"), "teamConversationSend", true);
-    row->addWidget(m_input, 1); row->addWidget(m_send, 0, Qt::AlignBottom);
+    m_attach = new QPushButton; m_attach->setObjectName("teamConversationAttach"); m_attach->setFixedSize(30, 28);
+    m_attach->setToolTip(tr("Attach files")); m_attach->setAccessibleName(tr("Attach files")); m_attach->setCursor(Qt::PointingHandCursor);
+    QObject::connect(m_attach, &QPushButton::clicked, this, [this] {
+        for (const auto &path : QFileDialog::getOpenFileNames(this, tr("Attach files"))) addFile(path, false);
+    });
+    row->addWidget(m_input, 1); row->addWidget(m_attach, 0, Qt::AlignBottom); row->addWidget(m_send, 0, Qt::AlignBottom);
     bv->addWidget(m_composerRow);
     v->addWidget(bottom);
     m_input->installEventFilter(new ComposerFilter([this] { send(m_input->toPlainText()); }, this));
@@ -153,6 +206,7 @@ void TeamConversation::setSession(const QString &host, const QString &name)
     if (!name.isEmpty() && m_starting) { m_starting = false; m_input->clear(); }
     m_status->hide(); m_openTerminal->hide();
     m_questionChoice.clear(); renderQuestion();
+    m_attach->setEnabled(!name.isEmpty());
     if (m_designer) {
         static_cast<CacheStatus::Chip *>(m_cache)->setData({});
         static_cast<SessionUsage::ContextButton *>(m_context)->setData({});
@@ -175,6 +229,7 @@ void TeamConversation::setTheme(bool dark)
     m_view->setTheme(dark);
     m_question->setTheme(dark);
     m_held->setColors(c.fg, c.muted, c.border, c.surface);
+    m_attach->setIcon(workspaceIcon("attachment", colorsFor(dark).text2));
     m_view->setBubbles(WorkspaceSkin::current().view(QStringLiteral("activity")) == QLatin1String("bubbles"));
     if (m_designer) {
         const Colors c = colorsFor(dark);
@@ -206,7 +261,6 @@ void TeamConversation::useDesignerLayout(QWidget *intro, QWidget *above)
     // The field and Send in one card; the row of the session's composer under it.
     m_bottom = new QWidget; m_bottom->setObjectName("teamDesignerComposer");
     auto *bv = new QVBoxLayout(m_bottom); bv->setContentsMargins(16, 6, 16, 4); bv->setSpacing(6);
-    m_filesRow = new QWidget; m_filesRow->setObjectName("teamConversationFiles"); m_filesRow->setLayout(new FlowLayout(6)); m_filesRow->hide();
     bv->addWidget(m_filesRow);
     bv->addWidget(m_status);
     m_card = new QFrame; m_card->setObjectName("teamDesignerComposerCard");
@@ -218,8 +272,6 @@ void TeamConversation::useDesignerLayout(QWidget *intro, QWidget *above)
     m_send->setMinimumHeight(34);
     bv->addWidget(m_card);
     m_row = new ComposerToolbar; m_row->setObjectName("teamDesignerComposerRow"); m_row->setThreeZones(true);
-    m_attach = new QPushButton; m_attach->setObjectName("teamConversationAttach"); m_attach->setFixedSize(30, 28);
-    m_attach->setToolTip(tr("Attach files")); m_attach->setAccessibleName(tr("Attach files")); m_attach->setCursor(Qt::PointingHandCursor);
     // Voice and video record where the session's composer has them.
     m_voice = new QPushButton; m_voice->setObjectName("teamConversationVoice"); m_voice->setFixedSize(30, 28);
     m_voice->setToolTip(tr("Record a voice message in the designer's session")); m_voice->setAccessibleName(tr("Voice message"));
@@ -243,18 +295,6 @@ void TeamConversation::useDesignerLayout(QWidget *intro, QWidget *above)
     m_row->add(ComposerToolbar::Slot::SessionReference, m_reference);
     m_row->add(ComposerToolbar::Slot::Model, m_model);
     bv->addWidget(m_row);
-    QObject::connect(m_attach, &QPushButton::clicked, this, [this] {
-        const auto paths = QFileDialog::getOpenFileNames(this, tr("Attach files"));
-        for (const auto &path : paths) {
-            QFile file(path);
-            if (!file.open(QIODevice::ReadOnly) || file.size() > HgsClient::MaximumAttachmentBytes || m_files.size() >= HgsClient::MaximumAttachments) continue;
-            const QByteArray bytes = file.readAll();
-            const QString mime = QMimeDatabase().mimeTypeForData(bytes).name();
-            m_files.append(MessageAttachment{QFileInfo(path).fileName(), mime, bytes,
-                                             QStringLiteral("[%1 #%2]").arg(mime.startsWith("image/") ? QStringLiteral("Image") : QStringLiteral("File")).arg(m_files.size() + 1)});
-        }
-        showFiles();
-    });
     QObject::connect(m_reference, &QPushButton::clicked, this, [this] {
         if (m_name.isEmpty()) return;
         m_client->requestSessionReference(m_host, m_name, m_details.value("run_id").toString(), m_details.value("conversation_id").toString());
@@ -315,6 +355,29 @@ void TeamConversation::fitInput()
     m_input->setVerticalScrollBarPolicy(lines > 8 ? Qt::ScrollBarAsNeeded : Qt::ScrollBarAlwaysOff);
     m_input->setFixedHeight(shown * line + 10);
     fitDesigner();
+}
+
+bool TeamConversation::addFile(const QString &path, bool reference)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly) || file.size() > HgsClient::MaximumAttachmentBytes || m_files.size() >= HgsClient::MaximumAttachments) return false;
+    const QByteArray bytes = file.readAll();
+    const QString mime = QMimeDatabase().mimeTypeForData(bytes).name();
+    const QString token = QStringLiteral("[%1 #%2]").arg(mime.startsWith("image/") ? QStringLiteral("Image") : QStringLiteral("File")).arg(m_files.size() + 1);
+    m_files.append(MessageAttachment{QFileInfo(path).fileName(), mime, bytes, token});
+    if (reference) m_input->insertPlainText(token + QLatin1Char(' '));
+    showFiles(); updateSend();
+    return true;
+}
+
+void TeamConversation::addImage(const QImage &image)
+{
+    QByteArray bytes; QBuffer buffer(&bytes); buffer.open(QIODevice::WriteOnly);
+    if (!image.save(&buffer, "PNG") || bytes.size() > HgsClient::MaximumAttachmentBytes || m_files.size() >= HgsClient::MaximumAttachments) return;
+    const QString token = QStringLiteral("[Image #%1]").arg(m_files.size() + 1);
+    m_files.append(MessageAttachment{QStringLiteral("pasted-image-%1.png").arg(m_files.size() + 1), QStringLiteral("image/png"), bytes, token});
+    m_input->insertPlainText(token + QLatin1Char(' '));
+    showFiles(); updateSend();
 }
 
 void TeamConversation::showFiles()

@@ -700,6 +700,12 @@ Controller rulings during Piece B:
 - The attention and reply keys use the view agent (dsh keyed as `deepseek`) rather than Qt's raw `cmd`.
 - `set_notifications` answering "busy" (its lane is taken) is shown as the pending reason "A shared notification change is pending. Wait for its result."
 
+Controller rulings during Piece C:
+- Menu-launched Start fresh and Forget saved session run the click-time pre-check before their dialogs, as the copy entries do.
+- The header's Start fresh and Clear session follow Qt's main-context rule: neither shows while a subagent is open.
+- Forget archived session stays disabled until the Archive view (`zerus-5wmh.32`).
+- Task C4 added the README part and the smoke steps for PR 3.
+
 Deviations from Qt, both from owner rules:
 - Attention marks and read replies are capped at 20 000 entries per map (bounded caches); Qt keeps them without a bound.
 - "Deselect all (Esc)" is "Deselect all" (no obvious keyboard hints).

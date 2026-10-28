@@ -277,7 +277,8 @@ async function autoRun(config: PerfConfig) {
 // set to any value but auto so that exit_app is allowed) is the end-to-end check
 // of the guarded actions: with ZERUS_CLIENT_REPLAY supplying the catalog and
 // ZERUS_CLIENT_HGS a fake hgs, it selects the replay session (its details come
-// from the Activity state value, or one inspect), runs pause, resume, rename,
+// from the Activity state value, or one inspect), runs start fresh, forget and
+// forget binding (through `perform`, as the dialogs confirm), pause, resume, rename,
 // archive, the end call the Terminate dialog picks for it through the
 // dialog's confirmation (`end`), then the other end call (terminate or kill)
 // once each, and exits 0 (1 when an outcome failed). Before the writes it marks
@@ -330,6 +331,9 @@ async function actionsSmoke(allowed: boolean) {
       ["copy connect command", () => copyCommand(row())],
       ["copy session name", () => copyName(row())],
       ["copy folder path", () => copyFolder(row())],
+      ["start fresh", () => perform(row(), { kind: "start_fresh" })],
+      ["forget", () => perform(row(), { kind: "forget" })],
+      ["forget binding", () => perform(row(), { kind: "forget_binding" })],
       ...([{ kind: "pause" }, { kind: "resume" }, { kind: "rename", new_name: SMOKE_RENAMED, archive_id: null }, { kind: "archive" }] as Action[])
         .map((action): [string, () => Promise<Outcome>] => [action.kind, () => perform(row(), action)]),
       [chosen, () => end(row(), chosen)],

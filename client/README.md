@@ -74,10 +74,13 @@ the child's own environment: the agent attribution (`HGS_SESSION`,
 | Mute or Unmute | `notifications NAME --json` | JSON: `run_id`, `conversation_id`, `muted`, `expected_revision` | 15 s, 35 s |
 | Pause | `pause NAME` | none | 45 s, 45 s |
 | Resume | `resume NAME -d` | none | 30 s, 30 s |
+| Start fresh | `resume NAME --fresh [--expected-run-id RUN] -d` | none | 30 s, 30 s |
 | Rename | `rename NAME NEW [--archive ID]` | none | 5 s, 15 s |
 | Move to archive | `archive NAME` | none | 30 s, 45 s |
 | Terminate a tracked Codex, Claude or Kimi session | `terminate NAME --expected-run-id RUN` | none | 45 s, 60 s |
 | Terminate any other live session | `kill NAME` | none | 5 s, 15 s |
+| Forget saved session | `kill NAME` | none | 5 s, 15 s |
+| Forget the OpenCode binding | `session-action NAME --json` | JSON: `request_id`, `action` (`forget`), `expected_run_id`, `expected_conversation_id` | 15 s, 45 s |
 
 Outcome rules:
 
@@ -178,8 +181,40 @@ Outcome rules:
   marks were queued are remembered in the webview's local storage. Outside the
   app (a browser) there is no pending list, and the window keeps its own.
 
-Forgetting and restoring arrive in later phases; their entries are disabled
-with a reason. Sending, the Mark read chip of the composer toolbar and the
+- Start fresh is offered for a paused or stopped Codex, Claude or Kimi session
+  of an online computer with no write pending. The dialog "Start fresh?" says
+  that the agent starts in the same folder with the same account and model
+  without the current conversation context, and its default button is Cancel.
+  On confirmation the row must still qualify and be the same run and
+  conversation; otherwise nothing runs and the sticky notice says "The session
+  changed. Open its actions again." Otherwise the call passes the run as
+  `--expected-run-id` (omitted when the row has none) and the notice says "Starting NAME with a
+  new conversation…". The header offers it in the main context only, in place of
+  Clear session, and not at all while a subagent is open.
+- Forget saved session ends a saved session that is not running. The dialog
+  "Forget saved session?" says "Remove NAME from HGS? The agent's native
+  conversation history is kept." and, for an OpenCode session that only keeps
+  a binding, "Forget NAME in Zerus? The conversation stays in OpenCode; only
+  Zerus forgets it." with the computer named below; Cancel is the default.
+  On confirmation the session must be as when the dialog opened (still not
+  running, the same binding-only case and, for a binding, the same run and
+  conversation); otherwise nothing runs and the sticky notice says "The
+  session state changed. Open its actions again." A binding with a run goes
+  through `session-action`, any other session through `kill`; an offline
+  computer or a vanished row ends silently. Forgetting an archived session
+  stays disabled until the Archive view (`zerus-5wmh.32`).
+- The binding forget counts only when the receipt echoes the request id,
+  session name, run id and conversation id of the call with status
+  `completed`; anything else is a failure and is never replayed. Success shows
+  "Zerus forgot NAME. The conversation stays in OpenCode."
+- Start fresh and Forget saved session first recheck the listed row when the
+  entry is clicked: a session that is gone or whose conversation changed opens
+  no dialog and shows "This session is no longer available. Open its actions
+  again."
+
+Restoring, forgetting an archived session and clearing the archive arrive with
+the Archive view (`zerus-5wmh.32`); their entries are disabled with a reason.
+Sending, the Mark read chip of the composer toolbar and the
 Open terminal entries arrive with phase 4. The copy entries below are live.
 
 ### Mute and Unmute
@@ -252,16 +287,17 @@ replay mode `run_action`, `inspect_session` and `session_reference` refuse unles
 a replay never drives the real CLI.
 
 Put `core/tests/support/fake_hgs_actions.py` as `hgs` in a scratch folder with a
-`config.json` beside it containing
-`{"reply":{"exit":0,"stdout":{"uri":"zerus://session?machine=m&name=claude%2Fsample-project%2Freview"}}}`
-(`reference` gets that URI; the write actions ignore standard output, and exit 0
-is a success for them; `echo_interrupt` parses standard input and fails on
-writes that have none). The fake logs each call to
+`config.json` beside it containing a `replies` list (the first entry whose
+`match` is a prefix of the arguments answers; `reply` answers the rest):
+`reference` gets a URI, `session-action` gets `echo_session_action` with status
+`completed`, and every other call is a plain success (the write actions ignore
+standard output, and exit 0 is a success for them; `echo_interrupt` parses
+standard input and fails on writes that have none). The fake logs each call to
 `log.ndjson` beside it. Run it only with the headless environment:
 
 ```sh
 S=$(mktemp -d); cp core/tests/support/fake_hgs_actions.py $S/hgs
-echo '{"reply":{"exit":0,"stdout":{"uri":"zerus://session?machine=m&name=claude%2Fsample-project%2Freview"}}}' > $S/config.json
+echo '{"reply":{"exit":0},"replies":[{"match":["reference"],"exit":0,"stdout":{"uri":"zerus://session?machine=m&name=claude%2Fsample-project%2Freview"}},{"match":["session-action"],"exit":0,"stdout":"echo_session_action","receipt_status":"completed"}]}' > $S/config.json
 env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=1 \
   WEBKIT_DISABLE_DMABUF_RENDERER=1 ZERUS_CLIENT_REPLAY=$PWD/fixtures/replay.ndjson \
   ZERUS_CLIENT_HGS=$S/hgs ZERUS_CLIENT_QUERY=actions-smoke=1 ZERUS_CLIENT_PERF=smoke \
@@ -277,7 +313,13 @@ use (`actions-smoke mark-as-read: done`, `mark-needs-attention: done`; they run
 no `hgs`), then copies the session reference, the connect command, the session name and the
 folder path through the store the menus use (the first calls `reference`; the
 fake's URI is the clipboard text), logging each as
-`actions-smoke copy-<entry>: done <the exact clipboard text>`, then runs pause, resume, rename (to `claude/sample-project/review-renamed`) and archive,
+`actions-smoke copy-<entry>: done <the exact clipboard text>`, then runs start
+fresh (`resume NAME --fresh --expected-run-id RUN -d`), forget (`kill NAME`) and
+forget binding (`session-action NAME --json`, answered with a completed
+receipt) through `perform`, which the dialogs' confirmations call on a row that passed their
+rechecks (the replay row is running and not an OpenCode binding, so `forget` and the binding
+forget skip the recheck; `actions-smoke start-fresh: done`,
+`forget: done`, `forget-binding: done`), then runs pause, resume, rename (to `claude/sample-project/review-renamed`) and archive,
 then the end call the Terminate dialog picks for the row through the dialog's
 confirmation (`kill`, since the replay row is not tracked), then the other end
 call (`terminate`), once each through the store the menus use. It logs each

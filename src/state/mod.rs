@@ -966,14 +966,17 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
             if after < 0 {
                 return Err("cursor must be nonnegative".into());
             }
-            println!(
-                "{}",
-                if let Some(id) = agent_id {
-                    subagents::inspection(name, id, archive_id)?
-                } else {
-                    journal::inspection(name, after, archive_id, include_processes)?
-                }
-            );
+            let mut inspection = if let Some(id) = agent_id {
+                subagents::inspection(name, id, archive_id)?
+            } else {
+                journal::inspection(name, after, archive_id, include_processes)?
+            };
+            // #569: this computer's refused private stores, with their fix;
+            // empty when none is refused.
+            if inspection.is_object() {
+                inspection["private_stores"] = json!(crate::private_stores::refused());
+            }
+            println!("{inspection}");
         }
         "archive" => {
             if args.len() != 1 {

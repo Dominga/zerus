@@ -105,6 +105,10 @@ private:
     // The team as the controller currently has it, by id (a poll may have
     // replaced the copy a widget was built with).
     const Teams::Team *currentTeam(const QString &id) const;
+    // C4 (#548): the full copy (`team status`) a plan edit is built from; null,
+    // after asking for it and showing "Loading the plan", while only the
+    // `team list` summary is here.
+    const Teams::Team *planTeam(const QString &id);
     QWidget *toolbar(const Teams::Team &team);
     QWidget *canvas(const Teams::Team &team);
     void linkDraft(const Teams::Team &team, int dependency, int task, bool add);

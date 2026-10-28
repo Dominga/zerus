@@ -752,8 +752,11 @@ pub(crate) fn run(op: &str, input: &Value, human: bool) -> anyhow::Result<Value>
         "propose" => locked(|| {
             let current = load()?;
             let mut draft = load_draft()?;
-            if draft.proposals.is_empty() {
-                draft.base = current.version;
+            // N38 (#548): a draft on an older version can never be applied
+            // ("apply" refuses it), and only the owner may discard; so the
+            // designer's next proposals replace it with a draft on this one.
+            if draft.proposals.is_empty() || draft.base != current.version {
+                draft = Draft { base: current.version, proposals: Vec::new() };
             }
             let mut added = Vec::new();
             for value in input["proposals"].as_array().context("A list of proposals is required")? {
@@ -1138,6 +1141,45 @@ mod tests {
         apply_one(&mut catalog, &remove).unwrap();
         // Templates still name the tester: the result is refused.
         assert!(validate(&catalog).is_err());
+    }
+
+    /// N38 (#548): after the owner saves the catalog, a draft on the older
+    /// version can never be applied and the designer cannot discard it; the
+    /// designer's next proposals replace it with a draft on the new version,
+    /// which the owner can apply.
+    #[test]
+    fn a_designer_redo_replaces_an_out_of_date_draft() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(temp.path(), || {
+            let tester = |model: &str| {
+                json!({"proposals":[{"kind":"role","action":"change","target":"tester","title":"Tester model",
+                    "value":serde_json::to_value(Role { id: "tester".into(), name: "Tester".into(), model: model.into(), ..Default::default() }).unwrap()}]})
+            };
+            let first = run("propose", &tester("Sonnet"), false).unwrap();
+            let base = first["base"].as_u64().unwrap();
+            // The owner saves the catalog meanwhile: the draft is out of date.
+            let catalog = run("get", &json!({}), true).unwrap()["catalog"].clone();
+            run("set", &json!({"catalog":catalog,"version":base}), true).unwrap();
+            let id = first["ids"][0].as_str().unwrap().to_owned();
+            run("decide", &json!({"proposal":id,"decision":"keep"}), true).unwrap();
+            let refused = run("apply", &json!({}), true).unwrap_err().to_string();
+            assert!(refused.contains("changed since this draft"), "{refused}");
+            assert!(run("discard", &json!({}), false).is_err(), "only the owner discards");
+            // The redo: new proposals on the new version replace the old draft.
+            let redo = run("propose", &tester("Haiku"), false).unwrap();
+            assert_eq!(redo["base"].as_u64().unwrap(), base + 1);
+            let draft = run("get", &json!({}), true).unwrap()["draft"].clone();
+            assert_eq!(draft["proposals"].as_array().unwrap().len(), 1, "{draft}");
+            run("decide", &json!({"proposal":redo["ids"][0],"decision":"keep"}), true).unwrap();
+            let applied = run("apply", &json!({}), true).unwrap();
+            assert_eq!(applied["version"].as_u64().unwrap(), base + 2);
+            assert_eq!(load().unwrap().roles.iter().find(|r| r.id == "tester").unwrap().model, "Haiku");
+            // A current draft still gathers proposals.
+            let one = run("propose", &tester("Opus"), false).unwrap();
+            let two = run("propose", &tester("Sonnet"), false).unwrap();
+            assert_eq!(one["base"], two["base"]);
+            assert_eq!(run("get", &json!({}), true).unwrap()["draft"]["proposals"].as_array().unwrap().len(), 2);
+        });
     }
 
     #[test]

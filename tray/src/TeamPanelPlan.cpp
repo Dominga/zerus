@@ -32,6 +32,15 @@ QString agentLabel(const QString &agent)
 
 void TeamPanel::savePlan(const Team &edited)
 {
+    // C4 (#548): never a whole plan from the `team list` summary: sent at its
+    // revision, it would be accepted and wipe every description, criterion,
+    // dependency and member prompt.
+    if (!edited.full) {
+        m_notice = tr("Loading the plan; your change was not sent. Try again in a moment.");
+        m_controller->watch(edited.id);
+        scheduleRender();
+        return;
+    }
     QJsonObject input = planInput(edited);
     input.insert("revision", edited.revision);
     act("plan", input);

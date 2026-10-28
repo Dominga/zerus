@@ -20,6 +20,8 @@
 #include "AttentionTracker.h"
 #include "AttentionNotifier.h"
 #include "ApplicationBadge.h"
+#include "PrivateStoreNotices.h"
+#include <QSettings>
 
 class SessionsWindow;
 class SwarmWorkerSupervisor;
@@ -54,6 +56,9 @@ private slots:
 private:
     void refreshIcon();
     void observeAttention(const QString &host, const BoxState &box);
+    // WhiteWh fork, #569: a refused private store, once per (computer, path, reason).
+    void observePrivateStores(const QString &host, const BoxState &box);
+    PrivateStoreNotices m_privateStores{QSettings().value(QStringLiteral("privateStores/notified")).toStringList()};
     void migrateReadMarks(const QString &host);
     void publishReadMarks();
     void warmCaches(const QString &host, const BoxState &box);

@@ -47,6 +47,11 @@ public:
     void showProposal(const QString &proposal);
     // Apply as from the header, with its confirmation; off while it is.
     void applyKept();
+    // N38 (#548): whether a designer runs to redo an out-of-date draft; the
+    // banner offers "Ask designer to redo" only then.
+    std::function<bool()> canRedo;
+    // The banner again, after canRedo's answer may have changed.
+    void refreshBanner() { updateHeader(); }
     // Discard as from the header, with its confirmation.
     void discardDraft();
     // The role's Computer and Account dropdowns: computers by alias (empty is

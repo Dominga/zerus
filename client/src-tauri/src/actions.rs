@@ -785,7 +785,7 @@ async fn dispatch_with(
         return match Lane::of(&action) {
             Lane::Send => Ok(failed(ALREADY_SENDING)),
             Lane::Answer => Ok(failed(ALREADY_ANSWERING)),
-            _ => Err("busy".into()),
+            _ => Err(BUSY.into()),
         };
     };
     if let Action::MarkRead {
@@ -1030,6 +1030,10 @@ impl Drop for ActivitySlot<'_> {
 
 /// The text the frontend ignores: a read of that row is already running.
 pub const ACTIVITY_BUSY: &str = "busy";
+
+/// `dispatch`'s `Err` when the session's lane is taken: refused before any
+/// call ran, so a definite refusal, never an uncertain outcome.
+pub const BUSY: &str = "busy";
 
 /// The recorded Activity of one archived session after cursor `after`
 /// (`hgs [@alias] inspect NAME --after N --skip-processes --archive ID`).

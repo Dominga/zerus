@@ -1659,14 +1659,34 @@ impl Composers {
     }
 }
 
-/// S3's compaction texts this side gives itself.
+/// S3's cancel texts this side gives itself (`SessionsWindow.cpp:4559, 4756`).
 const COMPACT_CANCELLED: &str = "Compaction was cancelled. Your draft was kept without sending.";
+const START_CANCELLED: &str = "Starting was cancelled. Your draft was kept without sending.";
+/// Clear session refused by another write of its session (4391, 4395).
+const TERMINATING: &str = "The session is terminating. Your draft stays here.";
+const UPDATING: &str = "Wait for the session update to finish.";
 /// The end of a start or compaction call whose thread died.
 const ABNORMAL: &str = "The request ended abnormally.";
 /// Clear session's notices (`SessionsWindow.cpp:1025`).
 const CLEARED: &str = "Context cleared. Your draft is ready to send.";
 const CLEAR_SENT: &str =
     "Clear command sent. Waiting for the agent to confirm the new conversation…";
+
+/// A call's outcome: a lane already taken (`actions::BUSY`) is a definite
+/// refusal with `refused` as its text; any other `Err` (the call's thread
+/// died) and a panic are uncertain.
+fn outcome_of(called: std::thread::Result<Result<Outcome, String>>, refused: &str) -> Outcome {
+    match called {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(error)) if error == crate::actions::BUSY => Outcome::Failed {
+            detail: refused.into(),
+        },
+        Ok(Err(error)) => Outcome::Uncertain { detail: error },
+        Err(_) => Outcome::Uncertain {
+            detail: ABNORMAL.into(),
+        },
+    }
+}
 
 /// The text and attachment digests S3 compares at every step. Each digest
 /// covers what Qt's `draftMatches` compares (`MessageComposer.cpp:668-676`):
@@ -2105,8 +2125,9 @@ impl Composers {
 
     /// The start or compaction call (Qt's `resumeSession`,
     /// `startFreshSession` and `requestCompactContext`) off the UI thread,
-    /// with its own request id. An `Err` or a panic is uncertain: S3 ends
-    /// the continuation, and its message is never sent.
+    /// with its own request id. A taken lane is a definite refusal; any
+    /// other `Err` or a panic is uncertain. Either way S3 ends the
+    /// continuation, and its message is never sent.
     fn request(&self, key: &str, start: bool, revision: u64, action: Action) {
         let target = {
             let mut hub = self.lock();
@@ -2126,21 +2147,27 @@ impl Composers {
         let me = self.clone();
         let owned = key.to_owned();
         (self.0.deps.spawn)(Box::new(move || {
-            if me.lock().closed {
-                return;
+            // Qt asks right in the save's callback (4762, 4561): a Cancel
+            // send or Stop that came in between leaves nothing to ask for.
+            {
+                let mut hub = me.lock();
+                if hub.closed || pending_mut(&mut hub, &owned, start, revision).is_none() {
+                    return;
+                }
             }
             let id = uuid::Uuid::new_v4().to_string();
             let dispatch = &me.0.deps.dispatch;
             let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 dispatch(target, action, id)
             }));
-            let outcome = match called {
-                Ok(Ok(outcome)) => outcome,
-                Ok(Err(error)) => Outcome::Uncertain { detail: error },
-                Err(_) => Outcome::Uncertain {
-                    detail: ABNORMAL.into(),
-                },
+            // A taken lane refused before anything ran: Qt's cancel text
+            // (4756, 4559), never an uncertain end.
+            let refused = if start {
+                START_CANCELLED
+            } else {
+                COMPACT_CANCELLED
             };
+            let outcome = outcome_of(called, refused);
             let (next, polling) = {
                 let mut hub = me.lock();
                 let live = pending_mut(&mut hub, &owned, start, revision).is_some();
@@ -2535,16 +2562,18 @@ impl Composers {
         let action = Action::ClearContext {
             dismiss_prompt: dismiss,
         };
+        let (computer, name) = (target.computer.clone(), target.name.clone());
         let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             dispatch(target, action, uuid::Uuid::new_v4().to_string())
         }));
-        let outcome = match called {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(error)) => Outcome::Uncertain { detail: error },
-            Err(_) => Outcome::Uncertain {
-                detail: ABNORMAL.into(),
-            },
+        // A taken lane refused before anything ran: the block reason Qt
+        // would show for that write (`messageBlockReason`, 4391 and 4395).
+        let refused = if (self.0.deps.facts)(&computer, &name) == Some(WriteKind::Terminate) {
+            TERMINATING
+        } else {
+            UPDATING
         };
+        let outcome = outcome_of(called, refused);
         let open = {
             let mut hub = self.lock();
             hub.clearing = None;
@@ -2592,9 +2621,18 @@ pub async fn send_message(
     .map_err(|e| e.to_string())
 }
 
+/// Off the main thread: Compact and continue hashes the draft's files
+/// (at most 20 MiB) the first time.
 #[tauri::command]
-pub fn send_answer(state: State<'_, Composers>, token: u64, answer: Answer) -> SendReply {
-    state.answer(token, answer)
+pub async fn send_answer(
+    state: State<'_, Composers>,
+    token: u64,
+    answer: Answer,
+) -> Result<SendReply, String> {
+    let composers = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || composers.answer(token, answer))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2662,6 +2700,8 @@ pub(crate) mod tests {
 
     /// What the fake `dispatch` answers a call with.
     type Answers = Box<dyn Fn(&Action, &str) -> Outcome + Send>;
+    /// Which calls the fake `dispatch` finds their lane taken for.
+    type Taken = Box<dyn Fn(&Action) -> bool + Send>;
 
     /// The session, clock, inspect and calls a test controls.
     pub(crate) struct Fake {
@@ -2673,6 +2713,9 @@ pub(crate) mod tests {
         pub(crate) write: Mutex<Option<WriteKind>>,
         pub(crate) calls: Mutex<Vec<(Target, Action, String)>>,
         pub(crate) outcome: Mutex<Answers>,
+        /// The calls whose lane is taken: `dispatch` refuses them with
+        /// `actions::BUSY` before anything runs, as `dispatch_with` does.
+        pub(crate) taken: Mutex<Taken>,
     }
 
     pub(crate) fn row(name: &str) -> ViewRow {
@@ -2707,6 +2750,7 @@ pub(crate) mod tests {
             write: Mutex::new(None),
             calls: Mutex::new(Vec::new()),
             outcome: Mutex::new(Box::new(receipt)),
+            taken: Mutex::new(Box::new(|_| false)),
         });
         let (f1, f2, f3, f4) = (fake.clone(), fake.clone(), fake.clone(), fake.clone());
         let f5 = fake.clone();
@@ -2728,6 +2772,9 @@ pub(crate) mod tests {
                         .ok_or_else(|| "timed out".to_owned())
                 }),
                 dispatch: Arc::new(move |target, action, id| {
+                    if (lock(&f5.taken))(&action) {
+                        return Err(crate::actions::BUSY.into());
+                    }
                     let out = (lock(&f5.outcome))(&action, &id);
                     lock(&f5.calls).push((target, action, id));
                     Ok(out)
@@ -4874,6 +4921,7 @@ mod continuations {
     use crate::composer::tests::{dir, drafts, hold, until, KEY};
     use crate::composer::{lock, Job};
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use zerus_client_core::{ActivityOut, Batch, ComputerId};
 
@@ -5238,8 +5286,12 @@ mod continuations {
             }
         );
         // A call whose thread died is no success either, and runs once.
-        *lock(&fake.outcome) = Box::new(|_, _| panic!("the call's thread died"));
-        let before = lock(&fake.calls).len();
+        let tries = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&tries);
+        *lock(&fake.outcome) = Box::new(move |_, _| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            panic!("the call's thread died")
+        });
         assert_eq!(
             c.clear_context(view.handle, "run-1", "conv-1", false),
             SendReply::Notice {
@@ -5247,11 +5299,42 @@ mod continuations {
                 error: true
             }
         );
-        assert_eq!(lock(&fake.calls).len(), before);
+        assert_eq!(tries.load(Ordering::SeqCst), 1, "one call, not repeated");
         assert!(
             c.current().unwrap().clear.enabled,
             "one ended, the next may run"
         );
+    }
+
+    /// A taken write lane refuses before anything runs: Qt's block reason
+    /// for that write, in the error tone (4391, 4395), never "busy".
+    #[test]
+    fn a_clear_refused_by_a_taken_lane_names_the_write() {
+        let root = dir("clear-busy");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.taken) = Box::new(|action| matches!(action, Action::ClearContext { .. }));
+        let view = opened(&c, ready());
+        assert_eq!(
+            c.clear_context(view.handle, "run-1", "conv-1", false),
+            SendReply::Notice {
+                text: "Wait for the session update to finish.".into(),
+                error: true
+            }
+        );
+        // The session's own termination holds the lane (Qt's `canClear`
+        // does not look at it, 3798-3799).
+        *lock(&fake.write) = Some(WriteKind::Terminate);
+        assert_eq!(
+            c.clear_context(view.handle, "run-1", "conv-1", false),
+            SendReply::Notice {
+                text: "The session is terminating. Your draft stays here.".into(),
+                error: true
+            }
+        );
+        *lock(&fake.write) = None;
+        let view = c.current().unwrap();
+        assert!(!view.uncertain && view.clear.enabled && !view.clear.running);
+        assert!(lock(&fake.calls).is_empty());
     }
 
     #[test]
@@ -5749,7 +5832,8 @@ mod continuations {
     fn a_start_whose_waiting_save_answers_after_the_exit_asks_for_nothing() {
         let root = dir("start-exit");
         let store = drafts(&root);
-        let (c, fake) = send_hub_on(&store);
+        let (spawn, jobs) = held_spawn();
+        let (c, fake) = send_hub_with(&store, spawn);
         stopped(&fake);
         let view = opened(&c, ready());
         let SendReply::Start { token, .. } =
@@ -5769,8 +5853,10 @@ mod continuations {
         );
         c.flush();
         release.send(()).unwrap();
+        // The waiting save answered (the store writes in order): no call
+        // was handed to a thread.
         store.flush();
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(lock(&jobs).is_empty());
         assert!(lock(&fake.calls).is_empty());
     }
 
@@ -5800,7 +5886,12 @@ mod continuations {
         let view = until(&c, |v| v.waiting.is_none() && v.status == "hgs: lost");
         assert!(view.status_error && !view.uncertain && view.text == "maybe");
         // A panicking call ends it too, after its one call.
-        *lock(&fake.outcome) = Box::new(|_, _| panic!("the call's thread died"));
+        let tries = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&tries);
+        *lock(&fake.outcome) = Box::new(move |_, _| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            panic!("the call's thread died")
+        });
         let SendReply::Start { token, .. } =
             c.send_message(view.handle, 2, view.text_epoch, "maybe".into(), 0, 0)
         else {
@@ -5822,14 +5913,12 @@ mod continuations {
         }
         let mut after = ready();
         after["run_id"] = json!("run-2");
+        // A send would begin within `observe` (its delivery marks the
+        // composer sending before it returns).
         c.observe(&state(after));
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!c.current().unwrap().sending && c.lock().start.is_none());
         assert!(sends(&fake).is_empty());
-        assert_eq!(
-            lock(&fake.calls).len(),
-            1,
-            "the panicked call is not recorded"
-        );
+        assert_eq!(tries.load(Ordering::SeqCst), 1, "one call, not repeated");
     }
 
     #[test]
@@ -6132,6 +6221,145 @@ mod continuations {
             }
         );
         assert!(lock(&fake.calls).is_empty());
+    }
+
+    /// A taken write lane refuses the call before anything runs: Qt's cancel
+    /// texts (4756, 4559) in the error tone, and nothing uncertain.
+    #[test]
+    fn a_taken_lane_ends_a_continuation_with_qts_cancel_text() {
+        let root = dir("lane-taken");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        *lock(&fake.taken) =
+            Box::new(|action| matches!(action, Action::Resume | Action::CompactContext));
+        let view = opened(&c, ready());
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "taken".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Start {
+                choice: StartChoice::Resume,
+            },
+        );
+        let view = until(&c, |v| v.status == START_CANCELLED);
+        assert!(view.waiting.is_none() && view.status_error && !view.uncertain);
+        assert_eq!(view.text, "taken");
+        lock(&fake.row).state = "running".into();
+        c.observe(&state(cold()));
+        let view = c.current().unwrap();
+        let SendReply::Cold { token, .. } =
+            c.send_message(view.handle, 2, view.text_epoch, "taken".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Cold {
+                action: ColdAction::Compact,
+            },
+        );
+        let view = until(&c, |v| v.status == COMPACT_CANCELLED);
+        assert!(!view.compacting && view.waiting.is_none());
+        assert!(view.status_error && !view.uncertain);
+        assert!(lock(&fake.calls).is_empty());
+    }
+
+    /// Qt asks in the waiting save's callback (4762, 4561): a Cancel send or
+    /// Stop between that answer and the call's thread leaves no call.
+    #[test]
+    fn a_cancel_before_the_call_asks_for_nothing() {
+        let root = dir("cancel-before-call");
+        let (spawn, jobs) = held_spawn();
+        let (c, fake) = send_hub_with(&drafts(&root), spawn);
+        stopped(&fake);
+        let view = opened(&c, ready());
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "not yet".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Start {
+                choice: StartChoice::Resume,
+            },
+        );
+        let call = next_job(&jobs);
+        c.cancel_send(view.handle);
+        let view = until(&c, |v| v.waiting.is_none());
+        call();
+        assert!(lock(&fake.calls).is_empty());
+        lock(&fake.row).state = "running".into();
+        c.observe(&state(cold()));
+        let SendReply::Cold { token, .. } =
+            c.send_message(view.handle, 2, view.text_epoch, "not yet".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Cold {
+                action: ColdAction::Compact,
+            },
+        );
+        let call = next_job(&jobs);
+        c.interrupted(view.handle);
+        let view = until(&c, |v| !v.compacting);
+        assert_eq!(view.status, rules::INTERRUPTED);
+        call();
+        assert!(lock(&fake.calls).is_empty());
+        assert!(lock(&jobs).is_empty());
+    }
+
+    #[test]
+    fn a_start_for_a_session_no_longer_open_is_polled_and_sent_there() {
+        let root = dir("start-away");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        let view = opened(&c, ready());
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "away".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Start {
+                choice: StartChoice::Resume,
+            },
+        );
+        until(&c, |_| called(&fake, &Action::Resume));
+        c.open(Some(other_session()));
+        c.observe(&other_state(ready()));
+        // The new run reports ready to the poll only.
+        {
+            let mut row = lock(&fake.row);
+            row.state = "running".into();
+            row.run_id = Some("run-2".into());
+        }
+        let mut after = ready();
+        after["run_id"] = json!("run-2");
+        *lock(&fake.inspected) = Some(after);
+        assert!(sends(&fake).is_empty());
+        *lock(&fake.now) += 3.0;
+        c.tick();
+        eventually(|| sends(&fake).len() == 1);
+        let (target, compaction) = sends(&fake).remove(0);
+        assert_eq!(
+            (target.name.as_str(), target.run_id.as_str()),
+            ("claude/sample-project/review", "run-2")
+        );
+        assert_eq!(compaction, None);
+        eventually(|| {
+            c.lock()
+                .composers
+                .get(KEY)
+                .is_some_and(|composer| !composer.sending && composer.draft.text.is_empty())
+        });
+        assert!(c.lock().start.is_none());
     }
 
     /// Runs the held jobs, those they hold included.

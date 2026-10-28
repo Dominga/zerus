@@ -499,6 +499,7 @@ fn the_import_copies_every_draft_once_and_never_writes_the_sources() {
             conflicts: vec![],
             invalid: 0,
             sources: vec!["dev".into(), "qt".into()],
+            unfinished: vec![],
         }
     );
     #[cfg(unix)]
@@ -603,9 +604,19 @@ fn damaged_foreign_and_empty_copies_are_not_imported() {
         json!({"version": 1, "key": "studio\nx", "text": "stray"}).to_string(),
     )
     .unwrap();
+    // A folder without a manifest, one whose manifest is not JSON, and a
+    // plain file, which is not a draft.
+    fs::create_dir_all(qt.join("1".repeat(64))).unwrap();
+    let unparsable = qt.join("2".repeat(64));
+    fs::create_dir_all(&unparsable).unwrap();
+    fs::write(unparsable.join("draft.json"), b"{not json").unwrap();
+    fs::write(qt.join("notes.txt"), b"not a draft").unwrap();
     let report = import_once(&here, &[source("qt", &qt)]);
-    assert_eq!((report.imported, report.invalid), (0, 1));
+    assert_eq!((report.imported, report.invalid), (0, 4));
     assert!(report.conflicts.is_empty());
+    // Damaged copies stay in their source; they never stop the marker.
+    assert!(report.unfinished.is_empty());
+    assert!(here.join(IMPORT_MARKER).exists());
     let store = DraftStore::open(here.clone());
     assert_eq!(load(&store, KEY).draft, StoredDraft::default());
     assert_eq!(load(&store, "studio\nx").draft, StoredDraft::default());
@@ -716,4 +727,124 @@ fn a_read_right_after_import_at_start_sees_the_imported_draft() {
         stderr.contains("drafts import: 2 imported, 0 identical, 0 conflicts, 0 invalid"),
         "{stderr}"
     );
+}
+
+#[test]
+fn large_attachments_import_one_draft_at_a_time() {
+    // The import holds one copy in memory at a time; this checks that the
+    // result stays right with several drafts near the attachment limits.
+    let scratch = Scratch::new("import-large");
+    let (qt, dev, here) = (
+        scratch.0.join("qt"),
+        scratch.0.join("dev"),
+        scratch.0.join("here"),
+    );
+    let mib = 1024 * 1024;
+    let bytes = |fill: u8| vec![fill; 5 * mib];
+    let keys: Vec<String> = (0..4)
+        .map(|index| format!("studio\nclaude/sample-project/large-{index}"))
+        .collect();
+    let qt_drafts: Vec<(&str, StoredDraft)> = keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| {
+            let first = bytes(index as u8);
+            let second = bytes(index as u8 + 100);
+            let value = draft(
+                &format!("qt {index}"),
+                &[("a.bin", first.as_slice()), ("b.bin", second.as_slice())],
+            );
+            (key.as_str(), value)
+        })
+        .collect();
+    seed(&qt, &qt_drafts);
+    // The dev app holds a newer copy of one draft and the same copy of
+    // another.
+    let newer = bytes(200);
+    seed(
+        &dev,
+        &[
+            (
+                keys[0].as_str(),
+                draft("dev 0", &[("c.bin", newer.as_slice())]),
+            ),
+            (keys[1].as_str(), qt_drafts[1].1.clone()),
+        ],
+    );
+    let report = import_once(&here, &[source("qt", &qt), source("dev", &dev)]);
+    assert_eq!(
+        (report.imported, report.identical, report.invalid),
+        (4, 1, 0)
+    );
+    let mut conflicts = report.conflicts.clone();
+    conflicts.sort();
+    assert_eq!(
+        conflicts,
+        vec![ImportConflict {
+            key: keys[0].clone(),
+            source: "qt".into(),
+        }]
+    );
+    let store = DraftStore::open(here.clone());
+    let first = load(&store, &keys[0]);
+    assert_eq!(first.draft.draft.text, "dev 0");
+    assert_eq!(&*first.draft.draft.attachments[0].bytes, newer.as_slice());
+    for (index, key) in keys.iter().enumerate().skip(1) {
+        let imported = load(&store, key).draft;
+        assert_eq!(imported.draft.text, format!("qt {index}"));
+        assert_eq!(
+            &*imported.draft.attachments[1].bytes,
+            bytes(index as u8 + 100)
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_source_that_cannot_be_listed_runs_the_import_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new("import-unlisted");
+    let (qt, dev, here) = (
+        scratch.0.join("qt"),
+        scratch.0.join("dev"),
+        scratch.0.join("here"),
+    );
+    let other = "studio\nclaude/sample-project/other";
+    seed(&qt, &[(KEY, draft("from Qt", &[]))]);
+    seed(&dev, &[(other, draft("from the dev app", &[]))]);
+    fs::set_permissions(&dev, fs::Permissions::from_mode(0o000)).unwrap();
+    let report = import_once(&here, &[source("qt", &qt), source("dev", &dev)]);
+    fs::set_permissions(&dev, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(report.imported, 1);
+    assert_eq!(report.unfinished.len(), 1);
+    assert!(report.unfinished[0].starts_with("dev not listed"));
+    assert!(!here.join(IMPORT_MARKER).exists(), "no marker yet");
+    // The next start imports the rest; the first draft reads as identical.
+    let again = import_once(&here, &[source("qt", &qt), source("dev", &dev)]);
+    assert_eq!((again.imported, again.identical), (1, 1));
+    assert!(again.unfinished.is_empty());
+    assert!(here.join(IMPORT_MARKER).exists());
+    let store = DraftStore::open(here.clone());
+    assert_eq!(load(&store, other).draft.draft.text, "from the dev app");
+}
+
+#[test]
+fn a_draft_that_cannot_be_saved_runs_the_import_again() {
+    let scratch = Scratch::new("import-unsaved");
+    let (qt, here) = (scratch.0.join("qt"), scratch.0.join("here"));
+    seed(&qt, &[(KEY, draft("from Qt", &[("a.txt", b"bytes")]))]);
+    // A plain file where the draft's folder belongs: the save fails, and
+    // the store can still write its marker.
+    fs::create_dir_all(&here).unwrap();
+    fs::write(folder(&here, KEY), b"in the way").unwrap();
+    let report = import_once(&here, &[source("qt", &qt)]);
+    assert_eq!((report.imported, report.invalid), (0, 1));
+    assert_eq!(report.unfinished, vec!["1 not saved".to_owned()]);
+    assert!(!here.join(IMPORT_MARKER).exists(), "no marker yet");
+    fs::remove_file(folder(&here, KEY)).unwrap();
+    let again = import_once(&here, &[source("qt", &qt)]);
+    assert_eq!((again.imported, again.invalid), (1, 0));
+    assert!(here.join(IMPORT_MARKER).exists());
+    let store = DraftStore::open(here.clone());
+    assert_eq!(load(&store, KEY).draft.draft.text, "from Qt");
 }

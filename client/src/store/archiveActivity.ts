@@ -1,7 +1,8 @@
-import { batch, createEffect, createRoot, createSignal, on, onCleanup, untrack } from "solid-js";
+import { batch, createEffect, createMemo, createRoot, createSignal, on, onCleanup, untrack } from "solid-js";
 import * as bridge from "../bridge";
 import { seqOf } from "./activity";
 import { errorText } from "./actions";
+import { computerOffline } from "./catalog";
 import { activityReadOnly, type ActivitySource } from "./activitySource";
 import { page, selected, selectedKey } from "./ui";
 import { pageHidden } from "./visibility";
@@ -13,7 +14,8 @@ import type { ActivityEvent, ArchivedActivity, ComputerId } from "../types";
 // shows, it is read with `hgs inspect NAME --after CURSOR --skip-processes
 // --archive ID` (bridge.archivedActivity) every 2500 ms, one read at a time.
 // Only the selected row is read and kept; leaving it, another page or a
-// hidden window drops everything, and the next read starts at cursor 0. The
+// hidden window drops everything, and the next read starts at cursor 0.
+// While its computer is offline nothing is read and the events stay. The
 // pane is read-only: no older pages, no end, no live state.
 
 /** Qt's m_activityPollMs: a read starts this long after the previous one started, once that one ended. */
@@ -36,6 +38,8 @@ export interface ArchiveActivityDeps {
   read(computer: ComputerId, name: string, archiveId: string, after: number): Promise<ArchivedActivity>;
   /** The window shows and the Sessions page is current (reactive). */
   showing(): boolean;
+  /** The computer is online (reactive); Qt's inspect() reads nothing while it is offline. Always, when left out. */
+  online?(computer: ComputerId): boolean;
   /** A timer; returns its cancel. */
   later?(callback: () => void, ms: number): () => void;
   /** A monotonic clock in milliseconds (performance.now), as Qt's QElapsedTimer. */
@@ -57,6 +61,8 @@ export function createArchiveActivity(deps: ArchiveActivityDeps) {
   const [summary, setSummary] = createSignal<Record<string, unknown> | undefined>();
   const [loaded, setLoaded] = createSignal(false);
   const [error, setError] = createSignal<string | undefined>();
+  /** The target's computer is online: the reads pause while it is not, keeping the events. */
+  const reachable = createMemo(() => { const t = target(); return !!t && (deps.online?.(t.computer) ?? true); });
 
   /** The next read's `--after` (Qt's m_cursor). */
   let cursor = 0;
@@ -86,7 +92,7 @@ export function createArchiveActivity(deps: ArchiveActivityDeps) {
 
   function read() {
     const t = untrack(target);
-    if (!t || !showing || reading) return;
+    if (!t || !showing || reading || !untrack(reachable)) return;
     const mine = generation;
     reading = true;
     started = now();
@@ -157,6 +163,8 @@ export function createArchiveActivity(deps: ArchiveActivityDeps) {
     if (!show) drop();
     else read();
   }));
+  // Back online: the paused reads resume.
+  createEffect(on(reachable, (up) => { if (up) read(); }, { defer: true }));
   onCleanup(() => { generation++; stopTimer(); });
 
   const source = {
@@ -170,8 +178,6 @@ export function createArchiveActivity(deps: ArchiveActivityDeps) {
   };
   return source satisfies ActivitySource;
 }
-
-export type ArchiveActivityStore = ReturnType<typeof createArchiveActivity>;
 
 /**
  * The selected archived row with an archive id: a loaded one, or the source of
@@ -190,6 +196,7 @@ export const archiveActivity = createRoot(() => {
   const store = createArchiveActivity({
     read: (computer, name, archiveId, after) => bridge.archivedActivity(computer, name, archiveId, after),
     showing: () => page() === "sessions" && !pageHidden(),
+    online: (computer) => !computerOffline(computer),
   });
   createEffect(() => {
     const t = selectedArchived();

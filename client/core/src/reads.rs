@@ -468,20 +468,14 @@ pub fn decode(read: &Read, exit: Exit) -> Result<Value, ReadError> {
             .map(|version| Value::String(version.to_owned()))
             .ok_or_else(|| invalid("not an hgs version"));
     }
-    if matches!(read, Read::ArchivePage { .. }) && serde_json::from_slice::<Value>(&stdout).is_err()
-    {
-        return Err(archive_invalid(ARCHIVE_PAGE_INVALID));
-    }
-    if matches!(read, Read::ArchivedActivity { .. })
-        && !matches!(
-            serde_json::from_slice::<Value>(&stdout),
-            Ok(Value::Object(_))
-        )
-    {
-        return Err(archive_invalid(ACTIVITY_INVALID));
-    }
-    let value: Value =
-        serde_json::from_slice(&stdout).map_err(|error| invalid(&error.to_string()))?;
+    // One parse; the archive reads word a reply they cannot use as Qt does.
+    let value = match (read, serde_json::from_slice::<Value>(&stdout)) {
+        (Read::ArchivedActivity { .. }, Ok(value @ Value::Object(_))) => value,
+        (Read::ArchivedActivity { .. }, _) => return Err(archive_invalid(ACTIVITY_INVALID)),
+        (Read::ArchivePage { .. }, Err(_)) => return Err(archive_invalid(ARCHIVE_PAGE_INVALID)),
+        (_, Ok(value)) => value,
+        (_, Err(error)) => return Err(invalid(&error.to_string())),
+    };
     if let Read::ArchivePage {
         from,
         until,

@@ -449,11 +449,13 @@ the oldest dropped first, as Qt keeps them. A failed read shows "Could not
 refresh activity: {error}" as a notice until the next answer; that notice is
 for read-only sources only, and the live pane shows no follow error. The row of
 a pending restore stays selected and read while the archive reloads, as Qt's
-`selected()` keeps it. Leaving the row, another page or a hidden window stops
-the reads and drops the events. The pane renders
-through the same Activity view, read-only: the transcript without the live
-tool line, the attention, error and offline banners or a composer, and no
-Terminal tab, as Qt shows none for an archived row.
+`selected()` keeps it. While the row's computer is offline nothing is read and
+the events stay, as Qt's `inspect()` waits for it; the reads resume once it is
+back. Leaving the row, another page or a hidden window stops the reads and
+drops the events. The pane renders through the same Activity view, read-only:
+the transcript without the live tool line, the attention, error and offline
+banners or a composer, and no Terminal tab, as Qt shows none for an archived
+row.
 
 ### Actions smoke run
 
@@ -511,23 +513,24 @@ waits up to 15 s for the row's Activity to show the fake's events and logs
 event shows, the row is followed live or the pane shows a notice or a live line
 (`log.ndjson` holds `inspect NAME --after 0 --skip-processes --archive ID` for
 the details and the first Activity read, and after the hook waits one poll the
-same call with `--after 2`). On the same archived row it then runs the Restore session entry's path and logs
-`actions-smoke restore: done (state filter now all)` (the Archive filter becomes
-All, as the row is selected and followed; `log.ndjson` holds `resume NAME
---archive ID -d`), Forget archived session through the dialog's confirmation
-path and logs `actions-smoke forget-archived: done` (`kill NAME --archive ID`),
-and Clear archive: it takes the batch menu's entry, presses the confirmation
-dialog's "Clear archive" button and logs `actions-smoke clear-archive: done
-(...)` with the notices of the batch (a second `kill NAME --archive ID`), or
-`failed (... is disabled)` when the entry is disabled, since the fake's row can
-be forgotten. The fake keeps answering the
-archived row; the hook shows the Archive filter again after the restore, as the
-pages load only there, so each step finds the row after the archive reloads. It
-returns to the All filter and the replay session. The hook selects `claude/sample-project/review` (its details come from the
-replay's Activity state value or, as here, one `inspect` of the fake), first
-marks it as read, marks all as read (logging `actions-smoke mark-all-as-read:
-N marked`) and marks it as needing attention, through the marks store the menus
-use (`actions-smoke mark-as-read: done`, `mark-needs-attention: done`; they run
+same call with `--after 2`). On the same archived row it then runs the Restore
+session entry's path and logs `actions-smoke restore: done (state filter now
+all)` (the Archive filter becomes All, as the row is selected and followed;
+`log.ndjson` holds `resume NAME --archive ID -d`), Forget archived session
+through the dialog's confirmation path and logs `actions-smoke forget-archived:
+done` (`kill NAME --archive ID`), and Clear archive: it takes the batch menu's
+entry, presses the confirmation dialog's "Clear archive" button and logs
+`actions-smoke clear-archive: done (...)` with the notices of the batch (a
+second `kill NAME --archive ID`), or `failed (... is disabled)` when the entry
+is disabled, since the fake's row can be forgotten. The fake keeps answering
+the archived row; the hook shows the Archive filter again after the restore, as
+the pages load only there, so each step finds the row after the archive
+reloads. It returns to the All filter and the replay session. The hook selects
+`claude/sample-project/review` (its details come from the replay's Activity
+state value or, as here, one `inspect` of the fake), first marks it as read,
+marks all as read (logging `actions-smoke mark-all-as-read: N marked`) and
+marks it as needing attention, through the marks store the menus use
+(`actions-smoke mark-as-read: done`, `mark-needs-attention: done`; they run
 no `hgs`), then copies the session reference, the connect command, the session name and the
 folder path through the store the menus use (the first calls `reference`; the
 fake's URI is the clipboard text), logging each as

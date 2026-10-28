@@ -45,14 +45,16 @@ function setup(options: { showing?: boolean; defaultClock?: boolean } = {}) {
   const read = vi.fn((computer: string, name: string, archiveId: string, after: number) =>
     new Promise<ArchivedActivity>((resolve, reject) => { calls.push({ computer, name, archiveId, after, resolve, reject }); }));
   const [showing, setShowing] = createSignal(options.showing ?? true);
+  const [offline, setOffline] = createSignal<string[]>([]);
   let store!: ReturnType<typeof createArchiveActivity>;
   // The fake timers move Date; the app's default clock is the monotonic one.
   const now = options.defaultClock ? undefined : () => Date.now();
-  const dispose = createRoot((d) => { store = createArchiveActivity({ read, showing, now }); return d; });
+  const online = (computer: string) => !offline().includes(computer);
+  const dispose = createRoot((d) => { store = createArchiveActivity({ read, showing, now, online }); return d; });
   /** Answers the call at `i` (default: the latest) and lets its handlers run. */
   const answer = async (r: ArchivedActivity, i = calls.length - 1) => { calls[i].resolve(r); await flush(); };
   const fail = async (error: unknown, i = calls.length - 1) => { calls[i].reject(error); await flush(); };
-  return { store, read, calls, answer, fail, setShowing, dispose };
+  return { store, read, calls, answer, fail, setShowing, setOffline, dispose };
 }
 
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date(2026, 9, 28, 12, 0, 0)); });
@@ -292,6 +294,31 @@ describe("archived Activity (Qt inspect 3467-3492, acceptInspection 3587-3660)",
     t.dispose();
     vi.advanceTimersByTime(ARCHIVED_POLL_MS * 4);
     expect(t.calls.length).toBe(3);
+  });
+
+  it("reads nothing while the row's computer is offline, keeps its events and reads again once it is back (Qt inspect 3472)", async () => {
+    const t = setup();
+    t.store.follow(target(1, "box"));
+    await t.answer(reply([ev(1), ev(2)]));
+    t.setOffline(["box"]);
+    vi.advanceTimersByTime(ARCHIVED_POLL_MS * 4);
+    expect(t.calls.length).toBe(1);
+    expect(seqs(t.store.events())).toEqual([1, 2]);
+    t.setOffline([]);
+    expect(t.calls.map((c) => c.after)).toEqual([0, 2]);
+    // Another computer going offline changes nothing for this row.
+    t.setOffline(["other"]);
+    await t.answer(reply([ev(3)]));
+    vi.advanceTimersByTime(ARCHIVED_POLL_MS);
+    expect(t.calls.length).toBe(3);
+    // A row selected while its computer is offline is read once it is back.
+    t.setOffline(["box"]);
+    t.store.follow(target(4, "box"));
+    expect(t.calls.length).toBe(3);
+    expect(t.store.events()).toEqual([]);
+    t.setOffline([]);
+    expect(t.calls.at(-1)).toMatchObject({ computer: "box", archiveId: uuid(4), after: 0 });
+    t.dispose();
   });
 
   it("is a read-only source: no older pages, no end, no live state", () => {

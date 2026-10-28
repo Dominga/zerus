@@ -16,7 +16,7 @@ Piece D) and the phase 2 Activity follow (`client/src/store/activity.ts`).
   - A reply that does not parse fails with "Invalid activity response"; any other failure gives its detail.
 - **When it reads** (`SessionsWindow::inspect`, 3467-3492, and the 500 ms timer at 2013-2016):
   - An archived row is never streamed (`archiveId.isEmpty()` is part of `streamed`), so the selected archived row is polled.
-  - The poll runs while the window shows and the Sessions page is current, every `m_activityPollMs` (2500 ms).
+  - The poll runs while the window shows, the Sessions page is current and the entry's computer is online (3472), every `m_activityPollMs` (2500 ms). While the computer is offline nothing is read and the events stay.
   - With the Terminal or native UI tab current it waits the background process interval instead, but this client has no such tabs on archived rows.
   - The cursor starts at 0 when the selection changes (451).
 - **Merging the reply** (`acceptInspection`, 3587-3660):
@@ -51,6 +51,9 @@ The store and component touch points go to the owner session before the PR.
 - **Shared files:**
   - `client/src/ui/sessions/Activity.tsx` gains one optional source input on `ActivityView`, and the read-only gating around the live indicators;
   - `client/src/ui/sessions/SessionDetail.tsx` chooses the source;
+  - `client/src/ui/PerfHost.tsx` gains the actions smoke's archive-activity step;
+  - `client/src/store/activity.ts` exports `seqOf` (additive; its follow logic is unchanged);
+  - `client/src/store/session.ts` does not follow `archive:` rows live, and `client/src/store/actions.ts` answers `followedFor` for them as settled and exports its error-text helper at module scope;
   - everything else is new files, or additive in `types.ts`, `bridge.ts`, `reads.rs` and src-tauri.
 
 ## Task G1: the read (core and src-tauri)

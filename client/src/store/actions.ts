@@ -210,6 +210,40 @@ export function createActions(catalog: Pick<CatalogState, "rows">, online: (comp
     return matches(value) ? value : undefined;
   }
 
+  const errorText = (error: unknown) => (typeof error === "string" ? error : error instanceof Error ? error.message : String(error));
+
+  /** Copies text; a failure is a sticky notice, a success shows nothing. */
+  async function copy(text: string): Promise<boolean> {
+    try { await bridge.copyText(text); return true; } catch (error) {
+      notify("error", `Zerus: could not copy\n${errorText(error)}`, true);
+      return false;
+    }
+  }
+
+  /** Copy connect command or Copy restore command (the archive id only for an archived row). */
+  async function copyCommand(row: ActionRow) {
+    let command: string;
+    try { command = await bridge.copyCommand(row.computer, row.name, row.state === "archived" ? row.archiveId ?? null : null); } catch (error) {
+      notify("error", errorText(error), true);
+      return;
+    }
+    await copy(command);
+  }
+
+  /** Copy session reference: the selected row's details name the run and conversation when present. */
+  async function copyReference(row: ActionRow, details?: Details) {
+    const target: Target = {
+      computer: row.computer, name: row.name,
+      run_id: details?.run_id || row.runId || "", conversation_id: details?.conversation_id || row.conversationId || "",
+    };
+    let uri: string;
+    try { uri = await bridge.sessionReference(target, row.state === "archived" ? row.archiveId ?? null : null); } catch (error) {
+      notify("error", errorText(error), true);
+      return;
+    }
+    if (await copy(uri)) notify("info", "Session reference copied");
+  }
+
   // Read-mark retry.
   let marks: ReadMark[] = [];
   const lastTry = new Map<string, number>();
@@ -246,9 +280,22 @@ export function createActions(catalog: Pick<CatalogState, "rows">, online: (comp
     }
   }
 
-  return { perform, end, change, updating, interrupting, reading, detailsFor, notices: list, dismiss, loadReadMarks, observeBatch };
+  return { perform, end, copy, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices: list, dismiss, loadReadMarks, observeBatch };
+}
+
+type FollowSource = { target(): { id: string } | undefined; summary(): Record<string, unknown> | undefined; loaded(): boolean; ended(): boolean; error(): unknown };
+let activity: FollowSource | undefined;
+/** Hands the store the app's Activity (session.ts), which this module cannot import without a cycle. */
+export function bindActivity(source: FollowSource) { activity = source; }
+
+/** The Activity subscription of a session: its state value while it is the followed one, and whether it has answered. */
+export function followedFor(key: string): Followed {
+  if (!activity) return { value: undefined, settled: false };
+  const mine = activity.target()?.id === key;
+  const value = mine ? activity.summary() : undefined;
+  return { value, settled: mine && (value !== undefined || activity.loaded() || activity.ended() || !!activity.error()) };
 }
 
 const app = createActions(appCatalog, (computer) => !computerOffline(computer));
-export const { perform, end, change, updating, interrupting, reading, detailsFor, notices, dismiss, loadReadMarks, observeBatch } = app;
+export const { perform, end, copy, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices, dismiss, loadReadMarks, observeBatch } = app;
 void loadReadMarks();

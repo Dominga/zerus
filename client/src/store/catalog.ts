@@ -137,6 +137,11 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow): Sessio
     allowed: Array.isArray(v.allowed_actions) ? v.allowed_actions.join(" ") : undefined,
     archiveReason: optional(v.action_reasons?.archive),
     terminateReason: optional(v.action_reasons?.terminate),
+    cwdPath: text(v.cwd),
+    terminalSupported: v.terminal_supported ?? !["deepseek", "dsh", "opencode"].includes(text(v.agent)),
+    terminalReported: !!v.terminal_reported,
+    terminalAttachSupported: !!v.terminal_attach_supported,
+    terminalAttachReported: !!v.terminal_attach_reported,
   };
 }
 

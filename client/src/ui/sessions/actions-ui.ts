@@ -11,7 +11,8 @@ import type { Session } from "./types";
 export type ActionRow = Pick<Session,
   | "key" | "computer" | "name" | "machine" | "cmd" | "state" | "tracked" | "resumable" | "activity" | "processState"
   | "archiveId" | "attention" | "unread" | "sharedRead" | "allowed" | "archiveReason" | "terminateReason" | "phase"
-  | "runId" | "conversationId" | "replyId" | "attentionSignature">;
+  | "runId" | "conversationId" | "replyId" | "attentionSignature"
+  | "cwdPath" | "terminalSupported" | "terminalReported" | "terminalAttachSupported" | "terminalAttachReported">;
 
 /** A plain copy of the action fields, as they were when a menu or dialog opened. */
 export function snapshotOf(s: ActionRow): ActionRow {
@@ -20,6 +21,8 @@ export function snapshotOf(s: ActionRow): ActionRow {
     resumable: s.resumable, activity: s.activity, processState: s.processState, archiveId: s.archiveId, attention: s.attention,
     unread: s.unread, sharedRead: s.sharedRead, allowed: s.allowed, archiveReason: s.archiveReason, terminateReason: s.terminateReason,
     phase: s.phase, runId: s.runId, conversationId: s.conversationId, replyId: s.replyId, attentionSignature: s.attentionSignature,
+    cwdPath: s.cwdPath, terminalSupported: s.terminalSupported, terminalReported: s.terminalReported,
+    terminalAttachSupported: s.terminalAttachSupported, terminalAttachReported: s.terminalAttachReported,
   };
 }
 
@@ -186,6 +189,39 @@ export function detailsFromInspection(value: unknown): Details | undefined {
     interrupt_supported: v.interrupt_supported === true,
     turn_started: typeof v.turn_started === "number" ? v.turn_started : 0,
     phase: text(v.phase),
+    cwd: text(v.cwd),
+    terminal_supported: typeof v.terminal_supported === "boolean" ? v.terminal_supported : null,
+    terminal_attach_supported: typeof v.terminal_attach_supported === "boolean" ? v.terminal_attach_supported : null,
+  };
+}
+
+/** NativeSessionCapabilities::terminal: whether the session has a terminal to attach to. */
+export function terminal(s: Pick<ActionRow, "cmd" | "terminalSupported" | "terminalReported" | "terminalAttachSupported" | "terminalAttachReported">, details?: Details): boolean {
+  if (s.cmd === "dsh" || s.cmd === "deepseek") return false;
+  if (s.cmd === "opencode") {
+    if (typeof details?.terminal_attach_supported === "boolean") return details.terminal_attach_supported;
+    if (s.terminalAttachReported) return s.terminalAttachSupported;
+  }
+  if (typeof details?.terminal_supported === "boolean") return details.terminal_supported;
+  if (s.cmd === "opencode" && !s.terminalReported) return false;
+  return s.terminalSupported;
+}
+
+export interface CopyState {
+  command: { label: "Copy connect command" | "Copy restore command"; enabled: boolean };
+  reference: boolean;
+  /** The folder to copy: the selected session's details first, else the row's (Qt's selectedDirectory). */
+  folder: { enabled: boolean; path: string };
+}
+
+/** The copy entries (SessionsWindow.cpp 5306-5307, 5374-5376): Copy session name is always enabled. */
+export function copyState(s: ActionRow, online: boolean, details?: Details): CopyState {
+  const archived = s.state === "archived";
+  const path = details?.cwd || s.cwdPath;
+  return {
+    command: { label: archived ? "Copy restore command" : "Copy connect command", enabled: (archived || terminal(s)) && (!archived || !!s.archiveId) },
+    reference: online && !!s.runId,
+    folder: { enabled: path !== "", path },
   };
 }
 

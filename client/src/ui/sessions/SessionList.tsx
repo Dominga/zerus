@@ -6,12 +6,13 @@ import {
   SessionCard, ChildCard, CompactCard, AgentBadge, StatusBadge, badgeKind, statusCaption, stripCaption,
   emphasis, childStatus, gitTooltip, paletteIndex, folderOf,
 } from "./SessionCard";
-import { catalog } from "../../store/catalog";
-import { actionEntries } from "./ActionDialogs";
+import { catalog, computerOffline } from "../../store/catalog";
+import { detailsFor, followedFor } from "../../store/actions";
+import { actionEntries, copyEntries } from "./ActionDialogs";
 import {
   selectedKey, setSelectedKey, collapsed, setCollapsed, setExpandedChildren, expandedChildren,
   setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
-  setMenu, toast, machineFilter, setMachineFilter, projectFilter, setProjectFilter,
+  setMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter,
   multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, menu, subagentOpen, projectOrder, setProjectOrder,
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
@@ -91,13 +92,12 @@ function setRowCompact(key: string, compact: boolean) {
   morphTimer = window.setTimeout(() => setMorphing(false), MORPH.duration + 40);
 }
 
-function copy(text: string, what: string) {
-  void navigator.clipboard?.writeText(text).then(() => toast("Copied", what), () => toast("Not copied", "The clipboard is unavailable"));
-}
-
 function sessionMenu(s: Session): MenuEntry[] {
   const live = s.status !== "paused" && s.status !== "ended";
+  // The selected row's menu reads the same details as the header (Qt's m_details).
+  const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
   const act = actionEntries(s, undefined, { context: true });
+  const cp = copyEntries(s, details);
   return [
     { label: compactRows[s.key] ? "Expand session row" : "Compact session row", icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setRowCompact(s.key, !compactRows[s.key]) },
     { label: "Expand all collapsed", icon: "expand-row", disabled: !Object.values(compactRows).some(Boolean), action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
@@ -105,7 +105,7 @@ function sessionMenu(s: Session): MenuEntry[] {
     s.agent === "deepseek" ? { label: "Open native DeepSeek UI", icon: "external-link", disabled: LATER } : { label: "Open terminal", icon: "square-terminal", disabled: LATER },
     { label: "Open folder", icon: "folder-open", disabled: LATER },
     { label: "Open shell in session folder", icon: "terminal", disabled: LATER },
-    { label: "Copy connect command", icon: "copy", disabled: LATER },
+    cp.command,
     { separator: true },
     { label: s.muted ? "Unmute" : "Mute", icon: s.muted ? "bell" : "bell-off", disabled: LATER },
     act.markRead,
@@ -117,9 +117,9 @@ function sessionMenu(s: Session): MenuEntry[] {
     ...(act.archive ? [act.archive] : []),
     { label: "Move to project…", icon: "folder", disabled: LATER },
     { separator: true },
-    { label: "Copy session name", icon: "copy", action: () => copy(s.name, "The session name is on the clipboard") },
-    { label: "Copy session reference", icon: "link", disabled: LATER },
-    { label: "Copy folder path", icon: "copy", disabled: LATER },
+    cp.name,
+    cp.reference,
+    cp.folder,
     { separator: true },
     act.end,
   ];

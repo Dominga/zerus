@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { toSession } from "../../store/catalog";
 import {
-  detailsFromInspection, dialogReducer, menuItemActivates, menuState, renameParts, renameProblem, snapshotOf, tagProblem, terminateCopy,
+  copyState, detailsFromInspection, dialogReducer, menuItemActivates, menuState, renameParts, renameProblem, snapshotOf, tagProblem, terminal, terminateCopy,
 } from "./actions-ui";
 import fixture from "../../../core/tests/fixtures/action-rows.json";
 import type { Details, ViewRow } from "../../types";
@@ -172,7 +172,7 @@ describe("details", () => {
   it("reads the inspection fields of an inspect reply or a state value", () => {
     expect(detailsFromInspection({ run_id: "r", conversation_id: "c", phase: "tool", turn_started: 1.5, interrupt_supported: true, allowed_actions: ["pause", 3], action_reasons: { resume: "busy", x: 1 } }))
       .toEqual({ run_id: "r", conversation_id: "c", auth_required: false, expected_id: "", resume_message_can_send: false, allowed_actions: ["pause"],
-        action_reasons: { resume: "busy" }, interrupt_supported: true, turn_started: 1.5, phase: "tool" });
+        action_reasons: { resume: "busy" }, interrupt_supported: true, turn_started: 1.5, phase: "tool", cwd: "", terminal_supported: null, terminal_attach_supported: null });
     expect(detailsFromInspection(null)).toBeUndefined();
     expect(detailsFromInspection([1])).toBeUndefined();
   });
@@ -249,5 +249,57 @@ describe("menus from hgs rows as the core projects them", () => {
     expect(m.change.enabled).toBe(false);
     expect(m.rename).toBe(true);
     expect(m.end).toMatchObject({ label: "Forget saved session…", enabled: false, reason: "Forgetting sessions arrives in a later version." });
+  });
+});
+
+describe("terminal", () => {
+  it("is never offered for deepseek", () => {
+    expect(terminal(row({ agent: "deepseek", terminal_supported: true, terminal_reported: true }), details({ terminal_supported: true }))).toBe(false);
+    expect(terminal(row({ agent: "dsh", terminal_supported: true }))).toBe(false);
+  });
+  it("follows the row for other agents and lets the details win", () => {
+    expect(terminal(row({ terminal_supported: true }))).toBe(true);
+    expect(terminal(row({ terminal_supported: false }))).toBe(false);
+    expect(terminal(row({ terminal_supported: false }), details({ terminal_supported: true }))).toBe(true);
+    expect(terminal(row({ terminal_supported: true }), details({ terminal_supported: false }))).toBe(false);
+    expect(terminal(row({ terminal_supported: true }), details({ terminal_supported: null }))).toBe(true);
+  });
+  it("reads the attach support first for opencode, details before the row", () => {
+    const oc = (extra: Partial<ViewRow>) => row({ agent: "opencode", ...extra });
+    expect(terminal(oc({ terminal_attach_supported: true, terminal_attach_reported: true }))).toBe(true);
+    expect(terminal(oc({ terminal_attach_supported: true, terminal_attach_reported: true }), details({ terminal_attach_supported: false }))).toBe(false);
+    expect(terminal(oc({ terminal_attach_supported: false, terminal_attach_reported: true, terminal_supported: true, terminal_reported: true }))).toBe(false);
+    expect(terminal(oc({}), details({ terminal_attach_supported: true }))).toBe(true);
+  });
+  it("gives an opencode row without a reported value no terminal", () => {
+    expect(terminal(row({ agent: "opencode", terminal_supported: true }))).toBe(false);
+    expect(terminal(row({ agent: "opencode", terminal_supported: true, terminal_reported: true }))).toBe(true);
+    expect(terminal(row({ agent: "opencode" }), details({ terminal_supported: true }))).toBe(true);
+  });
+});
+
+describe("copyState", () => {
+  it("offers connect for a terminal row and restore for an archived one", () => {
+    expect(copyState(row({ terminal_supported: true }), true).command).toEqual({ label: "Copy connect command", enabled: true });
+    expect(copyState(row({ terminal_supported: false }), true).command).toEqual({ label: "Copy connect command", enabled: false });
+    expect(copyState(row({ state: "archived", archive_id: "a1", terminal_supported: false }), true).command).toEqual({ label: "Copy restore command", enabled: true });
+  });
+  it("needs an archive id for an archived row", () => {
+    expect(copyState(row({ state: "archived", terminal_supported: true }), true).command.enabled).toBe(false);
+  });
+  it("copies the name always and the reference only online with a run id", () => {
+    expect(copyState(row(), false).reference).toBe(false);
+    expect(copyState(row({ run_id: undefined }), true).reference).toBe(false);
+    expect(copyState(row(), true).reference).toBe(true);
+  });
+  it("copies the details folder first, else the row's, and is off when empty", () => {
+    expect(copyState(row({ cwd: "/w/row" }), true).folder).toEqual({ enabled: true, path: "/w/row" });
+    expect(copyState(row({ cwd: "/w/row" }), true, details({ cwd: "/w/detail" })).folder.path).toBe("/w/detail");
+    expect(copyState(row({ cwd: "/w/row" }), true, details({ cwd: "" })).folder.path).toBe("/w/row");
+    expect(copyState(row(), true).folder).toEqual({ enabled: false, path: "" });
+  });
+  it("reads the inspection cwd and terminal flags", () => {
+    expect(detailsFromInspection({ cwd: "/w/x", terminal_supported: false, terminal_attach_supported: true }))
+      .toMatchObject({ cwd: "/w/x", terminal_supported: false, terminal_attach_supported: true });
   });
 });

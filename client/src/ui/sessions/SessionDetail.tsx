@@ -2,11 +2,11 @@ import { For, Show, createMemo } from "solid-js";
 import { Icon } from "../lib/icons";
 import { ActivityView, columnStyle } from "./Activity";
 import { AgentBadge, MachineBadge, statusOf, folderOf } from "./SessionCard";
-import { selected, setMenu, subagentOpen, toast, type MenuEntry } from "../../store/ui";
+import { selected, setMenu, subagentOpen, type MenuEntry } from "../../store/ui";
 import { activity } from "../../store/session";
 import { computerOffline } from "../../store/catalog";
-import { detailsFor, type Followed } from "../../store/actions";
-import { actionEntries } from "./ActionDialogs";
+import { copy, detailsFor, followedFor } from "../../store/actions";
+import { actionEntries, copyEntries } from "./ActionDialogs";
 
 // The session header and its Activity, after design/webui SessionDetail. The
 // composer, Terminal, Processes and the side panel move in with later phases;
@@ -27,31 +27,23 @@ function EmptyDetail() {
   );
 }
 
-const copy = (text: string, what: string) => {
-  void navigator.clipboard?.writeText(text).then(() => toast("Copied", what), () => toast("Not copied", "The clipboard is unavailable"));
-};
-
 function Header() {
   const s = () => selected()!;
   const tone = () => (statusOf(s()) === "attention" ? "attention" : statusOf(s()));
   // Details come from the followed session's Activity state value; the store
   // inspects only once that subscription answered without one.
-  const followed = (): Followed => {
-    const mine = activity.target()?.id === s().key;
-    const value = mine ? activity.summary() : undefined;
-    return { value, settled: mine && (value !== undefined || activity.loaded() || activity.ended() || !!activity.error()) };
-  };
-  const details = createMemo(() => detailsFor(s(), !computerOffline(s().computer), followed()));
+  const details = createMemo(() => detailsFor(s(), !computerOffline(s().computer), followedFor(s().key)));
   const act = createMemo(() => actionEntries(s(), details()));
+  const cp = createMemo(() => copyEntries(s(), details()));
   const actions = (): MenuEntry[] => [
     { label: "Open folder", icon: "folder-open", disabled: true },
     { label: "Open shell in session folder", icon: "square-terminal", disabled: true },
-    { label: "Copy session name", icon: "copy", action: () => copy(s().name, "The session name is on the clipboard") },
+    { label: "Copy session name", icon: "copy", action: () => { void copy(s().name); } },
     { separator: true },
     act().rename,
     { label: "Fork session…", icon: "git-fork", disabled: true },
     { separator: true },
-    { label: "Copy connect command", icon: "link", disabled: true },
+    cp().command,
     act().change,
     ...(act().stop.disabled ? [] : [act().stop]),
     act().markRead,
@@ -76,7 +68,7 @@ function Header() {
           onClick={() => act().change.action()}><Icon name={act().change.icon!} size={16} /></button>
         <button class="icon-btn" data-tip="Open session folder in file manager" disabled><Icon name="folder-open" size={16} /></button>
         <button class="icon-btn" data-tip="Open shell in session folder" disabled><Icon name="square-terminal" size={16} /></button>
-        <button class="icon-btn" data-tip="Copy session name" onClick={() => copy(s().name, "The session name is on the clipboard")}><Icon name="copy" size={15} /></button>
+        <button class="icon-btn" data-tip="Copy session name" onClick={() => { void copy(s().name); }}><Icon name="copy" size={15} /></button>
         <button class="icon-btn" data-tip="Clear session" disabled><Icon name="clear" size={15} /></button>
         <button class="icon-btn" data-tip="Session actions" onClick={(e) => setMenu({ x: e.clientX - 200, y: e.clientY + 12, items: actions() })}><Icon name="ellipsis" size={16} /></button>
       </div>

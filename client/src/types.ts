@@ -51,6 +51,12 @@ export interface ViewRow {
   /** The operations the computer reports as allowed; null when it reports none. */
   allowed_actions?: string[] | null;
   action_reasons?: Record<string, string>;
+  /** The raw working directory (`folder` is the name people know the checkout by). */
+  cwd?: string;
+  terminal_supported?: boolean;
+  terminal_reported?: boolean;
+  terminal_attach_supported?: boolean;
+  terminal_attach_reported?: boolean;
 }
 
 export interface RowOut { computer: ComputerId; key: string; row: ViewRow }
@@ -127,6 +133,11 @@ export interface Details {
   turn_started: number;
   /** The inspected phase ("" when not reported). */
   phase: string;
+  /** The session's working directory ("" when not reported). */
+  cwd?: string;
+  /** Null when the inspection does not report it. */
+  terminal_supported?: boolean | null;
+  terminal_attach_supported?: boolean | null;
 }
 
 /** A read mark whose delivery is still pending (client/core `readmarks.rs`). */

@@ -81,8 +81,26 @@ inline bool probe(const QString &program)
 #endif
 }
 
-inline QString locate(QString *error = nullptr)
+// Without PowerShell 7 a shell falls back to Windows PowerShell 5.1, with this
+// advice, instead of failing (owner, 2026-10-28: a clean Windows has only 5.1).
+inline QString upgradeAdvice()
 {
+    return QStringLiteral("PowerShell 7 is not installed, so Windows PowerShell 5.1 opened. "
+                          "Install PowerShell 7 for full support: winget install --id Microsoft.PowerShell --source winget");
+}
+
+inline QString windowsPowerShell()
+{
+    const QString root = qEnvironmentVariable("SystemRoot", QStringLiteral("C:\\Windows"));
+    const QString path = QDir::fromNativeSeparators(root) + QStringLiteral("/System32/WindowsPowerShell/v1.0/powershell.exe");
+    return QFileInfo(path).isFile() ? path : QString();
+}
+
+// PowerShell 7, else Windows PowerShell 5.1 with *legacy set; an explicit
+// HGS_PWSH stays authoritative and never falls back.
+inline QString locate(QString *error = nullptr, bool *legacy = nullptr)
+{
+    if (legacy) *legacy = false;
     QStringList candidates;
     const QString path = QStandardPaths::findExecutable(QStringLiteral("pwsh.exe"));
     if (!path.isEmpty()) candidates << path;
@@ -91,6 +109,12 @@ inline QString locate(QString *error = nullptr)
         if (!folder.isEmpty()) candidates << QDir(folder).filePath(QStringLiteral("PowerShell/7/pwsh.exe"));
     }
     candidates.removeDuplicates();
-    return select(qEnvironmentVariable("HGS_PWSH"), candidates, probe, error);
+    const QString found = select(qEnvironmentVariable("HGS_PWSH"), candidates, probe, error);
+    if (!found.isEmpty() || !qEnvironmentVariable("HGS_PWSH").isEmpty()) return found;
+    const QString fallback = windowsPowerShell();
+    if (fallback.isEmpty()) return {};
+    if (error) error->clear();
+    if (legacy) *legacy = true;
+    return fallback;
 }
 } // namespace PowerShell7

@@ -2,12 +2,15 @@
 
 ## Windows shell policy
 
-Native Windows folder shells, agent installer scripts and the fork update helper
-require PowerShell 7 or newer with `PSEdition=Core`. There is no Windows
-PowerShell 5.1 fallback. Zerus probes the exact executable with profiles disabled.
-`HGS_PWSH` selects an absolute executable path; an invalid explicit override is
-an error, not permission to use a different shell. Without an override, Zerus
-checks PATH and the standard PowerShell 7 installation directories.
+Native Windows folder shells and agent installer scripts prefer PowerShell 7 or
+newer with `PSEdition=Core`. Zerus probes the exact executable with profiles
+disabled. `HGS_PWSH` selects an absolute executable path; an invalid explicit
+override is an error, not permission to use a different shell. Without an
+override, Zerus checks PATH and the standard PowerShell 7 installation
+directories. When none is found, a clean Windows keeps working with Windows
+PowerShell 5.1: the CLI warns on stderr and the desktop shows a notice, both
+recommending `winget install --id Microsoft.PowerShell --source winget`. The
+fork update helper keeps its Windows PowerShell bootstrap.
 The fork update feed remains unset; this does not enable automatic publication.
 
 ## Explicit local WSL connection

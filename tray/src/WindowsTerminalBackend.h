@@ -51,7 +51,8 @@ public:
     // Build the argv of a previously verified PowerShell Core 7+; empty when
     // unavailable. locateShell verifies the executable and reports how to fix it.
     static QStringList shell(const QString &pwsh);
-    static QStringList locateShell(QString *error = nullptr);
+    // Windows PowerShell 5.1 when PowerShell 7 is missing; *legacy says so.
+    static QStringList locateShell(QString *error = nullptr, bool *legacy = nullptr);
 
 private:
     // Starts Windows Terminal unless the mode is console; otherwise, or when it

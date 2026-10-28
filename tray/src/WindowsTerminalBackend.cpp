@@ -98,9 +98,13 @@ QStringList WindowsTerminalBackend::shell(const QString &pwsh)
     return {};
 }
 
-QStringList WindowsTerminalBackend::locateShell(QString *error)
+QStringList WindowsTerminalBackend::locateShell(QString *error, bool *legacy)
 {
-    return shell(PowerShell7::locate(error));
+    bool old = false;
+    const QString program = PowerShell7::locate(error, &old);
+    if (legacy) *legacy = old;
+    if (program.isEmpty()) return {};
+    return old ? QStringList{program, QStringLiteral("-NoLogo")} : shell(program);
 }
 
 bool WindowsTerminalBackend::open(const QString &command, QString *error)
@@ -127,12 +131,16 @@ bool WindowsTerminalBackend::openShell(const QString &directory, QString *error)
         return false;
     }
     const QString folder = MachinePlatform::native(directory, MachinePlatform::Style::Windows);
-    const QStringList command = locateShell(error);
+    bool legacy = false;
+    const QStringList command = locateShell(error, &legacy);
     if (command.isEmpty()) return false;
-    if (startTerminal(shellArguments(m_mode, folder, command), QStringLiteral("this folder"),
-                      QStringLiteral("the shell")))
-        return true;
-    return startConsoleHost(title({folder}), command.first(), command.mid(1), error, folder);
+    const bool started = startTerminal(shellArguments(m_mode, folder, command), QStringLiteral("this folder"),
+                                       QStringLiteral("the shell"))
+        || startConsoleHost(title({folder}), command.first(), command.mid(1), error, folder);
+    // Windows PowerShell 5.1 opened: the advice to install PowerShell 7 follows any other.
+    if (started && legacy)
+        m_advisory = m_advisory.isEmpty() ? PowerShell7::upgradeAdvice() : m_advisory + QLatin1Char(' ') + PowerShell7::upgradeAdvice();
+    return started;
 }
 
 bool WindowsTerminalBackend::startTerminal(const QStringList &arguments, const QString &refused, const QString &what)

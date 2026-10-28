@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::actions::{Exit, Invocation};
+use crate::machine::MachineMeta;
 use crate::ComputerId;
 
 /// Where the newest policy known is kept between runs (Qt's key).
@@ -115,6 +116,15 @@ pub fn answer(exit: Exit) -> Result<Map<String, Value>, String> {
     }
 }
 
+/// Runs the call with its reply bounded: a peer that sends more than the
+/// limit is cut off rather than read to the end.
+pub fn call(hgs: &std::path::Path, call: &Call) -> Result<Map<String, Value>, String> {
+    match crate::run::run_limited(hgs, &invocation(call), &[], MAX_REPLY_BYTES) {
+        Ok(exit) => answer(exit),
+        Err(_) => Err("Invalid recovery response".into()),
+    }
+}
+
 /// What the caller does.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
@@ -171,6 +181,9 @@ pub struct RecoverySync {
     save_error: String,
     saves: u64,
     next: u64,
+    /// This computer's machine card arrived: until then nothing is read or
+    /// written anywhere, so a control console never touches itself.
+    known: bool,
 }
 
 impl RecoverySync {
@@ -192,6 +205,7 @@ impl RecoverySync {
             save_error: String::new(),
             saves: 0,
             next: 0,
+            known: false,
         }
     }
 
@@ -330,9 +344,10 @@ impl RecoverySync {
         }
     }
 
-    /// Reads every machine, unless a read or save is under way.
+    /// Reads every machine, unless a read or save is under way or this
+    /// computer is not known yet.
     pub fn refresh(&mut self) -> Vec<Effect> {
-        if self.busy() {
+        if self.busy() || !self.known {
             return Vec::new();
         }
         self.hosts()
@@ -344,7 +359,7 @@ impl RecoverySync {
     /// Saves `policy`, edited from `base`, to one reachable machine; the
     /// next reads copy it to the rest.
     pub fn save(&mut self, policy: Map<String, Value>, base: &Map<String, Value>) -> Vec<Effect> {
-        if self.busy() {
+        if self.busy() || !self.known {
             self.save_error = "Wait for synchronization to finish before saving.".into();
             return Vec::new();
         }
@@ -436,6 +451,32 @@ impl RecoverySync {
             .map(|host| self.send(host, Op::Sync, policy.clone()))
             .collect()
     }
+}
+
+/// One period of the service, as SessionsWindow drives Qt's RecoverySync:
+/// nothing until this computer's machine card is known; then whether it runs
+/// agents (setLocalSessions, before the peers), whether Machines offers to
+/// enable them, the peers (setPeers), and, when `due` (Qt's 15 s timer), a
+/// read of every machine.
+pub fn tick(
+    sync: &mut RecoverySync,
+    card: Option<&MachineMeta>,
+    peers: Option<Vec<String>>,
+    due: bool,
+) -> Vec<Effect> {
+    let Some(card) = card else {
+        return Vec::new();
+    };
+    sync.known = true;
+    let mut effects = sync.set_local_sessions(card.local_sessions.unwrap_or(true));
+    sync.set_local_sessions_offered(crate::launch::can_enable_local_sessions(card));
+    if let Some(peers) = peers {
+        effects.extend(sync.set_peers(peers));
+    }
+    if due {
+        effects.extend(sync.refresh());
+    }
+    effects
 }
 
 /// The page's form: the switch, each class's choice, the session limit's

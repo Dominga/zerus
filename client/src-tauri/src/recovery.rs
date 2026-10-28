@@ -1,37 +1,39 @@
 //! Automatic recovery's shared policy (`zerus_client_core::recovery_settings`):
-//! a background service, as Qt's RecoverySync is. It reads every machine
-//! every 15 seconds, follows the peers and whether this computer runs
-//! agents, copies the newest policy to machines behind it, and sends
+//! a background service, as Qt's RecoverySync is. Once a second it follows
+//! this computer's machine card and the peers; every 15 seconds, as Qt's
+//! timer, it reads every machine. Nothing is read or written before the card
+//! says whether this computer runs agents, and a replay never drives the CLI.
+//! The newest policy is copied to machines behind it; each answer sends
 //! `recovery-changed` with the page's view. Calls run on their own threads.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use zerus_client_core::recovery_settings::{
-    answer, form, invocation, policy, Effect, Form, RecoverySync, REFRESH, SHARED_POLICY_KEY,
+    self, form, policy, tick, Call, Effect, Form, RecoverySync, REFRESH, SHARED_POLICY_KEY,
 };
 use zerus_client_core::{default_hgs, ComputerId};
 
 use crate::commands::AppState;
 use crate::settings::Store;
 
-/// The service's state: the shared policy and the policy the page loaded
-/// its form from (Qt's `base`).
+/// How often the service looks at the fleet.
+const FOLLOW: Duration = Duration::from_secs(1);
+
+/// The service's state.
 pub struct Recovery(Arc<Inner>);
 
 struct Inner {
     sync: Mutex<RecoverySync>,
-    base: Mutex<Map<String, Value>>,
+    /// A replay without an explicit CLI: nothing is read or written.
+    blocked: bool,
 }
 
 impl Inner {
     fn sync(&self) -> MutexGuard<'_, RecoverySync> {
         self.sync.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn base(&self) -> MutexGuard<'_, Map<String, Value>> {
-        self.base.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -48,52 +50,78 @@ fn view(sync: &RecoverySync) -> Value {
     })
 }
 
-/// Starts the service: the newest policy kept from before, then a read of
-/// every machine now and every 15 seconds.
+/// Whether the service may read and write machines: never in a replay
+/// without an explicit CLI (actions::blocked), as for read marks.
+fn allowed(blocked: bool) -> Result<(), String> {
+    if blocked {
+        Err("Automatic recovery is not synchronized in a replay.".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// Starts the service from the newest policy kept from before. Its first
+/// look at the fleet comes a second later, and its first timed read 15 s
+/// later, as Qt's timer; a replay starts nothing.
 pub fn start(app: &AppHandle) -> Recovery {
     let stored = app.state::<Store>().0.text(SHARED_POLICY_KEY);
     let inner = Arc::new(Inner {
         sync: Mutex::new(RecoverySync::new(&stored)),
-        base: Mutex::new(Map::new()),
+        blocked: crate::actions::blocked(),
     });
-    let (handle, service) = (app.clone(), Arc::clone(&inner));
-    let started = std::thread::Builder::new()
-        .name("recovery-sync".into())
-        .spawn(move || loop {
-            tick(&handle, &service);
-            std::thread::sleep(REFRESH);
-        });
-    if let Err(error) = started {
-        eprintln!("zerus-client: automatic recovery settings: {error}");
+    if !inner.blocked {
+        let (handle, service) = (app.clone(), Arc::clone(&inner));
+        let periods = (REFRESH.as_secs() / FOLLOW.as_secs()).max(1);
+        let started = std::thread::Builder::new()
+            .name("recovery-sync".into())
+            .spawn(move || {
+                let mut second = 0u64;
+                loop {
+                    std::thread::sleep(FOLLOW);
+                    second += 1;
+                    step(&handle, &service, second.is_multiple_of(periods));
+                }
+            });
+        if let Err(error) = started {
+            eprintln!("zerus-client: automatic recovery settings: {error}");
+        }
     }
     Recovery(inner)
 }
 
-/// One period: the peers and local sessions as the fleet has them now, then
-/// a read of every machine.
-fn tick(app: &AppHandle, inner: &Arc<Inner>) {
+/// One look at the fleet: this computer's card and the peers, and a read
+/// of every machine when `due`.
+fn step(app: &AppHandle, inner: &Arc<Inner>, due: bool) {
     let state = app.state::<AppState>();
-    let peers = state.peers();
-    let local = state
-        .pump()
-        .fleet()
-        .into_iter()
-        .find(|entry| entry.computer == ComputerId::local());
-    let mut effects = Vec::new();
-    {
+    let card = state.pump().machine(&ComputerId::local());
+    let peers = state.peers().map(|peers| peers.into_iter().collect());
+    let store = app.state::<Store>();
+    let calls = {
         let mut sync = inner.sync();
-        if let Some(local) = local {
-            effects.extend(sync.set_local_sessions(local.local_sessions));
-            // Machines offers to enable local sessions on a control console.
-            sync.set_local_sessions_offered(!local.local_sessions);
-        }
-        if let Some(peers) = peers {
-            effects.extend(sync.set_peers(peers.into_iter().collect()));
-        }
-        effects.extend(sync.refresh());
+        let effects = tick(&mut sync, card.as_ref(), peers, due);
+        settle(&store, &sync, effects)
+    };
+    if due || !calls.is_empty() {
+        changed(app, inner);
     }
-    run(app, inner, effects);
-    changed(app, inner);
+    spawn(app, inner, calls);
+}
+
+/// Applies the effects that change the store under the service's lock: the
+/// newest policy known now is what is kept, so a slower thread never stores
+/// an older one. Returns the calls to run.
+fn settle(store: &Store, sync: &RecoverySync, effects: Vec<Effect>) -> Vec<Call> {
+    let mut calls = Vec::new();
+    for effect in effects {
+        match effect {
+            Effect::Call(call) => calls.push(call),
+            Effect::Persist(_) => {
+                let newest = Value::Object(sync.envelope().clone()).to_string();
+                let _ = store.0.set(SHARED_POLICY_KEY, json!(newest));
+            }
+        }
+    }
+    calls
 }
 
 fn changed(app: &AppHandle, inner: &Arc<Inner>) {
@@ -101,25 +129,37 @@ fn changed(app: &AppHandle, inner: &Arc<Inner>) {
     let _ = app.emit("recovery-changed", view);
 }
 
-/// Runs what the service asked for; the caller sends the view after.
-fn run(app: &AppHandle, inner: &Arc<Inner>, effects: Vec<Effect>) {
-    for effect in effects {
-        match effect {
-            Effect::Call(call) => {
-                let (app, inner) = (app.clone(), Arc::clone(inner));
-                std::thread::spawn(move || {
-                    let reply = answer(zerus_client_core::run::run(
-                        &default_hgs(),
-                        &invocation(&call),
-                    ));
-                    let next = inner.sync().answered(call.id, reply);
-                    run(&app, &inner, next);
-                    changed(&app, &inner);
-                });
-            }
-            Effect::Persist(text) => {
-                let _ = app.state::<Store>().0.set(SHARED_POLICY_KEY, json!(text));
-            }
+/// Feeds one answer and runs what follows.
+fn answered(
+    app: &AppHandle,
+    inner: &Arc<Inner>,
+    id: u64,
+    reply: Result<Map<String, Value>, String>,
+) {
+    let store = app.state::<Store>();
+    let calls = {
+        let mut sync = inner.sync();
+        let effects = sync.answered(id, reply);
+        settle(&store, &sync, effects)
+    };
+    spawn(app, inner, calls);
+    changed(app, inner);
+}
+
+/// Runs each call on a thread of its own; a thread that cannot start
+/// answers its call as failed, so nothing stays pending for good.
+fn spawn(app: &AppHandle, inner: &Arc<Inner>, calls: Vec<Call>) {
+    for call in calls {
+        let id = call.id;
+        let (handle, service) = (app.clone(), Arc::clone(inner));
+        let started = std::thread::Builder::new()
+            .name("recovery-call".into())
+            .spawn(move || {
+                let reply = recovery_settings::call(&default_hgs(), &call);
+                answered(&handle, &service, call.id, reply);
+            });
+        if let Err(error) = started {
+            answered(app, inner, id, Err(format!("Could not start hgs: {error}")));
         }
     }
 }
@@ -130,37 +170,84 @@ pub fn recovery_view(recovery: State<'_, Recovery>) -> Value {
     view(&recovery.0.sync())
 }
 
-/// The form for the newest policy, which becomes the base a save is
-/// checked against (RecoverySettings::load); null before any policy.
+/// The form for the newest policy and that policy (`base`), which the page
+/// keeps with the form and hands back to Save (RecoverySettings::load);
+/// both null before any policy.
 #[tauri::command]
 pub fn recovery_load(recovery: State<'_, Recovery>) -> Value {
     let envelope = recovery.0.sync().envelope().clone();
     let loaded = form(&envelope);
-    *recovery.0.base() = envelope;
-    json!({ "form": loaded })
+    let base = loaded.as_ref().map(|_| Value::Object(envelope));
+    json!({ "form": loaded, "base": base })
 }
 
 /// Save recovery settings: the form's delays checked as Qt checks them,
-/// then the policy sent on the loaded base. Answers the view and Qt's text
-/// when the form is refused.
+/// then the policy sent on the base the form was loaded with. Answers the
+/// view, Qt's text when the form is refused, and whether it was sent.
 #[tauri::command(async)]
-pub fn recovery_save(app: AppHandle, recovery: State<'_, Recovery>, form: Form) -> Value {
-    let base = recovery.0.base().clone();
-    let built = policy(&base, &form);
-    let (effects, message) = match built {
-        Err(message) => (Vec::new(), Some(message)),
-        Ok(policy) => (recovery.0.sync().save(policy, &base), None),
+pub fn recovery_save(
+    app: AppHandle,
+    recovery: State<'_, Recovery>,
+    form: Form,
+    base: Map<String, Value>,
+) -> Result<Value, String> {
+    allowed(recovery.0.blocked)?;
+    let store = app.state::<Store>();
+    let (calls, message, view) = {
+        let mut sync = recovery.0.sync();
+        let (effects, message) = match policy(&base, &form) {
+            Err(message) => (Vec::new(), Some(message)),
+            Ok(policy) => (sync.save(policy, &base), None),
+        };
+        (settle(&store, &sync, effects), message, view(&sync))
     };
-    let sent = !effects.is_empty();
-    let view = view(&recovery.0.sync());
-    run(&app, &recovery.0, effects);
-    json!({ "view": view, "message": message, "sent": sent })
+    let sent = !calls.is_empty();
+    spawn(&app, &recovery.0, calls);
+    Ok(json!({ "view": view, "message": message, "sent": sent }))
 }
 
-/// Reload: every machine read again.
+/// Reload, and opening the section: every machine read again.
 #[tauri::command(async)]
-pub fn recovery_reload(app: AppHandle, recovery: State<'_, Recovery>) -> Value {
-    let effects = recovery.0.sync().refresh();
-    run(&app, &recovery.0, effects);
-    view(&recovery.0.sync())
+pub fn recovery_reload(app: AppHandle, recovery: State<'_, Recovery>) -> Result<Value, String> {
+    allowed(recovery.0.blocked)?;
+    let store = app.state::<Store>();
+    let (calls, view) = {
+        let mut sync = recovery.0.sync();
+        let effects = sync.refresh();
+        (settle(&store, &sync, effects), view(&sync))
+    };
+    spawn(&app, &recovery.0, calls);
+    Ok(view)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_replay_neither_reloads_nor_saves() {
+        assert!(allowed(true).is_err());
+        assert!(allowed(false).is_ok());
+    }
+
+    #[test]
+    fn the_stored_policy_is_the_newest_at_the_time_it_is_written() {
+        let dir =
+            std::env::temp_dir().join(format!("zerus-recovery-settle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store(zerus_client_core::settings::Settings::open(
+            dir.join("settings.json"),
+            None,
+        ));
+        let newest = json!({"order": [9, "w"], "policy": {"revision": 9}});
+        let sync = RecoverySync::new(&newest.to_string());
+        // A slower thread's Persist carries an older policy; the newest is kept.
+        let older = json!({"order": [8, "w"], "policy": {"revision": 8}}).to_string();
+        let calls = settle(&store, &sync, vec![Effect::Persist(older)]);
+        assert!(calls.is_empty());
+        assert_eq!(store.0.text(SHARED_POLICY_KEY), newest.to_string());
+        assert!(store.0.flush_within(Duration::from_secs(5)));
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

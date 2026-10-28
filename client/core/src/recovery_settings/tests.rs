@@ -18,6 +18,21 @@ fn envelope(policy: &Map<String, Value>) -> Map<String, Value> {
     map(json!({"order": [policy["revision"], policy["writer"]], "policy": policy}))
 }
 
+/// This computer's card: it runs agents unless `local_sessions` says not.
+fn card(local_sessions: Option<bool>) -> MachineMeta {
+    MachineMeta {
+        local_sessions,
+        ..MachineMeta::default()
+    }
+}
+
+/// A sync whose computer is known, as after the fleet's first listing.
+fn known(stored: &str) -> RecoverySync {
+    let mut sync = RecoverySync::new(stored);
+    assert!(tick(&mut sync, Some(&card(None)), None, false).is_empty());
+    sync
+}
+
 fn calls(effects: &[Effect]) -> Vec<Call> {
     effects
         .iter()
@@ -74,7 +89,7 @@ fn an_offline_peer_catches_up_and_a_newer_peer_wins() {
         offline: vec!["mac".into()],
         persisted: Vec::new(),
     };
-    let mut sync = RecoverySync::new("");
+    let mut sync = known("");
     let effects = sync.set_peers(vec!["mac".into()]);
     assert_eq!(calls(&effects).len(), 2);
     machines.run(&mut sync, effects);
@@ -169,7 +184,7 @@ fn delays_follow_qts_rule() {
 
 #[test]
 fn a_save_goes_to_one_reachable_machine_and_reports_its_failure() {
-    let mut sync = RecoverySync::new(&Value::Object(envelope(&latest())).to_string());
+    let mut sync = known(&Value::Object(envelope(&latest())).to_string());
     assert_eq!(sync.envelope()["order"], json!([4, "local-writer"]));
     let base = sync.envelope().clone();
     let effects = sync.save(latest(), &base);
@@ -192,7 +207,7 @@ fn a_save_goes_to_one_reachable_machine_and_reports_its_failure() {
 
     // A control-only computer saves to a reachable peer, and without one cannot.
     let mut control = RecoverySync::new(&Value::Object(envelope(&latest())).to_string());
-    let effects = control.set_local_sessions(false);
+    let effects = tick(&mut control, Some(&card(Some(false))), None, true);
     assert!(effects.is_empty());
     assert_eq!(
         control.status(),
@@ -221,7 +236,7 @@ fn a_save_goes_to_one_reachable_machine_and_reports_its_failure() {
 
 #[test]
 fn an_older_hgs_is_named_and_a_stored_policy_must_be_whole() {
-    let mut sync = RecoverySync::new(r#"{"order": [1], "policy": {}}"#);
+    let mut sync = known(r#"{"order": [1], "policy": {}}"#);
     assert!(sync.envelope().is_empty());
     assert!(form(sync.envelope()).is_none());
     let call = calls(&sync.refresh()).remove(0);
@@ -297,4 +312,119 @@ fn invocation_of(op: Op) -> Invocation {
         op,
         data: Map::new(),
     })
+}
+
+#[test]
+fn nothing_is_read_or_written_before_this_computer_is_known() {
+    // The seeded policy is newer than anything a console holds.
+    let stored = Value::Object(envelope(&latest())).to_string();
+    let mut sync = RecoverySync::new(&stored);
+    assert!(sync.refresh().is_empty());
+    assert!(sync.save(latest(), &envelope(&latest())).is_empty());
+    assert!(tick(&mut sync, None, Some(vec!["mac".into()]), true).is_empty());
+    // A control console: its first known tick reads only the peers, and
+    // never syncs to itself (Qt's controlOnlyComputerKeepsRecoveryOnRemoteMachines).
+    let effects = tick(
+        &mut sync,
+        Some(&card(Some(false))),
+        Some(vec!["mac".into()]),
+        true,
+    );
+    let read = calls(&effects);
+    assert_eq!(
+        read.iter()
+            .map(|call| call.host.as_str())
+            .collect::<Vec<_>>(),
+        ["mac"]
+    );
+    let mut older = latest();
+    older.insert("revision".into(), json!(1));
+    let next = sync.answered(read[0].id, Ok(envelope(&older)));
+    let synced = calls(&next);
+    assert_eq!(
+        synced
+            .iter()
+            .map(|call| (call.host.as_str(), call.op))
+            .collect::<Vec<_>>(),
+        [("mac", Op::Sync)]
+    );
+    assert!(calls(&tick(
+        &mut sync,
+        Some(&card(Some(false))),
+        Some(vec!["mac".into()]),
+        true
+    ))
+    .iter()
+    .all(|call| !call.host.is_empty()));
+}
+
+#[test]
+fn a_console_alone_names_machines_as_qt_does() {
+    let mut sync = RecoverySync::new("");
+    tick(&mut sync, Some(&card(Some(false))), Some(Vec::new()), true);
+    // Qt's controlOnlyComputerAloneExplainsRecovery: no session host offered.
+    assert_eq!(
+        sync.status(),
+        "Add a remote machine in Machines to configure automatic recovery; this computer runs no agents."
+    );
+    let windows = MachineMeta {
+        local_sessions: Some(false),
+        platform: Some("windows".into()),
+        local_host: Some(crate::machine::LocalHost {
+            state: Some("stopped".into()),
+            ..Default::default()
+        }),
+        ..MachineMeta::default()
+    };
+    tick(&mut sync, Some(&windows), Some(Vec::new()), true);
+    assert!(sync
+        .status()
+        .starts_with("To configure automatic recovery, enable local sessions"));
+}
+
+#[test]
+fn a_host_whose_read_failed_is_not_synced_and_equal_orders_are_left() {
+    let mut sync = known("");
+    let effects = sync.set_peers(vec!["mac".into(), "pc".into()]);
+    let mut older = latest();
+    older.insert("revision".into(), json!(1));
+    for call in calls(&effects) {
+        let copy = match call.host.as_str() {
+            "mac" => older.clone(),
+            _ => latest(),
+        };
+        sync.answered(call.id, Ok(envelope(&copy)));
+    }
+    // mac held an older copy and was synced once; now its read fails.
+    let effects = sync.refresh();
+    let mut followups = Vec::new();
+    for call in calls(&effects) {
+        let reply = match call.host.as_str() {
+            "mac" => {
+                Err("Recovery request timed out. Reload its state before trying again.".to_owned())
+            }
+            _ => Ok(envelope(&latest())),
+        };
+        followups.extend(calls(&sync.answered(call.id, reply)));
+    }
+    // No sync to mac (its read failed), none to the hosts at the same order.
+    assert!(followups.is_empty(), "{followups:?}");
+}
+
+#[test]
+fn a_timed_out_save_is_not_sent_again() {
+    let mut sync = known(&Value::Object(envelope(&latest())).to_string());
+    let base = sync.envelope().clone();
+    let set = calls(&sync.save(latest(), &base)).remove(0);
+    let after = sync.answered(
+        set.id,
+        Err("Recovery request timed out. Reload its state before trying again.".into()),
+    );
+    assert!(calls(&after).iter().all(|call| call.op != Op::Set));
+    assert_eq!(
+        sync.error(),
+        "Recovery request timed out. Reload its state before trying again."
+    );
+    let read = sync.refresh();
+    assert!(calls(&read).iter().all(|call| call.op == Op::Get));
 }

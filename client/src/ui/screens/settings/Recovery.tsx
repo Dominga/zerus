@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { inTauri } from "../../../bridge";
 import { setPage } from "../../../store/ui";
 import { Check, Group, Lines, SectionHead, Select, Status } from "./ui";
+import { saveOutcome } from "./recovery-wait";
 
 // Settings > Automatic recovery (tray/src/RecoverySettings.h) as the
 // approved mockup lays it out (design/webui/src/screens/settings/Recovery.tsx).
@@ -23,48 +24,63 @@ const RULES = [
 ];
 const HELP = "Each positive number is a delay before the next attempt. End with −1 to stop, or 0 to repeat the previous delay forever.\nExample: 300, 0 retries every 5 minutes until stopped.\n\nNew messages and Stop cancel recovery. Sign-in, balance, other quota and context errors require your action.";
 
+/** Opening the section reads every machine again (Qt's openRecovery). */
+export function refreshRecovery() {
+  if (inTauri()) void invoke("recovery_reload").catch(() => {});
+}
+
 export function RecoverySection() {
   const [view, setView] = createSignal<RecoveryView | undefined>();
   const [form, setForm] = createStore<Form>({ enabled: false, rules: {}, session_limit_mode: "reset", delays: {} });
   const [loaded, setLoaded] = createSignal(false);
   const [saving, setSaving] = createSignal(false);
   const [message, setMessage] = createSignal("");
-  // The form holds edits the policy has not taken yet; and the answered
+  // The form holds edits the policy has not taken yet; the policy it was
+  // loaded from (Qt's base), which Save is checked against; and the answered
   // saves when ours was sent, so its answer is told from a read's.
   let dirty = false;
+  let base: Record<string, unknown> | null = null;
   let savesBefore = 0;
 
   const load = async () => {
-    const answer = await invoke<{ form: Form | null }>("recovery_load").catch(() => ({ form: null }));
-    if (dirty || saving() || !answer.form) return;
+    const answer = await invoke<{ form: Form | null; base: Record<string, unknown> | null }>("recovery_load")
+      .catch(() => ({ form: null, base: null }));
+    // An edit made while the policy was read keeps the form and its base.
+    if (dirty || saving() || !answer.form || !answer.base) return;
     setForm(reconcile(answer.form));
+    base = answer.base;
     setLoaded(true);
   };
   // RecoverySettings' changed(): the status, a save's outcome, and the
   // newest policy while nothing is being edited.
   const apply = (next: RecoveryView) => {
     setView(next);
-    if (saving() && next.saves > savesBefore && !next.busy) {
+    const outcome = saving() ? saveOutcome(savesBefore, next) : { done: false as const };
+    if (outcome.done) {
       setSaving(false);
-      if (next.error) setMessage(next.error);
-      else { dirty = false; setMessage("Saved."); }
+      if (outcome.saved) dirty = false;
+      setMessage(outcome.message);
     }
     if (!dirty && !saving()) void load();
   };
   const edit = (change: () => void) => { dirty = true; change(); };
   const save = async () => {
+    if (!base) return;
     savesBefore = view()?.saves ?? 0;
-    const answer = await invoke<{ view: RecoveryView; message: string | null; sent: boolean }>("recovery_save", { form: unwrap(form) });
+    const answer = await invoke<{ view: RecoveryView; message: string | null; sent: boolean }>("recovery_save", { form: unwrap(form), base })
+      .catch((error) => { setMessage(String(error)); return undefined; });
+    if (!answer) return;
     if (answer.message) { setMessage(answer.message); return; }
     if (!answer.sent) { setView(answer.view); setMessage(answer.view.error); return; }
     setSaving(true);
     // The answer may already have arrived as an event: read it again.
     apply(await invoke<RecoveryView>("recovery_view"));
   };
+  // Reload keeps the message line, as Qt's does.
   const reload = async () => {
     dirty = false;
-    setMessage("");
-    apply(await invoke<RecoveryView>("recovery_reload"));
+    const next = await invoke<RecoveryView>("recovery_reload").catch((error) => { setMessage(String(error)); return undefined; });
+    if (next) apply(next); else void load();
   };
 
   onMount(() => {

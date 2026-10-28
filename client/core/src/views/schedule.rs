@@ -129,6 +129,16 @@ impl AccountsState {
         self.start_catalogs(hosts, now, force)
     }
 
+    /// One host's `account ls` for New session (`NewSessionDialog::loadAccounts`):
+    /// it starts now (marked running) when never read, read thirty seconds ago
+    /// or more, or `force`d; a running one is shared. No other host changes.
+    /// True when it starts.
+    pub fn ensure_catalog(&mut self, host: &ComputerId, now: u64, force: bool) -> bool {
+        !self
+            .start_catalogs(std::slice::from_ref(host), now, force)
+            .is_empty()
+    }
+
     /// Each newly listed host once, even before Accounts is opened. `hosts`
     /// is the current host list: others are forgotten.
     pub fn warm(&mut self, hosts: &[ComputerId], now: u64) -> Vec<ComputerId> {
@@ -370,6 +380,49 @@ mod tests {
             "all are past thirty seconds"
         );
         assert!(s.reading());
+    }
+
+    // G3: New session reads one computer's catalog (NewSessionDialog::loadAccounts)
+    // on the hub: due after thirty seconds or when forced, a running one shared,
+    // and no other host is touched.
+    #[test]
+    fn one_computers_catalog_starts_when_due_and_leaves_the_others() {
+        let (local, studio) = (ComputerId::local(), ComputerId::from("studio"));
+        let mut s = AccountsState::default();
+        s.warm(&[local.clone(), studio.clone()], 0);
+        s.finish_catalog(
+            &local,
+            Ok(json!({"profiles": []})),
+            1,
+            std::slice::from_ref(&local),
+        );
+        assert!(
+            !s.ensure_catalog(&studio, 5, true),
+            "studio's warm-up still runs"
+        );
+        assert!(
+            !s.ensure_catalog(&local, 10_000, false),
+            "read ten seconds ago"
+        );
+        assert!(s.ensure_catalog(&local, 10_000, true), "forced");
+        assert!(s.catalogs[&local].pending && !s.catalogs[&local].queued);
+        assert!(
+            !s.ensure_catalog(&local, 50_000, false),
+            "a running read is shared"
+        );
+        s.finish_catalog(
+            &local,
+            Ok(json!({"profiles": []})),
+            50_001,
+            std::slice::from_ref(&local),
+        );
+        assert!(
+            s.ensure_catalog(&local, 80_001, false),
+            "due after thirty seconds"
+        );
+        let mac = ComputerId::from("mac");
+        assert!(s.ensure_catalog(&mac, 0, false), "never read");
+        assert!(s.catalogs.contains_key(&studio), "the others are kept");
     }
 
     #[test]

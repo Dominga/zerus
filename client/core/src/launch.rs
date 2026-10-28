@@ -203,6 +203,28 @@ pub fn other_windows_session(local: &MachineMeta, remote: bool, own: Option<u64>
     host.windows_session.filter(|session| *session != own)
 }
 
+/// This process's Windows session (`ProcessIdToSessionId`), the `own` of
+/// [`other_windows_session`]; None on other systems or when Windows does not
+/// say. A process never changes its session, so it is read once.
+pub fn own_windows_session() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        static SESSION: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+        *SESSION.get_or_init(|| {
+            use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+            use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+            let mut id = 0u32;
+            // SAFETY: `id` is a valid out pointer for the call's duration.
+            let ok = unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut id) } != 0;
+            ok.then_some(u64::from(id))
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// The warning before a launch into another Windows session.
 pub fn warning_text(session: u64) -> String {
     format!(
@@ -259,6 +281,294 @@ pub fn directories(exit: Exit) -> Result<Value, String> {
         },
         exit => Err(crate::actions::failure_detail(exit)),
     }
+}
+
+fn at_host(computer: &ComputerId) -> Vec<String> {
+    computer
+        .alias()
+        .map(|alias| format!("@{alias}"))
+        .into_iter()
+        .collect()
+}
+
+fn call(args: Vec<String>, seconds: u64) -> Invocation {
+    Invocation {
+        args,
+        stdin: None,
+        timeout: Duration::from_secs(seconds),
+        request_id: None,
+    }
+}
+
+/// A JSON object reply, None when it is not one (`objectReply`).
+fn object_reply(stdout: &[u8]) -> Option<Value> {
+    serde_json::from_slice::<Value>(stdout)
+        .ok()
+        .filter(Value::is_object)
+}
+
+/// What `hgs --help` lists when it creates folders.
+pub const DIRECTORY_CREATE_MARKER: &str = "dirs --create <path>";
+pub const PARENT_UNCONFIRMED: &str =
+    "The computer did not confirm the parent folder. Open it before creating a folder.";
+pub const FOLDER_CREATION_UNCONFIRMED: &str =
+    "Folder creation could not be confirmed. Open the path to check it before trying again.";
+
+fn directory_seconds(computer: &ComputerId) -> u64 {
+    if computer.is_local() {
+        5
+    } else {
+        15
+    }
+}
+
+/// `hgs [@host] --help`, 5 s here and 15 s on a peer: New folder probes the
+/// selected CLI first, so an older one never takes `dirs --create` for an
+/// agent launch.
+pub fn directory_create_probe(computer: &ComputerId) -> Invocation {
+    let mut args = at_host(computer);
+    args.push("--help".into());
+    call(args, directory_seconds(computer))
+}
+
+/// The probe's answer: Ok when the computer creates folders.
+pub fn directory_create_supported(exit: Exit, computer: &ComputerId) -> Result<(), String> {
+    match exit {
+        Exit::Code {
+            code: 0, stdout, ..
+        } if String::from_utf8_lossy(&stdout).contains(DIRECTORY_CREATE_MARKER) => Ok(()),
+        Exit::Code { code: 0, .. } => Err(format!(
+            "Update hgs on {} to create folders. You can still choose existing folders.",
+            computer.alias().unwrap_or("this computer")
+        )),
+        exit => Err(crate::actions::failure_detail(exit)),
+    }
+}
+
+/// The folder a new folder goes into and its name, split at the last `/`
+/// (on Windows `\` counts as one): `.` without a separator, `/` for a
+/// folder at the root.
+pub fn directory_parent(path: &str, style: Style) -> (String, String) {
+    let requested = match style {
+        Style::Windows => path.replace('\\', "/"),
+        Style::Posix => path.to_owned(),
+    };
+    match requested.rfind('/') {
+        None => (".".into(), requested),
+        Some(0) => ("/".into(), requested[1..].to_owned()),
+        Some(at) => (requested[..at].to_owned(), requested[at + 1..].to_owned()),
+    }
+}
+
+/// The parent's listing ([`directories_invocation`] of the parent, read
+/// with [`run_directories`]) pins its canonical path before anything is
+/// created: an absolute `path` with a `directories` array.
+pub fn directory_parent_confirmed(exit: Exit, style: Style) -> Result<String, String> {
+    let stdout = match exit {
+        Exit::Code {
+            code: 0, stdout, ..
+        } => stdout,
+        exit => return Err(crate::actions::failure_detail(exit)),
+    };
+    let data = object_reply(&stdout).unwrap_or(Value::Null);
+    let parent = text(&data, "path");
+    if paths::absolute(parent, style) && data.get("directories").is_some_and(Value::is_array) {
+        Ok(parent.to_owned())
+    } else {
+        Err(PARENT_UNCONFIRMED.into())
+    }
+}
+
+/// `hgs [@host] dirs --create PATH --request-id ID`, 5 s here and 15 s on a
+/// peer; one fresh identity per click.
+pub fn directory_create_invocation(
+    computer: &ComputerId,
+    path: &str,
+    request_id: &str,
+) -> Invocation {
+    let mut args = at_host(computer);
+    args.extend(["dirs", "--create", path, "--request-id", request_id].map(str::to_owned));
+    call(args, directory_seconds(computer))
+}
+
+/// The creation's receipt: `created` for this request and requested path, an
+/// absolute `path` that is the pinned parent's `leaf`, under that parent.
+/// A failure keeps its detail and asks to check the folder; nothing is sent
+/// again.
+pub fn directory_created(
+    exit: Exit,
+    request_id: &str,
+    path: &str,
+    parent: &str,
+    leaf: &str,
+    style: Style,
+) -> Result<Value, String> {
+    let stdout = match exit {
+        Exit::Code {
+            code: 0, stdout, ..
+        } => stdout,
+        exit => {
+            return Err(format!(
+                "{}\nOpen the path to check whether the folder exists before trying again.",
+                crate::actions::failure_detail(exit)
+            ))
+        }
+    };
+    let data = object_reply(&stdout).unwrap_or(Value::Null);
+    let confirmed = text(&data, "path");
+    let expected = paths::clean(&format!("{parent}/{leaf}"), style);
+    if text(&data, "status") == "created"
+        && data.get("request_id").and_then(Value::as_str) == Some(request_id)
+        && data.get("requested_path").and_then(Value::as_str) == Some(path)
+        && paths::absolute(confirmed, style)
+        && paths::same(confirmed, &expected, style)
+        && paths::same(text(&data, "parent"), parent, style)
+    {
+        Ok(data)
+    } else {
+        Err(FOLDER_CREATION_UNCONFIRMED.into())
+    }
+}
+
+/// The largest OpenCode model catalog: hgs keeps it within 4 MiB.
+pub const OPENCODE_CATALOG_LIMIT: usize = 5 * 1024 * 1024;
+pub const OPENCODE_TOO_LARGE: &str = "The OpenCode model catalog is too large";
+pub const INVALID_OPENCODE_CATALOG: &str = "Invalid OpenCode model catalog response";
+pub const INVALID_FAVORITE: &str = "Invalid favorite response";
+pub const INVALID_ACCOUNTS: &str = "Invalid account catalog response";
+
+/// `hgs [@host] account models native-opencode --location FOLDER --json`,
+/// 30 s: the folder's model catalog, read only when the picker opens.
+pub fn opencode_models_invocation(computer: &ComputerId, location: &str) -> Invocation {
+    let mut args = at_host(computer);
+    args.extend(
+        [
+            "account",
+            "models",
+            "native-opencode",
+            "--location",
+            location,
+            "--json",
+        ]
+        .map(str::to_owned),
+    );
+    call(args, 30)
+}
+
+/// Runs the model catalog read bounded at [`OPENCODE_CATALOG_LIMIT`]: a
+/// larger answer is not a catalog.
+pub fn run_opencode_models(hgs: &Path, invocation: &Invocation) -> Result<Value, String> {
+    match crate::run::run_limited(hgs, invocation, &[], OPENCODE_CATALOG_LIMIT) {
+        Ok(exit) => opencode_models(exit),
+        Err(_) => Err(OPENCODE_TOO_LARGE.into()),
+    }
+}
+
+/// The model catalog: any JSON object (the view reads it within its bounds).
+pub fn opencode_models(exit: Exit) -> Result<Value, String> {
+    match exit {
+        Exit::Code {
+            code: 0, stdout, ..
+        } => object_reply(&stdout).ok_or_else(|| INVALID_OPENCODE_CATALOG.into()),
+        exit => Err(crate::actions::failure_detail(exit)),
+    }
+}
+
+/// `hgs [@host] account favorite native-opencode --model VALUE --favorite
+/// on|off --request-id ID --json`, 25 s. hgs answers a repeated identity from
+/// its receipt, so every star click sends a fresh one.
+pub fn opencode_favorite_invocation(
+    computer: &ComputerId,
+    value: &str,
+    favorite: bool,
+    request_id: &str,
+) -> Invocation {
+    let mut args = at_host(computer);
+    args.extend(
+        [
+            "account",
+            "favorite",
+            "native-opencode",
+            "--model",
+            value,
+            "--favorite",
+            if favorite { "on" } else { "off" },
+            "--request-id",
+            request_id,
+            "--json",
+        ]
+        .map(str::to_owned),
+    );
+    call(args, 25)
+}
+
+/// The favorite's receipt must name this exact change: `applied`, the same
+/// request identity, model and favorite.
+pub fn opencode_favorite(
+    exit: Exit,
+    request_id: &str,
+    value: &str,
+    favorite: bool,
+) -> Result<Value, String> {
+    let stdout = match exit {
+        Exit::Code {
+            code: 0, stdout, ..
+        } => stdout,
+        exit => return Err(crate::actions::failure_detail(exit)),
+    };
+    match object_reply(&stdout) {
+        Some(receipt)
+            if text(&receipt, "status") == "applied"
+                && receipt.get("request_id").and_then(Value::as_str) == Some(request_id)
+                && receipt.get("model").and_then(Value::as_str) == Some(value)
+                && receipt.get("favorite").and_then(Value::as_bool) == Some(favorite) =>
+        {
+            Ok(receipt)
+        }
+        _ => Err(INVALID_FAVORITE.into()),
+    }
+}
+
+/// `hgs [@host] account start native-opencode --json`, 60 s: starts the
+/// shared OpenCode service when none is registered and alive. Only the
+/// explicit Start OpenCode on {computer} sends it.
+pub fn opencode_start_invocation(computer: &ComputerId) -> Invocation {
+    let mut args = at_host(computer);
+    args.extend(["account", "start", "native-opencode", "--json"].map(str::to_owned));
+    call(args, 60)
+}
+
+/// The start's answer, the computer's catalog: a JSON object.
+pub fn opencode_started(exit: Exit) -> Result<Value, String> {
+    match exit {
+        Exit::Code {
+            code: 0, stdout, ..
+        } => object_reply(&stdout).ok_or_else(|| INVALID_ACCOUNTS.into()),
+        exit => Err(crate::actions::failure_detail(exit)),
+    }
+}
+
+/// `OpenCodeModels::updateText`.
+pub fn opencode_update_text(computer: &str) -> String {
+    format!("Update Zerus on {computer} to search all models and star favorites.")
+}
+
+/// `OpenCodeModels::errorText`: an older CLI answers `account models` or
+/// `account favorite` with its usage, which reads as [`opencode_update_text`].
+/// hgs prefixes its errors with `hgs: ` and a remote answer can follow ssh
+/// warnings, so the first 16 lines of the first 4000 characters are read.
+pub fn opencode_error_text(error: &str, computer: &str) -> String {
+    let head: String = error.chars().take(4000).collect();
+    for line in head.split('\n').take(16) {
+        let mut line = line.trim();
+        while let Some(rest) = line.strip_prefix("hgs: ") {
+            line = rest.trim();
+        }
+        if line.starts_with("usage: hgs account") {
+            return opencode_update_text(computer);
+        }
+    }
+    error.to_owned()
 }
 
 /// `"work-"` and the first eight hex digits of a fresh UUID (`QUuid::Id128`).
@@ -692,15 +1002,18 @@ pub struct Form {
     /// Auto is the preferred worktree choice.
     pub auto_preferred: bool,
     /// [`automatic_worktree_available`].
+    #[serde(default)]
     pub automatic_available: bool,
     /// The generated worktree's creation failed.
     pub creation_failed: bool,
     /// [`project_worktree`] of the folder.
+    #[serde(default)]
     pub project_worktree: bool,
     /// The project is the untouched Inbox.
     pub implicit_inbox: bool,
     /// The generated branch and the generated worktree's path.
     pub branch: String,
+    #[serde(default)]
     pub automatic_path: String,
     pub style: Style,
     pub stage: Stage,

@@ -13,6 +13,13 @@
 //! pulls it again. A replay reads only with an explicit `ZERUS_CLIENT_HGS`,
 //! as the actions do.
 //!
+//! New session reads one computer's accounts on the same hub
+//! (`launch_accounts`): its `account ls` and the limits of its profiles go
+//! through the hub's catalogs and usage queue, never a second store. While a
+//! dialog shows that computer, each of its replies emits
+//! `launch-accounts-changed` with the computer, and the dialog pulls its rows
+//! again (`launch_account_rows`), as Qt's dialog follows the usage store.
+//!
 //! The one-second ticker does no per-profile work: it compares the fleet and
 //! steps the account reads only when the fleet changed, a catalog arrived, an
 //! account screen showed or the earliest due time passed. A view is
@@ -21,15 +28,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::Value;
 use tauri::State;
+use zerus_client_core::launch;
 use zerus_client_core::reads::{self, Read, ReadError};
 use zerus_client_core::views::accounts::{
-    self, AccountsDisplay, AccountsState, AccountsView, UsageRef,
+    self, Account, AccountsDisplay, AccountsState, AccountsView, Profile, UsageRef,
 };
 use zerus_client_core::views::machines::{MachinesState, MachinesView};
 use zerus_client_core::views::projects::{ProjectsView, SwarmState};
@@ -52,6 +60,29 @@ pub type Notify = Arc<dyn Fn(Screen) + Send + Sync>;
 pub type FleetSource = Arc<dyn Fn() -> Vec<FleetEntry> + Send + Sync>;
 /// Milliseconds since the hub started.
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
+/// Told when a reply for New session's computer was filed.
+pub type LaunchNotify = Arc<dyn Fn(&ComputerId) + Send + Sync>;
+
+/// The most profiles of one computer New session lists.
+const LAUNCH_PROFILES: usize = 256;
+/// How long `launch_accounts` waits for a catalog read: its 25 s limit and
+/// the read helper's margin.
+const LAUNCH_WAIT: Duration = Duration::from_secs(40);
+
+/// New session's account rows of one computer (`NewSessionDialog::loadAccounts`
+/// and `updateAccounts`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct LaunchAccounts {
+    /// A catalog or a failure arrived for this computer.
+    pub loaded: bool,
+    /// The last read's failure; the rows stay the last good catalog's.
+    pub error: Option<String>,
+    /// The catalog's raw rows, at most 256, for the OpenCode fields.
+    pub profiles: Vec<Value>,
+    /// `views::accounts::group` over its launchable profiles, each member with
+    /// the dialog's usage and each group with its members' best.
+    pub groups: Vec<Account>,
+}
 
 #[derive(Default)]
 struct Hub {
@@ -71,6 +102,8 @@ struct Hub {
     stale: bool,
     /// When the next catalog or inspect falls due, while an account screen shows.
     next_due: Option<u64>,
+    /// The computer New session last read the accounts of.
+    launch: Option<ComputerId>,
     #[cfg(test)]
     work: Work,
 }
@@ -129,6 +162,9 @@ struct Shared {
     notify: Notify,
     fleet: FleetSource,
     clock: Clock,
+    /// Woken whenever an `account ls` reply is filed.
+    catalog_done: Condvar,
+    launch_notify: OnceLock<LaunchNotify>,
 }
 
 /// The managed state of the screen commands; clones share it.
@@ -156,6 +192,14 @@ fn account_hosts(fleet: &[FleetEntry]) -> Vec<ComputerId> {
 
 fn message(reply: Result<Value, ReadError>) -> Result<Value, String> {
     reply.map_err(|error| error.to_string())
+}
+
+/// An `account ls` reply: a bad one reads as Qt's text (`requestAccounts`).
+fn catalog_message(reply: Result<Value, ReadError>) -> Result<Value, String> {
+    reply.map_err(|error| match error {
+        ReadError::Invalid { .. } => launch::INVALID_ACCOUNTS.to_owned(),
+        error => error.to_string(),
+    })
 }
 
 /// Records a view the webview now holds for the visible screens that show it.
@@ -186,7 +230,14 @@ impl Screens {
             notify,
             fleet,
             clock,
+            catalog_done: Condvar::new(),
+            launch_notify: OnceLock::new(),
         }))
+    }
+
+    /// Where New session hears of its computer's replies; set once.
+    pub fn on_launch_change(&self, notify: LaunchNotify) {
+        let _ = self.0.launch_notify.set(notify);
     }
 
     /// The app's hub: `default_hgs()` on Tauri's blocking pool, the fleet from
@@ -199,6 +250,7 @@ impl Screens {
             var("ZERUS_CLIENT_HGS").as_deref(),
         );
         let started = Instant::now();
+        let launch_app = app.clone();
         let screens = Self::new(
             zerus_client_core::default_hgs(),
             allowed,
@@ -211,6 +263,9 @@ impl Screens {
             Arc::new(move || pump.fleet()),
             Arc::new(move || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
         );
+        screens.on_launch_change(Arc::new(move |computer: &ComputerId| {
+            let _ = launch_app.emit("launch-accounts-changed", computer.0.clone());
+        }));
         screens.start_ticker();
         screens
     }
@@ -325,17 +380,22 @@ impl Screens {
     fn read(&self, job: Run) {
         let hgs = &self.0.hgs;
         let local = ComputerId::local();
+        let mut heard: Option<ComputerId> = None;
         let runs = match job {
             Run::Catalog(host) => {
-                let reply = message(reads::read(hgs, &host, &Read::Accounts));
+                let reply = catalog_message(reads::read(hgs, &host, &Read::Accounts));
                 let now = self.now();
                 let mut hub = self.lock();
                 let hosts = account_hosts(&hub.fleet);
                 let again = hub.accounts.finish_catalog(&host, reply, now, &hosts);
                 hub.stale = true;
                 hub.dirty.extend(ACCOUNT_SCREENS);
+                if hub.launch.as_ref() == Some(&host) {
+                    heard = Some(host.clone());
+                }
                 let mut runs: Vec<Run> = again.then_some(Run::Catalog(host)).into_iter().collect();
                 runs.extend(self.accounts_due(&mut hub, now, false));
+                self.0.catalog_done.notify_all();
                 runs
             }
             Run::Usage(r) => {
@@ -343,6 +403,9 @@ impl Screens {
                     reads::read(hgs, &r.host, &Read::AccountUsage { id: r.id.clone() }).ok();
                 let mut hub = self.lock();
                 hub.accounts.finish_usage(&r, reply);
+                if hub.launch.as_ref() == Some(&r.host) {
+                    heard = Some(r.host.clone());
+                }
                 // The profile falls due again five minutes after this attempt.
                 let attempted = hub
                     .accounts
@@ -393,6 +456,9 @@ impl Screens {
         };
         self.run(runs);
         self.publish();
+        if let (Some(computer), Some(notify)) = (heard, self.0.launch_notify.get()) {
+            notify(&computer);
+        }
     }
 
     /// One `screens-changed` per visible screen whose view changed since the
@@ -565,6 +631,136 @@ impl Screens {
         self.machines_answer()
     }
 
+    /// New session's computer: its `account ls` starts when never read, read
+    /// thirty seconds ago or more, or on Refresh; a running one is shared. A
+    /// computer that keeps no accounts is not read.
+    fn launch_start(&self, computer: &ComputerId, refresh: bool) -> Vec<Run> {
+        let now = self.now();
+        let mut hub = self.current();
+        hub.launch = Some(computer.clone());
+        if !account_hosts(&hub.fleet).contains(computer) {
+            return Vec::new();
+        }
+        if hub.accounts.ensure_catalog(computer, now, refresh) {
+            hub.dirty.extend(ACCOUNT_SCREENS);
+            vec![Run::Catalog(computer.clone())]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Waits while the computer's catalog reads, at most [`LAUNCH_WAIT`].
+    fn launch_wait(&self, computer: &ComputerId) {
+        let until = Instant::now() + LAUNCH_WAIT;
+        let mut hub = self.lock();
+        while hub
+            .accounts
+            .catalogs
+            .get(computer)
+            .is_some_and(|slot| slot.pending)
+        {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            hub = self
+                .0
+                .catalog_done
+                .wait_timeout(hub, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    /// The limits of the computer's installed launch profiles
+    /// (`requestUsage`): those not checked within five minutes, all on
+    /// Refresh. Returns the inspects that start now.
+    fn launch_usage(&self, computer: &ComputerId, force: bool) -> Vec<Run> {
+        let now = self.now();
+        let mut hub = self.lock();
+        let Some(entry) = hub
+            .fleet
+            .iter()
+            .find(|entry| &entry.computer == computer)
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        let Some(data) = hub
+            .accounts
+            .catalogs
+            .get(computer)
+            .and_then(|slot| slot.data.clone())
+        else {
+            return Vec::new();
+        };
+        let reachable = accounts::reachable(&entry);
+        for (profile, _) in accounts::host_profiles(&entry, &data, &hub.accounts, &launch::AGENTS) {
+            if profile.installed {
+                let r = UsageRef {
+                    host: profile.host,
+                    id: profile.id,
+                    home: profile.home,
+                    provider: profile.provider,
+                    auth_revision: profile.auth_revision,
+                };
+                hub.accounts.ensure_usage(&r, reachable, now, force);
+            }
+        }
+        hub.dirty.extend(ACCOUNT_SCREENS);
+        hub.dispatch()
+    }
+
+    /// The computer's rows as the hub has them; reads nothing.
+    pub fn launch_rows(&self, computer: &ComputerId) -> LaunchAccounts {
+        let hub = self.lock();
+        let Some(entry) = hub.fleet.iter().find(|entry| &entry.computer == computer) else {
+            return LaunchAccounts::default();
+        };
+        let Some(slot) = hub.accounts.catalogs.get(computer) else {
+            return LaunchAccounts::default();
+        };
+        let data = slot.data.as_ref();
+        let profiles: Vec<Value> = data
+            .and_then(|data| data.get("profiles"))
+            .and_then(Value::as_array)
+            .map(|rows| rows.iter().take(LAUNCH_PROFILES).cloned().collect())
+            .unwrap_or_default();
+        let members: Vec<Profile> = data
+            .map(|data| accounts::host_profiles(entry, data, &hub.accounts, &launch::AGENTS))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(profile, _)| profile)
+            .collect();
+        LaunchAccounts {
+            loaded: data.is_some() || slot.error.is_some(),
+            error: slot.error.clone(),
+            profiles,
+            groups: accounts::group(&members),
+        }
+    }
+
+    /// New session's accounts of one computer (`loadAccounts` with
+    /// `requestUsage`): reads its catalog when due or on `refresh` and waits
+    /// for it, then asks for its profiles' limits (forced on `refresh`) and
+    /// answers the rows. Blocks; the limits arrive later.
+    pub fn launch_accounts(
+        &self,
+        computer: &ComputerId,
+        refresh: bool,
+    ) -> Result<LaunchAccounts, String> {
+        if !self.0.allowed {
+            return Err(REPLAY_NEEDS_HGS.into());
+        }
+        let runs = self.launch_start(computer, refresh);
+        self.run(runs);
+        self.launch_wait(computer);
+        let runs = self.launch_usage(computer, refresh);
+        self.run(runs);
+        self.publish();
+        Ok(self.launch_rows(computer))
+    }
+
     /// The Projects view; while it shows, a pull also starts a due poll.
     pub fn projects(&self) -> ProjectsView {
         let run = {
@@ -615,6 +811,28 @@ pub fn projects_view(state: State<'_, Screens>) -> Result<ProjectsView, String> 
     Ok(state.projects())
 }
 
+/// New session's accounts of one computer; `refresh` is its Refresh.
+#[tauri::command]
+pub async fn launch_accounts(
+    state: State<'_, Screens>,
+    computer: String,
+    refresh: bool,
+) -> Result<LaunchAccounts, String> {
+    let screens = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        screens.launch_accounts(&ComputerId(computer), refresh)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// The rows again, after `launch-accounts-changed` or the dialog's minute;
+/// reads nothing.
+#[tauri::command(async)]
+pub fn launch_account_rows(state: State<'_, Screens>, computer: String) -> LaunchAccounts {
+    state.launch_rows(&ComputerId(computer))
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -663,6 +881,17 @@ mod tests {
                         .join(" ")
                 })
                 .collect()
+        }
+    }
+
+    impl Fake {
+        /// Replaces one argv's reply.
+        fn set_reply(&self, argv: &str, reply: Value) {
+            let path = self.dir.join("config.json");
+            let mut config: Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            config["replies"][argv] = reply;
+            std::fs::write(path, config.to_string()).unwrap();
         }
     }
 
@@ -1122,6 +1351,281 @@ mod tests {
             (projects.status.as_str(), projects.status_error),
             (REPLAY_NEEDS_HGS, true)
         );
+    }
+
+    /// An `account ls` reply of the Qt fixture's shape (test_newsessiondialog.cpp).
+    fn launch_catalog(rows: &[(&str, &str, &str)]) -> Value {
+        let profiles: Vec<Value> = rows
+            .iter()
+            .map(|(id, provider, email)| {
+                json!({"id": id, "provider": provider, "label": "Review", "home": format!("/profiles/{id}"),
+                       "installed": true, "is_default": false,
+                       "account_status": {"status": if *provider == "dsh" { "signed_out" } else { "ok" },
+                                          "checked_at": 100.0, "identity": {"email": email}}})
+            })
+            .collect();
+        json!({"profiles": profiles, "revision": "r1"})
+    }
+
+    fn reply(value: &Value) -> Value {
+        json!({ "stdout": value.to_string() })
+    }
+
+    fn inspect(id: &str, provider: &str, email: &str) -> Value {
+        reply(
+            &json!({"id": id, "provider": provider, "home": format!("/profiles/{id}"),
+            "status": if provider == "dsh" { "signed_out" } else { "ok" }, "checked_at": 200.0,
+            "identity": {"email": email}, "windows": [], "balances": []}),
+        )
+    }
+
+    fn launch_replies(duplicates: bool) -> Value {
+        let mut local = vec![
+            ("work", "codex", "shared@example.invalid"),
+            ("claude", "claude", "shared@example.invalid"),
+            ("native-dsh", "dsh", "shared@example.invalid"),
+            ("native-opencode", "opencode", ""),
+        ];
+        if duplicates {
+            local.push(("claude-copy", "claude", "shared@example.invalid"));
+        }
+        let studio = [
+            ("mac-claude", "claude", "mac@example.invalid"),
+            ("native-dsh", "dsh", "mac@example.invalid"),
+        ];
+        let mut replies = json!({
+            "account ls": reply(&launch_catalog(&local)),
+            "@studio account ls": reply(&launch_catalog(&studio)),
+        });
+        for (id, provider, email) in local {
+            replies[format!("account inspect {id} --refresh")] = inspect(id, provider, email);
+        }
+        for (id, provider, email) in studio {
+            replies[format!("@studio account inspect {id} --refresh")] =
+                inspect(id, provider, email);
+        }
+        replies
+    }
+
+    fn members(view: &LaunchAccounts) -> Vec<Vec<String>> {
+        view.groups
+            .iter()
+            .map(|group| group.members.iter().map(|m| m.id.clone()).collect())
+            .collect()
+    }
+
+    // accountAliasesMatchAccountsGroupingAndKeepExactBinding and
+    // chooserAndAccountsPageShowSameAccountsForEachComputer: one computer's
+    // rows group as the Accounts page groups that computer's profiles.
+    #[test]
+    fn launch_accounts_group_one_computer_as_the_accounts_page_does() {
+        let h = build(launch_replies(true), true, true);
+        h.set_fleet(vec![local(), peer("studio", "live", 0)]);
+        let view = h
+            .screens
+            .launch_accounts(&ComputerId::local(), false)
+            .unwrap();
+        assert!(view.loaded && view.error.is_none());
+        assert_eq!(view.profiles.len(), 5, "the raw rows");
+        assert_eq!(
+            members(&view),
+            [
+                vec!["work"],
+                vec!["claude", "claude-copy"],
+                vec!["native-dsh"],
+                vec!["native-opencode"]
+            ]
+        );
+        eventually("the limits arrived", || {
+            let rows = h.screens.launch_rows(&ComputerId::local());
+            rows.groups
+                .iter()
+                .all(|g| g.usage.checked_at == Some(200.0) || g.provider == "opencode")
+        });
+        h.screens.set_visible(Screen::Accounts, true);
+        eventually("the Accounts page read everything", || {
+            let page = h.screens.accounts(false);
+            page.pending == 0 && !page.busy && page.snapshot
+        });
+        let page = h.screens.accounts(false);
+        for computer in [ComputerId::local(), ComputerId::from("studio")] {
+            let view = h.screens.launch_accounts(&computer, false).unwrap();
+            let shown: BTreeSet<String> = view.groups.iter().map(|g| g.key.clone()).collect();
+            let listed: BTreeSet<String> = page
+                .accounts
+                .iter()
+                .filter(|a| a.members.iter().any(|m| m.host == computer))
+                .map(|a| a.key.clone())
+                .collect();
+            assert_eq!(shown, listed, "{computer:?}");
+            assert!(view
+                .groups
+                .iter()
+                .flat_map(|g| &g.members)
+                .all(|m| m.host == computer));
+        }
+    }
+
+    // localWindowsHidesDeepSeekAndOpenCode.
+    #[test]
+    fn the_local_windows_computer_offers_neither_deepseek_nor_opencode() {
+        let h = build(launch_replies(false), true, true);
+        let mut windows = local();
+        windows.platform = Some("windows".into());
+        h.set_fleet(vec![windows, peer("studio", "live", 0)]);
+        let here = h
+            .screens
+            .launch_accounts(&ComputerId::local(), false)
+            .unwrap();
+        let providers: Vec<&str> = here.groups.iter().map(|g| g.provider.as_str()).collect();
+        assert_eq!(providers, ["codex", "claude"]);
+        assert_eq!(
+            here.profiles.len(),
+            4,
+            "the raw rows stay for the OpenCode fields"
+        );
+        let studio = h
+            .screens
+            .launch_accounts(&ComputerId::from("studio"), false)
+            .unwrap();
+        assert!(studio.groups.iter().any(|g| g.provider == "dsh"));
+        assert!(h
+            .fake
+            .calls()
+            .iter()
+            .all(|call| !call.contains("inspect native-opencode")
+                && !call.starts_with("account inspect native-dsh")));
+    }
+
+    // emptyComputerCatalogOffersOnlyShell.
+    #[test]
+    fn an_empty_catalog_gives_no_rows_and_reads_no_limits() {
+        let h = build(
+            json!({"account ls": reply(&json!({"profiles": [], "revision": "r"}))}),
+            true,
+            true,
+        );
+        let view = h
+            .screens
+            .launch_accounts(&ComputerId::local(), false)
+            .unwrap();
+        assert!(view.loaded && view.groups.is_empty() && view.profiles.is_empty());
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(h.fake.calls().iter().all(|call| !call.contains("inspect")));
+    }
+
+    #[test]
+    fn a_running_catalog_read_is_shared_and_refresh_reads_again() {
+        let h = harness(launch_replies(false), true);
+        let local_id = ComputerId::local();
+        let runs = h.screens.launch_start(&local_id, false);
+        assert_eq!(runs.len(), 1, "never read");
+        h.screens.run(runs);
+        assert!(
+            h.screens.launch_start(&local_id, false).is_empty(),
+            "the running read is shared"
+        );
+        h.drain();
+        assert!(
+            h.screens.launch_start(&local_id, false).is_empty(),
+            "the hub has it"
+        );
+        let usage = h.screens.launch_usage(&local_id, false);
+        assert_eq!(usage.len(), 2, "two inspects at once");
+        h.screens.run(usage);
+        h.drain();
+        assert_eq!(h.count("account inspect work --refresh"), 1);
+        assert!(
+            h.screens.launch_usage(&local_id, false).is_empty(),
+            "limits checked within five minutes"
+        );
+        assert_eq!(
+            h.screens.launch_usage(&local_id, true).len(),
+            2,
+            "Refresh forces them"
+        );
+        h.drain();
+        let runs = h.screens.launch_start(&local_id, true);
+        assert_eq!(runs.len(), 1, "Refresh reads the catalog again");
+        h.screens.run(runs);
+        h.drain();
+        assert_eq!(h.count("account ls"), 2);
+        h.at(31_000);
+        let runs = h.screens.launch_start(&local_id, false);
+        assert_eq!(
+            runs.len(),
+            1,
+            "after thirty seconds a new dialog reads again"
+        );
+        // Rows only read nothing.
+        h.screens.launch_rows(&local_id);
+        assert_eq!(h.queued(), 0);
+        // A computer that keeps no accounts is not read.
+        assert!(h
+            .screens
+            .launch_start(&ComputerId::from("gone"), false)
+            .is_empty());
+        assert!(!h.screens.launch_rows(&ComputerId::from("gone")).loaded);
+    }
+
+    #[test]
+    fn a_bad_catalog_reads_as_qts_text_and_keeps_the_last_rows() {
+        let h = build(launch_replies(false), true, true);
+        let first = h
+            .screens
+            .launch_accounts(&ComputerId::local(), false)
+            .unwrap();
+        assert_eq!(first.groups.len(), 4);
+        h.fake.set_reply("account ls", json!({"stdout": "[]"}));
+        let failed = h
+            .screens
+            .launch_accounts(&ComputerId::local(), true)
+            .unwrap();
+        assert_eq!(
+            failed.error.as_deref(),
+            Some("Invalid account catalog response")
+        );
+        assert_eq!(failed.groups.len(), 4, "the last good catalog's rows");
+        assert!(failed.loaded);
+    }
+
+    #[test]
+    fn the_dialogs_computer_hears_of_its_catalog_and_limits() {
+        let h = harness(launch_replies(false), true);
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        {
+            let heard = Arc::clone(&heard);
+            h.screens
+                .on_launch_change(Arc::new(move |computer: &ComputerId| {
+                    heard.lock().unwrap().push(computer.clone());
+                }));
+        }
+        h.set_fleet(vec![local(), peer("studio", "live", 0)]);
+        let runs = h.screens.launch_start(&ComputerId::from("studio"), false);
+        h.screens.run(runs);
+        h.drain();
+        let runs = h.screens.launch_usage(&ComputerId::from("studio"), false);
+        h.screens.run(runs);
+        h.drain();
+        let heard = heard.lock().unwrap().clone();
+        assert!(heard.len() >= 3, "the catalog and both inspects: {heard:?}");
+        assert!(
+            heard
+                .iter()
+                .all(|computer| computer == &ComputerId::from("studio")),
+            "only the dialog's computer"
+        );
+    }
+
+    #[test]
+    fn a_replay_without_hgs_reads_no_launch_accounts() {
+        let h = harness(json!({}), false);
+        assert_eq!(
+            h.screens.launch_accounts(&ComputerId::local(), true),
+            Err(REPLAY_NEEDS_HGS.to_owned())
+        );
+        assert_eq!(h.queued(), 0);
+        assert!(h.fake.calls().is_empty());
     }
 
     fn eventually(what: &str, done: impl Fn() -> bool) {

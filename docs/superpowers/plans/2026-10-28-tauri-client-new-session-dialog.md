@@ -262,13 +262,15 @@ client/README.md                             "New session" and its smoke run (Ta
 **Files:**
 - Create `client/src-tauri/src/newsession.rs`.
 - Modify:
-  - `client/src-tauri/src/lib.rs`: register the commands; manage `NewSession` with the worktree `Catalogs` loaded from `<data_dir>/worktree-snapshots.json` (`worktree-snapshots-replay.json` in replay mode, as `actions::marks_file`);
+  - `client/src-tauri/src/lib.rs`: register the commands; manage `NewSession` with the worktree `Catalogs` loaded from `<data_dir>/worktree-snapshots.json` (`worktree-snapshots-replay.json` in replay mode, as `actions::marks_file`). `data_dir` is not on `integrate/client-core-2`, so until the rebase `NewSession` keeps its snapshots in memory (`NewSession::tauri(None)`); it takes the file as a parameter;
   - `client/src-tauri/src/screens.rs`: `launch_accounts`;
   - `client/src-tauri/Cargo.toml` and `Cargo.lock`: `tauri-plugin-dialog` (ruling D3);
   - `client/src/types.ts`, `client/src/bridge.ts`. In the browser build every command answers a failure, as the copy commands do.
 - Core, additive, with tests:
   - G1-G4;
-  - in `client/core/src/launch.rs`, beside `directories_invocation`: the OpenCode calls (Q1) and folder creation (Q2). The events stream does not edit `launch.rs`, so there is no collision.
+  - in `client/core/src/launch.rs`, beside `directories_invocation`: the OpenCode calls (Q1) and folder creation (Q2). The events stream does not edit `launch.rs`, so there is no collision;
+  - `AccountsState::ensure_catalog` (`views/schedule.rs`), one computer's `account ls` on the hub (G3);
+  - `tests/support/fake_hgs_creation.py`: two-word replies (`worktrees create`, `account favorite`), `sleep`, `echo` of a fresh identity and `raw` output.
 
 **Interfaces:**
 
@@ -280,28 +282,29 @@ client/README.md                             "New session" and its smoke run (Ta
     pub verified: Value,             // m_verifiedWorktrees[host\npath], or null
     pub project: Option<launch::Project>,
     pub host: String,                // this computer "" or the alias, as Project folders name it
-    pub catalog_pending: bool,
-}
+}                                    // the form's own catalog_pending is m_catalogRequest
 #[derive(Serialize)] pub struct FormView { pub shown: launch::Shown, pub automatic_available: bool, pub automatic_path: String, pub project_worktree: bool }
 
-#[tauri::command] pub fn new_session_context(state: State<NewSession>) -> Context;      // { branch, own_windows_session, remembered: { agent, accounts, open_terminal } }
+#[tauri::command] pub fn new_session_context() -> Context;      // { branch, own_windows_session, remembered: { agent, accounts, open_terminal } }
 #[tauri::command] pub fn new_session_form(input: FormInput) -> FormView;
 #[tauri::command] pub fn new_session_start(input: FormInput, submitted: bool) -> launch::Start;   // background = true
 #[tauri::command] pub fn new_session_plan(choices: launch::Choices) -> launch::Plan;
 #[tauri::command] pub fn launch_warning(local: MachineMeta, computer: String) -> Option<String>; // warning_text(other_windows_session(..)), own from G4
-#[tauri::command] pub fn repository_fields(url: String, destination: String, style: Style, custom: bool) -> RepositoryFields;
+#[tauri::command] pub fn repository_fields(url: String, destination: String, style: Style, custom: bool, fresh: Option<String>) -> RepositoryFields;
 #[tauri::command] pub fn worktree_snapshot(state: State<NewSession>, computer: String, path: String) -> Value;
 #[tauri::command] pub async fn worktree_catalog(state: State<'_, NewSession>, computer: String, path: String, refresh: bool) -> Result<Value, String>;
 #[tauri::command] pub async fn create_worktree(state: State<'_, NewSession>, computer: String, path: String, common_dir: String, branch: String, base: String, destination: String) -> Result<String, String>;
-#[tauri::command] pub async fn list_directories(computer: String, path: String, hidden: bool) -> Result<Value, String>;
-#[tauri::command] pub async fn create_directory(computer: String, path: String) -> Result<Value, String>;
+#[tauri::command] pub async fn list_directories(state: State<'_, NewSession>, computer: String, path: String, hidden: bool) -> Result<Value, String>;
+#[tauri::command] pub async fn create_directory(state: State<'_, NewSession>, computer: String, path: String) -> Result<Value, String>;
 #[tauri::command] pub async fn pick_local_folder(app: AppHandle, start: String) -> Option<String>;
 #[tauri::command] pub fn local_folder_exists(path: String) -> bool;                                         // ProjectsDialog.cpp:530
-#[tauri::command] pub async fn opencode_models(computer: String, folder: String) -> Result<Value, String>;
-#[tauri::command] pub async fn opencode_favorite(computer: String, value: String, favorite: bool) -> Result<Value, String>;
-#[tauri::command] pub async fn opencode_start(computer: String) -> Result<Value, String>;
+#[tauri::command] pub async fn opencode_models(state: State<'_, NewSession>, computer: String, folder: String, name: String) -> Result<Value, String>;
+#[tauri::command] pub async fn opencode_favorite(state: State<'_, NewSession>, computer: String, value: String, favorite: bool, name: String) -> Result<Value, String>;
+#[tauri::command] pub async fn opencode_start(state: State<'_, NewSession>, computer: String) -> Result<Value, String>;
 // screens.rs
 #[tauri::command] pub async fn launch_accounts(state: State<'_, Screens>, computer: String, refresh: bool) -> Result<LaunchAccounts, String>;
+#[tauri::command] pub fn launch_account_rows(state: State<'_, Screens>, computer: String) -> LaunchAccounts;  // reads nothing
+// event "launch-accounts-changed" (payload: the computer)
 ```
 
 Rules:
@@ -319,7 +322,8 @@ Rules:
 - **`repository_fields`** builds a fresh `repository::Clone::new(style, None, None)`. The client never saves a pending clone record (deviation 2).
   - A URL change without a custom destination suggests `{parent}/{suggested_name(url)}` in native form (289-295).
   - The destination splits into parent and name as `editRepositorySource` does (628-639). On Windows `\` reads as `/`; separator 0 gives the parent `/`, and a parent `X:` becomes `X:/`.
-  - It answers `{url, parent, name, destination, suggested, can_submit}`.
+  - With `fresh` (a new computer or style, `syncRepositoryComputer` 608-627) the destination starts in `~` with that folder name, or the URL's suggestion when it is empty; the view then clears its custom flag.
+  - It answers `{url, parent, name, field, destination, suggested, can_submit}`: `field` is the Clone to field's text, `destination` the clone's `PARENT/NAME` that Start and the plan take (767-768).
 - **`worktree_catalog`** ports `requestWorktrees` (1515-1563) over W1:
   - a fresh snapshot (under 30 s, not stale) answers without a call unless `refresh`;
   - reads of the same computer and path in flight share one call;
@@ -335,12 +339,14 @@ Rules:
   The repository's catalogs are invalidated on both outcomes.
 - **`list_directories`** is `directories_invocation`, `run_directories` and `directories`: 5 s here, 15 s on a peer; "Invalid directory response".
 - **`create_directory`** (Q2, `createDirectory` 1810-1870). The core gains `directory_create_invocation` and `directory_created` in `launch.rs`, next to `directories_invocation` and `creation::creation_directory_invocation`:
-  - the canonical parent is pinned before the creation;
+  - first `hgs [@host] --help` must list `dirs --create <path>` (5 s here, 15 s on a peer; HgsClient 1842-1850), else "Update hgs on {computer|this computer} to create folders. You can still choose existing folders.", and nothing is created;
+  - the canonical parent is pinned before the creation (`dirs PARENT`; an unconfirmed one gives "The computer did not confirm the parent folder. Open it before creating a folder.");
   - then `hgs [@host] dirs --create PATH --request-id ID`, 5 s here and 15 s on a peer;
   - the receipt must be `created` with the same `request_id` and `requested_path`, an absolute `path` equal to the cleaned `{parent}/{leaf}` and the same `parent`; otherwise Qt's failure text.
 - **`launch_accounts`** reads one computer, as the dialog does (865-874, 956-963):
-  - It runs that computer's `account ls` on the hub (25 s), unless the hub has it and `refresh` is false. A read already running is shared.
+  - It runs that computer's `account ls` on the hub (25 s) when the hub never read it, read it thirty seconds ago or more (the hub's interval), or on `refresh`, and waits for it. A read already running is shared. Qt's dialog reads on every open; the thirty seconds only share a read the Accounts page just made.
   - It ensures usage for the computer's installed profiles; `refresh` forces it.
+  - `launch_account_rows` answers the rows again and reads nothing. Each catalog or limits reply for the dialog's computer emits `launch-accounts-changed`; the view then pulls the rows, as Qt follows its usage store (340-342).
   - It answers `LaunchAccounts {loaded, error, profiles, groups}`:
     - `profiles`: the raw rows, at most 256, for the OpenCode fields (`model_options`, `model_options_truncated`, `catalog_state`, `catalog_reason`, `installed`, `install_reason`);
     - `groups`: `views::accounts::group` over that computer's launchable profiles only (883-896); each member carries its `Profile` projection with the cached usage (971-978), and each group the best usage of its members (980-988).
@@ -349,7 +355,7 @@ Rules:
   - `account models native-opencode --location F --json`: 30 s; over 5 MiB gives "The OpenCode model catalog is too large", a bad reply "Invalid OpenCode model catalog response";
   - `account favorite native-opencode --model V --favorite on|off --request-id ID --json`: 25 s, one fresh identity per call; the receipt must be `applied` with the same `request_id`, `model` and `favorite`, otherwise "Invalid favorite response";
   - `account start native-opencode --json`: 60 s;
-  - `OpenCodeModels::errorText`'s usage-line rule, read in the first 16 lines of at most 4000 characters, which turns an older CLI's usage text into "Update Zerus on {computer} to search all models and star favorites." (`OpenCodeModels.cpp:148-162`).
+  - `OpenCodeModels::errorText`'s usage-line rule, read in the first 16 lines of at most 4000 characters, which turns an older CLI's usage text into "Update Zerus on {computer} to search all models and star favorites." (`OpenCodeModels.cpp:148-162`). `opencode_models` and `opencode_favorite` apply it with `name`, the computer as the dialog names it (this computer's host name, 416, 451-452).
 - **`pick_local_folder`** opens the system folder dialog titled "Choose a folder" at `start`, or the home folder for `~` or empty (`DirectoryDialog.cpp:40-45`). Ruling D3 applies:
   - It is the official `tauri-plugin-dialog`, opened from Rust only, pinned in `Cargo.toml` and `Cargo.lock`. `integrate/client-webui` already pins it at 2.8.4 for the composer's picker (`fb11c50e`); reuse that pin after the rebase, else add the same.
   - `capabilities/default.json` keeps `core:default` alone: the webview never gets the plugin's JavaScript permission.

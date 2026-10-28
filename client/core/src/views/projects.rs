@@ -47,6 +47,9 @@ pub struct ProjectsView {
     pub unconnected: Vec<String>,
     pub notice: Option<String>,
     pub projects: Vec<Project>,
+    /// The catalog's `swarm_id`, empty before one arrives: New session takes
+    /// a folder's project inference only from this swarm.
+    pub swarm_id: String,
 }
 
 /// The shared catalog's reads so far.
@@ -228,6 +231,7 @@ impl SwarmState {
             unconnected,
             notice,
             projects,
+            swarm_id: text(snapshot, "swarm_id"),
         }
     }
 }
@@ -276,6 +280,22 @@ mod tests {
         );
         assert_eq!(leaf("C:\\Users\\example\\docs"), "docs");
         assert_eq!(leaf("/"), "/");
+    }
+
+    // G2: New session's folder check matches the project inference to this
+    // swarm (SessionsWindow 2922, NewSessionDialog 355-361).
+    #[test]
+    fn the_view_names_its_swarm() {
+        let mut swarm = SwarmState::default();
+        assert_eq!(swarm.view(&peers()).swarm_id, "");
+        swarm.finish(Ok(fixture("swarm.json")));
+        assert_eq!(swarm.view(&peers()).swarm_id, "swarm-1");
+        swarm.finish(Err("hgs did not answer in time".into()));
+        assert_eq!(
+            swarm.view(&peers()).swarm_id,
+            "swarm-1",
+            "the last good catalog's"
+        );
     }
 
     #[test]

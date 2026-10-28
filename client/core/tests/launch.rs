@@ -1276,3 +1276,363 @@ fn the_account_is_remembered_per_computer_and_agent() {
         json!({"": {"codex": "a"}, "box": {"claude": "b"}})
     );
 }
+
+fn ok(value: Value) -> Exit {
+    Exit::Code {
+        code: 0,
+        stdout: value.to_string().into_bytes(),
+        stderr: String::new(),
+    }
+}
+
+fn failed(stderr: &str) -> Exit {
+    Exit::Code {
+        code: 1,
+        stdout: Vec::new(),
+        stderr: stderr.into(),
+    }
+}
+
+// G4: LocalSessionHost::ownWindowsSession, which other_windows_session takes as `own`.
+#[test]
+fn this_process_has_a_windows_session_only_on_windows() {
+    let own = own_windows_session();
+    if cfg!(windows) {
+        assert!(own.is_some());
+    } else {
+        assert_eq!(own, None);
+    }
+    assert_eq!(
+        own_windows_session(),
+        own,
+        "a process never changes its session"
+    );
+}
+
+// Q1: HgsClient::requestOpenCodeModels, requestOpenCodeFavorite and
+// requestAccounts {"start", "native-opencode", "--json"}.
+#[test]
+fn the_opencode_calls_follow_hgs_client() {
+    let mac = ComputerId::from("mac");
+    let models = opencode_models_invocation(&mac, "/workspace/example");
+    assert_eq!(
+        models.args,
+        [
+            "@mac",
+            "account",
+            "models",
+            "native-opencode",
+            "--location",
+            "/workspace/example",
+            "--json"
+        ]
+    );
+    assert_eq!(models.timeout, Duration::from_secs(30));
+    let on = opencode_favorite_invocation(&ComputerId::local(), "fixture/plain", true, "req-1");
+    assert_eq!(
+        on.args,
+        [
+            "account",
+            "favorite",
+            "native-opencode",
+            "--model",
+            "fixture/plain",
+            "--favorite",
+            "on",
+            "--request-id",
+            "req-1",
+            "--json"
+        ]
+    );
+    assert_eq!(on.timeout, Duration::from_secs(25));
+    assert_eq!(
+        opencode_favorite_invocation(&mac, "fixture/plain", false, "req-2").args[..8],
+        [
+            "@mac",
+            "account",
+            "favorite",
+            "native-opencode",
+            "--model",
+            "fixture/plain",
+            "--favorite",
+            "off"
+        ]
+    );
+    let start = opencode_start_invocation(&mac);
+    assert_eq!(
+        start.args,
+        ["@mac", "account", "start", "native-opencode", "--json"]
+    );
+    assert_eq!(start.timeout, Duration::from_secs(60));
+    assert_eq!(
+        opencode_start_invocation(&ComputerId::local()).args,
+        ["account", "start", "native-opencode", "--json"]
+    );
+    assert_eq!(OPENCODE_CATALOG_LIMIT, 5 * 1024 * 1024);
+}
+
+#[test]
+fn the_opencode_answers_follow_qt() {
+    let catalog = json!({"catalog_state": "ready", "model_options": []});
+    assert_eq!(opencode_models(ok(catalog.clone())), Ok(catalog));
+    for bad in [json!([]), json!("x"), json!(1)] {
+        assert_eq!(
+            opencode_models(ok(bad)),
+            Err("Invalid OpenCode model catalog response".into())
+        );
+    }
+    assert_eq!(
+        opencode_models(Exit::Code {
+            code: 0,
+            stdout: b"not json".to_vec(),
+            stderr: String::new()
+        }),
+        Err(INVALID_OPENCODE_CATALOG.into())
+    );
+    assert_eq!(
+        opencode_models(failed(" offline \n")),
+        Err("offline".into())
+    );
+    assert_eq!(
+        OPENCODE_TOO_LARGE,
+        "The OpenCode model catalog is too large"
+    );
+    // The receipt names this exact change.
+    let receipt = json!({"status": "applied", "request_id": "req-1", "model": "fixture/plain", "favorite": true});
+    assert_eq!(
+        opencode_favorite(ok(receipt.clone()), "req-1", "fixture/plain", true),
+        Ok(receipt.clone())
+    );
+    for (key, value) in [
+        ("status", json!("queued")),
+        ("request_id", json!("req-2")),
+        ("model", json!("fixture/other")),
+        ("favorite", json!(false)),
+        ("favorite", json!("on")),
+    ] {
+        let mut changed = receipt.clone();
+        changed[key] = value;
+        assert_eq!(
+            opencode_favorite(ok(changed), "req-1", "fixture/plain", true),
+            Err("Invalid favorite response".into()),
+            "{key}"
+        );
+    }
+    assert_eq!(
+        opencode_favorite(ok(json!([])), "req-1", "fixture/plain", true),
+        Err(INVALID_FAVORITE.into())
+    );
+    assert_eq!(
+        opencode_favorite(
+            failed("Account catalog is busy. Retry after the current operation finishes.\n"),
+            "req-1",
+            "fixture/plain",
+            true
+        ),
+        Err("Account catalog is busy. Retry after the current operation finishes.".into())
+    );
+    // The start answers with the catalog, an object.
+    assert!(opencode_started(ok(json!({"model_options": []}))).is_ok());
+    assert_eq!(
+        opencode_started(ok(json!([]))),
+        Err("Invalid account catalog response".into())
+    );
+    assert_eq!(opencode_started(Exit::TimedOut), Err("timed out".into()));
+}
+
+// OpenCodeModels::errorText (OpenCodeModels.cpp:148-162).
+#[test]
+fn an_older_cli_usage_line_asks_to_update_zerus() {
+    let update = "Update Zerus on mac to search all models and star favorites.";
+    assert_eq!(opencode_update_text("mac"), update);
+    assert_eq!(
+        opencode_error_text(
+            "usage: hgs account ls | add ID --provider codex|claude|kimi --label NAME",
+            "mac"
+        ),
+        update
+    );
+    // hgs prefixes its errors, and ssh warnings can come first.
+    let warned = "Warning: Permanently added 'mac' to the list of known hosts.\nhgs: hgs: usage: hgs account models";
+    assert_eq!(opencode_error_text(warned, "mac"), update);
+    // Only the first 16 lines of the first 4000 characters count.
+    let late = format!("{}usage: hgs account models", "line\n".repeat(16));
+    assert_eq!(opencode_error_text(&late, "mac"), late);
+    let far = format!("{}\nusage: hgs account models", "x".repeat(4000));
+    assert_eq!(opencode_error_text(&far, "mac"), far);
+    assert_eq!(
+        opencode_error_text("Account catalog is busy.", "pc"),
+        "Account catalog is busy."
+    );
+}
+
+// Q2: HgsClient::createDirectory (HgsClient.cpp:1810-1870).
+#[test]
+fn folder_creation_probes_pins_the_parent_and_creates_with_one_identity() {
+    let peer = ComputerId::from("mac");
+    let probe = directory_create_probe(&peer);
+    assert_eq!(probe.args, ["@mac", "--help"]);
+    assert_eq!(probe.timeout, Duration::from_secs(15));
+    assert_eq!(
+        directory_create_probe(&ComputerId::local()).timeout,
+        Duration::from_secs(5)
+    );
+    let help = |text: &str| Exit::Code {
+        code: 0,
+        stdout: text.as_bytes().to_vec(),
+        stderr: String::new(),
+    };
+    assert_eq!(
+        directory_create_supported(help("hgs dirs --create <path> --request-id ID"), &peer),
+        Ok(())
+    );
+    assert_eq!(
+        directory_create_supported(help("usage: hgs dirs PATH"), &peer),
+        Err("Update hgs on mac to create folders. You can still choose existing folders.".into())
+    );
+    assert_eq!(
+        directory_create_supported(help("usage"), &ComputerId::local()),
+        Err(
+            "Update hgs on this computer to create folders. You can still choose existing folders."
+                .into()
+        )
+    );
+    assert_eq!(
+        directory_create_supported(failed("ssh: no route"), &peer),
+        Err("ssh: no route".into())
+    );
+    // The parent of the requested folder, as Qt splits it.
+    assert_eq!(
+        directory_parent("/srv/repo/new", Style::Posix),
+        ("/srv/repo".into(), "new".into())
+    );
+    assert_eq!(
+        directory_parent("/new", Style::Posix),
+        ("/".into(), "new".into())
+    );
+    assert_eq!(
+        directory_parent("new", Style::Posix),
+        (".".into(), "new".into())
+    );
+    assert_eq!(
+        directory_parent("C:\\work\\new", Style::Windows),
+        ("C:/work".into(), "new".into())
+    );
+    assert_eq!(
+        directory_parent("C:\\work\\new", Style::Posix),
+        (".".into(), "C:\\work\\new".into())
+    );
+    // The canonical parent is pinned before anything is created.
+    let parent = directories_invocation(&peer, "/srv/repo", false);
+    assert_eq!(parent.args, ["@mac", "dirs", "/srv/repo"]);
+    assert_eq!(
+        directory_parent_confirmed(
+            ok(json!({"path": "/srv/real", "directories": []})),
+            Style::Posix
+        ),
+        Ok("/srv/real".into())
+    );
+    for bad in [
+        json!({"path": "srv", "directories": []}),
+        json!({"path": "/srv"}),
+        json!([]),
+    ] {
+        assert_eq!(
+            directory_parent_confirmed(ok(bad), Style::Posix),
+            Err(
+                "The computer did not confirm the parent folder. Open it before creating a folder."
+                    .into()
+            )
+        );
+    }
+    assert_eq!(
+        directory_parent_confirmed(failed("gone"), Style::Posix),
+        Err("gone".into())
+    );
+    let create = directory_create_invocation(&peer, "/srv/repo/new", "req-1");
+    assert_eq!(
+        create.args,
+        [
+            "@mac",
+            "dirs",
+            "--create",
+            "/srv/repo/new",
+            "--request-id",
+            "req-1"
+        ]
+    );
+    assert_eq!(create.timeout, Duration::from_secs(15));
+    assert_eq!(
+        directory_create_invocation(&ComputerId::local(), "/r/n", "req-1").timeout,
+        Duration::from_secs(5)
+    );
+}
+
+#[test]
+fn a_created_folder_must_match_its_request_and_pinned_parent() {
+    let receipt = json!({"status": "created", "request_id": "req-1", "requested_path": "/srv/repo/new",
+                         "path": "/srv/real/new", "parent": "/srv/real"});
+    let created = |data: Value| {
+        directory_created(
+            ok(data),
+            "req-1",
+            "/srv/repo/new",
+            "/srv/real",
+            "new",
+            Style::Posix,
+        )
+    };
+    assert_eq!(created(receipt.clone()), Ok(receipt.clone()));
+    let unconfirmed =
+        "Folder creation could not be confirmed. Open the path to check it before trying again.";
+    for (key, value) in [
+        ("status", json!("exists")),
+        ("request_id", json!("req-2")),
+        ("requested_path", json!("/srv/real/new")),
+        ("path", json!("/srv/real/other")),
+        ("path", json!("new")),
+        ("parent", json!("/srv/repo")),
+    ] {
+        let mut changed = receipt.clone();
+        changed[key] = value;
+        assert_eq!(created(changed), Err(unconfirmed.into()), "{key}");
+    }
+    assert_eq!(created(json!([])), Err(unconfirmed.into()));
+    assert_eq!(
+        directory_created(
+            failed("permission denied"),
+            "req-1",
+            "/srv/repo/new",
+            "/srv/real",
+            "new",
+            Style::Posix
+        ),
+        Err(
+            "permission denied\nOpen the path to check whether the folder exists before trying again."
+                .into()
+        )
+    );
+    // Windows compares with either separator and ignoring case.
+    let windows = json!({"status": "created", "request_id": "req-1", "requested_path": "C:\\Work\\New",
+                         "path": "c:\\work\\new", "parent": "C:/Work"});
+    assert!(directory_created(
+        ok(windows),
+        "req-1",
+        "C:\\Work\\New",
+        "C:/Work",
+        "New",
+        Style::Windows
+    )
+    .is_ok());
+}
+
+// The three derived fields come from the command, so the view may leave them out.
+#[test]
+fn the_form_takes_its_derived_fields_as_optional() {
+    let mut value = serde_json::to_value(Form::default()).unwrap();
+    for key in ["automatic_available", "automatic_path", "project_worktree"] {
+        value.as_object_mut().unwrap().remove(key);
+    }
+    let form: Form = serde_json::from_value(value).unwrap();
+    assert!(!form.automatic_available && form.automatic_path.is_empty() && !form.project_worktree);
+}

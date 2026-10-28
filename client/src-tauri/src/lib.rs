@@ -10,6 +10,8 @@ mod clipboard;
 mod commands;
 mod display;
 mod metrics;
+#[cfg(feature = "live")]
+mod newsession;
 mod platform;
 #[cfg(feature = "live")]
 mod pump;
@@ -40,6 +42,9 @@ pub(crate) static PROCESS_TREE: std::sync::RwLock<()> = std::sync::RwLock::new((
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        // Opened from Rust only (`pick_local_folder`): the capabilities grant
+        // the webview none of its permissions.
+        .plugin(tauri_plugin_dialog::init())
         .manage(commands::AppState::default())
         .invoke_handler(handler())
         .setup(|app| {
@@ -53,6 +58,11 @@ pub fn run() {
                 app.manage(actions::Actions::new(dir.join(actions::marks_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
                 app.manage(screens::Screens::tauri(app.handle().clone(), pump));
+                // New session's worktree snapshots stay in memory until
+                // `data_dir` reaches this branch (webui rule 2): then
+                // `Some(data_dir(app).join("worktree-snapshots.json"))`, or
+                // `worktree-snapshots-replay.json` in a replay.
+                app.manage(newsession::NewSession::tauri(None));
                 // A replay never touches the real drafts either.
                 let drafts = std::sync::Arc::new(zerus_client_core::drafts::DraftStore::open(
                     dir.join(zerus_client_core::drafts::dir(replay)),
@@ -128,6 +138,24 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         screens::machine_resolve,
         screens::machine_check,
         screens::projects_view,
+        screens::launch_accounts,
+        screens::launch_account_rows,
+        newsession::new_session_context,
+        newsession::new_session_form,
+        newsession::new_session_start,
+        newsession::new_session_plan,
+        newsession::launch_warning,
+        newsession::repository_fields,
+        newsession::worktree_snapshot,
+        newsession::worktree_catalog,
+        newsession::create_worktree,
+        newsession::list_directories,
+        newsession::create_directory,
+        newsession::pick_local_folder,
+        newsession::local_folder_exists,
+        newsession::opencode_models,
+        newsession::opencode_favorite,
+        newsession::opencode_start,
         #[cfg(feature = "media")]
         voice::voice_open,
         #[cfg(feature = "media")]

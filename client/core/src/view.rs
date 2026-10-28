@@ -78,6 +78,12 @@ pub struct ViewRow {
     pub action_reasons: BTreeMap<String, String>,
     /// The raw working directory (`folder` is the name people know it by).
     pub cwd: String,
+    /// The canonical working directory (`cwd_canonical`), empty when the row
+    /// has none. New session's prefill opens on it.
+    pub cwd_canonical: String,
+    /// The checkout's root (`git_root`), empty outside Git. The worktree
+    /// picker counts sessions by it.
+    pub git_root: String,
     /// The row's `terminal_supported`, else true unless the agent is
     /// `dsh` or `opencode` (`HgsClient.cpp:217`).
     pub terminal_supported: bool,
@@ -702,6 +708,8 @@ pub fn row(value: &Value) -> ViewRow {
             })
             .unwrap_or_default(),
         cwd: text(value, "cwd").to_owned(),
+        cwd_canonical: text(value, "cwd_canonical").to_owned(),
+        git_root: text(value, "git_root").to_owned(),
         terminal_supported: flag("terminal_supported").unwrap_or(cmd != "dsh" && cmd != "opencode"),
         terminal_reported: flag("terminal_supported").is_some(),
         terminal_attach_supported: flag("terminal_attach_supported").unwrap_or(false),
@@ -1063,5 +1071,23 @@ mod tests {
         let attach = row(&json!({"terminal_attach_supported": true, "terminal_supported": "yes"}));
         assert!(attach.terminal_attach_supported && attach.terminal_attach_reported);
         assert!(!attach.terminal_reported);
+    }
+
+    // G1: the New session prefill opens on the canonical folder (SessionsWindow
+    // 2924), and the worktree picker counts sessions by checkout and folder
+    // (WorktreePanel.h:135-139).
+    #[test]
+    fn the_checkout_and_the_canonical_folder_are_kept_raw() {
+        let view = row(
+            &json!({"cwd": "/home/example/link/project", "cwd_canonical": "/srv/example/project",
+            "git_root": "/srv/example/project"}),
+        );
+        assert_eq!(view.cwd_canonical, "/srv/example/project");
+        assert_eq!(view.git_root, "/srv/example/project");
+        let plain = row(&json!({"cwd": "/home/example/notes", "git_root": 1}));
+        assert_eq!(
+            (plain.git_root.as_str(), plain.cwd_canonical.as_str()),
+            ("", "")
+        );
     }
 }

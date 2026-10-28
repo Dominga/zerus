@@ -15,7 +15,7 @@
 - **Three hubs in `client/src-tauri`**, each a managed state with injected spawn, clock, notify and `hgs` runners, so its tests need no Tauri and no real `hgs` (the pattern of `screens.rs`):
   - `terminal.rs`: one attach client per view, drained on a std thread into a `tauri::ipc::Channel`;
   - `processes.rs`: the followed session's processes topic, projected through `process_view`, with output reads and the sequential stop queue;
-  - `composer/`: the open draft (A1 `Draft`, held only in Rust), the S5 draft store, the S1/S2 rules, the S3 continuations, the S4 local rows, the A3 attachment cache and its URI scheme.
+  - `composer/`: the open draft (A1 `Draft`, held only in Rust), the app's one S5 draft store (`Drafts`, shared with voice), the S1/S2 rules, the S3 continuations, the S4 local rows, the A3 attachment cache and its URI scheme.
 - **One push path.** `next_batch` keeps returning the core's `Batch` as raw JSON, flattened into an envelope that adds the projected `composer` view, the `processes_view` and the `draft_keys`. Rust recomputes them when the followed Activity's details or a fact change, and once a minute for the cache chip. The webview never calls a rule per render.
 - **Native UI** is a child webview at the tunnel URL from `hgs native-ui NAME --json`, origin-locked and incognito; without one, the system browser through `hgs native-ui NAME`.
 
@@ -46,27 +46,13 @@ These surfaces are missing from the core section. This plan does not build them;
   - `enum Origin { ThisComputer, OtherMachine }`.
 
   The open and reveal calls themselves run in src-tauri through `tauri-plugin-opener` (Task 9).
-- **R3. M1b, the voice composer.** Task 13 consumes it as a serde `voice::ComposerView` and a step enum in S3's style. The view needs:
-  - the state (`idle`, `starting`, `recording`, `saving`, `preview`, `submitting`, `uncertain`);
-  - the mode (`voice` or `video`), whether the mode can change, the elapsed seconds and the 120 s or 59 s limit;
-  - the notice and its kind (`general` or `microphone_permission`);
-  - the profiles with the selected one, whether "Send" or "Preview" applies, and the transcript.
+- **R3 and R4: delivered.** The voice composer (M1b) and its commands (M1c) are on the events session's branches: M1c `work-ba0ed9fd-media` (head `1b14e68b`) and M3 `work-ba0ed9fd-video` (head `100e86bc`), in `client/src-tauri/src/voice.rs` and `client/core/src/voice_driver.rs`. Task 13 binds to that surface:
+  - `voice_open(key, events: Channel<Out>, frames: Channel<InvokeResponseBody>)`, at most 32 open drivers; a replay refuses with "Voice in replay mode needs ZERUS_CLIENT_HGS.";
+  - `voice_input(key, input)`, `input` tagged `kind`: `update {target, input_visible, preferences}`, `press`, `stop {forget_send}`, `send`, `discard`, `refresh`, `choose_provider {index}`, `confirm {ticket, confirmed}`, `inserted {token, inserted: refused | saved | not_saved}`, `playing {playing}`;
+  - `voice_close(key)`, `voice_microphones()`, `voice_video() -> {available, reason}`;
+  - `Out`, tagged `kind`: `shown`, `level`, `ask`, `message`, `insert`, `permission_recovery`, `remember_profile`, `pause_messages`, `stop_playback`, and `preview {mirrored}`, sent once per recording before its first frame. Preview frames are raw JPEG bodies on the `frames` channel.
 
-  The steps are:
-  - `RunSpeech(Value)` and `RunVoice(Value)`, the payloads for `hgs [@host] speech --json` and `hgs [@host] voice NAME --json`;
-  - `SaveDraft(StoredDraft)` under `voice-message-draft\n{key}`;
-  - `Capture(start | stop | cancel)`;
-  - `Message(Value)`, for `LocalMessages::voice_message`;
-  - `Idle`.
-
-  The inputs are the target (key, host, session, run, conversation, `available`, `reason`), the help probe result, a capture result (PCM, optional MP4 and metadata), a reply or failure, the clock and the user's choices.
-- **R4. M1c's commands.** Agreed: `voice_start`, `voice_stop` and `voice_cancel` go into src-tauri with M1c. Task 13 binds to:
-  - `voice_start(key, mode, level: Channel<{rms, peak}>, preview: Channel<raw JPEG>) -> Result<(), String>`, the error being the probe's reason;
-  - `voice_stop(key) -> voice::ComposerView`;
-  - `voice_cancel(key)`;
-  - `voice_capabilities() -> {voice: Option<String>, video: Option<String>}`, the reason each is unavailable or null.
-
-  If M1c names them differently, follow main and update Task 13's bridge.
+  The voice driver shares the app's one draft store (`Drafts`, Task 3a), and its `close_all` runs first in the one exit hook.
 - **R5. The terminal launcher.** Port `tray/src/TerminalBackend.h`, `WindowsTerminalBackend.cpp`, the macOS and Linux backends and `TrayAgent::openSessionTerminal` (`tray/src/TrayAgent.cpp:725-760`, spec row 294) as `client/core/src/launch.rs`: `open_program(program, args) -> Result<Option<String /*advisory*/>, String>` and `open_shell(directory)`. Task 15's Open terminal, Open shell in session folder and Open externally entries need it (Part B).
 
 ## Global Constraints
@@ -74,6 +60,15 @@ These surfaces are missing from the core section. This plan does not build them;
 - **Qt wins.** Where this plan and the Qt GUI disagree, Qt is right; fix the plan in the same PR. Add nothing Qt does not have.
 - **Ownership:** core modules are consumed exactly as their surfaces stand on main (or on the named PR). If a name differs at execution time, follow main and fix the task's code, never the core module.
 - "Actions keep today's guarded CLI calls and their rules: request identities, expected run and conversation, destructive confirmations with the safe choice focused, and **unknown outcomes are never replayed automatically**." (spec, Actions)
+- **Never replay an unknown delivery** (AGENTS.md). In the send driver (Task 4b) and the continuations (Task 5):
+  - the durable "sending" (or "waiting") save comes before any dispatch, and only its callback dispatches;
+  - an `Uncertain` outcome, or an `Err` after the call may have started, never resends by itself: the draft stays, marked uncertain, and asks for Allow retry;
+  - every path that could send re-checks the composer first: a question's answer, a Retry (S4's `retryable` excludes uncertain rows), a continuation's step, a reload and a restart;
+  - one request id per delivery, made right before its one dispatch and reused by nothing else; a Retry of a definite failure is a new submission with a new id.
+- **One draft store** (agreed with the events session): the app opens one `Arc<DraftStore>` in `setup` and manages it as `Drafts`; the composers and voice take it, so each store has one writer. **One exit hook**: `fn exit(app)` on `RunEvent::Exit` closes voice, flushes the organization, closes the composers and then flushes the store; whoever lands second adds lines to it, never a second hook. Termination signals run the same `exit`.
+- **Qt's stores are read, never written** (owner decision, 2026-10-28). Qt's drafts root is read only through `drafts::read_index`, `drafts::read_draft` and `DraftStore::recover` (which writes the client's own store), and left out entirely if it overlaps the client's root. The client's attachment cache is Tauri's `app_cache_dir`, not Qt's `hgdev/hgs-tray` cache. Task 7 proves Qt's folder byte-for-byte unchanged.
+- **Identity:** nothing in Part A assumes the dev identifier `dev.zerus.next` or the dev app's name; the switch build uses `com.hgdev.hgs-tray`. Paths come from Tauri's `app_data_dir` and `app_cache_dir`, which follow the identifier, and UI text names Qt's app as "the Qt app", never by a name the client may take over.
+- **No bytes as JSON over the IPC.** Attachments, previews, Terminal output and media reach the webview only as raw Channel messages, raw command bodies or `zerus-file` responses; pasted images and Terminal input go to Rust as raw bodies. No serde payload this plan adds carries base64 or a byte array. One exception is not this plan's: hgs's `voice.video.poster_base64` rides inside the core's Activity events, so Task 13 draws posters through the scheme and a request to the core owner (review report) would drop it from the batch.
 - Message bytes go only to the standard input of `hgs [@host] send NAME --json`; never argv, a shell command or the clipboard. `Action::Send` is never deserialized from webview JSON: `send_message` builds it in Rust from the held draft and calls `actions::dispatch_as`.
 - `attachments::Draft` is not serde; only `AttachmentInfo`-derived views cross the IPC. Pasted images reach `attachments::pasted_image` as a raw IPC body, never JSON.
 - **Bounds:**
@@ -86,7 +81,7 @@ These surfaces are missing from the core section. This plan does not build them;
   - the attachment cache 512 MiB, least recently used first (`attachments::CACHE_LIMIT`);
   - local message rows 50 per session and 512 sessions;
   - Saved drafts pages at most 200;
-  - the composer hub keeps at most 200 events of the followed session and 64 composers in memory;
+  - the composer hub keeps at most 200 events of the followed session, and at most 64 composers and 128 MiB of their attachments in memory;
   - process output as `hgs` bounds it.
 - All `hgs` calls, file reads and draft writes run off the UI thread (Tauri's blocking pool or the hubs' own threads).
 - The composer's block reason is computed in Rust whenever the followed Activity's details or a fact change and is pushed with the Activity update; the cache chip is recomputed once a minute; `local_time` is formatted in src-tauri.
@@ -99,7 +94,9 @@ These surfaces are missing from the core section. This plan does not build them;
 - Every app command refuses a webview other than `main` (the Native UI child webview gets no IPC).
 - The new UI never separates values with dots (U+00B7, U+2022, U+2219, U+22C5, U+2027, U+2981, U+30FB); `scripts/check-ui-separators.py` enforces it, `.rs` files under `client/` included. Qt's " · " joins become layout, commas or " / ".
 - No obvious keyboard hints in the UI (owner rule, round 6): no "(Delete)", "(Space / Esc)", "Enter to send" or shortcut text in tooltips, placeholders or buttons.
-- Histories, journals and lists use bounded pages (AGENTS.md); no per-session cache grows without a bound.
+- Histories, journals and lists use bounded pages (AGENTS.md); no per-session cache grows without a bound. The draft marks come from the 200 newest drafts plus the 64 composers held; Saved drafts reads pages of at most 200; the attachment cache is pruned to 512 MiB with pins only for what shows now; the Terminal keeps 1 MiB per view; the Processes view holds the followed session only.
+- **Each task adds only what it uses.** Clippy runs with `-D warnings`, and an item unused until a later task fails it (`dead_code`). When a later task needs a field, method or variant, that task adds it; the Interfaces blocks say which task brings what.
+- A task that adds a Rust dependency updates `client/src-tauri/Cargo.lock` with one `cargo +1.99.1 check --manifest-path src-tauri/Cargo.toml` without `--locked` and commits the lock; every other command keeps `--locked`.
 - Rust toolchain 1.99.1 (`cargo +1.99.1`, `rust-version = "1.99"`); `client/core` stays pure Rust without Tauri.
 - Never run the real `hgs` against live sessions in tests; tests use fake `hgs` scripts. Fixtures are synthetic: reserved example domains, `/home/example/...`, `claude/sample-project/review`.
 - Headless GUI runs only, with `env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 ZERUS_CLIENT_HEADLESS=1 xvfb-run -a -s "-screen 0 1440x900x24" ...` (`client/README.md`, "Headless runs").
@@ -113,15 +110,16 @@ These surfaces are missing from the core section. This plan does not build them;
    - the draft stays, marked uncertain;
    - the local row reads "Delivery not confirmed" with Check Terminal and Delete, but no Retry;
    - Send stays disabled until Allow retry;
-   - nothing is sent again by itself, not after a webview reload, an app restart or a reconnect.
+   - nothing is sent again by itself, not after a webview reload, an app restart, a reconnect or an older question's answer.
 
-   Tests: Task 4 (`an_uncertain_send_is_never_retried`), Task 7 (the row's buttons).
+   Tests: Task 4b (`an_uncertain_send_is_never_retried`, `a_stale_question_never_resends_an_uncertain_draft`, `a_send_whose_save_is_queued_at_exit_never_starts`), Task 7 (the row's buttons).
 2. **A draft surviving a crash.**
    - Typed text and added attachments reach disk within the coalescing window.
    - A draft saved while sending loads as uncertain with "Delivery was interrupted. Check Activity or Terminal before sending again.".
-   - Quit and SIGTERM flush the writer first.
+   - Quit and SIGTERM run the one exit hook: the hub closes (nothing new starts), then the shared store writes everything queued.
+   - A rename never overwrites a draft already at the new name; both stay.
 
-   Tests: Task 3 (`a_sending_draft_reloads_uncertain`, `quit_flushes_drafts`).
+   Tests: Task 3a (`a_sending_draft_reloads_uncertain`, `quit_flushes_drafts`, `a_rename_onto_an_existing_draft_keeps_both`).
 3. **A Terminal resize storm.** 200 resizes within 100 ms, as in a window drag:
    - at most one resize per 100 ms leaves the webview, plus the trailing one;
    - an unchanged size never reaches the PTY;
@@ -134,16 +132,23 @@ These surfaces are missing from the core section. This plan does not build them;
    - A pasted image of 32 megapixels or more shows "Image is too large. Use an image below 32 megapixels.".
    - Only one paste or attach runs at a time per composer, and the editor is read-only while it does.
 
-   Tests: Task 1 (`a_paste_over_the_queue_bound_queues_nothing`), Task 3 (`a_huge_pasted_image_is_refused`, `over_64_kib_disables_send`) and Task 6 ("over 64 KiB disables Send at once", "one attach at a time").
+   Tests: Task 1 (`a_paste_over_the_queue_bound_queues_nothing`), Task 3a (`a_huge_pasted_image_is_refused`, `over_64_kib_disables_send`) and Task 6 ("over 64 KiB disables Send at once", "one attach at a time").
 5. **Attachment cache eviction while a preview is open.** `prune` never removes a pinned copy: an open preview, a playing message, or the cached files of a failed local message that Retry needs. A preview whose file disappeared fetches once more and otherwise shows Qt's error. Tests: Task 9 (`prune_keeps_open_previews_and_retry_files`, and "a vanished preview fetches again once, then shows the error").
+6. **Qt's drafts.** Saved drafts, its preview, Recover and Restore read Qt's store and never write, rename or delete there, and a Qt root that overlaps the client's own is left out. Tests: Task 7 (`the_qt_store_is_never_written`, `the_qt_store_is_never_the_clients_own`).
 
 ## Decisions
 
 Rulings on the open questions; the tasks follow them.
 
-- **Saved drafts lists two sources.** The client's own store comes first, under "On this computer"; Qt's read-only store follows under "From the Zerus app". Each is paged by its own cursor ("Show more"), since the stores cannot share one cursor.
+- **One draft store, one exit hook (agreed with the events session, 2026-10-28).** M1c opens the app's one `Arc<DraftStore>` in `setup` and manages it as `pub struct Drafts(pub Arc<DraftStore>)` in `lib.rs`, at `zerus_client_core::drafts::dir(replay)` (`drafts`, or `drafts-replay` in a replay). `Composers::new` takes that store and never opens its own, so each store has one writer. M1c turns `run()` into `.build(...).expect(...).run(...)` with one `fn exit(app)` on `RunEvent::Exit`: `voices.close_all()`, then the organization's `flush()` (the org branch), then `composers.flush()`, then `Drafts.0.flush()`, each through `try_state`. Task 3a works whichever lands first: with M1c on main it uses M1c's `Drafts` and `exit`; without, it adds exactly the same struct, folder names and hook, and M1c rebases onto them. Whoever lands second adds lines, never a second store or hook.
+- **Qt's stores are read, never written (owner decision, 2026-10-28).** The client takes over Qt's identity on the Mac (`com.hgdev.hgs-tray`), and Qt's drafts are kept as they are. Qt's drafts root is read through `read_index`, `read_draft` and `DraftStore::recover` only; recovery copies into the client's store; a Qt root that is, holds or sits inside the client's root is left out. The one-time import of all Qt drafts at the switch (`zerus-5wmh.13`, core section S5) is a copy too.
+- **Saved drafts lists two sources.** The client's own store comes first, under "On this computer"; Qt's read-only store follows under "From the Qt app" (a name that stays right after the client takes over the Zerus name). Each is paged by its own cursor ("Show more"), since the stores cannot share one cursor.
   - A Qt draft is copied into the client's store with `DraftStore::recover` before Restore or Go to session. An existing nonempty draft there is never overwritten (S5's `ALREADY_EXISTS` text).
   - Qt's dialog texts, buttons and the "Replace current draft?" confirmation carry over.
+- **The exit closes the hub before the store flushes.** `Composers::flush` stops new edits, attaches and sends and waits up to 2 s for attach reads under way; `Drafts.0.flush()` then writes everything queued. A send whose "sending" save is still queued never starts and reloads as uncertain.
+- **Draft attachment URLs carry no digest.** `AttachmentView.path` is `draft/{handle}/{list}/{index}`, where `list` changes with every change of the attachment list; the scheme answers it from memory without hashing, and an old URL answers 404. S3's draft marks hash an attachment list once (Task 5), not per check.
+- **Renames lock until the store answers** (Qt's `renameDraft`). A refused rename (`ALREADY_EXISTS`) keeps the moved draft under its old key and loads the draft already at the new key, so neither is overwritten.
+- **Tasks 3 and 4 are split** for review: 3a (the hub, drafts and attachments), 3b (the `zerus-file` scheme and the cache), 4a (the session's block reasons, cache chip and inspect fallback), 4b (the delivery and local rows).
 - **Processes are off by default, as in Qt.** This phase adds the Settings > Processes section the client's Settings screen lacks: Qt's five controls and hint (`tray/src/SettingsPage.h:109-120`), stored under the QSettings keys `processes/enabled`, `processes/activeSeconds`, `processes/backgroundSeconds`, `processes/unknownSeconds` and `processes/loadingSeconds`. This follows the screen's pattern ("Settings, as far as the client has them"); phase 3b keeps the section when it builds the full screen.
 - **Composer parts outside this phase.** Task 12 files a follow-up child of `zerus-5wmh` for each, and each keeps its Qt place, disabled with "Arrives with …":
   - the model settings popup and the OpenCode model picker ("model settings");
@@ -173,7 +178,7 @@ Rulings on the open questions; the tasks follow them.
   - Every app command refuses a webview other than `main`.
   - Without a child webview (add_child failed), the system browser opens through `hgs native-ui NAME`, Qt's fallback when its plugin is missing.
 - **Restore follow-up.** Saved drafts restores Qt's second sentence of the menu-parity Piece E notice: "The restored conversation could not be verified. Your archived draft remains in Saved drafts." (owner ruling, `zerus-5wmh.9` comment of 2026-10-28).
-- **Composer Stop and Mark as read.** The composer action row's Stop reuses phase 2's `actionEntries(...).stop`. The Mark as read chip uses the menu-parity Piece B's `markReadChip(row)` (`zerus-5wmh.16`, PR #406) and runs Mark as read on click.
+- **Composer Stop and Mark as read.** The composer action row's Stop reuses phase 2's `actionEntries(...).stop`. The Mark as read chip uses the menu-parity Piece B's `markReadChip(session)` and runs its `runMarkRead(row)` on click (`zerus-5wmh.16`, PR #406, `ui/sessions/mark-entries.ts`).
 - **Keyboard hints.** The mockup's "Remove (Delete)" and "Stop recording (Space / Esc)" lose their parenthesized keys (round 6 rule); the keys still work.
 
 ---
@@ -182,16 +187,16 @@ Rulings on the open questions; the tasks follow them.
 
 ```
 client/src-tauri/Cargo.toml              + tauri "unstable", tauri-plugin-dialog, tauri-plugin-opener, signal-hook, chrono, sha2
-client/src-tauri/src/lib.rs              modules, managed hubs, URI scheme, window events, quit and SIGTERM flush, IPC guard
+client/src-tauri/src/lib.rs              modules, Drafts (the one store), managed hubs, URI scheme, window events, the one exit hook and its signals, IPC guard
 client/src-tauri/src/actions.rs          dispatch_as (caller-given request id), write_kind (facts for the send rules)
 client/src-tauri/src/commands.rs         next_batch envelope; Live::follow_processes and unfollow_processes
-client/src-tauri/src/pump.rs             Pump::poke, Pump::row, Pump::status
+client/src-tauri/src/pump.rs             Pump::poke, Pump::row, Pump::row_named, Pump::online
 client/src-tauri/src/replay.rs           processes states per session, served on follow
 client/src-tauri/src/terminal.rs         Terminals: connect, write, resize, ack, disconnect, retarget, status
 client/src-tauri/src/processes.rs        ProcessHub: follow, view projection, output reads, stop queue
-client/src-tauri/src/composer/mod.rs     Composers: open, edit, attach, paste, remove, undo, saved drafts, recover, view, draft keys
-client/src-tauri/src/composer/send.rs    send_message, answers, delivery, local rows, retry, delete, inspect, continuations, clear
-client/src-tauri/src/composer/files.rs   zerus-file scheme (Range), attachment_fetch, pins, prune lane, open and reveal
+client/src-tauri/src/composer/mod.rs     Composers: open, edit, attach, paste, remove, undo, rename, saved drafts, recover, view, draft keys, the exit's close
+client/src-tauri/src/composer/send.rs    the session's view (block reasons, cache chip), send_message, answers, delivery, local rows, retry, delete, inspect, continuations, clear
+client/src-tauri/src/composer/files.rs   zerus-file scheme (Range), the cache, pins, prune lane, attachment_fetch, open and reveal
 client/src-tauri/src/native_ui.rs        NativeUi: child webview per launch key, bounds, overlays, browser fallback
 client/src-tauri/tests/support/fake_hgs_phase4.py   fake hgs for the hubs' tests and the phase 4 smoke
 client/scripts/make-fixture.py           processes topic, cache hints, attachments and voice messages in the replay
@@ -203,6 +208,7 @@ client/src/store/terminal.ts             the Terminal view's state machine (+ .t
 client/src/store/processes.ts            the Processes view state and selection (+ .test.ts)
 client/src/store/composer.ts             the open composer: text sync, attach, paste, send replies, dialogs (+ .test.ts)
 client/src/store/media.ts                one player at a time, fetch and pin, progress (+ .test.ts)
+client/src/store/voice.ts                the voice driver's channels (voice_open), inputs and transcript inserts (+ .test.ts)
 client/src/store/settings.ts             processes/* keys
 client/src/store/session.ts              routes the envelope to the stores
 client/src/store/ui.ts                   detailTab, overlay count
@@ -218,7 +224,7 @@ client/src/ui/sessions/Activity.tsx      local rows, attachment chips, real medi
 client/src/ui/sessions/transcript.ts     local rows in the transcript
 client/src/ui/sessions/SessionDetail.tsx tabs (Activity, Terminal, Native UI, Processes), composer column
 client/src/ui/components/SettingsScreen.tsx  Processes section
-client/src-tauri/tauri.conf.json         CSP for the zerus-file scheme (img-src, media-src)
+client/src-tauri/tauri.conf.json         CSP for the zerus-file scheme (img-src, media-src, connect-src)
 client/README.md                         Terminal, Processes, Composer and Send, Attachments, Media, Native UI, Phase 4 smoke run
 ```
 
@@ -230,22 +236,24 @@ client/README.md                         Terminal, Processes, Composer and Send,
 |---|---|---|
 | 1 | Terminal commands | T1 `zerus-5wmh.9.1` (#405) and T2 `zerus-5wmh.9.2` (#401), merged |
 | 2 | Terminal tab | Task 1 |
-| 3 | Composer hub: drafts, attachments, view, the `zerus-file` scheme | A1 `zerus-5wmh.9.3` (#403), S5 `zerus-5wmh.9.11` (#409), the cache bound `zerus-5wmh.9.17` (branch `work-ba0ed9fd-cachelru`), `ViewRow.created` from `zerus-5wmh.16` (#406) |
-| 4 | Send driver and local rows | A2 `zerus-5wmh.9.4` (#404), S1 `zerus-5wmh.9.7` (#407), S2 `zerus-5wmh.9.8` (#408), S4 `zerus-5wmh.9.10` (branch `work-ba0ed9fd-localmsgs`), Task 3 |
-| 5 | Continuations and Clear context | S3 `zerus-5wmh.9.9` (branch `work-ba0ed9fd-continuation`), C1 `zerus-5wmh.9.18` (branch `work-ba0ed9fd-context`), Task 4 |
-| 6 | Composer view | Tasks 3-5; the Mark as read chip also #406; the Context chip R1 |
-| 7 | Local rows in Activity and Saved drafts | Tasks 4 and 6 |
-| 8 | Dropped files: composer attach, Terminal paste and stage | A2 #404 (StageFiles), Tasks 2, 3 and 6 |
-| 9 | Activity attachments: fetch, preview, open | A3 `zerus-5wmh.9.5` (#410), `zerus-5wmh.9.17`, Task 3; Open also R2 |
+| 3a | Composer hub: drafts and attachments, the one draft store and exit hook | A1 `zerus-5wmh.9.3` (#403), S5 `zerus-5wmh.9.11` (#409); M1c's `Drafts` and `exit` when on main |
+| 3b | The `zerus-file` scheme and the attachment cache | Task 3a, the cache bound `zerus-5wmh.9.17` (branch `work-ba0ed9fd-cachelru`) |
+| 4a | The session's block reasons, cache chip and inspect fallback | S1 `zerus-5wmh.9.7` (#407) and S2 `zerus-5wmh.9.8` (#408), both on main; A2 `zerus-5wmh.9.4` (#404); Tasks 3a-3b |
+| 4b | The delivery: guarded send, cold cache question, local rows | A2 #404, S4 `zerus-5wmh.9.10` (branch `work-ba0ed9fd-localmsgs`), `ViewRow.created` from `zerus-5wmh.16` (#406), Task 4a |
+| 5 | Continuations and Clear context | S3 `zerus-5wmh.9.9` (branch `work-ba0ed9fd-continuation`), C1 `zerus-5wmh.9.18` (branch `work-ba0ed9fd-context`), Task 4b |
+| 6 | Composer view | Tasks 3a-5; the Mark as read chip also #406; the Context chip R1 |
+| 7 | Local rows in Activity and Saved drafts | Tasks 4b and 6 |
+| 8 | Dropped files: composer attach, Terminal paste and stage | A2 #404 (StageFiles), #406 (`Session.created`), Tasks 2, 3a and 6 |
+| 9 | Activity attachments: fetch, preview, open | A3 `zerus-5wmh.9.5` (#410), `zerus-5wmh.9.17`, Tasks 3b and 4b; Open also R2 |
 | 10 | Processes hub | P1 `zerus-5wmh.9.6` (#411, stacked on A2 #404) |
 | 11 | Processes tab and Settings > Processes | Task 10 |
-| 12 | Fixtures, the Part A smoke run, docs and follow-ups | Tasks 1-11 |
+| 12 | Fixtures, the Part A smoke run, docs and follow-ups | Tasks 1-11 (3a, 3b, 4a and 4b included) |
 
 **Part B: after the bar**
 
 | Task | Piece | Depends on (Beads, PR) |
 |---|---|---|
-| 13 | Voice and round video: playback and recording | Task 9's scheme and fetch; M1 `zerus-5wmh.9.12` (#412 is M1a; R3 M1b; R4 M1c); round video also M2-M4 (`zerus-5wmh.9.13`, `.9.14`, `.9.15`) |
+| 13 | Voice and round video: playback and recording | Task 9's scheme and fetch; M1 `zerus-5wmh.9.12` (#412 is M1a; M1b and M1c on `work-ba0ed9fd-media`, R3 and R4 delivered); round video M2-M4 (`zerus-5wmh.9.13`, `.9.14`, `.9.15`; M3 on `work-ba0ed9fd-video`), shown only while `voice_video().available` |
 | 14 | Native UI | none in the core |
 | 15 | Open terminal, shell and folder | R5 (Open terminal, shell, externally); Open folder none |
 
@@ -268,7 +276,7 @@ Windows: `terminal::Attach::start` reports "Cannot open terminal: Terminal is no
 
 **Files:**
 - Create: `client/src-tauri/src/terminal.rs`
-- Modify: `client/src-tauri/src/actions.rs:150` (`REPLAY_NEEDS_HGS` becomes `pub(crate)`)
+- Modify: `client/src-tauri/src/actions.rs:138` (`REPLAY_NEEDS_HGS` becomes `pub(crate)`)
 - Modify: `client/src-tauri/src/lib.rs` (module, managed state, commands, window event)
 - Test: unit tests in `terminal.rs`, running `client/core/tests/support/fake_attach.py`
 
@@ -299,8 +307,8 @@ impl Terminals {
     pub fn ack(&self, view: &str, generation: u64);
     pub fn disconnect(&self, view: &str) -> Option<String>;
     pub fn retarget(&self, view: &str, target: &TerminalTarget) -> bool;
-    pub fn paste(&self, view: &str, text: &str) -> Result<(), String>; // Task 8
     pub fn stop_all(&self);
+    // Task 8 adds `paste` and `generation` with their first use (clippy denies unused code).
 }
 // Commands:
 // terminal_connect(view, target, cols, rows, on_event: Channel) -> Result<Connected, String>
@@ -863,14 +871,6 @@ impl Terminals {
         }
     }
 
-    /// Pastes text into the view's current attach (dropped paths, Task 8).
-    pub fn paste(&self, view: &str, text: &str) -> Result<(), String> {
-        match lock(&self.0.views).get(view) {
-            Some(open) => open.attach.write(text.as_bytes()),
-            None => Err("Terminal changed during file transfer. Drop the files again in the intended session.".into()),
-        }
-    }
-
     /// Applies a new size; an unchanged size never reaches the PTY.
     pub fn resize(&self, view: &str, generation: u64, cols: u16, rows: u16) {
         let mut views = lock(&self.0.views);
@@ -1050,6 +1050,7 @@ Spec: "xterm.js when Terminal first opens"; "DOM renderer by default on Linux, W
 - Create: `client/src/store/terminal.ts`, `client/src/store/terminal.test.ts`
 - Create: `client/src/ui/sessions/Terminal.tsx`
 - Modify: `client/src/store/ui.ts` (`detailTab`), `client/src/ui/sessions/SessionDetail.tsx` (tabs)
+- Modify: `client/src/ui/lib/icons.generated.ts` (`unplug`, which the generated set lacks)
 
 **Interfaces:**
 - Consumes: Task 1's commands and Channel messages; `detailsFor`, `followedFor` (`store/actions.ts`); `selected`, `page` (`store/ui.ts`); `computerOffline` (`store/catalog.ts`).
@@ -1603,13 +1604,12 @@ git commit -m "feat(client): the Terminal tab on xterm.js"
 
 ---
 
-### Task 3: The composer hub: drafts, attachments, the view and the `zerus-file` scheme
+### Task 3a: The composer hub: drafts and attachments
 
 **Depends on:**
-- A1 `zerus-5wmh.9.3` (#403): `attachments::{Draft, Attachment, AttachmentInfo, Selection, Added, FileRead, read_file, pasted_image, sniff, cached_at, touch, MAX_ATTACHMENT_BYTES}`.
-- S5 `zerus-5wmh.9.11` (#409): `drafts::{DraftStore, StoredDraft, Loaded, IndexPage, Page, read_draft, qt_root, ALREADY_EXISTS}`.
-- `zerus-5wmh.9.17` (branch `work-ba0ed9fd-cachelru`): `attachments::{prune, CACHE_LIMIT}`.
-- `zerus-5wmh.16` (#406): `ViewRow.created`.
+- A1 `zerus-5wmh.9.3` (#403): `attachments::{Draft, Attachment, Selection, FileRead, read_file, pasted_image, MAX_ATTACHMENTS}`.
+- S5 `zerus-5wmh.9.11` (#409): `drafts::{DraftStore, StoredDraft, Loaded, IndexPage, read_draft, ALREADY_EXISTS}`.
+- M1c (`zerus-5wmh.9.12`, branch `work-ba0ed9fd-media`) when it is on main: the app's one `Drafts` store, `drafts::dir` and the `exit` hook. Step 6 says what this task adds when M1c is not on main yet.
 
 **Qt reference:** `tray/src/MessageComposer.cpp`:
 - `setSessionKey` and `ensureDraftLoaded` (480-538), `restoreDraft` (539-548);
@@ -1620,32 +1620,31 @@ git commit -m "feat(client): the Terminal tab on xterm.js"
 - the Allow retry button (412-417).
 
 **Files:**
-- Create: `client/src-tauri/src/composer/mod.rs`, `client/src-tauri/src/composer/files.rs`
-- Modify: `client/src-tauri/Cargo.toml` (+ `sha2 = "0.10"`, `tauri-plugin-dialog = "2"`, `[target.'cfg(unix)'.dependencies] signal-hook = "0.3"`)
-- Modify: `client/src-tauri/src/pump.rs` (`poke`, `row`, `online`)
-- Modify: `client/src-tauri/src/commands.rs` (the `next_batch` envelope)
-- Modify: `client/src-tauri/src/lib.rs` (managed `Composers`, dialog plugin, URI scheme, quit and SIGTERM flush)
-- Modify: `client/src-tauri/tauri.conf.json` (CSP `img-src` and `media-src` for `zerus-file`)
-- Test: unit tests in `composer/mod.rs` and `composer/files.rs`; `pump.rs` tests
+- Create: `client/src-tauri/src/composer/mod.rs`
+- Modify: `client/src-tauri/Cargo.toml` (+ `tauri-plugin-dialog = "2"`, `[target.'cfg(unix)'.dependencies] signal-hook = "0.3"`), `client/src-tauri/Cargo.lock`
+- Modify: `client/src-tauri/src/pump.rs` (`poke`)
+- Modify: `client/src-tauri/src/commands.rs` (the `next_batch` envelope; `start` calls `Composers::resend`)
+- Modify: `client/src-tauri/src/lib.rs` (`Drafts` and `exit` unless M1c brought them, the managed `Composers`, the dialog plugin, the signal thread, the commands)
+- Test: unit tests in `composer/mod.rs`; one `pump.rs` test
 
 **Interfaces:**
-- Produces (Tasks 4-9 and 13 extend these; the frontend binds to the serde shapes):
+- Produces (Tasks 3b-9 and 13 extend these; the frontend binds to the serde shapes):
 
 ```rust
+// lib.rs (M1c's, or this task's when M1c is not on main; identical either way)
+#[cfg(feature = "live")] pub struct Drafts(pub std::sync::Arc<zerus_client_core::drafts::DraftStore>);
+#[cfg(feature = "live")] fn exit(app: &AppHandle); // the one RunEvent::Exit hook
 // composer/mod.rs
 pub type Job = Box<dyn FnOnce() + Send>;
 pub type Spawn = Arc<dyn Fn(Job) + Send + Sync>;
 pub type Notify = Arc<dyn Fn() + Send + Sync>;
-pub type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;              // seconds since the epoch
-pub type Rows = Arc<dyn Fn(&str, &str, &str) -> Option<(ViewRow, bool)> + Send + Sync>; // (computer, catalog key, name) -> (row, online); a new run is found by name
-pub struct Config { pub drafts: PathBuf, pub qt_drafts: Option<PathBuf>, pub cache: PathBuf, pub hgs: PathBuf, pub allowed: bool }
-pub struct Deps { pub spawn: Spawn, pub notify: Notify, pub clock: Clock, pub rows: Rows }
+pub struct Deps { pub spawn: Spawn, pub notify: Notify }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRef { pub computer: String, pub key: String, pub name: String, #[serde(default)] pub archive_id: Option<String> }
 pub fn draft_key(computer: &str, name: &str, archive: Option<&str>) -> String;
 #[derive(Clone)] pub struct Composers(/* Arc<Shared> */);
 impl Composers {
-    pub fn new(config: Config, deps: Deps) -> Self;
+    pub fn new(drafts: Arc<DraftStore>, deps: Deps) -> Self; // the app's one store, never its own
     pub fn open(&self, session: Option<SessionRef>) -> Option<ComposerView>;
     pub fn edit(&self, handle: u64, rev: u64, text: String, position: i64, anchor: i64);
     pub fn attach_paths(&self, handle: u64, paths: Vec<PathBuf>, selection: Selection);
@@ -1653,11 +1652,10 @@ impl Composers {
     pub fn remove(&self, handle: u64, index: usize);
     pub fn undo_remove(&self, handle: u64);
     pub fn allow_retry(&self, handle: u64);
-    pub fn observe(&self, batch: &Batch);
     pub fn take_view(&self) -> Option<ComposerView>;
     pub fn take_draft_keys(&self) -> Option<Vec<String>>;
-    pub fn flush(&self);
-    pub fn cache(&self) -> Arc<files::Cache>;
+    pub fn resend(&self);
+    pub fn flush(&self); // the exit hook: closes the hub; the store's own flush follows it
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct AttachmentView { pub name: String, pub mime: String, pub reference: String, pub bytes: u64, pub path: String, pub excerpt: Option<String> }
@@ -1668,17 +1666,15 @@ pub struct ComposerView {
     pub attaching: bool, pub sending: bool, pub waiting: Option<String>, pub uncertain: bool,
     pub status: String, pub status_error: bool, pub can_send: bool, pub send_label: String,
 }
-// composer/files.rs
-pub struct Cache;   // root, pins, prune lane
-impl Cache { pub fn new(root: PathBuf) -> Arc<Self>; pub fn root(&self) -> &Path; pub fn pin(&self, path: &Path); pub fn unpin(&self, path: &Path); pub fn clear_pins(&self); pub fn prune_later(self: &Arc<Self>, spawn: &Spawn, extra: Arc<dyn Fn() -> HashSet<PathBuf> + Send + Sync>); }
-pub fn respond(composers: &Composers, webview: &str, request: &http::Request<Vec<u8>>) -> http::Response<Vec<u8>>;
 // pump.rs
-impl Pump { pub fn poke(&self); pub fn row(&self, computer: &str, key: &str) -> Option<ViewRow>; pub fn row_named(&self, computer: &str, name: &str) -> Option<ViewRow>; pub fn online(&self, computer: &str) -> bool; }
+impl Pump { pub fn poke(&self); }
 // commands: composer_open(session: Option<SessionRef>) -> Option<ComposerView>; composer_edit(handle, rev, text, position, anchor);
 // composer_pick(handle, start, end); composer_attach(handle, paths, start, end); composer_paste_image(raw PNG; x-zerus-composer, x-zerus-start, x-zerus-end);
 // composer_remove(handle, index); composer_undo_remove(handle); composer_allow_retry(handle)
 // next_batch: {...batch, composer?: ComposerView, draft_keys?: string[]}
 ```
+
+`AttachmentView.path` is `draft/{handle}/{list}/{index}`: the composer, the revision of its attachment list, and the file's place. Task 3b serves it through the `zerus-file` scheme. No digest is computed per view: a new list (an attach, remove, undo, load or send) gets new paths, so an old URL never shows another file.
 
 - [ ] **Step 1: Write the failing hub tests** at the end of `client/src-tauri/src/composer/mod.rs`:
 
@@ -1686,9 +1682,12 @@ impl Pump { pub fn poke(&self); pub fn row(&self, computer: &str, key: &str) -> 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
     use zerus_client_core::drafts::{read_draft, StoredDraft};
+
+    pub(crate) const KEY: &str = "studio\nclaude/sample-project/review";
 
     pub(crate) fn dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("zerus-composer-{name}-{}", std::process::id()));
@@ -1697,24 +1696,28 @@ pub(crate) mod tests {
         dir
     }
 
-    pub(crate) fn row(name: &str) -> ViewRow {
-        ViewRow { name: name.into(), agent: "claude".into(), state: "running".into(), tracked: true, run_id: Some("run-1".into()),
-                  conversation_id: Some("conv-1".into()), created: 1_793_000_000, ..ViewRow::default() }
+    /// The test's draft store under `root/drafts`. A test that drops its hub
+    /// and opens another keeps this, as the app's `Drafts` does: a store must
+    /// never drop on its own writer thread.
+    pub(crate) fn drafts(root: &Path) -> Arc<DraftStore> {
+        Arc::new(DraftStore::open(root.join("drafts")))
     }
 
-    pub(crate) fn hub(root: &Path) -> (Composers, Arc<AtomicUsize>) {
+    pub(crate) fn hub_on(store: &Arc<DraftStore>) -> (Composers, Arc<AtomicUsize>) {
         let notified = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&notified);
         let composers = Composers::new(
-            Config { drafts: root.join("drafts"), qt_drafts: None, cache: root.join("cache"), hgs: PathBuf::from("hgs"), allowed: true },
+            Arc::clone(store),
             Deps {
                 spawn: Arc::new(|job| { std::thread::spawn(job); }),
                 notify: Arc::new(move || { count.fetch_add(1, Ordering::SeqCst); }),
-                clock: Arc::new(|| 1_793_000_100.0),
-                rows: Arc::new(|_, _, name| Some((row(name), true))),
             },
         );
         (composers, notified)
+    }
+
+    pub(crate) fn hub(root: &Path) -> (Composers, Arc<AtomicUsize>) {
+        hub_on(&drafts(root))
     }
 
     pub(crate) fn session() -> SessionRef {
@@ -1732,8 +1735,6 @@ pub(crate) mod tests {
         }
     }
 
-    const KEY: &str = "studio\nclaude/sample-project/review";
-
     #[test]
     fn draft_keys_are_qts() {
         assert_eq!(draft_key("", "claude/p/a", None), "\nclaude/p/a");
@@ -1743,34 +1744,41 @@ pub(crate) mod tests {
     #[test]
     fn a_draft_survives_reopening() {
         let root = dir("reopen");
-        let (c, _) = hub(&root);
+        let store = drafts(&root);
+        let (c, _) = hub_on(&store);
         let view = c.open(Some(session())).unwrap();
         let view = until(&c, |v| v.loaded && v.handle == view.handle);
         c.edit(view.handle, 1, "hello".into(), 5, 5);
         c.flush();
+        store.flush();
         drop(c);
-        let (again, _) = hub(&root);
+        // A new hub reads the draft back from the disk.
+        let (again, _) = hub_on(&store);
         again.open(Some(session()));
         let view = until(&again, |v| v.loaded);
         assert_eq!((view.text.as_str(), view.position), ("hello", 5));
-        assert!(view.can_send);
     }
 
     #[test]
     fn quit_flushes_drafts() {
         let root = dir("flush");
-        let (c, _) = hub(&root);
+        let store = drafts(&root);
+        let (c, _) = hub_on(&store);
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
         c.edit(view.handle, 1, "typed before quitting".into(), 0, 0);
+        // The exit hook's order: the hub closes, then the store writes everything queued.
         c.flush();
+        store.flush();
         assert_eq!(read_draft(&root.join("drafts"), KEY).draft.draft.text, "typed before quitting");
+        c.edit(view.handle, 2, "after the exit".into(), 0, 0);
+        assert_eq!(c.current().unwrap().text, "typed before quitting", "a closed hub takes no edits");
     }
 
     #[test]
     fn a_sending_draft_reloads_uncertain() {
         let root = dir("sending");
-        let store = zerus_client_core::drafts::DraftStore::open(root.join("drafts"));
+        let store = DraftStore::open(root.join("drafts"));
         let mut stored = StoredDraft { sending: true, ..StoredDraft::default() };
         stored.draft.text = "maybe delivered".into();
         store.save_durable(KEY, stored, |_| {});
@@ -1784,7 +1792,8 @@ pub(crate) mod tests {
         assert!(view.status_error && !view.can_send);
         c.allow_retry(view.handle);
         let view = until(&c, |v| !v.uncertain);
-        assert!(view.can_send && view.status.is_empty());
+        // Send's other conditions (the session's state) arrive with Task 4a.
+        assert!(!view.status_error);
     }
 
     #[test]
@@ -1815,7 +1824,8 @@ pub(crate) mod tests {
         let root = dir("attach");
         let file = root.join("notes.txt");
         std::fs::write(&file, "first line\nsecond line\n").unwrap();
-        let (c, _) = hub(&root);
+        let store = drafts(&root);
+        let (c, _) = hub_on(&store);
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
         c.edit(view.handle, 1, "see".into(), 3, 3);
@@ -1826,8 +1836,8 @@ pub(crate) mod tests {
         let attachment = &view.attachments[0];
         assert_eq!((attachment.name.as_str(), attachment.mime.as_str()), ("notes.txt", "text/plain"));
         assert_eq!(attachment.excerpt.as_deref(), Some("first line\nsecond line"));
-        assert!(attachment.path.starts_with("draft/"));
-        c.flush();
+        assert!(attachment.path.starts_with(&format!("draft/{}/", view.handle)));
+        store.flush();
         assert_eq!(read_draft(&root.join("drafts"), KEY).draft.draft.attachments.len(), 1);
     }
 
@@ -1857,7 +1867,8 @@ pub(crate) mod tests {
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
         c.attach_paths(view.handle, vec![file], Selection::default());
-        let view = until(&c, |v| v.attachments.len() == 1);
+        let view = until(&c, |v| v.attachments.len() == 1 && !v.attaching);
+        let first_path = view.attachments[0].path.clone();
         c.remove(view.handle, 0);
         let view = c.current().unwrap();
         assert!(view.attachments.is_empty() && !view.text.contains("[File #1]"));
@@ -1866,12 +1877,14 @@ pub(crate) mod tests {
         let view = c.current().unwrap();
         assert_eq!(view.attachments.len(), 1);
         assert!(view.text.contains("[File #1]") && view.removed.is_none());
+        assert_ne!(view.attachments[0].path, first_path, "a new list gets new paths");
     }
 
     #[test]
     fn a_rename_moves_the_draft() {
         let root = dir("rename");
-        let (c, _) = hub(&root);
+        let store = drafts(&root);
+        let (c, _) = hub_on(&store);
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
         c.edit(view.handle, 1, "kept across a rename".into(), 0, 0);
@@ -1880,8 +1893,29 @@ pub(crate) mod tests {
         c.open(Some(renamed));
         let view = until(&c, |v| v.key == "studio\nclaude/sample-project/review-2" && v.loaded);
         assert_eq!(view.text, "kept across a rename");
-        c.flush();
+        store.flush();
         assert_eq!(read_draft(&root.join("drafts"), KEY).draft.draft.text, "");
+    }
+
+    #[test]
+    fn a_rename_onto_an_existing_draft_keeps_both() {
+        let root = dir("rename-collision");
+        let store = drafts(&root);
+        let mut there = StoredDraft::default();
+        there.draft.text = "already here".into();
+        store.save_durable("studio\nclaude/sample-project/review-2", there, |_| {});
+        let (c, _) = hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.edit(view.handle, 1, "moving".into(), 0, 0);
+        let mut renamed = session();
+        renamed.name = "claude/sample-project/review-2".into();
+        c.open(Some(renamed));
+        let view = until(&c, |v| v.loaded && v.text == "already here");
+        assert_eq!(view.status, zerus_client_core::drafts::ALREADY_EXISTS);
+        store.flush();
+        assert_eq!(read_draft(&root.join("drafts"), KEY).draft.draft.text, "moving", "the moved draft stays for Saved drafts");
+        assert_eq!(read_draft(&root.join("drafts"), "studio\nclaude/sample-project/review-2").draft.draft.text, "already here");
     }
 
     #[test]
@@ -1911,65 +1945,8 @@ pub(crate) mod tests {
         c.edit(handle, 1, "y".into(), 1, 1);
         assert!(notified.load(Ordering::SeqCst) > before, "a change wakes the pump");
         assert_eq!(c.take_view().unwrap().text, "y");
-    }
-}
-```
-
-In `client/src-tauri/src/composer/files.rs`:
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::composer::tests::{dir, hub, session, until};
-    use zerus_client_core::attachments::Selection;
-
-    fn get(path: &str, range: Option<&str>) -> http::Request<Vec<u8>> {
-        let mut request = http::Request::builder().uri(format!("zerus-file://localhost/{path}"));
-        if let Some(range) = range { request = request.header("range", range); }
-        request.body(Vec::new()).unwrap()
-    }
-
-    #[test]
-    fn the_scheme_serves_draft_bytes_with_ranges_and_only_to_main() {
-        let root = dir("scheme");
-        let file = root.join("clip.bin");
-        std::fs::write(&file, b"0123456789").unwrap();
-        let (c, _) = hub(&root);
-        c.open(Some(session()));
-        let view = until(&c, |v| v.loaded);
-        c.attach_paths(view.handle, vec![file], Selection::default());
-        let view = until(&c, |v| v.attachments.len() == 1);
-        let path = view.attachments[0].path.clone();
-        let whole = respond(&c, "main", &get(&path, None));
-        assert_eq!(whole.status(), 200);
-        assert_eq!(whole.body(), b"0123456789");
-        assert_eq!(whole.headers()["accept-ranges"], "bytes");
-        assert_eq!(whole.headers()["cross-origin-resource-policy"], "cross-origin");
-        let part = respond(&c, "main", &get(&path, Some("bytes=2-5")));
-        assert_eq!(part.status(), 206);
-        assert_eq!(part.body(), b"2345");
-        assert_eq!(part.headers()["content-range"], "bytes 2-5/10");
-        assert_eq!(respond(&c, "native-ui-1", &get(&path, None)).status(), 403);
-        assert_eq!(respond(&c, "main", &get("draft/0000", None)).status(), 404);
-        assert_eq!(respond(&c, "main", &get("cache/../../etc/passwd", None)).status(), 404);
-    }
-
-    #[test]
-    fn the_scheme_serves_only_cached_files_under_the_root() {
-        let root = dir("cached");
-        let (c, _) = hub(&root);
-        let cached = zerus_client_core::attachments::store_at(c.cache().root(), "shot.png", b"\x89PNG\r\n\x1a\nrest").unwrap();
-        let relative = cached.strip_prefix(c.cache().root()).unwrap().to_string_lossy().replace('\\', "/");
-        let response = respond(&c, "main", &get(&format!("cache/{}", urlencode(&relative)), None));
-        assert_eq!(response.status(), 200);
-        assert_eq!(response.headers()["content-type"], "image/png");
-        std::fs::write(root.join("outside.txt"), b"secret").unwrap();
-        assert_eq!(respond(&c, "main", &get("cache/..%2Foutside.txt", None)).status(), 404);
-    }
-
-    fn urlencode(text: &str) -> String {
-        text.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+        c.resend();
+        assert!(c.take_view().is_some(), "a reloaded webview gets the view again");
     }
 }
 ```
@@ -1984,61 +1961,53 @@ Expected: compile errors, the module does not exist.
 ```rust
 //! The composer hub, ported from `tray/src/MessageComposer.cpp`: the open
 //! session's draft (A1's `Draft`, held only here, so attachment bytes never
-//! cross the IPC), its durable copy in the S5 store, the attachment list, the
-//! status line and Send's enablement. The webview gets a `ComposerView`
-//! through `next_batch` whenever it changed.
+//! cross the IPC as JSON), its durable copy in the app's one draft store (S5,
+//! shared with voice), the attachment list, the status line and Send's
+//! enablement. The webview gets a `ComposerView` through `next_batch`
+//! whenever it changed.
 //!
 //! Text protocol: the webview owns the text while the user types and sends
 //! `composer_edit` with a growing `rev`; Rust applies only a higher one. When
 //! Rust changes the text itself (a load, an attach or remove, a delivery's
 //! end, a restore), it bumps `text_epoch` and the webview takes `text`.
 //!
-//! Bounded: at most 64 composers in memory (the open one, a sending or
-//! waiting one and one being attached to are never dropped); the draft keys
-//! the cards mark come from the 200 newest drafts plus the composers held.
-
-pub mod files;
+//! Bounded: at most 64 composers and 128 MiB of their attachments in memory
+//! (the open one and a busy one are never dropped; a dropped one reloads
+//! from disk); the draft keys the cards mark come from the 200 newest drafts
+//! plus the composers held.
+//!
+//! The hub never holds the last `Arc<DraftStore>`: the app's `Drafts` keeps
+//! one for the life of the process, and tests keep theirs, since a store
+//! dropped on its own writer thread would wait for itself.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use zerus_client_core::attachments::{self, Attachment, Draft, FileRead, Selection};
-use zerus_client_core::drafts::{DraftStore, IndexPage, Loaded, StoredDraft};
-use zerus_client_core::{Batch, ViewRow};
+use zerus_client_core::drafts::{DraftStore, IndexPage, Loaded, StoredDraft, ALREADY_EXISTS};
 
 pub type Job = Box<dyn FnOnce() + Send>;
 pub type Spawn = Arc<dyn Fn(Job) + Send + Sync>;
 pub type Notify = Arc<dyn Fn() + Send + Sync>;
-pub type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
-/// The catalog row of (computer, catalog key, name) and whether its computer
-/// is online. A key that left (a new run) falls back to the computer's row of
-/// that name, so a continuation follows its session across a resume.
-pub type Rows = Arc<dyn Fn(&str, &str, &str) -> Option<(ViewRow, bool)> + Send + Sync>;
 
 const COMPOSERS: usize = 64;
+/// Attachment bytes the idle composers in memory may hold; their drafts stay on disk.
+const HELD_BYTES: usize = 128 * 1024 * 1024;
 const DRAFT_KEYS: usize = 200;
 /// Message text, in UTF-8 bytes (`MaxTextBytes`).
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 const EXCERPT_LINES: usize = 12;
 const EXCERPT_CHARS: usize = 1200;
-
-pub struct Config {
-    pub drafts: PathBuf,
-    pub qt_drafts: Option<PathBuf>,
-    pub cache: PathBuf,
-    pub hgs: PathBuf,
-    pub allowed: bool,
-}
+/// How long the exit waits for attach reads under way.
+const EXIT_WAIT: Duration = Duration::from_secs(2);
 
 pub struct Deps {
     pub spawn: Spawn,
     pub notify: Notify,
-    pub clock: Clock,
-    pub rows: Rows,
 }
 
 /// The session a composer belongs to, as the webview opened it.
@@ -2066,8 +2035,8 @@ pub struct AttachmentView {
     pub mime: String,
     pub reference: String,
     pub bytes: u64,
-    /// The `zerus-file` path of its bytes (`draft/<sha256>`); the webview
-    /// turns it into a URL with `convertFileSrc`.
+    /// The `zerus-file` path of its bytes (`draft/{handle}/{list}/{index}`,
+    /// Task 3b); the webview turns it into a URL with `convertFileSrc`.
     pub path: String,
     /// The first lines of a text file, for the preview.
     pub excerpt: Option<String>,
@@ -2096,10 +2065,6 @@ pub struct ComposerView {
     pub send_label: String,
 }
 
-pub(crate) fn digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// One composer's draft and state (`MessageComposer::Draft` plus its sets).
 pub(crate) struct Composer {
     pub(crate) handle: u64,
@@ -2120,6 +2085,10 @@ pub(crate) struct Composer {
     pub(crate) storage_error: Option<String>,
     pub(crate) removed: Option<(usize, Attachment)>,
     pub(crate) attaching: bool,
+    /// A rename's store call runs: the composer is locked, as Qt's loading keys.
+    pub(crate) renaming: bool,
+    /// Bumps whenever the attachment list changes; the `zerus-file` paths name it.
+    pub(crate) attachments_rev: u64,
 }
 
 impl Composer {
@@ -2128,6 +2097,7 @@ impl Composer {
             handle, key, loaded: false, draft: Draft::default(), position: 0, anchor: 0, label: String::new(),
             form_state: Map::new(), rev: 0, text_epoch: 0, sending: false, waiting: None, uncertain: false,
             error: false, notice: String::new(), storage_error: None, removed: None, attaching: false,
+            renaming: false, attachments_rev: 0,
         }
     }
 
@@ -2135,8 +2105,8 @@ impl Composer {
         !self.draft.text.trim().is_empty() || !self.draft.attachments.is_empty()
     }
 
-    fn busy(&self) -> bool {
-        self.sending || self.waiting.is_some() || self.attaching
+    pub(crate) fn busy(&self) -> bool {
+        self.sending || self.waiting.is_some() || self.attaching || self.renaming
     }
 
     pub(crate) fn stored(&self) -> StoredDraft {
@@ -2156,15 +2126,11 @@ impl Composer {
         self.notice = text.into();
         self.error = true;
     }
-}
 
-/// The followed session's Activity, as the batches bring it (Task 4 reads it).
-#[derive(Default)]
-pub(crate) struct Followed {
-    pub(crate) computer: String,
-    pub(crate) key: String,
-    pub(crate) details: Option<Arc<Value>>,
-    pub(crate) events: VecDeque<Value>,
+    /// The attachment list changed: its files get new `zerus-file` paths.
+    pub(crate) fn attachments_changed(&mut self) {
+        self.attachments_rev += 1;
+    }
 }
 
 #[derive(Default)]
@@ -2174,20 +2140,18 @@ pub(crate) struct Hub {
     order: VecDeque<String>,
     pub(crate) open: Option<SessionRef>,
     pub(crate) open_key: Option<String>,
-    pub(crate) followed: Followed,
     next_handle: u64,
     last_view: Option<ComposerView>,
-    stored_keys: BTreeSet<String>,
+    /// Keys of the newest stored drafts, newest first, at most 200.
+    stored_keys: VecDeque<String>,
     sent_keys: Option<Vec<String>>,
+    /// The app quits: no edit, attach or send starts any more.
+    pub(crate) closed: bool,
 }
 
 pub(crate) struct Shared {
     pub(crate) hub: Mutex<Hub>,
-    pub(crate) store: DraftStore,
-    pub(crate) qt_drafts: Option<PathBuf>,
-    pub(crate) cache: Arc<files::Cache>,
-    pub(crate) hgs: PathBuf,
-    pub(crate) allowed: bool,
+    pub(crate) store: Arc<DraftStore>,
     pub(crate) deps: Deps,
 }
 
@@ -2209,24 +2173,12 @@ fn excerpt(attachment: &Attachment) -> Option<String> {
 }
 
 impl Composers {
-    pub fn new(config: Config, deps: Deps) -> Self {
-        let store = DraftStore::open(config.drafts);
-        let shared = Arc::new(Shared {
-            hub: Mutex::new(Hub::default()),
-            store,
-            qt_drafts: config.qt_drafts,
-            cache: files::Cache::new(config.cache),
-            hgs: config.hgs,
-            allowed: config.allowed,
-            deps,
-        });
-        let composers = Composers(shared);
+    /// `drafts` is the app's one draft store (`Drafts` in lib.rs), shared
+    /// with voice, so every draft key has one writer.
+    pub fn new(drafts: Arc<DraftStore>, deps: Deps) -> Self {
+        let composers = Composers(Arc::new(Shared { hub: Mutex::new(Hub::default()), store: drafts, deps }));
         composers.load_stored_keys();
         composers
-    }
-
-    pub fn cache(&self) -> Arc<files::Cache> {
-        Arc::clone(&self.0.cache)
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, Hub> {
@@ -2262,9 +2214,6 @@ impl Composers {
         let renamed = hub.open.as_ref().filter(|old| {
             old.computer == session.computer && old.key == session.key && old.name != session.name
         }).and_then(|_| hub.open_key.clone());
-        if hub.followed.computer != session.computer || hub.followed.key != session.key {
-            hub.followed = Followed { computer: session.computer.clone(), key: session.key.clone(), ..Followed::default() };
-        }
         hub.open = Some(session);
         hub.open_key = Some(key.clone());
         if let Some(old) = renamed {
@@ -2310,49 +2259,102 @@ impl Composers {
         }
         composer.storage_error = loaded.storage_error;
         composer.text_epoch += 1;
+        composer.attachments_changed();
         drop(hub);
         self.changed();
     }
 
-    /// Moves a draft to a renamed session's key; S5 never overwrites a draft
-    /// there (`ALREADY_EXISTS`), and then the old key keeps its draft.
+    /// `renameDraft`: the draft moves once the store has it at the new key,
+    /// and the composer stays locked until then. A draft already at the new
+    /// key is never overwritten (S5's `ALREADY_EXISTS`): it loads instead,
+    /// and the moved draft stays under its old key for Saved drafts.
     fn rename(&self, hub: &mut Hub, old: &str, new: &str) {
         let Some(composer) = hub.composers.get(old) else { return };
         if composer.busy() || !composer.loaded || composer.storage_error.is_some() {
             return;
         }
         let stored = composer.stored();
+        if let Some(here) = hub.composers.get_mut(new) {
+            if here.busy() || !here.loaded {
+                return;
+            }
+            if here.has_content() || here.storage_error.is_some() {
+                here.show_error(ALREADY_EXISTS);
+                return;
+            }
+            hub.composers.remove(new);
+        }
         let mut moved = hub.composers.remove(old).expect("checked above");
         moved.key = new.to_owned();
+        moved.renaming = true;
         hub.composers.insert(new.to_owned(), moved);
         let me = self.clone();
-        let moved_to = new.to_owned();
-        self.0.store.rename(old, new, stored, move |result| {
-            if let Err(error) = result {
-                let mut hub = me.lock();
-                if let Some(composer) = hub.composers.get_mut(&moved_to) {
-                    composer.storage_error = Some(error);
-                }
-                drop(hub);
-                me.changed();
-            }
-        });
+        let (from, to) = (old.to_owned(), new.to_owned());
+        self.0.store.rename(old, new, stored, move |result| me.renamed(&from, &to, result));
     }
 
-    /// Drops least recently opened composers past the bound (`trimDraftCache`).
+    fn renamed(&self, old: &str, new: &str, result: Result<(), String>) {
+        let mut hub = self.lock();
+        match result {
+            Ok(()) => {
+                if let Some(composer) = hub.composers.get_mut(new) {
+                    composer.renaming = false;
+                }
+            }
+            Err(error) => {
+                if let Some(mut moved) = hub.composers.remove(new) {
+                    moved.key = old.to_owned();
+                    moved.renaming = false;
+                    hub.composers.insert(old.to_owned(), moved);
+                }
+                if hub.open_key.as_deref() == Some(new) {
+                    self.ensure(&mut hub, new);
+                    if let Some(here) = hub.composers.get_mut(new) {
+                        here.show_error(error);
+                    }
+                }
+            }
+        }
+        drop(hub);
+        self.changed();
+    }
+
+    /// Drops least recently opened composers past the bounds (`trimDraftCache`,
+    /// plus a byte bound Qt's unbounded cache lacks); a dropped composer's key
+    /// joins or leaves the stored keys, so its card's draft mark stays right.
     fn trim(&self, hub: &mut Hub) {
-        while hub.composers.len() > COMPOSERS {
+        let held = |hub: &Hub| -> usize {
+            hub.composers.values().map(|c| {
+                c.draft.attachments.iter().map(|a| a.bytes.len()).sum::<usize>() + c.removed.as_ref().map_or(0, |(_, a)| a.bytes.len())
+            }).sum()
+        };
+        while hub.composers.len() > COMPOSERS || held(hub) > HELD_BYTES {
             let open = hub.open_key.clone();
             let Some(index) = hub.order.iter().position(|key| {
-                Some(key) != open.as_ref() && hub.composers.get(key).is_none_or(|c| !c.busy())
+                Some(key) != open.as_ref() && hub.composers.get(key).is_none_or(|c| c.loaded && !c.busy())
             }) else { break };
             let key = hub.order.remove(index).expect("found above");
-            hub.composers.remove(&key);
+            if let Some(gone) = hub.composers.remove(&key) {
+                hub.stored_keys.retain(|k| k != &key);
+                if gone.has_content() {
+                    hub.stored_keys.push_front(key);
+                    hub.stored_keys.truncate(DRAFT_KEYS);
+                }
+            }
         }
     }
 
-    pub(crate) fn by_handle<'h>(hub: &'h mut Hub, handle: u64) -> Option<&'h mut Composer> {
+    pub(crate) fn by_handle(hub: &mut Hub, handle: u64) -> Option<&mut Composer> {
         hub.composers.values_mut().find(|c| c.handle == handle)
+    }
+
+    /// The composer of `handle` when it takes a change: loaded, not busy, and
+    /// the app not quitting.
+    pub(crate) fn editable(hub: &mut Hub, handle: u64) -> Option<&mut Composer> {
+        if hub.closed {
+            return None;
+        }
+        Self::by_handle(hub, handle).filter(|c| c.loaded && !c.busy())
     }
 
     /// Saves as the user types; a later save of the same key replaces it.
@@ -2360,11 +2362,6 @@ impl Composers {
         let me = self.clone();
         let (key, handle) = (composer.key.clone(), composer.handle);
         self.0.store.save(&composer.key, composer.stored(), move |result| me.saved(&key, handle, result));
-    }
-
-    /// Saves before something depends on it (a send); never replaced.
-    pub(crate) fn save_durable(&self, composer: &Composer, done: impl FnOnce(Result<(), String>) + Send + 'static) {
-        self.0.store.save_durable(&composer.key, composer.stored(), done);
     }
 
     fn saved(&self, key: &str, handle: u64, result: Result<(), String>) {
@@ -2379,8 +2376,8 @@ impl Composers {
     /// The editor changed (`MessageComposer.cpp:370-379`).
     pub fn edit(&self, handle: u64, rev: u64, text: String, position: i64, anchor: i64) {
         let mut hub = self.lock();
-        let Some(composer) = Self::by_handle(&mut hub, handle) else { return };
-        if !composer.loaded || composer.busy() || rev <= composer.rev {
+        let Some(composer) = Self::editable(&mut hub, handle) else { return };
+        if rev <= composer.rev {
             return;
         }
         composer.rev = rev;
@@ -2413,7 +2410,7 @@ impl Composers {
         }));
     }
 
-    /// A pasted image (`attachImage`): PNG bytes, checked in the core.
+    /// A pasted image (`attachImage`): PNG bytes from a raw IPC body, checked in the core.
     pub fn paste_image(&self, handle: u64, png: Vec<u8>, selection: Selection) {
         if !self.begin_attach(handle) {
             return;
@@ -2428,10 +2425,7 @@ impl Composers {
 
     fn begin_attach(&self, handle: u64) -> bool {
         let mut hub = self.lock();
-        let Some(composer) = Self::by_handle(&mut hub, handle) else { return false };
-        if !composer.loaded || composer.busy() {
-            return false;
-        }
+        let Some(composer) = Self::editable(&mut hub, handle) else { return false };
         composer.attaching = true;
         drop(hub);
         self.changed();
@@ -2449,6 +2443,7 @@ impl Composers {
                 composer.position = added.cursor as i64;
                 composer.anchor = added.cursor as i64;
                 composer.text_epoch += 1;
+                composer.attachments_changed();
                 if !composer.uncertain {
                     composer.notice.clear();
                     composer.error = false;
@@ -2478,13 +2473,11 @@ impl Composers {
     /// `removeAttachment`: the file and every mention of its reference.
     pub fn remove(&self, handle: u64, index: usize) {
         let mut hub = self.lock();
-        let Some(composer) = Self::by_handle(&mut hub, handle) else { return };
-        if !composer.loaded || composer.busy() {
-            return;
-        }
+        let Some(composer) = Self::editable(&mut hub, handle) else { return };
         if let Some(removed) = composer.draft.remove(index) {
             composer.removed = Some((index, removed));
             composer.text_epoch += 1;
+            composer.attachments_changed();
             self.save(composer);
         }
         drop(hub);
@@ -2495,11 +2488,11 @@ impl Composers {
     /// to its place and its reference to the end of the text.
     pub fn undo_remove(&self, handle: u64) {
         let mut hub = self.lock();
-        let Some(composer) = Self::by_handle(&mut hub, handle) else { return };
-        let Some((index, attachment)) = composer.removed.take() else { return };
-        if composer.busy() || composer.draft.attachments.len() >= attachments::MAX_ATTACHMENTS {
+        let Some(composer) = Self::editable(&mut hub, handle) else { return };
+        if composer.draft.attachments.len() >= attachments::MAX_ATTACHMENTS {
             return;
         }
+        let Some((index, attachment)) = composer.removed.take() else { return };
         if !attachment.reference.is_empty() {
             let text = &mut composer.draft.text;
             if text.chars().next_back().is_some_and(|c| !c.is_whitespace()) {
@@ -2511,6 +2504,7 @@ impl Composers {
         let at = index.min(composer.draft.attachments.len());
         composer.draft.attachments.insert(at, attachment);
         composer.text_epoch += 1;
+        composer.attachments_changed();
         self.save(composer);
         drop(hub);
         self.changed();
@@ -2519,7 +2513,7 @@ impl Composers {
     /// Allow retry (`MessageComposer.cpp:412-417`): clears an uncertain mark.
     pub fn allow_retry(&self, handle: u64) {
         let mut hub = self.lock();
-        let Some(composer) = Self::by_handle(&mut hub, handle) else { return };
+        let Some(composer) = Self::editable(&mut hub, handle) else { return };
         composer.uncertain = false;
         composer.error = false;
         composer.notice.clear();
@@ -2528,50 +2522,9 @@ impl Composers {
         self.changed();
     }
 
-    /// Records the followed session's Activity from a batch (Task 4 reads it).
-    pub fn observe(&self, batch: &Batch) {
-        let mut hub = self.lock();
-        let (computer, key) = (hub.followed.computer.clone(), hub.followed.key.clone());
-        let mut changed = false;
-        for out in batch.activity.iter().filter(|out| out.computer.0 == computer && out.key == key) {
-            match out.kind.as_str() {
-                "state" => {
-                    hub.followed.details = Some(Arc::new(out.payload["value"].clone()));
-                    changed = true;
-                }
-                "events" | "replace" => {
-                    if out.kind == "replace" {
-                        hub.followed.events.clear();
-                    }
-                    for event in out.payload["events"].as_array().into_iter().flatten() {
-                        hub.followed.events.push_back(event.clone());
-                    }
-                    while hub.followed.events.len() > 200 {
-                        hub.followed.events.pop_front();
-                    }
-                    changed = true;
-                }
-                "ended" => {
-                    hub.followed.details = None;
-                    changed = true;
-                }
-                _ => {}
-            }
-        }
-        drop(hub);
-        if changed {
-            self.after_observe();
-        }
-    }
-
-    /// What a change of the followed session's Activity sets off (Task 4 adds
-    /// the reconcile and Task 5 the continuations).
-    fn after_observe(&self) {
-        self.changed();
-    }
-
-    /// The open composer's view (tests and `composer_open`).
-    pub fn current(&self) -> Option<ComposerView> {
+    /// The open composer's view (tests).
+    #[cfg(test)]
+    pub(crate) fn current(&self) -> Option<ComposerView> {
         let hub = self.lock();
         let key = hub.open_key.clone()?;
         self.view_of(&hub, &key)
@@ -2589,12 +2542,13 @@ impl Composers {
         Some(view)
     }
 
-    /// The keys of nonempty drafts, when they changed since the last take.
+    /// The keys of nonempty drafts, when they changed since the last take:
+    /// the 200 newest stored ones and the composers held (at most 264).
     pub fn take_draft_keys(&self) -> Option<Vec<String>> {
         let mut hub = self.lock();
-        let mut keys = hub.stored_keys.clone();
+        let mut keys: BTreeSet<String> = hub.stored_keys.iter().cloned().collect();
         for (key, composer) in &hub.composers {
-            if composer.loaded && (composer.has_content() && !composer.sending) {
+            if composer.loaded && composer.has_content() && !composer.sending {
                 keys.insert(key.clone());
             } else if composer.loaded {
                 keys.remove(key);
@@ -2608,12 +2562,27 @@ impl Composers {
         Some(keys)
     }
 
-    /// Writes everything queued: on quit and on a termination signal.
-    pub fn flush(&self) {
-        self.0.store.flush();
+    /// A reloaded webview gets the view and the draft keys again.
+    pub fn resend(&self) {
+        let mut hub = self.lock();
+        hub.last_view = None;
+        hub.sent_keys = None;
     }
 
-    /// The status line and Send, by Qt's `updateControls` priority. Task 4
+    /// The app quits (`exit` in lib.rs, before the store's own flush): no
+    /// edit, attach or send starts any more, and attach reads under way end
+    /// first (at most 2 s), so everything the hub accepted is queued in the
+    /// store when the store flushes. A send whose "sending" save is still
+    /// queued never starts; it reloads as uncertain.
+    pub fn flush(&self) {
+        self.lock().closed = true;
+        let deadline = Instant::now() + EXIT_WAIT;
+        while self.lock().composers.values().any(|c| c.attaching) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The status line and Send, by Qt's `updateControls` priority. Task 4a
     /// adds the session's block reason and the cache chip.
     pub(crate) fn view_of(&self, hub: &Hub, key: &str) -> Option<ComposerView> {
         let composer = hub.composers.get(key)?;
@@ -2633,16 +2602,17 @@ impl Composers {
         Some(ComposerView {
             handle: composer.handle,
             key: composer.key.clone(),
-            loaded: composer.loaded,
+            loaded: composer.loaded && !composer.renaming,
             rev: composer.rev,
             text_epoch: composer.text_epoch,
             text: if composer.sending { String::new() } else { composer.draft.text.clone() },
             position: composer.position,
             anchor: composer.anchor,
             attachments: if composer.sending { Vec::new() } else {
-                composer.draft.attachments.iter().map(|a| AttachmentView {
-                    name: a.name.clone(), mime: a.mime.clone(), reference: a.reference.clone(),
-                    bytes: a.bytes.len() as u64, path: format!("draft/{}", digest(&a.bytes)), excerpt: excerpt(a),
+                composer.draft.attachments.iter().enumerate().map(|(index, a)| AttachmentView {
+                    name: a.name.clone(), mime: a.mime.clone(), reference: a.reference.clone(), bytes: a.bytes.len() as u64,
+                    path: format!("draft/{}/{}/{index}", composer.handle, composer.attachments_rev),
+                    excerpt: excerpt(a),
                 }).collect()
             },
             removed: composer.removed.as_ref().map(|(_, a)| a.name.clone()),
@@ -2724,92 +2694,313 @@ pub fn composer_allow_retry(state: State<'_, Composers>, handle: u64) {
 }
 ```
 
-- [ ] **Step 4: Write `client/src-tauri/src/composer/files.rs`**:
+- [ ] **Step 4: Extend the pump** in `client/src-tauri/src/pump.rs`:
 
 ```rust
-//! The `zerus-file` URI scheme and the attachment cache's pins.
-//!
-//! `zerus-file://localhost/draft/<sha256>` serves the bytes of an attachment
-//! of a composer in memory; `.../cache/<digest>/<name>` a copy in the private
-//! cache, only when `attachments::cached_at` accepts it (a regular file inside
-//! the canonical root, nonempty, at most 10 MiB). Only the main webview gets
-//! answers. Range requests answer 206, as media elements seek with them.
-//!
-//! Pins keep copies from `attachments::prune`: open previews, playing
-//! messages, and (through `extra`) the files a failed message's Retry needs.
+    /// Wakes a parked `take` without a change: a hub's view changed.
+    pub fn poke(&self) {
+        self.lock().dirty = true;
+        self.0 .1.notify_all();
+    }
+```
 
-use std::collections::{HashMap, HashSet};
+with the test:
+
+```rust
+    #[test]
+    fn a_poke_wakes_a_parked_take() {
+        let pump = Pump::default();
+        let _ = pump.take(Duration::ZERO);
+        let waker = pump.clone();
+        std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(30)); waker.poke(); });
+        let started = Instant::now();
+        let batch = pump.take(Duration::from_secs(5));
+        assert!(started.elapsed() < Duration::from_secs(2) && batch.is_empty());
+    }
+```
+
+- [ ] **Step 5: The envelope** in `client/src-tauri/src/commands.rs`. `next_batch` takes `composers: State<'_, crate::composer::Composers>` and serializes:
+
+```rust
+/// What `next_batch` returns: the core's batch, plus the hubs' projected views
+/// when they changed (latest value wins).
+#[derive(serde::Serialize)]
+struct Envelope<'a> {
+    #[serde(flatten)]
+    batch: &'a zerus_client_core::Batch,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    composer: Option<crate::composer::ComposerView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    draft_keys: Option<Vec<String>>,
+}
+```
+
+```rust
+    let composers = composers.inner().clone();
+    let bytes = blocking(move || {
+        let batch = live.pump.take(crate::pump::PARK);
+        actions.observe(&batch);
+        let envelope = Envelope { batch: &batch, composer: composers.take_view(), draft_keys: composers.take_draft_keys() };
+        serde_json::to_vec(&envelope).map_err(|error| error.to_string())
+    })
+    .await?;
+```
+
+The `start` command takes the composers too and calls `composers.resend()` beside `pump.resend()`, so a reloaded webview gets the view and the keys again.
+
+- [ ] **Step 6: Register it** in `client/src-tauri/src/lib.rs`.
+
+**The one draft store.** M1c opens the app's one `Arc<DraftStore>` in `setup` and manages it as `Drafts`, so the composers and voice share one writer per store. If M1c is on main, use its `Drafts` as it is. If it is not, this task adds exactly M1c's struct and lines, and M1c rebases onto them:
+
+```rust
+/// The app's one draft store, shared by the composers (and voice), so every
+/// draft key has one writer.
+#[cfg(feature = "live")]
+pub struct Drafts(pub std::sync::Arc<zerus_client_core::drafts::DraftStore>);
+```
+
+```rust
+                // in setup, after the actions: a replay never touches the real drafts either.
+                let drafts = std::sync::Arc::new(zerus_client_core::drafts::DraftStore::open(
+                    dir.join(zerus_client_core::drafts::dir(replay)),
+                ));
+                app.manage(Drafts(drafts));
+```
+
+Without M1c's core change, `drafts::dir(replay)` is not there yet: use `dir.join(if replay { "drafts-replay" } else { "drafts" })`, the values of M1c's `drafts::REPLAY_DIR` and `drafts::DIR`, and M1c's rebase replaces the literal with the call.
+
+**The composers**, after the `Drafts` lines (M1c's or these), taking the store from the managed state so they work with either:
+
+```rust
+                let drafts = std::sync::Arc::clone(&app.state::<Drafts>().0);
+                let notify_pump = app.state::<commands::AppState>().pump();
+                app.manage(composer::Composers::new(
+                    drafts,
+                    composer::Deps {
+                        spawn: std::sync::Arc::new(|job| { tauri::async_runtime::spawn_blocking(job); }),
+                        notify: std::sync::Arc::new(move || notify_pump.poke()),
+                    },
+                ));
+                #[cfg(unix)]
+                exit_on_signals(app.handle().clone());
+```
+
+Add `#[cfg(feature = "live")] mod composer;`, the builder's `.plugin(tauri_plugin_dialog::init())`, and the eight composer commands in the live handler.
+
+**The one exit hook.** M1c turns `run()`'s end into `.build(tauri::generate_context!()).expect(...).run(|_app, event| { if let tauri::RunEvent::Exit = event { #[cfg(feature = "live")] exit(_app); } })`, keeping main's `expect` text. If M1c is not on main, this task makes that change. Either way there is one `exit`, and whoever lands second adds its lines to it, never a second hook. The organization branch adds `Organization::flush()` to it the same way. This task adds the composers' flush before the store's:
+
+```rust
+/// Before the app quits: recordings under way are cancelled, the hubs take
+/// no more changes, and every draft save already queued reaches the disk.
+#[cfg(feature = "live")]
+fn exit(app: &AppHandle) {
+    use tauri::Manager;
+    #[cfg(feature = "media")]
+    if let Some(voices) = app.try_state::<voice::Voices>() {
+        voices.close_all();
+    }
+    // The organization branch's line: if let Some(o) = app.try_state::<organization::Organization>() { o.flush(); }
+    if let Some(composers) = app.try_state::<composer::Composers>() {
+        composers.flush();
+    }
+    if let Some(drafts) = app.try_state::<Drafts>() {
+        drafts.0.flush();
+    }
+}
+```
+
+Leave the `media` lines out if M1c is not on main; M1c's rebase brings them.
+
+**Termination signals** run the same hook rather than a second one:
+
+```rust
+/// SIGTERM, SIGINT or SIGHUP: the exit hook runs here first (drafts reach the
+/// disk even if the event loop is stuck), then the app exits, which runs the
+/// hook again harmlessly. Should the event loop not end the process, it ends
+/// five seconds later.
+#[cfg(all(unix, feature = "live"))]
+fn exit_on_signals(app: tauri::AppHandle) {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    let Ok(mut signals) = signal_hook::iterator::Signals::new([SIGTERM, SIGINT, SIGHUP]) else { return };
+    std::thread::Builder::new()
+        .name("zerus-signals".into())
+        .spawn(move || {
+            if signals.forever().next().is_some() {
+                exit(&app);
+                app.exit(0);
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                std::process::exit(0);
+            }
+        })
+        .expect("the signal thread starts");
+}
+```
+
+The Cargo additions change `client/src-tauri/Cargo.lock`: run `cargo +1.99.1 check --manifest-path src-tauri/Cargo.toml` once without `--locked` and commit the lock.
+
+- [ ] **Step 7: Run the tests to see them pass**
+
+Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer:: pump::`
+Expected: PASS (13 composer tests, the pump tests). Then clippy and fmt as in Task 1.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add client/src-tauri
+git commit -m "feat(client): the composer hub with durable drafts in the app's one store"
+```
+
+---
+
+### Task 3b: The `zerus-file` scheme and the attachment cache
+
+**Depends on:**
+- Task 3a;
+- A1 `zerus-5wmh.9.3` (#403): `attachments::{cached_at, sniff, store_at}`;
+- the cache bound `zerus-5wmh.9.17` (branch `work-ba0ed9fd-cachelru`): `attachments::touch`.
+
+**Qt reference:** `tray/src/AttachmentViewer.h:28` (the cache root under the app's cache folder); `tray/src/MessageComposer.cpp:1067-1085` (a composer attachment shown from its bytes).
+
+**Files:**
+- Create: `client/src-tauri/src/composer/files.rs`
+- Modify: `client/src-tauri/src/composer/mod.rs` (`pub mod files`, `Config`, `Shared.cache`, `Composers::cache`, `Composers::new` gains `config`)
+- Modify: `client/src-tauri/src/lib.rs` (the cache folder, the URI scheme)
+- Modify: `client/src-tauri/tauri.conf.json` (CSP `img-src`, `media-src` and `connect-src` for `zerus-file`)
+- Test: unit tests in `composer/files.rs`
+
+**Interfaces:**
+- Consumes: Task 3a's `Composers`, `Hub`, `Composer::{handle, attachments_rev, draft}` and the test helpers `dir`, `drafts`, `hub`, `session`, `until`.
+- Produces:
+
+```rust
+// composer/mod.rs
+pub struct Config { pub cache: PathBuf }
+impl Composers {
+    pub fn new(drafts: Arc<DraftStore>, config: Config, deps: Deps) -> Self; // Task 3a's, with the config
+    pub fn cache(&self) -> Arc<files::Cache>;
+}
+// composer/files.rs
+pub struct Cache; // the private cache's canonical root
+impl Cache { pub fn new(root: PathBuf) -> Arc<Self>; pub fn root(&self) -> &Path; }
+pub fn respond(composers: &Composers, webview: &str, request: &http::Request<Vec<u8>>) -> http::Response<Vec<u8>>;
+// the scheme: zerus-file://localhost/draft/{handle}/{list}/{index} and zerus-file://localhost/cache/<path under the root>
+// (http://zerus-file.localhost/... on Windows), answered only to the main webview, with HTTP Range (206)
+```
+
+Task 4b adds `Cache::prune_later`, and Task 9 the pins, `with_limit` and `set_extra`, each with its first use (clippy denies unused code).
+
+- [ ] **Step 1: Write the failing tests** at the end of `client/src-tauri/src/composer/files.rs`:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::composer::tests::{dir, hub, session, until};
+    use zerus_client_core::attachments::Selection;
+
+    fn get(path: &str, range: Option<&str>) -> Request<Vec<u8>> {
+        let mut request = Request::builder().uri(format!("zerus-file://localhost/{path}"));
+        if let Some(range) = range { request = request.header("range", range); }
+        request.body(Vec::new()).unwrap()
+    }
+
+    #[test]
+    fn the_scheme_serves_draft_bytes_with_ranges_and_only_to_main() {
+        let root = dir("scheme");
+        let file = root.join("clip.bin");
+        std::fs::write(&file, b"0123456789").unwrap();
+        let (c, _) = hub(&root);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.attach_paths(view.handle, vec![file], Selection::default());
+        let view = until(&c, |v| v.attachments.len() == 1 && !v.attaching);
+        let path = view.attachments[0].path.clone();
+        let whole = respond(&c, "main", &get(&path, None));
+        assert_eq!(whole.status(), 200);
+        assert_eq!(whole.body(), b"0123456789");
+        assert_eq!(whole.headers()["accept-ranges"], "bytes");
+        assert_eq!(whole.headers()["cross-origin-resource-policy"], "cross-origin");
+        let part = respond(&c, "main", &get(&path, Some("bytes=2-5")));
+        assert_eq!(part.status(), 206);
+        assert_eq!(part.body(), b"2345");
+        assert_eq!(part.headers()["content-range"], "bytes 2-5/10");
+        assert_eq!(respond(&c, "main", &get(&path, Some("bytes=20-"))).status(), 416);
+        assert_eq!(respond(&c, "native-ui-1", &get(&path, None)).status(), 403);
+        assert_eq!(respond(&c, "main", &get("draft/0/0/0", None)).status(), 404);
+        assert_eq!(respond(&c, "main", &get("cache/../../etc/passwd", None)).status(), 404);
+        c.remove(view.handle, 0);
+        assert_eq!(respond(&c, "main", &get(&path, None)).status(), 404, "a removed file's path answers nothing");
+    }
+
+    #[test]
+    fn the_scheme_serves_only_cached_files_under_the_root() {
+        let root = dir("cached");
+        let (c, _) = hub(&root);
+        let cached = zerus_client_core::attachments::store_at(c.cache().root(), "shot.png", b"\x89PNG\r\n\x1a\nrest").unwrap();
+        let relative = cached.strip_prefix(c.cache().root()).unwrap().to_string_lossy().replace('\\', "/");
+        let response = respond(&c, "main", &get(&format!("cache/{}", urlencode(&relative)), None));
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["content-type"], "image/png");
+        std::fs::write(root.join("outside.txt"), b"secret").unwrap();
+        assert_eq!(respond(&c, "main", &get("cache/..%2Foutside.txt", None)).status(), 404);
+    }
+
+    fn urlencode(text: &str) -> String {
+        text.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+    }
+}
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer::files::`
+Expected: compile errors, `files` does not exist.
+
+- [ ] **Step 3: The cache in the hub.** In `composer/mod.rs`:
+  - `pub mod files;` at the top;
+  - `pub struct Config { pub cache: PathBuf }`;
+  - `Shared` gains `pub(crate) cache: Arc<files::Cache>`;
+  - `Composers::new(drafts, config, deps)` builds it with `files::Cache::new(config.cache)`;
+  - `pub fn cache(&self) -> Arc<files::Cache> { Arc::clone(&self.0.cache) }`;
+  - the test helper `hub_on` passes `Config { cache: store.root().with_file_name("cache") }`, the `cache` folder beside the test's `drafts`.
+
+- [ ] **Step 4: Write `client/src-tauri/src/composer/files.rs`** above its tests:
+
+```rust
+//! The `zerus-file` URI scheme over the private attachment cache.
+//!
+//! `zerus-file://localhost/draft/{handle}/{list}/{index}` serves an
+//! attachment of a composer in memory while its attachment list is the one
+//! the view named; `.../cache/<path>` serves a copy in the private cache, only
+//! when `attachments::cached_at` accepts it (a regular file inside the
+//! canonical root, nonempty, at most 10 MiB). Only the main webview gets
+//! answers. Range requests answer 206, as media elements seek with them.
+//! Bytes reach the webview only this way or as raw IPC bodies, never as JSON.
+
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tauri::http::{Request, Response, StatusCode};
 use zerus_client_core::attachments;
 
-use super::{lock, Composers, Spawn};
+use super::Composers;
 
 pub struct Cache {
     root: PathBuf,
-    pins: Mutex<HashMap<PathBuf, usize>>,
-    pruning: AtomicBool,
-    again: AtomicBool,
 }
 
-fn canonical(path: &Path) -> PathBuf {
+pub(crate) fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 impl Cache {
     pub fn new(root: PathBuf) -> Arc<Self> {
         let _ = std::fs::create_dir_all(&root);
-        Arc::new(Cache { root: canonical(&root), pins: Mutex::new(HashMap::new()), pruning: AtomicBool::new(false), again: AtomicBool::new(false) })
+        Arc::new(Cache { root: canonical(&root) })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
-    }
-
-    pub fn pin(&self, path: &Path) {
-        *lock(&self.pins).entry(canonical(path)).or_default() += 1;
-    }
-
-    pub fn unpin(&self, path: &Path) {
-        let mut pins = lock(&self.pins);
-        let key = canonical(path);
-        if let Some(count) = pins.get_mut(&key) {
-            *count -= 1;
-            if *count == 0 {
-                pins.remove(&key);
-            }
-        }
-    }
-
-    /// A reloaded webview starts without previews.
-    pub fn clear_pins(&self) {
-        lock(&self.pins).clear();
-    }
-
-    /// One prune after a store, on the blocking pool; a store during a prune
-    /// runs exactly one more.
-    pub fn prune_later(self: &Arc<Self>, spawn: &Spawn, extra: Arc<dyn Fn() -> HashSet<PathBuf> + Send + Sync>) {
-        if self.pruning.swap(true, Ordering::SeqCst) {
-            self.again.store(true, Ordering::SeqCst);
-            return;
-        }
-        let cache = Arc::clone(self);
-        spawn(Box::new(move || loop {
-            cache.again.store(false, Ordering::SeqCst);
-            let kept: HashSet<PathBuf> = extra().iter().map(|path| canonical(path)).collect();
-            let pins: HashSet<PathBuf> = lock(&cache.pins).keys().cloned().collect();
-            attachments::prune(&cache.root, attachments::CACHE_LIMIT, |path| {
-                let path = canonical(path);
-                pins.contains(&path) || kept.contains(&path)
-            });
-            if !cache.again.load(Ordering::SeqCst) {
-                cache.pruning.store(false, Ordering::SeqCst);
-                break;
-            }
-        }));
     }
 }
 
@@ -2847,24 +3038,34 @@ fn range(header: Option<&str>, len: usize) -> Option<(usize, usize)> {
     (start <= end && end < len).then_some((start, end))
 }
 
+/// `draft/{handle}/{list}/{index}`: the attachment of a composer in memory,
+/// while its list is still the one the view named. No hashing: an attachment
+/// list that changed answers 404 for its old paths.
+fn draft_file(composers: &Composers, rest: &str) -> Option<(Arc<[u8]>, String)> {
+    let numbers: Vec<u64> = rest.split('/').map(|part| part.parse().ok()).collect::<Option<_>>()?;
+    let &[handle, list, index] = numbers.as_slice() else { return None };
+    let hub = composers.lock();
+    let composer = hub.composers.values().find(|c| c.handle == handle && c.attachments_rev == list)?;
+    let attachment = composer.draft.attachments.get(usize::try_from(index).ok()?)?;
+    Some((Arc::clone(&attachment.bytes), attachment.mime.clone()))
+}
+
 /// Answers one `zerus-file` request for webview `webview`.
 pub fn respond(composers: &Composers, webview: &str, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
     if webview != crate::MAIN_WINDOW {
         return status(StatusCode::FORBIDDEN);
     }
     let Some(path) = decode(request.uri().path().trim_start_matches('/')) else { return status(StatusCode::NOT_FOUND) };
-    let found = if let Some(sha) = path.strip_prefix("draft/") {
-        let hub = composers.lock();
-        hub.composers.values().flat_map(|c| c.draft.attachments.iter())
-            .find(|a| super::digest(&a.bytes) == sha)
-            .map(|a| (a.bytes.to_vec(), a.mime.clone()))
+    let found = if let Some(rest) = path.strip_prefix("draft/") {
+        draft_file(composers, rest)
     } else if let Some(relative) = path.strip_prefix("cache/") {
         let cache = composers.cache();
         attachments::cached_at(cache.root(), &cache.root().join(relative)).and_then(|file| {
             attachments::touch(&file);
+            // `cached_at` refuses files over 10 MiB, so this read is bounded.
             let bytes = std::fs::read(&file).ok()?;
             let mime = attachments::sniff(&bytes);
-            Some((bytes, mime))
+            Some((Arc::<[u8]>::from(bytes), mime))
         })
     } else {
         None
@@ -2883,7 +3084,7 @@ pub fn respond(composers: &Composers, webview: &str, request: &Request<Vec<u8>>)
             .header("content-range", format!("bytes {start}-{end}/{len}"))
             .body(bytes[start..=end].to_vec()),
         None if requested.is_some() => return status(StatusCode::RANGE_NOT_SATISFIABLE),
-        None => builder.status(StatusCode::OK).body(bytes),
+        None => builder.status(StatusCode::OK).body(bytes.to_vec()),
     }
     .expect("a file response")
 }
@@ -2891,118 +3092,14 @@ pub fn respond(composers: &Composers, webview: &str, request: &Request<Vec<u8>>)
 
 `attachments::cached_at` canonicalizes and rejects anything outside the root, so `cache/../...` paths answer 404.
 
-- [ ] **Step 5: Extend the pump** in `client/src-tauri/src/pump.rs`:
+- [ ] **Step 5: Register it** in `client/src-tauri/src/lib.rs`. `Composers::new` gets the config, from the app's cache folder (Tauri's `app_cache_dir`, so the identifier decides it; Qt's cache is `hgdev/hgs-tray/attachments`, a different folder this client never touches):
 
 ```rust
-    /// Wakes a parked `take` without a change: a hub's view changed.
-    pub fn poke(&self) {
-        self.lock().dirty = true;
-        self.0 .1.notify_all();
-    }
-
-    /// The last-known row of `(computer, catalog key)`.
-    pub fn row(&self, computer: &str, key: &str) -> Option<ViewRow> {
-        self.lock().mirror.computers.get(computer)?.rows.get(key).cloned()
-    }
-
-    /// The computer's live row of that name (a session that started a new
-    /// run has a new catalog key). A scan of one computer's rows.
-    pub fn row_named(&self, computer: &str, name: &str) -> Option<ViewRow> {
-        self.lock().mirror.computers.get(computer)?.rows.values().find(|row| row.name == name && row.state != "archived").cloned()
-    }
-
-    /// Whether the computer counts as online, as the frontend reads it
-    /// (`computerOffline`): neither reconnecting nor ended.
-    pub fn online(&self, computer: &str) -> bool {
-        self.lock().mirror.computers.get(computer)
-            .and_then(|rows| rows.status)
-            .is_some_and(|status| !matches!(status, ComputerStatus::Reconnecting { .. } | ComputerStatus::Ended))
-    }
-```
-
-with the test:
-
-```rust
-    #[test]
-    fn a_poke_wakes_a_parked_take_and_rows_are_looked_up() {
-        let pump = Pump::default();
-        pump.push(upsert("run:a", "claude/p/a"));
-        pump.push(Change::Computer { computer: ComputerId(String::new()), status: ComputerStatus::Live });
-        let _ = pump.take(PARK);
-        assert_eq!(pump.row("", "run:a").unwrap().name, "claude/p/a");
-        assert_eq!(pump.row_named("", "claude/p/a").unwrap().name, "claude/p/a");
-        assert!(pump.online(""));
-        assert!(!pump.online("studio"));
-        let waker = pump.clone();
-        std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(30)); waker.poke(); });
-        let started = Instant::now();
-        let batch = pump.take(Duration::from_secs(5));
-        assert!(started.elapsed() < Duration::from_secs(2) && batch.is_empty());
-    }
-```
-
-- [ ] **Step 6: The envelope** in `client/src-tauri/src/commands.rs`. `next_batch` takes `composers: State<'_, crate::composer::Composers>` and serializes:
-
-```rust
-/// What `next_batch` returns: the core's batch, plus the hubs' projected views
-/// when they changed (latest value wins).
-#[derive(serde::Serialize)]
-struct Envelope<'a> {
-    #[serde(flatten)]
-    batch: &'a zerus_client_core::Batch,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    composer: Option<crate::composer::ComposerView>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    draft_keys: Option<Vec<String>>,
-}
-```
-
-```rust
-    let bytes = blocking(move || {
-        let batch = live.pump.take(crate::pump::PARK);
-        actions.observe(&batch);
-        composers.observe(&batch);
-        let envelope = Envelope { batch: &batch, composer: composers.take_view(), draft_keys: composers.take_draft_keys() };
-        serde_json::to_vec(&envelope).map_err(|error| error.to_string())
-    })
-    .await?;
-```
-
-`Live::start` on a later call (a reloaded webview) also calls `composers.cache().clear_pins()` and forgets the last sent view and keys, so the new page gets them: add `Composers::resend(&self)` that sets `last_view` and `sent_keys` to `None`, and call it from `start` beside `pump.resend()`.
-
-- [ ] **Step 7: Register it** in `client/src-tauri/src/lib.rs`:
-
-```rust
-#[cfg(feature = "live")]
-mod composer;
-
-// in setup, after the actions:
-let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
 let cache = app.path().app_cache_dir()?.join(if replay { "attachments-replay" } else { "attachments" });
-let pump = app.state::<commands::AppState>().pump();
-let (rows_pump, notify_pump) = (pump.clone(), pump.clone());
-app.manage(composer::Composers::new(
-    composer::Config {
-        drafts: dir.join(if replay { "drafts-replay" } else { "drafts" }),
-        qt_drafts: (!replay).then(zerus_client_core::drafts::qt_root).flatten(),
-        cache,
-        hgs: zerus_client_core::default_hgs(),
-        allowed: actions::actions_allowed(std::env::var("ZERUS_CLIENT_REPLAY").ok().as_deref(), std::env::var("ZERUS_CLIENT_HGS").ok().as_deref()),
-    },
-    composer::Deps {
-        spawn: std::sync::Arc::new(|job| { tauri::async_runtime::spawn_blocking(job); }),
-        notify: std::sync::Arc::new(move || notify_pump.poke()),
-        clock: std::sync::Arc::new(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())),
-        rows: std::sync::Arc::new(move |computer, key, name| {
-            rows_pump.row(computer, key).or_else(|| rows_pump.row_named(computer, name)).map(|row| (row, rows_pump.online(computer)))
-        }),
-    },
-));
-#[cfg(unix)]
-flush_on_signals(app.handle().clone());
+app.manage(composer::Composers::new(drafts, composer::Config { cache }, composer::Deps { /* Task 3a's */ }));
 ```
 
-The builder gains `.plugin(tauri_plugin_dialog::init())` and the scheme:
+and the builder gains the scheme:
 
 ```rust
         .register_asynchronous_uri_scheme_protocol("zerus-file", |ctx, request, responder| {
@@ -3024,123 +3121,74 @@ The builder gains `.plugin(tauri_plugin_dialog::init())` and the scheme:
         })
 ```
 
-`run()` ends with `.build(tauri::generate_context!()).expect("Zerus Next failed to start").run(|app, event| { ... })`, flushing on `tauri::RunEvent::Exit`:
+In `tauri.conf.json`, in `csp` and `devCsp` (keeping the dev server origin in `devCsp`): `img-src` gains `zerus-file: http://zerus-file.localhost`, `media-src` is `'self' zerus-file: http://zerus-file.localhost`, and `connect-src` gains `zerus-file: http://zerus-file.localhost` (Task 9 reads a text preview's first bytes with `fetch`). The responses carry `Cross-Origin-Resource-Policy: cross-origin`, which the app's `Cross-Origin-Embedder-Policy: require-corp` needs.
 
-```rust
-        .run(|app, event| {
-            #[cfg(feature = "live")]
-            if let tauri::RunEvent::Exit = event {
-                use tauri::Manager;
-                app.state::<composer::Composers>().flush();
-                app.state::<terminal::Terminals>().stop_all();
-            }
-            #[cfg(not(feature = "live"))]
-            let _ = (app, event);
-        });
-```
+- [ ] **Step 6: Run the tests to see them pass**
 
-and the signal thread:
+Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer::`
+Expected: PASS (Task 3a's 13 and these 2). Clippy and fmt clean.
 
-```rust
-/// SIGTERM, SIGINT or SIGHUP: drafts reach disk and attaches hang up before
-/// the process exits (`DraftStore::flush`, as Qt's quit path).
-#[cfg(all(unix, feature = "live"))]
-fn flush_on_signals(app: tauri::AppHandle) {
-    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
-    use tauri::Manager;
-    let Ok(mut signals) = signal_hook::iterator::Signals::new([SIGTERM, SIGINT, SIGHUP]) else { return };
-    std::thread::Builder::new()
-        .name("zerus-signals".into())
-        .spawn(move || {
-            if signals.forever().next().is_some() {
-                app.state::<composer::Composers>().flush();
-                app.state::<terminal::Terminals>().stop_all();
-                app.exit(0);
-            }
-        })
-        .expect("the signal thread starts");
-}
-```
-
-Register the eight composer commands in the live handler. In `tauri.conf.json`, the CSP gets `"img-src": "'self' data: zerus-file: http://zerus-file.localhost"` and `"media-src": "zerus-file: http://zerus-file.localhost"`, in `csp` and `devCsp` (keeping the dev server origin in `devCsp`).
-
-- [ ] **Step 8: Run the tests to see them pass**
-
-Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer:: pump::`
-Expected: PASS (13 composer tests, the pump tests). Then clippy and fmt as in Task 1.
-
-- [ ] **Step 9: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add client/src-tauri
-git commit -m "feat(client): the composer hub with durable drafts, attachments and the zerus-file scheme"
+git commit -m "feat(client): the zerus-file scheme over draft attachments and the private cache"
 ```
 
 ---
 
-### Task 4: The send driver: block reasons, the cold cache, delivery and local rows
+### Task 4a: The session's part of the composer: block reasons, the cache chip and the inspect fallback
 
 **Depends on:**
-- A2 `zerus-5wmh.9.4` (#404): `Action::Send`, `Outcome::Uncertain`, `actions::dispatch` in src-tauri, `Lane::Send`;
-- S1 `zerus-5wmh.9.7` (#407): `send::{BlockFacts, block_reason}`;
-- S2 `zerus-5wmh.9.8` (#408): `cache::{expired, warning, chip, Chip, details, cold_prompt, ColdPrompt, ColdAction}`;
-- S4 `zerus-5wmh.9.10` (branch `work-ba0ed9fd-localmsgs`): `local_messages::{LocalMessages, LocalMessage, Reconciled, inspect, Inspect}`;
-- A1's `attachments::{prepare, read_stored, StoredFile}`;
-- Task 3.
+- S1 `zerus-5wmh.9.7` (#407, on main): `send::{BlockFacts, block_reason}`;
+- S2 `zerus-5wmh.9.8` (#408, on main): `cache::{expired, warning, chip, Chip, details}`;
+- A2 `zerus-5wmh.9.4` (#404): the `dispatch` function in `actions.rs`, which this task marks writes in;
+- Tasks 3a and 3b.
 
 **Qt reference:** `tray/src/SessionsWindow.cpp`:
 - `messageBlockReason` (4386-4432) and the availability it gives the composer (3982-3989);
-- `sendMessage` with the cold cache dialog (4806-4853);
-- `deliverMessage` and its `stillValid` (4855-4935);
-- `finishMessage` (4937-4968), `reconcileMessages` (4970-5000);
-- `messageAction` (4470-4527).
-
-Also `MessageComposer::prepareSendingAsync` and `deliveryFinished` (729-776).
+- `m_pending`, `isTerminating` and the update lanes the block reason reads;
+- the cache chip's minute and its popover text (987-1002);
+- the inspection a selected session gets (`inspect()`), and `m_inspectError`.
 
 **Files:**
 - Create: `client/src-tauri/src/composer/send.rs`
-- Modify: `client/src-tauri/src/composer/mod.rs` (Deps, Hub, the view, rename and observe hooks)
-- Modify: `client/src-tauri/src/actions.rs` (`dispatch_as`, `WriteKind`, `write_kind`)
-- Modify: `client/src-tauri/Cargo.toml` (+ `chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }`)
-- Modify: `client/src-tauri/src/lib.rs` (the new deps, the ticker, the commands)
-- Test: unit tests in `composer/send.rs` and `actions.rs`
+- Modify: `client/src-tauri/src/composer/mod.rs` (`pub mod send`, `Deps`, `Followed`, `Hub`, `open`, `observe`, the view; Task 3a's test helper)
+- Modify: `client/src-tauri/src/actions.rs` (`WriteKind`, `write_kind`, the mark in `dispatch`)
+- Modify: `client/src-tauri/src/pump.rs` (`row`, `row_named`, `online`)
+- Modify: `client/src-tauri/src/commands.rs` (`next_batch` calls `composers.observe`)
+- Modify: `client/src-tauri/Cargo.toml` (+ `chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }`), `client/src-tauri/Cargo.lock`
+- Modify: `client/src-tauri/src/lib.rs` (the new deps, the ticker)
+- Test: unit tests in `composer/send.rs`, `actions.rs` and `pump.rs`
 
 **Interfaces:**
-- Consumes: the S1, S2, S4, A1 and A2 surfaces in "Depends on"; `zerus_client_core::details::details_invocation`, `run_limited`; `terminal::{supported, TerminalFacts}`.
-- Produces:
+- Consumes: Task 3a's `Composers`, `Hub`, `Composer`, `SessionRef`, `lock`; Task 3b's `Config`; `zerus_client_core::details::details_invocation`, `run_limited`, `Exit`.
+- Produces (Tasks 4b and 5 extend these):
 
 ```rust
 // actions.rs
-#[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum WriteKind { Update, Terminate, Clear }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum WriteKind { Update, Terminate } // Task 5 adds Clear
+impl WriteKind { pub fn of(action: &Action) -> Self; }
 impl Actions { pub fn write_kind(&self, computer: &str, name: &str) -> Option<WriteKind>; }
-pub async fn dispatch_as(state: &Actions, target: Target, action: Action, request_id: String) -> Result<Outcome, String>;
 // composer/mod.rs: Deps gains
-pub type Dispatch = Arc<dyn Fn(Target, Action, String) -> Result<Outcome, String> + Send + Sync>; // blocking
+pub type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;              // seconds since the epoch
+pub type Rows = Arc<dyn Fn(&str, &str, &str) -> Option<(ViewRow, bool)> + Send + Sync>; // (computer, catalog key, name) -> (row, online); a new run is found by name
 pub type Facts = Arc<dyn Fn(&str, &str) -> Option<WriteKind> + Send + Sync>;
-pub type Inspect = Arc<dyn Fn(&Target, Option<&str>) -> Option<Value> + Send + Sync>;      // blocking
+pub type Inspect = Arc<dyn Fn(&Target, Option<&str>) -> Option<Value> + Send + Sync>; // blocking
+pub struct Deps { pub spawn: Spawn, pub notify: Notify, pub clock: Clock, pub rows: Rows, pub facts: Facts, pub inspect: Inspect }
+impl Composers { pub fn observe(&self, batch: &Batch); pub fn tick(&self); pub fn start_ticker(&self); }
 // ComposerView gains
 pub available: bool, pub unavailable_reason: String, pub block_reason: Option<String>,
 pub attachments_available: bool, pub cache: Chip, pub cache_warning: String, pub cache_details: String,
-pub local: Vec<LocalMessage>,
-// composer/send.rs
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SendReply { Sending, Busy, Blocked { reason: String }, Notice { text: String },
-                     Cold { token: u64, prompt: ColdPrompt }, ClearContext { token: u64 } }
-#[serde(tag = "kind", rename_all = "snake_case")] pub enum Answer { Cold { action: ColdAction }, Cancel }
-impl Composers {
-    pub fn send_message(&self, handle: u64, rev: u64, text: String, position: i64, anchor: i64) -> SendReply;
-    pub fn answer(&self, token: u64, answer: Answer) -> SendReply;
-    pub fn retry(&self, handle: u64, id: &str) -> SendReply;   // blocking: reads the cached files
-    pub fn delete_local(&self, handle: u64, id: &str);
-    pub fn inspect_local(&self, handle: u64, id: &str) -> Option<Inspect>;
-    pub fn tick(&self);                                      // the 1 s ticker
-    pub fn start_ticker(&self);
-}
-// commands: send_message(handle, rev, text, position, anchor) -> SendReply; send_answer(token, answer) -> SendReply;
-// local_retry(handle, id) -> SendReply; local_delete(handle, id); local_inspect(handle, id) -> Option<Inspect>
+// composer/send.rs (crate-internal; Task 4b builds on them)
+pub(crate) struct Context { session: SessionRef, key: String, row: ViewRow, online: bool, details: Option<Arc<Value>>, facts: BlockFacts }
+impl Composers { pub(crate) fn now(&self) -> f64; pub(crate) fn context(&self, hub: &Hub) -> Option<Context>; pub(crate) fn refresh_details(&self); }
+pub(crate) fn session_view(composers: &Composers, hub: &Hub, composer: &Composer) -> SessionView;
+// pump.rs
+impl Pump { pub fn row(&self, computer: &str, key: &str) -> Option<ViewRow>; pub fn row_named(&self, computer: &str, name: &str) -> Option<ViewRow>; pub fn online(&self, computer: &str) -> bool; }
 ```
 
-- [ ] **Step 1: `dispatch_as` and the write kinds.** In `client/src-tauri/src/actions.rs`, write the failing test:
+- [ ] **Step 1: The write kinds.** In `client/src-tauri/src/actions.rs`, write the failing test:
 
 ```rust
     #[test]
@@ -3151,7 +3199,6 @@ impl Composers {
         assert_eq!(actions.write_kind("", "claude/sample-project/review"), Some(WriteKind::Terminate));
         drop(guard);
         assert_eq!(actions.write_kind("", "claude/sample-project/review"), None);
-        assert_eq!(WriteKind::of(&Action::ClearContext { dismiss_prompt: false }), WriteKind::Clear);
         assert_eq!(WriteKind::of(&Action::Pause), WriteKind::Update);
     }
 ```
@@ -3164,14 +3211,12 @@ Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.t
 pub enum WriteKind {
     Update,
     Terminate,
-    Clear,
 }
 
 impl WriteKind {
     pub fn of(action: &Action) -> Self {
         match action {
             Action::Terminate | Action::Kill => Self::Terminate,
-            Action::ClearContext { .. } => Self::Clear,
             _ => Self::Update,
         }
     }
@@ -3204,7 +3249,7 @@ impl Drop for WriteMark {
     }
 ```
 
-`dispatch` becomes `dispatch_as(state, target, action, uuid::Uuid::new_v4().to_string())`, and `dispatch_as` is the old body with the caller's `request_id`, plus, right after the claim:
+In `dispatch` (A2), right after the claim:
 
 ```rust
     let _write = (Lane::of(&action) == Lane::Write).then(|| state.mark_write(&target.computer, &target.name, &action));
@@ -3212,59 +3257,59 @@ impl Drop for WriteMark {
 
 Run the actions tests again: PASS.
 
-- [ ] **Step 2: Write the failing driver tests** at the end of `client/src-tauri/src/composer/send.rs`:
+- [ ] **Step 2: Write the failing tests** at the end of `client/src-tauri/src/composer/send.rs`:
 
 ```rust
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::composer::tests::{dir, row, session, until};
-    use crate::composer::{ComposerView, Composers, Config, Deps};
-    use std::sync::Mutex;
+    use crate::composer::tests::{dir, drafts, session, until};
+    use crate::composer::{lock, ComposerView, Composers, Config, Deps};
     use serde_json::json;
+    use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use zerus_client_core::drafts::DraftStore;
     use zerus_client_core::{ActivityOut, Batch, ComputerId};
 
+    /// The session, clock and inspect a test controls.
     pub(crate) struct Fake {
-        pub(crate) calls: Mutex<Vec<(Target, Action, String)>>,
-        pub(crate) outcome: Mutex<Box<dyn Fn(&Action, &str) -> Outcome + Send>>,
         pub(crate) row: Mutex<ViewRow>,
         pub(crate) now: Mutex<f64>,
         pub(crate) inspected: Mutex<Option<Value>>,
         pub(crate) inspects: AtomicUsize,
     }
 
-    pub(crate) fn receipt(action: &Action, id: &str) -> Outcome {
-        Outcome::Done { receipt: json!({"status": "submitted", "request_id": id, "kind": format!("{action:?}").split_whitespace().next()}), cleanup: None }
+    pub(crate) fn row(name: &str) -> ViewRow {
+        ViewRow { name: name.into(), agent: "claude".into(), state: "running".into(), tracked: true, run_id: Some("run-1".into()),
+                  conversation_id: Some("conv-1".into()), ..ViewRow::default() }
     }
 
-    pub(crate) fn send_hub(root: &Path) -> (Composers, Arc<Fake>) {
+    pub(crate) fn send_hub_on(store: &Arc<DraftStore>) -> (Composers, Arc<Fake>) {
         let fake = Arc::new(Fake {
-            calls: Mutex::new(Vec::new()),
-            outcome: Mutex::new(Box::new(receipt)),
             row: Mutex::new(row("claude/sample-project/review")),
             now: Mutex::new(1_793_000_100.0),
             inspected: Mutex::new(None),
             inspects: AtomicUsize::new(0),
         });
-        let (f1, f2, f3, f4) = (fake.clone(), fake.clone(), fake.clone(), fake.clone());
+        let (f1, f2, f3) = (fake.clone(), fake.clone(), fake.clone());
         let composers = Composers::new(
-            Config { drafts: root.join("drafts"), qt_drafts: None, cache: root.join("cache"), hgs: PathBuf::from("hgs"), allowed: true },
+            Arc::clone(store),
+            Config { cache: store.root().with_file_name("cache") },
             Deps {
                 spawn: Arc::new(|job| { std::thread::spawn(job); }),
                 notify: Arc::new(|| {}),
                 clock: Arc::new(move || *lock(&f1.now)),
                 rows: Arc::new(move |_, _, _| Some((lock(&f2.row).clone(), true))),
-                dispatch: Arc::new(move |target, action, id| {
-                    let out = (lock(&f3.outcome))(&action, &id);
-                    lock(&f3.calls).push((target, action, id));
-                    Ok(out)
-                }),
                 facts: Arc::new(|_, _| None),
-                inspect: Arc::new(move |_, _| { f4.inspects.fetch_add(1, Ordering::SeqCst); lock(&f4.inspected).clone() }),
+                inspect: Arc::new(move |_, _| { f3.inspects.fetch_add(1, Ordering::SeqCst); lock(&f3.inspected).clone() }),
             },
         );
         (composers, fake)
+    }
+
+    pub(crate) fn send_hub(root: &Path) -> (Composers, Arc<Fake>) {
+        send_hub_on(&drafts(root))
     }
 
     pub(crate) fn ready() -> Value {
@@ -3285,7 +3330,531 @@ pub(crate) mod tests {
         until(c, |v| v.loaded)
     }
 
-    fn sent(fake: &Fake) -> Vec<(Target, Action, String)> {
+    #[test]
+    fn a_ready_session_takes_messages() {
+        let root = dir("ready");
+        let (c, _) = send_hub(&root);
+        let view = opened(&c, ready());
+        assert!(view.available && view.block_reason.is_none() && view.unavailable_reason.is_empty());
+        let handle = view.handle;
+        c.edit(handle, 1, "hello".into(), 5, 5);
+        assert!(c.current().unwrap().can_send);
+    }
+
+    #[test]
+    fn a_block_reason_is_shown() {
+        let root = dir("blocked");
+        let (c, _) = send_hub(&root);
+        let mut details = ready();
+        details["phase"] = json!("approval");
+        let view = opened(&c, details);
+        assert_eq!(view.block_reason.as_deref(), Some("Respond to the agent in the Terminal tab."));
+        assert_eq!(view.unavailable_reason, "Respond to the agent in the Terminal tab.");
+        assert!(!view.available);
+        c.edit(view.handle, 1, "hi".into(), 2, 2);
+        let view = c.current().unwrap();
+        assert!(!view.can_send);
+        assert_eq!(view.status, "Respond to the agent in the Terminal tab.");
+    }
+
+    #[test]
+    fn the_cache_chip_counts_down_in_minutes() {
+        let root = dir("chip");
+        let (c, fake) = send_hub(&root);
+        let mut details = ready();
+        details["session_usage"] = json!({"prompt_cache": {"status": "warm", "expires_at": 1_793_000_100.0 + 540.0}});
+        let view = opened(&c, details);
+        assert_eq!((view.cache.label.as_str(), view.cache.short_label.as_str()), ("Cache ~9m", "~9m"));
+        assert!(view.cache_details.starts_with("Estimated expiry from the TTL reported in native usage: "));
+        *lock(&fake.now) += 240.0;
+        c.tick();
+        assert_eq!(c.current().unwrap().cache.label, "Cache ~5m");
+    }
+
+    #[test]
+    fn without_a_state_the_session_is_inspected_once() {
+        let root = dir("inspect");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.inspected) = Some(ready());
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        assert_eq!(view.block_reason.as_deref(), Some("Checking the session…"));
+        *lock(&fake.now) += 3.5;
+        c.tick();
+        until(&c, |v| v.block_reason.is_none());
+        c.tick();
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_state_after_a_failed_inspect_clears_its_reason() {
+        let root = dir("inspect-failed");
+        let (c, fake) = send_hub(&root);
+        c.open(Some(session()));
+        until(&c, |v| v.loaded);
+        *lock(&fake.now) += 3.5;
+        c.tick();
+        until(&c, |v| v.block_reason.as_deref() == Some("Refresh the session before sending."));
+        c.observe(&state(ready()));
+        assert!(c.current().unwrap().block_reason.is_none());
+    }
+}
+```
+
+In `pump.rs`:
+
+```rust
+    #[test]
+    fn rows_are_looked_up_by_key_and_name() {
+        let pump = Pump::default();
+        pump.push(upsert("run:a", "claude/p/a"));
+        pump.push(Change::Computer { computer: ComputerId(String::new()), status: ComputerStatus::Live });
+        pump.push(Change::Computer { computer: ComputerId("studio".into()), status: ComputerStatus::Reconnecting { attempt: 1 } });
+        let _ = pump.take(PARK);
+        assert_eq!(pump.row("", "run:a").unwrap().name, "claude/p/a");
+        assert_eq!(pump.row_named("", "claude/p/a").unwrap().name, "claude/p/a");
+        assert!(pump.online(""));
+        assert!(!pump.online("studio"));
+        assert!(pump.online("unknown"), "as the frontend reads it: only reconnecting or ended is offline");
+    }
+```
+
+- [ ] **Step 3: Run them to see them fail**
+
+Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer::send:: pump::`
+Expected: compile errors.
+
+- [ ] **Step 4: Extend `composer/mod.rs`.**
+  - `pub mod send;` at the top.
+  - `Deps` gains `clock`, `rows`, `facts` and `inspect` (the aliases in "Produces"). Task 3a's test helper `hub_on` passes `clock: Arc::new(|| 1_793_000_100.0)`, `rows: Arc::new(|_, _, _| None)`, `facts: Arc::new(|_, _| None)` and `inspect: Arc::new(|_, _| None)`: those tests have no session, so their views read "Select a session.".
+  - The followed session's Activity state, which the batches bring:
+
+```rust
+/// The followed session's Activity state, as the batches bring it.
+#[derive(Default)]
+pub(crate) struct Followed {
+    pub(crate) computer: String,
+    pub(crate) key: String,
+    pub(crate) details: Option<Arc<Value>>,
+    /// The last inspect failed (`m_inspectError`); a state clears it.
+    pub(crate) inspect_error: bool,
+    pub(crate) opened_at: f64,
+    pub(crate) inspecting: bool,
+}
+```
+
+  - `Hub` gains `pub(crate) followed: Followed` and `pub(crate) minute: i64`.
+  - `open` resets the followed state when the session changes, before `hub.open = Some(session)`:
+
+```rust
+        if hub.followed.computer != session.computer || hub.followed.key != session.key {
+            hub.followed = Followed { computer: session.computer.clone(), key: session.key.clone(), opened_at: self.now(), ..Followed::default() };
+        }
+```
+
+  - `observe` records the state:
+
+```rust
+    /// Records the followed session's Activity state from a batch.
+    pub fn observe(&self, batch: &Batch) {
+        let mut hub = self.lock();
+        let (computer, key) = (hub.followed.computer.clone(), hub.followed.key.clone());
+        let mut changed = false;
+        for out in batch.activity.iter().filter(|out| out.computer.0 == computer && out.key == key) {
+            match out.kind.as_str() {
+                "state" => {
+                    hub.followed.details = Some(Arc::new(out.payload["value"].clone()));
+                    hub.followed.inspect_error = false;
+                    changed = true;
+                }
+                "ended" => {
+                    hub.followed.details = None;
+                    changed = true;
+                }
+                _ => {}
+            }
+        }
+        drop(hub);
+        if changed {
+            self.after_observe();
+        }
+    }
+
+    /// What a change of the followed session's Activity sets off (Task 4b
+    /// adds the reconcile and Task 5 the continuations).
+    fn after_observe(&self) {
+        self.changed();
+    }
+```
+
+  - `ComposerView` gains the fields in "Produces". `view_of` fills them through `send::session_view(self, hub, composer)` and uses its `block_reason`, `available` and attachments rule in the status line and `can_send`:
+
+```rust
+        let session = send::session_view(self, hub, composer);
+        let attachments_blocked = !composer.draft.attachments.is_empty() && !session.attachments_available;
+        // after the storage, waiting and own error cases:
+        } else if attachments_blocked {
+            (session.attachments_reason.clone(), false)
+        } else if too_long {
+            ("Message exceeds 64 KiB.".to_owned(), true)
+        } else {
+            (session.unavailable_reason.clone(), false)
+        };
+        // can_send: ... && session.available && !attachments_blocked
+```
+
+- [ ] **Step 5: Write `client/src-tauri/src/composer/send.rs`** above its tests:
+
+```rust
+//! The open session's part of the composer, ported from `SessionsWindow`:
+//! the block reason (`messageBlockReason`, S1), the cache chip and its
+//! details (S2), and one inspect when no Activity state arrived. Task 4b adds
+//! the delivery to this module.
+
+use std::sync::Arc;
+
+use serde_json::Value;
+use zerus_client_core::actions::Target;
+use zerus_client_core::cache::{self, Chip};
+use zerus_client_core::send::{block_reason, BlockFacts};
+use zerus_client_core::ViewRow;
+
+use super::{Composer, Composers, Hub, SessionRef};
+use crate::actions::WriteKind;
+
+/// No Activity state this long after opening: inspect once.
+const DETAILS_WAIT: f64 = 3.0;
+
+/// The session's state for the composer view.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SessionView {
+    pub(crate) available: bool,
+    pub(crate) unavailable_reason: String,
+    pub(crate) block_reason: Option<String>,
+    pub(crate) attachments_available: bool,
+    pub(crate) attachments_reason: String,
+    pub(crate) cache: Chip,
+    pub(crate) cache_warning: String,
+    pub(crate) cache_details: String,
+}
+
+/// The agent command the send rules read: the row says `deepseek` for `dsh`.
+pub(crate) fn cmd(row: &ViewRow) -> String {
+    if row.agent == "deepseek" { "dsh".into() } else { row.agent.clone() }
+}
+
+/// Local time as the cache details show it; formatted in Rust, never in the webview.
+fn local_time(seconds: i64) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_opt(seconds, 0)
+        .single()
+        .map(|time| time.format("%-d %b %H:%M:%S").to_string())
+        .unwrap_or_default()
+}
+
+/// The open session's row, online state, details and facts.
+pub(crate) struct Context {
+    pub(crate) session: SessionRef,
+    pub(crate) key: String,
+    pub(crate) row: ViewRow,
+    pub(crate) online: bool,
+    pub(crate) details: Option<Arc<Value>>,
+    pub(crate) facts: BlockFacts,
+}
+
+impl Context {
+    pub(crate) fn reason(&self) -> Option<String> {
+        block_reason(&self.facts, self.details.as_deref())
+    }
+    /// Qt's `recorded`: session data that is not live (`SessionsWindow.cpp:3783`).
+    pub(crate) fn recorded(&self) -> bool {
+        !self.online || matches!(self.row.state.as_str(), "archived" | "paused") || self.row.process_state == "exited" || self.facts.inspect_error
+    }
+}
+
+impl Composers {
+    pub(crate) fn now(&self) -> f64 {
+        (self.0.deps.clock)()
+    }
+
+    /// The open session as the catalog and the followed Activity show it now.
+    pub(crate) fn context(&self, hub: &Hub) -> Option<Context> {
+        let session = hub.open.clone()?;
+        let key = hub.open_key.clone()?;
+        let (row, online) = (self.0.deps.rows)(&session.computer, &session.key, &session.name)?;
+        let followed = hub.followed.computer == session.computer && hub.followed.key == session.key;
+        let details = if followed { hub.followed.details.clone() } else { None };
+        let write = (self.0.deps.facts)(&session.computer, &session.name);
+        let facts = BlockFacts {
+            start_send_waiting: false,
+            compacting: false,
+            clearing: false,
+            terminating: write == Some(WriteKind::Terminate),
+            settings_changing: false,
+            online,
+            state: row.state.clone(),
+            updating: write == Some(WriteKind::Update),
+            cmd: cmd(&row),
+            inspect_error: followed && hub.followed.inspect_error,
+        };
+        Some(Context { session, key, row, online, details, facts })
+    }
+
+    /// One `inspect` of the open session, off the UI thread; its value
+    /// stands in for the stream's state until the next state frame.
+    pub(crate) fn refresh_details(&self) {
+        let mut hub = self.lock();
+        if hub.followed.inspecting {
+            return;
+        }
+        let Some(ctx) = self.context(&hub) else { return };
+        hub.followed.inspecting = true;
+        drop(hub);
+        let target = Target {
+            computer: ctx.session.computer.clone(), name: ctx.session.name.clone(),
+            run_id: ctx.row.run_id.clone().unwrap_or_default(), conversation_id: ctx.row.conversation_id.clone().unwrap_or_default(),
+        };
+        let session = ctx.session;
+        let me = self.clone();
+        (self.0.deps.spawn)(Box::new(move || {
+            let value = (me.0.deps.inspect)(&target, session.archive_id.as_deref());
+            let mut hub = me.lock();
+            hub.followed.inspecting = false;
+            if hub.followed.computer == session.computer && hub.followed.key == session.key {
+                match value {
+                    Some(value) => {
+                        hub.followed.inspect_error = false;
+                        hub.followed.details = Some(Arc::new(value));
+                    }
+                    None => hub.followed.inspect_error = true,
+                }
+            }
+            drop(hub);
+            me.after_observe();
+        }));
+    }
+
+    /// Once a second: the cache chip's minute and the inspect fallback when
+    /// no Activity state arrived within 3 s of opening.
+    pub fn tick(&self) {
+        let now = self.now();
+        let (minute_changed, wants_details) = {
+            let mut hub = self.lock();
+            let minute = (now / 60.0).floor() as i64;
+            let changed = std::mem::replace(&mut hub.minute, minute) != minute;
+            let wants = hub.open.is_some() && hub.followed.details.is_none() && !hub.followed.inspecting
+                && !hub.followed.inspect_error && now - hub.followed.opened_at >= DETAILS_WAIT;
+            (changed, wants)
+        };
+        if wants_details {
+            self.refresh_details();
+        }
+        if minute_changed {
+            self.changed();
+        }
+    }
+
+    pub fn start_ticker(&self) {
+        let me = self.clone();
+        std::thread::Builder::new()
+            .name("zerus-composer".into())
+            .spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                me.tick();
+            })
+            .expect("the composer ticker starts");
+    }
+}
+
+/// The open session's part of the composer view (`renderDetails` 3982-3989).
+pub(crate) fn session_view(composers: &Composers, hub: &Hub, composer: &Composer) -> SessionView {
+    let Some(ctx) = composers.context(hub).filter(|ctx| ctx.key == composer.key) else {
+        return SessionView { unavailable_reason: "Select a session.".into(), attachments_available: true, ..SessionView::default() };
+    };
+    let details = ctx.details.as_deref().cloned().unwrap_or_default();
+    let now = composers.now();
+    let reason = ctx.reason();
+    let attachments_available = ctx.facts.cmd != "opencode" && details.get("attachments_supported").and_then(Value::as_bool).unwrap_or(true);
+    let attachments_reason = details.get("attachments_reason").and_then(Value::as_str).unwrap_or(
+        "This native adapter does not support file attachments. Your existing files remain saved; remove them to send text.",
+    ).to_owned();
+    let recorded = ctx.recorded();
+    SessionView {
+        available: reason.is_none(),
+        unavailable_reason: reason.clone().unwrap_or_default(),
+        block_reason: reason,
+        attachments_available,
+        attachments_reason,
+        cache: cache::chip(&details, now),
+        cache_warning: cache::warning(&details, now),
+        cache_details: cache::details(&details, recorded, local_time),
+    }
+}
+```
+
+`send` is a child module of `composer`, so it reaches the hub's private items (`after_observe`, `Hub`'s fields) without widening them.
+
+- [ ] **Step 6: The pump lookups** in `client/src-tauri/src/pump.rs`:
+
+```rust
+    /// The last-known row of `(computer, catalog key)`.
+    pub fn row(&self, computer: &str, key: &str) -> Option<ViewRow> {
+        self.lock().mirror.computers.get(computer)?.rows.get(key).cloned()
+    }
+
+    /// The computer's live row of that name (a session that started a new
+    /// run has a new catalog key). A scan of one computer's rows, only when
+    /// the key is gone.
+    pub fn row_named(&self, computer: &str, name: &str) -> Option<ViewRow> {
+        self.lock().mirror.computers.get(computer)?.rows.values().find(|row| row.name == name && row.state != "archived").cloned()
+    }
+
+    /// Whether the computer counts as online, as the frontend's
+    /// `computerOffline` reads it: neither reconnecting nor ended.
+    pub fn online(&self, computer: &str) -> bool {
+        self.lock().mirror.computers.get(computer)
+            .and_then(|rows| rows.status)
+            .is_none_or(|status| !matches!(status, ComputerStatus::Reconnecting { .. } | ComputerStatus::Ended))
+    }
+```
+
+`next_batch` calls `composers.observe(&batch)` after `actions.observe(&batch)`.
+
+- [ ] **Step 7: Register it** in `client/src-tauri/src/lib.rs`. `composer::Deps` gets, besides Task 3a's:
+
+```rust
+clock: std::sync::Arc::new(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())),
+rows: {
+    let pump = app.state::<commands::AppState>().pump();
+    std::sync::Arc::new(move |computer, key, name| {
+        pump.row(computer, key).or_else(|| pump.row_named(computer, name)).map(|row| (row, pump.online(computer)))
+    })
+},
+facts: {
+    let actions = app.state::<actions::Actions>().inner().clone();
+    std::sync::Arc::new(move |computer, name| actions.write_kind(computer, name))
+},
+inspect: {
+    // A replay without an explicit ZERUS_CLIENT_HGS never reaches the real CLI.
+    let allowed = actions::actions_allowed(std::env::var("ZERUS_CLIENT_REPLAY").ok().as_deref(), std::env::var("ZERUS_CLIENT_HGS").ok().as_deref());
+    let hgs = zerus_client_core::default_hgs();
+    std::sync::Arc::new(move |target, archive| {
+        if !allowed {
+            return None;
+        }
+        let inv = zerus_client_core::details::details_invocation(target, archive);
+        match zerus_client_core::run_limited(&hgs, &inv, &[], 8 << 20) {
+            Ok(zerus_client_core::Exit::Code { code: 0, stdout, .. }) => serde_json::from_slice(&stdout).ok(),
+            _ => None,
+        }
+    })
+},
+```
+
+After managing it: `app.state::<composer::Composers>().start_ticker();`. The chrono addition changes `Cargo.lock`: one `cargo +1.99.1 check` without `--locked`, as in Task 3a.
+
+- [ ] **Step 8: Run the tests to see them pass**
+
+Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer:: actions:: pump::`
+Expected: PASS (Tasks 3a and 3b's tests still pass with the new deps). Clippy and fmt clean.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add client/src-tauri
+git commit -m "feat(client): the composer's block reasons, cache chip and inspect fallback"
+```
+
+---
+
+### Task 4b: The delivery: the guarded send, the cold cache question and local rows
+
+**Depends on:**
+- A2 `zerus-5wmh.9.4` (#404): `Action::Send`, `Outcome::Uncertain`, `actions::dispatch` in src-tauri, `Lane::Send`;
+- S2 `zerus-5wmh.9.8` (#408, on main): `cache::{cold_prompt, ColdPrompt, ColdAction}`;
+- S4 `zerus-5wmh.9.10` (branch `work-ba0ed9fd-localmsgs`): `local_messages::{LocalMessages, LocalMessage, inspect, Inspect}`;
+- A1's `attachments::{prepare, read_stored, StoredFile}`;
+- `zerus-5wmh.16` (#406): `ViewRow.created`;
+- Tasks 3a, 3b and 4a.
+
+**Qt reference:** `tray/src/SessionsWindow.cpp`:
+- `sendMessage` with the cold cache dialog (4806-4853);
+- `deliverMessage` and its `stillValid` (4855-4935);
+- `finishMessage` (4937-4968), `reconcileMessages` (4970-5000);
+- `messageAction` (4470-4527).
+
+Also `MessageComposer::prepareSendingAsync` and `deliveryFinished` (729-776).
+
+**Files:**
+- Modify: `client/src-tauri/src/composer/send.rs` (the delivery, its commands, its tests)
+- Modify: `client/src-tauri/src/composer/mod.rs` (`Deps.dispatch`, `Hub`, `Followed.events`, the view's `local`, the rename and observe hooks)
+- Modify: `client/src-tauri/src/composer/files.rs` (`Cache::prune_later`)
+- Modify: `client/src-tauri/src/actions.rs` (`dispatch_as`)
+- Modify: `client/src-tauri/src/lib.rs` (the dispatch dep, the commands)
+- Test: unit tests in `composer/send.rs`
+
+**Interfaces:**
+- Consumes: Task 4a's `Context`, `context`, `now`, `refresh_details`, `session_view`, `Fake`, `send_hub_on`, `ready`, `state`, `opened`, `row`; Task 3b's `Cache`, `canonical`; Task 3a's `editable`, `save`, `KEY`, `drafts`.
+- Produces (Tasks 5-7 bind to these):
+
+```rust
+// actions.rs
+pub async fn dispatch_as(state: &Actions, target: Target, action: Action, request_id: String) -> Result<Outcome, String>;
+// composer/mod.rs: Deps gains
+pub type Dispatch = Arc<dyn Fn(Target, Action, String) -> Result<Outcome, String> + Send + Sync>; // blocking; the String is the request id
+// ComposerView gains
+pub local: Vec<LocalMessage>,
+// composer/files.rs
+impl Cache { pub fn prune_later(self: &Arc<Self>, spawn: &Spawn, extra: Arc<dyn Fn() -> HashSet<PathBuf> + Send + Sync>); }
+// composer/send.rs
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SendReply { Sending, Busy, Blocked { reason: String }, Notice { text: String },
+                     Cold { token: u64, prompt: ColdPrompt }, ClearContext { token: u64 } }
+#[serde(tag = "kind", rename_all = "snake_case")] pub enum Answer { Cold { action: ColdAction }, Cancel }
+impl Composers {
+    pub fn send_message(&self, handle: u64, rev: u64, text: String, position: i64, anchor: i64) -> SendReply;
+    pub fn answer(&self, token: u64, answer: Answer) -> SendReply;
+    pub fn retry(&self, handle: u64, id: &str) -> SendReply;   // blocking: reads the cached files
+    pub fn delete_local(&self, handle: u64, id: &str);
+    pub fn inspect_local(&self, handle: u64, id: &str) -> Option<Inspect>;
+}
+// crate-internal, for Task 5: Retry, Prompt, Delivery, Context::{run, conversation}, ask, delivery, deliver, delivery_finished, reconcile
+// commands: send_message(handle, rev, text, position, anchor) -> SendReply; send_answer(token, answer) -> SendReply;
+// local_retry(handle, id) -> SendReply; local_delete(handle, id); local_inspect(handle, id) -> Option<Inspect>
+```
+
+**The rules this task keeps (AGENTS.md: unknown delivery never authorizes replay):**
+- The durable "sending" save comes before any call: `deliver` saves, and only its callback (`prepared`) can dispatch.
+- One request id per delivery, made right before its one dispatch. The local row, the CLI request and the receipt check carry it, and no other delivery reuses it.
+- An `Uncertain` outcome (or an `Err`, which means the call's thread died) never resends. The draft stays, marked uncertain, and asks for Allow retry. Its row offers Check Terminal and Delete, never Retry.
+- A question's answer re-checks the composer. A busy or uncertain draft is never sent by an older question, and a delivery drops its key's open questions.
+- A closed hub (the app quits) starts nothing. A draft saved as "sending" reloads as uncertain.
+
+- [ ] **Step 1: `dispatch_as`.** In `client/src-tauri/src/actions.rs`, `dispatch` becomes `dispatch_as(state, target, action, uuid::Uuid::new_v4().to_string())`. `dispatch_as` is the old body with the caller's `request_id` in place of the one it made. The id reaches `invocation` and the receipt check unchanged, and nothing in it retries.
+
+- [ ] **Step 2: Write the failing driver tests** in `composer/send.rs`'s `tests` module. Task 4a's `Fake` gains `calls` and `outcome`, and `send_hub_on` passes `dispatch`:
+
+```rust
+    // Fake gains (with `type Answers = Box<dyn Fn(&Action, &str) -> Outcome + Send>;` in the module):
+    pub(crate) calls: Mutex<Vec<(Target, Action, String)>>,
+    pub(crate) outcome: Mutex<Answers>,
+    // send_hub_on initializes them with Vec::new() and Box::new(receipt), and passes:
+    dispatch: Arc::new(move |target, action, id| {
+        let out = (lock(&f4.outcome))(&action, &id);
+        lock(&f4.calls).push((target, action, id));
+        Ok(out)
+    }),
+```
+
+(`f4` is one more clone of `fake`.) Task 3a's `hub_on` passes `dispatch: Arc::new(|_, _, _| Err("no call in these tests".into()))`.
+
+```rust
+    pub(crate) fn receipt(action: &Action, id: &str) -> Outcome {
+        Outcome::Done { receipt: json!({"status": "submitted", "request_id": id, "kind": format!("{action:?}").split_whitespace().next()}), cleanup: None }
+    }
+
+    pub(crate) fn sent(fake: &Fake) -> Vec<(Target, Action, String)> {
         lock(&fake.calls).clone()
     }
 
@@ -3297,13 +3866,14 @@ pub(crate) mod tests {
         let (c, fake) = send_hub(&root);
         let view = opened(&c, ready());
         c.attach_paths(view.handle, vec![file], zerus_client_core::attachments::Selection { start: 0, end: 0 });
-        let view = until(&c, |v| v.attachments.len() == 1);
-        assert!(view.can_send && view.available);
+        let view = until(&c, |v| v.attachments.len() == 1 && !v.attaching);
+        c.edit(view.handle, 4, "hello [File #1] ".into(), 0, 0);
+        assert!(c.current().unwrap().can_send);
         assert_eq!(c.send_message(view.handle, 5, "hello [File #1] ".into(), 0, 0), SendReply::Sending);
         let view = until(&c, |v| !v.sending && v.text.is_empty());
         let calls = sent(&fake);
         assert_eq!(calls.len(), 1);
-        let (target, action, _) = &calls[0];
+        let (target, action, id) = &calls[0];
         assert_eq!((target.computer.as_str(), target.run_id.as_str(), target.conversation_id.as_str()), ("studio", "run-1", "conv-1"));
         let Action::Send { text, attachments, agent_id, expected_compaction_id } = action else { panic!("not a send") };
         assert_eq!(text, "hello [File #1] ");
@@ -3311,19 +3881,17 @@ pub(crate) mod tests {
         assert!(agent_id.is_none() && expected_compaction_id.is_none());
         assert!(view.attachments.is_empty());
         assert_eq!(view.local.len(), 1);
+        assert_eq!(&view.local[0].id, id, "the row carries the request's own id");
         assert_eq!(view.local[0].status, zerus_client_core::local_messages::Status::Sent);
     }
 
     #[test]
-    fn a_block_reason_is_shown_and_nothing_runs() {
-        let root = dir("blocked");
+    fn a_blocked_send_runs_nothing() {
+        let root = dir("blocked-send");
         let (c, fake) = send_hub(&root);
         let mut details = ready();
         details["phase"] = json!("approval");
         let view = opened(&c, details);
-        assert_eq!(view.block_reason.as_deref(), Some("Respond to the agent in the Terminal tab."));
-        assert_eq!(view.unavailable_reason, "Respond to the agent in the Terminal tab.");
-        assert!(!view.available);
         assert_eq!(
             c.send_message(view.handle, 1, "hi".into(), 2, 2),
             SendReply::Blocked { reason: "Respond to the agent in the Terminal tab.".into() }
@@ -3353,7 +3921,8 @@ pub(crate) mod tests {
     #[test]
     fn an_uncertain_send_is_never_retried() {
         let root = dir("uncertain");
-        let (c, fake) = send_hub(&root);
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
         *lock(&fake.outcome) = Box::new(|_, _| Outcome::Uncertain { detail: "Delivery timed out. The message may have reached the agent; inspect Terminal before retrying.".into() });
         let view = opened(&c, ready());
         assert_eq!(c.send_message(view.handle, 1, "maybe".into(), 5, 5), SendReply::Sending);
@@ -3366,11 +3935,46 @@ pub(crate) mod tests {
         assert_eq!(c.retry(view.handle, &row.id), SendReply::Busy);
         assert_eq!(c.send_message(view.handle, 2, "maybe".into(), 5, 5), SendReply::Busy, "Send waits for Allow retry");
         c.flush();
+        store.flush();
         drop(c);
-        let (again, _) = send_hub(&root);
+        let (again, _) = send_hub_on(&store);
         let view = opened(&again, ready());
         assert!(view.uncertain && !view.can_send, "a restart keeps it uncertain");
         assert_eq!(sent(&fake).len(), 1);
+    }
+
+    #[test]
+    fn a_stale_question_never_resends_an_uncertain_draft() {
+        let root = dir("stale-question");
+        let (c, fake) = send_hub(&root);
+        let mut details = ready();
+        details["cache_hint"] = json!({"status": "cold", "tokens": 120000});
+        let view = opened(&c, details);
+        let SendReply::Cold { token: first, .. } = c.send_message(view.handle, 1, "maybe".into(), 5, 5) else { panic!("no question") };
+        let SendReply::Cold { token: second, .. } = c.send_message(view.handle, 1, "maybe".into(), 5, 5) else { panic!("no question") };
+        *lock(&fake.outcome) = Box::new(|_, _| Outcome::Uncertain { detail: "Delivery timed out.".into() });
+        assert_eq!(c.answer(second, Answer::Cold { action: ColdAction::Send }), SendReply::Sending);
+        until(&c, |v| !v.sending && v.uncertain);
+        assert_eq!(c.answer(first, Answer::Cold { action: ColdAction::Send }), SendReply::Busy, "the older question went with the delivery");
+        assert_eq!(sent(&fake).len(), 1);
+    }
+
+    #[test]
+    fn a_send_whose_save_is_queued_at_exit_never_starts() {
+        let root = dir("exit-send");
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        let view = opened(&c, ready());
+        // Hold the writer, so the "sending" save waits in the queue.
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        store.load("hold", move |_| { let _ = held.recv(); });
+        assert_eq!(c.send_message(view.handle, 1, "at exit".into(), 7, 7), SendReply::Sending);
+        c.flush();
+        release.send(()).unwrap();
+        store.flush();
+        assert!(sent(&fake).is_empty(), "nothing starts once the app quits");
+        let saved = zerus_client_core::drafts::read_draft(&root.join("drafts"), crate::composer::tests::KEY);
+        assert!(saved.draft.uncertain, "the draft saved as sending reloads as uncertain");
     }
 
     #[test]
@@ -3390,6 +3994,7 @@ pub(crate) mod tests {
         assert_eq!(calls.len(), 2);
         let Action::Send { text, .. } = &calls[1].1 else { panic!() };
         assert_eq!(text, "first");
+        assert_ne!(calls[0].2, calls[1].2, "a retry is a new submission with its own request id");
         assert_eq!(view.text, "a newer draft");
         assert_eq!(view.local.len(), 1, "the retry replaced the failed row");
     }
@@ -3423,37 +4028,9 @@ pub(crate) mod tests {
         lock(&fake.row).run_id = Some("run-2".into());
         assert!(!c.still_valid(&delivery), "another run");
     }
-
-    #[test]
-    fn the_cache_chip_counts_down_in_minutes() {
-        let root = dir("chip");
-        let (c, fake) = send_hub(&root);
-        let mut details = ready();
-        details["prompt_cache"] = json!({"status": "warm", "expires_at": 1_793_000_100.0 + 540.0});
-        let view = opened(&c, details);
-        assert_eq!((view.cache.label.as_str(), view.cache.short_label.as_str()), ("Cache ~9m", "~9m"));
-        assert!(view.cache_details.starts_with("Estimated expiry from the TTL reported in native usage: "));
-        *lock(&fake.now) += 240.0;
-        c.tick();
-        assert_eq!(c.current().unwrap().cache.label, "Cache ~5m");
-    }
-
-    #[test]
-    fn without_a_state_the_session_is_inspected_once() {
-        let root = dir("inspect");
-        let (c, fake) = send_hub(&root);
-        *lock(&fake.inspected) = Some(ready());
-        c.open(Some(session()));
-        let view = until(&c, |v| v.loaded);
-        assert_eq!(view.block_reason.as_deref(), Some("Checking the session…"));
-        *lock(&fake.now) += 3.5;
-        c.tick();
-        until(&c, |v| v.block_reason.is_none());
-        c.tick();
-        assert_eq!(fake.inspects.load(Ordering::SeqCst), 1);
-    }
-}
 ```
+
+The tests module also imports `zerus_client_core::actions::{Action, Outcome}`, `zerus_client_core::cache::ColdAction` and `crate::composer::tests::drafts` (already there from Task 4a).
 
 - [ ] **Step 3: Run them to see them fail**
 
@@ -3461,58 +4038,52 @@ Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.t
 Expected: compile errors.
 
 - [ ] **Step 4: Extend `composer/mod.rs`.**
-  - `Deps` gains `dispatch: Dispatch`, `facts: Facts`, `inspect: Inspect` (the aliases in "Produces"). Task 3's test helper `hub()` passes `dispatch: Arc::new(|_, _, _| Err("busy".into()))`, `facts: Arc::new(|_, _| None)` and `inspect: Arc::new(|_, _| None)`.
-  - `Followed` gains `inspect_error: bool`, `opened_at: f64` (set by `open` from the clock) and `inspecting: bool`.
-  - `Hub` gains `local: LocalMessages`, `retry_reads: HashSet<String>`, `prompts: HashMap<u64, send::Prompt>`, `next_token: u64`, `minute: i64` and `opened: HashMap<(String, String), String>` (computer and catalog key to draft key, at most 512 entries, oldest dropped).
-  - `rename` also calls `hub.local.rename(old, new)`.
-  - `observe` forgets the local rows of a session that left the catalog: for `batch.removes` with a reason other than `replaced`, `hub.local.forget(key)` through `opened`.
+  - `Deps` gains `dispatch: Dispatch`.
+  - `Followed` gains `events: VecDeque<Value>`, the last 200 events of the followed session.
+  - `Hub` gains `local: LocalMessages`, `retry_reads: HashSet<String>`, `prompts: HashMap<u64, send::Prompt>`, `next_token: u64`, and `opened: HashMap<(String, String), String>` with `opened_order: VecDeque<(String, String)>` (computer and catalog key to draft key; `open` records it and drops the oldest entry past 512, matching S4's 512 sessions).
+  - `renamed` also calls `hub.local.rename(old, new)` when the store moved the draft.
+  - `observe` also keeps the events (`"events"` appends, `"replace"` clears first; at most 200, oldest dropped). It forgets the local rows of a session that left the catalog: for `batch.removes` with a reason other than `replaced`, `hub.local.forget(key)` through `opened`.
   - `after_observe` becomes `self.reconcile()` followed by `self.changed()`.
-  - `ComposerView` gains the fields in "Produces"; `view_of` fills them through `send::session_view(self, hub, composer)`, which returns the `SessionView` below, and uses its `block_reason` and `available` in the status line and `can_send`:
+  - `ComposerView` gains `local`, which `view_of` fills with `hub.local.rows(&composer.key).to_vec()` (at most 50).
+  - `impl Hub { pub(crate) fn local_keys(&self) -> Vec<String> { self.opened.values().cloned().collect() } }`, since S4 exposes rows per key only.
+
+- [ ] **Step 5: `Cache::prune_later`** in `composer/files.rs`. `Cache` gains `pruning: AtomicBool` and `again: AtomicBool`, false in `new`:
 
 ```rust
-        let session = send::session_view(self, hub, composer);
-        let attachments_blocked = !composer.draft.attachments.is_empty() && !session.attachments_available;
-        // after the own error, waiting and storage cases:
-        } else if attachments_blocked {
-            (session.attachments_reason.clone(), false)
-        } else if too_long {
-            ("Message exceeds 64 KiB.".to_owned(), true)
-        } else {
-            (session.unavailable_reason.clone(), false)
-        };
-        // can_send: ... && session.available && !attachments_blocked
+    /// One prune after a store, on the blocking pool; a store during a prune
+    /// runs exactly one more. `extra` names the copies Retry still needs.
+    pub fn prune_later(self: &Arc<Self>, spawn: &Spawn, extra: Arc<dyn Fn() -> HashSet<PathBuf> + Send + Sync>) {
+        if self.pruning.swap(true, Ordering::SeqCst) {
+            self.again.store(true, Ordering::SeqCst);
+            return;
+        }
+        let cache = Arc::clone(self);
+        spawn(Box::new(move || loop {
+            cache.again.store(false, Ordering::SeqCst);
+            let kept: HashSet<PathBuf> = extra().iter().map(|path| canonical(path)).collect();
+            attachments::prune(&cache.root, attachments::CACHE_LIMIT, |path| kept.contains(&canonical(path)));
+            if !cache.again.load(Ordering::SeqCst) {
+                cache.pruning.store(false, Ordering::SeqCst);
+                break;
+            }
+        }));
+    }
 ```
 
-- [ ] **Step 5: Write `client/src-tauri/src/composer/send.rs`** above its tests:
+- [ ] **Step 6: Write the delivery** in `client/src-tauri/src/composer/send.rs`, below Task 4a's code; its `use` lines join the module's imports at the top:
 
 ```rust
-//! The guarded send around A2's `Action::Send`, ported from
-//! `SessionsWindow::sendMessage`, `deliverMessage`, `finishMessage`,
-//! `reconcileMessages` and `messageAction`: the block reason (S1), the cold
-//! cache question (S2), the durable "sending" save before the call (S5), the
-//! cached copies a Retry reads (A1), the local rows (S4), and the outcome. An
-//! uncertain outcome marks the draft uncertain and is never sent again by
-//! itself; only Allow retry clears it.
-
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use zerus_client_core::actions::{Action, Outcome, Target};
+use zerus_client_core::actions::{Action, Outcome};
 use zerus_client_core::attachments::{self, Attachment};
-use zerus_client_core::cache::{self, Chip, ColdAction, ColdPrompt};
-use zerus_client_core::local_messages::{self, Inspect, LocalMessage, LocalMessages};
-use zerus_client_core::send::{block_reason, BlockFacts};
+use zerus_client_core::cache::{ColdAction, ColdPrompt};
+use zerus_client_core::local_messages::{self, Inspect, LocalMessages};
 use zerus_client_core::terminal::{self, TerminalFacts};
-use zerus_client_core::ViewRow;
-
-use super::{lock, Composer, Composers, Hub, SessionRef};
-use crate::actions::WriteKind;
 
 const CHANGED: &str = "The session changed. Your draft was kept without sending.";
-const DETAILS_WAIT: f64 = 3.0;
 
 /// What `send_message`, `send_answer` and `local_retry` answer.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -3554,7 +4125,6 @@ pub(crate) struct Prompt {
     pub(crate) session: SessionRef,
     pub(crate) run: String,
     pub(crate) conversation: String,
-    pub(crate) text: String,
     pub(crate) retry: Option<Retry>,
 }
 
@@ -3575,45 +4145,8 @@ pub(crate) struct Delivery {
     pub(crate) preserve: bool,
 }
 
-/// The session's state for the composer view.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct SessionView {
-    pub(crate) available: bool,
-    pub(crate) unavailable_reason: String,
-    pub(crate) block_reason: Option<String>,
-    pub(crate) attachments_available: bool,
-    pub(crate) attachments_reason: String,
-    pub(crate) cache: Chip,
-    pub(crate) cache_warning: String,
-    pub(crate) cache_details: String,
-}
-
-/// The agent command the send rules read: the row says `deepseek` for `dsh`.
-pub(crate) fn cmd(row: &ViewRow) -> String {
-    if row.agent == "deepseek" { "dsh".into() } else { row.agent.clone() }
-}
-
 fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or("")
-}
-
-fn local_time(seconds: i64) -> String {
-    use chrono::TimeZone;
-    chrono::Local
-        .timestamp_opt(seconds, 0)
-        .single()
-        .map(|time| time.format("%-d %b %H:%M:%S").to_string())
-        .unwrap_or_default()
-}
-
-/// The open session's row, online state, details and facts.
-pub(crate) struct Context {
-    pub(crate) session: SessionRef,
-    pub(crate) key: String,
-    pub(crate) row: ViewRow,
-    pub(crate) online: bool,
-    pub(crate) details: Option<Arc<Value>>,
-    pub(crate) facts: BlockFacts,
 }
 
 impl Context {
@@ -3623,52 +4156,17 @@ impl Context {
     pub(crate) fn conversation(&self) -> String {
         self.details.as_deref().map(|d| text(d, "conversation_id").to_owned()).unwrap_or_default()
     }
-    pub(crate) fn reason(&self) -> Option<String> {
-        block_reason(&self.facts, self.details.as_deref())
-    }
-    /// Qt's `recorded`: session data that is not live (`SessionsWindow.cpp:3783`).
-    pub(crate) fn recorded(&self) -> bool {
-        !self.online || matches!(self.row.state.as_str(), "archived" | "paused") || self.row.process_state == "exited" || self.facts.inspect_error
-    }
 }
 
 impl Composers {
-    pub(crate) fn now(&self) -> f64 {
-        (self.0.deps.clock)()
-    }
-
-    /// The open session as the catalog and the followed Activity show it now.
-    pub(crate) fn context(&self, hub: &Hub) -> Option<Context> {
-        let session = hub.open.clone()?;
-        let key = hub.open_key.clone()?;
-        let (row, online) = (self.0.deps.rows)(&session.computer, &session.key, &session.name)?;
-        let followed = hub.followed.computer == session.computer && hub.followed.key == session.key;
-        let details = if followed { hub.followed.details.clone() } else { None };
-        let write = (self.0.deps.facts)(&session.computer, &session.name);
-        let facts = BlockFacts {
-            start_send_waiting: false,
-            compacting: false,
-            clearing: write == Some(WriteKind::Clear),
-            terminating: write == Some(WriteKind::Terminate),
-            settings_changing: false,
-            online,
-            state: row.state.clone(),
-            updating: write == Some(WriteKind::Update),
-            cmd: cmd(&row),
-            inspect_error: followed && hub.followed.inspect_error,
-        };
-        Some(Context { session, key, row, online, details, facts })
-    }
-
     /// Asks a question about the open session; its answer brings this back.
-    fn ask(&self, hub: &mut Hub, ctx: &Context, text: &str, retry: Option<Retry>) -> u64 {
+    pub(crate) fn ask(&self, hub: &mut Hub, ctx: &Context, retry: Option<Retry>) -> u64 {
         hub.next_token += 1;
         let token = hub.next_token;
         // Only the latest few questions can be answered.
         hub.prompts.retain(|old, _| *old + 8 > token);
         hub.prompts.insert(token, Prompt {
-            key: ctx.key.clone(), session: ctx.session.clone(), run: ctx.run(), conversation: ctx.conversation(),
-            text: text.to_owned(), retry,
+            key: ctx.key.clone(), session: ctx.session.clone(), run: ctx.run(), conversation: ctx.conversation(), retry,
         });
         token
     }
@@ -3678,14 +4176,15 @@ impl Composers {
         self.edit(handle, rev, text, position, anchor);
         let mut hub = self.lock();
         let Some(ctx) = self.context(&hub) else { return SendReply::Busy };
-        let Some(composer) = hub.composers.get_mut(&ctx.key).filter(|c| c.handle == handle) else { return SendReply::Busy };
-        if !composer.loaded || composer.sending || composer.waiting.is_some() || composer.attaching || composer.uncertain {
+        let Some(composer) = hub.composers.get(&ctx.key).filter(|c| c.handle == handle) else { return SendReply::Busy };
+        if hub.closed || !composer.loaded || composer.busy() || composer.uncertain {
             return SendReply::Busy;
         }
-        let message = composer.draft.text.clone();
-        let attachments = composer.draft.attachments.clone();
+        let (message, attachments) = (composer.draft.text.clone(), composer.draft.attachments.clone());
         if let Some(reason) = ctx.reason() {
-            composer.show_error(reason.clone());
+            if let Some(composer) = hub.composers.get_mut(&ctx.key) {
+                composer.show_error(reason.clone());
+            }
             drop(hub);
             self.changed();
             return SendReply::Blocked { reason };
@@ -3698,7 +4197,7 @@ impl Composers {
         let details = ctx.details.clone().unwrap_or_default();
         let now = self.now();
         if cache::expired(&details, now) {
-            let token = self.ask(hub, ctx, &text, retry);
+            let token = self.ask(hub, ctx, retry);
             let prompt = cache::cold_prompt(&details, self.compacting(hub, &ctx.key), ctx.facts.clearing, now);
             return SendReply::Cold { token, prompt };
         }
@@ -3725,7 +4224,10 @@ impl Composers {
         }
     }
 
-    /// The answer to a question asked by this hub.
+    /// The answer to a question asked by this hub. It re-checks everything:
+    /// the session's identity, and that the composer is neither busy nor (for
+    /// its own draft) uncertain, so an older question never resends a draft
+    /// whose delivery is unknown.
     pub fn answer(&self, token: u64, answer: Answer) -> SendReply {
         let mut hub = self.lock();
         let Some(prompt) = hub.prompts.remove(&token) else { return SendReply::Busy };
@@ -3736,6 +4238,10 @@ impl Composers {
             || ctx.run() != prompt.run || ctx.conversation() != prompt.conversation {
             return SendReply::Busy;
         }
+        let Some(composer) = hub.composers.get(&prompt.key) else { return SendReply::Busy };
+        if hub.closed || !composer.loaded || composer.busy() || (prompt.retry.is_none() && composer.uncertain) {
+            return SendReply::Busy;
+        }
         match action {
             ColdAction::Send => {
                 if let Some(reason) = ctx.reason() {
@@ -3743,10 +4249,7 @@ impl Composers {
                 }
                 let (text, attachments) = match &prompt.retry {
                     Some(retry) => (retry.text.clone(), retry.attachments.clone()),
-                    None => match hub.composers.get(&prompt.key) {
-                        Some(c) => (c.draft.text.clone(), c.draft.attachments.clone()),
-                        None => return SendReply::Busy,
-                    },
+                    None => (composer.draft.text.clone(), composer.draft.attachments.clone()),
                 };
                 let delivery = self.delivery(&hub, &ctx, text, attachments, prompt.retry.clone(), None, true);
                 self.deliver(&mut hub, delivery);
@@ -3758,8 +4261,12 @@ impl Composers {
     }
 
     /// `prepareSendingAsync`: the draft is saved as "sending" before anything
-    /// runs, so a crash afterwards reloads it as uncertain.
+    /// runs, so a crash afterwards reloads it as uncertain. A delivery drops
+    /// the open questions of its key.
     pub(crate) fn deliver(&self, hub: &mut Hub, delivery: Delivery) {
+        if hub.closed {
+            return;
+        }
         let Some(composer) = hub.composers.get_mut(&delivery.key) else { return };
         if composer.sending {
             return;
@@ -3768,10 +4275,12 @@ impl Composers {
         composer.waiting = None;
         composer.error = false;
         composer.notice = "Saving before sending…".into();
-        self.save_durable(composer, {
+        self.0.store.save_durable(&composer.key, composer.stored(), {
             let me = self.clone();
             move |saved| me.prepared(delivery, saved)
         });
+        let key = composer.key.clone();
+        hub.prompts.retain(|_, prompt| prompt.key != key);
         self.changed();
     }
 
@@ -3787,6 +4296,11 @@ impl Composers {
             self.changed();
             return;
         }
+        // The app quits: the draft is on disk as "sending" and reloads as
+        // uncertain; nothing starts now.
+        if self.lock().closed {
+            return;
+        }
         if !self.still_valid(&delivery) {
             self.delivery_finished(&delivery.key, false, CHANGED, false, delivery.preserve);
             return;
@@ -3799,7 +4313,7 @@ impl Composers {
         (self.0.deps.spawn)(Box::new(move || me.send_now(delivery)));
     }
 
-    /// Caches the files for Retry, records the local row, runs the call.
+    /// Caches the files for Retry, records the local row, runs the one call.
     fn send_now(&self, delivery: Delivery) {
         let cache = self.cache();
         let files = match attachments::prepare(cache.root(), &delivery.attachments) {
@@ -3811,9 +4325,18 @@ impl Composers {
         if !self.still_valid(&delivery) {
             return self.delivery_finished(&delivery.key, false, CHANGED, false, delivery.preserve);
         }
+        // One request id per delivery, made here for its one dispatch: the
+        // local row, the CLI request and the receipt check carry it, and no
+        // other delivery reuses it.
         let request_id = uuid::Uuid::new_v4().to_string();
         let now = self.now();
-        self.lock().local.sending(&delivery.key, &request_id, delivery.retry_id.as_deref(), &delivery.text, &files, &delivery.run, &delivery.conversation, now);
+        {
+            let mut hub = self.lock();
+            if hub.closed {
+                return;
+            }
+            hub.local.sending(&delivery.key, &request_id, delivery.retry_id.as_deref(), &delivery.text, &files, &delivery.run, &delivery.conversation, now);
+        }
         self.changed();
         let target = Target {
             computer: delivery.session.computer.clone(),
@@ -3829,8 +4352,8 @@ impl Composers {
         };
         let outcome = match (self.0.deps.dispatch)(target, action, request_id.clone()) {
             Ok(outcome) => outcome,
-            // "busy" is refused before any call; anything else may have run.
-            Err(error) if error == "busy" => Outcome::Failed { detail: zerus_client_core::actions::ALREADY_SENDING.into() },
+            // A2 answers a busy send lane and every refusal before the call as
+            // `Failed`; an `Err` means the call's thread died, so it may have run.
             Err(error) => Outcome::Uncertain { detail: error },
         };
         let detail = self.lock().local.finished(&delivery.key, &request_id, &outcome);
@@ -3884,6 +4407,7 @@ impl Composers {
                     composer.draft = attachments::Draft::default();
                     composer.position = 0;
                     composer.anchor = 0;
+                    composer.attachments_changed();
                 }
             }
             composer.text_epoch += 1;
@@ -3915,7 +4439,7 @@ impl Composers {
         let events: Vec<Value> = hub.followed.events.iter().cloned().collect();
         let reconciled = hub.local.reconcile(&key, &details, &events);
         let clear = hub.composers.get(&key).is_some_and(|c| {
-            !c.sending && c.draft.attachments.is_empty() && reconciled.delivered.iter().any(|t| *t == c.draft.text)
+            !c.sending && c.draft.attachments.is_empty() && reconciled.delivered.contains(&c.draft.text)
         });
         drop(hub);
         if clear {
@@ -3924,12 +4448,13 @@ impl Composers {
     }
 
     /// Retry on a failed row (`messageAction` "retry"). Blocking: it reads
-    /// the cached files back.
+    /// the cached files back. Only a definite failure (S4's `retryable`) is
+    /// ever sent again, as a new submission with its own request id.
     pub fn retry(&self, handle: u64, id: &str) -> SendReply {
         let (ctx, files, text) = {
             let mut hub = self.lock();
             let Some(ctx) = self.context(&hub) else { return SendReply::Busy };
-            if !hub.composers.get(&ctx.key).is_some_and(|c| c.handle == handle && !c.sending && c.waiting.is_none()) {
+            if hub.closed || !hub.composers.get(&ctx.key).is_some_and(|c| c.handle == handle && !c.busy()) {
                 return SendReply::Busy;
             }
             let Some(row) = hub.local.retryable(&ctx.key, id, &ctx.run(), &ctx.conversation()).cloned() else { return SendReply::Busy };
@@ -3993,72 +4518,6 @@ impl Composers {
         Some(routed)
     }
 
-    /// One `inspect` of the open session, off the UI thread; its value
-    /// stands in for the stream's state until the next state frame.
-    pub(crate) fn refresh_details(&self) {
-        let mut hub = self.lock();
-        let Some(session) = hub.open.clone() else { return };
-        if hub.followed.inspecting {
-            return;
-        }
-        let Some((row, _)) = (self.0.deps.rows)(&session.computer, &session.key, &session.name) else { return };
-        hub.followed.inspecting = true;
-        drop(hub);
-        let target = Target {
-            computer: session.computer.clone(), name: session.name.clone(),
-            run_id: row.run_id.clone().unwrap_or_default(), conversation_id: row.conversation_id.clone().unwrap_or_default(),
-        };
-        let me = self.clone();
-        (self.0.deps.spawn)(Box::new(move || {
-            let value = (me.0.deps.inspect)(&target, session.archive_id.as_deref());
-            let mut hub = me.lock();
-            hub.followed.inspecting = false;
-            if hub.followed.computer == session.computer && hub.followed.key == session.key {
-                match value {
-                    Some(value) => {
-                        hub.followed.inspect_error = false;
-                        hub.followed.details = Some(Arc::new(value));
-                    }
-                    None => hub.followed.inspect_error = true,
-                }
-            }
-            drop(hub);
-            me.reconcile();
-            me.changed();
-        }));
-    }
-
-    /// Once a second: the cache chip's minute and the inspect fallback when
-    /// no Activity state arrived within 3 s of opening.
-    pub fn tick(&self) {
-        let now = self.now();
-        let (minute_changed, wants_details) = {
-            let mut hub = self.lock();
-            let minute = (now / 60.0).floor() as i64;
-            let changed = std::mem::replace(&mut hub.minute, minute) != minute;
-            let wants = hub.open.is_some() && hub.followed.details.is_none() && !hub.followed.inspecting
-                && !hub.followed.inspect_error && now - hub.followed.opened_at >= DETAILS_WAIT;
-            (changed, wants)
-        };
-        if wants_details {
-            self.refresh_details();
-        }
-        if minute_changed {
-            self.changed();
-        }
-    }
-
-    pub fn start_ticker(&self) {
-        let me = self.clone();
-        std::thread::Builder::new()
-            .name("zerus-composer".into())
-            .spawn(move || loop {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                me.tick();
-            })
-            .expect("the composer ticker starts");
-    }
-
     #[cfg(test)]
     pub(crate) fn delivery_for_test(&self, handle: u64, message: &str) -> Delivery {
         let hub = self.lock();
@@ -4067,59 +4526,9 @@ impl Composers {
         self.delivery(&hub, &ctx, message.to_owned(), Vec::new(), None, None, false)
     }
 }
-
-/// The open session's part of the composer view (`renderDetails` 3982-3989).
-pub(crate) fn session_view(composers: &Composers, hub: &Hub, composer: &Composer) -> SessionView {
-    let Some(ctx) = composers.context(hub).filter(|ctx| ctx.key == composer.key) else {
-        return SessionView { unavailable_reason: "Select a session.".into(), attachments_available: true, ..SessionView::default() };
-    };
-    let details = ctx.details.as_deref().cloned().unwrap_or_default();
-    let now = composers.now();
-    let reason = ctx.reason();
-    let attachments_available = ctx.facts.cmd != "opencode" && details.get("attachments_supported").and_then(Value::as_bool).unwrap_or(true);
-    let attachments_reason = details.get("attachments_reason").and_then(Value::as_str).unwrap_or(
-        "This native adapter does not support file attachments. Your existing files remain saved; remove them to send text.",
-    ).to_owned();
-    let recorded = ctx.recorded();
-    SessionView {
-        available: reason.is_none(),
-        unavailable_reason: reason.clone().unwrap_or_default(),
-        block_reason: reason,
-        attachments_available,
-        attachments_reason,
-        cache: cache::chip(&details, now),
-        cache_warning: cache::warning(&details, now),
-        cache_details: cache::details(&details, recorded, local_time),
-    }
-}
 ```
 
-`Hub::local_keys()` lists the keys the local rows hold: add to `mod.rs` `impl Hub { pub(crate) fn local_keys(&self) -> Vec<String> { self.opened.values().cloned().collect() } }`, since S4 exposes rows per key only.
-
-- [ ] **Step 6: Register it** in `client/src-tauri/src/lib.rs`. `composer::Deps` gets:
-
-```rust
-dispatch: {
-    let actions = app.state::<actions::Actions>().inner().clone();
-    std::sync::Arc::new(move |target, action, id| tauri::async_runtime::block_on(actions::dispatch_as(&actions, target, action, id)))
-},
-facts: {
-    let actions = app.state::<actions::Actions>().inner().clone();
-    std::sync::Arc::new(move |computer, name| actions.write_kind(computer, name))
-},
-inspect: {
-    let hgs = zerus_client_core::default_hgs();
-    std::sync::Arc::new(move |target, archive| {
-        let inv = zerus_client_core::details::details_invocation(target, archive);
-        match zerus_client_core::run_limited(&hgs, &inv, &[], 8 << 20) {
-            Ok(zerus_client_core::Exit::Code { code: 0, stdout, .. }) => serde_json::from_slice(&stdout).ok(),
-            _ => None,
-        }
-    })
-},
-```
-
-After managing it: `app.state::<composer::Composers>().start_ticker();`. The commands:
+The commands, in `send.rs` (with `use tauri::State;`):
 
 ```rust
 #[tauri::command(rename_all = "snake_case")]
@@ -4150,18 +4559,29 @@ pub fn local_inspect(state: State<'_, Composers>, handle: u64, id: String) -> Op
 }
 ```
 
-They live in `send.rs` (with `use tauri::State;`) and join the live handler. `Action::Send` is still never deserialized: it is built here, from the held draft or the cached retry files.
+`Action::Send` is never deserialized: it is built here, from the held draft or the cached retry files.
 
-- [ ] **Step 7: Run the tests to see them pass**
+- [ ] **Step 7: Register it** in `client/src-tauri/src/lib.rs`. `composer::Deps` gets:
+
+```rust
+dispatch: {
+    let actions = app.state::<actions::Actions>().inner().clone();
+    std::sync::Arc::new(move |target, action, id| tauri::async_runtime::block_on(actions::dispatch_as(&actions, target, action, id)))
+},
+```
+
+It runs on the hub's spawned blocking threads, never on an async worker. The five commands join the live handler.
+
+- [ ] **Step 8: Run the tests to see them pass**
 
 Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer:: actions::`
-Expected: PASS (Task 3's tests still pass with the new deps). Clippy and fmt clean.
+Expected: PASS (Tasks 3a-4a's tests still pass with the new dep). Clippy and fmt clean.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add client/src-tauri
-git commit -m "feat(client): the guarded send with block reasons, the cold cache question and local rows"
+git commit -m "feat(client): the guarded send with the cold cache question and local rows"
 ```
 
 ---
@@ -4171,7 +4591,7 @@ git commit -m "feat(client): the guarded send with block reasons, the cold cache
 **Depends on:**
 - S3 `zerus-5wmh.9.9` (branch `work-ba0ed9fd-continuation`): `send::{Session, can_start_stopped, start_question, StartChoice, StartQuestion, StartSend, CompactSend, Step, DraftMark, CANCELLED_BY_USER, INTERRUPTED}`, `Action::StartFresh`;
 - C1 `zerus-5wmh.9.18` (branch `work-ba0ed9fd-context`): `Action::{ClearContext, CompactContext}`, `actions::clearable`;
-- Task 4;
+- Tasks 4a and 4b;
 - R1 for the start question's context text (`""` until then).
 
 **Qt reference:** `tray/src/SessionsWindow.cpp`:
@@ -4183,10 +4603,13 @@ git commit -m "feat(client): the guarded send with block reasons, the cold cache
 
 **Files:**
 - Modify: `client/src-tauri/src/composer/send.rs`, `client/src-tauri/src/composer/mod.rs`
-- Test: unit tests in `composer/send.rs` (module `continuations`)
+- Modify: `client/src-tauri/src/actions.rs` (`WriteKind::Clear`)
+- Modify: `client/src-tauri/Cargo.toml` (+ `sha2 = "0.10"`), `client/src-tauri/Cargo.lock`
+- Modify: `client/src-tauri/src/lib.rs` (the three commands)
+- Test: unit tests in `composer/send.rs` (module `continuations`) and `actions.rs`
 
 **Interfaces:**
-- Consumes: the S3 and C1 surfaces in "Depends on"; Task 4's `Composers::{context, deliver, delivery, delivery_finished, refresh_details}`.
+- Consumes: the S3 and C1 surfaces in "Depends on"; Task 4a's `Composers::{context, now, refresh_details}` and `Context`; Task 4b's `Composers::{ask, deliver, delivery, delivery_finished}`, `Prompt`, `Retry`, `Delivery`, `CHANGED` and the test helpers `send_hub`, `opened`, `ready`, `state`, `Fake`, `receipt`.
 - Produces:
 
 ```rust
@@ -4198,13 +4621,14 @@ Start { choice: StartChoice },
 pub cancel_send: bool,   // "Cancel send" while a start or compaction waits
 pub compacting: bool,    // the compaction indicator
 pub clear: ClearControl, // the cache popover's Clear context and the header's Clear session
-#[derive(Serialize)] pub struct ClearControl { pub enabled: bool, pub dismiss: bool, pub title: String, pub text: String, pub confirm: String }
+#[derive(Serialize)] pub struct ClearControl { pub enabled: bool, pub dismiss: bool, pub title: String, pub text: String, pub confirm: String, pub run: String, pub conversation: String }
 impl Composers {
     pub fn cancel_send(&self, handle: u64);
     pub fn interrupted(&self, handle: u64);           // before the composer's Stop interrupts
-    pub fn clear_context(&self, handle: u64) -> SendReply; // after the Clear session confirmation
+    /// After the Clear session confirmation, with the identity the dialog showed.
+    pub fn clear_context(&self, handle: u64, run: &str, conversation: &str, dismiss: bool) -> SendReply;
 }
-// commands: send_cancel(handle), send_interrupted(handle), clear_context(handle) -> SendReply
+// commands: send_cancel(handle), send_interrupted(handle), clear_context(handle, run, conversation, dismiss) -> SendReply
 ```
 
 - [ ] **Step 1: Write the failing tests** in `client/src-tauri/src/composer/send.rs`:
@@ -4214,6 +4638,7 @@ impl Composers {
 mod continuations {
     use super::tests::{opened, ready, send_hub, state};
     use super::*;
+    use crate::composer::lock;
     use crate::composer::tests::{dir, until};
     use serde_json::json;
     use zerus_client_core::send::StartChoice;
@@ -4330,10 +4755,24 @@ mod continuations {
         let view = opened(&c, ready());
         assert!(view.clear.enabled && !view.clear.dismiss);
         assert_eq!(view.clear.title, "Clear session?");
-        assert_eq!(c.clear_context(view.handle), SendReply::Sending);
+        assert_eq!((view.clear.run.as_str(), view.clear.conversation.as_str()), ("run-1", "conv-1"));
+        assert_eq!(c.clear_context(view.handle, "run-1", "conv-1", false), SendReply::Sending);
         until(&c, |_| lock(&fake.calls).iter().any(|(_, a, _)| *a == Action::ClearContext { dismiss_prompt: false }));
         let (target, _, _) = lock(&fake.calls).last().cloned().unwrap();
         assert_eq!((target.run_id.as_str(), target.conversation_id.as_str()), ("run-1", "conv-1"));
+    }
+
+    #[test]
+    fn a_clear_confirmed_for_another_conversation_does_nothing() {
+        let root = dir("clear-moved");
+        let (c, fake) = send_hub(&root);
+        let view = opened(&c, ready());
+        let shown = view.clear.clone();
+        let mut moved = ready();
+        moved["conversation_id"] = json!("conv-2");
+        c.observe(&state(moved));
+        assert_eq!(c.clear_context(view.handle, &shown.run, &shown.conversation, shown.dismiss), SendReply::Busy);
+        assert!(lock(&fake.calls).is_empty(), "Qt returns quietly when the session changed under its dialog");
     }
 }
 ```
@@ -4343,7 +4782,12 @@ mod continuations {
 Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer::send::continuations`
 Expected: compile errors (`Start`, `cancel_send`, `clear_context`).
 
-- [ ] **Step 3: Implement the continuations.** In `mod.rs`, `Hub` gains `start: Option<(send::Pending, StartSend)>`, `compacts: HashMap<String, (send::Pending, CompactSend)>` and `last_poll: f64`; `ComposerView` gains the fields in "Produces". In `send.rs`:
+- [ ] **Step 3: Implement the continuations.**
+  - In `actions.rs`, `WriteKind` gains `Clear`, `WriteKind::of` maps `Action::ClearContext { .. }` to it, and `a_running_write_reports_its_kind` gains `assert_eq!(WriteKind::of(&Action::ClearContext { dismiss_prompt: false }), WriteKind::Clear);`. `context()` sets `clearing: write == Some(WriteKind::Clear)`.
+  - In `mod.rs`, `Hub` gains `start: Option<(send::Pending, StartSend)>`, `compacts: HashMap<String, (send::Pending, CompactSend)>` and `last_poll: f64`. `Composer` gains `pub(crate) digests: Option<(u64, Vec<String>)>` (None in `new`), the attachment digests of one attachment list. `ComposerView` gains the fields in "Produces".
+  - `Prompt` gains `rules: Option<Session>` and `mark: DraftMark`, which `ask` fills from the context and the composer.
+
+In `send.rs`:
 
 ```rust
 use zerus_client_core::send::{self as rules, CompactSend, DraftMark, Session, StartChoice, StartQuestion, StartSend, Step};
@@ -4356,9 +4800,24 @@ pub(crate) struct Pending {
     pub(crate) retry: Option<Retry>,
 }
 
-/// The text and attachment digests S3 compares at every step.
-pub(crate) fn mark(text: &str, attachments: &[Attachment]) -> DraftMark {
-    DraftMark { text: text.to_owned(), attachments: attachments.iter().map(|a| super::digest(&a.bytes)).collect() }
+/// The text and attachment digests S3 compares at every step. The SHA-256
+/// digests are computed once per attachment list, not per check: while a
+/// continuation waits, every Activity state and poll compares the mark.
+pub(crate) fn mark(composer: &mut Composer) -> DraftMark {
+    let digests = match &composer.digests {
+        Some((list, digests)) if *list == composer.attachments_rev => digests.clone(),
+        _ => {
+            let digests: Vec<String> = composer.draft.attachments.iter().map(|a| digest(&a.bytes)).collect();
+            composer.digests = Some((composer.attachments_rev, digests.clone()));
+            digests
+        }
+    };
+    DraftMark { text: composer.draft.text.clone(), attachments: digests }
+}
+
+fn digest(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 impl Composers {
@@ -4379,8 +4838,8 @@ impl Composers {
             || hub.composers.get(&ctx.key).is_some_and(|c| c.sending)
     }
 
-    fn draft_mark(hub: &Hub, key: &str) -> DraftMark {
-        hub.composers.get(key).map(|c| mark(&c.draft.text, &c.draft.attachments)).unwrap_or_default()
+    fn draft_mark(hub: &mut Hub, key: &str) -> DraftMark {
+        hub.composers.get_mut(key).map(mark).unwrap_or_default()
     }
 }
 ```
@@ -4399,25 +4858,25 @@ Then wire them in:
     };
 ```
 
-- `send_message` asks the start question before the block reason, for a send that is not a retry (`sendMessage` 4809):
+- `send_message` asks the start question after Task 4b's composer checks and draft copy and before the block reason, for a send that is not a retry (`sendMessage` 4809):
 
 ```rust
         let session = Composers::rules_session(&ctx);
         if rules::can_start_stopped(&session, self.start_busy(&hub, &ctx)) {
-            let token = self.ask(&mut hub, &ctx, &message, None);
+            let token = self.ask(&mut hub, &ctx, None);
             return SendReply::Start { token, question: rules::start_question(&session, "") };
         }
 ```
 
-  `""` is the R1 context text; when R1 merges, pass `session_usage::context(&details["session_usage"], ctx.recorded()).text`. `ask` also stores the question's `Session` and `DraftMark` in the `Prompt` (add the fields `rules: Option<Session>` and `mark: DraftMark`).
+  `""` is the R1 context text; when R1 merges, pass `session_usage::context(&details["session_usage"], ctx.recorded()).text`. `ask` stores the question's `Session` (`rules`) and the composer's `DraftMark` (`mark`) in the `Prompt`.
 
-`answer` handles the start choices and the compaction:
+`answer` keeps Task 4b's identity and composer checks for every answer (a busy or uncertain draft is never started or sent by an older question), then handles the start choices and the compaction:
 
 ```rust
             // Answer::Start { choice }
             let Some(original) = prompt.rules.clone() else { return SendReply::Busy };
             let current = Composers::rules_session(&ctx);
-            let now_mark = Composers::draft_mark(&hub, &prompt.key);
+            let now_mark = Composers::draft_mark(&mut hub, &prompt.key);
             match StartSend::begin(&original, Some(&current), self.start_busy(&hub, &ctx), choice, prompt.mark.clone(), &now_mark, self.now()) {
                 Err(notice) => SendReply::Notice { text: notice },
                 Ok((start, waiting)) => {
@@ -4428,7 +4887,7 @@ Then wire them in:
                 }
             }
             // ColdAction::Compact (sendMessage 4843-4846)
-            if Composers::draft_mark(&hub, &prompt.key) != prompt.mark {
+            if Composers::draft_mark(&mut hub, &prompt.key) != prompt.mark {
                 return SendReply::Notice { text: "Draft changed. Send it when you are ready.".into() };
             }
             let (compact, waiting) = CompactSend::begin(&Composers::rules_session(&ctx), &prompt.run, &prompt.conversation, prompt.mark.clone(), prompt.retry.as_ref().map(|r| r.id.clone()), self.now());
@@ -4448,13 +4907,18 @@ Then wire them in:
         composer.waiting = Some(waiting);
         let me = self.clone();
         let owned = key.to_owned();
-        self.save_durable(composer, move |saved| me.waiting_saved(&owned, saved.is_ok(), start));
+        self.0.store.save_durable(key, composer.stored(), move |saved| me.waiting_saved(&owned, saved.is_ok(), start));
         self.changed();
     }
 
     /// The waiting draft is durable: S3's `prepared` decides whether to run.
+    /// A closed hub (the app quits) starts nothing; the draft reloads as it
+    /// was saved, not sent.
     fn waiting_saved(&self, key: &str, ok: bool, start: bool) {
         let mut hub = self.lock();
+        if hub.closed {
+            return;
+        }
         let ctx = self.context(&hub);
         let current = ctx.as_ref().filter(|c| c.key == key).map(Composers::rules_session);
         let evidence = ctx.as_ref().filter(|c| c.key == key).and_then(|c| c.details.as_deref().cloned());
@@ -4482,6 +4946,8 @@ Then wire them in:
         match step {
             Step::Idle => {}
             Step::Cancelled(text) => self.cancel(key, start, &text),
+            // A start or compaction whose outcome is uncertain ends the
+            // continuation (S3 answers `Cancelled`): the message is never sent after it.
             Step::Run(action) => {
                 let Some(target) = self.target_of(key) else { return self.cancel(key, start, CHANGED) };
                 let me = self.clone();
@@ -4517,6 +4983,8 @@ Then wire them in:
                     Some(retry) => (retry.text.clone(), retry.attachments.clone()),
                     None => (composer.draft.text.clone(), composer.draft.attachments.clone()),
                 };
+                // A Retry's message is not the draft: a newer draft stays (Qt's preserveDraft).
+                let preserve = pending.retry.is_some() && (composer.draft.text != text || composer.draft.attachments != attachments);
                 // The open session, when this is it: the webview reopened it under the new run's catalog key.
                 let session = match (&hub.open, hub.open_key.as_deref()) {
                     (Some(open), Some(open_key)) if open_key == key => open.clone(),
@@ -4527,7 +4995,7 @@ Then wire them in:
                     key: key.to_owned(), session, created, run: run_id, conversation: conversation_id,
                     text, attachments, retry_id: pending.retry.as_ref().map(|r| r.id.clone()), compaction: compaction_id,
                     // The send counts as consent to the full context (Qt's contextChosen).
-                    consent: true, preserve: false,
+                    consent: true, preserve,
                 };
                 if let Some(composer) = hub.composers.get_mut(key) {
                     composer.waiting = None;
@@ -4546,15 +5014,27 @@ Then wire them in:
     }
 ```
 
-`target_of(key)` builds the `Target` from the continuation's session and the current row (run and conversation). A resume that leaves the stopped row in place keeps working, since the row of the same catalog key is looked up by name when the key changed: it scans `rows` only for the open session, so `Pending.session.key` is refreshed in `open` when the webview reopens the same draft key under a new catalog key (`replaced` hands the selection to the new run, `session.ts` `onReplaced`).
+`target_of(key)` builds the `Target` from the continuation's session (or the open session) and the current row's run and conversation:
 
-Every Activity state of the session and every poll feeds `inspected`. `after_observe` calls `self.continue_with(details)` for the open key:
+```rust
+    fn target_of(&self, key: &str) -> Option<Target> {
+        let hub = self.lock();
+        let session = hub.start.as_ref().filter(|(p, _)| p.key == key).map(|(p, _)| p.session.clone())
+            .or_else(|| hub.compacts.get(key).map(|(p, _)| p.session.clone()))
+            .or_else(|| hub.open.clone().filter(|_| hub.open_key.as_deref() == Some(key)))?;
+        let (row, _) = (self.0.deps.rows)(&session.computer, &session.key, &session.name)?;
+        Some(Target { computer: session.computer, name: session.name, run_id: row.run_id.unwrap_or_default(), conversation_id: row.conversation_id.unwrap_or_default() })
+    }
+```
+ A resume that leaves the stopped row in place keeps working, since the row of the same catalog key is looked up by name when the key changed: it scans `rows` only for the open session, so `Pending.session.key` is refreshed in `open` when the webview reopens the same draft key under a new catalog key (`replaced` hands the selection to the new run, `session.ts` `onReplaced`).
+
+Every Activity state of the session and every poll feeds `inspected`. `after_observe` becomes `self.reconcile()`, then `self.continue_with(key, details)` for the open key, then `self.changed()`:
 
 ```rust
     pub(crate) fn continue_with(&self, key: &str, details: &Value) {
         let now = self.now();
         let mut hub = self.lock();
-        let draft_now = Composers::draft_mark(&hub, key);
+        let draft_now = Composers::draft_mark(&mut hub, key);
         let terminating = self.context(&hub).is_some_and(|c| c.key == key && c.facts.terminating);
         let pending = self.context(&hub).is_some_and(|c| c.key == key && c.facts.updating);
         let start_step = match hub.start.as_mut() {
@@ -4568,9 +5048,24 @@ Every Activity state of the session and every poll feeds `inspected`. `after_obs
     }
 ```
 
-The duplicate states in the tests are safe because S3 removes the intent before it returns `Send`.
+The duplicate states in the tests are safe: S3's `CompactSend` marks itself sent before it returns `Send`, `step` takes a start's continuation out of the hub before it delivers (a second state finds none), and `deliver` refuses a composer that is already sending.
 
-`tick` gains the 2.5 s poll (`pollCompactContinuations`): each continuation calls `tick(now)` (180 s and 600 s limits, giving `Cancelled`). A continuation whose session is not the open one (or is open without a state) and that `polling()` (compactions) or is a start runs one `inspect` through `deps.inspect`. The result goes to `continue_with`. One inspect per continuation is in flight at a time, and every poll runs off the UI thread.
+`tick` gains the 2.5 s poll (`pollCompactContinuations`): each continuation calls `tick(now)` (180 s and 600 s limits, giving `Cancelled`), outside the hub's lock:
+
+```rust
+        let now = self.now();
+        let steps: Vec<(String, bool, Step)> = {
+            let hub = self.lock();
+            hub.start.iter().map(|(p, s)| (p.key.clone(), true, s.tick(now)))
+                .chain(hub.compacts.iter().map(|(k, (_, c))| (k.clone(), false, c.tick(now))))
+                .collect()
+        };
+        for (key, start, step) in steps {
+            self.step(&key, start, step);
+        }
+```
+
+Every 2.5 s (`last_poll`), a continuation whose session is not the open one (or is open without a state) and that `polling()` (compactions) or is a start runs one `inspect` through `deps.inspect`. The result goes to `continue_with`. One inspect per continuation is in flight at a time, and every poll runs off the UI thread.
 
 Cancel send, the interrupt hook and Clear context:
 
@@ -4592,17 +5087,18 @@ Cancel send, the interrupt hook and Clear context:
         if start { self.cancel(&key, true, rules::INTERRUPTED); }
     }
 
-    /// Clear session confirmed (`clearContext` 4637-4670): the identity is
-    /// checked again, then C1's call runs on the write lane.
-    pub fn clear_context(&self, handle: u64) -> SendReply {
+    /// Clear session confirmed (`clearContext` 4637-4670): the identity the
+    /// dialog showed (run, conversation, the dismiss variant) must still hold,
+    /// as Qt checks after its dialog, then C1's call runs on the write lane.
+    pub fn clear_context(&self, handle: u64, run: &str, conversation: &str, dismiss: bool) -> SendReply {
         let hub = self.lock();
         let Some(ctx) = self.context(&hub) else { return SendReply::Busy };
-        if !hub.composers.get(&ctx.key).is_some_and(|c| c.handle == handle && !c.sending) {
+        if hub.closed || !hub.composers.get(&ctx.key).is_some_and(|c| c.handle == handle && !c.sending) {
             return SendReply::Busy;
         }
         let details = ctx.details.as_deref().cloned().unwrap_or_default();
         let control = clear_control(&ctx, &details);
-        if !control.enabled {
+        if !control.enabled || control.run != run || control.conversation != conversation || control.dismiss != dismiss {
             return SendReply::Busy;
         }
         drop(hub);
@@ -4627,7 +5123,7 @@ Cancel send, the interrupt hook and Clear context:
 
 ```rust
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
-pub struct ClearControl { pub enabled: bool, pub dismiss: bool, pub title: String, pub text: String, pub confirm: String }
+pub struct ClearControl { pub enabled: bool, pub dismiss: bool, pub title: String, pub text: String, pub confirm: String, pub run: String, pub conversation: String }
 
 fn clear_control(ctx: &Context, details: &Value) -> ClearControl {
     let dismiss = !details["clear_context_supported"].as_bool().unwrap_or(false);
@@ -4642,21 +5138,23 @@ fn clear_control(ctx: &Context, details: &Value) -> ClearControl {
             format!("Clear the conversation context in {name} on {machine}?\n\nThis runs the agent’s native clear command. Future messages will start without the current conversation context. Your unsent draft will be kept.")
         },
         confirm: if dismiss { "Dismiss and clear" } else { "Clear session" }.into(),
+        run: ctx.run(),
+        conversation: ctx.conversation(),
     }
 }
 ```
 
-`view_of` fills `cancel_send` (a compaction or a start waits for this key), `compacting` (a compaction for this key) and `clear` (`clear_control` of the open session). Commands: `send_cancel(handle)`, `send_interrupted(handle)` and `clear_context(handle) -> SendReply`, registered with the others.
+`view_of` fills `cancel_send` (a compaction or a start waits for this key), `compacting` (a compaction for this key) and `clear` (`clear_control` of the open session). Commands: `send_cancel(handle)`, `send_interrupted(handle)` and `clear_context(handle, run, conversation, dismiss) -> SendReply`, registered with the others.
 
 - [ ] **Step 4: Run the tests to see them pass**
 
-Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer::`
-Expected: PASS (Tasks 3-5). Clippy and fmt clean.
+Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer:: actions::`
+Expected: PASS (Tasks 3a-5). Clippy and fmt clean. The sha2 addition updates `Cargo.lock` as in Task 3a.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add client/src-tauri/src/composer
+git add client/src-tauri
 git commit -m "feat(client): resume-then-send, compact-to-send and Clear context"
 ```
 
@@ -4665,8 +5163,8 @@ git commit -m "feat(client): resume-then-send, compact-to-send and Clear context
 ### Task 6: The composer view
 
 **Depends on:**
-- Tasks 3-5;
-- for the Mark as read chip, `markReadChip(row)` from the menu-parity Piece B (`zerus-5wmh.16`, PR #406): until it merges, the chip stays hidden;
+- Tasks 3a-5;
+- for the Mark as read chip, `markReadChip(session)` and `runMarkRead(row)` from the menu-parity Piece B (`zerus-5wmh.16`, PR #406, `ui/sessions/mark-entries.ts`): until it merges, the chip stays hidden;
 - for the Context chip, R1: until it merges, the chip stays hidden.
 
 **Qt reference:**
@@ -4682,19 +5180,21 @@ git commit -m "feat(client): resume-then-send, compact-to-send and Clear context
 - Create: `client/src/store/composer.ts`, `client/src/store/composer.test.ts`
 - Create: `client/src/ui/sessions/Composer.tsx`, `client/src/ui/sessions/Attachments.tsx`, `client/src/ui/sessions/ComposerDialogs.tsx`
 - Modify: `client/src/store/session.ts` (route `composer`, open the selected session's composer)
-- Modify: `client/src/store/actions.ts` (export `notify`, additive)
+- Modify: `client/src/store/catalog.ts` (`setDraftKeys`, additive)
+- Modify: `client/src/store/actions.ts` (export `notify`, additive, unless #406 already exports it)
 - Modify: `client/src/ui/sessions/Activity.tsx` (export the jump state: `following`, `unseen`, `jumpToLatest`)
 - Modify: `client/src/ui/sessions/SessionDetail.tsx` (the composer column under Activity; the header's Clear session entry and button)
+- Modify: `client/src/ui/styles/detail.css` (the rules Step 7 names, where the port lacks them), `client/src/ui/lib/icons.generated.ts` (any icon the generator must add)
 
 **Interfaces:**
-- Consumes: Tasks 3-5's commands and the serde shapes of `ComposerView`, `SendReply`, `Answer`, `ColdPrompt`, `StartQuestion`, `ClearControl`, `LocalMessage` and `Chip`.
+- Consumes: Tasks 3a-5's commands and the serde shapes of `ComposerView`, `SendReply`, `Answer`, `ColdPrompt`, `StartQuestion`, `ClearControl`, `LocalMessage` and `Chip`.
 - Produces:
 
 ```ts
 // types.ts (mirrors of the Rust shapes; snake_case fields)
 export interface AttachmentView { name: string; mime: string; reference: string; bytes: number; path: string; excerpt: string | null }
 export interface Chip { visible: boolean; tone: "quiet" | "danger" | "warning" | "success"; label: string; short_label: string }
-export interface ClearControl { enabled: boolean; dismiss: boolean; title: string; text: string; confirm: string }
+export interface ClearControl { enabled: boolean; dismiss: boolean; title: string; text: string; confirm: string; run: string; conversation: string }
 export interface LocalMessage { id: string; text: string; status: "sending" | "sent" | "error"; attachments: Record<string, unknown>[]; run_id: string; conversation_id: string;
   submitted_at: number; error: string; uncertain: boolean; message_id: string | null; submitted_text: string | null; source: string | null; voice: Record<string, unknown> | null }
 export interface ComposerView { handle: number; key: string; loaded: boolean; rev: number; text_epoch: number; text: string; position: number; anchor: number;
@@ -4736,7 +5236,7 @@ const view = (extra: Partial<ComposerView> = {}): ComposerView => ({
   attachments: [], removed: null, attaching: false, sending: false, waiting: null, uncertain: false, status: "", status_error: false,
   can_send: true, send_label: "Send", available: true, unavailable_reason: "", block_reason: null, attachments_available: true,
   cache: { visible: false, tone: "quiet", label: "", short_label: "" }, cache_warning: "", cache_details: "", local: [],
-  cancel_send: false, compacting: false, clear: { enabled: true, dismiss: false, title: "Clear session?", text: "", confirm: "Clear session" }, ...extra,
+  cancel_send: false, compacting: false, clear: { enabled: true, dismiss: false, title: "Clear session?", text: "", confirm: "Clear session", run: "run-1", conversation: "conv-1" }, ...extra,
 });
 
 function fakes(reply: SendReply = { kind: "sending" }) {
@@ -4750,7 +5250,7 @@ function fakes(reply: SendReply = { kind: "sending" }) {
     send: async (_h, rev, text) => { calls.push(`send ${rev} ${text}`); return reply; },
     answer: async (token, answer) => { calls.push(`answer ${token} ${JSON.stringify(answer)}`); return { kind: "sending" }; },
     remove: async () => {}, undo: async () => {}, allowRetry: async () => {}, cancelSend: async () => {}, interrupted: async () => {},
-    clear: async () => ({ kind: "sending" }),
+    clear: async (_h, run, conversation) => { calls.push(`clear ${run} ${conversation}`); return { kind: "sending" }; },
   };
   let clock = 0;
   const jobs: { at: number; fn: () => void }[] = [];
@@ -4862,7 +5362,7 @@ import { batch, createSignal } from "solid-js";
 import * as bridge from "../bridge";
 import { notify } from "./actions";
 import type { Timers } from "./terminal";
-import type { Answer, ColdPrompt, ComposerView, SendReply, SessionRef, StartQuestion } from "../types";
+import type { Answer, ClearControl, ColdPrompt, ComposerView, SendReply, SessionRef, StartQuestion } from "../types";
 
 // The open composer (Qt MessageComposer) over the Rust hub. The webview owns
 // the text while the user types: edits go to Rust 250 ms after the last key,
@@ -4891,7 +5391,7 @@ export interface ComposerPort {
   allowRetry(handle: number): Promise<void>;
   cancelSend(handle: number): Promise<void>;
   interrupted(handle: number): Promise<void>;
-  clear(handle: number): Promise<SendReply>;
+  clear(handle: number, run: string, conversation: string, dismiss: boolean): Promise<SendReply>;
 }
 
 /** Image decoding for pastes that are not PNG; tests pass their own. */
@@ -4917,7 +5417,7 @@ const utf8 = new TextEncoder();
 export type Dialog =
   | { kind: "cold"; token: number; prompt: ColdPrompt }
   | { kind: "start"; token: number; question: StartQuestion }
-  | { kind: "clear"; token?: number };
+  | { kind: "clear"; control: ClearControl; token?: number };
 
 export function createComposer(port: ComposerPort, timers: Timers = realTimers, images: Images = browserImages) {
   const [view, setView] = createSignal<ComposerView | undefined>();
@@ -4964,7 +5464,7 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     switch (r.kind) {
       case "cold": setDialog({ kind: "cold", token: r.token, prompt: r.prompt }); break;
       case "start": setDialog({ kind: "start", token: r.token, question: r.question }); break;
-      case "clear_context": setDialog({ kind: "clear", token: r.token }); break;
+      case "clear_context": { const control = view()?.clear; if (control) setDialog({ kind: "clear", control, token: r.token }); break; }
       case "notice": notify("error", r.text, true); break;
       default: break;
     }
@@ -5030,8 +5530,14 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
       reply(await port.answer(d.token, answer));
     },
     closeDialog() { const d = dialog(); setDialog(undefined); if (d?.token !== undefined) void port.answer(d.token, { kind: "cancel" }); },
-    openClear() { setDialog({ kind: "clear" }); },
-    async confirmClear() { setDialog(undefined); const h = handle(); if (h !== undefined) reply(await port.clear(h)); },
+    /** The Clear session dialog keeps the identity it shows; the confirm sends it back for Rust to check. */
+    openClear() { const control = view()?.clear; if (control) setDialog({ kind: "clear", control }); },
+    async confirmClear() {
+      const d = dialog();
+      setDialog(undefined);
+      const h = handle();
+      if (h !== undefined && d?.kind === "clear") reply(await port.clear(h, d.control.run, d.control.conversation, d.control.dismiss));
+    },
     async cancelSend() { const h = handle(); if (h !== undefined) await port.cancelSend(h); },
     async allowRetry() { const h = handle(); if (h !== undefined) await port.allowRetry(h); },
     async interrupted() { const h = handle(); if (h !== undefined) await port.interrupted(h); },
@@ -5047,23 +5553,35 @@ export const composer = createComposer({
 });
 ```
 
-In `client/src/store/actions.ts`, add `notify` to the object `createActions` returns and to the app's exported names (additive).
+In `client/src/store/actions.ts`, add `notify` to the object `createActions` returns and to the app's exported names (additive), unless #406 already exports it.
 
-- [ ] **Step 4: The bridge.** In `client/src/bridge.ts`, one wrapper per command. Each answers the browser build with "Actions need the desktop app.": a rejected promise, or `null` for `composerOpen`. The raw paste:
+- [ ] **Step 4: The bridge.** In `client/src/bridge.ts`, one wrapper per command. Outside Tauri each rejects with "Actions need the desktop app.", and `composerOpen` answers `null`:
 
 ```ts
+const DESKTOP_ACTIONS = "Actions need the desktop app.";
+const desktop = <T>(command: string, args: Record<string, unknown>): Promise<T> =>
+  inTauri() ? invoke<T>(command, args) : Promise.reject(DESKTOP_ACTIONS);
+
+/** A pasted image goes as a raw IPC body, never as JSON. */
 export async function composerPasteImage(handle: number, png: Uint8Array, start: number, end: number): Promise<void> {
-  if (!inTauri()) throw "Actions need the desktop app.";
+  if (!inTauri()) throw DESKTOP_ACTIONS;
   await invoke("composer_paste_image", png, { headers: { "x-zerus-composer": String(handle), "x-zerus-start": String(start), "x-zerus-end": String(end) } });
 }
 export const composerOpen = (session: SessionRef | undefined) => (inTauri() ? invoke<ComposerView | null>("composer_open", { session: session ?? null }) : Promise.resolve(null));
-export const composerEdit = (handle: number, rev: number, text: string, position: number, anchor: number) => invoke<void>("composer_edit", { handle, rev, text, position, anchor });
-export const composerPick = (handle: number, start: number, end: number) => invoke<void>("composer_pick", { handle, start, end });
-export const composerAttach = (handle: number, paths: string[], start: number, end: number) => invoke<void>("composer_attach", { handle, paths, start, end });
-export const sendMessage = (handle: number, rev: number, text: string, position: number, anchor: number) => invoke<SendReply>("send_message", { handle, rev, text, position, anchor });
-export const sendAnswer = (token: number, answer: Answer) => invoke<SendReply>("send_answer", { token, answer });
-// composerRemove, composerUndoRemove, composerAllowRetry, sendCancel, sendInterrupted, clearContext,
-// localRetry, localDelete, localInspect follow the same shape.
+export const composerEdit = (handle: number, rev: number, text: string, position: number, anchor: number) => desktop<void>("composer_edit", { handle, rev, text, position, anchor });
+export const composerPick = (handle: number, start: number, end: number) => desktop<void>("composer_pick", { handle, start, end });
+export const composerAttach = (handle: number, paths: string[], start: number, end: number) => desktop<void>("composer_attach", { handle, paths, start, end });
+export const composerRemove = (handle: number, index: number) => desktop<void>("composer_remove", { handle, index });
+export const composerUndoRemove = (handle: number) => desktop<void>("composer_undo_remove", { handle });
+export const composerAllowRetry = (handle: number) => desktop<void>("composer_allow_retry", { handle });
+export const sendMessage = (handle: number, rev: number, text: string, position: number, anchor: number) => desktop<SendReply>("send_message", { handle, rev, text, position, anchor });
+export const sendAnswer = (token: number, answer: Answer) => desktop<SendReply>("send_answer", { token, answer });
+export const sendCancel = (handle: number) => desktop<void>("send_cancel", { handle });
+export const sendInterrupted = (handle: number) => desktop<void>("send_interrupted", { handle });
+export const clearContext = (handle: number, run: string, conversation: string, dismiss: boolean) => desktop<SendReply>("clear_context", { handle, run, conversation, dismiss });
+export const localRetry = (handle: number, id: string) => desktop<SendReply>("local_retry", { handle, id });
+export const localDelete = (handle: number, id: string) => desktop<void>("local_delete", { handle, id });
+export const localInspect = (handle: number, id: string) => desktop<Inspect | null>("local_inspect", { handle, id });
 ```
 
 `normalize` keeps `composer` and `draft_keys`, and `isEmptyBatch` treats a batch with either as not empty.
@@ -5096,7 +5614,7 @@ createRoot(() => {
 - [ ] **Step 6: Write `client/src/ui/sessions/Attachments.tsx`**, the mockup's `AttachmentsChip` with the store:
   - the rows read `composer.view().attachments`;
   - a thumbnail or preview of an image uses `convertFileSrc(a.path, "zerus-file")`, and a text file's preview shows `a.excerpt`;
-  - a row opens its file through `bridge.attachmentOpenDraft(handle, index)` (Task 9);
+  - a row does not open its file yet: Task 9 adds Open (`attachment_open_draft`), disabled until R2;
   - remove calls `composer.remove(index)`, and Undo calls `composer.undo()` while `view().removed` names the file;
   - the head reads "{n} of 8, up to 10 MiB each";
   - the remove button's tooltip is "Remove" (the mockup's "(Delete)" goes), while Delete and Backspace still remove;
@@ -5107,7 +5625,6 @@ import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Icon } from "../lib/icons";
 import { composer } from "../../store/composer";
-import * as bridge from "../../bridge";
 import type { AttachmentView } from "../../types";
 
 const kib = (bytes: number) => `${Math.max(1, Math.ceil(bytes / 1024))} KiB`;
@@ -5129,7 +5646,6 @@ export function AttachmentsChip() {
   };
   const close = (refocus = false) => { setOpen(false); setPreview(undefined); if (refocus) chip.focus(); };
   const rows = () => [...(list?.querySelectorAll<HTMLElement>(".att-row") ?? [])];
-  const openFile = (index: number) => { close(); const h = composer.view()?.handle; if (h !== undefined) void bridge.attachmentOpenDraft(h, index).catch(() => {}); };
   const remove = (index: number) => {
     setPreview(undefined);
     void composer.remove(index);
@@ -5155,13 +5671,11 @@ export function AttachmentsChip() {
         <div class={`att-pop pv-${pos().side}`} ref={list} tabindex="-1" role="dialog" aria-label="Attachments" onKeyDown={onKey} style={{ left: `${pos().left}px`, bottom: `${pos().bottom}px` }}>
           <div class="att-head"><b>Attachments</b><span class="dim">{items().length} of 8, up to 10 MiB each</span></div>
           <For each={items()}>{(a, i) => (
-            <div class="att-row" tabindex="0" role="button" aria-label={`Open ${a.name}`} title={`Open ${a.name}`}
+            <div class="att-row" tabindex="0" aria-label={a.name}
               onMouseEnter={() => setPreview(i())} onMouseLeave={() => setPreview(undefined)} onFocus={() => { if (arrowed) setPreview(i()); }}
-              onClick={() => openFile(i())}
               onKeyDown={(e) => {
                 if (e.target !== e.currentTarget) return;
-                if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openFile(i()); }
-                else if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); remove(i()); }
+                if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); remove(i()); }
               }}>
               <span class="att-thumb" classList={{ file: !image(a) }}>
                 <Show when={image(a)} fallback={<Icon name="file-text" size={16} />}><img src={src(a)} alt="" /></Show>
@@ -5192,7 +5706,7 @@ export function AttachmentsChip() {
 - [ ] **Step 7: Write `client/src/ui/sessions/Composer.tsx`.** It follows the mockup's structure: the edge grip, the 34 px toolbar, the editor (76-720 px, kept under the local storage key `zerus-client-editor-height`) and the action row. The toolbar holds, in Qt's slot order:
   1. the `AttachmentsChip`;
   2. an empty voice slot, which Task 13 fills;
-  3. Mark as read: when `markReadChip(row).active`, an accent chip "Mark as read" with `markReadChip(row).detail` as its tooltip, running phase 2's `perform(row, {kind: "mark_read", ...})`;
+  3. Mark as read: when `markReadChip(session).active`, an accent chip "Mark as read" with `markReadChip(session).detail` as its tooltip, running #406's `runMarkRead(snapshotOf(session))` (the menu entry's own action, with its icon `check-check`);
   4. Latest: the icon chip `chevrons-down` with the tooltip "Jump to latest activity" or "Jump to latest activity ({n} new)", shown while Activity is not following the latest item;
   5. the grip;
   6. the compaction indicator: "Compacting context…" with the tooltip "The agent is compressing conversation context.", shown when the followed state's `phase` is `compacting`, `runtime_state` is `live`, `process_state` is `running` and `tracked` is true;
@@ -5223,9 +5737,10 @@ import { composer } from "../../store/composer";
 import { activity } from "../../store/session";
 import { selected, contentScale } from "../../store/ui";
 import { computerOffline } from "../../store/catalog";
-import { detailsFor, followedFor, perform } from "../../store/actions";
+import { detailsFor, followedFor } from "../../store/actions";
 import { actionEntries } from "./ActionDialogs";
-import { markReadChip, snapshotOf } from "./actions-ui";
+import { snapshotOf } from "./actions-ui";
+import { markReadChip, runMarkRead } from "./mark-entries";
 import { AttachmentsChip } from "./Attachments";
 import { ColdDialog, StartDialog, ClearDialog } from "./ComposerDialogs";
 import { following, unseen, jumpToLatest } from "./Activity";
@@ -5247,7 +5762,7 @@ export function Composer() {
   const act = createMemo(() => actionEntries(s(), details()));
   const summary = () => activity.summary() ?? {};
   const compacting = () => summary().phase === "compacting" && summary().runtime_state === "live" && summary().process_state === "running" && summary().tracked === true;
-  const mark = createMemo(() => markReadChip(snapshotOf(s())));
+  const mark = createMemo(() => markReadChip(s()));
   const [cacheOpen, setCacheOpen] = createSignal(false);
   let editor!: HTMLTextAreaElement;
   const caret = () => ({ start: editor.selectionStart, end: editor.selectionEnd });
@@ -5268,9 +5783,9 @@ export function Composer() {
       <div class="cmp-toolbar">
         <AttachmentsChip />
         <span class="rec-slot-host" />
-        <Show when={mark()?.active}>
-          <button class="tchip accent" title={mark()!.detail} onClick={() => { const row = snapshotOf(s()); void perform(row, { kind: "mark_read", reply_id: row.replyId ?? null, attention_signature: row.attentionSignature ?? null }); }}>
-            <Icon name="read-all" size={13} />Mark as read
+        <Show when={mark().active}>
+          <button class="tchip accent" title={mark().detail} onClick={() => { runMarkRead(snapshotOf(s())); }}>
+            <Icon name="check-check" size={13} />Mark as read
           </button>
         </Show>
         <Show when={!following()}>
@@ -5343,7 +5858,7 @@ Add `.cmp-status.error { color: var(--z-color-danger); }`, `.tchip.danger`, `.tc
 - [ ] **Step 8: Write `client/src/ui/sessions/ComposerDialogs.tsx`**: three modal dialogs over the existing dialog styles (`ActionDialogs.tsx`). Each focuses Cancel first, makes it the default, and Escape closes as Cancel (`setDefaultButton(cancel)`, `setEscapeButton(cancel)`):
   - **ColdDialog** (`dialog().kind === "cold"`): the title, `prompt.text` (plain text, `white-space: pre-wrap`), `prompt.informative` as plain text, one button per `prompt.choices` (disabled when `!enabled`, with `tooltip` as its title), then Cancel. A choice calls `composer.answer({kind: "cold", action})`. Clear turns into the Clear dialog through the `clear_context` reply.
   - **StartDialog** (`kind === "start"`): `question.title`, `question.text`, `question.informative`, one button per `question.options` in order ("Resume and send", "Resume, compact and send", "Start fresh and send"), then Cancel. A choice calls `composer.answer({kind: "start", choice})`.
-  - **ClearDialog** (`kind === "clear"`): `view.clear.title`, `view.clear.text` and a danger button `view.clear.confirm`, which calls `composer.confirmClear()` and is disabled when `!view.clear.enabled` at the time of the click; then Cancel.
+  - **ClearDialog** (`kind === "clear"`): the dialog's own `control` (the snapshot taken when it opened): its `title`, `text` and a danger button `confirm`, which calls `composer.confirmClear()`; then Cancel. Rust refuses the confirm quietly when the session's run, conversation or dismiss variant changed meanwhile, as Qt does.
 
 - [ ] **Step 9: Place it** in `client/src/ui/sessions/SessionDetail.tsx`. The Activity tab body becomes:
 
@@ -5372,7 +5887,9 @@ git commit -m "feat(client): the composer with its toolbar, attachments list and
 
 ### Task 7: Local message rows in Activity, and Saved drafts
 
-**Depends on:** Tasks 4 and 6; S5's `drafts::{IndexPage, Page, Cursor, Summary, owner, read_draft, read_index, ALREADY_EXISTS}` and `DraftStore::{index, recover}`.
+**Depends on:** Tasks 4b and 6; S5's `drafts::{IndexPage, Page, Cursor, Summary, owner, qt_root, read_draft, read_index, ALREADY_EXISTS}` and `DraftStore::{index, load, recover}`.
+
+**Qt's store is read, never written** (owner decision, 2026-10-28: the client takes over Qt's identity on the Mac, and Qt's drafts are kept as they are). Every path that touches Qt's drafts root goes through `Config.qt_drafts` and only these reads: `drafts::read_index` (Saved drafts' Qt section), `drafts::read_draft` (its preview) and `DraftStore::recover`, which reads Qt's copy and writes only the client's own store. Nothing writes, renames, locks or deletes in Qt's folder, and `qt_store` leaves Qt's folder out entirely if it is, holds or sits inside the client's own root. A test proves the folder byte-for-byte unchanged after every Qt path runs.
 
 **Qt reference:**
 - `tray/src/ActivityView.cpp:665-720` (local rows merged into the timeline) and `:1053-1068` (the stamp, the error line, Retry, Check Terminal, Check native UI and Delete).
@@ -5381,7 +5898,8 @@ git commit -m "feat(client): the composer with its toolbar, attachments list and
 - The restore notice (`SessionsWindow.cpp:3331`).
 
 **Files:**
-- Modify: `client/src-tauri/src/composer/mod.rs` (saved drafts commands)
+- Modify: `client/src-tauri/src/composer/mod.rs` (`Config.qt_drafts`, `qt_store`, saved drafts, recover, restore, their commands and tests)
+- Modify: `client/src-tauri/src/lib.rs` (`qt_drafts` in the config, the four commands)
 - Modify: `client/src/types.ts`, `client/src/bridge.ts`
 - Modify: `client/src/ui/sessions/transcript.ts`, `client/src/ui/sessions/transcript.test.ts` (local rows)
 - Modify: `client/src/ui/sessions/Activity.tsx` (the local card and its buttons)
@@ -5397,6 +5915,15 @@ git commit -m "feat(client): the composer with its toolbar, attachments list and
 #[derive(Serialize)] pub struct SavedDraftItem { pub key: String, pub kind: OwnerKind, pub computer: String, pub session: String, pub title: String, pub caption: String, pub machine: String, pub meta: String, pub detail: String, pub modified: f64, pub attachments: usize }
 #[derive(Serialize)] pub struct SavedDraftsPage { pub items: Vec<SavedDraftItem>, pub next: Option<zerus_client_core::drafts::Cursor> }
 #[derive(Serialize)] pub struct SavedDraftDetail { pub text: String, pub attachments: usize, pub detail: String, pub restorable: bool }
+// composer/mod.rs
+pub struct Config { pub cache: PathBuf, pub qt_drafts: Option<PathBuf> } // Task 3b's, with Qt's read-only root
+pub fn qt_store(own: &Path, qt: Option<PathBuf>) -> Option<PathBuf>;
+impl Composers {
+    pub fn saved_drafts(&self, source: DraftSource, limit: usize, before: Option<Cursor>) -> SavedDraftsPage; // blocking
+    pub fn saved_draft(&self, source: DraftSource, key: &str) -> SavedDraftDetail;                           // blocking
+    pub fn recover(&self, key: &str) -> Result<(), String>;                                                   // blocking
+    pub fn restore(&self, handle: u64, source: DraftSource, key: &str) -> Result<(), String>;                 // blocking
+}
 // commands: saved_drafts(source, limit, before) -> SavedDraftsPage; saved_draft(source, key) -> SavedDraftDetail;
 // draft_recover(key) -> Result<(), String>; draft_restore(handle, source, key) -> Result<(), String>
 ```
@@ -5416,7 +5943,7 @@ git commit -m "feat(client): the composer with its toolbar, attachments list and
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
         c.edit(view.handle, 1, "first line\nsecond".into(), 0, 0);
-        c.flush();
+        // The index runs on the store's writer after the queued save.
         let page = c.saved_drafts(DraftSource::Client, 10, None);
         assert_eq!(page.items.len(), 1);
         let item = &page.items[0];
@@ -5427,24 +5954,98 @@ git commit -m "feat(client): the composer with its toolbar, attachments list and
         assert_eq!((detail.text.as_str(), detail.detail.as_str()), ("first line\nsecond", "0 attachments"));
     }
 
+    /// A Qt store with one draft, written by a store of its own that is gone
+    /// before the client's hub opens.
+    fn qt_store_with_a_draft(root: &Path) -> PathBuf {
+        let qt = root.join("qt");
+        let writer = DraftStore::open(qt.clone());
+        let mut stored = StoredDraft { sending: true, ..StoredDraft::default() };
+        stored.draft.text = "from the Qt app".into();
+        writer.save_durable(KEY, stored, |_| {});
+        writer.flush();
+        drop(writer);
+        qt
+    }
+
     #[test]
     fn a_qt_draft_is_recovered_never_over_a_draft_here() {
         let root = dir("recover");
-        let qt = root.join("qt");
-        let store = DraftStore::open(qt.clone());
-        let mut stored = StoredDraft::default();
-        stored.draft.text = "from the Zerus app".into();
-        store.save_durable(KEY, stored, |_| {});
-        store.flush();
-        let (c, _) = hub_with_qt(&root, qt);
+        let qt = qt_store_with_a_draft(&root);
+        let (c, _) = hub_with_qt(&drafts(&root), Some(qt));
         assert_eq!(c.saved_drafts(DraftSource::Qt, 10, None).items.len(), 1);
         assert_eq!(c.recover(KEY), Ok(()));
-        assert_eq!(c.saved_draft(DraftSource::Client, KEY).text, "from the Zerus app");
+        assert_eq!(c.saved_draft(DraftSource::Client, KEY).text, "from the Qt app");
         assert_eq!(c.recover(KEY), Err("Another draft already exists here. Recover the previous one from Saved drafts.".into()));
+    }
+
+    /// Every file under `root`, with its bytes and modification time.
+    fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
+        let mut files = Vec::new();
+        let mut folders = vec![root.to_path_buf()];
+        while let Some(folder) = folders.pop() {
+            for entry in std::fs::read_dir(&folder).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    folders.push(path);
+                    continue;
+                }
+                let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+                files.push((path.strip_prefix(root).unwrap().to_path_buf(), std::fs::read(&path).unwrap(), modified));
+            }
+        }
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn the_qt_store_is_never_written() {
+        let root = dir("qt-untouched");
+        let qt = qt_store_with_a_draft(&root);
+        let before = snapshot(&qt);
+        let store = drafts(&root);
+        let (c, _) = hub_with_qt(&store, Some(qt.clone()));
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        assert_eq!(c.saved_drafts(DraftSource::Qt, 10, None).items.len(), 1);
+        assert!(c.saved_draft(DraftSource::Qt, KEY).text.contains("from the Qt app"));
+        assert_eq!(c.recover(KEY), Ok(()));
+        assert!(c.recover(KEY).is_err());
+        assert_eq!(c.restore(view.handle, DraftSource::Qt, KEY), Ok(()));
+        c.flush();
+        store.flush();
+        assert_eq!(snapshot(&qt), before, "Qt's folder is byte-for-byte unchanged, with no file added or removed");
+    }
+
+    #[test]
+    fn the_qt_store_is_never_the_clients_own() {
+        let root = dir("qt-same");
+        let own = root.join("drafts");
+        std::fs::create_dir_all(&own).unwrap();
+        assert_eq!(qt_store(&own, Some(own.clone())), None);
+        assert_eq!(qt_store(&own, Some(root.clone())), None, "nor a folder that holds it");
+        assert_eq!(qt_store(&own, Some(own.join("inner"))), None, "nor a folder inside it");
+        assert_eq!(qt_store(&own, Some(root.join("qt"))), Some(root.join("qt")));
+        assert_eq!(qt_store(&own, None), None);
     }
 ```
 
-`hub_with_qt(root, qt)` is `hub()` with `qt_drafts: Some(qt)`.
+Task 3a's test helper becomes `hub_with_qt(store, qt: Option<PathBuf>)`, which passes `Config { cache: store.root().with_file_name("cache"), qt_drafts: qt }`; `hub_on(store)` calls it with `None`, and Task 4a's `send_hub_on` passes `qt_drafts: None`.
+
+`qt_store` in `mod.rs`:
+
+```rust
+/// Qt's draft store, read-only, unless it is, holds or sits inside the
+/// client's own root: then it is left out, so nothing the client writes can
+/// land in Qt's folder.
+pub fn qt_store(own: &Path, qt: Option<PathBuf>) -> Option<PathBuf> {
+    let qt = qt?;
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let (own_real, qt_real) = (real(own), real(&qt));
+    (!own_real.starts_with(&qt_real) && !qt_real.starts_with(&own_real)).then_some(qt)
+}
+```
+
+In `lib.rs`, the config gains `qt_drafts: composer::qt_store(drafts.root(), (!replay).then(zerus_client_core::drafts::qt_root).flatten())`: a replay never lists Qt's drafts.
 
 TypeScript, in `transcript.test.ts`:
 
@@ -5519,11 +6120,11 @@ Go to session is the webview's: an item is reachable when its `kind` is a messag
 - a draft saved as `sending` shows "This message may already have been sent. Check Activity or Terminal before sending again.";
 - a voice draft shows "Open the original conversation ({session}) to review or check this voice message." and is not restorable.
 
-`recover(key)` is `DraftStore::recover(qt_root, key, ...)`. `restore(handle, source, key)` replaces the open composer's draft:
+`recover(key)` is `DraftStore::recover(qt_root, key, ...)`, waiting on a channel for its answer; without a Qt store it answers "No saved drafts from the Qt app.". `restore(handle, source, key)` replaces the open composer's draft:
 - with the selected draft, its label and form state cleared;
-- only while the composer is loaded and not sending, waiting or attaching;
-- a Qt source is recovered first;
-- it saves and bumps `text_epoch`.
+- only while `editable` gives the composer (loaded, not busy, the app not quitting);
+- a Qt source is read with `drafts::read_draft` and also recovered into the client's store; an existing draft there stays, and its `ALREADY_EXISTS` does not stop the restore, since the "Replace current draft?" confirmation already covered the open draft;
+- it saves, bumps `text_epoch` and calls `attachments_changed`.
 
 Register the four commands.
 
@@ -5546,7 +6147,7 @@ Register the four commands.
 
 - [ ] **Step 4: Saved drafts.** Write `client/src/ui/sessions/SavedDrafts.tsx`, a dialog titled "Saved drafts".
   - The hint reads "Drafts stay on this desktop, including those from ended or unavailable sessions. Restoring never sends a message.", and "No saved drafts on this desktop." when both sections are empty.
-  - Two sections, "On this computer" and "From the Zerus app", each with its rows (title, meta, detail, modified time as "d MMM HH:mm") and "Show more" while `next` is set.
+  - Two sections, "On this computer" and "From the Qt app" (the second only when Qt's store has drafts), each with its rows (title, meta, detail, modified time as "d MMM HH:mm") and "Show more" while `next` is set. Each page is one bounded read of at most 200 drafts; Show more appends the next page on request only, and the dialog drops its rows when it closes, so nothing loads the whole store or grows by itself.
   - A preview pane reads "Loading draft…" while `saved_draft` runs.
   - The buttons are Copy text, Restore in current session, Go to session (disabled with "This session is not in the session list now." when not reachable), Recover (Qt section only) and Close.
   - Restore over a nonempty current draft asks "Replace current draft?" with "Replace the unsent draft in {key with ' / '} with the selected saved draft?", the button "Replace draft", and Cancel as the default.
@@ -5563,7 +6164,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add client/src-tauri/src/composer client/src
+git add client/src-tauri/src/composer client/src-tauri/src/lib.rs client/src
 git commit -m "feat(client): local message rows with Retry, Delete and Inspect, and Saved drafts"
 ```
 
@@ -5571,7 +6172,7 @@ git commit -m "feat(client): local message rows with Retry, Delete and Inspect, 
 
 ### Task 8: Dropped files: composer attach, Terminal paste and stage
 
-**Depends on:** A2 `zerus-5wmh.9.4` (#404): `Action::StageFiles {paths, expected_created}` and its `staged` receipt; Tasks 2, 3 and 6.
+**Depends on:** A2 `zerus-5wmh.9.4` (#404): `Action::StageFiles {paths, expected_created}` and its `staged` receipt; `Session.created` from #406; Tasks 2, 3a and 6.
 
 **Qt reference:**
 - `tray/src/SessionsWindow.cpp:1595-1601`: `SessionFileDrop`'s targets. The composer takes drops on the Activity tab; the Terminal takes them while connected.
@@ -5580,18 +6181,19 @@ git commit -m "feat(client): local message rows with Retry, Delete and Inspect, 
 - `tray/src/MessageComposer.cpp:961-967`: `attachDroppedFiles` collapses the selection.
 
 **Files:**
-- Modify: `client/src-tauri/src/terminal.rs` (`terminal_drop`, `staged_paths`, `generation`)
+- Modify: `client/src-tauri/src/terminal.rs` (`terminal_drop`, `staged_paths`, `paste`, `generation`)
+- Modify: `client/src-tauri/src/lib.rs` (register `terminal_drop`)
 - Create: `client/src/store/drops.ts`, `client/src/store/drops.test.ts`
-- Modify: `client/src/bridge.ts`, `client/src/main.tsx` (start the drop listener)
+- Modify: `client/src/store/terminal.ts` (`generation()`), `client/src/bridge.ts`, `client/src/main.tsx` (start the drop listener)
 
 **Interfaces:**
-- Consumes: `terminal::paste_paths(paths, windows)`; `crate::actions::{Actions, dispatch}`; `Action::StageFiles`; Task 3's `composer_attach`.
+- Consumes: `terminal::paste_paths(paths, windows)`; `crate::actions::{Actions, dispatch}`; `Action::StageFiles`; Task 3a's `composer_attach`.
 - Produces:
 
 ```rust
 /// The staged paths of a `staged` receipt: absolute, without control characters, exactly `count`.
 pub fn staged_paths(receipt: &Value, count: usize) -> Result<Vec<String>, String>;
-impl Terminals { pub fn generation(&self, view: &str) -> Option<u64>; }
+impl Terminals { pub fn generation(&self, view: &str) -> Option<u64>; pub fn paste(&self, view: &str, text: &str) -> Result<(), String>; }
 #[derive(Deserialize)] pub struct DropTarget { pub computer: String, pub name: String, pub machine: String, pub run_id: String,
     pub conversation_id: String, pub tracked: bool, pub created: i64 }
 // command: terminal_drop(view, generation, target, paths) -> Result<Option<String /*info notice*/>, String /*sticky notice*/>
@@ -5685,6 +6287,14 @@ pub struct DropTarget {
 impl Terminals {
     pub fn generation(&self, view: &str) -> Option<u64> {
         lock(&self.0.views).get(view).map(|open| open.generation)
+    }
+
+    /// Pastes text into the view's current attach (dropped paths).
+    pub fn paste(&self, view: &str, text: &str) -> Result<(), String> {
+        match lock(&self.0.views).get(view) {
+            Some(open) => open.attach.write(text.as_bytes()),
+            None => Err("Terminal changed during file transfer. Drop the files again in the intended session.".into()),
+        }
     }
 }
 
@@ -5797,7 +6407,7 @@ export function startDrops(): () => void {
 }
 ```
 
-`terminal.generation()` is a new accessor on the Terminal store returning the current generation. `Session.created` is the row's `created` from #406 (copied flat in `toSession`). `bridge.terminalDrop(generation, target, paths)` invokes `terminal_drop` with `view: "main"`. `main.tsx` calls `startDrops()` once.
+`terminal.generation()` is a new accessor on the Terminal store returning the current generation. `Session.created` is the row's `created`, which #406 adds. `bridge.terminalDrop(generation, target, paths)` invokes `terminal_drop` with `view: "main"`. `main.tsx` calls `startDrops()` once.
 
 - [ ] **Step 4: Run the tests**
 
@@ -5807,7 +6417,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add client/src-tauri/src/terminal.rs client/src
+git add client/src-tauri/src/terminal.rs client/src-tauri/src/lib.rs client/src
 git commit -m "feat(client): dropped files attach to the composer or paste into Terminal"
 ```
 
@@ -5818,7 +6428,7 @@ git commit -m "feat(client): dropped files attach to the composer or paste into 
 **Depends on:**
 - A3 `zerus-5wmh.9.5` (#410): `reads::{AttachmentRef, fetch_attachment, CachedAttachment, attachment_message}`;
 - the cache bound `zerus-5wmh.9.17`: `attachments::{prune, touch, CACHE_LIMIT}`;
-- Task 3 (`files::Cache`, the `zerus-file` scheme).
+- Task 3b (`files::Cache`, the `zerus-file` scheme and its CSP) and Task 4b (`Cache::prune_later`, `Composers::retry_files`).
 
 **Open** depends also on R2. Until R2 merges, Open on an Activity attachment and on a composer attachment stays disabled with "Arrives with the downloaded-file marker.", because Qt never opens a program-running type directly and marks files from other machines.
 
@@ -5832,10 +6442,12 @@ git commit -m "feat(client): dropped files attach to the composer or paste into 
 - `tray/src/ActivityView.cpp`: `attachmentCards`, the preview on hover.
 
 **Files:**
-- Modify: `client/src-tauri/src/composer/files.rs` (`Fetcher`, pins and open commands)
-- Modify: `client/src-tauri/Cargo.toml` (+ `tauri-plugin-opener = "2"`), `client/src-tauri/src/lib.rs`
+- Modify: `client/src-tauri/src/composer/files.rs` (pins, the limit, `set_extra`, `Fetcher`, the open commands)
+- Modify: `client/src-tauri/Cargo.toml` (+ `tauri-plugin-opener = "2"`), `client/src-tauri/Cargo.lock`, `client/src-tauri/src/lib.rs`
+- Modify: `client/src-tauri/src/commands.rs` (a later `start` clears the pins)
 - Create: `client/src/store/attachments.ts`, `client/src/store/attachments.test.ts`
 - Modify: `client/src/ui/sessions/Activity.tsx` (attachment chips with preview), `client/src/ui/sessions/transcript.ts` (fetch refs on chips)
+- Modify: `client/src/ui/sessions/Attachments.tsx` (Open on a composer attachment, disabled until R2)
 - Modify: `client/src/types.ts`, `client/src/bridge.ts`
 
 **Interfaces:**
@@ -5850,7 +6462,11 @@ pub struct Fetcher; impl Fetcher {
 #[derive(Clone, Debug, PartialEq, Serialize)] pub struct Fetched { pub path: String /* "cache/<digest>/<name>" */, pub name: String, pub mime: String, pub bytes: u64 }
 // commands: attachment_fetch(computer, file: AttachmentRef) -> Result<Fetched, String>; attachment_pin(path); attachment_unpin(path);
 // attachment_open(path) -> Result<Option<String /*notice*/>, String>; attachment_open_draft(handle, index) -> Result<Option<String>, String>
-impl Cache { pub fn with_limit(root: PathBuf, limit: u64) -> Arc<Self>; }
+impl Cache {
+    pub fn with_limit(root: PathBuf, limit: u64) -> Arc<Self>;
+    pub fn pin(&self, path: &Path); pub fn unpin(&self, path: &Path); pub fn clear_pins(&self);
+    pub fn set_extra(&self, extra: Arc<dyn Fn() -> HashSet<PathBuf> + Send + Sync>);
+}
 ```
 
 ```ts
@@ -5910,7 +6526,26 @@ export type PreviewState = { kind: "loading" } | { kind: "ready"; url: string; f
 
 Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer::files::` and see it fail.
 
-- [ ] **Step 2: Implement** in `composer/files.rs`. `Cache` gains a `limit: u64` field (`new` uses `attachments::CACHE_LIMIT`; `with_limit` takes one) used by `prune_later`. Then:
+- [ ] **Step 2: Implement** in `composer/files.rs`. `Cache` gains:
+  - `limit: u64` (`new` uses `attachments::CACHE_LIMIT`; `with_limit` takes one), which `prune_later` uses instead of the constant;
+  - `pins: Mutex<HashMap<PathBuf, usize>>`, counted by canonical path: `pin` adds one, `unpin` removes one and forgets the path at zero, `clear_pins` empties them (a reloaded webview starts without previews). The map holds only what the webview shows now, so it stays small;
+  - `extra: Mutex<Option<Arc<dyn Fn() -> HashSet<PathBuf> + Send + Sync>>>`, set once by `set_extra`.
+
+  `prune_later` keeps a copy when it is pinned, in its own `extra`, or in the set extra:
+
+```rust
+            let mut kept: HashSet<PathBuf> = extra().iter().map(|path| canonical(path)).collect();
+            if let Some(more) = lock(&cache.extra).clone() {
+                kept.extend(more().iter().map(|path| canonical(path)));
+            }
+            let pins: HashSet<PathBuf> = lock(&cache.pins).keys().cloned().collect();
+            attachments::prune(&cache.root, cache.limit, |path| {
+                let path = canonical(path);
+                pins.contains(&path) || kept.contains(&path)
+            });
+```
+
+`lib.rs` calls `composers.cache().set_extra(...)` with the composers' `retry_files`, so the Fetcher's prunes keep Retry's files too, and `start` (a reloaded webview) calls `composers.cache().clear_pins()`. Then:
 
 ```rust
 use std::sync::mpsc;
@@ -5958,7 +6593,10 @@ impl Fetcher {
                 let result = (me.fetch)(&computer, &file, me.cache.root()).map(|cached| {
                     let relative = cached.local_path.strip_prefix(me.cache.root()).unwrap_or(&cached.local_path).to_string_lossy().replace('\\', "/");
                     let bytes = std::fs::metadata(&cached.local_path).map(|m| m.len()).unwrap_or(0);
-                    let head = std::fs::read(&cached.local_path).map(|b| b[..b.len().min(512)].to_vec()).unwrap_or_default();
+                    let mut head = Vec::new();
+                    if let Ok(file) = std::fs::File::open(&cached.local_path) {
+                        let _ = std::io::Read::read_to_end(&mut std::io::Read::take(file, 512), &mut head);
+                    }
                     Fetched {
                         path: format!("cache/{relative}"),
                         name: cached.metadata["name"].as_str().unwrap_or("attachment").to_owned(),
@@ -5980,7 +6618,7 @@ impl Fetcher {
 }
 ```
 
-The app's `FetchFn` is `|computer, file, root| reads::fetch_attachment(&default_hgs(), computer, file, root)`. The prune's `extra` comes from `Composers::retry_files` in the app: `lib.rs` passes the composers' retry files through a `Cache::set_extra(Arc<dyn Fn() -> HashSet<PathBuf>>)` setter, used by every `prune_later` whose own `extra` is empty.
+The app's `FetchFn` is `|computer, file, root| reads::fetch_attachment(&default_hgs(), computer, file, root)`, refusing with "Actions in replay mode need ZERUS_CLIENT_HGS." when `actions_allowed` is false, so a replay never reaches the real CLI. The Fetcher shares the composers' `Cache` (`Fetcher::new(composers.cache(), ...)`), so one root, one set of pins and one prune lane serve both.
 
 The commands, in `files.rs`:
 
@@ -6144,11 +6782,12 @@ export const previews = createPreviews({
 });
 ```
 
-- [ ] **Step 5: Show them in Activity.**
+- [ ] **Step 5: Show them in Activity, and Open in the composer's list.**
   - `transcript.ts` keeps, on each attachment of an item, a fetch reference built from the event (or the local row's file after a send): `request_id` and `index`, the session's name, the followed summary's `conversation_id`, the row's `archive_id` when archived, and the event's `agent_id`.
   - In `Activity.tsx`, an attachment chip with a reference shows, on hover or after an arrow-key move (never on focus alone, round 6), a preview of at most 320 px beside it. It is an `<img>` with `onError={() => previews.failed(ref)}` for an image, or the first 2 KiB of a text file read through `fetch(url)`.
   - Hiding the preview calls `previews.hide(ref)`.
   - Open uses `bridge.attachmentOpen(path)` (disabled until R2).
+  - In `Attachments.tsx`, a composer attachment row gains Open: a click, Enter or Space calls `bridge.attachmentOpenDraft(handle, index)`, and the row's title reads "Open {name}". Until R2 the row's Open is disabled with "Arrives with the downloaded-file marker." as its title.
 
 - [ ] **Step 6: Run the checks**
 
@@ -6607,11 +7246,12 @@ git commit -m "feat(client): the Processes tab and Settings > Processes"
 **Files:**
 - Create: `client/src-tauri/tests/support/fake_hgs_phase4.py`
 - Modify: `client/scripts/make-fixture.py`, then regenerate `client/fixtures/*`:
-  - a warm prompt cache on `claude/sample-project/api-refactor`'s Activity state (`prompt_cache: {status: warm, expires_at: BASE_AT + 1800}`);
+  - a warm prompt cache on `claude/sample-project/api-refactor`'s Activity state (`session_usage.prompt_cache: {status: warm, expires_at: BASE_AT + 1800}`, where S2 reads it);
   - a cold `cache_hint` on `codex/sample-project/pagination`;
   - a sent message with one attachment (`attachments: [{name: "orders.json", request_id: "req-fixture-1", index: 0, mime: "application/json", size: 812}]`) on api-refactor;
   - a paused `claude/sample-project/review` (already in the fixture) with `resumable: true`.
 - Modify: `client/src/ui/PerfHost.tsx` (`?phase4-smoke=1`)
+- Modify: `client/src-tauri/src/commands.rs` and `client/src-tauri/src/lib.rs` (`smoke_log`)
 - Modify: `client/README.md`
 - Modify: `.beads/issues.jsonl` (export after filing the follow-ups)
 
@@ -6663,7 +7303,7 @@ pub fn smoke_log() -> Result<Vec<serde_json::Value>, String> {
   - "Composer and Send":
     - the text protocol and the push envelope;
     - block reasons, the cold cache, resume and compact, local rows;
-    - drafts (paths `<app data>/drafts`, Qt's store read-only, flush on quit and SIGTERM);
+    - drafts: the app's one store at `<app data>/drafts` (`drafts-replay` in a replay), shared with voice; Qt's store read, never written; the one exit hook on quit and on SIGTERM;
   - "Attachments": limits, the `zerus-file` scheme, the cache bound and pins, Open and R2;
   - "Phase 4 smoke run": the commands, as in Step 2.
 
@@ -6679,7 +7319,7 @@ pub fn smoke_log() -> Result<Vec<serde_json::Value>, String> {
     - question answers;
     - the Usage limit and Recovery chips.
 
-    No paths outside the repository go into Beads text, and no `/w/` or home paths.
+    No paths outside the repository go into Beads text: no workspace or home paths.
   - Then:
     - `bd export -o .beads/issues.jsonl`;
     - `python3 scripts/check-source-privacy.py`;
@@ -6723,10 +7363,9 @@ Part B starts once Part A is merged and the owner has the client for daily use. 
 
 **Depends on:**
 - **Playback:** Task 9 (`attachment_fetch`, pins, the `zerus-file` scheme with Range).
-- **Recording:**
-  - M1 `zerus-5wmh.9.12`: #412 (M1a: `voice::{help_invocation, voice_supported, speech_supported, speech_invocation, voice_invocation, reply, failure, identity, audio, wav, duration, MAX_SECONDS}`), R3 (M1b) and R4 (M1c);
-  - round video also M2 (`zerus-5wmh.9.13`, macOS), M3 (`.9.14`, Linux) and M4 (`.9.15`, Windows), each per platform as it merges;
-  - `voice_capabilities` reports video unavailable with its reason until then.
+- **Recording:** M1c on main (`zerus-5wmh.9.12`, branch `work-ba0ed9fd-media`, head `1b14e68b`): `client/src-tauri/src/voice.rs` with `Voices` and the commands `voice_open`, `voice_input`, `voice_close` and `voice_microphones`, registered under the `media` feature; `client/core/src/voice_driver.rs` (`Out`, `Input`) and `voice_composer.rs` (`Shown`, `Ask`, `Target`, `Preferences`). R3 and R4 are delivered by it; this task adds no voice driver of its own.
+- **Round video:** M3 for Linux (`zerus-5wmh.9.14`, branch `work-ba0ed9fd-video`, head `100e86bc`: the `frames` channel, `Out::Preview`, `voice_video`), M2 for macOS (`.9.13`) and M4 for Windows (`.9.15`), each per platform as it merges. Video shows only while `voice_video().available`; otherwise the mode switch stays hidden and voice works alone, with `reason` as the tooltip where Qt shows one.
+- Task 3a (the composer hub, for transcript inserts) and Task 4b (local rows, for accepted voice messages).
 
 **Qt reference:**
 - `tray/src/ActivityView.cpp`:
@@ -6734,32 +7373,52 @@ Part B starts once Part A is merged and the owner has the client for daily use. 
   - `activateVoice`: one player, seek and pending seek (1818-1849);
   - the video note plays in place.
 - `tray/src/SessionsWindow.cpp:1104-1108`: playback fetches the file.
-- `tray/src/speech/SpeechComposer.cpp`: the record button, the mode switch locked while recording, preview before send, the provider choice, Send and Discard, the uncertain path, and the permission recovery texts.
+- `tray/src/speech/SpeechComposer.cpp`: the record button, the mode switch locked while recording, preview before send, the provider choice, Send and Discard, the uncertain path, the permission recovery texts, and `speech/*` settings (`video_mode`, `preview_before_send`, `microphone`, `machine_id`, `profile`, `profile_revision`).
+- `tray/src/MessageComposer.cpp:513-537`: `insertVoiceText`, which appends a transcript at the caret only to an unchanged draft and records its operation in `form_state.voice_insertions` (at most 32).
 - `tray/src/speech/RoundVideo.cpp`: the round preview and the 59 s limit.
 - `tray/src/speech/VoicePlayerImage.h`: the waveform, the times and the video poster.
 - Spec lines 212-214.
 
 **Files:**
 - Create: `client/src/store/media.ts`, `client/src/store/media.test.ts`
-- Modify: `client/src/ui/sessions/Activity.tsx` (`MediaCard` plays the real file)
+- Create: `client/src/store/voice.ts`, `client/src/store/voice.test.ts`
 - Create: `client/src/ui/sessions/Recorder.tsx`, mounted in the composer's voice slot
-- Create: `client/src-tauri/src/voice.rs` (the driver running R3's steps)
-- Modify: `client/src/types.ts`, `client/src/bridge.ts`, `client/src-tauri/src/lib.rs`
+- Modify: `client/src/ui/sessions/Composer.tsx` (mount the recorder; Escape and Space stop a recording)
+- Modify: `client/src/ui/sessions/Activity.tsx` (`MediaCard` plays the real file; the poster through the scheme)
+- Modify: `client/src-tauri/src/composer/mod.rs` (`insert_voice_text`, `voice_message`, their commands and tests)
+- Modify: `client/src-tauri/src/composer/files.rs` (`poster/{message id}` from the followed events)
+- Modify: `client/src-tauri/src/lib.rs` (the two composer commands; the voice commands are M1c's)
+- Modify: `client/src-tauri/Cargo.toml` (+ `base64 = "0.22"`, the core's version), `client/src-tauri/Cargo.lock`
+- Modify: `client/src/store/settings.ts` (the `speech/*` keys), `client/src/types.ts`, `client/src/bridge.ts`
 
 **Interfaces:**
-- Consumes: R3's `voice::ComposerView` and its step enum, R4's commands, M1a's calls, S4's `LocalMessages::voice_message`, Task 9's `attachment_fetch`, `attachment_pin` and `attachment_unpin`.
+- Consumes: M1c's commands and serde shapes as listed under "R3 and R4: delivered"; `voice_video() -> {available, reason}` (M3); Task 9's `attachment_fetch`, `attachment_pin` and `attachment_unpin`; S4's `LocalMessages::voice_message`.
 - Produces:
+
+```rust
+// composer/mod.rs
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)] #[serde(rename_all = "snake_case")] pub enum Inserted { Refused, Saved, NotSaved }
+impl Composers {
+    /// `insertVoiceText`: `rev` is the composer's rev when Send or Check was
+    /// pressed; a changed, busy or closed draft refuses. Blocking: answers
+    /// once the durable save ends.
+    pub fn insert_voice_text(&self, handle: u64, rev: u64, text: &str, operation: &str) -> Inserted;
+    /// An accepted voice message (`Out::Message`), kept as a local row until the history shows it.
+    pub fn voice_message(&self, key: &str, message: &Value);
+}
+// commands: composer_insert_voice(handle, rev, text, operation) -> Inserted; composer_voice_message(key, message)
+// scheme: zerus-file://localhost/poster/{message id}: a voice message's poster JPEG from the followed session's held events
+```
 
 ```ts
 // store/media.ts
 export interface MediaRef { computer: string; file: AttachmentRef; durationMs: number; video: boolean }
 export function createMedia(port: MediaPort): { playing(): string | undefined; position(id: string): number; loading(id: string): boolean; error(id: string): string | undefined;
-  toggle(id: string, ref: MediaRef): Promise<void>; seek(id: string, ref: MediaRef, fraction: number): void; ended(id: string): void; element(id: string, el: HTMLMediaElement | undefined): void };
-```
-
-```rust
-// voice.rs: Voice::step(key, step: voice::Step) runs RunSpeech, RunVoice, SaveDraft, Capture and Message on the blocking pool
-// and feeds the reply back into M1b's composer; commands voice_open(key, target), voice_action(key, action) -> voice::ComposerView
+  toggle(id: string, ref: MediaRef): Promise<void>; seek(id: string, ref: MediaRef, fraction: number): void; ended(id: string): void; element(id: string, el: HTMLMediaElement | undefined): void; pauseAll(): void };
+// store/voice.ts
+export function createVoice(port: VoicePort): { shown(): Shown | undefined; level(): { rms: number; peak: number }; preview(): { url: string; mirrored: boolean } | undefined;
+  ask(): Ask | undefined; video(): { available: boolean; reason: string | null }; open(key: string): Promise<void>; close(): Promise<void>; input(input: VoiceInput): void;
+  answer(confirmed: boolean): void };
 ```
 
 - [ ] **Step 1: Failing playback tests** in `client/src/store/media.test.ts`:
@@ -6810,35 +7469,80 @@ describe("media playback", () => {
 Run: `cd client && npm test -- src/store/media.test.ts` and see it fail.
 
 - [ ] **Step 2: Write `client/src/store/media.ts`** (Qt `activateVoice`):
-  - One player at a time.
-  - A play fetches the file with `attachment_fetch` (the voice event's `voice.audio`, or `voice.video` for a round video: `request_id` and `index`), pins it, and plays it through an `<audio>` or `<video>` element whose `src` is `convertFileSrc(path, "zerus-file")`.
+  - One player at a time; `pauseAll()` pauses it (the voice driver's `pause_messages`).
+  - A play fetches the file with `attachment_fetch` (the voice event's `voice.audio`, or `voice.video` for a round video: `request_id` and `index`), pins it, and plays it through an `<audio>` or `<video>` element whose `src` is `convertFileSrc(path, "zerus-file")`. The bytes never cross the IPC as JSON; the element reads them through the scheme with Range requests.
   - A seek while loading is kept (`m_voicePendingSeek`); a play at the end starts from 0.
   - A playback error reads "Could not play the voice message." and fetches once more, as previews do.
   - Ending or switching unpins.
 
-  `MediaCard` replaces its timer with the element's `timeupdate`, `ended` and `error` events through `media.element(id, el)`. The video note keeps its ring, its in-place play and the transcript button on the right. The poster is `data:image/jpeg;base64,${voice.video.poster_base64}` when present.
+  `MediaCard` replaces its timer with the element's `timeupdate`, `ended` and `error` events through `media.element(id, el)`. The video note keeps its ring, its in-place play and the transcript button on the right. Its poster is `convertFileSrc("poster/" + message id, "zerus-file")`, an `<img>` whose `onError` hides it (the frames placeholder stays): the webview never builds a `data:` URL from base64.
 
-- [ ] **Step 3: The recorder (R3, R4).**
-  - `Recorder.tsx` fills the composer's voice slot with the mockup's record chip and the mode switch, which is always present, shows the other mode and is disabled while recording.
-  - It shows the elapsed time against the limit (120 s for voice, 59 s for video), the level meter from the `level` Channel (about 30 Hz; a bar of `rms` and a tick at `peak`), and, for video, the round preview drawn from the `preview` Channel's JPEG frames, mirrored when the frame says so.
-  - It shows M1b's notice; for `microphone_permission` it adds Qt's recovery text and a button opening the system's microphone settings.
-  - Preview before send offers Play, Send, Discard and the provider choice, as M1b's view gives them.
-  - Every control calls `voice_action(key, action)` and renders the returned `voice::ComposerView`. Tooltips carry no key hints ("Stop recording", not "(Space / Esc)"); Space and Escape still stop.
-  - `voice.rs` runs M1b's steps:
-    - `RunSpeech` and `RunVoice` through M1a's invocations and `reply`/`failure` on the blocking pool, one per session;
-    - `SaveDraft` through the composer hub's `DraftStore`;
-    - `Capture` through R4's commands;
-    - `Message` into `LocalMessages::voice_message`, so the card shows until the history has it.
+- [ ] **Step 3: Posters and transcript inserts in Rust.** Failing tests in `composer/mod.rs`:
 
-    The help probe (`voice_supported`) runs once per computer before the first call, and its text ("Voice messages need an updated hgs CLI on the conversation computer.") becomes the voice button's tooltip when it fails.
-  - Write the R3 binding tests against the merged M1b surface: one per state the view can show, from M1b's own test cases. Each checks the chip's label and enabled state.
+```rust
+    #[test]
+    fn a_transcript_goes_in_at_the_caret_once_and_only_into_an_unchanged_draft() {
+        let root = dir("voice-insert");
+        let (c, _) = hub(&root);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.edit(view.handle, 1, "before after".into(), 6, 6);
+        assert_eq!(c.insert_voice_text(view.handle, 1, "spoken", "op-1"), Inserted::Saved);
+        assert_eq!(c.current().unwrap().text, "before spoken after");
+        assert_eq!(c.insert_voice_text(view.handle, 1, "spoken", "op-1"), Inserted::Saved, "the same operation is saved again, not inserted twice");
+        assert_eq!(c.current().unwrap().text, "before spoken after");
+        c.edit(view.handle, 2, "changed".into(), 7, 7);
+        assert_eq!(c.insert_voice_text(view.handle, 1, "late", "op-2"), Inserted::Refused);
+    }
+```
 
-- [ ] **Step 4: Run the checks**
+  and in `composer/files.rs`, `a_poster_is_served_from_the_followed_events`: an `events` batch with `{"seq": 3, "source": "hgs_voice", "voice": {"id": "vm-1", "video": {"poster_base64": <base64 of a small JPEG>}}}` makes `poster/vm-1` answer 200 `image/jpeg` with the decoded bytes, `poster/vm-2` 404, and another webview 403.
 
-Run: `cd client && npm test && npm run check && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml voice::`
+  Implement:
+  - `insert_voice_text` (`insertVoiceText`): refuses (`Refused`) unless `editable` gives the composer, its `rev` equals the rev given and `text` is nonempty; an operation already in `form_state.voice_insertions` only saves durably again; otherwise it inserts at `position` (UTF-16 units, converted as A1's `Draft::add` converts a `Selection`) without replacing a selection, adding a space where the neighbour is not whitespace, records the operation (at most 32, oldest dropped), bumps `text_epoch` (never `rev`, which counts the webview's edits), saves with the store's `save_durable` and waits on a channel for the result (`Saved` or `NotSaved`).
+  - `voice_message(key, message)`: `hub.local.voice_message(key, message)` and `changed()`.
+  - The scheme's `poster/{id}`: the held events of the followed session (Task 4b's `Followed.events`, at most 200) give the `voice.video.poster_base64` of the message with that `id`, decoded in Rust with `base64` (at most 256 KiB decoded) and served as `image/jpeg`; anything else answers 404.
+  - The commands `composer_insert_voice(handle, rev, text, operation) -> Inserted` (on the blocking pool) and `composer_voice_message(key, message)`, registered in `lib.rs`.
+
+- [ ] **Step 4: The voice store and the recorder.** Failing tests in `client/src/store/voice.test.ts`, with a fake `VoicePort` whose `open` hands the test the two channel callbacks:
+  - "a shown update renders the controls": an `{kind: "shown", shown}` message sets `shown()`;
+  - "frames become one object URL at a time": after `{kind: "preview", mirrored: true}`, each raw JPEG on the frames callback replaces `preview().url` and revokes the previous one, and `mirrored` is true;
+  - "an insert answers with the composer's result": `{kind: "insert", token: 4, text: "spoken", id: "op-1"}` calls `composerInsertVoice(handle, revAtPress, "spoken", "op-1")` and then `input({kind: "inserted", token: 4, inserted: "saved"})`;
+  - "video stays hidden while unavailable": with `voice_video` answering `{available: false, reason: "…"}`, `video().available` is false and an `update` input sends `preferences.video_mode: false`.
+
+  Then write `client/src/store/voice.ts`:
+  - `open(key)` calls `voice_open(key, events, frames)` with two `Channel`s: `events` gets `Out` as JSON, `frames` gets raw JPEG bodies (`ArrayBuffer`), turned into one `Blob` object URL at a time (the previous one revoked), so a frame never crosses as JSON. A refusal ("Voice in replay mode needs ZERUS_CLIENT_HGS.", or the 32-driver limit's text) becomes the voice button's tooltip and the button stays disabled.
+  - `voice_video()` runs once per process; until it answers, the mode switch is hidden.
+  - On every change of the selected session, the composer view or the settings: `input({kind: "update", target, input_visible, preferences})`, with `target` built from the open composer (key, host, session name, run, conversation, the cold cache warning, `available` and `reason` from the composer view, `draft_only: false`), and `preferences` from the `speech/*` settings (`video_mode` false while video is unavailable).
+  - `Out` handling:
+    - `shown`: the controls;
+    - `level`: the meter (about 30 Hz);
+    - `ask`: the cold cache or discard question, answered with `confirm {ticket, confirmed}`;
+    - `message`: `composer_voice_message(key, message)`, so the card shows until the history has it;
+    - `insert`: `composer.flush()` first (typing since the press then refuses the insert, as Qt does), then `composer_insert_voice` with the composer view's rev recorded when Send or Check was pressed, then `inserted {token, inserted}`;
+    - `permission_recovery`: the microphone recovery dialog with Qt's text and a button opening the system's microphone settings;
+    - `remember_profile`: stores `speech/machine_id`, `speech/profile` and `speech/profile_revision`;
+    - `pause_messages`: `media.pauseAll()`;
+    - `stop_playback`: stops the recording preview's playback.
+  - `close()` calls `voice_close(key)` when the composer closes or another opens.
+
+  `Recorder.tsx` fills the composer's voice slot from `shown()`:
+  - the record chip (`voice_label`, `voice_icon`, `voice_danger`, enabled by `voice_enabled`) with `press`;
+  - the mode switch (`mode_visible && video().available`, `mode_enabled`, `mode_icon`, `mode_label`), which flips `speech/video_mode`;
+  - the hint and the elapsed time against the limit (120 s voice, 59 s video);
+  - the level meter (a bar of `rms`, a tick at `peak`);
+  - for video, the round preview from `preview()`, mirrored when it says so;
+  - the preview row: Play (`playing {playing}`), Send, Discard, the provider choice (`choose_provider {index}`) and Refresh, from `shown`;
+  - the notice chip (`notice_label`, `notice_detail`).
+
+  Tooltips carry no key hints ("Stop recording", not "(Space / Esc)"); in `Composer.tsx`, Space and Escape still stop a recording (`stop {forget_send: false}`), and the composer hiding or the window losing focus sends `stop {forget_send: true}`.
+
+- [ ] **Step 5: Run the checks**
+
+Run: `cd client && npm test && npm run check && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer:: && cargo +1.99.1 clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --features media -- -D warnings`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add client/src client/src-tauri
@@ -6862,11 +7566,12 @@ git commit -m "feat(client): voice and round video playback and recording"
   - "Respond in Activity" (5043).
 
 **Files:**
-- Modify: `client/src-tauri/Cargo.toml` (`tauri = { version = "2", features = ["unstable"] }`)
+- Modify: `client/src-tauri/Cargo.toml` (`tauri = { version = "2", features = ["unstable"] }`), `client/src-tauri/Cargo.lock`
 - Create: `client/src-tauri/src/native_ui.rs`
 - Modify: `client/src-tauri/src/lib.rs` (managed state, commands, the IPC guard)
 - Create: `client/src/ui/sessions/NativeUi.tsx`, `client/src/store/native-ui.ts`
-- Modify: `client/src/store/ui.ts` (count open overlays), `client/src/ui/sessions/SessionDetail.tsx` (the tab), `client/src/ui/sessions/SessionList.tsx` (the menu entry), `client/src/ui/sessions/Activity.tsx` (the sign-in banner)
+- Modify: `client/src/store/ui.ts` (count open overlays), `client/src/ui/sessions/SessionDetail.tsx` (the tab), `client/src/ui/sessions/SessionList.tsx` (the menu entry), `client/src/ui/sessions/Activity.tsx` (the sign-in banner), `client/src/types.ts`, `client/src/bridge.ts`
+- Modify: `client/src/ui/PerfHost.tsx` and `client/src-tauri/tests/support/fake_hgs_phase4.py` (the smoke step `native`)
 
 **Interfaces:**
 - Produces:
@@ -7003,7 +7708,7 @@ fn guarded(inner: impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static) -
 }
 ```
 
-`run()` uses `.invoke_handler(guarded(handler()))`. The `zerus-file` scheme already refuses other webviews (Task 3).
+`run()` uses `.invoke_handler(guarded(handler()))`. The `zerus-file` scheme already refuses other webviews (Task 3b).
 
 - [ ] **Step 3: The tab.**
   - `NativeUi.tsx` shows for a `dsh` session when no subagent is open. Its toolbar holds the title "DeepSeek workspace / {machine}", "Respond in Activity" (shown while the session has a question or approval pending, switching to Activity) and Reload ("Reload native UI").
@@ -7048,6 +7753,7 @@ git commit -m "feat(client): DeepSeek's Native UI in an isolated child webview"
 
 **Files:**
 - Create: `client/src-tauri/src/launch.rs` (commands over R5)
+- Modify: `client/src-tauri/src/lib.rs` (the module and its four commands)
 - Modify: `client/src/ui/sessions/SessionList.tsx` (the context menu entries), `client/src/ui/sessions/SessionDetail.tsx` (the header's Open folder, Open shell and Open externally), `client/src/bridge.ts`
 
 **Interfaces:**
@@ -7121,15 +7827,16 @@ git commit -m "feat(client): open terminal, folder shell, folder and externally"
 
 - **Spec coverage:**
   - the PTY and xterm.js: Tasks 1-2;
-  - attachments, round 5 and round 6: Tasks 3, 6, 8 and 9;
-  - Send's rules: Tasks 4-5;
-  - drafts: Tasks 3 and 7;
+  - attachments, round 5 and round 6: Tasks 3a, 3b, 6, 8 and 9;
+  - Send's rules: Tasks 4a, 4b and 5;
+  - drafts: Tasks 3a and 7;
   - Processes: Tasks 10-11;
   - media lines 212-214 and row 296: Task 13;
   - Native UI, row 302: Task 14;
-  - opening files and pickers, row 301: Tasks 3, 9 and 15;
+  - opening files and pickers, row 301: Tasks 3a, 9 and 15;
   - terminal launch, row 294: Task 15 (R5).
 
   The epic's menu entries (Open terminal, Open native DeepSeek UI, Open folder, Open shell in session folder, Show running commands) are in Tasks 11, 14 and 15.
 - **Review Focus:** each line names its owning test above.
-- **Not in this plan:** the composer parts listed in Decisions, filed by Task 12; Windows ConPTY (T1b, `zerus-5wmh.9.16`); macOS microphone and camera entitlements (M1 and M2, with the coordinator).
+- **Not in this plan:** the composer parts listed in Decisions, filed by Task 12; Windows ConPTY (T1b, `zerus-5wmh.9.16`); macOS microphone and camera entitlements (M1 and M2, with the coordinator); the voice driver itself (M1c, the events session's).
+- **Review of 2026-10-28** (the coordinator's amendments and a review pass): one draft store and one exit hook shared with M1c and the organization branch; R3 and R4 delivered and Task 13 rebound to them; Qt's stores read-only with a byte-for-byte test; the unknown-delivery rules made explicit and tested (stale questions, exit while saving); no digests per view; rename collisions keep both drafts; Tasks 3 and 4 split; each task adds only what it uses.

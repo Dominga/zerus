@@ -280,13 +280,30 @@ fn find_hgs(path: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) 
 #[cfg(test)]
 mod hgs_tests {
     use super::*;
+    use std::path::Path;
 
-    fn folder(name: &str) -> PathBuf {
+    /// A scratch folder, removed again when the test ends.
+    struct Folder(PathBuf);
+
+    impl std::ops::Deref for Folder {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn folder(name: &str) -> Folder {
         let dir =
             std::env::temp_dir().join(format!("zerus-client-core-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        Folder(dir)
     }
 
     #[test]
@@ -296,9 +313,9 @@ mod hgs_tests {
         std::fs::create_dir_all(home.join(".local/bin")).unwrap();
         std::fs::write(home.join(".local/bin").join(HGS), b"").unwrap();
         std::fs::write(bin.join(HGS), b"").unwrap();
-        let path = std::env::join_paths([bin.clone()]).unwrap();
+        let path = std::env::join_paths([bin.to_path_buf()]).unwrap();
         assert_eq!(
-            find_hgs(Some(path), Some(home.clone().into())),
+            find_hgs(Some(path), Some(home.to_path_buf().into())),
             Some(bin.join(HGS))
         );
     }
@@ -309,9 +326,9 @@ mod hgs_tests {
         std::fs::create_dir_all(home.join(".local/bin")).unwrap();
         std::fs::write(home.join(".local/bin").join(HGS), b"").unwrap();
         let empty = folder("finder-path");
-        let path = std::env::join_paths([empty]).unwrap();
+        let path = std::env::join_paths([empty.to_path_buf()]).unwrap();
         assert_eq!(
-            find_hgs(Some(path), Some(home.clone().into())),
+            find_hgs(Some(path), Some(home.to_path_buf().into())),
             Some(home.join(".local/bin").join(HGS))
         );
     }
@@ -320,7 +337,7 @@ mod hgs_tests {
     fn a_folder_named_hgs_is_not_a_program() {
         let bin = folder("dir-bin");
         std::fs::create_dir_all(bin.join(HGS)).unwrap();
-        let path = std::env::join_paths([bin]).unwrap();
+        let path = std::env::join_paths([bin.to_path_buf()]).unwrap();
         let found = find_hgs(Some(path), None);
         assert!(found.is_none_or(|found| found.is_file()));
     }

@@ -17,7 +17,7 @@ use crate::attachments::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -422,62 +422,130 @@ fn loaded((mut draft, valid): (StoredDraft, bool)) -> Loaded {
     }
 }
 
-/// Lists the nonempty drafts under `root` (`indexDirect`).
-fn index_direct(root: &Path) -> BTreeMap<String, Summary> {
-    let mut result = BTreeMap::new();
-    let Ok(entries) = fs::read_dir(root) else {
-        return result;
+/// A position in Saved drafts: a manifest's modification time and its
+/// folder, which names its key. Opaque to the view; pass it back as is.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Cursor {
+    pub modified_ns: u64,
+    pub folder: String,
+}
+
+/// Which page of Saved drafts to read: at most `limit` (1-200) drafts older
+/// than `before`, or the newest when it is `None`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexPage {
+    pub limit: usize,
+    #[serde(default)]
+    pub before: Option<Cursor>,
+}
+
+/// One page of Saved drafts, newest first; `next` reads the following one.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Page {
+    pub items: Vec<(String, Summary)>,
+    pub next: Option<Cursor>,
+}
+
+/// The largest page.
+pub const MAX_PAGE: usize = 200;
+
+fn modified_ns(path: &Path) -> Option<u64> {
+    let since = fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?;
+    u64::try_from(since.as_nanos()).ok()
+}
+
+/// The Summary of one folder, `None` for an empty, damaged or foreign draft.
+fn summary(root: &Path, folder: &str, modified_ns: u64) -> Option<(String, Summary)> {
+    let bytes = read_bounded(&root.join(folder).join("draft.json"), MAX_MANIFEST).ok()?;
+    let Ok(Value::Object(object)) = serde_json::from_slice::<Value>(&bytes) else {
+        return None;
     };
-    for entry in entries.flatten() {
-        let manifest = entry.path().join("draft.json");
-        let Ok(bytes) = read_bounded(&manifest, MAX_MANIFEST) else {
-            continue;
-        };
-        let Ok(Value::Object(object)) = serde_json::from_slice::<Value>(&bytes) else {
-            continue;
-        };
-        let key = object.get("key").and_then(Value::as_str).unwrap_or("");
-        let text = object.get("text").and_then(Value::as_str).unwrap_or("");
-        let attachments = object
-            .get("attachments")
-            .and_then(Value::as_array)
-            .map_or(0, Vec::len);
-        if object.get("version").and_then(Value::as_i64) != Some(1)
-            || entry.file_name().to_string_lossy() != sha256_hex(key.as_bytes())
-            || (text.trim().is_empty() && attachments == 0)
-        {
-            continue;
-        }
-        let preview = text
-            .split('\n')
-            .find(|line| !line.trim().is_empty())
-            .map(|line| {
-                line.split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .chars()
-                    .take(PREVIEW_CHARS)
-                    .collect()
+    let key = object.get("key").and_then(Value::as_str).unwrap_or("");
+    let text = object.get("text").and_then(Value::as_str).unwrap_or("");
+    let attachments = object
+        .get("attachments")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    if object.get("version").and_then(Value::as_i64) != Some(1)
+        || folder != sha256_hex(key.as_bytes())
+        || (text.trim().is_empty() && attachments == 0)
+    {
+        return None;
+    }
+    let preview = text
+        .split('\n')
+        .find(|line| !line.trim().is_empty())
+        .map(|line| {
+            line.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(PREVIEW_CHARS)
+                .collect()
+        })
+        .unwrap_or_default();
+    let label = object
+        .get("label")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .into();
+    Some((
+        key.to_owned(),
+        Summary {
+            label,
+            preview,
+            modified: modified_ns as f64 / 1e9,
+            attachments,
+        },
+    ))
+}
+
+/// One page of the nonempty drafts under `root` (`indexDirect`), newest
+/// first. Ordering needs only each manifest's modification time; manifests
+/// are read for the page alone. A draft saved while someone pages moves to
+/// the front, so the drafts that did not change keep their places: no page
+/// repeats or skips one of them.
+fn index_page(root: &Path, page: &IndexPage) -> Page {
+    let limit = page.limit.clamp(1, MAX_PAGE);
+    let Ok(entries) = fs::read_dir(root) else {
+        return Page::default();
+    };
+    let mut drafts: Vec<Cursor> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let folder = entry.file_name().into_string().ok()?;
+            if folder.len() != 64
+                || !folder
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            {
+                return None;
+            }
+            let modified_ns = modified_ns(&entry.path().join("draft.json"))?;
+            Some(Cursor {
+                modified_ns,
+                folder,
             })
-            .unwrap_or_default();
-        let modified = fs::metadata(&manifest)
-            .and_then(|metadata| metadata.modified())
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map_or(0.0, |since| since.as_secs_f64());
-        result.insert(
-            key.to_owned(),
-            Summary {
-                label: object
-                    .get("label")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .into(),
-                preview,
-                modified,
-                attachments,
-            },
-        );
+        })
+        .filter(|cursor| page.before.as_ref().is_none_or(|before| cursor < before))
+        .collect();
+    drafts.sort_unstable_by(|a, b| b.cmp(a));
+    let mut result = Page::default();
+    for (index, cursor) in drafts.iter().enumerate() {
+        if let Some(item) = summary(root, &cursor.folder, cursor.modified_ns) {
+            result.items.push(item);
+        }
+        if result.items.len() == limit {
+            if index + 1 < drafts.len() {
+                result.next = Some(cursor.clone());
+            }
+            break;
+        }
     }
     result
 }
@@ -493,9 +561,9 @@ pub fn read_draft(qt_root: &Path, key: &str) -> Loaded {
     })
 }
 
-/// Saved drafts of Qt's store, read-only.
-pub fn read_index(qt_root: &Path) -> BTreeMap<String, Summary> {
-    index_direct(qt_root)
+/// One page of Saved drafts of Qt's store, read-only.
+pub fn read_index(qt_root: &Path, page: &IndexPage) -> Page {
+    index_page(qt_root, page)
 }
 
 type Work = Box<dyn FnOnce() + Send>;
@@ -645,11 +713,11 @@ impl DraftStore {
         );
     }
 
-    /// Saved drafts, after every save queued before it.
-    pub fn index(&self, done: impl FnOnce(BTreeMap<String, Summary>) + Send + 'static) {
+    /// One page of Saved drafts, after every save queued before it.
+    pub fn index(&self, page: IndexPage, done: impl FnOnce(Page) + Send + 'static) {
         let root = self.root.clone();
         self.writer
-            .enqueue("", false, Box::new(move || done(index_direct(&root))));
+            .enqueue("", false, Box::new(move || done(index_page(&root, &page))));
     }
 
     /// Moves a draft to a renamed session's key. An existing draft there is

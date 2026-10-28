@@ -6,8 +6,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 use zerus_client_core::attachments::{Attachment, Draft};
 use zerus_client_core::drafts::{
-    read_draft, read_index, DraftStore, Loaded, StoredDraft, Summary, ALREADY_EXISTS, INTERRUPTED,
-    NOT_RESTORED,
+    read_draft, read_index, Cursor, DraftStore, IndexPage, Loaded, Page, StoredDraft, Summary,
+    ALREADY_EXISTS, INTERRUPTED, NOT_RESTORED,
 };
 
 struct Scratch(PathBuf);
@@ -77,8 +77,12 @@ fn load(store: &DraftStore, key: &str) -> Loaded {
     wait(|done| store.load(key, done))
 }
 
+fn page(store: &DraftStore, limit: usize, before: Option<Cursor>) -> Page {
+    wait(|done| store.index(IndexPage { limit, before }, done))
+}
+
 fn index(store: &DraftStore) -> std::collections::BTreeMap<String, Summary> {
-    wait(|done| store.index(done))
+    page(store, 200, None).items.into_iter().collect()
 }
 
 #[test]
@@ -135,9 +139,15 @@ fn edits_coalesce_but_never_jump_ahead_of_a_durable_save() {
     let store = DraftStore::open(scratch.0.join("drafts"));
     // Hold the writer so everything below queues up.
     let (release, held) = mpsc::channel::<()>();
-    store.index(move |_| {
-        let _ = held.recv();
-    });
+    store.index(
+        IndexPage {
+            limit: 1,
+            before: None,
+        },
+        move |_| {
+            let _ = held.recv();
+        },
+    );
     let (sender, written) = mpsc::channel();
     for (text, durable) in [
         ("one", false),
@@ -316,7 +326,18 @@ fn qt_drafts_are_read_and_recovered_without_writing_qt_s_store() {
     };
     let before = snapshot(&qt);
     assert_eq!(read_draft(&qt, KEY).draft.draft.text, "from Qt");
-    assert_eq!(read_index(&qt).len(), 1);
+    assert_eq!(
+        read_index(
+            &qt,
+            &IndexPage {
+                limit: 10,
+                before: None
+            }
+        )
+        .items
+        .len(),
+        1
+    );
     let store = DraftStore::open(scratch.0.join("client"));
     let recovered = wait(|done| store.recover(&qt, KEY, done)).unwrap();
     assert_eq!(recovered.draft.draft.attachments.len(), 1);
@@ -343,4 +364,62 @@ fn dropping_the_store_writes_everything_queued() {
     }
     let store = DraftStore::open(root);
     assert_eq!(load(&store, KEY).draft.draft.text, "edit 49");
+}
+
+#[test]
+fn saved_drafts_pages_stay_stable_while_drafts_are_saved() {
+    let scratch = Scratch::new("pages");
+    let store = DraftStore::open(scratch.0.join("drafts"));
+    let keys: Vec<String> = (0..1000)
+        .map(|i| format!("studio\nclaude/p/s{i:04}"))
+        .collect();
+    for key in &keys {
+        store.save(key, draft(key, &[]), |result| assert!(result.is_ok()));
+    }
+    // Empty drafts are skipped and never fill a page.
+    for i in 0..50 {
+        store.save(
+            &format!("studio\nclaude/p/empty{i}"),
+            StoredDraft::default(),
+            |_| {},
+        );
+    }
+    store.flush();
+    let first = page(&store, 200, None);
+    assert_eq!(first.items.len(), 200);
+    // Newest first, with a stable order for equal times.
+    let times: Vec<f64> = first
+        .items
+        .iter()
+        .map(|(_, summary)| summary.modified)
+        .collect();
+    assert!(times.windows(2).all(|pair| pair[0] >= pair[1]));
+    // A draft from a later page is saved while the list is open.
+    let seen: std::collections::HashSet<&String> = first.items.iter().map(|(key, _)| key).collect();
+    let edited = keys.iter().find(|key| !seen.contains(key)).unwrap().clone();
+    std::thread::sleep(Duration::from_millis(20));
+    save(&store, &edited, draft("edited while browsing", &[])).unwrap();
+    let mut listed: Vec<String> = first.items.iter().map(|(key, _)| key.clone()).collect();
+    let mut next = first.next;
+    let mut pages = 1;
+    while let Some(cursor) = next {
+        let more = page(&store, 200, Some(cursor));
+        listed.extend(more.items.iter().map(|(key, _)| key.clone()));
+        next = more.next;
+        pages += 1;
+        assert!(pages < 10, "pages end");
+    }
+    let mut seen_unchanged: Vec<&String> = listed.iter().filter(|key| **key != edited).collect();
+    seen_unchanged.sort();
+    let mut expected: Vec<&String> = keys.iter().filter(|key| **key != edited).collect();
+    expected.sort();
+    assert_eq!(
+        seen_unchanged, expected,
+        "every unchanged draft exactly once"
+    );
+    // The edited draft moved to the front: it shows on the next first page.
+    assert_eq!(page(&store, 1, None).items[0].0, edited);
+    // Limits are bounded.
+    assert_eq!(page(&store, 5000, None).items.len(), 200);
+    assert_eq!(page(&store, 0, None).items.len(), 1);
 }

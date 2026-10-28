@@ -407,7 +407,11 @@ fn start_watchdog() -> std::io::Result<watchdog::Watchdog> {
     let pulse = dog.pulse();
     #[cfg(target_os = "macos")]
     {
-        platform::macos::heartbeat(limits.beat_every(), move || pulse.beat(watchdog::now_ms()));
+        platform::macos::heartbeat(
+            objc2::MainThreadMarker::new().expect("setup runs on the main thread"),
+            limits.beat_every(),
+            move || pulse.beat(watchdog::now_ms()),
+        );
         platform::macos_power::observe(dog.pulse());
     }
     #[cfg(target_os = "linux")]

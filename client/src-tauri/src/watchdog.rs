@@ -6,9 +6,10 @@
 //! A timer on the main thread records a beat every quarter of [`HANG_MS`]; a
 //! thread named `hgs-watchdog` checks every half. Once the main thread has not
 //! beaten for longer than [`HANG_MS`], it prints why and aborts, at most once:
-//! launchd (`KeepAlive Crashed`, `tray/packaging/com.hgdev.hgs-tray.plist`) or
-//! systemd (`Restart=on-failure`) starts the client again, and the crash report
-//! shows where the main thread stood. A plain exit would not be restarted.
+//! on macOS launchd (`KeepAlive Crashed`, `tray/packaging/com.hgdev.hgs-tray.plist`)
+//! starts the client again, and the crash report shows where the main thread
+//! stood; a plain exit would not be restarted. On Linux no unit supervises the
+//! client (`hgs-tray.service` runs the Qt GUI), so an abort only ends that run.
 //!
 //! The clock stops while the machine sleeps ([`now_ms`]). Around sleep macOS
 //! leaves the main thread unscheduled for longer than the threshold while the
@@ -23,7 +24,7 @@
 //! it too, whatever its stack shows.
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{mpsc, Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -138,11 +139,14 @@ impl Watchdog {
         let pulse = Arc::new(Pulse::new(clock()));
         let stopping = Arc::new((Mutex::new(false), Condvar::new()));
         let (watched, signal) = (Arc::clone(&pulse), Arc::clone(&stopping));
+        let (ready, holding) = mpsc::sync_channel(0);
         let thread = std::thread::Builder::new()
             .name(THREAD.into())
             .spawn(move || {
                 let (lock, wake) = &*signal;
                 let mut stopped = lock.lock().unwrap_or_else(PoisonError::into_inner);
+                // Held from here into the wait: a stop always finds the thread waiting.
+                let _ = ready.send(());
                 loop {
                     // Returns early only when stopped; a timeout is the next check.
                     stopped = wake
@@ -160,6 +164,7 @@ impl Watchdog {
                     }
                 }
             })?;
+        let _ = holding.recv();
         Ok(Self {
             pulse,
             stopping,
@@ -213,17 +218,29 @@ pub fn now_ms() -> i64 {
 }
 
 /// Qt's exit path (`main.cpp:410-417`): say why, then abort. The line is
-/// written with one `write(2)`: the main thread may hang holding Rust's
-/// stderr lock.
+/// built on the stack and written with one `write(2)`: the main thread may
+/// hang holding Rust's stderr lock or the allocator's.
 pub fn abort_on_hang(silent_ms: i64) -> ! {
-    let line = format!(
-        "zerus-client: main thread unresponsive for {} s (AppKit deadlock? see tray/src/QuietTrayIcon.h); \
-         aborting so the service manager restarts it\n",
-        silent_ms / 1000
-    );
-    // SAFETY: writes the bytes of a live string to stderr.
-    unsafe { libc::write(libc::STDERR_FILENO, line.as_ptr().cast(), line.len()) };
+    let mut line = [0; 256];
+    let length = hang_line(&mut line, silent_ms);
+    // SAFETY: writes initialized bytes of a stack buffer to stderr.
+    unsafe { libc::write(libc::STDERR_FILENO, line.as_ptr().cast(), length) };
     std::process::abort()
+}
+
+/// The abort line, written into `buffer` without allocating; its length.
+fn hang_line(buffer: &mut [u8; 256], silent_ms: i64) -> usize {
+    let mut cursor = io::Cursor::new(&mut buffer[..]);
+    // A line longer than the buffer is cut short, not lost.
+    let _ = io::Write::write_fmt(
+        &mut cursor,
+        format_args!(
+            "zerus-client: main thread unresponsive for {} s (AppKit deadlock? see tray/src/QuietTrayIcon.h); \
+             aborting so the service manager restarts it\n",
+            silent_ms / 1000
+        ),
+    );
+    cursor.position() as usize
 }
 
 #[cfg(test)]
@@ -379,8 +396,8 @@ mod tests {
             },
         )
         .unwrap();
-        // Let the thread reach its wait: a stop before that is seen without a wake-up.
-        std::thread::sleep(Duration::from_millis(100));
+        // start() returned with the thread on its way into the wait: only the
+        // stop's wake-up ends it before the next check.
         let started = std::time::Instant::now();
         drop(dog);
         assert!(
@@ -388,6 +405,18 @@ mod tests {
             "not at the next check, 5 s later"
         );
         assert!(fired.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn the_abort_line_fits_on_the_stack() {
+        let mut buffer = [0; 256];
+        let length = hang_line(&mut buffer, 45_500);
+        assert_eq!(
+            std::str::from_utf8(&buffer[..length]).unwrap(),
+            "zerus-client: main thread unresponsive for 45 s (AppKit deadlock? see tray/src/QuietTrayIcon.h); \
+             aborting so the service manager restarts it\n"
+        );
+        assert!(hang_line(&mut buffer, i64::MAX) < 256);
     }
 
     #[test]

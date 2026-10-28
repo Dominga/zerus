@@ -72,6 +72,8 @@ fn allow(context: &Context, argument: *mut c_void) {
 
 /// Holds the watchdog's check around sleep and dark wakes for the life of the
 /// process. Without the notices a wake may abort the client, as Qt warns.
+/// Call it once per process: the registration and the context that owns
+/// `pulse` are never released.
 pub fn observe(pulse: Arc<Pulse>) {
     let context = Box::into_raw(Box::new(Context {
         pulse,

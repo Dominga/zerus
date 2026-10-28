@@ -9,6 +9,8 @@ mod actions;
 mod cli;
 mod clipboard;
 mod commands;
+#[cfg(feature = "live")]
+mod desk;
 mod display;
 mod identity;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -133,7 +135,9 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
     let identity = startup.identity;
     let opens_sessions = startup.opens_sessions;
     // Only the macOS build has a menu-bar item in this phase; Linux keeps Qt.
-    let menu_bar = cfg!(target_os = "macos");
+    // The item lists the live fleet, so a build without the data source has
+    // none and keeps its window as the way back.
+    let menu_bar = cfg!(all(target_os = "macos", feature = "live"));
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let (listening, activations) = match startup.instance {
         Some(claimed) => (Some(claimed.listening), Some(claimed.activations)),
@@ -168,7 +172,25 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(actions::ArchiveReads::default());
                 app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
-                app.manage(screens::Screens::tauri(app.handle().clone(), pump));
+                app.manage(screens::Screens::tauri(app.handle().clone(), pump.clone()));
+                // The menu-bar item, before the fleet starts so its first catalog reaches it.
+                #[cfg(target_os = "macos")]
+                {
+                    let conf = desk::tray_conf();
+                    let configured = conf
+                        .as_deref()
+                        .and_then(|text| zerus_client_core::menubar::tray_conf_value(text, "icon-color"))
+                        .filter(|value| !value.is_empty())
+                        .and_then(|value| {
+                            let color = zerus_client_core::trayicon::parse_color(&value);
+                            if color.is_none() {
+                                eprintln!("zerus-client: icon-color {value:?} in tray.conf is not #rgb or #rrggbb; using the menu bar's colour");
+                            }
+                            color
+                        });
+                    platform::macos_menubar::install(app.handle(), configured)?;
+                    desk::start(app.handle(), &pump, dir.clone(), desk::load_mode(&dir, conf.as_deref()));
+                }
                 if menu_bar {
                     lifecycle::start_fleet(|| app.state::<commands::AppState>().start_source());
                 }
@@ -265,6 +287,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::archive_page,
         actions::cancel_archive_pages,
         clipboard::copy_text,
+        desk::desk_take_pending,
         screens::screen_visible,
         screens::accounts_view,
         screens::machines_view,

@@ -165,10 +165,13 @@ fn reopen(app: &AppHandle) {
 /// The one run-loop exit hook (Decision 15). `RunEvent::Exit` ends every
 /// quit: Quit, a signal (`signals.rs`) and the updater's quit event (tao's
 /// `applicationWillTerminate`). Other work before the process ends (drafts,
-/// organization) joins here, before the socket goes: Qt's `QLocalServer`
+/// organization) joins here, before the socket goes; the Dock badge goes
+/// first, as `~MacApplicationBadge` clears it. Qt's `QLocalServer`
 /// outlives the tray agent whose `aboutToQuit` flushes (`main.cpp:340`,
 /// `:378`), so the socket is removed last, as `QLocalServer::close` does.
 fn exit(app: &AppHandle) {
+    #[cfg(all(target_os = "macos", feature = "live"))]
+    crate::platform::macos_menubar::clear_badge(app);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Some(state) = app.try_state::<crate::instance::InstanceState>() {
         state.release();

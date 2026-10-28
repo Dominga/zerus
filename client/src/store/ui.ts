@@ -39,6 +39,9 @@ export const [stripMode, setStripMode] = createSignal(params.get("strip") === "1
 export const [menu, setMenu] = createSignal<{ x: number; y: number; items: MenuEntry[] } | undefined>();
 export const [contentScale, setContentScale] = createSignal(1);
 export const [toasts, setToasts] = createStore<{ items: { id: number; title: string; text: string }[] }>({ items: [] });
+/** A row the session list scrolls to once it lists it (Qt's `revealRow`); a new selection drops it. */
+export const [revealing, setRevealing] = createSignal<string | undefined>();
+export const revealRow = (id: string) => setRevealing(id);
 export const logoMotion = (): LogoMotion => "spin";
 
 /**

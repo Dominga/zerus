@@ -13,6 +13,7 @@ import { App } from "./App";
 import { inTauri, startBridge, type BridgeMode } from "./bridge";
 import { invoke } from "@tauri-apps/api/core";
 import { receive } from "./store/session";
+import { startDesk } from "./store/desk";
 import { startMotion } from "./ui/motion";
 
 const [mode, setMode] = createSignal<BridgeMode | "starting">("starting");
@@ -20,6 +21,8 @@ const [mode, setMode] = createSignal<BridgeMode | "starting">("starting");
 // The motion attributes are on the root before the first frame.
 startMotion();
 render(() => <App mode={mode} />, document.getElementById("root")!);
+// The menu bar and notifications open sessions and show notices in this window.
+startDesk();
 
 void startBridge(receive).then(setMode, (error) => console.error("Zerus Next: the data source did not start", error));
 

@@ -311,3 +311,34 @@ export function onScreensChanged(listener: (screen: Screen) => void): () => void
     stop?.();
   };
 }
+
+/** A session the menu bar or a notification opens: its computer and catalog key. */
+export type OpenSession = { computer: ComputerId; key: string };
+/** A notice for the window. */
+export type DeskNotice = { title: string; text: string };
+export type DeskPending = { open: OpenSession | null; notices: DeskNotice[] };
+
+function onEvent<T>(name: string, listener: (payload: T) => void): () => void {
+  if (!inTauri()) return () => {};
+  let stop: (() => void) | undefined;
+  let stopped = false;
+  void listen<T>(name, (event) => listener(event.payload)).then((unlisten) => {
+    if (stopped) unlisten();
+    else stop = unlisten;
+  });
+  return () => {
+    stopped = true;
+    stop?.();
+  };
+}
+
+/** `open-session`: the menu bar or a notification opens a session; returns the stop. */
+export const onOpenSession = (listener: (target: OpenSession) => void) => onEvent<OpenSession>("open-session", listener);
+/** `desk-notice`: a notice for the window; returns the stop. */
+export const onDeskNotice = (listener: (notice: DeskNotice) => void) => onEvent<DeskNotice>("desk-notice", listener);
+
+/** What the menu bar or a notification asked for before this page loaded. */
+export async function deskTakePending(): Promise<DeskPending> {
+  if (!inTauri()) return { open: null, notices: [] };
+  return invoke<DeskPending>("desk_take_pending");
+}

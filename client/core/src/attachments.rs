@@ -100,8 +100,10 @@ pub struct Added {
     pub cursor: usize,
 }
 
-/// The text and attachments of one composer.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The text and attachments of one composer. It stays in Rust: it has no
+/// serde, so its bytes never cross the IPC; the webview gets `infos()`, and
+/// the draft store keeps its own record with the bytes in separate files.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Draft {
     pub text: String,
     pub attachments: Vec<Attachment>,

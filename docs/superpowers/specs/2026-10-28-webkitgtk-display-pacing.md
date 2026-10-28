@@ -238,6 +238,14 @@ Xvfb and exited 0, with its real app, network and web processes loading the
 private libraries. Xvfb is not evidence of display-rate pacing or the GTK 3
 Wayland GL path.
 
+An isolated `kwin_wayland --virtual` session with a nominal 144 Hz output
+(current mode 143.606 Hz) exercised the EGL Wayland path with
+`__NV_DISABLE_EXPLICIT_SYNC=1`. WebKit-only list scrolling averaged 16.67 ms;
+with patch 0003 it averaged 7.03 ms (median 7.00 ms). Transform and light rAF
+runs were also near 7 ms. The software virtual compositor introduced enough
+jitter for some intervals to fail the strict harness criteria, so this is
+callback-path evidence, not a physical-display qualification.
+
 With a GDK shim reporting 144000 mHz, `webkit://gpu` reports `VBlank type Timer`
 and `VBlank refresh rate 144Hz`, while the same build's rAF interval remains
 about 16.67 ms. This is direct evidence of the downstream presentation gate and

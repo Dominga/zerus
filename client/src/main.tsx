@@ -6,6 +6,7 @@ import "./ui/styles/sessions.css";
 import "./ui/styles/detail.css";
 import "./ui/styles/client.css";
 import "./ui/styles/screens.css";
+import "./ui/styles/machines.css";
 import "./ui/styles/motion.css";
 import "./skin/runtime";
 import { App } from "./App";

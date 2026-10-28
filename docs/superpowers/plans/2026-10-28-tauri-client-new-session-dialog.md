@@ -175,7 +175,7 @@ Everything in the phase 2 plan's Global Constraints applies. In addition:
 
 ## Review Focus
 
-1. A full open, inspect, browse and Cancel run sends only reads. The fake `hgs` log has no write, clone, worktree or launch: no `worktrees create`, `dirs --create`, `clone`, `account start`, `account favorite`, `swarm` or agent launch.
+1. A full open, inspect, browse and Cancel run sends only reads. The fake `hgs` log has no write, clone, worktree or launch: no `worktrees create`, `dirs --create`, `clone`, `account start`, `account favorite`, `swarm` write (`swarm apply`) or agent launch. The organization's own `swarm get` reads, which Projects shows, are expected.
 2. No worktree is created before Start: every `worktrees create` comes after the Start that admitted its creation.
 3. Start submits once. A refused admission shows the reason and keeps every choice. The dialog closes only after admission (777).
 4. Late answers for another computer, folder or request never change the form: account rows, worktree catalogs, the prefill, OpenCode catalogs, favorites and the service start.
@@ -220,6 +220,8 @@ client/src/ui/sessions/opencode-models.ts (+test)  OpenCodeModels and the picker
 client/src/ui/sessions/paths.ts (+test)      the port of paths.rs and three launch.rs folder helpers (the scoped exception)
 client/core/tests/folder_paths.rs, tests/fixtures/folder-paths.json  the shared golden fixture both copies check
 client/src/ui/sessions/NewSessionDialog.tsx  the dialog and the Windows warning
+client/src/ui/sessions/newsession-view.ts (+test)  the view's logic: the entry points, `session.new`, the Projects entries' texts,
+                                             the warning's model, the dialog's key mapping and the row keys
 client/src/ui/sessions/ModelPicker.tsx       OpenCode's grouped picker and its popover
 client/src/ui/sessions/WorktreePicker.tsx    Choose an existing worktree (WorktreePanel, picker mode)
 client/src/ui/sessions/NewWorktreeDialog.tsx Create manually
@@ -618,7 +620,7 @@ Rows keep their height while texts change (171-186, 685, 705).
   - the entry points' option objects (with a mocked `openNewSession`);
   - `session.new` opens the dialog on every page;
   - the Projects entries' enablement and hints;
-  - the warning's focus and default (a DOM test of `NewSessionDialog`'s confirm: Cancel has `data-initial` and `autofocus`; Escape answers false).
+  - the warning's model, which the component renders: `createConfirm` (Escape and closing answer false; each question is answered once; a new question cancels the open one) and `WARNING_BUTTONS` (each button's answer; the one default, focused button answers as Escape does). Ruled in fix round 1: no DOM test, since a DOM library (jsdom or happy-dom) would change the shared client package's dependencies, outside this stream's touch points. The component takes its buttons, `data-initial` and `autofocus` from `WARNING_BUTTONS`, so no unit test covers that binding itself.
 - [ ] **Step 2: Run** and expect FAIL. **Step 3: Implement** the dialog from the prototype's layout and classes, with Qt's rows, texts and rules. The account list keeps arrow-key navigation, and focusing it never selects a row (947-949).
 - [ ] **Step 4: Run** `npx vitest run`, `npm run check`, `python3 ../scripts/check-ui-separators.py`. Expected: PASS.
 - [ ] **Step 5: Commit** `feat(client): the New session dialog and its entry points`.

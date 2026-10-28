@@ -82,13 +82,12 @@ describe("session.new (Shortcuts.cpp:29, 58, a Window shortcut)", () => {
     expect(view.isSessionNew(key({ ctrlKey: true }), true)).toBe(false);
   });
 
-  it("opens the dialog on every page, with the selected computer filter", () => {
-    for (const page of ["dashboard", "sessions", "projects", "machines", "accounts", "settings"]) {
-      const event = key({ ctrlKey: true });
-      expect(view.windowKey(event, { mac: false, modal: false }), page).toBe(true);
-      expect(event.preventDefault).toHaveBeenCalled();
-    }
-    expect(store.openNewSession.mock.calls).toEqual(Array(6).fill([{ computer: "mac" }]));
+  // App.tsx's window key handler calls it on every page; it takes the key and opens the dialog.
+  it("takes Ctrl+N and opens the dialog with the selected computer filter", () => {
+    const event = key({ ctrlKey: true });
+    expect(view.windowKey(event, { mac: false, modal: false })).toBe(true);
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(store.openNewSession.mock.calls).toEqual([[{ computer: "mac" }]]);
   });
 
   it("does nothing under another modal dialog, or for another key", () => {
@@ -111,12 +110,24 @@ describe("the Projects entries (ProjectsDialog.cpp 520-522, 556-558)", () => {
 });
 
 describe("the local Windows-session warning (LocalLaunchWarning.h 18-28)", () => {
-  it("has Qt's title and buttons, with Cancel the default and focused", () => {
-    expect(view.WARNING_TITLE).toBe("Launch in another Windows session?");
-    expect(view.WARNING_BUTTONS).toEqual([
-      { label: "Launch anyway", answer: true, initial: false },
-      { label: "Cancel", answer: false, initial: true },
-    ]);
+  // The warning renders its buttons from WARNING_BUTTONS; Cancel is Qt's default and escape button (27-28).
+  it("answers each button as Qt does, and the focused default answers as Escape", async () => {
+    await createRoot(async (dispose) => {
+      const confirm = view.createConfirm();
+      const answers: boolean[] = [];
+      for (const button of view.WARNING_BUTTONS) {
+        const asked = confirm.ask("text");
+        confirm.answer(button.answer);
+        answers.push(await asked);
+      }
+      expect(answers).toEqual([true, false]);
+      const escaped = confirm.ask("text");
+      confirm.cancel();
+      const initial = view.WARNING_BUTTONS.filter((b) => b.initial);
+      expect(initial.length).toBe(1);
+      expect(initial[0].answer).toBe(await escaped);
+      dispose();
+    });
   });
 
   it("answers once: Launch anyway is true, Escape and closing are Cancel", async () => {
@@ -167,5 +178,58 @@ describe("row keys (NewSessionDialog.cpp 503-509, 908-911)", () => {
       expect(accountNodes()[1]).toBe(shown[1]);
       dispose();
     });
+  });
+});
+
+describe("the dialog's keys (QDialog default button, QComboBox::keyPressEvent)", () => {
+  const press = (keyName: string, extra: Partial<KeyboardEvent> = {}) => ({ key: keyName, altKey: false, ctrlKey: false, metaKey: false, shiftKey: false, ...extra });
+
+  it("gives Enter to Start from a closed choice, a line edit, a check box, the Effort list and the non-default buttons", () => {
+    for (const control of ["choice", "button", "text", "check", "select"] as const) {
+      expect(view.dialogKey(control, press("Enter")), control).toBe("start");
+      // Qt's dialog takes Return and Enter only without modifiers.
+      expect(view.dialogKey(control, press("Enter", { shiftKey: true })), control).toBe("ignore");
+      expect(view.dialogKey(control, press("Enter", { ctrlKey: true })), control).toBe("ignore");
+    }
+  });
+
+  it("leaves Space to the buttons and the check box, and typing to the fields", () => {
+    expect(view.dialogKey("button", press(" "))).toBe("native");
+    expect(view.dialogKey("check", press(" "))).toBe("native");
+    expect(view.dialogKey("text", press("a"))).toBe("native");
+    expect(view.dialogKey("select", press("ArrowDown"))).toBe("native");
+    expect(view.dialogKey("button", press("Escape"))).toBe("native");
+  });
+
+  it("opens a closed choice on Alt+Down, F4 and Space, never on Enter", () => {
+    expect(view.dialogKey("choice", press("ArrowDown", { altKey: true }))).toBe("open");
+    expect(view.dialogKey("choice", press("F4"))).toBe("open");
+    expect(view.dialogKey("choice", press("F4", { shiftKey: true }))).toBe("native");
+    expect(view.dialogKey("choice", press(" "))).toBe("open");
+    expect(view.dialogKey("choice", press("Enter"))).toBe("start");
+  });
+
+  it("changes a closed choice with the arrows, PageUp, PageDown, Home and End", () => {
+    expect(view.dialogKey("choice", press("ArrowUp"))).toBe("previous");
+    expect(view.dialogKey("choice", press("PageUp"))).toBe("previous");
+    expect(view.dialogKey("choice", press("ArrowDown"))).toBe("next");
+    expect(view.dialogKey("choice", press("PageDown"))).toBe("next");
+    expect(view.dialogKey("choice", press("Home"))).toBe("first");
+    expect(view.dialogKey("choice", press("End"))).toBe("last");
+    expect(view.dialogKey("choice", press("ArrowDown", { ctrlKey: true }))).toBe("native");
+    expect(view.dialogKey("choice", press("ArrowUp", { metaKey: true }))).toBe("native");
+    // Escape is the dialog's: it closes an open list first, else the dialog.
+    expect(view.dialogKey("choice", press("Escape"))).toBe("native");
+  });
+
+  it("moves in an open list and picks its row on Enter or Space", () => {
+    expect(view.dialogKey("choice", press("ArrowDown"), true)).toBe("next");
+    expect(view.dialogKey("choice", press("ArrowUp"), true)).toBe("previous");
+    expect(view.dialogKey("choice", press("Home"), true)).toBe("first");
+    expect(view.dialogKey("choice", press("End"), true)).toBe("last");
+    expect(view.dialogKey("choice", press("Enter"), true)).toBe("pick");
+    expect(view.dialogKey("choice", press(" "), true)).toBe("pick");
+    expect(view.dialogKey("choice", press("Tab"), true)).toBe("close");
+    expect(view.dialogKey("choice", press("Escape"), true)).toBe("native");
   });
 });

@@ -6,8 +6,8 @@ import type { AccountRow, ComputerRow, FolderRow, LaunchFolder, ProjectRow } fro
 // The New session dialog's entry points and the logic its view keeps
 // (NewSessionDialog.tsx renders it): every place Qt opens the dialog, the
 // `session.new` shortcut, the Projects entries' texts, the local
-// Windows-session warning and the keys that keep list rows in place. The
-// dialog's rules stay in the store and the core.
+// Windows-session warning, the dialog's keys and the keys that keep list
+// rows in place. The dialog's rules stay in the store and the core.
 
 // Entry points: each is Qt's showNewSession call.
 
@@ -126,3 +126,61 @@ export const accountKey = (row: AccountRow) => row.key;
 export const projectKey = (row: ProjectRow) => (row.newProject ? "\nnew" : row.id);
 export const folderKey = (row: FolderRow) => `${row.key}\n${row.path}`;
 
+// The dialog's keys (Qt's QDialog with QDialogButtonBox): Return and Enter
+// press the default button, Start, when it is enabled. A closed non-editable
+// QComboBox ignores them and opens on Alt+Down, F4 or Space; a line edit, a
+// check box and a button Qt made `setAutoDefault(false)` pass them on too,
+// and Space presses such a button. Cancel and Open Machines stay
+// auto-default: Enter presses the one that has the focus.
+
+/** A control of the dialog as Qt's key handling sees it. */
+export type KeyControl =
+  /** A project, computer or folder choice (a non-editable QComboBox). */
+  | "choice"
+  /** A button Qt made `setAutoDefault(false)`, or a QToolButton (Manage this project's folders). */
+  | "button"
+  /** A line edit. */
+  | "text"
+  /** A check box. */
+  | "check"
+  /** The Effort list (a native select, a non-editable QComboBox in Qt). */
+  | "select";
+
+/**
+ * What a key does on a control:
+ * - "start": Start, as the dialog's default button (the form's submit checks Start is enabled);
+ * - "open": open the closed choice's list;
+ * - "previous", "next", "first", "last": change the choice, or move in its open list;
+ * - "pick": the open list's highlighted row;
+ * - "close": close the open list, and let the key go on (Tab);
+ * - "ignore": nothing (Qt's dialog takes Enter only without modifiers);
+ * - "native": the control's own handling, such as Space pressing a button.
+ */
+export type KeyAction = "start" | "open" | "previous" | "next" | "first" | "last" | "pick" | "close" | "ignore" | "native";
+
+type KeyPress = Pick<KeyboardEvent, "key" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey">;
+
+/** The key mapping of the dialog's controls; `open` is whether the choice's list is open. */
+export function dialogKey(control: KeyControl, e: KeyPress, open = false): KeyAction {
+  const plain = !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey;
+  if (control === "choice" && open) {
+    if (e.key === "ArrowUp") return "previous";
+    if (e.key === "ArrowDown") return "next";
+    if (e.key === "Home") return "first";
+    if (e.key === "End") return "last";
+    if (e.key === "Enter" || e.key === " ") return "pick";
+    if (e.key === "Tab") return "close";
+    return "native";
+  }
+  if (e.key === "Enter") return plain ? "start" : "ignore";
+  if (control !== "choice") return "native";
+  // QComboBox::keyPressEvent on a closed, non-editable combo box; Control
+  // (Command on macOS) with an arrow is left to the window.
+  const command = e.ctrlKey || e.metaKey;
+  if ((e.key === "ArrowDown" && e.altKey) || (e.key === "F4" && plain) || e.key === " ") return "open";
+  if ((e.key === "ArrowUp" && !command) || e.key === "PageUp") return "previous";
+  if ((e.key === "ArrowDown" && !command) || e.key === "PageDown") return "next";
+  if (e.key === "Home") return "first";
+  if (e.key === "End") return "last";
+  return "native";
+}

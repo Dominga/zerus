@@ -9,7 +9,7 @@ import { connectionOf, osOf } from "../../store/overview";
 import { now } from "../../store/ui";
 import { projectColor } from "./organization-ui";
 import { launchWindows, type AccountRow } from "./newsession-ui";
-import { WARNING_BUTTONS, WARNING_TITLE, accountKey, computerKey, createConfirm, folderKey, projectKey } from "./newsession-view";
+import { WARNING_BUTTONS, WARNING_TITLE, accountKey, computerKey, createConfirm, dialogKey, folderKey, projectKey, type KeyControl } from "./newsession-view";
 import type { Json } from "../lib/json";
 import "../styles/newsession.css";
 
@@ -42,8 +42,10 @@ function rowOf<T>(find: () => T | undefined): () => T {
 /**
  * A choice list with rows that a label cannot carry in a native list (the
  * project colour, the computer's OS tile). Rows are keyed: relabelling keeps
- * them and the hovered one. As Qt's combo box: arrows on the closed button
- * change the choice; Alt+Down, F4, Enter and Space open it; Escape closes it.
+ * them and the hovered one. Its keys are Qt's non-editable combo box
+ * (`dialogKey`): on the closed button the arrows, PageUp, PageDown, Home and
+ * End change the choice, Alt+Down, F4 and Space open it, and Enter goes to
+ * Start; Escape closes an open list first.
  */
 function Choice(props: {
   id: string;
@@ -78,20 +80,25 @@ function Choice(props: {
   };
   const onKey = (e: KeyboardEvent) => {
     if (props.disabled) return;
-    if (!props.open) {
-      if ((e.key === "ArrowDown" && e.altKey) || e.key === "F4" || e.key === "Enter" || e.key === " ") { e.preventDefault(); show(); }
-      else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    const action = dialogKey("choice", e, props.open);
+    const keys = props.keys;
+    const to = (from: string | undefined) =>
+      action === "first" ? keys[0] : action === "last" ? keys[keys.length - 1] : step(from, action === "next" ? 1 : -1);
+    switch (action) {
+      // Escape ("native") reaches the dialog's cancel, which closes the open list first.
+      case "native": return;
+      case "close": props.onOpen(false); return;
+      case "start": e.preventDefault(); button.form?.requestSubmit(); return;
+      case "ignore": e.preventDefault(); return;
+      case "open": e.preventDefault(); show(); return;
+      case "pick": e.preventDefault(); pick(active()); return;
+      default: {
         e.preventDefault();
-        const next = step(props.selected, e.key === "ArrowDown" ? 1 : -1);
+        if (props.open) { setActive(to(active())); return; }
+        const next = to(props.selected);
         if (next !== undefined && next !== props.selected) props.onPick(next);
       }
-      return;
     }
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); setActive(step(active(), e.key === "ArrowDown" ? 1 : -1)); }
-    else if (e.key === "Home" || e.key === "End") { e.preventDefault(); setActive(e.key === "Home" ? props.keys[0] : props.keys[props.keys.length - 1]); }
-    else if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(active()); }
-    // Escape reaches the dialog's cancel, which closes the open list first.
-    else if (e.key === "Tab") props.onOpen(false);
   };
   createEffect(() => {
     if (!props.open) return;
@@ -240,22 +247,34 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
     if (s().host === "") { void act.browseRepositoryLocal(); return; }
     setNewSessionChild({ kind: "browse-repository", target: s().host, computer: computerName(), parent: s().repositoryParent });
   };
+  // A click on a disabled entry does nothing and keeps the menu open, as Qt's QMenu.
   const chooseExisting = () => {
-    props.setPopup(undefined);
     if (!form()?.choose_existing_enabled) return;
+    props.setPopup(undefined);
     setNewSessionChild({ kind: "choose-worktree", target: s().host, computer: computerName(), project: project()?.id ?? "", path: folder()?.path ?? "" });
   };
   const createManually = () => {
-    props.setPopup(undefined);
     if (!form()?.create_manually_enabled) return;
+    props.setPopup(undefined);
     setNewSessionChild({ kind: "create-worktree", target: s().host, computer: computerName(), project: project()?.id ?? "", path: folder()?.path ?? "", catalog: s().worktrees.catalog, branch: s().name });
   };
 
   // The worktree options menu: Escape is the dialog's (it closes the menu first), arrows move.
+  // As Qt's QMenu, opened by the keyboard its first enabled entry is active; by the mouse none is.
   let menu: HTMLDivElement | undefined;
+  let menuByKeys = false;
+  const toggleMenu = (e: MouseEvent) => {
+    // A click the keyboard made (Space) has no pointer detail.
+    menuByKeys = e.detail === 0;
+    props.setPopup(opened("worktree") ? undefined : "worktree");
+  };
   createEffect(() => {
     if (!opened("worktree")) return;
-    queueMicrotask(() => menu?.querySelector<HTMLElement>(".menu-item:not([aria-disabled=true])")?.focus());
+    const byKeys = menuByKeys;
+    queueMicrotask(() => {
+      const first = byKeys ? menu?.querySelector<HTMLElement>(".menu-item:not([aria-disabled=true])") : undefined;
+      (first ?? menu)?.focus();
+    });
     const away = (e: PointerEvent) => { if (!menu?.parentElement?.contains(e.target as Node)) props.setPopup(undefined); };
     document.addEventListener("pointerdown", away, true);
     onCleanup(() => document.removeEventListener("pointerdown", away, true));
@@ -265,14 +284,16 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
     e.preventDefault();
     const items = [...(menu?.querySelectorAll<HTMLElement>(".menu-item:not([aria-disabled=true])") ?? [])];
     const at = items.indexOf(document.activeElement as HTMLElement);
-    items[(at + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length]?.focus();
+    const down = e.key === "ArrowDown";
+    // With no active entry, Down takes the first and Up the last.
+    items[at < 0 ? (down ? 0 : items.length - 1) : (at + (down ? 1 : -1) + items.length) % items.length]?.focus();
   };
 
   // The account list: arrows choose; taking the focus never does (947-949).
-  // Enter goes to the default button, as in Qt's dialog.
+  // Enter goes to the default button, as in Qt's dialog. Enabled unless the form is locked (698).
   let accountList!: HTMLUListElement;
   let formEl!: HTMLFormElement;
-  const accountsEnabled = () => fields() && !s().noMachine;
+  const accountsEnabled = () => fields();
   const accountKeyDown = (e: KeyboardEvent) => {
     if (!accountsEnabled()) return;
     const count = s().accounts.length;
@@ -302,8 +323,19 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
     void startNewSession((text) => props.confirm.ask(text));
   };
 
+  // Enter on a line edit, the check box, the Effort list and the buttons Qt
+  // made `setAutoDefault(false)` goes to Start (`dialogKey`); their
+  // `data-keys` names the control. Cancel and Open Machines keep Enter.
+  const formKey = (e: KeyboardEvent) => {
+    const control = (e.target as HTMLElement | null)?.dataset?.keys as KeyControl | undefined;
+    if (!control || control === "choice") return;
+    const action = dialogKey(control, e);
+    if (action === "start") { e.preventDefault(); formEl.requestSubmit(); }
+    else if (action === "ignore") e.preventDefault();
+  };
+
   return (
-    <form class="ns-form" ref={formEl} onSubmit={start}>
+    <form class="ns-form" ref={formEl} onSubmit={start} onKeyDown={formKey}>
       <div class="dlg-head">
         <h2 id="ns-title">New session</h2>
         <span class="grow" />
@@ -316,7 +348,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
             <Choice id="ns-project" label="Project" keys={projectKeys()} selected={project() ? projectKey(project()!) : undefined} disabled={!fields()}
               open={opened("project")} onOpen={toggle("project")} option={projectOption} class="ns-project" initial
               onPick={(key) => act.chooseProject(s().projects.findIndex((row) => projectKey(row) === key))} />
-            <button type="button" class="icon-btn ns-manage" data-tip="Manage this project's folders" aria-label="Manage this project's folders" disabled={!fields()}
+            <button type="button" class="icon-btn ns-manage" data-keys="button" data-tip="Manage this project's folders" aria-label="Manage this project's folders" disabled={!fields()}
               onClick={() => act.manageFolders()}><Icon name="settings" size={18} /></button>
             <Choice id="ns-computer" label="Computer" keys={computerKeys()} selected={computer() ? computerKey(computer()!) : undefined} disabled={!fields()}
               open={opened("computer")} onOpen={toggle("computer")} option={computerOption} class="ns-computer"
@@ -327,7 +359,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
           <div class="form-row">
             <label for="ns-new-project" classList={{ "ns-reserved": !s().newProjectVisible }}>New project</label>
             <Show when={s().newProjectVisible} fallback={<span class="ns-reserved-field" />}>
-              <input id="ns-new-project" class="field" maxLength={80} placeholder="Project name" value={s().newProjectName} disabled={!fields()}
+              <input id="ns-new-project" class="field" data-keys="text" maxLength={80} placeholder="Project name" value={s().newProjectName} disabled={!fields()}
                 onInput={(e) => act.setNewProjectName(e.currentTarget.value)} />
             </Show>
           </div>
@@ -335,10 +367,10 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
         <div class="form-row">
           <label>Source</label>
           <div class="ns-seg" role="group" aria-label="Source">
-            <button type="button" class="ns-segbtn" classList={{ on: !s().repository }} aria-pressed={!s().repository} disabled={!fields()} onClick={() => act.setSource(false)}>
+            <button type="button" class="ns-segbtn" data-keys="button" classList={{ on: !s().repository }} aria-pressed={!s().repository} disabled={!fields()} onClick={() => act.setSource(false)}>
               <Icon name="folder" size={14} />Working folder
             </button>
-            <button type="button" class="ns-segbtn" classList={{ on: s().repository }} aria-pressed={s().repository} disabled={!fields()} onClick={() => act.setSource(true)}>
+            <button type="button" class="ns-segbtn" data-keys="button" classList={{ on: s().repository }} aria-pressed={s().repository} disabled={!fields()} onClick={() => act.setSource(true)}>
               <Icon name="git-branch" size={14} />Git repository
             </button>
           </div>
@@ -347,7 +379,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
           <>
             <div class="form-row">
               <label for="ns-url">Repository</label>
-              <input id="ns-url" ref={url} class="field mono" maxLength={4096} placeholder="https://github.com/owner/repository.git"
+              <input id="ns-url" ref={url} class="field mono" data-keys="text" maxLength={4096} placeholder="https://github.com/owner/repository.git"
                 title="An SSH or HTTPS repository URL, on GitHub or another Git server." value={s().url} disabled={!fields() || !online()}
                 onInput={(e) => act.setUrl(e.currentTarget.value)} />
             </div>
@@ -355,10 +387,10 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
               <label for="ns-destination">Clone to</label>
               <div class="ns-src-detail">
                 <div class="row">
-                  <input id="ns-destination" class="field mono grow" maxLength={8192} value={s().destination} disabled={!fields() || !online()}
+                  <input id="ns-destination" class="field mono grow" data-keys="text" maxLength={8192} value={s().destination} disabled={!fields() || !online()}
                     title="The complete new checkout path. Edit its folder name or choose a parent folder with Browse."
                     onInput={(e) => act.setDestination(e.currentTarget.value)} />
-                  <button type="button" class="btn" disabled={!fields() || !online()} onClick={browseRepository}>Browse…</button>
+                  <button type="button" class="btn" data-keys="button" disabled={!fields() || !online()} onClick={browseRepository}>Browse…</button>
                 </div>
               </div>
             </div>
@@ -370,7 +402,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
               <Choice id="ns-folder" label="Working folder" keys={folderKeys()} selected={folder() ? folderKey(folder()!) : undefined} placeholder="Choose a folder…"
                 disabled={!fields()} open={opened("folder")} onOpen={toggle("folder")} option={folderOption} tip={(key) => folderOf(key)?.tooltip} class="grow"
                 onPick={(key) => act.chooseFolder(s().folders.findIndex((row) => folderKey(row) === key))} />
-              <button type="button" class="btn" disabled={!(form()?.browse_enabled ?? false)} onClick={browse}>Browse…</button>
+              <button type="button" class="btn" data-keys="button" disabled={!(form()?.browse_enabled ?? false)} onClick={browse}>Browse…</button>
             </div>
           </div>
           <div class="form-row top">
@@ -387,22 +419,22 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
           <div class="col ns-wt">
             <div class="row">
               <div class="ns-seg" role="group" aria-label="Worktree">
-                <button type="button" class="ns-segbtn" classList={{ on: !!form()?.automatic }} aria-pressed={!!form()?.automatic} disabled={!(form()?.auto_enabled ?? false)}
+                <button type="button" class="ns-segbtn" data-keys="button" classList={{ on: !!form()?.automatic }} aria-pressed={!!form()?.automatic} disabled={!(form()?.auto_enabled ?? false)}
                   title="Create a generated branch and worktree when you start the session." onClick={() => act.setAuto(true)}>
                   <Icon name="git-branch" size={14} />Auto
                 </button>
-                <button type="button" class="ns-segbtn" classList={{ on: !form()?.automatic }} aria-pressed={!form()?.automatic} disabled={!(form()?.none_enabled ?? true)}
+                <button type="button" class="ns-segbtn" data-keys="button" classList={{ on: !form()?.automatic }} aria-pressed={!form()?.automatic} disabled={!(form()?.none_enabled ?? true)}
                   title="Start directly in the working folder." onClick={() => act.setAuto(false)}>
                   <Icon name="folder" size={14} />None
                 </button>
               </div>
               <div class="ns-menu-anchor">
-                <button type="button" class="icon-btn" data-tip="Worktree options" aria-label="Worktree options" aria-haspopup="menu" aria-expanded={opened("worktree")}
-                  disabled={!(form()?.worktree_options_enabled ?? false)} onClick={() => props.setPopup(opened("worktree") ? undefined : "worktree")}>
+                <button type="button" class="icon-btn" data-keys="button" data-tip="Worktree options" aria-label="Worktree options" aria-haspopup="menu" aria-expanded={opened("worktree")}
+                  disabled={!(form()?.worktree_options_enabled ?? false)} onClick={toggleMenu}>
                   <Icon name="more" size={16} />
                 </button>
                 <Show when={opened("worktree")}>
-                  <div class="menu ns-menu" role="menu" ref={menu} onKeyDown={menuKey}>
+                  <div class="menu ns-menu" role="menu" tabindex="-1" ref={menu} onKeyDown={menuKey}>
                     <Show when={s().worktrees.chooseVisible}>
                       <button type="button" class="menu-item" role="menuitem" aria-disabled={!form()?.choose_existing_enabled} onClick={chooseExisting}>
                         <Icon name="git-branch" size={14} /><span>Choose existing…</span>
@@ -440,7 +472,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
             </ul>
             <div class="row ns-acc-status">
               <span class="grow ns-status">{s().accountStatus}</span>
-              <button type="button" class="btn small" aria-label="Refresh accounts" disabled={!s().refreshEnabled} onClick={() => act.refreshAccounts()}>
+              <button type="button" class="btn small" data-keys="button" aria-label="Refresh accounts" disabled={!s().refreshEnabled} onClick={() => act.refreshAccounts()}>
                 <Icon name="refresh" size={12} />Refresh
               </button>
             </div>
@@ -450,7 +482,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
         <Show when={s().modelVisible}>
           <div class="form-row">
             <label for="ns-model">Model</label>
-            <button type="button" id="ns-model" class="field ns-model-btn" aria-label="Model" aria-haspopup="dialog" aria-expanded={s().pickerOpen}
+            <button type="button" id="ns-model" class="field ns-model-btn" data-keys="button" aria-label="Model" aria-haspopup="dialog" aria-expanded={s().pickerOpen}
               title="Models OpenCode offers on this computer. Native default uses OpenCode's configuration." disabled={!s().modelEnabled}
               onClick={() => (s().pickerOpen ? act.closeModelPicker() : act.openModelPicker())}>
               <span class="ell">{s().modelButton}</span><Icon name="chevron-down" size={14} class="ns-choice-chevron" />
@@ -463,7 +495,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
             <div class="row ns-service">
               <span class="grow ns-status">{s().service.reason}</span>
               <Show when={s().service.offer}>
-                <button type="button" class="btn small" title={s().service.tooltip} disabled={!s().service.enabled} onClick={() => act.startOpenCode()}>{s().service.text}</button>
+                <button type="button" class="btn small" data-keys="button" title={s().service.tooltip} disabled={!s().service.enabled} onClick={() => act.startOpenCode()}>{s().service.text}</button>
               </Show>
             </div>
           </div>
@@ -471,7 +503,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
         <Show when={s().effortVisible}>
           <div class="form-row">
             <label for="ns-effort">Effort</label>
-            <select id="ns-effort" class="field ns-effort" aria-label="Effort" title="Variants of the selected model. Default uses the model's own setting."
+            <select id="ns-effort" class="field ns-effort" data-keys="select" aria-label="Effort" title="Variants of the selected model. Default uses the model's own setting."
               disabled={!fields()} value={s().effort} onChange={(e) => act.chooseEffort(e.currentTarget.value)}>
               <For each={s().efforts}>{(effort) => <option value={effort.value} selected={effort.value === s().effort}>{effort.label}</option>}</For>
             </select>
@@ -480,7 +512,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
 
         <div class="form-row">
           <label for="ns-name">Session name</label>
-          <input id="ns-name" class="field mono" value={s().name} disabled={!fields()} aria-invalid={!!form()?.name_problem}
+          <input id="ns-name" class="field mono" data-keys="text" value={s().name} disabled={!fields()} aria-invalid={!!form()?.name_problem}
             aria-describedby={form()?.name_problem ? "ns-name-problem" : undefined} onInput={(e) => act.setName(e.currentTarget.value)} />
         </div>
         <Show when={form()?.name_problem}>
@@ -489,13 +521,15 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
         <div class="form-row">
           <span />
           <label class="check" title={form()?.open_terminal_tooltip || undefined}>
-            <input type="checkbox" checked={s().openTerminal} disabled={!(form()?.open_terminal_enabled ?? false)} onChange={(e) => act.setOpenTerminal(e.currentTarget.checked)} />
+            <input type="checkbox" data-keys="check" checked={s().openTerminal} disabled={!(form()?.open_terminal_enabled ?? false)} onChange={(e) => act.setOpenTerminal(e.currentTarget.checked)} />
             Open terminal window
           </label>
         </div>
       </div>
+      {/* The error line, on its own line between the form and the buttons (264-265). */}
+      <div class="ns-error" role="status">{s().error}</div>
       <div class="dlg-foot">
-        <span class="ns-error grow" role="status">{s().error}</span>
+        <span class="spacer" />
         <Show when={s().noMachine}>
           <button type="button" class="btn" onClick={() => act.openMachines()}>Open Machines</button>
         </Show>

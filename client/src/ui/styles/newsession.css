@@ -86,7 +86,9 @@
   .ns-effort { justify-self: start; min-width: 160px; }
 
   /* The error line and the buttons. */
-  .ns-error { font-size: var(--fs-sm); color: var(--z-color-text-2); min-width: 0; white-space: pre-line; }
+  .ns-error { padding: 2px 16px 10px; font-size: var(--fs-sm); color: var(--z-color-text-2); white-space: pre-line; overflow-wrap: anywhere; }
+  .ns-error:empty { padding: 0; }
+  .menu.ns-menu:focus { outline: none; }
   .ns-start { min-width: 168px; }
 
   /* The local Windows-session warning. */

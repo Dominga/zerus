@@ -1153,13 +1153,16 @@ export function createNewSessionStore(deps: NewSessionDeps) {
   function folderLaunch(folder: LaunchFolder, exists?: boolean): { problem: string; shown: string; local: boolean } {
     const local = deps.cards()[""];
     const localHost = local?.host ?? "";
-    if (!local?.platform && buildStyle() === undefined) void ensureBuildStyle();
     const style = (machine: string) => of(local?.platform, !!machine && machine === localHost, buildStyle() ?? "posix");
     const env = { localHost, online: deps.online, style };
     return { problem: folderLaunchProblem(folder, env, exists), shown: native(folder.path, style(folder.machine)), local: !!localHost && folder.machine === localHost };
   }
 
-  /** Whether this computer's folder exists (`local_folder_exists`, a read); undefined for another computer's. */
+  /**
+   * Whether this computer's folder exists (`local_folder_exists`, a read);
+   * undefined for another computer's. It first asks the build style once, so
+   * `folderLaunch` follows this computer's style before its card reports one.
+   */
   async function folderExists(folder: LaunchFolder): Promise<boolean | undefined> {
     await ensureBuildStyle();
     if (!folderLaunch(folder).local) return undefined;

@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createResource, createSignal, onCleanup } from "solid-js";
+import { For, Show, createMemo, createResource, createSignal, onCleanup, untrack } from "solid-js";
 import { Icon } from "../lib/icons";
 import { MachineLabel } from "../components/MachineLabel";
 import type { Folder, Project } from "../../types";
@@ -7,6 +7,7 @@ import { projectsPage } from "../../store/projects";
 import { setMenu, type MenuEntry } from "../../store/ui";
 import { PROJECT_EDITING, WORKTREE_FLOWS } from "./reasons";
 import { folderExists, folderLaunch } from "../../store/newSession";
+import { machineCards } from "../../store/machines";
 import { folderButton, folderMenuEntry, newSessionInFolder } from "../sessions/newsession-view";
 import { copy } from "../../store/actions";
 import { nextSort, projectColor, showAskedProject, shownProjects, sortFolders, type Sort, type SortColumn } from "./projects-ui";
@@ -42,24 +43,33 @@ export function ProjectsScreen() {
   const projects = createMemo(() => shownProjects(view(), allSwarm()));
   const project = () => projects().find((p) => p.id === selectedProject()) ?? projects().find((p) => p.accessible);
   const folders = createMemo(() => sortFolders(project()?.folders ?? [], sort()));
-  onCleanup(() => setMenu(undefined));
+  let left = false;
+  onCleanup(() => { left = true; setMenu(undefined); });
   const choose = (p: Project) => { setSelectedProject(p.id); setSelectedFolder(0); };
   // ProjectsDialog.cpp:520-522: the Folders button's New session… follows the selected folder.
   const launchFolder = () => project()?.folders[selectedFolder()] ?? NO_FOLDER;
-  const [launchExists] = createResource(launchFolder, folderExists);
-  const launchButton = () => folderButton(folderLaunch(launchFolder(), launchExists.state === "ready" ? launchExists() : undefined), launchFolder().machine);
+  // Read again only for another folder or once this computer's identity arrives; the last answer shows meanwhile.
+  const launchPlace = () => `${launchFolder().machine}\n${launchFolder().path}\n${machineCards[""]?.host ?? ""}`;
+  const [launchExists] = createResource(launchPlace, () => folderExists(untrack(launchFolder)));
+  const launchButton = () => folderButton(folderLaunch(launchFolder(), launchExists.latest), launchFolder().machine);
   const launchSelected = () => { const p = project(), f = p?.folders[selectedFolder()]; if (p && f) void newSessionInFolder(p.id, f); };
   showAskedProject(projectToShow, () => setProjectToShow(undefined), view, choose);
 
+  let menuAsked = 0;
   const folderMenu = async (e: MouseEvent, index: number) => {
     e.preventDefault();
     setSelectedFolder(index);
     const { clientX: x, clientY: y } = e;
     const current = project();
+    const others = projects().filter((p) => p.accessible && p.id !== current?.id);
     const folder = current?.folders[index] ?? NO_FOLDER;
+    const asked = ++menuAsked;
     // ProjectsDialog.cpp:556-558, checked as the menu opens: this computer's folder must exist.
     const launch = folderMenuEntry(folderLaunch(folder, await folderExists(folder)));
-    const others = projects().filter((p) => p.accessible && p.id !== project()?.id);
+    // Opened for that row only: not once Projects was left, another row was chosen or a newer menu was asked.
+    const now = project()?.folders[index] ?? NO_FOLDER;
+    if (left || asked !== menuAsked || project()?.id !== current?.id || selectedFolder() !== index
+      || now.key !== folder.key || now.machine !== folder.machine || now.path !== folder.path) return;
     setMenu({ x, y, items: [
       { label: "New session…", icon: "plus", ...launch, action: () => { if (current) void newSessionInFolder(current.id, folder); } },
       disabled("Open folder", "folder-open", PROJECT_EDITING),

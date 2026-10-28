@@ -82,7 +82,7 @@ def reverse_reviewed_patch(name, source, fixture, fixture_sha):
 
 
 def reverse_fork_presentation(name, source):
-    """Remove only four reviewed fork presentation additions; keep policy pins.
+    """Remove only three reviewed cooperative presentation additions; keep policy pins.
 
     No question policy, verification writer or send admission is projected out.
     Requiring each exact replacement once makes drift/duplicate additions fail.
@@ -90,7 +90,6 @@ def reverse_fork_presentation(name, source):
     if name != "MainActivity.kt":
         return source
     edits = (
-        ('mutableStateOf(BuildConfig.DEFAULT_RELAY_URL)', 'mutableStateOf("https://relay.zerus.dev")'),
         ('    val cooperative = ConversationSource.cooperative(model.activity ?: session.raw)\n', ''),
         ('placeholder = if(cooperative) "Queue instruction" else "Message"', 'placeholder = "Message"'),
         ('if(cooperative) "Queue instruction for external agent" else "Send message"', '"Send message"'),
@@ -161,6 +160,13 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
                 projected = reverse_reviewed_patch(name, current,
                                                   WORKSPACE_UPDATES, WORKSPACE_UPDATES_SHA)
                 self.assertEqual(hashlib.sha256(projected.encode()).hexdigest(), digest)
+
+    def test_upstream_default_relay_is_pinned_and_not_projected_out(self):
+        source = (MAIN / "MainActivity.kt").read_text()
+        baseline = 'mutableStateOf("https://relay.zerus.dev")'
+        self.assertEqual(source.count(baseline), 1)
+        self.assertFalse(original_source("MainActivity.kt", source.replace(baseline, 'mutableStateOf("")', 1)))
+        self.assertFalse(original_source("MainActivity.kt", source.replace(baseline, baseline + baseline, 1)))
 
     def test_fork_projection_is_exact_and_does_not_hide_question_policy_changes(self):
         source=(MAIN / "MainActivity.kt").read_text()

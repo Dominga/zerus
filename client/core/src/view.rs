@@ -43,12 +43,26 @@ pub struct ViewRow {
     pub shared_notifications: bool,
     /// The revision of valid preferences.
     pub notification_revision: Option<i64>,
+    /// Qt's `notificationPreferencesError`: a listing named the confirmed
+    /// revision with other preferences (`FleetState.cpp:112-117`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notification_error: Option<String>,
     /// `created`, truncated to whole seconds.
     pub created: i64,
     /// The compact JSON the attention marks compare (`attentionFingerprint`).
     pub attention_fingerprint: String,
     /// The session needs the person's action (approval, input, error, recovery).
     pub needs_action: bool,
+    /// `SessionInfo::needsAttention` (`tray/src/HgsClient.h:107-108`) from
+    /// this listing's facts alone, before this device's marks: a request not
+    /// acknowledged by the host, or a finished unread reply. Children do not
+    /// count (Qt's tray and machine cards); `store/marks.ts` and the menu
+    /// bar's overlay apply the marks on top ([`attention_needed`]).
+    pub needs_attention: bool,
+    /// A subagent asks while the session runs (`SessionPresentation::needsAttention`,
+    /// `SessionPresentation.h:283-291`), before an acknowledgement: what
+    /// Qt's window adds to `needs_attention` for its lists and counts.
+    pub child_attention: bool,
     /// `status` and `caption` with the attention acknowledged.
     pub acknowledged_status: String,
     pub acknowledged_caption: String,
@@ -917,6 +931,20 @@ fn simplified(text: &str) -> String {
     out
 }
 
+/// `SessionInfo::needsAttention` (`tray/src/HgsClient.h:107-108`): a request
+/// not acknowledged, or, unless archived, a finished unread reply
+/// (`visibleUnreadReply`) or a Review later mark. The one rule the view row,
+/// the menu bar's overlay and `store/marks.ts` apply.
+pub fn attention_needed(
+    needs_action: bool,
+    acknowledged: bool,
+    archived: bool,
+    unread: bool,
+    review_later: bool,
+) -> bool {
+    (needs_action && !acknowledged) || (!archived && (unread || review_later))
+}
+
 fn positive_time(value: Option<f64>) -> Option<f64> {
     value.filter(|at| at.is_finite() && *at > 0.0)
 }
@@ -1051,9 +1079,18 @@ pub fn row(value: &Value) -> ViewRow {
         shared_notifications: notifications.is_some(),
         notification_revision: notifications
             .and_then(|preferences| notifications::revision(preferences.get("revision"))),
+        notification_error: None,
         created: number(value, "created").unwrap_or(0.0) as i64,
         attention_fingerprint: session.attention_fingerprint(),
         needs_action: session.needs_action(),
+        needs_attention: attention_needed(
+            session.needs_action(),
+            session.attention_acknowledged(),
+            session.state == "archived",
+            session.unread_reply() && !session.reply_in_progress(),
+            false,
+        ),
+        child_attention: session.current_activity() && session.child_needs_input(),
         acknowledged_status: acknowledged_status.to_owned(),
         acknowledged_caption,
         unread_candidate: session.state != "archived"
@@ -1282,6 +1319,28 @@ mod tests {
         );
         let older = row(&json!({"name": "x"})).notify;
         assert!(!older.optional_reported);
+    }
+
+    #[test]
+    fn needs_attention_is_qts_session_rule_and_children_are_apart() {
+        let asking = json!({"name": "codex/p/a", "run_id": "r", "conversation_id": "c", "tracked": true,
+            "state": "running", "activity": "idle", "phase": "idle", "subagent_source": "native",
+            "subagents": {"w": {"state": "approval"}}});
+        let running = row(&asking);
+        assert!(
+            running.child_attention && !running.needs_attention,
+            "a child asking is the window's, not Qt's tray's"
+        );
+        let mut paused = asking.clone();
+        paused["state"] = json!("paused");
+        assert!(!row(&paused).child_attention, "only while the session runs");
+        let mut error = asking.clone();
+        error["phase"] = json!("error");
+        assert!(
+            row(&error).needs_attention,
+            "an error without recovery needs attention"
+        );
+        assert_eq!(row(&error).status, "error", "while its status stays");
     }
 
     #[test]

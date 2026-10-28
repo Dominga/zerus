@@ -5,6 +5,7 @@ import { CAP, attentionKey, byCodePoint, createMarks, fallbackKey, replyKey, typ
 import { snapshotOf } from "../ui/sessions/actions-ui";
 import { emptyBatch, type Batch, type ReadMark, type RowOut, type ViewRow } from "../types";
 import overlayFixture from "../../core/tests/fixtures/marks-overlay.json";
+import { attentionNeeded, needsAttention } from "./attention";
 
 // The marks store against Qt's FleetState (updateUnread, markSessionRead,
 // setReviewLater, unreadReplies, markRepliesRead, legacyReadMarks), with a
@@ -163,9 +164,20 @@ describe("overlay", () => {
   });
 });
 
+describe("notification conflicts", () => {
+  it("shows the core's kept preferences over a conflicting listing as a conflict", async () => {
+    const a = await setup([rowOut({ muted: true, shared_notifications: true, notification_revision: 2, notification_error: "Conflicting shared notification preferences. Refresh the session." })]);
+    expect(a.row()).toMatchObject({ muted: true, notificationConflict: true });
+    a.receive(batchOf({ upserts: [rowOut({ muted: true, shared_notifications: true, notification_revision: 2 })] }));
+    expect(a.row().notificationConflict).toBe(false);
+  });
+});
+
 describe("the shared overlay fixture", () => {
   // client/core's menu-bar overlay (menubar::read_state) reads the same cases:
-  // the window and the menu bar count a session alike.
+  // both apply this device's marks alike, and count with Qt's rules. The menu
+  // bar counts SessionInfo::needsAttention (`counts`, `counts_stale`); the
+  // window adds a subagent that asks, as Qt's SessionPresentation does (`window`).
   interface OverlayCase {
     case: string;
     computer: string;
@@ -173,7 +185,10 @@ describe("the shared overlay fixture", () => {
     marks: Record<string, Mark>;
     replies: Record<string, string>;
     pending: ReadMark[];
-    expect: { review_later: boolean; unread_reply: boolean; unread: boolean; acknowledged: boolean };
+    expect: {
+      review_later: boolean; unread_reply: boolean; unread: boolean; acknowledged: boolean;
+      needs_attention: boolean; counts: boolean; counts_stale: boolean; window: boolean;
+    };
   }
   const cases = (overlayFixture as unknown as { cases: OverlayCase[] }).cases;
 
@@ -184,7 +199,14 @@ describe("the shared overlay fixture", () => {
     const s = await setup([{ computer: c.computer, key: "k", row: c.view as ViewRow }], fakePort({ marks: c.marks, replies: c.replies }, c.pending), memoryStorage([c.computer]));
     const row = s.row("k", c.computer);
     expect(s.marks.readState(row)).toEqual({ reviewLater: c.expect.review_later, unreadReply: c.expect.unread_reply, unread: c.expect.unread, ack: c.expect.acknowledged });
-    expect({ reviewLater: row.reviewLater, unread: row.unread }).toEqual({ reviewLater: c.expect.review_later, unread: c.expect.unread });
+    expect({ reviewLater: row.reviewLater, unread: row.unread, attentionNeeded: attentionNeeded(row) })
+      .toEqual({ reviewLater: c.expect.review_later, unread: c.expect.unread, attentionNeeded: c.expect.needs_attention });
+    // FleetState::attentionSessions, as menubar::Desk::attention counts a row.
+    const counts = (current: boolean) => !row.muted && (!!row.reviewLater || (current && attentionNeeded(row)));
+    expect({ counts: counts(true), counts_stale: counts(false) }).toEqual({ counts: c.expect.counts, counts_stale: c.expect.counts_stale });
+    // The window: online, and on an unreachable computer only Review later.
+    expect(needsAttention(row)).toBe(c.expect.window);
+    expect(needsAttention({ ...row, status: "offline" })).toBe(c.expect.review_later);
   });
 });
 

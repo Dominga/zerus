@@ -53,11 +53,11 @@ impl Computer {
 }
 
 /// `SessionInfo::needsAttention` (`tray/src/HgsClient.h:107-108`) of a row
-/// the marks overlay ([`overlay`]) has applied this device's marks to:
-/// `unread` is `visibleUnreadReply`.
+/// the marks overlay ([`overlay`]) has applied this device's marks to: the
+/// row's `needs_attention`, which the overlay recomputes with
+/// [`attention_needed`](crate::view::attention_needed).
 pub fn needs_attention(row: &ViewRow) -> bool {
-    (row.notify.needs_action && !row.notify.acknowledged)
-        || (row.state != "archived" && (row.unread || row.notify.review_later))
+    row.needs_attention
 }
 
 /// This device's read state, as `FleetState` keeps it: the attention marks
@@ -183,12 +183,19 @@ pub fn read_state(computer: &ComputerId, row: &ViewRow, device: &DeviceMarks) ->
 }
 
 /// Applies [`read_state`] to the fields the counts and the attention
-/// notifications read: `unread`, `notify.unread_reply`,
+/// notifications read: `unread`, `needs_attention`, `notify.unread_reply`,
 /// `notify.acknowledged` and `notify.review_later`. It reads none of them,
 /// so it can be applied again.
 pub fn overlay(computer: &ComputerId, row: &mut ViewRow, device: &DeviceMarks) {
     let state = read_state(computer, row, device);
     row.unread = state.unread;
+    row.needs_attention = crate::view::attention_needed(
+        row.notify.needs_action,
+        state.acknowledged,
+        row.state == "archived",
+        state.unread,
+        state.review_later,
+    );
     row.notify.unread_reply = state.unread_reply;
     row.notify.acknowledged = state.acknowledged;
     row.notify.review_later = state.review_later;
@@ -767,13 +774,16 @@ mod tests {
         "read_attention_signature",
         "attention_fingerprint",
         "needs_action",
+        "needs_attention",
+        "child_attention",
         "unread_candidate",
         "unread",
         "muted",
     ];
 
     /// The cases `store/marks.ts`' tests check its overlay against
-    /// (`tests/fixtures/marks-overlay.json`): the same rows, marks and answers.
+    /// (`tests/fixtures/marks-overlay.json`): the same rows, marks and
+    /// answers. The window's `window` rule is the frontend's alone.
     #[test]
     fn the_overlay_gives_the_shared_fixtures_answers() {
         let fixture: serde_json::Value =
@@ -823,6 +833,11 @@ mod tests {
                 status: ComputerStatus::Live,
             });
             assert_eq!(
+                needs_attention(&desk.computers()[&computer].rows["k"]),
+                expect("needs_attention"),
+                "{name}: needs attention"
+            );
+            assert_eq!(
                 desk.attention(),
                 usize::from(expect("counts")),
                 "{name}: counts"
@@ -865,10 +880,10 @@ mod tests {
         );
         listed(&mut desk, "", vec![("a", older_reply("claude/p/a"))]);
         assert_eq!(desk.attention(), 1, "nothing read on this device yet");
+        let unread = &desk.computers()[&ComputerId::local()].rows["a"];
         assert!(
-            desk.computers()[&ComputerId::local()].rows["a"]
-                .notify
-                .unread_reply
+            unread.notify.unread_reply && unread.unread,
+            "the overlay sets both"
         );
         let key = marks::reply_key("", "claude", "conv-1");
         let read = DeviceMarks::new(
@@ -932,6 +947,33 @@ mod tests {
             2,
             "without marks both replies are unread again"
         );
+    }
+
+    #[test]
+    fn the_desk_rows_carry_the_local_acknowledgement_for_the_tracker() {
+        let mut row = ViewRow {
+            conversation_id: Some("conv-1".to_owned()),
+            agent: "claude".to_owned(),
+            attention_fingerprint: "fp".to_owned(),
+            ..asking("claude/p/a")
+        };
+        row.notify.acknowledged = false;
+        let mut desk = Desk::default();
+        desk.set_marks(DeviceMarks::new(
+            BTreeMap::from([(
+                marks::reply_key("", "claude", "conv-1"),
+                Mark {
+                    review: false,
+                    acknowledged: "fp".to_owned(),
+                },
+            )]),
+            BTreeMap::new(),
+            Vec::new(),
+        ));
+        listed(&mut desk, "", vec![("a", row)]);
+        let shown = &desk.computers()[&ComputerId::local()].rows["a"];
+        assert!(shown.notify.acknowledged && !shown.needs_attention);
+        assert_eq!(desk.attention(), 0);
     }
 
     #[test]

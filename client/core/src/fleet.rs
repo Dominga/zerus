@@ -197,6 +197,20 @@ impl Fleet {
         handle.follow_tasks(project)
     }
 
+    /// Applies the preferences the host confirmed for a Mute or Unmute to the
+    /// session's row on `target.computer` at once; the window and the menu
+    /// bar get the changed row as any change. False for a computer without
+    /// a stream.
+    pub fn apply_notifications(
+        &self,
+        target: &crate::actions::Target,
+        preferences: serde_json::Value,
+    ) -> bool {
+        guard(&self.shared.streams)
+            .get(&ComputerId(target.computer.clone()))
+            .is_some_and(|handle| handle.apply_notifications(target.clone(), preferences))
+    }
+
     /// Stops following a project's task list; false when it was not followed.
     pub fn unfollow_tasks(&self, computer: &ComputerId, project: &str) -> bool {
         guard(&self.shared.streams)

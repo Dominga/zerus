@@ -548,10 +548,13 @@ pub async fn dispatch(state: &Actions, target: Target, action: Action) -> Result
 /// Changes the shared notification preferences of a session (Mute and Unmute)
 /// and returns the host's confirmed `preferences`. One change per session at a
 /// time, in its own lane (`Err("busy")` otherwise). The core probes the local
-/// `hgs --help` first.
+/// `hgs --help` first. The confirmed preferences go to the session's row at
+/// once (`FleetState::applyNotificationPreferences`), so the menu bar's
+/// count and the attention notifications follow before the next listing.
 #[tauri::command]
 pub async fn set_notifications(
     state: State<'_, Actions>,
+    app: State<'_, crate::commands::AppState>,
     target: Target,
     muted: bool,
     expected_revision: Option<i64>,
@@ -563,11 +566,14 @@ pub async fn set_notifications(
         return Err("busy".into());
     };
     let hgs = default_hgs();
-    tauri::async_runtime::spawn_blocking(move || {
-        change_notifications(&hgs, &target, muted, expected_revision)
+    let call_target = target.clone();
+    let confirmed = tauri::async_runtime::spawn_blocking(move || {
+        change_notifications(&hgs, &call_target, muted, expected_revision)
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())??;
+    app.apply_notifications(&target, &confirmed);
+    Ok(confirmed)
 }
 
 /// The session's read-only details, None when it cannot be read. Not guarded:

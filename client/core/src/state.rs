@@ -231,15 +231,22 @@ impl CatalogState {
             }
             Body::Delta(delta) if delta.topic == topic::CATALOG => {
                 let machine = self.machine(computer);
-                for item in &delta.upsert {
-                    let row = project(&item.row, &machine);
+                let mut upserts: Vec<(&String, ViewRow)> = delta
+                    .upsert
+                    .iter()
+                    .map(|item| (&item.key, project(&item.row, &machine)))
+                    .collect();
+                // The rows before this frame are Qt's `before`, read once per frame.
+                Before::index(&self.rows, upserts.iter().map(|(_, row)| row))
+                    .keep(upserts.iter_mut().map(|(_, row)| row));
+                for (key, row) in upserts {
                     if let Some(staged) = self.staged.as_mut() {
-                        staged.insert(item.key.clone(), row.clone());
+                        staged.insert(key.clone(), row.clone());
                     }
-                    self.rows.insert(item.key.clone(), row.clone());
+                    self.rows.insert(key.clone(), row.clone());
                     changes.push(Change::Upsert {
                         computer: computer.clone(),
-                        key: item.key.clone(),
+                        key: key.clone(),
                         row,
                     });
                 }
@@ -363,8 +370,9 @@ impl CatalogState {
     fn replace_rows(
         &mut self,
         computer: &ComputerId,
-        rows: BTreeMap<String, ViewRow>,
+        mut rows: BTreeMap<String, ViewRow>,
     ) -> Vec<Change> {
+        Before::index(&self.rows, rows.values()).keep(rows.values_mut());
         self.rows = rows;
         let mut changes = vec![Change::Replace {
             computer: computer.clone(),
@@ -380,6 +388,61 @@ impl CatalogState {
                 .retain(computer, |key| rows.contains_key(key)),
         );
         changes
+    }
+
+    /// `FleetState::applyNotificationPreferences` (`FleetState.cpp:203-215`):
+    /// the preferences the host confirmed for a Mute or Unmute, applied to
+    /// the session's row at once, so the window and the menu bar follow
+    /// before the next listing, which the keep step then applies in full.
+    /// Refused (no change) unless the listed row of that name, conversation
+    /// and run is not archived and shares notifications, and the preferences
+    /// are valid and neither older nor a different value of the same
+    /// revision.
+    pub fn apply_notification_preferences(
+        &mut self,
+        computer: &ComputerId,
+        target: &crate::actions::Target,
+        preferences: &Value,
+    ) -> Vec<Change> {
+        let Some(confirmed) = preferences.as_object() else {
+            return Vec::new();
+        };
+        let found = self.rows.iter_mut().find(|(_, row)| {
+            row.name == target.name
+                && row.conversation_id.as_deref().unwrap_or("") == target.conversation_id
+                && row.state != "archived"
+        });
+        let Some((key, row)) = found else {
+            return Vec::new();
+        };
+        let run = row.run_id.as_deref().unwrap_or("");
+        if !row.shared_notifications
+            || run.is_empty()
+            || run != target.run_id
+            || !view::preferences_valid(confirmed, &target.conversation_id)
+        {
+            return Vec::new();
+        }
+        let incoming = view::preferences_revision(confirmed.get("revision")).unwrap_or(-1);
+        let current = row.notification_revision.unwrap_or(-1);
+        let applied = view::Preferences {
+            muted: confirmed.get("muted") == Some(&Value::Bool(true)),
+            suppressed: confirmed.get("suppressed").cloned().unwrap_or(Value::Null),
+        };
+        if incoming < current
+            || (incoming == current && row.notify.preferences.as_ref() != Some(&applied))
+        {
+            return Vec::new();
+        }
+        row.muted = applied.muted;
+        row.notification_revision = Some(incoming);
+        row.notify.preferences = Some(applied);
+        row.notification_error = None;
+        vec![Change::Upsert {
+            computer: computer.clone(),
+            key: key.clone(),
+            row: row.clone(),
+        }]
     }
 
     /// Keeps a `catalog.meta` value; a changed machine card is a change.
@@ -699,6 +762,194 @@ impl CatalogState {
     }
 }
 
+/// Qt's text when a listing names the confirmed revision with other
+/// preferences (`FleetState.cpp:116`).
+pub const NOTIFICATION_CONFLICT: &str =
+    "Conflicting shared notification preferences. Refresh the session.";
+
+/// The previous rows a listing's rows keep values from, as `FleetState`'s
+/// `setLocal` and `setPeer` read `before`: indexed once per frame, and only
+/// under the keys the incoming rows look up.
+struct Before<'a> {
+    /// The host-confirmed preferences by `cmd`, then conversation: the
+    /// highest revision (`keepNotificationPreferences`, `FleetState.cpp:91-119`).
+    preferences: Index<'a>,
+    /// The first known optional questions by name, then archive and
+    /// conversation (`keepOptionalQuestions`, `FleetState.cpp:73-89`).
+    questions: HashMap<String, Vec<Question<'a>>>,
+}
+
+/// One looked-up session of the questions' index: its archive and
+/// conversation, and the first previous row with a known count.
+struct Question<'a> {
+    archive: String,
+    conversation: String,
+    row: Option<&'a ViewRow>,
+}
+
+/// Rows by two string keys, looked up without allocating; a key the
+/// incoming rows look up starts with no row.
+type Index<'a> = HashMap<String, HashMap<String, Option<&'a ViewRow>>>;
+
+/// Qt's `archiveId`: only an archived row has one (`HgsClient.cpp`).
+fn archive(row: &ViewRow) -> &str {
+    if row.state == "archived" {
+        row.archive_id.as_deref().unwrap_or("")
+    } else {
+        ""
+    }
+}
+
+fn conversation(row: &ViewRow) -> &str {
+    row.conversation_id.as_deref().unwrap_or("")
+}
+
+fn unknown_questions(row: &ViewRow) -> bool {
+    row.notify.optional_reported && row.notify.optional_count < 0
+}
+
+fn slot<'i, 'a>(
+    index: &'i mut Index<'a>,
+    first: &str,
+    second: &str,
+) -> Option<&'i mut Option<&'a ViewRow>> {
+    index.get_mut(first)?.get_mut(second)
+}
+
+fn found<'a>(index: &Index<'a>, first: &str, second: &str) -> Option<&'a ViewRow> {
+    *index.get(first)?.get(second)?
+}
+
+impl<'a> Before<'a> {
+    /// Only the keys the incoming rows look up are indexed, so a delta of a
+    /// few rows reads the previous rows once without building a large map.
+    fn index<'n>(
+        previous: &'a BTreeMap<String, ViewRow>,
+        incoming: impl Iterator<Item = &'n ViewRow>,
+    ) -> Self {
+        let mut before = Self {
+            preferences: HashMap::new(),
+            questions: HashMap::new(),
+        };
+        for row in incoming {
+            if !conversation(row).is_empty() {
+                before
+                    .preferences
+                    .entry(row.notify.cmd.clone())
+                    .or_default()
+                    .insert(conversation(row).to_owned(), None);
+            }
+            if unknown_questions(row) {
+                before
+                    .questions
+                    .entry(row.name.clone())
+                    .or_default()
+                    .push(Question {
+                        archive: archive(row).to_owned(),
+                        conversation: conversation(row).to_owned(),
+                        row: None,
+                    });
+            }
+        }
+        if before.preferences.is_empty() && before.questions.is_empty() {
+            return before;
+        }
+        for old in previous.values() {
+            if old.notify.preferences.is_some() {
+                if let Some(kept) =
+                    slot(&mut before.preferences, &old.notify.cmd, conversation(old))
+                {
+                    let newer = kept.is_none_or(|kept| {
+                        kept.notification_revision.unwrap_or(-1)
+                            < old.notification_revision.unwrap_or(-1)
+                    });
+                    if newer {
+                        *kept = Some(old);
+                    }
+                }
+            }
+            if old.notify.optional_count >= 0 {
+                let same = |question: &&mut Question| {
+                    question.archive == archive(old) && question.conversation == conversation(old)
+                };
+                for question in before
+                    .questions
+                    .get_mut(&old.name)
+                    .into_iter()
+                    .flatten()
+                    .filter(same)
+                {
+                    question.row.get_or_insert(old);
+                }
+            }
+        }
+        before
+    }
+
+    /// Applies both keep steps to the incoming rows.
+    fn keep<'r>(&self, rows: impl Iterator<Item = &'r mut ViewRow>) {
+        if self.preferences.is_empty() && self.questions.is_empty() {
+            return;
+        }
+        for row in rows {
+            self.keep_questions(row);
+            self.keep_preferences(row);
+        }
+    }
+
+    /// A null count while the host's question index is incomplete keeps the
+    /// last count of the same session and conversation, whatever its state;
+    /// another conversation starts unknown.
+    fn keep_questions(&self, row: &mut ViewRow) {
+        if !unknown_questions(row) {
+            return;
+        }
+        let old = self
+            .questions
+            .get(&row.name)
+            .into_iter()
+            .flatten()
+            .find_map(|question| {
+                (question.archive == archive(row) && question.conversation == conversation(row))
+                    .then_some(question.row)
+                    .flatten()
+            });
+        if let Some(old) = old {
+            row.notify.optional_count = old.notify.optional_count;
+            row.notify.optional_ids.clone_from(&old.notify.optional_ids);
+        }
+    }
+
+    /// A listing without shared notifications (a downgrade, or unknown)
+    /// keeps the last confirmed preferences for display and suppression,
+    /// with `shared_notifications` still false; an older revision keeps the
+    /// confirmed one; the same revision with other preferences keeps it too
+    /// and is Qt's conflict.
+    fn keep_preferences(&self, row: &mut ViewRow) {
+        if conversation(row).is_empty() {
+            return;
+        }
+        let Some(old) = found(&self.preferences, &row.notify.cmd, conversation(row)) else {
+            return;
+        };
+        if row.shared_notifications {
+            let previous = old.notification_revision.unwrap_or(-1);
+            let incoming = row.notification_revision.unwrap_or(-1);
+            if incoming > previous
+                || (incoming == previous && row.notify.preferences == old.notify.preferences)
+            {
+                return;
+            }
+            if incoming == previous {
+                row.notification_error = Some(NOTIFICATION_CONFLICT.to_owned());
+            }
+        }
+        row.notify.preferences.clone_from(&old.notify.preferences);
+        row.muted = old.muted;
+        row.notification_revision = old.notification_revision;
+    }
+}
+
 fn project(row: &Value, machine: &str) -> ViewRow {
     let mut view = view::row(row);
     view.machine = machine.to_owned();
@@ -741,6 +992,536 @@ mod tests {
 
     fn keys(rows: &[(String, ViewRow)]) -> Vec<&str> {
         rows.iter().map(|(key, _)| key.as_str()).collect()
+    }
+
+    fn snapshot(seq: u64, rows: &[(&str, Value)]) -> Frame {
+        let items: Vec<Value> = rows
+            .iter()
+            .map(|(key, row)| json!({"key": key, "row": row}))
+            .collect();
+        frame(
+            json!({"v": 1, "seq": seq, "t": "snapshot", "topic": "catalog",
+            "items": items, "page": 0, "last": true, "cursor": seq}),
+        )
+    }
+
+    fn upsert(seq: u64, key: &str, row: Value) -> Frame {
+        frame(json!({"v": 1, "seq": seq, "t": "delta", "topic": "catalog",
+            "upsert": [{"key": key, "row": row}], "cursor": seq}))
+    }
+
+    fn preferences(muted: bool, revision: i64, main: Value) -> Value {
+        json!({"conversation_id": "conversation", "muted": muted, "revision": revision, "suppressed": {
+            "reply_id": null, "attention_signature": null, "optional_question_ids": [],
+            "main_attention": main, "child_attention": {}}})
+    }
+
+    /// A Codex session asking for approval, as `hgs watch` lists it.
+    fn asking_row(run: &str, attention: &str, preferences: Option<Value>) -> Value {
+        let mut row = json!({"name": "codex/project/session", "cmd": "codex", "run_id": run,
+            "conversation_id": "conversation", "created": 10, "tracked": true, "state": "running",
+            "process_state": "running", "activity": "waiting", "phase": "approval",
+            "attention_id": attention, "attention_started": 10});
+        if let Some(preferences) = preferences {
+            row["notification_preferences"] = preferences;
+        }
+        row
+    }
+
+    fn row_of<'a>(changes: &'a [Change], key: &str) -> &'a ViewRow {
+        changes
+            .iter()
+            .find_map(|change| match change {
+                Change::Upsert {
+                    key: found, row, ..
+                } if found == key => Some(row),
+                Change::Replace { rows, .. } => rows
+                    .iter()
+                    .find(|(found, _)| found == key)
+                    .map(|(_, row)| row),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no row {key} in {changes:?}"))
+    }
+
+    fn observe(
+        tracker: &mut crate::attention::Tracker,
+        state: &CatalogState,
+        now: i64,
+    ) -> crate::attention::Changes {
+        let mut next = 0;
+        tracker.observe(
+            &crate::attention::Host {
+                alias: "peer",
+                label: "peer",
+                ok: true,
+                rows: state.rows(),
+            },
+            now,
+            false,
+            &mut || {
+                next += 1;
+                format!("notice-{now}-{next}")
+            },
+        )
+    }
+
+    #[test]
+    fn a_downgraded_listing_keeps_the_confirmed_suppression() {
+        // sharedSuppressionSurvivesCapabilityDowngrade
+        let peer = ComputerId::from("peer");
+        let main = json!({"run_id": "run", "phase": "approval", "request_id": "main-old", "started_at": 10});
+        let confirmed = preferences(false, 2, main);
+        let mut state = CatalogState::new();
+        let mut tracker = crate::attention::Tracker::new(Map::new());
+        state.apply(
+            &peer,
+            &snapshot(
+                1,
+                &[(
+                    "run:run",
+                    asking_row("run", "main-old", Some(confirmed.clone())),
+                )],
+            ),
+        );
+        assert!(
+            observe(&mut tracker, &state, 100).raised.is_empty(),
+            "suppressed"
+        );
+        let changes = state.apply(
+            &peer,
+            &snapshot(2, &[("run:run", asking_row("run", "main-old", None))]),
+        );
+        let kept = row_of(&changes, "run:run");
+        assert!(
+            !kept.shared_notifications,
+            "no command authority without the capability"
+        );
+        assert!(!kept.muted);
+        assert_eq!(kept.notification_revision, Some(2));
+        assert_eq!(
+            kept.notify
+                .preferences
+                .as_ref()
+                .map(|p| p.suppressed.clone()),
+            Some(confirmed["suppressed"].clone())
+        );
+        assert!(
+            observe(&mut tracker, &state, 101).raised.is_empty(),
+            "the baseline survives the downgrade"
+        );
+        state.apply(
+            &peer,
+            &upsert(3, "run:run", asking_row("run", "main-old", None)),
+        );
+        assert!(
+            observe(&mut tracker, &state, 102).raised.is_empty(),
+            "also across a delta"
+        );
+        state.apply(
+            &peer,
+            &upsert(4, "run:run", asking_row("run", "main-new", None)),
+        );
+        assert_eq!(
+            observe(&mut tracker, &state, 103).raised.len(),
+            1,
+            "a newer request notifies"
+        );
+    }
+
+    #[test]
+    fn a_listing_older_than_a_confirmed_write_keeps_the_write() {
+        let peer = ComputerId::from("peer");
+        let mut state = CatalogState::new();
+        state.apply(
+            &peer,
+            &snapshot(
+                1,
+                &[(
+                    "run:run",
+                    asking_row("run", "a", Some(preferences(false, 2, Value::Null))),
+                )],
+            ),
+        );
+        let target = crate::actions::Target {
+            computer: "peer".into(),
+            name: "codex/project/session".into(),
+            run_id: "run".into(),
+            conversation_id: "conversation".into(),
+        };
+        let muted = preferences(true, 3, Value::Null);
+        let applied = state.apply_notification_preferences(&peer, &target, &muted);
+        let row = row_of(&applied, "run:run");
+        assert!(
+            row.muted && row.notification_revision == Some(3),
+            "applied at once"
+        );
+        // A poll started before the write still lists revision 2.
+        let older = state.apply(
+            &peer,
+            &upsert(
+                2,
+                "run:run",
+                asking_row("run", "a", Some(preferences(false, 2, Value::Null))),
+            ),
+        );
+        let kept = row_of(&older, "run:run");
+        assert!(
+            kept.muted
+                && kept.notification_revision == Some(3)
+                && kept.notification_error.is_none()
+        );
+        let resumed = state.apply(
+            &peer,
+            &snapshot(
+                3,
+                &[(
+                    "run:next",
+                    asking_row("next", "a", Some(preferences(false, 2, Value::Null))),
+                )],
+            ),
+        );
+        assert!(
+            row_of(&resumed, "run:next").muted,
+            "by conversation, across a resume"
+        );
+        let newer = state.apply(
+            &peer,
+            &upsert(
+                4,
+                "run:next",
+                asking_row("next", "a", Some(preferences(false, 4, Value::Null))),
+            ),
+        );
+        assert!(!row_of(&newer, "run:next").muted, "a newer revision wins");
+    }
+
+    #[test]
+    fn the_same_revision_with_other_preferences_is_a_conflict() {
+        let peer = ComputerId::from("peer");
+        let mut state = CatalogState::new();
+        state.apply(
+            &peer,
+            &snapshot(
+                1,
+                &[(
+                    "run:run",
+                    asking_row("run", "a", Some(preferences(true, 2, Value::Null))),
+                )],
+            ),
+        );
+        let changes = state.apply(
+            &peer,
+            &upsert(
+                2,
+                "run:run",
+                asking_row("run", "a", Some(preferences(false, 2, Value::Null))),
+            ),
+        );
+        let row = row_of(&changes, "run:run");
+        assert!(row.muted, "the confirmed value stays");
+        assert_eq!(
+            row.notification_error.as_deref(),
+            Some(NOTIFICATION_CONFLICT)
+        );
+        let same = state.apply(
+            &peer,
+            &upsert(
+                3,
+                "run:run",
+                asking_row("run", "a", Some(preferences(true, 2, Value::Null))),
+            ),
+        );
+        assert_eq!(
+            row_of(&same, "run:run").notification_error,
+            None,
+            "an agreeing listing clears it"
+        );
+        // Nothing was confirmed for another conversation.
+        let mut other = asking_row("other", "a", None);
+        other["conversation_id"] = json!("elsewhere");
+        let changes = state.apply(&peer, &upsert(4, "run:other", other));
+        assert!(row_of(&changes, "run:other").notify.preferences.is_none());
+    }
+
+    #[test]
+    fn a_confirmed_write_needs_the_listed_run_and_a_newer_or_equal_value() {
+        let peer = ComputerId::from("peer");
+        let mut state = CatalogState::new();
+        state.apply(
+            &peer,
+            &snapshot(
+                1,
+                &[(
+                    "run:run",
+                    asking_row("run", "a", Some(preferences(false, 2, Value::Null))),
+                )],
+            ),
+        );
+        let target = |run: &str| crate::actions::Target {
+            computer: "peer".into(),
+            name: "codex/project/session".into(),
+            run_id: run.into(),
+            conversation_id: "conversation".into(),
+        };
+        let muted = preferences(true, 3, Value::Null);
+        assert!(
+            state
+                .apply_notification_preferences(&peer, &target("old"), &muted)
+                .is_empty(),
+            "another run"
+        );
+        assert!(
+            state
+                .apply_notification_preferences(
+                    &peer,
+                    &target("run"),
+                    &preferences(true, 1, Value::Null)
+                )
+                .is_empty(),
+            "older"
+        );
+        assert!(
+            state
+                .apply_notification_preferences(
+                    &peer,
+                    &target("run"),
+                    &preferences(true, 2, Value::Null)
+                )
+                .is_empty(),
+            "same revision, other value"
+        );
+        assert!(
+            !state
+                .apply_notification_preferences(
+                    &peer,
+                    &target("run"),
+                    &preferences(false, 2, Value::Null)
+                )
+                .is_empty(),
+            "same value again"
+        );
+        let mut invalid = muted.clone();
+        invalid["conversation_id"] = json!("elsewhere");
+        assert!(
+            state
+                .apply_notification_preferences(&peer, &target("run"), &invalid)
+                .is_empty(),
+            "invalid"
+        );
+        state.apply(&peer, &upsert(2, "run:run", asking_row("run", "a", None)));
+        assert!(
+            state
+                .apply_notification_preferences(&peer, &target("run"), &muted)
+                .is_empty(),
+            "no shared notifications"
+        );
+    }
+
+    #[test]
+    fn optional_questions_are_kept_across_an_unknown_count_of_the_same_conversation() {
+        // keepOptionalQuestions
+        let local = ComputerId::local();
+        let questions = |count: Value, conversation: &str, state: &str| {
+            json!({"name": "codex/project/session", "cmd": "codex", "run_id": "run", "conversation_id": conversation,
+                "state": state, "optional_questions": {"count": count, "ids": ["q1", "q2"]}})
+        };
+        let mut state = CatalogState::new();
+        state.apply(
+            &local,
+            &snapshot(
+                1,
+                &[("run:run", questions(json!(2), "conversation", "running"))],
+            ),
+        );
+        let unknown = state.apply(
+            &local,
+            &upsert(
+                2,
+                "run:run",
+                questions(Value::Null, "conversation", "paused"),
+            ),
+        );
+        let row = row_of(&unknown, "run:run");
+        assert_eq!(
+            (row.notify.optional_count, row.notify.optional_ids.clone()),
+            (2, vec!["q1".to_owned(), "q2".to_owned()]),
+            "whatever the state"
+        );
+        let again = state.apply(
+            &local,
+            &snapshot(
+                3,
+                &[("run:run", questions(Value::Null, "conversation", "running"))],
+            ),
+        );
+        assert_eq!(
+            row_of(&again, "run:run").notify.optional_count,
+            2,
+            "also across a full listing"
+        );
+        let other = state.apply(
+            &local,
+            &upsert(4, "run:run", questions(Value::Null, "other", "running")),
+        );
+        assert_eq!(
+            row_of(&other, "run:run").notify.optional_count,
+            -1,
+            "another conversation starts unknown"
+        );
+    }
+
+    #[test]
+    fn the_highest_confirmed_revision_of_the_provider_is_kept() {
+        // sharedPreferencesDoNotCrossProviders, and Qt's highest revision.
+        let peer = ComputerId::from("peer");
+        let mut archived = asking_row("old", "a", Some(preferences(false, 1, Value::Null)));
+        archived["state"] = json!("archived");
+        archived["archive_id"] = json!("archive-1");
+        let mut claude = asking_row("claude-run", "a", Some(preferences(true, 9, Value::Null)));
+        claude["cmd"] = json!("claude");
+        claude["name"] = json!("claude/project/other");
+        let mut state = CatalogState::new();
+        state.apply(
+            &peer,
+            &snapshot(
+                1,
+                &[
+                    ("a-archived", archived),
+                    ("b-claude", claude),
+                    (
+                        "run:run",
+                        asking_row("run", "a", Some(preferences(true, 3, Value::Null))),
+                    ),
+                ],
+            ),
+        );
+        let downgraded = state.apply(&peer, &upsert(2, "run:next", asking_row("next", "a", None)));
+        let kept = row_of(&downgraded, "run:next");
+        assert!(
+            kept.muted && kept.notification_revision == Some(3),
+            "the highest codex revision, not claude's 9"
+        );
+    }
+
+    #[test]
+    fn a_confirmed_write_finds_the_live_row_and_clears_a_conflict() {
+        let peer = ComputerId::from("peer");
+        let mut archived = asking_row("old", "a", Some(preferences(false, 1, Value::Null)));
+        archived["state"] = json!("archived");
+        archived["archive_id"] = json!("archive-1");
+        let mut state = CatalogState::new();
+        state.apply(
+            &peer,
+            &snapshot(
+                1,
+                &[
+                    ("a-archived", archived),
+                    (
+                        "run:run",
+                        asking_row("run", "a", Some(preferences(true, 2, Value::Null))),
+                    ),
+                ],
+            ),
+        );
+        let conflict = state.apply(
+            &peer,
+            &upsert(
+                2,
+                "run:run",
+                asking_row("run", "a", Some(preferences(false, 2, Value::Null))),
+            ),
+        );
+        assert!(row_of(&conflict, "run:run").notification_error.is_some());
+        let target = crate::actions::Target {
+            computer: "peer".into(),
+            name: "codex/project/session".into(),
+            run_id: "run".into(),
+            conversation_id: "conversation".into(),
+        };
+        let applied = state.apply_notification_preferences(
+            &peer,
+            &target,
+            &preferences(false, 3, Value::Null),
+        );
+        let row = row_of(&applied, "run:run");
+        assert!(
+            !row.muted && row.notification_error.is_none(),
+            "an archived row of the conversation is never the one"
+        );
+    }
+
+    #[test]
+    fn a_kept_count_comes_from_a_row_that_knew_it() {
+        let local = ComputerId::local();
+        let questions = |count: Value| {
+            json!({"name": "codex/project/session", "cmd": "codex", "run_id": "run", "conversation_id": "conversation",
+                "optional_questions": {"count": count, "ids": ["q1"]}})
+        };
+        let mut state = CatalogState::new();
+        state.apply(
+            &local,
+            &snapshot(
+                1,
+                &[
+                    ("a-unknown", questions(Value::Null)),
+                    ("b-known", questions(json!(1))),
+                ],
+            ),
+        );
+        let changes = state.apply(&local, &upsert(2, "c-next", questions(Value::Null)));
+        assert_eq!(row_of(&changes, "c-next").notify.optional_count, 1);
+    }
+
+    #[test]
+    fn a_confirmed_mute_takes_the_dock_count_and_the_banner_down_at_once() {
+        let peer = ComputerId::from("peer");
+        let mut state = CatalogState::new();
+        let mut desk = crate::menubar::Desk::default();
+        let mut tracker = crate::attention::Tracker::new(Map::new());
+        for change in state.apply(
+            &peer,
+            &snapshot(
+                1,
+                &[(
+                    "run:run",
+                    asking_row("run", "a", Some(preferences(false, 2, Value::Null))),
+                )],
+            ),
+        ) {
+            desk.observe(&change);
+        }
+        let token = observe(&mut tracker, &state, 100).raised[0].token.clone();
+        assert_eq!(desk.badge().as_deref(), Some("1"));
+        let target = crate::actions::Target {
+            computer: "peer".into(),
+            name: "codex/project/session".into(),
+            run_id: "run".into(),
+            conversation_id: "conversation".into(),
+        };
+        for change in
+            state.apply_notification_preferences(&peer, &target, &preferences(true, 3, Value::Null))
+        {
+            desk.observe(&change);
+        }
+        assert_eq!(desk.badge(), None, "before the next listing");
+        let rows: BTreeMap<String, ViewRow> = desk.computers()[&peer].rows.clone();
+        let mut next = 0;
+        let changes = tracker.observe(
+            &crate::attention::Host {
+                alias: "peer",
+                label: "peer",
+                ok: true,
+                rows: &rows,
+            },
+            101,
+            false,
+            &mut || {
+                next += 1;
+                format!("n{next}")
+            },
+        );
+        assert_eq!(changes.cleared, vec![token]);
     }
 
     #[test]

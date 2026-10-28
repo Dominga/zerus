@@ -355,6 +355,11 @@ enum Input {
         result: Result<Value, String>,
     },
     Control(Control),
+    /// Preferences the host confirmed for a Mute or Unmute.
+    Notifications {
+        target: crate::actions::Target,
+        preferences: Value,
+    },
     Stop,
 }
 
@@ -417,6 +422,20 @@ impl StreamHandle {
     /// once the supervisor stopped. Activity goes through [`Self::follow`].
     pub fn send(&self, control: Control) -> bool {
         !self.stopped() && self.tx.send(Input::Control(control)).is_ok()
+    }
+
+    /// Applies the preferences the host confirmed for a Mute or Unmute to the
+    /// session's row at once (`FleetState::applyNotificationPreferences`);
+    /// the row goes out as a change. False once the supervisor stopped.
+    pub fn apply_notifications(&self, target: crate::actions::Target, preferences: Value) -> bool {
+        !self.stopped()
+            && self
+                .tx
+                .send(Input::Notifications {
+                    target,
+                    preferences,
+                })
+                .is_ok()
     }
 
     /// Follows a session's Activity on this computer, now and on every later
@@ -782,6 +801,17 @@ impl Supervisor {
         self.status(ComputerStatus::Ended);
     }
 
+    /// Applies confirmed notification preferences to the session's row and
+    /// sends the changed row on, as a frame's changes go.
+    fn notifications(&mut self, target: &crate::actions::Target, preferences: &Value) {
+        for change in self
+            .state
+            .apply_notification_preferences(&self.computer, target, preferences)
+        {
+            self.emit(change);
+        }
+    }
+
     fn emit(&self, change: Change) {
         let _ = self.sink.send(StreamEvent::Change(change));
     }
@@ -825,6 +855,10 @@ impl Supervisor {
                 Ok(Input::SubscribeOrganization) => self.subscribe_organization(),
                 Ok(Input::UnsubscribeOrganization) => self.unsubscribe_organization(),
                 Ok(Input::OrganizationPolled(result)) => self.organization_polled(result),
+                Ok(Input::Notifications {
+                    target,
+                    preferences,
+                }) => self.notifications(&target, &preferences),
                 Ok(_) => {}
                 Err(RecvTimeoutError::Timeout) => return true,
             }
@@ -894,6 +928,10 @@ impl Supervisor {
                 Ok(Input::UnsubscribeOrganization) => self.unsubscribe_organization(),
                 Ok(Input::OrganizationPolled(result)) => self.organization_polled(result),
                 Ok(Input::Legacy { read, result }) => self.legacy_reply(read, result),
+                Ok(Input::Notifications {
+                    target,
+                    preferences,
+                }) => self.notifications(&target, &preferences),
                 Ok(_) => {}
                 Err(RecvTimeoutError::Timeout) => {}
             }
@@ -1092,6 +1130,10 @@ impl Supervisor {
                     self.unsubscribe_tasks(&key);
                 }
                 Ok(Input::Control(control)) => self.write(&control),
+                Ok(Input::Notifications {
+                    target,
+                    preferences,
+                }) => self.notifications(&target, &preferences),
                 Ok(Input::Stop) | Err(RecvTimeoutError::Disconnected) => return Outcome::Stopped,
                 Err(RecvTimeoutError::Timeout) => {}
             }

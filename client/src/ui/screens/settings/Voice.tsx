@@ -83,7 +83,9 @@ export function VoiceSection() {
     if (!inTauri()) return;
     let stop: (() => void) | undefined;
     let gone = false;
-    listen<View>("speech-settings", (e) => setView(e.payload)).then((off) => { if (gone) off(); else stop = off; }, () => {});
+    // Shown again once listening: a change in between would otherwise wait
+    // for the next one.
+    listen<View>("speech-settings", (e) => setView(e.payload)).then((off) => { if (gone) off(); else { stop = off; void input("show"); } }, () => {});
     onCleanup(() => { gone = true; stop?.(); });
     void input("show");
   });

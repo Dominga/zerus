@@ -30,6 +30,7 @@ pub mod local_messages;
 pub mod machine;
 pub mod marks;
 pub mod menubar;
+pub mod mobile;
 pub mod organization;
 pub mod paths;
 pub mod process_view;

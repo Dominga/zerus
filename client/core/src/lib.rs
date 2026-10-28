@@ -12,6 +12,7 @@ pub mod attachments;
 pub mod batch;
 pub mod cache;
 pub mod details;
+pub mod drafts;
 pub mod fleet;
 pub mod legacy;
 pub mod machine;

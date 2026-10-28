@@ -2,6 +2,33 @@
 // folder relies on.
 use super::*;
 
+/// A folder of the test's own, removed however the test ends.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!("zerus-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A lock left by a process that is gone.
+fn dead_lock(path: &Path) {
+    fs::write(
+        path,
+        contents(i64::from(i32::MAX - 7), "hgs-tray", &this_machine()),
+    )
+    .unwrap();
+}
+
 fn here() -> Machine {
     Machine {
         hostname: "arch".into(),
@@ -92,9 +119,8 @@ fn another_machine_or_an_unreadable_lock_is_never_stale() {
 
 #[test]
 fn a_held_lock_blocks_until_released_and_a_dead_one_is_taken_over() {
-    let dir = std::env::temp_dir().join(format!("zerus-qt-lock-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+    let scratch = Scratch::new("qt-lock");
+    let dir = &scratch.0;
     let path = dir.join(".zerus-files.lock");
     let held = lock(&path, Duration::ZERO).unwrap().unwrap();
     let text = fs::read(&path).unwrap();
@@ -104,16 +130,51 @@ fn a_held_lock_blocks_until_released_and_a_dead_one_is_taken_over() {
     drop(held);
     assert!(!path.exists());
     // A lock left by a process that is gone is removed and taken.
-    fs::write(
-        &path,
-        contents(i64::from(i32::MAX - 7), "hgs-tray", &this_machine()),
-    )
-    .unwrap();
+    dead_lock(&path);
     let taken = lock(&path, Duration::from_secs(2)).unwrap();
     assert!(taken.is_some());
     assert!(!dir.join(".zerus-files.lock.rmlock").exists());
     drop(taken);
-    let _ = fs::remove_dir_all(&dir);
+    assert!(!path.exists());
+}
+
+#[test]
+fn a_guard_left_behind_is_stale_by_qts_default_rule() {
+    let scratch = Scratch::new("qt-rmlock");
+    let path = scratch.0.join(".zerus-files.lock");
+    let guard = scratch.0.join(".zerus-files.lock.rmlock");
+    // A dead lock and a dead guard: both go, and the lock is taken.
+    dead_lock(&path);
+    dead_lock(&guard);
+    let taken = lock(&path, Duration::from_millis(1500)).unwrap();
+    assert!(taken.is_some());
+    assert!(!guard.exists());
+    drop(taken);
+    // A guard a live process left over 30 s ago is stale by its age.
+    dead_lock(&path);
+    let pid = i64::from(std::process::id());
+    fs::write(&guard, contents(pid, &own_name(), &this_machine())).unwrap();
+    assert!(lock(&path, Duration::ZERO).unwrap().is_none());
+    let old = SystemTime::now() - Duration::from_secs(31);
+    File::options()
+        .write(true)
+        .open(&guard)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let taken = lock(&path, Duration::ZERO).unwrap();
+    assert!(taken.is_some());
+    assert!(!guard.exists());
+    // The lock itself never ages: a live holder keeps it however old.
+    drop(taken);
+    fs::write(&path, contents(pid, &own_name(), &this_machine())).unwrap();
+    File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    assert!(lock(&path, Duration::ZERO).unwrap().is_none());
 }
 
 /// Against Qt's own QLockFile: with ZERUS_QT_LOCK_CHECK naming
@@ -126,10 +187,8 @@ fn qt_and_the_client_honour_each_others_locks() {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
     let checker = std::env::var("ZERUS_QT_LOCK_CHECK").expect("ZERUS_QT_LOCK_CHECK");
-    let dir = std::env::temp_dir().join(format!("zerus-qt-interop-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(".zerus-files.lock");
+    let scratch = Scratch::new("qt-interop");
+    let path = scratch.0.join(".zerus-files.lock");
     let qt_try = || {
         let out = Command::new(&checker)
             .arg("try")
@@ -178,5 +237,23 @@ fn qt_and_the_client_honour_each_others_locks() {
     )
     .unwrap();
     assert_eq!(qt_try(), "locked");
-    let _ = fs::remove_dir_all(&dir);
+
+    // Ours carries the same machine ID Qt writes (QSysInfo::machineUniqueId).
+    let mut qt = Command::new(&checker)
+        .arg("hold")
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(qt.stdout.as_mut().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let info = parse(&fs::read(&path).unwrap()).unwrap();
+    qt.kill().unwrap();
+    qt.wait().unwrap();
+    let ours = parse(&contents(1, "x", &this_machine())).unwrap();
+    assert!(!info.hostid.is_empty());
+    assert_eq!((info.hostid, info.bootid), (ours.hostid, ours.bootid));
 }

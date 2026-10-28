@@ -9,12 +9,18 @@
 //! sharing only, so a lock judged stale is removed only when nothing holds
 //! it. With no stale age (Qt's setStaleLockTime(0)) a lock is stale only
 //! when its process is gone, another process took the PID, or the machine
-//! booted since.
+//! booted since. The `.rmlock` guard that orders removals keeps Qt's default
+//! stale age of 30 seconds.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
+
+/// QLockFile's default stale age, which the `.rmlock` guard keeps.
+const GUARD_STALE: Duration = Duration::from_secs(30);
+/// How many guards deep a removal may go (`.rmlock.rmlock`…).
+const GUARD_DEPTH: usize = 4;
 
 /// What a lock file says about its holder (QLockFilePrivate::LockFileInfo).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,7 +132,42 @@ pub fn process_name(pid: i64) -> Option<String> {
         let length = usize::try_from(length).unwrap_or(0).min(name.len());
         Some(String::from_utf8_lossy(&name[..length]).into_owned())
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::ProcessStatus::K32GetModuleFileNameExW;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+        };
+        let mut path = [0u16; 260];
+        // SAFETY: the handle is checked and closed; the buffer is valid for
+        // its length.
+        let length = unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid as u32);
+            if handle.is_null() {
+                return None;
+            }
+            let length = K32GetModuleFileNameExW(
+                handle,
+                std::ptr::null_mut(),
+                path.as_mut_ptr(),
+                path.len() as u32,
+            );
+            CloseHandle(handle);
+            length as usize
+        };
+        if length == 0 {
+            return None;
+        }
+        // The file name without its extension, as Qt cuts it.
+        let path = String::from_utf16_lossy(&path[..length.min(path.len())]);
+        let name = path.rsplit('\\').next().unwrap_or(&path);
+        Some(match name.rfind('.') {
+            Some(dot) => name[..dot].to_owned(),
+            None => name.to_owned(),
+        })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = pid;
         None
@@ -167,9 +208,11 @@ pub fn process_running(pid: i64, appname: &str) -> bool {
     }
     match process_name(pid) {
         Some(name) if !name.is_empty() => {
-            // Qt compares with the stored name's last path part.
-            let stored = appname.rsplit(['/', '\\']).next().unwrap_or(appname);
-            name == stored
+            // On Unix Qt compares with the stored name's last path part, on
+            // Windows with the stored name itself.
+            #[cfg(unix)]
+            let appname = appname.rsplit('/').next().unwrap_or(appname);
+            name == appname
         }
         _ => true,
     }
@@ -213,9 +256,14 @@ pub fn this_machine() -> Machine {
                 .ok()
                 .map(|_| bytes)
         };
-        let hostid = first("/var/lib/dbus/machine-id", 32)
-            .or_else(|| first("/usr/local/var/lib/dbus/machine-id", 32))
-            .unwrap_or_default();
+        // The second path only when the first does not exist, as Qt reads.
+        let hostid = match fs::symlink_metadata("/var/lib/dbus/machine-id") {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                first("/usr/local/var/lib/dbus/machine-id", 32)
+            }
+            _ => first("/var/lib/dbus/machine-id", 32),
+        }
+        .unwrap_or_default();
         let bootid = first("/proc/sys/kernel/random/boot_id", 36)
             .filter(|id| id.len() == 36)
             .unwrap_or_default();
@@ -251,10 +299,9 @@ pub fn this_machine() -> Machine {
             )
         } == 0
             && length == uuid.len();
-        // The platform UUID needs IOKit; without it Qt's host name rule applies.
         Machine {
             hostname,
-            hostid: Vec::new(),
+            hostid: machine_id().clone(),
             bootid: if found {
                 uuid[..36].to_vec()
             } else {
@@ -266,7 +313,7 @@ pub fn this_machine() -> Machine {
     {
         Machine {
             hostname: std::env::var("COMPUTERNAME").unwrap_or_default(),
-            hostid: Vec::new(),
+            hostid: machine_id().clone(),
             bootid: Vec::new(),
         }
     }
@@ -274,6 +321,122 @@ pub fn this_machine() -> Machine {
     {
         Machine::default()
     }
+}
+
+/// QSysInfo::machineUniqueId on macOS: the IOPlatformUUID, read once.
+#[cfg(target_os = "macos")]
+fn machine_id() -> &'static Vec<u8> {
+    use std::ffi::{c_char, c_void, CStr};
+    type CFTypeRef = *const c_void;
+    #[link(name = "IOKit", kind = "framework")]
+    unsafe extern "C" {
+        fn IOServiceMatching(name: *const c_char) -> *mut c_void;
+        fn IOServiceGetMatchingService(main_port: u32, matching: *mut c_void) -> u32;
+        fn IORegistryEntryCreateCFProperty(
+            entry: u32,
+            key: CFTypeRef,
+            allocator: CFTypeRef,
+            options: u32,
+        ) -> CFTypeRef;
+        fn IOObjectRelease(object: u32) -> i32;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFStringCreateWithCString(
+            allocator: CFTypeRef,
+            text: *const c_char,
+            encoding: u32,
+        ) -> CFTypeRef;
+        fn CFStringGetCString(
+            string: CFTypeRef,
+            buffer: *mut c_char,
+            size: isize,
+            encoding: u32,
+        ) -> u8;
+        fn CFGetTypeID(value: CFTypeRef) -> usize;
+        fn CFStringGetTypeID() -> usize;
+        fn CFRelease(value: CFTypeRef);
+    }
+    /// kCFStringEncodingMacRoman, as Qt reads it.
+    const MAC_ROMAN: u32 = 0;
+    static ID: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        // SAFETY: each object is checked before use and released once; the
+        // matching dictionary is consumed by IOServiceGetMatchingService
+        // (kIOMainPortDefault is MACH_PORT_NULL).
+        unsafe {
+            let service = IOServiceGetMatchingService(
+                0,
+                IOServiceMatching(c"IOPlatformExpertDevice".as_ptr()),
+            );
+            if service == 0 {
+                return Vec::new();
+            }
+            let key =
+                CFStringCreateWithCString(std::ptr::null(), c"IOPlatformUUID".as_ptr(), MAC_ROMAN);
+            let value = if key.is_null() {
+                std::ptr::null()
+            } else {
+                let value = IORegistryEntryCreateCFProperty(service, key, std::ptr::null(), 0);
+                CFRelease(key);
+                value
+            };
+            IOObjectRelease(service);
+            if value.is_null() {
+                return Vec::new();
+            }
+            let mut uuid = [0 as c_char; 37];
+            let read = CFGetTypeID(value) == CFStringGetTypeID()
+                && CFStringGetCString(value, uuid.as_mut_ptr(), uuid.len() as isize, MAC_ROMAN)
+                    != 0;
+            CFRelease(value);
+            if read {
+                CStr::from_ptr(uuid.as_ptr()).to_bytes().to_vec()
+            } else {
+                Vec::new()
+            }
+        }
+    })
+}
+
+/// QSysInfo::machineUniqueId on Windows: the registry's MachineGuid in
+/// Latin-1, read once.
+#[cfg(windows)]
+fn machine_id() -> &'static Vec<u8> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+    static ID: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let key: Vec<u16> = "SOFTWARE\\Microsoft\\Cryptography\0"
+            .encode_utf16()
+            .collect();
+        let value: Vec<u16> = "MachineGuid\0".encode_utf16().collect();
+        let mut text = [0u16; 256];
+        let mut size = (text.len() * 2) as u32;
+        // SAFETY: the names are NUL-terminated and the buffer is `size` bytes.
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                key.as_ptr(),
+                value.as_ptr(),
+                RRF_RT_REG_SZ,
+                std::ptr::null_mut(),
+                text.as_mut_ptr().cast(),
+                &mut size,
+            )
+        };
+        if status != 0 {
+            return Vec::new();
+        }
+        let units = &text[..(size as usize / 2).min(text.len())];
+        let end = units
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(units.len());
+        String::from_utf16_lossy(&units[..end])
+            .chars()
+            .map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?'))
+            .collect()
+    })
 }
 
 /// A held lock; dropping it removes the file, as QLockFile::unlock does.
@@ -284,10 +447,41 @@ pub struct QtLock {
 
 impl Drop for QtLock {
     fn drop(&mut self) {
-        // Unlinked while still held, then closed (releaseLockFile).
-        let _ = fs::remove_file(&self.path);
-        self.file.take();
+        #[cfg(windows)]
+        {
+            // Closed first: our own handle shares no deletion. Then removed
+            // as Qt's unlock does, trying for up to 500 ms while someone
+            // reads it.
+            self.file.take();
+            for _ in 0..500 {
+                match delete(&self.path) {
+                    Ok(()) => break,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+                    Err(_) => std::thread::sleep(Duration::from_millis(1)),
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            // Unlinked while still held, then closed (releaseLockFile).
+            let _ = fs::remove_file(&self.path);
+            self.file.take();
+        }
     }
+}
+
+/// Qt's deleteFile on Windows: opened with no sharing and deleted on
+/// close, so it fails while anyone else has the file open.
+#[cfg(windows)]
+fn delete(path: &Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .custom_flags(0x0400_0000)
+        .open(path)
+        .map(drop)
 }
 
 enum Attempt {
@@ -327,22 +521,30 @@ fn try_lock(path: &Path, bytes: &[u8]) -> Attempt {
     let mut file = match options.open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Attempt::Busy,
+        // A sharing violation, or access denied to a lock being deleted.
         #[cfg(windows)]
-        Err(error) if error.raw_os_error() == Some(32) => return Attempt::Busy,
+        Err(error)
+            if error.raw_os_error() == Some(32)
+                || (error.raw_os_error() == Some(5) && fs::symlink_metadata(path).is_ok()) =>
+        {
+            return Attempt::Busy
+        }
         Err(error) => return Attempt::Failed(error),
     };
     #[cfg(unix)]
     if !native_lock(&file) {
         return Attempt::Busy;
     }
-    if file
-        .write_all(bytes)
-        .and_then(|()| file.sync_data())
-        .is_err()
-    {
+    if file.write_all(bytes).is_err() {
+        drop(file);
+        #[cfg(windows)]
+        let _ = delete(path);
+        #[cfg(not(windows))]
         let _ = fs::remove_file(path);
         return Attempt::Failed(io::Error::other("the lock file could not be written"));
     }
+    // Synced if the file system can; its errors are ignored, as Qt does.
+    let _ = file.sync_data();
     #[cfg(unix)]
     {
         // Still the file we wrote: not replaced from under us.
@@ -375,19 +577,9 @@ fn remove_stale(path: &Path) -> bool {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::OpenOptionsExt;
-        // No sharing and delete on close: fails while Qt holds it.
-        match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .share_mode(0)
-            .custom_flags(0x0400_0000)
-            .open(path)
-        {
-            Ok(file) => {
-                drop(file);
-                true
-            }
+        // Fails while anyone holds it.
+        match delete(path) {
+            Ok(()) => true,
             Err(error) => error.kind() == io::ErrorKind::NotFound,
         }
     }
@@ -403,15 +595,32 @@ fn read_info(path: &Path) -> Option<LockInfo> {
     parse(&bytes)
 }
 
-/// QLockFile::tryLock(timeout) with no stale age: waits up to `timeout`,
-/// removing a stale lock under the `.rmlock` guard as Qt does. Err when the
-/// lock could not be created at all; Ok(None) when someone holds it.
-pub fn lock(path: &Path, timeout: Duration) -> io::Result<Option<QtLock>> {
-    let deadline = Instant::now() + timeout;
-    let bytes = contents(i64::from(std::process::id()), &own_name(), &this_machine());
-    let mut sleep = Duration::from_millis(100);
+/// QLockFilePrivate::isApparentlyStale: by what the lock says, then, with
+/// a stale age, by how long ago it was written (either way).
+fn stale(path: &Path, here: &Machine, age: Duration) -> bool {
+    if apparently_stale(read_info(path).as_ref(), here, process_running) {
+        return true;
+    }
+    let written = fs::metadata(path).and_then(|meta| meta.modified()).ok();
+    let since = written.map(|written| match SystemTime::now().duration_since(written) {
+        Ok(since) => since,
+        Err(ahead) => ahead.duration(),
+    });
+    !age.is_zero() && since.is_some_and(|since| since > age)
+}
+
+/// One QLockFile::tryLock(0) with stale age `age`: a stale lock is removed
+/// under its `.rmlock` guard (itself a lock with Qt's 30 s age) and tried
+/// again. Ok(None) when someone holds it.
+fn try_once(
+    path: &Path,
+    bytes: &[u8],
+    here: &Machine,
+    age: Duration,
+    depth: usize,
+) -> io::Result<Option<QtLock>> {
     loop {
-        match try_lock(path, &bytes) {
+        match try_lock(path, bytes) {
             Attempt::Held(file) => {
                 return Ok(Some(QtLock {
                     path: path.to_owned(),
@@ -420,29 +629,38 @@ pub fn lock(path: &Path, timeout: Duration) -> io::Result<Option<QtLock>> {
             }
             Attempt::Failed(error) => return Err(error),
             Attempt::Busy => {
-                let here = this_machine();
-                if apparently_stale(read_info(path).as_ref(), &here, process_running) {
+                if depth < GUARD_DEPTH && stale(path, here, age) {
                     let guard = path.with_file_name(format!(
                         "{}.rmlock",
                         path.file_name()
                             .map(|name| name.to_string_lossy())
                             .unwrap_or_default()
                     ));
-                    if let Attempt::Held(file) = try_lock(&guard, &bytes) {
-                        let held = QtLock {
-                            path: guard,
-                            file: Some(file),
-                        };
-                        let removed =
-                            apparently_stale(read_info(path).as_ref(), &here, process_running)
-                                && remove_stale(path);
+                    if let Ok(Some(held)) = try_once(&guard, bytes, here, GUARD_STALE, depth + 1) {
+                        let removed = stale(path, here, age) && remove_stale(path);
                         drop(held);
                         if removed {
                             continue;
                         }
                     }
                 }
+                return Ok(None);
             }
+        }
+    }
+}
+
+/// QLockFile::tryLock(timeout) with no stale age: waits up to `timeout`,
+/// removing a stale lock under the `.rmlock` guard as Qt does. Err when the
+/// lock could not be created at all; Ok(None) when someone holds it.
+pub fn lock(path: &Path, timeout: Duration) -> io::Result<Option<QtLock>> {
+    let deadline = Instant::now() + timeout;
+    let here = this_machine();
+    let bytes = contents(i64::from(std::process::id()), &own_name(), &here);
+    let mut sleep = Duration::from_millis(100);
+    loop {
+        if let Some(held) = try_once(path, &bytes, &here, Duration::ZERO, 0)? {
+            return Ok(Some(held));
         }
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {

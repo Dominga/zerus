@@ -132,10 +132,12 @@ pub fn files_apply_limit(
 }
 
 /// Opens the folder in the file manager; the address is the client's own.
-#[tauri::command]
+/// Off the main thread: the folder may be on a mount that hangs.
+#[tauri::command(async)]
 pub fn files_open_folder(app: AppHandle) -> Result<(), String> {
     let root = folder(&app);
-    if !root.is_dir() {
+    // A link is not followed.
+    if !std::fs::symlink_metadata(&root).is_ok_and(|meta| meta.file_type().is_dir()) {
         return Err("The downloaded files folder is unavailable or is a link.".into());
     }
     crate::settings::open_url(&root.to_string_lossy()).map_err(|error| error.to_string())

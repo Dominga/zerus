@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { inTauri } from "../../../bridge";
 import { Icon } from "../../lib/icons";
 import { Group, NumberField, Row, SectionHead, Select, Status } from "./ui";
-import { GIB, formatDataSize, selectedLimit } from "./files-size";
+import { formatDataSize, limitSize, selectedLimit } from "./files-size";
 
 // Settings > Files (tray/src/DownloadCacheSettings.cpp) as the approved
 // mockup lays it out (design/webui/src/screens/settings/General.tsx). The
@@ -21,25 +21,29 @@ export function FilesSection() {
   const [size, setSize] = createSignal(1);
   const [checking, setChecking] = createSignal(false);
   const [confirming, setConfirming] = createSignal<number | undefined>();
+  // Why the last read, change or opening failed; the usage line shows it.
+  const [failure, setFailure] = createSignal<string | undefined>();
   let started = false;
 
   const show = (next: FilesView) => {
+    setFailure(undefined);
     setView(next);
     // The controls start from the stored limit once.
     if (!started) {
       started = true;
       setMode(next.limit > 0 ? "limit" : "never");
-      setSize(next.limit > 0 ? next.limit / GIB : 1);
+      setSize(limitSize(next.limit));
     }
   };
+  const failed = (error: unknown) => setFailure(String(error));
   const refresh = () => {
     if (!inTauri() || checking()) return;
     setChecking(true);
-    invoke<FilesView>("files_usage").then(show, () => {}).finally(() => setChecking(false));
+    invoke<FilesView>("files_usage").then(show, failed).finally(() => setChecking(false));
   };
   const apply = (bytes: number) => {
     setChecking(true);
-    invoke<FilesView>("files_apply_limit", { bytes }).then(show, () => {}).finally(() => setChecking(false));
+    invoke<FilesView>("files_apply_limit", { bytes }).then(show, failed).finally(() => setChecking(false));
   };
   const selected = () => selectedLimit(mode(), size());
   const changed = () => !!view() && selected() !== view()!.limit;
@@ -58,7 +62,9 @@ export function FilesSection() {
 
   const usageText = () => {
     const v = view();
-    if (!v || checking()) return undefined;
+    if (checking()) return undefined;
+    if (failure()) return failure();
+    if (!v) return undefined;
     return v.error ?? `Downloaded copies: ${formatDataSize(v.bytes)} in ${v.files} files`;
   };
   return (
@@ -67,7 +73,7 @@ export function FilesSection() {
       <Group>
         <Row label="Downloaded files" for="set-dl-folder">
           <input id="set-dl-folder" class="field mono set-path" readOnly value={view()?.folder ?? ""} />
-          <button type="button" class="icon-btn" aria-label="Open folder" disabled={!view()} onClick={() => void invoke("files_open_folder").catch(() => {})}>
+          <button type="button" class="icon-btn" aria-label="Open folder" disabled={!view()} onClick={() => void invoke("files_open_folder").catch(failed)}>
             <Icon name="folder" size={15} />
           </button>
         </Row>
@@ -82,7 +88,7 @@ export function FilesSection() {
         <p class="set-group-hint">Never clear is the default. With a limit, Zerus removes its least recently used downloaded copies first. Files you add or edit are kept. Downloads in progress and copies used in the last minute are protected, so usage can briefly exceed the limit. This setting applies to this computer.</p>
         <div class="set-actions">
           <button type="button" class="btn primary" disabled={!changed() || checking()} onClick={onApply}>Apply</button>
-          <Show when={checking()} fallback={<Show when={usageText()}>{(text) => <Status kind={view()?.error ? "error" : "muted"}>{text()}</Status>}</Show>}>
+          <Show when={checking()} fallback={<Show when={usageText()}>{(text) => <Status kind={failure() || view()?.error ? "error" : "muted"}>{text()}</Status>}</Show>}>
             <Status kind="busy">Checking downloaded files…</Status>
           </Show>
         </div>

@@ -148,13 +148,33 @@ fn is_link(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
+/// QString::startsWith(prefix, Qt::CaseInsensitive) for an ASCII prefix:
+/// Unicode simple case folding, under which only ASCII letters, the long s
+/// (U+017F, "s") and the Kelvin sign (U+212A, "k") fold to ASCII.
+fn starts_folded(name: &str, prefix: &str) -> bool {
+    let fold = |c: char| match c {
+        '\u{17F}' => 's',
+        '\u{212A}' => 'k',
+        c => c.to_ascii_lowercase(),
+    };
+    let mut chars = name.chars();
+    prefix
+        .chars()
+        .all(|p| chars.next().is_some_and(|c| fold(c) == fold(p)))
+}
+
+/// Zerus's own files in the folder (`.zerus-` in any case Qt folds).
+fn ours(name: &str) -> bool {
+    starts_folded(name, ".zerus-")
+}
+
 /// A name the index may hold: one plain name, never Zerus's own files.
 fn safe_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
         && name != ".."
         && !name.contains(['/', '\\', ':'])
-        && !name.to_lowercase().starts_with(".zerus-")
+        && !ours(name)
 }
 
 fn valid_source(source: &Source) -> bool {
@@ -230,7 +250,7 @@ pub fn filename(name: &str) -> String {
     if name.is_empty() || name == "." || name == ".." {
         name = "download".into();
     }
-    if reserved(&name) || name.to_lowercase().starts_with(".zerus-") {
+    if reserved(&name) || ours(&name) {
         name.insert_str(0, "download-");
     }
     let dot = name.rfind('.').filter(|dot| *dot > 0);
@@ -250,9 +270,10 @@ pub fn filename(name: &str) -> String {
 }
 
 /// CON, PRN, AUX, NUL, CONIN$, CONOUT$, COM1-9, LPT1-9 (and the superscript
-/// digits), alone or before a dot, in any case.
+/// digits), alone or before a dot, in any case. Qt's caseless pattern
+/// relates no other character to these letters, so only ASCII is folded.
 fn reserved(name: &str) -> bool {
-    let upper = name.to_uppercase();
+    let upper = name.to_ascii_uppercase();
     let base = upper.split('.').next().unwrap_or("");
     let numbered = |prefix: &str| {
         base.strip_prefix(prefix).is_some_and(|rest| {
@@ -263,6 +284,87 @@ fn reserved(name: &str) -> bool {
     matches!(base, "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
         || numbered("COM")
         || numbered("LPT")
+}
+
+/// QFile::rename to a new name: an exclusive rename where the file system
+/// has one (Linux RENAME_NOREPLACE, macOS RENAME_EXCL, Windows MoveFile),
+/// else a hard link and an unlink. Never Qt's last resort, a plain rename,
+/// which could replace a file that took the name meanwhile.
+fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let source = CString::new(from.as_os_str().as_bytes())?;
+        let target = CString::new(to.as_os_str().as_bytes())?;
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: both are NUL-terminated paths.
+            let renamed = unsafe {
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    libc::AT_FDCWD,
+                    source.as_ptr(),
+                    libc::AT_FDCWD,
+                    target.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            } == 0;
+            if renamed {
+                return Ok(());
+            }
+            // Some file systems refuse the flag; an old kernel lacks the call.
+            let error = std::io::Error::last_os_error();
+            if !matches!(error.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS)) {
+                return Err(error);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // SAFETY: both are NUL-terminated paths.
+            let renamed = unsafe {
+                libc::renameatx_np(
+                    libc::AT_FDCWD,
+                    source.as_ptr(),
+                    libc::AT_FDCWD,
+                    target.as_ptr(),
+                    libc::RENAME_EXCL,
+                )
+            } == 0;
+            if renamed {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ENOTSUP) {
+                return Err(error);
+            }
+        }
+        let _ = (&source, &target);
+        fs::hard_link(from, to)?;
+        if let Err(error) = fs::remove_file(from) {
+            let _ = fs::remove_file(to);
+            return Err(error);
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+        let wide = |path: &Path| -> Vec<u16> {
+            path.as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        };
+        let (source, target) = (wide(from), wide(to));
+        // SAFETY: both are NUL-terminated paths; no flag replaces a file.
+        if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), 0) } != 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
 }
 
 /// Makes or checks the folder: it must be a folder of its own, not a link.
@@ -599,10 +701,9 @@ pub fn complete(
         if occupied(&candidate) {
             continue;
         }
-        // A link never replaces a name another program took meanwhile.
-        match fs::hard_link(&part.path, &candidate) {
+        // Never replaces a name another program took meanwhile.
+        match rename_new(&part.path, &candidate) {
             Ok(()) => {
-                let _ = fs::remove_file(&part.path);
                 destination = Some(candidate);
                 break;
             }

@@ -1,5 +1,6 @@
 import { For, Show, type JSX } from "solid-js";
 import { Icon } from "../../lib/icons";
+import { fieldValue } from "./number-field";
 
 // The rows Settings sections are built from, from the approved mockup
 // (design/webui/src/screens/settings/ui.tsx). They stand in for the Qt widgets
@@ -126,7 +127,7 @@ export function NumberField(props: {
   value: number; min: number; max: number; step?: number; decimals?: number; suffix?: string;
   onChange: (v: number) => void; disabled?: boolean; id?: string; label?: string;
 }) {
-  const clamp = (v: number) => Math.min(props.max, Math.max(props.min, v));
+  const clamp = (v: number) => fieldValue(v, props.min, props.max, props.decimals);
   return (
     <span class="set-number" classList={{ disabled: props.disabled }}>
       <input id={props.id} class="field tabular" type="number" min={props.min} max={props.max} step={props.step ?? 1}

@@ -77,11 +77,26 @@ fn names_are_made_safe_as_qt_makes_them() {
     assert_eq!(filename("LPT¹"), "download-LPT¹");
     assert_eq!(filename("COM10.txt"), "COM10.txt");
     assert_eq!(filename(".zerus-files.json"), "download-.zerus-files.json");
+    // Qt folds case by Unicode: the long s and the Kelvin sign fold to ASCII.
+    assert_eq!(filename(".ZERUS-notes.txt"), "download-.ZERUS-notes.txt");
+    assert_eq!(
+        filename(".zeru\u{17F}-notes.txt"),
+        "download-.zeru\u{17F}-notes.txt"
+    );
+    assert_eq!(
+        filename(".zerus\u{2010}notes.txt"),
+        ".zerus\u{2010}notes.txt"
+    );
+    assert!(starts_folded("\u{212A}ey", "key") && !starts_folded("kez", "key"));
+    // Only ASCII letters are Windows device names in another case.
+    assert_eq!(filename("Con.log"), "download-Con.log");
+    assert_eq!(filename("con\u{131}n$"), "con\u{131}n$");
     let long = format!("{}.tar.gz", "ж".repeat(200));
     let made = filename(&long);
     assert!(made.ends_with(".gz") && made.len() <= 180, "{made}");
     assert!(
         !safe_name(".Zerus-part-1")
+            && !safe_name(".zeru\u{17F}-notes.txt")
             && !safe_name("a/b")
             && !safe_name("c:")
             && safe_name("report.pdf")
@@ -326,6 +341,22 @@ fn a_linked_folder_is_refused() {
     );
 }
 
+#[test]
+fn a_saved_copy_never_replaces_a_name_taken_meanwhile() {
+    let folder = Folder::new("rename");
+    fs::create_dir_all(&folder.0).unwrap();
+    let (from, to) = (folder.0.join("from"), folder.0.join("to"));
+    fs::write(&from, b"new").unwrap();
+    fs::write(&to, b"someone else's").unwrap();
+    assert!(rename_new(&from, &to).is_err());
+    assert_eq!(fs::read(&to).unwrap(), b"someone else's");
+    assert_eq!(fs::read(&from).unwrap(), b"new");
+    fs::remove_file(&to).unwrap();
+    rename_new(&from, &to).unwrap();
+    assert!(!from.exists());
+    assert_eq!(fs::read(&to).unwrap(), b"new");
+}
+
 /// Against the Qt client's own DownloadCache: with
 /// ZERUS_QT_DOWNLOAD_CACHE_CHECK naming client/scripts/qt-download-cache-check
 /// built with Qt 6, both apps read and change one folder.
@@ -436,4 +467,28 @@ fn qt_and_the_client_share_a_folder() {
     );
     assert!(!root.join("notes.txt").exists());
     assert_eq!(qt(&["usage", &root_text]), "15 1");
+
+    // A name Qt folds onto its own prefix is moved aside by both, so Qt
+    // still trusts the index the client wrote.
+    let long_s = ".zeru\u{17F}-notes.txt";
+    let named = save(root, long_s, b"long s", None, 0);
+    assert_eq!(named, root.join(format!("download-{long_s}")));
+    assert_eq!(qt(&["usage", &root_text]), "21 2");
+    let from_qt = contents.0.join("long-s");
+    fs::write(&from_qt, b"from qt").unwrap();
+    let saved = qt(&[
+        "publish",
+        &root_text,
+        long_s,
+        "mac",
+        "/srv/long-s.txt",
+        &from_qt.to_string_lossy(),
+        &at(200_000),
+    ]);
+    assert_eq!(
+        saved,
+        root.join(format!("download-{} (1).txt", &long_s[..long_s.len() - 4]))
+            .to_string_lossy()
+    );
+    assert_eq!(usage(root).files, 3);
 }

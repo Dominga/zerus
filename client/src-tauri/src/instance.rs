@@ -746,20 +746,27 @@ pub fn claim_at(
     }
 }
 
+/// How long one connection may take to send its line.
+const LINE_WAIT: Duration = Duration::from_secs(1);
+
 /// Reads the first line of each connection (`main.cpp:424-433`). Qt acts only
-/// on a complete line (`canReadLine`); a line is read for at most 1 s and
-/// 64 bytes, so a silent client cannot hold the next start back.
+/// on a complete line (`canReadLine`); a connection gets at most 1 s in all
+/// and 64 bytes, so a silent or slow client cannot hold the next start back.
 fn listen(listener: UnixListener, deliver: impl Fn(Activation) + Send + 'static) {
     std::thread::Builder::new()
         .name("zerus-client-instance".into())
         .spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                let deadline = Instant::now() + LINE_WAIT;
                 let mut line = Vec::new();
                 let mut byte = [0u8; 1];
                 let complete = loop {
-                    if line.len() >= 64 {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if line.len() >= 64
+                        || left.is_zero()
+                        || stream.set_read_timeout(Some(left)).is_err()
+                    {
                         break false;
                     }
                     match stream.read(&mut byte) {
@@ -1410,6 +1417,44 @@ mod tests {
                 .unwrap(),
             Activation::Show,
             "Qt acts on a line only once canReadLine"
+        );
+    }
+
+    #[test]
+    fn a_slow_client_holds_the_next_start_back_at_most_a_second() {
+        let dir = scratch("drip");
+        let paths = paths("zerus-test", &dir, &dir);
+        let Claim::Claimed(claimed) =
+            claim_at(&paths, None, Activation::Show, &LockInfo::own(), &fast())
+        else {
+            panic!("the first start claims")
+        };
+        let mut slow = UnixStream::connect(&paths.socket).unwrap();
+        let started = Instant::now();
+        // 1.8 s for the whole line, each byte well within a 1 s read timeout.
+        let dripping = std::thread::spawn(move || {
+            for byte in b"sessions\n" {
+                if slow.write_all(&[*byte]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        });
+        assert!(forward(&paths.socket, Activation::Show));
+        let first = claimed
+            .activations
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        let waited = started.elapsed();
+        dripping.join().unwrap();
+        assert_eq!(
+            first,
+            Activation::Show,
+            "the slow line is dropped at its deadline"
+        );
+        assert!(
+            waited < Duration::from_millis(1700),
+            "the next start waited {waited:?}"
         );
     }
 

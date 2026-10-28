@@ -262,6 +262,8 @@ pub fn perf_config() -> Value {
         "display": crate::display::display_name(),
         // The actions smoke runs only on a replay with an explicit fake hgs.
         "actions_smoke": actions_smoke_allowed(),
+        // The Linux WebKit renderer decision (renderer, reason, nvidia, wayland, marker_state).
+        "renderer": crate::renderer::diagnostics(),
     })
 }
 

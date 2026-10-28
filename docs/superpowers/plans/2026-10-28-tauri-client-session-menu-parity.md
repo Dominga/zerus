@@ -308,7 +308,9 @@ Rules:
   - a mark no longer pending is forgotten when it finishes.
 - **The worker** (`client/src-tauri/src/readsync.rs`): a thread that every 5 s, and whenever marks are added, takes `due`, runs each `MarkRead` through `run` (the phase 2 invocation and `classify`) and reports `finished`. Phase 2's frontend quiet retry and its read lane go away, since this worker owns delivery.
   - A delivery shows no notice, as Qt (`markFinished` has no visible receiver).
-  - Settling stays `Actions::observe` (phase 2).
+  - Settling stays `Actions::observe` (phase 2): a mark is saved before any call, and an empty replace never drops pending marks.
+- **Queueing from the frontend:** a new command `queue_read_marks(marks: Vec<ReadMark>) -> Vec<ReadMark>` merges each mark into `ReadMarks` (`add`, which saves before any delivery), wakes the worker and returns the pending marks. Phase 2's `run_action` with `MarkRead` stays callable, but the UI no longer uses it.
+- **Lanes:** the worker claims a session's Read lane for each delivery and skips a session whose Read lane is busy; Write and Interrupt lanes are untouched (Stop never waits for a write; a read never blocks a write).
 
 - [ ] Tests: the cap drops the oldest written; a corrupt file loads empty; `ReadSync` with a fake clock covers four in flight, the fewest-busy computer, backoff 10 s, 20 s and so on to 300 s, the 120 s resend, partial applies doubling to 960 s, and a changed mark resetting.
 - [ ] Commit `feat(client): durable attention marks and queued read-mark delivery`.
@@ -345,14 +347,17 @@ Rules:
 - **`unreadReplies` and `markAllRead`** (`FleetState.cpp:234-262`):
   - `unreadReplies` lists every row whose reply shows unread and that is not marked for review, hidden rows included.
   - `markAllRead` marks each of them whose reply is still the snapshot's, skipping an older host's row already in `replies`, and queues the reply marks. It returns the count.
-- **Persistence:** every change saves through `set_attention_marks` and adds queued marks through the phase 2 read-mark file. A host that starts sharing read state gets its legacy marks queued once (`legacyReadMarks`, `TrayAgent.cpp:570-572`).
+- **Pending mirror:** the store keeps the pending read marks the overlay reads: loaded at start, replaced by `queue_read_marks`' answer, and a mark is dropped when a batch row shows it settled or a non-empty snapshot of its computer no longer lists the session (the same rules as `ReadMarks::settle` and `Actions::observe`). Phase 2's frontend quiet retry (`observeBatch`'s retry) is removed; the worker owns delivery.
+- **Persistence:** every change saves through `set_attention_marks` and queues read marks through `queue_read_marks`. A host that starts sharing read state gets its legacy marks queued once (`legacyReadMarks`, `TrayAgent.cpp:570-572`).
 
 - [ ] Tests (vitest, mocked bridge): each overlay branch; a pending mark for another run is ignored; a newer reply after `markRead` shows unread again; `markRead` refuses a changed fingerprint; `markAllRead` skips review rows and counts; the fallback key migrates; the cap.
 - [ ] Commit `feat(client): local attention marks and read state, Qt's overlay`.
 
 ### Task B4: Mute and Unmute
 
-**Files:** core `actions.rs` (`Action::Notifications { muted: bool, expected_revision: i64 }`), the fake `hgs` replies, `store/actions.ts`, `actions-ui.ts`, `ActionDialogs.tsx`, `SessionList.tsx` (the Mute entry).
+**Files:** core `actions.rs` (`help_invocation`, `has_notifications_marker`, `notifications_invocation`, `classify_notifications`), the fake `hgs` replies, `client/src-tauri/src/actions.rs` (`set_notifications(target, muted, expected_revision) -> Result<Value, String>`, which runs the probe and then the call, returning the confirmed reply), `store/actions.ts`, `actions-ui.ts`, `ActionDialogs.tsx`, `SessionList.tsx` (the Mute entry).
+
+The change runs in its own per-session lane (`Lane::Notifications`): Qt tracks pending notification changes apart from `m_pending`, so a change never blocks a write and a write never blocks it. The frontend allows one pending change per conversation and 16 in all.
 
 Rules:
 - **The call** (`HgsClient.cpp:2401-2457`):
@@ -389,7 +394,7 @@ Rules:
   - Mark needs attention runs `markNeedsAttention`. Refused: the sticky "This session is no longer available. Open its actions again.".
   - No success notice.
   - This replaces phase 2's direct `hgs read` call and its "Update hgs on this session's host to share read state." refusal: an older host keeps this device's marks.
-- **The Mark read chip** (3777-3780): active for a row that is not archived and needs attention.
+- **The Mark read chip** (3777-3780) lives in Qt's composer toolbar (`ComposerToolbar::Slot::MarkRead`, 981-983), which the client builds in phase 4 (`zerus-5wmh.9`). This task adds only its pure state, `markReadChip(row)`, with tests; phase 4 places the chip. It is active for a row that is not archived and needs attention.
   - The detail is "Marked for later. Mark as read to clear this reminder." for a review mark.
   - Otherwise "Mark this session's current notification as read. This does not answer a pending question.".
   - A click runs Mark as read (1035-1040).

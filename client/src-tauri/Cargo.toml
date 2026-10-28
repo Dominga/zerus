@@ -1,0 +1,48 @@
+[package]
+name = "zerus-client"
+version = "0.1.0"
+description = "Zerus Next: the Tauri desktop client"
+edition = "2021"
+rust-version = "1.99"
+license = "MIT"
+publish = false
+
+# Its own package and lock, like crates/watch-protocol; the root hgs package
+# depends on neither this crate nor client/core.
+
+[lib]
+# Distinct from the binary name, so Windows debug symbols of both never collide.
+name = "zerus_client_lib"
+
+[features]
+default = ["live"]
+# Streams from `hgs watch` through zerus-client-core. Without it the app builds
+# with no data source and the frontend uses its built-in replay.
+live = ["dep:zerus-client-core"]
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zerus-watch-protocol = { path = "../../crates/watch-protocol" }
+# The pure-Rust core (watch streams, catalog state, per-frame batches).
+zerus-client-core = { path = "../core", optional = true }
+
+# Linux: the refresh rate of the window's monitor (display.rs); the same gtk as tauri's.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
+# macOS: process metrics through libproc, and the WebKit preference that lets
+# page rendering follow the display rate (platform/macos.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+objc2 = { version = "0.6.4", features = ["exception"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSProcessInfo"] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "WKPreferences", "WKWebViewConfiguration"] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# Dependencies optimised once keep the debug app responsive.
+[profile.dev.package."*"]
+opt-level = 2

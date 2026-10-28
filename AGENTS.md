@@ -16,6 +16,12 @@ builds with `mobile/ios/scripts/dev-install.sh` or `remote-dev-install.sh`; neve
 commit team IDs, device identifiers or signing material. TestFlight uploads run
 only from trusted main; see `docs/ios-distribution.md`.
 `design/` contains prototypes and original artwork, not runtime dependencies.
+The Tauri desktop client lives in `client/`: the SolidJS frontend in
+`client/src`, a pure-Rust core in `client/core` and the Tauri app in
+`client/src-tauri`, each its own Cargo package and lock. It grows beside the
+Qt GUI; see `docs/superpowers/specs/2026-10-27-tauri-web-ui-design.md`. Its UI
+never separates values with dots; `scripts/check-ui-separators.py` enforces it
+in CI (the Qt GUI and mobile clients are out of that rule's scope).
 
 The repository language is English. Write documentation and other project-facing
 text in English; conversations may use the user's preferred language.

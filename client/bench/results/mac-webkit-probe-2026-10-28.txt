@@ -1,0 +1,15 @@
+--- probe (release) 2026-10-27T21:24:09Z MacBookPro18,1
+macOS: Version 27.0.1 (Build 26A434)
+WKPreferences _features: 601 features
+related keys: PreferPageRenderingUpdatesNear60FPSEnabled, WebAnimationsCustomFrameRateEnabled
+feature PreferPageRenderingUpdatesNear60FPSEnabled: found among 601, name Some("Prefer Page Rendering Updates near 60fps"), default Some(true)
+missing-key check: ZerusProbeMissingFeatureEnabled is not among the 601 WebKit features
+control configuration (near 60 fps kept): before Some(true), after Some(true), error None
+preference_state() after the control: Some(true)
+display-rate configuration: before Some(true), after Some(false), applied true, error None
+preference_state(): Some(false)
+preference_state_of(configuration.preferences): Some(false)
+webview_configuration() read-back: Some(false)
+untouched configuration: Some(true)
+metrics: {"pid":81701,"processes":[{"cpu_percent":2.058,"cpu_seconds":0.026,"footprint_bytes":6128336,"name":"zerus-client-perf-probe-mac","pid":81701,"ppid":81700,"role":"app","rss_bytes":20004864}],"sampled_at_ms":1793136250226,"source":"proc_pidinfo","total":{"cpu_percent":2.058,"cpu_seconds":0.026,"footprint_bytes":6128336,"processes":1,"rss_bytes":20004864},"window_ms":210}
+responsible-process lookup available: true

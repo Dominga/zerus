@@ -404,3 +404,24 @@ The round 9 design was approved on 2026-10-27. Also decided on 2026-10-27: the W
 above, falling back to Chromium on macOS (CEF once beta, otherwise Electron);
 WebKitGTK first on Linux with CEF as the fallback; user-imported skins in v1;
 the two-turn spin-up for the Zerus mark.
+
+First measurement of the live screen, 2026-10-28 (`client/bench/results`, the
+page built by `client/scripts/measure-report.py`):
+
+- **macOS: the WebKit preference fix holds criterion 1.** On the owner's
+  ProMotion Mac (release dev client, live data, AC power) rAF on a light page,
+  during transform and non-accelerated `left` animations, and while scrolling
+  the session list average 8.33-8.34 ms against T = 8.33 ms; the control run
+  with the preference at its default paces at 16.67 ms and fails, so the harness
+  is valid. A separate display-link probe reads 119.9-120.5 Hz. Decision: keep
+  WKWebView with the preference disabled; the Chromium fallback is not needed.
+  Criterion 2 (window capture), a display-link counter in the same window and
+  the Activity scroll are still to be measured.
+- **Linux: WebKitGTK paces at 60 Hz on the owner's 144 Hz KDE Wayland desktop**
+  (NVIDIA and AMD GPUs), in the synthetic harness and in the client alike.
+  Decision: WebKitGTK stays first while the cause is investigated
+  (`zerus-5wmh.14`); if it cannot pace at the display rate there, the CEF
+  fallback is evaluated with the same harness.
+- Session open (median 98 ms on the Mac, 136 ms on arch) and input-to-frame
+  latency (below one frame) do not block the next screens. Idle CPU on Linux is
+  too high in the first build and is being fixed before the rerun.

@@ -15,6 +15,8 @@ pub mod legacy;
 pub mod machine;
 pub mod organization;
 pub mod processes;
+#[cfg(unix)]
+mod pty;
 pub mod readmarks;
 pub mod reads;
 pub mod run;

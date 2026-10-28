@@ -1,4 +1,6 @@
 //! `run` against a fake `hgs` (tests/support/fake_hgs_actions.py), never the real CLI.
+//! The fake is a Python script run through its shebang and a symlink.
+#![cfg(unix)]
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};

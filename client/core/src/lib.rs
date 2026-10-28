@@ -15,6 +15,7 @@ pub mod cache;
 mod conpty;
 pub mod details;
 pub mod drafts;
+pub mod external_file;
 pub mod fleet;
 pub mod legacy;
 pub mod machine;

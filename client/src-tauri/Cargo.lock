@@ -4699,6 +4699,8 @@ dependencies = [
  "base64 0.22.1",
  "infer",
  "libc",
+ "objc2",
+ "objc2-foundation",
  "serde",
  "serde_json",
  "sha2",

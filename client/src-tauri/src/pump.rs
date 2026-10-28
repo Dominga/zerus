@@ -1,14 +1,16 @@
 //! From the core's change sink to `next_batch`: one thread drains the sink
 //! into the coalescer, and `next_batch` takes everything pending, parking
-//! up to [`PARK`] while nothing is. A mirror of the last-known rows lets a
-//! reloaded webview start from the full catalog.
+//! up to [`PARK`] while nothing is. A mirror of the last-known rows, statuses
+//! and machine cards lets a reloaded webview start from the full catalog.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use zerus_client_core::{Batch, Change, Coalescer, ComputerId, ComputerStatus, ViewRow};
+use zerus_client_core::{
+    Batch, Change, Coalescer, ComputerId, ComputerStatus, MachineMeta, ViewRow,
+};
 
 /// The longest `next_batch` waits for a change before it returns an empty batch.
 pub const PARK: Duration = Duration::from_millis(250);
@@ -78,7 +80,8 @@ impl Pump {
     }
 }
 
-/// The last-known rows (in arrival order) and status of every computer.
+/// The last-known rows (in arrival order), status and machine card of every
+/// computer.
 #[derive(Default)]
 struct Mirror {
     /// Keyed by the computer id's string, so the core's id type needs no traits.
@@ -88,6 +91,8 @@ struct Mirror {
 #[derive(Default)]
 struct Rows {
     status: Option<ComputerStatus>,
+    /// The latest card data; an `ended` status drops it.
+    machine: Option<MachineMeta>,
     order: Vec<String>,
     rows: HashMap<String, ViewRow>,
 }
@@ -124,12 +129,19 @@ impl Mirror {
                 }
             }
             Change::Computer { computer, status } => {
-                self.computers.entry(computer.0.clone()).or_default().status = Some(*status)
+                let entry = self.computers.entry(computer.0.clone()).or_default();
+                entry.status = Some(*status);
+                if *status == ComputerStatus::Ended {
+                    entry.machine = None;
+                }
             }
-            Change::Activity { .. }
-            | Change::Processes { .. }
-            | Change::Tasks { .. }
-            | Change::Machine { .. } => {}
+            Change::Machine { computer, machine } => {
+                self.computers
+                    .entry(computer.0.clone())
+                    .or_default()
+                    .machine = Some(machine.clone())
+            }
+            Change::Activity { .. } | Change::Processes { .. } | Change::Tasks { .. } => {}
         }
     }
 
@@ -140,6 +152,12 @@ impl Mirror {
                 out.push(Change::Computer {
                     computer: ComputerId(computer.clone()),
                     status: *status,
+                });
+            }
+            if let Some(machine) = &rows.machine {
+                out.push(Change::Machine {
+                    computer: ComputerId(computer.clone()),
+                    machine: machine.clone(),
                 });
             }
             let list = rows
@@ -244,5 +262,67 @@ mod tests {
             .collect();
         assert_eq!(keys, ["run:b", "run:c"]);
         assert_eq!(batch.computers[0].status, "live");
+    }
+
+    fn machine(computer: &str, cpu: f64) -> Change {
+        let mut meta = MachineMeta {
+            host: Some(format!("{computer}-host")),
+            ..MachineMeta::default()
+        };
+        meta.metrics.cpu_percent = Some(cpu);
+        Change::Machine {
+            computer: ComputerId(computer.into()),
+            machine: meta,
+        }
+    }
+
+    #[test]
+    fn resend_replays_the_latest_machine_card_and_none_for_an_ended_computer() {
+        let pump = Pump::default();
+        for (computer, status) in [("", ComputerStatus::Live), ("studio", ComputerStatus::Live)] {
+            pump.push(Change::Computer {
+                computer: ComputerId(computer.into()),
+                status,
+            });
+        }
+        pump.push(machine("", 10.0));
+        pump.push(machine("", 20.0));
+        pump.push(machine("studio", 5.0));
+        pump.push(Change::Replace {
+            computer: ComputerId("studio".into()),
+            rows: vec![],
+        });
+        pump.push(Change::Computer {
+            computer: ComputerId("studio".into()),
+            status: ComputerStatus::Ended,
+        });
+        let _ = pump.take(PARK);
+
+        pump.resend();
+        let batch = pump.take(PARK);
+        assert_eq!(batch.machines.len(), 1, "an ended computer replays no card");
+        assert_eq!(batch.machines[0].computer, ComputerId(String::new()));
+        assert_eq!(batch.machines[0].machine.metrics.cpu_percent, Some(20.0));
+        let statuses: Vec<_> = batch
+            .computers
+            .iter()
+            .map(|c| (c.computer.0.as_str(), c.status.as_str()))
+            .collect();
+        assert_eq!(statuses, [("", "live"), ("studio", "ended")]);
+        // The replayed changes put each card right after its status.
+        let replayed = Mirror::changes(&pump.lock().mirror);
+        let kinds: Vec<_> = replayed
+            .iter()
+            .map(|change| match change {
+                Change::Computer { .. } => "computer",
+                Change::Machine { .. } => "machine",
+                Change::Replace { .. } => "replace",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            ["computer", "machine", "replace", "computer", "replace"]
+        );
     }
 }

@@ -90,16 +90,6 @@ describe("menuState rename, archive, end, read", () => {
     expect(menuState(row({ state: "paused" }), true, false).end.label).toBe("Forget saved session…");
     expect(menuState(row({ state: "archived" }), true, false).end.label).toBe("Forget archived session…");
   });
-  it("marks read when attention needs it and the host shares read state", () => {
-    expect(menuState(row({ unread: true, shared_read: true }), true, false).markRead).toEqual({ label: "Mark as read", enabled: true });
-    // A read mark runs in its own lane: a pending write does not hold it up.
-    expect(menuState(row({ unread: true, shared_read: true }), true, true).markRead.enabled).toBe(true);
-    expect(menuState(row({ unread: true, shared_read: true }), false, false).markRead.enabled).toBe(false);
-    expect(menuState(row({ unread: true, shared_read: true }), true, false, undefined, { reading: true }).markRead.enabled).toBe(false);
-    expect(menuState(row({ status: "attention", attention: "approval", shared_read: false }), true, false).markRead)
-      .toMatchObject({ label: "Mark as read", enabled: false, reason: "Update hgs on this session's host to share read state." });
-    expect(menuState(row(), true, false).markRead).toMatchObject({ label: "Mark needs attention", enabled: false, reason: "Arrives with attention marks." });
-  });
 });
 
 describe("menuState stop", () => {

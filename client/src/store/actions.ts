@@ -2,7 +2,7 @@ import { createSignal, untrack } from "solid-js";
 import { createStore } from "solid-js/store";
 import * as bridge from "../bridge";
 import { catalog as appCatalog, computerOffline, type CatalogState } from "./catalog";
-import { loadPending, marks as appMarks, type Marks } from "./marks";
+import { marks as appMarks, type Marks } from "./marks";
 import { copyState, detailsFromInspection, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type PendingNotifications } from "../ui/sessions/actions-ui";
 import type { Action, Details, Outcome, Target } from "../types";
 
@@ -25,7 +25,6 @@ const MAX_NOTICES = 5;
 const INFO_MS = 6000;
 const CHANGED = "This session changed. Open its actions again.";
 const STATE_CHANGED = "The session state changed. Open its actions again.";
-const NEW_REPLY = "A new reply or question arrived. Open the menu again to mark it as read.";
 const MUTE_CHANGED = "The shared notification setting changed while this request was pending. Refresh the session.";
 const GONE = "This session is no longer available. Open its actions again.";
 const ALREADY_STOPPED = ["hgs: This turn is no longer working", "This turn is no longer working"];
@@ -53,10 +52,9 @@ export function createActions(
   selection: () => Selection = () => ({}),
   notificationMarks: Pick<Marks, "currentNotificationRow" | "applyNotifications"> = appMarks,
 ) {
-  /** The write in flight per session (its kind), and whether an interrupt or a read mark is. */
+  /** The write in flight per session (its kind), and whether an interrupt is. */
   const [writes, setWrites] = createStore<Record<string, Action["kind"] | undefined>>({});
   const [interrupts, setInterrupts] = createStore<Record<string, boolean>>({});
-  const [reads, setReads] = createStore<Record<string, boolean>>({});
   const [list, setList] = createSignal<Notice[]>([]);
   let nextId = 1;
 
@@ -78,7 +76,6 @@ export function createActions(
 
   const updating = (computer: string, name: string) => !!writes[sessionId(computer, name)];
   const interrupting = (computer: string, name: string) => !!interrupts[sessionId(computer, name)];
-  const reading = (computer: string, name: string) => !!reads[sessionId(computer, name)];
 
   function report(action: Action, out: Outcome, row: ActionRow) {
     if (action.kind === "interrupt") {
@@ -91,7 +88,7 @@ export function createActions(
     }
     if (out.outcome === "failed") { notify("error", out.detail, true); return; }
     if (action.kind === "rename") notify("info", "Session renamed. Refreshing…");
-    else if (action.kind !== "mark_read") notify("info", "Session updated. Refreshing…");
+    else notify("info", "Session updated. Refreshing…");
     const cleanup = out.cleanup;
     if (!cleanup) return;
     if (cleanup.status === "removed") notify("info", "Worktree removed automatically. The branch and archived conversation are kept.");
@@ -103,17 +100,16 @@ export function createActions(
   /** One guarded call in its lane; a session with a call in that lane gets none. */
   async function call(target: Target, action: Action): Promise<{ out: Outcome; busy: boolean }> {
     const id = sessionId(target.computer, target.name);
-    const read = action.kind === "mark_read";
     const interrupt = action.kind === "interrupt";
-    if (read ? reads[id] : interrupt ? interrupts[id] : writes[id]) return { out: failed("busy"), busy: true };
-    if (read) setReads(id, true); else if (interrupt) setInterrupts(id, true); else setWrites(id, action.kind);
+    if (interrupt ? interrupts[id] : writes[id]) return { out: failed("busy"), busy: true };
+    if (interrupt) setInterrupts(id, true); else setWrites(id, action.kind);
     try {
       return { out: await bridge.runAction(target, action), busy: false };
     } catch (error) {
       const detail = typeof error === "string" ? error : error instanceof Error ? error.message : String(error);
       return { out: failed(detail), busy: detail === "busy" };
     } finally {
-      if (read) setReads(id, false); else if (interrupt) setInterrupts(id, false); else setWrites(id, undefined);
+      if (interrupt) setInterrupts(id, false); else setWrites(id, undefined);
     }
   }
 
@@ -130,14 +126,8 @@ export function createActions(
       notify("info", CHANGED);
       return failed(CHANGED);
     }
-    if (action.kind === "mark_read" && (live.replyId !== row.replyId || live.attentionSignature !== row.attentionSignature)) {
-      notify("error", NEW_REPLY, true);
-      return failed(NEW_REPLY);
-    }
     const { out, busy } = await call(target, action);
     if (!busy) report(action, out, row);
-    // The call saved its mark among the pending ones the rows read.
-    if (action.kind === "mark_read") await loadPending();
     return out;
   }
 
@@ -340,7 +330,7 @@ export function createActions(
     return out;
   }
 
-  return { perform, end, toggleMute, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices: list, dismiss, notify };
+  return { perform, end, toggleMute, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify };
 }
 
 type FollowSource = { target(): { id: string } | undefined; summary(): Record<string, unknown> | undefined; loaded(): boolean; ended(): boolean; error(): unknown };
@@ -361,4 +351,4 @@ let selection: () => Selection = () => ({});
 export function bindSelection(source: () => Selection) { selection = source; }
 
 const app = createActions(appCatalog, (computer) => !computerOffline(computer), () => selection());
-export const { perform, end, toggleMute, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices, dismiss, notify } = app;
+export const { perform, end, toggleMute, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify } = app;

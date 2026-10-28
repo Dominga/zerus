@@ -2,6 +2,7 @@ import { For, Show, createSignal } from "solid-js";
 import { Icon } from "../lib/icons";
 import { ZerusLogo } from "./ZerusLogo";
 import { page, setPage, counts, setMenu, toast, logoMotion, type Page } from "../../store/ui";
+import { markAllEntry } from "../sessions/mark-entries";
 import { skin } from "../../skin/runtime";
 
 // The side screen switcher stays on the side (owner decision 2026-10-27).
@@ -37,7 +38,7 @@ export function Rail() {
         {(item) => (
           <button class="rail-btn" classList={{ on: page() === item.id }} aria-current={page() === item.id ? "page" : undefined}
             data-tip={labeled() ? undefined : item.tip} data-tip-pos="right" onClick={() => setPage(item.id)}
-            onContextMenu={(e) => { if (item.id !== "sessions") return; e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, items: [{ label: `Mark all as read (${counts().attention})`, icon: "read-all", disabled: true }, { label: "Expand all collapsed" }] }); }}>
+            onContextMenu={(e) => { if (item.id !== "sessions") return; e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, items: [markAllEntry(), { label: "Expand all collapsed" }] }); }}>
             <Icon name={item.icon} size={24} />
             <Show when={item.id === "sessions" && counts().attention > 0}>
               <span class="rail-badge">{counts().attention}</span>

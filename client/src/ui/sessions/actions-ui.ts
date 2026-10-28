@@ -90,22 +90,17 @@ export interface MenuState {
   end: { label: "Terminate session…" | "Forget saved session…" | "Forget archived session…"; enabled: boolean; reason?: string };
   /** Qt's composer Stop: shown while the turn works, enabled when the host can interrupt it. */
   stop: { visible: boolean; enabled: boolean; reason?: string };
-  markRead: { label: "Mark as read" | "Mark needs attention"; enabled: boolean; reason?: string };
 }
 
 export interface MenuOptions {
   /** The row's context menu: Move to archive needs the machine online there (not in the header). */
   context?: boolean;
-  /** A read mark of this session is being delivered. */
-  reading?: boolean;
   /** The write in flight is this session's interrupt. */
   interrupting?: boolean;
 }
 
 export const FORGET_LATER = "Forgetting sessions arrives in a later version.";
 export const RESTORE_LATER = "Restoring sessions arrives in a later version.";
-export const MARK_NEEDS_LATER = "Arrives with attention marks.";
-export const READ_STATE_HOST = "Update hgs on this session's host to share read state.";
 const NO_REASON = "This native adapter does not support this action in the current session state.";
 const WORKING = ["working", "tool", "compacting"];
 
@@ -153,13 +148,6 @@ export function menuState(s: ActionRow, online: boolean, updating: boolean, deta
       : !interruptible ? "Interrupt is unavailable. Open Terminal to stop this turn." : undefined,
   };
 
-  const needsAttention = s.attention === "approval" || s.attention === "question" || s.unread;
-  const markRead: MenuState["markRead"] = !needsAttention
-    ? { label: "Mark needs attention", enabled: false, reason: MARK_NEEDS_LATER }
-    : !s.sharedRead
-      ? { label: "Mark as read", enabled: false, reason: READ_STATE_HOST }
-      : { label: "Mark as read", enabled: online && !options.reading };
-
   return {
     change: {
       label: updating ? "Updating…" : archived ? "Restore session" : running ? "Pause session" : "Resume session",
@@ -174,7 +162,6 @@ export function menuState(s: ActionRow, online: boolean, updating: boolean, deta
     },
     end,
     stop,
-    markRead,
   };
 }
 

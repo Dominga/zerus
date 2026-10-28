@@ -9,6 +9,7 @@ import {
 import { catalog, computerOffline } from "../../store/catalog";
 import { detailsFor, followedFor } from "../../store/actions";
 import { actionEntries, copyEntries, muteEntry } from "./ActionDialogs";
+import { markAllEntry, markEntry, runMarkAll } from "./mark-entries";
 import {
   selectedKey, setSelectedKey, collapsed, setCollapsed, setExpandedChildren, expandedChildren,
   setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
@@ -99,6 +100,7 @@ function sessionMenu(s: Session): MenuEntry[] {
   const act = actionEntries(s, undefined, { context: true });
   const cp = copyEntries(s, details);
   const mute = muteEntry(s);
+  const mark = markEntry(s);
   return [
     { label: compactRows[s.key] ? "Expand session row" : "Compact session row", icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setRowCompact(s.key, !compactRows[s.key]) },
     { label: "Expand all collapsed", icon: "expand-row", disabled: !Object.values(compactRows).some(Boolean), action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
@@ -109,7 +111,7 @@ function sessionMenu(s: Session): MenuEntry[] {
     cp.command,
     { separator: true },
     ...(mute ? [mute] : []),
-    act.markRead,
+    ...(mark ? [mark] : []),
     { separator: true },
     act.change,
     { label: live ? "Clear session…" : "Start fresh…", icon: "clear", disabled: LATER },
@@ -158,7 +160,7 @@ function headerMenu(project: string): MenuEntry[] {
 function batchMenu(): MenuEntry[] {
   return [
     { label: "Expand all collapsed", icon: "expand-row", action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
-    { label: `Mark all as read (${Object.values(catalog.rows).filter((s) => s.unread).length})`, icon: "read-all", disabled: LATER },
+    markAllEntry(),
     { label: "Clear archive…", icon: "trash", danger: true, disabled: LATER },
   ];
 }
@@ -439,7 +441,7 @@ export function SessionList() {
           <span class="tabular ell">{shownSummary().shown ? `${shownSummary().shown} shown, ${shownSummary().working} working, ${shownSummary().attention} attention` : catalog.order.length ? "No matching sessions" : ""}</span>
           <span class="grow" />
           <button class="icon-btn small" data-tip="Session creation status" disabled><Icon name="clock" size={16} /></button>
-          <button class="icon-btn small" data-tip="Mark all as read: current replies on every machine" disabled><Icon name="read-all" size={16} /></button>
+          <button class="icon-btn small" data-tip="Mark all as read: current replies on every machine" disabled={markAllEntry().disabled} onClick={() => runMarkAll()}><Icon name="read-all" size={16} /></button>
           <button class="icon-btn small" data-tip="Saved drafts: recover local drafts, including those from ended sessions" disabled><Icon name="drafts" size={16} /></button>
         </footer>
       </div>

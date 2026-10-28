@@ -98,7 +98,7 @@ describe("perform", () => {
     });
   });
 
-  it("words the success of each action, and says nothing for mark read", async () => {
+  it("words the success of each action", async () => {
     await createRoot(async (dispose) => {
       const a = setup();
       mocked.runAction.mockResolvedValue(done());
@@ -109,7 +109,6 @@ describe("perform", () => {
         [{ kind: "archive" }, "Session updated. Refreshing…"],
         [{ kind: "terminate" }, "Session updated. Refreshing…"],
         [{ kind: "kill" }, "Session updated. Refreshing…"],
-        [{ kind: "mark_read", reply_id: null, attention_signature: null }, undefined],
       ];
       for (const [action, text] of cases) {
         for (const n of a.notices()) a.dismiss(n.id);
@@ -314,26 +313,6 @@ describe("rechecks after a confirmation", () => {
       a.applyBatch(batchOf({ upserts: [rowOut({ state: "stopped" })] }));
       await a.change(session({ state: "stopped" }));
       expect(mocked.runAction.mock.calls.map((c) => c[1])).toEqual([{ kind: "pause" }, { kind: "resume" }]);
-      dispose();
-    });
-  });
-
-  it("marks read only the reply and attention the menu showed", async () => {
-    await createRoot(async (dispose) => {
-      const a = setup(rowOut({ unread: true, reply_id: "r1", attention_signature: "s1", shared_read: true }));
-      const menu = session({ unread: true, reply_id: "r1", attention_signature: "s1", shared_read: true });
-      a.applyBatch(batchOf({ upserts: [rowOut({ unread: true, reply_id: "r2", attention_signature: "s1", shared_read: true })] }));
-      const out = await a.perform(menu, { kind: "mark_read", reply_id: menu.replyId ?? null, attention_signature: menu.attentionSignature ?? null });
-      expect(out.outcome).toBe("failed");
-      expect(mocked.runAction).not.toHaveBeenCalled();
-      expect(a.notices()).toMatchObject([{ tone: "error", sticky: true, text: "A new reply or question arrived. Open the menu again to mark it as read." }]);
-      mocked.runAction.mockResolvedValue(done());
-      const fresh = session({ unread: true, reply_id: "r2", attention_signature: "s1", shared_read: true });
-      mocked.pendingReadMarks.mockClear();
-      await a.perform(fresh, { kind: "mark_read", reply_id: "r2", attention_signature: "s1" });
-      expect(mocked.runAction.mock.calls[0][1]).toEqual({ kind: "mark_read", reply_id: "r2", attention_signature: "s1" });
-      // The rows read the pending marks again, now holding the one the call saved.
-      expect(mocked.pendingReadMarks).toHaveBeenCalledTimes(1);
       dispose();
     });
   });

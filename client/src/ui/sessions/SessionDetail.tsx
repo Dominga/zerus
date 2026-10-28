@@ -8,6 +8,7 @@ import { computerOffline } from "../../store/catalog";
 import { copyName, detailsFor, followedFor } from "../../store/actions";
 import { actionEntries } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
+import { markEntry } from "./mark-entries";
 
 // The session header and its Activity, after design/webui SessionDetail. The
 // composer, Terminal, Processes and the side panel move in with later phases;
@@ -35,6 +36,7 @@ function Header() {
   // inspects only once that subscription answered without one.
   const details = createMemo(() => detailsFor(s(), !computerOffline(s().computer), followedFor(s().key)));
   const act = createMemo(() => actionEntries(s(), details()));
+  const mark = createMemo(() => markEntry(s()));
   const actions = (): MenuEntry[] => [
     { label: "Open folder", icon: "folder-open", disabled: true },
     { label: "Open shell in session folder", icon: "square-terminal", disabled: true },
@@ -46,7 +48,7 @@ function Header() {
     { label: "Copy connect command", icon: "link", disabled: true },
     act().change,
     ...(act().stop.disabled ? [] : [act().stop]),
-    act().markRead,
+    ...(mark() ? [mark()!] : []),
     { separator: true },
     { label: "Clear session…", icon: "clear", disabled: true },
     ...(act().archive ? [act().archive!] : []),

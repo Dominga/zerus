@@ -1,17 +1,19 @@
-//! The reads behind the Overview, Projects, Machines and Accounts screens:
-//! one hub that knows which screens are visible, runs the due `hgs` reads off
-//! the main thread (`zerus_client_core::reads`, bounded and timed out there),
-//! keeps the replies and hands the webview projected view models
-//! (`zerus_client_core::views`). Which read runs when is decided in
-//! `views::schedule`; this file wires the clock, the threads and the event.
+//! The reads behind the Overview, Machines and Accounts screens, and the
+//! Projects screen: one hub that knows which screens are visible, runs the
+//! due `hgs` reads off the main thread (`zerus_client_core::reads`, bounded
+//! and timed out there), keeps the replies and hands the webview projected
+//! view models (`zerus_client_core::views`). Which read runs when is decided
+//! in `views::schedule`; this file wires the clock, the threads and the event.
 //!
 //! Every command answers at once with the current view and starts what is
 //! due in the background. A screen's reads run only while it shows, or on an
 //! explicit Refresh, selection or "Test connection"; hidden, only Qt's
-//! account warm-up runs (one `account ls` per newly listed host). A changed
-//! view emits `screens-changed` with the screen's name; the frontend then
-//! pulls it again. A replay reads only with an explicit `ZERUS_CLIENT_HGS`,
-//! as the actions do.
+//! account warm-up runs (one `account ls` per newly listed host). Projects
+//! reads nothing: [`Screens::organization`] hands it the organization the
+//! Sessions list groups by, with the write controller's status line. A
+//! changed view emits `screens-changed` with the screen's name; the frontend
+//! then pulls it again. A replay reads only with an explicit
+//! `ZERUS_CLIENT_HGS`, as the actions do.
 //!
 //! The one-second ticker does no per-profile work: it compares the fleet and
 //! steps the account reads only when the fleet changed, a catalog arrived, an
@@ -139,7 +141,6 @@ pub struct Screens(Arc<Shared>);
 enum Run {
     Catalog(ComputerId),
     Usage(UsageRef),
-    Swarm,
     Machines,
     Resolve(String),
     Check(String),
@@ -249,9 +250,7 @@ impl Screens {
         let runs = {
             let now = self.now();
             let mut hub = self.current();
-            let mut runs = self.accounts_due(&mut hub, now, false);
-            runs.extend(self.projects_due(&mut hub, now));
-            runs
+            self.accounts_due(&mut hub, now, false)
         };
         self.run(runs);
         self.publish();
@@ -305,14 +304,6 @@ impl Screens {
         runs
     }
 
-    /// The shared project catalog, every five seconds while Projects shows.
-    fn projects_due(&self, hub: &mut Hub, now: u64) -> Option<Run> {
-        let due = self.0.allowed
-            && hub.visible.contains(&Screen::Projects)
-            && hub.swarm.poll.due(now, false);
-        due.then_some(Run::Swarm)
-    }
-
     fn run(&self, runs: impl IntoIterator<Item = Run>) {
         for job in runs {
             let screens = self.clone();
@@ -355,13 +346,6 @@ impl Screens {
                 }
                 hub.dirty.extend(ACCOUNT_SCREENS);
                 hub.dispatch()
-            }
-            Run::Swarm => {
-                let reply = message(reads::read(hgs, &local, &Read::Swarm));
-                let mut hub = self.lock();
-                hub.swarm.finish(reply);
-                hub.dirty.insert(Screen::Projects);
-                Vec::new()
             }
             Run::Machines => {
                 let reply = message(reads::read(hgs, &local, &Read::Machines));
@@ -465,9 +449,9 @@ impl Screens {
         view
     }
 
-    /// A screen shown or hidden. Showing Machines reads the list, showing
-    /// Projects the catalog; Overview and Accounts make the account reads
-    /// due. Hiding both of those drops their queued reads; reads already
+    /// A screen shown or hidden. Showing Machines reads the list; Overview
+    /// and Accounts make the account reads due; Projects reads nothing.
+    /// Hiding both account screens drops their queued reads; reads already
     /// running finish.
     pub fn set_visible(&self, screen: Screen, visible: bool) {
         let runs = {
@@ -482,12 +466,8 @@ impl Screens {
                                 runs.push(Run::Machines);
                             }
                         }
-                        Screen::Projects => {
-                            if hub.swarm.poll.due(now, true) {
-                                runs.push(Run::Swarm);
-                            }
-                        }
                         Screen::Overview | Screen::Accounts => hub.stale = true,
+                        Screen::Projects => {}
                     }
                 }
             } else if hub.visible.remove(&screen) {
@@ -565,18 +545,41 @@ impl Screens {
         self.machines_answer()
     }
 
-    /// The Projects view; while it shows, a pull also starts a due poll.
+    /// The Projects view. It follows the fleet (its unconnected computers)
+    /// and starts no read.
     pub fn projects(&self) -> ProjectsView {
-        let run = {
-            let now = self.now();
-            let mut hub = self.current();
-            self.projects_due(&mut hub, now)
-        };
-        self.run(run);
-        let mut hub = self.lock();
+        let mut hub = self.current();
         let view = self.projects_of(&hub);
         remember(&mut hub, &[Screen::Projects], &view);
         view
+    }
+
+    /// The organization the Sessions list groups by, from the organization
+    /// hub (`crate::organization::Presented`): its `swarm get` object, this
+    /// device's default project and the write controller's status line, as
+    /// Qt's `SwarmController::statusChanged` reaches
+    /// `ProjectsDialog::setSwarmStatus` (SessionsWindow.cpp:1653). An empty
+    /// status keeps the line the object gives.
+    ///
+    /// It takes only this hub's lock, projects and emits: it runs on the
+    /// organization's threads, sometimes under its writer's lock, which the
+    /// main thread takes in `flush` as the app quits. Tauri's emit queues
+    /// the event for the event loop and never waits for the main thread (as
+    /// long as tauri's `tracing` feature stays off: with it, `eval_script`
+    /// waits for the event loop's answer).
+    pub fn organization(&self, value: Arc<Value>, default_project: String, status: (String, bool)) {
+        let value = (*value).clone();
+        {
+            let mut hub = self.lock();
+            hub.swarm.set_default(Some(default_project));
+            hub.swarm.finish(Ok(value));
+            let (status, error) = status;
+            if !status.is_empty() {
+                hub.swarm.set_status(status, error);
+            }
+            hub.dirty.insert(Screen::Projects);
+        }
+        self.publish();
     }
 }
 
@@ -837,43 +840,44 @@ mod tests {
         })
     }
 
-    // Review Focus 5.
+    // Review Focus 5 of phase 3a, now "never" (the organization plan, Task 9).
     #[test]
-    fn projects_read_only_while_shown_every_five_seconds_and_never_twice_at_once() {
+    fn projects_show_the_organization_they_are_handed_and_never_read_it() {
         let h = harness(json!({"swarm get": {"file": "swarm.json"}}), true);
+        h.screens.set_visible(Screen::Projects, true);
         for second in 1..=12 {
             h.at(second * 1000);
             h.screens.tick();
         }
-        h.screens.projects();
-        assert_eq!(h.queued(), 1, "hidden: only the account warm-up");
+        // Every read started so far runs: the account warm-up, and nothing else.
         h.drain();
-        assert_eq!(h.count("account ls"), 1);
-        assert_eq!(h.count("swarm get"), 0, "hidden: no read");
-        h.at(13_000);
-        h.screens.set_visible(Screen::Projects, true);
-        assert_eq!(h.queued(), 1, "showing reads the catalog");
-        h.at(18_100);
-        h.screens.tick();
-        assert!(h.screens.projects().refreshing);
-        assert_eq!(h.queued(), 1, "the first read still runs");
-        h.drain();
-        assert_eq!(h.count("swarm get"), 1);
-        assert_eq!(h.events(), [Screen::Projects], "the catalog arrived");
-        assert!(h.screens.projects().loaded);
-        h.screens.tick();
-        assert_eq!(h.queued(), 1, "due 5 s after the last start");
-        h.at(30_000);
-        h.screens.tick();
-        h.screens.projects();
-        assert_eq!(h.queued(), 1, "never two at once");
-        h.drain();
-        assert_eq!(h.count("swarm get"), 2);
-        h.screens.set_visible(Screen::Projects, false);
-        h.at(60_000);
-        h.screens.tick();
-        h.screens.projects();
-        assert_eq!(h.queued(), 0, "hidden again: no read");
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            h.count("swarm get"),
+            0,
+            "the organization topic feeds Projects"
+        );
+        assert!(!h.screens.projects().loaded);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../core/tests/fixtures/views/swarm.json");
+        let swarm: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let failed = "Project sync unavailable: hgs did not answer in time";
+        h.screens
+            .organization(Arc::new(swarm), "sample".into(), (failed.into(), true));
+        let view = h.screens.projects();
+        assert!(view.loaded);
+        assert!(view
+            .projects
+            .iter()
+            .any(|p| p.id == "sample" && p.is_default));
+        assert_eq!(
+            (view.status.as_str(), view.status_error),
+            (failed, true),
+            "the controller's status line"
+        );
+        eventually("a change event", || {
+            h.notified.lock().unwrap().contains(&Screen::Projects)
+        });
     }
 
     // Review Focus 4.

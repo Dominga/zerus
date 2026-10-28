@@ -229,7 +229,7 @@ worktree flows.", "... the copy actions.").
 | Connection state | `Batch.computers`: only `live` is fresh; `probing` and `reconnecting` connect (amber), `ended` is offline, `unsupported` reads "Update hgs" |
 | Accounts | `hgs [@host] account ls` per host (every 30 s while Overview or Accounts shows, once per new host otherwise) and `account inspect ID --refresh` per installed profile (every 5 min, two at once, offline hosts skipped) |
 | Machines | `hgs machine ls` on show and Refresh, `machine resolve ALIAS` on selection, `machine check ALIAS` only on Test connection |
-| Projects | `hgs swarm get` every 5 s while Projects shows |
+| Projects | No read of its own: the organization the Sessions list groups by (the `organization` topic, or the core's `swarm get` poll for a CLI without it), this device's default project and the project sync status line |
 
 The reads run in `src-tauri/src/screens.rs` on the blocking pool with the
 core's timeouts and output limits (`core/src/reads.rs`); when each read is

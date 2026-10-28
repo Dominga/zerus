@@ -67,8 +67,16 @@ pub fn run() {
                     draft_path,
                 );
                 app.state::<commands::AppState>().set_organization(organization.clone());
+                let screens = screens::Screens::tauri(app.handle().clone(), pump);
+                // Projects shows the organization the Sessions list groups by. The
+                // call only takes the screens hub's lock and emits, so it never
+                // waits for the main thread (organization::Presented).
+                let projects = screens.clone();
+                organization.set_presented(std::sync::Arc::new(move |value, default, status| {
+                    projects.organization(value, default, status)
+                }));
                 app.manage(organization);
-                app.manage(screens::Screens::tauri(app.handle().clone(), pump));
+                app.manage(screens);
             }
             let display = display::display_name();
             if !display::headless_allowed(std::env::var("ZERUS_CLIENT_HEADLESS").is_ok_and(|v| v == "1"), display.as_deref()) {

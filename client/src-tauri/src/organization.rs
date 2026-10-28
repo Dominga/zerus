@@ -204,10 +204,6 @@ impl Organization {
         self.lock().source = Some(source);
     }
 
-    #[allow(
-        dead_code,
-        reason = "Task 9 hands the Projects screen the presented organization"
-    )]
     pub fn set_presented(&self, presented: Presented) {
         let mut hub = self.lock();
         hub.presented = Some(presented);

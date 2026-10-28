@@ -5402,7 +5402,8 @@ void TestTeamsUi::catalogHeaderRevertDraftAndBanners()
     auto moved = catalog(); auto inner = moved["catalog"].toObject(); inner["version"] = 4; moved["catalog"] = inner;
     { QFile c(script() + ".catalog"); QVERIFY(c.open(QIODevice::WriteOnly)); c.write(QJsonDocument(moved).toJson(QJsonDocument::Compact)); }
     controller.refreshCatalog();
-    QTRY_COMPARE(draft.findChild<QLabel *>("teamCatalogBannerTitle")->text(), QStringLiteral("Draft is out of date — Apply is off"));
+    // The fixture's catalog read takes more than QTRY's 5 s on a loaded Windows runner.
+    QTRY_COMPARE_WITH_TIMEOUT(draft.findChild<QLabel *>("teamCatalogBannerTitle")->text(), QStringLiteral("Draft is out of date — Apply is off"), 15000);
     QVERIFY(draft.findChild<QFrame *>("teamCatalogBanner")->isVisible());
     QVERIFY(!draft.findChild<QPushButton *>("teamDesignerApply")->isEnabled());
     shot(&draft, "ux-9-draft-stale-dark");

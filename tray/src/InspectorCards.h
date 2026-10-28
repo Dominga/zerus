@@ -76,6 +76,12 @@ public:
         refreshValue(card);
     }
     QString value(Card card) const { return m_cards.value(card).value->text(); }
+    // Shown and unfolded: its content is on screen when the inspector is.
+    bool isOpen(Card card) const
+    {
+        const auto entry = m_cards.value(card);
+        return entry.frame && !entry.frame->isHidden() && entry.block->isExpanded();
+    }
 
     // Unfolds the card and brings it into view.
     void open(Card card)

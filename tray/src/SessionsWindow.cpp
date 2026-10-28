@@ -4062,8 +4062,13 @@ void SessionsWindow::inspect()
     const auto *entry = selected();
     if(isVisible() && m_pages->currentIndex()==3)updateDashboardAccounts(true);
     if (!isVisible() || m_pages->currentIndex() != 0 || !entry || !entry->online) return;
+    // WhiteWh fork: the Tasks card lists the agent's background jobs from this
+    // read, so it is made while the card is on screen even with the Processes
+    // tab off, at the background interval (owner, 2026-10-28: with the tab off,
+    // which is the default, the card never showed them).
+    const bool tasksCard=m_inspector&&m_inspector->isVisible()&&m_inspector->isOpen(InspectorCards::Tasks);
     const int processInterval=m_detailTabs->currentWidget()==m_processes?ProcessSettings::activeMs():ProcessSettings::backgroundMs();
-    const bool processes=ProcessSettings::enabled() && (!m_processPollAge.isValid() || m_processPollAge.elapsed()>=processInterval);
+    const bool processes=(ProcessSettings::enabled()||tasksCard) && (!m_processPollAge.isValid() || m_processPollAge.elapsed()>=processInterval);
     // A live event stream brings Activity as it happens (EventStream.h); only
     // the process section is still polled, at its own interval.
     auto *streams = EventStreams::instance();

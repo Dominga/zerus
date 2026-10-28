@@ -70,6 +70,7 @@
 #include <utility>
 #include "SessionsWindow.h"
 #include "Extensions.h"
+#include "InspectorCards.h"
 #include "JsonParse.h"
 #include "OffGuiThread.h"
 #include "QuestionReply.h"
@@ -648,6 +649,7 @@ private slots:
     void rowPreparationDropsStaleResults();
     void rowPreparationsNeverQueueBehindEachOther();
     void aConfirmingCreationReadsItsComputerUntilListed();
+    void tasksCardReadsBackgroundJobsWithTheProcessesTabOff();
     void rowPreparationKeepsItemsSelectionAndScroll();
     void rowPreparationRevealsSessionsAfterFilterChanges();
 private:
@@ -16835,6 +16837,39 @@ void TestSessionsWindow::rowPreparationDropsStaleResults()
 // for a minute: peers are listed once a minute (or only through their event
 // stream), and the one refresh after the launch came before the session was
 // listed. Its computer is read every 2 s until the session is placed.
+// Owner, 2026-10-28: with the Processes tab off (the default) the Tasks card
+// never showed the agent's background jobs, since no read included them. While
+// the card is on screen the reads include them, at the background interval.
+void TestSessionsWindow::tasksCardReadsBackgroundJobsWithTheProcessesTabOff()
+{
+    QTemporaryDir temp; const auto program = temp.filePath("hgs"); QFile fixture(program); QVERIFY(fixture.open(QIODevice::WriteOnly));
+    fixture.write(R"PY(#!/usr/bin/env python3
+import sys,json,pathlib,time
+root=pathlib.Path(__file__).parent
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a=a[1:]
+if a and a[0]=='inspect':
+ with (root/'inspections.jsonl').open('a') as f:f.write(json.dumps(a)+'\n')
+ value=dict(tracked=True,run_id='run',conversation_id='conversation',activity='busy',phase='working',events=[],cursor=0)
+ if '--skip-processes' not in a:value['processes']=dict(items=[dict(id='job',background=True,status='running',description='Wait for the fork build',started_at=time.time()-120)])
+ print(json.dumps(value))
+else:print('{}')
+)PY");
+    fixture.close(); QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
+    QVERIFY(!ProcessSettings::enabled());
+    SessionsWindow window(FakeCli::program(program)); window.resize(1440, 900); window.setFleet(fleet()); window.show();
+    window.showSession({}, "codex/hgs/dashboard");
+    window.findChild<QPushButton *>("toggleInspector")->setChecked(true);
+    auto *inspector = static_cast<InspectorCards *>(window.findChild<QScrollArea *>("sessionInspector")); QVERIFY(inspector);
+    inspector->open(InspectorCards::Tasks); QTRY_VERIFY(inspector->isOpen(InspectorCards::Tasks));
+    const auto log = [&] { QStringList result; QFile file(temp.filePath("inspections.jsonl")); if (file.open(QIODevice::ReadOnly)) while (!file.atEnd()) result << QString::fromUtf8(file.readLine()); return result; };
+    const auto readsProcesses = [&] { const auto calls = log(); return std::any_of(calls.cbegin(), calls.cend(), [](const QString &call) { return !call.contains("--skip-processes"); }); };
+    QTRY_VERIFY_WITH_TIMEOUT(readsProcesses(), 15000);
+    auto *roster = window.findChild<QTextBrowser *>("subagents");
+    QTRY_VERIFY_WITH_TIMEOUT(roster->toPlainText().contains("Wait for the fork build"), 15000);
+    QVERIFY(roster->toPlainText().contains("Background jobs"));
+}
+
 void TestSessionsWindow::aConfirmingCreationReadsItsComputerUntilListed()
 {
     const auto id = QUuid::createUuid().toString(QUuid::WithoutBraces);

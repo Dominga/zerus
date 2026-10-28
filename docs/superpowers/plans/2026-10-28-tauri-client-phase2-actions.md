@@ -15,6 +15,18 @@
 
 Unknown outcomes are shown and never replayed.
 
+> **Corrections after the final review (2026-10-28).** Where this plan first
+> disagreed with Qt, Qt won and the text below now says so: Stop is gated on
+> the inspected details (`interrupt_supported`, phase, `turn_started`), never
+> on `allowed_actions`, which never lists `interrupt`; Stop shows Qt's three
+> notices; Terminate kills (`hgs kill NAME`) every live session that is not a
+> tracked Codex, Claude or Kimi session; Rename edits only the tag
+> (`SessionTag::problem`); details come from the followed session's Activity
+> `state` value, with `inspect` only as a fallback; a live row without a
+> `state` is `running`, as Qt reads it; the store keeps flat action fields,
+> never the nested view row; read marks have their own in-flight lane. See
+> `client/README.md` ("Actions") for the resulting rules.
+
 **Tech Stack:** Rust 1.99.1 (`client/core`, `client/src-tauri`, Tauri 2), SolidJS 1.9 + TypeScript + Vite, vitest, Python 3 stdlib for the fake `hgs`.
 
 **Spec:** `docs/superpowers/specs/2026-10-27-tauri-web-ui-design.md` (section "Actions"); phase table in `docs/superpowers/plans/2026-10-28-tauri-client-phase1.md`. The behavioural reference is the Qt GUI:
@@ -39,7 +51,7 @@ Read those lines before each task; this plan quotes the rules it depends on.
   - After a successful write: "Session renamed. Refreshing…" for rename, and "Session updated. Refreshing…" for pause, resume, archive and terminate (`SessionsWindow.cpp:1971`).
   - On failure: the detail `hgs` printed.
   - Worktree cleanup: "Worktree removed automatically. The branch and archived conversation are kept." and "Worktree kept for review: {reason}" (`SessionsWindow.cpp:1987-1992`).
-  - Interrupt and mark read show no success notice.
+  - Mark read shows no success notice. Stop shows Qt's notices (`SessionsWindow.cpp:1206-1211`): "Interrupt sent to {name} ({machine}). Waiting for the agent to stop…" (info), "Stop {name} ({machine}): the turn already ended or is waiting for input. No action needed." when `hgs` answers "This turn is no longer working" (info), otherwise the sticky error "Stop {name} ({machine}) failed: {detail}\nOpen Terminal to check the agent before trying again.".
 - Never run the real `hgs` against live sessions in tests; tests use the fake `hgs` in `client/core/tests/support`.
 - Headless GUI runs only with `env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 ZERUS_CLIENT_HEADLESS=1 xvfb-run -a -s "-screen 0 1440x900x24" ...` (`client/README.md`, "Headless runs").
 - Repository text in English; fixtures synthetic (reserved example domains, `/home/example/...`, `claude/sample-project/review`).
@@ -62,7 +74,7 @@ client/core/src/actions.rs        Action, Target, Invocation, Exit, Outcome, Wor
 client/core/src/run.rs            run(), run_with_env(): spawn, stdin, deadline, environment
 client/core/src/details.rs        Details (inspect fields used by enablement); details_invocation(), parse_details()
 client/core/src/readmarks.rs      ReadMark, ReadMarks: durable pending shared read marks
-client/core/src/view.rs           ViewRow gains state, tracked, resumable, activity, process_state, archive_id,
+client/core/src/view.rs           ViewRow gains state (running when the row lists none), tracked, resumable, activity, process_state, archive_id,
                                   reply_id, attention_signature, shared_read, read_reply_id,
                                   read_attention_signature, allowed_actions, action_reasons
 client/core/src/lib.rs            new modules and re-exports
@@ -141,7 +153,7 @@ pub fn allowed(row: &ViewRow, operation: &str) -> bool;
 ```
 
 `ViewRow` additions, all `#[serde(default)]`, from the catalog row:
-- **State:** `state: String`, `tracked: bool`, `resumable: bool`, `activity: String`, `process_state: String`, `archive_id: Option<String>`.
+- **State:** `state: String` (`running` when the row has no `state`, as `HgsClient.cpp` reads it: live rows list none), `tracked: bool`, `resumable: bool`, `activity: String`, `process_state: String`, `archive_id: Option<String>`.
 - **Reply identity:** `reply_id: Option<String>`, `attention_signature: Option<String>`, and `shared_read: bool` (the row has the key `attention_signature`).
 - **Read state:** `read_reply_id: Option<String>` and `read_attention_signature: Option<String>`, taken from `row.read` only when `row.read.conversation_id == row.conversation_id` (`HgsClient.cpp:186-192`).
 - **Capabilities:** `allowed_actions: Option<Vec<String>>`, `action_reasons: BTreeMap<String, String>`.
@@ -156,7 +168,8 @@ Calls, inputs and timeouts (from `tray/src/HgsClient.cpp`; `@alias` first for a 
 | Resume | `resume NAME -d` | none | 30 s / 30 s |
 | Rename | `rename NAME NEW` plus `--archive ID` when archived | none | 5 s / 15 s |
 | Archive | `archive NAME` | none | 30 s / 45 s |
-| Terminate | `terminate NAME --expected-run-id RUN` (flag only when RUN is not empty) | none | 45 s / 60 s |
+| Terminate | `terminate NAME --expected-run-id RUN` (flag only when RUN is not empty); only for a live, tracked `codex`, `claude` or `kimi` session | none | 45 s / 60 s |
+| Kill | `kill NAME`: Terminate for every other live session (`killSession`, `SessionsWindow.cpp:5824-5827`) | none | 5 s / 15 s |
 
 - [ ] **Step 1: Write the failing tests** (in `actions.rs`):
 
@@ -262,7 +275,7 @@ In `view.rs` tests:
 
 - [ ] **Step 3: Implement `actions.rs`:**
   - `invocation` prepends `@{computer}` for a peer and follows the table.
-  - The rename rule follows Qt and `src/config.rs::check_name`: both name sections (before and after the first `/`) are non-empty, with no whitespace, no `=` and no leading `#`. The refusal text is "Use a name without spaces or '=', with a project and a session part."
+  - The rename keeps the agent and project of the old name and changes only the tag, as Qt's dialog and `src/state/rename.rs` do. The tag follows `SessionTag::problem` (`tray/src/SessionTag.h`): "Enter a session name.", "Remove spaces at the beginning or end.", "Names cannot contain /, : or . or control characters."; another prefix is refused with `hgs`'s own text.
   - JSON input is compact (`serde_json::to_vec`); `request_id` is the passed id for interrupt.
   - `classify` for Interrupt follows `runSessionAction` (non-scoped):
     - `TimedOut`, `WriteFailed` and non-zero exits map to the failure texts in the tests.
@@ -419,6 +432,8 @@ pub struct Details {
     pub run_id: String, pub conversation_id: String,
     pub auth_required: bool, pub expected_id: String, pub resume_message_can_send: bool,
     pub allowed_actions: Option<Vec<String>>, pub action_reasons: BTreeMap<String, String>,
+    // Stop's inputs (`src/state/journal.rs` inspection): interrupt_supported, turn_started, phase.
+    pub interrupt_supported: bool, pub turn_started: f64, pub phase: String,
 }
 /// `hgs [@host] inspect NAME --after 0 --skip-processes [--archive ID]`, 5 s here / 15 s on a peer (HgsClient.cpp:925-931).
 pub fn details_invocation(target: &Target, archive_id: Option<&str>) -> Invocation;
@@ -510,7 +525,7 @@ git commit -m "feat(client): durable shared read marks until the host shows them
 **Files:**
 - Create: `client/src-tauri/src/actions.rs`
 - Modify: `client/src-tauri/src/lib.rs`: the module; `.manage(Actions::new(app.path().app_data_dir()?.join("read-marks.json")))`; `run_action`, `inspect_session` and `pending_read_marks` in `invoke_handler`.
-- Modify: `client/src-tauri/src/commands.rs` (call `actions.settle(&computer, &row)` for each upserted row of an applied batch)
+- Modify: `client/src-tauri/src/commands.rs` (`actions.observe(&batch)` for each batch: every upserted or snapshot row settles its mark, a computer's snapshot drops marks of sessions it no longer lists, and nothing is done without pending marks). A replay keeps its marks in `read-marks-replay.json`. Read marks have their own in-flight lane, so a quiet retry never makes a write answer `busy`.
 
 **Interfaces:**
 - Consumes: `invocation`, `classify`, `run`, `details_invocation`, `parse_details`, `ReadMarks`, `default_hgs()`.
@@ -569,23 +584,25 @@ git commit -m "feat(client): run_action and inspect_session with one action per 
 - Produces:
 
 ```ts
-export function targetOf(entry: RowOut): Target | undefined;   // undefined without a run id
-export function updating(computer: string, name: string): boolean;   // reactive: an action of that session is pending
-export async function perform(entry: RowOut, action: Action): Promise<Outcome>;
-export function detailsFor(entry: RowOut): Details | undefined;  // reactive; fetched once per selection and run
+// `ActionRow`: the flat action fields of a catalog Session (no nested view row), or a snapshot of them.
+export function targetOf(row: ActionRow, kind: Action["kind"]): Target | undefined;   // interrupt, mark_read and terminate need the run id
+export function updating(computer: string, name: string): boolean;   // reactive: a write of that session is pending
+export async function perform(row: ActionRow, action: Action): Promise<Outcome>;   // row: the menu's snapshot
+export async function end(row: ActionRow, action: "terminate" | "kill"): Promise<Outcome>;   // the Terminate confirmation
+export function detailsFor(row: ActionRow, online: boolean, followed?: Followed): Details | undefined;  // state value first, inspect fallback
 export const notices: () => Notice[];   // { id, tone: "error" | "warn" | "info", text, sticky }
 export function dismiss(id: number): void;
 ```
 
 Rules:
-- `perform` re-reads the row by `(computer, key)` from the catalog. If the row is gone or its `run_id` differs from `entry.row.run_id`, it shows the info notice "This session changed. Open its actions again." and returns without a call.
-- **Success notices:** rename shows "Session renamed. Refreshing…"; pause, resume, archive and terminate show "Session updated. Refreshing…" (info, 6 s). Interrupt and mark read show none.
+- `perform` re-reads the row by its key from the catalog. If the row is gone or (when the snapshot has one) its `run_id` differs from the snapshot's, it shows the info notice "This session changed. Open its actions again." and returns without a call. Mark as read also compares the reply and attention signature with the snapshot: "A new reply or question arrived. Open the menu again to mark it as read." (sticky).
+- **Success notices:** rename shows "Session renamed. Refreshing…"; pause, resume, archive, terminate and kill show "Session updated. Refreshing…" (info, 6 s). Mark read shows none; Stop shows its own notices (Global Constraints).
 - **Failures:** an error notice with the detail, which stays until dismissed.
 - **Cleanup notices:**
   - `removed`: info "Worktree removed automatically. The branch and archived conversation are kept."
   - `kept` and `unconfirmed`: a sticky warning "Worktree kept for review: {reason}".
   - Nothing ever retries.
-- `detailsFor` calls `inspectSession` when a session is selected and again when its `run_id`, `conversation_id` or `state` changes. Only one inspect runs per session at a time, and only details whose identities match the row are kept.
+- `detailsFor` takes the followed session's Activity `state` value (the same inspection, `src/state/watch_source.rs`) when it names the row's run and conversation. Only when the subscription answered without such a value does it call `inspectSession`, again when the `run_id`, `conversation_id` or `state` changes, and never while the computer is offline. Only one inspect runs per session at a time, and only details whose identities match the row are kept.
 - **Read-mark retry:** load `pendingReadMarks()` at start. When a batch upserts a row with a pending mark that still shows unread, call `perform(entry, mark_read)` again, at most once per 5 s per session.
 
 - [ ] **Step 1: Write the failing vitest tests** (`vi.mock("../bridge")`, fake timers):
@@ -625,12 +642,13 @@ export interface MenuState {
   rename: boolean;
   archive: { visible: boolean; enabled: boolean; reason?: string };
   end: { label: "Terminate session…" | "Forget saved session…" | "Forget archived session…"; enabled: boolean; reason?: string };
-  stop: boolean;
+  stop: { visible: boolean; enabled: boolean; reason?: string };
   markRead: { label: "Mark as read" | "Mark needs attention"; enabled: boolean; reason?: string };
 }
-export function menuState(entry: RowOut, online: boolean, updating: boolean, details?: Details): MenuState;
-export function terminateCopy(entry: RowOut): { title: string; text: string; detail: string; confirm: string };
-export function renameError(name: string): string | undefined;
+export function menuState(row: ActionRow, online: boolean, updating: boolean, details?: Details, options?: { context?: boolean; reading?: boolean; interrupting?: boolean }): MenuState;
+export function terminateCopy(row: ActionRow): { title: string; text: string; detail: string; confirm: string; action: "terminate" | "kill" };
+export function tagProblem(tag: string): string | undefined;   // SessionTag::problem
+export function renameProblem(tag: string, row: ActionRow, rows: Iterable<Session>): string | undefined;
 ```
 
 Rules (Qt `SessionsWindow.cpp` 3890-3912 for the selected session with details, and 5270-5380 for the context menu):
@@ -643,11 +661,11 @@ Rules (Qt `SessionsWindow.cpp` 3890-3912 for the selected session with details, 
     - or archived, which shows "Restore session" disabled in this phase (Restore moves to `zerus-5wmh.17`).
   - The label is "Updating…" while updating, otherwise as in the type.
 - **Rename:** `allowed("rename") && available`, both name sections non-empty, and `archive_id` present when archived.
-- **Move to archive:** visible only when `agent != "dsh"` and `state` is `paused` or `stopped`; enabled when `!updating && allowed("archive")`; the reason is `action_reasons.archive`.
+- **Move to archive:** visible only when the agent is not DeepSeek (the core names `dsh` sessions `deepseek`) and `state` is `paused` or `stopped`; enabled when `!updating && allowed("archive")`, and in the context menu only while the machine is online; the reason is `action_reasons.archive`.
 - **End entry:** operation `terminate` when `state == "running"` and not forgets-binding-only (`agent == "opencode" && allowed("forget") && !allowed("terminate")`); otherwise `forget`.
   - The label is "Terminate session…", "Forget saved session…", or "Forget archived session…" when archived.
   - Terminate is enabled when `available && allowed("terminate")`. The Forget variants stay disabled in this phase with the reason "Forgetting sessions arrives in a later version." (`zerus-5wmh.17`).
-- **Stop:** `turn_started` set, `allowed("interrupt")` and `available`.
+- **Stop** (Qt's composer, `SessionsWindow.cpp:3992-3999` and 1187-1199): shown while the inspected phase (`details.phase`, else the row's) is `working`, `tool` or `compacting` and the state is `running`; enabled when online, `details.interrupt_supported` and no write is pending. It sends the details' run, conversation and `turn_started`. Never gate it on `allowed("interrupt")`: hosts never list it. Reasons: "Interrupt is being sent…", "Machine is offline", "Interrupt is unavailable. Open Terminal to stop this turn.".
 - **Mark as read:** shown when the row needs attention (`attention` set, or `unread`, matching Qt `SessionRows::needsAttention` for the fields the client has). It runs `mark_read` with the row's `reply_id` and `attention_signature`.
   - When the host has no shared read state (`!shared_read`), it is disabled with the reason "Update hgs on this session's host to share read state." (the local fallback is `zerus-5wmh.16`).
   - Otherwise the entry is "Mark needs attention", disabled with the reason "Arrives with attention marks." (`zerus-5wmh.16`).
@@ -657,10 +675,10 @@ Rules (Qt `SessionsWindow.cpp` 3890-3912 for the selected session with details, 
   - Otherwise the text is "Terminate {name}? Its running processes will stop. No HGS archive is available for this session; any native conversation history is kept." and the button is "Terminate session".
   - The detail is "Computer: {machine}".
   - Cancel is focused and is the default button, and Escape cancels. There is no Remove-worktree checkbox in this phase (`zerus-5wmh.10`).
-  - On confirm, the row is checked again as in `perform`.
-- **Rename dialog:**
-  - The field starts with the full current name, with the session part selected.
-  - `renameError` returns "Use a name without spaces or '=', with a project and a session part." for names Task 1's rule refuses. Rename is disabled while there is an error or the name is unchanged.
+  - On confirm, the session must still terminate (running, not a forget-only OpenCode binding) as when the dialog opened, else "The session state changed. Open its actions again." (sticky); then the row is checked again as in `perform`. The confirmed call is `terminate --expected-run-id` for a tracked `codex`, `claude` or `kimi` session and `kill NAME` for every other live session.
+- **Rename dialog** (Qt `renameSession`, `SessionsWindow.cpp:5698-5757`):
+  - It shows "{machine} / {agent}/{project}" and edits only the tag, which starts selected; a preview shows the full new name.
+  - The tag follows `SessionTag::problem`, then "This name is already in use on {machine}." for a live session of that name on the same computer. Rename is disabled while there is a problem or the tag is unchanged.
   - Escape cancels.
 
 - [ ] **Step 1: Write the failing vitest tests** for `menuState`: one case per rule above with synthetic rows, including an `opencode` row, a `dsh` row, an archived row with and without `archive_id`, a running `claude` row in idle and in working, `process_state == "exited"`, and details with `expected_id` set and `resume_message_can_send` false. Also test `terminateCopy` for both variants and `renameError`.
@@ -685,7 +703,7 @@ git commit -m "feat(client): session actions with Qt's enablement and confirmati
 
 - [ ] **Step 1: End-to-end with the fake `hgs`.** Copy `fake_hgs_actions.py` as `hgs` with `{"reply":{"exit":0,"stdout":"echo_interrupt"}}` into a scratch folder and point `ZERUS_CLIENT_HGS` at it.
   - Run the release app headless on the replay fixtures with `ZERUS_CLIENT_QUERY=actions-smoke=1` and the Headless constraint's environment.
-  - The hook selects the replay session `claude/sample-project/review`, runs pause, resume, rename (to `claude/sample-project/review-renamed`), archive and terminate through `perform` (confirming dialogs programmatically), then exits.
+  - The hook selects the replay session `claude/sample-project/review`, runs pause, resume, rename (to `claude/sample-project/review-renamed`), archive, the end call the Terminate dialog picks through its confirmation (`kill` for the untracked replay row), then the other end call (`terminate`), then exits.
   - Afterwards `log.ndjson` holds exactly one call per action, with the table's argument lists.
   - Record the command and the log lines in the PR description. Screenshots stay in the scratch folder.
 - [ ] **Step 2: Run all checks:** `cargo +1.99.1 test`, plus clippy with `-D warnings`, in `client/core` and `client/src-tauri`; then `npx vitest run`, `npm run check`, `python3 scripts/check-ui-separators.py` and `python3 scripts/check-source-privacy.py`.

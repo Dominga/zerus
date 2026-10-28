@@ -59,8 +59,8 @@ env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=
 
 ## Actions
 
-The session menus and the Rename and Terminate dialogs run guarded actions
-through the `hgs` CLI (`core/src/actions.rs`, `src-tauri/src/actions.rs`),
+The session menus, the header and the Rename and Terminate dialogs run guarded
+actions through the `hgs` CLI (`core/src/actions.rs`, `src-tauri/src/actions.rs`),
 with Qt's enablement, confirmations and texts (`actions-ui.ts`). A peer's call
 is prefixed with `@alias` and uses the longer timeout. Every call is made with
 the child's own environment: the agent attribution (`HGS_SESSION`,
@@ -74,35 +74,69 @@ the child's own environment: the agent attribution (`HGS_SESSION`,
 | Resume | `resume NAME -d` | none | 30 s, 30 s |
 | Rename | `rename NAME NEW [--archive ID]` | none | 5 s, 15 s |
 | Move to archive | `archive NAME` | none | 30 s, 45 s |
-| Terminate | `terminate NAME --expected-run-id RUN` | none | 45 s, 60 s |
+| Terminate a tracked Codex, Claude or Kimi session | `terminate NAME --expected-run-id RUN` | none | 45 s, 60 s |
+| Terminate any other live session | `kill NAME` | none | 5 s, 15 s |
 
 Outcome rules:
 
 - A call is made once and never repeated. A timeout, a failed hand-over or an
-  abnormal end is an unknown outcome: it is shown as a failure ("Request timed
-  out. Check Terminal before retrying.", "Transfer failed. Check Terminal
-  before retrying."). Unknown outcomes are never replayed.
+  abnormal end is an unknown outcome, shown as a failure and never replayed.
+  Stop words them "Request timed out. Check Terminal before retrying." and
+  "Transfer failed. Check Terminal before retrying."; the other actions show
+  "timed out" or the trimmed standard error `hgs` printed.
 - Stop succeeds only when the receipt echoes the request id, session name, run
   id and conversation id of the call (status `submitted`); anything else is
-  "Invalid acknowledgement. Check Terminal before retrying."
-- Pause, Resume and Rename succeed on exit 0. Move to archive and Terminate also
-  read the single worktree report line on standard error: a removed worktree
-  gives an information notice, a kept or unconfirmed one a sticky warning with
-  its reason. Otherwise a failure shows the trimmed standard error.
-- One action per session at a time, for every kind. A second request while one
-  runs (or one for a row whose run id changed) is a silent no-op, answered
-  `busy` by the Rust side; a changed row shows "This session changed. Open its
-  actions again."
-- Details (allowed actions and their reasons, `auth_required`) come from one
-  read-only `inspect` per selected session, refetched when its run, conversation
-  or state changes.
-- Mark as read applies at once. The mark is saved before the call in
-  `read-marks.json` in the app data directory (`app_data_dir`, e.g.
-  `~/.local/share/<bundle id>/` on Linux) so a restart keeps it, and is dropped
-  once the row shows the host has settled it. While a mark is pending and a
-  batch shows its row unread again for the same reply and attention signature,
-  the call is retried quietly, at most once per 5 s per session.
-  A host without shared read state keeps the entry disabled.
+  "Invalid acknowledgement. Check Terminal before retrying." Its notices are
+  Qt's: "Interrupt sent to NAME (COMPUTER). Waiting for the agent to stop…",
+  "Stop NAME (COMPUTER): the turn already ended or is waiting for input. No
+  action needed." when `hgs` answers "This turn is no longer working", and
+  otherwise a sticky "Stop NAME (COMPUTER) failed: …" with "Open Terminal to
+  check the agent before trying again."
+- Pause, Resume, Rename and kill succeed on exit 0. Move to archive and
+  terminate also read the single worktree report line on standard error: a
+  removed worktree gives an information notice, a kept or unconfirmed one a
+  sticky warning with its reason. Otherwise a failure shows the trimmed
+  standard error.
+- An entry acts on the row as it was when its menu, button or dialog was
+  built. If the listed row has another run id by then (or, for a row without
+  one, is gone), nothing runs and the notice says "This session changed. Open
+  its actions again." Stop, Mark as read and terminate need the row's run id
+  (Stop and Mark as read also its conversation id); the other actions name
+  the session only.
+- One write per session at a time. While it runs the session's entries show
+  "Updating…"; another write for that session is a silent no-op (the Rust side
+  answers `busy`). Read marks run in their own lane and never hold up a write.
+- Terminate stops a tracked Codex, Claude or Kimi session into Archive and
+  kills any other live session; the confirmation says which. After the
+  confirmation (and after a menu's Pause or Resume) the session must still be
+  running, or still not running, as it was; otherwise nothing runs and the
+  notice says "The session state changed. Open its actions again."
+- Rename edits only the tag after the agent and project, with Qt's tag rule
+  ("Enter a session name.", "Remove spaces at the beginning or end.", "Names
+  cannot contain /, : or . or control characters.") and "This name is already
+  in use on COMPUTER." for a live session of that name on the same computer.
+- Stop is shown while the selected session's turn works (`working`, `tool` or
+  `compacting`) and enabled when its computer is online and the details say
+  `interrupt_supported`; it sends the details' run, conversation and
+  `turn_started`. Hosts never list `interrupt` among the allowed actions.
+- Details (allowed actions and their reasons, `auth_required`, Stop's fields)
+  come from the followed session's Activity `state` value when it names the
+  row's run and conversation. Only when the subscription answered without one
+  does the client run one read-only `inspect`, refetched when the run,
+  conversation or state changes, and never while the computer is offline.
+- Mark as read sends the reply and attention the menu showed; if a newer reply
+  or question arrived meanwhile, nothing runs and the notice says "A new reply
+  or question arrived. Open the menu again to mark it as read." The row shows
+  read once the host's snapshot reports it. The mark is saved before the call
+  in `read-marks.json` in the app data directory (`app_data_dir`, e.g.
+  `~/.local/share/<bundle id>/` on Linux; a replay uses
+  `read-marks-replay.json`) so a restart keeps it. It is dropped once a row
+  shows the host settled it, or when a complete snapshot of its computer no
+  longer lists the session. While a mark is pending and a batch (an upsert or
+  a snapshot) shows its row unread again for the same reply and attention
+  signature, the call is retried quietly, at most once per 5 s per session
+  (a person's Mark as read counts too). A host without shared read state keeps
+  the entry disabled.
 
 Forgetting, restoring, attention marks and sending arrive in later phases; their
 entries are disabled with a reason.
@@ -134,11 +168,14 @@ env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=
 cat $S/log.ndjson
 ```
 
-The hook selects `claude/sample-project/review`, runs pause, resume, rename (to
-`claude/sample-project/review-renamed`), archive and terminate once each through
-the `perform` the menus use, logs each outcome to stderr
-(`zerus-client perf: actions-smoke ...`) and exits 0, or 1 when an outcome
-failed.
+The hook selects `claude/sample-project/review` (its details come from the
+replay's Activity state value or, as here, one `inspect` of the fake), runs
+pause, resume, rename (to `claude/sample-project/review-renamed`) and archive,
+then the end call the Terminate dialog picks for the row through the dialog's
+confirmation (`kill`, since the replay row is not tracked), then the other end
+call (`terminate`), once each through the store the menus use. It logs each
+outcome to stderr (`zerus-client perf: actions-smoke ...`) and exits 0, or 1
+when an outcome failed.
 
 ## Measurement run
 

@@ -4691,8 +4691,11 @@ name = "zerus-client-core"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "objc2",
+ "objc2-foundation",
  "serde",
  "serde_json",
+ "windows-sys 0.61.2",
  "zerus-watch-protocol",
 ]
 

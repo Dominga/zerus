@@ -11,6 +11,7 @@ pub mod actions;
 pub mod batch;
 pub mod cache;
 pub mod details;
+pub mod external_file;
 pub mod fleet;
 pub mod legacy;
 pub mod machine;

@@ -222,6 +222,9 @@ pub async fn next_batch(
         // The host's rows settle pending read marks, whether they arrive as
         // single upserts or inside a computer's snapshot.
         actions.observe(&batch);
+        // The followed session's Activity state and its row feed the
+        // composer's block reason, before its view is taken.
+        composers.observe(&batch);
         // Marks for computers the local listing no longer names can never be
         // written (Qt's `publishReadMarks`).
         actions.drop_orphans(|| live.peers());

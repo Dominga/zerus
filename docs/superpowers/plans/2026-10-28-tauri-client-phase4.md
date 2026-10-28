@@ -16,7 +16,7 @@
   - `terminal.rs`: one attach client per view, drained on a std thread into a `tauri::ipc::Channel`;
   - `processes.rs`: the followed session's processes topic, projected through `process_view`, with output reads and the sequential stop queue;
   - `composer/`: the open draft (A1 `Draft`, held only in Rust), the app's one S5 draft store (`Drafts`, shared with voice), the S1/S2 rules, the S3 continuations, the S4 local rows, the A3 attachment cache and its URI scheme.
-- **One push path.** `next_batch` keeps returning the core's `Batch` as raw JSON, flattened into an envelope that adds the projected `composer` view, the `processes_view` and the `draft_keys`. Rust recomputes them when the followed Activity's details or a fact change, and once a minute for the cache chip. The webview never calls a rule per render.
+- **One push path.** `next_batch` keeps returning the core's `Batch` as raw JSON, flattened into an envelope that adds the projected `composer` view, the `processes_view` and the `draft_keys`. Rust recomputes them when the followed Activity's details or a fact change, and once a second for the cache chip (Qt's chip refresh), pushing only a view that changed. The webview never calls a rule per render.
 - **Native UI** is a child webview at the tunnel URL from `hgs native-ui NAME --json`, origin-locked and incognito; without one, the system browser through `hgs native-ui NAME`.
 
 **Tech Stack:** Rust 1.99.1 (`client/core`, `client/src-tauri`, Tauri 2.12 with the `unstable` feature for child webviews), `tauri-plugin-dialog` 2, `tauri-plugin-opener` 2, `chrono` 0.4, `sha2` 0.10; SolidJS 1.9 + TypeScript + Vite, `@xterm/xterm` 6.0.0, `@xterm/addon-fit` 0.11.0, `@xterm/addon-webgl` 0.19.0, vitest; Python 3 stdlib for fixtures and fake `hgs`.
@@ -90,7 +90,7 @@ These surfaces are missing from the core section. This plan does not build them;
   - the composer hub keeps at most 200 events of the followed session, and at most 64 composers and 128 MiB of their attachments in memory;
   - process output as `hgs` bounds it.
 - All `hgs` calls, file reads and draft writes run off the UI thread (Tauri's blocking pool or the hubs' own threads).
-- The composer's block reason is computed in Rust whenever the followed Activity's details or a fact change and is pushed with the Activity update; the cache chip is recomputed once a minute; `local_time` is formatted in src-tauri.
+- The composer's block reason is computed in Rust whenever the followed Activity's details or a fact change and is pushed with the Activity update; the composer's session part, the cache chip included, is recomputed once a second and pushed only when it changed; `local_time` is formatted in src-tauri.
 - Terminal output goes as `InvokeResponseBody::Raw`, the finish as a small JSON message on the same Channel; the `AttachEvent` receiver is drained on a std thread; an attach stops on close or when `terminal::target_changed`.
 - **Lanes** (`client/src-tauri/src/actions.rs`):
   - `Lane::Send` is keyed by (computer, name, agent_id);
@@ -229,6 +229,12 @@ Rulings on the open questions; the tasks follow them.
 - **Restore follow-up.** Saved drafts restores Qt's second sentence of the menu-parity Piece E notice: "The restored conversation could not be verified. Your archived draft remains in Saved drafts." (owner ruling, `zerus-5wmh.9` comment of 2026-10-28).
 - **Composer Stop and Mark as read.** The composer action row's Stop reuses phase 2's `actionEntries(...).stop`. The Mark as read chip uses the menu-parity Piece B's `markReadChip(session)` and runs its `runMarkRead(row)` on click (`zerus-5wmh.16`, PR #406, `ui/sessions/mark-entries.ts`).
 - **Keyboard hints.** The mockup's "Remove (Delete)" and "Stop recording (Space / Esc)" lose their parenthesized keys (round 6 rule); the keys still work.
+- **Rulings on the Task 4a review (2026-10-28).** The reviewer confirmed each against Qt.
+  - **The composer's session status (ruling 1).** Rust computes Qt's `setSessionStatus(contextVisible ? hint : "", contextError, contextError && !messageProblem.isEmpty())` (`SessionsWindow.cpp:3984-3986`) and applies it in the view: the status line falls back to it before the block reason (`MessageComposer.cpp:1204`), it is an error when Qt says so (1225), and its lock joins `can_send`'s lock (1149, 1186) and refuses attach, paste, remove and Undo (`canEditAttachments`, `MessageComposer.h:108`). The hint is the first six links of Qt's chain (3917-3922): terminating, offline, "Last restore failed: %1", `m_inspectError` ("Could not refresh activity: %1"), the question error, archived and occupied. A2 fills the question error and Piece E the restore error and occupied, through `send::HintFacts`. Task 6 renders it: the read-only editor with the status as its tooltip, and Refresh (311, 1194).
+  - **One window-wide update block (ruling 2).** Qt's `m_pending` is one bool (`SessionsWindow.h:554`) that every session's or computer's write sets (2876, 2881, 4699, 4758, 5554, 5575, 5693, 5752, 5808, 5815) and `messageBlockReason` reads without a key (4394). So the open session's own Terminate or Kill, running or retained, is a termination, and any other message-blocking write anywhere is "Wait for the session update to finish.". A context reset, a compaction and a Terminal file drop are not among them: Qt keys `m_clearKey` and `m_compacts` per session and sets no `m_pending` for them (4668, 4544, 2657).
+  - **Write marks wake the composer at once (ruling 3).** `Actions::on_writes` takes a hook, set in `setup` to `Composers::changed_hook()`; a mark fires it as it appears and as it goes, after the marks' lock is released. The hook is `changed()`: a counter and a pump poke, no hub lock.
+  - **A retained termination compares only the run id (ruling 4).** hgs mints a fresh UUID v4 for every start, resume (`src/state/lifecycle.rs:763`), restore (660), fresh start (808) and dsh resume (`src/state/dsh.rs:1271`), so a run id names one run; Qt's `created` comparison adds nothing. A session without a run id (untracked) is never held.
+  - **The plan follows the code (ruling 5).** Task 4a's "As built" lists what changed from its first text for Tasks 4b, 5 and 6.
 
 ---
 
@@ -3960,6 +3966,17 @@ git commit -m "feat(client): the zerus-file scheme over draft attachments and th
 
 ### Task 4a: The session's part of the composer: block reasons, the cache chip and the inspect fallback
 
+**As built** (`ad286289` and its review fix round; the Decisions' Task 4a rulings). Where the steps below differ, the code and this list win:
+- **The tick.** It recomputes the open composer's session part (`send::SessionView`) once a second and wakes the pump only when it differs from the last tick's (`Hub.seen`, in place of `Hub.minute`). The ticker sleeps on `Shared.opened` while no composer is open and ends when the hub closes.
+- **`Followed`** is `{computer, key, details, expiry, inspect_error: Option<String>, opened_at, inspected_at, inspecting: Option<u64>, streamed, inspected: Option<send::Basis>}`; `Hub` also has `next_inspect`. `expiry` is the cache expiry formatted before the hub lock is taken (`send::expiry`).
+- **`observe`** returns at once on an empty batch, applies the followed session's last `state` or `ended` in a `match` (A2 adds `hub.queue.hidden = false` to the state arm), and wakes the view when `touches` finds the open session's row or its computer's status in the batch. `ended` keeps the details, clears `streamed`, `inspected` and `inspecting`, and the next tick inspects (Qt's `activityEnded`).
+- **`refresh_details`** reads nothing while the stream keeps the details or the computer is offline, one inspect at a time, and a late answer of another follow is dropped by its number. The tick calls it 3 s after opening without a state, at once after `ended`, every 2.5 s after a failure (Qt's `m_activityPollMs`), and when the row's run, conversation or state changed. Task 6's Refresh calls it.
+- **`Inspect`** returns `Result<Value, String>`; `send::inspection` reads the CLI's answer as Qt's `requestInspection` does, and the error becomes "Could not refresh activity: %1".
+- **`ComposerView`** also has `attachments_reason`, `session_status`, `session_status_error` and `session_blocks_input` (ruling 1).
+- **`actions.rs`**: `WriteKind`, `WriteMark`, `Running` (the mark drops before the claim), `blocks_messages`, `Actions::{write_kind, begin, finished, session_write, on_writes}`, `WritesHook`, and `dispatch_with(…, runner)` behind `dispatch`. `write_kind` is the window-wide rule (ruling 2); `session_write` adds a retained termination (ruling 4).
+- **The `facts` dep** in `lib.rs` is `actions.session_write(computer, name, || (pump.row_named(..), pump.online(..)))`.
+- **Test helpers**: `send_hub(&Scratch)`; `Fake` also has `online` and `write`, and its `inspected: None` answers `Err("timed out")`.
+
 **Depends on:**
 - S1 `zerus-5wmh.9.7` (#407, on main): `send::{BlockFacts, block_reason}`;
 - S2 `zerus-5wmh.9.8` (#408, on main): `cache::{expired, warning, chip, Chip, details}`;
@@ -4264,7 +4281,7 @@ pub(crate) struct Followed {
 }
 ```
 
-  - `Hub` gains `pub(crate) followed: Followed` and `pub(crate) minute: i64`.
+  - `Hub` gains `pub(crate) followed: Followed` and `pub(crate) seen: Option<send::SessionView>` (as built: see the list at the top of this task).
   - `open` resets the followed state when the session changes, before `hub.open = Some(session)`:
 
 ```rust
@@ -4456,22 +4473,26 @@ impl Composers {
         }));
     }
 
-    /// Once a second: the cache chip's minute and the inspect fallback when
-    /// no Activity state arrived within 3 s of opening.
+    /// Once a second while a composer is open: its session part, the
+    /// cache chip included (Qt's chip refreshes every second and counts
+    /// `ceil((expires_at - now) / 60)` minutes, `CacheStatus.h:31, 51`), and
+    /// the inspect fallback (`wants_details`, as built).
     pub fn tick(&self) {
         let now = self.now();
-        let (minute_changed, wants_details) = {
-            let mut hub = self.lock();
-            let minute = (now / 60.0).floor() as i64;
-            let changed = std::mem::replace(&mut hub.minute, minute) != minute;
-            let wants = hub.open.is_some() && hub.followed.details.is_none() && !hub.followed.inspecting
-                && !hub.followed.inspect_error && now - hub.followed.opened_at >= DETAILS_WAIT;
-            (changed, wants)
-        };
-        if wants_details {
+        let mut hub = self.lock();
+        let seen = hub
+            .open_key
+            .as_ref()
+            .and_then(|key| hub.composers.get(key))
+            .map(|composer| session_view(self, &hub, composer));
+        let changed = hub.seen != seen;
+        hub.seen = seen;
+        let wants = self.wants_details(&hub, now);
+        drop(hub);
+        if wants {
             self.refresh_details();
         }
-        if minute_changed {
+        if changed {
             self.changed();
         }
     }
@@ -5609,6 +5630,7 @@ Expected: compile errors (`Start`, `cancel_send`, `clear_context`).
 
 - [ ] **Step 3: Implement the continuations.**
   - In `actions.rs`, `WriteKind` gains `Clear`, `WriteKind::of` maps `Action::ClearContext { .. }` to it, and `a_running_write_reports_its_kind` gains `assert_eq!(WriteKind::of(&Action::ClearContext { dismiss_prompt: false }), WriteKind::Clear);`. `context()` sets `clearing: write == Some(WriteKind::Clear)`.
+  - `ClearContext` and `CompactContext` stay out of the window-wide update (Decisions, Task 4a ruling 2). Task 4a's `blocks_messages` leaves both unmarked. This task marks a running `ClearContext` as `Clear` for its own session only (Qt's `m_clearKey`), so another session's reset is no update anywhere; `write_kind` reports `Clear` only to the session it resets and never counts it as an update. `CompactContext` stays unmarked: compact-to-send's own `compacting` fact blocks its session (Qt's `m_compacts`).
   - In `mod.rs`, `Hub` gains `start: Option<(send::Pending, StartSend)>`, `compacts: HashMap<String, (send::Pending, CompactSend)>` and `last_poll: f64`. `Composer` gains `pub(crate) digests: Option<(u64, Vec<String>)>` (None in `new`), the attachment digests of one attachment list. `ComposerView` gains the fields in "Produces".
   - `Prompt` gains `rules: Option<Session>` and `mark: DraftMark`, which `ask` fills from the context and the composer.
 
@@ -6013,6 +6035,7 @@ git commit -m "feat(client): resume-then-send, compact-to-send and Clear context
 
 **Interfaces:**
 - Consumes: Tasks 3a-5's commands and the serde shapes of `ComposerView`, `SendReply`, `Answer`, `ColdPrompt`, `StartQuestion`, `ClearControl`, `LocalMessage` and `Chip`.
+- The session status (Decisions, Task 4a ruling 1): the editor is read-only while `session_blocks_input`, with `session_status` as its tooltip (`MessageComposer.cpp:1153, 1161-1164`). Refresh (311) shows while `session_status` is shown as an error (1194) and calls a `composer_refresh` command, which runs `Composers::refresh_details` (Qt's `sessionRefreshRequested`: `refreshRequested` and `inspect()`, `SessionsWindow.cpp:1031-1034`).
 - Produces:
 
 ```ts
@@ -6025,7 +6048,8 @@ export interface LocalMessage { id: string; text: string; status: "sending" | "s
 export interface ComposerView { handle: number; key: string; loaded: boolean; rev: number; text_epoch: number; text: string; position: number; anchor: number;
   attachments: AttachmentView[]; removed: string | null; attaching: boolean; sending: boolean; waiting: string | null; uncertain: boolean;
   status: string; status_error: boolean; can_send: boolean; send_label: string; available: boolean; unavailable_reason: string; block_reason: string | null;
-  attachments_available: boolean; cache: Chip; cache_warning: string; cache_details: string; local: LocalMessage[];
+  attachments_available: boolean; attachments_reason: string; session_status: string; session_status_error: boolean; session_blocks_input: boolean;
+  cache: Chip; cache_warning: string; cache_details: string; local: LocalMessage[];
   cancel_send: boolean; compacting: boolean; clear: ClearControl }
 export interface ColdChoice { action: "send" | "compact" | "clear"; label: string; enabled: boolean; tooltip: string }
 export interface ColdPrompt { title: string; text: string; informative: string; choices: ColdChoice[] }

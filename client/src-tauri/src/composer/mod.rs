@@ -24,21 +24,35 @@
 //! dropped on its own writer thread would wait for itself.
 
 pub mod files;
+pub mod send;
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use zerus_client_core::attachments::{self, Attachment, Draft, FileRead, Selection};
+use zerus_client_core::cache::Chip;
 use zerus_client_core::drafts::{DraftStore, IndexPage, Loaded, StoredDraft, ALREADY_EXISTS};
+use zerus_client_core::{Batch, Target, ViewRow};
+
+use crate::actions::WriteKind;
 
 pub type Job = Box<dyn FnOnce() + Send>;
 pub type Spawn = Arc<dyn Fn(Job) + Send + Sync>;
 pub type Notify = Arc<dyn Fn() + Send + Sync>;
+/// Seconds since the epoch.
+pub type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
+/// (computer, catalog key, name) -> (row, online); a new run is found by name.
+pub type Rows = Arc<dyn Fn(&str, &str, &str) -> Option<(ViewRow, bool)> + Send + Sync>;
+/// (computer, name) -> the session's write, for the send rules.
+pub type Facts = Arc<dyn Fn(&str, &str) -> Option<WriteKind> + Send + Sync>;
+/// One `hgs inspect` of the session (with its archive id); blocking. The
+/// error is Qt's detail for "Could not refresh activity: %1" (`send::inspection`).
+pub type Inspect = Arc<dyn Fn(&Target, Option<&str>) -> Result<Value, String> + Send + Sync>;
 
 const COMPOSERS: usize = 64;
 /// Attachment bytes the idle composers in memory may hold; their drafts stay on disk.
@@ -56,6 +70,10 @@ const SAVE_RETRY: Duration = Duration::from_secs(2);
 pub struct Deps {
     pub spawn: Spawn,
     pub notify: Notify,
+    pub clock: Clock,
+    pub rows: Rows,
+    pub facts: Facts,
+    pub inspect: Inspect,
 }
 
 /// Where the hub keeps its files.
@@ -118,6 +136,26 @@ pub struct ComposerView {
     pub status_error: bool,
     pub can_send: bool,
     pub send_label: String,
+    /// The session takes messages: no block reason (`setAvailability`).
+    pub available: bool,
+    pub unavailable_reason: String,
+    /// `messageBlockReason`, None when a message may be sent.
+    pub block_reason: Option<String>,
+    /// The session's agent takes files (`setAttachmentAvailability`); the
+    /// reason is Attach's tooltip and, with files attached, the status.
+    pub attachments_available: bool,
+    pub attachments_reason: String,
+    /// Qt's session status in the composer (`setSessionStatus`): the hint
+    /// shown when the computer is offline or the session cannot be read,
+    /// whether it is an error, and whether it locks the editor and its
+    /// attachments while a block reason stands.
+    pub session_status: String,
+    pub session_status_error: bool,
+    pub session_blocks_input: bool,
+    /// The cache chip, its popover's warning and its detail lines.
+    pub cache: Chip,
+    pub cache_warning: String,
+    pub cache_details: String,
 }
 
 /// One composer's draft and state (`MessageComposer::Draft` plus its sets).
@@ -230,6 +268,30 @@ impl Composer {
     }
 }
 
+/// The followed session's Activity state, as the batches bring it.
+#[derive(Default)]
+pub(crate) struct Followed {
+    pub(crate) computer: String,
+    pub(crate) key: String,
+    pub(crate) details: Option<Arc<Value>>,
+    /// The cache expiry of `details` in local time, formatted before the
+    /// hub lock was taken, since local time may read the time zone files.
+    pub(crate) expiry: Option<(i64, String)>,
+    /// Why the last inspect failed (`m_inspectError`, the whole text); a
+    /// state clears it.
+    pub(crate) inspect_error: Option<String>,
+    pub(crate) opened_at: f64,
+    /// When the last inspect started (Qt's `m_inspectionAge`).
+    pub(crate) inspected_at: f64,
+    /// The number of the inspect under way.
+    pub(crate) inspecting: Option<u64>,
+    /// A state frame of this follow arrived: the stream keeps the details
+    /// current, and Qt's `inspect()` reads nothing more while it does.
+    pub(crate) streamed: bool,
+    /// The row's run, conversation and state when the last inspect started.
+    pub(crate) inspected: Option<send::Basis>,
+}
+
 #[derive(Default)]
 pub(crate) struct Hub {
     pub(crate) composers: HashMap<String, Composer>,
@@ -248,6 +310,12 @@ pub(crate) struct Hub {
     sent_keys: Option<Vec<String>>,
     /// The app quits: no edit, attach or send starts any more.
     pub(crate) closed: bool,
+    pub(crate) followed: Followed,
+    /// The session part of the open composer's view as the last tick saw
+    /// it: the tick wakes the pump only when it changed.
+    pub(crate) seen: Option<send::SessionView>,
+    /// Numbers the inspects, so a late answer of another session's is dropped.
+    next_inspect: u64,
 }
 
 pub(crate) struct Shared {
@@ -258,6 +326,11 @@ pub(crate) struct Shared {
     pub(crate) deps: Deps,
     /// Counts `changed` calls.
     changes: AtomicU64,
+    /// Wakes the ticker, which sleeps while no composer is open.
+    opened: Condvar,
+    /// The ticker sleeps (tests wait for it).
+    #[cfg(test)]
+    parked: std::sync::atomic::AtomicBool,
 }
 
 /// The managed state of the composer commands; clones share it.
@@ -266,6 +339,21 @@ pub struct Composers(pub(crate) Arc<Shared>);
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Whether `batch` changes the row of `open` or the status of its computer.
+fn touches(batch: &Batch, open: &SessionRef) -> bool {
+    let here = |computer: &zerus_client_core::ComputerId| computer.0 == open.computer;
+    batch
+        .upserts
+        .iter()
+        .any(|out| here(&out.computer) && (out.key == open.key || out.row.name == open.name))
+        || batch
+            .removes
+            .iter()
+            .any(|out| here(&out.computer) && out.key == open.key)
+        || batch.replaces.iter().any(|out| here(&out.computer))
+        || batch.computers.iter().any(|out| here(&out.computer))
 }
 
 fn excerpt(attachment: &Attachment) -> Option<String> {
@@ -290,6 +378,9 @@ impl Composers {
             cache: files::Cache::new(config.cache),
             deps,
             changes: AtomicU64::new(0),
+            opened: Condvar::new(),
+            #[cfg(test)]
+            parked: Default::default(),
         }));
         composers.load_stored_keys();
         composers
@@ -308,6 +399,18 @@ impl Composers {
     pub(crate) fn changed(&self) {
         self.0.changes.fetch_add(1, Ordering::SeqCst);
         (self.0.deps.notify)();
+    }
+
+    /// `changed` for another owner to call (the write marks' hook,
+    /// `Actions::on_writes`). It takes no hub lock and holds the hub only
+    /// weakly, so the two never keep each other alive.
+    pub fn changed_hook(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let hub = Arc::downgrade(&self.0);
+        Arc::new(move || {
+            if let Some(shared) = hub.upgrade() {
+                Composers(shared).changed();
+            }
+        })
     }
 
     /// Keys of the 200 newest nonempty drafts, for the cards' draft mark.
@@ -332,6 +435,7 @@ impl Composers {
         let Some(session) = session else {
             hub.open = None;
             hub.open_key = None;
+            hub.followed = Followed::default();
             drop(hub);
             self.changed();
             return None;
@@ -350,8 +454,17 @@ impl Composers {
                     && old.name != session.name
             })
             .and_then(|_| hub.open_key.clone());
+        if hub.followed.computer != session.computer || hub.followed.key != session.key {
+            hub.followed = Followed {
+                computer: session.computer.clone(),
+                key: session.key.clone(),
+                opened_at: self.now(),
+                ..Followed::default()
+            };
+        }
         hub.open = Some(session);
         hub.open_key = Some(key.clone());
+        self.0.opened.notify_all();
         if let Some(old) = renamed {
             self.rename(&mut hub, &old, &key);
         }
@@ -567,7 +680,25 @@ impl Composers {
     pub fn can_attach(&self, handle: u64) -> bool {
         let mut hub = self.lock();
         let open = hub.open_key.clone();
-        Self::editable(&mut hub, handle).is_some_and(|c| Some(&c.key) == open.as_ref())
+        self.session_allows(&hub, handle, true)
+            && Self::editable(&mut hub, handle).is_some_and(|c| Some(&c.key) == open.as_ref())
+    }
+
+    /// The session's part of Qt's `canEditAttachments` and `canAttachFiles`
+    /// (`MessageComposer.h:108-109`) for the open composer: its session
+    /// status does not lock input and, for new `files`, its agent takes
+    /// them. Another composer has no session part.
+    fn session_allows(&self, hub: &Hub, handle: u64, files: bool) -> bool {
+        let Some(composer) = hub
+            .open_key
+            .as_ref()
+            .and_then(|key| hub.composers.get(key))
+            .filter(|c| c.handle == handle)
+        else {
+            return true;
+        };
+        let session = send::session_view(self, hub, composer);
+        !session.session_blocks_input && (!files || session.attachments_available)
     }
 
     /// Saves as the user types; a later save of the same key replaces it.
@@ -722,6 +853,9 @@ impl Composers {
 
     fn begin_attach(&self, handle: u64) -> bool {
         let mut hub = self.lock();
+        if !self.session_allows(&hub, handle, true) {
+            return false;
+        }
         let Some(composer) = Self::editable(&mut hub, handle) else {
             return false;
         };
@@ -779,6 +913,9 @@ impl Composers {
     /// for it, unlocks.
     pub fn remove(&self, handle: u64, index: usize) {
         let mut hub = self.lock();
+        if !self.session_allows(&hub, handle, false) {
+            return self.hand_back(hub, handle);
+        }
         let Some(composer) = Self::editable(&mut hub, handle) else {
             return self.hand_back(hub, handle);
         };
@@ -797,6 +934,9 @@ impl Composers {
     /// it always answers with a new text epoch.
     pub fn undo_remove(&self, handle: u64) {
         let mut hub = self.lock();
+        if !self.session_allows(&hub, handle, false) {
+            return self.hand_back(hub, handle);
+        }
         let Some(composer) = Self::editable(&mut hub, handle) else {
             return self.hand_back(hub, handle);
         };
@@ -908,6 +1048,70 @@ impl Composers {
         Some(keys)
     }
 
+    /// Records the followed session's Activity state from a batch; a batch
+    /// that changes the open session's row or its computer's status changes
+    /// its block reason too. `next_batch` calls it before it takes the view.
+    pub fn observe(&self, batch: &Batch) {
+        if batch.is_empty() {
+            return;
+        }
+        let (computer, key) = {
+            let hub = self.lock();
+            (hub.followed.computer.clone(), hub.followed.key.clone())
+        };
+        // The followed session's last state (or end) in this batch.
+        let mut last = None;
+        for out in batch
+            .activity
+            .iter()
+            .filter(|out| out.computer.0 == computer && out.key == key)
+        {
+            match out.kind.as_str() {
+                "state" => last = Some(Some(&out.payload["value"])),
+                "ended" => last = Some(None),
+                _ => {}
+            }
+        }
+        // Formatted before the lock is taken: local time may read files.
+        let update =
+            last.map(|state| state.map(|value| (Arc::new(value.clone()), send::expiry(value))));
+        let mut hub = self.lock();
+        let followed = hub.followed.computer == computer && hub.followed.key == key;
+        let changed = match update.filter(|_| followed) {
+            Some(Some((details, expiry))) => {
+                hub.followed.details = Some(details);
+                hub.followed.expiry = expiry;
+                hub.followed.inspect_error = None;
+                hub.followed.streamed = true;
+                true
+            }
+            // The follow ended: the details stay and an inspect reads them
+            // anew at once (Qt's `activityEnded`, `SessionsWindow.cpp:1880-1883`).
+            // An inspect still under way is dropped by its number, so it
+            // cannot bring back details older than the last state.
+            Some(None) => {
+                hub.followed.streamed = false;
+                hub.followed.inspected = None;
+                hub.followed.inspecting = None;
+                true
+            }
+            None => false,
+        };
+        let touched = hub.open.as_ref().is_some_and(|open| touches(batch, open));
+        drop(hub);
+        if changed {
+            self.after_observe();
+        } else if touched {
+            self.changed();
+        }
+    }
+
+    /// What a change of the followed session's Activity sets off (Task 4b
+    /// adds the reconcile and Task 5 the continuations).
+    fn after_observe(&self) {
+        self.changed();
+    }
+
     /// A reloaded webview gets the view and the draft keys again.
     pub fn resend(&self) {
         let mut hub = self.lock();
@@ -926,34 +1130,52 @@ impl Composers {
     /// queued never starts; it reloads as uncertain.
     pub fn flush(&self) {
         self.lock().closed = true;
+        self.0.opened.notify_all();
         let deadline = Instant::now() + EXIT_WAIT;
         while self.lock().composers.values().any(|c| c.attaching) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
 
-    /// The status line and Send, by Qt's `updateControls` priority. Task 4a
-    /// adds the session's block reason and the cache chip.
+    /// The status line and Send, by Qt's `updateControls` priority
+    /// (`MessageComposer.cpp:1185, 1200-1204`), with the session's block
+    /// reason, attachment rule and cache chip.
     pub(crate) fn view_of(&self, hub: &Hub, key: &str) -> Option<ComposerView> {
         let composer = hub.composers.get(key)?;
+        let session = send::session_view(self, hub, composer);
+        let attachments_blocked =
+            !composer.draft.attachments.is_empty() && !session.attachments_available;
         let too_long = composer.draft.text.len() > MAX_TEXT_BYTES;
-        let status = if let Some(error) = &composer.storage_error {
+        let mut status = if let Some(error) = &composer.storage_error {
             error.clone()
         } else if let Some(waiting) = &composer.waiting {
             waiting.clone()
         } else if composer.error || composer.uncertain {
             composer.notice.clone()
-        } else if too_long {
-            "Message exceeds 64 KiB.".to_owned()
         } else {
             String::new()
         };
+        if status.is_empty() && attachments_blocked {
+            status = session.attachments_reason.clone();
+        }
+        if status.is_empty() {
+            status = if too_long {
+                "Message exceeds 64 KiB.".to_owned()
+            } else if !session.session_status.is_empty() {
+                session.session_status.clone()
+            } else {
+                session.unavailable_reason.clone()
+            };
+        }
         // Qt's `ownError` (`MessageComposer.cpp:1202`): an uncertain mark
-        // alone is a caution, not an error.
+        // alone is a caution, not an error. The session status is one when
+        // it is shown and Qt marks it so (1225).
         let status_error = (composer.waiting.is_none() && composer.error)
             || too_long
-            || composer.storage_error.is_some();
-        let locked = composer.busy() || !composer.loaded;
+            || composer.storage_error.is_some()
+            || (status == session.session_status && session.session_status_error);
+        // Qt's `locked` includes the session status's lock (1149).
+        let locked = composer.busy() || !composer.loaded || session.session_blocks_input;
         Some(ComposerView {
             handle: composer.handle,
             key: composer.key.clone(),
@@ -996,7 +1218,9 @@ impl Composers {
             status,
             status_error,
             can_send: composer.loaded
+                && session.available
                 && composer.has_content()
+                && !attachments_blocked
                 && !too_long
                 && !locked
                 && !composer.uncertain,
@@ -1008,6 +1232,17 @@ impl Composers {
                 "Send"
             }
             .into(),
+            available: session.available,
+            unavailable_reason: session.unavailable_reason,
+            block_reason: session.block_reason,
+            attachments_available: session.attachments_available,
+            attachments_reason: session.attachments_reason,
+            session_status: session.session_status,
+            session_status_error: session.session_status_error,
+            session_blocks_input: session.session_blocks_input,
+            cache: session.cache,
+            cache_warning: session.cache_warning,
+            cache_details: session.cache_details,
         })
     }
 }
@@ -1143,6 +1378,8 @@ pub(crate) mod tests {
     use zerus_client_core::drafts::{read_draft, StoredDraft};
 
     pub(crate) const KEY: &str = "studio\nclaude/sample-project/review";
+    /// The status line of a composer whose session the catalog lacks.
+    const NO_SESSION: &str = "Select a session.";
 
     /// A test's own folder, `zerus-composer-{name}-{pid}` in the temp
     /// folder, removed when the test ends. Declared first in a test, it ends
@@ -1221,6 +1458,11 @@ pub(crate) mod tests {
                 notify: Arc::new(move || {
                     count.fetch_add(1, Ordering::SeqCst);
                 }),
+                // No session: these views read "Select a session.".
+                clock: Arc::new(|| 1_793_000_100.0),
+                rows: Arc::new(|_, _, _| None),
+                facts: Arc::new(|_, _| None),
+                inspect: Arc::new(|_, _| Err("timed out".into())),
             },
         );
         (composers, notified)
@@ -1511,7 +1753,8 @@ pub(crate) mod tests {
         let view = until(&c, |v| v.loaded && v.text == "already here");
         // Qt's placement: the new key reloads with no message, and the moved
         // draft is marked under its old key, past the hub's own save of it.
-        assert!(view.status.is_empty() && !view.status_error, "{view:?}");
+        // (No session here: the status line reads "Select a session.".)
+        assert!(view.status == NO_SESSION && !view.status_error, "{view:?}");
         store.flush();
         assert_eq!(
             c.lock().composers[KEY].storage_error.as_deref(),
@@ -1866,7 +2109,7 @@ pub(crate) mod tests {
         let (again, _) = hub_on(&store);
         again.open(Some(session()));
         let view = until(&again, |v| v.loaded);
-        assert!(view.status.is_empty(), "no restore error: {}", view.status);
+        assert_eq!(view.status, NO_SESSION, "no restore error");
         let kept: Vec<(&str, u64)> = view
             .attachments
             .iter()

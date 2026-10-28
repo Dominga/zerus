@@ -1,10 +1,16 @@
 //! The Settings page's state (AnalyticsSettings.cpp): the routes a refresh
 //! reads one at a time, each route's last reads, the epochs seen, this
-//! computer's collection controls, and what the page shows, rendered when
-//! Qt renders it (a refresh's start and end, a failed change, the minute
-//! timer) so no total is drawn from a read half done.
+//! computer's collection controls, and what the page shows, drawn when Qt
+//! draws it (a refresh's start and end, a failed purge, the minute timer)
+//! so no total comes from a read half done.
+//!
+//! Drawing a fleet at the limits (32 computers of 1080 daily buckets) takes
+//! a while, so it happens outside the page's lock: [`Page::draw_due`] takes
+//! what a drawing needs (reads are shared, not copied), [`Draw::render`]
+//! draws it on the caller's thread, and [`Page::drawn`] keeps the newest.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 
 use serde::Serialize;
 
@@ -100,7 +106,7 @@ pub struct Report {
     pub missing: Vec<Missing>,
     pub computers: Vec<ComputerReport>,
     pub voice: Vec<VoiceReport>,
-    /// The daily buckets rendered.
+    /// The daily buckets drawn.
     pub buckets: usize,
 }
 
@@ -129,6 +135,8 @@ pub struct Rows {
 pub struct Local {
     pub enabled: bool,
     pub retention_days: i64,
+    /// The epoch a change pins, taken when the person starts it.
+    pub epoch: String,
     /// Counts the reads that set it, so the page resets its controls to
     /// each one as Qt does.
     pub reads: u64,
@@ -145,11 +153,150 @@ pub struct View {
     /// The peers the computer list offers, at most 31.
     pub peers: Vec<String>,
     pub peer_limit: bool,
+    /// The last refresh's computers and days, which the page starts from.
+    pub selection: String,
+    pub from: Option<String>,
+    pub through: Option<String>,
     pub local: Option<Local>,
     /// None before the first refresh.
     pub report: Option<Report>,
     /// A purge is waiting for the person's confirmation.
     pub purge_pending: bool,
+}
+
+/// A computer the drawing counted, with its whole summary.
+#[derive(Clone, Debug)]
+struct Drawn {
+    route: String,
+    current: bool,
+    agent: Arc<Summary>,
+}
+
+/// What a drawing needs, taken under the page's lock without copying a read.
+#[derive(Debug)]
+pub struct Draw {
+    id: u64,
+    from: Day,
+    through: Day,
+    routes: usize,
+    peer_limit: bool,
+    observations: Vec<Observation>,
+}
+
+/// A finished drawing: the report and the daily buckets in Qt's order, as
+/// places in the computers' summaries.
+#[derive(Debug, Default)]
+pub struct Drawing {
+    id: u64,
+    report: Option<Report>,
+    computers: Vec<Drawn>,
+    rows: Vec<(usize, usize)>,
+}
+
+impl Draw {
+    /// AnalyticsSettings::render, off the page's lock.
+    pub fn render(self) -> Drawing {
+        let computers = unique_computers(&self.observations);
+        let mut current: Vec<&Bucket> = Vec::new();
+        let mut rows = Vec::new();
+        let mut reports = Vec::new();
+        let mut drawn = Vec::new();
+        for (index, observation) in computers.iter().enumerate() {
+            let agent = observation
+                .agent
+                .as_ref()
+                .expect("a unique computer has a summary");
+            let coverage = &agent.coverage;
+            reports.push(ComputerReport {
+                route: observation.route.clone(),
+                current: observation.current,
+                generated_at: agent.generated_at,
+                revision: agent.revision,
+                start: coverage.start,
+                end: coverage.end,
+                partial: coverage.partial,
+                gaps: coverage.gaps.clone(),
+                unsupported: coverage.unsupported.clone(),
+                collecting: agent.enabled,
+                error: observation.error.clone(),
+                waits: agent.unresolved_waits,
+                providers: PROVIDERS
+                    .iter()
+                    .map(|provider| {
+                        let reported = coverage.providers.get(*provider);
+                        ProviderLine {
+                            provider: (*provider).to_owned(),
+                            partial: reported.map(|c| c.partial),
+                            unsupported: reported.map(|c| c.unsupported.clone()),
+                        }
+                    })
+                    .collect(),
+            });
+            rows.extend((0..agent.buckets.len()).map(|bucket| (index, bucket)));
+            if observation.current {
+                current.extend(agent.buckets.iter());
+            }
+            drawn.push(Drawn {
+                route: observation.route.clone(),
+                current: observation.current,
+                agent: Arc::clone(agent),
+            });
+        }
+        let missing: Vec<&Observation> = self
+            .observations
+            .iter()
+            .filter(|o| o.agent.is_none())
+            .collect();
+        let voice = computers
+            .iter()
+            .chain(missing.iter().copied())
+            .map(|observation| VoiceReport {
+                route: observation.route.clone(),
+                read: observation.voice.as_ref().map(|voice| VoiceRead {
+                    current: observation.voice_current,
+                    enabled: voice.enabled,
+                    totals: speech_totals(&voice.days),
+                    identified: observation.agent.is_some(),
+                }),
+                error: observation.voice_error.clone(),
+            })
+            .collect();
+        let key = |&(computer, bucket): &(usize, usize)| {
+            let b = &drawn[computer].agent.buckets[bucket];
+            (
+                b.date.as_str(),
+                display(&drawn[computer].route),
+                b.provider.as_str(),
+                b.producer.as_str(),
+            )
+        };
+        rows.sort_by(|a, b| key(a).cmp(&key(b)));
+        let report = Report {
+            from: self.from.iso(),
+            through: self.through.iso(),
+            routes: self.routes,
+            present: computers.iter().filter(|o| o.current).count(),
+            totals: totals(current.iter().copied(), None),
+            work: histogram_totals(current.iter().copied(), None).remove("work_ms"),
+            peer_limit: self.peer_limit,
+            missing: missing
+                .iter()
+                .map(|o| Missing {
+                    route: o.route.clone(),
+                    error: o.error.clone(),
+                })
+                .collect(),
+            computers: reports,
+            voice,
+            buckets: rows.len(),
+        };
+        Drawing {
+            id: self.id,
+            report: Some(report),
+            computers: drawn,
+            rows,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -158,17 +305,21 @@ pub struct Page {
     peer_limit: bool,
     snapshots: BTreeMap<String, Observation>,
     epochs: EpochGuard,
+    selection: String,
     routes: Vec<String>,
     queue: VecDeque<String>,
-    local: Option<Summary>,
+    local: Option<Arc<Summary>>,
     local_reads: u64,
     applied: Option<(Day, Day)>,
     busy: bool,
     mutating: bool,
     purge_epoch: Option<String>,
     status: String,
-    report: Option<Report>,
-    rows: Vec<Row>,
+    /// A drawing is due (Qt would render now).
+    due: bool,
+    /// The last drawing asked for, and the drawing shown.
+    draws: u64,
+    drawing: Drawing,
 }
 
 impl Page {
@@ -210,14 +361,15 @@ impl Page {
     }
 
     fn local_fresh(&self, now_ms: i64) -> Option<&Summary> {
-        self.local.as_ref().filter(|local| fresh(local, now_ms))
+        self.local.as_deref().filter(|local| fresh(local, now_ms))
     }
 
     /// Apply and refresh (and opening the section): reads `selection` (this
-    /// computer, `*` for all, or a peer) for the inclusive UTC days
-    /// `from`..`through`. Returns whether a read began; the caller then
-    /// reads each [`Page::next`] route.
-    pub fn refresh(&mut self, selection: &str, from: &str, through: &str, now_ms: i64) -> bool {
+    /// computer, `*` for all, or a peer; anything else is this computer, as
+    /// Qt's list falls back) for the inclusive UTC days `from`..`through`.
+    /// Returns whether a read began; the caller then reads each
+    /// [`Page::next_route`] route.
+    pub fn refresh(&mut self, selection: &str, from: &str, through: &str) -> bool {
         if !self.idle() {
             return false;
         }
@@ -228,10 +380,16 @@ impl Page {
             self.status = "Choose an inclusive UTC range of at most 90 days.".into();
             return false;
         };
+        let selection = if selection == ALL || self.peers.iter().any(|peer| peer == selection) {
+            selection
+        } else {
+            ""
+        };
         if self.applied != Some(range) {
             self.snapshots.clear();
         }
         self.applied = Some(range);
+        self.selection = selection.to_owned();
         self.routes = if selection == ALL {
             std::iter::once(String::new())
                 .chain(self.peers.iter().cloned())
@@ -249,14 +407,14 @@ impl Page {
             observation.voice_current = false;
             observation.error = "Reading…".into();
         }
-        self.render(now_ms);
+        self.due = true;
         self.status = format!("Reading {} configured route(s)…", self.routes.len());
         true
     }
 
     /// The next route to read, one at a time so a large catalog never runs
     /// more than one child; None once the read is finished.
-    pub fn next(&mut self, now_ms: i64) -> Option<(String, Day, Day)> {
+    pub fn next_route(&mut self) -> Option<(String, Day, Day)> {
         let (from, through) = self.applied?;
         while let Some(route) = self.queue.pop_front() {
             if route.is_empty() || self.peers.contains(&route) {
@@ -267,7 +425,7 @@ impl Page {
             self.busy = false;
             self.status =
                 "Read finished. Last-known or missing data is excluded from current totals.".into();
-            self.render(now_ms);
+            self.due = true;
         }
         None
     }
@@ -290,21 +448,23 @@ impl Page {
             }
             Ok(reply) => {
                 observation.error.clear();
+                let reply = Arc::new(reply);
                 // A lower revision of the same epoch never replaces a newer
                 // one kept; a new epoch always replaces it (a purge, a reset).
                 let replace = observation.agent.as_ref().is_none_or(|kept| {
                     kept.source_epoch != reply.source_epoch || reply.revision >= kept.revision
                 });
                 if replace {
-                    observation.agent = Some(reply.clone());
+                    observation.agent = Some(Arc::clone(&reply));
                 }
                 let kept = observation.agent.as_ref().expect("kept");
-                observation.current = fresh(kept, now_ms) && *kept == reply;
+                observation.current =
+                    fresh(kept, now_ms) && (Arc::ptr_eq(kept, &reply) || **kept == *reply);
                 if !observation.current {
                     observation.error = "Summary is stale or its clock is unconfirmed.".into();
                 }
                 if route.is_empty() && observation.current {
-                    self.local = Some(reply);
+                    self.local = observation.agent.clone();
                     self.local_reads += 1;
                 }
             }
@@ -319,7 +479,7 @@ impl Page {
             Ok(voice) => {
                 observation.voice_current = true;
                 observation.voice_error.clear();
-                observation.voice = Some(voice);
+                observation.voice = Some(Arc::new(voice));
                 observation.voice_read_at = now_ms;
             }
             Err(error) => {
@@ -330,7 +490,7 @@ impl Page {
     }
 
     /// Each selected route's reads as they stand now: a summary or a voice
-    /// read past its age is no longer current.
+    /// read past its age is no longer current. Reads are shared, not copied.
     pub fn observations(&self, now_ms: i64) -> Vec<Observation> {
         self.routes
             .iter()
@@ -352,121 +512,57 @@ impl Page {
             .collect()
     }
 
-    /// AnalyticsSettings::render.
-    fn render(&mut self, now_ms: i64) {
-        let Some((from, through)) = self.applied else {
-            return;
-        };
-        let all = self.observations(now_ms);
-        let computers = unique_computers(&all);
-        let mut current: Vec<&Bucket> = Vec::new();
-        let mut rows = Vec::new();
-        let mut reports = Vec::new();
-        for observation in &computers {
-            let agent = observation
-                .agent
-                .as_ref()
-                .expect("a unique computer has a summary");
-            let coverage = &agent.coverage;
-            reports.push(ComputerReport {
-                route: observation.route.clone(),
-                current: observation.current,
-                generated_at: agent.generated_at,
-                revision: agent.revision,
-                start: coverage.start,
-                end: coverage.end,
-                partial: coverage.partial,
-                gaps: coverage.gaps.clone(),
-                unsupported: coverage.unsupported.clone(),
-                collecting: agent.enabled,
-                error: observation.error.clone(),
-                waits: agent.unresolved_waits,
-                providers: PROVIDERS
-                    .iter()
-                    .map(|provider| {
-                        let reported = coverage.providers.get(*provider);
-                        ProviderLine {
-                            provider: (*provider).to_owned(),
-                            partial: reported.map(|c| c.partial),
-                            unsupported: reported.map(|c| c.unsupported.clone()),
-                        }
-                    })
-                    .collect(),
-            });
-            for bucket in &agent.buckets {
-                rows.push(Row {
-                    date: bucket.date.clone(),
-                    route: observation.route.clone(),
-                    provider: bucket.provider.clone(),
-                    producer: bucket.producer.clone(),
-                    current: observation.current,
-                    counters: bucket.counters.clone(),
-                    histograms: bucket.histograms.clone(),
-                });
-                if observation.current {
-                    current.push(bucket);
-                }
-            }
+    /// What a due drawing needs, if one is due; quick, for under the lock.
+    pub fn draw_due(&mut self, now_ms: i64) -> Option<Draw> {
+        if !self.due {
+            return None;
         }
-        let missing: Vec<&Observation> = all.iter().filter(|o| o.agent.is_none()).collect();
-        let voice = computers
-            .iter()
-            .chain(missing.iter().copied())
-            .map(|observation| VoiceReport {
-                route: observation.route.clone(),
-                read: observation.voice.as_ref().map(|voice| VoiceRead {
-                    current: observation.voice_current,
-                    enabled: voice.enabled,
-                    totals: speech_totals(&voice.days),
-                    identified: observation.agent.is_some(),
-                }),
-                error: observation.voice_error.clone(),
-            })
-            .collect();
-        rows.sort_by(|a, b| {
-            (&a.date, display(&a.route), &a.provider, &a.producer).cmp(&(
-                &b.date,
-                display(&b.route),
-                &b.provider,
-                &b.producer,
-            ))
-        });
-        self.report = Some(Report {
-            from: from.iso(),
-            through: through.iso(),
+        let (from, through) = self.applied?;
+        self.due = false;
+        self.draws += 1;
+        Some(Draw {
+            id: self.draws,
+            from,
+            through,
             routes: self.routes.len(),
-            present: computers.iter().filter(|o| o.current).count(),
-            totals: totals(current.iter().copied(), None),
-            work: histogram_totals(current.iter().copied(), None).remove("work_ms"),
             peer_limit: self.peer_limit,
-            missing: missing
-                .iter()
-                .map(|o| Missing {
-                    route: o.route.clone(),
-                    error: o.error.clone(),
-                })
-                .collect(),
-            computers: reports,
-            voice,
-            buckets: rows.len(),
-        });
-        self.rows = rows;
+            observations: self.observations(now_ms),
+        })
+    }
+
+    /// Keeps a finished drawing unless a newer one is already shown.
+    pub fn drawn(&mut self, drawing: Drawing) {
+        if drawing.id > self.drawing.id {
+            self.drawing = drawing;
+        }
+    }
+
+    /// Draws now, on this thread, under whatever lock holds the page.
+    pub fn draw(&mut self, now_ms: i64) {
+        if let Some(draw) = self.draw_due(now_ms) {
+            let drawing = draw.render();
+            self.drawn(drawing);
+        }
     }
 
     /// The minute timer: ages the view unless a read runs.
-    pub fn age(&mut self, now_ms: i64) {
+    pub fn age(&mut self) {
         if !self.busy {
-            self.render(now_ms);
+            self.due = true;
         }
     }
 
-    /// A page of the rendered buckets for one provider (empty for all); an
+    /// A page of the drawn buckets for one provider (empty for all); an
     /// offset past the end shows the last page.
     pub fn rows(&self, provider: &str, offset: usize) -> Rows {
-        let filtered: Vec<&Row> = self
+        let drawing = &self.drawing;
+        let bucket = |&(computer, bucket): &(usize, usize)| {
+            &drawing.computers[computer].agent.buckets[bucket]
+        };
+        let filtered: Vec<&(usize, usize)> = drawing
             .rows
             .iter()
-            .filter(|row| provider.is_empty() || row.provider == provider)
+            .filter(|place| provider.is_empty() || bucket(place).provider == provider)
             .collect();
         let total = filtered.len();
         let offset = if offset >= total {
@@ -479,7 +575,19 @@ impl Page {
                 .into_iter()
                 .skip(offset)
                 .take(PAGE_SIZE)
-                .cloned()
+                .map(|place| {
+                    let computer = &drawing.computers[place.0];
+                    let b = bucket(place);
+                    Row {
+                        date: b.date.clone(),
+                        route: computer.route.clone(),
+                        provider: b.provider.clone(),
+                        producer: b.producer.clone(),
+                        current: computer.current,
+                        counters: b.counters.clone(),
+                        histograms: b.histograms.clone(),
+                    }
+                })
                 .collect(),
             offset,
             total,
@@ -497,26 +605,30 @@ impl Page {
             can_change_local: idle && self.local_fresh(now_ms).is_some(),
             peers: self.peers.clone(),
             peer_limit: self.peer_limit,
+            selection: self.selection.clone(),
+            from: self.applied.map(|(from, _)| from.iso()),
+            through: self.applied.map(|(_, through)| through.iso()),
             local: self.local.as_ref().map(|local| Local {
                 enabled: local.enabled,
                 retention_days: local.retention_days,
+                epoch: local.source_epoch.clone(),
                 reads: self.local_reads,
             }),
-            report: self.report.clone(),
+            report: self.drawing.report.clone(),
             purge_pending: self.purge_epoch.is_some(),
         }
     }
 
-    /// Apply locally: the epoch to pin, once the person has confirmed a
-    /// shorter retention; None when the controls are not usable now.
-    pub fn begin_configure(&mut self, now_ms: i64) -> Option<String> {
-        if !self.idle() {
-            return None;
+    /// Apply locally, with the epoch the person's view showed when they
+    /// clicked it (Qt captures it before its question); the CLI compares it
+    /// atomically. False while a read or a change runs.
+    pub fn begin_configure(&mut self, epoch: &str) -> bool {
+        if !self.idle() || epoch.is_empty() {
+            return false;
         }
-        let epoch = self.local_fresh(now_ms)?.source_epoch.clone();
         self.mutating = true;
         self.status = "Applying local collection settings…".into();
-        Some(epoch)
+        true
     }
 
     /// The change answered; true when the page reads again (a failed or
@@ -579,7 +691,7 @@ impl Page {
     }
 
     /// The purge answered; true when the page reads again.
-    pub fn purge_answered(&mut self, reply: Result<(), String>, now_ms: i64) -> bool {
+    pub fn purge_answered(&mut self, reply: Result<(), String>) -> bool {
         self.mutating = false;
         self.local = None;
         self.snapshots.clear();
@@ -587,26 +699,29 @@ impl Page {
             Ok(()) => true,
             Err(error) => {
                 self.status = error;
-                self.render(now_ms);
+                self.due = true;
                 false
             }
         }
     }
 
-    /// Review aggregate diagnostics: the file's text, or None while a read
-    /// or a change runs.
-    pub fn diagnostic(&self, now_ms: i64) -> Option<String> {
+    /// What Review aggregate diagnostics… shows, to be written off the lock
+    /// with [`super::diagnostic_text`]; None while a read or a change runs.
+    pub fn diagnostic_input(&self, now_ms: i64) -> Option<(Vec<Observation>, Day, Day)> {
         let (from, through) = self.applied?;
-        self.idle().then(|| {
-            super::diagnostic_text(&super::diagnostic(
-                &self.observations(now_ms),
-                from,
-                through,
-            ))
-        })
+        self.idle()
+            .then(|| (self.observations(now_ms), from, through))
     }
 
-    /// The line under the page, set when a saved file's outcome is known.
+    /// The diagnostic's text, written here.
+    pub fn diagnostic(&self, now_ms: i64) -> Option<String> {
+        self.diagnostic_input(now_ms)
+            .map(|(observations, from, through)| {
+                super::diagnostic_text(&super::diagnostic(&observations, from, through))
+            })
+    }
+
+    /// The line under the page.
     pub fn set_status(&mut self, status: &str) {
         self.status = status.to_owned();
     }

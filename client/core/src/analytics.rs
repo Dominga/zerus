@@ -10,6 +10,7 @@ pub mod page;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -198,11 +199,12 @@ pub fn valid_range(from: Day, through: Day) -> bool {
     from <= through && through.0 - from.0 < 90
 }
 
-/// An exact nonnegative JSON integer.
+/// An exact nonnegative JSON integer (-0 reads as 0, as Qt writes it).
 fn number(value: &Value) -> Option<f64> {
     value
         .as_f64()
         .filter(|n| n.is_finite() && *n >= 0.0 && *n <= MAX_INTEGER && n.floor() == *n)
+        .map(|n| n + 0.0)
 }
 
 /// Seconds since the epoch before the year 10000.
@@ -270,18 +272,26 @@ fn add(into: &mut BTreeMap<String, f64>, key: &str, value: &Value, duration: boo
         value
             .as_f64()
             .filter(|n| n.is_finite() && *n >= 0.0 && *n <= MAX_INTEGER)
+            .map(|n| n + 0.0)
     } else {
         number(value)
     };
-    let Some(value) = value else {
-        return false;
-    };
-    let sum = into.get(key).copied().unwrap_or(0.0) + value;
-    if sum > MAX_INTEGER {
-        return false;
+    value.is_some_and(|value| add_checked(into, key, value))
+}
+
+/// Adds a checked value to `into[key]` unless the sum passes [`MAX_INTEGER`].
+fn add_checked(into: &mut BTreeMap<String, f64>, key: &str, value: f64) -> bool {
+    match into.get_mut(key) {
+        Some(sum) if *sum + value > MAX_INTEGER => false,
+        Some(sum) => {
+            *sum += value;
+            true
+        }
+        None => {
+            into.insert(key.to_owned(), value);
+            true
+        }
     }
-    into.insert(key.to_owned(), sum);
-    true
 }
 
 /// A daily histogram: six counts for the bounds 100 ms, 1 s, 10 s, 1 min
@@ -599,8 +609,9 @@ pub fn speech(bytes: &[u8], from: Day, through: Day) -> Option<Speech> {
 pub struct Observation {
     /// The `hgs @route`; empty for this computer.
     pub route: String,
-    pub agent: Option<Summary>,
-    pub voice: Option<Speech>,
+    /// Reads are shared between the page and its drawings, never copied.
+    pub agent: Option<Arc<Summary>>,
+    pub voice: Option<Arc<Speech>>,
     pub current: bool,
     pub voice_current: bool,
     /// Fixed client messages, never remote standard error.
@@ -729,8 +740,9 @@ pub fn totals<'a>(
             continue;
         }
         for name in COUNTERS {
-            let value = bucket.counters.get(name).map(|n| json!(n));
-            if !value.is_some_and(|value| add(&mut result, name, &value, false)) {
+            // Bucket counters were checked when read.
+            let value = bucket.counters.get(name);
+            if !value.is_some_and(|value| add_checked(&mut result, name, *value)) {
                 unavailable.insert(name);
             }
         }
@@ -790,13 +802,13 @@ pub fn speech_totals(days: &[SpeechDay]) -> SpeechTotals {
     let (mut unavailable, mut unavailable_errors) = (HashSet::new(), HashSet::new());
     for day in days {
         for name in SPEECH_COUNTERS {
-            let value = day.counters.get(name).map_or(Value::Null, |n| json!(n));
-            if !add(&mut totals.counters, name, &value, name.ends_with("_ms")) {
+            let value = day.counters.get(name);
+            if !value.is_some_and(|value| add_checked(&mut totals.counters, name, *value)) {
                 unavailable.insert(name.to_owned());
             }
         }
         for (code, count) in &day.error_codes {
-            if !add(&mut totals.error_codes, code, &json!(count), false) {
+            if !add_checked(&mut totals.error_codes, code, *count) {
                 unavailable_errors.insert(code.clone());
             }
         }
@@ -886,7 +898,7 @@ pub fn diagnostic(observations: &[Observation], from: Day, through: Day) -> Valu
             let mut row = json!({
                 "computer": index + 1,
                 "current": observation.current,
-                "agent": observation.agent.as_ref().map_or(Value::Null, public_agent),
+                "agent": observation.agent.as_deref().map_or(Value::Null, public_agent),
             });
             if let Some(voice) = &observation.voice {
                 let sums = speech_totals(&voice.days);
@@ -1094,14 +1106,20 @@ impl Request {
 /// AnalyticsClient: probes the selected computer's `hgs`, then runs the
 /// call, each bounded in time and output. Blocks; never on the main thread.
 pub fn call(hgs: &Path, request: &Request) -> Result<Reply, String> {
+    call_in(hgs, request, &[])
+}
+
+/// [`call`] with variables added to the child's environment; the agent's
+/// attribution is removed after them, as from the client's own.
+fn call_in(hgs: &Path, request: &Request, env: &[(&str, &str)]) -> Result<Reply, String> {
     if let Some((from, through)) = request.range() {
         if !valid_range(from, through) {
             return Err("Choose an inclusive UTC range of at most 90 days.".into());
         }
     }
-    let probe = crate::run::run_limited(hgs, &request.probe(), &[], HELP_BYTES).ok();
+    let probe = crate::run::run_limited(hgs, &request.probe(), env, HELP_BYTES).ok();
     request.probed(probe)?;
-    request.answer(crate::run::run_limited(hgs, &request.invocation(), &[], MAX_BYTES).ok())
+    request.answer(crate::run::run_limited(hgs, &request.invocation(), env, MAX_BYTES).ok())
 }
 
 #[cfg(test)]

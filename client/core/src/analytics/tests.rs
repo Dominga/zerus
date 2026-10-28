@@ -1,5 +1,7 @@
 // Mirrors tray/tests/test_analytics.cpp.
-use super::page::{Page, ALL};
+use std::sync::Arc;
+
+use super::page::{self, Page, ALL};
 use super::*;
 
 const MACHINE: &str = "10000000-0000-4000-8000-000000000001";
@@ -76,7 +78,7 @@ fn voice() -> Value {
 fn observation(route: &str, agent: Summary, current: bool) -> Observation {
     Observation {
         route: route.into(),
-        agent: Some(agent),
+        agent: Some(Arc::new(agent)),
         current,
         ..Observation::default()
     }
@@ -237,7 +239,7 @@ fn a_fleet_keeps_one_snapshot_per_computer_and_epoch() {
         totals(&unique[0].agent.as_ref().unwrap().buckets, None)["turn_completed"],
         3.0
     );
-    let agent = b.agent.as_mut().unwrap();
+    let agent = Arc::make_mut(b.agent.as_mut().unwrap());
     agent.revision = 8.0;
     agent.buckets = parsed(vec![bucket(first(), "codex", 5)]).buckets;
     assert_eq!(
@@ -248,7 +250,7 @@ fn a_fleet_keeps_one_snapshot_per_computer_and_epoch() {
             .revision,
         8.0
     );
-    let agent = b.agent.as_mut().unwrap();
+    let agent = Arc::make_mut(b.agent.as_mut().unwrap());
     agent.source_epoch = RESET.into();
     agent.revision = 0.0;
     agent.generated_at += 1.0;
@@ -259,14 +261,15 @@ fn a_fleet_keeps_one_snapshot_per_computer_and_epoch() {
     assert_eq!(unique[0].agent.as_ref().unwrap().source_epoch, RESET);
     assert!(!unique[0].current && unique[0].agent.as_ref().unwrap().buckets.is_empty());
     // On a tie a current read wins, then the later one; machines in order.
-    let stale = observation("stale", a.agent.clone().unwrap(), false);
+    let stale = observation("stale", (*a.agent.clone().unwrap()).clone(), false);
     assert_eq!(
         unique_computers(&[stale.clone(), a.clone()])[0].route,
         "route-a"
     );
     let mut other = a.clone();
     other.route = "other".into();
-    other.agent.as_mut().unwrap().machine_id = "00000000-0000-4000-8000-000000000009".into();
+    Arc::make_mut(other.agent.as_mut().unwrap()).machine_id =
+        "00000000-0000-4000-8000-000000000009".into();
     let routes: Vec<String> = unique_computers(&[a, other])
         .into_iter()
         .map(|o| o.route)
@@ -276,7 +279,8 @@ fn a_fleet_keeps_one_snapshot_per_computer_and_epoch() {
     let mut many: Vec<Observation> = (0..33)
         .map(|n| {
             let mut o = stale.clone();
-            o.agent.as_mut().unwrap().machine_id = format!("10000000-0000-4000-8000-{n:012}");
+            Arc::make_mut(o.agent.as_mut().unwrap()).machine_id =
+                format!("10000000-0000-4000-8000-{n:012}");
             o
         })
         .collect();
@@ -497,8 +501,8 @@ fn diagnostics_leave_out_identity_content_and_history() {
     let speech = speech(&bytes(&voice()), first(), last()).unwrap();
     let observation = Observation {
         route: "private-host-sentinel".into(),
-        agent: Some(agent),
-        voice: Some(speech),
+        agent: Some(Arc::new(agent)),
+        voice: Some(Arc::new(speech)),
         current: true,
         voice_current: true,
         ..Observation::default()
@@ -681,17 +685,111 @@ fn calls_probe_the_help_first_and_word_failures_as_qt_does() {
 /// A route's summary and speech answers.
 type Answers = (Result<Summary, String>, Result<Speech, String>);
 
+/// A fake `hgs` that logs each call (and whether the agent's attribution
+/// reached it), prints `help` for `--help` and `reply` (or fails) otherwise.
+#[cfg(unix)]
+fn fake_hgs(dir: &Path, help: &str, reply: &[u8], fail: bool) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = dir.join("hgs");
+    std::fs::write(dir.join("help"), help).unwrap();
+    std::fs::write(dir.join("reply"), reply).unwrap();
+    let answer = if fail {
+        "echo private-stderr-sentinel >&2; exit 1"
+    } else {
+        "cat \"$here/reply\""
+    };
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nhere=$(dirname \"$0\")\necho \"$* session=${{HGS_SESSION:-unset}}\" >> \"$here/calls\"\ncase \"$*\" in *--help*) cat \"$here/help\"; exit 0;; esac\ncat >/dev/null\n{answer}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+#[cfg(unix)]
+#[test]
+fn an_older_cli_is_only_asked_for_help_and_errors_never_echo_its_text() {
+    let dir = std::env::temp_dir().join(format!("zerus-analytics-cli-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    struct Gone(std::path::PathBuf);
+    impl Drop for Gone {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _gone = Gone(dir.clone());
+    let calls = || std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
+    let read = Request::Summary {
+        host: "old".into(),
+        from: first(),
+        through: last(),
+    };
+    let attribution = [
+        ("HGS_SESSION", "claude/sample/agent"),
+        ("HGS_RUN_ID", "run-1"),
+    ];
+
+    // An older CLI: only its help is read, never the unknown verb.
+    let hgs = fake_hgs(&dir, "hgs [@host] ls", b"{}", false);
+    assert_eq!(
+        call_in(&hgs, &read, &attribution).unwrap_err(),
+        "This computer does not support the requested analytics read."
+    );
+    assert_eq!(calls(), "@old --help session=unset\n");
+
+    // A reply past 1 MiB, and a failing CLI: Qt's words, never its stderr.
+    std::fs::remove_file(dir.join("calls")).unwrap();
+    let help = "hgs [@host] analytics --json\nhgs [@host] speech --json";
+    let hgs = fake_hgs(&dir, help, &vec![b'x'; MAX_BYTES + 1], false);
+    assert_eq!(
+        call_in(&hgs, &read, &attribution).unwrap_err(),
+        "Analytics read failed or exceeded its response limit."
+    );
+    let hgs = fake_hgs(&dir, help, b"", true);
+    let failed = call_in(&hgs, &read, &attribution).unwrap_err();
+    assert_eq!(
+        failed,
+        "Analytics read failed or exceeded its response limit."
+    );
+    assert!(!failed.contains("sentinel"));
+    // A good reply, read without the agent's attribution.
+    let good = bytes(&raw(vec![bucket(first(), "codex", 3)]));
+    let hgs = fake_hgs(&dir, help, &good, false);
+    assert!(matches!(
+        call_in(&hgs, &read, &attribution),
+        Ok(Reply::Summary(_))
+    ));
+    let log = calls();
+    assert!(
+        log.lines().all(|line| line.ends_with("session=unset")),
+        "{log}"
+    );
+    assert!(log.contains("@old analytics --json"));
+}
+
 /// Runs a page's read with the given answers per route.
 fn read_all(page: &mut Page, answer: &dyn Fn(&str) -> Answers) -> Vec<String> {
     let mut routes = Vec::new();
-    while let Some((route, from, through)) = page.next(NOW_MS) {
+    while let Some((route, from, through)) = page.next_route() {
         assert_eq!((from, through), (first(), last()));
         let (agent, voice) = answer(&route);
         page.summary_answered(&route, agent, NOW_MS);
         page.speech_answered(&route, voice, NOW_MS);
         routes.push(route);
     }
+    // As the service draws after each read.
+    page.draw(NOW_MS);
     routes
+}
+
+/// The page as the service shows it: drawn whenever a drawing is due.
+fn shown(page: &mut Page) -> page::View {
+    page.draw(NOW_MS);
+    page.view(NOW_MS)
 }
 
 fn local_voice() -> Result<Speech, String> {
@@ -707,20 +805,20 @@ fn a_refresh_reads_each_route_in_turn_and_pages_its_rows() {
     value["range"]["through"] = json!(first().plus(59).iso());
     let agent = summary(&bytes(&value), first(), first().plus(59)).unwrap();
     let mut page = Page::new();
-    assert!(page.view(NOW_MS).report.is_none());
-    assert!(page.refresh("", "2026-01-01", "2026-03-01", NOW_MS));
-    let view = page.view(NOW_MS);
+    assert!(shown(&mut page).report.is_none());
+    assert!(page.refresh("", "2026-01-01", "2026-03-01"));
+    let view = shown(&mut page);
     assert_eq!(view.status, "Reading 1 configured route(s)…");
     assert!(view.busy && !view.can_refresh && !view.can_export);
     // A second refresh while one runs does nothing.
-    assert!(!page.refresh(ALL, "2026-01-01", "2026-03-01", NOW_MS));
+    assert!(!page.refresh(ALL, "2026-01-01", "2026-03-01"));
     let (from, through) = (first(), first().plus(59));
-    let (route, ..) = page.next(NOW_MS).unwrap();
+    let (route, ..) = page.next_route().unwrap();
     assert_eq!(route, "");
     page.summary_answered("", Ok(agent), NOW_MS);
     page.speech_answered("", local_voice(), NOW_MS);
-    assert!(page.next(NOW_MS).is_none());
-    let view = page.view(NOW_MS);
+    assert!(page.next_route().is_none());
+    let view = shown(&mut page);
     assert_eq!(
         view.status,
         "Read finished. Last-known or missing data is excluded from current totals."
@@ -754,12 +852,12 @@ fn repeated_refreshes_and_routes_to_one_computer_do_not_add_up() {
     let mut page = Page::new();
     page.set_peers(["same-computer".to_owned()]);
     for _ in 0..2 {
-        assert!(page.refresh(ALL, "2026-01-01", "2026-01-30", NOW_MS));
+        assert!(page.refresh(ALL, "2026-01-01", "2026-01-30"));
         let routes = read_all(&mut page, &|_| {
             (Ok(parsed(vec![bucket(first(), "codex", 3)])), local_voice())
         });
         assert_eq!(routes, ["", "same-computer"]);
-        let report = page.view(NOW_MS).report.unwrap();
+        let report = shown(&mut page).report.unwrap();
         assert_eq!((report.routes, report.present), (2, 1));
         assert_eq!(report.totals["turn_completed"], 3.0);
         assert_eq!(report.work.as_ref().map(|work| work.count), Some(1));
@@ -774,7 +872,7 @@ fn the_fleet_overview_pools_samples_and_excludes_stale_computers() {
     peer.machine_id = "10000000-0000-4000-8000-000000000002".into();
     let mut page = Page::new();
     page.set_peers(["same-computer".to_owned(), "peer".to_owned()]);
-    page.refresh(ALL, "2026-01-01", "2026-01-30", NOW_MS);
+    page.refresh(ALL, "2026-01-01", "2026-01-30");
     let answer = |route: &str| {
         let agent = if route == "peer" {
             peer.clone()
@@ -784,7 +882,7 @@ fn the_fleet_overview_pools_samples_and_excludes_stale_computers() {
         (Ok(agent), local_voice())
     };
     read_all(&mut page, &answer);
-    let report = page.view(NOW_MS).report.unwrap();
+    let report = shown(&mut page).report.unwrap();
     assert_eq!(report.present, 2);
     assert_eq!(
         report.work,
@@ -794,7 +892,7 @@ fn the_fleet_overview_pools_samples_and_excludes_stale_computers() {
             sum: 9100
         })
     );
-    page.refresh(ALL, "2026-01-01", "2026-01-30", NOW_MS);
+    page.refresh(ALL, "2026-01-01", "2026-01-30");
     read_all(&mut page, &|route| {
         if route == "peer" {
             (
@@ -805,7 +903,7 @@ fn the_fleet_overview_pools_samples_and_excludes_stale_computers() {
             answer(route)
         }
     });
-    let report = page.view(NOW_MS).report.unwrap();
+    let report = shown(&mut page).report.unwrap();
     assert_eq!(report.present, 1);
     assert_eq!(
         report.work.as_ref().map(|work| (work.count, work.sum)),
@@ -829,18 +927,18 @@ fn the_fleet_overview_pools_samples_and_excludes_stale_computers() {
 #[test]
 fn a_failed_read_keeps_the_last_known_but_excludes_its_totals() {
     let mut page = Page::new();
-    page.refresh("", "2026-01-01", "2026-01-30", NOW_MS);
+    page.refresh("", "2026-01-01", "2026-01-30");
     read_all(&mut page, &|_| {
         (Ok(parsed(vec![bucket(first(), "codex", 3)])), local_voice())
     });
-    page.refresh("", "2026-01-01", "2026-01-30", NOW_MS);
+    page.refresh("", "2026-01-01", "2026-01-30");
     read_all(&mut page, &|_| {
         (
             Err("Computer unavailable. No current analytics read.".into()),
             local_voice(),
         )
     });
-    let view = page.view(NOW_MS);
+    let view = shown(&mut page);
     let report = view.report.unwrap();
     assert_eq!(report.present, 0);
     assert!(report.totals.is_empty() && report.work.is_none());
@@ -849,8 +947,8 @@ fn a_failed_read_keeps_the_last_known_but_excludes_its_totals() {
     assert!(!page.rows("", 0).rows[0].current);
     assert!(!view.can_change_local && view.local.is_none());
     // Another range forgets what was read for the last one.
-    page.refresh("", "2026-01-01", "2026-01-29", NOW_MS);
-    while let Some((route, ..)) = page.next(NOW_MS) {
+    page.refresh("", "2026-01-01", "2026-01-29");
+    while let Some((route, ..)) = page.next_route() {
         page.summary_answered(
             &route,
             Err("Computer unavailable. No current analytics read.".into()),
@@ -862,7 +960,7 @@ fn a_failed_read_keeps_the_last_known_but_excludes_its_totals() {
             NOW_MS,
         );
     }
-    let report = page.view(NOW_MS).report.unwrap();
+    let report = shown(&mut page).report.unwrap();
     assert!(report.computers.is_empty());
     assert_eq!(
         report.missing[0].error,
@@ -874,29 +972,29 @@ fn a_failed_read_keeps_the_last_known_but_excludes_its_totals() {
 fn stale_retired_and_peer_summaries_never_set_the_local_controls() {
     let mut page = Page::new();
     page.set_peers(["peer".to_owned()]);
-    page.refresh("peer", "2026-01-01", "2026-01-30", NOW_MS);
+    page.refresh("peer", "2026-01-01", "2026-01-30");
     read_all(&mut page, &|_| (Ok(parsed(vec![])), local_voice()));
-    let view = page.view(NOW_MS);
+    let view = shown(&mut page);
     assert!(view.local.is_none() && !view.can_change_local);
     assert_eq!(view.report.unwrap().present, 1);
     // A summary generated more than five minutes ago is stale.
-    page.refresh("", "2026-01-01", "2026-01-30", NOW_MS);
+    page.refresh("", "2026-01-01", "2026-01-30");
     read_all(&mut page, &|_| {
         let mut old = parsed(vec![]);
         old.generated_at -= 301.0;
         old.revision = 9.0;
         (Ok(old), local_voice())
     });
-    let report = page.view(NOW_MS).report.unwrap();
+    let report = shown(&mut page).report.unwrap();
     assert_eq!(
         report.computers[0].error,
         "Summary is stale or its clock is unconfirmed."
     );
-    assert!(page.view(NOW_MS).local.is_none());
+    assert!(shown(&mut page).local.is_none());
     // A lower revision of the same epoch is refused by the epochs seen.
-    page.refresh("", "2026-01-01", "2026-01-30", NOW_MS);
+    page.refresh("", "2026-01-01", "2026-01-30");
     read_all(&mut page, &|_| (Ok(parsed(vec![])), local_voice()));
-    let report = page.view(NOW_MS).report.unwrap();
+    let report = shown(&mut page).report.unwrap();
     assert_eq!(
         report.computers[0].error,
         "Retired, older or ambiguous analytics source. Excluded from current totals."
@@ -906,7 +1004,7 @@ fn stale_retired_and_peer_summaries_never_set_the_local_controls() {
 #[test]
 fn reads_age_out_of_the_current_totals() {
     let mut page = Page::new();
-    page.refresh("", "2026-01-01", "2026-01-30", NOW_MS);
+    page.refresh("", "2026-01-01", "2026-01-30");
     read_all(&mut page, &|_| {
         (Ok(parsed(vec![bucket(first(), "codex", 3)])), local_voice())
     });
@@ -916,20 +1014,21 @@ fn reads_age_out_of_the_current_totals() {
     assert!(!page.view(later).can_change_local);
     // The minute timer draws it again, and only then.
     assert_eq!(page.view(later).report.unwrap().present, 1);
-    page.age(later);
+    page.age();
+    page.draw(later);
     assert_eq!(page.view(later).report.unwrap().present, 0);
 }
 
 #[test]
 fn an_invalid_range_reads_nothing_and_says_why() {
     let mut page = Page::new();
-    assert!(!page.refresh("", "2026-01-01", "2026-04-01", NOW_MS));
-    assert!(!page.refresh("", "2026-01-01", "not a day", NOW_MS));
+    assert!(!page.refresh("", "2026-01-01", "2026-04-01"));
+    assert!(!page.refresh("", "2026-01-01", "not a day"));
     assert_eq!(
-        page.view(NOW_MS).status,
+        shown(&mut page).status,
         "Choose an inclusive UTC range of at most 90 days."
     );
-    assert!(page.next(NOW_MS).is_none());
+    assert!(page.next_route().is_none());
     assert!(page.diagnostic(NOW_MS).is_none());
 }
 
@@ -942,24 +1041,24 @@ fn peers_are_bounded_and_a_leaving_peer_takes_its_reads() {
     peers.insert(2, "peer-0".to_owned());
     peers.push("x".repeat(257));
     page.set_peers(peers);
-    let view = page.view(NOW_MS);
+    let view = shown(&mut page);
     assert_eq!(view.peers.len(), 31);
     assert!(view.peer_limit);
     page.set_peers(["a".to_owned(), "b".to_owned()]);
-    page.refresh(ALL, "2026-01-01", "2026-01-30", NOW_MS);
+    page.refresh(ALL, "2026-01-01", "2026-01-30");
     // A peer that leaves during the read is skipped.
-    assert_eq!(page.next(NOW_MS).unwrap().0, "");
+    assert_eq!(page.next_route().unwrap().0, "");
     page.set_peers(["b".to_owned()]);
-    assert_eq!(page.next(NOW_MS).unwrap().0, "b");
-    assert!(page.next(NOW_MS).is_none());
-    assert!(!page.view(NOW_MS).peer_limit);
+    assert_eq!(page.next_route().unwrap().0, "b");
+    assert!(page.next_route().is_none());
+    assert!(!shown(&mut page).peer_limit);
 }
 
 #[test]
 fn rows_sort_by_day_then_the_computer_as_shown() {
     let mut page = Page::new();
     page.set_peers(["Alpha".to_owned(), "zulu".to_owned()]);
-    page.refresh(ALL, "2026-01-01", "2026-01-30", NOW_MS);
+    page.refresh(ALL, "2026-01-01", "2026-01-30");
     read_all(&mut page, &|route| {
         let mut agent = parsed(vec![
             bucket(first().plus(1), "codex", 1),
@@ -992,51 +1091,206 @@ fn rows_sort_by_day_then_the_computer_as_shown() {
     assert_eq!(page.rows("claude", 0).total, 3);
 }
 
+/// A summary at the limits: 1080 daily buckets with every counter and
+/// histogram.
+fn limit_summary(machine: usize) -> Summary {
+    let mut summary = parsed(vec![]);
+    summary.machine_id = format!("10000000-0000-4000-8000-{machine:012}");
+    let histogram = Histogram {
+        counts: [1, 2, 3, 4, 5, 6],
+        count: 21,
+        sum: 21_000,
+    };
+    for day in 0..90 {
+        for provider in PROVIDERS {
+            for producer in ["main", "child"] {
+                summary.buckets.push(Bucket {
+                    date: first().plus(day).iso(),
+                    provider: provider.into(),
+                    producer: producer.into(),
+                    counters: COUNTERS
+                        .iter()
+                        .map(|name| ((*name).to_owned(), 7.0))
+                        .collect(),
+                    histograms: ["work_ms", "approval_wait_ms", "input_wait_ms"]
+                        .iter()
+                        .map(|name| ((*name).to_owned(), histogram.clone()))
+                        .collect(),
+                });
+            }
+        }
+    }
+    assert_eq!(summary.buckets.len(), MAX_BUCKETS);
+    summary
+}
+
+#[test]
+fn a_fleet_at_the_limits_is_drawn_off_the_lock() {
+    use std::time::{Duration, Instant};
+    let mut page = Page::new();
+    page.set_peers((1..MAX_COMPUTERS).map(|n| format!("peer-{n}")));
+    assert!(page.refresh(ALL, "2026-01-01", "2026-01-30"));
+    let mut machine = 0;
+    while let Some((route, ..)) = page.next_route() {
+        page.summary_answered(&route, Ok(limit_summary(machine)), NOW_MS);
+        page.speech_answered(
+            &route,
+            Err("Computer unavailable. No current analytics read.".into()),
+            NOW_MS,
+        );
+        machine += 1;
+    }
+    assert_eq!(machine, MAX_COMPUTERS);
+    // Under the lock: only what a drawing needs, the reads shared.
+    let start = Instant::now();
+    let draw = page.draw_due(NOW_MS).unwrap();
+    let taken = start.elapsed();
+    let start = Instant::now();
+    let drawing = draw.render();
+    let rendered = start.elapsed();
+    let start = Instant::now();
+    page.drawn(drawing);
+    let rows = page.rows("", 34_000);
+    let view = page.view(NOW_MS);
+    let input = page.diagnostic_input(NOW_MS).unwrap();
+    let locked = taken + start.elapsed();
+    let start = Instant::now();
+    let text = diagnostic_text(&diagnostic(&input.0, input.1, input.2));
+    let exported = start.elapsed();
+    eprintln!(
+        "at the limits: {locked:?} under the lock, {rendered:?} drawing, {exported:?} diagnostic"
+    );
+    assert_eq!(
+        view.report.as_ref().unwrap().buckets,
+        MAX_COMPUTERS * MAX_BUCKETS
+    );
+    assert_eq!(
+        (rows.total, rows.rows.len()),
+        (MAX_COMPUTERS * MAX_BUCKETS, 50)
+    );
+    assert!(text.contains("\"computer\": 32"));
+    // Loose bounds for an unoptimized build on a shared machine.
+    assert!(locked < Duration::from_millis(200), "{locked:?}");
+    assert!(rendered < Duration::from_secs(10), "{rendered:?}");
+    // A drawing that finishes after a newer one never replaces it.
+    page.age();
+    let older = page.draw_due(NOW_MS).unwrap();
+    page.age();
+    let newer = page.draw_due(NOW_MS).unwrap();
+    page.drawn(newer.render());
+    page.speech_answered("", Err("x".into()), NOW_MS);
+    page.drawn(older.render());
+    assert_eq!(
+        page.view(NOW_MS).report.unwrap().buckets,
+        MAX_COMPUTERS * MAX_BUCKETS
+    );
+}
+
+#[test]
+fn an_unknown_selection_reads_this_computer_and_the_view_keeps_the_choice() {
+    let mut page = Page::new();
+    page.set_peers(["mac".to_owned()]);
+    assert!(page.refresh("not-a-peer", "2026-01-01", "2026-01-30"));
+    assert_eq!(page.next_route().unwrap().0, "");
+    assert!(page.next_route().is_none());
+    let view = shown(&mut page);
+    assert_eq!(view.selection, "");
+    page.refresh(ALL, "2026-01-02", "2026-01-30");
+    let view = page.view(NOW_MS);
+    assert_eq!(
+        (
+            view.selection.as_str(),
+            view.from.as_deref(),
+            view.through.as_deref()
+        ),
+        ("*", Some("2026-01-02"), Some("2026-01-30"))
+    );
+}
+
+#[test]
+fn local_controls_stay_usable_when_a_peer_is_offline() {
+    let mut page = Page::new();
+    page.set_peers(["offline".to_owned()]);
+    page.refresh(ALL, "2026-01-01", "2026-01-30");
+    read_all(&mut page, &|route| {
+        if route.is_empty() {
+            (Ok(parsed(vec![bucket(first(), "codex", 3)])), local_voice())
+        } else {
+            let gone = "Computer unavailable. No current analytics read.";
+            (Err(gone.into()), Err(gone.into()))
+        }
+    });
+    let view = shown(&mut page);
+    assert!(view.can_change_local);
+    let report = view.report.unwrap();
+    assert_eq!(report.totals["turn_completed"], 3.0);
+    assert_eq!(report.missing[0].route, "offline");
+    assert_eq!(
+        report.missing[0].error,
+        "Computer unavailable. No current analytics read."
+    );
+}
+
+#[test]
+fn a_negative_zero_reads_as_zero() {
+    let mut value = raw(vec![bucket(first(), "codex", 3)]);
+    value["buckets"][0]["counters"]["failure_network"] = json!(-0.0);
+    let counter = read(&value).unwrap().buckets[0].counters["failure_network"];
+    assert!(counter == 0.0 && counter.is_sign_positive());
+    let mut speech_value = voice();
+    speech_value["days"][0]["queue_ms"] = json!(-0.0);
+    let parsed = speech(&bytes(&speech_value), first(), last()).unwrap();
+    assert!(parsed.days[0].counters["queue_ms"].is_sign_positive());
+}
+
 #[test]
 fn configure_pins_the_reviewed_epoch_and_is_never_retried() {
     let mut page = Page::new();
-    assert!(page.begin_configure(NOW_MS).is_none());
-    page.refresh("", "2026-01-01", "2026-01-30", NOW_MS);
+    assert!(!page.begin_configure(""));
+    page.refresh("", "2026-01-01", "2026-01-30");
     read_all(&mut page, &|_| (Ok(parsed(vec![])), local_voice()));
-    assert_eq!(page.begin_configure(NOW_MS).as_deref(), Some(EPOCH));
-    let view = page.view(NOW_MS);
+    // The epoch is the one the view showed when the person clicked.
+    let epoch = shown(&mut page).local.unwrap().epoch;
+    assert_eq!(epoch, EPOCH);
+    assert!(page.begin_configure(&epoch));
+    let view = shown(&mut page);
     assert_eq!(view.status, "Applying local collection settings…");
     assert!(view.mutating && !view.can_refresh && !view.can_change_local);
-    assert!(page.begin_configure(NOW_MS).is_none());
-    assert!(!page.refresh("", "2026-01-01", "2026-01-30", NOW_MS));
+    assert!(!page.begin_configure(&epoch));
+    assert!(!page.refresh("", "2026-01-01", "2026-01-30"));
     let unconfirmed = "Change was not confirmed. Refresh and review before another action.";
     assert!(!page.configure_answered(Err(unconfirmed.into())));
-    let view = page.view(NOW_MS);
+    let view = shown(&mut page);
     assert_eq!(view.status, unconfirmed);
     assert!(!view.mutating && view.local.is_none() && !view.can_change_local);
-    page.refresh("", "2026-01-01", "2026-01-30", NOW_MS);
+    page.refresh("", "2026-01-01", "2026-01-30");
     read_all(&mut page, &|_| (Ok(parsed(vec![])), local_voice()));
-    page.begin_configure(NOW_MS);
+    page.begin_configure(EPOCH);
     assert!(page.configure_answered(Ok(())));
 }
 
 #[test]
 fn a_purge_waits_for_a_fresh_epoch_and_the_persons_confirmation() {
     let mut page = Page::new();
-    page.refresh("", "2026-01-01", "2026-01-30", NOW_MS);
+    page.refresh("", "2026-01-01", "2026-01-30");
     read_all(&mut page, &|_| {
         (Ok(parsed(vec![bucket(first(), "codex", 3)])), local_voice())
     });
     assert_eq!(page.begin_purge(NOW_MS), Some((first(), last())));
-    assert!(page.view(NOW_MS).mutating);
+    assert!(shown(&mut page).mutating);
     // Cancelled: nothing changes and nothing is left pending.
     assert!(page.purge_checked(Ok(parsed(vec![])), NOW_MS));
-    assert!(page.view(NOW_MS).purge_pending);
+    assert!(shown(&mut page).purge_pending);
     page.purge_cancelled();
-    let view = page.view(NOW_MS);
+    let view = shown(&mut page);
     assert!(!view.mutating && !view.purge_pending && view.can_change_local);
     assert_eq!(page.purge_confirmed(), None);
     // A cancel outside a purge leaves a running change alone.
-    page.begin_configure(NOW_MS);
+    page.begin_configure(EPOCH);
     page.purge_cancelled();
-    assert!(page.view(NOW_MS).mutating);
+    assert!(shown(&mut page).mutating);
     page.configure_answered(Ok(()));
-    page.refresh("", "2026-01-01", "2026-01-30", NOW_MS);
+    page.refresh("", "2026-01-01", "2026-01-30");
     read_all(&mut page, &|_| {
         (Ok(parsed(vec![bucket(first(), "codex", 3)])), local_voice())
     });
@@ -1045,7 +1299,7 @@ fn a_purge_waits_for_a_fresh_epoch_and_the_persons_confirmation() {
     let mut stale = parsed(vec![]);
     stale.generated_at -= 400.0;
     assert!(!page.purge_checked(Ok(stale), NOW_MS));
-    let view = page.view(NOW_MS);
+    let view = shown(&mut page);
     assert_eq!(
         view.status,
         "Local analytics epoch is stale or ambiguous. Refresh before purging."
@@ -1058,11 +1312,11 @@ fn a_purge_waits_for_a_fresh_epoch_and_the_persons_confirmation() {
     reset.generated_at += 1.0;
     assert!(page.purge_checked(Ok(reset), NOW_MS));
     assert_eq!(page.purge_confirmed().as_deref(), Some(RESET));
-    assert!(page.view(NOW_MS).mutating);
-    assert!(page.purge_answered(Ok(()), NOW_MS));
+    assert!(shown(&mut page).mutating);
+    assert!(page.purge_answered(Ok(())));
     assert!(page.observations(NOW_MS)[0].agent.is_none());
     // A failed purge says so and draws the forgotten reads.
-    page.refresh("", "2026-01-01", "2026-01-30", NOW_MS);
+    page.refresh("", "2026-01-01", "2026-01-30");
     read_all(&mut page, &|_| {
         let mut agent = parsed(vec![]);
         agent.source_epoch = RESET.into();
@@ -1074,13 +1328,13 @@ fn a_purge_waits_for_a_fresh_epoch_and_the_persons_confirmation() {
         Err("Computer unavailable. No current analytics read.".into()),
         NOW_MS
     ));
-    assert!(!page.view(NOW_MS).mutating);
+    assert!(!shown(&mut page).mutating);
 }
 
 #[test]
 fn the_diagnostic_review_waits_for_reads_and_changes() {
     let mut page = Page::new();
-    page.refresh("", "2026-01-01", "2026-01-30", NOW_MS);
+    page.refresh("", "2026-01-01", "2026-01-30");
     assert!(page.diagnostic(NOW_MS).is_none());
     read_all(&mut page, &|_| {
         (Ok(parsed(vec![bucket(first(), "codex", 3)])), local_voice())
@@ -1088,7 +1342,7 @@ fn the_diagnostic_review_waits_for_reads_and_changes() {
     let text = page.diagnostic(NOW_MS).unwrap();
     assert!(text.contains("\"kind\": \"local_aggregate_diagnostics\""));
     assert!(!text.contains(MACHINE) && !text.contains("profile_id"));
-    page.begin_configure(NOW_MS);
+    page.begin_configure(EPOCH);
     assert!(page.diagnostic(NOW_MS).is_none());
 }
 
@@ -1364,8 +1618,8 @@ fn qt_and_the_client_read_replies_alike() {
         .iter()
         .map(|row| Observation {
             route: row["route"].as_str().unwrap().into(),
-            agent: summary(&bytes(&row["agent"]), first(), last()),
-            voice: speech(&bytes(&row["voice"]), first(), last()),
+            agent: summary(&bytes(&row["agent"]), first(), last()).map(Arc::new),
+            voice: speech(&bytes(&row["voice"]), first(), last()).map(Arc::new),
             current: row["current"].as_bool().unwrap(),
             voice_current: row["voice_current"].as_bool().unwrap(),
             ..Observation::default()

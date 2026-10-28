@@ -141,3 +141,17 @@ export function defaultRange(nowMs: number): { from: string; through: string } {
   const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
   return { from: day(nowMs - 29 * 86_400_000), through: day(nowMs) };
 }
+
+/**
+ * Apply locally (AnalyticsSettings::configure): nothing unless the controls
+ * are usable; otherwise the epoch the view shows now, which the change pins
+ * even if the read ages while the question is open, and whether to ask
+ * first (a shorter retention deletes history).
+ */
+export function localChange(
+  view: { can_change_local: boolean; local: { retention_days: number; epoch: string } | null },
+  retention: number,
+): { epoch: string; ask: boolean } | undefined {
+  if (!view.can_change_local || !view.local) return undefined;
+  return { epoch: view.local.epoch, ask: retention < view.local.retention_days };
+}

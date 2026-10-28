@@ -3,8 +3,10 @@
 //! route at a time on a thread of its own, as Qt's queue does, and each
 //! reply is parsed on that thread; every answer sends `analytics-changed`
 //! (`refresh` set when a change succeeded and the page should read again).
-//! A replay never drives the CLI.
+//! The page is drawn outside its lock, and no command runs on the main
+//! thread. A replay never drives the CLI: it says so on the status line.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,53 +19,37 @@ use zerus_client_core::default_hgs;
 
 use crate::commands::AppState;
 
+/// What a replay says instead of reading or changing anything.
+const REPLAY: &str = "Private analytics are not read in a replay.";
+
 /// The page's state, and the diagnostics last shown for review.
 pub struct Analytics(Arc<Inner>);
+
+type Notify = Box<dyn Fn(bool) + Send + Sync>;
 
 struct Inner {
     page: Mutex<Page>,
     review: Mutex<Option<String>>,
     /// A replay without an explicit CLI: nothing is read or changed.
     blocked: bool,
+    /// Tells the page something changed (and whether to read again).
+    notify: Notify,
 }
 
-impl Inner {
-    fn page(&self) -> MutexGuard<'_, Page> {
-        self.page.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
-pub fn start() -> Analytics {
-    Analytics(Arc::new(Inner {
-        page: Mutex::new(Page::new()),
-        review: Mutex::new(None),
-        blocked: crate::actions::blocked(),
-    }))
+pub fn start(app: &AppHandle) -> Analytics {
+    let handle = app.clone();
+    Analytics(Arc::new(Inner::new(
+        crate::actions::blocked(),
+        Box::new(move |refresh| {
+            let _ = handle.emit("analytics-changed", json!({ "refresh": refresh }));
+        }),
+    )))
 }
 
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_millis() as i64)
-}
-
-fn allowed(blocked: bool) -> Result<(), String> {
-    if blocked {
-        Err("Private analytics are not read in a replay.".into())
-    } else {
-        Ok(())
-    }
-}
-
-fn changed(app: &AppHandle, refresh: bool) {
-    let _ = app.emit("analytics-changed", json!({ "refresh": refresh }));
-}
-
-/// The peers this computer lists, once a listing named them.
-fn follow_peers(app: &AppHandle, page: &mut Page) {
-    if let Some(peers) = app.state::<AppState>().peers() {
-        page.set_peers(peers);
-    }
 }
 
 fn summary(hgs: &Path, request: &Request) -> Result<Summary, String> {
@@ -80,72 +66,225 @@ fn speech(hgs: &Path, request: &Request) -> Result<Speech, String> {
     }
 }
 
-fn changed_by(hgs: &Path, request: &Request) -> Result<(), String> {
-    analytics::call(hgs, request).map(drop)
-}
-
-/// Runs `work` on a thread of its own; None when it could not start.
-fn spawn(name: &str, work: impl FnOnce() + Send + 'static) -> Option<()> {
+/// Runs `work` on a thread of its own; false when it could not start.
+fn spawn(name: &str, work: impl FnOnce() + Send + 'static) -> bool {
     std::thread::Builder::new()
         .name(name.into())
         .spawn(work)
-        .ok()
-        .map(drop)
+        .is_ok()
 }
 
-/// Reads the queued routes, each its summary then its speech statistics.
-fn read(app: &AppHandle, inner: &Inner) {
-    let hgs = default_hgs();
-    loop {
-        let next = inner.page().next(now_ms());
-        let Some((route, from, through)) = next else {
-            break;
-        };
-        let agent = summary(
-            &hgs,
-            &Request::Summary {
-                host: route.clone(),
-                from,
-                through,
-            },
-        );
-        inner.page().summary_answered(&route, agent, now_ms());
-        let voice = speech(
-            &hgs,
-            &Request::Speech {
-                host: route.clone(),
-                from,
-                through,
-            },
-        );
-        inner.page().speech_answered(&route, voice, now_ms());
-        changed(app, false);
-    }
-    changed(app, false);
-}
-
-/// Starts the read a refresh queued; a thread that cannot start answers
-/// every route as unavailable, so the page never stays busy.
-fn start_read(app: &AppHandle, inner: &Arc<Inner>) {
-    let (handle, service) = (app.clone(), Arc::clone(inner));
-    if spawn("analytics-read", move || read(&handle, &service)).is_none() {
-        let failed = "Computer unavailable. No current analytics read.";
-        let mut page = inner.page();
-        while let Some((route, ..)) = page.next(now_ms()) {
-            page.summary_answered(&route, Err(failed.into()), now_ms());
-            page.speech_answered(&route, Err(failed.into()), now_ms());
+impl Inner {
+    fn new(blocked: bool, notify: Notify) -> Inner {
+        Inner {
+            page: Mutex::new(Page::new()),
+            review: Mutex::new(None),
+            blocked,
+            notify,
         }
-        drop(page);
-        changed(app, false);
+    }
+
+    fn page(&self) -> MutexGuard<'_, Page> {
+        self.page.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Draws a due drawing on this thread, outside the page's lock.
+    fn draw(&self) {
+        let draw = self.page().draw_due(now_ms());
+        if let Some(draw) = draw {
+            let drawing = draw.render();
+            self.page().drawn(drawing);
+        }
+    }
+
+    fn view(&self) -> View {
+        self.draw();
+        self.page().view(now_ms())
+    }
+
+    /// In a replay: the status says why nothing runs.
+    fn refused(&self) -> Option<View> {
+        self.blocked.then(|| {
+            self.page().set_status(REPLAY);
+            self.view()
+        })
+    }
+
+    /// Apply and refresh, and opening the section.
+    fn refresh(
+        self: &Arc<Self>,
+        peers: Option<BTreeSet<String>>,
+        selection: &str,
+        from: &str,
+        through: &str,
+    ) -> View {
+        if let Some(view) = self.refused() {
+            return view;
+        }
+        let started = {
+            let mut page = self.page();
+            if let Some(peers) = peers {
+                page.set_peers(peers);
+            }
+            page.refresh(selection, from, through)
+        };
+        if started {
+            let service = Arc::clone(self);
+            if !spawn("analytics-read", move || service.read()) {
+                // Never busy for good: every route answers as unavailable.
+                let failed = "Computer unavailable. No current analytics read.";
+                let mut page = self.page();
+                while let Some((route, ..)) = page.next_route() {
+                    page.summary_answered(&route, Err(failed.into()), now_ms());
+                    page.speech_answered(&route, Err(failed.into()), now_ms());
+                }
+            }
+        }
+        self.view()
+    }
+
+    /// Reads the queued routes, each its summary then its speech statistics.
+    fn read(&self) {
+        let hgs = default_hgs();
+        loop {
+            let next = self.page().next_route();
+            let Some((route, from, through)) = next else {
+                break;
+            };
+            let agent = summary(
+                &hgs,
+                &Request::Summary {
+                    host: route.clone(),
+                    from,
+                    through,
+                },
+            );
+            self.page().summary_answered(&route, agent, now_ms());
+            let voice = speech(
+                &hgs,
+                &Request::Speech {
+                    host: route.clone(),
+                    from,
+                    through,
+                },
+            );
+            self.page().speech_answered(&route, voice, now_ms());
+            (self.notify)(false);
+        }
+        self.draw();
+        (self.notify)(false);
+    }
+
+    /// Apply locally with the epoch the person's view showed when they
+    /// clicked (Qt captures it before its question).
+    fn configure(self: &Arc<Self>, epoch: &str, enabled: bool, retention_days: i64) -> View {
+        if let Some(view) = self.refused() {
+            return view;
+        }
+        if !(1..=90).contains(&retention_days) || !self.page().begin_configure(epoch) {
+            return self.view();
+        }
+        let request = Request::Configure {
+            epoch: epoch.to_owned(),
+            enabled,
+            retention_days,
+        };
+        let service = Arc::clone(self);
+        let started = spawn("analytics-change", move || {
+            let reply = analytics::call(&default_hgs(), &request).map(drop);
+            let refresh = service.page().configure_answered(reply);
+            (service.notify)(refresh);
+        });
+        if !started {
+            let unconfirmed = "Change was not confirmed. Refresh and review before another action.";
+            self.page().configure_answered(Err(unconfirmed.into()));
+        }
+        self.view()
+    }
+
+    /// Purge local history…: this computer's latest epoch is read first;
+    /// the page asks the person once `purge_pending` shows it was fresh.
+    fn purge_check(self: &Arc<Self>) -> View {
+        if let Some(view) = self.refused() {
+            return view;
+        }
+        let range = self.page().begin_purge(now_ms());
+        if let Some((from, through)) = range {
+            let service = Arc::clone(self);
+            let started = spawn("analytics-change", move || {
+                let latest = summary(
+                    &default_hgs(),
+                    &Request::Summary {
+                        host: String::new(),
+                        from,
+                        through,
+                    },
+                );
+                service.page().purge_checked(latest, now_ms());
+                (service.notify)(false);
+            });
+            if !started {
+                let gone = "Computer unavailable. No current analytics read.";
+                self.page().purge_checked(Err(gone.into()), now_ms());
+            }
+        }
+        self.view()
+    }
+
+    /// The person's answer to the purge question.
+    fn purge(self: &Arc<Self>, confirm: bool) -> View {
+        if !confirm {
+            self.page().purge_cancelled();
+            return self.view();
+        }
+        if let Some(view) = self.refused() {
+            self.page().purge_cancelled();
+            return view;
+        }
+        let epoch = self.page().purge_confirmed();
+        if let Some(epoch) = epoch {
+            let service = Arc::clone(self);
+            let started = spawn("analytics-change", move || {
+                let reply = analytics::call(&default_hgs(), &Request::Purge { epoch }).map(drop);
+                let refresh = service.page().purge_answered(reply);
+                service.draw();
+                (service.notify)(refresh);
+            });
+            if !started {
+                let unconfirmed =
+                    "Change was not confirmed. Refresh and review before another action.";
+                self.page().purge_answered(Err(unconfirmed.into()));
+            }
+        }
+        self.view()
+    }
+
+    /// The diagnostics' text, written off the lock and kept for Save file….
+    fn review(&self) -> Option<String> {
+        let input = self.page().diagnostic_input(now_ms());
+        let text = input.map(|(observations, from, through)| {
+            analytics::diagnostic_text(&analytics::diagnostic(&observations, from, through))
+        });
+        *self.review.lock().unwrap_or_else(PoisonError::into_inner) = text.clone();
+        text
+    }
+
+    /// The reviewed text, once: Cancel drops it and Save file… takes it.
+    fn take_review(&self) -> Option<String> {
+        self.review
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
     }
 }
 
 /// The page as it stands.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn analytics_view(app: AppHandle, analytics: State<'_, Analytics>) -> View {
-    let mut page = analytics.0.page();
-    follow_peers(&app, &mut page);
-    page.view(now_ms())
+    if let Some(peers) = app.state::<AppState>().peers() {
+        analytics.0.page().set_peers(peers);
+    }
+    analytics.0.view()
 }
 
 /// Apply and refresh, and opening the section: reads `selection` (empty for
@@ -158,159 +297,64 @@ pub fn analytics_refresh(
     selection: String,
     from: String,
     through: String,
-) -> Result<View, String> {
-    allowed(analytics.0.blocked)?;
-    let (started, view) = {
-        let mut page = analytics.0.page();
-        follow_peers(&app, &mut page);
-        let started = page.refresh(&selection, &from, &through, now_ms());
-        (started, page.view(now_ms()))
-    };
-    if started {
-        start_read(&app, &analytics.0);
-    }
-    Ok(view)
+) -> View {
+    let peers = app.state::<AppState>().peers();
+    analytics.0.refresh(peers, &selection, &from, &through)
 }
 
 /// One page (50) of the daily buckets drawn, for one provider or all.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn analytics_rows(analytics: State<'_, Analytics>, provider: String, offset: usize) -> Rows {
     analytics.0.page().rows(&provider, offset)
 }
 
 /// The minute timer: the view drawn again with its reads aged.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn analytics_age(analytics: State<'_, Analytics>) -> View {
-    let mut page = analytics.0.page();
-    page.age(now_ms());
-    page.view(now_ms())
+    analytics.0.page().age();
+    analytics.0.view()
 }
 
-/// Apply locally, once the person confirmed a shorter retention: this
-/// computer's collection, pinned to the epoch they reviewed.
-#[tauri::command]
+/// Apply locally, once the person confirmed a shorter retention, pinned to
+/// the epoch their view showed when they clicked.
+#[tauri::command(async)]
 pub fn analytics_configure(
-    app: AppHandle,
     analytics: State<'_, Analytics>,
+    epoch: String,
     enabled: bool,
     retention_days: i64,
-) -> Result<View, String> {
-    allowed(analytics.0.blocked)?;
-    if !(1..=90).contains(&retention_days) {
-        return Err("Daily aggregate retention is 1 to 90 days.".into());
-    }
-    let (epoch, view) = {
-        let mut page = analytics.0.page();
-        let epoch = page.begin_configure(now_ms());
-        (epoch, page.view(now_ms()))
-    };
-    if let Some(epoch) = epoch {
-        let (handle, service) = (app.clone(), Arc::clone(&analytics.0));
-        let request = Request::Configure {
-            epoch,
-            enabled,
-            retention_days,
-        };
-        let work = move || {
-            let reply = changed_by(&default_hgs(), &request);
-            let refresh = service.page().configure_answered(reply);
-            changed(&handle, refresh);
-        };
-        if spawn("analytics-change", work).is_none() {
-            let refresh = analytics.0.page().configure_answered(Err(
-                "Change was not confirmed. Refresh and review before another action.".into(),
-            ));
-            changed(&app, refresh);
-        }
-    }
-    Ok(view)
+) -> View {
+    analytics.0.configure(&epoch, enabled, retention_days)
 }
 
-/// Purge local history…: reads this computer's latest epoch first; the
-/// page asks the person once `purge_pending` shows it was fresh.
-#[tauri::command]
-pub fn analytics_purge_check(
-    app: AppHandle,
-    analytics: State<'_, Analytics>,
-) -> Result<View, String> {
-    allowed(analytics.0.blocked)?;
-    let (range, view) = {
-        let mut page = analytics.0.page();
-        let range = page.begin_purge(now_ms());
-        (range, page.view(now_ms()))
-    };
-    if let Some((from, through)) = range {
-        let (handle, service) = (app.clone(), Arc::clone(&analytics.0));
-        let work = move || {
-            let latest = summary(
-                &default_hgs(),
-                &Request::Summary {
-                    host: String::new(),
-                    from,
-                    through,
-                },
-            );
-            service.page().purge_checked(latest, now_ms());
-            changed(&handle, false);
-        };
-        if spawn("analytics-change", work).is_none() {
-            analytics.0.page().purge_checked(
-                Err("Computer unavailable. No current analytics read.".into()),
-                now_ms(),
-            );
-            changed(&app, false);
-        }
-    }
-    Ok(view)
+/// Purge local history….
+#[tauri::command(async)]
+pub fn analytics_purge_check(analytics: State<'_, Analytics>) -> View {
+    analytics.0.purge_check()
 }
 
 /// The person's answer to the purge question; anything but Purge local
 /// history (and leaving the page) cancels.
-#[tauri::command]
-pub fn analytics_purge(app: AppHandle, analytics: State<'_, Analytics>, confirm: bool) -> View {
-    let epoch = {
-        let mut page = analytics.0.page();
-        if confirm {
-            page.purge_confirmed()
-        } else {
-            page.purge_cancelled();
-            None
-        }
-    };
-    if let Some(epoch) = epoch {
-        let (handle, service) = (app.clone(), Arc::clone(&analytics.0));
-        let work = move || {
-            let reply = changed_by(&default_hgs(), &Request::Purge { epoch });
-            let refresh = service.page().purge_answered(reply, now_ms());
-            changed(&handle, refresh);
-        };
-        if spawn("analytics-change", work).is_none() {
-            let unconfirmed = "Change was not confirmed. Refresh and review before another action.";
-            let refresh = analytics
-                .0
-                .page()
-                .purge_answered(Err(unconfirmed.into()), now_ms());
-            changed(&app, refresh);
-        }
-    }
-    analytics.0.page().view(now_ms())
+#[tauri::command(async)]
+pub fn analytics_purge(analytics: State<'_, Analytics>, confirm: bool) -> View {
+    analytics.0.purge(confirm)
 }
 
 /// Review aggregate diagnostics…: the file's text, which Save file… saves
 /// unchanged; None while a read or a change runs.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn analytics_review(analytics: State<'_, Analytics>) -> Option<String> {
-    let text = analytics.0.page().diagnostic(now_ms());
-    *analytics
-        .0
-        .review
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner) = text.clone();
-    text
+    analytics.0.review()
+}
+
+/// Cancel in the review: nothing is kept to save.
+#[tauri::command(async)]
+pub fn analytics_review_cancel(analytics: State<'_, Analytics>) {
+    analytics.0.take_review();
 }
 
 /// Writes `bytes` for its owner alone, replacing the file only once it is
-/// whole (QSaveFile).
+/// whole (QSaveFile). Only a temporary file this call created is removed.
 fn save_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let name = path
@@ -326,11 +370,14 @@ fn save_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let written = options.open(&temporary).and_then(|mut file| {
-        file.write_all(bytes)?;
-        file.sync_all()
-    });
-    let saved = written.and_then(|()| std::fs::rename(&temporary, path));
+    let mut file = options.open(&temporary)?;
+    let saved = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            drop(file);
+            std::fs::rename(&temporary, path)
+        });
     if saved.is_err() {
         let _ = std::fs::remove_file(&temporary);
     }
@@ -346,12 +393,7 @@ pub async fn analytics_save_review(
 ) -> Result<(), String> {
     use tauri_plugin_dialog::DialogExt;
     let inner = Arc::clone(&analytics.0);
-    let Some(text) = inner
-        .review
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .take()
-    else {
+    let Some(text) = inner.take_review() else {
         return Ok(());
     };
     let window = app.get_webview_window(crate::MAIN_WINDOW);
@@ -382,18 +424,61 @@ pub async fn analytics_save_review(
     } else {
         "Could not save aggregate diagnostics."
     });
-    changed(&app, false);
+    (inner.notify)(false);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn service(blocked: bool) -> (Arc<Inner>, Arc<AtomicUsize>) {
+        let told = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&told);
+        let notify: Notify = Box::new(move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+        });
+        (Arc::new(Inner::new(blocked, notify)), told)
+    }
 
     #[test]
-    fn a_replay_reads_and_changes_nothing() {
-        assert!(allowed(true).is_err());
-        assert!(allowed(false).is_ok());
+    fn a_replay_reads_and_changes_nothing_and_says_so() {
+        let (inner, told) = service(true);
+        let views = [
+            inner.refresh(None, "", "2026-01-01", "2026-01-30"),
+            inner.configure("20000000-0000-4000-8000-000000000001", true, 30),
+            inner.purge_check(),
+            inner.purge(true),
+        ];
+        for view in views {
+            assert_eq!(view.status, REPLAY);
+            assert!(!view.busy && !view.mutating && !view.purge_pending);
+            assert!(view.report.is_none());
+        }
+        assert_eq!(told.load(Ordering::SeqCst), 0);
+        // Leaving the purge question needs no CLI and is always allowed.
+        assert!(!inner.purge(false).mutating);
+    }
+
+    #[test]
+    fn a_change_the_controls_do_not_allow_is_not_sent() {
+        let (inner, told) = service(false);
+        // No local read yet: nothing to pin, nothing sent.
+        let view = inner.configure("", true, 30);
+        assert!(!view.mutating);
+        let view = inner.configure("20000000-0000-4000-8000-000000000001", true, 91);
+        assert!(!view.mutating);
+        assert!(!inner.purge_check().mutating);
+        assert_eq!(told.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_cancelled_review_leaves_nothing_to_save() {
+        let (inner, _) = service(false);
+        *inner.review.lock().unwrap() = Some("{}".into());
+        assert_eq!(inner.take_review().as_deref(), Some("{}"));
+        assert_eq!(inner.take_review(), None);
     }
 
     #[test]
@@ -412,6 +497,15 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        // Someone else's file at the temporary name is left alone.
+        let temporary = dir.join(format!(
+            ".zerus-aggregate-diagnostics.json.{}.tmp",
+            std::process::id()
+        ));
+        std::fs::write(&temporary, b"not ours").unwrap();
+        assert!(save_private(&path, b"new").is_err());
+        assert_eq!(std::fs::read(&temporary).unwrap(), b"not ours");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\n}\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

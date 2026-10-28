@@ -5,7 +5,7 @@ import { inTauri } from "../../../bridge";
 import { Icon } from "../../lib/icons";
 import { Actions, Check, Group, Lines, NumberField, Row, SectionHead, Select, Status, Table } from "./ui";
 import {
-  PROVIDERS, coverageText, defaultRange, detailText, displayRoute, measure, overviewText, pageText, voiceText,
+  PROVIDERS, coverageText, defaultRange, detailText, displayRoute, localChange, measure, overviewText, pageText, voiceText,
   type Report, type Row as Bucket,
 } from "./analytics-text";
 
@@ -17,7 +17,8 @@ import {
 
 interface View {
   status: string; busy: boolean; mutating: boolean; can_refresh: boolean; can_export: boolean; can_change_local: boolean;
-  peers: string[]; peer_limit: boolean; local: { enabled: boolean; retention_days: number; reads: number } | null;
+  peers: string[]; peer_limit: boolean; selection: string; from: string | null; through: string | null;
+  local: { enabled: boolean; retention_days: number; epoch: string; reads: number } | null;
   report: Report | null; purge_pending: boolean;
 }
 interface Rows { rows: Bucket[]; offset: number; total: number }
@@ -37,8 +38,10 @@ export function AnalyticsSection() {
   const [selected, setSelected] = createSignal<string | undefined>();
   const [enabled, setEnabled] = createSignal(false);
   const [retention, setRetention] = createSignal(90);
-  const [shorten, setShorten] = createSignal<number | undefined>();
+  const [shorten, setShorten] = createSignal<{ days: number; epoch: string } | undefined>();
   const [review, setReview] = createSignal<string | undefined>();
+  // A call that failed outright; the status line says why until the next view.
+  const [failure, setFailure] = createSignal<string | undefined>();
   let localReads = 0;
 
   const readRows = () => {
@@ -47,9 +50,11 @@ export function AnalyticsSection() {
       if (page.offset !== offset()) setOffset(page.offset);
       // Qt clears the detail whenever it draws the rows.
       setSelected(undefined);
-    }, () => {});
+    }, (error) => setFailure(String(error)));
   };
+  const failed = (error: unknown) => setFailure(String(error));
   const apply = (next: View) => {
+    setFailure(undefined);
     setView(next);
     // The selected peer left: Qt's list falls back to this computer.
     if (selection() !== "" && selection() !== "*" && !next.peers.includes(selection())) setSelection("");
@@ -61,11 +66,11 @@ export function AnalyticsSection() {
     }
     readRows();
   };
-  const fetchView = () => { void invoke<View>("analytics_view").then(apply, () => {}); };
+  const fetchView = () => { void invoke<View>("analytics_view").then(apply, failed); };
   const refresh = () => {
     if (!inTauri()) return;
     setOffset(0);
-    void invoke<View>("analytics_refresh", { selection: selection(), from: from(), through: through() }).then(apply, () => {});
+    void invoke<View>("analytics_refresh", { selection: selection(), from: from(), through: through() }).then(apply, failed);
   };
 
   onMount(() => {
@@ -74,10 +79,19 @@ export function AnalyticsSection() {
     let stop: (() => void) | undefined;
     listen<{ refresh: boolean }>("analytics-changed", (e) => { if (e.payload.refresh) refresh(); else fetchView(); })
       .then((off) => { if (gone) off(); else stop = off; }, () => {});
-    // A purge question left from an earlier visit is cancelled.
-    void invoke<View>("analytics_purge", { confirm: false }).then(() => refresh(), () => refresh());
+    // The page starts from the last read's computers and days, as Qt's
+    // controls keep them; a purge question left from an earlier visit is
+    // cancelled; then the section reads, as Qt's does when opened.
+    void invoke<View>("analytics_purge", { confirm: false }).then((last) => {
+      if (last.from && last.through) {
+        setSelection(last.selection);
+        setFrom(last.from);
+        setThrough(last.through);
+      }
+      refresh();
+    }, () => refresh());
     const timer = setInterval(() => {
-      if (!view()?.busy) void invoke<View>("analytics_age").then(apply, () => {});
+      if (!view()?.busy) void invoke<View>("analytics_age").then(apply, failed);
     }, AGE_MS);
     onCleanup(() => {
       gone = true;
@@ -96,16 +110,18 @@ export function AnalyticsSection() {
     { value: "*", label: view()?.peer_limit ? "First 32 configured computers" : "All configured computers" },
     ...(view()?.peers ?? []).map((peer) => ({ value: peer, label: peer })),
   ];
-  const configure = (days: number) => {
-    void invoke<View>("analytics_configure", { enabled: enabled(), retentionDays: days }).then(apply, () => {});
+  const configure = (days: number, epoch: string) => {
+    void invoke<View>("analytics_configure", { epoch, enabled: enabled(), retentionDays: days }).then(apply, failed);
   };
   const applyLocal = () => {
-    const current = view()?.local?.retention_days;
-    if (current !== undefined && retention() < current) setShorten(retention());
-    else configure(retention());
+    const v = view();
+    const change = v && localChange(v, retention());
+    if (!change) return;
+    if (change.ask) setShorten({ days: retention(), epoch: change.epoch });
+    else configure(retention(), change.epoch);
   };
   const openReview = () => {
-    void invoke<string | null>("analytics_review").then((text) => { if (text) setReview(text); }, () => {});
+    void invoke<string | null>("analytics_review").then((text) => { if (text) setReview(text); }, failed);
   };
   const working = () => !!view()?.busy || !!view()?.mutating;
 
@@ -123,7 +139,7 @@ export function AnalyticsSection() {
           </label>
           <button type="button" class="btn primary" disabled={!view()?.can_refresh} onClick={refresh}><Icon name="refresh-cw" size={13} />Apply and refresh</button>
         </Actions>
-        <Show when={view()?.status}>{(text) => <Status kind={working() ? "busy" : "muted"}>{text()}</Status>}</Show>
+        <Show when={failure() ?? view()?.status}>{(text) => <Status kind={failure() ? "error" : working() ? "busy" : "muted"}>{text()}</Status>}</Show>
         <Lines class="an-overview" text={report() ? overviewText(report()!) : "Choose a range and refresh to read analytics."} />
         <Show when={report()}>
           {(r) => (
@@ -181,7 +197,7 @@ export function AnalyticsSection() {
         <Actions>
           <button type="button" class="btn primary" disabled={!view()?.can_change_local} onClick={applyLocal}>Apply locally</button>
           <button type="button" class="btn danger" disabled={!view()?.can_change_local}
-            onClick={() => void invoke<View>("analytics_purge_check").then(apply, () => {})}>
+            onClick={() => void invoke<View>("analytics_purge_check").then(apply, failed)}>
             <Icon name="trash" size={13} />Purge local history…
           </button>
         </Actions>
@@ -191,19 +207,23 @@ export function AnalyticsSection() {
       </Actions>
 
       <Show when={shorten()}>
-        {(days) => (
+        {(asked) => (
           <Question title="Shorten local analytics history?" yes="Shorten retention"
-            text={`Keep only the latest ${days()} UTC days of agent analytics on this computer. Older daily aggregates will be deleted. Speech statistics and durable delivery receipts are unaffected.`}
-            answer={(yes) => { setShorten(undefined); if (yes) configure(days()); }} />
+            text={`Keep only the latest ${asked().days} UTC days of agent analytics on this computer. Older daily aggregates will be deleted. Speech statistics and durable delivery receipts are unaffected.`}
+            answer={(yes) => { const { days, epoch } = asked(); setShorten(undefined); if (yes) configure(days, epoch); }} />
         )}
       </Show>
       <Show when={view()?.purge_pending}>
         <Question title="Purge local agent analytics?" yes="Purge local history"
           text="Permanently delete all retained agent analytics on this computer. Speech statistics, other computers and durable delivery receipts are unaffected. Collection keeps its current enabled/disabled setting."
-          answer={(yes) => void invoke<View>("analytics_purge", { confirm: yes }).then(apply, () => {})} />
+          answer={(yes) => void invoke<View>("analytics_purge", { confirm: yes }).then(apply, failed)} />
       </Show>
       <Show when={review()}>
-        {(text) => <Review text={text()} close={(save) => { setReview(undefined); if (save) void invoke("analytics_save_review").catch(() => {}); }} />}
+        {(text) => <Review text={text()} close={(save) => {
+          setReview(undefined);
+          // Cancel keeps nothing to save; only Save file… writes, after its own dialog.
+          void invoke(save ? "analytics_save_review" : "analytics_review_cancel").catch(failed);
+        }} />}
       </Show>
     </>
   );

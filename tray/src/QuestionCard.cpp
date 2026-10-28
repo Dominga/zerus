@@ -229,6 +229,8 @@ QuestionCard::QuestionCard(QWidget *parent) : QWidget(parent)
     m_next = new QPushButton(tr("Next →")); m_next->setObjectName("questionNext");
     m_approve = new QPushButton(tr("Approve once (3)"));m_approve->setObjectName("approveToolRequest");
     m_deny = new QPushButton(tr("Deny"));m_deny->setObjectName("denyToolRequest");
+    m_approveAlways = new QPushButton(tr("Allow all, don't ask again"));m_approveAlways->setObjectName("approveSubagentsAlways");
+    m_approveAlways->setToolTip(tr("Starts every subagent listed and stops asking before this session's later subagents. Claude also saves its own rule when it offers one."));
     m_skip = new QPushButton(tr("Skip")); m_skip->setObjectName("skipQuestion");
     m_skip->setToolTip(tr("Dismiss this optional question without sending an answer. The agent can continue."));
     connect(m_skip,&QPushButton::clicked,this,[this]{
@@ -239,7 +241,18 @@ QuestionCard::QuestionCard(QWidget *parent) : QWidget(parent)
     footer->addWidget(m_terminal); footer->addStretch(); footer->addWidget(m_skip); footer->addWidget(m_retry); footer->addWidget(m_previous); footer->addWidget(m_next); footer->addWidget(m_submit); layout->addLayout(footer);
     connect(m_previous,&QPushButton::clicked,this,[this]{m_tabs->setCurrentIndex(m_tabs->currentIndex()-1);});
     connect(m_next,&QPushButton::clicked,this,[this]{m_tabs->setCurrentIndex(m_tabs->currentIndex()+1);});
-    footer->addWidget(m_deny);footer->addWidget(m_approve);
+    footer->addWidget(m_deny);footer->addWidget(m_approveAlways);footer->addWidget(m_approve);
+    // U19: allow every subagent and stop asking for the session: the card's
+    // broader Yes, behind a second, explicit confirmation as any broader choice.
+    connect(m_approveAlways,&QPushButton::clicked,this,[this]{
+        if(!m_approveAlways->isEnabled()||m_key.isEmpty()||!SubagentRequest::is(m_question))return;
+        const auto question=m_question.value("questions").toArray().first().toObject();
+        const QString option=SubagentRequest::alwaysOptionId(question);
+        if(option.isEmpty())return;
+        if(m_drafts[m_key].confirm!=option){m_drafts[m_key].confirm=option;updateControls();return;}
+        emit answerRequested(m_session,m_id,QJsonArray{QJsonObject{{"question_id",question.value("id")},
+            {"selected_option_ids",QJsonArray{option}},{"text",""}}});
+    });
     for(auto *button:{m_approve,m_deny})connect(button,&QPushButton::clicked,this,[this,button]{
         if(!button->isEnabled()||!m_question.value("approval").toBool())return;
         const auto question=m_question.value("questions").toArray().first().toObject();
@@ -821,7 +834,7 @@ void QuestionCard::updateControls()
     // Disabling the focused answer control would move Qt focus out to the
     // context button. Hold it here until the card resolves or the user moves it.
     auto *focus = QApplication::focusWidget();
-    if (locked && focus && (focus == m_submit || focus==m_approve || focus==m_deny || m_pages->isAncestorOf(focus)))
+    if (locked && focus && (focus == m_submit || focus==m_approve || focus==m_deny || focus==m_approveAlways || m_pages->isAncestorOf(focus)))
         setFocus(Qt::OtherFocusReason);
     bool complete = false; answers(&complete);
     const bool supported = m_question.value("can_answer").toBool();
@@ -871,6 +884,12 @@ void QuestionCard::updateControls()
     m_approve->setEnabled(canApprove&&m_reviewSeconds==0);m_deny->setEnabled(canApprove);
     m_approve->setText(subagents?(m_reviewSeconds>0?tr("Allow all (%1)").arg(m_reviewSeconds):tr("Allow all"))
         :m_reviewSeconds>0?tr("Approve once (%1)").arg(m_reviewSeconds):tr("Approve once"));
+    // U19: only a subagent card that offers a broader Yes which stops asking.
+    const QString always=subagents?SubagentRequest::alwaysOptionId(m_question.value("questions").toArray().first().toObject()):QString();
+    const bool confirmingAlways=!always.isEmpty()&&draft.confirm==always;
+    m_approveAlways->setVisible(buttons&&!always.isEmpty());
+    m_approveAlways->setEnabled(canApprove&&m_reviewSeconds==0);
+    m_approveAlways->setText(confirmingAlways?tr("Confirm"):tr("Allow all, don't ask again"));
     int answered = 0;
     for (int i = 0; i < m_forms.size(); ++i) {
         const auto &form = m_forms[i]; const auto answer = draft.answers.value(form.id);
@@ -903,6 +922,8 @@ void QuestionCard::updateControls()
         notice = tr("“%1” changes the agent's permissions beyond this request. Select Confirm to send it.").arg(broader);
     if (notice.isEmpty() && choices) notice = tr("Review the request, then choose one of the agent's options.");
     if (notice.isEmpty() && planReview && !complete) notice = tr("Review the plan, then choose how the agent continues.");
+    if (notice.isEmpty() && confirmingAlways)
+        notice = tr("“Allow all, don't ask again” also stops asking before this session's later subagents. Select Confirm to send it.");
     if (notice.isEmpty() && subagents) notice = tr("Allow all starts every subagent listed; Deny stops them all.");
     if (notice.isEmpty()) notice = approval?tr("Approval applies only to this command. Review it before continuing."):
         optional ? tr("The agent can continue. Answer when ready or skip this question.") :

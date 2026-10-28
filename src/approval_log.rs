@@ -489,6 +489,14 @@ mod tests {
         let mut agent = card(false);
         agent["questions"][0]["header"] = json!("Agent");
         assert!(answers(&agent).is_none(), "an Agent request without the mark is refused as well");
+        // Nor its "don't ask again" choice, which outlives the request.
+        let mut always = card(true);
+        always["questions"][0]["options"] = json!([{"id":"1","label":"Yes","scope":"once"},
+            {"id":"3","label":"Yes, and don't ask again for subagents","scope":"broader"},{"id":"2","label":"No","scope":"once"}]);
+        assert!(answers(&always).is_none());
+        always.as_object_mut().unwrap().remove("subagent_confirmation");
+        always["questions"][0]["header"] = json!("Bash");
+        assert_eq!(answers(&always).unwrap()[0]["selected_option_ids"], json!(["1"]), "only ever the one-time Yes");
     }
 
     #[test]

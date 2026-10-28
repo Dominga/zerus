@@ -7371,6 +7371,37 @@ Connect directly to synchronize through this computer.</source>
       <source>Open native UI</source>
       <translation>Открыть интерфейс агента</translation>
     </message>
+    <message>
+      <location filename="../src/QuestionCard.cpp" line="232" />
+      <location filename="../src/QuestionCard.cpp" line="892" />
+      <source>Allow all, don't ask again</source>
+      <translation>Разрешить все и больше не спрашивать</translation>
+    </message>
+    <message>
+      <location filename="../src/QuestionCard.cpp" line="233" />
+      <source>Starts every subagent listed and stops asking before this session's later subagents. Claude also saves its own rule when it offers one.</source>
+      <translation>Запускает все перечисленные субагенты и больше не спрашивает о следующих субагентах этой сессии. Claude также сохраняет своё правило, если предлагает его.</translation>
+    </message>
+    <message>
+      <location filename="../src/QuestionCard.cpp" line="885" />
+      <source>Allow all (%1)</source>
+      <translation>Разрешить все (%1)</translation>
+    </message>
+    <message>
+      <location filename="../src/QuestionCard.cpp" line="885" />
+      <source>Allow all</source>
+      <translation>Разрешить все</translation>
+    </message>
+    <message>
+      <location filename="../src/QuestionCard.cpp" line="926" />
+      <source>“Allow all, don't ask again” also stops asking before this session's later subagents. Select Confirm to send it.</source>
+      <translation>«Разрешить все и больше не спрашивать» также отключает вопросы о следующих субагентах этой сессии. Выберите «Подтвердить», чтобы отправить.</translation>
+    </message>
+    <message>
+      <location filename="../src/QuestionCard.cpp" line="927" />
+      <source>Allow all starts every subagent listed; Deny stops them all.</source>
+      <translation>«Разрешить все» запускает все перечисленные субагенты; «Отклонить» останавливает их все.</translation>
+    </message>
   </context>
   <context>
     <name>RecoverySettings</name>

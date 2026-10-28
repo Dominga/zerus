@@ -28,7 +28,17 @@ const TERMINAL_ONLY_TOOLS:[&str;2]=["ExitPlanMode","EnterPlanMode"];
 const ONCE:[&str;6]=["Yes","No","Yes, but ask again next time","No, and ask again next time",
     "No, and tell Claude what to do differently (esc)","No, and tell Claude what to do differently"];
 
+// U19: the subagent card's own broader allow, which the hook answers.
+const SUBAGENTS_ALWAYS:&str="Yes, and don't ask again for subagents";
+const SUBAGENTS_ALWAYS_DESCRIPTION:&str="Starts every subagent listed. Zerus stops asking before this session's later subagents, and Claude saves its own rule for them when it offers one.";
+
 pub(super) fn question_tool(tool:&str)->bool {QUESTION_TOOLS.contains(&tool)}
+/// A broader allow that stops asking: Claude's "Yes, and don't ask again ..."
+/// or the subagent card's own (`SUBAGENTS_ALWAYS`).
+fn always(option:&Value)->bool {
+    let text=label(string(option,"label")).replace('\u{2019}',"'");
+    option["scope"]!="once"&&text.starts_with("Yes")&&text.contains("don't ask again")
+}
 fn rule(row:&str,c:char)->bool {row.chars().count()>=20&&row.chars().all(|x|x==c)}
 fn numbered(row:&str)->Option<(bool,usize,String)> {
     let (mark,rest)=match row.strip_prefix('❯'){Some(rest)=>(true,rest.trim_start()),None=>(false,row)};
@@ -279,15 +289,28 @@ fn build_request(record:&Value,screen:Option<&str>,request:&Value,at:&Value,chil
         Some(_) => "",
     };
     let native=panel.as_ref().filter(|_|problem.is_empty());
-    let hash=format!("{:x}",Sha256::digest(json!([record["run_id"],record["conversation_id"],record["pane"],record["pid"],
-        record["process_start"],tool,request["tool_input"],request["agent_id"],child_request_id,at,native.map(|p|json!([p.title,identity_body(p),p.question,p.labels]))]).to_string()));
+    let tool_id=match child_request_id {
+        "" => match tool_call_id(record,tool) {
+            // U19: the subagent calls of one message are all active at once;
+            // the request's own call is the one with its exact input.
+            id if id.is_empty()&&matches!(tool,"Agent"|"Task") =>
+                channel::identity(record).map(|identity|string(&identity,"tool_call_id").to_owned()).unwrap_or_default(),
+            id => id,
+        },
+        _ => string(request,"tool_use_id").to_owned(),
+    };
+    let group=if child_request_id.is_empty(){subagents(record,request,&tool_id)}else{None};
+    let mut identity=vec![record["run_id"].clone(),record["conversation_id"].clone(),record["pane"].clone(),record["pid"].clone(),
+        record["process_start"].clone(),json!(tool),request["tool_input"].clone(),request["agent_id"].clone(),json!(child_request_id),at.clone(),
+        json!(native.map(|p|json!([p.title,identity_body(p),p.question,p.labels])))];
+    // U19: the calls a subagent answer decides are part of what was reviewed.
+    if let Some((calls,_,_))=&group {identity.push(json!(calls));}
+    let hash=format!("{:x}",Sha256::digest(json!(identity).to_string()));
     let (question,body,options)=match native {
         Some(panel) => (panel.question.clone(),native_body(panel),native_options(panel)),
         None => (format!("Claude asks to use {tool}"),with_warning(summary(request),screen),Vec::new()),
     };
     let created=at.as_f64().map_or(record["last_event_at"].clone(),|at|json!(at));
-    let tool_id=if child_request_id.is_empty(){tool_call_id(record,tool)}else{string(request,"tool_use_id").to_owned()};
-    let group=if child_request_id.is_empty(){subagents(record,request,&tool_id)}else{None};
     let built=Some((json!({"question_id":format!("claude-approval:{hash}"),"question_hash":hash,"tool_call_id":tool_id,"agent_id":request["agent_id"],"child_request_id":child_request_id,
         "run_id":record["run_id"],"conversation_id":record["conversation_id"],"source":"claude_tool_approval",
         "can_answer":native.is_some(),"answer_unavailable_reason":problem,"approval":true,"approval_choices":native.is_some(),
@@ -410,6 +433,11 @@ fn channel_card(record:&Value,screen:Option<&str>,identity:&Value)->Option<Value
     if let Some(warning)=&warning {body=format!("{body}\n\n{}",warning_text(warning));}
     let (question,options)=match &native {
         Some(panel) => (panel.question.clone(),native_options(panel)),
+        // U19: a subagent card also stops asking for the session, through this hook.
+        None if group.is_some() => (format!("Claude asks to use {tool}"),
+            vec![json!({"id":"1","label":"Yes","scope":"once"}),
+                json!({"id":"3","label":SUBAGENTS_ALWAYS,"description":SUBAGENTS_ALWAYS_DESCRIPTION,"scope":"broader"}),
+                json!({"id":"2","label":"No","scope":"once"})]),
         None => (format!("Claude asks to use {tool}"),
             vec![json!({"id":"1","label":"Yes","scope":"once"}),json!({"id":"2","label":"No","scope":"once"})]),
     };
@@ -679,8 +707,22 @@ pub(super) fn available(record:&Value,question:&Value)->Result<()> {
 pub(super) fn answer(record:&Value,question:&Value,answers:&Value,request_id:&str)->Result<&'static str> {
     available(record,question)?;
     if question["answer_transport"]!="claude_hook" {
+        // U19: when every call the card shows has a waiting hook, the answer
+        // goes to those hooks, never as keys that could land on the next
+        // queued panel once a hook has answered the one shown.
+        let option=chosen(question,answers);
+        let plain=!string(&answers[0],"text").is_empty()||option.is_some_and(|option|option["scope"]=="once"||always(option));
+        if let Some(verdict)=group_verdict(question,answers).filter(|_|plain) {
+            if let Some(waiting)=answer_channel::batch_waiting(record,&group_calls(question)) {
+                decide_group(record,question,answers,true);
+                answer_channel::batch_delivered(record,&waiting,std::time::Duration::from_secs(3))?;
+                let _ = settle(record,if verdict.allow {Settled::Approved} else if verdict.message.is_empty() {Settled::Interrupted}
+                    else {Settled::Refused(string(question,"tool_call_id"))});
+                return Ok("claude_hook");
+            }
+        }
         keys(record,question,answers,snapshot)?;
-        decide_group(record,question,answers);
+        decide_group(record,question,answers,false);
         return Ok("claude_tui");
     }
     let identity=channel::identity(record).ok_or("The approval changed. Review its new request")?;
@@ -690,8 +732,10 @@ pub(super) fn answer(record:&Value,question:&Value,answers:&Value,request_id:&st
         answer_channel::Route::Screen => return Err("Claude's permission hook stopped waiting. Nothing was sent; review the approval again.".into()),
     };
     let text=string(&answers[0],"text");
-    let option=answers[0]["selected_option_ids"][0].as_str().and_then(|id|question["questions"][0]["options"].as_array()?
-        .iter().find(|option|string(option,"id")==id));
+    let option=chosen(question,answers);
+    // U19: "don't ask again" for subagents also goes through the hook, which
+    // hands Claude the rule its own panel would save.
+    let remember=question["subagent_confirmation"]==true&&option.is_some_and(always);
     let decision=match option {
         _ if !text.is_empty() => "feedback",
         Some(option) if option["scope"]=="once" => match label(string(option,"label")) {
@@ -699,11 +743,12 @@ pub(super) fn answer(record:&Value,question:&Value,answers:&Value,request_id:&st
             once if once.starts_with("No") => "deny",
             _ => return Err("Choose one of Claude's options".into()),
         },
+        Some(_) if remember => "allow",
         // Broader permissions exist only in Claude's panel, behind its second confirmation.
         Some(_) => {keys(record,question,answers,channel_snapshot)?;return Ok("claude_tui");}
         None => return Err("Choose one of Claude's options".into()),
     };
-    let offer=json!({"request_id":request_id,"decision":decision,"message":text});
+    let offer=json!({"request_id":request_id,"decision":decision,"message":text,"remember":remember});
     let on_screen=question["panel_verified"]==true&&decision!="feedback";
     let transport=answer_channel::deliver(&dir,&offer,std::time::Duration::from_secs(3),std::time::Duration::from_secs(3),||{
         if !on_screen {return Err("Claude's permission hook did not take the answer, and the panel cannot be answered on screen. Nothing was sent; answer it in Terminal.".into());}
@@ -712,19 +757,50 @@ pub(super) fn answer(record:&Value,question:&Value,answers:&Value,request_id:&st
     if transport=="claude_hook" {
         let _ = settle(record,match decision {"allow"=>Settled::Approved,"deny"=>Settled::Interrupted,_=>Settled::Refused(string(&identity,"tool_call_id"))});
     }
-    decide_group(record,question,answers);
+    // The hook that took the offer already handed Claude any rule.
+    decide_group(record,question,answers,false);
     Ok(transport)
+}
+
+/// The option `answers` chose on `question`.
+fn chosen<'a>(question:&'a Value,answers:&Value)->Option<&'a Value> {
+    answers[0]["selected_option_ids"][0].as_str().and_then(|id|question["questions"][0]["options"].as_array()?
+        .iter().find(|option|string(option,"id")==id))
+}
+
+/// The calls a subagent card decides.
+fn group_calls(question:&Value)->Vec<String> {
+    question["subagent_calls"].as_array().into_iter().flatten().filter_map(|id|id.as_str().map(str::to_owned)).collect()
+}
+
+/// What `answers` say for a subagent card's group: a Yes allows, anything
+/// else denies (with the person's message, if any); a broader Yes that stops
+/// asking (`always`) also remembers it.
+fn group_verdict(question:&Value,answers:&Value)->Option<subagents_confirm::Verdict> {
+    if question["subagent_confirmation"]!=true {return None;}
+    let text=string(&answers[0],"text");
+    let option=chosen(question,answers);
+    let allow=text.is_empty()&&option.is_some_and(|option|label(string(option,"label")).starts_with("Yes"));
+    Some(subagents_confirm::Verdict{allow,message:if allow {String::new()} else {text.to_owned()},
+        remember:allow&&option.is_some_and(always)})
 }
 
 /// U19 (3): the answer to a subagent card decides every call it showed; the
 /// others' waiting hooks and later PreToolUse calls take the same decision.
-fn decide_group(record:&Value,question:&Value,answers:&Value) {
-    if question["subagent_confirmation"]!=true {return;}
-    let calls:Vec<String>=question["subagent_calls"].as_array().into_iter().flatten().filter_map(|id|id.as_str().map(str::to_owned)).collect();
-    let option=answers[0]["selected_option_ids"][0].as_str().and_then(|id|question["questions"][0]["options"].as_array()?
-        .iter().find(|option|string(option,"id")==id));
-    let allow=string(&answers[0],"text").is_empty()&&option.is_some_and(|option|label(string(option,"label")).starts_with("Yes"));
-    subagents_confirm::decide(string(record,"conversation_id"),&calls,allow);
+/// "Don't ask again" also stops asking for this Zerus session and allows
+/// every call still waiting in the group, shown or not: the owner allowed
+/// all of them. `carry_rule`: no hook has handed Claude its rule yet, so the
+/// first call's hook does.
+pub(super) fn decide_group(record:&Value,question:&Value,answers:&Value,carry_rule:bool) {
+    let Some(mut verdict)=group_verdict(question,answers) else {return};
+    let session=string(record,"conversation_id");
+    let mut calls=group_calls(question);
+    if verdict.remember {
+        let _ = subagents_confirm::allow_session(record);
+        for (id,_) in subagents_confirm::open_calls(session) {if !calls.contains(&id) {calls.push(id);}}
+    }
+    verdict.remember&=carry_rule;
+    subagents_confirm::decide(session,&calls,&verdict);
 }
 /// Choose option `answers` in the verified native panel with its keys.
 fn keys(record:&Value,question:&Value,answers:&Value,snapshot:fn(&Value,&str)->Option<(Value,usize)>)->Result<()> {
@@ -753,6 +829,18 @@ fn settle_child(original:&Value,id:&str)->Result<()> {
         if children::settle(&mut record,original,id) {write(&mut record)?;}
     }
     Ok(())
+}
+/// U19: the bound hook of the record's request handed Claude `decision`
+/// (Claude's PermissionRequest decision) without `hgs answer`: its group was
+/// answered on another card, or the owner stopped asking. Settle it as an
+/// answer through the hook would.
+pub(super) fn settle_hook(record:&Value,decision:&Value,tool_use:&str) {
+    let outcome=match decision["behavior"].as_str() {
+        Some("allow") => Settled::Approved,
+        _ if decision["interrupt"]==true => Settled::Interrupted,
+        _ => Settled::Refused(tool_use),
+    };
+    let _ = settle(record,outcome);
 }
 /// How an answered request ended: approved, denied with the turn, or denied
 /// with feedback for the tool use named, after which Claude continues.
@@ -1123,7 +1211,9 @@ pub(super) fn reconcile(record:Value)->Value {
             assert_eq!((q["answer_transport"].clone(),q["panel_verified"].clone(),q["can_answer"].clone()),(json!("claude_hook"),json!(false),json!(true)));
             assert_eq!(q["questions"][0]["header"],"Subagents");
             assert_eq!(q["questions"][0]["question"],"Start 2 subagents: Explore (model haiku): Find the callers; general (model inherits claude-opus-4-6): Write the fix");
-            assert_eq!(options(&q),vec![("Yes".to_owned(),"once".to_owned()),("No".to_owned(),"once".to_owned())],"never Claude's broader choice");
+            // Never Claude's broader choice, only the card's own, which the hook answers.
+            assert_eq!(options(&q),vec![("Yes".to_owned(),"once".to_owned()),(SUBAGENTS_ALWAYS.to_owned(),"broader".to_owned()),("No".to_owned(),"once".to_owned())]);
+            assert_eq!(q["questions"][0]["options"][1]["id"],"3","the one-time choices keep their ids");
             // Without the waiting hook the screen card is still marked.
             assert_eq!(card(&r,AGENT_PANEL)["subagent_confirmation"],true);
             // The calls it decides are part of its identity: a third call is a new review.
@@ -1132,18 +1222,84 @@ pub(super) fn reconcile(record:Value)->Value {
             assert_ne!(channel_card(&r,Some(AGENT_PANEL),&identity).unwrap()["question_hash"],before);
             // An answer settles the whole group it showed; a denial with a message denies it too.
             let answered=channel_card(&r,Some(AGENT_PANEL),&identity).unwrap();
-            decide_group(&r,&answered,&json!([{"question_id":"approval","selected_option_ids":["2"]}]));
+            decide_group(&r,&answered,&json!([{"question_id":"approval","selected_option_ids":["2"]}]),false);
             for id in ["toolu_one","toolu_two","toolu_three"] {
                 assert_eq!(subagents_confirm::decided("conversation",id).as_deref(),Some("deny"),"{id}");
             }
             subagents_confirm::group_reset("conversation");
             subagents_confirm::group_add("conversation","toolu_one",&input);
             let q=channel_card(&r,Some(AGENT_PANEL),&identity).unwrap();
-            decide_group(&r,&q,&json!([{"question_id":"approval","selected_option_ids":["1"]}]));
+            decide_group(&r,&q,&json!([{"question_id":"approval","selected_option_ids":["1"]}]),false);
             assert_eq!(subagents_confirm::decided("conversation","toolu_one").as_deref(),Some("allow"));
             // Another tool's card is not a subagent card.
             let bash=hooked("Bash",json!({"command":"printf hi > out.txt"}));
             assert!(channel_card(&bash,Some(BASH),&channel::identity(&bash).unwrap()).unwrap().get("subagent_confirmation").is_none());
+        });
+    }
+
+    /// U19: on the screen, a batch's request is still a subagent card for
+    /// its own call, found by its exact input among the message's calls, so
+    /// its answer decides the group the waiting hooks deliver.
+    #[test] fn a_batch_request_on_the_screen_is_a_subagent_card_for_its_own_call() {
+        let dir=tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(),||{
+            let input=json!({"subagent_type":"Explore","description":"Find the callers"});
+            let other=json!({"subagent_type":"general","description":"Write the fix"});
+            let mut r=hooked("Agent",input.clone());
+            r["active_tools"]["toolu_two"]=json!({"name":"Agent"});
+            channel::observe(&mut r,&json!({"hook_event_name":"PreToolUse","tool_use_id":"toolu_two","tool_name":"Agent","tool_input":other}));
+            r["claude_tool_uses"]["toolu_two"]["at"]=json!(5.0);
+            subagents_confirm::group_add("conversation","toolu_one",&input);
+            subagents_confirm::group_add("conversation","toolu_two",&other);
+            assert_eq!(tool_call_id(&r,"Agent"),"","two active Agent calls are ambiguous by name");
+            let screen=card(&r,AGENT_PANEL);
+            assert_eq!((screen["tool_call_id"].clone(),screen["subagent_confirmation"].clone()),(json!("toolu_one"),json!(true)));
+            assert_eq!(screen["subagent_calls"],json!(["toolu_one","toolu_two"]));
+            // Two identical calls stay unbound: no group is decided for them.
+            r["claude_tool_uses"]["toolu_two"]["input"]=r["claude_tool_uses"]["toolu_one"]["input"].clone();
+            assert!(card(&r,AGENT_PANEL).get("subagent_confirmation").is_none());
+        });
+    }
+
+    /// U19: a broader allow that stops asking - Claude's own "Yes, and don't
+    /// ask again ..." on the screen card (as the phone lists it) or the hook
+    /// card's - is remembered for the Zerus session and allows every call
+    /// still waiting in the group, shown or not; only one hook is asked to
+    /// hand Claude its rule, and only when no keys or offer did. Other
+    /// broader choices, a one-time Yes or a denial remember nothing.
+    #[test] fn a_dont_ask_again_answer_is_remembered_for_the_session() {
+        let dir=tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(),||{
+            let input=json!({"subagent_type":"Explore","description":"Find the callers"});
+            let mut r=hooked("Agent",input.clone());
+            r["name"]=json!("claude/x/owner");r["created"]=json!(1_700_000_000);
+            subagents_confirm::group_add("conversation","toolu_one",&input);
+            let screen=card(&r,AGENT_PANEL);
+            assert_eq!(screen["subagent_confirmation"],true);
+            let native=screen["questions"][0]["options"].as_array().unwrap();
+            assert!(always(&native[1])&&!always(&native[0])&&!always(&native[2]),"{native:?}");
+            for label in ["Yes, and switch to auto mode","Yes, allow reading from /work during this session","No, and don't ask again"] {
+                assert!(!always(&json!({"label":label,"scope":"broader"})),"{label}");
+            }
+            assert!(always(&json!({"label":"Yes, and don\u{2019}t ask again for Agent commands","scope":"broader"})));
+            assert!(!always(&json!({"label":"Yes, and don't ask again","scope":"once"})));
+            let choose=|id:&str,text:&str|json!([{"question_id":"approval","selected_option_ids":[id],"text":text}]);
+            // A one-time Yes or a denial with a message is not remembered.
+            assert_eq!(group_verdict(&screen,&choose("1","")),Some(subagents_confirm::Verdict::allow()));
+            assert_eq!(group_verdict(&screen,&choose("1","Use the docs")).unwrap().message,"Use the docs");
+            // A call that joined after the card was shown is allowed with it.
+            subagents_confirm::group_add("conversation","toolu_two",&json!({"subagent_type":"general"}));
+            decide_group(&r,&screen,&choose("2",""),true);
+            assert!(subagents_confirm::session_allowed(&r));
+            assert_eq!(subagents_confirm::verdict("conversation","toolu_one"),
+                Some(subagents_confirm::Verdict{allow:true,message:String::new(),remember:true}));
+            assert_eq!(subagents_confirm::verdict("conversation","toolu_two"),Some(subagents_confirm::Verdict::allow()));
+            // The hook card's own choice, once its hook handed the rule over.
+            subagents_confirm::group_reset("conversation");
+            subagents_confirm::group_add("conversation","toolu_one",&input);
+            let hook=channel_card(&r,Some(AGENT_PANEL),&channel::identity(&r).unwrap()).unwrap();
+            decide_group(&r,&hook,&choose("3",""),false);
+            assert_eq!(subagents_confirm::verdict("conversation","toolu_one"),Some(subagents_confirm::Verdict::allow()));
         });
     }
 

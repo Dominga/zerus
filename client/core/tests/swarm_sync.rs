@@ -175,9 +175,9 @@ fn place(sync: &Controller) -> String {
 
 /// What the hub does after each change: the draft file follows the pending edits.
 fn persist(sync: &mut Controller, path: &Path) {
-    if let Some(change) = sync.take_draft() {
-        draft::store(path, &change).unwrap();
-        sync.draft_written();
+    if let Some((change, write)) = sync.take_draft() {
+        draft::store(path, &write).unwrap();
+        sync.draft_written(change);
     }
 }
 

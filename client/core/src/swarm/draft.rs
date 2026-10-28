@@ -119,7 +119,7 @@ impl Draft {
 }
 
 /// What the draft file becomes.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum DraftWrite {
     Save(Vec<u8>),
     Remove,
@@ -164,6 +164,19 @@ fn load_at_most(path: &Path, limit: u64) -> Load {
 /// `<file>.<seconds>-<n>.bad` when that name is taken, so it is neither
 /// deleted nor overwritten. Gives the new path.
 pub fn set_aside(path: &Path, now_secs: u64) -> io::Result<PathBuf> {
+    set_aside_by(path, now_secs, |from, to| std::fs::hard_link(from, to))
+}
+
+/// `set_aside` with the hard link made by `link`. A link to a new name fails
+/// when the name exists, so no file is ever replaced; the original name goes
+/// once the link stands. Where hard links are not supported, a free name is
+/// looked up and the file renamed to it.
+fn set_aside_by(
+    path: &Path,
+    now_secs: u64,
+    link: impl Fn(&Path, &Path) -> io::Result<()>,
+) -> io::Result<PathBuf> {
+    let mut links = true;
     for n in 0..100u32 {
         let mut name = path.as_os_str().to_owned();
         name.push(if n == 0 {
@@ -172,6 +185,17 @@ pub fn set_aside(path: &Path, now_secs: u64) -> io::Result<PathBuf> {
             format!(".{now_secs}-{n}.bad")
         });
         let aside = PathBuf::from(name);
+        if links {
+            match link(path, &aside) {
+                Ok(()) => {
+                    std::fs::remove_file(path)?;
+                    return Ok(aside);
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(error),
+                Err(_) => links = false,
+            }
+        }
         if matches!(std::fs::symlink_metadata(&aside), Err(error) if error.kind() == io::ErrorKind::NotFound)
         {
             std::fs::rename(path, &aside)?;
@@ -373,6 +397,24 @@ mod tests {
             format!("the draft file is larger than {} bytes", size - 1)
         );
         assert_eq!(MAX_BYTES, 3 * (8 << 20));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn without_hard_links_a_draft_is_renamed_to_a_free_name() {
+        let dir = scratch("rename");
+        file(&dir, &json!("taken"));
+        std::fs::rename(dir.join(FILE), dir.join(format!("{FILE}.7.bad"))).unwrap();
+        let path = file(&dir, &json!("dropped"));
+        let unsupported = |_: &Path, _: &Path| Err(io::Error::from(io::ErrorKind::Unsupported));
+        let aside = set_aside_by(&path, 7, unsupported).unwrap();
+        assert_eq!(aside, dir.join(format!("{FILE}.7-1.bad")));
+        assert_eq!(std::fs::read(&aside).unwrap(), br#""dropped""#);
+        assert_eq!(
+            std::fs::read(dir.join(format!("{FILE}.7.bad"))).unwrap(),
+            br#""taken""#
+        );
+        assert!(!path.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -199,7 +199,7 @@ pub fn seed(own: Option<&[u8]>, qt: Option<&[u8]>) -> Map<String, Value> {
     }
 }
 
-/// `SessionNotifications::valid` (`SessionNotifications.h:43-80`), the check
+/// `SessionNotifications::valid` (`SessionNotifications.h:44-77`), the check
 /// the view rows already apply ([`crate::view::preferences_valid`]).
 pub fn valid_preferences(value: &Value, conversation: &str) -> bool {
     value
@@ -228,7 +228,7 @@ fn baseline(row: &ViewRow) -> Option<&Map<String, Value>> {
         .and_then(|preferences| preferences.suppressed.as_object())
 }
 
-/// `SessionNotifications::matches` (`SessionNotifications.h:116-119`).
+/// `SessionNotifications::matches` (`SessionNotifications.h:81-84`).
 fn matches_saved(
     saved: &Map<String, Value>,
     phase: &str,

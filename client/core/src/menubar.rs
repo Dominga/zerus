@@ -130,7 +130,7 @@ pub fn read_state(computer: &ComputerId, row: &ViewRow, device: &DeviceMarks) ->
             conversation,
         );
         // A mark kept under the fallback key still applies until the
-        // frontend moves it (`FleetState.cpp:135-139`).
+        // frontend moves it (`FleetState.cpp:136-139`).
         device.marks.get(&key).or_else(|| {
             if conversation.is_empty() {
                 return None;
@@ -1003,7 +1003,7 @@ mod tests {
         assert_eq!(
             desk.attention(),
             1,
-            "Review later counts past the stale limit (FleetState.cpp:428-433)"
+            "Review later counts past the stale limit (FleetState.cpp:431-432)"
         );
         assert_eq!(desk.badge().as_deref(), Some("1"));
     }

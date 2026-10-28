@@ -20,7 +20,7 @@ use crate::readmarks::write_atomically;
 /// At most this many entries per map (owner rule on bounded caches).
 pub const CAP: usize = 20_000;
 
-/// The reply key (`replyKey`, `FleetState.cpp:45-47`): computer, agent and
+/// The reply key (`replyKey`, `FleetState.cpp:46-48`): computer, agent and
 /// conversation as compact JSON, as `store/marks.ts` writes it. The agent is
 /// the view row's `agent` (`deepseek` for `dsh`), the value the frontend keys
 /// by; Qt keys by the raw `cmd`, and its marks never reach this file.
@@ -29,13 +29,13 @@ pub fn reply_key(computer: &str, agent: &str, conversation: &str) -> String {
 }
 
 /// The attention key of a row without a conversation
-/// (`attentionFallbackKey`, `FleetState.cpp:48-50`): computer, agent, name
+/// (`attentionFallbackKey`, `FleetState.cpp:49-51`): computer, agent, name
 /// and `created`.
 pub fn fallback_key(computer: &str, agent: &str, name: &str, created: i64) -> String {
     serde_json::json!([computer, agent, name, created]).to_string()
 }
 
-/// `attentionKey` (`FleetState.cpp:51-53`): the reply key, or the fallback
+/// `attentionKey` (`FleetState.cpp:52-54`): the reply key, or the fallback
 /// key without a conversation.
 pub fn attention_key(
     computer: &str,

@@ -16,9 +16,14 @@ mod platform;
 #[cfg(feature = "live")]
 mod pump;
 #[cfg(feature = "live")]
+mod readsync;
+pub mod renderer;
+#[cfg(feature = "live")]
 mod replay;
 #[cfg(feature = "live")]
 mod screens;
+#[cfg(feature = "live")]
+pub mod settings;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod signals;
 #[cfg(feature = "live")]
@@ -77,9 +82,14 @@ pub fn run() {
                 use tauri::Manager;
                 let dir = data_dir(app.handle());
                 std::fs::create_dir_all(&dir)?;
-                // A replay never touches the real read marks.
+                app.manage(settings::open(app.handle(), &dir));
+                // A replay never touches the real read or attention marks.
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
-                app.manage(actions::Actions::new(dir.join(actions::marks_file(replay))));
+                let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
+                readsync::start(actions.clone());
+                app.manage(actions);
+                app.manage(actions::ArchiveReads::default());
+                app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
                 app.manage(screens::Screens::tauri(app.handle().clone(), pump));
                 app.manage(terminal::Terminals::new(
@@ -150,10 +160,14 @@ pub fn run() {
 }
 
 /// Before the app quits: recordings under way are cancelled, the hubs take
-/// no more changes, and every draft save already queued reaches the disk.
+/// no more changes, every draft save already queued reaches the disk, and
+/// the last settings change gets a bounded wait.
 #[cfg(feature = "live")]
 fn exit(app: &AppHandle) {
     use tauri::Manager;
+    if let Some(settings) = app.try_state::<settings::Store>() {
+        settings.0.flush_within(settings::EXIT_FLUSH);
+    }
     #[cfg(feature = "media")]
     if let Some(voices) = app.try_state::<voice::Voices>() {
         voices.close_all();
@@ -242,11 +256,20 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::display_hz,
         commands::exit_app,
         commands::perf_away,
+        renderer::renderer_frame,
+        settings::settings_get,
+        settings::settings_set,
         actions::run_action,
+        actions::set_notifications,
         actions::inspect_session,
         actions::pending_read_marks,
+        actions::queue_read_marks,
+        actions::attention_marks,
+        actions::update_attention_marks,
         actions::session_reference,
         actions::copy_command,
+        actions::archive_page,
+        actions::cancel_archive_pages,
         clipboard::copy_text,
         screens::screen_visible,
         screens::accounts_view,
@@ -296,6 +319,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::display_hz,
         commands::exit_app,
         commands::perf_away,
+        renderer::renderer_frame,
         clipboard::copy_text,
     ]
 }

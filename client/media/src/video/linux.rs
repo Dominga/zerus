@@ -3,9 +3,9 @@
 //! an AAC encoder found at run time, and the microphone through cpal into
 //! the AAC track (appsrc) and the PCM at once.
 use super::{
-    closest_format, finish, must_stop, poster, square_crop, CameraFormat, VideoEvent, MAX_BYTES,
-    NOT_STARTED, NO_DEVICES, NO_FORMAT, NO_STORAGE, POSTER_QUALITIES, POSTER_SIDE, PREVIEW_FPS,
-    PREVIEW_SIDE, START_TIMEOUT, TICK,
+    closest_format, finish, finish_refused, must_stop, poster, refused, square_crop, CameraFormat,
+    VideoEvent, FINISH_POLL, FINISH_TIMEOUT, MAX_BYTES, NOT_STARTED, NO_DEVICES, NO_FORMAT,
+    NO_STORAGE, POSTER_QUALITIES, POSTER_SIDE, PREVIEW_FPS, PREVIEW_SIDE, START_TIMEOUT, TICK,
 };
 use crate::{device, Event, Session};
 use gstreamer as gst;
@@ -253,16 +253,18 @@ fn description(
     let decode = if jpeg { "jpegdec ! " } else { "" };
     let location = path.to_str().ok_or(NO_STORAGE)?.replace('"', "");
     Ok(format!(
+        // The preview and poster sinks keep one frame nobody pulls once stopping
+        // starts; waiting for it on EOS would hold back the pipeline's EOS.
         "capsfilter name=camcaps ! {decode}videoconvert ! videorate ! video/x-raw,framerate=24/1 ! tee name=t \
          t. ! queue ! videoconvert ! {h264} ! h264parse ! queue ! mux. \
          t. ! queue leaky=downstream max-size-buffers=1 ! videorate drop-only=true max-rate={PREVIEW_FPS} \
             ! videocrop left={left} right={right} top={top} bottom={bottom} ! videoscale ! videoconvert \
             ! video/x-raw,format=I420,width={PREVIEW_SIDE},height={PREVIEW_SIDE} ! tee name=p \
          p. ! queue leaky=downstream max-size-buffers=1 ! jpegenc quality=70 \
-            ! appsink name=preview max-buffers=1 drop=true sync=false \
+            ! appsink name=preview max-buffers=1 drop=true sync=false wait-on-eos=false \
          p. ! queue leaky=downstream max-size-buffers=1 ! videoscale ! videoconvert \
             ! video/x-raw,format=RGB,width={POSTER_SIDE},height={POSTER_SIDE} \
-            ! appsink name=poster max-buffers=1 drop=true sync=false \
+            ! appsink name=poster max-buffers=1 drop=true sync=false wait-on-eos=false \
          appsrc name=audio is-live=true do-timestamp=true format=time caps=\"{audio}\" \
             ! audioconvert ! audioresample ! audio/x-raw,channels=1 ! {aac} ! aacparse ! queue ! mux. \
          mp4mux name=mux faststart=true ! filesink location=\"{location}\""
@@ -651,10 +653,14 @@ fn record(
     }
     let _ = audio.end_of_stream();
     pipeline.send_event(gst::event::Eos::new());
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // A loaded machine may need a while to encode what is queued and write
+    // the file; the window shows Preparing meanwhile.
+    let deadline = Instant::now() + FINISH_TIMEOUT;
     let mut ended = false;
     while !ended && Instant::now() < deadline {
-        if let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) {
+        if let Some(message) =
+            bus.timed_pop(gst::ClockTime::from_mseconds(FINISH_POLL.as_millis() as u64))
+        {
             match message.view() {
                 gst::MessageView::Eos(..) => ended = true,
                 gst::MessageView::Error(error) => {
@@ -670,11 +676,14 @@ fn record(
     }
     teardown(&pipeline);
     if !ended {
-        return Err(super::INVALID.into());
+        return Err(refused(format!(
+            "the file was not finished within {} s",
+            FINISH_TIMEOUT.as_secs()
+        )));
     }
-    let mp4 = std::fs::read(&path).map_err(|_| super::INVALID.to_owned())?;
+    let mp4 = std::fs::read(&path).map_err(|error| refused(format!("cannot read it: {error}")))?;
     if mp4.len() as u64 > MAX_BYTES {
-        return Err(super::INVALID.into());
+        return Err(refused(format!("{} bytes", mp4.len())));
     }
     let pcm = session.into_pcm();
     let poster = last_poster.and_then(|rgb| poster(posters(&rgb)));
@@ -686,7 +695,7 @@ fn record(
         pcm.len(),
         poster.as_deref(),
     )
-    .map_err(str::to_owned)?;
+    .map_err(|error| finish_refused(error, duration_ms, camera.width, camera.height))?;
     events(VideoEvent::Completed { pcm, mp4, meta });
     drop(folder);
     Ok(())

@@ -8,9 +8,9 @@
 //! Like Qt, the first press asks for camera and microphone consent and ends
 //! there: a grant needs a fresh press, never a late capture.
 use super::{
-    closest_format, finish, must_stop, poster_from_rgb, square_rgb, CameraFormat, VideoEvent,
-    MAX_BYTES, NOT_STARTED, NO_DEVICES, NO_FORMAT, NO_STORAGE, POSTER_SIDE, PREVIEW_FPS,
-    PREVIEW_SIDE, START_TIMEOUT, TICK,
+    closest_format, finish, finish_refused, must_stop, poster_from_rgb, refused, square_rgb,
+    CameraFormat, VideoEvent, FINISH_POLL, FINISH_TIMEOUT, MAX_BYTES, NOT_STARTED, NO_DEVICES,
+    NO_FORMAT, NO_STORAGE, POSTER_SIDE, PREVIEW_FPS, PREVIEW_SIDE, START_TIMEOUT, TICK,
 };
 use crate::{device, Event, Session};
 use block2::RcBlock;
@@ -693,20 +693,38 @@ fn record(
             writing.poster.take(),
         )
     };
-    if finished.recv_timeout(Duration::from_secs(10)).is_err() || cancelled.load(Ordering::SeqCst) {
-        return if cancelled.load(Ordering::SeqCst) {
-            Ok(())
-        } else {
-            Err(super::INVALID.into())
-        };
+    // Wait for the writer in steps that check Cancel, so Cancel while
+    // Preparing is prompt.
+    let deadline = Instant::now() + FINISH_TIMEOUT;
+    loop {
+        if cancelled.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        match finished.recv_timeout(FINISH_POLL) {
+            Ok(()) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                return Err(refused(format!(
+                    "the file was not finished within {} s",
+                    FINISH_TIMEOUT.as_secs()
+                )))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(refused("the writer never reported its end"))
+            }
+        }
+    }
+    if cancelled.load(Ordering::SeqCst) {
+        return Ok(());
     }
     // SAFETY: a read-only property after the writing finished.
-    if unsafe { lock(&shared.writing).writer.status() } != AVAssetWriterStatus::Completed {
-        return Err(super::INVALID.into());
+    let status = unsafe { lock(&shared.writing).writer.status() };
+    if status != AVAssetWriterStatus::Completed {
+        return Err(refused(format!("writer status {}", status.0)));
     }
-    let mp4 = std::fs::read(&path).map_err(|_| super::INVALID.to_owned())?;
+    let mp4 = std::fs::read(&path).map_err(|error| refused(format!("cannot read it: {error}")))?;
     if mp4.len() as u64 > MAX_BYTES {
-        return Err(super::INVALID.into());
+        return Err(refused(format!("{} bytes", mp4.len())));
     }
     let pcm = pcm.into_pcm();
     let poster = poster_rgb.and_then(|rgb| poster_from_rgb(&rgb));
@@ -718,7 +736,7 @@ fn record(
         pcm.len(),
         poster.as_deref(),
     )
-    .map_err(str::to_owned)?;
+    .map_err(|error| finish_refused(error, duration_ms, camera.width, camera.height))?;
     events(VideoEvent::Completed { pcm, mp4, meta });
     drop(folder);
     Ok(())

@@ -7,8 +7,14 @@ import {
   emphasis, childStatus, gitTooltip, paletteIndex, folderOf,
 } from "./SessionCard";
 import { catalog, computerOffline } from "../../store/catalog";
-import { detailsFor, followedFor } from "../../store/actions";
-import { actionEntries, copyEntries } from "./ActionDialogs";
+import { archiveCount, archiveTip } from "../../store/archive";
+import { ArchiveBar, datePanelOpen } from "./ArchiveBar";
+import { detailsFor, followedFor, updating } from "../../store/actions";
+import { running } from "../../store/batch";
+import { TOOL_WIDTH, clearArchiveMenuEntry, machineMenu, runSelection, selectedRows, selectionContextMenu, selectionCount } from "./selection-live";
+import { barTools, splitTools, toolEntry } from "./selection-ui";
+import { actionEntries, copyEntries, freshActionEntry, muteEntry } from "./ActionDialogs";
+import { markAllEntry, markAllTip, markEntry, runMarkAll } from "./mark-entries";
 import {
   selectedKey, setSelectedKey, collapsed, setCollapsed, setExpandedChildren, expandedChildren,
   setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
@@ -27,12 +33,12 @@ const projectColor = (project: string) => `var(--z-entity-palette-${paletteIndex
 const LATER = true;
 
 // Five state filters, in SessionsWindow order, then the scope filters.
-const FILTERS: { id: StateFilter; icon: string; tip: string; count: () => string }[] = [
+const FILTERS: { id: StateFilter; icon: string; tip: string; count: () => string; tipText?: () => string }[] = [
   { id: "all", icon: "all", tip: "All sessions", count: () => String(counts().all) },
   { id: "attention", icon: "attention", tip: "Needs attention", count: () => String(counts().attention) },
   { id: "active", icon: "active", tip: "Active: working, scheduled, waiting, needs attention or a draft", count: () => String(counts().active) },
   { id: "paused", icon: "paused", tip: "Saved sessions (paused or stopped)", count: () => String(counts().paused) },
-  { id: "archived", icon: "archived", tip: "Archive", count: () => "" },
+  { id: "archived", icon: "archived", tip: "Archive", count: archiveCount, tipText: archiveTip },
 ];
 
 const filterTone = (id: StateFilter) => ({
@@ -92,26 +98,28 @@ function setRowCompact(key: string, compact: boolean) {
   morphTimer = window.setTimeout(() => setMorphing(false), MORPH.duration + 40);
 }
 
-function sessionMenu(s: Session): MenuEntry[] {
-  const live = s.status !== "paused" && s.status !== "ended";
+export function sessionMenu(s: Session): MenuEntry[] {
   // The selected row's menu reads the same details as the header (Qt's m_details).
   const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
   const act = actionEntries(s, undefined, { context: true });
   const cp = copyEntries(s, details);
+  const mute = muteEntry(s);
+  const mark = markEntry(s);
+  const fresh = freshActionEntry(s);
+  const archived = s.state === "archived";
   return [
     { label: compactRows[s.key] ? "Expand session row" : "Compact session row", icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setRowCompact(s.key, !compactRows[s.key]) },
     { label: "Expand all collapsed", icon: "expand-row", disabled: !Object.values(compactRows).some(Boolean), action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
     { separator: true },
-    s.agent === "deepseek" ? { label: "Open native DeepSeek UI", icon: "external-link", disabled: LATER } : { label: "Open terminal", icon: "square-terminal", disabled: LATER },
+    // An archived row has no terminal, and no Mute or Mark group (Qt's `if (!archived)`).
+    ...(archived ? [] : [s.agent === "deepseek" ? { label: "Open native DeepSeek UI", icon: "external-link", disabled: LATER } : { label: "Open terminal", icon: "square-terminal", disabled: LATER }]),
     { label: "Open folder", icon: "folder-open", disabled: LATER },
     { label: "Open shell in session folder", icon: "terminal", disabled: LATER },
     cp.command,
-    { separator: true },
-    { label: s.muted ? "Unmute" : "Mute", icon: s.muted ? "bell" : "bell-off", disabled: LATER },
-    act.markRead,
+    ...(archived ? [] : [{ separator: true } as const, ...(mute ? [mute] : []), ...(mark ? [mark] : [])]),
     { separator: true },
     act.change,
-    { label: live ? "Clear session…" : "Start fresh…", icon: "clear", disabled: LATER },
+    ...(fresh ? [fresh] : archived ? [] : [{ label: "Clear session…", icon: "clear", disabled: LATER }]),
     act.rename,
     { label: "Fork session…", icon: "git-fork", disabled: LATER },
     ...(act.archive ? [act.archive] : []),
@@ -156,9 +164,10 @@ function headerMenu(project: string): MenuEntry[] {
 
 function batchMenu(): MenuEntry[] {
   return [
+    ...machineMenu(),
     { label: "Expand all collapsed", icon: "expand-row", action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
-    { label: `Mark all as read (${Object.values(catalog.rows).filter((s) => s.unread).length})`, icon: "read-all", disabled: LATER },
-    { label: "Clear archive…", icon: "trash", danger: true, disabled: LATER },
+    markAllEntry(),
+    clearArchiveMenuEntry(),
   ];
 }
 
@@ -235,18 +244,29 @@ function FilterChips() {
 }
 
 function SelectionBar() {
+  const [width, setWidth] = createSignal(0);
+  const observe = (el: HTMLElement) => {
+    const ro = new ResizeObserver(() => setWidth(el.clientWidth));
+    ro.observe(el);
+    onCleanup(() => ro.disconnect());
+  };
+  const rows = createMemo(() => selectedRows(listRows()));
+  const tools = createMemo(() => barTools(selectionCount(rows()), rows().length, running()));
+  const split = createMemo(() => splitTools(tools(), Math.max(1, Math.floor(width() / TOOL_WIDTH))));
   return (
-    <Show when={multiCount() > 1}>
+    <Show when={rows().length > 1}>
       <div class="selection-bar" role="toolbar" aria-label="Selected sessions">
-        <div class="row"><b>{multiCount()} selected</b><span class="grow" /><button class="icon-btn small" title="Deselect all (Esc)" onClick={clearMulti}><Icon name="x" size={14} /></button></div>
-        <div class="row sel-actions">
-          <button class="icon-btn" title={`Mark as read (${multiCount()})`} disabled><Icon name="read-all" size={18} /></button>
-          <button class="icon-btn" title="Pause" disabled><Icon name="pause" size={18} /></button>
-          <button class="icon-btn" title="Compact session rows" onClick={() => Object.keys(multi).forEach((k) => multi[k] && setCompactRows(k, true))}><Icon name="compact-row" size={18} /></button>
-          <button class="icon-btn" title="Move to project" disabled><Icon name="folder" size={18} /></button>
-          <button class="icon-btn" title="Move to archive" disabled><Icon name="archive" size={18} /></button>
-          <button class="icon-btn danger" title={`Terminate (${multiCount()})`} disabled><Icon name="circle-stop" size={18} /></button>
-          <button class="icon-btn" title="More actions for selected sessions" disabled><Icon name="chevron-down" size={18} /></button>
+        <div class="row"><b>{rows().length} selected</b><span class="grow" /><button class="icon-btn small" title="Deselect all" aria-label="Deselect all" onClick={clearMulti}><Icon name="x" size={14} /></button></div>
+        <div class="row sel-actions" ref={observe}>
+          <For each={split().shown}>
+            {(t) => (
+              <button class="icon-btn" classList={{ danger: t.danger }} title={t.hint} aria-label={t.hint} disabled={!t.enabled} data-text={t.text} onClick={() => runSelection(rows(), t.action)}><Icon name={t.icon} size={18} /></button>
+            )}
+          </For>
+          <Show when={split().more.length}>
+            <button class="icon-btn" title="More actions for selected sessions" aria-label="More actions for selected sessions" aria-haspopup="menu"
+              onClick={(e) => openMenu(e, split().more.map((t) => toolEntry(t, (a) => runSelection(rows(), a))))}><Icon name="more" size={18} /></button>
+          </Show>
         </div>
       </div>
     </Show>
@@ -339,7 +359,7 @@ export function SessionList() {
   // pointer has been outside for 350 ms. Menus and an active search keep it open.
   let enterTimer: number | undefined, leaveTimer: number | undefined;
   let hoverOpened = false;
-  const keepOpen = () => !!menu() || searchFocused() || search().length > 0;
+  const keepOpen = () => !!menu() || searchFocused() || search().length > 0 || datePanelOpen();
   const onStripEnter = () => {
     clearTimeout(leaveTimer);
     if (!stripMode() || peek()) return;
@@ -356,7 +376,7 @@ export function SessionList() {
     if (e.key !== "Escape") return;
     if (peek()) { hoverOpened = false; setPeek(false); }
     // Esc ends a bulk selection, unless a menu or dialog takes it first.
-    else if (multiCount() && !menu() && !document.querySelector("[role=dialog]")) clearMulti();
+    else if (multiCount() && !menu() && !document.querySelector("dialog[open]")) clearMulti();
   };
   addEventListener("keydown", onKeyEsc);
   const outside = (e: PointerEvent) => { if (peek() && section && !section.contains(e.target as Node) && !(e.target as Element).closest?.(".menu")) { hoverOpened = false; setPeek(false); } };
@@ -407,7 +427,7 @@ export function SessionList() {
         <div class="sp-filters" role="toolbar" aria-label="State filter">
           <For each={FILTERS}>
             {(f) => (
-              <button class="fchip" classList={{ on: stateFilter() === f.id, ...filterTone(f.id) }} data-tip={`${f.tip} / ${f.count()}`}
+              <button class="fchip" classList={{ on: stateFilter() === f.id, ...filterTone(f.id) }} data-tip={f.tipText?.() ?? `${f.tip} / ${f.count()}`}
                 aria-pressed={stateFilter() === f.id} onClick={() => setStateFilter(f.id)}>
                 <Icon name={f.icon} size={16} />
                 <span class="tabular">{f.count()}</span>
@@ -419,8 +439,8 @@ export function SessionList() {
         </div>
         <FilterChips />
 
-        <Show when={stateFilter() !== "archived"} fallback={<ArchiveList />}>
-          <Show when={catalog.order.length > 0} fallback={<ListPlaceholder />}>
+        <Show when={stateFilter() === "archived"}><ArchiveBar /></Show>
+          <Show when={catalog.order.length > 0 || stateFilter() === "archived"} fallback={<ListPlaceholder />}>
             <div class="sp-scroll" classList={{ morphing: morphing(), organizing: !!dragItem() }} ref={list.ref} tabindex="0" onKeyDown={onKey} role="tree"
               onDragOver={(e) => organizeOver(e, list)} onDrop={(e) => organizeDrop(e)} onDragLeave={(e) => { if (!(e.currentTarget as Element).contains(e.relatedTarget as Node)) setDrop(undefined); }}
               aria-label="Agent sessions; Ctrl-click to select several; drag to organize, left/right to collapse or expand a group">
@@ -432,13 +452,12 @@ export function SessionList() {
               </Show>
             </div>
           </Show>
-        </Show>
         <SelectionBar />
         <footer class="sp-foot">
           <span class="tabular ell">{shownSummary().shown ? `${shownSummary().shown} shown, ${shownSummary().working} working, ${shownSummary().attention} attention` : catalog.order.length ? "No matching sessions" : ""}</span>
           <span class="grow" />
           <button class="icon-btn small" data-tip="Session creation status" disabled><Icon name="clock" size={16} /></button>
-          <button class="icon-btn small" data-tip="Mark all as read: current replies on every machine" disabled><Icon name="read-all" size={16} /></button>
+          <button class="icon-btn small" title={markAllTip(markAllEntry())} disabled={markAllEntry().disabled} onClick={() => runMarkAll()}><Icon name="read-all" size={16} /></button>
           <button class="icon-btn small" data-tip="Saved drafts: recover local drafts, including those from ended sessions" disabled><Icon name="drafts" size={16} /></button>
         </footer>
       </div>
@@ -535,6 +554,7 @@ function ListRow(props: { id: string; list: RowSource }) {
             onContextMenu={(e) => {
               // macOS turns Control-click into a context click; Control keeps its selection meaning here.
               if (e.ctrlKey && e.button === 0 && IS_MAC) { e.preventDefault(); selectSession(v().session.key, e); return; }
+              if (multi[v().session.key] && selectedRows(listRows()).length > 1) { openMenu(e, selectionContextMenu(listRows())); return; }
               if (!multi[v().session.key]) selectSession(v().session.key); openMenu(e, sessionMenu(v().session));
             }}
             onDblClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) setRowCompact(v().session.key, !compactRows[v().session.key]); }}>
@@ -594,18 +614,6 @@ function ListPlaceholder() {
   );
 }
 
-function ArchiveList() {
-  return (
-    <div class="sp-scroll archive">
-      <div class="empty">
-        <Icon name="archive" size={26} />
-        <h3>Archive</h3>
-        <p>Archived sessions are read in pages from each machine; browsing them moves to this client in a later phase.</p>
-      </div>
-    </div>
-  );
-}
-
 /**
  * Collapsed list (SessionPanelDock Collapsed): one toggle, a search button as
  * wide as a tile, the active and most urgent filters meeting in the middle,
@@ -626,7 +634,7 @@ function Strip(props: { onEnter: () => void; onToggle: () => void }) {
       </button>
       <div class="strip-filters" classList={{ single: shown().length < 2 }}>
         <For each={shown()}>{(f) => (
-          <button class="fchip" classList={{ on: stateFilter() === f.id, ...filterTone(f.id) }} aria-pressed={stateFilter() === f.id} data-tip={`${f.tip} / ${f.count()}`} data-tip-pos="right" onClick={() => setStateFilter(f.id)}>
+          <button class="fchip" classList={{ on: stateFilter() === f.id, ...filterTone(f.id) }} aria-pressed={stateFilter() === f.id} data-tip={f.tipText?.() ?? `${f.tip} / ${f.count()}`} data-tip-pos="right" onClick={() => setStateFilter(f.id)}>
             <Icon name={f.icon} size={16} /><span class="tabular">{f.count()}</span>
           </button>
         )}</For>

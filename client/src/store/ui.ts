@@ -85,9 +85,13 @@ export function toast(title: string, text: string) {
   setTimeout(() => setToasts("items", (items) => items.filter((t) => t.id !== id)), 4200);
 }
 
+let archivedRow: (key: string) => Session | undefined = () => undefined;
+/** Hands the selection the loaded archived rows (store/archive.ts), which this module cannot import: archive.ts reads the filters here. */
+export function bindArchivedRows(lookup: (key: string) => Session | undefined) { archivedRow = lookup; }
+
 export const selected = createMemo<Session | undefined>(() => {
   const key = selectedKey();
-  return key ? catalog.rows[key] : undefined;
+  return key ? catalog.rows[key] ?? archivedRow(key) : undefined;
 });
 
 export function matchesFilter(s: Session, f: StateFilter): boolean {
@@ -96,7 +100,7 @@ export function matchesFilter(s: Session, f: StateFilter): boolean {
     case "attention": return needsAttention(s);
     case "active": return isActive(s);
     case "paused": return s.status === "paused";
-    case "archived": return false;
+    case "archived": return s.state === "archived";
   }
 }
 

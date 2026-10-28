@@ -788,6 +788,21 @@ impl DraftStore {
         );
     }
 
+    /// The one-time import ([`import_once`]) on this store's writer, so it
+    /// runs between the client's own writes.
+    pub fn import(
+        &self,
+        sources: Vec<ImportSource>,
+        done: impl FnOnce(ImportReport) + Send + 'static,
+    ) {
+        let root = self.root.clone();
+        self.writer.enqueue(
+            "",
+            false,
+            Box::new(move || done(import_once(&root, &sources))),
+        );
+    }
+
     /// Blocks until everything queued so far is written: on quit, and on a
     /// termination signal before the process exits.
     pub fn flush(&self) {
@@ -812,6 +827,320 @@ impl Drop for DraftStore {
             let _ = thread.join();
         }
     }
+}
+
+/// One draft store the import reads. It is never written to: no locks,
+/// writes or renames.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportSource {
+    /// A short name for the report, such as `qt` or `dev`.
+    pub name: String,
+    pub root: PathBuf,
+}
+
+/// What a draft import did.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportReport {
+    /// The import ran before: nothing was read or written now.
+    pub already_done: bool,
+    /// Drafts copied into this store.
+    pub imported: usize,
+    /// Copies whose content this store already holds under the same key.
+    pub identical: usize,
+    /// Copies not written because a different draft already exists here
+    /// under their key, or a newer copy won: they stay in their source, where
+    /// Saved drafts can still recover them.
+    pub conflicts: Vec<ImportConflict>,
+    /// Copies that could not be read completely, or draft folders without a
+    /// manifest naming their key; they stay in their source. Also drafts
+    /// that could not be saved here.
+    pub invalid: usize,
+    /// The sources read, by name.
+    pub sources: Vec<String>,
+    /// Why the import runs again at the next start: a source that exists but
+    /// could not be listed, or drafts that could not be saved here. Empty
+    /// when the marker was written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unfinished: Vec<String>,
+}
+
+/// One copy the import left in its source: its key and source name only,
+/// never its text.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ImportConflict {
+    pub key: String,
+    pub source: String,
+}
+
+/// Marks this store's one-time import (`<root>/.imported-v1.json`).
+pub const IMPORT_MARKER: &str = ".imported-v1.json";
+
+/// The draft roots of the dev app (`dev.zerus.next` and its phase builds)
+/// that exist on this computer: Tauri's app data folder plus `drafts`.
+pub fn dev_roots() -> Vec<PathBuf> {
+    let data = if cfg!(windows) {
+        std::env::var_os("APPDATA")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .map(|home| PathBuf::from(home).join("Library/Application Support"))
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .filter(|home| !home.is_empty())
+                    .map(|home| PathBuf::from(home).join(".local/share"))
+            })
+    };
+    let Some(data) = data else {
+        return Vec::new();
+    };
+    ["dev.zerus.next", "dev.zerus.next.phase2"]
+        .into_iter()
+        .map(|identifier| data.join(identifier).join(DIR))
+        .filter(|root| root.is_dir())
+        .collect()
+}
+
+/// `path` with its longest existing ancestor resolved, so a folder not
+/// created yet still compares by where it will be.
+fn resolved(path: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut existing = path;
+    loop {
+        if let Ok(real) = fs::canonicalize(existing) {
+            return missing
+                .iter()
+                .rev()
+                .fold(real, |path, part| path.join(part));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_owned());
+                existing = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+/// Whether two folders overlap: one is the other or lies inside it.
+fn overlaps(a: &Path, b: &Path) -> bool {
+    let (a, b) = (resolved(a), resolved(b));
+    a.starts_with(&b) || b.starts_with(&a)
+}
+
+/// The import's sources for the store at `own`: Qt's store (`qt`) and the
+/// dev app's stores (`dev`), without any that is, holds or lies inside `own`.
+pub fn import_sources(own: &Path, qt: Option<PathBuf>, dev: Vec<PathBuf>) -> Vec<ImportSource> {
+    qt.map(|root| ImportSource {
+        name: "qt".into(),
+        root,
+    })
+    .into_iter()
+    .chain(dev.into_iter().map(|root| ImportSource {
+        name: "dev".into(),
+        root,
+    }))
+    .filter(|source| !overlaps(&source.root, own))
+    .collect()
+}
+
+/// Queues the one-time import of Qt's and the dev app's drafts as the job
+/// the store runs next. Call it right after the store opens, before anything
+/// reads it: loads and pages run on the same writer after it, so every read
+/// sees the imported drafts. The report goes to the marker and a log line.
+pub fn import_at_start(store: &DraftStore) {
+    let sources = import_sources(store.root(), qt_root(), dev_roots());
+    store.import(sources, |_| {});
+}
+
+/// What makes two copies of a draft the same: the text, label, form state
+/// and attachments, not the cursor or delivery flags.
+fn content_hash(draft: &StoredDraft) -> String {
+    let attachments: Vec<Value> = draft
+        .draft
+        .attachments
+        .iter()
+        .map(|attachment| {
+            json!([
+                attachment.name,
+                attachment.mime,
+                attachment.reference,
+                sha256_hex(&attachment.bytes)
+            ])
+        })
+        .collect();
+    let content = json!({
+        "text": draft.draft.text,
+        "label": draft.label,
+        "form_state": draft.form_state,
+        "attachments": attachments,
+    });
+    sha256_hex(content.to_string().as_bytes())
+}
+
+/// One draft folder found in a source: only its key and manifest time, so
+/// the first pass holds no draft in memory.
+struct Candidate {
+    key: String,
+    source: usize,
+    modified_ns: u64,
+}
+
+/// The keys of the drafts under `root`, and how many draft folders have no
+/// manifest naming their key: each folder's manifest names its key, and the
+/// folder must be that key's hash. Plain files are not drafts. A root that
+/// does not exist has no drafts; one that cannot be listed is an error.
+fn source_keys(root: &Path) -> std::io::Result<(Vec<(String, u64)>, usize)> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), 0));
+        }
+        Err(error) => return Err(error),
+    };
+    let (mut keys, mut invalid) = (Vec::new(), 0);
+    for entry in entries {
+        let entry = entry?;
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let manifest = entry.path().join("draft.json");
+        let key = entry.file_name().into_string().ok().and_then(|folder| {
+            let bytes = read_bounded(&manifest, MAX_MANIFEST).ok()?;
+            let key = serde_json::from_slice::<Value>(&bytes)
+                .ok()?
+                .get("key")?
+                .as_str()?
+                .to_owned();
+            (sha256_hex(key.as_bytes()) == folder).then_some(key)
+        });
+        match key {
+            Some(key) => keys.push((key, modified_ns(&manifest).unwrap_or(0))),
+            None => invalid += 1,
+        }
+    }
+    Ok((keys, invalid))
+}
+
+/// Imports every draft of `sources` into the store at `root` once, at the
+/// switch of the default client. Per key the newest valid, nonempty copy is
+/// written when this store has none; the same content is never written
+/// twice, and a different draft here is never overwritten. The sources are
+/// only read: Qt may replace a file while it is read, so [`read_draft`]
+/// tries an invalid read once more.
+///
+/// Memory stays bounded by one draft: the first pass lists only keys and
+/// manifest times, and then each copy is read, compared or saved, and
+/// dropped before the next. Only the hash of this store's own draft is kept.
+///
+/// The marker is written only when every existing source was listed and
+/// every save succeeded. Otherwise the next start runs the import again,
+/// which is safe: drafts copied before read as identical and are never
+/// written again. Blocking: run it before the client's own store opens, or
+/// through [`DraftStore::import`].
+pub fn import_once(root: &Path, sources: &[ImportSource]) -> ImportReport {
+    let marker = root.join(IMPORT_MARKER);
+    if marker.exists() {
+        return ImportReport {
+            already_done: true,
+            ..ImportReport::default()
+        };
+    }
+    let mut report = ImportReport {
+        sources: sources.iter().map(|source| source.name.clone()).collect(),
+        ..ImportReport::default()
+    };
+    let mut candidates = Vec::new();
+    for (index, source) in sources.iter().enumerate() {
+        match source_keys(&source.root) {
+            Ok((keys, invalid)) => {
+                report.invalid += invalid;
+                candidates.extend(keys.into_iter().map(|(key, modified_ns)| Candidate {
+                    key,
+                    source: index,
+                    modified_ns,
+                }));
+            }
+            Err(error) => report
+                .unfinished
+                .push(format!("{} not listed: {error}", source.name)),
+        }
+    }
+    // Per key, newest first; equal times keep the sources' order.
+    candidates.sort_by(|a, b| a.key.cmp(&b.key).then(b.modified_ns.cmp(&a.modified_ns)));
+    let mut not_saved = 0;
+    for copies in candidates.chunk_by(|a, b| a.key == b.key) {
+        let key = &copies[0].key;
+        let here = loaded(load_once(root, key));
+        let mut kept = (here.storage_error.is_some() || !here.draft.is_empty())
+            .then(|| content_hash(&here.draft));
+        drop(here);
+        for copy in copies {
+            let source = &sources[copy.source];
+            let found = read_draft(&source.root, key);
+            if found.storage_error.is_some() {
+                report.invalid += 1;
+                continue;
+            }
+            if found.draft.is_empty() {
+                continue;
+            }
+            let hash = content_hash(&found.draft);
+            match &kept {
+                Some(existing) if *existing == hash => report.identical += 1,
+                Some(_) => report.conflicts.push(ImportConflict {
+                    key: key.clone(),
+                    source: source.name.clone(),
+                }),
+                None => match save_direct(root, key, &found.draft) {
+                    Ok(()) => {
+                        report.imported += 1;
+                        kept = Some(hash);
+                    }
+                    Err(_) => {
+                        report.invalid += 1;
+                        not_saved += 1;
+                    }
+                },
+            }
+        }
+    }
+    if not_saved > 0 {
+        report.unfinished.push(format!("{not_saved} not saved"));
+    }
+    let finished = report.unfinished.is_empty();
+    eprintln!(
+        "zerus-client-core: drafts import: {} imported, {} identical, {} conflicts, {} invalid{}",
+        report.imported,
+        report.identical,
+        report.conflicts.len(),
+        report.invalid,
+        if finished {
+            String::new()
+        } else {
+            format!(
+                "; runs again at the next start ({})",
+                report.unfinished.join("; ")
+            )
+        }
+    );
+    if finished && fs::create_dir_all(root).is_ok() && private(root, 0o700) {
+        let record = json!({
+            "version": 1,
+            "imported_at": std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs()),
+            "report": report,
+        });
+        let _ = atomic_write(&marker, record.to_string().as_bytes());
+    }
+    report
 }
 
 #[cfg(test)]

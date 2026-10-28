@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>automaticApprovals.enabled</key>
+	<true/>
+	<key>notifications.optionalQuestions</key>
+	<true/>
+	<key>processes.enabled</key>
+	<true/>
+	<key>processes.unknownSeconds</key>
+	<integer>700</integer>
+	<key>recovery.sharedPolicy</key>
+	<data>
+	QFZhcmlhbnQoAAAAfyk=
+	</data>
+	<key>shortcuts.message·push</key>
+	<array/>
+	<key>shortcuts.queue·sendNow</key>
+	<array>
+		<string>Ctrl+Return</string>
+	</array>
+	<key>speech.host</key>
+	<string>studio</string>
+	<key>speech.manage_host</key>
+	<string>laptop</string>
+	<key>speech.microphone</key>
+	<data>
+	bWlj
+	</data>
+	<key>speech.profile</key>
+	<string>@@x</string>
+	<key>speech.profile_revision</key>
+	<integer>3</integer>
+	<key>updates.channel</key>
+	<string>dev</string>
+	<key>updates.notified.zerus-update:v2:dev:1</key>
+	<true/>
+	<key>workspace.activityFullWidth</key>
+	<true/>
+	<key>workspace.activityWidth</key>
+	<integer>1000</integer>
+	<key>workspace.contentScale</key>
+	<real>1.5</real>
+	<key>workspace.theme</key>
+	<string>light</string>
+</dict>
+</plist>

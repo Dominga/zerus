@@ -600,6 +600,9 @@ mod tests {
         listed(&mut desk, "", vec![("a", row("claude/p/x", "running"))]);
         status(&mut desk, "", ComputerStatus::Reconnecting { attempt: 2 });
         assert_eq!(desk.face(), Face::error());
+        let face = desk.face();
+        assert_eq!((face.total.as_str(), face.attention.as_str()), ("?", "?"));
+        assert!(face.dot && !face.highlighted);
         assert_eq!(
             desk.tooltip(),
             "Zerus: reconnecting to hgs on this computer"

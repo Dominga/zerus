@@ -12,6 +12,13 @@
 
 ## Decisions
 
+- **Controller rulings on the open questions (2026-10-28).**
+  - The primary click shows and raises the window, as Qt does (`TrayAgent::showSessions`). Bead .44's "shows or hides" was wrong.
+  - The notification rules apply the host-confirmed session Mute and Qt's optional-question banner setting (`notifications/optionalQuestions`, off by default). There is no "Reduce" notification setting in Qt. Bead .43's wording was wrong.
+  - The switch does not wait for M1c. Voice and round video are phase 4 Part B, after the switch. The install enables `--features media` whenever the feature exists.
+  - Lazy window: the switch bundle creates its webview on first open, as Qt creates its window lazily. The slower first open is accepted.
+  - Questions 3-7 and 9 (the rollback slot, the scope of the numbered Dev guard, the watchdog, data carry-over, update notices and display windows) went to the coordinator. Their answers are recorded here when they arrive.
+
 These are settled for this plan. Items 1 to 4 deviate from the spec text and are recorded in the spec's Decisions section by Task 8.
 
 1. **Single instance follows Qt, not `tauri-plugin-single-instance` (deviates from spec row 298).** The client implements Qt's `SingleInstance` protocol (`tray/src/SingleInstance.{h,cpp}`, `tray/src/main.cpp:337-361` and `:424-433`): the per-user start lock `hgs-tray-start.lock` in Qt's runtime location, the socket named `hgs-tray` in the canonical temporary folder, and the one-line `show` and `sessions` activations. `tray/update-installed.py` finds the old GUI's socket by `lsof` (a path ending in `/hgs-tray`), waits on that same path for the new GUI and sends `sessions` (`update-installed.py:187-208`, `:295-315`). The plugin uses another path, so the updater would time out and roll back.

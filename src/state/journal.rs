@@ -758,6 +758,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         "exited_at",
         "session_end",
         "last_restore_error",
+        "launch_prompt",
         "error",
         "expected_id",
         "requested_id",

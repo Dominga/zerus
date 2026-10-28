@@ -4,7 +4,10 @@
 //! requests a [`Coalescer`] folds every [`Change`] so that a burst of thousands
 //! of deltas costs one batch with the latest row per key, and its memory stays
 //! bounded by the number of distinct keys.
-use crate::{ActivityUpdate, Change, ComputerId, ComputerStatus, ViewRow};
+use crate::{
+    ActivityUpdate, Change, ComputerId, ComputerStatus, MachineMeta, OrganizationUpdate,
+    ProcessesUpdate, TasksUpdate, ViewRow,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -56,17 +59,73 @@ pub struct ActivityOut {
     pub payload: Value,
 }
 
+/// The latest change of a followed session's processes. `kind` and `payload`:
+/// `state` carries `{value, rev}` (`value` is `{processes, process_work}` as
+/// `hgs inspect` reports them; `rev` orders one stream's states), `failed`
+/// `{code, message}` (the last state stays as known) and `ended` null (the
+/// follow ended and its state is gone).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProcessesOut {
+    pub computer: ComputerId,
+    pub key: String,
+    pub kind: String,
+    pub payload: Value,
+}
+
+/// The latest change of a followed project's task list, keyed by the project
+/// ID as followed. `kind` and `payload`: `list` carries `{tasks, project,
+/// damaged, digest, truncated}` (the whole list, `tasks` as `hgs task list
+/// --json` lists them), `failed` `{code, message}` (the last list stays) and
+/// `ended` null (the follow ended).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TasksOut {
+    pub computer: ComputerId,
+    pub key: String,
+    pub kind: String,
+    pub payload: Value,
+}
+
+/// The latest change of a computer's followed organization. `kind` and
+/// `payload`: `state` carries `{value, digest}` (`value` is `swarm get`'s
+/// object without `versions` and `written`), `failed` `{code, message}` (the
+/// last state stays) and `ended` null.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OrganizationOut {
+    pub computer: ComputerId,
+    pub kind: String,
+    pub payload: Value,
+}
+
+/// A computer's latest card data from its `catalog.meta`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MachineOut {
+    pub computer: ComputerId,
+    pub machine: MachineMeta,
+}
+
 /// Everything that changed since the previous batch. The view applies, in
-/// order: `computers`, `replaces`, `removes`, `upserts`, `activity`. Row changes
-/// of a computer with a replacement are already part of it; otherwise a key is
-/// in at most one of `removes` and `upserts`.
+/// order: `computers`, `machines`, `replaces`, `removes`, `upserts`,
+/// `activity`, `processes`, `tasks`, then `organizations`. `machines` holds
+/// at most one entry per computer and none for a computer whose status became
+/// `ended`; `organizations` holds at most one per computer. Row changes of a computer with a replacement are
+/// already part of it; otherwise a key is in at most one of `removes` and
+/// `upserts`. `processes` and `tasks` hold at most one entry per key and are
+/// left out when empty.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Batch {
     pub upserts: Vec<RowOut>,
     pub removes: Vec<KeyOut>,
     pub replaces: Vec<ReplaceOut>,
     pub computers: Vec<ComputerOut>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub machines: Vec<MachineOut>,
     pub activity: Vec<ActivityOut>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub processes: Vec<ProcessesOut>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<TasksOut>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub organizations: Vec<OrganizationOut>,
 }
 
 impl Batch {
@@ -75,7 +134,11 @@ impl Batch {
             && self.removes.is_empty()
             && self.replaces.is_empty()
             && self.computers.is_empty()
+            && self.machines.is_empty()
             && self.activity.is_empty()
+            && self.processes.is_empty()
+            && self.tasks.is_empty()
+            && self.organizations.is_empty()
     }
 }
 
@@ -95,22 +158,30 @@ type SessionKey = (ComputerId, String);
 ///   pending upsert and an upsert a pending removal;
 /// - a replacement drops the computer's pending row changes, and later row
 ///   changes of that computer fold into it;
-/// - the latest status of a computer wins;
+/// - the latest status of a computer wins, and so does its latest card data;
+///   an `ended` status drops pending card data;
 /// - Activity updates of a key keep their order: consecutive events merge
 ///   (into a pending window replacement too), a replacement drops the events
 ///   before it, the latest summary and the highest `rev` of an event id win,
-///   and an end drops what was pending before it.
+///   and an end drops what was pending before it;
+/// - the latest processes or tasks change of a `(computer, key)`, and the
+///   latest organization change of a computer, wins, except that a failure
+///   never replaces a pending state or list.
 ///
 /// Memory is bounded by the distinct keys, the computers and
 /// [`PENDING_EVENTS`] per followed session.
 #[derive(Debug, Default)]
 pub struct Coalescer {
     computers: BTreeMap<ComputerId, ComputerStatus>,
+    machines: BTreeMap<ComputerId, MachineMeta>,
     replaces: BTreeMap<ComputerId, BTreeMap<String, ViewRow>>,
     rows: BTreeMap<SessionKey, RowChange>,
     activity: BTreeMap<SessionKey, Vec<ActivityUpdate>>,
     /// Activity keys in the order they first changed.
     order: Vec<SessionKey>,
+    processes: BTreeMap<SessionKey, ProcessesUpdate>,
+    tasks: BTreeMap<SessionKey, TasksUpdate>,
+    organizations: BTreeMap<ComputerId, OrganizationUpdate>,
 }
 
 impl Coalescer {
@@ -153,7 +224,23 @@ impl Coalescer {
                 self.replaces.insert(computer, rows.into_iter().collect());
             }
             Change::Computer { computer, status } => {
+                if status == ComputerStatus::Ended {
+                    self.machines.remove(&computer);
+                }
                 self.computers.insert(computer, status);
+            }
+            Change::Machine { computer, machine } => {
+                self.machines.insert(computer, machine);
+            }
+            Change::Organization { computer, update } => {
+                let keep = matches!(update, OrganizationUpdate::Failed { .. })
+                    && matches!(
+                        self.organizations.get(&computer),
+                        Some(OrganizationUpdate::State { .. })
+                    );
+                if !keep {
+                    self.organizations.insert(computer, update);
+                }
             }
             Change::Activity {
                 computer,
@@ -170,6 +257,30 @@ impl Coalescer {
                 };
                 fold(list, update);
             }
+            Change::Processes {
+                computer,
+                key,
+                update,
+            } => {
+                let id = (computer, key);
+                let keep = matches!(update, ProcessesUpdate::Failed { .. })
+                    && matches!(self.processes.get(&id), Some(ProcessesUpdate::State { .. }));
+                if !keep {
+                    self.processes.insert(id, update);
+                }
+            }
+            Change::Tasks {
+                computer,
+                key,
+                update,
+            } => {
+                let id = (computer, key);
+                let keep = matches!(update, TasksUpdate::Failed { .. })
+                    && matches!(self.tasks.get(&id), Some(TasksUpdate::List { .. }));
+                if !keep {
+                    self.tasks.insert(id, update);
+                }
+            }
         }
     }
 
@@ -181,6 +292,9 @@ impl Coalescer {
                 status: status.name().to_owned(),
                 attempt: status.attempt(),
             });
+        }
+        for (computer, machine) in std::mem::take(&mut self.machines) {
+            batch.machines.push(MachineOut { computer, machine });
         }
         for (computer, rows) in std::mem::take(&mut self.replaces) {
             let rows = rows
@@ -218,11 +332,70 @@ impl Coalescer {
                 });
             }
         }
+        for ((computer, key), update) in std::mem::take(&mut self.processes) {
+            let (kind, payload) = match update {
+                ProcessesUpdate::State { value, rev } => {
+                    ("state", json!({"value": value, "rev": rev}))
+                }
+                ProcessesUpdate::Failed { code, message } => {
+                    ("failed", json!({"code": code, "message": message}))
+                }
+                ProcessesUpdate::Ended => ("ended", Value::Null),
+            };
+            batch.processes.push(ProcessesOut {
+                computer,
+                key,
+                kind: kind.to_owned(),
+                payload,
+            });
+        }
+        for ((computer, key), update) in std::mem::take(&mut self.tasks) {
+            let (kind, payload) = match update {
+                TasksUpdate::List {
+                    tasks,
+                    project,
+                    damaged,
+                    digest,
+                    truncated,
+                } => (
+                    "list",
+                    json!({"tasks": tasks, "project": project, "damaged": damaged,
+                           "digest": digest, "truncated": truncated}),
+                ),
+                TasksUpdate::Failed { code, message } => {
+                    ("failed", json!({"code": code, "message": message}))
+                }
+                TasksUpdate::Ended => ("ended", Value::Null),
+            };
+            batch.tasks.push(TasksOut {
+                computer,
+                key,
+                kind: kind.to_owned(),
+                payload,
+            });
+        }
+        for (computer, update) in std::mem::take(&mut self.organizations) {
+            let (kind, payload) = match update {
+                OrganizationUpdate::State { value, digest, .. } => {
+                    ("state", json!({"value": &*value, "digest": digest}))
+                }
+                OrganizationUpdate::Failed { code, message } => {
+                    ("failed", json!({"code": code, "message": message}))
+                }
+                OrganizationUpdate::Ended => ("ended", Value::Null),
+            };
+            batch.organizations.push(OrganizationOut {
+                computer,
+                kind: kind.to_owned(),
+                payload,
+            });
+        }
         batch
     }
 
     /// Pending entries: rows (a replacement counts each row), computers and
-    /// Activity updates, with events counted one by one.
+    /// their card data, Activity updates, with events counted one by one, and
+    /// processes and tasks changes.
     pub fn pending(&self) -> usize {
         let replaced: usize = self.replaces.values().map(|rows| rows.len().max(1)).sum();
         let activity: usize =
@@ -235,14 +408,25 @@ impl Coalescer {
                     _ => 1,
                 })
                 .sum();
-        self.computers.len() + replaced + self.rows.len() + activity
+        self.computers.len()
+            + self.machines.len()
+            + replaced
+            + self.rows.len()
+            + activity
+            + self.processes.len()
+            + self.tasks.len()
+            + self.organizations.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.computers.is_empty()
+            && self.machines.is_empty()
             && self.replaces.is_empty()
             && self.rows.is_empty()
             && self.activity.is_empty()
+            && self.processes.is_empty()
+            && self.tasks.is_empty()
+            && self.organizations.is_empty()
     }
 }
 
@@ -706,6 +890,208 @@ mod tests {
         assert_eq!(kept[0]["seq"], 5000 - PENDING_EVENTS as i64);
         assert_eq!(update.payload["cursor"], 4999);
         assert!(coalescer.is_empty());
+    }
+
+    fn processes(key: &str, update: ProcessesUpdate) -> Change {
+        Change::Processes {
+            computer: local(),
+            key: key.to_owned(),
+            update,
+        }
+    }
+
+    #[test]
+    fn the_latest_processes_change_of_a_key_wins_but_a_failure_keeps_a_state() {
+        let state = |rev| ProcessesUpdate::State {
+            value: json!({"processes": {"active_count": rev}}),
+            rev,
+        };
+        let failed = ProcessesUpdate::Failed {
+            code: "inspect_failed".into(),
+            message: "ps failed".into(),
+        };
+        let mut coalescer = Coalescer::new();
+        for rev in 1..=500 {
+            coalescer.push(processes("run:a", state(rev)));
+        }
+        coalescer.push(processes("run:a", failed.clone()));
+        coalescer.push(processes("run:b", failed.clone()));
+        coalescer.push(processes("run:c", state(1)));
+        coalescer.push(processes("run:c", ProcessesUpdate::Ended));
+        coalescer.push(processes("run:d", ProcessesUpdate::Ended));
+        coalescer.push(processes("run:d", state(2)));
+        assert_eq!(coalescer.pending(), 4);
+        let batch = coalescer.take();
+        let kinds: Vec<_> = batch
+            .processes
+            .iter()
+            .map(|out| (out.key.as_str(), out.kind.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("run:a", "state"),
+                ("run:b", "failed"),
+                ("run:c", "ended"),
+                ("run:d", "state")
+            ]
+        );
+        assert_eq!(batch.processes[0].payload["rev"], 500);
+        assert_eq!(
+            batch.processes[0].payload["value"]["processes"]["active_count"],
+            500
+        );
+        assert_eq!(
+            batch.processes[1].payload,
+            json!({"code": "inspect_failed", "message": "ps failed"})
+        );
+        assert_eq!(batch.processes[2].payload, Value::Null);
+        assert!(!batch.is_empty() && coalescer.is_empty());
+        // A batch without processes changes leaves the field out.
+        coalescer.push(upsert(&local(), "run:a", 1.0));
+        let value = serde_json::to_value(coalescer.take()).unwrap();
+        assert!(value.get("processes").is_none(), "{value}");
+        let back: Batch = serde_json::from_value(value).unwrap();
+        assert!(back.processes.is_empty());
+        let only = Batch {
+            processes: vec![ProcessesOut::default()],
+            ..Batch::default()
+        };
+        assert!(!only.is_empty());
+        assert_eq!(
+            serde_json::to_value(&only).unwrap()["processes"][0]["kind"],
+            ""
+        );
+    }
+
+    #[test]
+    fn the_latest_task_list_of_a_project_wins_and_a_failure_keeps_it() {
+        let list = |digest: &str| TasksUpdate::List {
+            tasks: vec![json!({"text": digest})],
+            project: json!({"id": "p1"}),
+            damaged: json!([]),
+            digest: digest.into(),
+            truncated: false,
+        };
+        let failed = TasksUpdate::Failed {
+            code: "tasks_failed".into(),
+            message: "unknown project".into(),
+        };
+        let tasks = |key: &str, update: TasksUpdate| Change::Tasks {
+            computer: local(),
+            key: key.to_owned(),
+            update,
+        };
+        let mut coalescer = Coalescer::new();
+        coalescer.push(tasks("p1", list("d1")));
+        coalescer.push(tasks("p1", list("d2")));
+        coalescer.push(tasks("p1", failed.clone()));
+        coalescer.push(tasks("p2", failed));
+        coalescer.push(tasks("p3", list("d3")));
+        coalescer.push(tasks("p3", TasksUpdate::Ended));
+        assert_eq!(coalescer.pending(), 3);
+        let batch = coalescer.take();
+        let kinds: Vec<_> = batch
+            .tasks
+            .iter()
+            .map(|out| (out.key.as_str(), out.kind.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![("p1", "list"), ("p2", "failed"), ("p3", "ended")]
+        );
+        assert_eq!(
+            batch.tasks[0].payload,
+            json!({"tasks": [{"text": "d2"}], "project": {"id": "p1"}, "damaged": [],
+                   "digest": "d2", "truncated": false})
+        );
+        let value = serde_json::to_value(&batch).unwrap();
+        assert_eq!(value["tasks"][1]["payload"]["code"], "tasks_failed");
+        assert!(value.get("processes").is_none());
+        assert!(serde_json::to_value(Batch::default())
+            .unwrap()
+            .get("tasks")
+            .is_none());
+    }
+
+    #[test]
+    fn the_latest_card_data_of_a_computer_wins_and_an_end_drops_it() {
+        let studio = ComputerId::from("studio");
+        let card = |cpu: f64| MachineMeta {
+            host: Some("workstation".into()),
+            metrics: crate::machine::Metrics {
+                cpu_percent: Some(cpu),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut coalescer = Coalescer::new();
+        for cpu in [1.0, 2.0, 3.0] {
+            coalescer.push(Change::Machine {
+                computer: local(),
+                machine: card(cpu),
+            });
+        }
+        coalescer.push(Change::Machine {
+            computer: studio.clone(),
+            machine: card(9.0),
+        });
+        coalescer.push(Change::Computer {
+            computer: studio.clone(),
+            status: ComputerStatus::Ended,
+        });
+        assert_eq!(coalescer.pending(), 2);
+        let batch = coalescer.take();
+        assert_eq!(batch.machines.len(), 1);
+        assert_eq!(batch.machines[0].computer, local());
+        assert_eq!(batch.machines[0].machine.metrics.cpu_percent, Some(3.0));
+        let value = serde_json::to_value(&batch).unwrap();
+        assert_eq!(value["machines"][0]["machine"]["host"], "workstation");
+        assert_eq!(value["computers"][0]["status"], "ended");
+        assert!(serde_json::to_value(Batch::default())
+            .unwrap()
+            .get("machines")
+            .is_none());
+        assert!(coalescer.is_empty());
+    }
+
+    #[test]
+    fn the_latest_organization_of_a_computer_wins_and_a_failure_keeps_its_state() {
+        let state = |digest: &str| OrganizationUpdate::State {
+            value: std::sync::Arc::new(json!({"digest": digest, "organization": {"projects": []}})),
+            digest: digest.into(),
+            membership: std::sync::Arc::default(),
+        };
+        let failed = OrganizationUpdate::Failed {
+            code: "organization_failed".into(),
+            message: "damaged".into(),
+        };
+        let organization = |computer: &ComputerId, update| Change::Organization {
+            computer: computer.clone(),
+            update,
+        };
+        let studio = ComputerId::from("studio");
+        let mut coalescer = Coalescer::new();
+        coalescer.push(organization(&local(), state("d1")));
+        coalescer.push(organization(&local(), state("d2")));
+        coalescer.push(organization(&local(), failed.clone()));
+        coalescer.push(organization(&studio, failed));
+        assert_eq!(coalescer.pending(), 2);
+        let batch = coalescer.take();
+        let kinds: Vec<_> = batch
+            .organizations
+            .iter()
+            .map(|out| (out.computer.0.as_str(), out.kind.as_str()))
+            .collect();
+        assert_eq!(kinds, [("", "state"), ("studio", "failed")]);
+        assert_eq!(
+            batch.organizations[0].payload,
+            json!({"value": {"digest": "d2", "organization": {"projects": []}}, "digest": "d2"})
+        );
+        assert!(serde_json::to_value(Batch::default())
+            .unwrap()
+            .get("organizations")
+            .is_none());
     }
 
     #[test]

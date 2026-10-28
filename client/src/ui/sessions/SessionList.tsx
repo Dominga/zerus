@@ -6,15 +6,18 @@ import {
   SessionCard, ChildCard, CompactCard, AgentBadge, StatusBadge, badgeKind, statusCaption, stripCaption,
   emphasis, childStatus, gitTooltip, paletteIndex, folderOf,
 } from "./SessionCard";
-import { catalog } from "../../store/catalog";
+import { catalog, computerOffline } from "../../store/catalog";
+import { detailsFor, followedFor } from "../../store/actions";
+import { actionEntries, copyEntries } from "./ActionDialogs";
 import {
   selectedKey, setSelectedKey, collapsed, setCollapsed, setExpandedChildren, expandedChildren,
   setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
-  setMenu, toast, machineFilter, setMachineFilter, projectFilter, setProjectFilter,
+  setMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter,
   multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, menu, subagentOpen, projectOrder, setProjectOrder,
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
 import type { Session } from "./types";
+import { motionReduced } from "../motion";
 import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem } from "./organize";
 
 /** The project band's colour: a palette slot per project until the listing carries project colours. */
@@ -57,7 +60,7 @@ function setRowCompact(key: string, compact: boolean) {
   if (!!compactRows[key] === compact) return;
   const row = document.querySelector<HTMLElement>(`.sp-scroll .vrow[data-key="${CSS.escape(key)}"]`);
   const card = row?.querySelector<HTMLElement>(".scard");
-  if (!row || !card || stripMode() || reducedMotion()) { setCompactRows(key, compact); return; }
+  if (!row || !card || stripMode() || motionReduced()) { setCompactRows(key, compact); return; }
   const before = FLIP.map((sel) => row.querySelector(sel)?.getBoundingClientRect());
   const from = card.getBoundingClientRect().height;
   const ghosts = compact ? [...card.querySelectorAll<HTMLElement>(DETAIL_LINES)].map((n) => n.cloneNode(true) as HTMLElement) : [];
@@ -89,12 +92,12 @@ function setRowCompact(key: string, compact: boolean) {
   morphTimer = window.setTimeout(() => setMorphing(false), MORPH.duration + 40);
 }
 
-function copy(text: string, what: string) {
-  void navigator.clipboard?.writeText(text).then(() => toast("Copied", what), () => toast("Not copied", "The clipboard is unavailable"));
-}
-
 function sessionMenu(s: Session): MenuEntry[] {
   const live = s.status !== "paused" && s.status !== "ended";
+  // The selected row's menu reads the same details as the header (Qt's m_details).
+  const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
+  const act = actionEntries(s, undefined, { context: true });
+  const cp = copyEntries(s, details);
   return [
     { label: compactRows[s.key] ? "Expand session row" : "Compact session row", icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setRowCompact(s.key, !compactRows[s.key]) },
     { label: "Expand all collapsed", icon: "expand-row", disabled: !Object.values(compactRows).some(Boolean), action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
@@ -102,23 +105,23 @@ function sessionMenu(s: Session): MenuEntry[] {
     s.agent === "deepseek" ? { label: "Open native DeepSeek UI", icon: "external-link", disabled: LATER } : { label: "Open terminal", icon: "square-terminal", disabled: LATER },
     { label: "Open folder", icon: "folder-open", disabled: LATER },
     { label: "Open shell in session folder", icon: "terminal", disabled: LATER },
-    { label: "Copy connect command", icon: "copy", disabled: LATER },
+    cp.command,
     { separator: true },
     { label: s.muted ? "Unmute" : "Mute", icon: s.muted ? "bell" : "bell-off", disabled: LATER },
-    s.unread || s.status === "attention" ? { label: "Mark as read", icon: "check-check", disabled: LATER } : { label: "Mark needs attention", icon: "bell", disabled: LATER },
+    act.markRead,
     { separator: true },
-    { label: live ? "Pause session" : "Resume session", icon: live ? "pause" : "play", disabled: LATER },
+    act.change,
     { label: live ? "Clear session…" : "Start fresh…", icon: "clear", disabled: LATER },
-    { label: "Rename…", icon: "pencil", kbd: "F2", disabled: LATER },
+    act.rename,
     { label: "Fork session…", icon: "git-fork", disabled: LATER },
-    { label: "Move to archive", icon: "archive", disabled: LATER },
+    ...(act.archive ? [act.archive] : []),
     { label: "Move to project…", icon: "folder", disabled: LATER },
     { separator: true },
-    { label: "Copy session name", icon: "copy", action: () => copy(s.name, "The session name is on the clipboard") },
-    { label: "Copy session reference", icon: "link", disabled: LATER },
-    { label: "Copy folder path", icon: "copy", disabled: LATER },
+    cp.name,
+    cp.reference,
+    cp.folder,
     { separator: true },
-    live ? { label: "Terminate session…", icon: "circle-stop", danger: true, disabled: LATER } : { label: "Forget saved session…", icon: "trash", danger: true, disabled: LATER },
+    act.end,
   ];
 }
 
@@ -254,7 +257,6 @@ function SelectionBar() {
 const STRIP_WIDTH = 98;
 const OPEN_MS = 220; // SessionPanelDock: 220 ms, OutCubic
 const OUT_CUBIC = "cubic-bezier(.33, 1, .68, 1)";
-const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches || document.documentElement.dataset.reduceMotion === "1";
 
 /**
  * Keeps one DOM node per row id. The virtualizer's items are new objects on
@@ -296,7 +298,7 @@ function useRows(strip: boolean) {
 
 /** Slides the full panel out from under the strip (transform only). */
 function slide(el: HTMLElement | undefined, width: number, opening: boolean, done?: () => void) {
-  if (!el || reducedMotion()) { done?.(); return; }
+  if (!el || motionReduced()) { done?.(); return; }
   const hidden = `translateX(${-(width - STRIP_WIDTH)}px)`;
   const a = el.animate(
     opening ? [{ transform: hidden, opacity: 0.6 }, { transform: "translateX(0)", opacity: 1 }] : [{ transform: "translateX(0)", opacity: 1 }, { transform: hidden, opacity: 0 }],

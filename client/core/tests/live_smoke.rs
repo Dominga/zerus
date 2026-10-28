@@ -1,6 +1,7 @@
 //! A read-only check against the installed `hgs` (or `ZERUS_CLIENT_HGS`):
 //! `cargo test -- --ignored live_smoke`. It follows this computer for 5 s,
-//! subscribes one session's Activity and prints counts only, never names.
+//! subscribes one session's Activity and processes and prints counts only,
+//! never names.
 use std::collections::BTreeMap;
 use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
@@ -35,6 +36,8 @@ fn live_smoke() {
                         });
                         if let Some(session) = session {
                             let key = session.key();
+                            let _ = fleet.follow_processes(&local, session.clone());
+                            let _ = fleet.follow_organization(&local);
                             followed = fleet.follow(&local, &key, session, None, 100).is_ok();
                         }
                     }
@@ -45,6 +48,10 @@ fn live_smoke() {
                     "computer"
                 }
                 Change::Activity { .. } => "activity",
+                Change::Processes { .. } => "processes",
+                Change::Tasks { .. } => "tasks",
+                Change::Machine { .. } => "machine",
+                Change::Organization { .. } => "organization",
             };
             *kinds.entry(kind).or_default() += 1;
             coalescer.push(change);

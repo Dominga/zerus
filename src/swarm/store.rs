@@ -68,6 +68,69 @@ fn save_members(
     Ok(())
 }
 
+/// Marks the members that need an hgs update in a snapshot's `peers`.
+fn flag_outdated(
+    snapshot: &mut Value,
+    peers: &BTreeMap<String, Peer>,
+    outdated: &BTreeMap<String, String>,
+    replica_outdated: &BTreeMap<String, String>,
+) {
+    for (alias, peer) in peers {
+        if outdated.get(alias) == Some(&peer.node) {
+            snapshot["peers"][alias]["catalog_outdated"] = json!(true);
+        }
+        if replica_outdated.get(alias) == Some(&peer.node) {
+            snapshot["peers"][alias]["tasks_outdated"] = json!(true);
+        }
+    }
+}
+
+/// The files a catalog snapshot reads, for a reader that follows changes.
+pub fn snapshot_files(config: &Config) -> Vec<PathBuf> {
+    let dir = config.dir.join("swarm");
+    vec![dir.join("catalog.json"), dir.join(OUTDATED), dir.join(REPLICA_OUTDATED)]
+}
+
+/// The catalog snapshot as `swarm get` shows it, read without the lock and
+/// without saving, so a reader never waits for or changes the catalog.
+/// Writers replace the file at once, so the read is whole. A missing catalog
+/// is an uninitialized one.
+pub fn read_snapshot(config: &Config) -> Result<Value> {
+    let dir = config.dir.join("swarm");
+    let path = dir.join("catalog.json");
+    let mut bytes = Vec::new();
+    match fs::File::open(&path) {
+        Ok(file) => {
+            file.take(128 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+            ensure!(bytes.len() <= 128 * 1024 * 1024, "Shared project catalog is too large");
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    let mut data: Store = if bytes.is_empty() {
+        Store {
+            node_id: String::new(),
+            catalog: Catalog::default(),
+            imported: false,
+            bindings: BTreeMap::new(),
+            peers: BTreeMap::new(),
+        }
+    } else {
+        serde_json::from_slice(&bytes).context("read swarm catalog")?
+    };
+    data.catalog.validate()?;
+    // As the loader binds this computer's own aliases, in memory only.
+    for alias in &config.selves {
+        data.bindings.insert(alias.clone(), Binding { id: data.node_id.clone(), verified: true });
+    }
+    let members = |name: &str| -> BTreeMap<String, String> {
+        serde_json::from_slice(&fs::read(dir.join(name)).unwrap_or_default()).unwrap_or_default()
+    };
+    let mut snapshot = data.snapshot(config);
+    flag_outdated(&mut snapshot, &data.peers, &members(OUTDATED), &members(REPLICA_OUTDATED));
+    Ok(snapshot)
+}
+
 pub struct LockedStore {
     pub data: Store,
     /// Alias -> node of members that keep syncing projects and folders but do
@@ -219,14 +282,7 @@ impl LockedStore {
     /// The catalog snapshot, naming members that need an hgs update.
     pub fn snapshot(&self, config: &Config) -> Value {
         let mut snapshot = self.data.snapshot(config);
-        for (alias, peer) in &self.data.peers {
-            if self.outdated.get(alias) == Some(&peer.node) {
-                snapshot["peers"][alias]["catalog_outdated"] = json!(true);
-            }
-            if self.replica_outdated.get(alias) == Some(&peer.node) {
-                snapshot["peers"][alias]["tasks_outdated"] = json!(true);
-            }
-        }
+        flag_outdated(&mut snapshot, &self.data.peers, &self.outdated, &self.replica_outdated);
         snapshot
     }
     pub fn backup(&self, reason: &str) -> Result<PathBuf> {

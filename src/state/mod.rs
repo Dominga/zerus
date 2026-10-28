@@ -45,6 +45,7 @@ mod kimi_plan;
 mod kimi_trust;
 mod kimi_tui_choice;
 mod lifecycle;
+mod kimi_launch;
 mod provider_errors;
 mod recovery;
 mod service_worker;

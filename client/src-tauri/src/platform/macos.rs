@@ -51,10 +51,15 @@ impl fmt::Display for SpiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SpiError::MissingSelector(name) => write!(f, "WebKit does not respond to {name}"),
-            SpiError::FeatureNotFound { key, features } => write!(f, "{key} is not among the {features} WebKit features"),
+            SpiError::FeatureNotFound { key, features } => {
+                write!(f, "{key} is not among the {features} WebKit features")
+            }
             SpiError::Exception(text) => write!(f, "Objective-C exception: {text}"),
             SpiError::Panicked => write!(f, "panic in the WebKit bindings"),
-            SpiError::NotApplied { read_back } => write!(f, "{FEATURE_KEY} reads back as {read_back:?} after setting it"),
+            SpiError::NotApplied { read_back } => write!(
+                f,
+                "{FEATURE_KEY} reads back as {read_back:?} after setting it"
+            ),
         }
     }
 }
@@ -86,10 +91,14 @@ static LAST_STATE: AtomicU8 = AtomicU8::new(0);
 
 /// Runs `body` with Objective-C exceptions and Rust panics turned into errors.
 fn guarded<R>(body: impl FnOnce() -> Result<R, SpiError>) -> Result<R, SpiError> {
-    match catch_unwind(AssertUnwindSafe(|| objc2::exception::catch(AssertUnwindSafe(body)))) {
+    match catch_unwind(AssertUnwindSafe(|| {
+        objc2::exception::catch(AssertUnwindSafe(body))
+    })) {
         Ok(Ok(result)) => result,
         Ok(Err(exception)) => Err(SpiError::Exception(
-            exception.map(|exception| format!("{exception:?}")).unwrap_or_else(|| "nil".into()),
+            exception
+                .map(|exception| format!("{exception:?}"))
+                .unwrap_or_else(|| "nil".into()),
         )),
         Err(_) => Err(SpiError::Panicked),
     }
@@ -169,7 +178,10 @@ pub fn find_feature(key: &str) -> Result<(Retained<AnyObject>, usize), SpiError>
         list.into_iter()
             .find(|feature| feature_key(feature).as_deref() == Some(key))
             .map(|feature| (feature, count))
-            .ok_or_else(|| SpiError::FeatureNotFound { key: key.to_string(), features: count })
+            .ok_or_else(|| SpiError::FeatureNotFound {
+                key: key.to_string(),
+                features: count,
+            })
     })
 }
 
@@ -190,7 +202,9 @@ pub fn feature_keys_matching(fragments: &[&str]) -> Result<Vec<String>, SpiError
 pub fn is_enabled(preferences: &WKPreferences, feature: &AnyObject) -> Result<bool, SpiError> {
     guarded(|| {
         if !responds(preferences, sel!(_isEnabledForFeature:)) {
-            return Err(SpiError::MissingSelector("-[WKPreferences _isEnabledForFeature:]"));
+            return Err(SpiError::MissingSelector(
+                "-[WKPreferences _isEnabledForFeature:]",
+            ));
         }
         // SAFETY: _isEnabledForFeature: takes a _WKFeature and returns BOOL.
         let value: Bool = unsafe { msg_send![preferences, _isEnabledForFeature: feature] };
@@ -199,13 +213,20 @@ pub fn is_enabled(preferences: &WKPreferences, feature: &AnyObject) -> Result<bo
 }
 
 /// `-[WKPreferences _setEnabled:forFeature:]` for `feature`.
-pub fn set_enabled(preferences: &WKPreferences, feature: &AnyObject, enabled: bool) -> Result<(), SpiError> {
+pub fn set_enabled(
+    preferences: &WKPreferences,
+    feature: &AnyObject,
+    enabled: bool,
+) -> Result<(), SpiError> {
     guarded(|| {
         if !responds(preferences, sel!(_setEnabled:forFeature:)) {
-            return Err(SpiError::MissingSelector("-[WKPreferences _setEnabled:forFeature:]"));
+            return Err(SpiError::MissingSelector(
+                "-[WKPreferences _setEnabled:forFeature:]",
+            ));
         }
         // SAFETY: _setEnabled:forFeature: takes a BOOL and a _WKFeature and returns void.
-        let _: () = unsafe { msg_send![preferences, _setEnabled: Bool::new(enabled), forFeature: feature] };
+        let _: () =
+            unsafe { msg_send![preferences, _setEnabled: Bool::new(enabled), forFeature: feature] };
         Ok(())
     })
 }
@@ -214,14 +235,27 @@ pub fn set_enabled(preferences: &WKPreferences, feature: &AnyObject, enabled: bo
 pub fn set_near_60fps(preferences: &WKPreferences, enabled: bool) -> PreferenceOutcome {
     let (feature, _) = match find_feature(FEATURE_KEY) {
         Ok(found) => found,
-        Err(error) => return PreferenceOutcome { default_value: None, before: None, after: None, error: Some(error) },
+        Err(error) => {
+            return PreferenceOutcome {
+                default_value: None,
+                before: None,
+                after: None,
+                error: Some(error),
+            }
+        }
     };
     let default_value = feature_default(&feature);
     let before = is_enabled(preferences, &feature).ok();
     let error = set_enabled(preferences, &feature, enabled).err();
     let after = is_enabled(preferences, &feature).ok();
-    let error = error.or_else(|| (after != Some(enabled)).then_some(SpiError::NotApplied { read_back: after }));
-    PreferenceOutcome { default_value, before, after, error }
+    let error = error
+        .or_else(|| (after != Some(enabled)).then_some(SpiError::NotApplied { read_back: after }));
+    PreferenceOutcome {
+        default_value,
+        before,
+        after,
+        error,
+    }
 }
 
 /// The near-60 fps preference of `preferences` (for example a live webview's
@@ -251,7 +285,10 @@ pub fn webview_configuration(mtm: MainThreadMarker) -> Retained<WKWebViewConfigu
 
 /// As `webview_configuration`, with the preference set to `near_60fps` (true is
 /// the must-fail control run of the measurement), and what happened.
-pub fn configure(mtm: MainThreadMarker, near_60fps: bool) -> (Retained<WKWebViewConfiguration>, PreferenceOutcome) {
+pub fn configure(
+    mtm: MainThreadMarker,
+    near_60fps: bool,
+) -> (Retained<WKWebViewConfiguration>, PreferenceOutcome) {
     // SAFETY: called on the main thread, as the marker proves.
     let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
     // SAFETY: preferences is a non-null property of every configuration.
@@ -271,18 +308,24 @@ pub fn configure(mtm: MainThreadMarker, near_60fps: bool) -> (Retained<WKWebView
 
 /// "Version 27.0.1 (Build 26A434)" from NSProcessInfo.
 pub fn macos_version() -> String {
-    NSProcessInfo::processInfo().operatingSystemVersionString().to_string()
+    NSProcessInfo::processInfo()
+        .operatingSystemVersionString()
+        .to_string()
 }
 
 /// `NSScreen.mainScreen.maximumFramesPerSecond` (macOS 12+): the display rate
 /// the measurement's T is computed from. Needs a window server connection.
 pub fn screen_max_fps(_mtm: MainThreadMarker) -> Option<i64> {
     guarded(|| {
-        let Some(class) = AnyClass::get(c"NSScreen") else { return Ok(None) };
+        let Some(class) = AnyClass::get(c"NSScreen") else {
+            return Ok(None);
+        };
         let class = class_object(class);
         // SAFETY: mainScreen is a class property returning NSScreen or nil.
         let screen: Option<Retained<AnyObject>> = unsafe { msg_send![class, mainScreen] };
-        let Some(screen) = screen else { return Ok(None) };
+        let Some(screen) = screen else {
+            return Ok(None);
+        };
         if !responds(&screen, sel!(maximumFramesPerSecond)) {
             return Ok(None);
         }
@@ -299,13 +342,21 @@ pub fn window_display_id(window: &AnyObject) -> Option<u32> {
     guarded(|| {
         // SAFETY: screen returns the window's NSScreen or nil.
         let screen: Option<Retained<AnyObject>> = unsafe { msg_send![window, screen] };
-        let Some(screen) = screen else { return Ok(None) };
+        let Some(screen) = screen else {
+            return Ok(None);
+        };
         // SAFETY: deviceDescription is an NSDictionary; NSScreenNumber holds an NSNumber.
-        let description: Option<Retained<AnyObject>> = unsafe { msg_send![&*screen, deviceDescription] };
-        let Some(description) = description else { return Ok(None) };
+        let description: Option<Retained<AnyObject>> =
+            unsafe { msg_send![&*screen, deviceDescription] };
+        let Some(description) = description else {
+            return Ok(None);
+        };
         let key = NSString::from_str("NSScreenNumber");
-        let number: Option<Retained<AnyObject>> = unsafe { msg_send![&*description, objectForKey: &*key] };
-        let Some(number) = number else { return Ok(None) };
+        let number: Option<Retained<AnyObject>> =
+            unsafe { msg_send![&*description, objectForKey: &*key] };
+        let Some(number) = number else {
+            return Ok(None);
+        };
         let id: u32 = unsafe { msg_send![&*number, unsignedIntValue] };
         Ok(Some(id))
     })
@@ -315,12 +366,23 @@ pub fn window_display_id(window: &AnyObject) -> Option<u32> {
 
 type CVDisplayLinkRef = *mut c_void;
 type CVReturn = i32;
-type OutputCallback = extern "C" fn(CVDisplayLinkRef, *const c_void, *const c_void, u64, *mut u64, *mut c_void) -> CVReturn;
+type OutputCallback = extern "C" fn(
+    CVDisplayLinkRef,
+    *const c_void,
+    *const c_void,
+    u64,
+    *mut u64,
+    *mut c_void,
+) -> CVReturn;
 
 #[link(name = "CoreVideo", kind = "framework")]
 extern "C" {
     fn CVDisplayLinkCreateWithCGDisplay(display: u32, link: *mut CVDisplayLinkRef) -> CVReturn;
-    fn CVDisplayLinkSetOutputCallback(link: CVDisplayLinkRef, callback: OutputCallback, context: *mut c_void) -> CVReturn;
+    fn CVDisplayLinkSetOutputCallback(
+        link: CVDisplayLinkRef,
+        callback: OutputCallback,
+        context: *mut c_void,
+    ) -> CVReturn;
     fn CVDisplayLinkStart(link: CVDisplayLinkRef) -> CVReturn;
     fn CVDisplayLinkStop(link: CVDisplayLinkRef) -> CVReturn;
     fn CVDisplayLinkRelease(link: CVDisplayLinkRef);
@@ -359,7 +421,9 @@ pub fn display_link_hz(display: Option<u32>, duration: Duration) -> Option<f64> 
         }
         let counter = Arc::new(AtomicU64::new(0));
         let context = Arc::as_ptr(&counter) as *mut c_void;
-        if CVDisplayLinkSetOutputCallback(link, count_frame, context) != 0 || CVDisplayLinkStart(link) != 0 {
+        if CVDisplayLinkSetOutputCallback(link, count_frame, context) != 0
+            || CVDisplayLinkStart(link) != 0
+        {
             CVDisplayLinkRelease(link);
             return None;
         }

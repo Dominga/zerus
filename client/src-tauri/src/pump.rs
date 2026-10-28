@@ -94,7 +94,6 @@ impl Pump {
     }
 
     /// The organization the list shows; `revision` changes whenever it does.
-    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
     pub fn present(
         &self,
         organization: &Value,
@@ -108,7 +107,6 @@ impl Pump {
         self.wake(inner);
     }
 
-    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
     pub fn set_sync(&self, sync: SyncView) {
         let mut inner = self.lock();
         inner.grouping.set_sync(sync);
@@ -116,41 +114,34 @@ impl Pump {
     }
 
     /// An edit the user made, applied to the list at once.
-    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
     pub fn edited(&self, intent: &Intent) {
         let mut inner = self.lock();
         inner.grouping.edited(intent);
         self.wake(inner);
     }
 
-    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
     pub fn set_collapsed(&self, project: &str, collapsed: bool) {
         let mut inner = self.lock();
         inner.grouping.set_collapsed(project, collapsed);
         self.wake(inner);
     }
 
-    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
     pub fn members_of(&self, project: &str) -> Vec<(String, String)> {
         self.lock().grouping.members_of(project)
     }
 
-    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
     pub fn default_project(&self) -> String {
         self.lock().grouping.default_project().to_owned()
     }
 
-    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
     pub fn take_renames(&self) -> Vec<(String, String)> {
         self.lock().grouping.take_renames()
     }
 
-    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
     pub fn take_layout(&self) -> Option<Vec<u8>> {
         self.lock().grouping.take_layout()
     }
 
-    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
     pub fn load_layout(&self, bytes: &[u8]) {
         let mut inner = self.lock();
         inner.grouping.replace_layout(Layout::from_json(bytes));
@@ -186,13 +177,8 @@ impl Pump {
             .collect()
     }
 
-    /// Drains a change sink on its own thread until every sender is gone.
-    pub fn drain(&self, changes: Receiver<Change>) {
-        self.drain_with(changes, |_| {});
-    }
-
-    /// Like [`Pump::drain`], running `observe` on each change just before it is queued.
-    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
+    /// Drains a change sink on its own thread until every sender is gone,
+    /// running `observe` on each change just before it is queued.
     pub fn drain_with(
         &self,
         changes: Receiver<Change>,
@@ -342,7 +328,7 @@ mod tests {
     fn a_change_wakes_a_parked_take() {
         let pump = Pump::default();
         let (tx, rx) = std::sync::mpsc::channel();
-        pump.drain(rx);
+        pump.drain_with(rx, |_| {});
         let sender = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(30));
             tx.send(upsert("run:a", "claude/p/a")).unwrap();

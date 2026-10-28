@@ -10,6 +10,8 @@ mod clipboard;
 mod commands;
 mod display;
 mod metrics;
+#[cfg(feature = "live")]
+mod organization;
 mod platform;
 #[cfg(feature = "live")]
 mod pump;
@@ -45,6 +47,27 @@ pub fn run() {
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 app.manage(actions::Actions::new(dir.join(actions::marks_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
+                let allowed = actions::actions_allowed(
+                    std::env::var("ZERUS_CLIENT_REPLAY").ok().as_deref(),
+                    std::env::var("ZERUS_CLIENT_HGS").ok().as_deref(),
+                );
+                let draft_path = dir.join(organization::draft_file(replay));
+                if replay {
+                    // A replay starts from the fixture's catalog: no draft of an earlier replay.
+                    let _ = zerus_client_core::swarm::draft::store(
+                        &draft_path,
+                        &zerus_client_core::swarm::draft::DraftWrite::Remove,
+                    );
+                }
+                let organization = organization::Organization::new(
+                    pump.clone(),
+                    zerus_client_core::default_hgs(),
+                    allowed,
+                    dir.join(organization::layout_file(replay)),
+                    draft_path,
+                );
+                app.state::<commands::AppState>().set_organization(organization.clone());
+                app.manage(organization);
                 app.manage(screens::Screens::tauri(app.handle().clone(), pump));
             }
             let display = display::display_name();
@@ -88,6 +111,13 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::session_reference,
         actions::copy_command,
         clipboard::copy_text,
+        organization::move_to_project,
+        organization::create_project,
+        organization::rename_project,
+        organization::delete_project,
+        organization::move_project,
+        organization::sort_project,
+        organization::set_project_collapsed,
         screens::screen_visible,
         screens::accounts_view,
         screens::machines_view,

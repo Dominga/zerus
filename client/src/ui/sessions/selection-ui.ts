@@ -23,11 +23,10 @@ export const SELECTION_ICONS: Record<SelectionAction, string> = {
 };
 
 /**
- * Whether an archived row's Resume (restore) and Forget count. Archive pages
- * are not bound yet (Piece E), so those calls could only fail: they are not
- * counted. Piece E sets this true when it binds the archive hooks.
+ * Whether an archived row's Resume (restore) and Forget count: true since
+ * store/restores.ts binds the archive calls (Qt counts them as any other row).
  */
-export const ARCHIVE_ACTIONS_BOUND = false;
+export const ARCHIVE_ACTIONS_BOUND = true;
 
 /** A row counts for an action when it applies and its call is bound. */
 export function countable(s: Pick<SelectionRow, "state">, a: SelectionAction, applies: boolean, archiveBound = ARCHIVE_ACTIONS_BOUND): boolean {

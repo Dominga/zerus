@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { toSession } from "../../store/catalog";
 import {
-  canStartStopped, headerClearSlot, copyState, detailsFromInspection, freshCopy, freshEntry, freshStillValid, identityOk, notificationsState, notificationsStillAllowed, dialogReducer, menuItemActivates, menuState, renameParts, renameProblem, snapshotOf, tagProblem, terminal, terminateCopy, forgetCopy, forgetsBindingOnly, forgetOpening, FORGET_ARCHIVE_LATER,
+  canStartStopped, headerClearSlot, copyState, detailsFromInspection, freshCopy, freshEntry, freshStillValid, identityOk, notificationsState, notificationsStillAllowed, dialogReducer, menuItemActivates, menuState, renameParts, renameProblem, snapshotOf, tagProblem, terminal, terminateCopy, forgetCopy, forgetsBindingOnly, forgetOpening, forgetArchivedCopy, archiveNameOccupied, liveNameIndex, nameKey,
 } from "./actions-ui";
 import fixture from "../../../core/tests/fixtures/action-rows.json";
 import type { Details, ViewRow } from "../../types";
@@ -29,8 +29,31 @@ describe("menuState change", () => {
     expect(menuState(row(), true, true).change).toMatchObject({ label: "Updating…", enabled: false });
     expect(menuState(row(), false, false).change.enabled).toBe(false);
   });
-  it("shows Restore disabled for an archived row", () => {
-    expect(menuState(row({ state: "archived", archive_id: "a1" }), true, false).change).toMatchObject({ label: "Restore session", enabled: false });
+  it("restores an archived row (Qt canChange 5302-5304, the header 3897-3898)", () => {
+    const archived = row({ state: "archived", archive_id: "a1" });
+    expect(menuState(archived, true, false).change).toEqual({ label: "Restore session", enabled: true, reason: undefined });
+    expect(menuState(archived, true, false, undefined, { context: true }).change.enabled).toBe(true);
+    // Not without its archive id, not resumable, offline, updating or while a batch runs.
+    expect(menuState(row({ state: "archived" }), true, false).change.enabled).toBe(false);
+    expect(menuState(row({ state: "archived" }), true, false, undefined, { context: true }).change.enabled).toBe(false);
+    expect(menuState(row({ state: "archived", archive_id: "a1", resumable: false }), true, false).change.enabled).toBe(false);
+    expect(menuState(archived, false, false).change.enabled).toBe(false);
+    expect(menuState(archived, true, true).change).toMatchObject({ label: "Updating…", enabled: false });
+    expect(menuState(archived, true, false, undefined, { batchRunning: true, context: true }).change.enabled).toBe(false);
+  });
+  it("does not restore while a live row of that computer has the name (archiveNameOccupied)", () => {
+    const archived = row({ state: "archived", archive_id: "a1" });
+    expect(menuState(archived, true, false, undefined, { occupied: true }).change.enabled).toBe(false);
+    expect(menuState(archived, true, false, undefined, { occupied: true, context: true }).change.enabled).toBe(false);
+    // A live row's change entry never reads it.
+    expect(menuState(row({ state: "paused" }), true, false, undefined, { occupied: true }).change.enabled).toBe(true);
+  });
+  it("needs allowed(restore) in the context menu only, as Qt's header does not read it (5360-5361)", () => {
+    const refused = row({ state: "archived", archive_id: "a1", allowed_actions: ["rename", "forget"] });
+    expect(menuState(refused, true, false, undefined, { context: true }).change.enabled).toBe(false);
+    expect(menuState(refused, true, false).change.enabled).toBe(true);
+    const allowed = row({ state: "archived", archive_id: "a1", allowed_actions: ["restore"] });
+    expect(menuState(allowed, true, false, undefined, { context: true }).change.enabled).toBe(true);
   });
   it("lets auth_required stand in for idle with details", () => {
     expect(menuState(row({ activity: "busy" }), true, false, details({ auth_required: true })).change.enabled).toBe(true);
@@ -95,9 +118,16 @@ describe("menuState rename, archive, end, read", () => {
     expect(menuState(row({ state: "paused", allowed_actions: ["rename"] }), true, false, details({ action_reasons: { forget: "Busy" } })).end.reason).toBe("Busy");
     expect(menuState(row({ state: "paused", allowed_actions: ["rename"] }), true, false, details({ allowed_actions: ["forget"] })).end.enabled).toBe(true);
   });
-  it("keeps the archived forget disabled until the Archive view", () => {
-    expect(menuState(row({ state: "archived", archive_id: "a1" }), true, false).end).toMatchObject({ label: "Forget archived session…", enabled: false, reason: FORGET_ARCHIVE_LATER });
-    expect(FORGET_ARCHIVE_LATER).toBe("Forgetting archived sessions arrives in a later version.");
+  it("forgets an archived row with allowed(forget) and its archive id (Qt 5378-5380)", () => {
+    const archived = row({ state: "archived", archive_id: "a1" });
+    expect(menuState(archived, true, false).end).toEqual({ label: "Forget archived session…", enabled: true, reason: undefined });
+    expect(menuState(archived, true, false, undefined, { context: true }).end.enabled).toBe(true);
+    expect(menuState(row({ state: "archived" }), true, false).end).toMatchObject({ label: "Forget archived session…", enabled: false });
+    expect(menuState(archived, false, false).end.enabled).toBe(false);
+    expect(menuState(archived, true, true).end.enabled).toBe(false);
+    expect(menuState(archived, true, false, undefined, { batchRunning: true }).end.enabled).toBe(false);
+    const refused = menuState(row({ state: "archived", archive_id: "a1", allowed_actions: ["restore"], action_reasons: { forget: "Kept." } }), true, false).end;
+    expect(refused).toMatchObject({ enabled: false, reason: "Kept." });
   });
 });
 
@@ -479,11 +509,40 @@ describe("forgetCopy", () => {
       detail: "Computer: box", confirm: "Forget saved session",
     });
   });
+  it("words the archived instance (Qt terminateSession 5771-5774, 5788-5789)", () => {
+    const archived = snapshotOf(row({ state: "archived", archive_id: "a1" }));
+    expect(forgetArchivedCopy(archived)).toEqual({
+      title: "Forget archived session?",
+      text: "Remove this archived instance of claude/proj/a from HGS? Other sessions with this name and the agent\u2019s native conversation history are kept.",
+      detail: "Computer: box", confirm: "Forget archived session",
+    });
+  });
   it("sees a running OpenCode forget-only session as a binding", () => {
     expect(forgetsBindingOnly({ cmd: "opencode", allowed: "forget rename" })).toBe(true);
   });
   it("opens the forget dialog with its scope", () => {
     const bound = { binding: true, run: "r1", conversation: "c1" };
     expect(dialogReducer(undefined, { type: "open", kind: "forget", row: saved, bound })).toEqual({ kind: "forget", row: saved, bound });
+  });
+});
+
+describe("archiveNameOccupied (Qt SessionsWindow.cpp 3148-3154)", () => {
+  const live = (name: string, computer = "", state = "paused") => ({ key: `${computer}\nrun:${name}`, computer, name, state });
+  const archived = { computer: "", name: "claude/proj/a" };
+  it("is a live row of the same computer with the same name; archived rows and other computers do not count", () => {
+    const rows = { a: live("claude/proj/a"), b: live("claude/proj/b") };
+    expect(archiveNameOccupied(archived, rows)).toBe(true);
+    expect(archiveNameOccupied(archived, { a: live("claude/proj/a", "laptop"), b: live("claude/proj/b") })).toBe(false);
+    expect(archiveNameOccupied(archived, { a: live("claude/proj/a", "", "archived") })).toBe(false);
+    expect(archiveNameOccupied(archived, { a: live("claude/proj/a", "", "running") })).toBe(true);
+    expect(archiveNameOccupied(archived, {})).toBe(false);
+  });
+  it("gives the same answer from a name index built once", () => {
+    const rows = { a: live("claude/proj/a"), b: live("claude/proj/b", "laptop"), c: live("claude/proj/c", "", "archived") };
+    const index = liveNameIndex(rows);
+    expect([...index].sort()).toEqual([nameKey({ computer: "", name: "claude/proj/a" }), nameKey({ computer: "laptop", name: "claude/proj/b" })].sort());
+    for (const s of [archived, { computer: "laptop", name: "claude/proj/b" }, { computer: "", name: "claude/proj/b" }, { computer: "", name: "claude/proj/c" }]) {
+      expect(index.has(nameKey(s))).toBe(archiveNameOccupied(s, rows));
+    }
   });
 });

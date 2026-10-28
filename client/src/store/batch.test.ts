@@ -49,17 +49,20 @@ function deferredCalls() {
   return { answer: async (o: Outcome) => { pending.shift()!(o); await flush(); }, waiting: () => pending.length };
 }
 
-function setup(rows: RowOut[], options: { online?: (computer: string) => boolean; confirm?: boolean; archive?: ArchiveCalls } = {}) {
+function setup(rows: RowOut[], options: { online?: (computer: string) => boolean; confirm?: boolean; archive?: ArchiveCalls; scans?: { n: number } } = {}) {
   const online = options.online ?? (() => true);
   const catalog = createCatalog();
   catalog.applyBatch(batchOf({ upserts: rows }));
+  // Counts the walks over every catalog row (a `for in` asks for the keys once per walk).
+  const scans = options.scans;
+  const listedRows = scans ? new Proxy(catalog.catalog.rows, { ownKeys: (t) => { scans.n++; return Reflect.ownKeys(t); } }) : catalog.catalog.rows;
   const actions = createActions(catalog.catalog, online);
   const [compact, setCompact] = createStore<Record<string, boolean>>({});
   const confirm = vi.fn(async (_copy: BatchConfirmation) => options.confirm ?? true);
   const markRead = vi.fn((_row: unknown) => true);
   const markNeedsAttention = vi.fn((_row: unknown) => true);
   const b = createBatch({
-    catalog: catalog.catalog,
+    catalog: { rows: listedRows },
     online,
     updating: actions.updating,
     perform: (row, action) => actions.perform(row, action, { quiet: true }),
@@ -339,6 +342,7 @@ describe("archived rows", () => {
         current: vi.fn(() => row),
         restore: vi.fn(async () => done()),
         forget: vi.fn(async () => failed("not found")),
+        refresh: vi.fn(),
       };
       const a = setup([], { archive });
       await a.run("resume", [row]);
@@ -355,10 +359,107 @@ describe("archived rows", () => {
   it("count a restore past the restore limit as failed", async () => {
     await createRoot(async (dispose) => {
       const row = archivedRow();
-      const archive: ArchiveCalls = { current: () => row, restore: vi.fn(() => "limit" as const), forget: vi.fn() };
+      const archive: ArchiveCalls = { current: () => row, restore: vi.fn(() => "limit" as const), forget: vi.fn(), refresh: vi.fn() };
       const a = setup([], { archive });
       await a.run("resume", [row]);
       expect(a.texts()).toEqual(["Resume / restore: 0 of 1 completed. 1 failed or changed; refresh before retrying.\nclaude/p/a: earlier restores still need a refresh"]);
+      dispose();
+    });
+  });
+
+  it("are compacted and expanded as their page lists them now (archive.row)", async () => {
+    await createRoot(async (dispose) => {
+      const row = archivedRow();
+      const listed = new Map([[row.key, row]]);
+      const archive: ArchiveCalls = { current: vi.fn((r) => listed.get(r.key)), restore: vi.fn(), forget: vi.fn(), refresh: vi.fn() };
+      const a = setup([], { archive });
+      await a.run("compact", [row]);
+      expect(a.compact).toEqual({ [row.key]: true });
+      await a.run("expand", [row]);
+      expect(a.compact).toEqual({ [row.key]: false });
+      // Gone from its page, or another instance: left as it is.
+      listed.clear();
+      await a.run("compact", [row]);
+      listed.set(row.key, { ...row, created: 999 });
+      await a.run("compact", [row]);
+      expect(a.compact).toEqual({ [row.key]: false });
+      dispose();
+    });
+  });
+
+  it("check the name of every archived row against one name index per run, not a scan per row", async () => {
+    await createRoot(async (dispose) => {
+      const scans = { n: 0 };
+      const rows = Array.from({ length: 5 }, (_, i) => toSession("", `archive:a${i}`, view(`a${i}`, { state: "archived", archive_id: `a${i}` })));
+      const listed = new Map(rows.map((r) => [r.key, r]));
+      const archive: ArchiveCalls = { current: (r) => listed.get(r.key), restore: vi.fn(async () => done()), forget: vi.fn(), refresh: vi.fn() };
+      const a = setup([rowOut("live", { name: "claude/p/a3", state: "paused" }), rowOut("other")], { archive, scans });
+      await a.run("resume", rows);
+      expect(scans.n).toBe(1);
+      expect((archive.restore as ReturnType<typeof vi.fn>).mock.calls.map((c) => (c[0] as SelectionRow).name)).toEqual(["claude/p/a0", "claude/p/a1", "claude/p/a2", "claude/p/a4"]);
+      dispose();
+    });
+  });
+
+  it("see a name restored earlier in the same run as taken", async () => {
+    await createRoot(async (dispose) => {
+      const one = archivedRow();
+      const two = toSession("", "archive:a2", view("a", { state: "archived", archive_id: "a2" }));
+      const listed = new Map([[one.key, one], [two.key, two]]);
+      const archive: ArchiveCalls = { current: (r) => listed.get(r.key), restore: vi.fn(async () => done()), forget: vi.fn(), refresh: vi.fn() };
+      const a = setup([], { archive });
+      await a.run("resume", [one, two]);
+      expect(archive.restore).toHaveBeenCalledTimes(1);
+      expect(a.texts()).toEqual(["Resume / restore: 1 of 2 completed. 1 failed or changed; refresh before retrying.\nbox / claude/p/a: session changed or is unavailable"]);
+      dispose();
+    });
+  });
+
+  it("refresh the archive once when a write batch ends (Qt SessionsWindow.cpp 1916)", async () => {
+    await createRoot(async (dispose) => {
+      const row = archivedRow();
+      const archive: ArchiveCalls = { current: () => row, restore: vi.fn(), forget: vi.fn(async () => done()), refresh: vi.fn() };
+      const a = setup([rowOut("b", { state: "paused" })], { archive });
+      const calls = deferredCalls();
+      const forget = a.run("forget", [row, ...a.listed("b")]);
+      await flush();
+      expect(archive.refresh).not.toHaveBeenCalled();
+      await calls.answer(done());
+      await forget;
+      expect(archive.refresh).toHaveBeenCalledTimes(1);
+      // A batch on live rows ends with a refresh too; marks, a cancelled confirmation or no target do not.
+      mocked.runAction.mockResolvedValue(done());
+      await a.run("archive", a.listed("b"));
+      expect(archive.refresh).toHaveBeenCalledTimes(2);
+      await a.run("review_later", a.listed("b"));
+      await a.run("pause", a.listed("b"));
+      a.confirm.mockResolvedValueOnce(false);
+      await a.run("forget", [row]);
+      expect(archive.refresh).toHaveBeenCalledTimes(2);
+      dispose();
+    });
+  });
+
+  it("go on with the next item when an archive hook throws, counting it failed with its error, never retried", async () => {
+    await createRoot(async (dispose) => {
+      const one = archivedRow();
+      const two = toSession("", "archive:a2", view("b", { state: "archived", archive_id: "a2" }));
+      const three = toSession("", "archive:a3", view("c", { state: "archived", archive_id: "a3" }));
+      const current = vi.fn((r: { key: string }) => {
+        if (r.key === two.key) throw new Error("page read failed");
+        return r.key === one.key ? one : three;
+      });
+      const restore = vi.fn((r: { key: string }) => {
+        if (r.key === one.key) throw new Error("hook broke");
+        return Promise.resolve(done());
+      });
+      const archive: ArchiveCalls = { current, restore, forget: vi.fn(), refresh: vi.fn() };
+      const a = setup([], { archive });
+      await a.run("resume", [one, two, three]);
+      expect(restore.mock.calls.map((c) => c[0].key)).toEqual([one.key, three.key]);
+      expect(a.running()).toBe(false);
+      expect(a.texts()).toEqual(["Resume / restore: 1 of 3 completed. 2 failed or changed; refresh before retrying.\nrestore claude/p/a: hook broke\nrestore claude/p/b: page read failed"]);
+      expect(archive.refresh).toHaveBeenCalledTimes(1);
       dispose();
     });
   });

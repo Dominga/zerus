@@ -409,5 +409,13 @@ export const { archive, archiveRows, archiveCount, archiveTip } = createRoot(() 
   return { archive, archiveRows, archiveCount: () => archive.countText(counted()), archiveTip: () => archive.tipText("Archive", counted()) };
 });
 
-bindSelectedRows(archive.row);
+let retained: (key: string) => Session | undefined = () => undefined;
+/**
+ * Hands the selection the archived rows of pending restores (store/restores.ts),
+ * which stay the selected row while the archive reloads (Qt's selected()).
+ * The actions find loaded rows only.
+ */
+export function bindRetainedRows(lookup: (key: string) => Session | undefined) { retained = lookup; }
+
+bindSelectedRows((key) => archive.row(key) ?? retained(key));
 bindActionRows(archive.row);

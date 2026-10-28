@@ -3,7 +3,7 @@ import { catalog as appCatalog, computerOffline, type CatalogState } from "./cat
 import { dismiss as appDismiss, notify as appNotify, perform as appPerform, performComputer as appPerformComputer, updating as appUpdating, type Notice } from "./actions";
 import { markNeedsAttention as appMarkNeedsAttention, markRead as appMarkRead } from "./marks";
 import { compactRows, needsAttention, setCompactRows } from "./ui";
-import { FORGET_ARCHIVE_LATER, RESTORE_LATER, snapshotOf, type ActionRow } from "../ui/sessions/actions-ui";
+import { archiveNameOccupied, liveNameIndex, nameKey, snapshotOf, type ActionRow } from "../ui/sessions/actions-ui";
 import {
   changedText, confirmationCopy, markSummary, progressText, restoreLimitText, sameInstance, selectionApplies, selectionCall,
   selectionSnapshot, summaryText, SHOWN_ERRORS, type BatchConfirmation, type SelectionAction, type SelectionRow, type WriteAction,
@@ -17,8 +17,9 @@ import type { Action, Outcome } from "../types";
 // read and Mark needs attention change the local marks at once. A write runs
 // one session at a time through the guarded `perform`: each item is looked up
 // again and must be the same instance and still apply, the next starts only
-// after the previous outcome, a failure is counted and never retried, and one
-// notice sums the batch up. While a batch runs (`running`, Qt's m_pending) no
+// after the previous outcome, a failure (also a hook that throws) is counted
+// and never retried, and one notice sums the batch up. The archive refreshes
+// when a write batch ends. While a batch runs (`running`, Qt's m_pending) no
 // other write starts: the single-session entries read it too.
 //
 // Qt's local launch question before resuming sessions of this computer (spec
@@ -28,15 +29,18 @@ import type { Action, Outcome } from "../types";
 export type { SelectionAction, SelectionRow };
 
 /**
- * Piece E's archive calls (Qt's restoreArchive and forgetArchive). Archived
- * rows are not catalog rows: `current` is the archived row as its archive
- * page lists it now. Until these are bound an archived item fails without a call.
+ * The archive calls (Qt's restoreArchive and forgetArchive, store/restores.ts).
+ * Archived rows are not catalog rows: `current` is the archived row as its
+ * archive page lists it now. Until these are bound an archived item fails
+ * without a call.
  */
 export interface ArchiveCalls {
   current(row: ActionRow): SelectionRow | undefined;
   /** "limit" when earlier restores still need a refresh: nothing runs. */
   restore(row: ActionRow): Promise<Outcome> | "limit";
   forget(row: ActionRow): Promise<Outcome>;
+  /** Reloads the archive pages, once a write batch has ended (Qt SessionsWindow.cpp 1916). */
+  refresh(): void;
 }
 
 export interface BatchDeps {
@@ -68,40 +72,29 @@ const errorText = (error: unknown) => (typeof error === "string" ? error : error
 export function createBatch(deps: BatchDeps) {
   const [running, setRunning] = createSignal(false);
 
-  /** Qt's archiveNameOccupied: a live row of the same computer has the name. */
-  function occupied(s: ActionRow): boolean {
-    for (const id in deps.catalog.rows) {
-      const r = deps.catalog.rows[id];
-      if (r && r.computer === s.computer && r.name === s.name && r.state !== "archived") return true;
-    }
-    return false;
-  }
-
-  /** Qt's selectionActionApplies for a row now. */
-  function applies(s: SelectionRow, a: SelectionAction, online: boolean, updating: boolean): boolean {
+  /**
+   * Qt's selectionActionApplies for a row now. `names` is a live name index
+   * (`liveNameIndex`) for checking many rows; without it an archived row's
+   * Resume scans the catalog once (Qt's archiveNameOccupied).
+   */
+  function applies(s: SelectionRow, a: SelectionAction, online: boolean, updating: boolean, names?: () => ReadonlySet<string>): boolean {
     return selectionApplies(s, a, {
       online, updating, compact: deps.compact.get(s.key), attention: deps.attention(s),
-      occupied: a === "resume" && s.state === "archived" && occupied(s),
+      occupied: a === "resume" && s.state === "archived" && (names ? names().has(nameKey(s)) : archiveNameOccupied(s, deps.catalog.rows)),
     });
   }
-
-  const appliesNow = (s: SelectionRow, a: SelectionAction) => applies(s, a, deps.online(s.computer), deps.updating(s.computer, s.name));
 
   /** The row as it is listed now: a catalog row, or an archived row through the archive calls. */
   const current = (s: ActionRow): SelectionRow | undefined =>
     s.state === "archived" ? deps.archive()?.current(s) : deps.catalog.rows[s.key];
 
   /** One item's call; an archived row needs the archive calls. */
-  async function call(row: ActionRow, a: WriteAction): Promise<{ operation: string; out: Outcome | "limit" }> {
+  async function call(row: ActionRow, a: WriteAction): Promise<Outcome | "limit"> {
     const step = selectionCall(row, a);
-    try {
-      if ("call" in step) return { operation: step.operation, out: await deps.perform(row, step.call) };
-      const archive = deps.archive();
-      if (!archive) return { operation: step.operation, out: { outcome: "failed", detail: step.archive === "restore" ? RESTORE_LATER : FORGET_ARCHIVE_LATER } };
-      return { operation: step.operation, out: await (step.archive === "restore" ? archive.restore(row) : archive.forget(row)) };
-    } catch (error) {
-      return { operation: step.operation, out: { outcome: "failed", detail: errorText(error) } };
-    }
+    if ("call" in step) return deps.perform(row, step.call);
+    const archive = deps.archive();
+    if (!archive) return { outcome: "failed", detail: "session changed or is unavailable" };
+    return step.archive === "restore" ? archive.restore(row) : archive.forget(row);
   }
 
   /**
@@ -110,19 +103,24 @@ export function createBatch(deps: BatchDeps) {
    * happens. Forget and Terminate ask first.
    */
   async function run(a: SelectionAction, rows: readonly SelectionRow[], options: RunOptions = {}): Promise<void> {
+    // One live name index per run (Qt's archiveNameOccupied for every archived
+    // Resume), built on first use; a name restored during the run joins it.
+    let names: Set<string> | undefined;
+    const index = () => (names ??= liveNameIndex(deps.catalog.rows));
+    const appliesNow = (s: SelectionRow) => applies(s, a, deps.online(s.computer), deps.updating(s.computer, s.name), index);
     if (a === "compact" || a === "expand") {
       // Presentation only: also while a batch runs. Qt's compact row limit has no client counterpart.
       together(() => {
         for (const original of rows) {
-          const live = deps.catalog.rows[original.key];
-          if (live && sameInstance(live, original) && appliesNow(live, a)) deps.compact.set(live.key, a === "compact");
+          const live = current(original);
+          if (live && sameInstance(live, original) && appliesNow(live)) deps.compact.set(live.key, a === "compact");
         }
       });
       return;
     }
     // Move to project waits for the organisation stream's move (MOVE_LATER).
     if (a === "move" || running()) return;
-    const targets = rows.filter((r) => appliesNow(r, a)).map(selectionSnapshot);
+    const targets = rows.filter((r) => appliesNow(r)).map(selectionSnapshot);
     if (!targets.length) return;
     if (a === "forget" || a === "terminate") {
       const copy = confirmationCopy(a, targets, rows.length, options.clearArchive ? { paged: !!options.paged } : undefined);
@@ -144,16 +142,23 @@ export function createBatch(deps: BatchDeps) {
     let progress: number | undefined;
     try {
       for (const original of targets) {
-        const live = current(original);
-        if (!live || !sameInstance(live, original) || !appliesNow(live, a)) { fail(changedText(original)); continue; }
-        // One progress line at a time, as Qt's single notice.
-        if (progress !== undefined) deps.dismiss(progress);
-        progress = deps.notify("info", progressText(a, done + failed + 1, targets.length));
-        const row = snapshotOf(live);
-        const { operation, out } = await call(row, a);
-        if (out === "limit") fail(restoreLimitText(row));
-        else if (out.outcome === "done") done++;
-        else fail(`${operation}: ${out.detail}`);
+        // Each item on its own: a hook or call that throws fails this item only, and is never retried.
+        try {
+          const live = current(original);
+          if (!live || !sameInstance(live, original) || !appliesNow(live)) { fail(changedText(original)); continue; }
+          // One progress line at a time, as Qt's single notice.
+          if (progress !== undefined) deps.dismiss(progress);
+          progress = deps.notify("info", progressText(a, done + failed + 1, targets.length));
+          const row = snapshotOf(live);
+          const out = await call(row, a);
+          if (out === "limit") fail(restoreLimitText(row));
+          else if (out.outcome === "done") {
+            done++;
+            if (a === "resume" && row.state === "archived") names?.add(nameKey(row));
+          } else fail(`${selectionCall(row, a).operation}: ${out.detail}`);
+        } catch (error) {
+          fail(`${selectionCall(original, a).operation}: ${errorText(error)}`);
+        }
       }
     } finally {
       setRunning(false);
@@ -161,6 +166,8 @@ export function createBatch(deps: BatchDeps) {
     if (progress !== undefined) deps.dismiss(progress);
     const summary = summaryText(a, done, targets.length, failed, errors);
     deps.notify(summary.failed ? "error" : "info", summary.text, summary.failed);
+    // Qt refreshes the archive when the batch is over (SessionsWindow.cpp 1916).
+    try { deps.archive()?.refresh(); } catch { /* the summary stands; a refresh is only a read */ }
   }
 
   /**
@@ -182,7 +189,7 @@ let confirmer: ((copy: BatchConfirmation) => Promise<boolean>) | undefined;
 export function bindBatchConfirm(confirm: (copy: BatchConfirmation) => Promise<boolean>) { confirmer = confirm; }
 
 let archiveCalls: ArchiveCalls | undefined;
-/** Hands the store Piece E's archive calls. */
+/** Hands the store the archive calls (store/restores.ts). */
 export function bindArchiveCalls(calls: ArchiveCalls) { archiveCalls = calls; }
 
 const app = createBatch({

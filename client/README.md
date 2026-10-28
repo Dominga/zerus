@@ -83,6 +83,8 @@ the child's own environment: the agent attribution (`HGS_SESSION`,
 | Terminate any other live session | `kill NAME` | none | 5 s, 15 s |
 | Forget saved session | `kill NAME` | none | 5 s, 15 s |
 | Forget the OpenCode binding | `session-action NAME --json` | JSON: `request_id`, `action` (`forget`), `expected_run_id`, `expected_conversation_id` | 15 s, 45 s |
+| Restore session | `resume NAME --archive ID -d` | none | 30 s, 30 s |
+| Forget archived session | `kill NAME --archive ID` | none | 5 s, 15 s |
 | Archive page (a read) | `archives --json` | JSON: `from`, `until`, `limit` (50), `cursor`, `query` | 30 s, 30 s |
 
 Outcome rules:
@@ -204,8 +206,16 @@ Outcome rules:
   conversation); otherwise nothing runs and the sticky notice says "The
   session state changed. Open its actions again." A binding with a run goes
   through `session-action`, any other session through `kill`; an offline
-  computer ends silently; a vanished row raises the same notice. Forgetting an archived session
-  stays disabled until the Archive view (`zerus-5wmh.32`).
+  computer ends silently; a vanished row raises the same notice.
+- Forget archived session needs the archive id and an allowed forget. The
+  dialog "Forget archived session?" says "Remove this archived instance of NAME
+  from HGS? Other sessions with this name and the agent's native conversation
+  history are kept." with the computer named below; Cancel is the default. On
+  confirmation the archived row must still be listed as the instance the dialog
+  named (its archive id, and `created` when known), otherwise nothing runs and
+  the sticky notice says "This session is no longer available. Refresh the list
+  and open its actions again."; an offline computer or a running batch ends
+  silently. The call is `kill NAME --archive ID`.
 - The binding forget counts only when the receipt echoes the request id,
   session name, run id and conversation id of the call with status
   `completed`; anything else is a failure and is never replayed. Success shows
@@ -215,9 +225,30 @@ Outcome rules:
   no dialog and shows "This session is no longer available. Open its actions
   again."
 
-Restoring, forgetting an archived session and clearing the archive arrive with
-the Archive view (`zerus-5wmh.32`); their entries are disabled with a reason.
-Sending, the Mark read chip of the composer toolbar and the
+Restore session is an archived row's change entry. It is enabled when the
+computer is online, no write is pending, the row is resumable and has its archive
+id, and no live row of that computer has its name; the context menu also needs
+an allowed restore (Qt's header does not). The call is `resume NAME --archive ID
+-d`. While the same session's restore is pending, another single restore runs or
+64 restores are pending, nothing runs and the sticky notice says "Finish or
+refresh the earlier restores before restoring another session." A restore stays
+pending until its live (running) row appears, or until its call fails.
+
+- After a success the archive pages reload, and the Archive filter becomes All
+  when the restored row is still selected there; the search, machine and project
+  filters stay. The archived row stays selected until its live row appears.
+- When the live row appears with the restored conversation, the selection moves
+  to it (also when it carries no conversation at all). With another
+  conversation the selection clears with the sticky notice "The restored
+  conversation could not be verified." Qt adds that the archived draft remains
+  in Saved drafts; the client has no saved drafts before phase 4
+  (`zerus-5wmh.9`).
+- A change of the state filter or the search, a Rename, a Forget archived
+  session or a batch cancels the follow: the verified live row then only clears
+  an old selection of the archived row.
+
+A successful Rename or Move to archive also reloads the archive pages, as Qt's
+`writeDone` does. Sending, the Mark read chip of the composer toolbar and the
 Open terminal entries arrive with phase 4. The copy entries below are live.
 
 ### Batches
@@ -239,8 +270,9 @@ selected row, under the heading "N selected sessions", followed by "Deselect all
   attention one that does not; every other action needs the computer online, no
   write pending for the session and an operation the row allows (Resume / restore
   is Resume for a live-listed saved session and Restore for an archived one);
-  Move always applies. Only listed rows count: a search or filter hides rows from the selection, and vanished sessions drop out. Archived Resume and Forget are not counted until the
-  archive hooks are bound (Piece E, `zerus-5wmh.17`).
+  Move always applies. Only listed rows count: a search or filter hides rows from the selection, and vanished sessions drop out. An archived Resume
+  also needs the archive id and no live row of that computer with its name,
+  checked against one index of the live names.
 - Move to project is shown with its count, disabled, with the hint "Arrives with
   project organisation." until the organisation stream's move lands.
 - Forget and Terminate first confirm. The title is the action, the text
@@ -263,11 +295,21 @@ selected row, under the heading "N selected sessions", followed by "Deselect all
   shows "ACTION: D of N completed." and, when items failed, "F failed or
   changed; refresh before retrying." with the first three errors, as a notice
   that stays. A call is made once and never retried, and a failure does not stop
-  the next item. The calls are the single-session ones of the table above, with
-  their own success and failure notices replaced by the batch's.
+  the next item, also when it throws. The calls are the single-session ones of
+  the table above, with their own success and failure notices replaced by the
+  batch's. An archived row restores (past the restore limit it fails with
+  "NAME: earlier restores still need a refresh") or forgets its archived
+  instance. When a write batch ends, the archive pages reload.
 - While a batch (or a Pause all or Resume all) runs, every write entry is
   disabled, the header shows "Updating…" and a second batch does not start. Stop
   and the copy entries are not writes.
+
+Remove loaded archived sessions… in the batch menu is Qt's Clear archive. It is
+enabled when no batch runs and some loaded archived row in the machine and
+project filters can be forgotten. It runs Forget on the loaded archived rows in
+those filters and the date range, with the title and button "Clear archive" and
+the text "Remove N loaded archived sessions in the current date and machine
+scope? Unloaded entries are kept." plus the Forget suffixes.
 
 Pause all and Resume all are in the batch menu, one group per computer: a
 heading with the machine name, "Pause all (LIVE)" and "Resume all in background
@@ -376,9 +418,8 @@ live catalog.
 - The list shows the loaded archived rows as flat cards, newest archived first
   (Qt groups them by project: `zerus-5wmh.40`). Selecting one shows its header
   and its details, read with `inspect --archive ID`; its Activity pane stays
-  empty (`zerus-5wmh.42`). Copy restore command, Copy session reference,
-  Copy session name and Rename work on a loaded archived row. Restore, Forget
-  archived session and Clear archive arrive with a later change.
+  empty (`zerus-5wmh.42`). Restore session, Forget archived session, the copy
+  entries and Rename work on a loaded archived row (see Actions).
 - The page is checked as Qt checks it. An invalid reply shows one of three
   texts: "Invalid archive page. Update the computer CLI and refresh." (version,
   shape, cursors, total or echo of the query), "Invalid archive window. Refresh

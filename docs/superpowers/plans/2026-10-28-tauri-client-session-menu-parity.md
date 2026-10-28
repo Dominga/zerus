@@ -639,14 +639,16 @@ An empty archive id fails before any call with "Missing archive identity". The o
 
 Rules:
 - **Restore session** (5302-5304, 5360-5361, 5542-5560):
-  - The change entry of an archived row is enabled when available, `resumable`, `archiveId` is set, no live row on the same computer has the name (`archiveNameOccupied`), and `allowed("restore")`.
-  - A restore of the same session already pending, or 64 restores pending, gives the sticky "Finish or refresh the earlier restores before restoring another session.".
+  - The change entry of an archived row is enabled when available, `resumable`, `archiveId` is set, no live row on the same computer has the name (`archiveNameOccupied`), and, in the context menu, `allowed("restore")`. Qt's header (`m_changeAction`, 3897-3898) does not read `allowed("restore")`.
+  - A restore of the same session already pending, another single restore still running (`m_restoreWriteKey`), or 64 restores pending, gives the sticky "Finish or refresh the earlier restores before restoring another session.". A restore stays pending until its live row appears running or its call fails. Qt's limit also counts `m_restoredInspections`, which the client does not have (see the last rule below).
 - **After a successful restore** (1958-1969, 3281-3336):
   - The archive refreshes (Forget keeps its refresh too). A successful rename or Move to archive also refreshes the archive (`SessionsWindow.cpp:1917`).
   - The batch's Compact/Expand and E's archived calls find loaded archived rows (the store's `archive.row(key)`), not only catalog rows.
   - When the restored row is still selected under the Archive filter, the filter becomes All; other scopes stay.
-  - When the live row of that name appears with the restored conversation, the selection follows it.
+  - While its restore is pending, the archived row stays the selected row after the archive reloads (Qt's `selected()`, 3136-3139).
+  - When the live row of that name appears with the restored conversation, the selection follows it; a live row without a conversation is followed too (3322-3323).
   - When it appears with another conversation, the selection clears with the sticky "The restored conversation could not be verified." Qt adds "Your archived draft remains in Saved drafts."; the client has no saved drafts before phase 4 (`zerus-5wmh.9`), which restores the full text.
+  - Only the single restore of the selected row is followed (`m_restoreKey`). A batch, a state filter or search change, a Rename or a Forget archived session cancels the follow; then a verified live row only clears a selection still on the archived row (3297-3305).
   - Phase 2's details matching on run and conversation already keeps old-run details from enabling controls (Qt's `awaitingRestoredInspection`).
 - **Forget archived session** (5378-5380, 5771-5774):
   - The end entry is enabled when available, `allowed("forget")` and `archiveId` is set.

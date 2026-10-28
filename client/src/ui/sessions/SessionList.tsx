@@ -11,7 +11,7 @@ import { archiveCount, archiveTip } from "../../store/archive";
 import { ArchiveBar, datePanelOpen } from "./ArchiveBar";
 import { detailsFor, followedFor, updating } from "../../store/actions";
 import { running } from "../../store/batch";
-import { TOOL_WIDTH, machineMenu, runSelection, selectedRows, selectionContextMenu, selectionCount } from "./selection-live";
+import { TOOL_WIDTH, clearArchiveMenuEntry, machineMenu, runSelection, selectedRows, selectionContextMenu, selectionCount } from "./selection-live";
 import { barTools, splitTools, toolEntry } from "./selection-ui";
 import { actionEntries, copyEntries, freshActionEntry, muteEntry } from "./ActionDialogs";
 import { markAllEntry, markAllTip, markEntry, runMarkAll } from "./mark-entries";
@@ -167,7 +167,7 @@ function batchMenu(): MenuEntry[] {
     ...machineMenu(),
     { label: "Expand all collapsed", icon: "expand-row", action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
     markAllEntry(),
-    { label: "Clear archive…", icon: "trash", danger: true, disabled: LATER },
+    clearArchiveMenuEntry(),
   ];
 }
 

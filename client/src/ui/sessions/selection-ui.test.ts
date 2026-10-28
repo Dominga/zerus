@@ -45,10 +45,12 @@ describe("splitTools", () => {
 });
 
 describe("countable", () => {
-  it("does not count archived Resume or Forget until the archive hooks are bound", () => {
-    expect(ARCHIVE_ACTIONS_BOUND).toBe(false);
-    expect(countable({ state: "archived" }, "resume", true)).toBe(false);
-    expect(countable({ state: "archived" }, "forget", true)).toBe(false);
+  it("counts archived Resume and Forget now that the archive calls are bound, and not without them", () => {
+    expect(ARCHIVE_ACTIONS_BOUND).toBe(true);
+    expect(countable({ state: "archived" }, "resume", true)).toBe(true);
+    expect(countable({ state: "archived" }, "forget", true)).toBe(true);
+    expect(countable({ state: "archived" }, "resume", true, false)).toBe(false);
+    expect(countable({ state: "archived" }, "forget", true, false)).toBe(false);
     expect(countable({ state: "archived" }, "mark_read", true)).toBe(true);
     expect(countable({ state: "paused" }, "resume", true)).toBe(true);
     expect(countable({ state: "paused" }, "resume", false)).toBe(false);

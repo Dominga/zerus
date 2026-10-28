@@ -3,16 +3,20 @@ import { Icon } from "../lib/icons";
 import { catalog, computerOffline } from "../../store/catalog";
 import { change, copyCommand, copyFolder, copyName, copyReference, dismiss, end, forget, interrupting, notices, notify, perform, stillListed, pendingNotifications, toggleMute, updating } from "../../store/actions";
 import { bindBatchConfirm, running } from "../../store/batch";
+import { cancelRestoreFollow, forgetArchived, refreshArchiveWhenDone, restoreSession } from "../../store/restores";
 import type { MenuEntry } from "../../store/ui";
 import type { Details } from "../../types";
 import type { Session } from "./types";
-import { FRESH_CHANGED, STATE_CHANGED, canStartStopped, FRESH_TIP, copyState, dialogReducer, freshCopy, freshEntry, freshStillValid, menuState, notificationsState, renameParts, renameProblem, forgetCopy, forgetOpening, snapshotOf, terminateCopy, terminates, type ForgetScope, type ActionRow, type DialogEvent } from "./actions-ui";
+import { FRESH_CHANGED, STATE_CHANGED, archiveNameOccupied, canStartStopped, FRESH_TIP, copyState, dialogReducer, freshCopy, freshEntry, freshStillValid, menuState, notificationsState, renameParts, renameProblem, forgetArchivedCopy, forgetCopy, forgetOpening, snapshotOf, terminateCopy, terminates, type ForgetScope, type ActionRow, type DialogEvent } from "./actions-ui";
 import type { BatchConfirmation } from "./selection";
 
 // The guarded session actions: the entries both menus share, the Rename,
-// Terminate, Forget, Start fresh and selection dialogs, and the notices the
-// action store raises. While a selection batch runs (store/batch.ts, Qt's
-// m_pending) every write entry here is off.
+// Terminate, Forget (saved or archived), Start fresh and selection dialogs,
+// and the notices the action store raises. An archived row's change entry is
+// Restore session (store/restores.ts). While a selection batch runs
+// (store/batch.ts, Qt's m_pending) every write entry here is off. A
+// successful Rename or Move to archive reloads the archive pages (Qt's
+// writeDone, SessionsWindow.cpp 1917).
 
 const [open, dispatch] = createSignal<ReturnType<typeof dialogReducer>>(undefined, { equals: false });
 const send = (event: DialogEvent) => dispatch(dialogReducer(open(), event));
@@ -35,14 +39,17 @@ type Item = Extract<MenuEntry, { label: string }> & { action: () => void };
  */
 export function actionEntries(s: Session, details?: Details, options: { context?: boolean } = {}): { change: Item; stop: Item & { shown: boolean }; rename: Item; archive?: Item; end: Item } {
   const row = snapshotOf(s);
-  const m = menuState(row, !computerOffline(s.computer), updating(s.computer, s.name), details,
-    { context: options.context, interrupting: interrupting(s.computer, s.name), batchRunning: running() });
-  const hint = (enabled: boolean, reason?: string) => (enabled ? undefined : reason);
   const archived = row.state === "archived";
+  const m = menuState(row, !computerOffline(s.computer), updating(s.computer, s.name), details, {
+    context: options.context, interrupting: interrupting(s.computer, s.name), batchRunning: running(),
+    // Qt's archiveNameOccupied: one scan of the live rows, for an archived row only.
+    occupied: archived && archiveNameOccupied(row, catalog.rows),
+  });
+  const hint = (enabled: boolean, reason?: string) => (enabled ? undefined : reason);
   return {
     change: {
       label: m.change.label, icon: archived || row.state !== "running" ? "play" : "pause", disabled: !m.change.enabled, hint: hint(m.change.enabled, m.change.reason),
-      action: () => { void change(row); },
+      action: () => { void (archived ? restoreSession(row, { context: options.context }) : change(row)); },
     },
     stop: {
       label: "Stop", icon: "circle-stop", shown: m.stop.visible, disabled: !m.stop.enabled, hint: hint(m.stop.enabled, m.stop.reason),
@@ -50,7 +57,7 @@ export function actionEntries(s: Session, details?: Details, options: { context?
     },
     rename: { label: "Rename…", icon: "pencil", disabled: !m.rename, action: () => send({ type: "open", kind: "rename", row }) },
     archive: m.archive.visible
-      ? { label: "Move to archive", icon: "archive", disabled: !m.archive.enabled, hint: hint(m.archive.enabled, m.archive.reason), action: () => { void perform(row, { kind: "archive" }); } }
+      ? { label: "Move to archive", icon: "archive", disabled: !m.archive.enabled, hint: hint(m.archive.enabled, m.archive.reason), action: () => { void perform(row, { kind: "archive" }).then(refreshArchiveWhenDone); } }
       : undefined,
     end: {
       label: m.end.label, icon: m.end.label === "Terminate session…" ? "circle-stop" : "trash", danger: true, disabled: !m.end.enabled, hint: hint(m.end.enabled, m.end.reason),
@@ -136,7 +143,8 @@ function RenameDialog(props: { row: ActionRow; close: () => void }) {
     const tag = value();
     if (tag === oldTag || renameProblem(tag, props.row, listedRows())) return;
     props.close();
-    void perform(props.row, { kind: "rename", new_name: prefix + tag, archive_id: props.row.archiveId ?? null });
+    cancelRestoreFollow();
+    void perform(props.row, { kind: "rename", new_name: prefix + tag, archive_id: props.row.archiveId ?? null }).then(refreshArchiveWhenDone);
   };
   return (
     <form onSubmit={submit}>
@@ -175,8 +183,13 @@ function TerminateDialog(props: { row: ActionRow; close: () => void }) {
   );
 }
 
+/**
+ * Forget saved session or Forget archived session (Qt terminateSession): the
+ * confirm button acts only on the instance the dialog named.
+ */
 function ForgetDialog(props: { row: ActionRow; bound: ForgetScope; close: () => void }) {
-  const copy = forgetCopy(props.row, props.bound.binding);
+  const archived = props.row.state === "archived";
+  const copy = archived ? forgetArchivedCopy(props.row) : forgetCopy(props.row, props.bound.binding);
   return (
     <>
       <div class="dlg-head"><Icon name="triangle-alert" size={18} class="accent" /><h2 id="action-dlg-title">{copy.title}</h2></div>
@@ -187,7 +200,7 @@ function ForgetDialog(props: { row: ActionRow; bound: ForgetScope; close: () => 
       <div class="dlg-foot">
         <span class="spacer" />
         <button type="button" class="btn primary" data-initial autofocus onClick={props.close}>Cancel</button>
-        <button type="button" class="btn solid-danger" onClick={() => { props.close(); void forget(props.row, props.bound); }}>{copy.confirm}</button>
+        <button type="button" class="btn solid-danger" onClick={() => { props.close(); void (archived ? forgetArchived(props.row) : forget(props.row, props.bound)); }}>{copy.confirm}</button>
       </div>
     </>
   );

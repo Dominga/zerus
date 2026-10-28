@@ -103,10 +103,10 @@ export interface MenuOptions {
    * is off, and the header's change entry reads Updating….
    */
   batchRunning?: boolean;
+  /** An archived row's name is taken by a live row of its computer (Qt's archiveNameOccupied): no Restore. */
+  occupied?: boolean;
 }
 
-export const FORGET_ARCHIVE_LATER = "Forgetting archived sessions arrives in a later version.";
-export const RESTORE_LATER = "Restoring sessions arrives in a later version.";
 const NO_REASON = "This native adapter does not support this action in the current session state.";
 const WORKING = ["working", "tool", "compacting"];
 
@@ -135,14 +135,17 @@ export function menuState(s: ActionRow, online: boolean, updating: boolean, deta
   const idle = s.activity === "idle" || !!details?.auth_required;
   const canPause = running && s.resumable && idle && s.processState !== "exited"
     && (!details || details.expected_id === "" || details.resume_message_can_send);
-  const change = !archived && available
-    && ((canPause && allowedOp(s, "pause", details)) || (!running && s.resumable && allowedOp(s, "resume", details)));
+  // Restore (Qt canChange 5302-5304): the context menu also needs allowed(restore)
+  // (5360-5361); the header's m_changeAction does not read it (3897-3898).
+  const change = archived
+    ? available && s.resumable && !!s.archiveId && !options.occupied && (!options.context || allowedOp(s, "restore"))
+    : available && ((canPause && allowedOp(s, "pause", details)) || (!running && s.resumable && allowedOp(s, "resume", details)));
   const [agent, project] = s.name.split("/", 2);
 
   const end: MenuState["end"] = terminates(s, details)
     ? { label: "Terminate session…", enabled: available && allowedOp(s, "terminate", details), reason: allowedOp(s, "terminate", details) ? undefined : reasonFor(s, "terminate", details) }
     : archived
-      ? { label: "Forget archived session…", enabled: false, reason: FORGET_ARCHIVE_LATER }
+      ? { label: "Forget archived session…", enabled: available && allowedOp(s, "forget", details) && !!s.archiveId, reason: allowedOp(s, "forget", details) ? undefined : reasonFor(s, "forget", details) }
       : { label: "Forget saved session…", enabled: available && allowedOp(s, "forget", details), reason: allowedOp(s, "forget", details) ? undefined : reasonFor(s, "forget", details) };
 
   // Stop follows the inspected turn (Qt's m_details); without details it stays off.
@@ -160,7 +163,7 @@ export function menuState(s: ActionRow, online: boolean, updating: boolean, deta
     change: {
       label: updating || (options.batchRunning && !options.context) ? "Updating…" : archived ? "Restore session" : running ? "Pause session" : "Resume session",
       enabled: change,
-      reason: archived ? RESTORE_LATER : undefined,
+      reason: undefined,
     },
     rename: allowedOp(s, "rename", details) && available && !!agent && !!project && (!archived || !!s.archiveId),
     archive: {
@@ -204,6 +207,46 @@ export function forgetCopy(s: Pick<ActionRow, "name" | "machine">, binding: bool
     detail: `Computer: ${s.machine}`,
     confirm: "Forget saved session",
   };
+}
+
+/** The Forget archived session confirmation (terminateSession, 5771-5774 and 5788-5789): one archived instance only. */
+export function forgetArchivedCopy(s: Pick<ActionRow, "name" | "machine">): { title: string; text: string; detail: string; confirm: string } {
+  return {
+    title: "Forget archived session?",
+    text: `Remove this archived instance of ${s.name} from HGS? Other sessions with this name and the agent\u2019s native conversation history are kept.`,
+    detail: `Computer: ${s.machine}`,
+    confirm: "Forget archived session",
+  };
+}
+
+/** The fields a name check reads from a row. */
+type Named = Pick<Session, "computer" | "name">;
+type Listed = Named & Pick<Session, "state">;
+
+/** A session's computer and name, the key Qt's restores and archiveNameOccupied compare. */
+export const nameKey = (s: Named) => `${s.computer}\n${s.name}`;
+
+/**
+ * Qt's archiveNameOccupied (SessionsWindow.cpp 3148-3154): a live (not
+ * archived) row of the same computer has the archived row's name. One scan of
+ * `rows`; a check of many rows builds `liveNameIndex` once instead.
+ */
+export function archiveNameOccupied(s: Named, rows: Readonly<Record<string, Listed | undefined>>): boolean {
+  for (const id in rows) {
+    const r = rows[id];
+    if (r && r.state !== "archived" && r.computer === s.computer && r.name === s.name) return true;
+  }
+  return false;
+}
+
+/** The `nameKey` of every live row, for archiveNameOccupied over many rows: `index.has(nameKey(s))`. */
+export function liveNameIndex(rows: Readonly<Record<string, Listed | undefined>>): Set<string> {
+  const index = new Set<string>();
+  for (const id in rows) {
+    const r = rows[id];
+    if (r && r.state !== "archived") index.add(nameKey(r));
+  }
+  return index;
 }
 
 /** The fixed part of a name (agent and project, with the slash after them) and the tag the rename dialog edits. */

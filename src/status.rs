@@ -289,11 +289,11 @@ mod tests {
     #[test]
     fn a_refused_private_store_is_shown_with_its_fix() {
         let machine = json!({"host":"arch","ok":true,"hgs_version":"1.2.3","sessions":{},"services":{},
-            "private_stores":[{"path":"/home/u/.local/state/hgs/sessions/read-marks.json","reason":"it is owned by uid 0",
-                "fix":"sudo chown \"$USER\" '/home/u/.local/state/hgs/sessions/read-marks.json' && chmod 600 '/home/u/.local/state/hgs/sessions/read-marks.json'"}]});
+            "private_stores":[{"path":"/home/user/.local/state/hgs/sessions/read-marks.json","reason":"it is owned by uid 0",
+                "fix":"sudo chown \"$USER\" '/home/user/.local/state/hgs/sessions/read-marks.json' && chmod 600 '/home/user/.local/state/hgs/sessions/read-marks.json'"}]});
         let text = render(&machine, true);
-        assert!(text.ends_with("  Private store refused: /home/u/.local/state/hgs/sessions/read-marks.json (it is owned by uid 0)\n    \
-            Fix: sudo chown \"$USER\" '/home/u/.local/state/hgs/sessions/read-marks.json' && chmod 600 '/home/u/.local/state/hgs/sessions/read-marks.json'\n"), "{text}");
+        assert!(text.ends_with("  Private store refused: /home/user/.local/state/hgs/sessions/read-marks.json (it is owned by uid 0)\n    \
+            Fix: sudo chown \"$USER\" '/home/user/.local/state/hgs/sessions/read-marks.json' && chmod 600 '/home/user/.local/state/hgs/sessions/read-marks.json'\n"), "{text}");
         let quiet = json!({"host":"arch","ok":true,"hgs_version":"1.2.3","sessions":{},"services":{},"private_stores":[]});
         assert!(!render(&quiet, true).contains("Private store"));
     }

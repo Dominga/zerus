@@ -913,9 +913,9 @@ mod tests {
 
     #[test]
     fn a_claude_designer_is_trusted_for_its_folder_and_gets_the_narrow_rules() {
-        let folder = "C:\\Users\\owner\\.local/state\\hgs/sessions\\team-designer";
+        let folder = "C:\\Users\\example\\.local/state\\hgs/sessions\\team-designer";
         // N19: Claude files a Windows project under forward slashes.
-        let key = if cfg!(windows) { "C:/Users/owner/.local/state/hgs/sessions/team-designer" } else { folder };
+        let key = if cfg!(windows) { "C:/Users/example/.local/state/hgs/sessions/team-designer" } else { folder };
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join(".claude.json");
         fs::write(&config, json!({

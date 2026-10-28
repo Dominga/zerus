@@ -1202,9 +1202,9 @@ mod permission_tests {
     #[test]
     fn claude_project_keys_use_forward_slashes_on_windows() {
         // N19: as Claude writes them; the mixed form was another project.
-        let mixed = "C:\\Users\\owner\\.local/state\\hgs/sessions\\team-designer";
-        assert_eq!(claude::project_key(mixed, true), "C:/Users/owner/.local/state/hgs/sessions/team-designer");
-        assert_eq!(claude::project_key("/home/owner/a\\b", false), "/home/owner/a\\b");
+        let mixed = "C:\\Users\\example\\.local/state\\hgs/sessions\\team-designer";
+        assert_eq!(claude::project_key(mixed, true), "C:/Users/example/.local/state/hgs/sessions/team-designer");
+        assert_eq!(claude::project_key("/home/example/a\\b", false), "/home/example/a\\b");
     }
     #[test]
     fn auto_mode_is_claude_only() {

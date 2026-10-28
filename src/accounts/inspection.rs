@@ -483,10 +483,10 @@ fn kimi(home: &Path) -> Value {
     }
     result
 }
-fn dsh(home: &Path) -> Value {
+pub(super) fn dsh(home: &Path) -> Value {
     let fallback =
         json!({"identity":{},"windows":[],"source":"DeepSeek Harness","status":"unavailable"});
-    // Without a running native UI only the API key and its balance are read.
+    // Without a running native UI only the API key, its balance and public models are read.
     let url = crate::state::dsh::account_ui_url(home).ok();
     let mut cmd = Command::new("node");
     cmd.args([

@@ -64,6 +64,36 @@ pub(crate) fn account_ui_url(home: &Path) -> Result<String> {
         .map(|m| m.as_str().to_owned())
         .ok_or_else(|| "Native DeepSeek UI is unavailable.".into())
 }
+fn catalog_models(catalog: &Value) -> Vec<Value> {
+    catalog["groups"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|group| {
+            group["models"].as_array().into_iter().flatten().map(|model| {
+                json!({
+                    "id":format!("{}/{}",string(group,"id"),string(model,"id")),
+                    "label":format!("{} ({})",string(model,"name"),string(group,"name")),
+                    "effort_options":model["reasoning"]["efforts"].as_array().into_iter().flatten().map(|effort|effort["id"].clone()).collect::<Vec<_>>(),
+                    "default_effort":model["reasoning"]["defaultEffort"].clone(),
+                })
+            })
+        })
+        .collect()
+}
+/// The native account's model catalog through its resident host, never a host start.
+pub(crate) fn account_models(home: &Path) -> Value {
+    let record = json!({"agent_home":home});
+    match rpc(&record, "catalog", json!({})) {
+        Ok(catalog) => {
+            let mut models = catalog_models(&catalog);
+            let truncated = models.len() > 64;
+            models.truncate(64);
+            json!({"models":models,"truncated":truncated})
+        }
+        Err(error) => json!({"models":[],"truncated":false,"reason":error}),
+    }
+}
 /// H3: the host serving a member's dsh session: its pid and when it started
 /// (the pid file's time), for team status. Read only.
 pub(crate) fn host_of(name: &str) -> Option<Value> {
@@ -1413,7 +1443,7 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
             string(&result, "model_provider"),
             string(&result, "model")
         ));
-        result["model_options"]=json!(catalog["groups"].as_array().into_iter().flatten().flat_map(|g|g["models"].as_array().into_iter().flatten().map(|m|json!({"id":format!("{}/{}",string(g,"id"),string(m,"id")),"label":format!("{} ({})",string(m,"name"),string(g,"name")),"effort_options":m["reasoning"]["efforts"].as_array().into_iter().flatten().map(|e|e["id"].clone()).collect::<Vec<_>>()}))).collect::<Vec<_>>());
+        result["model_options"] = json!(catalog_models(&catalog));
     }
     if agent_id.is_none() { notifications::enrich(&mut result, notifications::load().as_ref(), journal::journal_name(&record)); }
     Ok(result)
@@ -2022,6 +2052,26 @@ mod windows_tests {
         let value: Value = serde_json::from_str(&response).unwrap();
         assert_eq!(value["value"]["method"], "ping");
         assert!(node.wait().unwrap().success());
+    }
+}
+
+#[cfg(test)]
+mod account_model_tests {
+    use super::*;
+
+    #[test]
+    fn native_catalog_projects_provider_models_and_efforts() {
+        let catalog = json!({"groups":[{"id":"deepseek","name":"DeepSeek","models":[
+            {"id":"chat","name":"Chat","reasoning":{"defaultEffort":"medium","efforts":[{"id":"low"},{"id":"medium"},{"id":"high"}]}},
+            {"id":"reasoner","name":"Reasoner","reasoning":{"defaultEffort":"high","efforts":[{"id":"high"}]}}
+        ]}]});
+        let models = catalog_models(&catalog);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["id"], "deepseek/chat");
+        assert_eq!(models[0]["label"], "Chat (DeepSeek)");
+        assert_eq!(models[0]["effort_options"], json!(["low", "medium", "high"]));
+        assert_eq!(models[0]["default_effort"], "medium");
+        assert_eq!(models[1]["id"], "deepseek/reasoner");
     }
 }
 

@@ -1133,6 +1133,13 @@ answered; a denial cannot carry an explanation.
   That changes the notification semantics and the mobile contract, so it waits
   for the owner's direction.
 
+- **U44. Agent teams on the phone (found in #535).** Android has no agent-team
+  view, and the mobile relay and connector carry no team status. Phase 42 adds
+  only the Kotlin model and presentation of the pipeline stages, checked
+  against the shared fixture. A team view on the phone (the graph or board, the
+  lead's inbox, the stage chips) needs a team status API through the connector
+  and relay first; it is a feature of its own for the owner to plan.
+
 ## Phases 37-40 (replanned 2026-10-27)
 
 Phase 36 closed without its own build: its review findings and the build go to

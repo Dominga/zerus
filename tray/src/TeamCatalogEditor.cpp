@@ -960,10 +960,10 @@ QWidget *TeamCatalogEditor::roleEditor(int index)
     auto *agent = choice(agentItems, r.agent, "teamRoleAgent");
     auto *account = new QComboBox; account->setObjectName("teamRoleAccount"); fillAccounts(account, r);
     m_accountChoice = account; m_accountRole = index;
-    // Suggestions only: any model the agent's command line knows.
+    // Native account models replace the offline suggestions when they arrive.
     auto *model = new QComboBox; model->setObjectName("teamRoleModel"); model->setEditable(true); model->setInsertPolicy(QComboBox::NoInsert);
-    model->addItems(Teams::knownModels(r.agent)); model->setCurrentText(r.model); model->lineEdit()->setPlaceholderText(tr("default model"));
-    model->setEnabled(r.agent != "dsh");
+    fillModels(model, r); model->lineEdit()->setPlaceholderText(tr("default model"));
+    m_modelChoice = model; m_modelRole = index; requestModels(r);
     auto *effort = choice({{"", "—"}, {"low", "low"}, {"medium", "medium"}, {"high", "high"}, {"xhigh", "xhigh"}}, r.effort, "teamRoleEffort");
     for (auto *combo : {agent, account, model, effort}) combo->setMinimumWidth(60);
     agentRow->addWidget(logo); agentRow->addWidget(agent, 11); agentRow->addWidget(account, 10); agentRow->addWidget(model, 11); agentRow->addWidget(effort, 7);
@@ -973,7 +973,10 @@ QWidget *TeamCatalogEditor::roleEditor(int index)
         role.agent = value; role.account.clear(); role.model = Teams::knownModels(value).value(0);
         changed(); rebuildEditor();
     });
-    connect(account, &QComboBox::activated, this, set([this, index, account] { m_catalog.roles[index].account = account->currentData().toString(); }));
+    connect(account, &QComboBox::activated, this, [this, index, account, model] {
+        auto &role = m_catalog.roles[index]; role.account = account->currentData().toString(); changed();
+        fillModels(model, role); requestModels(role);
+    });
     const auto modelChanged = [this, index, model] {
         const auto text = model->currentText().trimmed(); if (text == m_catalog.roles[index].model) return;
         m_catalog.roles[index].model = text; changed();
@@ -1749,7 +1752,16 @@ void TeamCatalogEditor::setSources(HgsClient *client, const QList<Computer> &com
     m_computers = computers;
     if (client && client != m_client) {
         m_client = client;
-        connect(m_client, &HgsClient::accountsReady, this, [this](quint64, const QString &host, const QJsonObject &result) {
+        m_modelCatalogs.clear(); m_modelPending.clear(); m_modelRequests.clear();
+        connect(m_client, &HgsClient::accountsReady, this, [this](quint64 request, const QString &host, const QJsonObject &result) {
+            if (m_modelRequests.contains(request)) {
+                const QString key = m_modelRequests.take(request); m_modelPending.remove(key);
+                m_modelCatalogs.insert(key, result.value("models").toArray());
+                if (m_modelChoice && m_modelRole >= 0 && m_modelRole < m_catalog.roles.size()
+                    && modelKey(m_catalog.roles[m_modelRole]) == key)
+                    fillModels(m_modelChoice, m_catalog.roles[m_modelRole]);
+                return;
+            }
             if (host != QString() && std::none_of(m_computers.cbegin(), m_computers.cend(), [&](const Computer &c) { return c.alias == host; })) return;
             QList<Account> list;
             for (const auto &value : result.value("profiles").toArray()) {
@@ -1759,6 +1771,9 @@ void TeamCatalogEditor::setSources(HgsClient *client, const QList<Computer> &com
             }
             m_accounts.insert(host, list);
             if (m_accountChoice && m_accountRole >= 0 && m_accountRole < m_catalog.roles.size()) fillAccounts(m_accountChoice, m_catalog.roles[m_accountRole]);
+        });
+        connect(m_client, &HgsClient::accountsFailed, this, [this](quint64 request, const QString &, const QString &) {
+            const QString key = m_modelRequests.take(request); m_modelPending.remove(key);
         });
     }
     if (!m_client) return;
@@ -1776,4 +1791,36 @@ void TeamCatalogEditor::fillAccounts(QComboBox *box, const Teams::Role &role) co
     // An account this computer did not report (yet) stays as written.
     if (!role.account.isEmpty() && box->findData(role.account) < 0) box->addItem(role.account, role.account);
     box->setCurrentIndex(qMax(0, box->findData(role.account)));
+}
+
+QString TeamCatalogEditor::modelKey(const Teams::Role &role) const
+{
+    const QString agent = role.agent.isEmpty() ? QStringLiteral("claude") : role.agent;
+    return role.computer + QLatin1Char('\n') + (role.account.isEmpty() ? QStringLiteral("native-") + agent : role.account);
+}
+
+void TeamCatalogEditor::fillModels(QComboBox *box, const Teams::Role &role) const
+{
+    const QSignalBlocker blocker(box);
+    box->clear();
+    const auto models = m_modelCatalogs.value(modelKey(role));
+    if (models.isEmpty()) box->addItems(Teams::knownModels(role.agent));
+    for (const auto &value : models) {
+        const QString id = value.toObject().value("id").toString();
+        if (!id.isEmpty() && box->findText(id) < 0) box->addItem(id, id);
+    }
+    if (!role.model.isEmpty() && box->findText(role.model) < 0) box->addItem(role.model, role.model);
+    box->setCurrentText(role.model);
+}
+
+void TeamCatalogEditor::requestModels(const Teams::Role &role)
+{
+    const QString agent = role.agent.isEmpty() ? QStringLiteral("claude") : role.agent;
+    if (!m_client || !QStringList{"claude", "codex", "kimi", "dsh"}.contains(agent)) return;
+    const QString key = modelKey(role);
+    if (m_modelCatalogs.contains(key) || m_modelPending.contains(key)) return;
+    const QString account = key.section(QLatin1Char('\n'), 1);
+    m_modelPending.insert(key);
+    const quint64 request = m_client->requestAccounts(role.computer, {"model-settings", account, "--json"});
+    m_modelRequests.insert(request, key);
 }

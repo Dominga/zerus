@@ -11,7 +11,7 @@ import { detailsFor, followedFor } from "../../store/actions";
 import { grouping, headerOf, moveProject, setProjectCollapsed, setProjectToShow, sortProject } from "../../store/organization";
 import { actionEntries, copyEntries } from "./ActionDialogs";
 import { moveEntry, openDeleteProjectDialog, openRenameProjectDialog } from "./OrganizationDialogs";
-import { headerEntries, projectColor } from "./organization-ui";
+import { chipColor, headerEntries, projectColor, type FilterChip } from "./organization-ui";
 import {
   selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
   setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
@@ -199,22 +199,17 @@ function ScopeButton(props: { icon: string; label: string; selected: string[]; s
 }
 
 function FilterChips() {
-  const chips = () => [
+  const chips = (): FilterChip[] => [
     ...machineFilter().map((m) => ({ id: m, label: m, kind: "m" as const })),
     ...projectFilter().map((p) => ({ id: p, label: headerOf(p)?.name ?? p, kind: "p" as const })),
   ];
-  // A project chip matches its header band; a machine chip, or a project no longer listed, takes its name's slot.
-  const chipColor = (c: { id: string; label: string; kind: "m" | "p" }) => {
-    const h = c.kind === "p" ? headerOf(c.id) : undefined;
-    return h ? projectColor(h) : `var(--z-entity-palette-${paletteIndex(c.label)})`;
-  };
-  const remove = (c: { id: string; kind: "m" | "p" }) =>
+  const remove = (c: FilterChip) =>
     c.kind === "m" ? setMachineFilter(machineFilter().filter((x) => x !== c.id)) : setProjectFilter(projectFilter().filter((x) => x !== c.id));
   return (
     <Show when={chips().length}>
       <div class="filter-chips">
         <For each={chips()}>{(c) => (
-          <button class="fchip-sel entity" style={{ "--entity": chipColor(c) }} title="Remove filter" onClick={() => remove(c)}>
+          <button class="fchip-sel entity" style={{ "--entity": chipColor(c, headerOf, paletteIndex) }} title="Remove filter" onClick={() => remove(c)}>
             <span class="ell">{c.label}</span><Icon name="x" size={11} />
           </button>
         )}</For>

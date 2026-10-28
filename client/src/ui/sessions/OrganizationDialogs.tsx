@@ -3,7 +3,7 @@ import { Icon } from "../lib/icons";
 import * as organization from "../../store/organization";
 import type { MenuEntry } from "../../store/ui";
 import type { Session } from "./types";
-import { NAME_CHARS, createOrgDialogs, deleteText, nameProblem, projectColor, type OrgDialog } from "./organization-ui";
+import { createOrgDialogs, deleteText, nameProblem, projectColor, type OrgDialog } from "./organization-ui";
 
 // The organization dialogs: Move to project (also for a selection), New
 // project, Rename project and Delete project, in one modal host as
@@ -25,7 +25,7 @@ function MoveDialog(props: { rows: Session[] }) {
       <div class="dlg-head"><Icon name="folder" size={18} class="accent" /><h2 id="org-dlg-title">Move to project</h2></div>
       <div class="dlg-body col" style={{ gap: "4px" }}>
         <For each={dialogs.moveChoicesFor(props.rows)}>{(p) => (
-          <button type="button" class="menu-item entity" data-initial={p.current ? "" : undefined} style={{ "--entity": projectColor(p) }}
+          <button type="button" class="menu-item entity" style={{ "--entity": projectColor(p) }}
             aria-pressed={p.current} onClick={() => dialogs.choose(p.id)}>
             <Icon name="folder" size={14} /><span class="ell">{p.name}</span>
             <Show when={p.current}><span class="grow" /><Icon name="check" size={14} /></Show>
@@ -34,7 +34,7 @@ function MoveDialog(props: { rows: Session[] }) {
         <div class="menu-sep" />
         <button type="button" class="menu-item" onClick={dialogs.newProject}><Icon name="plus" size={14} />New project…</button>
       </div>
-      <div class="dlg-foot"><span class="spacer" /><button type="button" class="btn" onClick={close}>Cancel</button></div>
+      <div class="dlg-foot"><span class="spacer" /><button type="button" class="btn" data-initial onClick={close}>Cancel</button></div>
     </>
   );
 }
@@ -47,7 +47,7 @@ function NameDialog(props: { title: string; initial: string }) {
       <div class="dlg-head"><Icon name="folder" size={18} class="accent" /><h2 id="org-dlg-title">{props.title}</h2></div>
       <div class="dlg-body">
         <label class="dlg-label" for="org-name">Project name</label>
-        <input id="org-name" data-initial class="dlg-input" maxLength={NAME_CHARS} value={value()} onInput={(e) => setValue(e.currentTarget.value)} />
+        <input id="org-name" data-initial class="dlg-input" value={value()} onInput={(e) => setValue(e.currentTarget.value)} />
       </div>
       <div class="dlg-foot">
         <span class="spacer" />
@@ -80,8 +80,10 @@ function DeleteDialog(props: Extract<OrgDialog, { kind: "delete" }>) {
 
 /**
  * One modal host. In one code path it opens the modal, then focuses the
- * dialog's initial control: the current project, the name with its text
- * selected, or Cancel. Escape closes through the dialog's own cancel.
+ * dialog's initial control: the name with its text selected, or Cancel. In
+ * Move to project the check mark shows the current project, and Cancel takes
+ * the focus, so a repeated Enter never moves the rows within their own project.
+ * Escape closes through the dialog's own cancel.
  */
 export function OrganizationDialogs() {
   let el: HTMLDialogElement | undefined;
@@ -91,7 +93,7 @@ export function OrganizationDialogs() {
     if (!state) { if (el.open) el.close(); return; }
     if (!el.open) el.showModal();
     queueMicrotask(() => {
-      const initial = el?.querySelector<HTMLElement>("[data-initial]") ?? el?.querySelector<HTMLElement>(".menu-item");
+      const initial = el?.querySelector<HTMLElement>("[data-initial]");
       initial?.focus();
       if (initial instanceof HTMLInputElement) initial.select();
     });

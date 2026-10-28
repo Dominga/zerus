@@ -85,9 +85,24 @@ export function moveChoices(g: GroupingOut, current: readonly string[]): (Header
 }
 
 export const projectColor = (h: Pick<HeaderOut, "color" | "palette">) => h.color ?? `var(--z-entity-palette-${h.palette})`;
-/** SessionOrganization keeps the first 80 characters of a name (SessionOrganization.cpp:135, 150). */
-export const NAME_CHARS = 80;
-/** createGroup and renameGroup ignore a blank name (SessionOrganization.cpp:135-136, 149). */
+
+/** A Sessions list filter chip: a machine, or a project by its id. */
+export interface FilterChip { id: string; label: string; kind: "m" | "p" }
+/**
+ * A project chip matches its header band; a machine chip, or a project no
+ * longer listed, takes its name's palette slot (`slot`, SessionCard's paletteIndex).
+ */
+export function chipColor(c: FilterChip, headerOf: (project: string) => Pick<HeaderOut, "color" | "palette"> | undefined,
+                          slot: (name: string) => number): string {
+  const h = c.kind === "p" ? headerOf(c.id) : undefined;
+  return h ? projectColor(h) : `var(--z-entity-palette-${slot(c.label)})`;
+}
+
+/**
+ * createGroup and renameGroup ignore a blank name (SessionOrganization.cpp:135-136, 149).
+ * Qt's name dialogs set no length limit (QInputDialog::getText, SessionsWindow.cpp:2561,
+ * 2585); the core trims a name and keeps 80 characters (`swarm::edit::clean_name`).
+ */
 export const nameProblem = (name: string) => (name.trim() ? undefined : "Enter a project name.");
 export const deleteText = (name: string) =>
   `Delete “${name}”? Choose the project that will receive its sessions. Files and running agents stay in place.`;

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  NAME_CHARS, createOrgDialogs, deleteTargets, deleteText, editEntry, headerEntries, headerMenuState, moveChoices, nameProblem, projectColor,
+  chipColor, createOrgDialogs, deleteTargets, deleteText, editEntry, headerEntries, headerMenuState, moveChoices, nameProblem, projectColor,
   type HeaderActions, type OrgStore,
 } from "./organization-ui";
 import type { EditOutcome, GroupingOut } from "../../types";
@@ -49,6 +49,16 @@ describe("project menu rules", () => {
     expect(projectColor({ color: null, palette: 4 })).toBe("var(--z-entity-palette-4)");
     expect(nameProblem("  ")).toBe("Enter a project name.");
     expect(nameProblem(" Release ")).toBeUndefined();
+  });
+
+  it("colours a project chip as its header band, and a machine chip or an unlisted project by its name's slot", () => {
+    const bands: Record<string, { color: string | null; palette: number }> = { alpha: { color: "#3fb950", palette: 1 }, beta: { color: null, palette: 4 } };
+    const headerOf = (id: string) => bands[id];
+    const slot = (name: string) => (name === "alpha" ? 6 : 7);
+    expect(chipColor({ id: "alpha", label: "Alpha", kind: "p" }, headerOf, slot)).toBe("#3fb950");
+    expect(chipColor({ id: "beta", label: "beta", kind: "p" }, headerOf, slot)).toBe("var(--z-entity-palette-4)");
+    expect(chipColor({ id: "gone", label: "gone", kind: "p" }, headerOf, slot)).toBe("var(--z-entity-palette-7)");
+    expect(chipColor({ id: "alpha", label: "alpha", kind: "m" }, headerOf, slot)).toBe("var(--z-entity-palette-6)");
   });
 });
 
@@ -126,6 +136,10 @@ describe("the project header menu", () => {
     const single = headerEntries(g({ headers: [header("alpha")] }), "alpha", actions());
     expect([entry(single, "Delete project…").disabled, entry(single, "Delete project…").hint]).toEqual([true, undefined]);
     expect([entry(single, "Move project up").disabled, entry(single, "Move project down").disabled]).toEqual([true, true]);
+    // The last project gets no reason, also while sync waits (2614).
+    const lone = headerEntries(g({ headers: [header("alpha")], ready: false, reason: WAITING }), "alpha", actions());
+    expect([entry(lone, "Delete project…").disabled, entry(lone, "Delete project…").hint]).toEqual([true, undefined]);
+    expect(entry(lone, "Rename project…").hint).toBe(WAITING);
   });
 
   it("never separates values with dots or names a key in its texts", () => {
@@ -139,10 +153,6 @@ describe("edit entries and names", () => {
     expect(editEntry(g())).toEqual({ enabled: true });
     expect(editEntry(g({ ready: false, reason: WAITING }))).toEqual({ enabled: false, reason: WAITING });
     expect(editEntry(g({ ready: false, reason: null }))).toEqual({ enabled: false });
-  });
-
-  it("keeps 80 characters, as SessionOrganization stores them (SessionOrganization.cpp:135)", () => {
-    expect(NAME_CHARS).toBe(80);
   });
 
   it("wants a name that is not blank, as createGroup and renameGroup ignore one (135-136, 149)", () => {

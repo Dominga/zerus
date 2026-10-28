@@ -3059,7 +3059,7 @@ git commit -m "feat(client): menu-bar lifecycle, activation lines and quit on si
 ### Task 4: The menu-bar item on macOS (zerus-5wmh.44)
 
 The status item shows Qt's tile, which AppKit draws from pure geometry (`IconFactory::renderTile`, `IconFactory.cpp:114-159`), and Qt's menu.
-- **Clicks.** A primary click opens Zerus; the secondary click shows the menu (`QtTrayIcon.cpp:71-79`).
+- **Clicks.** A primary click opens Zerus; the secondary click shows the menu (`QtTrayIcon.cpp:12-20`).
 - **Session entries.** A running session opens in Terminal.app or is copied, per "Open in" (`MacBackend.cpp:27-36`, `ClipboardBackend.cpp:242-265`). A saved session opens the window on its row (`TrayAgent.cpp:214-216`).
 - **Notices.** The menu's notices go through `osascript display notification`, as Qt's `TrayAgent::notify` does on macOS (`TrayAgent.cpp:796-830`).
 - **Dock badge.** The Dock tile shows the attention count, as Qt's `MacApplicationBadge` does (spec row 291; no bead names it).
@@ -3856,7 +3856,7 @@ Create `client/src-tauri/src/platform/macos_menubar.rs` and add `#[cfg(all(targe
 //! (`tray/src/QtTrayIcon.cpp`, `TrayMenu.cpp`). Updates go through
 //! [`Gate`]: only changes, and nothing while a menu is open (`QuietTrayIcon.h`).
 //! A primary click opens Zerus; the secondary click opens the menu
-//! (`QtTrayIcon.cpp:71-79`).
+//! (`QtTrayIcon.cpp:12-20`).
 use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4405,6 +4405,13 @@ The client decides what to notify, withdraw and open exactly as Qt does. Qt's pa
 | A click opens the session by conversation and agent (replies, questions), by run, or by name and creation time; archived rows never match; otherwise "This session is no longer available: NAME" after a current listing or 16 s | `AttentionTracker.cpp:314-322`, `TrayAgent.cpp:176-193`, `:593-608` |
 | Delivery: one authorization check at a time, request it when not determined (alert and sound), "Allow Zerus notifications in System Settings → Notifications." when denied, a late add for a withdrawn token is removed | `MacAttentionNotifier.mm:51-114` |
 | Shared notification preferences are validated strictly before they mute or suppress | `SessionNotifications.h:43-80` |
+
+**Device marks in the menu bar's counts (coordinator, 2026-10-28; Task 4 review).** Task 1's `needs_attention` reads host values only, so the tile's attention count, the Dock badge and the tooltip ignore this device's marks. They must apply them the way `FleetState::updateUnread` and `attentionSessions` do, from the Rust `AttentionMarks` (`client/core/src/marks.rs`), so the counts are right while the window is closed and no webview runs `store/marks.ts`:
+- **Review later** counts while not archived and not muted, also for a peer past the stale limit, which counts nothing else (`FleetState.cpp:141`, `:421-435`, `HgsClient.h:107-108`).
+- **Local acknowledgement**: a mark whose `acknowledged` equals the row's `attention_fingerprint` acknowledges its attention on a host without shared read state, and for recovery-only attention without a host signature (`FleetState.cpp:142`, `:147`, `:160-161`).
+- **Read replies and pending read marks**: a host without shared read state keeps the device's read reply per reply key; a queued read mark of the same run and conversation reads the reply or the attention until the host shows it (`FleetState.cpp:143-161`); `visibleUnreadReply` waits while a reply is in progress (`HgsClient.h:104-106`).
+
+Task 5 ports these rules into the core as a pure overlay beside `menubar::needs_attention`. The Rust tests and `store/marks.ts`' tests read one shared JSON fixture, so the two overlays cannot drift. Task 6 wires it (below).
 
 **Files:**
 - Modify: `client/core/src/view.rs` (extend `NotifyFacts`, add `ChildFacts` and `Preferences`, fill them in `row()`)
@@ -5799,6 +5806,7 @@ The client posts Qt's attention notifications under the app's identity. That is 
 - **Focus.** Window focus is the foreground test (`AttentionTracker.cpp:80-84`).
 - **Who posts.** Only the switch identity posts, unless `ZERUS_CLIENT_NOTIFICATIONS=1` is set (Decision 7).
 - **Seeding.** The tracker is seeded from Qt's `attention.observed` the first time (Decision 11).
+- **Device marks.** The desk reads `AttentionMarks` (`client/core/src/marks.rs`) and applies Task 5's overlay to its attention count, Dock badge and tooltip. It gets an input whenever the marks or the pending read marks change: `update_attention_marks`, `queue_read_marks`, and the read-mark worker when a mark settles. It then offers the status item again, so the counts follow a click in the window and are right while the window is closed.
 
 **Files:**
 - Modify: `client/src-tauri/src/identity.rs` (`notifications`)
@@ -5893,7 +5901,7 @@ In `impl Identity` of `client/src-tauri/src/identity.rs`:
 
 - [ ] **Step 3: Extend the desk thread**
 
-In `client/src-tauri/src/desk.rs`, remove the two `#[allow(dead_code)]` lines Task 4 put on `Pending::notice` and `window_notice`; the run loop below calls them. Then:
+In `client/src-tauri/src/desk.rs`, remove the `#[allow(dead_code)]` Task 4 put on `window_notice`; the run loop below calls it. Then:
 - add the imports `std::collections::{BTreeMap, BTreeSet}`, `std::sync::atomic::{AtomicBool, Ordering}`, `std::sync::Arc`, `std::sync::mpsc::RecvTimeoutError`, `std::time::{Instant, SystemTime, UNIX_EPOCH}`, `serde_json::{Map, Value}` and `zerus_client_core::attention::{self, Changes, Host, Resolution, Tracker, CLICK_WAIT}`;
 - extend `DeskInput`, `DeskState` and `start`;
 - replace `run`;
@@ -5948,7 +5956,7 @@ pub fn start(app: &AppHandle, pump: &crate::pump::Pump, dir: PathBuf, mode: Open
         sender: Mutex::new(sender),
         mode: Mutex::new(mode),
         dir,
-        pending: Mutex::new(Pending::default()),
+        inbox: Mutex::new(Inbox::default()),
         focused: Arc::clone(&focused),
     });
     let handle = app.clone();
@@ -6016,6 +6024,10 @@ fn run(app: AppHandle, inputs: Receiver<DeskInput>, mut mode: OpenMode, mut atte
     let mut dirty: BTreeSet<ComputerId> = BTreeSet::new();
     let mut click: Option<(Map<String, Value>, Instant)> = None;
     let mut swept = Instant::now();
+    // The menu with Open Zerus and Quit before any change arrives, as Qt builds
+    // its menu at once (`TrayAgent.cpp:252-254`): tray-icon 0.25.1 shows no menu
+    // while it is empty, so a fleet that never starts would leave no Quit.
+    publish(&app, &desk, mode);
     loop {
         let wait = if click.is_some() { Duration::from_secs(1) } else { SWEEP };
         let first = match inputs.recv_timeout(wait) {
@@ -6034,6 +6046,8 @@ fn run(app: AppHandle, inputs: Receiver<DeskInput>, mut mode: OpenMode, mut atte
                 }
                 DeskInput::Mode(chosen) => {
                     mode = chosen;
+                    // Task 4: the desk thread saves the choice, off the main thread.
+                    store_mode(&app, chosen);
                     menu_changed = true;
                 }
                 DeskInput::Clicked(token) => {
@@ -8698,6 +8712,13 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    - **Defaults:** `defaults read dev.zerus.next` lists only Cocoa and WebKit keys (`NS…`, `Apple…`, `WebKit…`). Report the list; it shows what Cocoa or WebKit writes into a client's domain.
    - **Watchdog:** Terminal shows `main-thread watchdog on (30 s)`. Open the menu-bar menu and leave it open for 60 s, then close it: the app keeps running and no `main thread unresponsive` line appears (the heartbeat runs in the common run-loop modes).
    - **Ignored tile test:** if `the_tile_draws_amber_attention_and_the_stale_dot` was ignored over SSH, run it here with `--ignored`.
+   - **Menu-bar checks from the Task 4 review:**
+     - **A click after a rebuild.** Hold the menu open while a session appears above the target entry, then click the target: exactly that session opens, never a neighbour or Quit.
+     - **The Dock badge after a closed window.** Let attention arrive while the window is closed. Opening the window shows the Dock badge with the count, and the badge survives closing and reopening the window.
+     - **A fleet that cannot start.** Start with `ZERUS_CLIENT_HGS=/nonexistent/hgs`: a right-click still shows Open Zerus and Quit, and Quit works.
+     - **`&` in a name.** A session or computer name containing `&` shows a single `&` in the menu.
+     - **Other menus.** After using the app menu, a webview context menu and the Open in submenu, tile updates resume once each has closed.
+     - **A theme switch with the menu open.** Switch light and dark while the status item's menu is open: the tile redraws in the new colour once the menu closes.
    Quit the dev app from its menu.
 
    **Scroll measurement (zerus-5wmh.36), in the same window.** Two instances must never share the client's data folder, so start this only after the dev app has quit.

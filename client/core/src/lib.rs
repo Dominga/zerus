@@ -8,19 +8,26 @@
 //! and the "Event stream" section of `docs/reference.md`.
 
 pub mod actions;
+pub mod attachments;
 pub mod batch;
+pub mod cache;
 pub mod details;
+pub mod drafts;
 pub mod fleet;
 mod fsx;
 pub mod legacy;
 pub mod machine;
+pub mod marks;
 pub mod organization;
+pub mod process_view;
 pub mod processes;
 #[cfg(unix)]
 mod pty;
 pub mod readmarks;
 pub mod reads;
+pub mod readsync;
 pub mod run;
+pub mod send;
 pub mod shell;
 pub mod state;
 pub mod stream;
@@ -29,6 +36,7 @@ pub mod tasks;
 pub mod terminal;
 pub mod view;
 pub mod views;
+pub mod voice;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -45,7 +53,7 @@ pub use machine::{LocalHost, MachineMeta};
 pub use organization::{OrganizationSnapshot, OrganizationState, OrganizationUpdate};
 pub use processes::{ProcessesState, ProcessesUpdate};
 pub use reads::{Read, ReadError};
-pub use run::{run, run_limited, run_with_env, TooLarge};
+pub use run::{run, run_cancellable, run_limited, run_with_env, Stopped, TooLarge};
 pub use state::{ActivityState, CatalogState};
 pub use stream::{StreamEvent, StreamHandle, Timing};
 pub use swarm::grouping::{GroupOut, GroupingOut, HeaderOut, SyncView};

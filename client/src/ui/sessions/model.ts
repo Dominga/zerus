@@ -1,4 +1,5 @@
 import { createMemo } from "solid-js";
+import { archiveRows } from "../../store/archive";
 import { catalog, orderedRows } from "../../store/catalog";
 import { defaultProject, grouping, groups } from "../../store/organization";
 import { stateFilter, matchesFilter, search, machineFilter, projectFilter, expandedChildren, compactRows } from "../../store/ui";
@@ -111,7 +112,7 @@ export function groupRows(input: ListInput): Row[] {
 export const membersByGroup = createMemo(() => groupMembers(catalog.order, catalog.rows, groups, defaultProject()));
 
 export const listRows = createMemo<Row[]>(() => {
-  // The archive view returns its own flat rows here, ahead of the grouping.
+  if (stateFilter() === "archived") return archiveRows();
   const f = stateFilter();
   const q = search().trim();
   const hosts = machineFilter();

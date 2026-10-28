@@ -1,7 +1,8 @@
 import { batch, createEffect, createRoot, on } from "solid-js";
 import { activityPort } from "../bridge";
 import { applyBatch, onReplaced, orderedRows } from "./catalog";
-import { bindActivity, bindSelection, observeBatch } from "./actions";
+import { bindActivity, bindSelection } from "./actions";
+import { observeMarks } from "./marks";
 import { createActivity } from "./activity";
 import { applyGrouping } from "./organization";
 import { compactRows, page, selected, selectedKey, setCompactRows, setSelectedKey, subagentOpen } from "./ui";
@@ -24,7 +25,7 @@ export function receive(b: Batch) {
     applyBatch(b);
     applyGrouping(b);
   });
-  observeBatch(b);
+  observeMarks(b);
   if (b.activity.length) activity.applyActivity(b.activity);
 }
 

@@ -1,5 +1,6 @@
-//! The core's whole-file writes: the read marks ([`crate::readmarks`]) and
-//! the organization's pending edits ([`crate::swarm::draft`]).
+//! The core's whole-file writes: the read marks ([`crate::readmarks`]), the
+//! attention marks ([`crate::marks`]) and the organization's pending edits
+//! ([`crate::swarm::draft`]).
 use std::fs::{File, OpenOptions};
 use std::hash::{BuildHasher, Hasher};
 use std::io::{self, Write};
@@ -54,8 +55,8 @@ fn private_file(path: &Path) -> io::Result<(PathBuf, File)> {
 /// file or the new one, never a part of either; a failure keeps the old file
 /// and removes the temporary one. A missing folder is created. `durable`
 /// flushes the temporary file to disk before the rename, as Qt's `QSaveFile`
-/// commits its settings; the read marks skip it, since they are saved under
-/// their lock on the batch path.
+/// commits its settings; the read and attention marks skip it, as they did
+/// before this writer.
 pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8], durable: bool) -> io::Result<()> {
     if let Some(folder) = path
         .parent()

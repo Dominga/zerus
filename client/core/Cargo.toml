@@ -10,8 +10,11 @@ publish = false
 # Pure Rust and fast to test: no Tauri, no async runtime. The Tauri app in
 # client/src-tauri depends on this crate by path.
 [dependencies]
+base64 = "0.22"
+infer = { version = "0.22", default-features = false, features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 zerus-watch-protocol = { path = "../../crates/watch-protocol" }
 
 [target.'cfg(unix)'.dependencies]

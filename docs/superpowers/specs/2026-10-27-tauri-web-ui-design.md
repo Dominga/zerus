@@ -432,3 +432,18 @@ page built by `client/scripts/measure-report.py`):
 - Session open (median 98 ms on the Mac, 136 ms on arch) and input-to-frame
   latency (below one frame) do not block the next screens. Idle CPU on Linux is
   too high in the first build and is being fixed before the rerun.
+
+Owner decisions, 2026-10-28:
+
+- **Endless motion at idle: as in Qt** (the owner chose "As in Qt", the recommended option). Working
+  halos, count pulses, the mark's turn and typing dots stay on by default as
+  approved; Animate working sessions and Reduce motion turn them off, and they
+  pause while the window is hidden (PR #385). Revisit only if the real-display
+  idle measurement on arch shows a high cost.
+- **144 Hz on the NVIDIA arch desktop: not decided.** The owner asked for the
+  problem to be explained first. The real-display WebKitGTK experiment
+  (`zerus-5wmh.14`) stays armed, since its result feeds this decision.
+- The Mac rerun of 2026-10-28 (05:47-05:55 UTC) ran while the owner was working
+  at the Mac and is not used for the verdict. Real-display runs now start only in
+  a window the owner gives (Mac), or on arch when the session is unlocked, a
+  screen is on and the desktop has had no input for 2 minutes; input stops them.

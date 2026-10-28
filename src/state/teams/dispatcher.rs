@@ -3224,9 +3224,19 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::Brief => send_brief(store, &team.id),
         Step::AllDecided => send_all_decided(store, &team.id),
         Step::Permission { member } => sync_permission(store, team, member),
-        Step::ClearPermission { member } => change(store, &team.id, |team, _| {
+        // The owner (2026-10-28): a question the session no longer asks (you
+        // answered it on the desktop, or it went) closes in the team too: its
+        // record leaves the member's open question and the answer is kept as
+        // unknown, as sync_permission does (N5); it showed open for an hour.
+        Step::ClearPermission { member } => change(store, &team.id, |team, events| {
+            let role = team.role_of(member);
             if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
-                found.pending = None;
+                if let Some(pending) = found.pending.take() {
+                    let answer = permission_lost(&mut found.permission_answers, &pending.question_id, now());
+                    events.push(Event::new("permission_answered", json!({"member":role,
+                        "question_id":answer["question_id"],"decision":answer["decision"],"by":answer["by"]})));
+                }
+                found.permission = None;
             }
             Ok(())
         }),
@@ -5872,6 +5882,29 @@ mod tests {
         let seen = vec![session("claude/x/lead", "r0", true)];
         let late = steps(&t, &seen, 10.0 + timeout + 1.0);
         assert!(late.contains(&Step::NoReport { task: 1 }), "{late:?}");
+    }
+
+    #[test]
+    fn a_question_the_session_stopped_asking_closes_in_the_team() {
+        // The owner, 2026-10-28: the reviewer's question was answered on the
+        // desktop and stayed open in team status for an hour.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let pending = PendingQuestion { question_id: "q1".into(), question_hash: "h1".into(), approval: true, at: 1.0, card: json!({}) };
+        {
+            let dev = t.members.iter_mut().find(|m| m.id == "dev").unwrap();
+            dev.permission = Some(permission_record(&pending));
+            dev.pending = Some(pending);
+        }
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        run_step(&mut store, &t, &Step::ClearPermission { member: "dev".into() }, "").unwrap();
+        let after = store.load(&t.id).unwrap().unwrap();
+        let dev = after.members.iter().find(|m| m.id == "dev").unwrap();
+        assert!(dev.pending.is_none());
+        assert!(dev.permission.is_none(), "the closed question still shows");
+        assert_eq!(dev.permission_answers.last().unwrap()["decision"], "unknown");
     }
 
     /// N6: one NoReport step with a given `hgs inspect` record.

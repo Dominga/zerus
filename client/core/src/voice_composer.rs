@@ -187,7 +187,8 @@ pub enum Call {
 }
 
 /// A confirmation the view asks; its answer goes back with the ticket.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Ask {
     /// "Continue with a cold cache?" with the warning, "Send with full
     /// context" and Cancel (the default); answer [`VoiceComposer::send_confirmed`].

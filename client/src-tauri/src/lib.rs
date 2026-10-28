@@ -31,7 +31,9 @@ pub fn run() {
                 use tauri::Manager;
                 let dir = app.path().app_data_dir()?;
                 std::fs::create_dir_all(&dir)?;
-                app.manage(actions::Actions::new(dir.join("read-marks.json")));
+                // A replay never touches the real read marks.
+                let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
+                app.manage(actions::Actions::new(dir.join(actions::marks_file(replay))));
             }
             let display = display::display_name();
             if !display::headless_allowed(std::env::var("ZERUS_CLIENT_HEADLESS").is_ok_and(|v| v == "1"), display.as_deref()) {

@@ -1,6 +1,8 @@
 //! The inspect fields of the selected session that enable header actions
 //! (`m_details` in the Qt client). Adopted only when they name the row's run
-//! and conversation.
+//! and conversation. The followed session's Activity `state` value is the same
+//! inspection (`src/state/watch_source.rs`); the frontend reads these fields
+//! from it and runs this inspect only when no such value has arrived.
 use crate::actions::{prepend_alias, Exit, Invocation, Target};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,6 +18,13 @@ pub struct Details {
     pub resume_message_can_send: bool,
     pub allowed_actions: Option<Vec<String>>,
     pub action_reasons: BTreeMap<String, String>,
+    /// Stop is offered only when the host can interrupt this turn
+    /// (`interrupt::available`, `src/state/journal.rs`).
+    pub interrupt_supported: bool,
+    /// The turn an interrupt is pinned to; `hgs interrupt` compares it exactly.
+    pub turn_started: f64,
+    /// The inspected phase; Stop needs `working`, `tool` or `compacting`.
+    pub phase: String,
 }
 
 /// `hgs [@host] inspect NAME --after 0 --skip-processes [--archive ID]`, 5 s
@@ -93,6 +102,12 @@ pub fn parse_details(target: &Target, exit: Exit) -> Option<Details> {
         resume_message_can_send: flag(&value, "resume_message_can_send"),
         allowed_actions,
         action_reasons,
+        interrupt_supported: flag(&value, "interrupt_supported"),
+        turn_started: value
+            .get("turn_started")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        phase: text(&value, "phase"),
     })
 }
 
@@ -230,5 +245,30 @@ mod tests {
             d.action_reasons.get("resume").map(String::as_str),
             Some("busy")
         );
+        assert!(!d.interrupt_supported);
+        assert_eq!((d.turn_started, d.phase.as_str()), (0.0, ""));
+    }
+
+    #[test]
+    fn the_interrupt_fields_are_read() {
+        let t = Target {
+            computer: String::new(),
+            name: "claude/sample-project/review".into(),
+            run_id: "r".into(),
+            conversation_id: "c".into(),
+        };
+        let body = br#"{"run_id":"r","conversation_id":"c","phase":"tool","turn_started":1793000000.5,"interrupt_supported":true}"#;
+        let d = parse_details(
+            &t,
+            Exit::Code {
+                code: 0,
+                stdout: body.to_vec(),
+                stderr: String::new(),
+            },
+        )
+        .unwrap();
+        assert!(d.interrupt_supported);
+        assert_eq!(d.turn_started, 1793000000.5);
+        assert_eq!(d.phase, "tool");
     }
 }

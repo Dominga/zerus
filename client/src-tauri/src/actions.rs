@@ -2,8 +2,9 @@
 //! `pending_read_marks`. The commands run the `hgs` CLI through the core's
 //! `run`; this module owns the in-flight guard and the read-mark file.
 //!
-//! One action per session at a time, for every kind: Qt's `updating` disables
-//! all of a session's actions while one runs (`tray/src/`).
+//! One write per session at a time: Qt's `updating` disables all of a
+//! session's actions while one runs (`tray/src/`). A read mark has its own
+//! lane, so a quiet retry never makes a confirmed write answer busy.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -13,10 +14,26 @@ use tauri::State;
 use zerus_client_core::actions::{classify, invocation};
 use zerus_client_core::details::{details_invocation, parse_details, Details};
 use zerus_client_core::readmarks::{ReadMark, ReadMarks};
-use zerus_client_core::{default_hgs, run, Action, Outcome, Target, ViewRow};
+use zerus_client_core::{default_hgs, run, Action, Batch, Outcome, Target};
 
-/// A session by computer id and session name.
-type Key = (String, String);
+/// A session by computer id and session name, and the action's lane.
+type Key = (String, String, Lane);
+
+/// Writes and read marks run apart: at most one of each per session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Lane {
+    Write,
+    Read,
+}
+
+impl Lane {
+    pub fn of(action: &Action) -> Self {
+        match action {
+            Action::MarkRead { .. } => Self::Read,
+            _ => Self::Write,
+        }
+    }
+}
 
 /// The sessions that have an action running.
 #[derive(Clone, Default)]
@@ -66,13 +83,41 @@ impl Actions {
         }
     }
 
-    /// Drops the pending mark of this row's session once the row shows it
-    /// settled. Called for each row of every batch the pump hands out.
-    pub fn settle(&self, computer: &str, row: &ViewRow) {
-        self.marks
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .settle(computer, row);
+    /// Settles pending read marks with a batch the pump hands out: each row,
+    /// single or inside a computer's snapshot, drops the mark it shows
+    /// settled, and a snapshot drops its computer's marks for sessions it no
+    /// longer lists. Nothing to do (the usual case) costs one lock.
+    pub fn observe(&self, batch: &Batch) {
+        let mut marks = self.marks.lock().unwrap_or_else(PoisonError::into_inner);
+        if marks.is_empty() {
+            return;
+        }
+        for out in batch.upserts.iter().chain(
+            batch
+                .replaces
+                .iter()
+                .flat_map(|replace| replace.rows.iter()),
+        ) {
+            marks.settle(&out.computer.0, &out.row);
+        }
+        for replace in &batch.replaces {
+            let names: HashSet<&str> = replace
+                .rows
+                .iter()
+                .map(|out| out.row.name.as_str())
+                .collect();
+            marks.drop_unlisted(&replace.computer.0, &names);
+        }
+    }
+}
+
+/// The read-marks file in the app data directory: a replay keeps its own, so
+/// replay runs never touch the marks of real sessions.
+pub fn marks_file(replay: bool) -> &'static str {
+    if replay {
+        "read-marks-replay.json"
+    } else {
+        "read-marks.json"
     }
 }
 
@@ -131,10 +176,11 @@ pub async fn run_action(
     if blocked() {
         return Ok(failed(REPLAY_NEEDS_HGS));
     }
-    let Some(_claim) = state
-        .flight
-        .claim((target.computer.clone(), target.name.clone()))
-    else {
+    let Some(_claim) = state.flight.claim((
+        target.computer.clone(),
+        target.name.clone(),
+        Lane::of(&action),
+    )) else {
         return Err("busy".into());
     };
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -209,6 +255,12 @@ mod tests {
     }
 
     #[test]
+    fn a_replay_keeps_its_own_read_marks() {
+        assert_eq!(marks_file(false), "read-marks.json");
+        assert_eq!(marks_file(true), "read-marks-replay.json");
+    }
+
+    #[test]
     fn the_smoke_needs_replay_hgs_and_perf() {
         assert!(smoke_allowed(Some("f"), Some("h"), Some("smoke")));
         assert!(!smoke_allowed(None, Some("h"), Some("smoke")));
@@ -218,20 +270,95 @@ mod tests {
     }
 
     #[test]
-    fn one_action_per_session_at_a_time() {
+    fn one_action_per_session_and_lane_at_a_time() {
+        let key = |computer: &str, lane| {
+            (
+                computer.to_owned(),
+                "claude/sample-project/review".to_owned(),
+                lane,
+            )
+        };
         let flight = InFlight::default();
-        let first = flight
-            .claim(("".into(), "claude/sample-project/review".into()))
-            .unwrap();
-        assert!(flight
-            .claim(("".into(), "claude/sample-project/review".into()))
-            .is_none());
-        assert!(flight
-            .claim(("mac".into(), "claude/sample-project/review".into()))
-            .is_some());
+        let first = flight.claim(key("", Lane::Write)).unwrap();
+        assert!(flight.claim(key("", Lane::Write)).is_none());
+        assert!(flight.claim(key("mac", Lane::Write)).is_some());
+        // A quiet read-mark retry never blocks a confirmed write, nor the reverse.
+        let read = flight.claim(key("", Lane::Read)).unwrap();
+        assert!(flight.claim(key("", Lane::Read)).is_none());
         drop(first);
-        assert!(flight
-            .claim(("".into(), "claude/sample-project/review".into()))
-            .is_some());
+        assert!(flight.claim(key("", Lane::Write)).is_some());
+        drop(read);
+        assert!(flight.claim(key("", Lane::Read)).is_some());
+    }
+
+    #[test]
+    fn only_mark_read_takes_the_read_lane() {
+        assert_eq!(
+            Lane::of(&Action::MarkRead {
+                reply_id: None,
+                attention_signature: None
+            }),
+            Lane::Read
+        );
+        for action in [
+            Action::Pause,
+            Action::Terminate,
+            Action::Kill,
+            Action::Interrupt { turn_started: 1.0 },
+        ] {
+            assert_eq!(Lane::of(&action), Lane::Write);
+        }
+    }
+
+    #[test]
+    fn a_snapshot_drops_marks_of_sessions_it_no_longer_lists() {
+        use zerus_client_core::readmarks::ReadMark;
+        use zerus_client_core::{ComputerId, ReplaceOut, RowOut, ViewRow};
+        let path =
+            std::env::temp_dir().join(format!("zerus-actions-observe-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let actions = Actions::new(path.clone());
+        let mark = |name: &str| ReadMark {
+            computer: "mac".into(),
+            name: name.into(),
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+            reply_id: Some("r1".into()),
+            attention_signature: None,
+        };
+        {
+            let mut marks = actions.marks.lock().unwrap();
+            marks.add(mark("claude/sample-project/review"));
+            marks.add(mark("claude/sample-project/gone"));
+        }
+        let row = |name: &str| RowOut {
+            computer: ComputerId::from("mac"),
+            key: format!("run:{name}"),
+            row: ViewRow {
+                name: name.into(),
+                run_id: Some("run-1".into()),
+                conversation_id: Some("conv-1".into()),
+                reply_id: Some("r1".into()),
+                ..ViewRow::default()
+            },
+        };
+        let batch = Batch {
+            replaces: vec![ReplaceOut {
+                computer: ComputerId::from("mac"),
+                rows: vec![row("claude/sample-project/review")],
+            }],
+            ..Batch::default()
+        };
+        actions.observe(&batch);
+        let left: Vec<String> = actions
+            .marks
+            .lock()
+            .unwrap()
+            .pending()
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(left, ["claude/sample-project/review"]);
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -57,7 +57,8 @@ pub struct ViewRow {
     pub turn_started: Option<f64>,
     pub run_id: Option<String>,
     pub conversation_id: Option<String>,
-    /// The raw `state` (`running`, `paused`, `stopped`, `archived`, ...).
+    /// The raw `state` (`running`, `paused`, `stopped`, `archived`, ...);
+    /// `running` when the row lists none (a live session).
     pub state: String,
     pub tracked: bool,
     pub resumable: bool,
@@ -653,7 +654,8 @@ pub fn row(value: &Value) -> ViewRow {
         turn_started: session.turn_started(),
         run_id: some(session.run_id),
         conversation_id: some(session.conversation_id),
-        state: text(value, "state").to_owned(),
+        // A live row lists no state; Qt reads it as running (`HgsClient.cpp`).
+        state: session.state.to_owned(),
         tracked: session.tracked,
         resumable: value
             .get("resumable")
@@ -742,9 +744,12 @@ mod tests {
             ViewRow {
                 status: "ready".into(),
                 caption: "Not tracked".into(),
+                // Qt's default for a row without a state (`HgsClient.cpp`).
+                state: "running".into(),
                 ..ViewRow::default()
             }
         );
+        assert_eq!(row(&json!({"state": "paused"})).state, "paused");
         let not_object = row(&json!([1, 2]));
         assert_eq!(not_object.status, "ready");
     }
@@ -998,5 +1003,23 @@ mod tests {
         assert_eq!(other.read_reply_id, None);
         assert_eq!(row(&json!({"name": "a/b/c"})).allowed_actions, None);
         assert!(!row(&json!({"name": "a/b/c"})).shared_read);
+    }
+
+    /// The rows the frontend's action tests build their menus from
+    /// (`tests/fixtures/action-rows.json`) are what this projection gives.
+    #[test]
+    fn the_shared_action_rows_are_the_projection() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/action-rows.json")).unwrap();
+        let cases = fixture["rows"].as_array().unwrap();
+        assert!(cases.len() >= 4);
+        for case in cases {
+            assert_eq!(
+                serde_json::to_value(row(&case["hgs"])).unwrap(),
+                case["view"],
+                "{}",
+                case["case"]
+            );
+        }
     }
 }

@@ -2,7 +2,7 @@
 //! restart keeps retrying (`tray/src/ReadMarks.h`).
 use crate::view::ViewRow;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -66,6 +66,25 @@ impl ReadMarks {
 
     pub fn pending(&self) -> Vec<ReadMark> {
         self.marks.values().cloned().collect()
+    }
+
+    /// No mark waits; a batch then has nothing to settle.
+    pub fn is_empty(&self) -> bool {
+        self.marks.is_empty()
+    }
+
+    /// A complete snapshot of `computer` lists `names`: its marks for sessions
+    /// it no longer lists can never apply and are dropped (`updateUnread` in
+    /// `tray/src/FleetState.cpp`). Returns true when it dropped any (then saves).
+    pub fn drop_unlisted(&mut self, computer: &str, names: &HashSet<&str>) -> bool {
+        let before = self.marks.len();
+        self.marks
+            .retain(|(owner, name), _| owner != computer || names.contains(name.as_str()));
+        let dropped = self.marks.len() != before;
+        if dropped {
+            self.save();
+        }
+        dropped
     }
 
     /// Drops a mark that is finished (`settled()` in `tray/src/FleetState.cpp`):
@@ -263,6 +282,35 @@ mod tests {
         marks.add(mark("run-1", Some("r1"), None));
         assert!(!marks.settle("mac", &row("run-1", None, None)));
         assert!(marks.settle("mac", &row("run-1", Some("r1"), None)));
+    }
+
+    #[test]
+    fn a_complete_snapshot_drops_marks_of_sessions_it_no_longer_lists() {
+        let temp = Temp::new("unlisted");
+        let mut marks = ReadMarks::load(temp.0.clone());
+        marks.add(mark("run-1", Some("r1"), None));
+        let mut other = mark("run-2", Some("r2"), None);
+        other.name = "claude/sample-project/other".into();
+        marks.add(other.clone());
+        let mut peer = mark("run-3", Some("r3"), None);
+        peer.computer = "laptop".into();
+        marks.add(peer.clone());
+        assert!(!marks.is_empty());
+        let listed: HashSet<&str> = ["claude/sample-project/review"].into();
+        assert!(!marks.drop_unlisted(
+            "mac",
+            &[
+                "claude/sample-project/review",
+                "claude/sample-project/other",
+            ]
+            .into()
+        ));
+        assert!(marks.drop_unlisted("mac", &listed));
+        assert_eq!(marks.pending(), vec![peer, mark("run-1", Some("r1"), None)]);
+        assert_eq!(ReadMarks::load(temp.0.clone()).pending().len(), 2);
+        assert!(marks.drop_unlisted("laptop", &HashSet::new()));
+        assert!(marks.drop_unlisted("mac", &HashSet::new()));
+        assert!(marks.is_empty());
     }
 
     #[test]

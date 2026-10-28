@@ -89,6 +89,26 @@ fn a_terminate_with_a_cleanup_line_reports_it() {
 }
 
 #[test]
+fn a_kill_through_the_fake_is_one_call_without_input() {
+    let fake = Fake::new(r#"{"reply":{"exit":0}}"#);
+    let mut t = target();
+    t.run_id.clear();
+    t.conversation_id.clear();
+    let inv = invocation(&t, &Action::Kill, "u").unwrap();
+    assert!(matches!(
+        classify(&t, &Action::Kill, &inv, run(&fake.hgs, &inv)),
+        Outcome::Done { cleanup: None, .. }
+    ));
+    let log = fake.log();
+    assert_eq!(log.len(), 1);
+    assert_eq!(
+        log[0]["argv"],
+        serde_json::json!(["kill", "claude/sample-project/review"])
+    );
+    assert_eq!(log[0]["stdin"], "");
+}
+
+#[test]
 fn a_hanging_hgs_times_out_and_is_killed() {
     let fake = Fake::new(r#"{"reply":{"exit":0,"sleep":30}}"#);
     let mut inv = invocation(&target(), &Action::Pause, "u").unwrap();

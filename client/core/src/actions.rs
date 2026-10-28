@@ -36,6 +36,9 @@ pub enum Action {
     },
     Archive,
     Terminate,
+    /// `hgs kill NAME`: Terminate for a live session without an HGS archive
+    /// (`killSession`; `SessionsWindow::terminateSession` picks it).
+    Kill,
 }
 
 /// One `hgs` call: arguments (with a leading `@alias` for a peer), standard
@@ -96,17 +99,41 @@ fn done(receipt: Value, cleanup: Option<WorktreeCleanup>) -> Outcome {
     Outcome::Done { receipt, cleanup }
 }
 
-/// The session-name rule of the Qt rename dialog: a project part and a session
-/// part around the first `/`, without whitespace, `=` or a leading `#`.
-fn valid_session_name(name: &str) -> bool {
-    let Some((project, session)) = name.split_once('/') else {
-        return false;
-    };
-    !project.is_empty()
-        && !session.is_empty()
-        && !name.starts_with('#')
-        && !name.contains('=')
-        && !name.chars().any(char::is_whitespace)
+/// `SessionTag::problem` (`tray/src/SessionTag.h`): why a session tag is not
+/// accepted, None when it is. `hgs rename` enforces the same rule.
+pub fn tag_problem(tag: &str) -> Option<&'static str> {
+    if tag.is_empty() {
+        return Some("Enter a session name.");
+    }
+    if tag.trim() != tag {
+        return Some("Remove spaces at the beginning or end.");
+    }
+    if tag
+        .chars()
+        .any(|c| matches!(c, '/' | ':' | '.') || c.is_control())
+    {
+        return Some("Names cannot contain /, : or . or control characters.");
+    }
+    None
+}
+
+/// The rename the Qt dialog makes: the agent and project of `old` stay, only
+/// the tag after them changes (`src/state/rename.rs` refuses anything else).
+fn rename_problem(old: &str, new: &str) -> Option<&'static str> {
+    let mut parts = old.splitn(3, '/');
+    let (agent, project) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let tag = (!agent.is_empty() && !project.is_empty())
+        .then(|| {
+            new.strip_prefix(agent)?
+                .strip_prefix('/')?
+                .strip_prefix(project)?
+                .strip_prefix('/')
+        })
+        .flatten();
+    match tag {
+        Some(tag) => tag_problem(tag),
+        None => Some("rename must keep the same agent/project and use a nonempty tag without '/', ':', '.', control characters or surrounding whitespace"),
+    }
 }
 
 pub fn invocation(
@@ -161,10 +188,8 @@ pub fn invocation(
             new_name,
             archive_id,
         } => {
-            if !valid_session_name(new_name) {
-                return Err(
-                    "Use a name without spaces or '=', with a project and a session part.".into(),
-                );
+            if let Some(problem) = rename_problem(&name, new_name) {
+                return Err(problem.into());
             }
             let mut args = vec!["rename".to_owned(), name, new_name.clone()];
             if let Some(id) = archive_id.as_ref().filter(|id| !id.is_empty()) {
@@ -180,6 +205,8 @@ pub fn invocation(
             }
             (args, None, 45, 60, None)
         }
+        // A local kill is a tmux kill-session; a peer's goes through SSH.
+        Action::Kill => (vec!["kill".to_owned(), name], None, 5, 15, None),
     };
     let peer_call = prepend_alias(&mut args, &target.computer);
     Ok(Invocation {
@@ -435,7 +462,7 @@ mod tests {
             attention_signature: None,
         };
         let rename = || Action::Rename {
-            new_name: "a/b".into(),
+            new_name: "claude/sample-project/b".into(),
             archive_id: None,
         };
         assert_eq!(
@@ -459,6 +486,25 @@ mod tests {
         assert_eq!(
             (secs("", Action::Terminate), secs("p", Action::Terminate)),
             (45, 60)
+        );
+        assert_eq!((secs("", Action::Kill), secs("p", Action::Kill)), (5, 15));
+    }
+
+    #[test]
+    fn kill_names_the_session_and_reports_no_worktree() {
+        let inv = invocation(&target("mac"), &Action::Kill, "u").unwrap();
+        assert_eq!(inv.args, ["@mac", "kill", "claude/sample-project/review"]);
+        assert_eq!(inv.stdin, None);
+        let line = "ZERUS_WORKTREE_CLEANUP {\"status\":\"removed\",\"path\":\"/home/example/wt\",\"common_dir\":\"/home/example/.git\"}\n";
+        assert!(matches!(
+            classify(&target(""), &Action::Kill, &inv, exit0(b"", line)),
+            Outcome::Done { cleanup: None, .. }
+        ));
+        assert_eq!(
+            classify(&target(""), &Action::Kill, &inv, Exit::TimedOut),
+            Outcome::Failed {
+                detail: "timed out".into()
+            }
         );
     }
 
@@ -644,28 +690,63 @@ mod tests {
     }
 
     #[test]
-    fn rename_uses_the_cli_name_rule() {
-        for bad in [
+    fn rename_changes_only_the_tag_by_the_session_tag_rule() {
+        let rename = |new_name: &str| {
+            invocation(
+                &target(""),
+                &Action::Rename {
+                    new_name: new_name.into(),
+                    archive_id: None,
+                },
+                "u",
+            )
+            .map(|inv| inv.args)
+        };
+        assert_eq!(
+            rename("claude/sample-project/release planning").unwrap()[2],
+            "claude/sample-project/release planning"
+        );
+        for (bad, problem) in [
+            ("claude/sample-project/", "Enter a session name."),
+            (
+                "claude/sample-project/ review",
+                "Remove spaces at the beginning or end.",
+            ),
+            (
+                "claude/sample-project/review ",
+                "Remove spaces at the beginning or end.",
+            ),
+            (
+                "claude/sample-project/a/b",
+                "Names cannot contain /, : or . or control characters.",
+            ),
+            (
+                "claude/sample-project/a:b",
+                "Names cannot contain /, : or . or control characters.",
+            ),
+            (
+                "claude/sample-project/v1.2",
+                "Names cannot contain /, : or . or control characters.",
+            ),
+            (
+                "claude/sample-project/a\u{7}b",
+                "Names cannot contain /, : or . or control characters.",
+            ),
+        ] {
+            assert_eq!(rename(bad), Err(problem.to_owned()), "{bad:?}");
+        }
+        for other in [
+            "codex/sample-project/review-2",
+            "claude/other-project/review-2",
+            "claude/sample-project",
             "",
-            "claude/a b",
-            "claude/a=b",
-            "#claude/a",
-            "claude/",
-            "/review",
         ] {
             assert!(
-                invocation(
-                    &target(""),
-                    &Action::Rename {
-                        new_name: bad.into(),
-                        archive_id: None
-                    },
-                    "u"
-                )
-                .is_err(),
-                "{bad:?}"
+                rename(other).unwrap_err().starts_with("rename must keep"),
+                "{other:?}"
             );
         }
+        assert_eq!(tag_problem("release planning"), None);
     }
 
     #[test]

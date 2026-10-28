@@ -170,14 +170,7 @@ pub async fn next_batch(
         let batch = live.pump.take(crate::pump::PARK);
         // The host's rows settle pending read marks, whether they arrive as
         // single upserts or inside a computer's snapshot.
-        for out in batch.upserts.iter().chain(
-            batch
-                .replaces
-                .iter()
-                .flat_map(|replace| replace.rows.iter()),
-        ) {
-            actions.settle(&out.computer.0, &out.row);
-        }
+        actions.observe(&batch);
         serde_json::to_vec(&batch).map_err(|error| error.to_string())
     })
     .await?;

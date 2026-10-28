@@ -946,6 +946,9 @@ fn a_record_the_disk_refuses_is_cleared_and_the_change_not_sent() {
         clear_pending(&settings);
         assert_eq!(settings.text(PENDING_KEY), "");
     }
+    // Written before the folder goes: a store still writing would make it
+    // again after the guard removed it.
+    assert!(pending_written(&settings));
 }
 
 #[test]
@@ -959,6 +962,18 @@ fn test_and_remove_omit_what_the_profile_lacks() {
     let call = calls(&providers.stored(true, now())).remove(0);
     assert!(call.payload.get("profile_id").is_none());
     assert!(call.payload.get("expected_profile_revision").is_none());
+    providers.answered(CallId::Change, completed(&call, json!({})), now());
+    let effects = providers.refresh();
+    providers.answered(
+        CallId::List(generation(&effects)),
+        listing(json!([{"name": "No id", "adapter": "gigaam"}])),
+        now(),
+    );
+    let ask = providers.ask_remove().unwrap();
+    providers.remove(ask.ticket, true);
+    let call = calls(&providers.stored(true, now())).remove(0);
+    assert_eq!(call.payload["action"], "profile_remove");
+    assert!(call.payload.get("profile_id").is_none());
 }
 
 #[test]

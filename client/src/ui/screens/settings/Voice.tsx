@@ -204,7 +204,8 @@ const OTHER_HELP = "This provider type cannot be edited by this version of Zerus
 
 /**
  * Add or Edit speech provider (SpeechSettings.cpp ProfileEditor). The fields
- * stay here until Save; the API key goes out with Save and is cleared at once.
+ * stay here until Save; the API key goes out with Save and is cleared once
+ * the core takes the save (a refused one, such as a duplicate ID, keeps it).
  */
 function ProviderEditor(props: { editor: EditorView }) {
   const start = props.editor.start;

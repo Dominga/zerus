@@ -1,6 +1,9 @@
 //! Guarded session actions: `run_action`, `inspect_session` and
 //! `pending_read_marks`. The commands run the `hgs` CLI through the core's
 //! `run`; this module owns the in-flight guard and the read-mark file.
+//! `queue_read_marks` hands marks to the delivery worker (`readsync.rs`);
+//! `attention_marks` and `update_attention_marks` keep the device's attention
+//! marks and read replies.
 //!
 //! One write per session at a time: Qt's `updating` disables all of a
 //! session's actions while one runs (`tray/src/`). An interrupt and a read
@@ -8,13 +11,14 @@
 //! (`m_interruptRequest`), and a quiet retry never makes a confirmed write
 //! answer busy.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tauri::State;
 use zerus_client_core::actions::{classify, invocation, parse_reference, reference_invocation};
 use zerus_client_core::details::{details_invocation, parse_details, Details};
+use zerus_client_core::marks::{AttentionMarks, Mark};
 use zerus_client_core::readmarks::{ReadMark, ReadMarks};
 use zerus_client_core::shell::{current_shell, open_command};
 use zerus_client_core::{default_hgs, run, Action, Batch, Outcome, Target};
@@ -78,6 +82,8 @@ impl Drop for Claim {
 pub struct Actions {
     flight: InFlight,
     marks: Arc<Mutex<ReadMarks>>,
+    /// Wakes the read-mark delivery worker (`readsync.rs`).
+    pub(crate) wake: crate::readsync::Wake,
 }
 
 impl Actions {
@@ -86,7 +92,41 @@ impl Actions {
         Self {
             flight: InFlight::default(),
             marks: Arc::new(Mutex::new(ReadMarks::load(marks_path))),
+            wake: crate::readsync::Wake::default(),
         }
+    }
+
+    /// `queue_read_marks`: merges each mark into the pending ones and saves
+    /// them before any delivery (`ReadMarkStore::add`), wakes the delivery
+    /// worker and returns what is pending.
+    pub fn queue_marks(&self, marks: Vec<ReadMark>) -> Vec<ReadMark> {
+        let pending = {
+            let mut store = self.marks.lock().unwrap_or_else(PoisonError::into_inner);
+            store.add_all(marks);
+            store.pending()
+        };
+        self.wake.notify();
+        pending
+    }
+
+    /// The marks not settled yet.
+    pub(crate) fn pending_marks(&self) -> Vec<ReadMark> {
+        self.marks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pending()
+    }
+
+    /// The session's lane, None while an action runs in it.
+    pub(crate) fn claim_lane(&self, computer: &str, name: &str, lane: Lane) -> Option<Claim> {
+        self.flight
+            .claim((computer.to_owned(), name.to_owned(), lane))
+    }
+
+    /// A mark as `run_action` saves it, without `queue_read_marks`' cleanup.
+    #[cfg(test)]
+    pub(crate) fn add_mark_for_test(&self, mark: ReadMark) {
+        self.marks.lock().unwrap().add(mark);
     }
 
     /// Settles pending read marks with a batch the pump hands out: each row,
@@ -134,6 +174,57 @@ pub fn marks_file(replay: bool) -> &'static str {
     }
 }
 
+/// The attention-marks file beside the read marks; a replay keeps its own.
+pub fn attention_file(replay: bool) -> &'static str {
+    if replay {
+        "attention-marks-replay.json"
+    } else {
+        "attention-marks.json"
+    }
+}
+
+/// The device's attention marks and read replies (`attention_marks`,
+/// `update_attention_marks`).
+pub struct Attention {
+    marks: Mutex<AttentionMarks>,
+}
+
+/// Both maps by key, as the frontend receives them.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct AttentionSnapshot {
+    pub marks: BTreeMap<String, Mark>,
+    pub replies: BTreeMap<String, String>,
+}
+
+impl Attention {
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            marks: Mutex::new(AttentionMarks::load(path)),
+        }
+    }
+
+    pub fn snapshot(&self) -> AttentionSnapshot {
+        let (marks, replies) = self
+            .marks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .snapshot();
+        AttentionSnapshot { marks, replies }
+    }
+
+    /// A delta: `Some` writes an entry, `None` removes it; then saves.
+    pub fn update(
+        &self,
+        marks: BTreeMap<String, Option<Mark>>,
+        replies: BTreeMap<String, Option<String>>,
+    ) {
+        self.marks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .update(marks, replies);
+    }
+}
+
 /// The refusal of a replay that would reach the real CLI.
 const REPLAY_NEEDS_HGS: &str = "Actions in replay mode need ZERUS_CLIENT_HGS.";
 
@@ -157,7 +248,7 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
-fn blocked() -> bool {
+pub(crate) fn blocked() -> bool {
     !actions_allowed(
         env("ZERUS_CLIENT_REPLAY").as_deref(),
         env("ZERUS_CLIENT_HGS").as_deref(),
@@ -284,6 +375,33 @@ pub fn pending_read_marks(state: State<'_, Actions>) -> Vec<ReadMark> {
         .pending()
 }
 
+/// Queues read marks for their hosts (`FleetState::queueRead`): each is merged
+/// into the pending mark of its session and saved before any delivery; the
+/// worker (`readsync.rs`) delivers them. Returns the pending marks. Not async,
+/// so calls apply in the order the frontend makes them.
+#[tauri::command]
+pub fn queue_read_marks(state: State<'_, Actions>, marks: Vec<ReadMark>) -> Vec<ReadMark> {
+    state.queue_marks(marks)
+}
+
+/// The device's attention marks and read replies by key.
+#[tauri::command]
+pub fn attention_marks(state: State<'_, Attention>) -> AttentionSnapshot {
+    state.snapshot()
+}
+
+/// Writes (`Some`) or removes (`None`) attention marks and read replies, then
+/// saves; each map keeps its 20 000 newest written entries. Not async, so
+/// updates apply in the order the frontend makes them.
+#[tauri::command]
+pub fn update_attention_marks(
+    state: State<'_, Attention>,
+    marks: BTreeMap<String, Option<Mark>>,
+    replies: BTreeMap<String, Option<String>>,
+) {
+    state.update(marks, replies);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,6 +420,83 @@ mod tests {
     fn a_replay_keeps_its_own_read_marks() {
         assert_eq!(marks_file(false), "read-marks.json");
         assert_eq!(marks_file(true), "read-marks-replay.json");
+    }
+
+    #[test]
+    fn attention_marks_keep_their_own_file() {
+        assert_eq!(attention_file(false), "attention-marks.json");
+        assert_eq!(attention_file(true), "attention-marks-replay.json");
+    }
+
+    #[test]
+    fn queued_read_marks_are_merged_saved_and_wake_the_worker() {
+        let path =
+            std::env::temp_dir().join(format!("zerus-actions-queue-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let actions = Actions::new(path.clone());
+        let mark = |name: &str, reply: Option<&str>, signature: Option<&str>| ReadMark {
+            computer: "mac".into(),
+            name: name.into(),
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+            reply_id: reply.map(Into::into),
+            attention_signature: signature.map(Into::into),
+        };
+        assert!(!actions.wake.wait(std::time::Duration::ZERO));
+        let pending = actions.queue_marks(vec![
+            mark("claude/sample-project/review", Some("r1"), None),
+            mark("claude/sample-project/review", None, Some("s1")),
+            // Nothing to mark: not stored (`ReadMarkStore::add`).
+            mark("claude/sample-project/other", None, None),
+        ]);
+        let expected = vec![mark("claude/sample-project/review", Some("r1"), Some("s1"))];
+        assert_eq!(pending, expected);
+        assert_eq!(actions.pending_marks(), expected);
+        // Saved before any delivery.
+        assert_eq!(ReadMarks::load(path.clone()).pending(), expected);
+        assert!(actions.wake.wait(std::time::Duration::ZERO));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn attention_updates_merge_and_persist() {
+        use zerus_client_core::marks::Mark;
+        let path = std::env::temp_dir().join(format!(
+            "zerus-actions-attention-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let key = r#"["mac","claude","conv-1"]"#.to_owned();
+        let other = r#"["mac","claude","conv-2"]"#.to_owned();
+        let attention = Attention::new(path.clone());
+        assert_eq!(attention.snapshot(), AttentionSnapshot::default());
+        let review = Mark {
+            review: true,
+            acknowledged: String::new(),
+        };
+        attention.update(
+            BTreeMap::from([
+                (key.clone(), Some(review.clone())),
+                (other.clone(), Some(Mark::default())),
+            ]),
+            BTreeMap::from([(key.clone(), Some("r1".to_owned()))]),
+        );
+        attention.update(BTreeMap::from([(other, None)]), BTreeMap::new());
+        let expected = AttentionSnapshot {
+            marks: BTreeMap::from([(key.clone(), review)]),
+            replies: BTreeMap::from([(key, "r1".to_owned())]),
+        };
+        assert_eq!(attention.snapshot(), expected);
+        assert_eq!(Attention::new(path.clone()).snapshot(), expected);
+        // What the frontend receives.
+        assert_eq!(
+            serde_json::to_value(&expected).unwrap(),
+            serde_json::json!({
+                "marks": {r#"["mac","claude","conv-1"]"#: {"review": true, "acknowledged": ""}},
+                "replies": {r#"["mac","claude","conv-1"]"#: "r1"},
+            })
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

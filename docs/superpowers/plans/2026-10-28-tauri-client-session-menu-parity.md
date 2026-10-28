@@ -19,7 +19,7 @@ Project organisation (Move to project, project header menu, grouping: `zerus-5wm
   - `marks.rs` (new) keeps the device's attention marks and read replies;
   - `readsync.rs` (new) ports `ReadMarkSync` (the queued delivery of read marks);
   - `reads.rs` gains the archive page read.
-- **`client/src-tauri`:** new commands (`copy_text`, `session_reference`, `copy_command`, `notifications`, `attention_marks`, `set_attention_marks`, `archive_page`) and the read-mark delivery worker.
+- **`client/src-tauri`:** new commands (`copy_text`, `session_reference`, `copy_command`, `notifications`, `attention_marks`, `update_attention_marks`, `queue_read_marks`, `archive_page`) and the read-mark delivery worker.
 - **SolidJS:** `store/marks.ts` (new) overlays the marks on catalog rows; `store/archive.ts` (new) holds archive pages; `store/batch.ts` (new) runs a selection one session at a time. Menu entries are built in `actions-ui.ts` and `ActionDialogs.tsx`, so `SessionList.tsx` changes by a few lines per entry.
 
 Unknown outcomes are shown and never replayed.
@@ -96,7 +96,8 @@ client/core/src/readsync.rs         ReadSync: Qt's queued delivery of read marks
 client/core/src/reads.rs            Read::ArchivePage and its checks
 client/core/tests/actions.rs        new calls through the fake hgs
 client/core/tests/support/fake_hgs_actions.py   "replies" by argument prefix
-client/src-tauri/src/actions.rs     copy_text, session_reference, copy_command, notifications, attention_marks, set_attention_marks
+client/src-tauri/src/actions.rs     copy_text, session_reference, copy_command, notifications, attention_marks, update_attention_marks,
+                                    queue_read_marks
 client/src-tauri/src/readsync.rs    the delivery worker around core ReadSync
 client/src-tauri/src/lib.rs         registers the commands, the clipboard plugin and the worker
 client/src/types.ts, bridge.ts      the new fields, actions and commands
@@ -283,7 +284,8 @@ pub struct AttentionMarks { /* path, marks: key -> Mark, replies: key -> reply_i
 impl AttentionMarks {
     pub fn load(path: PathBuf) -> Self;     // missing or unreadable: empty
     pub fn snapshot(&self) -> (BTreeMap<String, Mark>, BTreeMap<String, String>);
-    pub fn replace(&mut self, marks: BTreeMap<String, Mark>, replies: BTreeMap<String, String>); // saves atomically
+    // A delta: Some writes (the entry becomes the newest written), None removes; then caps and saves atomically.
+    pub fn update(&mut self, marks: BTreeMap<String, Option<Mark>>, replies: BTreeMap<String, Option<String>>);
 }
 pub struct ReadSync { /* ReadMarkSync */ }
 impl ReadSync {
@@ -291,14 +293,16 @@ impl ReadSync {
     pub fn set_pending(&mut self, pending: Vec<ReadMark>);
     pub fn due(&mut self, now_ms: i64) -> Vec<ReadMark>;   // the marks to send now, marked in flight
     pub fn finished(&mut self, mark: &ReadMark, delivered: bool, applied_all: bool, now_ms: i64);
+    pub fn not_sent(&mut self, mark: &ReadMark);          // its read lane was busy: due again, no failure counted
 }
+pub fn applied_all(mark: &ReadMark, receipt: &Value) -> bool; // every part the mark sets is `applied: true`
 ```
 
 Rules:
 - **Keys** are the client's own (`FleetState.cpp:44-52`):
   - reply key `["{computer}","{agent}","{conversation}"]`;
   - attention key the reply key, or `["{computer}","{agent}","{name}",created]` without a conversation.
-  - `set_attention_marks` keeps the frontend's merge (Task B3); the file is `attention-marks.json` beside `read-marks.json` (`read-marks-replay.json` style for a replay).
+  - The frontend keeps the merge rules (Task B3) and sends deltas: `attention_marks()` answers `{ marks, replies }` (maps by key), `update_attention_marks(marks, replies)` takes maps of key to entry or null (removal). A full replace would send megabytes per click at the cap. The file is `attention-marks.json` beside `read-marks.json` (`attention-marks-replay.json` for a replay) and lists each map as `[key, value]` pairs in write order, so the cap drops the oldest written after a restart too.
 - **`ReadSync`** (`ReadMarkSync.h`, `ReadMarkSync.cpp:36-95`):
   - at most 4 marks in flight; each free slot goes to the computer with the fewest in flight, then key order;
   - a mark in flight, or one already sent unchanged that is not yet due, waits;
@@ -348,7 +352,7 @@ Rules:
   - `unreadReplies` lists every row whose reply shows unread and that is not marked for review, hidden rows included.
   - `markAllRead` marks each of them whose reply is still the snapshot's, skipping an older host's row already in `replies`, and queues the reply marks. It returns the count.
 - **Pending mirror:** the store keeps the pending read marks the overlay reads: loaded at start, replaced by `queue_read_marks`' answer, and a mark is dropped when a batch row shows it settled or a non-empty snapshot of its computer no longer lists the session (the same rules as `ReadMarks::settle` and `Actions::observe`). Phase 2's frontend quiet retry (`observeBatch`'s retry) is removed; the worker owns delivery.
-- **Persistence:** every change saves through `set_attention_marks` and queues read marks through `queue_read_marks`. A host that starts sharing read state gets its legacy marks queued once (`legacyReadMarks`, `TrayAgent.cpp:570-572`).
+- **Persistence:** every change saves through `update_attention_marks` (only the changed keys) and queues read marks through `queue_read_marks`. A host that starts sharing read state gets its legacy marks queued once (`legacyReadMarks`, `TrayAgent.cpp:570-572`).
 
 - [ ] Tests (vitest, mocked bridge): each overlay branch; a pending mark for another run is ignored; a newer reply after `markRead` shows unread again; `markRead` refuses a changed fingerprint; `markAllRead` skips review rows and counts; the fallback key migrates; the cap.
 - [ ] Commit `feat(client): local attention marks and read state, Qt's overlay`.

@@ -14,6 +14,8 @@ mod platform;
 #[cfg(feature = "live")]
 mod pump;
 #[cfg(feature = "live")]
+mod readsync;
+#[cfg(feature = "live")]
 mod replay;
 
 use tauri::{AppHandle, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -33,9 +35,12 @@ pub fn run() {
                 use tauri::Manager;
                 let dir = app.path().app_data_dir()?;
                 std::fs::create_dir_all(&dir)?;
-                // A replay never touches the real read marks.
+                // A replay never touches the real read or attention marks.
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
-                app.manage(actions::Actions::new(dir.join(actions::marks_file(replay))));
+                let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
+                readsync::start(actions.clone());
+                app.manage(actions);
+                app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
             }
             let display = display::display_name();
             if !display::headless_allowed(std::env::var("ZERUS_CLIENT_HEADLESS").is_ok_and(|v| v == "1"), display.as_deref()) {
@@ -75,6 +80,9 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::run_action,
         actions::inspect_session,
         actions::pending_read_marks,
+        actions::queue_read_marks,
+        actions::attention_marks,
+        actions::update_attention_marks,
         actions::session_reference,
         actions::copy_command,
         clipboard::copy_text,

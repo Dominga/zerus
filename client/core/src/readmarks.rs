@@ -3,7 +3,7 @@
 use crate::view::ViewRow;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -17,9 +17,18 @@ pub struct ReadMark {
 }
 
 impl ReadMark {
+    /// Marks neither a reply nor an attention signature (`ReadMark::isEmpty`).
+    pub fn is_empty(&self) -> bool {
+        self.reply_id.as_deref().is_none_or(str::is_empty)
+            && self
+                .attention_signature
+                .as_deref()
+                .is_none_or(str::is_empty)
+    }
+
     /// A newer mark for the same run and conversation keeps the field it does
     /// not set; a mark for another run or conversation replaces the old one.
-    fn merged(old: &ReadMark, mut next: ReadMark) -> ReadMark {
+    pub(crate) fn merged(old: &ReadMark, mut next: ReadMark) -> ReadMark {
         if old.run_id != next.run_id || old.conversation_id != next.conversation_id {
             return next;
         }
@@ -62,6 +71,26 @@ impl ReadMarks {
         };
         self.marks.insert(key, mark);
         self.save();
+    }
+
+    /// Merges each mark that is not empty, then saves once
+    /// (`ReadMarkStore::add`). An empty field counts as unset, as in Qt.
+    pub fn add_all(&mut self, marks: impl IntoIterator<Item = ReadMark>) {
+        let mut added = false;
+        for mut mark in marks.into_iter().filter(|mark| !mark.is_empty()) {
+            mark.reply_id = mark.reply_id.filter(|id| !id.is_empty());
+            mark.attention_signature = mark.attention_signature.filter(|s| !s.is_empty());
+            let key = (mark.computer.clone(), mark.name.clone());
+            let mark = match self.marks.get(&key) {
+                Some(old) => ReadMark::merged(old, mark),
+                None => mark,
+            };
+            self.marks.insert(key, mark);
+            added = true;
+        }
+        if added {
+            self.save();
+        }
     }
 
     pub fn pending(&self) -> Vec<ReadMark> {
@@ -114,29 +143,31 @@ impl ReadMarks {
         settled
     }
 
-    /// Writes a temporary file beside the target, then renames it over it. A
-    /// failure keeps the marks in memory; the next change tries again.
+    /// A failure keeps the marks in memory; the next change tries again.
     fn save(&self) {
         let list: Vec<&ReadMark> = self.marks.values().collect();
-        let Ok(bytes) = serde_json::to_vec(&list) else {
-            return;
-        };
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let mut temporary = self.path.clone().into_os_string();
-        temporary.push(format!(
-            ".{}-{}.tmp",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let temporary = PathBuf::from(temporary);
-        if let Some(folder) = self.path.parent().filter(|f| !f.as_os_str().is_empty()) {
-            let _ = std::fs::create_dir_all(folder);
+        if let Ok(bytes) = serde_json::to_vec(&list) {
+            write_atomically(&self.path, &bytes);
         }
-        if std::fs::write(&temporary, bytes).is_err()
-            || std::fs::rename(&temporary, &self.path).is_err()
-        {
-            let _ = std::fs::remove_file(&temporary);
-        }
+    }
+}
+
+/// Writes a temporary file beside `path`, then renames it over it, so a
+/// reader sees the old file or the new one, never a part. Creates the folder.
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut temporary = path.to_path_buf().into_os_string();
+    temporary.push(format!(
+        ".{}-{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let temporary = PathBuf::from(temporary);
+    if let Some(folder) = path.parent().filter(|f| !f.as_os_str().is_empty()) {
+        let _ = std::fs::create_dir_all(folder);
+    }
+    if std::fs::write(&temporary, bytes).is_err() || std::fs::rename(&temporary, path).is_err() {
+        let _ = std::fs::remove_file(&temporary);
     }
 }
 
@@ -311,6 +342,36 @@ mod tests {
         assert!(marks.drop_unlisted("laptop", &HashSet::new()));
         assert!(marks.drop_unlisted("mac", &HashSet::new()));
         assert!(marks.is_empty());
+    }
+
+    #[test]
+    fn adding_several_merges_each_saves_once_and_skips_empty_marks() {
+        let temp = Temp::new("add-all");
+        let mut marks = ReadMarks::load(temp.0.clone());
+        let mut other = mark("run-2", Some("r2"), None);
+        other.name = "claude/sample-project/other".into();
+        marks.add_all([
+            mark("run-1", Some("r1"), None),
+            // An empty field is no field, as in Qt: it keeps the older value.
+            mark("run-1", Some(""), Some("s1")),
+            mark("run-1", None, None),
+            other.clone(),
+        ]);
+        let expected = vec![other, mark("run-1", Some("r1"), Some("s1"))];
+        assert_eq!(marks.pending(), expected);
+        assert_eq!(ReadMarks::load(temp.0.clone()).pending(), expected);
+        // Only empty marks: nothing is stored.
+        let temp = Temp::new("add-all-empty");
+        ReadMarks::load(temp.0.clone()).add_all([mark("run-1", Some(""), None)]);
+        assert!(!temp.0.exists());
+    }
+
+    #[test]
+    fn a_mark_without_reply_or_signature_is_empty() {
+        assert!(mark("run-1", None, None).is_empty());
+        assert!(mark("run-1", Some(""), Some("")).is_empty());
+        assert!(!mark("run-1", Some("r1"), None).is_empty());
+        assert!(!mark("run-1", None, Some("s1")).is_empty());
     }
 
     #[test]

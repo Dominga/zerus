@@ -1207,6 +1207,14 @@ sets them in the catalog, the team settings or the plan; members never do.
   owner, not a usage limit) is launched again into the same folder at most
   three times an hour, its open attempt returned as unconfirmed for the lead;
   the feed records each restart.
+- **U53. Change the account of a running session (owner, 2026-10-28).** The
+  composer shows the session's account beside the model; its menu lists the
+  same provider's logged-in accounts. Choosing one, after the owner confirms,
+  waits for an idle session, copies the conversation into that account's
+  native store and resumes the agent into the same conversation, folder and
+  name; a failed launch returns to the old account, an unconfirmed one is
+  reported uncertain and never retried. Nothing changes until the owner
+  chooses; a team member's account changes only through swap-member.
 
 ## Phases 37-40 (replanned 2026-10-27)
 

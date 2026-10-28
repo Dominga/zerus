@@ -651,6 +651,12 @@ public:
     // edge are still there.
     std::function<void(int connectFrom, QPair<int, int> edge)> editChanged;
     void keepEdit(int connectFrom, QPair<int, int> edge) { m_keepFrom = connectFrom; m_keepEdge = edge; m_keep = true; }
+    // #570: the task under a resting pointer stays lit through a poll. The
+    // view says when its hover changes; keepHover() lights that task again at
+    // the next layout() while it is still in the view.
+    std::function<void(int from, int to)> hoverChanged;
+    void keepHover(int task) { m_keepHover = task; }
+    int hovered() const { return m_hover; }
     QList<Node> nodes;
     // Phase grouping: empty while the plan is phase 1 only. The owner's
     // toggles call phaseToggled; the caller re-renders with the new collapse.
@@ -888,6 +894,14 @@ public:
             }
             const bool edge = m_keepEdge.first && edges.value(m_keepEdge.second).contains(m_keepEdge.first) && canEdit(m_keepEdge.second);
             m_edge = edge ? m_keepEdge : qMakePair(0, 0);
+        }
+        if (m_keepHover) {
+            if (m_rects.contains(m_keepHover)) {
+                m_hover = m_keepHover;
+                for (const auto &node : nodes) if (node.id == m_hover) { setToolTip(node.tooltip); break; }
+                setCursor(Qt::PointingHandCursor);
+            }
+            m_keepHover = 0;
         }
         bool working = false;
         for (const auto &n : nodes) working = working || n.working;
@@ -1574,13 +1588,13 @@ protected:
         const int id = at(e->position());
         if (m_dragFrom || m_connectFrom) { m_dragAt = e->position(); m_hover = id; update(); return; }
         if (phaseAt(e->position())) {
-            if (m_hover) { m_hover = 0; update(); }
+            if (m_hover) { setHover(0); update(); }
             setCursor(Qt::PointingHandCursor);
             setToolTip(bandTooltip(phaseAt(e->position())));
             return;
         }
         if (id != m_hover) {
-            m_hover = id;
+            setHover(id);
             // The hovered node's phase tooltip names the state, the time and
             // the next step (spec 11).
             QString tip;
@@ -1590,7 +1604,20 @@ protected:
             update();
         }
     }
-    void leaveEvent(QEvent *) override { if (!m_dragFrom && !m_connectFrom) { m_hover = 0; setToolTip({}); update(); } }
+    void leaveEvent(QEvent *) override
+    {
+        // #570: a render hides the old view under a resting pointer and Qt
+        // sends it a Leave; that is not the pointer leaving, so the hover
+        // stays for the view that replaces it.
+        if (!isVisible()) return;
+        if (!m_dragFrom && !m_connectFrom) { setHover(0); setToolTip({}); update(); }
+    }
+    void setHover(int id)
+    {
+        const int from = m_hover;
+        m_hover = id;
+        if (from != id && hoverChanged) hoverChanged(from, id);
+    }
     void mouseReleaseEvent(QMouseEvent *e) override
     {
         const int id = at(e->position());
@@ -1653,7 +1680,7 @@ private:
     void reportEdit() { if (editChanged) editChanged(m_connectFrom, m_edge); }
     Colors m_c;
     Mode m_mode;
-    int m_hover = 0, m_dragFrom = 0, m_connectFrom = 0;
+    int m_hover = 0, m_dragFrom = 0, m_connectFrom = 0, m_keepHover = 0;
     bool m_keep = false;
     int m_keepFrom = 0;
     QPair<int, int> m_keepEdge{0, 0};

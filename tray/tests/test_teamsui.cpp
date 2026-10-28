@@ -683,6 +683,7 @@ private slots:
     void workspaceAddsAMember();
     void graphRoutesEdgesAroundNodes();
     void graphEdgesAreEditedByHandleAndSelection();
+    void graphHoverLightSurvivesPolls();
     void graphRoutingStaysFastForTheLargestPlan();
     void aTallLayerWrapsIntoColumns();
     void graphNodesInTwoLinesWithDraftEdits();
@@ -4135,6 +4136,95 @@ void TestTeamsUi::aTallLayerWrapsIntoColumns()
         }
     }
     view.resize(view.size()); shot(&view, "graph-wrapped-layer");
+}
+
+// #570 (owner): hovering a task lights its linked tasks; every poll rebuilt
+// the phase graphs and the light went out under a resting pointer.
+void TestTeamsUi::graphHoverLightSurvivesPolls()
+{
+    setTeam(graphTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.resize(1500, 900); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1"); workspace.showTeam("team-1");
+    // Every render replaces the phase graphs: always ask for the current one.
+    const auto graph = [&] { return phaseGraphOf(&workspace, 2); };
+    QTRY_VERIFY(graph() && graph()->nodeRect(3).width() > 0 && graph()->isVisible());
+    const auto at = [&](const QPointF &point) { return QPoint(int(std::round(point.x() * graph()->zoom)), int(std::round(point.y() * graph()->zoom))); };
+    // #4 is not linked to #3: it dims while #3 is lit.
+    const auto pixels = [&](int task) {
+        const QRectF r = graph()->nodeRect(task);
+        return graph()->grab(QRect(at(r.topLeft()), at(r.bottomRight()))).toImage();
+    };
+    TestWait::settle();
+    const QImage plain = pixels(4);
+    QTest::mouseMove(graph(), at(graph()->nodeRect(3).center()));
+    QTRY_COMPARE(graph()->hovered(), 3);
+    QVERIFY(graph()->chain(3).contains(5) && graph()->chain(3).contains(6) && !graph()->chain(3).contains(4));
+    TestWait::settle();
+    const QImage lit = pixels(4);
+    QVERIFY(lit != plain);
+    int revision = 21;
+    const auto poll = [&](QJsonObject next) {
+        QPointer<TeamUi::TaskView> old = graph();
+        next["revision"] = ++revision;
+        setTeam(next);
+        controller.refresh();
+        QTRY_VERIFY(!old && graph() && graph()->nodeRect(4).width() > 0);
+        TestWait::settle();
+    };
+    // Several polls with new revisions; the pointer does not move.
+    for (int i = 0; i < 3; ++i) {
+        poll(graphTeam());
+        QCOMPARE(graph()->hovered(), 3);
+        QCOMPARE(pixels(4), lit);
+        QVERIFY(graph()->toolTip().startsWith(QStringLiteral("#3 Card form UI")));
+    }
+    // Another phase's graph never takes the light.
+    QCOMPARE(phaseGraphOf(&workspace, 3)->hovered(), 0);
+    // The pointer moves to the gutter right of #3: the light goes, and a poll
+    // keeps it off.
+    const QRectF three = graph()->nodeRect(3);
+    QTest::mouseMove(graph(), at(QPointF(three.right() + 12, three.center().y())));
+    QTRY_COMPARE(graph()->hovered(), 0);
+    poll(graphTeam());
+    QCOMPARE(graph()->hovered(), 0);
+    QCOMPARE(pixels(4), plain);
+    // Back on #3, then the pointer leaves the view: off, also after a poll.
+    QTest::mouseMove(graph(), at(graph()->nodeRect(3).center()));
+    QTRY_COMPARE(graph()->hovered(), 3);
+    QEvent leave(QEvent::Leave);
+    QCoreApplication::sendEvent(graph(), &leave);
+    QCOMPARE(graph()->hovered(), 0);
+    poll(graphTeam());
+    QCOMPARE(graph()->hovered(), 0);
+    // A task that is gone takes its light with it. (A move to where the
+    // pointer already is sends nothing: go by the gutter.)
+    QTest::mouseMove(graph(), at(QPointF(graph()->nodeRect(3).right() + 12, graph()->nodeRect(3).center().y())));
+    QTest::mouseMove(graph(), at(graph()->nodeRect(3).center()));
+    QTRY_COMPARE(graph()->hovered(), 3);
+    auto gone = graphTeam();
+    QJsonArray tasks;
+    for (const auto &value : gone["tasks"].toArray()) {
+        auto task = value.toObject();
+        if (task["id"].toInt() == 3) continue;
+        QJsonArray deps;
+        for (const auto &d : task["deps"].toArray()) if (d.toObject()["task"].toInt() != 3) deps.append(d);
+        task["deps"] = deps;
+        tasks.append(task);
+    }
+    gone["tasks"] = tasks;
+    auto phases = gone["phases"].toArray();
+    auto second = phases[0].toObject(); second["tasks"] = QJsonArray{2, 4, 5, 6}; phases[0] = second;
+    gone["phases"] = phases;
+    poll(gone);
+    QCOMPARE(graph()->hovered(), 0);
+    poll(graphTeam());
+    QCOMPARE(graph()->hovered(), 0);
 }
 
 void TestTeamsUi::graphEdgesAreEditedByHandleAndSelection()

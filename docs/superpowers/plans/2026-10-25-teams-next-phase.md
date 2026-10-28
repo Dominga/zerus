@@ -1121,6 +1121,15 @@ answered; a denial cannot carry an explanation.
     work-ahead ignores dependencies inside a draft phase; N5 a failed held
     message is lost silently; ...).
 
+- **U43. A team member's mute on every device (for the owner).** A team member
+  is muted by default only on the desktop that shows the team (#547 N36): the
+  phone and other desktops keep notifying. Phase 42 makes the desktop's text
+  honest ("Muted on this computer"). The shared fix makes hgs apply the team
+  default itself: a member of an active team without a recorded choice reads
+  muted in `notification_preferences`, so Android and every desktop follow.
+  That changes the notification semantics and the mobile contract, so it waits
+  for the owner's direction.
+
 ## Phases 37-40 (replanned 2026-10-27)
 
 Phase 36 closed without its own build: its review findings and the build go to

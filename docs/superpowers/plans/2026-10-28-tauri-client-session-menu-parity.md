@@ -741,3 +741,19 @@ Deviations from Qt, both from owner rules:
 Deviations from Qt after Piece D:
 - The date inputs show the browser's empty date field instead of "Any date" (`ArchiveDatePicker.cpp`); the hint says "All archived dates (no date limits)".
 - An empty Archive list, loading or not, shows the client's "No matching sessions" card with its "Show all sessions" button. Qt shows an empty list and says "No matching sessions" only in the footer count (`SessionsWindowRows.cpp:473`). With no live row at all the client footer is empty, where Qt's reads the same text. Both sit in `SessionList.tsx` outside the agreed ArchiveBar line, so they stay.
+
+Controller rulings during Piece E:
+- The archive reloads once after a write batch ends (Clear archive included). Qt's own path (`SessionsWindow.cpp:1916`) never runs, because its deferred step leaves the selection running, so this is kept as a deviation.
+- Restore follows Qt without `allowed("restore")` in the header (`SessionsWindow.cpp:3897-3898`) and in the context menu, since every client context menu is Qt's selectedTarget case (5360). A batch's Resume / restore still reads it (`SessionSelection.cpp:94-96`).
+- A second archived instance of the same name in one batch reaches the restore limit: "earlier restores still need a refresh" (`SessionSelection.cpp:336-338`).
+- A thrown restore shows the sticky error notice with the error text, as a failed outcome does.
+- Task E3 added the README part and the smoke steps for PR 6.
+
+Deviations from Qt after Piece E:
+- "Session restored. Refreshing its current state…" and Qt's restored-inspection set (`m_restoredInspections`) in the 64 limit are not ported; the control gating rests on the details matching run and conversation.
+- "Updating session on {machine}…" is absent, as for every client change entry.
+- Qt's local launch question before a restore (`confirmLocalStart`) has no client counterpart, as for Resume.
+- The header's Forget archived on a retained archived source (after the archive reloaded) refuses at click time with the client's pre-check text, "This session is no longer available. Open its actions again."; Qt opens the dialog and refuses at confirmation with "…Refresh the list and open its actions again."
+- The restore follow is cancelled by the state filter, the search, a running batch, Rename and Forget archived; other single writes (pause, resume, terminate, start fresh) do not cancel it, as they act on another selected row.
+- The restore's conversation is the row's conversation id; Qt prefers `m_details`, which the client only returns when it matches the row's conversation.
+- A live row of a restored name that appears during a batch by another path is seen by the batch's occupied check only through a tracked restore (`taken`); otherwise `hgs` decides and the item counts as failed.

@@ -2,7 +2,7 @@ import { Show, Suspense, createSignal, lazy, onCleanup, onMount } from "solid-js
 import { invoke } from "@tauri-apps/api/core";
 import { listRows } from "./sessions/model";
 import { orderedRows } from "../store/catalog";
-import { multi, peek, selectedKey, setMulti, setPeek, setSelectedKey, setStateFilter, setStripMode, stripMode } from "../store/ui";
+import { multi, peek, selectedKey, setMulti, setPeek, setSelectedKey, setStateFilter, setStripMode, stateFilter, stripMode } from "../store/ui";
 import { clearMulti } from "./sessions/organize";
 import { archive, archiveRows } from "../store/archive";
 import { activity } from "../store/session";
@@ -11,6 +11,8 @@ import { copyFolder, copyName, copyCommand, detailsFor, followedFor, lastCopied,
 import { panelPlace } from "./sessions/archive-dates";
 import { run, running, runMachine } from "../store/batch";
 import { machineEntries } from "./sessions/machine-batch";
+import { forgetArchived, restoreSession } from "../store/restores";
+import { clearArchiveMenuEntry } from "./sessions/selection-live";
 import { computerOffline } from "../store/catalog";
 import { selectionSnapshot } from "./sessions/selection";
 import { snapshotOf, terminateCopy, type ActionRow } from "./sessions/actions-ui";
@@ -455,6 +457,58 @@ async function actionsSmoke(allowed: boolean) {
       .then(() => true, () => false);
     log(`actions-smoke archive-inspect: ${inspected ? "done" : "failed (no details within 15 s)"} ${archived.archiveId ?? "(no id)"}`);
     if (!inspected) bad++;
+    // Restore, Forget archived and Clear archive on the loaded archived row. The fake answers
+    // `resume NAME --archive ID -d` and `kill NAME --archive ID` with a plain success (its log.ndjson
+    // holds both argv lines); the live row never appears, so the restore stays pending, as in Qt.
+    const errorsSince = (id: number) => notices().filter((n) => n.id > id && n.tone === "error").map((n) => n.text);
+    const lastNoticeId = () => notices().reduce((m, n) => Math.max(m, n.id), 0);
+    // Pages load only while the Archive filter is shown, so a user looks at it again after the restore.
+    const settled = async () => {
+      setStateFilter("archived");
+      await sleep(300);
+      await until(() => archive.pages()[archive.computers()[0]?.computer ?? ""]?.loaded === true && !!archive.row(archivedKey), 15_000, "the archive did not reload");
+    };
+    {
+      const before = lastNoticeId();
+      await restoreSession(snapshotOf(archived));
+      const errors = errorsSince(before);
+      // A restore that was not enabled returns silently and leaves the Archive filter on.
+      const switched = stateFilter() === "all";
+      log(`actions-smoke restore: ${errors.length || !switched ? `failed (${errors.join(" / ") || "the entry did not run"})` : "done"} (state filter now ${stateFilter()})`);
+      if (errors.length || !switched) bad++;
+      await settled();
+    }
+    {
+      const before = lastNoticeId();
+      await forgetArchived(snapshotOf(archive.row(archivedKey)!));
+      const errors = errorsSince(before);
+      log(`actions-smoke forget-archived: ${errors.length ? `failed (${errors.join(" / ")})` : "done"}`);
+      if (errors.length) bad++;
+      await settled();
+    }
+    {
+      // Through the menu entry the batch menu shows; its confirmation dialog is answered by pressing its own button.
+      const entry = clearArchiveMenuEntry();
+      if (!("label" in entry) || entry.disabled) log(`actions-smoke clear-archive: skipped (${"label" in entry ? entry.label : "no entry"} is disabled by Qt's rules)`);
+      else {
+        const before = lastNoticeId();
+        entry.action?.();
+        const button = (): HTMLButtonElement | undefined =>
+          [...document.querySelectorAll<HTMLButtonElement>("dialog[open] button.solid-danger")].find((b) => b.textContent === "Clear archive");
+        const asked = await until(() => !!button(), 5000, "no confirmation").then(() => true, () => false);
+        if (!asked) { log("actions-smoke clear-archive: failed (the confirmation did not open)"); bad++; }
+        else {
+          button()!.click();
+          await until(() => !running() && notices().some((n) => n.id > before && /\d+ of \d+ completed/.test(n.text)), 15_000, "the batch did not end")
+            .then(() => {}, () => {});
+          const fresh = notices().filter((n) => n.id > before);
+          const failed = fresh.some((n) => n.tone === "error") || !fresh.length;
+          log(`actions-smoke clear-archive: ${failed ? "failed" : "done"} (${fresh.map((n) => n.text).join(" / ")})`);
+          if (failed) bad++;
+          await settled().catch(() => {});
+        }
+      }
+    }
     setStateFilter("all");
     setSelectedKey(keep);
     const local = (ok: boolean): Outcome => (ok ? { outcome: "done", receipt: null, cleanup: null } : { outcome: "failed", detail: "the row changed" });

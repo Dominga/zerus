@@ -215,7 +215,8 @@ Outcome rules:
   named (its archive id, and `created` when known), otherwise nothing runs and
   the sticky notice says "This session is no longer available. Refresh the list
   and open its actions again."; an offline computer or a running batch ends
-  silently. The call is `kill NAME --archive ID`.
+  silently. The call is `kill NAME --archive ID`; after a success the archive
+  pages reload, and a pending restore's follow is cancelled.
 - The binding forget counts only when the receipt echoes the request id,
   session name, run id and conversation id of the call with status
   `completed`; anything else is a failure and is never replayed. Success shows
@@ -300,7 +301,8 @@ selected row, under the heading "N selected sessions", followed by "Deselect all
   the table above, with their own success and failure notices replaced by the
   batch's. An archived row restores (past the restore limit, also for a second
   instance of a name restored earlier in the batch, it fails with "NAME: earlier
-  restores still need a refresh") or forgets its archived instance. When a write batch ends, the archive pages reload.
+  restores still need a refresh") or forgets its archived instance. When a write batch ends, the archive pages reload
+  (Qt's own reload after a batch never runs, so this is a deviation).
 - While a batch (or a Pause all or Resume all) runs, every write entry is
   disabled, the header shows "Updating…" and a second batch does not start. Stop
   and the copy entries are not writes.
@@ -450,7 +452,7 @@ standard input and fails on writes that have none). The fake logs each call to
 
 ```sh
 S=$(mktemp -d); cp core/tests/support/fake_hgs_actions.py $S/hgs
-echo '{"reply":{"exit":0},"replies":[{"match":["reference"],"exit":0,"stdout":{"uri":"zerus://session?machine=m&name=claude%2Fsample-project%2Freview"}},{"match":["session-action"],"exit":0,"stdout":"echo_session_action","receipt_status":"completed"},{"match":["archives"],"exit":0,"stdout":{"version":1,"from":0,"until":253402300800,"query":"","next_cursor":"","previous_cursor":"","total":1,"position":0,"sessions":[{"name":"claude/sample-project/archived","state":"archived","archive_id":"00000000-0000-4000-8000-000000000001","archived_at":1700000000}]}},{"match":["inspect","claude/sample-project/archived"],"exit":0,"stdout":{}}]}' > $S/config.json
+echo '{"reply":{"exit":0},"replies":[{"match":["reference"],"exit":0,"stdout":{"uri":"zerus://session?machine=m&name=claude%2Fsample-project%2Freview"}},{"match":["session-action"],"exit":0,"stdout":"echo_session_action","receipt_status":"completed"},{"match":["archives"],"exit":0,"stdout":{"version":1,"from":0,"until":253402300800,"query":"","next_cursor":"","previous_cursor":"","total":1,"position":0,"sessions":[{"name":"claude/sample-project/archived","state":"archived","resumable":true,"archive_id":"00000000-0000-4000-8000-000000000001","archived_at":1700000000}]}},{"match":["inspect","claude/sample-project/archived"],"exit":0,"stdout":{}},{"match":["resume","claude/sample-project/archived"],"exit":0},{"match":["kill","claude/sample-project/archived"],"exit":0}]}' > $S/config.json
 env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=1 \
   WEBKIT_DISABLE_DMABUF_RENDERER=1 ZERUS_CLIENT_REPLAY=$PWD/fixtures/replay.ndjson \
   ZERUS_CLIENT_HGS=$S/hgs ZERUS_CLIENT_QUERY=actions-smoke=1 ZERUS_CLIENT_PERF=smoke \
@@ -461,7 +463,8 @@ cat $S/log.ndjson
 The `archives` entry answers the Archive step with one archived row (the page
 echoes the All dates range and an empty query); the `inspect` entry for that
 row answers its details (an object with no run or conversation, as the row has
-none).
+none). The `resume` and `kill` entries for that row answer the Restore and
+Forget archived steps with a plain success.
 
 The hook first switches to the Archive filter, waits for the page and logs
 `actions-smoke archive-page: <status text> (<row count> rows)`. It then opens
@@ -476,7 +479,18 @@ peek and a selection stay), leaving the list with the panel open keeps the peek
 closes the peek. It selects the archived row, waits up to 15 s for its
 details and logs `actions-smoke archive-inspect: done <archive id>` (or
 `failed`); the fake's `log.ndjson` then holds `archives --json` (with the page
-query on standard input) and an `inspect NAME ... --archive ID` call. It
+query on standard input) and an `inspect NAME ... --archive ID` call. On the
+same archived row it then runs the Restore session entry's path and logs
+`actions-smoke restore: done (state filter now all)` (the Archive filter becomes
+All, as the row is selected and followed; `log.ndjson` holds `resume NAME
+--archive ID -d`), Forget archived session through the dialog's confirmation
+path and logs `actions-smoke forget-archived: done` (`kill NAME --archive ID`),
+and Clear archive: it takes the batch menu's entry, presses the confirmation
+dialog's "Clear archive" button and logs `actions-smoke clear-archive: done
+(...)` with the notices of the batch (a second `kill NAME --archive ID`), or
+`skipped (...)` when the entry is disabled. The fake keeps answering the
+archived row; the hook shows the Archive filter again after the restore, as the
+pages load only there, so each step finds the row after the archive reloads. It
 returns to the All filter and the replay session. The hook selects `claude/sample-project/review` (its details come from the
 replay's Activity state value or, as here, one `inspect` of the fake), first
 marks it as read, marks all as read (logging `actions-smoke mark-all-as-read:

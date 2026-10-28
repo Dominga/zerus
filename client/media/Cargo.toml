@@ -1,0 +1,22 @@
+[package]
+name = "zerus-client-media"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.99"
+license = "MIT"
+description = "Microphone capture for the Zerus desktop client's voice messages"
+publish = false
+
+# Device capture for client/src-tauri's `media` feature: cpal on its own
+# thread, converted by zerus-client-core's PcmConverter. Linux needs the ALSA
+# development package to build it; nothing else in the client does.
+[dependencies]
+cpal = "0.18"
+zerus-client-core = { path = "../core" }
+
+# The microphone permission (AVCaptureDevice authorization) before capture.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "AVCaptureDevice", "AVMediaFormat"] }

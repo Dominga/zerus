@@ -15,6 +15,8 @@ mod platform;
 mod pump;
 #[cfg(feature = "live")]
 mod replay;
+#[cfg(feature = "media")]
+mod voice;
 
 use tauri::{AppHandle, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
@@ -36,6 +38,10 @@ pub fn run() {
                 // A replay never touches the real read marks.
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 app.manage(actions::Actions::new(dir.join(actions::marks_file(replay))));
+                #[cfg(feature = "media")]
+                app.manage(voice::Voices::new(std::sync::Arc::new(
+                    zerus_client_core::drafts::DraftStore::open(dir.join(voice::DRAFTS)),
+                )));
             }
             let display = display::display_name();
             if !display::headless_allowed(std::env::var("ZERUS_CLIENT_HEADLESS").is_ok_and(|v| v == "1"), display.as_deref()) {
@@ -78,6 +84,16 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::session_reference,
         actions::copy_command,
         clipboard::copy_text,
+        #[cfg(feature = "media")]
+        voice::voice_open,
+        #[cfg(feature = "media")]
+        voice::voice_input,
+        #[cfg(feature = "media")]
+        voice::voice_close,
+        #[cfg(feature = "media")]
+        voice::voice_microphones,
+        #[cfg(feature = "media")]
+        voice::voice_video_available,
     ]
 }
 

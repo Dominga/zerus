@@ -27,6 +27,7 @@ pub mod view;
 pub mod views;
 pub mod voice;
 pub mod voice_composer;
+pub mod voice_driver;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

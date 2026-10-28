@@ -19,6 +19,9 @@ default = ["live"]
 # Streams from `hgs watch` through zerus-client-core. Without it the app builds
 # with no data source and the frontend uses its built-in replay.
 live = ["dep:zerus-client-core"]
+# Voice messages: microphone capture through client/media (cpal). Linux
+# builds need the ALSA development package; nothing else does.
+media = ["live", "dep:zerus-client-media"]
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -30,6 +33,7 @@ zerus-watch-protocol = { path = "../../crates/watch-protocol" }
 uuid = { version = "1", features = ["v4"] }
 # The pure-Rust core (watch streams, catalog state, per-frame batches).
 zerus-client-core = { path = "../core", optional = true }
+zerus-client-media = { path = "../media", optional = true }
 
 # Linux: the refresh rate of the window's monitor (display.rs); the same gtk as tauri's.
 [target.'cfg(target_os = "linux")'.dependencies]

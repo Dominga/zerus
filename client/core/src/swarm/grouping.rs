@@ -77,6 +77,8 @@ struct Slot {
     title: String,
     group: String,
     rank: u64,
+    /// Arrival order; a placement of many rows keeps it.
+    seq: u64,
 }
 
 type At = (ComputerId, String);
@@ -96,6 +98,10 @@ pub struct Grouping {
     sent: Option<GroupingOut>,
     sync: SyncView,
     renames: Vec<(String, String)>,
+    next_seq: u64,
+    headers_dirty: bool,
+    /// The layout size after the last prune from `observe`.
+    prune_floor: usize,
 }
 
 impl Default for Grouping {
@@ -129,6 +135,9 @@ impl Grouping {
             sent: None,
             sync: SyncView::default(),
             renames: Vec::new(),
+            next_seq: 0,
+            headers_dirty: true,
+            prune_floor: 0,
         }
     }
 
@@ -140,7 +149,7 @@ impl Grouping {
             .unwrap_or_else(|| self.default.clone())
     }
 
-    fn place(&mut self, at: At, member: String, title: String) {
+    fn place(&mut self, at: At, member: String, title: String, seq: u64) {
         let group = self.group_of(&member);
         let rank = self.layout.rank(&group, &member);
         let changed = self
@@ -157,6 +166,7 @@ impl Grouping {
                 title,
                 group,
                 rank,
+                seq,
             },
         );
     }
@@ -164,7 +174,13 @@ impl Grouping {
     fn upsert(&mut self, computer: &ComputerId, key: &str, machine: &str, name: &str, title: &str) {
         let at = (computer.clone(), key.to_owned());
         let member = super::member(machine, name);
-        if let Some(old) = self.rows.get(&at).map(|slot| slot.member.clone()) {
+        let mut seq = None;
+        if let Some((old, kept)) = self
+            .rows
+            .get(&at)
+            .map(|slot| (slot.member.clone(), slot.seq))
+        {
+            seq = Some(kept);
             // The catalog keys a run by its ID: the same key under a new name is a rename.
             if old != member
                 && key.starts_with("run:")
@@ -172,10 +188,35 @@ impl Grouping {
                 && !old.starts_with('\n')
             {
                 self.layout.rename(&old, &member);
+                if self.membership.contains_key(&old) {
+                    // The new name stays in the old one's project until the catalog follows.
+                    let membership = Arc::make_mut(&mut self.membership);
+                    if let Some(project) = membership.remove(&old) {
+                        membership.entry(member.clone()).or_insert(project);
+                    }
+                }
                 self.renames.push((old, member.clone()));
             }
         }
-        self.place(at, member, title.to_owned());
+        let seq = seq.unwrap_or_else(|| {
+            self.next_seq += 1;
+            self.next_seq
+        });
+        if self.loaded {
+            self.place(at, member, title.to_owned(), seq);
+        } else {
+            // Before the first catalog nothing touches the layout.
+            self.rows.insert(
+                at,
+                Slot {
+                    member,
+                    title: title.to_owned(),
+                    group: String::new(),
+                    rank: 0,
+                    seq,
+                },
+            );
+        }
     }
 
     /// A row change from the pump.
@@ -201,6 +242,19 @@ impl Grouping {
             }
             _ => {}
         }
+        if self.loaded
+            && self.layout.len() > super::layout::MAX_MEMBERS.max(self.prune_floor) + 1024
+        {
+            self.prune_layout();
+            self.prune_floor = self.layout.len();
+        }
+    }
+
+    fn prune_layout(&mut self) {
+        let listed: HashSet<String> = self.rows.values().map(|slot| slot.member.clone()).collect();
+        let membership = Arc::clone(&self.membership);
+        self.layout
+            .prune(|member| listed.contains(member) || membership.contains_key(member));
     }
 
     /// The organization the list shows; `revision` changes whenever it does.
@@ -215,10 +269,14 @@ impl Grouping {
         }
         self.revision = Some(revision);
         self.loaded = true;
-        self.projects = projects(organization)
+        self.headers_dirty = true;
+        let listed_projects: Vec<&Value> = projects(organization)
             .iter()
             .filter(|project| !project_id(project).is_empty())
             .take(MAX_PROJECTS)
+            .collect();
+        self.projects = listed_projects
+            .iter()
             .map(|project| {
                 (
                     project_id(project).to_owned(),
@@ -245,34 +303,41 @@ impl Grouping {
             self.default = self.projects[0].0.clone();
         }
         self.membership = membership;
-        for project in projects(organization).iter().take(MAX_PROJECTS) {
+        for project in &listed_projects {
             for member in sessions(project) {
                 self.layout.rank(project_id(project), member);
             }
         }
         if self.layout.len() > super::layout::MAX_MEMBERS {
-            let listed: HashSet<String> =
-                self.rows.values().map(|slot| slot.member.clone()).collect();
-            let membership = Arc::clone(&self.membership);
-            self.layout
-                .prune(|member| listed.contains(member) || membership.contains_key(member));
+            self.prune_layout();
+            self.prune_floor = self.layout.len();
         }
-        let slots: Vec<(At, String, String)> = self
+        let mut slots: Vec<(u64, At, String, String)> = self
             .rows
             .iter()
-            .map(|(at, slot)| (at.clone(), slot.member.clone(), slot.title.clone()))
+            .map(|(at, slot)| {
+                (
+                    slot.seq,
+                    at.clone(),
+                    slot.member.clone(),
+                    slot.title.clone(),
+                )
+            })
             .collect();
-        for (at, member, title) in slots {
-            self.place(at, member, title);
+        slots.sort_unstable_by_key(|slot| slot.0);
+        for (seq, at, member, title) in slots {
+            self.place(at, member, title, seq);
         }
     }
 
     pub fn set_sync(&mut self, sync: SyncView) {
         self.sync = sync;
+        self.headers_dirty = true;
     }
 
     pub fn set_collapsed(&mut self, project: &str, collapsed: bool) {
         self.layout.set_collapsed(project, collapsed);
+        self.headers_dirty = true;
     }
 
     /// The local side of an edit; the hub presents the edited organization next.
@@ -298,6 +363,7 @@ impl Grouping {
             Intent::Rename { .. } | Intent::Reorder { .. } | Intent::Renamed { .. } => {}
         }
         self.revision = None;
+        self.headers_dirty = true;
     }
 
     /// A project's listed rows in list order, with their titles.
@@ -357,11 +423,15 @@ impl Grouping {
                 })
             })
             .collect();
-        let out = self.out();
-        let headers = (self.sent.as_ref() != Some(&out)).then(|| {
-            self.sent = Some(out.clone());
-            out
-        });
+        let headers = if std::mem::take(&mut self.headers_dirty) {
+            let out = self.out();
+            (self.sent.as_ref() != Some(&out)).then(|| {
+                self.sent = Some(out.clone());
+                out
+            })
+        } else {
+            None
+        };
         (groups, headers)
     }
 
@@ -369,6 +439,7 @@ impl Grouping {
     pub fn resend(&mut self) {
         self.dirty = self.rows.keys().cloned().collect();
         self.sent = None;
+        self.headers_dirty = true;
     }
 
     pub fn take_renames(&mut self) -> Vec<(String, String)> {
@@ -433,11 +504,7 @@ mod tests {
         ));
         grouping.observe(&upsert("run:2", "workstation", "kimi/docs-site/landing"));
         let (groups, out) = grouping.take();
-        assert_eq!(
-            assigned(&groups),
-            [("run:1", "ungrouped"), ("run:2", "ungrouped")],
-            "before the catalog: the Inbox"
-        );
+        assert!(groups.is_empty(), "before the catalog nothing is placed");
         assert!(!out.unwrap().loaded);
         present(
             &mut grouping,
@@ -447,8 +514,8 @@ mod tests {
         let (groups, out) = grouping.take();
         assert_eq!(
             assigned(&groups),
-            [("run:1", "alpha")],
-            "only the row that changed"
+            [("run:1", "alpha"), ("run:2", "ungrouped")],
+            "the first placement of both rows"
         );
         let out = out.unwrap();
         assert!(out.loaded);
@@ -494,6 +561,8 @@ mod tests {
             ("run:1", "claude/p/one"),
             ("run:2", "claude/p/two"),
             ("run:3", "claude/p/three"),
+            ("run:4", "claude/p/four"),
+            ("run:5", "claude/p/five"),
         ] {
             grouping.observe(&upsert(key, "workstation", name));
         }
@@ -517,8 +586,8 @@ mod tests {
         assert_eq!(keys("alpha"), ["run:3", "run:1"], "the catalog's order");
         assert_eq!(
             keys("ungrouped"),
-            ["run:2"],
-            "the row no project lists stays in the Inbox"
+            ["run:2", "run:4", "run:5"],
+            "the rows no project lists stay in the Inbox, in arrival order"
         );
         grouping.set_collapsed("alpha", true);
         let (groups, out) = grouping.take();
@@ -547,6 +616,7 @@ mod tests {
     #[test]
     fn a_rename_under_the_same_run_is_reported_once_and_keeps_its_place() {
         let mut grouping = Grouping::new(Layout::default());
+        present(&mut grouping, &organization(&[], &[]), 1);
         grouping.observe(&upsert("run:0", "workstation", "claude/p/first"));
         grouping.observe(&upsert("run:1", "workstation", "claude/p/old"));
         grouping.observe(&upsert("run:9", "workstation", "claude/p/last"));
@@ -635,6 +705,122 @@ mod tests {
     }
 
     #[test]
+    fn the_saved_order_survives_rows_arriving_before_the_catalog() {
+        let (a, b) = ("workstation\nclaude/p/a", "workstation\nclaude/p/b");
+        let mut saved = Layout::default();
+        saved.place("alpha", &[b.to_owned(), a.to_owned()], None);
+        let mut grouping = Grouping::new(saved);
+        grouping.observe(&upsert("run:1", "workstation", "claude/p/a"));
+        grouping.observe(&upsert("run:2", "workstation", "claude/p/b"));
+        let (groups, out) = grouping.take();
+        assert!(groups.is_empty());
+        assert!(!out.unwrap().loaded);
+        present(&mut grouping, &organization(&[a, b], &[]), 1);
+        let (mut groups, _) = grouping.take();
+        groups.sort_by_key(|g| g.rank);
+        assert_eq!(
+            groups
+                .iter()
+                .map(|g| (g.key.as_str(), g.group.as_str()))
+                .collect::<Vec<_>>(),
+            [("run:2", "alpha"), ("run:1", "alpha")]
+        );
+        assert_eq!(
+            grouping
+                .members_of("alpha")
+                .iter()
+                .map(|m| m.0.as_str())
+                .collect::<Vec<_>>(),
+            [b, a]
+        );
+    }
+
+    #[test]
+    fn a_rename_inside_a_listed_project_keeps_the_project_and_the_place() {
+        let member = |name: &str| format!("workstation\nclaude/p/{name}");
+        let mut grouping = Grouping::new(Layout::default());
+        for (key, name) in [("run:1", "x"), ("run:2", "old"), ("run:3", "z")] {
+            grouping.observe(&upsert(key, "workstation", &format!("claude/p/{name}")));
+        }
+        let org = organization(&[&member("x"), &member("old"), &member("z")], &[]);
+        present(&mut grouping, &org, 1);
+        let (before, _) = grouping.take();
+        let rank =
+            |groups: &[GroupOut], key: &str| groups.iter().find(|g| g.key == key).unwrap().rank;
+        let old = rank(&before, "run:2");
+        grouping.observe(&upsert("run:2", "workstation", "claude/p/new"));
+        let (after, _) = grouping.take();
+        assert!(after.is_empty(), "no hop to the default project: {after:?}");
+        let members = grouping.members_of("alpha");
+        assert_eq!(
+            members.iter().map(|m| m.0.clone()).collect::<Vec<_>>(),
+            [member("x"), member("new"), member("z")]
+        );
+        grouping.resend();
+        let (all, _) = grouping.take();
+        assert_eq!(rank(&all, "run:2"), old);
+        assert_eq!(
+            all.iter().find(|g| g.key == "run:2").unwrap().group,
+            "alpha"
+        );
+    }
+
+    #[test]
+    fn rows_that_move_together_keep_their_arrival_order() {
+        let mut grouping = Grouping::new(Layout::default());
+        for (key, name) in [("run:c", "c"), ("run:a", "a"), ("run:b", "b")] {
+            grouping.observe(&upsert(key, "workstation", &format!("claude/p/{name}")));
+        }
+        let org = |default: &str| {
+            json!({"default_project": default, "projects": [
+                {"id": "one", "name": "One", "sessions": []},
+                {"id": "two", "name": "Two", "sessions": []}]})
+        };
+        present(&mut grouping, &org("one"), 1);
+        let _ = grouping.take();
+        present(&mut grouping, &org("two"), 2);
+        let (mut groups, _) = grouping.take();
+        groups.sort_by_key(|g| g.rank);
+        assert_eq!(
+            groups
+                .iter()
+                .map(|g| (g.key.as_str(), g.group.as_str()))
+                .collect::<Vec<_>>(),
+            [("run:c", "two"), ("run:a", "two"), ("run:b", "two")]
+        );
+    }
+
+    #[test]
+    fn a_layout_grown_past_the_bound_is_pruned_by_row_changes() {
+        let stale: Vec<String> = (0..super::super::layout::MAX_MEMBERS + 1100)
+            .map(|n| format!("old\nsession-{n}"))
+            .collect();
+        let mut layout = Layout::default();
+        layout.place("ungrouped", &stale, None);
+        let mut grouping = Grouping::new(layout);
+        present(&mut grouping, &organization(&[], &[]), 1);
+        grouping.observe(&upsert("run:1", "workstation", "claude/p/a"));
+        assert!(
+            grouping.layout.len() < 10,
+            "{} members left",
+            grouping.layout.len()
+        );
+    }
+
+    #[test]
+    fn headers_are_compared_only_after_something_could_change_them() {
+        let mut grouping = Grouping::new(Layout::default());
+        present(&mut grouping, &organization(&[], &[]), 1);
+        assert!(grouping.take().1.is_some());
+        grouping.observe(&upsert("run:1", "workstation", "claude/p/a"));
+        assert!(grouping.take().1.is_none());
+        grouping.set_collapsed("alpha", true);
+        assert!(grouping.take().1.is_some());
+        grouping.resend();
+        assert!(grouping.take().1.is_some());
+    }
+
+    #[test]
     fn sort_by_name_folds_case_then_keeps_the_written_form_then_the_member() {
         let rows = vec![
             ("m3".into(), "beta".into()),
@@ -647,7 +833,7 @@ mod tests {
 
     // Review Focus 5.
     #[test]
-    fn twenty_thousand_sessions_cost_one_pass_and_a_move_sends_one_row() {
+    fn twenty_thousand_sessions_group_in_one_pass_and_a_move_sends_one_row() {
         let names: Vec<String> = (0..20_000)
             .map(|n| format!("claude/sample-project/s{n:05}"))
             .collect();

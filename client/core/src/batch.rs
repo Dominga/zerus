@@ -106,7 +106,9 @@ pub struct MachineOut {
 
 /// Everything that changed since the previous batch. The view applies, in
 /// order: `computers`, `machines`, `replaces`, `removes`, `upserts`,
-/// `activity`, `processes`, `tasks`, `organizations`, then `groups` and `grouping`. `machines` holds
+/// `activity`, `processes`, `tasks`, `organizations`, then `groups` and `grouping`. A `replaces`
+/// entry keeps the groups of the keys it keeps: grouping does not resend
+/// unchanged rows after a Replace, so the view must not clear them. `machines` holds
 /// at most one entry per computer and none for a computer whose status became
 /// `ended`; `organizations` holds at most one per computer. Row changes of a computer with a replacement are
 /// already part of it; otherwise a key is in at most one of `removes` and

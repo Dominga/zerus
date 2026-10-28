@@ -688,6 +688,8 @@ impl Pass<'_, '_> {
 pub struct Tracker {
     hosts: Map<String, Value>,
     optional_questions: bool,
+    /// The state changed since [`Tracker::take_changed`] last asked.
+    changed: bool,
 }
 
 impl Tracker {
@@ -695,6 +697,7 @@ impl Tracker {
         Self {
             hosts: saved,
             optional_questions: false,
+            changed: false,
         }
     }
 
@@ -707,6 +710,13 @@ impl Tracker {
 
     pub fn state(&self) -> &Map<String, Value> {
         &self.hosts
+    }
+
+    /// Whether the state changed since the last call: Qt stores it after an
+    /// observation that changed it (`TrayAgent.cpp:553-557`) and after a
+    /// failed delivery (`TrayAgent.cpp:198-199`). Answers without copying it.
+    pub fn take_changed(&mut self) -> bool {
+        std::mem::take(&mut self.changed)
     }
 
     /// `AttentionTracker::observe` (`AttentionTracker.cpp:51-253`).
@@ -758,6 +768,8 @@ impl Tracker {
                 changes.cleared.push(token.to_owned());
             }
         }
+        // Qt assigns the host's entries every time; a new host's empty ones too.
+        self.changed |= !existed || current != previous;
         self.hosts
             .insert(host.alias.to_owned(), Value::Object(current));
         changes
@@ -818,6 +830,7 @@ impl Tracker {
             }
         }
         // A host never observed stays absent, as Qt writes only a change.
+        self.changed |= !changes.cleared.is_empty();
         if existed || !changes.cleared.is_empty() {
             self.hosts
                 .insert(host.alias.to_owned(), Value::Object(retained));
@@ -831,6 +844,7 @@ impl Tracker {
             for entry in entries.values_mut().filter_map(Value::as_object_mut) {
                 if entry.get("token").and_then(Value::as_str) == Some(token) {
                     entry.insert("retry_at".into(), Value::from(now + RETRY_SECONDS));
+                    self.changed = true;
                     return;
                 }
             }
@@ -1047,6 +1061,60 @@ mod tests {
                 raised: vec![],
                 cleared: vec![token]
             }
+        );
+    }
+
+    #[test]
+    fn the_tracker_says_when_its_state_changed_as_qt_compares_it() {
+        // `TrayAgent::observeAttention` stores the state only when it changed.
+        let mut fixture = Fixture::new();
+        assert!(!fixture.tracker.take_changed(), "nothing observed yet");
+        fixture.observe(vec![session("claude/p/a")]);
+        assert!(
+            fixture.tracker.take_changed(),
+            "a host seen for the first time gets its entry, even an empty one"
+        );
+        assert!(!fixture.tracker.take_changed(), "asked once");
+        fixture.observe(vec![session("claude/p/a")]);
+        assert!(!fixture.tracker.take_changed(), "the same listing");
+        let raised = fixture.observe(vec![asking("claude/p/a", "approval", "req-1")]);
+        assert!(fixture.tracker.take_changed(), "a new edge");
+        fixture.observe(vec![asking("claude/p/a", "approval", "req-1")]);
+        assert!(!fixture.tracker.take_changed(), "the same edge");
+        fixture.tracker.delivery_failed("unknown-token", 1000);
+        assert!(!fixture.tracker.take_changed(), "no entry has that token");
+        fixture
+            .tracker
+            .delivery_failed(&raised.raised[0].token, 1000);
+        assert!(fixture.tracker.take_changed(), "a retry is due");
+        // An offline listing changes the state only when it withdraws a muted banner.
+        fixture.observe_at(
+            vec![asking("claude/p/a", "approval", "req-1")],
+            1001,
+            false,
+            false,
+        );
+        assert!(
+            !fixture.tracker.take_changed(),
+            "offline keeps every identity"
+        );
+        let muted = with_preferences(asking("claude/p/a", "approval", "req-1"), true);
+        assert_eq!(
+            fixture
+                .observe_at(vec![muted], 1002, false, false)
+                .cleared
+                .len(),
+            1
+        );
+        assert!(
+            fixture.tracker.take_changed(),
+            "the muted banner's token is gone"
+        );
+        let mut offline = Fixture::new();
+        offline.observe_at(vec![session("claude/p/a")], 1000, false, false);
+        assert!(
+            !offline.tracker.take_changed(),
+            "a host never observed stays absent offline"
         );
     }
 

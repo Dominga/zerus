@@ -368,6 +368,9 @@ pub struct ProjectFolder {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub id: String,
+    /// Its name, which background creation records with the plan.
+    #[serde(default)]
+    pub name: String,
     pub folders: Vec<ProjectFolder>,
 }
 

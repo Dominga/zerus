@@ -13,6 +13,7 @@ pub mod batch;
 pub mod cache;
 #[cfg(windows)]
 mod conpty;
+pub mod creation;
 pub mod details;
 pub mod drafts;
 pub mod external_file;

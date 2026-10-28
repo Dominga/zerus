@@ -275,9 +275,16 @@ export const FRESH_HINT = "Start with a new conversation and the same folder, ac
 export const FRESH_TIP = "Start this stopped session with a new conversation and the same folder, account and model.";
 export const FRESH_CHANGED = "The session changed. Open its actions again.";
 
+/** The header's Start fresh or Clear session slot (Qt 3808-3809): only in the main context, never with a subagent open. */
+export function headerClearSlot(mainContext: boolean, state: ActionRow["state"]): "fresh" | "clear" | undefined {
+  if (!mainContext) return undefined;
+  return state === "paused" || state === "stopped" ? "fresh" : "clear";
+}
+
 /**
  * Qt's canStartStopped: online, paused or stopped, tracked, a Codex, Claude or
- * Kimi session, no write pending for it. `batchRunning` is for Piece F's batch
+ * Kimi session, no write pending for it. Qt's other blockers (terminating,
+ * compacting, composer sending, rename in flight) have no client state yet. `batchRunning` is for Piece F's batch
  * runner (Qt: no batch running); until then callers leave it false.
  */
 export function canStartStopped(s: Pick<ActionRow, "state" | "tracked" | "cmd">, online: boolean, updating: boolean, batchRunning = false): boolean {

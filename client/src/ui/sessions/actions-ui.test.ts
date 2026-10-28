@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { toSession } from "../../store/catalog";
 import {
-  canStartStopped, copyState, detailsFromInspection, freshCopy, freshEntry, freshStillValid, identityOk, notificationsState, notificationsStillAllowed, dialogReducer, menuItemActivates, menuState, renameParts, renameProblem, snapshotOf, tagProblem, terminal, terminateCopy,
+  canStartStopped, headerClearSlot, copyState, detailsFromInspection, freshCopy, freshEntry, freshStillValid, identityOk, notificationsState, notificationsStillAllowed, dialogReducer, menuItemActivates, menuState, renameParts, renameProblem, snapshotOf, tagProblem, terminal, terminateCopy,
 } from "./actions-ui";
 import fixture from "../../../core/tests/fixtures/action-rows.json";
 import type { Details, ViewRow } from "../../types";
@@ -381,5 +381,15 @@ describe("Start fresh", () => {
   it("opens as a dialog kind", () => {
     const a = snapshotOf(stopped());
     expect(dialogReducer(undefined, { type: "open", kind: "fresh", row: a })).toEqual({ kind: "fresh", row: a });
+  });
+});
+
+describe("header Start fresh slot", () => {
+  it("follows Qt: main context only", () => {
+    expect(headerClearSlot(true, "stopped")).toBe("fresh");
+    expect(headerClearSlot(true, "paused")).toBe("fresh");
+    expect(headerClearSlot(true, "running")).toBe("clear");
+    expect(headerClearSlot(false, "stopped")).toBeUndefined();
+    expect(headerClearSlot(false, "running")).toBeUndefined();
   });
 });

@@ -17,7 +17,7 @@ export interface Entry { enabled: boolean; reason?: string }
  * (`host\nname`) would move the live session of that name instead.
  */
 export const ARCHIVED_MOVE = "Archived sessions keep their project until the Archive view groups by project.";
-export interface HeaderMenuState {
+interface HeaderMenuState {
   collapse: "Expand project" | "Collapse project";
   edit: Entry;
   up: Entry & { before?: string };

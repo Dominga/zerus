@@ -123,14 +123,14 @@ export function createOrganization(say: Say, unsay: (key: string) => void = () =
   /** Expand or collapse: this device's layout; the next batch shows it. */
   const setProjectCollapsed = (projectId: string, collapsed: boolean) => { void bridge.setProjectCollapsed(projectId, collapsed).catch(() => {}); };
 
-  return { grouping, groups, defaultProject, applyGrouping, groupOf, headerOf, refusal, moveToProject, createProject,
+  return { grouping, groups, defaultProject, applyGrouping, groupOf, headerOf, moveToProject, createProject,
            renameProject, deleteProject, moveProject, sortProject, setProjectCollapsed };
 }
 
 export type Organization = ReturnType<typeof createOrganization>;
 
 const app = createOrganization(notify, clearNotice);
-export const { grouping, groups, defaultProject, applyGrouping, groupOf, headerOf, refusal, moveToProject, createProject,
+export const { grouping, groups, defaultProject, applyGrouping, groupOf, headerOf, moveToProject, createProject,
                renameProject, deleteProject, moveProject, sortProject, setProjectCollapsed } = app;
 
 /** Project settings… asks the Projects screen to show this project. */

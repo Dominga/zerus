@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import native from "./shortcuts-native.json";
 import { setSetting, settings } from "./settings";
 import {
-  COMMANDS, allowed, assignable, candidates, comboFromEvent, conflicts, contextOf, customized, formatSequence, keys,
+  COMMANDS, allowed, assignable, candidates, comboFromEvent, conflicts, contextOf, customized, formatSequence, handlerFor, keys,
   nativeText, onCommand, parseChord, parseSequence, popupOpen, portableDefaults, protectedInTextField, reset, resetAll,
   route, sequenceState, setKeys, terminalSafe, type Combo, type Platform,
 } from "./shortcuts";
@@ -117,8 +117,8 @@ describe("key events", () => {
     expect(comboFromEvent(key({ key: "л", code: "KeyK", ctrlKey: true }), "linux")!.key).toBe("K");
     expect(comboFromEvent(key({ key: "б", code: "Comma", ctrlKey: true }), "linux")!.key).toBe(",");
     expect(comboFromEvent(key({ key: "ё", code: "Backquote", ctrlKey: true }), "linux")!.key).toBe("`");
-    expect(comboFromEvent(key({ key: "Б", code: "Comma", ctrlKey: true, shiftKey: true }), "linux")!.key).toBe("<");
-    expect(comboFromEvent(key({ key: "Ё", code: "Backquote", ctrlKey: true, shiftKey: true }), "linux")!.key).toBe("~");
+    expect(comboFromEvent(key({ key: "Б", code: "Comma", ctrlKey: true, shiftKey: true }), "linux")!.key).toBe(",");
+    expect(comboFromEvent(key({ key: "Ё", code: "Backquote", ctrlKey: true, shiftKey: true }), "linux")!.key).toBe("`");
     expect(comboFromEvent(key({ key: "№", code: "Digit3", ctrlKey: true, shiftKey: true }), "linux")!.key).toBe("3");
     // AZERTY and Dvorak: the character the layout types, not the US position.
     expect(comboFromEvent(key({ key: "a", code: "KeyQ", ctrlKey: true }), "linux")!.key).toBe("A");
@@ -131,9 +131,29 @@ describe("key events", () => {
     expect(comboFromEvent(key({ key: "≠", code: "Equal", altKey: true }), "macos")!.key).toBe("=");
     expect(comboFromEvent(key({ key: "Shift", code: "ShiftLeft", shiftKey: true }), "linux")).toBeUndefined();
   });
-  it("also tries a shifted symbol without Shift", () => {
-    const plus = comboFromEvent(key({ key: "+", code: "Equal", ctrlKey: true, shiftKey: true }), "linux")!;
-    expect(candidates(plus).map((c) => formatSequence([c]))).toEqual(["Ctrl+Shift++", "Ctrl++"]);
+  it("tries the base key with Shift first, then the shifted character without it, as Qt does", () => {
+    const tried = (init: Partial<KeyboardEvent> & { key: string; code: string }, on: Platform = "linux") =>
+      candidates(key(init), on).map((c) => formatSequence([c]));
+    expect(tried({ key: "+", code: "Equal", ctrlKey: true, shiftKey: true })).toEqual(["Ctrl+Shift+=", "Ctrl++"]);
+    // US Ctrl+Shift+1 and Ctrl+Shift+3.
+    expect(tried({ key: "!", code: "Digit1", ctrlKey: true, shiftKey: true })).toEqual(["Ctrl+Shift+1", "Ctrl+!"]);
+    expect(tried({ key: "#", code: "Digit3", ctrlKey: true, shiftKey: true })).toEqual(["Ctrl+Shift+3", "Ctrl+#"]);
+    // Russian Ctrl+Shift+2 types ", and Ctrl+Shift+Б has no Latin character.
+    expect(tried({ key: "\"", code: "Digit2", ctrlKey: true, shiftKey: true })).toEqual(["Ctrl+Shift+2", "Ctrl+\""]);
+    expect(tried({ key: "Б", code: "Comma", ctrlKey: true, shiftKey: true })).toEqual(["Ctrl+Shift+,", "Ctrl+<"]);
+    // macOS ⌃⇧` is Meta+Shift+` first.
+    expect(tried({ key: "~", code: "Backquote", ctrlKey: true, shiftKey: true }, "macos")).toEqual(["Meta+Shift+`", "Meta+~"]);
+    // A layout's own shifted symbol on another key is also tried without Shift.
+    expect(tried({ key: "|", code: "IntlBackslash", ctrlKey: true, shiftKey: true })).toEqual(["Ctrl+Shift+|", "Ctrl+|"]);
+    expect(tried({ key: "A", code: "KeyA", ctrlKey: true, shiftKey: true })).toEqual(["Ctrl+Shift+A"]);
+  });
+  it("records what Qt records, so Terminal's Ctrl+Shift digits and ⌃⇧` keep their ✓", () => {
+    const one = comboFromEvent(key({ key: "!", code: "Digit1", ctrlKey: true, shiftKey: true }), "linux")!;
+    expect(formatSequence([one])).toBe("Ctrl+Shift+1");
+    expect(terminalSafe(one, "linux")).toBe(true);
+    const tick = comboFromEvent(key({ key: "~", code: "Backquote", ctrlKey: true, shiftKey: true }), "macos")!;
+    expect(nativeText([tick], "macos")).toBe("⌃⇧`");
+    expect(terminalSafe(tick, "macos")).toBe(true);
   });
 });
 
@@ -246,6 +266,29 @@ describe("the focus (ShortcutRouter)", () => {
 });
 
 describe("composer commands in the one map", () => {
+  it("run the handler of the field that has the focus, before a window command on the same chord", async () => {
+    const fieldA = focus({ marked: "composer", tag: "TEXTAREA", selection: [0, 0] });
+    const fieldB = focus({ marked: "composer", tag: "TEXTAREA", selection: [0, 0] });
+    const root = (field: EventTarget) => ({ contains: (target: Node | null) => target === (field as unknown as Node) });
+    const ran: string[] = [];
+    await setSetting("shortcuts/go.anywhere", ["Ctrl+Return"]);
+    const off = [
+      onCommand("go.anywhere", () => ran.push("window")),
+      onCommand("message.send", () => ran.push("A"), root(fieldA)),
+      onCommand("message.send", () => ran.push("B"), root(fieldB)),
+    ];
+    const state = sequenceState();
+    const send = (target: EventTarget) => key({ key: "Enter", code: "Enter", ctrlKey: true, target });
+    expect(route(send(fieldA), state, "linux")).toEqual({ run: "message.send", consume: true });
+    expect(handlerFor("message.send", fieldA)).toBeDefined();
+    handlerFor("message.send", fieldA)!();
+    handlerFor("message.send", fieldB)!();
+    expect(ran).toEqual(["A", "B"]);
+    // Outside a message field the window command keeps the chord.
+    expect(route(send(focus()), state, "linux")).toEqual({ run: "go.anywhere", consume: true });
+    off.forEach((f) => f());
+    await setSetting("shortcuts/go.anywhere", null);
+  });
   const composer = (selection?: [number, number]) => focus({ marked: "composer", tag: "TEXTAREA", selection: selection ?? [2, 2] });
   it("sends and pushes from a message field only", () => {
     const ran: string[] = [];

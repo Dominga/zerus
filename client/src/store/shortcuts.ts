@@ -149,38 +149,61 @@ const SHIFTED_SYMBOLS: Record<string, string> = {
   Comma: "<", Period: ">", Slash: "?", Backquote: "~",
 };
 
+const SHIFTED_DIGITS = ")!@#$%^&*(";
+const printable = (key: string) => /^[\x21-\x7e]$/.test(key);
+
 /**
  * The key of an event in Qt's names, or undefined for a modifier or an
- * unknown key. A printable ASCII character is the key the layout names
- * (AZERTY, Dvorak); another script (Cyrillic) falls back to the Latin key at
- * that position, as Qt does, so Ctrl+б is Ctrl+, on a Russian layout.
+ * unknown key. With Shift (or Option on macOS), a digit or symbol key is its
+ * base key, as Qt's first candidate is; otherwise a printable ASCII
+ * character is the key the layout names (AZERTY, Dvorak), and another
+ * script (Cyrillic) falls back to the Latin key at that position, as Qt
+ * does, so Ctrl+б is Ctrl+, on a Russian layout.
  */
 export function keyOf(e: Pick<KeyboardEvent, "key" | "code" | "altKey" | "shiftKey">, on: Platform = platform): string | undefined {
   if (e.code === "NumpadEnter") return "Enter";
   if (/^F([1-9]|[12][0-9]|3[0-5])$/.test(e.key)) return e.key;
   if (e.key in NAMED) return NAMED[e.key];
-  // Option composes characters on macOS: name the physical key instead.
-  if (on === "macos" && e.altKey && e.code in CODE_SYMBOLS) return CODE_SYMBOLS[e.code];
-  if (/^[\x21-\x7e]$/.test(e.key)) return e.key.toUpperCase();
+  if (e.shiftKey || (on === "macos" && e.altKey)) {
+    if (/^Digit[0-9]$/.test(e.code)) return e.code.slice(5);
+    if (e.code in CODE_SYMBOLS) return CODE_SYMBOLS[e.code];
+  }
+  if (printable(e.key)) return e.key.toUpperCase();
   if (/^Key[A-Z]$/.test(e.code)) return e.code.slice(3);
   if (/^Digit[0-9]$/.test(e.code)) return e.code.slice(5);
-  if (e.code in CODE_SYMBOLS) return (e.shiftKey ? SHIFTED_SYMBOLS : CODE_SYMBOLS)[e.code];
+  if (e.code in CODE_SYMBOLS) return CODE_SYMBOLS[e.code];
   if (e.key.length === 1) return e.key.toUpperCase();
   return undefined;
 }
 
-/** The chord of a key event (Shortcuts::combination); macOS Command is Qt's Ctrl. */
-export function comboFromEvent(e: Pick<KeyboardEvent, "key" | "code" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey">, on: Platform = platform): Combo | undefined {
+type KeyEvent = Pick<KeyboardEvent, "key" | "code" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey">;
+
+/** The chord of a key event (Shortcuts::combination), Qt's first candidate; macOS Command is Qt's Ctrl. */
+export function comboFromEvent(e: KeyEvent, on: Platform = platform): Combo | undefined {
   const key = keyOf(e, on);
   if (!key) return undefined;
   const mac = on === "macos";
   return { meta: mac ? e.ctrlKey : e.metaKey, ctrl: mac ? e.metaKey : e.ctrlKey, alt: e.altKey, shift: e.shiftKey, key };
 }
 
-/** The chords Qt would try for an event: a shifted symbol also without Shift (QKeyMapper::possibleKeys). */
-export function candidates(combo: Combo): Combo[] {
-  const symbol = combo.key.length === 1 && !/[A-Z0-9]/.test(combo.key);
-  return combo.shift && symbol ? [combo, { ...combo, shift: false }] : [combo];
+/**
+ * The chords Qt tries for an event (QKeyMapper::possibleKeys): the base key
+ * with every modifier, then a shifted digit's or symbol's character without
+ * Shift, so Ctrl+Shift+= also matches Ctrl++.
+ */
+export function candidates(e: KeyEvent, on: Platform = platform): Combo[] {
+  const combo = comboFromEvent(e, on);
+  if (!combo) return [];
+  if (!combo.shift) return [combo];
+  const digit = /^Digit([0-9])$/.exec(e.code)?.[1];
+  const shifted = printable(e.key) ? e.key
+    : digit !== undefined ? SHIFTED_DIGITS[Number(digit)]
+    : SHIFTED_SYMBOLS[e.code];
+  const key = shifted?.toUpperCase();
+  if (key && key !== combo.key && !/^[A-Z]$/.test(key)) return [combo, { ...combo, shift: false, key }];
+  // A layout's own shifted symbol on another key: also without Shift.
+  if (combo.key.length === 1 && !/[A-Z0-9]/.test(combo.key)) return [combo, { ...combo, shift: false }];
+  return [combo];
 }
 
 /** QKeySequence::matches: typed so far against a bound sequence. */
@@ -371,27 +394,46 @@ const listPopupKey = (target: EventTarget | null, c: Combo) =>
   focused(target)?.tagName === "SELECT"
   && ((only(c, { alt: true }) && (c.key === "Up" || c.key === "Down")) || (only(c, {}) && c.key === "F4"));
 
-// The handlers per command: the newest runs, and removing it restores the one before.
-const handlers = new Map<string, (() => void)[]>();
-const handlerOf = (id: string) => handlers.get(id)?.at(-1);
+/** What a handler is limited to: the focus must be inside it (a message field). */
+export interface Root { contains(target: Node | null): boolean }
+interface Handler { run: () => void; root?: Root }
+
+// The handlers per command: the newest one whose root holds the focus runs,
+// and removing it restores the one before.
+const handlers = new Map<string, Handler[]>();
+
+/** The handler that runs `id` for a key aimed at `target`. */
+export function handlerFor(id: string, target: EventTarget | null): (() => void) | undefined {
+  const stack = handlers.get(id) ?? [];
+  for (let i = stack.length - 1; i >= 0; i--) {
+    const root = stack[i].root;
+    if (!root || root.contains(target as Node | null)) return stack[i].run;
+  }
+  return undefined;
+}
 
 /**
  * Runs `handler` for a command: a window command anywhere in the window, a
- * composer command while a message field has the focus. Returns the
- * unregister function.
+ * composer command while the focus is inside `root`, its message field.
+ * Returns the unregister function.
  */
-export function onCommand(id: string, handler: () => void): () => void {
+export function onCommand(id: string, handler: () => void, root?: Root): () => void {
+  const entry: Handler = { run: handler, root };
   const stack = handlers.get(id) ?? [];
-  stack.push(handler);
+  stack.push(entry);
   handlers.set(id, stack);
   return () => {
     const current = handlers.get(id);
-    const at = current?.lastIndexOf(handler) ?? -1;
+    const at = current?.lastIndexOf(entry) ?? -1;
     if (!current || at < 0) return;
     current.splice(at, 1);
     if (!current.length) handlers.delete(id);
   };
 }
+
+// In a message field its own commands come first, as Qt's field keeps the
+// keys its actions claim (ClaimedKeys).
+const COMPOSER_FIRST = [...COMMANDS.filter((c) => c.scope === "composer"), ...COMMANDS.filter((c) => c.scope !== "composer")];
 
 const windowState = sequenceState();
 
@@ -402,7 +444,8 @@ type RouterEvent = Pick<KeyboardEvent, "key" | "code" | "altKey" | "ctrlKey" | "
 export function route(event: RouterEvent, state: SequenceState = windowState, on: Platform = platform): { run?: string; consume: boolean } {
   // An input method composing text owns its keys.
   if (event.isComposing || event.keyCode === 229 || event.key === "Process") return { consume: false };
-  const combo = comboFromEvent(event, on);
+  const tried = candidates(event, on);
+  const combo = tried[0];
   if (!combo) return { consume: false };
   const pending = state.typed.length > 0;
   if (pending && only(combo, {}) && combo.key === "Esc") { state.typed = []; return { consume: true }; }
@@ -416,9 +459,9 @@ export function route(event: RouterEvent, state: SequenceState = windowState, on
   const selection = hasSelection(event.target);
   let full: string | undefined;
   let partial: Combo | undefined;
-  for (const c of COMMANDS) {
-    if (!handlerOf(c.id) || (c.scope === "composer" && context !== "composer")) continue;
-    for (const candidate of candidates(combo)) {
+  for (const c of context === "composer" ? COMPOSER_FIRST : COMMANDS) {
+    if ((c.scope === "composer" && context !== "composer") || !handlerFor(c.id, event.target)) continue;
+    for (const candidate of tried) {
       const typed = [...state.typed, candidate];
       for (const key of keys(c.id, on)) {
         const result = matchSequence(key, typed);
@@ -443,7 +486,7 @@ export function installShortcutRouter(target: Window = window): () => void {
     if (!decision.consume) return;
     event.preventDefault();
     event.stopPropagation();
-    if (decision.run) handlerOf(decision.run)?.();
+    if (decision.run) handlerFor(decision.run, event.target)?.();
   };
   const restart = () => { windowState.typed = []; };
   target.addEventListener("keydown", keydown, true);

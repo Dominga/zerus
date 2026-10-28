@@ -132,13 +132,14 @@ function ChangeDialog(props: { id: string; slot: number; close: () => void }) {
   const close = () => { dialog.close(); props.close(); };
 
   // QKeySequenceEdit with at most two chords: the first key replaces the
-  // chord shown, a second follows it, and recording finishes at two chords
-  // or a second after a key is released.
+  // chord shown, a second follows it, and recording finishes at two chords,
+  // a second after any key is released (macOS sends no release for a key
+  // let go while ⌘ is held, so the modifier's counts), or when the field
+  // loses the focus.
   const [recording, setRecording] = createSignal(false);
-  let held: string | undefined;
   let release: ReturnType<typeof setTimeout> | undefined;
   const stopTimer = () => { if (release !== undefined) clearTimeout(release); release = undefined; };
-  const finish = () => { stopTimer(); held = undefined; setRecording(false); };
+  const finish = () => { stopTimer(); setRecording(false); };
   onCleanup(stopTimer);
   const record = (e: KeyboardEvent) => {
     if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey) return;
@@ -149,13 +150,12 @@ function ChangeDialog(props: { id: string; slot: number; close: () => void }) {
     if (!combo) return;
     stopTimer();
     const sequence = recording() ? [...recorded(), combo] : [combo];
-    held = e.code;
     setRecorded(sequence);
     setReason("");
     if (sequence.length >= 2) finish(); else setRecording(true);
   };
-  const released = (e: KeyboardEvent) => {
-    if (!recording() || e.code !== held) return;
+  const released = () => {
+    if (!recording()) return;
     stopTimer();
     release = setTimeout(finish, 1000);
   };
@@ -204,7 +204,7 @@ function ChangeDialog(props: { id: string; slot: number; close: () => void }) {
           <p>Press the new shortcut for {title}.</p>
           <div class="kb-capture-row">
             <div ref={field} class="dlg-input kb-capture" tabindex="0" role="textbox" aria-label={`Shortcut for ${title}`}
-              data-shortcut-context="capture" onKeyDown={record} onKeyUp={released}>
+              data-shortcut-context="capture" onKeyDown={record} onKeyUp={released} onBlur={finish}>
               <Show when={recorded().length} fallback={<span class="kb-placeholder">Press shortcut</span>}>
                 {nativeText(recorded())}{recording() ? ", …" : ""}
               </Show>

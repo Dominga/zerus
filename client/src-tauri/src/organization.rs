@@ -56,9 +56,10 @@ const LOG_EVERY: Duration = Duration::from_secs(60);
 /// The base and versions of the latest state: `Fleet::organization_snapshot`
 /// live, the replay's own catalog in a replay.
 pub type SnapshotSource = Arc<dyn Fn() -> Option<OrganizationSnapshot> + Send + Sync>;
-/// Hands the presented `swarm get` object, the default project and the
-/// controller's status line to the Projects screen (Task 9), as Qt's
-/// `statusChanged` reaches its Projects page (SessionsWindow.cpp:1653).
+/// Hands the presented `swarm get` object (none before the first state),
+/// the default project and the controller's status line to the Projects
+/// screen, as Qt's `statusChanged` reaches its Projects page
+/// (SessionsWindow.cpp:1653).
 /// It runs without the hub's lock, one call at a time, and a call never
 /// follows a newer one; it must not call back into [`Organization`]. A
 /// panic in it is caught and logged.
@@ -67,10 +68,10 @@ pub type SnapshotSource = Arc<dyn Fn() -> Option<OrganizationSnapshot> + Send + 
 /// some calls run under that lock (see the module's lock list), and some on
 /// the main thread itself, in [`Organization::flush`] as the app quits. A
 /// call that waited for the main thread there would deadlock the quit.
-pub type Presented = Arc<dyn Fn(Arc<Value>, String, (String, bool)) + Send + Sync>;
+pub type Presented = Arc<dyn Fn(Option<Arc<Value>>, String, (String, bool)) + Send + Sync>;
 
 /// One call of [`Presented`], made once the hub's lock is released.
-type Announce = (Presented, Arc<Value>, String, (String, bool));
+type Announce = (Presented, Option<Arc<Value>>, String, (String, bool));
 
 /// The layout file in the app data directory; a replay keeps its own.
 pub fn layout_file(replay: bool) -> &'static str {
@@ -283,7 +284,9 @@ impl Organization {
     }
 
     /// Hands the pump what the list shows, and queues the Projects call when
-    /// the revision or the status line changed.
+    /// the revision or the status line changed. The call carries the
+    /// presented catalog once there is one, and the status line always: a
+    /// source that fails before its first state still reaches Projects.
     fn publish(&self, hub: &mut Hub) {
         let view = self.view(hub);
         let shown = (hub.sync.revision(), view.status.clone(), view.status_error);
@@ -298,10 +301,10 @@ impl Organization {
         if hub.shown.as_ref() == Some(&shown) {
             return;
         }
-        let (Some(presented), Some(value)) = (hub.presented.clone(), hub.sync.presented_value())
-        else {
+        let Some(presented) = hub.presented.clone() else {
             return;
         };
+        let value = hub.sync.presented_value();
         let status = (shown.1.clone(), shown.2);
         hub.announcements += 1;
         hub.announce = Some((
@@ -1525,6 +1528,81 @@ mod tests {
         );
         wait_until("the draft to go", || fake.settled_after(1));
         assert_eq!(fake.applies().len(), 1, "no second apply");
+        fake.finish(organization);
+    }
+
+    /// What Projects receives: whether a catalog came with the call, and the
+    /// status line.
+    type Calls = Arc<Mutex<Vec<(Option<String>, (String, bool))>>>;
+
+    fn recording(organization: &Organization) -> Calls {
+        let calls: Calls = Arc::default();
+        let kept = Arc::clone(&calls);
+        organization.set_presented(Arc::new(move |value, _, status| {
+            let digest = value.map(|value| value["digest"].as_str().unwrap_or("").to_owned());
+            kept.lock().unwrap().push((digest, status));
+        }));
+        calls
+    }
+
+    /// A source that fails before its first state: Projects gets Qt's
+    /// "Project sync unavailable: …" line without a catalog, as the Qt
+    /// GUI's `swarmFailed` reaches its Projects page.
+    #[test]
+    fn a_source_that_fails_before_any_state_reaches_projects() {
+        let fake = Fake::landing();
+        let organization = fake.organization(&Pump::default(), true);
+        let calls = recording(&organization);
+        organization.observe(&Change::Organization {
+            computer: ComputerId::local(),
+            update: OrganizationUpdate::Failed {
+                code: "unavailable".into(),
+                message: "hgs: unknown command swarm".into(),
+            },
+        });
+        assert_eq!(
+            calls.lock().unwrap().last().cloned(),
+            Some((
+                None,
+                (
+                    "Project sync unavailable: hgs: unknown command swarm".into(),
+                    true
+                )
+            ))
+        );
+        fake.finish(organization);
+    }
+
+    /// A saved draft whose apply fails on every tick: Projects shows the
+    /// first state's catalog with the failure line, not an empty screen.
+    #[test]
+    fn a_saved_draft_whose_apply_fails_reaches_projects() {
+        let refused =
+            json!({"exit": 1, "stderr": "hgs: unknown field version; reload the catalog\n"});
+        let fake = Fake::new(json!([refused]));
+        let base = full("d1")["organization"].clone();
+        let mut desired = base.clone();
+        desired["projects"][0]["sessions"] = json!([]);
+        desired["projects"][1]["sessions"] = json!([R]);
+        draft::write(
+            &fake.draft(),
+            &Draft::new(base, desired, serde_json::Map::new()).to_json(),
+        )
+        .unwrap();
+        let organization = fake.organization(&Pump::default(), true);
+        let calls = recording(&organization);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        let failed = (
+            Some("d1".to_owned()),
+            (
+                "Project sync unavailable: hgs: unknown field version; reload the catalog".into(),
+                true,
+            ),
+        );
+        wait_until("Projects to get the failure", || {
+            calls.lock().unwrap().last() == Some(&failed)
+        });
         fake.finish(organization);
     }
 }

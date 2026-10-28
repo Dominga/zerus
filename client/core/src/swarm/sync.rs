@@ -367,6 +367,13 @@ impl Controller {
                 // base kept since it was a read (203), and the flush sends the
                 // draft from the saved base and versions (204-205).
                 self.ready |= observation.value["initialized"] == true;
+                if self.value.is_none() {
+                    // Shown, not adopted: Projects gets a catalog (with the
+                    // draft over it) and the status line, and `reason` reads
+                    // whether the catalog is initialized.
+                    self.value = Some(Arc::clone(&observation.value));
+                    self.revision += 1;
+                }
                 if self.ready {
                     self.restored = false;
                     self.flush_at = Some(now + FLUSH_MS);
@@ -1939,6 +1946,43 @@ mod tests {
             crate::swarm::members(&value["organization"])[R],
             "beta",
             "Projects shows what was written too"
+        );
+    }
+
+    /// A restored draft that fails on every tick still gives Projects the
+    /// first state's catalog with the failure line, and an uninitialized
+    /// first state is reported as such.
+    #[test]
+    fn a_restored_draft_that_keeps_failing_reaches_projects() {
+        let mut first = ready();
+        first.edit(&to("beta"), 0).unwrap();
+        let (_, write) = first.take_draft().unwrap();
+        let DraftWrite::Save(bytes) = write else {
+            panic!("a draft")
+        };
+
+        let mut waiting = Controller::default();
+        waiting.restore(Draft::from_json(&bytes).unwrap());
+        let mut fresh = state("d0", "alpha", &["op-1"]);
+        fresh["initialized"] = json!(false);
+        assert!(!waiting.observe(observation(fresh), 0));
+        assert_eq!(waiting.view().reason.as_deref(), Some(NOT_SET_UP));
+
+        let mut sync = Controller::default();
+        sync.restore(Draft::from_json(&bytes).unwrap());
+        assert!(sync.presented_value().is_none(), "no state yet");
+        let revision = sync.revision();
+        assert!(!sync.observe(observation(state("d5", "alpha", &["op-9"])), 1_000));
+        assert!(sync.revision() > revision, "Projects gets the catalog");
+        let _ = input(sync.due(1_200));
+        sync.finish(Exit::TimedOut, 11_200);
+        assert!(sync.view().status_error, "the status line is the failure");
+        let value = sync.presented_value().expect("a catalog for Projects");
+        assert_eq!(value["digest"], "d5");
+        assert_eq!(
+            crate::swarm::members(&value["organization"])[R],
+            "beta",
+            "with the draft over it"
         );
     }
 }

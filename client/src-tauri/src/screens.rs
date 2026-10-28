@@ -564,12 +564,18 @@ impl Screens {
     /// the event for the event loop and never waits for the main thread (as
     /// long as tauri's `tracing` feature stays off: with it, `eval_script`
     /// waits for the event loop's answer).
-    pub fn organization(&self, value: Arc<Value>, default_project: String, status: (String, bool)) {
-        let value = (*value).clone();
+    pub fn organization(
+        &self,
+        value: Option<Arc<Value>>,
+        default_project: String,
+        status: (String, bool),
+    ) {
         {
             let mut hub = self.lock();
             hub.swarm.set_default(Some(default_project));
-            hub.swarm.finish(Ok(value));
+            if let Some(value) = value {
+                hub.swarm.finish(Ok((*value).clone()));
+            }
             let (status, error) = status;
             if !status.is_empty() {
                 hub.swarm.set_status(status, error);
@@ -866,8 +872,17 @@ mod tests {
         let failed = "Project sync unavailable: hgs did not answer in time";
         // Showing Projects published its empty view; only the call's event counts.
         h.events();
+        // Before the first state the call carries the status line alone.
         h.screens
-            .organization(Arc::new(swarm), "sample".into(), (failed.into(), true));
+            .organization(None, "sample".into(), (failed.into(), true));
+        let view = h.screens.projects();
+        assert!(!view.loaded);
+        assert_eq!((view.status.as_str(), view.status_error), (failed, true));
+        h.screens.organization(
+            Some(Arc::new(swarm)),
+            "sample".into(),
+            (failed.into(), true),
+        );
         let view = h.screens.projects();
         assert!(view.loaded);
         assert!(view
@@ -1131,7 +1146,7 @@ mod tests {
         // handed; the fixture's own line names a conflict.
         let line = "Local catalog. Connect another computer to sync projects.";
         h.screens.organization(
-            Arc::new(swarm_fixture()),
+            Some(Arc::new(swarm_fixture())),
             "sample".into(),
             (line.into(), false),
         );

@@ -1,7 +1,7 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, untrack } from "solid-js";
 import { Icon } from "../lib/icons";
 import { catalog, computerOffline } from "../../store/catalog";
-import { change, copyCommand, copyFolder, copyName, copyReference, dismiss, end, forget, interrupting, notices, notify, perform, stillListed, pendingNotifications, toggleMute, updating } from "../../store/actions";
+import { GONE, change, copyCommand, copyFolder, copyName, copyReference, dismiss, end, forget, interrupting, notices, notify, perform, stillListed, pendingNotifications, toggleMute, updating } from "../../store/actions";
 import { bindBatchConfirm, running } from "../../store/batch";
 import { cancelRestoreFollow, forgetArchived, refreshArchiveWhenDone, restoreSession } from "../../store/restores";
 import type { MenuEntry } from "../../store/ui";
@@ -66,6 +66,8 @@ export function actionEntries(s: Session, details?: Details, options: { context?
         if (terminates(row, details)) { send({ type: "open", kind: "terminate", row }); return; }
         const live = stillListed(row);
         if (!live) return;
+        // An archived row is keyed by its archive id; Qt's key also holds the name.
+        if (archived && live.name !== row.name) { notify("info", GONE, true); return; }
         const opening = forgetOpening(row, live, details);
         if (opening === "changed") { notify("error", STATE_CHANGED, true); return; }
         send({ type: "open", kind: "forget", ...opening });

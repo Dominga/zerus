@@ -104,10 +104,12 @@ client/src/types.ts, bridge.ts      the new fields, actions and commands
 client/src/store/marks.ts (+test)   marks store and the row overlay
 client/src/store/archive.ts (+test) archive pages per computer
 client/src/store/batch.ts (+test)   selection runner
+client/src/store/restores.ts (+test)   Restore, its follow-up and limit, Forget archived, the batch's archive calls
 client/src/store/actions.ts         new actions, notices, the global batch busy flag
 client/src/store/catalog.ts         new flat Session fields; the overlay hook
 client/src/ui/sessions/actions-ui.ts (+test)   menuState additions, selection applicability, dialog copy
 client/src/ui/sessions/ActionDialogs.tsx       entries, Start fresh, Forget and batch confirmations
+client/src/ui/sessions/archive-entries.ts (+test)   Clear archive: the entry and its loaded rows in scope
 client/src/ui/sessions/ArchiveBar.tsx          date range, Older, Newer, Refresh, status
 client/src/ui/sessions/SessionList.tsx         wiring of the entries above only
 client/src/ui/sessions/SessionDetail.tsx       Mark read chip detail, Start fresh header action
@@ -709,12 +711,12 @@ Controller rulings during Piece B:
 Controller rulings during Piece C:
 - Menu-launched Start fresh and Forget saved session run the click-time pre-check before their dialogs, as the copy entries do.
 - The header's Start fresh and Clear session follow Qt's main-context rule: neither shows while a subagent is open.
-- Forget archived session stays disabled until the Archive view (`zerus-5wmh.32`).
+- Forget archived session stays disabled until the Archive view (`zerus-5wmh.32`) (lifted by Piece E).
 - Task C4 added the README part and the smoke steps for PR 3.
 
 Controller rulings during Piece F:
 - The batch-running flag disables every write entry (Qt's m_pending).
-- Archived Resume and Forget are not counted until Piece E binds its hooks.
+- Archived Resume and Forget are not counted until Piece E binds its hooks (lifted by Piece E).
 - Move to project is disabled with "Arrives with project organisation." until the organization stream's move lands.
 - Pause all and Resume all are computer-wide calls on their own write claim.
 - The client shows machines as headings, since its menus have no submenus.
@@ -754,6 +756,7 @@ Deviations from Qt after Piece E:
 - "Updating session on {machine}…" is absent, as for every client change entry.
 - Qt's local launch question before a restore (`confirmLocalStart`) has no client counterpart, as for Resume.
 - The header's Forget archived on a retained archived source (after the archive reloaded) refuses at click time with the client's pre-check text, "This session is no longer available. Open its actions again."; Qt opens the dialog and refuses at confirmation with "…Refresh the list and open its actions again."
-- The restore follow is cancelled by the state filter, the search, a running batch, Rename and Forget archived; other single writes (pause, resume, terminate, start fresh) do not cancel it, as they act on another selected row.
+- The restore follow is cancelled by the state filter, the search, a running batch, Rename and Forget archived; other single writes (pause, resume, Move to archive, terminate, start fresh) do not cancel it, as they act on another selected row. Qt clears it in each of them (Move to archive: `archiveSession`, `SessionsWindow.cpp:5575`).
+- Clicking the state filter that is already active does not cancel the follow (only a change of the filter does); Qt cancels on every filter-button click (`SessionsWindow.cpp:409`). The filter buttons are the owner session's `SessionList`, outside this piece.
 - The restore's conversation is the row's conversation id; Qt prefers `m_details`, which the client only returns when it matches the row's conversation.
 - A live row of a restored name that appears during a batch by another path is seen by the batch's occupied check only through a tracked restore (`taken`); otherwise `hgs` decides and the item counts as failed.

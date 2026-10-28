@@ -111,6 +111,28 @@ describe("the archived row's menu entries", () => {
   });
 });
 
+describe("a reloaded page that lists the archive id under another name", () => {
+  it("makes the entries opened for the old name refuse at the click, with no call and no dialog", async () => {
+    await loadArchive(archived(14));
+    const menu = actionEntries(archive.row(key(14))!, undefined, { context: true });
+    archive.refresh();
+    await flush();
+    pages.splice(0).forEach((answer) => answer(page({ ...archived(14), name: "codex/example/renamed" })));
+    await flush();
+    expect(archive.row(key(14))?.name).toBe("codex/example/renamed");
+    const before = notices().length;
+    menu.change.action!();
+    await flush();
+    menu.end.action!();
+    await flush();
+    expect(mocked.runAction).not.toHaveBeenCalled();
+    expect(notices().slice(before).map((n) => n.text)).toEqual([
+      "This session is no longer available. Open its actions again.",
+      "This session is no longer available. Open its actions again.",
+    ]);
+  });
+});
+
 describe("the header and the context menu Restore", () => {
   it("restore a row whose operations leave out restore, as Qt's header and selected-row menu do", async () => {
     await loadArchive({ ...archived(12), allowed_actions: ["rename", "forget"] });

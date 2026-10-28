@@ -452,6 +452,20 @@ fn failed(detail: impl Into<String>) -> Outcome {
     }
 }
 
+/// The refusal `dispatch` returns as a failed outcome before it claims the
+/// session or starts a process: a restore or archived forget without its
+/// archive id, refused before any pending check as Qt's `restoreArchive` and
+/// `forgetArchive` do (`HgsClient.cpp:1303-1324`). Other calls are built off
+/// the async workers after the claim, since building one may read files.
+fn refused_before_claim(target: &Target, action: &Action) -> Option<String> {
+    match action {
+        Action::Restore { .. } | Action::ForgetArchive { .. } => {
+            invocation(target, action, "").err()
+        }
+        _ => None,
+    }
+}
+
 /// Runs one action on a session. `Err("busy")` while another runs for it.
 #[tauri::command]
 pub async fn run_action(
@@ -469,6 +483,9 @@ pub async fn run_action(
 pub async fn dispatch(state: &Actions, target: Target, action: Action) -> Result<Outcome, String> {
     if blocked() {
         return Ok(failed(REPLAY_NEEDS_HGS));
+    }
+    if let Some(refusal) = refused_before_claim(&target, &action) {
+        return Ok(failed(refusal));
     }
     // Pause all and Resume all are computer-wide: one per computer at a time,
     // whatever session name the caller sent.
@@ -1029,6 +1046,40 @@ mod tests {
         assert!(!smoke_allowed(Some("f"), None, Some("smoke")));
         assert!(!smoke_allowed(Some("f"), Some("h"), None));
         assert!(!smoke_allowed(Some("f"), Some("h"), Some("")));
+    }
+
+    #[test]
+    fn an_empty_archive_identity_is_refused_before_any_claim_or_process() {
+        let target = Target {
+            computer: "mac".into(),
+            name: "claude/sample-project/review".into(),
+            run_id: "r".into(),
+            conversation_id: "c".into(),
+        };
+        for action in [
+            Action::Restore {
+                archive_id: String::new(),
+            },
+            Action::ForgetArchive {
+                archive_id: String::new(),
+            },
+        ] {
+            assert_eq!(
+                refused_before_claim(&target, &action),
+                Some("Missing archive identity".to_owned())
+            );
+        }
+        for action in [
+            Action::Restore {
+                archive_id: "a1".into(),
+            },
+            Action::ForgetArchive {
+                archive_id: "a1".into(),
+            },
+            Action::Pause,
+        ] {
+            assert_eq!(refused_before_claim(&target, &action), None);
+        }
     }
 
     #[test]

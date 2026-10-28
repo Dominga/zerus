@@ -18,7 +18,8 @@ name = "zerus_client_lib"
 default = ["live"]
 # Streams from `hgs watch` through zerus-client-core. Without it the app builds
 # with no data source and the frontend uses its built-in replay.
-live = ["dep:zerus-client-core"]
+# On Linux it talks to Konsole over D-Bus (libdbus) for terminal tabs.
+live = ["dep:zerus-client-core", "zerus-client-core/konsole"]
 
 [dependencies]
 tauri = { version = "2", features = [] }

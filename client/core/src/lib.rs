@@ -26,6 +26,7 @@ pub mod machine;
 pub mod organization;
 pub mod organization;
 pub mod paths;
+pub mod paths;
 pub mod process_view;
 pub mod processes;
 #[cfg(unix)]
@@ -43,6 +44,7 @@ pub mod task_view;
 pub mod tasks;
 pub mod tasks_write;
 pub mod terminal;
+pub mod terminal_launch;
 pub mod termination_cleanup;
 pub mod view;
 pub mod views;

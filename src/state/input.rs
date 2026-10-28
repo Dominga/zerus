@@ -112,7 +112,7 @@ pub(super) fn validate_launch_prompt(text: &str) -> Result<()> {
     validate(&Request {
         request_id: uuid::Uuid::new_v4().to_string(), text: text.into(),
         expected_run_id: "launch".into(), expected_conversation_id: String::new(),
-        attachments: Vec::new(), expected_compaction_id: String::new(),
+        attachments: Vec::new(), expected_compaction_id: String::new(), queue_when_unconfirmed: false,
     }).map(|_| ())
 }
 

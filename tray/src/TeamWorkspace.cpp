@@ -597,10 +597,10 @@ QWidget *TeamWorkspace::headerActionsContent(const Team &team)
         limits->setToolTip(team.resumeAfterLimits
             ? tr("On: a member stopped by a usage limit with a known reset time continues after the reset")
             : tr("Off: a member stopped by a usage limit waits for you or the lead"));
-        QObject::connect(limits, &QPushButton::clicked, this, [this, settings = team.settingsJson](bool on) {
-            QJsonObject changed = settings;
-            changed.insert("resume_after_limits", on);
-            m_panel->act("settings", {{"settings", changed}});
+        // N33 (#548): only the switch's own field, as N13 for the others; the
+        // server merges it, so a lead's newer settings stay.
+        QObject::connect(limits, &QPushButton::clicked, this, [this](bool on) {
+            m_panel->act("settings", {{"settings", QJsonObject{{"resume_after_limits", on}}}});
         });
         h->addWidget(limits);
     }
@@ -937,6 +937,16 @@ const Teams::Team *TeamWorkspace::currentTeam(const QString &id) const
     return m_teams->team(id);
 }
 
+const Teams::Team *TeamWorkspace::planTeam(const QString &id)
+{
+    const auto *team = currentTeam(id);
+    if (team && team->full) return team;
+    m_error = tr("Loading the plan; try again in a moment.");
+    m_teams->watch(id);
+    scheduleRender();
+    return nullptr;
+}
+
 // Owner, 2026-10-28: a sideways bar must not come and go. An as-needed bar
 // appeared a moment after each poll's rebuild and flipped at the edge of the
 // room; this one is on exactly while the content's minimum width is more
@@ -974,6 +984,40 @@ private:
     QScrollArea *m_area;
     QPointer<QWidget> m_content;
     bool m_pending = false;
+};
+
+// QA #500, finding 1 (SPEC 5.3): the Board scrolls every phase sideways as
+// one page (U33), but a phase's header stays in the visible part: at most as
+// wide as the viewport, and moved along with the sideways scroll, so its
+// actions never leave the view; its info row yields first (FitRow).
+class PinnedPhaseHeaders : public QObject {
+public:
+    PinnedPhaseHeaders(QScrollArea *area, QWidget *content) : QObject(area), m_area(area), m_content(content)
+    {
+        area->viewport()->installEventFilter(this);
+        QObject::connect(area->horizontalScrollBar(), &QScrollBar::valueChanged, this, [this] { pin(); });
+        pin();
+    }
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() == QEvent::Resize) pin();
+        return QObject::eventFilter(watched, event);
+    }
+private:
+    void pin()
+    {
+        if (!m_content) return;
+        const int offset = qMax(0, m_area->horizontalScrollBar()->value());
+        for (auto *holder : m_content->findChildren<QWidget *>(QStringLiteral("teamPhaseHeaderPin"))) {
+            // The same margin on the right as the phase frame has on the left.
+            const int left = holder->mapTo(m_content, QPoint(0, 0)).x();
+            const int room = qMax(240, m_area->viewport()->width() - 2 * left);
+            if (auto *layout = holder->layout(); layout && layout->contentsMargins().left() != offset) layout->setContentsMargins(offset, 0, 0, 0);
+            if (auto *head = holder->findChild<QWidget *>(QStringLiteral("teamPhaseHeader")); head && head->maximumWidth() != room) head->setMaximumWidth(room);
+        }
+    }
+    QScrollArea *m_area;
+    QPointer<QWidget> m_content;
 };
 
 // Owner, 2026-10-28: on a narrow window the workspace toolbar keeps its icons
@@ -1044,7 +1088,7 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
     const bool planning = team.status == "planning";
     if (planning) {
         auto *task = button(tr("+ Task"), "teamWorkspaceAddTask");
-        QObject::connect(task, &QPushButton::clicked, this, [this] { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, 0); });
+        QObject::connect(task, &QPushButton::clicked, this, [this] { if (const auto *t = planTeam(m_team)) m_panel->editTask(*t, 0); });
         h->addWidget(task);
         if (m_view == "graph") {
             auto *hint = elided(tr("Drag from a node's right edge onto a task to connect them"), c.dim, 11);
@@ -1177,9 +1221,9 @@ QWidget *TeamWorkspace::canvas(const Team &team)
     // a drag from a node's handle adds a dependency, a selected edge goes.
     if (team.status == "planning") {
         view->editable = true;
-        view->clicked = [this](int id, const QPoint &) { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, id); };
-        view->linked = [this](int dependency, int task) { if (const auto *t = currentTeam(m_team)) m_panel->link(*t, dependency, task, true); };
-        view->unlinked = [this](int dependency, int task) { if (const auto *t = currentTeam(m_team)) m_panel->link(*t, dependency, task, false); };
+        view->clicked = [this](int id, const QPoint &) { if (const auto *t = planTeam(m_team)) m_panel->editTask(*t, id); };
+        view->linked = [this](int dependency, int task) { if (const auto *t = planTeam(m_team)) m_panel->link(*t, dependency, task, true); };
+        view->unlinked = [this](int dependency, int task) { if (const auto *t = planTeam(m_team)) m_panel->link(*t, dependency, task, false); };
     }
     if (team.status != "planning") view->clicked = [this](int id, const QPoint &) {
         const auto *team = currentTeam(m_team);
@@ -1607,7 +1651,7 @@ QWidget *TeamWorkspace::phaseColumn(const Team &team)
     for (const auto &group : groups) v->addWidget(phaseScroll(team, group));
     v->addStretch();
     area->setWidget(content);
-    if (boardView) new SideBarFit(area, content);
+    if (boardView) { new SideBarFit(area, content); new PinnedPhaseHeaders(area, content); }
     keepScroll(area, QStringLiteral("phases/") + m_view);
     return area;
 }
@@ -1821,7 +1865,17 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         });
         h->addWidget(more);
     }
-    fv->addWidget(head);
+    if (m_view == "board") {
+        // Pinned to the visible part of the sideways page (PinnedPhaseHeaders).
+        auto *pin = new QWidget; pin->setObjectName("teamPhaseHeaderPin");
+        auto *ph = new QHBoxLayout(pin); ph->setContentsMargins(0, 0, 0, 0); ph->setSpacing(0);
+        ph->addWidget(head, 1);
+        ph->addStretch(0);
+        frame->header = pin;
+        fv->addWidget(pin);
+    } else {
+        fv->addWidget(head);
+    }
     if (!open) return frame;
     // The lead's note, then the send-back form, then the body.
     const QString note = record ? record->note : QString();
@@ -2042,16 +2096,18 @@ QWidget *TeamWorkspace::phaseGraph(const Team &team, const PhaseGroup &group, co
     // Planning edits the plan with `plan`; a running team's draft phase edits
     // its tasks' dependencies with edit-draft (the server takes `plan` only
     // in Planning).
+    // C4 (#548): every edit is built from the full copy (planTeam), never the
+    // `team list` summary, which has no dependencies or descriptions.
     if (team.status == "planning") {
         view->editable = true;
-        view->linked = [this](int dependency, int task) { if (const auto *t = currentTeam(m_team)) m_panel->link(*t, dependency, task, true); };
-        view->unlinked = [this](int dependency, int task) { if (const auto *t = currentTeam(m_team)) m_panel->link(*t, dependency, task, false); };
+        view->linked = [this](int dependency, int task) { if (const auto *t = planTeam(m_team)) m_panel->link(*t, dependency, task, true); };
+        view->unlinked = [this](int dependency, int task) { if (const auto *t = planTeam(m_team)) m_panel->link(*t, dependency, task, false); };
     } else if (ownerPhaseState(team, group) == "draft") {
         for (int id : group.tasks) if (const auto *task = team.task(id); task && task->status == "draft") view->editableTasks.insert(id);
-        view->linked = [this, id = team.id](int dependency, int task) { if (const auto *t = currentTeam(id)) linkDraft(*t, dependency, task, true); };
-        view->unlinked = [this, id = team.id](int dependency, int task) { if (const auto *t = currentTeam(id)) linkDraft(*t, dependency, task, false); };
+        view->linked = [this, id = team.id](int dependency, int task) { if (const auto *t = planTeam(id)) linkDraft(*t, dependency, task, true); };
+        view->unlinked = [this, id = team.id](int dependency, int task) { if (const auto *t = planTeam(id)) linkDraft(*t, dependency, task, false); };
     }
-    if (team.status == "planning") view->clicked = [this](int id, const QPoint &) { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, id); };
+    if (team.status == "planning") view->clicked = [this](int id, const QPoint &) { if (const auto *t = planTeam(m_team)) m_panel->editTask(*t, id); };
     else view->clicked = [this](int id, const QPoint &) {
         const auto *t = currentTeam(m_team);
         if (t) if (const auto *task = t->task(id); task && task->subteam.known && !task->subteam.team.isEmpty()) {

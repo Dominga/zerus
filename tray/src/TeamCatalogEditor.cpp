@@ -695,7 +695,7 @@ void TeamCatalogEditor::updateHeader()
     m_banner->setStyleSheet(QStringLiteral("QFrame#teamCatalogBanner{background:%1;border:1px solid %2;border-radius:9px;}"
                                            "QLabel#teamCatalogBannerTitle{color:%3;font-weight:600;font-size:13px;} QLabel#teamCatalogBannerText{color:%4;font-size:12px;}")
                                 .arg(alpha(tone, .08).name(QColor::HexArgb), alpha(tone, .45).name(QColor::HexArgb), c.fg.name(), c.text2.name()));
-    m_bannerAction->setVisible(redo && askRedo);
+    m_bannerAction->setVisible(redo && askRedo && (!canRedo || canRedo()));
     m_bannerAction->setText(tr("Ask designer to redo"));
     m_bannerAction->setToolTip(tr("Ask the designer to propose again on v%1").arg(base.version));
     m_bannerDiscard->setVisible(redo);
@@ -1704,9 +1704,14 @@ void TeamCatalogEditor::applyKept()
     // U15: from the draft's own state, not this editor's mode: the designer
     // page applies while a hand edit hides the draft here.
     const auto &base = m_teams->catalog();
-    int kept = 0; for (const auto &p : base.proposals) kept += p.state == "kept";
+    int kept = 0, undecided = 0;
+    for (const auto &p : base.proposals) { kept += p.state == "kept"; undecided += p.state == "proposed"; }
     if (!kept || base.draftBase != base.version) return;
-    if (confirm && !confirm(QStringLiteral("teamCatalogApplyConfirm"), tr("Apply changes"), counted(kept, tr("Write %1 kept change as the next catalog version?"), tr("Write %1 kept changes as the next catalog version?")) + QLatin1Char(' ') + tr("Undecided ones stay in the draft; running teams keep their roster."), tr("Apply"))) return;
+    // N37 (#548): Apply ends the whole draft (catalog.rs, "apply": save_draft
+    // of an empty draft); undecided changes would be based on the old version.
+    const QString dropped = undecided ? counted(undecided, tr("The %1 undecided change is dropped with the draft."),
+                                                tr("The %1 undecided changes are dropped with the draft.")) + QLatin1Char(' ') : QString();
+    if (confirm && !confirm(QStringLiteral("teamCatalogApplyConfirm"), tr("Apply changes"), counted(kept, tr("Write %1 kept change as the next catalog version?"), tr("Write %1 kept changes as the next catalog version?")) + QLatin1Char(' ') + dropped + tr("Running teams keep their roster."), tr("Apply"))) return;
     m_teams->applyDraft([this](bool ok, const QJsonObject &result, const QString &) {
         if (!ok) return;   // the controller keeps the refusal for the banner
         m_applied = tr("Applied as v%1").arg(result.value("version").toInteger());

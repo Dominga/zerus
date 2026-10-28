@@ -33,7 +33,8 @@ fn text<'a>(object: &'a Map<String, Value>, key: &str) -> &'a str {
     object.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-/// `QJsonValue::toInteger()`: a whole number in range, else 0.
+/// `QJsonValue::toInteger()`: an integer, or any whole double within the
+/// qint64 range; anything else is 0.
 fn integer(object: &Map<String, Value>, key: &str) -> i64 {
     let Some(value) = object.get(key) else {
         return 0;
@@ -43,7 +44,12 @@ fn integer(object: &Map<String, Value>, key: &str) -> i64 {
         .or_else(|| {
             value
                 .as_f64()
-                .filter(|number| number.fract() == 0.0 && number.abs() <= 9.007_199_254_740_992e15)
+                .filter(|number| {
+                    // [-2^63, 2^63): exactly the doubles an i64 holds.
+                    number.fract() == 0.0
+                        && *number >= i64::MIN as f64
+                        && *number < -(i64::MIN as f64)
+                })
                 .map(|number| number as i64)
         })
         .unwrap_or(0)
@@ -711,14 +717,14 @@ impl Tracker {
         focused: bool,
         notice_id: &mut dyn FnMut() -> String,
     ) -> Changes {
-        let previous = self
-            .hosts
-            .get(host.alias)
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
+        // Taken, not copied: every path below puts the host's entry back.
+        let existed = self.hosts.get(host.alias).is_some_and(Value::is_object);
+        let previous = match self.hosts.get_mut(host.alias) {
+            Some(Value::Object(entries)) => std::mem::take(entries),
+            _ => Map::new(),
+        };
         if !host.ok {
-            return self.observe_offline(host, previous);
+            return self.observe_offline(host, previous, existed);
         }
         let mut pass = Pass {
             host,
@@ -759,7 +765,12 @@ impl Tracker {
 
     /// A failed or stale listing only withdraws muted banners and keeps every
     /// identity (`AttentionTracker.cpp:55-81`).
-    fn observe_offline(&mut self, host: &Host, previous: Map<String, Value>) -> Changes {
+    fn observe_offline(
+        &mut self,
+        host: &Host,
+        mut retained: Map<String, Value>,
+        existed: bool,
+    ) -> Changes {
         let mut changes = Changes::default();
         let mut muted_runs = BTreeSet::new();
         let mut muted_conversations = BTreeSet::new();
@@ -773,7 +784,6 @@ impl Tracker {
                 muted_conversations.insert(format!("{}:{conversation}", row.notify.cmd));
             }
         }
-        let mut retained = previous.clone();
         for entry in retained.values_mut().filter_map(Value::as_object_mut) {
             let token = text(entry, "token").to_owned();
             let Some(destination) = target(&token) else {
@@ -807,7 +817,8 @@ impl Tracker {
                 entry.remove("retry_at");
             }
         }
-        if retained != previous {
+        // A host never observed stays absent, as Qt writes only a change.
+        if existed || !changes.cleared.is_empty() {
             self.hosts
                 .insert(host.alias.to_owned(), Value::Object(retained));
         }
@@ -1993,6 +2004,83 @@ mod tests {
             vec![token],
             "by conversation, not run"
         );
+    }
+
+    #[test]
+    fn a_native_request_identity_ignores_metadata_time_changes() {
+        // nativeRequestIdentityIgnoresMetadataTimeChanges
+        let mut fixture = Fixture::new();
+        let mut row = asking("claude/p/a", "approval", "call-1");
+        row.notify.attention_started = 10.5;
+        assert_eq!(fixture.observe(vec![row.clone()]).raised.len(), 1);
+        row.notify.attention_started = 20.5;
+        assert!(fixture.observe(vec![row.clone()]).raised.is_empty());
+        row.notify.attention_id = "call-2".into();
+        assert_eq!(fixture.observe(vec![row]).raised.len(), 1);
+    }
+
+    #[test]
+    fn a_baseline_keeps_a_raw_dsh_multi_request_identity() {
+        // sharedSuppressionRetainsRawDshMultiRequestIdentity
+        let request = "request-a\nrequest-b";
+        let suppressed = json!({"reply_id": null, "attention_signature": null, "optional_question_ids": [],
+            "main_attention": {"run_id": "run-dsh/p/a", "phase": "input", "request_id": request, "started_at": null},
+            "child_attention": {}});
+        let mut row = with_baseline(asking("dsh/p/a", "input", request), suppressed);
+        row.notify.cmd = "dsh".into();
+        let mut fixture = Fixture::new();
+        assert!(fixture.observe(vec![row.clone()]).raised.is_empty());
+        assert_eq!(
+            fixture.tracker.state()[""]["run:run-dsh/p/a"]["request"],
+            json!(format!("[{},null]", json!(request))),
+            "the line feed stays in the identity"
+        );
+        row.notify.attention_id = "request-a\nrequest-c".into();
+        assert_eq!(fixture.observe(vec![row]).raised.len(), 1);
+    }
+
+    #[test]
+    fn an_offline_round_puts_the_entries_back_and_never_adds_a_host() {
+        let mut fixture = Fixture::new();
+        fixture.observe(vec![asking("claude/p/a", "approval", "r")]);
+        let before = fixture.tracker.state().clone();
+        assert_eq!(
+            fixture.observe_at(
+                vec![asking("claude/p/a", "approval", "r")],
+                1000,
+                false,
+                false
+            ),
+            Changes::default()
+        );
+        assert_eq!(fixture.tracker.state(), &before);
+        let rows = BTreeMap::new();
+        fixture.tracker.observe(
+            &Host {
+                alias: "mac",
+                label: "mac",
+                ok: false,
+                rows: &rows,
+            },
+            1000,
+            false,
+            &mut || "n".into(),
+        );
+        assert!(
+            !fixture.tracker.state().contains_key("mac"),
+            "a host never observed stays absent"
+        );
+        assert_eq!(
+            integer(json!({"at": 9.0e15}).as_object().unwrap(), "at"),
+            9_000_000_000_000_000
+        );
+        assert_eq!(
+            integer(json!({"at": 1.0e16}).as_object().unwrap(), "at"),
+            10_000_000_000_000_000,
+            "Qt takes any whole double in the qint64 range"
+        );
+        assert_eq!(integer(json!({"at": 1.5}).as_object().unwrap(), "at"), 0);
+        assert_eq!(integer(json!({"at": 1.0e19}).as_object().unwrap(), "at"), 0);
     }
 
     #[test]

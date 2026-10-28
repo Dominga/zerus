@@ -212,7 +212,7 @@ Outcome rules:
   from HGS? Other sessions with this name and the agent's native conversation
   history are kept." with the computer named below; Cancel is the default. On
   confirmation the archived row must still be listed as the instance the dialog
-  named (its archive id, and `created` when known), otherwise nothing runs and
+  named (its archive id and name, and `created` when known), otherwise nothing runs and
   the sticky notice says "This session is no longer available. Refresh the list
   and open its actions again."; an offline computer or a running batch ends
   silently. The call is `kill NAME --archive ID`; after a success the archive
@@ -224,7 +224,9 @@ Outcome rules:
 - Start fresh and Forget saved session first recheck the listed row when the
   entry is clicked: a session that is gone or whose conversation or `created` changed opens
   no dialog and shows "This session is no longer available. Open its actions
-  again."
+  again." Restore session and Forget archived session do the same, and also
+  for an archived row listed again under another name (the client keys an
+  archived row by its archive id; Qt's key also holds the name).
 
 Restore session is an archived row's change entry. It is enabled when the
 computer is online, no write is pending, the row is resumable and has its archive
@@ -488,7 +490,8 @@ path and logs `actions-smoke forget-archived: done` (`kill NAME --archive ID`),
 and Clear archive: it takes the batch menu's entry, presses the confirmation
 dialog's "Clear archive" button and logs `actions-smoke clear-archive: done
 (...)` with the notices of the batch (a second `kill NAME --archive ID`), or
-`skipped (...)` when the entry is disabled. The fake keeps answering the
+`failed (... is disabled)` when the entry is disabled, since the fake's row can
+be forgotten. The fake keeps answering the
 archived row; the hook shows the Archive filter again after the restore, as the
 pages load only there, so each step finds the row after the archive reloads. It
 returns to the All filter and the replay session. The hook selects `claude/sample-project/review` (its details come from the

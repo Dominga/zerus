@@ -488,9 +488,12 @@ async function actionsSmoke(allowed: boolean) {
     }
     {
       // Through the menu entry the batch menu shows; its confirmation dialog is answered by pressing its own button.
+      // The fake's archived row is built to be forgettable, so a disabled entry is a failure.
       const entry = clearArchiveMenuEntry();
-      if (!("label" in entry) || entry.disabled) log(`actions-smoke clear-archive: skipped (${"label" in entry ? entry.label : "no entry"} is disabled by Qt's rules)`);
-      else {
+      if (!("label" in entry) || entry.disabled) {
+        log(`actions-smoke clear-archive: failed (${"label" in entry ? entry.label : "no entry"} is disabled)`);
+        bad++;
+      } else {
         const before = lastNoticeId();
         entry.action?.();
         const button = (): HTMLButtonElement | undefined =>

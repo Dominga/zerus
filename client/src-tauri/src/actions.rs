@@ -18,7 +18,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use tauri::State;
 use zerus_client_core::actions::{
-    change_notifications, classify, invocation, parse_reference, reference_invocation,
+    change_notifications, classify, invocation, parse_reference, reference_invocation, Invocation,
 };
 use zerus_client_core::details::{details_invocation, parse_details, Details};
 use zerus_client_core::marks::{AttentionMarks, Mark};
@@ -429,6 +429,14 @@ fn failed(detail: impl Into<String>) -> Outcome {
     }
 }
 
+/// The call `run_action` makes, or the refusal it returns as a failed
+/// outcome before it claims the session or starts a process: an action the
+/// core refuses, such as a restore or archived forget without its archive id.
+fn planned(target: &Target, action: &Action) -> Result<Invocation, String> {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    invocation(target, action, &request_id)
+}
+
 /// Runs one action on a session. `Err("busy")` while another runs for it.
 #[tauri::command]
 pub async fn run_action(
@@ -439,6 +447,10 @@ pub async fn run_action(
     if blocked() {
         return Ok(failed(REPLAY_NEEDS_HGS));
     }
+    let inv = match planned(&target, &action) {
+        Ok(inv) => inv,
+        Err(refusal) => return Ok(failed(refusal)),
+    };
     // Pause all and Resume all are computer-wide: one per computer at a time,
     // whatever session name the caller sent.
     let name = if matches!(action, Action::PauseAll { .. } | Action::ResumeAll { .. }) {
@@ -451,11 +463,6 @@ pub async fn run_action(
         .claim((target.computer.clone(), name, Lane::of(&action)))
     else {
         return Err("busy".into());
-    };
-    let request_id = uuid::Uuid::new_v4().to_string();
-    let inv = match invocation(&target, &action, &request_id) {
-        Ok(inv) => inv,
-        Err(refusal) => return Ok(failed(refusal)),
     };
     if let Action::MarkRead {
         reply_id,
@@ -994,6 +1001,47 @@ mod tests {
         assert!(!smoke_allowed(Some("f"), None, Some("smoke")));
         assert!(!smoke_allowed(Some("f"), Some("h"), None));
         assert!(!smoke_allowed(Some("f"), Some("h"), Some("")));
+    }
+
+    #[test]
+    fn an_empty_archive_identity_is_refused_before_any_claim_or_process() {
+        let target = Target {
+            computer: "mac".into(),
+            name: "claude/sample-project/review".into(),
+            run_id: "r".into(),
+            conversation_id: "c".into(),
+        };
+        for action in [
+            Action::Restore {
+                archive_id: String::new(),
+            },
+            Action::ForgetArchive {
+                archive_id: String::new(),
+            },
+        ] {
+            assert_eq!(
+                planned(&target, &action),
+                Err("Missing archive identity".to_owned())
+            );
+        }
+        let restore = planned(
+            &target,
+            &Action::Restore {
+                archive_id: "a1".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            restore.args,
+            [
+                "@mac",
+                "resume",
+                "claude/sample-project/review",
+                "--archive",
+                "a1",
+                "-d"
+            ]
+        );
     }
 
     #[test]

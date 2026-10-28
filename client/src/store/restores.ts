@@ -1,6 +1,6 @@
 import { batch, createEffect, createRoot, createSignal, on, untrack } from "solid-js";
 import { catalog as appCatalog, computerOffline, type CatalogState } from "./catalog";
-import { notify as appNotify, perform as appPerform, stillListed as appStillListed, updating as appUpdating, type Notice } from "./actions";
+import { GONE, notify as appNotify, perform as appPerform, stillListed as appStillListed, updating as appUpdating, type Notice } from "./actions";
 import { archive, bindRetainedRows } from "./archive";
 import { bindArchiveCalls, running, type ArchiveCalls } from "./batch";
 import { search, selectedKey, setSelectedKey, setStateFilter, stateFilter, type StateFilter } from "./ui";
@@ -154,14 +154,17 @@ export function createRestores(deps: RestoreDeps) {
   /**
    * Restore session from a menu or the header (Qt's runSessionMenuAction
    * recheck, then changeSession). A row that is gone or changed gets the
-   * recheck's notice; an entry no longer enabled returns silently; past the
-   * restore limit nothing runs and the sticky notice says so.
+   * recheck's notice, also one listed under another name (Qt's entry key holds
+   * the name; the client's holds the archive id); an entry no longer enabled
+   * returns silently; past the restore limit nothing runs and the sticky
+   * notice says so.
    */
   async function restore(row: ActionRow): Promise<void> {
     // A pending restore's row, kept selected after the archive reloaded, is Qt's selected() entry.
     const kept = untrack(pending).find((p) => p.sourceKey === row.key)?.source;
     const live = kept && !deps.archived(row.key) ? snapshotOf(kept) : deps.stillListed(row);
     if (!live) return;
+    if (live.name !== row.name) { deps.notify("info", GONE, true); return; }
     if ((live.state === "running") !== (row.state === "running")) { deps.notify("error", STATE_CHANGED, true); return; }
     if (live.state !== "archived" || !restorable(live)) return;
     const id = nameKey(live);
@@ -198,13 +201,13 @@ export function createRestores(deps: RestoreDeps) {
 
   /**
    * The Forget archived session confirmation's click: only the instance the
-   * dialog named (its key holds the archive id; `created` unchanged), else
-   * Qt's notice and nothing runs. An offline computer or a running batch ends
+   * dialog named (its key holds the archive id; the same name, which Qt's key
+   * holds; `created` unchanged), else Qt's notice and nothing runs. An offline computer or a running batch ends
    * silently, as in Qt. Success refreshes the archive.
    */
   async function forgetArchived(row: ActionRow): Promise<void> {
     const live = deps.archived(row.key);
-    if (!live || ((row.created ?? 0) > 0 && (live.created ?? 0) > 0 && live.created !== row.created) || (live.archiveId ?? "") !== (row.archiveId ?? "")) {
+    if (!live || live.name !== row.name || ((row.created ?? 0) > 0 && (live.created ?? 0) > 0 && live.created !== row.created)) {
       deps.notify("error", NO_LONGER_AVAILABLE, true);
       return;
     }

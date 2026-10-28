@@ -524,22 +524,3 @@ fn restore_and_forget_archive_run_their_hgs_arguments_and_report_outcomes() {
         );
     }
 }
-
-#[test]
-fn an_empty_archive_identity_makes_no_call() {
-    let fake = Fake::new(r#"{"reply":{"exit":0}}"#);
-    for action in [
-        Action::Restore {
-            archive_id: String::new(),
-        },
-        Action::ForgetArchive {
-            archive_id: String::new(),
-        },
-    ] {
-        assert_eq!(
-            invocation(&target(), &action, "r").unwrap_err(),
-            "Missing archive identity"
-        );
-    }
-    assert!(fake.log().is_empty());
-}

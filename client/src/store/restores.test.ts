@@ -146,6 +146,20 @@ describe("Restore session (Qt changeSession 5542-5560)", () => {
     });
   });
 
+  it("refuses a reloaded row with the same archive id and another name, as a vanished row (Qt's key holds the name)", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      a.page(archivedView(1));
+      const shown = a.row(1);
+      a.page(archivedView(1, { name: "codex/example/renamed" }));
+      await a.restore(shown);
+      expect(mocked.runAction).not.toHaveBeenCalled();
+      expect(a.pendingCount()).toBe(0);
+      expect(a.texts()).toEqual(["info:This session is no longer available. Open its actions again."]);
+      dispose();
+    });
+  });
+
   it("returns silently when the entry is no longer enabled (offline, a live row took the name, no archive id, a batch runs)", async () => {
     await createRoot(async (dispose) => {
       const off = setup({ online: false });
@@ -471,6 +485,20 @@ describe("Forget archived session (Qt terminateSession 5758-5826)", () => {
       expect(a.refreshArchive).not.toHaveBeenCalled();
       expect(a.texts()).toEqual([`error:${NO_LONGER_AVAILABLE}`, `error:${NO_LONGER_AVAILABLE}`]);
       expect(NO_LONGER_AVAILABLE).toBe("This session is no longer available. Refresh the list and open its actions again.");
+      dispose();
+    });
+  });
+
+  it("refuses at confirmation a reloaded row with the same archive id and another name", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      a.page(archivedView(1));
+      const shown = a.row(1);
+      a.page(archivedView(1, { name: "codex/example/renamed" }));
+      await a.forgetArchived(shown);
+      expect(mocked.runAction).not.toHaveBeenCalled();
+      expect(a.refreshArchive).not.toHaveBeenCalled();
+      expect(a.texts()).toEqual([`error:${NO_LONGER_AVAILABLE}`]);
       dispose();
     });
   });

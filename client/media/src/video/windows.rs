@@ -7,9 +7,9 @@
 //! Media Foundation's AAC encoder takes 96, 128, 160 or 192 kbit/s, so the
 //! audio track uses its lowest, 96 kbit/s, where Qt asks for 64.
 use super::{
-    closest_format, finish, must_stop, poster_from_rgb, square_rgb, CameraFormat, MonoPcm,
-    VideoEvent, MAX_BYTES, NOT_STARTED, NO_DEVICES, NO_FORMAT, NO_STORAGE, POSTER_SIDE,
-    PREVIEW_FPS, PREVIEW_SIDE, START_TIMEOUT, TICK,
+    closest_format, finish, finish_refused, must_stop, poster_from_rgb, refused, square_rgb,
+    CameraFormat, MonoPcm, VideoEvent, MAX_BYTES, NOT_STARTED, NO_DEVICES, NO_FORMAT, NO_STORAGE,
+    POSTER_SIDE, PREVIEW_FPS, PREVIEW_SIDE, START_TIMEOUT, TICK,
 };
 use crate::{device, Event, Session};
 use std::path::{Path, PathBuf};
@@ -554,10 +554,11 @@ fn record(
     if cancelled.load(Ordering::SeqCst) {
         return Ok(());
     }
-    finalized.map_err(|_| super::INVALID.to_owned())?;
-    let mp4 = std::fs::read(&path).map_err(|_| super::INVALID.to_owned())?;
+    // Media Foundation's Finalize is synchronous: no wait to bound here.
+    finalized.map_err(|error| refused(format!("the sink did not finalize: {error}")))?;
+    let mp4 = std::fs::read(&path).map_err(|error| refused(format!("cannot read it: {error}")))?;
     if mp4.len() as u64 > MAX_BYTES {
-        return Err(super::INVALID.into());
+        return Err(refused(format!("{} bytes", mp4.len())));
     }
     let pcm = pcm.into_pcm();
     let poster = poster_rgb.and_then(|rgb| poster_from_rgb(&rgb));
@@ -569,7 +570,7 @@ fn record(
         pcm.len(),
         poster.as_deref(),
     )
-    .map_err(str::to_owned)?;
+    .map_err(|error| finish_refused(error, written_ms, camera.width, camera.height))?;
     events(VideoEvent::Completed { pcm, mp4, meta });
     drop(folder);
     Ok(())

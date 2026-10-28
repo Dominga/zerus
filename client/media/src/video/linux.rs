@@ -3,9 +3,9 @@
 //! an AAC encoder found at run time, and the microphone through cpal into
 //! the AAC track (appsrc) and the PCM at once.
 use super::{
-    closest_format, finish, must_stop, poster, square_crop, CameraFormat, VideoEvent, MAX_BYTES,
-    NOT_STARTED, NO_DEVICES, NO_FORMAT, NO_STORAGE, POSTER_QUALITIES, POSTER_SIDE, PREVIEW_FPS,
-    PREVIEW_SIDE, START_TIMEOUT, TICK,
+    closest_format, finish, finish_refused, must_stop, poster, refused, square_crop, CameraFormat,
+    VideoEvent, FINISH_POLL, FINISH_TIMEOUT, MAX_BYTES, NOT_STARTED, NO_DEVICES, NO_FORMAT,
+    NO_STORAGE, POSTER_QUALITIES, POSTER_SIDE, PREVIEW_FPS, PREVIEW_SIDE, START_TIMEOUT, TICK,
 };
 use crate::{device, Event, Session};
 use gstreamer as gst;
@@ -66,9 +66,6 @@ fn init() -> Result<(), String> {
 fn found(name: &str) -> bool {
     gst::ElementFactory::find(name).is_some()
 }
-
-/// How long stopping may take to finish the file before it is refused.
-const FINISH_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn encoder(choices: &[(&'static str, &'static str)]) -> Option<&'static str> {
     choices
@@ -659,7 +656,9 @@ fn record(
     let deadline = Instant::now() + FINISH_TIMEOUT;
     let mut ended = false;
     while !ended && Instant::now() < deadline {
-        if let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) {
+        if let Some(message) =
+            bus.timed_pop(gst::ClockTime::from_mseconds(FINISH_POLL.as_millis() as u64))
+        {
             match message.view() {
                 gst::MessageView::Eos(..) => ended = true,
                 gst::MessageView::Error(error) => {
@@ -674,20 +673,15 @@ fn record(
         }
     }
     teardown(&pipeline);
-    // Every refusal shows Qt's one text; the log says which check it was.
-    let invalid = |why: String| {
-        eprintln!("zerus-client-media: video recording refused: {why}");
-        super::INVALID.to_owned()
-    };
     if !ended {
-        return Err(invalid(format!(
+        return Err(refused(format!(
             "the file was not finished within {} s",
             FINISH_TIMEOUT.as_secs()
         )));
     }
-    let mp4 = std::fs::read(&path).map_err(|error| invalid(format!("cannot read it: {error}")))?;
+    let mp4 = std::fs::read(&path).map_err(|error| refused(format!("cannot read it: {error}")))?;
     if mp4.len() as u64 > MAX_BYTES {
-        return Err(invalid(format!("{} bytes", mp4.len())));
+        return Err(refused(format!("{} bytes", mp4.len())));
     }
     let pcm = session.into_pcm();
     let poster = last_poster.and_then(|rgb| poster(posters(&rgb)));
@@ -699,16 +693,7 @@ fn record(
         pcm.len(),
         poster.as_deref(),
     )
-    .map_err(|error| {
-        if error == super::INVALID {
-            invalid(format!(
-                "{duration_ms} ms at {}x{}",
-                camera.width, camera.height
-            ))
-        } else {
-            error.to_owned()
-        }
-    })?;
+    .map_err(|error| finish_refused(error, duration_ms, camera.width, camera.height))?;
     events(VideoEvent::Completed { pcm, mp4, meta });
     drop(folder);
     Ok(())

@@ -34,6 +34,10 @@ pub enum Action {
     },
     Pause,
     Resume,
+    /// `hgs resume NAME --fresh [--expected-run-id RUN] -d`
+    /// (`startFreshSession`): a new conversation in the same folder, with the
+    /// same account and model.
+    StartFresh,
     Rename {
         new_name: String,
         archive_id: Option<String>,
@@ -65,6 +69,18 @@ pub enum Action {
         #[serde(default)]
         generation: Option<String>,
     },
+    /// `hgs clear-context NAME --json` (`requestClearContext`): start a new
+    /// context in the same session. `dismiss_prompt` first dismisses a
+    /// chooser the agent shows; it is sent only when set, since an older hgs
+    /// rejects the field.
+    ClearContext {
+        #[serde(default)]
+        dismiss_prompt: bool,
+    },
+    /// `hgs compact-context NAME --json` (`requestCompactContext`): the
+    /// agent's native /compact. Its receipt's `request_id` is the compaction
+    /// a waiting message names (compact-to-send).
+    CompactContext,
     /// Stage dropped files on the session's computer, as Qt's
     /// `requestStageFiles` (the `attachment` session action). The paths must
     /// be absolute paths of regular files; they are read when the call is
@@ -232,6 +248,14 @@ pub fn invocation(
             30,
             None,
         ),
+        Action::StartFresh => {
+            let mut args = vec!["resume".to_owned(), name, "--fresh".to_owned()];
+            if !target.run_id.is_empty() {
+                args.extend(["--expected-run-id".to_owned(), target.run_id.clone()]);
+            }
+            args.push("-d".to_owned());
+            (args, None, 30, 30, None)
+        }
         Action::Rename {
             new_name,
             archive_id,
@@ -299,6 +323,37 @@ pub fn invocation(
                 args.extend(["--generation".to_owned(), generation.clone()]);
             }
             (args, None, 45, 45, None)
+        }
+        Action::ClearContext { dismiss_prompt } => {
+            let mut input = json!({
+                "request_id": request_id,
+                "expected_run_id": target.run_id,
+                "expected_conversation_id": target.conversation_id,
+            });
+            if *dismiss_prompt {
+                input["dismiss_prompt"] = json!(true);
+            }
+            (
+                vec!["clear-context".to_owned(), name, "--json".to_owned()],
+                Some(serde_json::to_vec(&input).map_err(|error| error.to_string())?),
+                15,
+                45,
+                Some(request_id.to_owned()),
+            )
+        }
+        Action::CompactContext => {
+            let input = json!({
+                "request_id": request_id,
+                "expected_run_id": target.run_id,
+                "expected_conversation_id": target.conversation_id,
+            });
+            (
+                vec!["compact-context".to_owned(), name, "--json".to_owned()],
+                Some(serde_json::to_vec(&input).map_err(|error| error.to_string())?),
+                15,
+                45,
+                Some(request_id.to_owned()),
+            )
         }
         Action::StageFiles {
             paths,
@@ -527,8 +582,12 @@ fn trimmed_stderr(stderr: &str) -> Option<String> {
 
 pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit: Exit) -> Outcome {
     match action {
-        Action::Interrupt { .. } => {
-            classify_session_action(target, invocation, exit, "submitted", None)
+        Action::Interrupt { .. } | Action::CompactContext => {
+            classify_session_action(target, invocation, exit, &["submitted"], None)
+        }
+        // A clear may be confirmed at once.
+        Action::ClearContext { .. } => {
+            classify_session_action(target, invocation, exit, &["submitted", "confirmed"], None)
         }
         Action::StageFiles {
             expected_created, ..
@@ -536,7 +595,7 @@ pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit:
             target,
             invocation,
             exit,
-            "staged",
+            &["staged"],
             stage_created(target, *expected_created),
         ),
         Action::Send { agent_id, .. } => {
@@ -555,7 +614,7 @@ fn classify_session_action(
     target: &Target,
     invocation: &Invocation,
     exit: Exit,
-    state: &str,
+    states: &[&str],
     expected_created: Option<i64>,
 ) -> Outcome {
     match exit {
@@ -573,7 +632,7 @@ fn classify_session_action(
         Exit::Code { stdout, .. } => {
             let receipt: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
             let field = |key: &str| receipt.get(key).and_then(Value::as_str);
-            let matches = field("status") == Some(state)
+            let matches = field("status").is_some_and(|status| states.contains(&status))
                 && invocation.request_id.is_some()
                 && field("request_id") == invocation.request_id.as_deref()
                 && field("name") == Some(target.name.as_str())
@@ -668,6 +727,16 @@ fn classify_stop(target: &Target, process_id: &str, exit: Exit) -> Outcome {
         }
         exit => failed(failure_detail(exit)),
     }
+}
+
+/// Whether the inspected conversation can be cleared now, or after
+/// dismissing a chooser the agent shows (`clearableContext`).
+pub fn clearable(details: &Value) -> bool {
+    let text = |key: &str| details[key].as_str().unwrap_or("");
+    let flag = |key: &str| details[key].as_bool().unwrap_or(false);
+    !text("run_id").is_empty()
+        && !text("conversation_id").is_empty()
+        && (flag("clear_context_supported") || flag("clear_context_dismiss"))
 }
 
 /// `requestRead`: applied marks, or a session that is gone (nothing to mark).
@@ -1162,6 +1231,104 @@ mod tests {
                 archive_id: None,
                 generation: None
             }
+        );
+    }
+
+    #[test]
+    fn clear_and_compact_are_session_actions_with_receipts() {
+        let t = target("mac");
+        let clear = Action::ClearContext {
+            dismiss_prompt: false,
+        };
+        let inv = invocation(&t, &clear, "req-1").unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "@mac",
+                "clear-context",
+                "claude/sample-project/review",
+                "--json"
+            ]
+        );
+        assert_eq!(inv.timeout, Duration::from_secs(45));
+        let input: Value = serde_json::from_slice(inv.stdin.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            input,
+            json!({"request_id": "req-1", "expected_run_id": "run-1", "expected_conversation_id": "conv-1"})
+        );
+        let dismiss = invocation(
+            &target(""),
+            &Action::ClearContext {
+                dismiss_prompt: true,
+            },
+            "req-2",
+        )
+        .unwrap();
+        assert_eq!(dismiss.timeout, Duration::from_secs(15));
+        let input: Value = serde_json::from_slice(dismiss.stdin.as_ref().unwrap()).unwrap();
+        assert_eq!(input["dismiss_prompt"], json!(true));
+        let receipt = |status: &str| {
+            json!({"status": status, "request_id": "req-1", "name": "claude/sample-project/review",
+                   "run_id": "run-1", "conversation_id": "conv-1"})
+            .to_string()
+        };
+        let outcome = |action: &Action, status: &str| {
+            let inv = invocation(&t, action, "req-1").unwrap();
+            classify(&t, action, &inv, exit(0, receipt(status).as_bytes(), ""))
+        };
+        assert!(matches!(outcome(&clear, "confirmed"), Outcome::Done { .. }));
+        assert!(matches!(outcome(&clear, "submitted"), Outcome::Done { .. }));
+        assert!(matches!(
+            outcome(&Action::CompactContext, "submitted"),
+            Outcome::Done { .. }
+        ));
+        assert_eq!(
+            outcome(&Action::CompactContext, "confirmed"),
+            failed("Invalid acknowledgement. Check Terminal before retrying.")
+        );
+        let compact = invocation(&t, &Action::CompactContext, "req-9").unwrap();
+        assert_eq!(compact.args[1], "compact-context");
+        assert_eq!(compact.request_id.as_deref(), Some("req-9"));
+        let from_webview: Action =
+            serde_json::from_value(json!({"kind": "clear_context"})).unwrap();
+        assert_eq!(
+            from_webview,
+            Action::ClearContext {
+                dismiss_prompt: false
+            }
+        );
+        assert!(clearable(
+            &json!({"run_id": "r", "conversation_id": "c", "clear_context_dismiss": true})
+        ));
+        assert!(!clearable(
+            &json!({"run_id": "r", "conversation_id": "", "clear_context_supported": true})
+        ));
+        assert!(!clearable(&json!({"run_id": "r", "conversation_id": "c"})));
+    }
+
+    #[test]
+    fn a_fresh_start_names_the_run_it_replaces() {
+        let inv = invocation(&target("mac"), &Action::StartFresh, "u").unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "@mac",
+                "resume",
+                "claude/sample-project/review",
+                "--fresh",
+                "--expected-run-id",
+                "run-1",
+                "-d"
+            ]
+        );
+        assert_eq!(inv.timeout, Duration::from_secs(30));
+        let mut untracked = target("");
+        untracked.run_id.clear();
+        assert_eq!(
+            invocation(&untracked, &Action::StartFresh, "u")
+                .unwrap()
+                .args,
+            ["resume", "claude/sample-project/review", "--fresh", "-d"]
         );
     }
 

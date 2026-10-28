@@ -393,6 +393,13 @@ mod tests {
                 paths: vec![],
                 expected_created: None,
             },
+            // Clear and Compact start after the view's confirmation and run
+            // as session writes.
+            Action::ClearContext {
+                dismiss_prompt: true,
+            },
+            Action::CompactContext,
+            Action::StartFresh,
         ] {
             assert_eq!(Lane::of(&action), Lane::Write);
         }

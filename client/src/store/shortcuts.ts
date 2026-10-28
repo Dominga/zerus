@@ -139,20 +139,32 @@ const NAMED: Record<string, string> = {
   ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right", PageUp: "PgUp", PageDown: "PgDown",
   Home: "Home", End: "End", ContextMenu: "Menu",
 };
+// The US layout's symbols by key position, unshifted and with Shift.
 const CODE_SYMBOLS: Record<string, string> = {
   Minus: "-", Equal: "=", BracketLeft: "[", BracketRight: "]", Backslash: "\\", Semicolon: ";", Quote: "'",
   Comma: ",", Period: ".", Slash: "/", Backquote: "`",
 };
+const SHIFTED_SYMBOLS: Record<string, string> = {
+  Minus: "_", Equal: "+", BracketLeft: "{", BracketRight: "}", Backslash: "|", Semicolon: ":", Quote: "\"",
+  Comma: "<", Period: ">", Slash: "?", Backquote: "~",
+};
 
-/** The key of an event in Qt's names, or undefined for a modifier or an unknown key. */
-export function keyOf(e: Pick<KeyboardEvent, "key" | "code" | "altKey">, on: Platform = platform): string | undefined {
-  if (/^Key[A-Z]$/.test(e.code)) return e.code.slice(3);
-  if (/^Digit[0-9]$/.test(e.code)) return e.code.slice(5);
+/**
+ * The key of an event in Qt's names, or undefined for a modifier or an
+ * unknown key. A printable ASCII character is the key the layout names
+ * (AZERTY, Dvorak); another script (Cyrillic) falls back to the Latin key at
+ * that position, as Qt does, so Ctrl+б is Ctrl+, on a Russian layout.
+ */
+export function keyOf(e: Pick<KeyboardEvent, "key" | "code" | "altKey" | "shiftKey">, on: Platform = platform): string | undefined {
   if (e.code === "NumpadEnter") return "Enter";
   if (/^F([1-9]|[12][0-9]|3[0-5])$/.test(e.key)) return e.key;
   if (e.key in NAMED) return NAMED[e.key];
   // Option composes characters on macOS: name the physical key instead.
   if (on === "macos" && e.altKey && e.code in CODE_SYMBOLS) return CODE_SYMBOLS[e.code];
+  if (/^[\x21-\x7e]$/.test(e.key)) return e.key.toUpperCase();
+  if (/^Key[A-Z]$/.test(e.code)) return e.code.slice(3);
+  if (/^Digit[0-9]$/.test(e.code)) return e.code.slice(5);
+  if (e.code in CODE_SYMBOLS) return (e.shiftKey ? SHIFTED_SYMBOLS : CODE_SYMBOLS)[e.code];
   if (e.key.length === 1) return e.key.toUpperCase();
   return undefined;
 }
@@ -265,7 +277,11 @@ export function setKeys(id: string, sequences: Sequence[], on: Platform = platfo
 }
 
 export const reset = (id: string) => void setSetting(settingKey(id), null);
-export function resetAll() { for (const c of COMMANDS) if (customized(c.id)) reset(c.id); }
+
+/** Removes every shortcuts/ override, as Qt removes the group (ShortcutRegistry::resetAll). */
+export function resetAll() {
+  for (const key of Object.keys(settings)) if (key.startsWith("shortcuts/") && settings[key] != null) void setSetting(key, null);
+}
 
 /** Every other command whose chord equals the sequence or is a prefix either way, in command order. */
 export function conflicts(id: string, sequence: Sequence, on: Platform = platform): string[] {
@@ -281,59 +297,65 @@ export function chord(id: string, on: Platform = platform): string {
 }
 
 // ---------------------------------------------------------------------------
-// Matching: a held state for two-chord sequences (QShortcutMap). Qt keeps a
-// partial match until the next key; it has no timeout. Escape and a focus
-// change start over.
+// The router (ShortcutRouter, QShortcutMap): one capture listener and one
+// map for window and composer commands. A partial match is held until the
+// next key (Qt has no timeout); Escape and a focus change start over. Bound
+// commands win over Terminal and text fields under their rules.
 
 export interface SequenceState { typed: Sequence }
 export const sequenceState = (): SequenceState => ({ typed: [] });
 
-/**
- * Whether `event` completes or continues one of `id`'s chords. With a state, a
- * partial match is remembered and the next key continues it.
- */
-export function matches(id: string, event: KeyboardEvent, state?: SequenceState, on: Platform = platform): "full" | "partial" | false {
-  const combo = comboFromEvent(event, on);
-  if (!combo) return false;
-  let best: "full" | "partial" | false = false;
-  let held = combo;
-  for (const candidate of candidates(combo)) {
-    const typed = [...(state?.typed ?? []), candidate];
-    for (const key of keys(id, on)) {
-      const result = matchSequence(key, typed);
-      if (result === "full") best = "full";
-      else if (result === "partial" && best === false) { best = "partial"; held = candidate; }
-    }
-  }
-  if (state) state.typed = best === "partial" ? [...state.typed, held] : [];
-  return best;
-}
-
-// ---------------------------------------------------------------------------
-// The window router (ShortcutRouter): one capture listener; bound window
-// commands win over Terminal and text fields under their rules. Composer
-// commands are left to the composer, which calls `matches` itself.
-
 export type Context = "terminal" | "composer" | "text-field" | "window" | "none";
 
-export function contextOf(target: EventTarget | null): Context {
-  const el = typeof Element !== "undefined" && target instanceof Element ? target : null;
+/** What the router reads of a focus target; a DOM element has all of it. */
+interface Focused {
+  closest(selector: string): { getAttribute(name: string): string | null } | null;
+  matches(selector: string): boolean;
+  isContentEditable?: boolean;
+  tagName?: string;
+}
+
+const focused = (target: EventTarget | null): Focused | null => {
+  const el = target as Partial<Focused> | null;
+  return el && typeof el.closest === "function" && typeof el.matches === "function" ? (el as Focused) : null;
+};
+
+/**
+ * Whether a modal dialog or an open popup (a menu, a panel marked
+ * data-shortcut-context="none") is up: they take every key, wherever the
+ * focus has fallen.
+ */
+export function popupOpen(doc: Pick<Document, "querySelector"> | undefined = typeof document === "undefined" ? undefined : document): boolean {
+  if (!doc) return false;
+  try {
+    return !!doc.querySelector('dialog:modal, [data-shortcut-context="none"]');
+  } catch {
+    // An engine without :modal.
+    return !!doc.querySelector('dialog[open], [data-shortcut-context="none"]');
+  }
+}
+
+export function contextOf(target: EventTarget | null, popup: boolean = popupOpen()): Context {
+  if (popup) return "none";
+  const el = focused(target);
   // A modal dialog is its own window in Qt, and the Keyboard page's capture
-  // field records keys: neither runs window commands.
+  // field records keys: neither runs commands.
   if (el?.closest("dialog[open]")) return "none";
   const marked = el?.closest("[data-shortcut-context]")?.getAttribute("data-shortcut-context");
-  if (marked === "capture") return "none";
+  if (marked === "capture" || marked === "none") return "none";
   if (marked === "terminal" || marked === "composer") return marked;
-  if (el && (el.matches("input, textarea, select") || (el as HTMLElement).isContentEditable)) return "text-field";
+  // xterm's hidden text area is Terminal, marked or not.
+  if (el?.closest(".xterm")) return "terminal";
+  if (el && (el.matches("input, textarea, select") || el.isContentEditable)) return "text-field";
   return "window";
 }
 
 function hasSelection(target: EventTarget | null): boolean {
-  if (typeof HTMLElement === "undefined") return false;
-  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)
-    return target.selectionStart !== null && target.selectionStart !== target.selectionEnd;
+  const field = target as { selectionStart?: unknown; selectionEnd?: unknown } | null;
+  if (field && typeof field.selectionStart === "number") return field.selectionStart !== field.selectionEnd;
   const selection = typeof getSelection === "undefined" ? null : getSelection();
-  return !!selection && !selection.isCollapsed && target instanceof Node && selection.anchorNode !== null && target.contains(selection.anchorNode);
+  return !!selection && !selection.isCollapsed && typeof Node !== "undefined" && target instanceof Node
+    && selection.anchorNode !== null && target.contains(selection.anchorNode);
 }
 
 /** Whether the focus lets a bound sequence starting with `first` through. */
@@ -344,29 +366,58 @@ export function allowed(context: Context, first: Combo, bound: Sequence, selecti
   return true;
 }
 
-const handlers = new Map<string, () => void>();
+/** A drop-down list opens with Alt+Up, Alt+Down and F4 (Shortcuts.cpp comboPopupKey). */
+const listPopupKey = (target: EventTarget | null, c: Combo) =>
+  focused(target)?.tagName === "SELECT"
+  && ((only(c, { alt: true }) && (c.key === "Up" || c.key === "Down")) || (only(c, {}) && c.key === "F4"));
 
-/** Runs `handler` for a window command; returns the unregister function. */
+// The handlers per command: the newest runs, and removing it restores the one before.
+const handlers = new Map<string, (() => void)[]>();
+const handlerOf = (id: string) => handlers.get(id)?.at(-1);
+
+/**
+ * Runs `handler` for a command: a window command anywhere in the window, a
+ * composer command while a message field has the focus. Returns the
+ * unregister function.
+ */
 export function onCommand(id: string, handler: () => void): () => void {
-  handlers.set(id, handler);
-  return () => { if (handlers.get(id) === handler) handlers.delete(id); };
+  const stack = handlers.get(id) ?? [];
+  stack.push(handler);
+  handlers.set(id, stack);
+  return () => {
+    const current = handlers.get(id);
+    const at = current?.lastIndexOf(handler) ?? -1;
+    if (!current || at < 0) return;
+    current.splice(at, 1);
+    if (!current.length) handlers.delete(id);
+  };
 }
 
 const windowState = sequenceState();
 
+type RouterEvent = Pick<KeyboardEvent, "key" | "code" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey" | "target" | "isComposing" | "keyCode">
+  & { getModifierState?: (key: string) => boolean };
+
 /** The router's decision for one key event: the command to run, a partial match to hold, or nothing. */
-export function route(event: KeyboardEvent, state: SequenceState = windowState, on: Platform = platform): { run?: string; consume: boolean } {
+export function route(event: RouterEvent, state: SequenceState = windowState, on: Platform = platform): { run?: string; consume: boolean } {
+  // An input method composing text owns its keys.
+  if (event.isComposing || event.keyCode === 229 || event.key === "Process") return { consume: false };
   const combo = comboFromEvent(event, on);
   if (!combo) return { consume: false };
   const pending = state.typed.length > 0;
   if (pending && only(combo, {}) && combo.key === "Esc") { state.typed = []; return { consume: true }; }
   const context = contextOf(event.target);
-  if (context === "none") { state.typed = []; return { consume: false }; }
+  const typing = context === "text-field" || context === "composer";
+  // AltGr types characters; on Windows it arrives as Ctrl+Alt.
+  if (context === "none" || (typing && event.getModifierState?.("AltGraph")) || listPopupKey(event.target, combo)) {
+    state.typed = [];
+    return { consume: false };
+  }
   const selection = hasSelection(event.target);
   let full: string | undefined;
   let partial: Combo | undefined;
   for (const c of COMMANDS) {
-    if (c.scope !== "window" || !handlers.has(c.id)) continue;
+    if (!handlerOf(c.id) || (c.scope === "composer" && context !== "composer")) continue;
     for (const candidate of candidates(combo)) {
       const typed = [...state.typed, candidate];
       for (const key of keys(c.id, on)) {
@@ -387,12 +438,12 @@ export function route(event: KeyboardEvent, state: SequenceState = windowState, 
 /** Installs the router on `target` in the capture phase; returns the uninstall function. */
 export function installShortcutRouter(target: Window = window): () => void {
   const keydown = (event: KeyboardEvent) => {
-    if (event.defaultPrevented || event.isComposing) return;
+    if (event.defaultPrevented) return;
     const decision = route(event);
     if (!decision.consume) return;
     event.preventDefault();
     event.stopPropagation();
-    if (decision.run) handlers.get(decision.run)?.();
+    if (decision.run) handlerOf(decision.run)?.();
   };
   const restart = () => { windowState.typed = []; };
   target.addEventListener("keydown", keydown, true);

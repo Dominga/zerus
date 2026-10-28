@@ -58,7 +58,7 @@ const KEYBOARD_FILLED: [string, string][] = [
 ];
 
 const ABOUT_FILLED: [string, string][] = [
-  ["Zerus %1", "`Zerus ${installed()}`"],
+  ["Zerus %1", "`Zerus ${__APP_VERSION__}`"],
   ["hgs CLI %1", "`hgs CLI ${version}`"],
 ];
 const ABOUT = ["About", "hgs CLI version unavailable", "hgs CLI: checking…", "Open Zerus repository on GitHub"];

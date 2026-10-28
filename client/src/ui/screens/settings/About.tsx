@@ -8,20 +8,19 @@ import { SectionHead } from "./ui";
 // the hgs CLI, checked whenever the section opens, and the repository.
 
 const [cli, setCli] = createSignal("hgs CLI version unavailable");
-const [installed, setInstalled] = createSignal(__APP_VERSION__);
+// HgsClient::requestVersion: one `hgs --version` at a time.
+let checking = false;
 
 /** Qt's refreshCliVersion: "checking" until `hgs --version` answers. */
 export function refreshAbout() {
   if (!inTauri()) return;
   setCli("hgs CLI: checking…");
+  if (checking) return;
+  checking = true;
   invoke<string | null>("hgs_version")
     .then((version) => setCli(version ? `hgs CLI ${version}` : "hgs CLI version unavailable"))
-    .catch(() => setCli("hgs CLI version unavailable"));
-  // The installed build, once the app reports it (build_info); the package
-  // version until then.
-  invoke<{ version?: string; versionName?: string }>("build_info")
-    .then((info) => { const name = info.versionName ?? info.version; if (name) setInstalled(name); })
-    .catch(() => {});
+    .catch(() => setCli("hgs CLI version unavailable"))
+    .finally(() => { checking = false; });
 }
 
 export function AboutSection() {
@@ -29,7 +28,7 @@ export function AboutSection() {
   return (
     <>
       <SectionHead title="About" />
-      <p class="selectable">{`Zerus ${installed()}`}</p>
+      <p class="selectable">{`Zerus ${__APP_VERSION__}`}</p>
       <p class="selectable">{cli()}</p>
       <div>
         <button class="btn" title="https://github.com/ufna/zerus" aria-label="Open Zerus repository on GitHub"

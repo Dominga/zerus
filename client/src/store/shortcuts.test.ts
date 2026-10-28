@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import native from "./shortcuts-native.json";
-import { setSetting } from "./settings";
+import { setSetting, settings } from "./settings";
 import {
-  COMMANDS, allowed, assignable, candidates, comboFromEvent, conflicts, customized, formatSequence, keys, matches,
-  nativeText, onCommand, parseChord, parseSequence, portableDefaults, protectedInTextField, reset, route, sequenceState,
-  setKeys, terminalSafe, type Combo, type Platform,
+  COMMANDS, allowed, assignable, candidates, comboFromEvent, conflicts, contextOf, customized, formatSequence, keys,
+  nativeText, onCommand, parseChord, parseSequence, popupOpen, portableDefaults, protectedInTextField, reset, resetAll,
+  route, sequenceState, setKeys, terminalSafe, type Combo, type Platform,
 } from "./shortcuts";
 
 // shortcuts-native.json was recorded by Qt 6.12 itself on Linux and on macOS
@@ -14,7 +14,24 @@ import {
 const seq = (text: string) => parseSequence(text)!;
 const combo = (text: string) => parseChord(text)!;
 const key = (init: Partial<KeyboardEvent> & { key: string; code: string }) =>
-  ({ altKey: false, ctrlKey: false, metaKey: false, shiftKey: false, isComposing: false, defaultPrevented: false, target: null, ...init }) as KeyboardEvent;
+  ({ altKey: false, ctrlKey: false, metaKey: false, shiftKey: false, isComposing: false, defaultPrevented: false, keyCode: 0, target: null, ...init }) as KeyboardEvent;
+const ctrl = (letter: string, init: Partial<KeyboardEvent> = {}) =>
+  key({ key: letter.toLowerCase(), code: /[0-9]/.test(letter) ? `Digit${letter}` : `Key${letter}`, ctrlKey: true, ...init });
+
+/** A focus target as the router reads it: a mark, a tag, xterm, a dialog, a selection. */
+function focus(o: { marked?: string; tag?: string; xterm?: boolean; dialog?: boolean; selection?: [number, number] } = {}): EventTarget {
+  const found = (yes: boolean | undefined, attribute: string | null = null) => (yes ? { getAttribute: () => attribute } : null);
+  return {
+    closest: (selector: string) =>
+      selector === "dialog[open]" ? found(o.dialog)
+      : selector === "[data-shortcut-context]" ? found(!!o.marked, o.marked ?? null)
+      : selector === ".xterm" ? found(o.xterm) : null,
+    matches: (selector: string) => !!o.tag && selector.split(", ").includes(o.tag.toLowerCase()),
+    tagName: o.tag,
+    selectionStart: o.selection?.[0],
+    selectionEnd: o.selection?.[1],
+  } as unknown as EventTarget;
+}
 
 describe("chords as Qt writes them", () => {
   it.each(native.linux)("parses and writes $portable in portable text", (row) => {
@@ -95,8 +112,19 @@ describe("key events", () => {
     expect(comboFromEvent(key({ key: "Tab", code: "Tab", ctrlKey: true }), "macos")).toEqual<Combo>({ meta: true, ctrl: false, alt: false, shift: false, key: "Tab" });
     expect(comboFromEvent(key({ key: "k", code: "KeyK", ctrlKey: true }), "linux")!.ctrl).toBe(true);
   });
-  it("names keys as Qt does, by position for letters and digits", () => {
+  it("names keys by the layout's Latin character, else by position as Qt falls back", () => {
+    // Russian: letters and symbols fall back to the Latin key at that position.
     expect(comboFromEvent(key({ key: "л", code: "KeyK", ctrlKey: true }), "linux")!.key).toBe("K");
+    expect(comboFromEvent(key({ key: "б", code: "Comma", ctrlKey: true }), "linux")!.key).toBe(",");
+    expect(comboFromEvent(key({ key: "ё", code: "Backquote", ctrlKey: true }), "linux")!.key).toBe("`");
+    expect(comboFromEvent(key({ key: "Б", code: "Comma", ctrlKey: true, shiftKey: true }), "linux")!.key).toBe("<");
+    expect(comboFromEvent(key({ key: "Ё", code: "Backquote", ctrlKey: true, shiftKey: true }), "linux")!.key).toBe("~");
+    expect(comboFromEvent(key({ key: "№", code: "Digit3", ctrlKey: true, shiftKey: true }), "linux")!.key).toBe("3");
+    // AZERTY and Dvorak: the character the layout types, not the US position.
+    expect(comboFromEvent(key({ key: "a", code: "KeyQ", ctrlKey: true }), "linux")!.key).toBe("A");
+    expect(comboFromEvent(key({ key: "&", code: "Digit1", ctrlKey: true }), "linux")!.key).toBe("&");
+    expect(comboFromEvent(key({ key: "k", code: "KeyV", ctrlKey: true }), "linux")!.key).toBe("K");
+    expect(comboFromEvent(key({ key: "w", code: "Comma", ctrlKey: true }), "linux")!.key).toBe("W");
     expect(comboFromEvent(key({ key: "Enter", code: "NumpadEnter" }), "linux")!.key).toBe("Enter");
     expect(comboFromEvent(key({ key: "Enter", code: "Enter" }), "linux")!.key).toBe("Return");
     expect(comboFromEvent(key({ key: "PageDown", code: "PageDown" }), "linux")!.key).toBe("PgDown");
@@ -128,12 +156,12 @@ describe("the registry and matching", () => {
     expect(conflicts("go.overview", seq("Ctrl+X"), "linux")).toEqual(["message.push"]);
     expect(conflicts("go.overview", seq("Ctrl+F12"), "linux")).toEqual([]);
   });
-  it("matches a two-chord sequence with a held state", () => {
-    const state = sequenceState();
-    expect(matches("message.push", key({ key: "x", code: "KeyX", ctrlKey: true }), state, "linux")).toBe("partial");
-    expect(matches("message.push", key({ key: "s", code: "KeyS", ctrlKey: true }), state, "linux")).toBe("full");
-    expect(state.typed).toEqual([]);
-    expect(matches("message.push", key({ key: "s", code: "KeyS", ctrlKey: true }), state, "linux")).toBe(false);
+  it("resets every shortcuts/ override, as Qt removes the group", async () => {
+    await setSetting("shortcuts/go.anywhere", ["Ctrl+J"]);
+    await setSetting("shortcuts/session.rename", []);
+    resetAll();
+    await Promise.resolve();
+    expect(Object.keys(settings).filter((k) => k.startsWith("shortcuts/") && settings[k] != null)).toEqual([]);
   });
   it("routes window commands only, holds a partial and starts over on Escape", async () => {
     await setSetting("shortcuts/go.settings", ["Ctrl+G, Ctrl+S"]);
@@ -145,12 +173,107 @@ describe("the registry and matching", () => {
     expect(state.typed).toEqual([]);
     route(key({ key: "g", code: "KeyG", ctrlKey: true }), state, "linux");
     expect(route(key({ key: "s", code: "KeyS", ctrlKey: true }), state, "linux")).toEqual({ run: "go.settings", consume: true });
-    // Composer commands are the composer's.
-    onCommand("message.send", () => ran += 100);
+    // Composer commands run only from a message field.
+    const send = onCommand("message.send", () => ran += 100);
     expect(route(key({ key: "Enter", code: "Enter", ctrlKey: true }), state, "linux")).toEqual({ consume: false });
+    send();
     off();
     expect(route(key({ key: "g", code: "KeyG", ctrlKey: true }), state, "linux")).toEqual({ consume: false });
     await setSetting("shortcuts/go.settings", null);
     expect(ran).toBe(0);
+  });
+  it("keeps a newer handler first and restores the one before", () => {
+    const calls: string[] = [];
+    const first = onCommand("view.refresh", () => calls.push("first"));
+    const second = onCommand("view.refresh", () => calls.push("second"));
+    const state = sequenceState();
+    expect(route(key({ key: "F5", code: "F5" }), state, "linux")).toEqual({ run: "view.refresh", consume: true });
+    second();
+    first();
+    expect(route(key({ key: "F5", code: "F5" }), state, "linux")).toEqual({ consume: false });
+    expect(calls).toEqual([]);
+  });
+});
+
+describe("the focus (ShortcutRouter)", () => {
+  it("knows Terminal by its mark and by xterm itself", () => {
+    expect(contextOf(focus({ marked: "terminal", tag: "TEXTAREA" }), false)).toBe("terminal");
+    // xterm's text area without the mark is still Terminal, never a text field.
+    expect(contextOf(focus({ xterm: true, tag: "TEXTAREA" }), false)).toBe("terminal");
+    expect(contextOf(focus({ tag: "TEXTAREA" }), false)).toBe("text-field");
+    expect(contextOf(focus({ marked: "composer", tag: "TEXTAREA" }), false)).toBe("composer");
+    expect(contextOf(focus({ marked: "capture" }), false)).toBe("none");
+    expect(contextOf(focus({ dialog: true }), false)).toBe("none");
+    expect(contextOf(focus(), false)).toBe("window");
+    // A modal dialog or popup takes every key, wherever the focus fell.
+    expect(contextOf(focus(), true)).toBe("none");
+  });
+  it("sees an open modal dialog or marked popup", () => {
+    const doc = (found: string[]) => ({
+      querySelector: (selector: string) => {
+        if (selector.includes(":modal") && !found.includes(":modal")) throw new SyntaxError("unsupported");
+        return found.some((f) => selector.includes(f)) ? ({} as Element) : null;
+      },
+    });
+    expect(popupOpen(doc([]))).toBe(false);
+    expect(popupOpen(doc([":modal"]))).toBe(true);
+    expect(popupOpen(doc(["dialog[open]"]))).toBe(true);
+    expect(popupOpen(undefined)).toBe(false);
+  });
+  it("lets Terminal keep Ctrl+- and Ctrl+= (readline undo)", () => {
+    const off = onCommand("zoom.out", () => {});
+    const state = sequenceState();
+    const term = focus({ marked: "terminal", tag: "TEXTAREA" });
+    expect(route(key({ key: "-", code: "Minus", ctrlKey: true, target: term }), state, "linux")).toEqual({ consume: false });
+    expect(route(key({ key: "-", code: "Minus", ctrlKey: true, target: focus({ xterm: true, tag: "TEXTAREA" }) }), state, "linux")).toEqual({ consume: false });
+    expect(route(key({ key: "-", code: "Minus", ctrlKey: true, target: focus() }), state, "linux")).toEqual({ run: "zoom.out", consume: true });
+    off();
+  });
+  it("leaves keys to an input method, AltGr and a drop-down list", () => {
+    const off = [onCommand("help.shortcuts", () => {}), onCommand("session.next", () => {}), onCommand("go.overview", () => {})];
+    const state = sequenceState();
+    expect(route(key({ key: "Process", code: "KeyK", ctrlKey: true }), state, "linux")).toEqual({ consume: false });
+    expect(route(key({ key: "1", code: "Digit1", ctrlKey: true, keyCode: 229 }), state, "linux")).toEqual({ consume: false });
+    const altGr = key({ key: "1", code: "Digit1", ctrlKey: true, altKey: false, target: focus({ tag: "INPUT" }) });
+    expect(route({ ...altGr, getModifierState: (k: string) => k === "AltGraph" }, state, "windows")).toEqual({ consume: false });
+    expect(route({ ...altGr, getModifierState: () => false }, state, "windows")).toEqual({ run: "go.overview", consume: true });
+    const list = focus({ tag: "SELECT" });
+    expect(route(key({ key: "F4", code: "F4", target: list }), state, "linux")).toEqual({ consume: false });
+    expect(route(key({ key: "ArrowDown", code: "ArrowDown", altKey: true, target: list }), state, "linux")).toEqual({ consume: false });
+    expect(route(key({ key: "F1", code: "F1", target: list }), state, "linux")).toEqual({ run: "help.shortcuts", consume: true });
+    off.forEach((f) => f());
+  });
+});
+
+describe("composer commands in the one map", () => {
+  const composer = (selection?: [number, number]) => focus({ marked: "composer", tag: "TEXTAREA", selection: selection ?? [2, 2] });
+  it("sends and pushes from a message field only", () => {
+    const ran: string[] = [];
+    const off = [onCommand("message.send", () => ran.push("send")), onCommand("message.push", () => ran.push("push"))];
+    const state = sequenceState();
+    expect(route(key({ key: "Enter", code: "Enter", ctrlKey: true, target: composer() }), state, "linux")).toEqual({ run: "message.send", consume: true });
+    expect(route(ctrl("X", { target: composer() }), state, "linux")).toEqual({ consume: true });
+    expect(route(ctrl("S", { target: composer() }), state, "linux")).toEqual({ run: "message.push", consume: true });
+    expect(route(key({ key: "Enter", code: "Enter", ctrlKey: true, target: focus() }), state, "linux")).toEqual({ consume: false });
+    off.forEach((f) => f());
+  });
+  it("leaves Ctrl+X with a selection to Cut", () => {
+    const off = onCommand("message.push", () => {});
+    const state = sequenceState();
+    expect(route(ctrl("X", { target: composer([0, 4]) }), state, "linux")).toEqual({ consume: false });
+    expect(state.typed).toEqual([]);
+    off();
+  });
+  it("swallows the key that ends a partial push, and Escape cancels it", () => {
+    let zoomed = 0;
+    const off = [onCommand("message.push", () => {}), onCommand("zoom.reset", () => zoomed++)];
+    const state = sequenceState();
+    route(ctrl("X", { target: composer() }), state, "linux");
+    expect(route(ctrl("0", { target: composer() }), state, "linux")).toEqual({ consume: true });
+    expect(zoomed).toBe(0);
+    route(ctrl("X", { target: composer() }), state, "linux");
+    expect(route(key({ key: "Escape", code: "Escape", target: composer() }), state, "linux")).toEqual({ consume: true });
+    expect(route(ctrl("S", { target: composer() }), state, "linux")).toEqual({ consume: false });
+    off.forEach((f) => f());
   });
 });

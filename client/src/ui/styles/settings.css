@@ -93,6 +93,7 @@
   .kb-capture { flex: 1; display: flex; align-items: center; min-height: 36px; cursor: text; }
   .kb-capture:focus { outline: none; border-color: var(--z-color-accent-muted); box-shadow: var(--z-shadow-focus-ring); }
   .kb-capture .kbd { font-size: var(--fs-sm); color: var(--z-color-text); }
+  .kb-placeholder { color: var(--z-color-muted); }
   .kb-reason { font-size: var(--fs-sm); margin: 4px 0; }
   .kb-capture-row { display: flex; gap: 8px; align-items: center; margin: 10px 0 6px; }
 }

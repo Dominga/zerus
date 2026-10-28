@@ -481,6 +481,30 @@ ring are the web client's (spec lines 212-214).
     bundle's Info.plist;
   - the hardened runtime entitlements `com.apple.security.device.camera` and
     `com.apple.security.device.audio-input`.
+- Capability probes (agreed with the web client): each platform backend
+  answers with a reason the composer shows, never a bare code: no microphone,
+  no camera, permission denied, or encoder missing.
+  - Linux probes the GStreamer elements at runtime: `x264enc`, `openh264enc`
+    or VA-API for H.264, and `avenc_aac` or `fdkaacenc` for AAC. Without them,
+    video is unavailable with that reason and voice still works.
+  - Linux prefers `pipewiresrc` where PipeWire runs, otherwise `v4l2src`.
+  - The plugin packages become optdepends of the AUR packages (`zerus`,
+    `zerus-git` and the binary packages) when the Tauri client ships. The M PRs
+    note this but leave packaging unchanged.
+- Build dependencies (ALSA and GStreamer development packages) enter CI only
+  with the `media` feature and only on the jobs that build it. `cargo build`
+  without `media` needs none of them.
+- Playback is the web client's, from A3's cached file through a Tauri URI
+  scheme. `voice.rs` exposes the duration, the waveform and the video poster
+  from the message metadata, so the webview decodes nothing to show them.
+- Persistence: a voice or video draft lives in S5's store under Qt's key rules
+  (`voice-message-draft\n{session key}`), so a crash loses at most the unsaved
+  tail. `voice.rs` documents what is written when: the recording when it
+  stops, the submit's request identity before it is sent, and the outcome
+  when it arrives.
+- The Info.plist keys and the entitlements go in the M1 (microphone) and M2
+  (camera) PRs. The coordinator is told, since the signing configuration in
+  `docs/macos-distribution.md` is theirs.
 - The pipeline mirrors Qt's exactly, as `SpeechRecorder`, `SpeechComposer` and
   `RoundVideo` define it: states, limits, texts, profiles, the draft, preview
   before send, and the uncertain and cancel paths. Each M task ports the Qt

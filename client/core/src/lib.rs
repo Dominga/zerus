@@ -19,6 +19,7 @@ pub mod state;
 pub mod stream;
 pub mod tasks;
 pub mod view;
+pub mod views;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

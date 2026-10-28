@@ -31,6 +31,7 @@ pub mod processes;
 mod pty;
 pub mod readmarks;
 pub mod reads;
+pub mod repository;
 pub mod run;
 pub mod send;
 pub mod session_usage;

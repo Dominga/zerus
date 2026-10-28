@@ -6601,8 +6601,10 @@ void SessionsWindow::openSession()
         e->host.isEmpty() && e->session.attached && !e->session.clients.isEmpty() ? e->session.clients.first() : QString());
 }
 
-bool SessionsWindow::confirmLocalStart(const Entry &original)
+bool SessionsWindow::confirmLocalStart(Entry original)
 {
+    // The modal loop may rebuild m_entries. Keep the confirmed identity by
+    // value, so the comparison below never reads a retired or replaced row.
     if (!LocalSessionHost::confirmLaunch(this, m_fleet.local(), original.host)) return false;
     const auto *e = selected();
     if (e && e->key == original.key && e->session.state == original.session.state && e->session.runId == original.session.runId

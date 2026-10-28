@@ -411,6 +411,8 @@ private slots:
     void coldCacheExplainsUnavailableContextActions();
     void stoppedSessionStartsFreshOrSendsAfterStart();
     void localStartsAskAboutAnotherWindowsSession();
+    void localStartConfirmationKeepsIdentityAcrossRefresh_data();
+    void localStartConfirmationKeepsIdentityAcrossRefresh();
     void clearInspectionUpdatesActivityAndCountersImmediately();
     void coldCacheCompactWaitsForSuccess_data();
     void coldCacheCompactWaitsForSuccess();
@@ -5706,6 +5708,56 @@ void TestSessionsWindow::localStartsAskAboutAnotherWindowsSession()
     QTRY_COMPARE_WITH_TIMEOUT(writes.size(), 3, 15000);
     QVERIFY(writes[2][2].toString().startsWith("fork\n" + name + "\n-n\nforked-here\n-d"));
     QTest::qWait(200); QCOMPARE(writes.size(), 3); QCOMPARE(warnings.shown, 6);
+}
+
+void TestSessionsWindow::localStartConfirmationKeepsIdentityAcrossRefresh_data()
+{
+    QTest::addColumn<QString>("run"); QTest::addColumn<QString>("conversation"); QTest::addColumn<bool>("activate");
+    QTest::newRow("same-identity") << QString("saved-run") << QString("conversation-one") << true;
+    QTest::newRow("changed-run") << QString("replacement-run") << QString("conversation-one") << false;
+    QTest::newRow("changed-conversation") << QString("saved-run") << QString("replacement-conversation") << false;
+}
+
+void TestSessionsWindow::localStartConfirmationKeepsIdentityAcrossRefresh()
+{
+    QFETCH(QString, run); QFETCH(QString, conversation); QFETCH(bool, activate);
+    const auto reset = qScopeGuard([] { LocalSessionHost::resetOwnWindowsSessionForTests(); });
+    LocalSessionHost::setOwnWindowsSessionForTests(1);
+    const QString name = "codex/website/navigation";
+    auto state = fleet(); auto box = state.local(); box.metrics["platform"] = "windows";
+    box.localHost = QJsonObject{{"state", "running"}, {"windows_session", 2}};
+    for (auto &session : box.sessions) if (session.name == name) {
+        session.state = "paused"; session.runId = "saved-run"; session.conversationId = "conversation-one";
+    }
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    const QJsonObject details{{"tracked", true}, {"run_id", "saved-run"}, {"conversation_id", "conversation-one"},
+        {"runtime_state", "saved"}, {"process_state", "exited"}, {"terminal_supported", true},
+        {"events", QJsonArray{}}, {"cursor", 0}};
+    const auto fixture = programInspecting("refresh-during-launch-warning", details); QVERIFY(!fixture.isEmpty());
+    SessionsWindow window(fixture); window.setFleet(state); window.show(); window.showSession({}, name);
+    auto *client = window.findChild<HgsClient *>();
+    auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    settleSelectedInspection(composer, client, {}, name, details);
+    setComposerText(composer, "Keep this draft");
+    auto *open = window.findChild<QAction *>("openSessionAction"); QTRY_VERIFY(open->isEnabled());
+    QSignalSpy opened(&window, &SessionsWindow::sessionActivated);
+    LaunchWarnings warnings(window, "launchAnyway");
+    bool rebuilt = false;
+    QTimer::singleShot(0, &window, [&] {
+        auto *warning = window.findChild<QMessageBox *>("otherWindowsSessionWarning"); QVERIFY(warning);
+        for (auto &session : box.sessions) if (session.name == name) {
+            session.runId = run; session.conversationId = conversation;
+        }
+        // The nested modal loop can replace the row storage even when its
+        // identity stays the same. An actual new identity must still refuse.
+        state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state); rebuilt = true;
+    });
+    open->trigger();
+    QVERIFY(rebuilt); QCOMPARE(warnings.shown, 1);
+    QCOMPARE(opened.size(), activate ? 1 : 0);
+    if (activate) { QCOMPARE(opened[0][0].toString(), QString()); QCOMPARE(opened[0][1].toString(), name); }
+    else QVERIFY(window.findChild<QLabel *>("notice")->text().contains("session changed", Qt::CaseInsensitive));
+    QCOMPARE(composer->editor()->toPlainText(), QString("Keep this draft"));
 }
 
 void TestSessionsWindow::stoppedSessionStartsFreshOrSendsAfterStart()

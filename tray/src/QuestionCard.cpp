@@ -230,7 +230,7 @@ QuestionCard::QuestionCard(QWidget *parent) : QWidget(parent)
     m_approve = new QPushButton(tr("Approve once (3)"));m_approve->setObjectName("approveToolRequest");
     m_deny = new QPushButton(tr("Deny"));m_deny->setObjectName("denyToolRequest");
     m_approveAlways = new QPushButton(tr("Allow all, don't ask again"));m_approveAlways->setObjectName("approveSubagentsAlways");
-    m_approveAlways->setToolTip(tr("Starts every subagent listed and stops asking before this session's later subagents. Claude also saves its own rule when it offers one."));
+    m_approveAlways->setToolTip(tr("Starts every subagent listed and stops asking before later subagents in this session."));
     m_skip = new QPushButton(tr("Skip")); m_skip->setObjectName("skipQuestion");
     m_skip->setToolTip(tr("Dismiss this optional question without sending an answer. The agent can continue."));
     connect(m_skip,&QPushButton::clicked,this,[this]{
@@ -923,7 +923,7 @@ void QuestionCard::updateControls()
     if (notice.isEmpty() && choices) notice = tr("Review the request, then choose one of the agent's options.");
     if (notice.isEmpty() && planReview && !complete) notice = tr("Review the plan, then choose how the agent continues.");
     if (notice.isEmpty() && confirmingAlways)
-        notice = tr("“Allow all, don't ask again” also stops asking before this session's later subagents. Select Confirm to send it.");
+        notice = tr("“Allow all, don't ask again” also stops asking before later subagents in this session. Select Confirm to send it.");
     if (notice.isEmpty() && subagents) notice = tr("Allow all starts every subagent listed; Deny stops them all.");
     if (notice.isEmpty()) notice = approval?tr("Approval applies only to this command. Review it before continuing."):
         optional ? tr("The agent can continue. Answer when ready or skip this question.") :

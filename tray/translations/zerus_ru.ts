@@ -7379,8 +7379,8 @@ Connect directly to synchronize through this computer.</source>
     </message>
     <message>
       <location filename="../src/QuestionCard.cpp" line="233" />
-      <source>Starts every subagent listed and stops asking before this session's later subagents. Claude also saves its own rule when it offers one.</source>
-      <translation>Запускает все перечисленные субагенты и больше не спрашивает о следующих субагентах этой сессии. Claude также сохраняет своё правило, если предлагает его.</translation>
+      <source>Starts every subagent listed and stops asking before later subagents in this session.</source>
+      <translation>Запускает все перечисленные субагенты и больше не спрашивает о следующих субагентах в этой сессии.</translation>
     </message>
     <message>
       <location filename="../src/QuestionCard.cpp" line="885" />
@@ -7394,8 +7394,8 @@ Connect directly to synchronize through this computer.</source>
     </message>
     <message>
       <location filename="../src/QuestionCard.cpp" line="926" />
-      <source>“Allow all, don't ask again” also stops asking before this session's later subagents. Select Confirm to send it.</source>
-      <translation>«Разрешить все и больше не спрашивать» также отключает вопросы о следующих субагентах этой сессии. Выберите «Подтвердить», чтобы отправить.</translation>
+      <source>“Allow all, don't ask again” also stops asking before later subagents in this session. Select Confirm to send it.</source>
+      <translation>«Разрешить все и больше не спрашивать» также отключает вопросы о следующих субагентах в этой сессии. Выберите «Подтвердить», чтобы отправить.</translation>
     </message>
     <message>
       <location filename="../src/QuestionCard.cpp" line="927" />

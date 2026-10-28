@@ -51,7 +51,8 @@ computer's hgs state, where the hooks that ask run. `hgs subagents-confirm get
 `{"request_id":"UUID","confirm":false,"by":"human"} | hgs subagents-confirm set --json`
 changes it, also where local sessions are not enabled; Settings > Sessions >
 "Ask before an agent starts subagents" uses them. Neither goes to another
-`@host`: set it on each computer whose agents should not ask.
+`@host`, an SSH peer or a WSL profile: set it on each computer whose agents
+should not ask.
 Only the owner changes it: a set from an agent session (a caller record, a dsh
 conversation, an `HGS_SESSION` or an `HGS_RUN_ID`) is refused, so a member whose
 own subagent call was denied cannot turn the ask off for every later session.
@@ -74,11 +75,19 @@ showed. The hook of the card's request answers it. The hook of every other call
 of the batch waits for its group rather than for a card of its own, also after
 another request has taken the record, and hands Claude the same allow, denial
 or message for its own call. A hook matches its call by tool and input, as the
-channel binds; identical calls waiting at once stay in Terminal. A new call
-joining the group changes the card, so a one-time answer never covers a call it
-did not show. A waiting hook stops with its turn (a new prompt, Stop or
+channel binds. Claude's requests for identical calls cannot be told apart, so
+each of their hooks hands over only an answer all of those calls got. A new
+call joining the group changes the card, so a one-time answer never covers a
+call it did not show. A waiting hook stops with its turn (a new prompt, Stop or
 SessionEnd), when Claude cancels it or the call ends, or when the session's
-agent, run or conversation changes.
+agent, run or conversation changes; it then removes its files.
+
+An answer reports `claude_hook` only once every hook it was handed to says
+that it gave Claude the answer; Claude stops the other hooks of a turn that
+**No** ends, so they count. A call of the batch without a waiting hook (its
+hook ended, or an older hgs) still waits in Terminal: the answer names it as
+undelivered, and the session keeps waiting for an approval rather than showing
+as working.
 
 A card answered on the screen (no hook took its request, for example a request
 too long to show) still goes to the hooks when every call it shows has a
@@ -91,28 +100,38 @@ Windows), the keys answer only the call on screen.
 
 "Don't ask again" for subagents is **Allow all, don't ask again** on the
 desktop (after a second **Confirm**), the card's own option on the phone, or
-Claude's own "Yes, and don't ask again ..." on a screen card. It allows every
-call still waiting in the group and stops asking for the rest of that Zerus
-session: across turns, a new conversation (/clear, compaction) and a resume,
-until a fresh start, a fork or a new session with the same name. Later
-subagent calls of the session get no decision from Zerus, so Claude's own
-policy applies; they join no group. Through the hook, Zerus also hands Claude
-the rule its own panel offered for that request (`updatedPermissions` from the
-request's `permission_suggestions`, only rules that allow `Agent` or `Task`).
-Claude saves it where its panel would, usually the folder's
-`.claude/settings.local.json`, so later sessions there are not asked either.
-When Claude offers no such rule, only the Zerus session remembers it.
+Claude's own "Yes, and don't ask again ..." on a screen card. It stops asking
+for the rest of that Zerus session: across turns, a new conversation (/clear,
+compaction) and a resume, until a fresh start, a fork or a new session with the
+same name. It also allows every call still waiting in the group, including one
+that joined after the card was drawn: the one exception to an answer covering
+only the calls its card showed. Later subagent calls of the session get no
+decision from Zerus, so Claude's own policy applies; they join no group.
+Through a hook, Zerus also hands Claude the rule its own panel offered for that
+request (`updatedPermissions` from the request's `permission_suggestions`,
+only rules that allow `Agent` or `Task`), for this Claude session only: their
+destination becomes `session`, so Claude saves no lasting rule. The allowance
+is kept in this computer's hgs state and removed once its session is gone
+(terminated into Archive, forgotten or replaced by a fresh start); a
+permission hook or a new allowance looks for such files.
 
-Rules Claude saved itself count as well, in the user's settings
-(`CLAUDE_CONFIG_DIR`, else `~/.claude`) and in the session folder's
-`.claude/settings.json` and `.claude/settings.local.json`. `Agent`, `Task`,
-`Agent(*)` and `Task(*)` cover every subagent; `Agent(Explore)` covers only
-that `subagent_type`, and a call without one is `general-purpose`. A deny rule
-wins over an allow rule. A call a rule covers is not asked, and Claude allows
-or denies it itself. A waiting hook of the batch whose call an allow rule now
-covers allows it, so "don't ask again" chosen in Claude's own panel covers the
-rest of the batch. A settings file that cannot be read decides nothing;
-managed settings are not read.
+Claude's settings files never switch the ask off: an allow rule an agent
+writes or a repository commits is no answer of the owner's, and a session with
+`Agent` already allowed in its settings is still asked. An allow rule counts
+only as the owner's "don't ask again" in Claude's own Terminal panel: one for
+the call's subagent type that appears while its hook waits, in the user's
+settings (`settings.json` in `CLAUDE_CONFIG_DIR`, else in the account home
+Zerus started Claude with, else in `~/.claude`) or in the session folder's
+`.claude/settings.local.json`. That hook then allows its call and records the
+Zerus session allowance, so the rest of the batch goes ahead too. A rule that
+existed when the hook started never counts. `Agent`, `Task`, `Agent(*)`,
+`Task(*)` and an empty `Agent()` cover every subagent; `Agent(Explore)` covers
+only that `subagent_type`, and a call without one is `general-purpose`. Any
+ask or deny rule for the call in those files or the folder's
+`.claude/settings.json` means no, and so does a settings file that cannot be
+read. Managed settings, `--settings` files and the local settings of an
+enclosing repository root are not read, so a rule saved there leaves the batch
+to the card.
 
 The card also lists its calls in `subagents` (`id`, `type`, `model`, `effort`
 when the tool input or the agent definition gives it, and `description`); the
@@ -1710,9 +1729,9 @@ card answers through it, so a clipped panel no longer needs a larger Terminal.
 - Options that reach beyond this request go only through the verified panel,
   with the second **Confirm**. A subagent card's own **Yes, and don't ask
   again for subagents** is the exception: the hook takes it, as described in
-  [subagent confirmation](#subagent-confirmation). A **Yes** or **No** that the hook does not take
-  within three seconds also goes through a verified panel; feedback it does not
-  take is not sent.
+  [subagent confirmation](#subagent-confirmation). A **Yes** or **No** that
+  the hook does not take within three seconds also goes through a verified
+  panel; feedback it does not take is not sent.
 - A decision the hook has taken is never sent again. Until Claude confirms it,
   the card stays locked and is answered in Terminal.
 - `hgs answer` receipts report `transport` `claude_hook` or `claude_tui`.

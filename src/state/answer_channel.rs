@@ -353,7 +353,7 @@ fn decision_kind(kind: Kind, event: &Value, card: &Value, offer: &Value) -> Resu
 }
 
 /// U19: where the waiting hook of one subagent call says that it takes its
-/// group's answer: beside the run's channels, so it is pruned with them.
+/// group's answer, beside the run's channels; the hook removes it as it ends.
 fn batch_file(root: &Path, record: &Value, tool_use: &str) -> PathBuf {
     let digest = |value: Value| format!("{:x}", Sha256::digest(value.to_string().as_bytes()));
     root.join("native_answers")
@@ -380,38 +380,51 @@ fn batch_waiter(root: &Path, record: &Value, tool_use: &str) -> Option<Value> {
         .then_some(waiter)
 }
 
-/// The calls of `calls` whose waiting hooks will hand Claude the group's
-/// answer, when every call has one that will or already answered (a rule
-/// Claude saved, say), so the answer reaches all of them without the screen.
-/// None when a call has no waiting hook, or none is left to answer.
-pub(super) fn batch_waiting(record: &Value, calls: &[String]) -> Option<Vec<String>> {
-    let root = absolute_root().ok()?;
-    let mut waiting = Vec::new();
+/// The calls of `calls` that have a waiting hook to take the group's answer,
+/// and those that have none. A call whose hook already answered (a rule the
+/// owner saved while it waited) is in neither.
+pub(super) fn batch_status(record: &Value, calls: &[String]) -> (Vec<String>, Vec<String>) {
+    let conversation = string(record, "conversation_id");
+    let root = absolute_root().ok();
+    let (mut waiting, mut missing) = (Vec::new(), Vec::new());
     for tool in calls {
-        if read_file(&batch_file(&root, record, tool)).is_some_and(|waiter| !waiter["emitted_at"].is_null()) {
+        if subagents_confirm::answered(conversation, tool) {
             continue;
         }
-        batch_waiter(&root, record, tool)?;
-        waiting.push(tool.clone());
+        if root.as_ref().is_some_and(|root| batch_waiter(root, record, tool).is_some()) {
+            waiting.push(tool.clone());
+        } else {
+            missing.push(tool.clone());
+        }
     }
-    (!waiting.is_empty()).then_some(waiting)
+    (waiting, missing)
 }
 
-/// Waits up to `within` for the hooks of `calls` to hand Claude the group's
-/// answer: one did, and every other one did too or ended (a denial ends the
-/// turn, and Claude then stops the queued requests' hooks). Anything else is
-/// uncertain: the group keeps its answer and is never asked again.
-pub(super) fn batch_delivered(record: &Value, calls: &[String], within: Duration) -> Result<()> {
+/// The calls of `calls` whose waiting hooks will hand Claude the group's
+/// answer, when every call has one or was already answered by it, so the
+/// answer reaches all of them without the screen. None otherwise.
+pub(super) fn batch_waiting(record: &Value, calls: &[String]) -> Option<Vec<String>> {
+    let (waiting, missing) = batch_status(record, calls);
+    (missing.is_empty() && !waiting.is_empty()).then_some(waiting)
+}
+
+/// Waits up to `within` for the hooks of `calls` to report that they handed
+/// Claude the group's answer, and says how many did. Every one must, except
+/// for a denial that ends the turn (`ends_turn`): Claude then stops the other
+/// queued requests and their hooks, so a hook that ended counts as done.
+/// Anything else is uncertain: the group keeps its answer and is never asked
+/// again.
+pub(super) fn batch_delivered(record: &Value, calls: &[String], within: Duration, ends_turn: bool) -> Result<usize> {
     let root = absolute_root()?;
+    let conversation = string(record, "conversation_id");
     let deadline = Instant::now() + within;
     loop {
-        let emitted = |tool: &String| {
-            read_file(&batch_file(&root, record, tool)).is_some_and(|waiter| !waiter["emitted_at"].is_null())
-        };
-        let done = calls.iter().filter(|tool| emitted(tool)).count();
-        let ended = calls.iter().filter(|tool| !emitted(tool) && batch_waiter(&root, record, tool).is_none()).count();
-        if done > 0 && done + ended == calls.len() {
-            return Ok(());
+        let done = calls.iter().filter(|tool| subagents_confirm::answered(conversation, tool)).count();
+        let ended = calls.iter()
+            .filter(|tool| !subagents_confirm::answered(conversation, tool) && batch_waiter(&root, record, tool).is_none())
+            .count();
+        if done == calls.len() || ends_turn && done + ended == calls.len() {
+            return Ok(done);
         }
         if Instant::now() >= deadline {
             return Err("delivery uncertain: the subagents' permission hooks did not all report handing the answer over; inspect Terminal before answering again".into());
@@ -423,32 +436,51 @@ pub(super) fn batch_delivered(record: &Value, calls: &[String], within: Duration
 /// U19: a subagent call of the session's open group, whose waiting hook
 /// delivers the group's answer even when its request is not the one Zerus
 /// shows: Claude asks for each call of a batch at once ("1 of N"), and the
-/// record keeps only the last request.
+/// record keeps only the last request. Identical calls of one message cannot
+/// tell their requests apart, so each of their hooks stands for one of them
+/// (`tool`) and hands over only an answer they all got (`candidates`).
 struct Batch {
     tool: String,
+    candidates: Vec<String>,
     file: PathBuf,
-    rules: Instant,
+    conversation: String,
+    /// The subagent rules in Claude's settings when the call started waiting;
+    /// None when they could not be read, and then no rule ever counts.
+    rules: Option<subagents_confirm::SavedRules>,
+    looked: Instant,
     /// One waiting hook per call, as per channel: a second hook process for
     /// the same request leaves the call to the first.
-    _owner: Option<Guard>,
+    owner: Option<Guard>,
 }
 
 impl Batch {
-    /// The call `tool_use` that Claude's request `event` asks about, when it
-    /// is a main-agent subagent call of the open group that no other hook
-    /// waits for; it says it waits.
-    fn join(root: &Path, record: &Value, event: &Value, tool_use: &str, deadline: f64) -> Option<Self> {
-        if !subagents_confirm::subagent_tool(event) || !subagents_confirm::grouped(string(record, "conversation_id"), tool_use) {
+    /// The calls `candidates` that Claude's request `event` may ask about,
+    /// when they are main-agent subagent calls of the open group; the hook
+    /// stands for the first one no other hook waits for, and says it waits.
+    fn join(root: &Path, record: &Value, event: &Value, candidates: &[String], deadline: f64) -> Option<Self> {
+        let conversation = string(record, "conversation_id");
+        if !subagents_confirm::subagent_tool(event) || candidates.iter().any(|tool| !subagents_confirm::grouped(conversation, tool)) {
             return None;
         }
-        let file = batch_file(root, record, tool_use);
-        let owner = lock_until(&file.with_extension("lock"), Instant::now()).ok()??;
+        let (tool, file, owner) = candidates.iter().find_map(|tool| {
+            let file = batch_file(root, record, tool);
+            let owner = lock_until(&file.with_extension("lock"), Instant::now()).ok()??;
+            Some((tool.clone(), file, owner))
+        })?;
         let pid = std::process::id();
         let waiter = json!({"protocol":PROTOCOL,"pid":pid,"process_start":process_start(pid),"run_id":record["run_id"],
-            "conversation_id":record["conversation_id"],"tool_call_id":tool_use,"deadline":deadline});
+            "conversation_id":record["conversation_id"],"tool_call_id":tool,"deadline":deadline});
         // Without the file an answer uses the screen, as before.
         let _ = atomic(&file, &waiter.to_string());
-        Some(Self { tool: tool_use.to_owned(), file, rules: Instant::now() - Duration::from_secs(1), _owner: Some(owner) })
+        Some(Self {
+            tool,
+            candidates: candidates.to_vec(),
+            file,
+            conversation: conversation.to_owned(),
+            rules: subagents_confirm::saved_rules(record),
+            looked: Instant::now() - Duration::from_secs(1),
+            owner: Some(owner),
+        })
     }
 
     /// Why this call no longer waits for its group: the session, run,
@@ -464,20 +496,27 @@ impl Batch {
         if !process_alive(current) {
             return Some("agent exited");
         }
-        if !claude_approval::channel::active(current, &self.tool) {
+        if !self.candidates.iter().any(|tool| claude_approval::channel::active(current, tool)) {
             return Some("call ended");
         }
-        if !subagents_confirm::grouped(string(current, "conversation_id"), &self.tool) {
+        if !self.candidates.iter().any(|tool| subagents_confirm::grouped(&self.conversation, tool)) {
             return Some("group ended");
         }
         None
     }
 
+    /// Whether the group already answered every call this hook may serve.
+    fn decided(&self) -> bool {
+        subagents_confirm::common_verdict(&self.conversation, &self.candidates, &self.tool).is_some()
+    }
+
     /// Claude's decision for this call, once there is one: its group's
-    /// answer, "don't ask again" for this Zerus session, or a rule Claude
-    /// saved that allows this subagent (read at most once a second).
+    /// answer, "don't ask again" for this Zerus session, or the owner's
+    /// "don't ask again" in Claude's own panel while it waited: an allow rule
+    /// for this subagent that was not saved before (read at most once a
+    /// second), which then stops asking for the session as well.
     fn answer(&mut self, current: &Value, event: &Value) -> Option<Value> {
-        let offer = if let Some(verdict) = subagents_confirm::verdict(string(current, "conversation_id"), &self.tool) {
+        let offer = if let Some(verdict) = subagents_confirm::common_verdict(&self.conversation, &self.candidates, &self.tool) {
             match (verdict.allow, verdict.message.is_empty()) {
                 (true, _) => json!({"decision":"allow","remember":verdict.remember}),
                 (false, true) => json!({"decision":"deny"}),
@@ -485,9 +524,14 @@ impl Batch {
             }
         } else if subagents_confirm::session_allowed(current) {
             json!({"decision":"allow"})
-        } else if self.rules.elapsed() >= Duration::from_secs(1) {
-            self.rules = Instant::now();
-            subagents_confirm::claude_rule(current, &event["tool_input"]).filter(|allowed| *allowed)?;
+        } else if self.looked.elapsed() >= Duration::from_secs(1) {
+            self.looked = Instant::now();
+            let before = self.rules.as_ref()?;
+            let now = subagents_confirm::saved_rules(current)?;
+            if !subagents_confirm::newly_allowed(before, &now, &event["tool_input"]) {
+                return None;
+            }
+            let _ = subagents_confirm::allow_session(current);
             json!({"decision":"allow"})
         } else {
             return None;
@@ -495,11 +539,18 @@ impl Batch {
         claude_approval::channel::decision(&offer, event).ok()
     }
 
-    /// Written before the decision is printed, as emitted.json is.
-    fn emitted(&self) -> Result<()> {
-        let mut waiter = read_file(&self.file).unwrap_or_else(|| json!({}));
-        waiter["emitted_at"] = json!(now());
-        atomic(&self.file, &waiter.to_string())
+    /// Recorded before the decision is printed, as emitted.json is.
+    fn emitted(&self) {
+        subagents_confirm::mark_answered(&self.conversation, &self.tool);
+    }
+}
+
+/// A hook leaves nothing behind, whatever ended it.
+impl Drop for Batch {
+    fn drop(&mut self) {
+        drop(self.owner.take());
+        let _ = fs::remove_file(&self.file);
+        let _ = fs::remove_file(self.file.with_extension("lock"));
     }
 }
 
@@ -733,22 +784,28 @@ fn serve(
     // An approval stays with the one active tool call that the first record
     // shows for it; without one it never binds, and a later call with the same
     // input is another request.
-    let mut asked: Option<Option<String>> = None;
+    let mut asked: Option<Vec<String>> = None;
     let mut batch: Option<Batch> = None;
     let mut first: Option<Value> = None;
     let (record, card) = loop {
         if let Some(record) = read_run(name, token)? {
             let card = match kind {
                 Kind::Question => bind(&record, event),
-                Kind::Approval => match asked.get_or_insert_with(|| claude_approval::channel::asked_use(&record, event, started)) {
-                    Some(tool_use) => {
-                        if batch.is_none() {
-                            batch = Batch::join(&root, &record, event, tool_use, started + lifetime);
-                        }
-                        claude_approval::channel::bind_to(&record, event, tool_use)
+                Kind::Approval => {
+                    let candidates = asked.get_or_insert_with(|| claude_approval::channel::asked_uses(&record, event, started));
+                    if candidates.is_empty() {
+                        return Ok(());
                     }
-                    None => return Ok(()),
-                },
+                    if batch.is_none() {
+                        batch = Batch::join(&root, &record, event, candidates, started + lifetime);
+                    }
+                    match candidates.as_slice() {
+                        [only] => claude_approval::channel::bind_to(&record, event, only),
+                        // U19: identical subagent calls wait for their group together.
+                        _ if batch.is_some() => None,
+                        _ => return Ok(()),
+                    }
+                }
             };
             if let Some(card) = card {
                 break (record, Some(card));
@@ -756,8 +813,7 @@ fn serve(
             // U19: Claude asks for every call of a batch at once, and the
             // record keeps only the last request: the others wait for their
             // group's answer without a card of their own.
-            let answered = batch.as_ref().is_some_and(|batch| subagents_confirm::verdict(string(&record, "conversation_id"), &batch.tool).is_some());
-            if answered {
+            if batch.as_ref().is_some_and(Batch::decided) {
                 break (record, None);
             }
             first.get_or_insert(record);
@@ -774,6 +830,9 @@ fn serve(
         std::thread::sleep(Duration::from_millis(100));
     };
     prune(&root.join("native_answers"), Duration::from_secs(30 * 86_400), 64);
+    if batch.is_some() {
+        subagents_confirm::prune_allowances(subagents_confirm::PRUNE_LIMIT);
+    }
     // The channel of the bound request: one worker per question, and a second
     // PermissionRequest worker leaves it.
     let mut channel = None;
@@ -827,7 +886,9 @@ fn serve(
             close_channel(&channel, reason);
             return Ok(());
         }
-        if looked.elapsed() >= Duration::from_secs(1) {
+        // A result for one of several identical calls tells nothing of this one.
+        let single = batch.as_ref().is_none_or(|batch| batch.candidates.len() == 1);
+        if single && looked.elapsed() >= Duration::from_secs(1) {
             looked = Instant::now();
             if transcript.answered(current.as_ref().unwrap_or(&record), &tool) {
                 close_channel(&channel, "answered in Terminal");
@@ -841,7 +902,7 @@ fn serve(
                 if let Some((dir, _, _)) = &channel {
                     write(dir, EMITTED, &json!({"request_id":"subagent-group","at":now()}))?;
                 }
-                batch.emitted()?;
+                batch.emitted();
                 emit(&output);
                 close_channel(&channel, "decided with its group");
                 // The record's request is this one: it no longer waits.
@@ -867,7 +928,7 @@ fn serve(
                 }
                 write(dir, EMITTED, &json!({"request_id":offer["request_id"],"at":now()}))?;
                 if let Some(batch) = &batch {
-                    batch.emitted()?;
+                    batch.emitted();
                 }
                 emit(&output?);
                 close(dir, "emitted");
@@ -898,20 +959,21 @@ mod tests {
         crate::state::with_test_state_root(dir.path(), || {
             let record = record();
             let event = json!({"hook_event_name":"PermissionRequest","tool_name":"Agent","tool_input":{"subagent_type":"Explore"}});
-            let call = |tool: &str| Batch { tool: tool.into(), file: dir.path().join(format!("{tool}.json")), rules: Instant::now(), _owner: None };
+            let call = |tool: &str| Batch { tool: tool.into(), candidates: vec![tool.into()], file: dir.path().join(format!("{tool}.json")),
+                conversation: "conversation-1".into(), rules: None, looked: Instant::now(), owner: None };
             let answer = |batch: &mut Batch| batch.answer(&record, &event).map(|output| output["hookSpecificOutput"]["decision"].clone());
             subagents_confirm::group_add("conversation-1", "toolu_1", &json!({"subagent_type":"Explore"}));
             subagents_confirm::group_add("conversation-1", "toolu_2", &json!({"subagent_type":"general"}));
             assert!(answer(&mut call("toolu_2")).is_none(), "undecided: it waits for its card");
-            subagents_confirm::decide("conversation-1", &["toolu_1".into(), "toolu_2".into()], &subagents_confirm::Verdict::allow());
+            subagents_confirm::decide("conversation-1", &["toolu_1".into(), "toolu_2".into()], &subagents_confirm::Verdict::allow(), None);
             assert_eq!(answer(&mut call("toolu_2")).unwrap(), json!({"behavior":"allow"}));
             subagents_confirm::group_reset("conversation-1");
             subagents_confirm::group_add("conversation-1", "toolu_3", &json!({"subagent_type":"Explore"}));
             subagents_confirm::group_add("conversation-1", "toolu_4", &json!({"subagent_type":"Explore"}));
-            subagents_confirm::decide("conversation-1", &["toolu_3".into()], &subagents_confirm::Verdict::deny());
+            subagents_confirm::decide("conversation-1", &["toolu_3".into()], &subagents_confirm::Verdict::deny(), None);
             assert_eq!(answer(&mut call("toolu_3")).unwrap()["interrupt"], true);
             let feedback = subagents_confirm::Verdict { message: "Read the docs first".into(), ..subagents_confirm::Verdict::deny() };
-            subagents_confirm::decide("conversation-1", &["toolu_4".into()], &feedback);
+            subagents_confirm::decide("conversation-1", &["toolu_4".into()], &feedback, None);
             assert_eq!(answer(&mut call("toolu_4")).unwrap(), json!({"behavior":"deny","message":"Read the docs first"}));
             assert!(answer(&mut call("toolu_other")).is_none());
         });
@@ -1004,13 +1066,19 @@ mod tests {
             eventually("the moved request's channel closes", || closed(&channel).is_some_and(|closed| closed["reason"] == "approval resolved"));
             assert!(batch_waiting(&record, &ids).as_deref() == Some(ids.as_slice()), "both calls still wait for their group");
             assert!(second_printed.try_recv().is_err(), "nothing was decided");
-            subagents_confirm::decide("conversation-1", &ids, &subagents_confirm::Verdict::allow());
+            subagents_confirm::decide("conversation-1", &ids, &subagents_confirm::Verdict::allow(), None);
             assert_eq!(decision_of(&first_printed), json!({"behavior":"allow"}));
             assert_eq!(decision_of(&second_printed), json!({"behavior":"allow"}));
-            batch_delivered(&record, &ids, Duration::from_secs(3)).unwrap();
+            assert_eq!(batch_delivered(&record, &ids, Duration::from_secs(3), false).unwrap(), 2);
             assert!(batch_waiting(&record, &ids).is_none(), "an answered hook takes no second answer");
             first.join().unwrap();
             second.join().unwrap();
+            // The hooks leave nothing behind.
+            let root = absolute_root().unwrap();
+            for id in &ids {
+                let file = batch_file(&root, &record, id);
+                assert!(!file.exists() && !file.with_extension("lock").exists(), "{id}");
+            }
         });
     }
 
@@ -1030,7 +1098,7 @@ mod tests {
             let identity = claude_approval::channel::identity(&record).unwrap();
             eventually("the bound hook takes offers", || matches!(route(&record, &identity), Ok(Route::Channel(_))));
             eventually("both hooks wait", || batch_waiting(&record, &ids).as_deref() == Some(ids.as_slice()));
-            subagents_confirm::decide("conversation-1", &ids, &subagents_confirm::Verdict::allow());
+            subagents_confirm::decide("conversation-1", &ids, &subagents_confirm::Verdict::allow(), None);
             assert_eq!(decision_of(&second_printed), json!({"behavior":"allow"}));
             assert_eq!(decision_of(&first_printed), json!({"behavior":"allow"}));
             first.join().unwrap();
@@ -1043,9 +1111,9 @@ mod tests {
     }
 
     /// U19: "Allow all, don't ask again" on the card goes to the bound hook,
-    /// which hands Claude the rule Claude's own panel would save; `hgs
-    /// answer` then allows the rest of the batch (without the rule twice) and
-    /// stops asking for this Zerus session.
+    /// which hands Claude the rule its own panel offered, for this Claude
+    /// session only; `hgs answer` then allows the rest of the batch (without
+    /// the rule twice) and stops asking for this Zerus session.
     #[test]
     fn dont_ask_again_reaches_the_batch_and_the_session() {
         let dir = tempfile::tempdir().unwrap();
@@ -1063,11 +1131,15 @@ mod tests {
             let offer = json!({"request_id":"one","decision":"allow","message":"","remember":true});
             let transport = deliver(&channel, &offer, Duration::from_secs(3), Duration::from_secs(5), || Err("no screen".into()));
             assert_eq!(transport.unwrap(), "claude_hook");
-            assert_eq!(decision_of(&second_printed), json!({"behavior":"allow","updatedPermissions":[rule]}));
+            let session_rule = json!({"type":"addRules","rules":[{"toolName":"Agent"}],"behavior":"allow","destination":"session"});
+            assert_eq!(decision_of(&second_printed), json!({"behavior":"allow","updatedPermissions":[session_rule]}));
             let card = json!({"subagent_confirmation":true,"subagent_calls":ids,"questions":[{"id":"approval","options":[
                 {"id":"1","label":"Yes","scope":"once"},{"id":"3","label":"Yes, and don't ask again for subagents","scope":"broader"},
                 {"id":"2","label":"No","scope":"once"}]}]});
-            claude_approval::decide_group(&record, &card, &json!([{"question_id":"approval","selected_option_ids":["3"],"text":""}]), false);
+            let verdict = subagents_confirm::Verdict { allow: true, message: String::new(), remember: true };
+            let (waiting, missing) = batch_status(&record, &ids[..1]);
+            assert_eq!((waiting.as_slice(), missing.len()), (&ids[..1], 0));
+            claude_approval::hand_over(&record, &card, &ids, &waiting, &missing, &verdict, false, true).unwrap();
             assert_eq!(decision_of(&first_printed), json!({"behavior":"allow"}), "Claude gets the rule once");
             first.join().unwrap();
             second.join().unwrap();
@@ -1081,16 +1153,16 @@ mod tests {
         });
     }
 
-    /// U19: "don't ask again" chosen in Claude's own panel saves Claude's
-    /// rule; the hooks of the other calls of the batch follow it. A call the
-    /// rule does not cover keeps waiting until Claude ends the turn, which
-    /// ends its group and its hook without an answer.
+    /// U19: "don't ask again" chosen in Claude's own panel while the batch
+    /// waits saves Claude's rule; the hook of a call it names takes that as
+    /// the owner's answer, allows its call and stops asking for the Zerus
+    /// session, so the other calls of the batch go ahead too.
     #[test]
-    fn a_waiting_call_follows_claudes_saved_rule_and_ends_with_its_turn() {
+    fn a_rule_saved_while_the_batch_waits_allows_it_and_the_session() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_owned();
         crate::state::with_test_state_root(&root, || {
-            let (mut record, requests) = batch_session(&subagent_calls(), &root, json!([]));
+            let (record, requests) = batch_session(&subagent_calls(), &root, json!([]));
             let ids = vec!["toolu_1".to_owned(), "toolu_2".to_owned()];
             let (first, first_printed) = hook(&root, &requests[0]);
             let (second, second_printed) = hook(&root, &requests[1]);
@@ -1098,16 +1170,135 @@ mod tests {
             fs::create_dir_all(root.join(".claude")).unwrap();
             fs::write(root.join(".claude/settings.local.json"), r#"{"permissions":{"allow":["Agent(Explore)"]}}"#).unwrap();
             assert_eq!(decision_of(&first_printed), json!({"behavior":"allow"}));
+            assert_eq!(decision_of(&second_printed), json!({"behavior":"allow"}), "the session no longer asks");
+            assert!(subagents_confirm::session_allowed(&record));
+            first.join().unwrap();
+            second.join().unwrap();
+        });
+    }
+
+    /// U19: a rule saved before the batch asked never answers it, whoever
+    /// wrote it (an agent, a repository): the hooks keep waiting until Claude
+    /// ends the turn, which ends their group and them, without an answer and
+    /// without leaving their files behind.
+    #[test]
+    fn a_rule_saved_before_never_answers_and_hooks_end_with_their_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_owned();
+        crate::state::with_test_state_root(&root, || {
+            fs::create_dir_all(root.join(".claude")).unwrap();
+            fs::write(root.join(".claude/settings.local.json"), r#"{"permissions":{"allow":["Agent"]}}"#).unwrap();
+            fs::write(root.join(".claude/settings.json"), r#"{"permissions":{"allow":["Task(*)"]}}"#).unwrap();
+            let (mut record, requests) = batch_session(&subagent_calls(), &root, json!([]));
+            let ids = vec!["toolu_1".to_owned(), "toolu_2".to_owned()];
+            let (first, first_printed) = hook(&root, &requests[0]);
+            let (second, second_printed) = hook(&root, &requests[1]);
+            eventually("both hooks wait", || batch_waiting(&record, &ids).as_deref() == Some(ids.as_slice()));
             std::thread::sleep(Duration::from_millis(1500));
-            assert!(second_printed.try_recv().is_err(), "the rule does not name this subagent");
-            // The card's answer would now reach only the call still waiting.
-            assert_eq!(batch_waiting(&record, &ids), Some(vec!["toolu_2".to_owned()]));
+            assert!(first_printed.try_recv().is_err() && second_printed.try_recv().is_err(), "an old rule is no answer");
+            assert!(!subagents_confirm::session_allowed(&record));
             questions::observe(&mut record, &json!({"hook_event_name":"Stop","session_id":"conversation-1"}));
             subagents_confirm::group_reset("conversation-1");
             super::super::storage::write(&mut record).unwrap();
-            second.join().unwrap();
-            assert!(second_printed.try_recv().is_err(), "a hook that ends with its turn answers nothing");
             first.join().unwrap();
+            second.join().unwrap();
+            assert!(first_printed.try_recv().is_err() && second_printed.try_recv().is_err(), "a hook that ends with its turn answers nothing");
+            let root = absolute_root().unwrap();
+            for id in &ids {
+                assert!(!batch_file(&root, &record, id).exists(), "{id}");
+            }
+        });
+    }
+
+    /// U19: two identical subagent calls and a third: Claude's requests for
+    /// the identical ones cannot be told apart, so each of their hooks waits
+    /// for an answer both calls got, and "Allow all" on the third call's card
+    /// reaches all three. The card's answer hands the "don't ask again" rule
+    /// to a hook that waits, never to a call without one.
+    #[test]
+    fn identical_calls_take_the_batch_answer_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_owned();
+        crate::state::with_test_state_root(&root, || {
+            let same = json!({"subagent_type":"Explore","description":"Look","prompt":"Look around"});
+            let calls = [("toolu_1", same.clone()), ("toolu_2", same), ("toolu_3", json!({"subagent_type":"general","prompt":"Fix it"}))];
+            let rule = json!({"type":"addRules","rules":[{"toolName":"Agent"}],"behavior":"allow","destination":"projectSettings"});
+            let (record, requests) = batch_session(&calls, &root, json!([rule]));
+            let ids: Vec<String> = calls.iter().map(|(id, _)| id.to_string()).collect();
+            let hooks: Vec<_> = requests.iter().map(|request| hook(&root, request)).collect();
+            eventually("every call has a hook", || batch_waiting(&record, &ids).as_deref() == Some(ids.as_slice()));
+            let identity = claude_approval::channel::identity(&record).unwrap();
+            assert_eq!(identity["tool_call_id"], "toolu_3");
+            eventually("the third call's hook takes offers", || matches!(route(&record, &identity), Ok(Route::Channel(_))));
+            // One of the identical calls is answered alone: neither hook may
+            // hand that over, since either may be the other call's.
+            subagents_confirm::decide("conversation-1", &ids[..1], &subagents_confirm::Verdict::allow(), None);
+            std::thread::sleep(Duration::from_millis(600));
+            assert!(hooks[0].1.try_recv().is_err() && hooks[1].1.try_recv().is_err());
+            // "Allow all, don't ask again" on the card: the offer, then the
+            // rest; the rule goes to the first call still waiting.
+            let Ok(Route::Channel(channel)) = route(&record, &identity) else { unreachable!() };
+            let offer = json!({"request_id":"one","decision":"allow","message":"","remember":true});
+            assert_eq!(deliver(&channel, &offer, Duration::from_secs(3), Duration::from_secs(5), || Err("no screen".into())).unwrap(), "claude_hook");
+            let card = json!({"subagent_confirmation":true,"subagent_calls":ids,"questions":[{"id":"approval","options":[]}]});
+            let verdict = subagents_confirm::Verdict { allow: true, message: String::new(), remember: true };
+            let (waiting, missing) = batch_status(&record, &ids[..2]);
+            claude_approval::hand_over(&record, &card, &ids, &waiting, &missing, &verdict, false, true).unwrap();
+            let session_rule = json!({"type":"addRules","rules":[{"toolName":"Agent"}],"behavior":"allow","destination":"session"});
+            assert_eq!(decision_of(&hooks[2].1), json!({"behavior":"allow","updatedPermissions":[session_rule]}));
+            for (_, printed) in &hooks[..2] {
+                assert_eq!(decision_of(printed), json!({"behavior":"allow"}));
+            }
+            for (handle, _) in hooks {
+                handle.join().unwrap();
+            }
+        });
+    }
+
+    /// U19: on the screen path the rule goes to the first call that has a
+    /// waiting hook; a call its own hook already answered is skipped.
+    #[test]
+    fn dont_ask_again_on_the_screen_hands_the_rule_to_a_waiting_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_owned();
+        crate::state::with_test_state_root(&root, || {
+            let rule = json!({"type":"addRules","rules":[{"toolName":"Agent"}],"behavior":"allow","destination":"localSettings"});
+            let (record, requests) = batch_session(&subagent_calls(), &root, json!([rule]));
+            let ids = vec!["toolu_1".to_owned(), "toolu_2".to_owned()];
+            // The first call's hook answered on its own before the card's answer.
+            subagents_confirm::mark_answered("conversation-1", "toolu_1");
+            let (second, second_printed) = hook(&root, &requests[1]);
+            eventually("the second hook waits", || batch_waiting(&record, &ids).as_deref() == Some(&ids[1..]));
+            let (waiting, missing) = batch_status(&record, &ids);
+            assert_eq!((waiting.as_slice(), missing.len()), (&ids[1..], 0));
+            let card = json!({"subagent_confirmation":true,"subagent_calls":ids,"questions":[{"id":"approval","options":[]}]});
+            let verdict = subagents_confirm::Verdict { allow: true, message: String::new(), remember: true };
+            claude_approval::hand_over(&record, &card, &ids, &waiting, &missing, &verdict, true, false).unwrap();
+            let session_rule = json!({"type":"addRules","rules":[{"toolName":"Agent"}],"behavior":"allow","destination":"session"});
+            assert_eq!(decision_of(&second_printed), json!({"behavior":"allow","updatedPermissions":[session_rule]}));
+            assert_eq!(subagents_confirm::verdict("conversation-1", "toolu_1"), Some(subagents_confirm::Verdict::allow()), "no rule for a call without a hook");
+            second.join().unwrap();
+        });
+    }
+
+    /// U19: an allow is confirmed only by every hook it was handed to; a hook
+    /// that ended without answering leaves it uncertain. Only a denial that
+    /// ends the turn accepts hooks Claude stopped.
+    #[test]
+    fn an_ended_hook_confirms_only_a_denial_that_ends_the_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let record = record();
+            for id in ["toolu_1", "toolu_2"] {
+                subagents_confirm::group_add("conversation-1", id, &json!({"subagent_type":"Explore"}));
+            }
+            subagents_confirm::mark_answered("conversation-1", "toolu_1");
+            let ids = ["toolu_1".to_owned(), "toolu_2".to_owned()];
+            let error = batch_delivered(&record, &ids, Duration::from_millis(200), false).unwrap_err();
+            assert!(error.starts_with("delivery uncertain"), "{error}");
+            assert_eq!(batch_delivered(&record, &ids, Duration::from_millis(200), true).unwrap(), 1);
+            assert_eq!(batch_delivered(&record, &ids[..1], Duration::from_millis(200), false).unwrap(), 1);
+            assert_eq!(batch_delivered(&record, &[], Duration::from_millis(200), false).unwrap(), 0);
         });
     }
 

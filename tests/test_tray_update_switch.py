@@ -20,6 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('update_installed', ROOT / 'tray/update-installed.py')
 updater = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(updater)
+# The real one, for the cases that fail it from inside.
+BUILD_INFO = updater.build_info
 
 TEST_ID = 'com.example.zerus-switch-test'
 DEFAULTS = '''#!{python}
@@ -438,18 +440,53 @@ class UpdateFlow(Flow):
         self.on_start = lambda: self.domain({'attention.observed': b'{"qt":1}'})
         self.assertEqual(updater.roll_back_installed(self.installed), 0)
 
-    def test_a_stopped_rollback_keeps_the_slot_and_the_client(self):
-        # Nothing starts Qt, so nothing verifies it: the slot stays, and the
-        # client is kept where the update says (I1, I2).
+    def test_a_stopped_rollback_takes_the_slot_once_qt_reports_itself(self):
+        # Nothing starts Qt: its signature and its own --build-info verify it.
         self.install('client', 'tauri', self.installed)
         self.install('qt', 'qt', self.slot)
         self.running = False
-        self.assertEqual(updater.roll_back_installed(self.installed), 0)
-        self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('qt', 'qt'))
-        [kept] = self.installed.parent.glob('.hgs-tray-kept-*/previous/hgs-tray.app')
-        self.assertEqual(self.variant(kept), 'client')
-        self.assertIn(f'the replaced GUI is kept in {kept}', self.lines[-1])
+        asked = []
+        build_info = updater.build_info
+
+        def reported(path):
+            asked.append(Path(path))
+            return build_info(path)
+        with mock.patch.object(updater, 'build_info', reported):
+            self.assertEqual(updater.roll_back_installed(self.installed), 0)
+        self.assertEqual(asked[-1], self.installed)
+        self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('qt', 'client'))
         self.assertEqual(self.events, [])
+        self.assertEqual(list(self.installed.parent.glob('.hgs-tray-*')), [])
+
+    def test_a_stopped_install_that_reports_another_build_is_undone(self):
+        self.install('client-1', 'tauri', self.installed)
+        self.install('qt', 'qt', self.slot)
+        self.running = False
+        build_info = updater.build_info
+
+        def reported(path):
+            info = build_info(path)
+            return dict(info, versionName='other') if Path(path) == self.installed and info['versionName'] == 'client-2' else info
+        with mock.patch.object(updater, 'build_info', reported), \
+                self.assertRaisesRegex(updater.UpdateError, 'reports another build identity; the previous GUI was restored'):
+            updater.update(self.bundle('client-2', 'tauri'), self.installed)
+        self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('client-1', 'qt'))
+        self.assertIn(f'{self.installed} keeps the previous GUI', self.lines[-1])
+
+    def test_copies_kept_by_earlier_updates_are_listed_and_never_removed(self):
+        self.install('client-1', 'tauri', self.installed)
+        self.install('qt', 'qt', self.slot)
+        kept = self.installed.parent / '.hgs-tray-kept-earlier/previous/hgs-tray.app'
+        incoming = updater.ROLLBACK / '.incoming-earlier/hgs-tray.app'
+        self.install('client-0', 'tauri', kept)
+        self.install('client-00', 'tauri', incoming)
+        (updater.ROLLBACK / '.replaced-empty').mkdir()
+        self.assertEqual(updater.update(self.bundle('client-2', 'tauri'), self.installed), 0)
+        [listed] = [line for line in self.lines if line.startswith('earlier updates kept these copies')]
+        self.assertIn(str(kept.parents[1]), listed)
+        self.assertIn(str(incoming.parent), listed)
+        self.assertNotIn('.replaced-empty', listed, 'an empty folder holds nothing to recover')
+        self.assertEqual((self.variant(kept), self.variant(incoming)), ('client-0', 'client-00'))
 
     def test_an_update_interrupted_twice_keeps_its_copies(self):
         # The new GUI cannot move in and the old one cannot move back: the
@@ -601,9 +638,10 @@ class UpdateFlow(Flow):
 class Invariants(Flow):
     """The ruling on the updater (webui, 2026-10-28), over every direction,
     start result and fault point:
-    I1 no GUI bundle is deleted before its replacement was verified running,
-       and then only one that policy supersedes or that has a copy elsewhere;
-    I2 the slot changes only after a verified start;
+    I1 no GUI bundle is deleted before its replacement was verified (running;
+       when no GUI ran, by its signature and its own --build-info), and then
+       only one that policy supersedes or that has a copy elsewhere;
+    I2 the slot changes only after that verification;
     I3 every failure or interrupt restores the set-aside GUI or keeps it where
        a printed line names it;
     I4 links are refused (test_symbolic_links_are_never_followed_by_an_update).
@@ -619,12 +657,14 @@ class Invariants(Flow):
         'second --rollback': (('qt', 'qt'), ('client', 'tauri'), None, set()),
         'install over nothing': (None, ('qt', 'qt'), ('client', 'tauri'), set()),
     }
-    STARTS = ('ok', 'start() raises', 'wait times out', 'Ctrl-C in wait_started', 'not running')
+    STARTS = ('ok', 'start() raises', 'wait times out', 'Ctrl-C in wait_started')
+    # No GUI runs, so none starts: the installed copy's --build-info verifies it.
+    STOPPED = ('not running', 'build-info fails', 'build-info times out', 'Ctrl-C in build-info')
 
     def setUp(self):
         super().setUp()
         settings = {'attention.observed': b'{}'}
-        for name, value in {'wait_started': self.wait,
+        for name, value in {'wait_started': self.wait, 'build_info': self.build_info,
                             'export_settings': lambda: (plistlib.dumps(settings), dict(settings))}.items():
             patcher = mock.patch.object(updater, name, value)
             patcher.start()
@@ -643,6 +683,21 @@ class Invariants(Flow):
             raise KeyboardInterrupt
         self.verified |= self.found().get(self.installed, (None,))[0] == self.requested
         return 200
+
+    def build_info(self, path):
+        path = Path(path)
+        if path == self.installed and self.variant(path) == self.requested:
+            # The stopped path's verification of the copy it installed.
+            if self.mode == 'Ctrl-C in build-info':
+                raise KeyboardInterrupt
+            if self.mode in ('build-info fails', 'build-info times out'):
+                command = [str(path), '--build-info']
+                error = (subprocess.TimeoutExpired(command, 30) if self.mode == 'build-info times out'
+                         else subprocess.CalledProcessError(1, command))
+                with mock.patch.object(updater, 'run', side_effect=error):
+                    return BUILD_INFO(path)
+            self.verified = True
+        return {'version': '0.47.0', 'versionName': self.variant(path), 'devBuildNumber': 1413}
 
     def found(self):
         """Every bundle outside the build sources: (variant, kind), or None when incomplete."""
@@ -680,7 +735,7 @@ class Invariants(Flow):
             self.install(*slot, self.slot)
         self.lines.clear()
         self.mode, self.started, self.waited, self.verified = mode, 0, 0, False
-        self.running = mode != 'not running' and installed is not None
+        self.running = mode not in self.STOPPED and installed is not None
         self.requested = (built or slot)[0]
         count, patches = self.faulty(fault, point)
         error = None
@@ -725,7 +780,7 @@ class Invariants(Flow):
     def test_every_direction_start_result_and_fault_point_keeps_the_invariants(self):
         cases = 0
         for direction in self.DIRECTIONS:
-            for mode in self.STARTS:
+            for mode in self.STARTS + self.STOPPED:
                 for fault in (KeyboardInterrupt, OSError):
                     point = 0
                     while True:
@@ -735,7 +790,7 @@ class Invariants(Flow):
                         point += 1
                         if point > steps:
                             break
-        self.assertGreater(cases, 600)
+        self.assertGreater(cases, 900)
 
 
 if __name__ == '__main__':

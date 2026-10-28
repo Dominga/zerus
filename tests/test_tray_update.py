@@ -27,6 +27,9 @@ import json, os, pathlib, signal, socket, sys
 VARIANT = {variant!r}
 root = pathlib.Path(os.environ['TRAY_FIXTURE'])
 if sys.argv[1:] == ['--build-info']:
+    # 'unverifiable' reports itself as a build, never once installed.
+    if VARIANT == 'unverifiable' and pathlib.Path(sys.argv[0]).parent.name == 'bin':
+        sys.exit(1)
     print(json.dumps({{'version': '0.42.0', 'versionName': VARIANT, 'devBuildNumber': int(VARIANT[4:]) if VARIANT.startswith('dev-') else 0,
                       'sourceCommit': VARIANT.ljust(40, '0'), 'sourceDirty': False}}))
     sys.exit(0)
@@ -211,27 +214,25 @@ class TrayUpdate(unittest.TestCase):
         self.assertEqual(self.leftovers(), [])
 
     def test_stopped_gui_is_replaced_without_starting_it(self):
-        # Nothing verifies a GUI that is not started: the rollback copy stays,
-        # and the replaced GUI is kept where the update says.
-        slot = self.home / '.local/share/hgs/desktop-previous/hgs-tray'
-        self.build('zero', slot)
         self.build('first', self.installed)
         result = self.update(self.build('second'))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("'second'", self.installed.read_text())
-        self.assertIn("'zero'", slot.read_text())
-        [kept] = self.installed.parent.glob('.hgs-tray-kept-*/previous/hgs-tray')
-        self.assertIn("'first'", kept.read_text())
-        self.assertIn(f'the replaced GUI is kept in {kept}', result.stdout)
+        self.assertIn("'first'", (self.home / '.local/share/hgs/desktop-previous/hgs-tray').read_text())
         self.assertFalse((self.root / 'systemctl').exists())
         self.assertEqual(self.running(), [])
-        # A later update reports it and never removes it.
-        os.utime(kept.parents[1], (time.time() - 7200,) * 2)
-        result = self.update(self.build('third'))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f'earlier updates kept these copies; remove them once Zerus runs as it should: {kept.parents[1]}',
-                      result.stdout)
-        self.assertIn("'first'", kept.read_text())
+        self.assertEqual(self.leftovers(), [])
+
+    def test_a_stopped_gui_that_cannot_report_itself_is_not_installed(self):
+        # Without a start, the new GUI's own --build-info verifies it.
+        self.build('first', self.installed)
+        result = self.update(self.build('unverifiable'))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('the new GUI was not verified', result.stderr)
+        self.assertIn('the previous GUI was restored', result.stderr)
+        self.assertIn(f'{self.installed} keeps the previous GUI', result.stdout)
+        self.assertIn("'first'", self.installed.read_text())
+        self.assertFalse((self.home / '.local/share/hgs/desktop-previous').exists())
 
     def test_update_removes_only_old_unused_leftover_folders(self):
         folder = self.installed.parent
@@ -264,10 +265,8 @@ class TrayUpdate(unittest.TestCase):
         self.build('first', self.installed)
         result = self.update(self.build('second'))
         self.assertEqual(result.returncode, 0, result.stderr)
-        # The stopped update keeps the GUI it replaced: nothing verified the new one.
-        [stopped] = [p.name for p in folder.iterdir() if p.name.startswith('.hgs-tray-kept-')]
         self.assertEqual(sorted(p.name for p in folder.iterdir() if p.name.startswith('.')),
-                         sorted([p.name for p in kept] + ['.zerus-running', '.zerus-link', stopped]))
+                         sorted([p.name for p in kept] + ['.zerus-running', '.zerus-link']))
         self.assertIn('removed 4 leftover folders', result.stdout)
         self.assertIn('.zerus-notes: it holds files other than installer copies', result.stdout)
         self.assertIn('.hgs-tray-update-set-aside: it holds files other than installer copies', result.stdout)

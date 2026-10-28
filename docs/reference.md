@@ -3413,12 +3413,12 @@ restarts native agents, tmux servers or DeepSeek hosts. A changed build replaces
 running Zerus through `tray/update-installed.py`, the only supported live update:
 Zerus quits as its Quit action does, so drafts are saved, then starts again through
 systemd or launchd. Do not stage GUI copies in `~/Applications` or `~/.local/bin` by
-hand. The GUI it replaces stays aside until the new one was verified running and
+hand. The GUI it replaces stays aside until the new one was verified (running, or,
+for a GUI that is not running, by its signature and its own `--build-info`) and
 only then becomes the one rollback copy in `~/.local/share/hgs/desktop-previous`;
-a new GUI that does not start is replaced by it again. An interrupted update, or
-one that replaces a GUI that is not running and so starts nothing, keeps the
-replaced GUI in a `.hgs-tray-kept-*` folder beside the installed one and prints
-where; later updates list such folders and never remove them. Links at the
+a new GUI that does not start is replaced by it again. An interrupted update
+keeps the replaced GUI in a `.hgs-tray-kept-*` folder beside the installed one
+and prints where; later updates list such folders and never remove them. Links at the
 installed path or in the rollback folder are refused. The update confirms the
 running image, unchanged nonempty drafts and native agent and tmux processes. It records the
 installed builds in `~/.local/share/hgs/build-provenance.json`, then removes hidden

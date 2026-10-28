@@ -16,13 +16,13 @@ tray/install.sh runs this whenever its build differs from the installed GUI.
 3. Move the installed GUI aside into that folder and the new GUI into place.
    No GUI is deleted, and the one rollback copy
    (~/.local/share/hgs/desktop-previous) does not change, until the new GUI
-   was verified running. Then the replaced GUI becomes the rollback copy, or,
-   once the Tauri client replaced the Qt GUI, goes while Qt stays that copy.
-   A failure or interrupt restores the replaced GUI or keeps it in a
-   .hgs-tray-kept-* folder and prints where; so does an update of a GUI that
-   is not running, which starts nothing. `--rollback` reinstalls the rollback
-   copy through the same steps. Links at the installed path, the rollback
-   folder or its copy are refused.
+   was verified: running, or, when no GUI was running and none is started,
+   by its signature and its own --build-info. Then the replaced GUI becomes
+   the rollback copy, or, once the Tauri client replaced the Qt GUI, goes
+   while Qt stays that copy. A failure or interrupt restores the replaced GUI
+   or keeps it in a .hgs-tray-kept-* folder and prints where. `--rollback`
+   reinstalls the rollback copy through the same steps. Links at the
+   installed path, the rollback folder or its copy are refused.
 4. Start a GUI that was running through its service manager and wait for its
    single-instance socket; a new GUI that does not start is replaced by the
    previous one again. Then confirm the running image, the unchanged nonempty
@@ -890,13 +890,20 @@ def update(built, installed, rollback=False):
             if switching:
                 save_settings_snapshot()
             swap_in(stage, installed, aside)
-            # Nothing starts the new GUI, so nothing verifies it: the rollback
-            # copy stays and the replaced GUI is kept.
-            kept = keep_aside(folder, aside)
+            # Nothing starts the new GUI: its signature (swap_in) and its own
+            # --build-info verify it, and then the replaced GUI settles as after a start.
+            try:
+                if build_info(installed) != info:
+                    raise UpdateError(f'{installed} reports another build identity')
+            except UpdateError as error:
+                if not aside.exists():
+                    raise UpdateError(f'the new GUI was not verified: {error}') from None
+                put_back(installed, aside, folder / 'new' / installed.name)
+                raise UpdateError(f'the new GUI was not verified: {error}; the previous GUI was restored') from None
+            verified = True
+            settled = settle(aside if aside.exists() else None, keep)
             done = True
-            say(f'installed {name} without starting it; ' + (
-                f'the rollback copy did not change and the replaced GUI is kept in {kept}' if kept
-                else 'nothing was installed before'))
+            say(f'installed {name} without starting it; {settled}')
             sweep(installed.parent, folder)
             if early:
                 raise UpdateError('the new GUI is installed, but ' + '; '.join(early))

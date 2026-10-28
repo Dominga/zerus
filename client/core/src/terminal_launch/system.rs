@@ -186,10 +186,54 @@ fn start_detached(start: &Start) -> Result<(), String> {
             &mut info,
         ) == 0
         {
-            return Err(std::io::Error::last_os_error().to_string());
+            let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32;
+            return Err(super::windows_start_error(
+                code,
+                format_message(code, LANGUAGE_DEFAULT).as_deref(),
+            ));
         }
         CloseHandle(info.hThread);
         CloseHandle(info.hProcess);
     }
     Ok(())
+}
+
+/// `MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT)`: the user's language.
+#[cfg(windows)]
+pub(super) const LANGUAGE_DEFAULT: u32 = 0x0400;
+/// `MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US)`.
+#[cfg(windows)]
+pub(super) const LANGUAGE_ENGLISH: u32 = 0x0409;
+
+/// The system's text for an error code in `language`; None when it has none.
+#[cfg(windows)]
+pub(super) fn format_message(code: u32, language: u32) -> Option<String> {
+    use std::ptr::{null, null_mut};
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::System::Diagnostics::Debug::{
+        FormatMessageW, FORMAT_MESSAGE_ALLOCATE_BUFFER, FORMAT_MESSAGE_FROM_SYSTEM,
+        FORMAT_MESSAGE_IGNORE_INSERTS,
+    };
+    let mut buffer: *mut u16 = null_mut();
+    // SAFETY: with ALLOCATE_BUFFER the system stores a LocalAlloc'd buffer of
+    // `length` units in `buffer`, which is read once and freed once.
+    unsafe {
+        let length = FormatMessageW(
+            FORMAT_MESSAGE_ALLOCATE_BUFFER
+                | FORMAT_MESSAGE_FROM_SYSTEM
+                | FORMAT_MESSAGE_IGNORE_INSERTS,
+            null(),
+            code,
+            language,
+            (&mut buffer as *mut *mut u16).cast(),
+            0,
+            null(),
+        );
+        if buffer.is_null() {
+            return None;
+        }
+        let text = String::from_utf16_lossy(std::slice::from_raw_parts(buffer, length as usize));
+        LocalFree(buffer.cast());
+        Some(text)
+    }
 }

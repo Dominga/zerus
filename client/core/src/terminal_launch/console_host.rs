@@ -75,6 +75,15 @@ pub fn failure_message(program: &str, exit_code: u32) -> String {
     format!("{name} exited with code {code}. Press Enter to close this window.")
 }
 
+/// The reason a program did not start, as the console host shows it: the
+/// system's English text, trimmed, or `error CODE` without one.
+pub fn start_error(code: u32, message: Option<&str>) -> String {
+    match message {
+        Some(text) if !text.is_empty() => text.trim().to_owned(),
+        _ => format!("error {code}"),
+    }
+}
+
 /// Runs the request in `arguments` (after the program name) and returns the
 /// program's exit code: 2 for a malformed request, 127 when it cannot start.
 #[cfg(windows)]
@@ -84,7 +93,8 @@ pub fn run(arguments: &[String]) -> i32 {
 
 #[cfg(windows)]
 mod windows {
-    use super::{failure_message, parse};
+    use super::super::system::{format_message, LANGUAGE_ENGLISH};
+    use super::{failure_message, parse, start_error};
     use crate::paths::{self, Style};
     use crate::shell::windows_program_line;
     use std::ptr::{null, null_mut};
@@ -268,15 +278,16 @@ mod windows {
                 &startup.StartupInfo,
                 &mut info,
             );
-            let start_error = std::io::Error::last_os_error();
+            let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32;
             if listed {
                 DeleteProcThreadAttributeList(attributes);
             }
             if started == 0 {
+                let reason = start_error(code, format_message(code, LANGUAGE_ENGLISH).as_deref());
                 write(
                     output,
                     &format!(
-                        "Cannot start {program}: {start_error}\r\n\r\nPress Enter to close this window."
+                        "Cannot start {program}: {reason}\r\n\r\nPress Enter to close this window."
                     ),
                 );
                 wait_for_enter(input);

@@ -14,9 +14,9 @@
 //! session click ([`Launcher::copies`]), and launches open the platform's
 //! default mode instead, as `makeLaunchTerminal` does.
 //!
-//! The Konsole tab explanation appears once per [`Launcher`]; the Qt GUI shows
-//! it once per run for session clicks and again for each other launch action,
-//! whose backend it builds anew each time.
+//! As in Qt, Konsole explains a refused tab once per run for session clicks
+//! and New session launches, which share the terminal the Qt GUI keeps, and
+//! every time for the other launches, whose terminal it builds anew.
 
 pub mod console_host;
 #[cfg(all(target_os = "linux", feature = "konsole"))]
@@ -510,6 +510,24 @@ fn with_computer<const N: usize>(computer: &str, rest: [&str; N]) -> Vec<String>
     arguments
 }
 
+/// `QProcess::errorString()` after a failed start on Windows: `Process failed
+/// to start:` and the system's text in the user's language, with Qt's
+/// fallbacks when the system has none (`windowsErrorString`).
+pub fn windows_start_error(code: u32, message: Option<&str>) -> String {
+    const ERROR_MOD_NOT_FOUND: u32 = 126;
+    let mut text = message.unwrap_or_default().to_owned();
+    if text.is_empty() && code == ERROR_MOD_NOT_FOUND {
+        text = "The specified module could not be found.".to_owned();
+    }
+    if let Some(stripped) = text.strip_suffix("\r\n") {
+        text = stripped.to_owned();
+    }
+    if text.is_empty() {
+        text = format!("Unknown error 0x{code:08x}.");
+    }
+    format!("Process failed to start: {text}")
+}
+
 /// How a started program gets its window on Windows; ignored elsewhere.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Window {
@@ -639,12 +657,25 @@ pub struct Launcher {
     platform: Platform,
     desktop: Box<dyn Desktop>,
     konsole: Box<dyn Konsole>,
+    /// The Konsole tab explanation went out for a session terminal.
     tab_advisory_shown: bool,
 }
 
 /// The `auto` mode's note that Konsole refuses tabs goes to the log once per
 /// run.
 static AUTO_WARNED: AtomicBool = AtomicBool::new(false);
+/// A folder shell for a path that is no folder goes to the log once per run.
+static FOLDER_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Which terminal of the Qt GUI a launch stands for: the session terminal it
+/// keeps for the whole run (session clicks and New session), or one it builds
+/// for each other launch. Konsole explains a refused tab once per run in the
+/// first, and every time in the second.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kept {
+    Session,
+    Fresh,
+}
 
 impl Launcher {
     /// A launcher for this computer.
@@ -693,12 +724,37 @@ impl Launcher {
         })
     }
 
-    /// Runs `program` with `arguments` in a terminal. Ok holds an advisory
-    /// when it opened other than asked; Err says why nothing opened.
+    /// Runs `program` with `arguments` in a terminal: agent sign-in and
+    /// install, the SSH terminal. Ok holds an advisory when it opened other
+    /// than asked; Err says why nothing opened.
     pub fn open_program(
         &mut self,
         program: &str,
         arguments: &[String],
+    ) -> Result<Option<String>, String> {
+        self.run_program(program, arguments, Kept::Fresh)
+    }
+
+    /// Runs a New session launch (`TrayAgent::launchSession`): as
+    /// [`Launcher::open_program`], on the session terminal.
+    pub fn open_new_session(
+        &mut self,
+        program: &str,
+        arguments: &[String],
+    ) -> Result<Option<String>, String> {
+        let kept = if self.copies() {
+            Kept::Fresh
+        } else {
+            Kept::Session
+        };
+        self.run_program(program, arguments, kept)
+    }
+
+    fn run_program(
+        &mut self,
+        program: &str,
+        arguments: &[String],
+        kept: Kept,
     ) -> Result<Option<String>, String> {
         match self.backend() {
             Backend::WindowsTerminal { mode } => {
@@ -716,7 +772,7 @@ impl Launcher {
             }
             backend => {
                 let command = shell::command(program, arguments, self.platform.shell());
-                self.open_line(line(&backend), &command)
+                self.open_line(line(&backend), &command, kept)
             }
         }
     }
@@ -748,13 +804,14 @@ impl Launcher {
             backend => {
                 let command = shell::folder_shell("", "", directory, self.platform.shell())
                     .ok_or_else(not_a_folder)?;
-                self.open_line(line(&backend), &command)
+                self.open_line(line(&backend), &command, Kept::Fresh)
             }
         }
     }
 
     /// A shell in `directory` of `computer` (empty for this one): a local
-    /// shell there, or `hgs machine ssh` into a peer's folder.
+    /// shell there, or `hgs machine ssh` into a peer's folder. A path that is
+    /// no folder of that computer opens nothing and reports nothing, as in Qt.
     pub fn open_folder_shell(
         &mut self,
         hgs: &str,
@@ -762,11 +819,15 @@ impl Launcher {
         directory: &str,
     ) -> Result<Option<String>, String> {
         if shell::folder_shell(hgs, computer, directory, self.platform.shell()).is_none() {
-            return Err(if computer.is_empty() {
-                format!("not a folder of this computer: {directory}")
-            } else {
-                format!("not a folder of {computer}: {directory}")
-            });
+            if !FOLDER_WARNED.swap(true, Ordering::Relaxed) {
+                let computer = if computer.is_empty() {
+                    "this computer"
+                } else {
+                    computer
+                };
+                eprintln!("zerus: no folder shell: {directory:?} is not a folder of {computer}");
+            }
+            return Ok(None);
         }
         if computer.is_empty() {
             return self.open_shell(directory);
@@ -777,7 +838,8 @@ impl Launcher {
 
     /// Opens session `name` of `computer` (`openSessionTerminal`): the Konsole
     /// tab already attached on `tty` comes forward when it can, otherwise a
-    /// terminal runs `hgs [@computer] a NAME`.
+    /// terminal runs `hgs [@computer] a NAME`. In the clipboard mode the Qt
+    /// GUI opens it on a terminal of its own.
     pub fn open_session(
         &mut self,
         hgs: &str,
@@ -795,7 +857,12 @@ impl Launcher {
         }
         let arguments = shell::open_arguments(computer, name, None);
         let program = if hgs.is_empty() { "hgs" } else { hgs };
-        self.open_program(program, &arguments)
+        let kept = if self.copies() {
+            Kept::Fresh
+        } else {
+            Kept::Session
+        };
+        self.run_program(program, &arguments, kept)
             .map(|advisory| Opened::Opened { advisory })
     }
 
@@ -814,7 +881,12 @@ impl Launcher {
         self.desktop.start(&start)
     }
 
-    fn open_line(&mut self, line: Line<'_>, command: &str) -> Result<Option<String>, String> {
+    fn open_line(
+        &mut self,
+        line: Line<'_>,
+        command: &str,
+        kept: Kept,
+    ) -> Result<Option<String>, String> {
         match line {
             Line::Command(template) => {
                 let mut argv = build_argv(template, command)?;
@@ -829,7 +901,7 @@ impl Launcher {
                     .map_err(|_| format!("cannot start '{program}'"))?;
                 Ok(None)
             }
-            Line::Konsole(mode) => self.konsole_open(mode, command),
+            Line::Konsole(mode) => self.konsole_open(mode, command, kept),
             Line::TerminalApp => {
                 let arguments = vec!["-e".to_owned(), terminal_app_script(command)];
                 self.start("osascript", arguments, Window::Plain)
@@ -846,7 +918,12 @@ impl Launcher {
 
     /// `KonsoleBackend::open`: a tab in the active (else the oldest) Konsole
     /// window that accepts commands over D-Bus, otherwise a new window.
-    fn konsole_open(&mut self, mode: KonsoleMode, command: &str) -> Result<Option<String>, String> {
+    fn konsole_open(
+        &mut self,
+        mode: KonsoleMode,
+        command: &str,
+        kept: Kept,
+    ) -> Result<Option<String>, String> {
         if mode == KonsoleMode::Window {
             return self.konsole_window(command).map(|()| None);
         }
@@ -859,10 +936,12 @@ impl Launcher {
         if usable.is_empty() {
             self.konsole_window(command)?;
             if mode == KonsoleMode::Tab {
-                if self.tab_advisory_shown {
-                    return Ok(None);
+                if kept == Kept::Session {
+                    if self.tab_advisory_shown {
+                        return Ok(None);
+                    }
+                    self.tab_advisory_shown = true;
                 }
-                self.tab_advisory_shown = true;
                 return Ok(Some(tab_advisory(&self.desktop.home())));
             }
             if !AUTO_WARNED.swap(true, Ordering::Relaxed) {

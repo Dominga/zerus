@@ -846,22 +846,34 @@ fn konsole_tabs_go_to_the_active_window() {
 }
 
 #[test]
-fn a_refused_tab_mode_explains_the_window_once() {
+fn a_refused_tab_explains_itself_as_qt_does() {
     let log = Shared::default();
     let desktop = FakeDesktop::new(&log, &["konsole"]);
     let mut konsole = FakeKonsole::new(&log);
     konsole.input = false;
     let mut launcher = launcher(Platform::Linux, "tab", desktop, konsole);
-    let advisory = launcher.open_program("hgs", &session()).unwrap().unwrap();
-    assert!(advisory.contains("EnableSecuritySensitiveDBusAPI=true"));
-    assert!(advisory.contains("/home/user/.config/konsolerc"));
-    assert_eq!(starts(&log).len(), 1);
+    // Other launches get a terminal of their own each time, and with it the
+    // explanation.
+    for _ in 0..2 {
+        let advisory = launcher.open_program("hgs", &session()).unwrap().unwrap();
+        assert!(advisory.contains("EnableSecuritySensitiveDBusAPI=true"));
+        assert!(advisory.contains("/home/user/.config/konsolerc"));
+    }
+    assert_eq!(starts(&log).len(), 2);
     // No empty tab is created when Konsole refuses input.
     assert!(!konsole_calls(&log)
         .iter()
         .any(|call| call.starts_with("newSession")));
-    assert_eq!(launcher.open_program("hgs", &session()), Ok(None));
-    assert_eq!(starts(&log).len(), 1);
+    // Session clicks and New session share the kept terminal: once per run.
+    let first = launcher.open_session("hgs", "", "codex/p", "").unwrap();
+    assert!(matches!(first, Opened::Opened { advisory: Some(_) }));
+    assert_eq!(
+        launcher.open_session("hgs", "", "codex/p", ""),
+        Ok(Opened::Opened { advisory: None })
+    );
+    assert_eq!(launcher.open_new_session("hgs", &session()), Ok(None));
+    assert_eq!(starts(&log).len(), 3);
+    assert!(launcher.open_program("hgs", &session()).unwrap().is_some());
 }
 
 #[test]
@@ -1107,11 +1119,38 @@ fn folder_shells_of_peers_go_through_machine_ssh() {
         starts(&log)[0].arguments,
         launch::konsole_launch_args(&local)
     );
+    // A path that is no folder opens nothing and reports nothing, as in Qt.
     assert_eq!(
         launcher.open_folder_shell("/opt/hgs", "mac", "C:/work"),
-        Err("not a folder of mac: C:/work".to_owned())
+        Ok(None)
     );
+    assert_eq!(launcher.open_folder_shell("/opt/hgs", "", "work"), Ok(None));
     assert!(starts(&log).is_empty());
+}
+
+#[test]
+fn windows_start_errors_read_as_qt_writes_them() {
+    assert_eq!(
+        launch::windows_start_error(2, Some("The system cannot find the file specified.\r\n")),
+        "Process failed to start: The system cannot find the file specified."
+    );
+    assert_eq!(
+        launch::windows_start_error(126, None),
+        "Process failed to start: The specified module could not be found."
+    );
+    assert_eq!(
+        launch::windows_start_error(0xC000_0135, Some("")),
+        "Process failed to start: Unknown error 0xc0000135."
+    );
+    assert_eq!(
+        launch::windows_start_error(5, None),
+        "Process failed to start: Unknown error 0x00000005."
+    );
+    assert_eq!(
+        console_host::start_error(2, Some("The system cannot find the file specified.\r\n")),
+        "The system cannot find the file specified."
+    );
+    assert_eq!(console_host::start_error(1234, None), "error 1234");
 }
 
 #[test]

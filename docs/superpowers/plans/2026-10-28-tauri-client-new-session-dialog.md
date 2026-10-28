@@ -288,7 +288,7 @@ client/README.md                             "New session" and its smoke run (Ta
 #[tauri::command] pub fn new_session_context() -> Context;      // { branch, own_windows_session, remembered: { agent, accounts, open_terminal } }
 #[tauri::command] pub fn new_session_form(input: FormInput) -> FormView;
 #[tauri::command] pub fn new_session_start(input: FormInput, submitted: bool) -> launch::Start;   // background = true
-#[tauri::command] pub fn new_session_plan(choices: launch::Choices) -> launch::Plan;
+#[tauri::command] pub fn new_session_plan(input: FormInput, choices: launch::Choices) -> launch::Plan; // the form's fields from input, as Start derives them
 #[tauri::command] pub fn launch_warning(local: MachineMeta, computer: String) -> Option<String>; // warning_text(other_windows_session(..)), own from G4
 #[tauri::command] pub fn repository_fields(url: String, destination: String, style: Style, custom: bool, fresh: Option<String>) -> RepositoryFields;
 #[tauri::command] pub fn worktree_snapshot(state: State<NewSession>, computer: String, path: String) -> Value;
@@ -297,13 +297,14 @@ client/README.md                             "New session" and its smoke run (Ta
 #[tauri::command] pub async fn list_directories(state: State<'_, NewSession>, computer: String, path: String, hidden: bool) -> Result<Value, String>;
 #[tauri::command] pub async fn create_directory(state: State<'_, NewSession>, computer: String, path: String) -> Result<Value, String>;
 #[tauri::command] pub async fn pick_local_folder(app: AppHandle, start: String) -> Option<String>;
-#[tauri::command] pub fn local_folder_exists(path: String) -> bool;                                         // ProjectsDialog.cpp:530
+#[tauri::command] pub async fn local_folder_exists(path: String) -> bool;                                   // ProjectsDialog.cpp:530, on the blocking pool
 #[tauri::command] pub async fn opencode_models(state: State<'_, NewSession>, computer: String, folder: String, name: String) -> Result<Value, String>;
 #[tauri::command] pub async fn opencode_favorite(state: State<'_, NewSession>, computer: String, value: String, favorite: bool, name: String) -> Result<Value, String>;
 #[tauri::command] pub async fn opencode_start(state: State<'_, NewSession>, computer: String) -> Result<Value, String>;
 // screens.rs
-#[tauri::command] pub async fn launch_accounts(state: State<'_, Screens>, computer: String, refresh: bool) -> Result<LaunchAccounts, String>;
+#[tauri::command] pub async fn launch_accounts(state: State<'_, Screens>, computer: String, refresh: bool, agent: Option<String>) -> Result<LaunchAccounts, String>;
 #[tauri::command] pub fn launch_account_rows(state: State<'_, Screens>, computer: String) -> LaunchAccounts;  // reads nothing
+#[tauri::command] pub fn launch_accounts_close(state: State<'_, Screens>);  // the dialog closed
 // event "launch-accounts-changed" (payload: the computer)
 ```
 
@@ -322,7 +323,7 @@ Rules:
 - **`repository_fields`** builds a fresh `repository::Clone::new(style, None, None)`. The client never saves a pending clone record (deviation 2).
   - A URL change without a custom destination suggests `{parent}/{suggested_name(url)}` in native form (289-295).
   - The destination splits into parent and name as `editRepositorySource` does (628-639). On Windows `\` reads as `/`; separator 0 gives the parent `/`, and a parent `X:` becomes `X:/`.
-  - With `fresh` (a new computer or style, `syncRepositoryComputer` 608-627) the destination starts in `~` with that folder name, or the URL's suggestion when it is empty; the view then clears its custom flag.
+  - With `fresh` (a new computer or style, `syncRepositoryComputer` 608-627) the destination starts in `~` with the old record's folder name, kept even when empty (613); the view then clears its custom flag. The first record (no `fresh`, an empty field) is named after the URL.
   - It answers `{url, parent, name, field, destination, suggested, can_submit}`: `field` is the Clone to field's text, `destination` the clone's `PARENT/NAME` that Start and the plan take (767-768).
 - **`worktree_catalog`** ports `requestWorktrees` (1515-1563) over W1:
   - a fresh snapshot (under 30 s, not stale) answers without a call unless `refresh`;
@@ -344,7 +345,9 @@ Rules:
   - then `hgs [@host] dirs --create PATH --request-id ID`, 5 s here and 15 s on a peer;
   - the receipt must be `created` with the same `request_id` and `requested_path`, an absolute `path` equal to the cleaned `{parent}/{leaf}` and the same `parent`; otherwise Qt's failure text.
 - **`launch_accounts`** reads one computer, as the dialog does (865-874, 956-963):
-  - It runs that computer's `account ls` on the hub (25 s) when the hub never read it, read it thirty seconds ago or more (the hub's interval), or on `refresh`, and waits for it. A read already running is shared. Qt's dialog reads on every open; the thirty seconds only share a read the Accounts page just made.
+  - It runs that computer's `account ls` on the hub (25 s) on every open, computer change and Refresh, and waits for it; a read already running is shared, without a follow-up. An open or another computer (`refresh` false) starts with no rows until a reply is filed (Qt clears `m_accounts`, 869-871); Refresh keeps the rows on failure. A failure reads "Could not load accounts: %1" with Qt's `failureDetail` (`launch::read_accounts`, which the Accounts page now uses too).
+  - The rows are grouped when a good catalog is filed (or the folder style changes, 883); later limits only refresh the members and each row's best usage (`views::accounts::refresh_groups`, `refreshUsage` 990-1000).
+  - `agent` is the dialog's requested agent: it joins the provider order after `launch::AGENTS` (221-222). `launch_accounts_close` ends the watch when the dialog closes.
   - It ensures usage for the computer's installed profiles; `refresh` forces it.
   - `launch_account_rows` answers the rows again and reads nothing. Each catalog or limits reply for the dialog's computer emits `launch-accounts-changed`; the view then pulls the rows, as Qt follows its usage store (340-342).
   - It answers `LaunchAccounts {loaded, error, profiles, groups}`:
@@ -471,7 +474,7 @@ Rules (each with its Qt lines; port the logic, not the widget code):
   1. Ask `new_session_start(input, submitted)`; `nothing` ends here.
   2. With `launch_warning(...)` text, await `confirm(text)`; Cancel ends here and changes nothing.
   3. Ask `new_session_start` again (748).
-  4. Set `submitted`, then `creation_submit(new_session_plan(choices))`.
+  4. Set `submitted`, then `creation_submit(new_session_plan(input, choices))`.
   5. Ok closes the dialog (777) and hands the id to `store/creations.ts`, which reveals its card (Task 6). An error clears `submitted` and shows the error (783-786).
 
   No creating command is sent before step 4. The choices are `launch::Choices` from the state (751-771):
@@ -956,7 +959,7 @@ New modules owned by this plan:
 **Trivial and additive, done in this plan** (the events stream reviews the core lines in the PR):
 - **G1:** `ViewRow.git_root`, `ViewRow.cwd_canonical` (`view.rs`) and `Details.cwd_canonical` (`details.rs`). The prefill uses the canonical folder (2924), and the worktree picker counts sessions by them (`WorktreePanel.h:135-139`).
 - **G2:** `ProjectsView.swarm_id` (`views/projects.rs`), the swarm the folder check's project inference must match (2922, 355-361).
-- **G3:** `views::accounts::launchable` public, and `host_profiles(entry, catalog, state)` returning one computer's launchable profiles with their raw rows, for `launch_accounts`.
+- **G3:** `views::accounts::launchable` public (this computer without a platform takes the build's, `MachinePlatform::of`), `host_profiles(entry, catalog, state, agents)` returning one computer's launchable profiles with their raw rows, and `refresh_groups`, for `launch_accounts`.
 - **G4:** `launch::own_windows_session()`, this process's Windows session (`ProcessIdToSessionId`, `LocalSessionHost.cpp`; windows-sys feature `Win32_System_RemoteDesktop`), None on other systems. `other_windows_session` takes it as `own`.
 
 **Answered by the events stream (2026-10-28):**

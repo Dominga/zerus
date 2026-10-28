@@ -1636,3 +1636,44 @@ fn the_form_takes_its_derived_fields_as_optional() {
     let form: Form = serde_json::from_value(value).unwrap();
     assert!(!form.automatic_available && form.automatic_path.is_empty() && !form.project_worktree);
 }
+
+// requestAccounts {"ls"} (HgsClient.cpp 607-620) with failureDetail
+// (466-479): the dialog shows "Could not load accounts: %1" with it.
+#[test]
+fn an_account_catalog_failure_reads_as_qts_failure_detail() {
+    let hgs = std::path::Path::new("/opt/example/hgs");
+    let catalog = json!({"profiles": [], "revision": "r"});
+    assert_eq!(accounts_reply(hgs, ok(catalog.clone())), Ok(catalog));
+    assert_eq!(accounts_reply(hgs, Exit::TimedOut), Err("timed out".into()));
+    assert_eq!(
+        accounts_reply(hgs, Exit::StartFailed("No such file or directory".into())),
+        Err("cannot start '/opt/example/hgs': No such file or directory".into())
+    );
+    assert_eq!(
+        accounts_reply(
+            hgs,
+            Exit::Code {
+                code: 3,
+                stdout: Vec::new(),
+                stderr: " \n".into()
+            }
+        ),
+        Err("exit code 3".into())
+    );
+    let long = "e".repeat(5000);
+    assert_eq!(
+        accounts_reply(hgs, failed(&format!("  {long}\n"))),
+        Err("e".repeat(4000))
+    );
+    for bad in [json!([]), json!({"profiles": {}}), json!({"revision": "r"})] {
+        assert_eq!(
+            accounts_reply(hgs, ok(bad)),
+            Err("Invalid account catalog response".into())
+        );
+    }
+    assert_eq!(
+        accounts_reply(hgs, ok(json!({"error": "Account catalog is busy."}))),
+        Err("Account catalog is busy.".into()),
+        "a refusal on success keeps its text"
+    );
+}

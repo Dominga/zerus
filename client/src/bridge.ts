@@ -262,10 +262,11 @@ export const newSessionContext = () => desktop<NewSessionContext>("new_session_c
 export const newSessionForm = (input: NewSessionFormInput) => desktop<NewSessionFormView>("new_session_form", { input });
 /** What Start does now; asked again at the click. */
 export const newSessionStart = (input: NewSessionFormInput, submitted: boolean) => desktop<LaunchStart>("new_session_start", { input, submitted });
-export const newSessionPlan = (choices: LaunchChoices) => desktop<LaunchPlan>("new_session_plan", { choices });
+/** The plan at the click: the form's fields and what the core derives from them come from `input`, as Start reads them. */
+export const newSessionPlan = (input: NewSessionFormInput, choices: LaunchChoices) => desktop<LaunchPlan>("new_session_plan", { input, choices });
 /** The Windows-session warning's text when Start must ask first; `computer` is "" for this one. */
 export const launchWarning = (local: MachineMeta, computer: ComputerId) => desktop<string | null>("launch_warning", { local, computer });
-/** The repository fields; `fresh` (the previous folder name, or "") starts them anew on another computer or style. */
+/** The repository fields; `fresh` (the old record's folder name, kept even when empty) starts them anew on another computer or style. */
 export const repositoryFields = (url: string, destination: string, style: PathStyle, custom: boolean, fresh: string | null = null) =>
   desktop<RepositoryFields>("repository_fields", { url, destination, style, custom, fresh });
 /** The folder's saved catalog, `{}` without one. */
@@ -288,10 +289,16 @@ export const openCodeFavorite = (computer: ComputerId, value: string, favorite: 
   desktop<Record<string, unknown>>("opencode_favorite", { computer, value, favorite, name });
 /** Start OpenCode on {computer}. */
 export const openCodeStart = (computer: ComputerId) => desktop<Record<string, unknown>>("opencode_start", { computer });
-/** One computer's account rows: reads its catalog when due or on `refresh`, then asks for limits. */
-export const launchAccounts = (computer: ComputerId, refresh: boolean) => desktop<LaunchAccounts>("launch_accounts", { computer, refresh });
-/** The rows again, reading nothing. */
+/**
+ * One computer's account rows, on the dialog's open, a computer change (`refresh` false) and Refresh: reads its catalog
+ * (sharing a running read), then asks for limits. `agent` is the dialog's requested agent.
+ */
+export const launchAccounts = (computer: ComputerId, refresh: boolean, agent: string | null = null) =>
+  desktop<LaunchAccounts>("launch_accounts", { computer, refresh, agent });
+/** The rows again, reading nothing; the grouping stays the last catalog's. */
 export const launchAccountRows = (computer: ComputerId) => desktop<LaunchAccounts>("launch_account_rows", { computer });
+/** The dialog closed: its computer's replies stop sending `launch-accounts-changed`. */
+export const launchAccountsClose = () => desktop<void>("launch_accounts_close");
 
 /** Calls `listener` with the computer whose catalog or limits changed while a dialog reads it; returns the stop. */
 export function onLaunchAccountsChanged(listener: (computer: ComputerId) => void): () => void {

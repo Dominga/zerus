@@ -548,6 +548,43 @@ pub fn opencode_started(exit: Exit) -> Result<Value, String> {
     }
 }
 
+/// Qt's `failureDetail` (HgsClient.cpp 466-479) of a call that did not end
+/// with exit 0: "timed out", "cannot start '{hgs}': {error}", the trimmed
+/// standard error (at most 4000 characters) or "exit code {n}".
+fn failure_text(hgs: &Path, exit: Exit) -> String {
+    match exit {
+        Exit::StartFailed(error) => format!("cannot start '{}': {error}", hgs.display()),
+        exit => crate::actions::failure_detail(exit),
+    }
+}
+
+/// An `account ls` answer as Qt's `requestAccounts` words it: the catalog
+/// (an object with a `profiles` array and a `revision`), a refusal's own
+/// text, [`INVALID_ACCOUNTS`] for any other reply, or [`failure_text`] when
+/// the call failed. New session shows it as "Could not load accounts: %1",
+/// the Accounts page as "{computer}: %1".
+pub fn accounts_reply(hgs: &Path, exit: Exit) -> Result<Value, String> {
+    if !matches!(exit, Exit::Code { code: 0, .. }) {
+        return Err(failure_text(hgs, exit));
+    }
+    crate::reads::decode(&crate::reads::Read::Accounts, exit).map_err(|error| match error {
+        crate::reads::ReadError::Failed { message, .. } => message,
+        _ => INVALID_ACCOUNTS.to_owned(),
+    })
+}
+
+/// `hgs [@host] account ls` (25 s) read bounded at
+/// [`crate::reads::READ_LIMIT`]; a larger reply is not a catalog.
+pub fn read_accounts(hgs: &Path, computer: &ComputerId) -> Result<Value, String> {
+    let read = crate::reads::Read::Accounts;
+    let invocation =
+        crate::reads::invocation(computer, &read).map_err(|error| error.to_string())?;
+    match crate::run::run_limited(hgs, &invocation, &[], read.limit()) {
+        Ok(exit) => accounts_reply(hgs, exit),
+        Err(_) => Err(INVALID_ACCOUNTS.into()),
+    }
+}
+
 /// `OpenCodeModels::updateText`.
 pub fn opencode_update_text(computer: &str) -> String {
     format!("Update Zerus on {computer} to search all models and star favorites.")

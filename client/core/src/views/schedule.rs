@@ -129,14 +129,18 @@ impl AccountsState {
         self.start_catalogs(hosts, now, force)
     }
 
-    /// One host's `account ls` for New session (`NewSessionDialog::loadAccounts`):
-    /// it starts now (marked running) when never read, read thirty seconds ago
-    /// or more, or `force`d; a running one is shared. No other host changes.
-    /// True when it starts.
-    pub fn ensure_catalog(&mut self, host: &ComputerId, now: u64, force: bool) -> bool {
-        !self
-            .start_catalogs(std::slice::from_ref(host), now, force)
-            .is_empty()
+    /// One host's `account ls` for New session, which reads on every open,
+    /// computer change and Refresh (`NewSessionDialog::loadAccounts`): it
+    /// starts now (marked running) unless one runs, which is shared without a
+    /// follow-up. No other host changes. True when it starts.
+    pub fn ensure_catalog(&mut self, host: &ComputerId, now: u64) -> bool {
+        let slot = self.catalogs.entry(host.clone()).or_default();
+        if slot.pending {
+            return false;
+        }
+        slot.requested = Some(now);
+        slot.pending = true;
+        true
     }
 
     /// Each newly listed host once, even before Accounts is opened. `hosts`
@@ -382,11 +386,11 @@ mod tests {
         assert!(s.reading());
     }
 
-    // G3: New session reads one computer's catalog (NewSessionDialog::loadAccounts)
-    // on the hub: due after thirty seconds or when forced, a running one shared,
-    // and no other host is touched.
+    // G3: New session reads one computer's catalog on every open, computer
+    // change and Refresh (NewSessionDialog::loadAccounts 865-874), on the hub:
+    // a running one is shared without a follow-up, and no other host changes.
     #[test]
-    fn one_computers_catalog_starts_when_due_and_leaves_the_others() {
+    fn one_computers_catalog_starts_unless_one_runs_and_leaves_the_others() {
         let (local, studio) = (ComputerId::local(), ComputerId::from("studio"));
         let mut s = AccountsState::default();
         s.warm(&[local.clone(), studio.clone()], 0);
@@ -396,32 +400,25 @@ mod tests {
             1,
             std::slice::from_ref(&local),
         );
+        assert!(!s.ensure_catalog(&studio, 5), "studio's warm-up still runs");
+        assert!(!s.catalogs[&studio].queued, "shared, not queued again");
         assert!(
-            !s.ensure_catalog(&studio, 5, true),
-            "studio's warm-up still runs"
+            s.ensure_catalog(&local, 10),
+            "read a moment ago, read again"
         );
-        assert!(
-            !s.ensure_catalog(&local, 10_000, false),
-            "read ten seconds ago"
-        );
-        assert!(s.ensure_catalog(&local, 10_000, true), "forced");
         assert!(s.catalogs[&local].pending && !s.catalogs[&local].queued);
-        assert!(
-            !s.ensure_catalog(&local, 50_000, false),
-            "a running read is shared"
-        );
+        assert_eq!(s.catalogs[&local].requested, Some(10));
+        assert!(!s.ensure_catalog(&local, 50), "a running read is shared");
+        assert!(!s.catalogs[&local].queued);
         s.finish_catalog(
             &local,
             Ok(json!({"profiles": []})),
-            50_001,
+            51,
             std::slice::from_ref(&local),
         );
-        assert!(
-            s.ensure_catalog(&local, 80_001, false),
-            "due after thirty seconds"
-        );
+        assert!(s.ensure_catalog(&local, 52));
         let mac = ComputerId::from("mac");
-        assert!(s.ensure_catalog(&mac, 0, false), "never read");
+        assert!(s.ensure_catalog(&mac, 0), "never read");
         assert!(s.catalogs.contains_key(&studio), "the others are kept");
     }
 

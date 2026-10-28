@@ -335,9 +335,11 @@ export interface RepositoryFields {
   destination: string;
   suggested: string; can_submit: boolean;
 }
-/** New session's account rows of one computer (`screens.rs`). */
+/** New session's account rows of the dialog's computer (`screens.rs`). */
 export interface LaunchAccounts {
+  /** A catalog reply (good or failed) was filed since the dialog chose this computer. */
   loaded: boolean;
+  /** "Could not load accounts: %1" for the last reply's failure; the rows stay the last good catalog's since then. */
   error: string | null;
   /** The catalog's raw rows, at most 256, for the OpenCode fields. */
   profiles: Record<string, unknown>[];

@@ -43,6 +43,8 @@ pub const REPLAY_NEEDS_HGS: &str = "New session in replay mode needs ZERUS_CLIEN
 pub const CHOOSE_A_FOLDER: &str = "Choose a folder";
 /// The largest reply of a creating call or the service start.
 const REPLY_LIMIT: usize = zerus_client_core::reads::READ_LIMIT;
+/// The largest help text the folder creation's probe reads.
+const HELP_LIMIT: usize = 128 * 1024;
 
 /// Seconds since the Unix epoch, the clock folder catalogs are dated by.
 pub type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
@@ -79,15 +81,34 @@ impl Flight {
     }
 }
 
-/// Answers the waiters even when the read panics.
-struct Finish<'a>(&'a Flight);
+/// The running read's flight: it leaves the map and answers its waiters,
+/// also when the read panics.
+struct Finish<'a> {
+    flights: &'a Mutex<HashMap<(String, String), Arc<Flight>>>,
+    key: (String, String),
+    flight: Arc<Flight>,
+}
+
+impl Finish<'_> {
+    /// Leaves the map (when still the folder's flight), then answers.
+    fn answer(&self, answer: Result<Value, String>) {
+        let mut flights = lock(self.flights);
+        if flights
+            .get(&self.key)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.flight))
+        {
+            flights.remove(&self.key);
+        }
+        drop(flights);
+        if lock(&self.flight.answer).is_none() {
+            self.flight.finish(answer);
+        }
+    }
+}
 
 impl Drop for Finish<'_> {
     fn drop(&mut self) {
-        if lock(&self.0.answer).is_none() {
-            self.0
-                .finish(Err("The worktree catalog read stopped.".into()));
-        }
+        self.answer(Err("The worktree catalog read stopped.".into()));
     }
 }
 
@@ -277,20 +298,15 @@ impl NewSession {
         if !runs {
             return flight.wait();
         }
-        let finish = Finish(&flight);
+        let finish = Finish {
+            flights: &self.0.flights,
+            key,
+            flight: Arc::clone(&flight),
+        };
         let invocation = worktrees::catalog_invocation(computer, path, refresh);
         let exit = worktrees::run_catalog(&self.0.hgs, &invocation);
         let answer = lock(&self.0.catalogs).accept(&host, path, &flight.stamp, exit, self.now());
-        {
-            let mut flights = lock(&self.0.flights);
-            if flights
-                .get(&key)
-                .is_some_and(|current| Arc::ptr_eq(current, &flight))
-            {
-                flights.remove(&key);
-            }
-        }
-        finish.0.finish(answer.clone());
+        finish.answer(answer.clone());
         if answer.is_ok() {
             self.save();
         }
@@ -353,7 +369,7 @@ impl NewSession {
         let hgs = &self.0.hgs;
         let style = paths::of(None, computer.is_local());
         let probe = launch::directory_create_probe(computer);
-        launch::directory_create_supported(zerus_client_core::run(hgs, &probe), computer)?;
+        launch::directory_create_supported(run_bounded(hgs, &probe, HELP_LIMIT), computer)?;
         let (parent, leaf) = launch::directory_parent(path, style);
         let listing = launch::directories_invocation(computer, &parent, false);
         let parent =
@@ -550,9 +566,11 @@ fn split_destination(destination: &str, style: Style) -> (String, String) {
 
 /// The repository source's fields over a fresh clone record (the client
 /// keeps no pending clone): with `fresh` (a new computer or style,
-/// `syncRepositoryComputer` 608-627) the destination starts in `~` with that
-/// folder name, or the URL's suggestion when it is empty; without a custom
-/// destination it follows the URL (289-295); a custom one is kept as typed.
+/// `syncRepositoryComputer` 608-627) the destination starts in `~` with the
+/// old record's folder name, kept even when empty (613); without a custom
+/// destination it follows the URL (289-295), from `~` while the field is
+/// empty (the first record, named after the URL); a custom one is kept as
+/// typed.
 pub fn repository_source(
     url: &str,
     destination: &str,
@@ -563,14 +581,7 @@ pub fn repository_source(
     let mut clone = repository::Clone::new(style, None, None);
     let suggested = repository::suggested_name(url);
     let field = match fresh {
-        Some(name) => {
-            let name = if name.is_empty() {
-                suggested.as_str()
-            } else {
-                name
-            };
-            paths::native(&repository::destination(clone.parent(), name), style)
-        }
+        Some(name) => paths::native(&repository::destination(clone.parent(), name), style),
         None if custom => destination.to_owned(),
         None => {
             let parent = if destination.is_empty() {
@@ -632,9 +643,29 @@ pub fn new_session_start(input: FormInput, submitted: bool) -> Start {
     launch::start(&derived(input), true, submitted)
 }
 
+/// The background plan at the click (`start`, 757-776): the form's folder,
+/// agent, name, branch, Auto, listed folder, untouched Inbox, catalog and
+/// what the core derives from them come from `input`, as Start reads them;
+/// the rest of `choices` is the view's (computer, account, project, model,
+/// terminal, repository, predecessor).
 #[tauri::command(async)]
-pub fn new_session_plan(choices: Choices) -> Plan {
-    launch::plan(&choices)
+pub fn new_session_plan(input: FormInput, choices: Choices) -> Plan {
+    let catalog = input.catalog.clone();
+    let form = derived(input);
+    launch::plan(&Choices {
+        path: form.path,
+        agent: form.agent,
+        name: form.name,
+        branch: form.branch,
+        auto_preferred: form.auto_preferred,
+        listed_folder: form.listed_folder,
+        implicit_inbox: form.implicit_inbox,
+        automatic_available: form.automatic_available,
+        automatic_path: form.automatic_path,
+        project_worktree: form.project_worktree,
+        catalog,
+        ..choices
+    })
 }
 
 #[tauri::command(async)]
@@ -741,9 +772,16 @@ pub async fn pick_local_folder(app: AppHandle, start: String) -> Option<String> 
 }
 
 /// Whether a folder of this computer exists (`ProjectsDialog.cpp:530`).
-#[tauri::command(async)]
-pub fn local_folder_exists(path: String) -> bool {
-    !path.is_empty() && Path::new(&path).is_dir()
+fn folder_exists(path: &str) -> bool {
+    !path.is_empty() && Path::new(path).is_dir()
+}
+
+/// [`folder_exists`] on the blocking pool: a stat can wait on a network drive.
+#[tauri::command]
+pub async fn local_folder_exists(path: String) -> bool {
+    tauri::async_runtime::spawn_blocking(move || folder_exists(&path))
+        .await
+        .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -831,12 +869,13 @@ mod tests {
     // repositorySourceKeepsCommonChoicesAndManualDestination.
     #[test]
     fn the_repository_destination_follows_the_url_until_it_is_typed() {
+        // The first repository source has no record: the URL suggests the name.
         let first = repository_source(
             "https://github.com/example/first.git",
             "",
             Style::Posix,
             false,
-            Some(""),
+            None,
         );
         assert_eq!(
             (first.field.as_str(), first.name.as_str()),
@@ -890,6 +929,22 @@ mod tests {
         assert_eq!(empty.field, "~/");
         assert!(!empty.can_submit);
         assert!(!repository_source("  ", "/srv/x", Style::Posix, true, None).can_submit);
+    }
+
+    // syncRepositoryComputer (613): another computer keeps the old record's
+    // folder name, an empty one too.
+    #[test]
+    fn a_new_computer_keeps_the_old_records_empty_name() {
+        let moved = repository_source(
+            "https://github.com/example/first.git",
+            "~/",
+            Style::Windows,
+            true,
+            Some(""),
+        );
+        assert_eq!((moved.field.as_str(), moved.name.as_str()), ("~\\", ""));
+        assert_eq!(moved.suggested, "first");
+        assert!(!moved.can_submit);
     }
 
     #[test]
@@ -1051,25 +1106,59 @@ mod tests {
             Some(PathBuf::from("/srv"))
         );
         assert_eq!(start_folder("~", None), None);
-        assert!(!local_folder_exists(String::new()));
-        assert!(local_folder_exists(
-            std::env::temp_dir().to_string_lossy().into_owned()
-        ));
-        assert!(!local_folder_exists("/nonexistent/zerus-example".into()));
+        assert!(!folder_exists(""));
+        assert!(folder_exists(&std::env::temp_dir().to_string_lossy()));
+        assert!(!folder_exists("/nonexistent/zerus-example"));
     }
 
+    // start (757-776) reads the form live at the click: the plan takes the
+    // form's folder, agent, name, branch, Auto and its derived fields from the
+    // same input Start derives them from, never the view's copies.
     #[test]
-    fn the_plan_command_is_the_cores() {
-        let choices = Choices {
-            agent: "opencode".into(),
+    fn the_plan_derives_from_the_same_form_as_start() {
+        let input = || input("/srv/repo", catalog(), Value::Null);
+        let stale = Choices {
+            agent: "claude".into(),
+            name: "old-name".into(),
+            path: "/srv/other".into(),
+            branch: "work-00000000".into(),
+            automatic_available: false,
+            automatic_path: String::new(),
+            project_worktree: false,
+            listed_folder: true,
+            catalog: json!({}),
             model: "fixture/local".into(),
             effort: "high".into(),
             open_terminal: true,
-            path: "/srv/repo".into(),
+            machine: "machine-1".into(),
             ..Choices::default()
         };
-        let plan = new_session_plan(choices.clone());
-        assert_eq!(plan, launch::plan(&choices));
+        assert_eq!(new_session_start(input(), false), Start::Background);
+        let plan = new_session_plan(input(), stale.clone());
+        assert_eq!(
+            (plan.cmd.as_str(), plan.tag.as_str()),
+            ("codex", "work-1a2b3c4d")
+        );
+        assert_eq!(
+            (plan.target.as_str(), plan.source.as_str()),
+            ("/srv/repo", "/srv/repo")
+        );
+        assert!(plan.auto, "Auto as Start saw it");
+        assert_eq!(plan.branch, "work-1a2b3c4d");
+        assert_eq!(plan.destination.as_deref(), Some("/srv/repo-work-1a2b3c4d"));
+        assert!(!plan.add_folder, "a project worktree adds no folder");
+        assert_eq!(plan.catalog, catalog());
+        // What only the view knows comes from its choices.
+        assert_eq!(
+            (plan.model.as_str(), plan.effort.as_str()),
+            ("", ""),
+            "a model only for OpenCode"
+        );
+        assert!(plan.terminal);
+        assert_eq!(plan.machine, "machine-1");
+        let mut opencode = input();
+        opencode.form.agent = "opencode".into();
+        let plan = new_session_plan(opencode, stale);
         assert_eq!(
             (plan.model.as_str(), plan.effort.as_str(), plan.terminal),
             ("fixture/local", "high", false)
@@ -1215,6 +1304,34 @@ mod tests {
                 Err("not reachable".into())
             );
             assert!(creating(&fake.log()).is_empty());
+        }
+
+        // A read that panics leaves no flight behind: the next read calls.
+        #[test]
+        fn a_panicking_read_leaves_no_shared_flight() {
+            let fake = Fake::new(json!({"replies": {"worktrees": {"stdout": catalog_at(1000.0)}}}));
+            let fail = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let session = {
+                let fail = Arc::clone(&fail);
+                NewSession::new(
+                    fake.hgs.clone(),
+                    true,
+                    None,
+                    Arc::new(move || {
+                        assert!(!fail.load(Ordering::SeqCst), "the clock fails");
+                        1000.0
+                    }),
+                )
+            };
+            let local = ComputerId::local();
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                session.catalog(&local, "/srv/repo", true)
+            }));
+            assert!(panicked.is_err());
+            assert!(lock(&session.0.flights).is_empty(), "the guard removed it");
+            fail.store(false, Ordering::SeqCst);
+            assert!(session.catalog(&local, "/srv/repo", true).is_ok());
+            assert_eq!(fake.log().len(), 2, "the next read made its own call");
         }
 
         #[test]
@@ -1422,6 +1539,19 @@ mod tests {
                 before + 2,
                 "the probe and the parent only"
             );
+            // A help text past its bound is not read as support.
+            let mut help = "x".repeat(HELP_LIMIT);
+            help.push_str(" dirs --create <path>");
+            fake.configure(json!({"help": help}));
+            let before = fake.log().len();
+            assert_eq!(
+                session.create_directory(&mac, "/srv/repo/new"),
+                Err(
+                    "Update hgs on mac to create folders. You can still choose existing folders."
+                        .into()
+                )
+            );
+            assert_eq!(fake.log()[before..], [vec!["@mac", "--help"]]);
             // An older CLI is never asked to create.
             fake.configure(json!({"help": "usage: hgs dirs PATH"}));
             let before = fake.log().len();

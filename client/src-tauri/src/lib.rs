@@ -140,6 +140,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         screens::projects_view,
         screens::launch_accounts,
         screens::launch_account_rows,
+        screens::launch_accounts_close,
         newsession::new_session_context,
         newsession::new_session_form,
         newsession::new_session_start,

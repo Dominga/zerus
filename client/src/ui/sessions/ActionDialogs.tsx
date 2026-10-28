@@ -1,11 +1,11 @@
 import { For, Show, createEffect, createMemo, createSignal, untrack } from "solid-js";
 import { Icon } from "../lib/icons";
 import { catalog, computerOffline } from "../../store/catalog";
-import { change, copyCommand, copyFolder, copyName, copyReference, dismiss, end, interrupting, notices, perform, reading, updating } from "../../store/actions";
+import { change, copyCommand, copyFolder, copyName, copyReference, dismiss, end, interrupting, notices, perform, pendingNotifications, reading, toggleMute, updating } from "../../store/actions";
 import type { MenuEntry } from "../../store/ui";
 import type { Details } from "../../types";
 import type { Session } from "./types";
-import { copyState, dialogReducer, menuState, renameParts, renameProblem, snapshotOf, terminateCopy, type ActionRow, type DialogEvent } from "./actions-ui";
+import { copyState, dialogReducer, menuState, notificationsState, renameParts, renameProblem, snapshotOf, terminateCopy, type ActionRow, type DialogEvent } from "./actions-ui";
 
 // The guarded session actions: the entries both menus share, the Rename and
 // Terminate dialogs, and the notices the action store raises.
@@ -66,6 +66,18 @@ export function copyEntries(s: Session, details?: Details): { command: Item; nam
     reference: { label: "Copy session reference", icon: "link", disabled: !c.reference, action: () => { void copyReference(row, details); } },
     folder: { label: "Copy folder path", icon: "copy", disabled: !c.folder.enabled, action: () => { void copyFolder(row, details); } },
   };
+}
+
+/**
+ * The Mute or Unmute entry of a row's context menu (Qt's contextToggleMute),
+ * undefined for an archived row. Its hint is always shown: the reason it is
+ * off, else what it does.
+ */
+export function muteEntry(s: Session): Item | undefined {
+  const row = snapshotOf(s);
+  const m = notificationsState(row, !computerOffline(s.computer), pendingNotifications(s.computer, s.conversationId));
+  if (!m) return undefined;
+  return { label: m.label, icon: row.muted ? "bell" : "bell-off", disabled: !m.enabled, hint: m.hint, action: () => { void toggleMute(row); } };
 }
 
 /** The listed rows, for the rename dialog's check of names in use. */

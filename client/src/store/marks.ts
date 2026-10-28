@@ -21,11 +21,14 @@ import type { Session } from "../ui/sessions/types";
 
 export type { AttentionSnapshot, Mark };
 
+/** Confirmed notification overrides kept; the oldest goes first. */
+export const OVERRIDE_CAP = 1000;
+
 /** Entries kept per map; the oldest written goes first (the Rust side caps its copy the same way). */
 export const CAP = 20_000;
 
 /** What the overlay decides; the rest of a row is the host's. */
-export type Overlay = Pick<Session, "status" | "caption" | "attention" | "unread" | "reviewLater" | "summary" | "muted">;
+export type Overlay = Pick<Session, "status" | "caption" | "attention" | "unread" | "reviewLater" | "summary" | "muted" | "notificationConflict">;
 
 export interface MarksPort {
   attentionMarks(): Promise<AttentionSnapshot>;
@@ -246,11 +249,33 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
   }
 
   /**
-   * Extension point for Task B4: its confirmed notification override (Qt's
-   * keepNotificationPreferences) decides `muted` here, after every other rule.
-   * Until then the row's own value stands.
+   * Confirmed notification preferences by reply key (computer, agent,
+   * conversation), oldest written first and bounded: what the host confirmed
+   * for a change, which an older listing must not roll back (Qt's
+   * keepNotificationPreferences). Only the revision and `muted` are kept: the
+   * row carries no more of the preferences.
    */
-  const mutedOf = (s: Session) => s.baseMuted;
+  const overrides = new Map<string, { revision: number; muted: boolean }>();
+  const overrideKey = (s: Pick<Session, "computer" | "cmd" | "conversationId">) => replyKey(s.computer, s.cmd, s.conversationId ?? "");
+
+  /**
+   * keepNotificationPreferences for one row. A host that no longer reports shared
+   * notifications keeps the last confirmed display. A row with a higher
+   * revision wins and ends the override; a lower one is ignored; the same
+   * revision with another value keeps the override and is a conflict.
+   */
+  function notificationOf(s: Session): { muted: boolean; conflict: boolean } {
+    const base = { muted: s.baseMuted, conflict: false };
+    const kept = overrides.size && s.conversationId ? overrides.get(overrideKey(s)) : undefined;
+    if (!kept) return base;
+    if (!s.sharedNotifications) return { muted: kept.muted, conflict: false };
+    const incoming = s.notificationRevision ?? -1;
+    if (incoming > kept.revision) return base;
+    if (incoming === kept.revision) return s.baseMuted === kept.muted ? base : { muted: kept.muted, conflict: true };
+    return { muted: kept.muted, conflict: false };
+  }
+
+  const mutedOf = (s: Session) => notificationOf(s).muted;
 
   function overlay(s: Session): Overlay {
     const r = readState(s);
@@ -264,7 +289,15 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
       // Qt's currentAction repeats the status for an unread reply unless the session needs action.
       summary: r.unread && !s.needsAction ? "" : s.baseSummary,
       muted: mutedOf(s),
+      notificationConflict: notificationOf(s).conflict,
     };
+  }
+
+  /** Applies the overlay again to the rows that match (after a confirmed notification override). */
+  function reapply(match: (s: Session) => boolean) {
+    if (!target) return;
+    const rows = target.rows();
+    batch(() => { for (const id in rows) if (match(rows[id])) target!.patch(id, overlay(rows[id])); });
   }
 
   /** Applies the overlay again to the rows a change touched (every row after a load or a cap). */
@@ -514,6 +547,16 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
         for (const [key, mark] of pending) if (mark.computer === r.computer && !names.has(mark.name)) { pending.delete(key); c.names.add(pair(r.computer, mark.name)); }
       }
     }
+    if (overrides.size) {
+      // A listing with a higher revision ends the override (the overlay already shows the row's own value).
+      for (const u of b.replaces.length ? [...b.upserts, ...b.replaces.flatMap((r) => r.rows)] : b.upserts) {
+        const row = u.row;
+        const kept = row.conversation_id ? overrides.get(replyKey(u.computer, row.agent ?? "", row.conversation_id)) : undefined;
+        if (kept && row.shared_notifications && (row.notification_revision ?? -1) > kept.revision) {
+          overrides.delete(replyKey(u.computer, row.agent ?? "", row.conversation_id!));
+        }
+      }
+    }
     moveFallbacks(c);
     const sharing = new Set<string>();
     for (const u of b.upserts) if (u.row.shared_read) sharing.add(u.computer);
@@ -564,6 +607,39 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     return true;
   }
 
+  /**
+   * The listed row a notification change was started for: the same name,
+   * archive, conversation, `created` and run, not archived (the filter of
+   * SessionsWindow's notificationsFinished). Undefined for a replaced run.
+   */
+  function currentNotificationRow(row: ActionRow): Session | undefined {
+    const s = matching(row);
+    return s && (s.runId ?? "") === (row.runId ?? "") ? s : undefined;
+  }
+
+  /**
+   * FleetState::applyNotificationPreferences: keeps the host's confirmed
+   * preferences as an override. Refused (false) for a row that no longer shares
+   * notifications, an invalid reply, a lower revision than the row shows, or
+   * the same revision with another value.
+   */
+  function applyNotifications(row: ActionRow, preferences: unknown): boolean {
+    const s = currentNotificationRow(row);
+    const p = preferences && typeof preferences === "object" ? (preferences as Record<string, unknown>) : undefined;
+    if (!s || !p || !s.sharedNotifications || !s.runId || !s.conversationId || p.conversation_id !== s.conversationId
+      || typeof p.muted !== "boolean" || typeof p.revision !== "number" || !Number.isSafeInteger(p.revision) || p.revision < 0) return false;
+    const kept = overrides.get(overrideKey(s));
+    const current = Math.max(s.notificationRevision ?? -1, kept?.revision ?? -1);
+    const muted = notificationOf(s).muted;
+    if (p.revision < current || (p.revision === current && p.muted !== muted)) return false;
+    const key = overrideKey(s);
+    overrides.delete(key);
+    overrides.set(key, { revision: p.revision, muted: p.muted });
+    while (overrides.size > OVERRIDE_CAP) overrides.delete(overrides.keys().next().value!);
+    reapply((r) => r.computer === s.computer && r.cmd === s.cmd && r.conversationId === s.conversationId);
+    return true;
+  }
+
   /** FleetState::unreadReplies: every unread reply, hidden rows included, except rows marked for review. */
   function unreadReplies(): Map<string, string> {
     const out = new Map<string, string>();
@@ -607,12 +683,11 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     markNeedsAttention,
     unreadReplies,
     markAllRead,
-    /** Applies the overlay again to the rows that match (Task B4 after a confirmed override). */
-    reapply(match: (s: Session) => boolean) {
-      if (!target) return;
-      const rows = target.rows();
-      batch(() => { for (const id in rows) if (match(rows[id])) target!.patch(id, overlay(rows[id])); });
-    },
+    currentNotificationRow,
+    applyNotifications,
+    /** The confirmed overrides held (tests, diagnostics). */
+    overrideCount: () => overrides.size,
+    reapply,
     /** The pending read marks the rows read (a copy). */
     pending: (): ReadMark[] => [...pending.values()],
     /** Each map's keys, oldest written first (tests, diagnostics). */

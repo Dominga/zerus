@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { toSession } from "../../store/catalog";
 import {
-  copyState, detailsFromInspection, dialogReducer, menuItemActivates, menuState, renameParts, renameProblem, snapshotOf, tagProblem, terminal, terminateCopy,
+  copyState, detailsFromInspection, identityOk, notificationsState, notificationsStillAllowed, dialogReducer, menuItemActivates, menuState, renameParts, renameProblem, snapshotOf, tagProblem, terminal, terminateCopy,
 } from "./actions-ui";
 import fixture from "../../../core/tests/fixtures/action-rows.json";
 import type { Details, ViewRow } from "../../types";
@@ -306,5 +306,44 @@ describe("copyState", () => {
   it("reads the inspection cwd and terminal flags", () => {
     expect(detailsFromInspection({ cwd: "/home/example/x", terminal_supported: false, terminal_attach_supported: true }))
       .toMatchObject({ cwd: "/home/example/x", terminal_supported: false, terminal_attach_supported: true });
+  });
+});
+
+describe("notificationsState", () => {
+  const free = { conversation: false, total: 0 };
+  const shared = (extra: Partial<ViewRow> = {}) => row({ shared_notifications: true, notification_revision: 2, ...extra });
+  it("is Mute or Unmute with Qt's hints when available", () => {
+    expect(notificationsState(shared(), true, free)).toEqual({ label: "Mute", enabled: true, hint: "Mute notifications for this session on all devices" });
+    expect(notificationsState(shared({ muted: true }), true, free)).toMatchObject({ label: "Unmute", enabled: true, hint: "Allow future notifications for this session on all devices" });
+  });
+  it("is absent for an archived row", () => expect(notificationsState(shared({ state: "archived" }), true, free)).toBeUndefined());
+  it("gives the reasons in Qt's order", () => {
+    const pending = { conversation: true, total: 1 };
+    const bare = row({ run_id: "", conversation_id: "" });
+    expect(notificationsState(bare, false, pending)?.hint).toBe("Connect to this session's host to change shared notifications.");
+    expect(notificationsState(bare, true, pending)?.hint).toBe("Update hgs on this session's host to support shared notification preferences.");
+    expect(notificationsState(shared({ run_id: "" }), true, pending)).toMatchObject({ enabled: false, hint: "Refresh this session's identity before changing shared notifications." });
+    const conflict = { ...snapshotOf(shared()), notificationConflict: true };
+    expect(notificationsState(conflict, true, pending)).toMatchObject({ enabled: false, hint: "Conflicting shared notification preferences. Refresh the session." });
+    expect(notificationsState(shared(), true, pending)).toMatchObject({ enabled: false, hint: "A shared notification change is pending. Wait for its result." });
+    expect(notificationsState(shared(), true, { conversation: false, total: 16 })).toMatchObject({ enabled: false, hint: "A shared notification change is pending. Wait for its result." });
+    expect(notificationsState(shared(), true, { conversation: false, total: 15 })?.enabled).toBe(true);
+  });
+  it("checks identities as Qt does", () => {
+    expect(identityOk("x".repeat(128), 128)).toBe(true);
+    expect(identityOk("x".repeat(129), 128)).toBe(false);
+    expect(identityOk("\u00e9".repeat(65), 128)).toBe(false);
+    expect(identityOk("", 128)).toBe(false);
+    expect(identityOk("a\tb", 128)).toBe(false);
+    expect(identityOk("a\u007fb", 128)).toBe(false);
+    expect(identityOk(undefined, 128)).toBe(false);
+  });
+  it("rechecks the run and the preferences at the click", () => {
+    const shown = snapshotOf(shared());
+    expect(notificationsStillAllowed(snapshotOf(shared()), shown, true, free)).toBe(true);
+    expect(notificationsStillAllowed(snapshotOf(shared({ run_id: "r2" })), shown, true, free)).toBe(false);
+    expect(notificationsStillAllowed(snapshotOf(shared({ notification_revision: 3 })), shown, true, free)).toBe(false);
+    expect(notificationsStillAllowed(snapshotOf(shared({ muted: true })), shown, true, free)).toBe(false);
+    expect(notificationsStillAllowed(snapshotOf(shared()), shown, false, free)).toBe(false);
   });
 });

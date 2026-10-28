@@ -78,6 +78,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::exit_app,
         commands::perf_away,
         actions::run_action,
+        actions::set_notifications,
         actions::inspect_session,
         actions::pending_read_marks,
         actions::queue_read_marks,

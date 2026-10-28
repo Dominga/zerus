@@ -2,8 +2,8 @@ import { createSignal, untrack } from "solid-js";
 import { createStore } from "solid-js/store";
 import * as bridge from "../bridge";
 import { catalog as appCatalog, computerOffline, type CatalogState } from "./catalog";
-import { loadPending } from "./marks";
-import { copyState, detailsFromInspection, snapshotOf, terminates, type ActionRow } from "../ui/sessions/actions-ui";
+import { loadPending, marks as appMarks, type Marks } from "./marks";
+import { copyState, detailsFromInspection, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type PendingNotifications } from "../ui/sessions/actions-ui";
 import type { Action, Details, Outcome, Target } from "../types";
 
 // Guarded session actions. Every action is one call to the Rust side; a call
@@ -26,6 +26,7 @@ const INFO_MS = 6000;
 const CHANGED = "This session changed. Open its actions again.";
 const STATE_CHANGED = "The session state changed. Open its actions again.";
 const NEW_REPLY = "A new reply or question arrived. Open the menu again to mark it as read.";
+const MUTE_CHANGED = "The shared notification setting changed while this request was pending. Refresh the session.";
 const GONE = "This session is no longer available. Open its actions again.";
 const ALREADY_STOPPED = ["hgs: This turn is no longer working", "This turn is no longer working"];
 
@@ -50,6 +51,7 @@ export function createActions(
   catalog: Pick<CatalogState, "rows">,
   online: (computer: string) => boolean = () => true,
   selection: () => Selection = () => ({}),
+  notificationMarks: Pick<Marks, "currentNotificationRow" | "applyNotifications"> = appMarks,
 ) {
   /** The write in flight per session (its kind), and whether an interrupt or a read mark is. */
   const [writes, setWrites] = createStore<Record<string, Action["kind"] | undefined>>({});
@@ -166,6 +168,44 @@ export function createActions(
       return failed(STATE_CHANGED);
     }
     return perform(row, { kind: row.state === "running" ? "pause" : "resume" });
+  }
+
+  // Shared notification changes (Qt's m_pendingNotifications): tracked apart
+  // from the writes, one per conversation of a computer and sixteen in all.
+  const [changing, setChanging] = createSignal<{ id: number; computer: string; conversation: string }[]>([]);
+  let nextChange = 1;
+
+  /** What the pending notification changes block for a row (reactive). */
+  const pendingNotifications = (computer: string, conversationId: string | undefined): PendingNotifications => ({
+    conversation: changing().some((p) => p.computer === computer && p.conversation === (conversationId ?? "")),
+    total: changing().length,
+  });
+
+  /**
+   * Mute or Unmute (SessionsWindow runSessionMenuAction ToggleMute and the
+   * notificationsFinished result). The same checks run again on the live row,
+   * and the preferences must be unchanged since the menu opened; otherwise
+   * nothing happens. The call is never repeated. A late answer for a row that
+   * is no longer the same run, conversation and `created` is dropped.
+   */
+  async function toggleMute(row: ActionRow): Promise<void> {
+    const live = catalog.rows[row.key];
+    if (!live) return;
+    const original = snapshotOf(live);
+    if (!notificationsStillAllowed(original, row, online(live.computer), untrack(() => pendingNotifications(live.computer, live.conversationId)))) return;
+    const expected = original.notificationRevision;
+    if (expected === undefined) return;
+    const target: Target = { computer: original.computer, name: original.name, run_id: original.runId ?? "", conversation_id: original.conversationId ?? "" };
+    const entry = { id: nextChange++, computer: original.computer, conversation: original.conversationId ?? "" };
+    setChanging((all) => [...all, entry]);
+    let preferences: Record<string, unknown> | undefined;
+    let detail = "";
+    try { preferences = await bridge.setNotifications(target, !original.muted, expected); } catch (error) { detail = errorText(error); } finally {
+      setChanging((all) => all.filter((p) => p.id !== entry.id));
+    }
+    if (!notificationMarks.currentNotificationRow(original)) return;
+    if (!preferences) { notify("error", detail, true); return; }
+    if (!notificationMarks.applyNotifications(original, preferences)) notify("error", MUTE_CHANGED, true);
   }
 
   // Details: the followed session's Activity state value when it names the
@@ -300,7 +340,7 @@ export function createActions(
     return out;
   }
 
-  return { perform, end, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices: list, dismiss, notify };
+  return { perform, end, toggleMute, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices: list, dismiss, notify };
 }
 
 type FollowSource = { target(): { id: string } | undefined; summary(): Record<string, unknown> | undefined; loaded(): boolean; ended(): boolean; error(): unknown };
@@ -321,4 +361,4 @@ let selection: () => Selection = () => ({});
 export function bindSelection(source: () => Selection) { selection = source; }
 
 const app = createActions(appCatalog, (computer) => !computerOffline(computer), () => selection());
-export const { perform, end, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices, dismiss, notify } = app;
+export const { perform, end, toggleMute, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices, dismiss, notify } = app;

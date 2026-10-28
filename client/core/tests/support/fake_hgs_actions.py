@@ -1,11 +1,21 @@
 #!/usr/bin/env python3
 """A fake `hgs` for the client action tests. Reads `config.json` beside itself:
-{"reply": {"exit": 0, "stdout": <object or "echo_interrupt">, "stderr": "", "sleep": 0, "log_env": [], "read_stdin": true, "linger": 0}}
+{"reply": {"exit": 0, "stdout": <object or "echo_interrupt">, "stdout_text": "<raw text instead of stdout>", "stderr": "", "sleep": 0, "log_env": [], "read_stdin": true, "linger": 0},
+ "replies": [{"match": [<args after an @alias>], ...the same keys as "reply"}]}
+The first entry of the optional "replies" whose "match" is a prefix of the arguments
+(without a leading @alias) answers; otherwise "reply" does.
 Appends {"argv": [...], "stdin": "...", "env": {...}} to `log.ndjson` beside itself."""
 import json, os, sys, time
 
 here = os.path.dirname(os.path.abspath(__file__))
-config = json.load(open(os.path.join(here, "config.json")))["reply"]
+whole = json.load(open(os.path.join(here, "config.json")))
+config = whole["reply"]
+_args = [a for a in sys.argv[1:] if not a.startswith("@")] if sys.argv[1:2] and sys.argv[1].startswith("@") else sys.argv[1:]
+for _candidate in whole.get("replies", []):
+    _match = _candidate["match"]
+    if _args[:len(_match)] == _match:
+        config = _candidate
+        break
 data = sys.stdin.read() if config.get("read_stdin", True) else ""
 entry = {"argv": sys.argv[1:], "stdin": data}
 if config.get("log_env"):
@@ -21,6 +31,8 @@ if out == "echo_interrupt":
            "run_id": request["expected_run_id"], "conversation_id": request["expected_conversation_id"]}
 if out is not None:
     sys.stdout.write(json.dumps(out))
+if "stdout_text" in config:
+    sys.stdout.write(config["stdout_text"])
 sys.stderr.write(config.get("stderr", ""))
 sys.stdout.flush()
 sys.stderr.flush()

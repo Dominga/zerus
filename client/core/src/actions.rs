@@ -286,6 +286,163 @@ pub fn parse_reference(exit: Exit) -> Result<String, String> {
     uri.ok_or_else(|| "Could not read a session reference. Update hgs on this computer.".to_owned())
 }
 
+const NOTIFICATIONS_MARKER: &str = "session-notifications-v1";
+const NOTIFICATIONS_IDENTITY: &str =
+    "The session notification identity is unavailable. Refresh the session.";
+/// Shown when the local `hgs` lacks the shared-notification marker.
+pub const NOTIFICATIONS_UPDATE: &str =
+    "Update the configured local hgs to support shared notification preferences.";
+const NOTIFICATIONS_UNCONFIRMED: &str =
+    "The shared notification change was not confirmed. Refresh the session before trying again.";
+
+/// The local `hgs --help` probe that runs before the first notification call
+/// (`requestNotifications`, `HgsClient.cpp:2401`): an old CLI could read the
+/// unknown command as an agent launch. 5 s, no input.
+pub fn help_invocation() -> Invocation {
+    Invocation {
+        args: vec!["--help".to_owned()],
+        stdin: None,
+        timeout: Duration::from_secs(5),
+        request_id: None,
+    }
+}
+
+/// Whether the help text has a line that is exactly `session-notifications-v1`
+/// (a trailing CR is allowed, nothing else).
+pub fn has_notifications_marker(stdout: &[u8]) -> bool {
+    stdout.split(|&b| b == b'\n').any(|line| {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        line == NOTIFICATIONS_MARKER.as_bytes()
+    })
+}
+
+/// A probe that passes: a normal exit 0 with the marker.
+pub fn help_confirms(exit: &Exit) -> bool {
+    matches!(exit, Exit::Code { code: 0, stdout, .. } if has_notifications_marker(stdout))
+}
+
+/// `SessionNotifications::text` for an identity: non-empty, at most `maximum`
+/// bytes, no control character.
+fn identity_ok(value: &str, maximum: usize) -> bool {
+    !value.is_empty() && value.len() <= maximum && !value.chars().any(|c| c < ' ' || c == '\u{7f}')
+}
+
+/// `hgs [@host] notifications NAME --json` with exactly the four payload keys;
+/// 15 s here and 35 s on a peer. The identity is checked first, as Qt does.
+pub fn notifications_invocation(
+    target: &Target,
+    muted: bool,
+    expected_revision: Option<i64>,
+) -> Result<Invocation, String> {
+    let expected = expected_revision.filter(|revision| *revision >= 0);
+    let Some(expected) = expected.filter(|_| {
+        !target.name.is_empty()
+            && identity_ok(&target.run_id, 128)
+            && identity_ok(&target.conversation_id, 256)
+    }) else {
+        return Err(NOTIFICATIONS_IDENTITY.to_owned());
+    };
+    let input = json!({
+        "run_id": target.run_id,
+        "conversation_id": target.conversation_id,
+        "muted": muted,
+        "expected_revision": expected,
+    });
+    let mut args = vec![
+        "notifications".to_owned(),
+        target.name.clone(),
+        "--json".to_owned(),
+    ];
+    let peer = prepend_alias(&mut args, &target.computer);
+    Ok(Invocation {
+        args,
+        stdin: Some(serde_json::to_vec(&input).map_err(|error| error.to_string())?),
+        timeout: Duration::from_secs(if peer { 35 } else { 15 }),
+        request_id: None,
+    })
+}
+
+/// The reply's `preferences` when Qt's rule confirms the change: exit 0, exactly
+/// `ok, applied, run_id, conversation_id, preferences`, `ok` true, a boolean
+/// `applied`, this session's identities, valid preferences with the requested
+/// `muted`, and revision `expected + 1` when applied, else `expected`. Anything
+/// else is the trimmed stderr or Qt's fallback text.
+pub fn classify_notifications(
+    target: &Target,
+    muted: bool,
+    expected_revision: i64,
+    exit: Exit,
+) -> Result<Value, String> {
+    let stderr = match &exit {
+        Exit::Code { stderr, .. } | Exit::Abnormal { stderr } => stderr.as_str(),
+        _ => "",
+    };
+    let fail = || trimmed_stderr(stderr).unwrap_or_else(|| NOTIFICATIONS_UNCONFIRMED.to_owned());
+    let Exit::Code {
+        code: 0, stdout, ..
+    } = &exit
+    else {
+        return Err(fail());
+    };
+    let Ok(Value::Object(mut reply)) = serde_json::from_slice::<Value>(stdout) else {
+        return Err(fail());
+    };
+    let exact = reply.len() == 5
+        && ["ok", "applied", "run_id", "conversation_id", "preferences"]
+            .iter()
+            .all(|key| reply.contains_key(*key));
+    let applied = reply.get("applied").and_then(Value::as_bool);
+    let preferences = reply.get("preferences").and_then(Value::as_object);
+    let revision = preferences.and_then(|p| crate::view::preferences_revision(p.get("revision")));
+    let confirmed = exact
+        && reply.get("ok") == Some(&Value::Bool(true))
+        && reply.get("run_id").and_then(Value::as_str) == Some(target.run_id.as_str())
+        && reply.get("conversation_id").and_then(Value::as_str)
+            == Some(target.conversation_id.as_str())
+        && preferences.is_some_and(|p| {
+            crate::view::preferences_valid(p, &target.conversation_id)
+                && p.get("muted") == Some(&Value::Bool(muted))
+        })
+        && match (applied, revision) {
+            (Some(true), Some(revision)) => {
+                expected_revision < i64::MAX && revision == expected_revision + 1
+            }
+            (Some(false), Some(revision)) => revision == expected_revision,
+            _ => false,
+        };
+    if !confirmed {
+        return Err(fail());
+    }
+    Ok(reply.remove("preferences").unwrap_or(Value::Null))
+}
+
+const HELP_CAP: usize = 256 * 1024;
+const NOTIFICATIONS_CAP: usize = 512 * 1024;
+
+/// The whole shared-notification change: the local help probe (refused without
+/// the marker), then the call, then [`classify_notifications`]. Blocks.
+pub fn change_notifications(
+    hgs: &std::path::Path,
+    target: &Target,
+    muted: bool,
+    expected_revision: Option<i64>,
+) -> Result<Value, String> {
+    let call = notifications_invocation(target, muted, expected_revision)?;
+    let expected = expected_revision.unwrap_or_default();
+    let probe = crate::run::run_limited(hgs, &help_invocation(), &[], HELP_CAP);
+    if !probe.as_ref().is_ok_and(help_confirms) {
+        return Err(NOTIFICATIONS_UPDATE.to_owned());
+    }
+    // A reply of more than the cap is not a reply (Qt's maximumOutputBytes).
+    let exit =
+        crate::run::run_limited(hgs, &call, &[], NOTIFICATIONS_CAP).unwrap_or_else(|too_large| {
+            Exit::Abnormal {
+                stderr: too_large.stderr,
+            }
+        });
+    classify_notifications(target, muted, expected, exit)
+}
+
 /// Puts `@alias` first for a peer; true when `computer` is a peer.
 pub(crate) fn prepend_alias(args: &mut Vec<String>, computer: &str) -> bool {
     let peer = !computer.is_empty();
@@ -461,6 +618,258 @@ mod tests {
             stdout: stdout.to_vec(),
             stderr: stderr.into(),
         }
+    }
+
+    fn preferences(muted: bool, revision: i64) -> Value {
+        json!({"conversation_id": "conv-1", "muted": muted, "revision": revision, "suppressed": {
+            "reply_id": null, "attention_signature": null, "optional_question_ids": [],
+            "main_attention": null, "child_attention": {}}})
+    }
+    fn reply(applied: bool, muted: bool, revision: i64) -> Value {
+        json!({"ok": true, "applied": applied, "run_id": "run-1", "conversation_id": "conv-1",
+            "preferences": preferences(muted, revision)})
+    }
+    fn reply_exit(value: &Value) -> Exit {
+        exit0(value.to_string().as_bytes(), "")
+    }
+    const UNCONFIRMED: &str =
+        "The shared notification change was not confirmed. Refresh the session before trying again.";
+
+    #[test]
+    fn the_help_probe_is_local_short_and_needs_the_exact_marker() {
+        let probe = help_invocation();
+        assert_eq!(probe.args, ["--help"]);
+        assert_eq!(probe.stdin, None);
+        assert_eq!(probe.timeout, std::time::Duration::from_secs(5));
+        assert!(has_notifications_marker(
+            b"usage\nsession-notifications-v1\nmore"
+        ));
+        assert!(has_notifications_marker(
+            b"usage\r\nsession-notifications-v1\r\n"
+        ));
+        assert!(has_notifications_marker(b"session-notifications-v1"));
+        for text in [
+            &b"session-notifications-v10\n"[..],
+            b" session-notifications-v1\n",
+            b"session-notifications-v1 \n",
+            b"x session-notifications-v1\n",
+            b"session-notifications-v1\r\r\n",
+            b"",
+        ] {
+            assert!(!has_notifications_marker(text), "{text:?}");
+        }
+        assert!(help_confirms(&exit0(b"session-notifications-v1\n", "")));
+        assert!(!help_confirms(&Exit::Code {
+            code: 1,
+            stdout: b"session-notifications-v1\n".to_vec(),
+            stderr: String::new()
+        }));
+        assert!(!help_confirms(&Exit::TimedOut));
+    }
+
+    #[test]
+    fn the_notification_call_matches_the_qt_client() {
+        let local = notifications_invocation(&target(""), true, Some(4)).unwrap();
+        assert_eq!(
+            local.args,
+            ["notifications", "claude/sample-project/review", "--json"]
+        );
+        assert_eq!(local.timeout, std::time::Duration::from_secs(15));
+        assert_eq!(
+            String::from_utf8(local.stdin.unwrap()).unwrap(),
+            r#"{"conversation_id":"conv-1","expected_revision":4,"muted":true,"run_id":"run-1"}"#
+        );
+        let peer = notifications_invocation(&target("mac"), false, Some(0)).unwrap();
+        assert_eq!(
+            peer.args,
+            [
+                "@mac",
+                "notifications",
+                "claude/sample-project/review",
+                "--json"
+            ]
+        );
+        assert_eq!(peer.timeout, std::time::Duration::from_secs(35));
+    }
+
+    #[test]
+    fn a_bad_identity_fails_before_any_call() {
+        let text = "The session notification identity is unavailable. Refresh the session.";
+        let long = |n: usize| "x".repeat(n);
+        let mut cases = Vec::new();
+        for (run, conv) in [
+            ("", "c"),
+            ("r", ""),
+            (long(129).leak() as &str, "c"),
+            ("r", long(257).leak() as &str),
+            ("r\n", "c"),
+            ("r", "c\u{7f}"),
+        ] {
+            let mut t = target("");
+            t.run_id = run.into();
+            t.conversation_id = conv.into();
+            cases.push(t);
+        }
+        let mut nameless = target("");
+        nameless.name.clear();
+        cases.push(nameless);
+        for t in cases {
+            assert_eq!(
+                notifications_invocation(&t, true, Some(1)).unwrap_err(),
+                text
+            );
+        }
+        for revision in [None, Some(-1)] {
+            assert_eq!(
+                notifications_invocation(&target(""), true, revision).unwrap_err(),
+                text
+            );
+        }
+        let mut edge = target("");
+        edge.run_id = long(128);
+        edge.conversation_id = long(256);
+        assert!(notifications_invocation(&edge, true, Some(1)).is_ok());
+    }
+
+    #[test]
+    fn a_confirmed_change_returns_the_preferences() {
+        let t = target("");
+        assert_eq!(
+            classify_notifications(&t, true, 4, reply_exit(&reply(true, true, 5))).unwrap(),
+            preferences(true, 5)
+        );
+        assert_eq!(
+            classify_notifications(&t, false, 4, reply_exit(&reply(false, false, 4))).unwrap(),
+            preferences(false, 4)
+        );
+    }
+
+    #[test]
+    fn every_confirmation_field_is_required() {
+        let t = target("");
+        let check = |value: Value, muted: bool, expected: i64| {
+            classify_notifications(&t, muted, expected, reply_exit(&value)).unwrap_err()
+        };
+        let mutate = |f: &dyn Fn(&mut Value)| {
+            let mut value = reply(true, true, 5);
+            f(&mut value);
+            value
+        };
+        let cases: Vec<(&str, Value)> = vec![
+            ("ok false", mutate(&|v| v["ok"] = json!(false))),
+            ("ok text", mutate(&|v| v["ok"] = json!("true"))),
+            ("applied text", mutate(&|v| v["applied"] = json!("yes"))),
+            (
+                "applied missing",
+                mutate(&|v| {
+                    v.as_object_mut().unwrap().remove("applied");
+                }),
+            ),
+            ("extra key", mutate(&|v| v["extra"] = json!(1))),
+            ("run id", mutate(&|v| v["run_id"] = json!("run-2"))),
+            (
+                "conversation",
+                mutate(&|v| v["conversation_id"] = json!("conv-2")),
+            ),
+            (
+                "preferences conversation",
+                mutate(&|v| v["preferences"]["conversation_id"] = json!("conv-2")),
+            ),
+            (
+                "preferences invalid",
+                mutate(&|v| {
+                    v["preferences"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("suppressed");
+                }),
+            ),
+            (
+                "muted other",
+                mutate(&|v| v["preferences"]["muted"] = json!(false)),
+            ),
+            (
+                "muted text",
+                mutate(&|v| v["preferences"]["muted"] = json!("true")),
+            ),
+            (
+                "revision skipped",
+                mutate(&|v| v["preferences"]["revision"] = json!(6)),
+            ),
+            (
+                "revision same when applied",
+                mutate(&|v| v["preferences"]["revision"] = json!(4)),
+            ),
+            (
+                "fraction",
+                mutate(&|v| v["preferences"]["revision"] = json!(5.5)),
+            ),
+            ("not an object", json!([1])),
+        ];
+        for (name, value) in cases {
+            assert_eq!(check(value, true, 4), UNCONFIRMED, "{name}");
+        }
+        // Not applied: the revision must stay.
+        assert_eq!(check(reply(false, true, 5), true, 4), UNCONFIRMED);
+        // The muted value must be the requested one.
+        assert_eq!(check(reply(true, true, 5), false, 4), UNCONFIRMED);
+        // Text that is not JSON.
+        assert_eq!(
+            classify_notifications(&t, true, 4, exit0(b"nope", "")).unwrap_err(),
+            UNCONFIRMED
+        );
+        assert_eq!(
+            classify_notifications(&t, true, i64::MAX, reply_exit(&reply(true, true, i64::MAX)))
+                .unwrap_err(),
+            UNCONFIRMED
+        );
+    }
+
+    #[test]
+    fn a_failed_call_reports_the_trimmed_stderr_or_the_fallback() {
+        let t = target("");
+        let nonzero = |stderr: &str| Exit::Code {
+            code: 2,
+            stdout: reply(true, true, 5).to_string().into_bytes(),
+            stderr: stderr.into(),
+        };
+        assert_eq!(
+            classify_notifications(&t, true, 4, nonzero("  stale revision \n")).unwrap_err(),
+            "stale revision"
+        );
+        assert_eq!(
+            classify_notifications(&t, true, 4, nonzero(" ")).unwrap_err(),
+            UNCONFIRMED
+        );
+        assert_eq!(
+            classify_notifications(&t, true, 4, nonzero(&"e".repeat(2500)))
+                .unwrap_err()
+                .chars()
+                .count(),
+            2000
+        );
+        for exit in [
+            Exit::TimedOut,
+            Exit::StartFailed("x".into()),
+            Exit::WriteFailed,
+        ] {
+            assert_eq!(
+                classify_notifications(&t, true, 4, exit).unwrap_err(),
+                UNCONFIRMED
+            );
+        }
+        assert_eq!(
+            classify_notifications(
+                &t,
+                true,
+                4,
+                Exit::Abnormal {
+                    stderr: "killed".into()
+                }
+            )
+            .unwrap_err(),
+            "killed"
+        );
     }
 
     #[test]

@@ -672,6 +672,17 @@ impl<'a> Session<'a> {
 }
 
 /// The Qt `SessionNotifications` validation of the host's preferences.
+/// `SessionNotifications::valid`: complete, bounded shared notification
+/// preferences of that conversation.
+pub fn preferences_valid(value: &Map<String, Value>, conversation: &str) -> bool {
+    notifications::valid(value, conversation)
+}
+
+/// `SessionNotifications::revision`: a whole, non-negative number.
+pub fn preferences_revision(value: Option<&Value>) -> Option<i64> {
+    notifications::revision(value)
+}
+
 mod notifications {
     use serde_json::{Map, Value};
 

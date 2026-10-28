@@ -54,6 +54,8 @@ export interface Session {
   unread: boolean;
   draft: boolean;
   muted?: boolean;
+  /** The host's preferences conflict with the confirmed override (Qt's notificationPreferencesError). */
+  notificationConflict?: boolean;
   attention?: "question" | "approval" | "reply";
   scheduleNext?: string;
   backgroundJobs?: number;

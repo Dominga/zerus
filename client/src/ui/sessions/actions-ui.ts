@@ -12,7 +12,8 @@ export type ActionRow = Pick<Session,
   | "key" | "computer" | "name" | "machine" | "cmd" | "state" | "tracked" | "resumable" | "activity" | "processState"
   | "archiveId" | "attention" | "unread" | "sharedRead" | "allowed" | "archiveReason" | "terminateReason" | "phase"
   | "runId" | "conversationId" | "replyId" | "attentionSignature" | "created" | "fingerprint"
-  | "cwdPath" | "terminalSupported" | "terminalReported" | "terminalAttachSupported" | "terminalAttachReported">;
+  | "cwdPath" | "terminalSupported" | "terminalReported" | "terminalAttachSupported" | "terminalAttachReported"
+  | "muted" | "sharedNotifications" | "notificationRevision" | "notificationConflict">;
 
 /** A plain copy of the action fields, as they were when a menu or dialog opened. */
 export function snapshotOf(s: ActionRow): ActionRow {
@@ -24,7 +25,62 @@ export function snapshotOf(s: ActionRow): ActionRow {
     created: s.created, fingerprint: s.fingerprint,
     cwdPath: s.cwdPath, terminalSupported: s.terminalSupported, terminalReported: s.terminalReported,
     terminalAttachSupported: s.terminalAttachSupported, terminalAttachReported: s.terminalAttachReported,
+    muted: s.muted, sharedNotifications: s.sharedNotifications, notificationRevision: s.notificationRevision,
+    notificationConflict: s.notificationConflict,
   };
+}
+
+// Mute and Unmute (SessionsWindow.cpp 5310-5323, 5401-5414; SessionNotifications.h).
+
+/** Pending shared notification changes allowed in all. */
+export const MAX_PENDING_NOTIFICATIONS = 16;
+export const MUTE_OFFLINE = "Connect to this session's host to change shared notifications.";
+export const MUTE_HOST = "Update hgs on this session's host to support shared notification preferences.";
+export const MUTE_IDENTITY = "Refresh this session's identity before changing shared notifications.";
+export const MUTE_CONFLICT = "Conflicting shared notification preferences. Refresh the session.";
+export const MUTE_PENDING = "A shared notification change is pending. Wait for its result.";
+export const MUTE_ALLOW = "Allow future notifications for this session on all devices";
+export const MUTE_SILENCE = "Mute notifications for this session on all devices";
+
+/** SessionNotifications::identity: non-empty, at most `maximum` UTF-8 bytes, no control character. */
+export function identityOk(value: string | undefined, maximum: number): boolean {
+  if (!value || new TextEncoder().encode(value).length > maximum) return false;
+  for (const ch of value) { const c = ch.codePointAt(0)!; if (c < 32 || c === 127) return false; }
+  return true;
+}
+
+export const notificationIdentityOk = (s: Pick<ActionRow, "runId" | "conversationId">) => identityOk(s.runId, 128) && identityOk(s.conversationId, 256);
+
+/** What the pending changes block: one per conversation of a computer, sixteen in all. */
+export interface PendingNotifications { conversation: boolean; total: number }
+
+export interface NotificationsState { label: "Mute" | "Unmute"; enabled: boolean; hint: string }
+
+/**
+ * The Mute entry of a row's context menu: undefined for an archived row. The
+ * hint is the reason it is off (Qt's order: offline, no shared notifications,
+ * identity, conflict, pending) or what the entry does.
+ */
+export function notificationsState(s: ActionRow, online: boolean, pending: PendingNotifications): NotificationsState | undefined {
+  if (s.state === "archived") return undefined;
+  const full = pending.conversation || pending.total >= MAX_PENDING_NOTIFICATIONS;
+  const enabled = online && !!s.sharedNotifications && !s.notificationConflict && notificationIdentityOk(s) && !full;
+  const hint = !online ? MUTE_OFFLINE
+    : !s.sharedNotifications ? MUTE_HOST
+    : !notificationIdentityOk(s) ? MUTE_IDENTITY
+    : s.notificationConflict ? MUTE_CONFLICT
+    : full ? MUTE_PENDING
+    : s.muted ? MUTE_ALLOW : MUTE_SILENCE;
+  return { label: s.muted ? "Unmute" : "Mute", enabled, hint };
+}
+
+/**
+ * The click-time check: the entry is still available on the live row, the run
+ * is the one the menu showed, and the shared preferences have not changed since.
+ */
+export function notificationsStillAllowed(live: ActionRow, shown: ActionRow, online: boolean, pending: PendingNotifications): boolean {
+  return !!notificationsState(live, online, pending)?.enabled && live.runId === shown.runId
+    && live.notificationRevision === shown.notificationRevision && !!live.muted === !!shown.muted;
 }
 
 export interface MenuState {

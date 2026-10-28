@@ -158,6 +158,15 @@ export async function runAction(target: Target, action: Action): Promise<Outcome
   return invoke<Outcome>("run_action", { target, action });
 }
 
+/**
+ * Changes the shared notification preferences of a session; resolves with the
+ * host's confirmed `preferences`. A rejection carries the reason.
+ */
+export async function setNotifications(target: Target, muted: boolean, expectedRevision: number | null): Promise<Record<string, unknown>> {
+  if (!inTauri()) throw new Error("Actions need the desktop app.");
+  return invoke<Record<string, unknown>>("set_notifications", { target, muted, expectedRevision });
+}
+
 /** The inspect fields of a session; null when they are unavailable. */
 export async function inspectSession(target: Target, archiveId: string | null): Promise<Details | null> {
   if (!inTauri()) return null;

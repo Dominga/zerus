@@ -2,7 +2,7 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use zerus_client_core::actions::{classify, invocation};
+use zerus_client_core::actions::{change_notifications, classify, invocation};
 use zerus_client_core::{run, run_with_env, Action, Exit, Outcome, Target};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -193,4 +193,98 @@ fn a_reference_through_the_fake_is_the_uri() {
     let log = fake.log();
     assert_eq!(log.len(), 1);
     assert_eq!(log[0]["argv"][0], "reference");
+}
+
+fn preferences(muted: bool, revision: i64) -> Value {
+    serde_json::json!({"conversation_id": "conv-1", "muted": muted, "revision": revision, "suppressed": {
+        "reply_id": null, "attention_signature": null, "optional_question_ids": [],
+        "main_attention": null, "child_attention": {}}})
+}
+
+fn notifications_config(help: &str, reply: Value) -> String {
+    serde_json::json!({
+        "reply": {"exit": 1, "stderr": "unexpected call"},
+        "replies": [
+            {"match": ["--help"], "exit": 0, "stdout_text": help},
+            {"match": ["notifications"], "exit": 0, "stdout": reply},
+        ]
+    })
+    .to_string()
+}
+
+#[test]
+fn a_notification_change_probes_the_local_help_then_calls_once() {
+    let reply = serde_json::json!({"ok": true, "applied": true, "run_id": "run-1",
+        "conversation_id": "conv-1", "preferences": preferences(true, 5)});
+    let fake = Fake::new(&notifications_config(
+        "usage\nsession-notifications-v1\n",
+        reply,
+    ));
+    let mut t = target();
+    t.computer = "mac".into();
+    let out = change_notifications(&fake.hgs, &t, true, Some(4)).unwrap();
+    assert_eq!(out, preferences(true, 5));
+    let log = fake.log();
+    assert_eq!(log.len(), 2);
+    // The probe is local and has no input; the call goes to the peer.
+    assert_eq!(log[0]["argv"], serde_json::json!(["--help"]));
+    assert_eq!(log[0]["stdin"], "");
+    assert_eq!(
+        log[1]["argv"],
+        serde_json::json!([
+            "@mac",
+            "notifications",
+            "claude/sample-project/review",
+            "--json"
+        ])
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(log[1]["stdin"].as_str().unwrap()).unwrap(),
+        serde_json::json!({"run_id": "run-1", "conversation_id": "conv-1", "muted": true, "expected_revision": 4})
+    );
+}
+
+#[test]
+fn a_cli_without_the_marker_is_refused_before_the_call() {
+    let fake = Fake::new(&notifications_config("usage\n", serde_json::json!({})));
+    let error = change_notifications(&fake.hgs, &target(), true, Some(4)).unwrap_err();
+    assert_eq!(
+        error,
+        "Update the configured local hgs to support shared notification preferences."
+    );
+    assert_eq!(fake.log().len(), 1, "only the probe ran");
+}
+
+#[test]
+fn a_failing_help_probe_is_refused_and_a_bad_identity_runs_nothing() {
+    let fake = Fake::new(r#"{"reply":{"exit":2,"stdout_text":"session-notifications-v1\n"}}"#);
+    assert!(change_notifications(&fake.hgs, &target(), true, Some(4))
+        .unwrap_err()
+        .starts_with("Update the configured local hgs"));
+    let none = Fake::new(r#"{"reply":{"exit":0}}"#);
+    let mut t = target();
+    t.run_id.clear();
+    assert!(change_notifications(&none.hgs, &t, true, Some(4))
+        .unwrap_err()
+        .starts_with("The session notification identity"));
+    assert!(none.log().is_empty());
+}
+
+#[test]
+fn an_unconfirmed_reply_reports_stderr_and_a_huge_help_is_refused() {
+    let bad = serde_json::json!({"ok": true, "applied": true, "run_id": "run-1",
+        "conversation_id": "conv-1", "preferences": preferences(true, 9)});
+    let fake = Fake::new(&notifications_config("session-notifications-v1\n", bad));
+    assert_eq!(
+        change_notifications(&fake.hgs, &target(), true, Some(4)).unwrap_err(),
+        "The shared notification change was not confirmed. Refresh the session before trying again."
+    );
+    let huge = "x".repeat(300 * 1024);
+    let big = Fake::new(&notifications_config(
+        &format!("{huge}\nsession-notifications-v1\n"),
+        serde_json::json!({}),
+    ));
+    assert!(change_notifications(&big.hgs, &target(), true, Some(4))
+        .unwrap_err()
+        .starts_with("Update the configured local hgs"));
 }

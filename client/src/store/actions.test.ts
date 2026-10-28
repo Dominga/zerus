@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRoot } from "solid-js";
 import { createCatalog, toSession } from "./catalog";
 import { createActions, type Followed } from "./actions";
+import { createMarks, type MarksPort } from "./marks";
+import { notificationsState, snapshotOf } from "../ui/sessions/actions-ui";
 import * as bridge from "../bridge";
 import { emptyBatch, type Action, type Batch, type Details, type Outcome, type RowOut, type ViewRow } from "../types";
 
@@ -15,6 +17,7 @@ vi.mock("../bridge", () => ({
   sessionReference: vi.fn(),
   copyCommand: vi.fn(),
   copyText: vi.fn(),
+  setNotifications: vi.fn(),
 }));
 
 const mocked = vi.mocked(bridge);
@@ -564,6 +567,188 @@ describe("copy click-time recheck", () => {
       expect(out.outcome).toBe("failed");
       expect(mocked.copyCommand).not.toHaveBeenCalled();
       expect(mocked.copyText).not.toHaveBeenCalled();
+      dispose();
+    });
+  });
+});
+
+describe("toggleMute", () => {
+  const quietPort = (): MarksPort => ({
+    attentionMarks: async () => ({ marks: {}, replies: {} }),
+    updateAttentionMarks: async () => {},
+    queueReadMarks: async () => [],
+    pendingReadMarks: async () => [],
+  });
+  const shared = (extra: Partial<ViewRow> = {}, key = "run:a"): RowOut => rowOut({ shared_notifications: true, notification_revision: 3, muted: false, created: 1_790_000_000, ...extra }, key);
+  const prefs = (muted: boolean, revision: number, conversation = "conv-1") => ({ conversation_id: conversation, muted, revision, suppressed: {} });
+
+  async function setupMute(rows: RowOut[] = [shared()], online: (computer: string) => boolean = () => true) {
+    const marks = createMarks(quietPort(), { load: () => [], save: () => {} });
+    const catalog = createCatalog(marks);
+    catalog.applyBatch(batchOf({ upserts: rows }));
+    await marks.load();
+    const actions = createActions(catalog.catalog, online, () => ({}), marks);
+    const receive = (b: Batch) => { catalog.applyBatch(b); marks.observe(b); };
+    const row = (key = "run:a") => catalog.catalog.rows[`\n${key}`];
+    return { ...actions, marks, receive, row, snap: (key = "run:a") => snapshotOf(row(key)) };
+  }
+  const pending = <T,>() => {
+    let resolve: (v: T) => void = () => {};
+    let reject: (e: unknown) => void = () => {};
+    const promise = new Promise<T>((a, b) => { resolve = a; reject = b; });
+    return { promise, resolve, reject };
+  };
+
+  beforeEach(() => mocked.setNotifications.mockReset());
+
+  it("asks the host to flip the value at the listed revision, then shows the confirmed value", async () => {
+    await createRoot(async (dispose) => {
+      const a = await setupMute();
+      mocked.setNotifications.mockResolvedValue(prefs(true, 4));
+      await a.toggleMute(a.snap());
+      expect(mocked.setNotifications).toHaveBeenCalledWith({ computer: "", name: "claude/sample-project/a", run_id: "run-1", conversation_id: "conv-1" }, true, 3);
+      expect(a.row().muted).toBe(true);
+      expect(a.notices()).toEqual([]);
+      // An older listing does not roll it back; a newer one replaces it.
+      a.receive(batchOf({ upserts: [shared({ notification_revision: 3, muted: false })] }));
+      expect(a.row()).toMatchObject({ muted: true, notificationConflict: false });
+      a.receive(batchOf({ upserts: [shared({ notification_revision: 4, muted: true })] }));
+      expect(a.row().muted).toBe(true);
+      // The override stays until the row lists a higher revision.
+      expect(a.marks.overrideCount()).toBe(1);
+      a.receive(batchOf({ upserts: [shared({ notification_revision: 5, muted: false })] }));
+      expect(a.row().muted).toBe(false);
+      expect(a.marks.overrideCount()).toBe(0);
+      dispose();
+    });
+  });
+
+  it("unmutes a muted row", async () => {
+    await createRoot(async (dispose) => {
+      const a = await setupMute([shared({ muted: true })]);
+      mocked.setNotifications.mockResolvedValue(prefs(false, 4));
+      await a.toggleMute(a.snap());
+      expect(mocked.setNotifications.mock.calls[0].slice(1)).toEqual([false, 3]);
+      expect(a.row().muted).toBe(false);
+      dispose();
+    });
+  });
+
+  it("keeps the override on the same revision with another value and marks a conflict", async () => {
+    await createRoot(async (dispose) => {
+      const a = await setupMute();
+      mocked.setNotifications.mockResolvedValue(prefs(true, 4));
+      await a.toggleMute(a.snap());
+      a.receive(batchOf({ upserts: [shared({ notification_revision: 4, muted: false })] }));
+      expect(a.row()).toMatchObject({ muted: true, notificationConflict: true });
+      expect(notificationsState(a.snap(), true, a.pendingNotifications("", "conv-1"))).toMatchObject({ enabled: false, hint: "Conflicting shared notification preferences. Refresh the session." });
+      dispose();
+    });
+  });
+
+  it("refuses a reply older than the row, or equal with another value, with a sticky notice", async () => {
+    await createRoot(async (dispose) => {
+      const a = await setupMute();
+      const first = pending<Record<string, unknown>>();
+      mocked.setNotifications.mockReturnValueOnce(first.promise);
+      const call = a.toggleMute(a.snap());
+      a.receive(batchOf({ upserts: [shared({ notification_revision: 5, muted: false })] }));
+      first.resolve(prefs(true, 4));
+      await call;
+      expect(a.row().muted).toBe(false);
+      expect(a.notices()).toMatchObject([{ tone: "error", sticky: true, text: "The shared notification setting changed while this request was pending. Refresh the session." }]);
+
+      const second = pending<Record<string, unknown>>();
+      mocked.setNotifications.mockReturnValueOnce(second.promise);
+      const again = a.toggleMute(a.snap());
+      second.resolve(prefs(true, 5));
+      await again;
+      expect(a.notices()).toHaveLength(2);
+      expect(a.row().muted).toBe(false);
+      dispose();
+    });
+  });
+
+  it("shows a failure as a sticky error and keeps the row", async () => {
+    await createRoot(async (dispose) => {
+      const a = await setupMute();
+      const failing = pending<Record<string, unknown>>();
+      mocked.setNotifications.mockReturnValueOnce(failing.promise);
+      const call = a.toggleMute(a.snap());
+      failing.reject("Update the configured local hgs to support shared notification preferences.");
+      await call;
+      expect(a.notices()).toMatchObject([{ tone: "error", sticky: true, text: "Update the configured local hgs to support shared notification preferences." }]);
+      expect(a.row().muted).toBe(false);
+      expect(a.pendingNotifications("", "conv-1")).toEqual({ conversation: false, total: 0 });
+      dispose();
+    });
+  });
+
+  it("drops a late answer for a row that is no longer the same run, conversation or created", async () => {
+    for (const next of [{ run_id: "run-2" }, { conversation_id: "conv-2" }, { created: 1_790_000_001 }, { state: "archived" }]) {
+      await createRoot(async (dispose) => {
+        const a = await setupMute();
+        const slow = pending<Record<string, unknown>>();
+        mocked.setNotifications.mockReturnValueOnce(slow.promise);
+        const call = a.toggleMute(a.snap());
+        a.receive(batchOf({ upserts: [shared({ ...next, muted: false })] }));
+        slow.resolve(prefs(true, 4));
+        await call;
+        expect(a.row().muted).toBe(false);
+        expect(a.notices()).toEqual([]);
+        dispose();
+      });
+    }
+    await createRoot(async (dispose) => {
+      const a = await setupMute();
+      const slow = pending<Record<string, unknown>>();
+      mocked.setNotifications.mockReturnValueOnce(slow.promise);
+      const call = a.toggleMute(a.snap());
+      a.receive(batchOf({ upserts: [shared({ run_id: "run-2" })] }));
+      slow.reject("boom");
+      await call;
+      expect(a.notices()).toEqual([]);
+      dispose();
+    });
+  });
+
+  it("does nothing when the row changed since the menu opened", async () => {
+    await createRoot(async (dispose) => {
+      for (const next of [{ run_id: "run-2" }, { notification_revision: 4 }, { muted: true }, { shared_notifications: false }]) {
+        const a = await setupMute();
+        const shown = a.snap();
+        a.receive(batchOf({ upserts: [shared(next)] }));
+        await a.toggleMute(shown);
+      }
+      const gone = await setupMute();
+      const shown = gone.snap();
+      gone.receive(batchOf({ removes: [{ computer: "", key: "run:a" }] }));
+      await gone.toggleMute(shown);
+      const offline = await setupMute([shared()], () => false);
+      await offline.toggleMute(offline.snap());
+      expect(mocked.setNotifications).not.toHaveBeenCalled();
+      expect(offline.notices()).toEqual([]);
+      dispose();
+    });
+  });
+
+  it("allows one pending change per conversation and sixteen in all", async () => {
+    await createRoot(async (dispose) => {
+      const rows = Array.from({ length: 18 }, (_, i) => shared({ name: `claude/sample-project/s${i}`, conversation_id: `conv-${i}` }, `run:${i}`));
+      const a = await setupMute(rows);
+      const hold = pending<Record<string, unknown>>();
+      mocked.setNotifications.mockImplementation(() => hold.promise);
+      void a.toggleMute(a.snap("run:0"));
+      void a.toggleMute(a.snap("run:0"));
+      expect(mocked.setNotifications).toHaveBeenCalledTimes(1);
+      expect(a.pendingNotifications("", "conv-0")).toEqual({ conversation: true, total: 1 });
+      expect(notificationsState(a.snap("run:0"), true, a.pendingNotifications("", "conv-0"))).toMatchObject({ enabled: false, hint: "A shared notification change is pending. Wait for its result." });
+      for (let i = 1; i < 18; i++) void a.toggleMute(a.snap(`run:${i}`));
+      expect(mocked.setNotifications).toHaveBeenCalledTimes(16);
+      expect(a.pendingNotifications("", "conv-17").total).toBe(16);
+      hold.resolve(prefs(true, 4, "other"));
+      await flush();
+      expect(a.pendingNotifications("", "conv-17").total).toBe(0);
       dispose();
     });
   });

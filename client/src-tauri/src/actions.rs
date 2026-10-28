@@ -16,7 +16,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use tauri::State;
-use zerus_client_core::actions::{classify, invocation, parse_reference, reference_invocation};
+use zerus_client_core::actions::{
+    change_notifications, classify, invocation, parse_reference, reference_invocation,
+};
 use zerus_client_core::details::{details_invocation, parse_details, Details};
 use zerus_client_core::marks::{AttentionMarks, Mark};
 use zerus_client_core::readmarks::{ReadMark, ReadMarks};
@@ -33,6 +35,8 @@ pub enum Lane {
     Write,
     Interrupt,
     Read,
+    /// A shared notification change: Qt tracks these apart from `m_pending`.
+    Notifications,
 }
 
 impl Lane {
@@ -472,6 +476,31 @@ pub async fn run_action(
     Ok(classify(&target, &action, &inv, exit))
 }
 
+/// Changes the shared notification preferences of a session (Mute and Unmute)
+/// and returns the host's confirmed `preferences`. One change per session at a
+/// time, in its own lane (`Err("busy")` otherwise). The core probes the local
+/// `hgs --help` first.
+#[tauri::command]
+pub async fn set_notifications(
+    state: State<'_, Actions>,
+    target: Target,
+    muted: bool,
+    expected_revision: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    if blocked() {
+        return Err(REPLAY_NEEDS_HGS.into());
+    }
+    let Some(_claim) = state.claim_lane(&target.computer, &target.name, Lane::Notifications) else {
+        return Err("busy".into());
+    };
+    let hgs = default_hgs();
+    tauri::async_runtime::spawn_blocking(move || {
+        change_notifications(&hgs, &target, muted, expected_revision)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// The session's read-only details, None when it cannot be read. Not guarded:
 /// the store keeps at most one inspect in flight per session.
 #[tauri::command]
@@ -796,6 +825,25 @@ mod tests {
         assert!(flight.claim(key("", Lane::Write)).is_some());
         drop(read);
         assert!(flight.claim(key("", Lane::Read)).is_some());
+    }
+
+    #[test]
+    fn a_notification_change_has_its_own_lane() {
+        let actions = Actions::new(std::env::temp_dir().join("zerus-lane-test-marks.json"));
+        let write = actions.claim_lane("", "a/b/c", Lane::Write).unwrap();
+        let change = actions
+            .claim_lane("", "a/b/c", Lane::Notifications)
+            .unwrap();
+        assert!(actions
+            .claim_lane("", "a/b/c", Lane::Notifications)
+            .is_none());
+        assert!(actions.claim_lane("", "a/b/c", Lane::Write).is_none());
+        drop(write);
+        assert!(actions.claim_lane("", "a/b/c", Lane::Write).is_some());
+        drop(change);
+        assert!(actions
+            .claim_lane("", "a/b/c", Lane::Notifications)
+            .is_some());
     }
 
     #[test]

@@ -11,6 +11,7 @@ pub mod actions;
 pub mod attachments;
 pub mod batch;
 pub mod details;
+pub mod drafts;
 pub mod fleet;
 pub mod machine;
 pub mod organization;

@@ -8169,13 +8169,19 @@ void TestTeamsUi::leadAnswersAMembersSubagentRequest()
     // The attention strip's Answer brings the lead to the same box.
     workspace.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&workspace));
     workspace.findChild<QPushButton *>("teamAttentionAnswer")->click();
-    QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(workspace.findChild<QPushButton *>("teamMemberPermissionAllow")));
+    // The window's focus: the application's is empty whenever the window is
+    // briefly inactive on a loaded runner (fork builds 93 and 98).
+    QTRY_COMPARE(workspace.focusWidget(), static_cast<QWidget *>(workspace.findChild<QPushButton *>("teamMemberPermissionAllow")));
     // A status/feed refresh can arrive immediately after Answer. Rebuild
     // deterministically: the new button for this request keeps keyboard focus.
     const QPointer<QPushButton> oldAllow = workspace.findChild<QPushButton *>("teamMemberPermissionAllow");
     workspace.render();
     QVERIFY(workspace.findChild<QPushButton *>("teamMemberPermissionAllow") != oldAllow.data());
-    QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(workspace.findChild<QPushButton *>("teamMemberPermissionAllow")));
+    QTRY_COMPARE(workspace.focusWidget(), static_cast<QWidget *>(workspace.findChild<QPushButton *>("teamMemberPermissionAllow")));
+    // Lost before a rebuild, it comes back to the same question's Allow.
+    workspace.findChild<QPushButton *>("teamMemberPermissionAllow")->clearFocus();
+    workspace.render();
+    QTRY_COMPARE(workspace.focusWidget(), static_cast<QWidget *>(workspace.findChild<QPushButton *>("teamMemberPermissionAllow")));
     shot(&workspace, "u19-lead-subagents-three-dark");
     workspace.setTheme(false); lightShot(&workspace, "u19-lead-subagents-three-light"); darkPalette(); workspace.setTheme(true);
     QTRY_VERIFY(workspace.findChild<QPushButton *>("teamMemberPermissionAllow"));

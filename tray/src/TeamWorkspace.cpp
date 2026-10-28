@@ -333,6 +333,13 @@ void TeamWorkspace::render()
         retire(m_members->takeWidget());
         m_members->setWidget(list); m_membersContent = list;
         m_members->verticalScrollBar()->setValue(scroll);
+        // Answer was clicked a moment ago and the focus has already gone (a
+        // rebuild before this one, or the window briefly inactive): focus the
+        // same question's Allow again (fork CI, leadAnswersAMembersSubagentRequest).
+        if (focusControl.isEmpty() && m_answerAt.isValid() && m_answerAt.elapsed() < 3000 && m_answerTeam == team->id) {
+            focusMember = m_answerMember; focusQuestion = m_answerQuestion; focusHash = m_answerHash;
+            focusTeam = m_answerTeam; focusControl = QStringLiteral("teamMemberPermissionAllow");
+        }
         if (!focusControl.isEmpty() && focusTeam == team->id && !focusQuestion.isEmpty() && !focusHash.isEmpty()) {
             for (auto *box : list->findChildren<QFrame *>("teamMemberPermission")) {
                 if (box->property("member").toString() != focusMember || box->property("question").toString() != focusQuestion
@@ -940,7 +947,12 @@ void TeamWorkspace::answerAttention(const QString &teamId, const QString &member
         if (box->property("member").toString() != id || !box->isVisible()) continue;
         m_members->ensureWidgetVisible(box, 0, 24);
         auto *allow = box->findChild<QPushButton *>("teamMemberPermissionAllow");
-        if (allow && allow->isEnabled()) allow->setFocus(Qt::OtherFocusReason);
+        if (allow && allow->isEnabled()) {
+            allow->setFocus(Qt::OtherFocusReason);
+            m_answerTeam = teamId; m_answerMember = box->property("member").toString();
+            m_answerQuestion = box->property("question").toString(); m_answerHash = box->property("questionHash").toString();
+            m_answerAt.start();
+        }
         else if (auto *reason = box->findChild<QLineEdit *>("teamMemberPermissionDenyReason")) reason->setFocus(Qt::OtherFocusReason);
         return;
     }

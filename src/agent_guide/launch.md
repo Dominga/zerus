@@ -9,7 +9,7 @@ Start a session (hgs guide launch)
 - Text after -- is the agent's first prompt; resume never replays it.
 - For Kimi, Zerus waits for the interactive input and sends that prompt once
   through guarded send. It does not use Kimi's non-interactive --prompt mode.
-  inspect includes launch_prompt status; a stopped or uncertain attempt needs
+  inspect includes launch_prompt status and a short preview; a stopped or uncertain attempt needs
   review before any manual resend.
 - A launch that ended early appears in hgs [@h] ls --json under
   ended_launches with its launch_id, exit code and last screen lines.

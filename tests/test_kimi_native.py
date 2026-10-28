@@ -851,6 +851,24 @@ class NativeKimi(lifecycle.Harness):
         self.assertEqual(self.held(text), 1)
         self.assert_process(name, 'resumed')
 
+    def test_declined_initial_prompt_is_cancelled_and_inspection_is_bounded(self):
+        name, text = 'kimi/p/declined', 'Private initial message ' * 100
+        self.hgs('kimi', 'p', '--new', '-n', 'declined', '-d', '--', text)
+        state = self.until(lambda: (s if any(q.get('can_answer') for q in s.get('pending_questions', [])) else None)
+                           if (s := self.inspect(name)) else None, name)
+        pending = state['launch_prompt']
+        self.assertEqual(pending['status'], 'pending')
+        self.assertNotIn('text', pending)
+        self.assertEqual(pending['preview'], text[:200] + '…')
+        self.assertLess(len(json.dumps(pending)), 1024)
+        self.assertFalse(self.requests)
+        self.assert_process(name, 'initial')
+        card = next(q for q in state['pending_questions'] if q.get('can_answer'))
+        self.assertEqual(self.answer(name, card, 1)['status'], 'answered')
+        self.until(lambda: self.binding(name).get('launch_prompt', {}).get('status') == 'cancelled', name)
+        self.assertFalse(self.requests, 'declining trust delivered the initial message')
+        self.assertFalse((self.root / 'state/input_receipts' / (pending['request_id'] + '.json')).exists())
+
     def test_exact_input_reaches_the_model_once(self):
         # Existing account-wide tracking entries predate the managed TOML
         # block. A supervised launch must retain them without adding another

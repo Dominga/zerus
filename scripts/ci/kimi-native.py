@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # Historical data validation only; native execution always uses stage_latest().
 HISTORICAL_VERSIONS = ('2.1.1', '2.2.0')
 METHODS = (
+    'test_kimi_native.NativeKimi.test_declined_initial_prompt_is_cancelled_and_inspection_is_bounded',
     'test_kimi_native.NativeKimi.test_launch_prompt_waits_for_trust_and_is_not_replayed_on_resume',
     'test_kimi_native.NativeKimi.test_exact_input_reaches_the_model_once',
     'test_kimi_native.NativeKimi.test_pause_and_resume_keep_the_conversation',

@@ -986,6 +986,8 @@ guarded input and preserving the conversation across pause/resume without
 replaying that message. The former send-after-start-only coverage missed the
 unsupported positional launch prompt. Help snapshots from native 2.1.1, 2.2.0
 and 2.3.3 cover argument construction without running historical releases in CI.
+Declining trust also verifies cancellation without delivery and bounds the
+retained inspection preview independently of the full initial message size.
 
 To test the latest releases or inspect current upstream changes locally:
 

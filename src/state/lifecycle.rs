@@ -80,15 +80,28 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     }
     // Strip only a capability-verified interactive launch prompt. Never save it
     // in the native resume recipe, where a later resume could replay it.
-    let mut launch_prompt = if agent == "kimi" && base.len() > 1 {
-        let help = agent_help("kimi")?;
+    let native_kimi = ["kimi", "kimi.exe", "kimi.cmd"].contains(&Path::new(&base[0])
+        .file_name().and_then(|name| name.to_str()).unwrap_or(""));
+    let mut launch_prompt = if agent == "kimi" && native_kimi && base.len() > 1 {
+        // Resolve after the account's login shell and environment assignments.
+        // Probe and spawn the same absolute path, including PATH-local installs
+        // and Windows npm shims. A project run_kimi.sh owns its own argv contract
+        // and must never run twice just to probe help; --bare selects native Kimi.
+        let resolved = crate::platform::which(&base[0]).ok_or("Kimi is not found on the launch PATH")?;
+        let resolved = std::path::absolute(resolved).map_err(|e|e.to_string())?.to_string_lossy().into_owned();
+        let help = agent_help(&resolved)?;
         let prompt = kimi_launch::take_prompt(&mut base, &help)?;
         if !first.is_empty() {
             let other = kimi_launch::take_prompt(&mut first, &help)?;
             if other != prompt { return Err("Kimi launch prompts do not match".into()); }
         }
-        if let Some(text) = &prompt { input::validate_launch_prompt(text)?; }
-        prompt.map(kimi_launch::Prompt::new)
+        if let Some(text) = &prompt {
+            input::validate_launch_prompt(text)?;
+            base[0] = resolved.clone();
+            if !first.is_empty() { first[0] = resolved; }
+        }
+        prompt.map(|text| kimi_launch::Prompt::new(text,
+            nonempty_env("HGS_EXPECTED_ID").or_else(|| nonempty_env("HGS_REQUESTED_ID")).unwrap_or_default()))
     } else { None };
     if nonempty_env("HGS_ACCOUNT_ID").is_some_and(|id| !id.starts_with("native-")) {
         for key in crate::accounts::AUTH_ENV {

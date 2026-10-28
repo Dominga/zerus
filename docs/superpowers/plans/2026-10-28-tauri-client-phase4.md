@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** The new desktop client gets the session Terminal, the Processes tab, the full composer with Qt's guarded Send (block reasons, the cold-cache question, resume-then-send, compact-to-send, local failed messages, durable drafts), attachments, voice and round video, and DeepSeek's Native UI, with the Qt GUI's exact behaviour (Beads `zerus-5wmh.9`).
+**Goal:** The new desktop client gets the session Terminal, the Processes tab, the full composer with Qt's guarded Send (block reasons, the cold-cache question, resume-then-send, compact-to-send, local failed messages, durable drafts), attachments, voice and round video, DeepSeek's Native UI, agent question cards and approvals, and the agent's native queue with Send now and Send and push now, with the Qt GUI's exact behaviour (Beads `zerus-5wmh.9`).
 
-**Two parts (owner decision, 2026-10-28).** The new client replaces the Qt app on the owner's Mac as soon as it is workable for daily use. **Part A is that bar** for this phase: the Terminal, the composer and Send (block reasons, the cold cache, resume-then-send and compact-to-send, local messages, durable drafts), attachments (stage, send, fetch, preview) and Processes. New session (phase 5, `zerus-5wmh.10`) completes the bar. **Part B** follows the bar and is fully planned here: voice and round video, Native UI, and the external terminal, shell and folder entries. Within Part A the tasks follow the core: first the merged Terminal core, then in the order the core PRs land (#403, #404, #407, #408, #409, #410, #411).
+**Two parts (owner decision, 2026-10-28).** The new client replaces the Qt app on the owner's Mac as soon as it is workable for daily use. **Part A is that bar** for this phase: the Terminal, the composer and Send (block reasons, the cold cache, resume-then-send and compact-to-send, local messages, durable drafts), attachments (stage, send, fetch, preview) and Processes. **Part A2** joins the bar by the coordinator's ruling of 2026-10-28: question answers (`zerus-5wmh.9.23`) and sending while the agent works (`zerus-5wmh.9.24`). New session (phase 5, `zerus-5wmh.10`) completes the bar. **Part B** follows the bar and is fully planned here: voice and round video, Native UI, and the external terminal, shell and folder entries. Within Part A the tasks follow the core: first the merged Terminal core, then in the order the core PRs land (#403, #404, #407, #408, #409, #410, #411).
 
 **Architecture:**
 - **Ownership (binding).** The pure Rust core modules belong to the events session and are listed with their public surfaces in `docs/superpowers/plans/2026-10-28-tauri-client-phase4-core-section.md` (branch `work-ba0ed9fd-phase4core`). This plan never re-plans them. It covers:
@@ -54,6 +54,7 @@ These surfaces are missing from the core section. This plan does not build them;
 
   The voice driver shares the app's one draft store (`Drafts`, Task 3a), and its `close_all` runs first in the one exit hook.
 - **R5. The terminal launcher.** Port `tray/src/TerminalBackend.h`, `WindowsTerminalBackend.cpp`, the macOS and Linux backends and `TrayAgent::openSessionTerminal` (`tray/src/TrayAgent.cpp:725-760`, spec row 294) as `client/core/src/launch.rs`: `open_program(program, args) -> Result<Option<String /*advisory*/>, String>` and `open_shell(directory)`. Task 15's Open terminal, Open shell in session folder and Open externally entries need it (Part B).
+- **R7 and R8: question cards and the native queue.** See Part A2, "Requests to the core owner: R7 and R8". R7 covers the cards, their drafts and the guarded `hgs answer` (`zerus-5wmh.9.23`). R8 covers the native queue, Send now, the push and OpenCode's inbox (`zerus-5wmh.9.24`). Tasks A2-1 to A2-6 start once they merge. The bar needs both, so no control ships disabled waiting for them.
 
 ## Global Constraints
 
@@ -89,7 +90,9 @@ These surfaces are missing from the core section. This plan does not build them;
 - **Lanes** (`client/src-tauri/src/actions.rs`):
   - `Lane::Send` is keyed by (computer, name, agent_id);
   - `Lane::Process` is for `StopProcess`;
-  - `ClearContext`, `CompactContext` and `StartFresh` run on `Lane::Write`.
+  - `ClearContext`, `CompactContext` and `StartFresh` run on `Lane::Write`;
+  - `Lane::Answer` (R7) is keyed by (computer, name): one answer per session, as Qt's `m_answersInFlight`;
+  - `Lane::Queue` (`SendNow`) and `Lane::Inbox` (`RemoveQueued`) are R8's. The hub also keeps Qt's one send-now and one removal in the whole app.
 - The attachment URI scheme serves only canonical regular files under `cache_root` (`attachments::cached_at`) or bytes of an open draft, and only to the main webview.
 - Every app command refuses a webview other than `main` (the Native UI child webview gets no IPC).
 - The new UI never separates values with dots (U+00B7, U+2022, U+2219, U+22C5, U+2027, U+2981, U+30FB); `scripts/check-ui-separators.py` enforces it, `.rs` files under `client/` included. Qt's " · " joins become layout, commas or " / ".
@@ -135,6 +138,19 @@ These surfaces are missing from the core section. This plan does not build them;
    Tests: Task 1 (`a_paste_over_the_queue_bound_queues_nothing`), Task 3a (`a_huge_pasted_image_is_refused`, `over_64_kib_disables_send`) and Task 6 ("over 64 KiB disables Send at once", "one attach at a time").
 5. **Attachment cache eviction while a preview is open.** `prune` never removes a pinned copy: an open preview, a playing message, or the cached files of a failed local message that Retry needs. A preview whose file disappeared fetches once more and otherwise shows Qt's error. Tests: Task 9 (`prune_keeps_open_previews_and_retry_files`, and "a vanished preview fetches again once, then shows the error").
 6. **Qt's drafts.** Saved drafts, its preview, Recover and Restore read Qt's store and never write, rename or delete there, and a Qt root that overlaps the client's own is left out. Tests: Task 7 (`the_qt_store_is_never_written`, `the_qt_store_is_never_the_clients_own`).
+7. **A question card that changes while it is answered.** The hash changes, the card is answered in Terminal or on the phone, or the delivery is unknown.
+   - Nothing is sent for a changed card: the card reads "The question changed. Your answers were kept without submitting.".
+   - A card answered elsewhere goes away and the composer returns.
+   - An uncertain answer reads "Delivery is not confirmed. Check Terminal before retrying. …". It sends nothing again until Allow retry: not after a new state, a reload or a restart. A draft saved while sending reloads as interrupted.
+   - A retry is a new request id.
+
+   Tests: A2-1 (`a_sending_answer_reloads_uncertain`, `a_card_answered_elsewhere_goes_away`), A2-2 (`a_card_changed_during_the_save_is_never_sent`, `an_uncertain_answer_waits_for_allow_retry`).
+8. **A broader approval option.** The first Submit only arms Confirm, and the second one sends. Holding Enter never confirms. Approve once waits out the 3 s review while the card is visible and the window active; Deny never waits.
+
+   Tests: R7 (`a_broader_option_needs_a_second_confirm`), A2-2 (`a_broader_choice_sends_only_after_confirm`), A2-3 ("holding Enter never submits again", "the review delay counts only while the card is active").
+9. **A push never resends text.** Send and push now sends the message once, then only the agent's own send-now of the snapshot that holds it. It ends with Qt's notice when another session opens, after 20 s, or when the send fails or is uncertain.
+
+   Tests: R8 (`a_push_sends_only_the_snapshot_that_holds_the_message`, `the_twenty_second_endings`), A2-4 (`a_push_sends_the_queue_once_the_agent_queues_it`, `selecting_another_session_ends_the_push`, `a_push_ends_after_twenty_seconds`).
 
 ## Decisions
 
@@ -143,7 +159,10 @@ These surfaces are missing from the core section. This plan does not build them;
   - On macOS under `com.hgdev.hgs-tray`, Cocoa writes its own keys (for example the file picker's last folder) into `com.hgdev.hgs-tray.plist`, which is Qt's settings file. Qt's own dialogs write the same keys, and no Qt key is changed. Accepted. The switch slice (zerus-5wmh.12.2) checks that Qt's keys stay byte-for-byte unchanged.
   - The spec's line "a distinct bundle identifier from the Qt app" predates the identity decision of 2026-10-28. It is corrected in the switch slice's PR, not here.
   - The client's own data (read marks, cache, local settings) moving with the identifier is decided by the Mac switch plan, not by this plan.
-  - Part A lands as five PRs: the Terminal (Tasks 1-2), the composer and send (3a-7), attachments (8-9), Processes (10-11), then the smoke run and docs (12).
+  - Part A lands as five PRs: the Terminal (Tasks 1-2), the composer and send (3a-7), attachments (8-9), Processes (10-11), then the smoke run and docs (12). Part A2 adds three:
+    - the question cards (A2-1 to A2-3);
+    - the queue and the push (A2-4 and A2-5);
+    - OpenCode's inbox (A2-6).
 
 Rulings on the open questions; the tasks follow them.
 
@@ -160,12 +179,27 @@ Rulings on the open questions; the tasks follow them.
 - **Composer parts outside this phase.** Task 12 files a follow-up child of `zerus-5wmh` for each, and each keeps its Qt place, disabled with "Arrives with …":
   - the model settings popup and the OpenCode model picker ("model settings");
   - file references ("file references");
-  - Send and push now and the native queue ("the message queue");
   - suggestions;
   - the subagent composer (the subagent view stays read only);
-  - question answers ("question answers");
   - the Usage limit and Recovery chips ("account usage" and "automatic recovery").
-- **The push envelope.** `next_batch` serializes `{...batch, composer?, processes_view?, draft_keys?}`. Only the open composer and the followed processes are projected; `draft_keys` lists the sessions with a nonempty draft among the 200 newest drafts plus the composers in memory, so the cards' draft marks stay bounded.
+- **Part A2 (coordinator ruling, 2026-10-28).** Question answers and sending while the agent works join the bar: R7 and R8 for the core owner, and Tasks A2-1 to A2-6 here.
+  - **Send needs no new rule.** S1's block reasons already let a busy agent take messages, and the agent's TUI queues them. A2 adds Qt's "Queued in agent" panel with Send now, its window chord, and Send and push now.
+  - **The chords.** Send and push now is a composer chord only, as in Qt:
+    - Control-X Control-S on macOS (Qt's Meta+X, Meta+S);
+    - Ctrl+X Ctrl+S elsewhere, where Ctrl+X with a selection stays Cut.
+
+    Send now is the panel's button and Command+Shift+Return (Ctrl+Shift+Return elsewhere). No tooltip names a chord (owner rule).
+  - **No edit, reorder or remove of a native queue.** Qt has none, and the CLI marks Codex's ordinary follow-ups read-only. Remove exists only for OpenCode's inbox (A2-6), which lands after the switch unless the owner rules otherwise.
+  - **Every A2 action is built in Rust from held state** and is `skip_deserializing`:
+    - `Answer` from the shown card's raw entry and its held draft;
+    - `SendNow` from the followed details' queue id;
+    - `RemoveQueued` after the confirmation's re-check.
+  - **The review delay** (3 s) runs in the webview store, which knows the card's visibility and the window's focus. The card's view says which buttons it gates. Rust does not time it: Qt's gate is the button state too.
+  - **Question drafts** use the app's one draft store with Qt's keys (`question\n…`) and `form_state`, so Saved drafts and the switch's import see them.
+  - **Later notices.** Rust's notices that arrive after the call (push endings, send-now results, answer follow-ups) and the Terminal tab a Codex update opens reach the webview as `composer_events` in the envelope, at most 16 per batch.
+  - **The question read error.** The client has no session hint banner yet: Qt's "Could not load agent questions: … Check Terminal." shows at the top of the composer column.
+  - **Naming.** Task 4b's "questions" are the hub's own dialogs (cold cache, start). The agent's requests are "question cards" (`questions.rs`, `QuestionReply`).
+- **The push envelope.** `next_batch` serializes `{...batch, composer?, processes_view?, draft_keys?}`. Only the open composer and the followed processes are projected; `draft_keys` lists the sessions with a nonempty draft among the 200 newest drafts plus the composers in memory, so the cards' draft marks stay bounded. Part A2 adds `composer_events?`, and the composer view carries the question card, the queue panel and the inbox state.
 - **Editing protocol.**
   - The webview owns the text while the user types and flushes `composer_edit(handle, rev, text, position, anchor)` 250 ms after the last keystroke, on blur and before any attach, paste, remove or send. Rust applies only a higher `rev`.
   - Rust-originated text changes bump `text_epoch`; the webview takes `text` when the epoch grows: a load, an attach or remove, a delivery's end, a restore.
@@ -204,6 +238,8 @@ client/src-tauri/src/processes.rs        ProcessHub: follow, view projection, ou
 client/src-tauri/src/composer/mod.rs     Composers: open, edit, attach, paste, remove, undo, rename, saved drafts, recover, view, draft keys, the exit's close
 client/src-tauri/src/composer/send.rs    the session's view (block reasons, cache chip), send_message, answers, delivery, local rows, retry, delete, inspect, continuations, clear
 client/src-tauri/src/composer/files.rs   zerus-file scheme (Range), the cache, pins, prune lane, attachment_fetch, open and reveal
+client/src-tauri/src/composer/questions.rs  question cards: answer drafts, the shown card, the guarded answer (A2-1, A2-2)
+client/src-tauri/src/composer/queue.rs  the native queue, Send now, Send and push now, OpenCode's inbox (A2-4, A2-6)
 client/src-tauri/src/native_ui.rs        NativeUi: child webview per launch key, bounds, overlays, browser fallback
 client/src-tauri/tests/support/fake_hgs_phase4.py   fake hgs for the hubs' tests and the phase 4 smoke
 client/scripts/make-fixture.py           processes topic, cache hints, attachments and voice messages in the replay
@@ -216,6 +252,7 @@ client/src/store/processes.ts            the Processes view state and selection 
 client/src/store/composer.ts             the open composer: text sync, attach, paste, send replies, dialogs (+ .test.ts)
 client/src/store/media.ts                one player at a time, fetch and pin, progress (+ .test.ts)
 client/src/store/voice.ts                the voice driver's channels (voice_open), inputs and transcript inserts (+ .test.ts)
+client/src/store/questions.ts            the question card: review delay, replies, cold cache dialog (+ .test.ts)
 client/src/store/settings.ts             processes/* keys
 client/src/store/session.ts              routes the envelope to the stores
 client/src/store/ui.ts                   detailTab, overlay count
@@ -225,6 +262,9 @@ client/src/ui/sessions/Composer.tsx      editor, toolbar chips, action row, heig
 client/src/ui/sessions/Attachments.tsx   the composer's attachment list (mockup's AttachmentsChip)
 client/src/ui/sessions/ComposerDialogs.tsx   cold cache, start, clear, replace draft
 client/src/ui/sessions/SavedDrafts.tsx   the Saved drafts dialog
+client/src/ui/sessions/QuestionCard.tsx  the question card and its cold cache dialog
+client/src/ui/sessions/QueuePanel.tsx    "Queued in agent" with Send now
+client/src/ui/sessions/chords.ts         the Send and push now and Send now chords (+ .test.ts)
 client/src/ui/sessions/Recorder.tsx      voice and video recorder controls and preview
 client/src/ui/sessions/NativeUi.tsx      the Native UI tab and its placeholder rectangle
 client/src/ui/sessions/Activity.tsx      local rows, attachment chips, real media playback
@@ -250,11 +290,17 @@ client/README.md                         Terminal, Processes, Composer and Send,
 | 5 | Continuations and Clear context | S3 `zerus-5wmh.9.9` (branch `work-ba0ed9fd-continuation`), C1 `zerus-5wmh.9.18` (branch `work-ba0ed9fd-context`), Task 4b |
 | 6 | Composer view | Tasks 3a-5; the Mark as read chip also #406; the Context chip R1 |
 | 7 | Local rows in Activity and Saved drafts | Tasks 4b and 6 |
+| A2-1 | Question cards in the hub: drafts, the shown card, its view | R7 (`zerus-5wmh.9.23`); Tasks 3a, 4a and 4b |
+| A2-2 | The guarded answer: Submit, Approve once, Deny, Skip, the cold cache | A2-1 |
+| A2-3 | The question card view, answers in Activity | A2-2; Tasks 2 and 6 |
+| A2-4 | The native queue, Send now and Send and push now in the hub | R8 (`zerus-5wmh.9.24`); Tasks 4b and 5; A2-2's events (or its Step 3) |
+| A2-5 | The queue panel, the push chord, "You (queued)" | A2-4; Task 6 |
+| A2-6 | OpenCode's inbox: Queued, Not delivered, Remove (after the switch unless ruled onto the bar) | R8; A2-4; Task 7 |
 | 8 | Dropped files: composer attach, Terminal paste and stage | A2 #404 (StageFiles), #406 (`Session.created`), Tasks 2, 3a and 6 |
 | 9 | Activity attachments: fetch, preview, open | A3 `zerus-5wmh.9.5` (#410), `zerus-5wmh.9.17`, Tasks 3b and 4b; Open also R2 |
 | 10 | Processes hub | P1 `zerus-5wmh.9.6` (#411, stacked on A2 #404) |
 | 11 | Processes tab and Settings > Processes | Task 10 |
-| 12 | Fixtures, the Part A smoke run, docs and follow-ups | Tasks 1-11 (3a, 3b, 4a and 4b included) |
+| 12 | Fixtures, the Part A smoke run, docs and follow-ups | Tasks 1-11 (3a, 3b, 4a and 4b included) and A2-1 to A2-5 |
 
 **Part B: after the bar**
 
@@ -6573,6 +6619,3598 @@ git commit -m "feat(client): local message rows with Retry, Delete and Inspect, 
 
 ---
 
+# Part A2: question answers and sending while the agent works
+
+The coordinator ruled on 2026-10-28 that two features block the switch, because the owner uses them every day in the Qt app:
+- **Question answers** (`zerus-5wmh.9.23`): Claude, Codex and Kimi question cards and approvals are answered from the app.
+- **Sending while the agent works** (`zerus-5wmh.9.24`): the agent's native queue, Send now and Send and push now.
+
+Part A2 is on the bar. Its tasks follow Task 7 and come before Task 12, which runs the smoke for both parts. Two requests go to the core owner, R7 and R8. The webui tasks bind to them and to Tasks 3a-7.
+
+**The ownership split** (fixed):
+- The **events session** owns the pure core in `client/core`: parsing, view models, and the guarded actions with their lanes in `actions::dispatch`. This is R7 and R8.
+- **webui** owns the `client/src-tauri` commands and hub state, and the SolidJS UI. These are Tasks A2-1 to A2-6.
+
+**Estimate (2026-10-28), in working days:**
+- **Core (events session):** R7 about 2, R8 about 1. They are independent and can run in parallel. Started by 2026-10-30, both land before webui reaches Part A2 (after Task 7), so they stay off the critical path.
+- **webui:** 5.5 in all:
+  - A2-1: 1; A2-2: 1; A2-3: 1.5;
+  - A2-4: 1; A2-5: 0.75;
+  - Task 12's additions: 0.25.
+
+  A2-6 adds 0.5 if the owner puts it on the bar.
+- **The switch** was previously about 2026-11-05. With Part A2 it is:
+  - about 2026-11-13 with one webui implementer;
+  - about 2026-11-09 when a second implementer runs the A2 chains beside Tasks 8-12 once Task 7 is merged (see "A2 tasks").
+
+## A2 behaviour (Qt)
+
+Verified on main `99835752`. Qt wins: where this section and Qt disagree, fix this section.
+
+**Where questions come from.**
+- They come from the inspection's `pending_questions`, not from Activity events. The client already receives the inspection as the followed session's Activity `state` value (`src/watch/activity.rs:115-123`; only `events`, `processes`, `process_work`, `cursor`, `history_truncated` and `replace_events` are removed), and Task 4a keeps it in `Followed.details`.
+- Each card is `{question_id, question_hash, run_id, conversation_id, source, answer_transport, created_at, optional, can_answer, can_skip, approval, approval_choices, trust_request, plan_review, answer_unavailable_reason, answer_delivery, questions: [{id, question, header, body, multi_select, allow_other, required, other_label, other_description, options: [{id, label, description, scope}], default_option_ids, default_text, min_items, max_items, max_length}]}` (`src/state/questions.rs:34-111, 394-462`, `src/state/claude_approval.rs:257-269, 381-383`).
+- `pending_questions_error` names a failed read. Qt then shows "Could not load agent questions: {error}. Check Terminal." in the session hint (`SessionsWindow.cpp:3913-3918`).
+
+**Which card shows.** `renderQuestion` (`SessionsWindow.cpp:5003-5068`) walks `pending_questions` in order and skips four kinds of entry:
+- one without an id;
+- a repeated id;
+- one without questions that can be answered (`can_answer` missing counts as true);
+- a Codex optional question whose answer was already submitted.
+
+Of the rest:
+- `pending` counts each card's questions, at least one per card.
+- The first required card shows. A later required card that can be answered replaces one that cannot.
+- Without a required card, the optional cards are sorted newest first by `created_at` and one of them shows. The user's choice among them is remembered per (session, run, conversation) and survives polls.
+- A required card **hides the composer's editor and action row**. The toolbar stays (`MessageComposer::setInputVisible`, `MessageComposer.cpp:1126-1131`). An optional card keeps the composer.
+- The card sits in the Activity column, between the Activity view and the composer (`SessionsWindow.cpp:918, 1030`).
+
+**Availability.** The first rule that holds disables the card with its text (`SessionsWindow.cpp:5054-5065`):
+1. "Machine unavailable. Your answers stay here."
+2. "This session is not running."
+3. "Wait for the session update to finish." (terminating, an update or a rename)
+4. "Refresh the session before answering." (the last inspect failed)
+5. "Refresh the pending question before answering." (the card's run or conversation is not the details')
+6. "The agent is no longer running." (`runtime_state` not `live` or `process_state` not `running`)
+
+**The card** (`QuestionCard.cpp`):
+- **Heading.** "Agent needs your approval" for an approval, a trust request or a plan review. Otherwise "Optional question", or "Optional question #i/n" while several optional cards wait, or "Agent needs your answer" (805-807).
+- **Progress.** "i of n answered", or "Awaiting agent" after a submission. Hidden for approvals (828-829).
+- **Metadata row** (380-385, 396-405):
+  - "Asked 28 Oct 14:03:05" (with the year when it is not this year);
+  - "n pending", with the tooltip "Questions waiting for an answer, including the questions shown in this card.";
+  - for several optional cards, Previous and Next arrows with "Previous queued question (newer)" / "Next queued question (older)" and "Request i of n, newest first. Draft answers are kept when switching.".
+- **Tabs.** One per question, only when there are several. The title is "Question i", or "i: {header, at most 32 characters}", with a "✓ " prefix once the question is filled (625-627, 818-827).
+- **Text and Markdown.** The prompt and body are Markdown for authored sources (`hook`, `codex_async`, `kimi_wire`, `kimi_plan_review`, `dsh_native`, `opencode_native`, `claude_native_question`). Approvals, trust requests and any other source show plain text, and an approval's body is monospace (515-519, 561-577).
+- **Mode line.** "Select one" or "Select one or more". OpenCode bounds give "Select {min} to {max}", "Select at least {min}" or "Select up to {max}". It is hidden for plan reviews (578-580, 623).
+- **Option rows.** A radio button or a check box, with the label and the description:
+  - A `scope: broader` option adds "Applies beyond this request. Asks for confirmation." to its description (587-591).
+  - Approvals without `approval_choices` hide their synthesized rows: Approve once and Deny stand in for them (582-584, 599).
+- **Other.** "Other" (or the provider's `other_label`) with "Write your own answer" (or `other_description`) (602-612).
+- **The free-text line.** Placeholder "Write your answer…". It shows when the question has no options or Other is chosen. Its bound is 4096 UTF-16 units, or OpenCode's `max_length` in characters (613-621, 785-786).
+- **Custom answer checks** (104-113):
+  - "Keep your custom answer under 4 KiB.";
+  - "Use one line for a custom answer. Multiline input is available in Terminal.";
+  - "Remove control characters from your custom answer.";
+  - "Use Terminal for answers starting with / or !." (except OpenCode form replies).
+- **Footer** (211-236, 793-817):
+  - Open Terminal, or "Open native UI" for DeepSeek;
+  - Skip, with the tooltip "Dismiss this optional question without sending an answer. The agent can continue.";
+  - Allow retry, with the tooltip "Check the agent in Terminal before retrying to avoid submitting twice.";
+  - "← Back" and "Next →";
+  - Submit, labelled "Submit answer", "Submit answers", "Submitting…", "Submitted", "Confirm" or "Submit answer (3)";
+  - Deny and "Approve once (3)".
+- **Status line** (830-854). The first of these that applies:
+  1. the storage error;
+  2. the draft's notice;
+  3. the unavailable reason;
+  4. the card's own `answer_unavailable_reason`;
+  5. "Answer this request in Terminal.";
+  6. "Loading your saved answer…";
+  7. the first custom answer problem;
+  8. "“{label}” changes the agent's permissions beyond this request. Select Confirm to send it.";
+  9. "Review the request, then choose one of the agent's options.";
+  10. "Review the plan, then choose how the agent continues.";
+  11. "Approval applies only to this command. Review it before continuing." for an approval;
+  12. "The agent can continue. Answer when ready or skip this question." for an optional card;
+  13. "Your choices are ready to send." when every question is answered;
+  14. "Answer each question to continue.".
+
+  The error colour applies for an error or a storage error.
+- **The review delay** (237-246, 793-817). An approval's Submit (with native choices) and Approve once stay disabled for 3 s of review, counting "(3)", "(2)", "(1)". The count runs only while the card is visible, the window is active and the card is available. Otherwise it starts over. Deny is never delayed.
+- **The second Confirm** (916-941, 846-847). Submitting a broader option the first time only arms Confirm. The next Submit sends it. Any edit disarms it.
+- **Enter** (898-914). Enter on an option row clicks Submit, never on auto-repeat, so holding Enter cannot confirm or resend. Enter in the free-text line submits too.
+- **Read-only cards** (779-780). A card with `can_answer` false from a Terminal-only source keeps its options disabled.
+- **Drafts** (282-309, 676-739):
+  - The draft key is `question\n` + `["{session key}","{question_id}","{question_hash}"]` (compact JSON) + `\n{run_id}\n{conversation_id}`.
+  - The label is "{session key with ' / '} (question answer)".
+  - `form_state` is `{answers: [{id, text, other, options}], page, answered, submitted}`.
+  - The draft text joins the free-text answers, so Saved drafts lists it.
+  - Untouched OpenCode defaults are not saved (523-551, 719-720).
+
+**The answer path** (`answerQuestion` and `finishQuestion`, `SessionsWindow.cpp:5070-5186`):
+1. **Quiet refusals.** Nothing happens while a cold-cache dialog of an answer is open, while an answer of this session is in flight, or when the session is not the selected one, offline, not running, updating, failed to inspect, or not `live`/`running`.
+2. **A changed card.** When the card is gone, can no longer be answered (or skipped), or its run or conversation differs from the details', the card shows "This question changed. Refresh before answering.".
+3. **A cold cache.** It asks "Submit with a cold cache?", with the cache warning, a blank line and "Submitting this answer may resume the agent with the entire conversation, increasing token usage, cost or subscription usage. Compaction or clearing can invalidate the pending question. Cancel keeps your answers.". The buttons are "Submit with full context" and Cancel, with Cancel the default and Escape. Kimi's own cache panel (`kimi_cache_hint` with `kimi_tui`) skips the dialog. After the dialog, any change shows "The question or your answers changed. Your draft was kept; review it before submitting again." as an error notice and sends nothing:
+   - in the session's identity;
+   - in the card's consent identity (`question_id`, `question_hash`, `run_id`, `conversation_id`, `questions`, `source`, `tool`, `tool_name`, `tool_call_id`, `native_question_id`, `agent_id`, `answer_transport`, `approval`, `approval_choices`, `trust_request`, `optional`);
+   - in the draft.
+4. **The durable save.** The draft is saved durably as sending ("Saving before submitting…", `prepareSendingAsync` 428-445). Only its callback can continue.
+5. **The re-check.** The callback checks everything again, on the details or the evidence captured at the click (`sendEvidence`, 138-145), and on the consent identity. On any change the card shows "The question changed. Your answers were kept without submitting." and nothing is sent.
+6. **The call.** `hgs [@host] answer NAME --json` (`HgsClient.cpp:1872-1959`):
+   - **Standard input:** `{request_id, question_id, expected_question_hash, expected_run_id, expected_conversation_id, answers}`, with a fresh UUID per attempt.
+   - **Answers:** `{question_id, selected_option_ids, text}` per question; Skip sends `{question_id, skip: true}`; Approve once and Deny send `{question_id: first question, selected_option_ids: ["allow" | "deny"], text: ""}`.
+   - **Timeouts:** 30 s locally and 45 s on a peer. One answer per session at a time ("An answer to this session is already being sent.").
+   - **Refusals before the call:**
+     - "This request is not ready to answer. Wait for an updated request or open Terminal." when an identity or the answers are missing, or the card cannot be answered or skipped. A conversation may be empty only for the recognized startup requests: folder trust, Claude's permission mode, Codex's hooks review and Codex's update.
+     - "The answers exceed 64 KiB.".
+   - **Outcomes:**
+     - a failed start is definite: "Cannot start hgs: …";
+     - a timeout is uncertain: "Answer delivery timed out. Check Terminal before retrying.";
+     - a nonzero exit is uncertain unless it is a normal exit 1 without "delivery uncertain". The detail is stderr (at most 4000 characters) or "Answer transfer failed (exit {code}).";
+     - more than 64 KiB of output is uncertain: "The answer acknowledgement is too large. Check Terminal before retrying.";
+     - a receipt that does not echo `request_id`, `name`, `question_id`, `question_hash`, `run_id` and a string `conversation_id` is uncertain: "The answer acknowledgement is invalid. Check Terminal before retrying.";
+     - success is `status: answered`, or `submitted` for a Codex optional answer that is not a skip.
+7. **After the answer** (447-478, 1156-1186):
+   - `answered` shows "Answer sent. Waiting for the agent…" ("Response recorded." for an optional card).
+   - `submitted` shows "Answer submitted. Waiting for Codex to record it. You can check the queue above or open Terminal.".
+   - A definite failure shows its detail.
+   - An uncertain one shows "Delivery is not confirmed. Check Terminal before retrying. {detail}" and keeps Submit disabled until Allow retry.
+   - The session is inspected again.
+   - Codex's hooks review and Update now open the Terminal tab when the receipt says `open_terminal`.
+   - Update now also shows "Codex in {name} ({machine}) is installing its update in Terminal. Resume the session after Codex exits." or "… exited after its update. Check the result in Terminal, then resume the session.".
+8. **Answered elsewhere.** An answer in Terminal, the phone or another desktop removes the card from `pending_questions`. The next state hides the card and returns the composer. A Codex answer recorded as submitted (`answer_delivery`) is never offered again, even when a stale poll lists it (311-368). If the card changed between the click and the call, the CLI refuses with "question changed; refresh before answering" (exit 1, definite).
+9. **Unknown never replays.** The CLI keeps a receipt per request id and answers "delivery uncertain: … do not resend automatically" for an id it saw before (`src/state/questions.rs:695-711`). Qt makes a new id per attempt, and only after Allow retry.
+
+**Sending while the agent works.**
+- **Send.** Send already works while the agent is busy. The block reasons let a busy agent in `idle`, `working`, `tool` or `compacting` take messages (`messageBlockReason` 4425-4430, S1 on main). `hgs send` types them into the agent's TUI, which queues them natively.
+- **The queue panel.** The inspection's `input_queue` is `{id, text, can_send_now, hint}` (`src/state/input_queue.rs:108-124`):
+  - It exists for Claude, Codex and Kimi while they are busy and their panel shows queued input.
+  - `can_send_now` is false while compacting, while the Terminal input is not empty ("Return Terminal to an empty input before sending the queue now"), and for Codex's ordinary follow-ups ("Use Terminal to edit or submit these queued follow-ups").
+- **"Queued in agent."** Activity shows the panel at the bottom of the transcript column when the session is tracked and a queue id exists (`ActivityView.cpp:1280-1292, 1890-1895`):
+  - the caption "Queued in agent";
+  - the queue's text, plain and selectable, at most 100 px high, with the whole text as tooltip;
+  - a **Send now** button, labelled "Sending…" while a send-now runs, enabled when `can_send_now` holds and none runs. It is disabled when offline or after a failed inspect (`SessionsWindow.cpp:3976-3980`). Its tooltip is the queue's `hint`; Qt appends the `queue.sendNow` chord, which the owner rule drops.
+- **Send now** (`sendQueuedNow`, `SessionsWindowShortcuts.cpp:248-260`):
+  - One runs at a time in the whole app.
+  - It needs the selected session online, the queue id unchanged and `can_send_now`; otherwise "Nothing queued can be sent now".
+  - The call is `hgs [@host] send-now NAME --json` with `{request_id, expected_run_id, expected_conversation_id, queue_id}`, 20 s locally and 35 s on a peer (`HgsClient.cpp:2235-2290`). Success is `status: submitted` echoing all five.
+  - Texts: "Queue action timed out. Check Terminal before retrying.", "Queue action failed. Check Terminal before retrying.", "Could not confirm sending the queue. Check Terminal before retrying." and "Invalid queue acknowledgement. Check Terminal before retrying.".
+  - After it, a still-selected session hides the panel until the next inspection, shows "Send now requested. Waiting for the agent to accept the queue." or the error, and is inspected again (`SessionsWindow.cpp:1859-1873`). A stale queue shows "The native queue is no longer visible; nothing was sent. Activity is being refreshed; check Terminal or the current queue before retrying." as a transient error.
+  - The CLI re-reads the screen and sends only the agent's own shortcut, never the text (`src/state/input_queue.rs:125-158`).
+- **The keyboard.** `queue.sendNow` is a window chord, Ctrl+Shift+Return (Command+Shift+Return on macOS) (`Shortcuts.cpp:40, 61`; `SessionsWindowShortcuts.cpp:242`).
+- **Send and push now** (`message.push`, `MessageComposer.cpp:399-406, 811-847`; `SessionsWindowShortcuts.cpp:265-341`) is a composer chord only: Control-X Control-S on macOS (Qt's Meta+X, Meta+S) and Ctrl+X, Ctrl+S elsewhere (`Shortcuts.cpp:41, 70`). There is no button.
+  - With an empty field (or while a message is on its way) it is Send now.
+  - Otherwise, when Send is enabled, it arms a push for the selected session with the typed text, then sends as usual.
+  - The push records the send's request, run and conversation (`deliverMessage` 4910-4912), and becomes confirmed when that send succeeds.
+  - On each later inspection of that session, the first queue snapshot whose items hold the message's start (`queueHolds` 95-161: the leading `[Image #n]`/`[File #n]` references and the first 24 non-space characters) and can be sent now is sent with Send now. A push never sends text.
+  - It ends with a notice when:
+    - the session changes: "The message was not pushed: the session changed";
+    - the send fails: "The message was not pushed: sending did not complete";
+    - the send is uncertain: "The message was not pushed: delivery is not confirmed";
+    - the message has no text: "Sent without push: a message without text cannot be found in the agent's queue";
+    - another push replaces it: "The earlier push was replaced by a new one";
+    - another session is selected: "The message to {title} was not pushed: another session was selected", or "… its session is no longer selected";
+    - 20 s pass: "The message was sent without push: the agent did not offer to send it now within 20 seconds", "The message will be sent without push: it was not delivered within 20 seconds" or "The message was not pushed: it was not sent within 20 seconds".
+- **Edit, reorder and remove.** Qt has no edit or reorder of a native queue; the CLI marks Codex's ordinary follow-ups read-only. Remove exists only for OpenCode's inbox (`ActivityView.cpp:1034-1038, 1069-1087`; `SessionsWindow.cpp:4433-4467`):
+  - a user message with `delivery_state` `queued` or `not_delivered` stamps "Queued" or "Not delivered";
+  - a not-delivered one adds "Still waiting in OpenCode's queue. It runs first with your next message unless you remove it.";
+  - while the session allows `remove_queued`, it offers Remove. That asks "Remove queued message" / "Remove this queued message? It is still waiting in OpenCode's queue and runs first with your next message unless you remove it." with Remove and Cancel (the default), and runs `hgs session-action NAME --json` with `action: remove_queued`.
+- **Activity labels** (`ActivityView.cpp:1029-1046, 975-981`):
+  - "You (queued)" for `UserPromptQueued`;
+  - "You (answer)" for `QuestionAnswered` and for Codex question replies (`<send_user_message_question_reply>`, `QuestionReply.h`), shown as "Question" and "Your answer" blocks;
+  - "You (recorded answer)" for a recorded prompt that holds replies.
+
+  Session cards show "Your answer: …" in place of such a prompt (`SessionPresentation.h:314-327`).
+
+## Requests to the core owner: R7 and R8
+
+Both requests follow the rules of PR #404 (`Action::Send`):
+- Every new action is `#[serde(skip_deserializing)]` and is built in Rust from held state. Webview JSON can never produce it.
+- Every action keeps the request identity, the expected run and conversation, and Qt's texts.
+- An `Outcome::Uncertain` is never retried.
+- serde names are snake_case.
+- All new structs derive `Clone, Debug, Default, PartialEq`.
+- The view structs that cross the IPC also derive `Serialize`: `CardView` and its parts, `ColdAnswer`, `Reply`, `QueueView` and `Notice`. The composer view carries them and compares them.
+
+### R7. Question cards and the guarded answer (`zerus-5wmh.9.23`)
+
+**Files:**
+- `client/core/src/questions.rs` (new, `pub mod questions` in `lib.rs`);
+- `client/core/src/actions.rs` (`Action::Answer`);
+- `client/core/src/view.rs` (answer previews on the cards);
+- `client/src-tauri/src/actions.rs` (`Lane::Answer`, as #404 added `Lane::Send`);
+- `client/core/tests/questions.rs`.
+
+**Qt reference:**
+- `tray/src/QuestionCard.cpp` (all of it);
+- `tray/src/SessionsWindow.cpp`: 138-154, 1131-1186, 3913-3918, 5003-5186;
+- `tray/src/HgsClient.cpp:1872-1959`;
+- `tray/src/QuestionReply.h`;
+- `tray/src/ActivityView.cpp:347-363, 975-981, 1029-1031`;
+- `tray/src/SessionPresentation.h:314-327`.
+
+The CLI side:
+- `src/state/questions.rs:34-111, 394-485, 659-913`;
+- `src/state/claude_approval.rs:257-269, 381-383`.
+
+**Surface:**
+
+```rust
+// client/core/src/questions.rs
+pub const REVIEW_MS: u64 = 3000;
+pub const STORE_PREFIX: &str = "question\n";
+pub const CHANGED: &str = "This question changed. Refresh before answering.";
+pub const CHANGED_KEPT: &str = "The question changed. Your answers were kept without submitting.";
+pub const CONSENT_CHANGED: &str = "The question or your answers changed. Your draft was kept; review it before submitting again.";
+
+pub struct Choice { pub id: String, pub label: String, pub description: String, pub broader: bool }
+pub struct Item {
+    pub id: String, pub question: String, pub header: String, pub body: String,
+    pub multi: bool, pub allow_other: bool, pub required: bool,
+    pub other_label: String, pub other_description: String, pub options: Vec<Choice>,
+    pub default_option_ids: Vec<String>, pub default_text: String,
+    pub min_items: usize, pub max_items: usize, pub max_length: usize,
+}
+/// One `pending_questions` entry. `raw` is the object as listed: the answer pins it.
+pub struct Question {                       // Clone, Debug, Default, PartialEq (not Serialize)
+    pub id: String, pub hash: String, pub run_id: String, pub conversation_id: String,
+    pub source: String, pub transport: String, pub created_at: f64,
+    pub optional: bool, pub can_answer: bool, pub can_skip: bool, pub approval: bool,
+    pub approval_choices: bool, pub trust_request: bool, pub plan_review: bool,
+    pub unavailable_reason: String, pub items: Vec<Item>, pub raw: Value,
+}
+pub fn pending(details: &Value) -> Vec<Question>;
+pub fn questions_error(details: &Value) -> Option<String>;
+
+pub struct Selection { pub question: Option<Question>, pub pending: usize, pub optional: Vec<String>, pub index: usize, pub chosen: Option<String> }
+impl Selection { pub fn input_visible(&self) -> bool; }
+pub fn select(questions: &[Question], submitted: &dyn Fn(&Question) -> bool, chosen: Option<&str>, navigation: i32) -> Selection;
+
+pub struct AnswerFacts { pub online: bool, pub state: String, pub updating: bool, pub inspect_error: bool }
+pub fn unavailable(facts: &AnswerFacts, question: &Question, details: &Value) -> Option<&'static str>;
+
+pub fn store_key(session_key: &str, question: &Question) -> Option<String>;
+pub fn label(session_key: &str) -> String;
+
+pub struct ItemAnswer { pub options: BTreeSet<String>, pub text: String, pub other: bool }
+#[derive(Deserialize)] #[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Edit { Option { item: String, option: String, checked: bool }, Other { item: String, checked: bool }, Text { item: String, text: String } }
+pub struct AnswerDraft {                    // Clone, Debug, Default, PartialEq
+    pub answers: BTreeMap<String, ItemAnswer>, pub seeded: BTreeSet<String>,
+    pub notice: String, pub confirm: String, pub storage_error: String, pub label: String, pub page: usize,
+    pub sending: bool, pub submitted: bool, pub answered: bool, pub error: bool, pub uncertain: bool,
+}
+pub struct Snapshot { /* answers, page, confirm, sending, submitted, answered, uncertain, storage_error */ }  // PartialEq
+impl AnswerDraft {
+    pub fn from_loaded(loaded: &drafts::Loaded, label: &str) -> Self;
+    pub fn stored(&self) -> drafts::StoredDraft;
+    pub fn locked(&self) -> bool;                           // sending || submitted || answered
+    pub fn seed(&mut self, question: &Question);
+    pub fn restore_submitted(&mut self, question: &Question) -> bool;
+    pub fn apply(&mut self, question: &Question, edit: Edit) -> bool;
+    pub fn confirm_step(&mut self, question: &Question) -> bool;
+    pub fn begin_sending(&mut self);
+    pub fn sending_failed(&mut self);
+    pub fn set_error(&mut self, detail: &str, uncertain: bool);
+    pub fn set_answered(&mut self, optional: bool);
+    pub fn set_submitted(&mut self);
+    pub fn allow_retry(&mut self);
+    pub fn snapshot(&self) -> Snapshot;
+}
+
+#[derive(Serialize)] #[serde(untagged)]
+pub enum AnswerItem { Skip { question_id: String, skip: bool }, Choice { question_id: String, selected_option_ids: Vec<String>, text: String } }
+pub fn answers(question: &Question, draft: &AnswerDraft) -> (Vec<AnswerItem>, bool);
+pub fn skip_answers(question: &Question) -> Vec<AnswerItem>;
+pub fn decision(question: &Question, allow: bool) -> Option<Vec<AnswerItem>>;
+pub fn custom_answer_problem(text: &str, form_reply: bool) -> Option<&'static str>;
+pub fn broader(question: &Question, draft: &AnswerDraft) -> Option<String>;
+pub fn same_form(old: &Question, new: &Question) -> bool;
+
+pub struct CardContext { pub available: bool, pub unavailable_reason: String, pub loading: bool, pub in_flight: bool, pub pending: usize, pub queue_index: usize, pub queue_count: usize }
+pub struct ButtonView { pub visible: bool, pub enabled: bool, pub label: String, pub review_label: Option<String> }
+pub struct OptionView { pub id: String, pub label: String, pub description: String, pub markdown: bool, pub checked: bool, pub enabled: bool, pub visible: bool }
+pub struct TextView { pub visible: bool, pub enabled: bool, pub value: String, pub placeholder: String, pub accessible_name: String, pub max_units: usize, pub max_chars: usize }
+pub struct FormView { pub id: String, pub tab: String, pub prompt: String, pub body: String, pub markdown: bool, pub monospace_body: bool,
+                      pub multi: bool, pub mode: String, pub mode_visible: bool, pub options: Vec<OptionView>, pub other: Option<OptionView>, pub text: Option<TextView> }
+pub struct QueueNav { pub previous: bool, pub next: bool, pub previous_tip: String, pub next_tip: String }
+pub struct CardView {
+    pub heading: String, pub progress: String, pub pending: String, pub pending_tip: String, pub nav: Option<QueueNav>,
+    pub tabs_visible: bool, pub page: usize, pub forms: Vec<FormView>, pub status: String, pub status_error: bool,
+    pub available: bool, pub locked: bool, pub review: bool, pub created_at: f64,
+    pub submit: ButtonView, pub approve: ButtonView, pub deny: ButtonView, pub skip: ButtonView,
+    pub previous: ButtonView, pub next: ButtonView, pub retry: bool, pub skip_tip: String, pub retry_tip: String,
+}
+pub fn card(question: &Question, draft: &AnswerDraft, ctx: &CardContext) -> CardView;
+
+pub enum Actionable { Ready(Question), Silent, Changed }
+pub fn actionable(details: &Value, facts: &AnswerFacts, question_id: &str, skipping: bool) -> Actionable;
+pub fn consent_identity(question: &Value) -> Value;
+pub struct Recheck<'a> {
+    pub pinned: &'a Value, pub question: &'a Question, pub evidence: &'a Value, pub captured: &'a Value,
+    pub row_same: bool, pub row_identity: bool, pub facts: &'a AnswerFacts,
+    pub skipping: bool, pub consent: bool, pub submitted: bool, pub now: f64,
+}
+pub fn still_answerable(r: &Recheck<'_>) -> bool;
+pub struct ColdAnswer { pub title: String, pub text: String, pub proceed: String }   // Serialize
+pub fn cold_answer(details: &Value, question: &Question, now: f64) -> Option<ColdAnswer>;
+pub struct FollowUp { pub open_terminal: bool, pub notice: Option<String> }
+pub fn answered_follow_up(question: &Question, receipt: &Value, open_run: Option<&str>, target: &str) -> FollowUp;
+
+pub struct Reply { pub question: String, pub answer: String }                       // Serialize
+pub fn replies(text: &str) -> Vec<Reply>;
+pub fn replies_preview(replies: &[Reply]) -> String;
+pub fn annotate_replies(payload: &mut Value);
+
+// client/core/src/actions.rs
+#[serde(skip_deserializing)]
+Answer { question: Value, answers: Vec<questions::AnswerItem> },
+pub const ALREADY_ANSWERING: &str = "An answer to this session is already being sent.";
+// client/src-tauri/src/actions.rs: Lane::Answer, keyed by (computer, name); a busy lane answers Ok(failed(ALREADY_ANSWERING)).
+```
+
+**Rules:**
+
+- **`pending(details)`** reads `details["pending_questions"]` in order.
+  - The question's fields are `question_id`, `question_hash`, `run_id`, `conversation_id`, `source`, `answer_transport`, `created_at`, `optional`, `can_answer`, `can_skip`, `approval`, `approval_choices`, `trust_request` and `plan_review`. Missing flags are false.
+  - `unavailable_reason` is the first nonempty trimmed of `answer_unavailable_reason` and `unavailable_reason`.
+  - An item has `id`, `question`, `header`, `body`, `multi_select`, `allow_other`, `required` (missing: true), and `other_label` and `other_description` with whitespace simplified.
+  - Its options are `{id, label, description, broader: scope == "broader"}`.
+  - `default_option_ids` and `default_text` are read as listed.
+  - OpenCode only: `min_items` and `max_items` (multi only, at least 0), and `max_length` (clamped to 0..=4096).
+  - `raw` is the entry unchanged.
+- **`questions_error(details)`** gives "Could not load agent questions: {error}. Check Terminal." for a nonempty `pending_questions_error`.
+- **`select`** is `renderQuestion` 5009-5040:
+  - An entry is left out without an id, when its id repeats, when it has no items and `raw.can_answer` is not false (a missing value counts as true), or when `submitted(question)` holds.
+  - `pending` adds `max(1, items)` per entry left in.
+  - Required entries: the first one, replaced by a later one that `can_answer` when the first cannot.
+  - Optional entries: ids newest first by `created_at`, a stable sort.
+  - `chosen` (the remembered id) gives the index when it is still listed. Otherwise the index is 0 and `Selection.chosen` is None, so the hub forgets it.
+  - Without a required entry, `navigation` (-1, 0 or +1) moves the index within bounds, and `Selection.chosen` becomes that id.
+  - `input_visible()` is true without a question or for an optional one.
+- **`unavailable`** gives the six texts in "Availability" above, in that order:
+  - `facts.state != "running"` → "This session is not running.";
+  - `facts.updating` → "Wait for the session update to finish.";
+  - `facts.inspect_error` → "Refresh the session before answering.";
+  - the card's run or conversation not the details' → "Refresh the pending question before answering.";
+  - `runtime_state` or `process_state` not `live`/`running` → "The agent is no longer running.".
+- **`store_key`** is `STORE_PREFIX` + `serde_json::to_string(&[session_key, id, hash])` + `"\n" + run + "\n" + conversation`. It is None for an empty id.
+- **`label(session_key)`** is "{session_key with '\n' replaced by ' / '} (question answer)".
+- **`AnswerDraft`** follows Qt's state rules:
+  - **`from_loaded`** is `restoredDraft` 691-707:
+    - `storage_error` and `notice` come from `Loaded` (S5 already marks a draft saved while sending as uncertain with "Delivery was interrupted. Check Activity or Terminal before sending again.");
+    - `error` is `uncertain`;
+    - `page`, `answered`, `submitted` and `answers` come from `form_state`;
+    - `submitted` sets the notice "Answer submitted. Waiting for the agent to record it. Check Activity or Terminal.";
+    - `answered` sets "Response recorded.".
+  - **`stored()`** is `saveDraft` 709-739:
+    - `form_state` is `{answers: answered ? [] : [{id, text, other, options (sorted)}] by sorted id without the seeded ones, page, answered, submitted}`;
+    - the draft text is the nonempty answer texts joined by "\n" (empty once answered or submitted);
+    - `label`, `sending` and `uncertain` are kept;
+    - no attachments, position 0.
+  - **`apply(edit)`** is `capture` 676-689 and returns false while `locked()`:
+    - In a single-select item, checking an option clears the others and Other, and checking Other clears the options. Unchecking a radio does nothing.
+    - In a multi-select item, an option or Other toggles.
+    - `Text` sets the text.
+    - Every applied edit clears `confirm` and `seeded`, and leaves an entry for every item, as `capture` reads every form. A later `seed` then never refills an answer the user emptied.
+  - **`seed`** is `rebuild` 523-551, for OpenCode only and not while locked:
+    - An item without an answer gets the `default_option_ids` it offers (only the first for single select).
+    - An item without options that allows Other gets `default_text`, cut to `max_length` characters (or 4096).
+    - Seeded items are marked in `seeded`.
+  - **`restore_submitted`** is 311-338: a `codex_async` optional card whose `answer_delivery` is `submitted` and echoes id, hash, run and conversation:
+    - fills the answers from it the first time;
+    - sets `submitted`, clears `sending`, `error` and `uncertain`;
+    - sets the notice "Answer submitted. Waiting for Codex to record it. You can check the queue above or open Terminal.";
+    - returns true when the answers changed.
+  - **`confirm_step`** is `submit` 921-925: for `approval_choices`, while `broader` names an option that `confirm` does not, it sets `confirm` and returns true (only the first click). Otherwise it clears `seeded` and returns false.
+  - **`begin_sending`** sets `sending` and the notice "Saving before submitting…", and clears `error`.
+  - **`sending_failed`** clears `sending`, and also the notice unless submitted or answered.
+  - **`set_error`**:
+    - once submitted or answered, it only clears `sending`;
+    - otherwise it sets `error` and `uncertain` and the notice: `detail`, or "Delivery is not confirmed. Check Terminal before retrying. {detail}" when uncertain.
+  - **`set_answered(optional)`**:
+    - sets "Response recorded." for an optional card, else "Answer sent. Waiting for the agent…";
+    - sets `answered`;
+    - clears `sending`, `error` and `uncertain`.
+  - **`set_submitted`**:
+    - sets "Answer submitted. Waiting for Codex to record it. You can check the queue above or open Terminal.";
+    - sets `submitted`;
+    - clears `sending`, `error` and `uncertain`.
+  - **`allow_retry`** clears `uncertain`, `error` and the notice.
+  - **`snapshot()`** holds what `submissionSnapshot` 340-357 compares, without the notice.
+- **`answers`** is 741-765, in source option order:
+  - An item is incomplete when:
+    - it has neither options nor text;
+    - Other is chosen without text;
+    - a single-select item has more than one option;
+    - `custom_answer_problem` holds;
+    - its id is empty;
+    - an OpenCode bound fails (options plus an Other text count).
+  - `form_reply` is `source == "opencode_native" && !approval`.
+- **`skip_answers`** gives one `Skip { question_id, skip: true }` per item.
+- **`decision`** gives `[Choice { question_id: items[0].id, selected_option_ids: ["allow" | "deny"], text: "" }]` for an approval card, and None otherwise.
+- **`custom_answer_problem`** gives Qt's four texts (104-113). The size is UTF-8 bytes over 4096. Control characters are below U+0020 and U+007F-U+009F. The "/" and "!" check applies only when `!form_reply`.
+- **`broader`** is the label of the first chosen option with `broader` (931-941).
+- **`same_form(old, new)`** is `refreshNativeBody` 484-510. For the sources `claude_tool_approval`, `claude_terminal_safety` and `claude_terminal_choice` with the same nonempty hash and the same items except `body`, it is true: the form is kept and only the bodies change.
+- **`card`** is `rebuild` and `updateControls` 512-632, 767-856:
+  - `locked` = `draft.locked() || ctx.in_flight || ctx.loading`.
+  - `read_only` = `!can_answer` and the source is one of `claude_tool_approval`, `kimi_tool_approval`, `claude_terminal_choice`, `claude_native_question`, `claude_terminal_safety`, `claude_usage_limit` or `startup_terminal_choice`.
+  - `literal` (no Markdown) = approval, trust request, or a source outside the authored list.
+  - `listed` = `!approval || approval_choices`.
+  - The texts are those in "The card" above.
+  - Option rows are `enabled` = `!locked && !read_only` and `visible` = `listed`.
+  - A broader option's description gains "Applies beyond this request. Asks for confirmation." (alone when it has none), and its `markdown` is false.
+  - `markdown` is `!literal` and only for a nonempty description.
+  - Other is present when `allow_other` and the item has options.
+  - The text line is present when `allow_other`:
+    - `visible` when the item has no options or Other is checked;
+    - `max_units` is 4096, or `2 * max_length` for OpenCode;
+    - `max_chars` is `max_length` (0 when there is no bound);
+    - the placeholder is "Write your answer…", the accessible name "Your answer to {prompt}".
+  - **Submit:**
+    - `visible` = `!read_only && !forms.empty && (!approval || (approval_choices && can_answer)) && page == last`;
+    - `enabled` = `available && can_answer && complete && !locked && !uncertain`;
+    - the label is "Submitted", "Submitting…", "Confirm", "Submit answer" or "Submit answers" in Qt's precedence;
+    - `review_label` is `Some("Submit answer")` for `approval_choices` unless submitted or sending.
+  - **Approve once and Deny:**
+    - `visible` = `approval && !approval_choices && can_answer && items[0] has options`;
+    - `enabled` = `available && !locked && !uncertain`;
+    - Approve's `review_label` is `Some("Approve once")`; Deny has none.
+  - **Skip:** `visible` = `optional`; `enabled` = `available && can_skip && !locked && !uncertain`.
+  - **Allow retry:** `retry` = `uncertain && !locked`.
+  - **Back and Next:** Back is visible with several forms and enabled = `page > 0 && !locked`. Next is visible while `page < last` and enabled = `!locked`.
+  - **Pending:** `pending` is "{n} pending" with `n = max(ctx.pending, forms)`, or empty for 0.
+  - **Navigation:** `nav` is Some for optional cards with `queue_count > 1`.
+  - **Status:** the status line's priority, cut to 600 characters. `status_error` = `error || storage_error` is nonempty.
+  - **Review:** `review` = `approval`.
+  - The page is clamped to the forms.
+- **`actionable`** is `actionableQuestion` 5078-5096:
+  - `Silent` while the session is not ready: offline, not running, updating, inspect error, or not `live`/`running`. The hub checks "an answer of this session is in flight" and "already submitted" before.
+  - `Changed` when the card is missing, cannot be answered (`can_skip` when skipping), or its run or conversation is not the details'.
+  - Otherwise `Ready`.
+- **`consent_identity`** keeps exactly the sixteen fields listed in "The answer path".
+- **`still_answerable`** is the callback's check (5153-5170). It is false when:
+  - `!row_same || !row_identity`;
+  - the session is offline or not running;
+  - the session is updating;
+  - there is an inspect error;
+  - the evidence is not `live`/`running`;
+  - the evidence's run or conversation is not the question's;
+  - the card's consent identity, found by id in the evidence, differs from `pinned`;
+  - without consent and outside Kimi's cache panel, `cache::expired` holds on the captured details or the evidence;
+  - the card cannot be answered or skipped;
+  - `submitted` holds.
+- **`native_cache_choice`** is `source == "kimi_cache_hint" && transport == "kimi_tui"`.
+- **`cold_answer`** is None for Kimi's cache panel or when `cache::expired(details, now)` is false. Otherwise it gives the title "Submit with a cold cache?", the text `cache::warning(details, now)` + "\n\n" + the dialog text above, and the button "Submit with full context".
+- **`answered_follow_up`** is 1156-1179:
+  - `open_terminal` holds when the id starts with `codex-hooks-trust:` or `codex-update:`, the receipt's `question_hash` is the card's, `open_run` equals the receipt's `run_id`, and `receipt.open_terminal` is true.
+  - For `codex-update:`, `receipt.codex_update` `installing` or `exited` gives the two update notices with `target` ("{name} ({machine})").
+- **`Action::Answer`** invocation (`HgsClient.cpp:1872-1932`):
+  - The request goes as above. Its identity comes from `question`, and the target's run and conversation are the question's.
+  - The two refusals return `Err` with Qt's texts. The startup forms match exactly:
+    - `{provider}-trust:{hash}` with `{provider}_tui` for `claude`, `codex` and `kimi`;
+    - `claude-permissions:{hash}` with `claude_tui`;
+    - `codex-hooks-trust:{hash}` and `codex-update:{hash}` with `codex_tui`;
+    - each with a 64-character hash.
+  - The answers are allowed when nonempty and the card `can_answer`, or when every answer is a Skip and the card is a `codex_async` optional with `can_skip`.
+  - The timeouts are 30 s and 45 s.
+- **`classify` for `Answer`** (1934-1957):
+  - `StartFailed` is a definite failure: "Cannot start hgs: {error}".
+  - `TimedOut` is uncertain: "Answer delivery timed out. Check Terminal before retrying.".
+  - `WriteFailed` is uncertain with the same text: Qt's runner keeps waiting until its timeout in that case.
+  - `Abnormal` is uncertain, with stderr or "Answer transfer failed (exit -1).".
+  - A nonzero exit is uncertain unless it is code 1 without "delivery uncertain" (case-insensitive). The detail is stderr (trimmed, at most 4000 characters) or "Answer transfer failed (exit {code}).".
+  - More than 65536 bytes of output is uncertain: "The answer acknowledgement is too large. Check Terminal before retrying.".
+  - Done needs:
+    - `status: answered`, or `submitted` for a `codex_async` optional card whose answers are not all Skip and whose receipt is not `skipped`;
+    - `request_id`, `name`, `question_id`, `question_hash` and `run_id` equal to the request's;
+    - a string `conversation_id` equal to the request's.
+
+    Anything else is uncertain: "The answer acknowledgement is invalid. Check Terminal before retrying.".
+- **Replies** (`QuestionReply.h`):
+  - **`replies(text)`** trims the text.
+    - It drops a Codex IDE preamble up to "\n## My request for Codex:\n".
+    - It requires the `<send_user_message_question_reply>` … `</send_user_message_question_reply>` envelope around one object or an array.
+    - Each item needs nonempty `questionItemId` and `question` and a string `answer`. Otherwise the result is empty.
+  - **`replies_preview`** gives "Your answer: {a}" or "Your answers: {a} / {b}", with "(empty answer)" for an empty answer.
+  - **`annotate_replies(payload)`** adds `question_replies: [{question, answer}]` to every user event (`UserPromptSubmit`, `UserPromptQueued`, `TurnStarted`, `QuestionAnswered`) of an Activity payload's `events` (and of an `event` frame's `event`) whose `detail` holds replies. A `state` payload's `value.prompt` gets `value.prompt_replies`.
+  - **`view.rs`:** a row's preview reads `replies_preview` in place of `prompt`, and in place of `activity_detail` (or a clipped excerpt of the prompt, as `activityDetailPreview` 319-328).
+
+**Tests that pin Qt** (`client/core/tests/questions.rs` unless noted):
+- `a_required_card_wins_and_hides_the_editor`
+- `optional_cards_are_newest_first_and_keep_the_choice`
+- `a_card_without_items_that_cannot_be_answered_still_shows`
+- `availability_texts_follow_qts_order`
+- `store_keys_and_labels_are_qts` (byte-exact key for `"studio\nclaude/p/a"`)
+- `drafts_round_trip_through_form_state` (seeded answers left out)
+- `a_sending_draft_loads_uncertain`
+- `single_select_edits_are_exclusive_and_multi_toggles`
+- `opencode_defaults_seed_but_are_not_saved`
+- `a_submitted_codex_answer_is_restored_and_hidden`
+- `answers_follow_source_order_and_bounds`
+- `custom_answer_problems`
+- `a_broader_option_needs_a_second_confirm`
+- `an_edit_disarms_confirm`
+- `card_labels_and_status_priority` (one assertion per status rule)
+- `approvals_without_choices_use_approve_and_deny`
+- `read_only_cards_disable_their_options`
+- `a_body_refresh_keeps_the_form`
+- `actionable_is_silent_for_a_session_that_is_not_ready`
+- `actionable_reports_a_changed_card`
+- `still_answerable_refuses_every_change`
+- `a_cold_cache_asks_except_kimis_own_panel`
+- `codex_update_follow_ups`
+- `replies_parse_and_preview`
+- `annotate_replies_marks_user_events_only`
+- `card_previews_read_answers` (in `view.rs`)
+- `actions.rs`:
+  - `answer_input_is_qts` (stdin fields and argv, never answers in argv);
+  - `answer_refusals`;
+  - `answer_outcomes` (each classification, including an echo mismatch per field and the `submitted` rule);
+  - `an_uncertain_answer_is_never_retried`.
+- `client/src-tauri/src/actions.rs`: `one_answer_per_session`.
+
+### R8. The native queue, Send now, the push and OpenCode's inbox (`zerus-5wmh.9.24`)
+
+**Files:**
+- `client/core/src/input_queue.rs` (new);
+- `client/core/src/actions.rs` (`Action::SendNow`, `Action::RemoveQueued`, `allowed_with`);
+- `client/src-tauri/src/actions.rs` (`Lane::Queue`, `Lane::Inbox`);
+- `client/core/tests/input_queue.rs`.
+
+**Qt reference:**
+- `tray/src/SessionsWindowShortcuts.cpp:95-161, 248-341`;
+- `tray/src/SessionsWindow.cpp:1015-1018, 1859-1873, 3976-3980, 4433-4467, 4908-4912, 4939`;
+- `tray/src/ActivityView.cpp:1029-1046, 1069-1087, 1280-1292, 1477-1487, 1890-1895`;
+- `tray/src/HgsClient.cpp:2156-2290`;
+- `tray/src/NativeSessionCapabilities.h:7-15`.
+
+The CLI side: `src/state/input_queue.rs`.
+
+**Surface:**
+
+```rust
+// client/core/src/input_queue.rs
+pub const NOTHING_QUEUED: &str = "Nothing queued can be sent now";
+pub const PUSH_SECONDS: f64 = 20.0;
+
+pub struct QueueView { pub id: String, pub text: String, pub hint: String, pub can_send_now: bool, pub enabled: bool, pub label: String }
+pub fn queue_view(details: &Value, tracked: bool, online: bool, inspect_error: bool, sending: bool) -> Option<QueueView>;
+pub fn can_send_now(details: &Value, online: bool, queue_id: &str) -> bool;
+pub struct Notice { pub text: String, pub error: bool, pub transient: bool }            // Serialize, Eq
+pub fn send_now_notice(outcome: &Outcome) -> Notice;
+
+pub struct MessageStart { pub references: Vec<String>, pub text: String, pub whole: bool }
+pub fn message_start(message: &str) -> MessageStart;
+pub fn queue_holds(queue: &str, message: &str) -> bool;
+
+pub struct Push { pub key: String, pub run: String, pub conversation: String, pub text: String, pub request: Option<String>, pub confirmed: bool, pub deadline: f64 }
+pub struct PushFacts { pub dialog: bool, pub sending: bool, pub waiting: bool }       // Copy, Default
+pub enum PushStep { Wait, End(Option<Notice>), SendNow(String) }
+#[derive(Default)] pub struct Pusher { /* Option<Push> */ }
+impl Pusher {
+    pub fn active(&self) -> Option<&Push>;
+    pub fn arm(&mut self, key: &str, text: &str, now: f64) -> Option<Notice>;
+    pub fn dispatched(&mut self, key: &str, text: &str, request: &str, run: &str, conversation: &str);
+    pub fn send_finished(&mut self, request: &str, ok: bool, uncertain: bool) -> Option<Notice>;
+    pub fn inspected(&mut self, key: &str, details: &Value, now: f64, facts: PushFacts, queue_busy: bool) -> PushStep;
+    pub fn selection_changed(&mut self, key: Option<&str>, title: &str) -> Option<Notice>;
+    pub fn check(&mut self, now: f64, facts: PushFacts) -> Option<Notice>;
+}
+
+pub struct InboxFacts<'a> { pub cmd: &'a str, pub online: bool, pub inspect_error: bool, pub busy: bool, pub allowed: bool, pub details: &'a Value, pub events: &'a [Value] }
+pub fn inbox_removable(facts: &InboxFacts<'_>, message_id: &str) -> bool;
+pub const REMOVE_TITLE: &str = "Remove queued message";
+pub const REMOVE_TEXT: &str = "Remove this queued message? It is still waiting in OpenCode's queue and runs first with your next message unless you remove it.";
+pub const REMOVE_CHANGED: &str = "The queued message changed. Check Activity before removing it.";
+pub const REMOVED: &str = "Queued message removed.";
+
+// client/core/src/actions.rs
+#[serde(skip_deserializing)] SendNow { queue_id: String },
+#[serde(skip_deserializing)] RemoveQueued { message_id: String },
+pub fn allowed_with(row: &ViewRow, details: &Value, operation: &str) -> bool;  // NativeSessionCapabilities::action
+// client/src-tauri/src/actions.rs: Lane::Queue (SendNow) and Lane::Inbox (RemoveQueued), keyed by (computer, name); busy → Err("busy").
+```
+
+**Rules:**
+
+- **`queue_view`** reads `details["input_queue"]`. It is None when `!tracked` or the id is empty.
+  - `can_send_now` = `input_queue.can_send_now && online && !inspect_error`.
+  - `enabled` = `can_send_now && !sending`.
+  - `label` is "Sending…" while sending, else "Send now".
+  - `hint` is the queue's hint, with no chord.
+- **`can_send_now(details, online, id)`** is `sendQueuedNow`'s check: online, a nonempty id equal to the queue's, and `can_send_now`.
+- **`send_now_notice`**:
+  - Done gives "Send now requested. Waiting for the agent to accept the queue." (info).
+  - A failure whose trimmed detail is "hgs: The native queue is no longer visible; nothing was sent" or "The native queue is no longer visible; nothing was sent" gives the stale text as a transient error.
+  - Any other failure gives its detail as an error.
+- **`message_start`, `queue_holds`** are ported line for line (95-161):
+  - the references are `\[(?:Image|File) #\d+\]`;
+  - the text is the first 24 non-space characters, with whitespace simplified;
+  - a pasted file location may follow a reference;
+  - an item starts at `❯`, `↳` or `›` and continues on indented rows, but not on `•` rows. Write the bullet as `'\u{2022}'` in Rust source and test strings, since `scripts/check-ui-separators.py` scans `client/`;
+  - a whole short text must end a word.
+
+  `client/core` has no `regex` dependency: match by hand, with no new crate.
+- **`Pusher`** is `armPush`, `pushSendFinished`, `pushInspected`, `pushSelectionChanged`, `checkPush` and `endPush`, with Qt's texts and a clock in seconds.
+  - **`arm`** replaces an active push with "The earlier push was replaced by a new one" (info). The deadline is `now + PUSH_SECONDS`.
+  - **`dispatched`** records the request, run and conversation when the key and text match and no request is recorded yet.
+  - **`send_finished`** ends the push with a notice when the send was uncertain, failed, or had no text (`message_start(text).text` is empty). Otherwise it marks the push confirmed.
+  - **`inspected`** works on the push of `key`, in this order:
+    1. with a request recorded, a different run, or a different nonempty conversation, ends it ("The message was not pushed: the session changed", error);
+    2. otherwise adopts the conversation;
+    3. runs `check`;
+    4. once confirmed, returns `SendNow(id)` when the queue `can_send_now`, `queue_holds(text, push.text)` holds and `!queue_busy`, ending the push without a notice.
+  - **`check`**:
+    - `sending` is `request.is_some() && !confirmed`, or `dialog || sending || waiting` before a request;
+    - unconfirmed and not sending ends the push with "… sending did not complete" (error);
+    - before the deadline nothing happens;
+    - after it, the three 20-second notices follow Qt's order.
+  - **`selection_changed`** ends a push of another key with "The message to {title} was not pushed: another session was selected", or "… its session is no longer selected" for None.
+- **`inbox_removable`** is `queuedMessageRemovable` 4433-4442:
+  - `cmd == "opencode"`, online, no inspect error, not busy;
+  - a nonempty `details.run_id`;
+  - `allowed` (from `allowed_with(row, details, "remove_queued")`);
+  - an event with that `message_id` and `delivery_state == "not_delivered"`.
+- **`allowed_with`**: the details' `allowed_actions` array when present, else `allowed(row, operation)`.
+- **`Action::SendNow`** is `hgs [@host] send-now NAME --json` with `{request_id, expected_run_id, expected_conversation_id, queue_id}`, 20 s and 35 s.
+  - **Classification:**
+    - `StartFailed(e)` fails definitely with `e`;
+    - `TimedOut` is uncertain: "Queue action timed out. Check Terminal before retrying.";
+    - `WriteFailed` is uncertain: "Queue action failed. Check Terminal before retrying.";
+    - `Abnormal` or a nonzero exit gives stderr (trimmed, at most 2000 characters) or "Could not confirm sending the queue. Check Terminal before retrying.". It is uncertain when abnormal or when stderr contains "delivery uncertain", definite otherwise;
+    - Done needs `status: submitted` echoing `request_id`, `name`, `run_id`, `conversation_id` and `queue_id`. Anything else is uncertain: "Invalid queue acknowledgement. Check Terminal before retrying.".
+- **`Action::RemoveQueued`** is the scoped `runSessionAction` (2156-2233).
+  - The id must match `msg_[A-Za-z0-9_-]{1,124}`; otherwise `Err("Choose the exact queued OpenCode message.")`.
+  - The call is `hgs [@host] session-action NAME --json` with `{request_id, action: "remove_queued", expected_run_id, expected_conversation_id, message_id}`, 15 s and 45 s.
+  - **Classification, with the scoped texts:**
+    - "Transfer failed. Check the session before retrying.";
+    - "Request timed out. Check the session before retrying.";
+    - a nonzero exit gives stderr or "Could not complete the request. Check the session before retrying.";
+    - a receipt that echoes request, name, run and conversation with `failed` is definite: its `error` or "The queued message was not removed.";
+    - with `uncertain` it is uncertain: "The result was not confirmed. Refresh before trying again." or "The result was not confirmed ({error}). Refresh before trying again.";
+    - Done needs `completed`;
+    - anything else is uncertain: "Invalid acknowledgement. Check the session before retrying.".
+
+**Tests that pin Qt** (`client/core/tests/input_queue.rs` unless noted):
+- `the_panel_follows_tracking_online_and_sending`
+- `send_now_needs_the_same_queue`
+- `send_now_notices` (the stale text, both forms)
+- `queue_holds_matches_qts_cases`: Claude's `❯` rows with wrapped continuation, Codex's `↳` items under the steer header, `[File #1]` with a pasted location, "test" not matching "testing", and attachments only
+- `a_push_sends_only_the_snapshot_that_holds_the_message`
+- `a_push_ends_when_the_session_changes`
+- `a_push_ends_on_failure_uncertainty_or_no_text`
+- `the_twenty_second_endings` (each of the three)
+- `a_new_push_replaces_the_old_one`
+- `selecting_another_session_ends_the_push`
+- `inbox_removal_needs_a_not_delivered_message`
+- `actions.rs`:
+  - `send_now_input_and_outcomes`;
+  - `remove_queued_input_and_outcomes`;
+  - `a_bad_message_id_is_refused`;
+  - `allowed_with_prefers_details`.
+
+## A2 tasks
+
+Each task is one PR, merged after the "CI gate" check is SUCCESS. The PRs:
+- the question cards: A2-1 to A2-3;
+- the queue and the push: A2-4 and A2-5;
+- OpenCode's inbox: A2-6.
+
+Two chains can run side by side once Task 7 is merged:
+- A2-1 → A2-2 → A2-3 (with R7);
+- A2-4 → A2-5 → A2-6 (with R8).
+
+They share `composer/mod.rs`, `Composer.tsx` and `SessionDetail.tsx` only additively. A2-4 reads A2-2's `answers.cold` when A2-2 is on main. Whichever lands second adds that line.
+
+**Naming.** Task 4b's "questions" are the hub's own dialogs (`Prompt`, `SendReply::Cold`, `SendReply::Start`). The agent's requests are **question cards** here: `questions.rs`, `QuestionView`, `QuestionReply` and the `question_*` commands.
+
+### Task A2-1: Question cards in the composer hub: drafts, the shown card and its view
+
+**Depends on:**
+- R7 (`questions::{pending, questions_error, select, Selection, AnswerFacts, unavailable, store_key, label, AnswerDraft, Edit, CardContext, CardView, card, same_form}`);
+- Tasks 3a, 4a and 4b (`Context`, `after_observe`, `tick`, and the test helpers `send_hub`, `send_hub_on`, `opened`, `ready`, `state`, `Fake`).
+
+**Qt reference:**
+- `tray/src/QuestionCard.cpp`:
+  - `ensureDraft` 282-309, `restoreSubmittedAnswer` 311-338, `hasSubmittedAnswer` 359-368, `setQuestion` 370-389;
+  - `setQueueNavigation` 396-406, `refreshNativeBody` 484-510, `rebuild` 512-632;
+  - `capture` 676-689, `restoredDraft` 691-707, `saveDraft` 709-739;
+  - the Allow retry and save-retry timers 256-265.
+- `tray/src/SessionsWindow.cpp`: `renderQuestion` 5003-5068, the hint 3913-3918.
+
+**Files:**
+- Create: `client/src-tauri/src/composer/questions.rs`
+- Modify: `client/src-tauri/src/composer/mod.rs` (`pub mod questions`, `Hub.answers`, the view's three fields, `open`, `after_observe` and `tick` calls)
+- Modify: `client/src-tauri/src/lib.rs` (four commands)
+- Test: unit tests in `composer/questions.rs`
+
+**Interfaces:**
+- Consumes: R7's surface above; Task 3a's `Composers::{lock, changed, current}`, `self.0.store`, `Hub.closed`, `Hub.open_key`, test helpers `dir`, `drafts`, `until`; Task 4a's `Composers::{context, now}`, `Context { session, key, row, online, details, facts }`.
+- Produces (A2-2 and A2-3 bind to these):
+
+```rust
+// composer/questions.rs
+pub(crate) type Done = Box<dyn FnOnce(bool) + Send>;
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct QuestionView { pub card: String, pub revision: u64, pub asked: String, pub asked_tip: String, pub terminal_label: String, pub view: CardView }
+#[derive(Default)] pub(crate) struct Answers { pub(crate) drafts: HashMap<String, AnswerDraft>, pub(crate) loading: HashSet<String>, pub(crate) revision: u64, /* private: order, saves, failed, choices, shown, last_retry */ }
+pub(crate) fn facts(ctx: &Context) -> AnswerFacts;
+pub(crate) fn text<'a>(value: &'a Value, key: &str) -> &'a str;
+impl Composers {
+    pub fn question_edit(&self, card: &str, edit: Edit);
+    pub fn question_page(&self, card: &str, page: usize);
+    pub fn question_navigate(&self, direction: i32);
+    pub fn question_allow_retry(&self, card: &str);
+    pub(crate) fn sync_questions(&self);
+    pub(crate) fn question_part(&self, hub: &Hub) -> (Option<QuestionView>, bool, Option<String>);
+    pub(crate) fn shown_question(&self, hub: &Hub, card: &str) -> Option<(Context, Question)>;
+    pub(crate) fn save_answer(&self, hub: &mut Hub, key: &str, durable: bool, done: Option<Done>) -> bool;
+    pub(crate) fn retry_answer_saves(&self);
+}
+// ComposerView gains
+pub question: Option<QuestionView>, pub input_visible: bool, pub questions_error: Option<String>,
+// commands: question_edit(card, edit); question_page(card, page); question_navigate(direction); question_allow_retry(card)
+```
+
+- [ ] **Step 1: Write the failing tests** at the end of `client/src-tauri/src/composer/questions.rs`:
+
+```rust
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::composer::send::tests::{opened, ready, send_hub, send_hub_on, state};
+    use crate::composer::tests::{dir, drafts, until};
+    use crate::composer::ComposerView;
+    use serde_json::json;
+    use zerus_client_core::drafts::{read_draft, StoredDraft};
+
+    pub(crate) const HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    /// A Claude AskUserQuestion card, as `hgs inspect` lists it.
+    pub(crate) fn card_json(id: &str) -> Value {
+        json!({"question_id": id, "question_hash": HASH, "run_id": "run-1", "conversation_id": "conv-1",
+               "source": "hook", "answer_transport": "claude_hook", "created_at": 1_793_000_000.0, "can_answer": true,
+               "questions": [{"id": "q_0", "question": "Which checks?", "header": "Checks", "body": "", "multi_select": false,
+                              "allow_other": true, "options": [{"id": "opt_0_0", "label": "Unit", "description": ""},
+                                                                 {"id": "opt_0_1", "label": "UI", "description": ""}]}]})
+    }
+
+    pub(crate) fn asking(cards: Vec<Value>) -> Value {
+        let mut details = ready();
+        details["phase"] = json!("input");
+        details["pending_questions"] = json!(cards);
+        details
+    }
+
+    pub(crate) fn store_key(id: &str) -> String {
+        format!("question\n[\"studio\\nclaude/sample-project/review\",\"{id}\",\"{HASH}\"]\nrun-1\nconv-1")
+    }
+
+    /// The composer view once a card shows and its draft has loaded.
+    pub(crate) fn with_card(c: &Composers) -> ComposerView {
+        until(c, |v| v.question.as_ref().is_some_and(|q| q.view.status != "Loading your saved answer…" && !q.view.forms.is_empty()))
+    }
+
+    #[test]
+    fn a_required_card_replaces_the_editor() {
+        let root = dir("q-required");
+        let (c, _) = send_hub(&root);
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        let view = with_card(&c);
+        assert!(!view.input_visible, "a required card hides the editor and the action row");
+        let q = view.question.unwrap();
+        assert_eq!(q.card, store_key("tool:t1"));
+        assert_eq!(q.view.heading, "Agent needs your answer");
+        assert_eq!(q.view.forms[0].options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), ["Unit", "UI"]);
+        assert_eq!(q.view.status, "Answer each question to continue.");
+        assert_eq!(q.terminal_label, "Open Terminal");
+        assert!(q.asked.starts_with("Asked "));
+    }
+
+    #[test]
+    fn edits_are_saved_under_qts_key() {
+        let root = dir("q-saved");
+        let store = drafts(&root);
+        let (c, _) = send_hub_on(&store);
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        let card = with_card(&c).question.unwrap().card;
+        c.question_edit(&card, Edit::Option { item: "q_0".into(), option: "opt_0_1".into(), checked: true });
+        let view = until(&c, |v| v.question.as_ref().is_some_and(|q| q.view.forms[0].options[1].checked));
+        assert_eq!(view.question.unwrap().view.status, "Your choices are ready to send.");
+        store.flush();
+        let saved = read_draft(&root.join("drafts"), &store_key("tool:t1"));
+        assert_eq!(saved.draft.label, "studio / claude/sample-project/review (question answer)");
+        assert_eq!(saved.draft.form_state["answers"], json!([{"id": "q_0", "text": "", "other": false, "options": ["opt_0_1"]}]));
+    }
+
+    #[test]
+    fn an_answer_draft_survives_reopening() {
+        let root = dir("q-reopen");
+        let store = drafts(&root);
+        let (c, _) = send_hub_on(&store);
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        let card = with_card(&c).question.unwrap().card;
+        c.question_edit(&card, Edit::Other { item: "q_0".into(), checked: true });
+        c.question_edit(&card, Edit::Text { item: "q_0".into(), text: "Lint only".into() });
+        c.flush();
+        store.flush();
+        drop(c);
+        let (again, _) = send_hub_on(&store);
+        opened(&again, asking(vec![card_json("tool:t1")]));
+        let q = until(&again, |v| v.question.as_ref().is_some_and(|q| q.view.forms[0].other.as_ref().is_some_and(|o| o.checked))).question.unwrap();
+        assert_eq!(q.view.forms[0].text.as_ref().unwrap().value, "Lint only");
+        assert!(q.view.forms[0].text.as_ref().unwrap().visible);
+    }
+
+    #[test]
+    fn optional_cards_are_newest_first_and_keep_the_choice() {
+        let root = dir("q-optional");
+        let (c, _) = send_hub(&root);
+        let optional = |id: &str, at: f64| {
+            let mut card = card_json(id);
+            card["source"] = json!("codex_async");
+            card["optional"] = json!(true);
+            card["can_skip"] = json!(true);
+            card["created_at"] = json!(at);
+            card
+        };
+        let mut details = ready();
+        details["pending_questions"] = json!([optional("codex:old", 10.0), optional("codex:new", 20.0)]);
+        opened(&c, details.clone());
+        let view = with_card(&c);
+        assert!(view.input_visible, "an optional card keeps the composer");
+        let q = view.question.unwrap();
+        assert_eq!(q.card, store_key("codex:new"));
+        assert_eq!(q.view.heading, "Optional question #1/2");
+        c.question_navigate(1);
+        let q = until(&c, |v| v.question.as_ref().is_some_and(|q| q.card == store_key("codex:old"))).question.unwrap();
+        assert_eq!(q.view.heading, "Optional question #2/2");
+        assert!(q.view.nav.as_ref().is_some_and(|nav| nav.previous && !nav.next));
+        c.observe(&state(details));
+        assert_eq!(c.current().unwrap().question.unwrap().card, store_key("codex:old"), "a new state keeps the choice");
+    }
+
+    #[test]
+    fn an_unavailable_session_says_why() {
+        let root = dir("q-unavailable");
+        let (c, _) = send_hub(&root);
+        let mut details = asking(vec![card_json("tool:t1")]);
+        details["runtime_state"] = json!("stopped");
+        opened(&c, details);
+        let q = with_card(&c).question.unwrap();
+        assert!(!q.view.available && !q.view.submit.enabled);
+        assert_eq!(q.view.status, "The agent is no longer running.");
+    }
+
+    #[test]
+    fn a_sending_answer_reloads_uncertain() {
+        let root = dir("q-sending");
+        let store = drafts(&root);
+        let mut stored = StoredDraft { sending: true, ..StoredDraft::default() };
+        stored.form_state.insert("answers".into(), json!([{"id": "q_0", "text": "", "other": false, "options": ["opt_0_0"]}]));
+        store.save_durable(&store_key("tool:t1"), stored, |_| {});
+        store.flush();
+        let (c, _) = send_hub_on(&store);
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        let q = until(&c, |v| v.question.as_ref().is_some_and(|q| q.view.retry)).question.unwrap();
+        assert_eq!(q.view.status, "Delivery was interrupted. Check Activity or Terminal before sending again.");
+        assert!(q.view.status_error && !q.view.submit.enabled);
+        assert!(q.view.forms[0].options[0].checked);
+        c.question_allow_retry(&q.card);
+        let q = until(&c, |v| v.question.as_ref().is_some_and(|q| !q.view.retry)).question.unwrap();
+        assert!(q.view.submit.enabled);
+    }
+
+    #[test]
+    fn a_card_answered_elsewhere_goes_away() {
+        let root = dir("q-elsewhere");
+        let (c, _) = send_hub(&root);
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        with_card(&c);
+        c.observe(&state(ready()));
+        let view = until(&c, |v| v.question.is_none());
+        assert!(view.input_visible, "the composer returns");
+    }
+
+    #[test]
+    fn a_failed_question_read_is_shown() {
+        let root = dir("q-error");
+        let (c, _) = send_hub(&root);
+        let mut details = ready();
+        details["pending_questions_error"] = json!("timed out");
+        let view = opened(&c, details);
+        assert_eq!(view.questions_error.as_deref(), Some("Could not load agent questions: timed out. Check Terminal."));
+        assert!(view.question.is_none() && view.input_visible);
+    }
+}
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer::questions::`
+Expected: compile errors (no `questions` module).
+
+- [ ] **Step 3: Write `client/src-tauri/src/composer/questions.rs`** above its tests:
+
+```rust
+//! Agent question cards and approvals of the open session: Qt's
+//! `QuestionCard` state and `SessionsWindow::renderQuestion`
+//! (`tray/src/QuestionCard.cpp`, `tray/src/SessionsWindow.cpp:5003-5068`).
+//! The rules are the core's (`questions`, R7). This module holds the answer
+//! drafts, loads and saves them through the app's one store under Qt's keys,
+//! and projects the shown card into the composer view. A2-2 adds the delivery.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+
+use serde::Serialize;
+use serde_json::Value;
+use zerus_client_core::drafts::Loaded;
+use zerus_client_core::questions::{self as rules, AnswerDraft, AnswerFacts, CardContext, CardView, Edit, Question, Selection};
+
+use super::send::Context;
+use super::{Composers, Hub};
+
+/// At most this many answer drafts stay in memory; Qt keeps every one.
+const HELD: usize = 64;
+/// At most this many remembered choices among optional cards.
+const CHOICES: usize = 64;
+/// A failed save is tried again after this long (Qt's 2 s timer).
+const RETRY_SAVE: f64 = 2.0;
+
+pub(crate) type Done = Box<dyn FnOnce(bool) + Send>;
+
+/// The shown card, as the composer view carries it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct QuestionView {
+    /// The card's draft key; every card command names it.
+    pub card: String,
+    /// Bumps when the card is built again (`rebuild`): the webview resets its
+    /// fields and the review delay.
+    pub revision: u64,
+    pub asked: String,
+    pub asked_tip: String,
+    pub terminal_label: String,
+    pub view: CardView,
+}
+
+/// The question cards' state (`QuestionCard`'s drafts and key sets).
+#[derive(Default)]
+pub(crate) struct Answers {
+    pub(crate) drafts: HashMap<String, AnswerDraft>,
+    /// Least recently shown first.
+    order: VecDeque<String>,
+    /// Keys whose load has not answered yet (`m_loadingKeys`).
+    pub(crate) loading: HashSet<String>,
+    /// The newest save per key (`m_saveRevision`): an older save's answer is ignored.
+    saves: HashMap<String, u64>,
+    /// Keys whose last save failed (`m_failedSaves`).
+    failed: HashSet<String>,
+    /// The chosen optional card per (session, run, conversation) (`m_questionSelections`).
+    choices: VecDeque<(String, String)>,
+    /// The shown card's key and question, to tell a rebuild from a body refresh.
+    shown: Option<(String, Question)>,
+    pub(crate) revision: u64,
+    last_retry: f64,
+}
+
+impl Answers {
+    fn choice(&self, scope: &str) -> Option<&str> {
+        self.choices.iter().find(|(s, _)| s == scope).map(|(_, id)| id.as_str())
+    }
+
+    fn remember(&mut self, scope: String, chosen: Option<String>) {
+        self.choices.retain(|(s, _)| *s != scope);
+        if let Some(id) = chosen {
+            self.choices.push_back((scope, id));
+            while self.choices.len() > CHOICES {
+                self.choices.pop_front();
+            }
+        }
+    }
+}
+
+pub(crate) fn text<'a>(value: &'a Value, key: &str) -> &'a str {
+    value.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+/// Where a choice among optional cards is kept (`renderQuestion`'s scope).
+fn scope(key: &str, details: &Value) -> String {
+    serde_json::to_string(&[key, text(details, "run_id"), text(details, "conversation_id")]).unwrap_or_default()
+}
+
+/// The answer rules' view of the open session (`renderQuestion` 5054-5065).
+pub(crate) fn facts(ctx: &Context) -> AnswerFacts {
+    AnswerFacts {
+        online: ctx.online,
+        state: ctx.row.state.clone(),
+        updating: ctx.facts.terminating || ctx.facts.updating,
+        inspect_error: ctx.facts.inspect_error,
+    }
+}
+
+/// "Asked 28 Oct 14:03:05" (with the year when it is not this year) and the
+/// full time with its zone; formatted in Rust, never in the webview.
+fn asked(created: f64) -> (String, String) {
+    use chrono::{Datelike, Local, TimeZone};
+    if !(created > 0.0 && created < 253_402_300_800.0) {
+        return (String::new(), String::new());
+    }
+    let Some(time) = Local.timestamp_opt(created as i64, 0).single() else { return (String::new(), String::new()) };
+    let format = if time.year() == Local::now().year() { "%-d %b %H:%M:%S" } else { "%-d %b %Y %H:%M:%S" };
+    (format!("Asked {}", time.format(format)), time.format("%-d %b %Y %H:%M:%S %Z").to_string())
+}
+
+impl Composers {
+    /// The open session's cards as Qt chooses them, without side effects.
+    fn selection(&self, hub: &Hub, ctx: &Context, navigation: i32) -> Option<(Selection, String)> {
+        let details = ctx.details.as_deref()?;
+        let questions = rules::pending(details);
+        let answers = &hub.answers;
+        // `hasSubmittedAnswer`: the held draft, or the card's own record of a submitted answer.
+        let submitted = |q: &Question| {
+            if q.source != "codex_async" || !q.optional {
+                return false;
+            }
+            let Some(key) = rules::store_key(&ctx.key, q) else { return false };
+            let mut draft = answers.drafts.get(&key).cloned().unwrap_or_default();
+            draft.restore_submitted(q);
+            draft.submitted
+        };
+        let scope = scope(&ctx.key, details);
+        Some((rules::select(&questions, &submitted, answers.choice(&scope), navigation), scope))
+    }
+
+    /// What a change of the open session's cards sets off (`renderQuestion`,
+    /// `setQuestion`): drafts load, Codex's submitted answers are restored,
+    /// OpenCode's defaults are seeded, the choice is remembered, and a new
+    /// card is built.
+    pub(crate) fn sync_questions(&self) {
+        self.sync_moving(0);
+    }
+
+    fn sync_moving(&self, navigation: i32) {
+        let mut hub = self.lock();
+        let Some(ctx) = self.context(&hub) else {
+            hub.answers.shown = None;
+            return;
+        };
+        let Some(details) = ctx.details.clone() else { return };
+        let label = rules::label(&ctx.key);
+        let mut restored = HashSet::new();
+        for q in rules::pending(&details).into_iter().filter(|q| q.source == "codex_async" && q.optional) {
+            let Some(key) = rules::store_key(&ctx.key, &q) else { continue };
+            self.ensure_answer(&mut hub, &key, &label);
+            let Some(draft) = hub.answers.drafts.get_mut(&key) else { continue };
+            let changed = draft.restore_submitted(&q);
+            if draft.submitted {
+                // A verified record wins over a load still on its way (Qt 321).
+                hub.answers.loading.remove(&key);
+            }
+            if changed {
+                restored.insert(key.clone());
+                self.save_answer(&mut hub, &key, false, None);
+            }
+        }
+        let Some((selection, scope)) = self.selection(&hub, &ctx, navigation) else { return };
+        hub.answers.remember(scope, selection.chosen.clone());
+        let Some(question) = selection.question else {
+            hub.answers.shown = None;
+            drop(hub);
+            self.changed();
+            return;
+        };
+        let Some(key) = rules::store_key(&ctx.key, &question) else { return };
+        self.ensure_answer(&mut hub, &key, &label);
+        if !hub.answers.loading.contains(&key) {
+            if let Some(draft) = hub.answers.drafts.get_mut(&key) {
+                draft.seed(&question);
+            }
+        }
+        let rebuilt = restored.contains(&key)
+            || match &hub.answers.shown {
+                Some((shown, old)) => *shown != key || (old.items != question.items && !rules::same_form(old, &question)),
+                None => true,
+            };
+        if rebuilt {
+            hub.answers.revision += 1;
+        }
+        hub.answers.shown = Some((key, question));
+        drop(hub);
+        self.changed();
+    }
+
+    /// Loads a card's draft that is not in memory (`ensureDraft`).
+    fn ensure_answer(&self, hub: &mut Hub, key: &str, label: &str) {
+        hub.answers.order.retain(|k| k != key);
+        hub.answers.order.push_back(key.to_owned());
+        if hub.answers.drafts.contains_key(key) {
+            return;
+        }
+        hub.answers.drafts.insert(key.to_owned(), AnswerDraft { label: label.to_owned(), ..AnswerDraft::default() });
+        hub.answers.loading.insert(key.to_owned());
+        let save = hub.answers.saves.get(key).copied().unwrap_or(0);
+        self.trim_answers(hub);
+        let me = self.clone();
+        let (owned, label) = (key.to_owned(), label.to_owned());
+        self.0.store.load(key, move |loaded| me.answer_loaded(&owned, save, &label, &loaded));
+    }
+
+    fn answer_loaded(&self, key: &str, save: u64, label: &str, loaded: &Loaded) {
+        let mut hub = self.lock();
+        if !hub.answers.loading.contains(key) || hub.answers.saves.get(key).copied().unwrap_or(0) != save {
+            return;
+        }
+        hub.answers.loading.remove(key);
+        hub.answers.drafts.insert(key.to_owned(), AnswerDraft::from_loaded(loaded, label));
+        if hub.answers.shown.as_ref().is_some_and(|(shown, _)| shown == key) {
+            hub.answers.revision += 1;
+        }
+        drop(hub);
+        self.sync_questions();
+    }
+
+    /// Keeps at most `HELD` drafts, never the shown one, one loading, one
+    /// sending or one whose save failed.
+    fn trim_answers(&self, hub: &mut Hub) {
+        let shown = hub.answers.shown.as_ref().map(|(key, _)| key.clone());
+        let answers = &mut hub.answers;
+        let mut i = 0;
+        while answers.drafts.len() > HELD && i < answers.order.len() {
+            let key = answers.order[i].clone();
+            let keep = shown.as_deref() == Some(key.as_str()) || answers.loading.contains(&key) || answers.failed.contains(&key)
+                || answers.drafts.get(&key).is_some_and(|d| d.sending);
+            if keep {
+                i += 1;
+                continue;
+            }
+            answers.order.remove(i);
+            answers.drafts.remove(&key);
+            answers.saves.remove(&key);
+        }
+    }
+
+    /// Saves a card's draft (`saveDraft`); `durable` for the save before a
+    /// submission, which nothing replaces. `done` hears whether it was
+    /// written, never under the hub's lock.
+    pub(crate) fn save_answer(&self, hub: &mut Hub, key: &str, durable: bool, done: Option<Done>) -> bool {
+        let refuse = |done: Option<Done>| {
+            if let Some(done) = done {
+                (self.0.deps.spawn)(Box::new(move || done(false)));
+            }
+            false
+        };
+        if hub.answers.loading.contains(key) {
+            return refuse(done);
+        }
+        let Some(draft) = hub.answers.drafts.get(key) else { return refuse(done) };
+        if !durable && draft.sending {
+            return false;
+        }
+        let stored = draft.stored();
+        let save = {
+            let n = hub.answers.saves.entry(key.to_owned()).or_default();
+            *n += 1;
+            *n
+        };
+        let me = self.clone();
+        let owned = key.to_owned();
+        let finished = move |result: Result<(), String>| me.answer_saved(&owned, save, result, done);
+        if durable {
+            self.0.store.save_durable(key, stored, finished);
+        } else {
+            self.0.store.save(key, stored, finished);
+        }
+        true
+    }
+
+    fn answer_saved(&self, key: &str, save: u64, result: Result<(), String>, done: Option<Done>) {
+        let mut hub = self.lock();
+        if hub.answers.saves.get(key) != Some(&save) || !hub.answers.drafts.contains_key(key) {
+            drop(hub);
+            if let Some(done) = done {
+                done(false);
+            }
+            return;
+        }
+        let ok = result.is_ok();
+        if let Some(draft) = hub.answers.drafts.get_mut(key) {
+            draft.storage_error = result.err().unwrap_or_default();
+        }
+        if ok {
+            hub.answers.failed.remove(key);
+        } else {
+            hub.answers.failed.insert(key.to_owned());
+        }
+        drop(hub);
+        self.changed();
+        if let Some(done) = done {
+            done(ok);
+        }
+    }
+
+    /// Saves again, every 2 s, the drafts whose last save failed.
+    pub(crate) fn retry_answer_saves(&self) {
+        let now = self.now();
+        let mut hub = self.lock();
+        if hub.answers.failed.is_empty() || now - hub.answers.last_retry < RETRY_SAVE {
+            return;
+        }
+        hub.answers.last_retry = now;
+        let keys: Vec<String> = hub.answers.failed.iter().cloned().collect();
+        for key in keys {
+            self.save_answer(&mut hub, &key, false, None);
+        }
+    }
+
+    /// The question part of the open composer's view: the shown card, whether
+    /// the editor shows, and a failed question read.
+    pub(crate) fn question_part(&self, hub: &Hub) -> (Option<QuestionView>, bool, Option<String>) {
+        let Some(ctx) = self.context(hub) else { return (None, true, None) };
+        let Some(details) = ctx.details.as_deref() else { return (None, true, None) };
+        let error = rules::questions_error(details);
+        let Some((selection, _)) = self.selection(hub, &ctx, 0) else { return (None, true, error) };
+        let input_visible = selection.input_visible();
+        let Some(question) = selection.question.as_ref() else { return (None, input_visible, error) };
+        let Some(key) = rules::store_key(&ctx.key, question) else { return (None, input_visible, error) };
+        let draft = hub.answers.drafts.get(&key).cloned().unwrap_or_default();
+        let reason = rules::unavailable(&facts(&ctx), question, details);
+        let card = CardContext {
+            available: reason.is_none(),
+            unavailable_reason: reason.unwrap_or_default().to_owned(),
+            loading: hub.answers.loading.contains(&key) || !hub.answers.drafts.contains_key(&key),
+            in_flight: false,
+            pending: selection.pending,
+            queue_index: selection.index,
+            queue_count: selection.optional.len(),
+        };
+        let (asked, asked_tip) = asked(question.created_at);
+        let view = QuestionView {
+            card: key,
+            revision: hub.answers.revision,
+            asked,
+            asked_tip,
+            terminal_label: if ctx.facts.cmd == "dsh" { "Open native UI" } else { "Open Terminal" }.to_owned(),
+            view: rules::card(question, &draft, &card),
+        };
+        (Some(view), input_visible, error)
+    }
+
+    /// The shown card when `card` names it; commands for another card do nothing.
+    pub(crate) fn shown_question(&self, hub: &Hub, card: &str) -> Option<(Context, Question)> {
+        let ctx = self.context(hub)?;
+        let (selection, _) = self.selection(hub, &ctx, 0)?;
+        let question = selection.question?;
+        (rules::store_key(&ctx.key, &question).as_deref() == Some(card)).then_some((ctx, question))
+    }
+
+    /// A change on the card (`capture`): saved as the user makes it.
+    pub fn question_edit(&self, card: &str, edit: Edit) {
+        let mut hub = self.lock();
+        if hub.closed || hub.answers.loading.contains(card) {
+            return;
+        }
+        let Some((_, question)) = self.shown_question(&hub, card) else { return };
+        let Some(draft) = hub.answers.drafts.get_mut(card) else { return };
+        if !draft.apply(&question, edit) {
+            return;
+        }
+        self.save_answer(&mut hub, card, false, None);
+        drop(hub);
+        self.changed();
+    }
+
+    /// A tab, Back or Next (`currentChanged`): the page is kept with the draft.
+    pub fn question_page(&self, card: &str, page: usize) {
+        let mut hub = self.lock();
+        if hub.closed || hub.answers.loading.contains(card) || self.shown_question(&hub, card).is_none() {
+            return;
+        }
+        let Some(draft) = hub.answers.drafts.get_mut(card) else { return };
+        if draft.locked() || draft.page == page {
+            return;
+        }
+        draft.page = page;
+        self.save_answer(&mut hub, card, false, None);
+        drop(hub);
+        self.changed();
+    }
+
+    /// The optional cards' arrows: -1 for newer, +1 for older.
+    pub fn question_navigate(&self, direction: i32) {
+        self.sync_moving(direction.signum());
+    }
+
+    /// Allow retry on the card, after the user checked Terminal.
+    pub fn question_allow_retry(&self, card: &str) {
+        let mut hub = self.lock();
+        let Some(draft) = hub.answers.drafts.get_mut(card) else { return };
+        draft.allow_retry();
+        self.save_answer(&mut hub, card, false, None);
+        drop(hub);
+        self.changed();
+    }
+}
+
+#[tauri::command]
+pub fn question_edit(state: tauri::State<'_, Composers>, card: String, edit: Edit) {
+    state.question_edit(&card, edit);
+}
+
+#[tauri::command]
+pub fn question_page(state: tauri::State<'_, Composers>, card: String, page: usize) {
+    state.question_page(&card, page);
+}
+
+#[tauri::command]
+pub fn question_navigate(state: tauri::State<'_, Composers>, direction: i32) {
+    state.question_navigate(direction);
+}
+
+#[tauri::command]
+pub fn question_allow_retry(state: tauri::State<'_, Composers>, card: String) {
+    state.question_allow_retry(&card);
+}
+```
+
+- [ ] **Step 4: Wire it into `composer/mod.rs`.**
+  - Add `pub mod questions;`.
+  - `Hub` gains `pub(crate) answers: questions::Answers`.
+  - `ComposerView` gains `pub question: Option<questions::QuestionView>`, `pub input_visible: bool` and `pub questions_error: Option<String>`.
+  - `view_of` fills them: `let (question, input_visible, questions_error) = self.question_part(hub);`. Without an open session `input_visible` is `true`.
+  - `after_observe` calls `self.sync_questions();` before its `self.changed()`: Task 4b's reconcile, then Task 5's continuation, then this line.
+  - `open` calls `self.sync_questions();` after it drops the hub and before it returns the view.
+  - `tick` calls `self.retry_answer_saves();`.
+
+- [ ] **Step 5: Register the commands** in `client/src-tauri/src/lib.rs`, beside the composer's: `composer::questions::question_edit`, `question_page`, `question_navigate` and `question_allow_retry`. They pass the IPC guard like every app command.
+
+- [ ] **Step 6: Run the tests to see them pass**
+
+Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer::`
+Expected: PASS, the 8 new tests and every earlier composer test.
+
+Run: `cd client && cargo +1.99.1 clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings && cargo +1.99.1 fmt --manifest-path src-tauri/Cargo.toml --check`
+Expected: clean.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add client/src-tauri
+git commit -m "feat(client): question cards in the composer hub, with Qt's answer drafts"
+```
+
+---
+
+### Task A2-2: The guarded answer: Submit, Approve once, Deny, Skip and the cold cache
+
+**Depends on:**
+- A2-1;
+- R7 (`questions::{answers, skip_answers, decision, actionable, Actionable, consent_identity, Recheck, still_answerable, cold_answer, ColdAnswer, answered_follow_up, Snapshot, AnswerItem, CHANGED, CHANGED_KEPT, CONSENT_CHANGED}`, `Action::Answer`, `Lane::Answer`);
+- Task 4b (`Deps.dispatch`, `actions::dispatch_as`, the test fake's `calls` and `outcome`, `sent`).
+
+**Qt reference:**
+- `tray/src/QuestionCard.cpp`: `prepareSendingAsync` 428-445, `setError` 447-458, `setAnswered` 460-468, `setSubmitted` 470-478, `submit` 916-929, the Approve once, Deny and Skip handlers 222-236.
+- `tray/src/SessionsWindow.cpp`: `answerQuestion` 5070-5175, `finishQuestion` 5177-5186, the receipt's follow-ups 1156-1186, `sendEvidence` 138-145, `observedIdentityMatches` 147-154.
+
+**The rules this task keeps** (AGENTS.md):
+- **Unknown delivery never authorizes replay.** The durable "sending" save comes before the call, and only its callback continues.
+  - An `Uncertain` outcome or an `Err` marks the draft uncertain. Submit stays disabled until Allow retry.
+  - A draft saved as sending reloads uncertain (A2-1's `a_sending_answer_reloads_uncertain`).
+- **The exact identity.** The answer carries the card's own `question_id`, `question_hash`, `run_id` and `conversation_id`, pinned at the click.
+  - The callback re-checks the consent identity on the newest details.
+  - The CLI checks the hash again.
+- **One request id per attempt.** It is made right before the one call, and nothing reuses it.
+- **Broader options need the second Confirm.** `confirm_step` arms Confirm on the first click. The review delay is the webview's (A2-3).
+- **Ordinary questions stay manual.** Nothing here answers without a click: no automatic approvals and no default answers sent.
+
+**Files:**
+- Modify: `client/src-tauri/src/composer/questions.rs` (the delivery, its commands, its tests)
+- Modify: `client/src-tauri/src/composer/mod.rs` (`ComposerEvent`, `Hub.events`, `take_events`, `event`)
+- Modify: `client/src-tauri/src/commands.rs` (`composer_events` in the envelope)
+- Modify: `client/src-tauri/src/lib.rs` (four commands)
+- Test: unit tests in `composer/questions.rs`
+
+**Interfaces:**
+- Consumes: A2-1's `Answers`, `facts`, `text`, `shown_question`, `question_part`, `save_answer`, `Done`; Task 4a's `refresh_details`, `now`; Task 4b's `Deps.dispatch` and test helpers.
+- Produces:
+
+```rust
+// composer/mod.rs
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ComposerEvent { Notice { text: String, error: bool, transient: bool }, OpenTerminal { key: String } }
+impl Composers { pub fn take_events(&self) -> Vec<ComposerEvent>; pub(crate) fn event(&self, hub: &mut Hub, event: ComposerEvent); }
+// composer/questions.rs
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum QuestionReply { Sending, Busy, Cold { token: u64, prompt: ColdAnswer }, Notice { text: String } }
+// Answers gains: pub(crate) cold: Option<ColdAsk>, pub(crate) in_flight: HashMap<String /*session key*/, String /*card*/>, next_token
+impl Composers {
+    pub fn question_submit(&self, card: &str) -> QuestionReply;
+    pub fn question_decide(&self, card: &str, allow: bool) -> QuestionReply;
+    pub fn question_skip(&self, card: &str) -> QuestionReply;
+    pub fn question_cold(&self, token: u64, proceed: bool) -> QuestionReply;
+}
+// commands: question_submit(card) -> QuestionReply; question_decide(card, allow) -> QuestionReply;
+//           question_skip(card) -> QuestionReply; question_cold(token, proceed) -> QuestionReply
+// next_batch envelope: composer_events?: ComposerEvent[] (drained; at most 16)
+```
+
+- [ ] **Step 1: Write the failing tests** in `composer/questions.rs`'s `tests` module:
+
+```rust
+    use crate::composer::send::tests::sent;
+    use crate::composer::{lock, ComposerEvent};
+    use zerus_client_core::{Action, Outcome};
+
+    fn answered(_: &Action, id: &str) -> Outcome {
+        Outcome::Done { receipt: json!({"status": "answered", "request_id": id}), cleanup: None }
+    }
+
+    /// Chooses Unit on the shown card and returns its key once Submit is enabled.
+    fn chosen(c: &Composers) -> String {
+        let card = with_card(c).question.unwrap().card;
+        c.question_edit(&card, Edit::Option { item: "q_0".into(), option: "opt_0_0".into(), checked: true });
+        until(c, |v| v.question.as_ref().is_some_and(|q| q.view.submit.enabled));
+        card
+    }
+
+    fn status_is(c: &Composers, status: &str) -> QuestionView {
+        until(c, |v| v.question.as_ref().is_some_and(|q| q.view.status == status)).question.unwrap()
+    }
+
+    #[test]
+    fn an_answer_goes_out_once_with_the_cards_identity() {
+        let root = dir("q-answer");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(answered);
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        let card = chosen(&c);
+        assert_eq!(c.question_submit(&card), QuestionReply::Sending);
+        let q = status_is(&c, "Answer sent. Waiting for the agent…");
+        assert!(q.view.locked && !q.view.submit.enabled);
+        let calls = sent(&fake);
+        assert_eq!(calls.len(), 1);
+        let (target, action, _) = &calls[0];
+        assert_eq!((target.name.as_str(), target.run_id.as_str(), target.conversation_id.as_str()), ("claude/sample-project/review", "run-1", "conv-1"));
+        let Action::Answer { question, answers } = action else { panic!("not an answer") };
+        assert_eq!((question["question_id"].as_str(), question["question_hash"].as_str()), (Some("tool:t1"), Some(HASH)));
+        assert_eq!(serde_json::to_value(answers).unwrap(), json!([{"question_id": "q_0", "selected_option_ids": ["opt_0_0"], "text": ""}]));
+        assert_eq!(c.question_submit(&card), QuestionReply::Busy, "an answered card sends nothing again");
+        assert_eq!(sent(&fake).len(), 1);
+    }
+
+    #[test]
+    fn a_card_changed_during_the_save_is_never_sent() {
+        let root = dir("q-changed");
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        let card = chosen(&c);
+        // Hold the writer, so the durable save waits while the card changes.
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        store.load("hold", move |_| { let _ = held.recv(); });
+        assert_eq!(c.question_submit(&card), QuestionReply::Sending);
+        let mut changed = card_json("tool:t1");
+        changed["question_hash"] = json!("b".repeat(64));
+        c.observe(&state(asking(vec![changed])));
+        release.send(()).unwrap();
+        store.flush();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while c.lock().answers.drafts.get(&card).is_some_and(|d| d.sending) {
+            assert!(std::time::Instant::now() < deadline, "the callback never ran");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(c.lock().answers.drafts[&card].notice, rules::CHANGED_KEPT);
+        assert!(sent(&fake).is_empty(), "a changed card is never answered");
+    }
+
+    #[test]
+    fn an_uncertain_answer_waits_for_allow_retry() {
+        let root = dir("q-uncertain");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(|_, _| Outcome::Uncertain { detail: "Answer delivery timed out. Check Terminal before retrying.".into() });
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        let card = chosen(&c);
+        c.question_submit(&card);
+        let q = until(&c, |v| v.question.as_ref().is_some_and(|q| q.view.retry)).question.unwrap();
+        assert_eq!(q.view.status, "Delivery is not confirmed. Check Terminal before retrying. Answer delivery timed out. Check Terminal before retrying.");
+        assert!(q.view.status_error && !q.view.submit.enabled);
+        assert_eq!(c.question_submit(&card), QuestionReply::Busy);
+        c.observe(&state(asking(vec![card_json("tool:t1")])));
+        assert_eq!(c.question_submit(&card), QuestionReply::Busy, "a new state never resends");
+        assert_eq!(sent(&fake).len(), 1);
+        c.question_allow_retry(&card);
+        until(&c, |v| v.question.as_ref().is_some_and(|q| q.view.submit.enabled));
+        *lock(&fake.outcome) = Box::new(answered);
+        assert_eq!(c.question_submit(&card), QuestionReply::Sending);
+        status_is(&c, "Answer sent. Waiting for the agent…");
+        let calls = sent(&fake);
+        assert_ne!(calls[0].2, calls[1].2, "a retry is a new request");
+    }
+
+    #[test]
+    fn a_broader_choice_sends_only_after_confirm() {
+        let root = dir("q-broader");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(answered);
+        let mut card = card_json("claude-approval:1");
+        card["source"] = json!("claude_tool_approval");
+        card["answer_transport"] = json!("claude_tui");
+        card["approval"] = json!(true);
+        card["approval_choices"] = json!(true);
+        card["questions"] = json!([{"id": "approval", "question": "Run cargo test?", "header": "Bash", "body": "cargo test", "allow_other": false,
+            "options": [{"id": "1", "label": "Yes", "scope": "once"}, {"id": "2", "label": "Yes, and don't ask again", "scope": "broader"}, {"id": "3", "label": "No", "scope": "once"}]}]);
+        let mut details = asking(vec![card]);
+        details["phase"] = json!("approval");
+        opened(&c, details);
+        let key = with_card(&c).question.unwrap().card;
+        c.question_edit(&key, Edit::Option { item: "approval".into(), option: "2".into(), checked: true });
+        until(&c, |v| v.question.as_ref().is_some_and(|q| q.view.submit.enabled));
+        assert_eq!(c.question_submit(&key), QuestionReply::Busy, "the first click only arms Confirm");
+        let q = status_is(&c, "“Yes, and don't ask again” changes the agent's permissions beyond this request. Select Confirm to send it.");
+        assert_eq!(q.view.submit.label, "Confirm");
+        assert!(sent(&fake).is_empty());
+        assert_eq!(c.question_submit(&key), QuestionReply::Sending);
+        status_is(&c, "Answer sent. Waiting for the agent…");
+        let Action::Answer { answers, .. } = &sent(&fake)[0].1 else { panic!("not an answer") };
+        assert_eq!(serde_json::to_value(answers).unwrap(), json!([{"question_id": "approval", "selected_option_ids": ["2"], "text": ""}]));
+    }
+
+    #[test]
+    fn approve_and_deny_send_the_decision() {
+        let root = dir("q-decide");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(answered);
+        let mut card = card_json("kimi-approval:1");
+        card["source"] = json!("kimi_tool_approval");
+        card["answer_transport"] = json!("kimi_tui");
+        card["approval"] = json!(true);
+        card["questions"] = json!([{"id": "approval", "question": "Run rm -rf build?", "body": "rm -rf build", "allow_other": false,
+            "options": [{"id": "allow", "label": "Approve"}, {"id": "deny", "label": "Deny"}]}]);
+        opened(&c, asking(vec![card]));
+        let q = with_card(&c).question.unwrap();
+        assert!(q.view.approve.visible && q.view.deny.visible && !q.view.submit.visible);
+        assert_eq!(q.view.approve.review_label.as_deref(), Some("Approve once"));
+        assert_eq!(c.question_decide(&q.card, false), QuestionReply::Sending);
+        status_is(&c, "Answer sent. Waiting for the agent…");
+        let Action::Answer { answers, .. } = &sent(&fake)[0].1 else { panic!("not an answer") };
+        assert_eq!(serde_json::to_value(answers).unwrap(), json!([{"question_id": "approval", "selected_option_ids": ["deny"], "text": ""}]));
+    }
+
+    #[test]
+    fn a_cold_cache_asks_first_and_cancel_sends_nothing() {
+        let root = dir("q-cold");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(answered);
+        let mut details = asking(vec![card_json("tool:t1")]);
+        details["session_usage"] = json!({"prompt_cache": {"status": "warm", "expires_at": 1_793_000_000.0}});
+        opened(&c, details);
+        let card = chosen(&c);
+        let QuestionReply::Cold { token, prompt } = c.question_submit(&card) else { panic!("no cold question") };
+        assert_eq!((prompt.title.as_str(), prompt.proceed.as_str()), ("Submit with a cold cache?", "Submit with full context"));
+        assert_eq!(c.question_submit(&card), QuestionReply::Busy, "one cold question at a time");
+        assert_eq!(c.question_cold(token, false), QuestionReply::Busy);
+        assert!(sent(&fake).is_empty());
+        let QuestionReply::Cold { token, .. } = c.question_submit(&card) else { panic!("no cold question") };
+        assert_eq!(c.question_cold(token, true), QuestionReply::Sending);
+        status_is(&c, "Answer sent. Waiting for the agent…");
+        assert_eq!(sent(&fake).len(), 1);
+    }
+
+    #[test]
+    fn answers_changed_behind_the_cold_question_are_kept() {
+        let root = dir("q-cold-changed");
+        let (c, fake) = send_hub(&root);
+        let mut details = asking(vec![card_json("tool:t1")]);
+        details["session_usage"] = json!({"prompt_cache": {"status": "warm", "expires_at": 1_793_000_000.0}});
+        opened(&c, details);
+        let card = chosen(&c);
+        let QuestionReply::Cold { token, .. } = c.question_submit(&card) else { panic!("no cold question") };
+        c.question_edit(&card, Edit::Option { item: "q_0".into(), option: "opt_0_1".into(), checked: true });
+        assert_eq!(c.question_cold(token, true), QuestionReply::Notice { text: rules::CONSENT_CHANGED.into() });
+        assert!(sent(&fake).is_empty());
+    }
+
+    #[test]
+    fn skip_sends_skips_and_codex_update_opens_terminal() {
+        let root = dir("q-skip");
+        let (c, fake) = send_hub(&root);
+        lock(&fake.row).machine = "studio".into();
+        *lock(&fake.outcome) = Box::new(answered);
+        let mut optional = card_json("codex:q1");
+        optional["source"] = json!("codex_async");
+        optional["optional"] = json!(true);
+        optional["can_skip"] = json!(true);
+        let mut details = ready();
+        details["pending_questions"] = json!([optional]);
+        opened(&c, details);
+        let card = with_card(&c).question.unwrap().card;
+        assert_eq!(c.question_skip(&card), QuestionReply::Sending);
+        status_is(&c, "Response recorded.");
+        let Action::Answer { answers, .. } = &sent(&fake)[0].1 else { panic!("not an answer") };
+        assert_eq!(serde_json::to_value(answers).unwrap(), json!([{"question_id": "q_0", "skip": true}]));
+
+        let id = format!("codex-update:{HASH}");
+        let mut update = card_json(&id);
+        update["source"] = json!("codex_update");
+        update["answer_transport"] = json!("codex_tui");
+        update["questions"] = json!([{"id": "update", "question": "Update Codex?", "allow_other": false,
+            "options": [{"id": "update_now", "label": "Update now"}, {"id": "skip", "label": "Skip"}]}]);
+        *lock(&fake.outcome) = Box::new(|_, id| Outcome::Done { receipt: json!({"status": "answered", "request_id": id, "question_hash": HASH,
+            "run_id": "run-1", "open_terminal": true, "codex_update": "installing"}), cleanup: None });
+        c.observe(&state(asking(vec![update])));
+        let card = until(&c, |v| v.question.as_ref().is_some_and(|q| q.card.contains("codex-update:") && !q.view.forms.is_empty())).question.unwrap().card;
+        c.question_edit(&card, Edit::Option { item: "update".into(), option: "update_now".into(), checked: true });
+        until(&c, |v| v.question.as_ref().is_some_and(|q| q.view.submit.enabled));
+        assert_eq!(c.question_submit(&card), QuestionReply::Sending);
+        status_is(&c, "Answer sent. Waiting for the agent…");
+        assert_eq!(c.take_events(), vec![
+            ComposerEvent::OpenTerminal { key: crate::composer::tests::KEY.into() },
+            ComposerEvent::Notice { text: "Codex in claude/sample-project/review (studio) is installing its update in Terminal. Resume the session after Codex exits.".into(), error: false, transient: false },
+        ]);
+    }
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer::questions::`
+Expected: compile errors (no `question_submit`, `QuestionReply` or `ComposerEvent`).
+
+- [ ] **Step 3: The events** in `composer/mod.rs`:
+
+```rust
+/// What Rust tells the webview besides the views: a notice (Qt's
+/// `showNotice`), or the Terminal tab to open. Drained with each batch.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ComposerEvent {
+    Notice { text: String, error: bool, transient: bool },
+    OpenTerminal { key: String },
+}
+
+/// At most this many events wait for the next batch; older ones go first.
+const EVENTS: usize = 16;
+
+impl Composers {
+    /// Queues an event; the caller wakes the pump (`changed`) after it drops the hub.
+    pub(crate) fn event(&self, hub: &mut Hub, event: ComposerEvent) {
+        hub.events.push_back(event);
+        while hub.events.len() > EVENTS {
+            hub.events.pop_front();
+        }
+    }
+
+    /// The events since the last batch.
+    pub fn take_events(&self) -> Vec<ComposerEvent> {
+        self.lock().events.drain(..).collect()
+    }
+}
+```
+
+`Hub` gains `pub(crate) events: VecDeque<ComposerEvent>`. In `commands.rs`, the `Envelope` gains `#[serde(skip_serializing_if = "Vec::is_empty")] composer_events: Vec<crate::composer::ComposerEvent>`, filled with `composers.take_events()` beside `take_view()`.
+
+- [ ] **Step 4: The delivery** in `composer/questions.rs`. `Answers` gains `pub(crate) cold: Option<ColdAsk>`, `pub(crate) in_flight: HashMap<String, String>` and `next_token: u64`. `question_part` passes `in_flight: hub.answers.in_flight.values().any(|card| *card == key)`.
+
+```rust
+use std::sync::MutexGuard;
+use zerus_client_core::questions::{Actionable, AnswerItem, ColdAnswer, Snapshot};
+use zerus_client_core::{Action, Outcome, Target};
+use super::{ComposerEvent, SessionRef};
+
+/// What Submit, Approve once, Deny, Skip and the cold question answer.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum QuestionReply {
+    /// The answer is on its way; its end arrives with the card.
+    Sending,
+    /// Nothing happened: the card is not ready, changed quietly, or another answer runs.
+    Busy,
+    /// Ask "Submit with a cold cache?" and answer with `question_cold(token, …)`.
+    Cold { token: u64, prompt: ColdAnswer },
+    /// A sticky error notice.
+    Notice { text: String },
+}
+
+/// One answer from the click to its end, with everything it was asked under.
+#[derive(Clone)]
+pub(crate) struct Answering {
+    card: String,
+    key: String,
+    session: SessionRef,
+    created: i64,
+    row_run: String,
+    row_conversation: String,
+    question: Question,
+    answers: Vec<AnswerItem>,
+    /// The card's consent identity at the click.
+    pinned: Value,
+    /// The details at the click (`sendEvidence`).
+    captured: Value,
+    skipping: bool,
+    consent: bool,
+}
+
+/// An answer waiting for the cold-cache consent (`answerQuestion` 5111-5142).
+pub(crate) struct ColdAsk {
+    token: u64,
+    answering: Answering,
+    snapshot: Snapshot,
+}
+
+impl Composers {
+    fn button_ready(&self, hub: &Hub, card: &str, pick: fn(&CardView) -> &rules::ButtonView) -> bool {
+        self.question_part(hub).0.filter(|q| q.card == card).is_some_and(|q| pick(&q.view).visible && pick(&q.view).enabled)
+    }
+
+    /// Submit on the card (`QuestionCard::submit`): the shown values, after a
+    /// broader option's second Confirm. The review delay is the webview's.
+    pub fn question_submit(&self, card: &str) -> QuestionReply {
+        let mut hub = self.lock();
+        let Some((ctx, question)) = self.shown_question(&hub, card) else { return QuestionReply::Busy };
+        if !self.button_ready(&hub, card, |v| &v.submit) {
+            return QuestionReply::Busy;
+        }
+        let Some(draft) = hub.answers.drafts.get_mut(card) else { return QuestionReply::Busy };
+        let (answers, valid) = rules::answers(&question, draft);
+        if !valid {
+            return QuestionReply::Busy;
+        }
+        if draft.confirm_step(&question) {
+            self.save_answer(&mut hub, card, false, None);
+            drop(hub);
+            self.changed();
+            return QuestionReply::Busy;
+        }
+        self.request_answer(hub, ctx, question, card, answers, false)
+    }
+
+    /// Approve once or Deny on an approval without native choices.
+    pub fn question_decide(&self, card: &str, allow: bool) -> QuestionReply {
+        let hub = self.lock();
+        let Some((ctx, question)) = self.shown_question(&hub, card) else { return QuestionReply::Busy };
+        let pick: fn(&CardView) -> &rules::ButtonView = if allow { |v| &v.approve } else { |v| &v.deny };
+        if !self.button_ready(&hub, card, pick) {
+            return QuestionReply::Busy;
+        }
+        let Some(answers) = rules::decision(&question, allow) else { return QuestionReply::Busy };
+        self.request_answer(hub, ctx, question, card, answers, false)
+    }
+
+    /// Skip on an optional Codex card.
+    pub fn question_skip(&self, card: &str) -> QuestionReply {
+        let hub = self.lock();
+        let Some((ctx, question)) = self.shown_question(&hub, card) else { return QuestionReply::Busy };
+        if !self.button_ready(&hub, card, |v| &v.skip) {
+            return QuestionReply::Busy;
+        }
+        let answers = rules::skip_answers(&question);
+        self.request_answer(hub, ctx, question, card, answers, true)
+    }
+
+    /// `answerQuestion`: the quiet checks, the changed card, the cold cache.
+    fn request_answer(&self, mut hub: MutexGuard<'_, Hub>, ctx: Context, question: Question, card: &str, answers: Vec<AnswerItem>, skipping: bool) -> QuestionReply {
+        if hub.closed || hub.answers.cold.is_some() || hub.answers.in_flight.contains_key(&ctx.key) {
+            return QuestionReply::Busy;
+        }
+        let Some(details) = ctx.details.clone() else { return QuestionReply::Busy };
+        if question.source == "codex_async" && question.optional && hub.answers.drafts.get(card).is_some_and(|d| d.submitted) {
+            return QuestionReply::Busy;
+        }
+        let question = match rules::actionable(&details, &facts(&ctx), &question.id, skipping) {
+            Actionable::Ready(question) => question,
+            Actionable::Silent => return QuestionReply::Busy,
+            Actionable::Changed => {
+                if let Some(draft) = hub.answers.drafts.get_mut(card) {
+                    draft.set_error(rules::CHANGED, false);
+                }
+                self.save_answer(&mut hub, card, false, None);
+                drop(hub);
+                self.changed();
+                return QuestionReply::Busy;
+            }
+        };
+        let answering = Answering {
+            card: card.to_owned(),
+            key: ctx.key.clone(),
+            session: ctx.session.clone(),
+            created: ctx.row.created,
+            row_run: ctx.row.run_id.clone().unwrap_or_default(),
+            row_conversation: ctx.row.conversation_id.clone().unwrap_or_default(),
+            pinned: rules::consent_identity(&question.raw),
+            captured: (*details).clone(),
+            question,
+            answers,
+            skipping,
+            consent: false,
+        };
+        if let Some(prompt) = rules::cold_answer(&details, &answering.question, self.now()) {
+            let Some(draft) = hub.answers.drafts.get(card) else { return QuestionReply::Busy };
+            if draft.sending || draft.submitted || draft.answered || draft.uncertain || !draft.storage_error.is_empty() {
+                return QuestionReply::Busy;
+            }
+            let snapshot = draft.snapshot();
+            hub.answers.next_token += 1;
+            let token = hub.answers.next_token;
+            hub.answers.cold = Some(ColdAsk { token, answering, snapshot });
+            return QuestionReply::Cold { token, prompt };
+        }
+        self.prepare_answer(hub, answering)
+    }
+
+    /// The cold question's answer. Anything that changed behind it keeps the
+    /// draft and sends nothing (`answerQuestion` 5131-5142).
+    pub fn question_cold(&self, token: u64, proceed: bool) -> QuestionReply {
+        let mut hub = self.lock();
+        let Some(ask) = hub.answers.cold.take_if(|ask| ask.token == token) else { return QuestionReply::Busy };
+        if !proceed {
+            return QuestionReply::Busy;
+        }
+        let a = &ask.answering;
+        let same = self.context(&hub).is_some_and(|ctx| {
+            let details = ctx.details.as_deref().cloned().unwrap_or_default();
+            let identity = match rules::actionable(&details, &facts(&ctx), &a.question.id, a.skipping) {
+                Actionable::Ready(question) => rules::consent_identity(&question.raw),
+                _ => Value::Null,
+            };
+            ctx.key == a.key && ctx.session.computer == a.session.computer && ctx.session.name == a.session.name
+                && ctx.row.created == a.created
+                && ctx.row.run_id.clone().unwrap_or_default() == a.row_run
+                && ctx.row.conversation_id.clone().unwrap_or_default() == a.row_conversation
+                && text(&details, "run_id") == text(&a.captured, "run_id")
+                && text(&details, "conversation_id") == text(&a.captured, "conversation_id")
+                && identity == a.pinned
+        }) && hub.answers.drafts.get(&a.card).is_some_and(|d| d.snapshot() == ask.snapshot);
+        if !same {
+            return QuestionReply::Notice { text: rules::CONSENT_CHANGED.to_owned() };
+        }
+        let mut answering = ask.answering;
+        answering.consent = true;
+        self.prepare_answer(hub, answering)
+    }
+
+    /// `prepareSendingAsync`: the draft is saved durably as sending before
+    /// anything runs, and only that save's answer can continue.
+    fn prepare_answer(&self, mut hub: MutexGuard<'_, Hub>, answering: Answering) -> QuestionReply {
+        let card = answering.card.clone();
+        if hub.answers.loading.contains(&card) {
+            return QuestionReply::Busy;
+        }
+        let Some(draft) = hub.answers.drafts.get_mut(&card) else { return QuestionReply::Busy };
+        if draft.sending || draft.submitted || draft.answered || draft.uncertain {
+            return QuestionReply::Busy;
+        }
+        draft.begin_sending();
+        let me = self.clone();
+        self.save_answer(&mut hub, &card, true, Some(Box::new(move |saved| me.answer_prepared(answering, saved))));
+        drop(hub);
+        self.changed();
+        QuestionReply::Sending
+    }
+
+    /// The durable save answered: check everything again, then call `hgs answer` once.
+    fn answer_prepared(&self, answering: Answering, saved: bool) {
+        let mut hub = self.lock();
+        let card = answering.card.clone();
+        if !saved {
+            if let Some(draft) = hub.answers.drafts.get_mut(&card) {
+                draft.sending_failed();
+            }
+            drop(hub);
+            self.changed();
+            return;
+        }
+        // The app quits: the draft is on disk as sending and reloads uncertain.
+        if hub.closed {
+            return;
+        }
+        if !self.still_answerable(&hub, &answering) {
+            if let Some(draft) = hub.answers.drafts.get_mut(&card) {
+                draft.set_error(rules::CHANGED_KEPT, false);
+            }
+            self.save_answer(&mut hub, &card, false, None);
+            drop(hub);
+            self.changed();
+            return;
+        }
+        hub.answers.in_flight.insert(answering.key.clone(), card);
+        drop(hub);
+        self.changed();
+        let me = self.clone();
+        (self.0.deps.spawn)(Box::new(move || me.answer_now(answering)));
+    }
+
+    /// The callback's re-check (5153-5170), on the open session's details or,
+    /// after a switch, on the details captured at the click.
+    fn still_answerable(&self, hub: &Hub, a: &Answering) -> bool {
+        let Some((row, online)) = (self.0.deps.rows)(&a.session.computer, &a.session.key, &a.session.name) else { return false };
+        let ctx = (hub.open_key.as_deref() == Some(a.key.as_str())).then(|| self.context(hub)).flatten();
+        let evidence = ctx.as_ref().and_then(|c| c.details.as_deref().cloned()).unwrap_or_else(|| a.captured.clone());
+        let facts = AnswerFacts {
+            online,
+            state: row.state.clone(),
+            updating: (self.0.deps.facts)(&a.session.computer, &a.session.name).is_some(),
+            inspect_error: ctx.as_ref().is_some_and(|c| c.facts.inspect_error),
+        };
+        let (run, conversation) = (row.run_id.clone().unwrap_or_default(), row.conversation_id.clone().unwrap_or_default());
+        rules::still_answerable(&rules::Recheck {
+            pinned: &a.pinned,
+            question: &a.question,
+            evidence: &evidence,
+            captured: &a.captured,
+            row_same: row.name == a.session.name && row.created == a.created,
+            row_identity: (run == a.row_run && conversation == a.row_conversation)
+                || (run == a.question.run_id && conversation == a.question.conversation_id),
+            facts: &facts,
+            skipping: a.skipping,
+            consent: a.consent,
+            submitted: hub.answers.drafts.get(&a.card).is_some_and(|d| d.submitted),
+            now: self.now(),
+        })
+    }
+
+    /// The one `hgs answer` call of this attempt, with its own request id.
+    fn answer_now(&self, answering: Answering) {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let target = Target {
+            computer: answering.session.computer.clone(),
+            name: answering.session.name.clone(),
+            run_id: answering.question.run_id.clone(),
+            conversation_id: answering.question.conversation_id.clone(),
+        };
+        let action = Action::Answer { question: answering.question.raw.clone(), answers: answering.answers.clone() };
+        let outcome = match (self.0.deps.dispatch)(target, action, request_id) {
+            Ok(outcome) => outcome,
+            // The call's thread died, so it may have run.
+            Err(error) => Outcome::Uncertain { detail: error },
+        };
+        self.answer_finished(&answering, outcome);
+    }
+
+    /// `finishQuestion`: the card says how it ended. Nothing is sent again by itself.
+    fn answer_finished(&self, a: &Answering, outcome: Outcome) {
+        let mut hub = self.lock();
+        hub.answers.in_flight.remove(&a.key);
+        let open = hub.open_key.as_deref() == Some(a.key.as_str());
+        let open_run = open.then(|| hub.followed.details.as_deref().map(|d| text(d, "run_id").to_owned())).flatten();
+        let mut follow = None;
+        if let Some(draft) = hub.answers.drafts.get_mut(&a.card) {
+            match &outcome {
+                Outcome::Done { receipt, .. } if receipt["status"] == "submitted" => draft.set_submitted(),
+                Outcome::Done { receipt, .. } => {
+                    draft.set_answered(a.question.optional);
+                    let target = (self.0.deps.rows)(&a.session.computer, &a.session.key, &a.session.name)
+                        .map(|(row, _)| format!("{} ({})", a.session.name, row.machine))
+                        .unwrap_or_else(|| a.session.name.clone());
+                    follow = Some(rules::answered_follow_up(&a.question, receipt, open_run.as_deref(), &target));
+                }
+                Outcome::Failed { detail } => draft.set_error(detail, false),
+                Outcome::Uncertain { detail } => draft.set_error(detail, true),
+            }
+        }
+        self.save_answer(&mut hub, &a.card, false, None);
+        if let Some(follow) = follow {
+            if follow.open_terminal {
+                self.event(&mut hub, ComposerEvent::OpenTerminal { key: a.key.clone() });
+            }
+            if let Some(text) = follow.notice {
+                self.event(&mut hub, ComposerEvent::Notice { text, error: false, transient: false });
+            }
+        }
+        drop(hub);
+        self.changed();
+        if open {
+            self.refresh_details();
+        }
+    }
+}
+
+#[tauri::command]
+pub fn question_submit(state: tauri::State<'_, Composers>, card: String) -> QuestionReply {
+    state.question_submit(&card)
+}
+
+#[tauri::command]
+pub fn question_decide(state: tauri::State<'_, Composers>, card: String, allow: bool) -> QuestionReply {
+    state.question_decide(&card, allow)
+}
+
+#[tauri::command]
+pub fn question_skip(state: tauri::State<'_, Composers>, card: String) -> QuestionReply {
+    state.question_skip(&card)
+}
+
+#[tauri::command]
+pub fn question_cold(state: tauri::State<'_, Composers>, token: u64, proceed: bool) -> QuestionReply {
+    state.question_cold(token, proceed)
+}
+```
+
+`Action::Answer` is never deserialized: it is built here from the shown card's raw entry and the held draft's answers.
+
+- [ ] **Step 5: Register** the four commands in `lib.rs` beside A2-1's.
+
+- [ ] **Step 6: Run the tests to see them pass**
+
+Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer:: actions::`
+Expected: PASS, A2-1's tests and the 8 new ones. Clippy and fmt clean.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add client/src-tauri
+git commit -m "feat(client): answer question cards and approvals through the guarded hgs answer"
+```
+
+---
+
+### Task A2-3: The question card view, and answers in Activity
+
+**Depends on:**
+- A2-2;
+- Task 2 (`terminal`, `setDetailTab`) and Task 6 (`composer`, `SessionDetail`'s composer column);
+- R7's `annotate_replies` for the transcript.
+
+**Qt reference:**
+- `tray/src/QuestionCard.cpp`: the layout 179-268, the form 512-632, the controls 767-856, Enter 898-914, the review timer 237-246.
+- `tray/src/SessionsWindow.cpp`:
+  - the placement 918 and 1030;
+  - `setInputVisible` at 5049;
+  - Open Terminal 1137-1142;
+  - the cold dialog 5111-5131.
+- `tray/src/ActivityView.cpp`: the answer labels and bodies 347-363, 975-981 and 1029-1031.
+
+There is no mockup for the card: it follows Qt's layout with the skin's tokens.
+
+**Files:**
+- Modify: `client/src/types.ts` (the card's shapes, `ComposerView`'s three fields, `Batch.composer_events`), `client/src/bridge.ts` (eight wrappers; `normalize` keeps `composer_events`)
+- Create: `client/src/store/questions.ts`, `client/src/store/questions.test.ts`
+- Create: `client/src/ui/sessions/QuestionCard.tsx`
+- Modify: `client/src/store/session.ts` (route the card and the events)
+- Modify: `client/src/ui/sessions/Composer.tsx` (the input hides under a required card)
+- Modify: `client/src/ui/sessions/SessionDetail.tsx` (the card and the read error above the composer)
+- Modify: `client/src/ui/sessions/Activity.tsx` (export `Body`; reply blocks), `client/src/ui/sessions/types.ts` (`TranscriptItem.replies`)
+- Modify: `client/src/ui/sessions/transcript.ts`, `client/src/ui/sessions/transcript.test.ts`
+- Modify: `client/src/ui/styles/detail.css`
+- Modify: `client/src-tauri/src/commands.rs` (`annotate` before the envelope, and its test)
+
+**Interfaces:**
+- Consumes: A2-1 and A2-2's commands and serde shapes; Task 6's `composer` store and `notify`; Task 2's `terminal.status()`, `terminal.connect()`, `setDetailTab`.
+- Produces:
+
+```ts
+// types.ts
+export interface ButtonView { visible: boolean; enabled: boolean; label: string; review_label: string | null }
+export interface OptionView { id: string; label: string; description: string; markdown: boolean; checked: boolean; enabled: boolean; visible: boolean }
+export interface TextView { visible: boolean; enabled: boolean; value: string; placeholder: string; accessible_name: string; max_units: number; max_chars: number }
+export interface FormView { id: string; tab: string; prompt: string; body: string; markdown: boolean; monospace_body: boolean; multi: boolean;
+  mode: string; mode_visible: boolean; options: OptionView[]; other: OptionView | null; text: TextView | null }
+export interface QueueNav { previous: boolean; next: boolean; previous_tip: string; next_tip: string }
+export interface CardView { heading: string; progress: string; pending: string; pending_tip: string; nav: QueueNav | null; tabs_visible: boolean;
+  page: number; forms: FormView[]; status: string; status_error: boolean; available: boolean; locked: boolean; review: boolean; created_at: number;
+  submit: ButtonView; approve: ButtonView; deny: ButtonView; skip: ButtonView; previous: ButtonView; next: ButtonView; retry: boolean; skip_tip: string; retry_tip: string }
+export interface QuestionView { card: string; revision: number; asked: string; asked_tip: string; terminal_label: string; view: CardView }
+export type QuestionEdit = { kind: "option"; item: string; option: string; checked: boolean } | { kind: "other"; item: string; checked: boolean } | { kind: "text"; item: string; text: string };
+export interface ColdAnswer { title: string; text: string; proceed: string }
+export type QuestionReply = { kind: "sending" } | { kind: "busy" } | { kind: "cold"; token: number; prompt: ColdAnswer } | { kind: "notice"; text: string };
+export type ComposerEvent = { kind: "notice"; text: string; error: boolean; transient: boolean } | { kind: "open_terminal"; key: string };
+export interface Reply { question: string; answer: string }
+// ComposerView gains: question: QuestionView | null; input_visible: boolean; questions_error: string | null
+// Batch gains: composer_events?: ComposerEvent[]
+// store/questions.ts
+export const REVIEW_MS = 3000;
+export const TICK_MS = 100;
+export function createQuestions(port: QuestionPort, clock?: Clock): QuestionsStore;
+export const questions: QuestionsStore;
+// QuestionsStore: view(), left(), dialog(), apply(view), setActive(on), label(button), enabled(button), edit(e), page(i), navigate(d),
+//   allowRetry(), submit(), enter(repeat), decide(allow), skip(), answerCold(proceed)
+// Activity.tsx: export function Body(props: { text: string })
+```
+
+- [ ] **Step 1: Write the failing store tests** in `client/src/store/questions.test.ts`:
+
+```ts
+import { describe, expect, it } from "vitest";
+import { createRoot } from "solid-js";
+import { createQuestions, type Clock, type QuestionPort } from "./questions";
+import type { ButtonView, CardView, QuestionView } from "../types";
+
+const button = (over: Partial<ButtonView> = {}): ButtonView => ({ visible: true, enabled: true, label: "Submit answer", review_label: null, ...over });
+
+function card(over: Partial<CardView> = {}, revision = 1): QuestionView {
+  return {
+    card: "question\n[\"studio\\nclaude/sample-project/review\",\"tool:t1\",\"h\"]\nrun-1\nconv-1", revision, asked: "", asked_tip: "", terminal_label: "Open Terminal",
+    view: {
+      heading: "Agent needs your answer", progress: "", pending: "1 pending", pending_tip: "", nav: null, tabs_visible: false, page: 0, forms: [],
+      status: "", status_error: false, available: true, locked: false, review: false, created_at: 0,
+      submit: button(), approve: button({ visible: false, label: "Approve once" }), deny: button({ visible: false, label: "Deny" }),
+      skip: button({ visible: false, label: "Skip" }), previous: button({ visible: false, label: "← Back" }), next: button({ visible: false, label: "Next →" }),
+      retry: false, skip_tip: "", retry_tip: "", ...over,
+    },
+  };
+}
+
+const approval = (revision = 1) => card({ heading: "Agent needs your approval", review: true, submit: button({ visible: false }),
+  approve: button({ label: "Approve once", review_label: "Approve once" }), deny: button({ label: "Deny" }) }, revision);
+
+function fakes() {
+  const calls: string[] = [];
+  let now = 0;
+  const ticks = new Set<() => void>();
+  const clock: Clock = { now: () => now, every: (_ms, f) => { ticks.add(f); return () => ticks.delete(f); } };
+  let next: Record<string, unknown> = { kind: "sending" };
+  const port: QuestionPort = {
+    edit: async (c, e) => { calls.push(`edit ${JSON.stringify(e)}`); void c; },
+    page: async (_c, p) => { calls.push(`page ${p}`); },
+    navigate: async (d) => { calls.push(`navigate ${d}`); },
+    allowRetry: async () => { calls.push("retry"); },
+    submit: async () => { calls.push("submit"); return next as never; },
+    decide: async (_c, allow) => { calls.push(`decide ${allow}`); return next as never; },
+    skip: async () => { calls.push("skip"); return next as never; },
+    cold: async (token, proceed) => { calls.push(`cold ${token} ${proceed}`); return { kind: "busy" }; },
+    notify: (text) => { calls.push(`notify ${text}`); },
+  };
+  return { calls, clock, port, ticking: () => ticks.size, advance(ms: number) { now += ms; ticks.forEach((f) => f()); }, reply(r: Record<string, unknown>) { next = r; } };
+}
+
+describe("question cards", () => {
+  it("the review delay counts only while the card is active", () => createRoot(async (dispose) => {
+    const f = fakes();
+    const q = createQuestions(f.port, f.clock);
+    q.apply(approval());
+    const approve = () => q.view()!.view.approve;
+    expect([q.label(approve()), q.enabled(approve())]).toEqual(["Approve once (3)", false]);
+    f.advance(5000);
+    expect(q.label(approve())).toBe("Approve once (3)");
+    q.setActive(true);
+    f.advance(1000);
+    expect(q.label(approve())).toBe("Approve once (2)");
+    expect(q.enabled(q.view()!.view.deny)).toBe(true);
+    f.advance(2000);
+    expect([q.label(approve()), q.enabled(approve())]).toEqual(["Approve once", true]);
+    q.setActive(false);
+    expect(q.label(approve())).toBe("Approve once (3)");
+    dispose();
+  }));
+
+  it("a rebuilt card starts the review again, and only a review card ticks", () => createRoot(async (dispose) => {
+    const f = fakes();
+    const q = createQuestions(f.port, f.clock);
+    q.apply(approval());
+    q.setActive(true);
+    f.advance(3000);
+    expect(q.label(q.view()!.view.approve)).toBe("Approve once");
+    q.apply(approval(2));
+    f.advance(100);
+    expect(q.label(q.view()!.view.approve)).toBe("Approve once (3)");
+    q.apply(card());
+    expect(f.ticking()).toBe(0);
+    dispose();
+  }));
+
+  it("buttons that are off send nothing", () => createRoot(async (dispose) => {
+    const f = fakes();
+    const q = createQuestions(f.port, f.clock);
+    q.apply(card({ submit: button({ enabled: false }) }));
+    await q.submit();
+    q.apply(approval());
+    await q.decide(true);
+    expect(f.calls).toEqual([]);
+    await q.decide(false);
+    expect(f.calls).toEqual(["decide false"]);
+    dispose();
+  }));
+
+  it("holding Enter never submits again", () => createRoot(async (dispose) => {
+    const f = fakes();
+    const q = createQuestions(f.port, f.clock);
+    q.apply(card());
+    await q.enter(true);
+    expect(f.calls).toEqual([]);
+    await q.enter(false);
+    expect(f.calls).toEqual(["submit"]);
+    dispose();
+  }));
+
+  it("a cold reply opens the dialog, and Cancel answers it", () => createRoot(async (dispose) => {
+    const f = fakes();
+    const q = createQuestions(f.port, f.clock);
+    q.apply(card());
+    f.reply({ kind: "cold", token: 7, prompt: { title: "Submit with a cold cache?", text: "…", proceed: "Submit with full context" } });
+    await q.submit();
+    expect(q.dialog()?.prompt.title).toBe("Submit with a cold cache?");
+    await q.answerCold(false);
+    expect(q.dialog()).toBeUndefined();
+    expect(f.calls).toEqual(["submit", "cold 7 false"]);
+    dispose();
+  }));
+
+  it("a notice reply raises a sticky error", () => createRoot(async (dispose) => {
+    const f = fakes();
+    const q = createQuestions(f.port, f.clock);
+    q.apply(card());
+    f.reply({ kind: "notice", text: "The question or your answers changed. Your draft was kept; review it before submitting again." });
+    await q.submit();
+    expect(f.calls.at(-1)).toBe("notify The question or your answers changed. Your draft was kept; review it before submitting again.");
+    dispose();
+  }));
+});
+```
+
+In `client/src/ui/sessions/transcript.test.ts`:
+
+```ts
+  it("answers are labelled and keep their questions", () => {
+    const items = buildTranscript([
+      { seq: 1, type: "QuestionAnswered", at: 10, detail: "Which checks? → Unit" },
+      { seq: 2, type: "UserPromptSubmit", at: 11, detail: "<send_user_message_question_reply>…", question_replies: [{ question: "Which checks?", answer: "Unit" }] },
+    ] as ActivityEvent[]);
+    expect(items.map((i) => i.label)).toEqual(["You (answer)", "You (answer)"]);
+    expect(items[1].replies).toEqual([{ question: "Which checks?", answer: "Unit" }]);
+  });
+
+  it("a recorded prompt with answers reads as a recorded answer", () => {
+    const items = buildTranscript([], { prompt: "<send_user_message_question_reply>…", prompt_replies: [{ question: "Q", answer: "A" }] });
+    expect(items[0].label).toBe("You (recorded answer)");
+    expect(items[0].replies).toEqual([{ question: "Q", answer: "A" }]);
+  });
+```
+
+In `client/src-tauri/src/commands.rs` (its `tests` module; add `#[cfg(test)] mod tests { use super::*; … }` if it has none):
+
+```rust
+    #[test]
+    fn question_replies_are_annotated_before_the_webview() {
+        use zerus_client_core::{ActivityOut, Batch, ComputerId};
+        let detail = "<send_user_message_question_reply>{\"questionItemId\":\"q1\",\"question\":\"Which checks?\",\"answer\":\"Unit\"}</send_user_message_question_reply>";
+        let mut batch = Batch {
+            activity: vec![ActivityOut { computer: ComputerId::from("studio"), key: "run:run-1".into(), kind: "events".into(),
+                payload: serde_json::json!({"events": [{"seq": 1, "type": "UserPromptSubmit", "detail": detail}], "cursor": 1}) }],
+            ..Batch::default()
+        };
+        annotate(&mut batch);
+        assert_eq!(batch.activity[0].payload["events"][0]["question_replies"], serde_json::json!([{"question": "Which checks?", "answer": "Unit"}]));
+    }
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cd client && npm test -- src/store/questions.test.ts src/ui/sessions/transcript.test.ts`
+Expected: FAIL (no `questions` store; no labels).
+
+Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml commands::`
+Expected: compile error (no `annotate`).
+
+- [ ] **Step 3: Annotate in Rust.** In `commands.rs`:
+
+```rust
+/// Codex's question replies become `question_replies` on their events
+/// (R7's `annotate_replies`), so the webview never parses them.
+pub(crate) fn annotate(batch: &mut zerus_client_core::Batch) {
+    for out in &mut batch.activity {
+        zerus_client_core::questions::annotate_replies(&mut out.payload);
+    }
+}
+```
+
+`next_batch` takes its batch as `let mut batch = live.pump.take(crate::pump::PARK);` and calls `annotate(&mut batch);` before `actions.observe(&batch)`.
+
+- [ ] **Step 4: The store.** Write `client/src/store/questions.ts`:
+
+```ts
+import { createRoot, createSignal } from "solid-js";
+import * as bridge from "../bridge";
+import { notify } from "./actions";
+import type { ButtonView, ColdAnswer, QuestionEdit, QuestionReply, QuestionView } from "../types";
+
+/** Qt's review delay before an approval can be granted, and its timer. */
+export const REVIEW_MS = 3000;
+export const TICK_MS = 100;
+
+export interface QuestionPort {
+  edit(card: string, edit: QuestionEdit): Promise<void>;
+  page(card: string, page: number): Promise<void>;
+  navigate(direction: number): Promise<void>;
+  allowRetry(card: string): Promise<void>;
+  submit(card: string): Promise<QuestionReply>;
+  decide(card: string, allow: boolean): Promise<QuestionReply>;
+  skip(card: string): Promise<QuestionReply>;
+  cold(token: number, proceed: boolean): Promise<QuestionReply>;
+  notify(text: string): void;
+}
+
+export interface Clock { now(): number; every(ms: number, f: () => void): () => void }
+
+const browserClock: Clock = {
+  now: () => performance.now(),
+  every: (ms, f) => { const id = setInterval(f, ms); return () => clearInterval(id); },
+};
+
+export function createQuestions(port: QuestionPort, clock: Clock = browserClock) {
+  const [view, setView] = createSignal<QuestionView | undefined>();
+  const [left, setLeft] = createSignal(REVIEW_MS / 1000);
+  const [dialog, setDialog] = createSignal<{ token: number; prompt: ColdAnswer } | undefined>();
+  let active = false;
+  let started: number | undefined;
+  let shown = "";
+  let stop: (() => void) | undefined;
+  const secondsLeft = (elapsed: number) => Math.ceil(Math.max(0, REVIEW_MS - elapsed) / 1000);
+
+  /** The count runs only while the card is on screen, the window is active and the card is available. */
+  function tick() {
+    const v = view();
+    if (!v?.view.review) return;
+    if (!active || !v.view.available) { started = undefined; setLeft(secondsLeft(0)); return; }
+    started ??= clock.now();
+    setLeft(secondsLeft(clock.now() - started));
+  }
+
+  /** A new card or a rebuilt one starts the review again; only a review card ticks. */
+  function apply(next: QuestionView | null | undefined) {
+    const id = next ? `${next.card}\n${next.revision}` : "";
+    if (id !== shown) { shown = id; started = undefined; setLeft(secondsLeft(0)); }
+    setView(next ?? undefined);
+    const review = !!next?.view.review;
+    if (review && !stop) stop = clock.every(TICK_MS, tick);
+    if (!review && stop) { stop(); stop = undefined; }
+    tick();
+  }
+
+  const reviewing = (b: ButtonView) => b.review_label !== null && left() > 0;
+  const label = (b: ButtonView) => (reviewing(b) ? `${b.review_label} (${left()})` : b.label);
+  const enabled = (b: ButtonView) => b.visible && b.enabled && !reviewing(b);
+  const reply = (r: QuestionReply) => {
+    if (r.kind === "cold") setDialog({ token: r.token, prompt: r.prompt });
+    else if (r.kind === "notice") port.notify(r.text);
+  };
+  const card = () => view()?.card;
+
+  async function submit() {
+    const v = view();
+    if (v && enabled(v.view.submit)) reply(await port.submit(v.card));
+  }
+
+  return {
+    view, left, dialog, apply, label, enabled, submit,
+    setActive(on: boolean) { active = on; tick(); },
+    edit(e: QuestionEdit) { const c = card(); if (c !== undefined) void port.edit(c, e); },
+    async page(i: number) { const c = card(); if (c !== undefined) await port.page(c, i); },
+    async navigate(direction: number) { await port.navigate(direction); },
+    async allowRetry() { const c = card(); if (c !== undefined) await port.allowRetry(c); },
+    /** Enter on an option or the answer line: Submit when it shows, never on auto-repeat. */
+    async enter(repeat: boolean) { if (!repeat && view()?.view.submit.visible) await submit(); },
+    async decide(allow: boolean) {
+      const v = view();
+      if (v && enabled(allow ? v.view.approve : v.view.deny)) reply(await port.decide(v.card, allow));
+    },
+    async skip() { const v = view(); if (v && enabled(v.view.skip)) reply(await port.skip(v.card)); },
+    async answerCold(proceed: boolean) {
+      const d = dialog();
+      if (!d) return;
+      setDialog(undefined);
+      reply(await port.cold(d.token, proceed));
+    },
+  };
+}
+
+export type QuestionsStore = ReturnType<typeof createQuestions>;
+
+export const questions = createRoot(() => createQuestions({
+  edit: bridge.questionEdit, page: bridge.questionPage, navigate: bridge.questionNavigate, allowRetry: bridge.questionAllowRetry,
+  submit: bridge.questionSubmit, decide: bridge.questionDecide, skip: bridge.questionSkip, cold: bridge.questionCold,
+  notify: (text) => notify("error", text, true),
+}));
+```
+
+The bridge, in `client/src/bridge.ts`. Outside Tauri each wrapper rejects with "Actions need the desktop app.", as the composer's do:
+
+```ts
+export const questionEdit = (card: string, edit: QuestionEdit) => desktop<void>("question_edit", { card, edit });
+export const questionPage = (card: string, page: number) => desktop<void>("question_page", { card, page });
+export const questionNavigate = (direction: number) => desktop<void>("question_navigate", { direction });
+export const questionAllowRetry = (card: string) => desktop<void>("question_allow_retry", { card });
+export const questionSubmit = (card: string) => desktop<QuestionReply>("question_submit", { card });
+export const questionDecide = (card: string, allow: boolean) => desktop<QuestionReply>("question_decide", { card, allow });
+export const questionSkip = (card: string) => desktop<QuestionReply>("question_skip", { card });
+export const questionCold = (token: number, proceed: boolean) => desktop<QuestionReply>("question_cold", { token, proceed });
+```
+
+`normalize` keeps `composer_events`, and `isEmptyBatch` treats a batch with events as not empty.
+
+- [ ] **Step 5: Route it** in `client/src/store/session.ts`:
+
+```ts
+import { questions } from "./questions";
+import { terminal } from "./terminal";
+import { notify } from "./actions";
+import { setDetailTab } from "./ui";
+import type { ComposerEvent } from "../types";
+
+function composerEvent(e: ComposerEvent) {
+  // Qt's showNotice: an error stays until dismissed unless it is transient.
+  if (e.kind === "notice") notify(e.error ? "error" : "info", e.text, e.error && !e.transient);
+  // Codex's hooks review and Update now continue in Terminal (SessionsWindow.cpp:1157-1178).
+  else if (composer.view()?.key === e.key) { setDetailTab("terminal"); void terminal.connect(); }
+}
+```
+
+In `receive`: `if (b.composer) questions.apply(b.composer.question);` after `composer.apply(...)`, then `for (const e of b.composer_events ?? []) composerEvent(e);`. The selection effect calls `questions.apply(undefined)` when no session is selected.
+
+Task 6's `view()` fixture in `store/composer.test.ts` gains `question: null, input_visible: true, questions_error: null`, so the type check passes.
+
+- [ ] **Step 6: The transcript.** In `client/src/ui/sessions/types.ts`, `TranscriptItem` gains `replies?: Reply[]`, and `ActivityEvent` gains `question_replies?: Reply[]`. In `transcript.ts`:
+  - A user item's label is "You (answer)" when `e.type === "QuestionAnswered"` or `e.question_replies?.length`, and it carries `replies: e.question_replies`.
+  - `recordedContext` reads `summary.prompt_replies`. With replies, the prompt item is labelled "You (recorded answer)" and carries them.
+
+In `Activity.tsx`:
+- Export the existing `Body` (`export function Body(props: { text: string })`).
+- A user item with `replies` renders, for each reply:
+
+```tsx
+<div class="act-reply">
+  <div class="act-reply-q">Question</div>
+  <p class="wrap-pre">{r.question}</p>
+  <div class="act-reply-a"><b>Your answer</b><p class="wrap-pre">{r.answer}</p></div>
+</div>
+```
+
+  It renders this in place of the plain text body.
+
+- [ ] **Step 7: Write `client/src/ui/sessions/QuestionCard.tsx`:**
+
+```tsx
+import { For, Show, createEffect, createMemo, onCleanup, onMount, untrack } from "solid-js";
+import { Icon } from "../lib/icons";
+import { questions } from "../../store/questions";
+import { terminal } from "../../store/terminal";
+import { setDetailTab } from "../../store/ui";
+import { Body } from "./Activity";
+import type { FormView, OptionView } from "../../types";
+
+/** The shown question card (Qt's QuestionCard), between Activity and the composer. */
+export function QuestionCard() {
+  // Rebuilt for a new card or a rebuilt one only: typing never remounts the fields.
+  const ident = createMemo(() => { const q = questions.view(); return q ? `${q.card}\n${q.revision}` : undefined; });
+  return (
+    <>
+      <Show when={ident()} keyed>{() => <Card />}</Show>
+      <ColdAnswerDialog />
+    </>
+  );
+}
+
+function Card() {
+  const q = () => questions.view()!;
+  const c = () => q().view;
+  const form = () => c().forms[c().page];
+  let el!: HTMLDivElement;
+  onMount(() => {
+    // The review delay counts only while the card is on screen and the window is active.
+    let visible = false;
+    const update = () => questions.setActive(visible && document.visibilityState === "visible" && document.hasFocus());
+    const observer = new IntersectionObserver((entries) => { visible = entries.some((e) => e.isIntersecting); update(); });
+    observer.observe(el);
+    window.addEventListener("focus", update);
+    window.addEventListener("blur", update);
+    document.addEventListener("visibilitychange", update);
+    onCleanup(() => {
+      observer.disconnect();
+      window.removeEventListener("focus", update);
+      window.removeEventListener("blur", update);
+      document.removeEventListener("visibilitychange", update);
+      questions.setActive(false);
+    });
+  });
+  const native = () => q().terminal_label === "Open native UI";
+  const terminalTip = () => (native() ? "Arrives with Native UI." : terminal.status().available ? undefined : terminal.status().reason);
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key !== "Enter" || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
+    e.preventDefault();
+    void questions.enter(e.repeat);
+  };
+  return (
+    <div class="qcard" ref={el} role="group" aria-label={c().heading}>
+      <div class="qcard-head">
+        <b class="qcard-title">{c().heading}</b><span class="grow" />
+        <Show when={c().progress}><span class="qcard-dim">{c().progress}</span></Show>
+      </div>
+      <div class="qcard-meta">
+        <Show when={q().asked}><span class="qcard-dim" title={q().asked_tip}>{q().asked}</span></Show>
+        <span class="grow" />
+        <Show when={c().pending}><span class="qcard-dim" title={c().pending_tip}>{c().pending}</span></Show>
+        <Show when={c().nav}>{(nav) => (
+          <>
+            <button class="icon-btn small" aria-label="Previous queued question" title={nav().previous_tip} disabled={!nav().previous}
+              onClick={() => void questions.navigate(-1)}><Icon name="chevron-left" size={12} /></button>
+            <button class="icon-btn small" aria-label="Next queued question" title={nav().next_tip} disabled={!nav().next}
+              onClick={() => void questions.navigate(1)}><Icon name="chevron-right" size={12} /></button>
+          </>
+        )}</Show>
+      </div>
+      <Show when={c().tabs_visible}>
+        <div class="qcard-tabs tabs" role="tablist">
+          <For each={c().forms}>{(f, i) => (
+            <button class="tab" role="tab" classList={{ on: i() === c().page }} aria-selected={i() === c().page} disabled={c().locked}
+              onClick={() => void questions.page(i())}>{f.tab}</button>
+          )}</For>
+        </div>
+      </Show>
+      <Show when={form()} keyed>{(f) => <Form form={f} onKey={onKey} />}</Show>
+      <p class="qcard-status" classList={{ error: c().status_error }} title={c().status}>{c().status}</p>
+      <div class="qcard-actions">
+        <button class="btn ghost" disabled={native() || !terminal.status().available} title={terminalTip()}
+          onClick={() => { setDetailTab("terminal"); void terminal.connect(); }}>{q().terminal_label}</button>
+        <span class="grow" />
+        <Show when={c().skip.visible}><button class="btn ghost" title={c().skip_tip} disabled={!questions.enabled(c().skip)} onClick={() => void questions.skip()}>{c().skip.label}</button></Show>
+        <Show when={c().retry}><button class="btn ghost" title={c().retry_tip} onClick={() => void questions.allowRetry()}>Allow retry</button></Show>
+        <Show when={c().previous.visible}><button class="btn ghost" disabled={!c().previous.enabled} onClick={() => void questions.page(c().page - 1)}>{c().previous.label}</button></Show>
+        <Show when={c().next.visible}><button class="btn ghost accent" disabled={!c().next.enabled} onClick={() => void questions.page(c().page + 1)}>{c().next.label}</button></Show>
+        <Show when={c().submit.visible}><button class="btn primary" disabled={!questions.enabled(c().submit)} onClick={() => void questions.submit()}>{questions.label(c().submit)}</button></Show>
+        <Show when={c().deny.visible}><button class="btn ghost" disabled={!questions.enabled(c().deny)} onClick={() => void questions.decide(false)}>{c().deny.label}</button></Show>
+        <Show when={c().approve.visible}><button class="btn primary" disabled={!questions.enabled(c().approve)} onClick={() => void questions.decide(true)}>{questions.label(c().approve)}</button></Show>
+      </div>
+    </div>
+  );
+}
+
+function Form(props: { form: FormView; onKey: (e: KeyboardEvent) => void }) {
+  const f = () => questions.view()?.view.forms.find((form) => form.id === props.form.id) ?? props.form;
+  const group = `qcard-${props.form.id}`;
+  return (
+    <div class="qcard-page">
+      <div class="qcard-scroll">
+        <Show when={f().markdown} fallback={<p class="qcard-prompt wrap-pre">{f().prompt}</p>}><div class="qcard-prompt"><Body text={f().prompt} /></div></Show>
+        <Show when={f().body}>
+          <Show when={f().markdown} fallback={<p class="qcard-body wrap-pre" classList={{ mono: f().monospace_body }}>{f().body}</p>}><div class="qcard-body"><Body text={f().body} /></div></Show>
+        </Show>
+        <Show when={f().mode_visible}><p class="qcard-mode">{f().mode}</p></Show>
+        <For each={f().options}>{(o) => <Choice form={f()} option={o} group={group} onKey={props.onKey} />}</For>
+        <Show when={f().other}>{(o) => <Choice form={f()} option={o()} group={group} other onKey={props.onKey} />}</Show>
+      </div>
+      <Show when={f().text?.visible ? f().text : undefined}>{(t) => (
+        <input class="qcard-text" type="text" placeholder={t().placeholder} aria-label={t().accessible_name} maxLength={t().max_units}
+          disabled={!t().enabled} value={untrack(() => t().value)}
+          onInput={(e) => {
+            const input = e.currentTarget;
+            // OpenCode counts its bound in characters, as Qt's CharacterLimit does.
+            if (t().max_chars > 0 && [...input.value].length > t().max_chars) input.value = [...input.value].slice(0, t().max_chars).join("");
+            questions.edit({ kind: "text", item: props.form.id, text: input.value });
+          }}
+          onKeyDown={props.onKey} />
+      )}</Show>
+    </div>
+  );
+}
+
+function Choice(props: { form: FormView; option: OptionView; group: string; other?: boolean; onKey: (e: KeyboardEvent) => void }) {
+  const o = () => props.option;
+  const toggle = (checked: boolean) => questions.edit(props.other
+    ? { kind: "other", item: props.form.id, checked }
+    : { kind: "option", item: props.form.id, option: o().id, checked });
+  return (
+    <Show when={o().visible}>
+      <label class="qchoice" classList={{ on: o().checked, off: !o().enabled }}>
+        <input type={props.form.multi ? "checkbox" : "radio"} name={props.group} checked={o().checked} disabled={!o().enabled}
+          onChange={(e) => toggle(e.currentTarget.checked)} onKeyDown={props.onKey} />
+        <span class="qchoice-copy">
+          <span class="qchoice-title">{o().label}</span>
+          <Show when={o().description}>
+            <Show when={o().markdown} fallback={<span class="qchoice-desc wrap-pre">{o().description}</span>}><span class="qchoice-desc"><Body text={o().description} /></span></Show>
+          </Show>
+        </span>
+      </label>
+    </Show>
+  );
+}
+
+/** "Submit with a cold cache?": Cancel is the default and Escape (SessionsWindow.cpp:5111-5131). */
+function ColdAnswerDialog() {
+  let el: HTMLDialogElement | undefined;
+  createEffect(() => {
+    const d = questions.dialog();
+    if (!el) return;
+    if (!d) { if (el.open) el.close(); return; }
+    if (!el.open) el.showModal();
+    queueMicrotask(() => el?.querySelector<HTMLElement>("[data-initial]")?.focus());
+  });
+  return (
+    <dialog class="dlg" ref={el} role="alertdialog" aria-labelledby="qcard-cold-title" aria-describedby="qcard-cold-text" style={{ width: "460px" }}
+      onClose={() => { if (questions.dialog()) void questions.answerCold(false); }}>
+      <Show when={questions.dialog()}>{(d) => (
+        <>
+          <div class="dlg-head"><Icon name="triangle-alert" size={18} class="accent" /><h2 id="qcard-cold-title">{d().prompt.title}</h2></div>
+          <div class="dlg-body"><div class="confirm-body wrap-pre" id="qcard-cold-text">{d().prompt.text}</div></div>
+          <div class="dlg-foot">
+            <span class="spacer" />
+            <button type="button" class="btn primary" data-initial autofocus onClick={() => void questions.answerCold(false)}>Cancel</button>
+            <button type="button" class="btn" onClick={() => void questions.answerCold(true)}>{d().prompt.proceed}</button>
+          </div>
+        </>
+      )}</Show>
+    </dialog>
+  );
+}
+```
+
+- [ ] **Step 8: Place it.**
+  - In `SessionDetail.tsx`, the composer column (Task 6 Step 9) becomes:
+
+```tsx
+<div class="cmp-col">
+  <Show when={composer.view()?.questions_error}>{(e) => <p class="qcard-error">{e()}</p>}</Show>
+  <QuestionCard />
+  <Composer />
+</div>
+```
+
+  - In `Composer.tsx`, `const input = () => v()?.input_visible !== false;`. The two `ResizeHandle`s, the `<textarea>` and `.cmp-actions` render inside `<Show when={input()}>`. The toolbar stays, as Qt's `setInputVisible` keeps it.
+  - In `detail.css`:
+
+```css
+.qcard { display: flex; flex-direction: column; gap: 9px; padding: 12px 14px; margin-bottom: 8px; background: var(--z-color-surface);
+  border: 1px solid var(--z-color-border); border-radius: var(--z-radius-lg); max-height: 60vh; }
+.qcard-head, .qcard-meta, .qcard-actions { display: flex; align-items: center; gap: 8px; }
+.qcard-title { color: var(--z-color-accent); font-weight: 600; }
+.qcard-dim, .qcard-mode { color: var(--z-color-muted); font-size: 11px; }
+.qcard-page { display: flex; flex-direction: column; gap: 7px; min-height: 0; }
+.qcard-scroll { display: flex; flex-direction: column; gap: 7px; overflow-y: auto; min-height: 40px; }
+.qcard-prompt { font-weight: 600; }
+.qcard-body { color: var(--z-color-muted); font-size: 11px; }
+.qchoice { display: flex; gap: 8px; align-items: flex-start; padding: 9px 12px 9px 10px; border: 1px solid var(--z-color-border);
+  border-radius: var(--z-radius-md); background: var(--z-color-raised); cursor: pointer; }
+.qchoice:hover, .qchoice.on { border-color: var(--z-color-accent); }
+.qchoice.on { background: var(--z-color-accent-bg); }
+.qchoice.off { cursor: default; opacity: .7; }
+.qchoice-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.qchoice-desc { color: var(--z-color-muted); font-size: 11px; }
+.qcard-text { min-height: 35px; padding: 7px; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-md); background: var(--z-color-raised); color: var(--z-color-text); }
+.qcard-text:focus { border-color: var(--z-color-accent); outline: none; }
+.qcard-status { color: var(--z-color-muted); font-size: 11px; margin: 0; }
+.qcard-status.error, .qcard-error { color: var(--z-color-danger); }
+.qcard-error { font-size: 11px; margin: 0 0 6px; }
+.wrap-pre { white-space: pre-wrap; }
+.act-reply-q { color: var(--z-color-muted); font-size: 10px; margin-bottom: 3px; }
+.act-reply-a { border: 1px solid var(--z-color-border); background: var(--z-color-code-bg); padding: 10px; border-radius: var(--z-radius-md); margin-bottom: 10px; }
+.act-reply-a b { color: var(--z-color-accent); font-size: 10px; }
+```
+
+`.mono` (`base.css`) already gives `--z-font-mono`.
+
+- [ ] **Step 9: Run the checks**
+
+Run: `cd client && npm test -- src/store/questions.test.ts src/ui/sessions/transcript.test.ts && npm run check && npm test && python3 ../scripts/check-ui-separators.py`
+Expected: PASS, the 6 store tests and the 2 transcript tests; no type errors; no separators.
+
+Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml commands::`
+Expected: PASS.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add client/src client/src-tauri
+git commit -m "feat(client): the question card, its review delay and cold cache question, and answers in Activity"
+```
+
+---
+
+### Task A2-4: The native queue, Send now and Send and push now in the hub
+
+**Depends on:**
+- R8 (`input_queue::{queue_view, can_send_now, send_now_notice, Notice, NOTHING_QUEUED, Pusher, PushFacts, PushStep, QueueView}`, `Action::SendNow`, `Lane::Queue`);
+- Tasks 4a, 4b and 5 (`observe`, `refresh_details`, `after_observe`, `send_now`, `prompts`);
+- A2-2's `ComposerEvent` and `event`. If A2-2 is not on main yet, this task adds exactly A2-2's Step 3, and A2-2 rebases onto it.
+
+**Qt reference:**
+- `tray/src/SessionsWindowShortcuts.cpp:248-341`;
+- `tray/src/SessionsWindow.cpp`: 1218-1221, 1859-1873, 3976-3980, 4908-4912, 4939;
+- `tray/src/MessageComposer.cpp:811-847`;
+- `tray/src/ActivityView.cpp:1890-1895`.
+
+**Files:**
+- Create: `client/src-tauri/src/composer/queue.rs`
+- Modify: `client/src-tauri/src/composer/mod.rs` (`pub mod queue`, `Hub.queue`, `ComposerView.queue`, the hooks in `open`, `observe`, `after_observe` and `tick`)
+- Modify: `client/src-tauri/src/composer/send.rs` (two lines in `send_now`; one in `refresh_details`)
+- Modify: `client/src-tauri/src/lib.rs` (two commands)
+- Test: unit tests in `composer/queue.rs`
+
+**Interfaces:**
+- Consumes: R8's surface; Task 4b's `send_message`, `SendReply`, `Prompt.key`, `Hub.prompts`, test helpers; A2-2's `ComposerEvent`, `event`, `take_events`.
+- Produces:
+
+```rust
+// composer/queue.rs
+#[derive(Default)] pub(crate) struct Queue { pub(crate) pusher: Pusher, pub(crate) sending: Option<String>, pub(crate) hidden: bool, /* session */ }
+impl Composers {
+    pub fn send_queue_now(&self, queue_id: Option<String>) -> bool;
+    pub fn send_push(&self, handle: u64, rev: u64, text: String, position: i64, anchor: i64) -> SendReply;
+    pub(crate) fn queue_part(&self, hub: &Hub) -> Option<QueueView>;
+    pub(crate) fn push_finished(&self, request: &str, ok: bool, uncertain: bool);
+    pub(crate) fn queue_observed(&self);
+    pub(crate) fn push_selection(&self, hub: &mut Hub, key: Option<&str>);
+    pub(crate) fn push_check(&self);
+}
+// ComposerView gains: pub queue: Option<QueueView>,
+// commands: queue_send_now(queue_id: Option<String>) -> bool; send_push(handle, rev, text, position, anchor) -> SendReply
+```
+
+- [ ] **Step 1: Write the failing tests** at the end of `client/src-tauri/src/composer/queue.rs`:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::composer::send::tests::{opened, ready, receipt, send_hub, sent, state};
+    use crate::composer::tests::{dir, until};
+    use crate::composer::{lock, ComposerEvent};
+    use serde_json::json;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    fn working() -> Value {
+        let mut details = ready();
+        details["activity"] = json!("busy");
+        details["phase"] = json!("working");
+        details
+    }
+
+    fn queued(text: &str, can: bool) -> Value {
+        let mut details = working();
+        details["input_queue"] = json!({"id": "queue-1", "text": text, "can_send_now": can, "hint": "Send the queued messages now"});
+        details
+    }
+
+    fn submitted(action: &Action, id: &str) -> Outcome {
+        match action {
+            Action::SendNow { queue_id } => Outcome::Done { receipt: json!({"status": "submitted", "request_id": id, "queue_id": queue_id}), cleanup: None },
+            _ => receipt(action, id),
+        }
+    }
+
+    fn send_nows(fake: &crate::composer::send::tests::Fake) -> usize {
+        sent(fake).iter().filter(|(_, action, _)| matches!(action, Action::SendNow { .. })).count()
+    }
+
+    fn wait_for(done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn notice(text: &str) -> ComposerEvent {
+        ComposerEvent::Notice { text: text.into(), error: false, transient: false }
+    }
+
+    #[test]
+    fn send_now_runs_once_and_hides_the_panel_until_the_next_state() {
+        let root = dir("send-now");
+        let (c, fake) = send_hub(&root);
+        let (gate, wait) = std::sync::mpsc::channel::<()>();
+        let wait = Mutex::new(wait);
+        *lock(&fake.outcome) = Box::new(move |action, id| {
+            if matches!(action, Action::SendNow { .. }) {
+                let _ = lock(&wait).recv();
+            }
+            submitted(action, id)
+        });
+        let view = opened(&c, queued("❯ first", true));
+        let queue = view.queue.clone().unwrap();
+        assert_eq!((queue.text.as_str(), queue.label.as_str(), queue.enabled), ("❯ first", "Send now", true));
+        assert!(c.send_queue_now(Some("queue-1".into())));
+        until(&c, |v| v.queue.as_ref().is_some_and(|q| q.label == "Sending…" && !q.enabled));
+        assert!(!c.send_queue_now(None), "one send-now at a time");
+        gate.send(()).unwrap();
+        until(&c, |v| v.queue.is_none());
+        assert_eq!(c.take_events(), vec![notice("Send now requested. Waiting for the agent to accept the queue.")]);
+        c.observe(&state(queued("❯ first", true)));
+        assert!(c.current().unwrap().queue.is_some(), "the next state shows the queue again");
+        assert_eq!(send_nows(&fake), 1);
+    }
+
+    #[test]
+    fn nothing_queued_says_so() {
+        let root = dir("nothing-queued");
+        let (c, fake) = send_hub(&root);
+        opened(&c, working());
+        assert!(!c.send_queue_now(None));
+        assert_eq!(c.take_events(), vec![notice("Nothing queued can be sent now")]);
+        assert!(sent(&fake).is_empty());
+    }
+
+    #[test]
+    fn a_push_sends_the_queue_once_the_agent_queues_it() {
+        let root = dir("push");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(submitted);
+        let view = opened(&c, working());
+        assert_eq!(c.send_push(view.handle, 1, "please also run lint".into(), 20, 20), SendReply::Sending);
+        until(&c, |v| !v.sending && v.text.is_empty());
+        assert_eq!(send_nows(&fake), 0, "nothing is queued yet");
+        c.observe(&state(queued("❯ please also run lint", true)));
+        wait_for(|| send_nows(&fake) == 1);
+        let calls = sent(&fake);
+        assert_eq!(calls.iter().filter(|(_, action, _)| matches!(action, Action::Send { .. })).count(), 1, "a push never sends text again");
+        let Some((_, Action::SendNow { queue_id }, _)) = calls.last() else { panic!("no send-now") };
+        assert_eq!(queue_id, "queue-1");
+        c.observe(&state(queued("❯ please also run lint", true)));
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(send_nows(&fake), 1, "the push ended with its one send-now");
+    }
+
+    #[test]
+    fn a_push_with_an_empty_field_is_send_now() {
+        let root = dir("push-empty");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(submitted);
+        let view = opened(&c, queued("❯ earlier", true));
+        assert_eq!(c.send_push(view.handle, 1, String::new(), 0, 0), SendReply::Busy);
+        wait_for(|| send_nows(&fake) == 1);
+    }
+
+    #[test]
+    fn selecting_another_session_ends_the_push() {
+        let root = dir("push-switch");
+        let (c, fake) = send_hub(&root);
+        lock(&fake.row).title = "review".into();
+        *lock(&fake.outcome) = Box::new(submitted);
+        let view = opened(&c, working());
+        c.send_push(view.handle, 1, "later".into(), 5, 5);
+        until(&c, |v| !v.sending && v.text.is_empty());
+        c.take_events();
+        c.open(Some(SessionRef { computer: "studio".into(), key: "run:run-2".into(), name: "codex/sample-project/other".into(), archive_id: None }));
+        assert_eq!(c.take_events(), vec![notice("The message to review was not pushed: another session was selected")]);
+    }
+
+    #[test]
+    fn a_push_ends_after_twenty_seconds() {
+        let root = dir("push-late");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(submitted);
+        let view = opened(&c, working());
+        c.send_push(view.handle, 1, "later".into(), 5, 5);
+        until(&c, |v| !v.sending && v.text.is_empty());
+        c.take_events();
+        *lock(&fake.now) += 21.0;
+        c.tick();
+        assert_eq!(c.take_events(), vec![notice("The message was sent without push: the agent did not offer to send it now within 20 seconds")]);
+        c.observe(&state(queued("❯ later", true)));
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(send_nows(&fake), 0, "a snapshot after the deadline never sends the queue");
+    }
+}
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer::queue::`
+Expected: compile errors (no `queue` module).
+
+- [ ] **Step 3: Write `client/src-tauri/src/composer/queue.rs`** above its tests:
+
+```rust
+//! The agent's native queue and Send and push now, as Qt runs them
+//! (`SessionsWindowShortcuts.cpp:248-341`, `SessionsWindow.cpp:1859-1873`,
+//! `3976-3980`, `4908-4912`, `4939`). The rules are the core's
+//! (`input_queue`, R8): a push never sends text, only the agent's own
+//! send-now of the snapshot that holds the message.
+
+use serde_json::Value;
+use zerus_client_core::input_queue::{self as rules, Notice, PushFacts, PushStep, Pusher, QueueView};
+use zerus_client_core::{Action, Outcome, Target};
+
+use super::send::SendReply;
+use super::{ComposerEvent, Composers, Hub, SessionRef};
+
+#[derive(Default)]
+pub(crate) struct Queue {
+    pub(crate) pusher: Pusher,
+    /// The session (composer key) whose send-now runs: one in the app (`m_queueSendRequest`).
+    pub(crate) sending: Option<String>,
+    /// A send-now of the open session ended: its queue hides until new
+    /// details arrive (`m_details.remove("input_queue")`).
+    pub(crate) hidden: bool,
+    /// The pushed session, for its title when the push ends.
+    session: Option<SessionRef>,
+}
+
+fn text<'a>(value: &'a Value, key: &str) -> &'a str {
+    value.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+fn event(notice: Notice) -> ComposerEvent {
+    ComposerEvent::Notice { text: notice.text, error: notice.error, transient: notice.transient }
+}
+
+impl Composers {
+    /// The open session's queue panel (`ActivityView::render` 1890-1895).
+    pub(crate) fn queue_part(&self, hub: &Hub) -> Option<QueueView> {
+        if hub.queue.hidden {
+            return None;
+        }
+        let ctx = self.context(hub)?;
+        let details = ctx.details.as_deref()?;
+        let sending = hub.queue.sending.as_deref() == Some(ctx.key.as_str());
+        rules::queue_view(details, ctx.row.tracked, ctx.online, ctx.facts.inspect_error, sending)
+    }
+
+    /// Send now: the panel's button, the window's chord, an empty push, or a
+    /// push's snapshot (`sendQueuedNow`). One runs at a time in the app.
+    pub fn send_queue_now(&self, queue_id: Option<String>) -> bool {
+        let mut hub = self.lock();
+        if hub.closed || hub.queue.sending.is_some() {
+            return false;
+        }
+        let ctx = self.context(&hub);
+        let details = ctx.as_ref().and_then(|ctx| ctx.details.clone());
+        let id = queue_id.unwrap_or_else(|| details.as_deref().map(|d| d["input_queue"]["id"].as_str().unwrap_or("").to_owned()).unwrap_or_default());
+        let ready = matches!((&ctx, &details), (Some(ctx), Some(details)) if rules::can_send_now(details, ctx.online, &id));
+        let (Some(ctx), Some(details), true) = (ctx, details, ready) else {
+            self.event(&mut hub, event(Notice { text: rules::NOTHING_QUEUED.into(), error: false, transient: false }));
+            drop(hub);
+            self.changed();
+            return false;
+        };
+        hub.queue.sending = Some(ctx.key.clone());
+        drop(hub);
+        self.changed();
+        let target = Target {
+            computer: ctx.session.computer.clone(),
+            name: ctx.session.name.clone(),
+            run_id: text(&details, "run_id").to_owned(),
+            conversation_id: text(&details, "conversation_id").to_owned(),
+        };
+        let (me, key) = (self.clone(), ctx.key.clone());
+        (self.0.deps.spawn)(Box::new(move || {
+            let outcome = (me.0.deps.dispatch)(target, Action::SendNow { queue_id: id }, uuid::Uuid::new_v4().to_string())
+                .unwrap_or_else(|error| Outcome::Uncertain { detail: error });
+            me.queue_sent(&key, &outcome);
+        }));
+        true
+    }
+
+    /// `queueSendFinished` (1860-1872): only a still-selected session hears how
+    /// it ended; nothing is sent again by itself.
+    fn queue_sent(&self, key: &str, outcome: &Outcome) {
+        let mut hub = self.lock();
+        hub.queue.sending = None;
+        let current = hub.open_key.as_deref() == Some(key);
+        if current {
+            hub.queue.hidden = true;
+            self.event(&mut hub, event(rules::send_now_notice(outcome)));
+        }
+        drop(hub);
+        self.changed();
+        if current {
+            self.refresh_details();
+        }
+    }
+
+    /// Send and push now (`MessageComposer::push`): with nothing typed, or a
+    /// message on its way, it is Send now. Otherwise, when Send would run, it
+    /// arms a push for the open session and sends as usual.
+    pub fn send_push(&self, handle: u64, rev: u64, text: String, position: i64, anchor: i64) -> SendReply {
+        self.edit(handle, rev, text.clone(), position, anchor);
+        let mut hub = self.lock();
+        let Some(key) = hub.open_key.clone() else { return SendReply::Busy };
+        let Some(composer) = hub.composers.get(&key).filter(|c| c.handle == handle) else { return SendReply::Busy };
+        if composer.sending || !composer.has_content() {
+            drop(hub);
+            self.send_queue_now(None);
+            return SendReply::Busy;
+        }
+        let message = composer.draft.text.clone();
+        // Qt's send() does nothing while Send is disabled: no push either.
+        if !self.view_of(&hub, &key).is_some_and(|view| view.can_send) {
+            return SendReply::Busy;
+        }
+        if let Some(notice) = hub.queue.pusher.arm(&key, &message, self.now()) {
+            self.event(&mut hub, event(notice));
+        }
+        hub.queue.session = hub.open.clone();
+        drop(hub);
+        self.changed();
+        self.send_message(handle, rev, text, position, anchor)
+    }
+
+    /// The send ended (`pushSendFinished`).
+    pub(crate) fn push_finished(&self, request: &str, ok: bool, uncertain: bool) {
+        let mut hub = self.lock();
+        if let Some(notice) = hub.queue.pusher.send_finished(request, ok, uncertain) {
+            self.event(&mut hub, event(notice));
+        }
+    }
+
+    /// What the push waits on: a dialog of that message, its save or its call,
+    /// or a start or compaction before it (`checkPush`).
+    fn push_facts(&self, hub: &Hub) -> PushFacts {
+        let Some(push) = hub.queue.pusher.active() else { return PushFacts::default() };
+        let composer = hub.composers.get(&push.key);
+        PushFacts {
+            dialog: hub.prompts.values().any(|prompt| prompt.key == push.key) || hub.answers.cold.is_some(),
+            sending: composer.is_some_and(|c| c.sending),
+            waiting: composer.is_some_and(|c| c.waiting.is_some()),
+        }
+    }
+
+    /// Each new state of the open session (`pushInspected`): the push sends
+    /// the snapshot that holds its message, or ends.
+    pub(crate) fn queue_observed(&self) {
+        let mut hub = self.lock();
+        let (Some(key), Some(details)) = (hub.open_key.clone(), hub.followed.details.clone()) else { return };
+        let facts = self.push_facts(&hub);
+        let busy = hub.queue.sending.is_some();
+        let step = hub.queue.pusher.inspected(&key, &details, self.now(), facts, busy);
+        match step {
+            PushStep::Wait => {}
+            PushStep::End(notice) => {
+                if let Some(notice) = notice {
+                    self.event(&mut hub, event(notice));
+                }
+            }
+            PushStep::SendNow(id) => {
+                drop(hub);
+                self.send_queue_now(Some(id));
+            }
+        }
+    }
+
+    /// Another session (or none) is about to open (`pushSelectionChanged`).
+    pub(crate) fn push_selection(&self, hub: &mut Hub, key: Option<&str>) {
+        let Some(push) = hub.queue.pusher.active() else { return };
+        if key == Some(push.key.as_str()) {
+            return;
+        }
+        let fallback = push.key.split('\n').nth(1).unwrap_or_default().to_owned();
+        let title = hub.queue.session.as_ref()
+            .and_then(|s| (self.0.deps.rows)(&s.computer, &s.key, &s.name))
+            .map(|(row, _)| row.title)
+            .filter(|title| !title.is_empty())
+            .unwrap_or(fallback);
+        if let Some(notice) = hub.queue.pusher.selection_changed(key, &title) {
+            self.event(hub, event(notice));
+        }
+    }
+
+    /// Once a second while a push waits (`m_pushTimer`).
+    pub(crate) fn push_check(&self) {
+        let mut hub = self.lock();
+        if hub.queue.pusher.active().is_none() {
+            return;
+        }
+        let facts = self.push_facts(&hub);
+        if let Some(notice) = hub.queue.pusher.check(self.now(), facts) {
+            self.event(&mut hub, event(notice));
+            drop(hub);
+            self.changed();
+        }
+    }
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn queue_send_now(state: tauri::State<'_, Composers>, queue_id: Option<String>) -> bool {
+    state.send_queue_now(queue_id)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn send_push(state: tauri::State<'_, Composers>, handle: u64, rev: u64, text: String, position: i64, anchor: i64) -> Result<SendReply, String> {
+    let composers = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || composers.send_push(handle, rev, text, position, anchor)).await.map_err(|e| e.to_string())
+}
+```
+
+`push_facts` reads `hub.answers.cold` (A2-2). When A2-2 is not on main, leave that term out; A2-2 then adds it, since a cold question of an answer is a modal dialog in Qt too.
+
+- [ ] **Step 4: The hooks.**
+  - `composer/mod.rs`:
+    - `pub mod queue;`, `Hub` gains `pub(crate) queue: queue::Queue`, and `ComposerView` gains `pub queue: Option<QueueView>`, filled by `self.queue_part(hub)`.
+    - `open` starts with these lines, before the session is replaced:
+
+      ```rust
+      let next = session.as_ref().map(|s| draft_key(&s.computer, &s.name, s.archive_id.as_deref()));
+      self.push_selection(&mut hub, next.as_deref());
+      ```
+
+    - `observe`'s `"state"` arm sets `hub.queue.hidden = false;`.
+    - `after_observe` calls `self.queue_observed();` before its `self.changed()`.
+    - `tick` calls `self.push_check();`.
+  - `composer/send.rs`:
+    - In `refresh_details`, the `Some(value)` arm sets `hub.queue.hidden = false;`. A failed inspect keeps the queue hidden, as Qt's removal holds until an inspection is accepted.
+    - In `send_now`, the block that records the local row adds `hub.queue.pusher.dispatched(&delivery.key, &delivery.text, &request_id, &delivery.run, &delivery.conversation);` after `hub.local.sending(...)`.
+    - In `send_now`, the line before `self.delivery_finished(...)` is `self.push_finished(&request_id, ok, uncertain);`.
+
+- [ ] **Step 5: Register** `composer::queue::queue_send_now` and `composer::queue::send_push` in `lib.rs`.
+
+- [ ] **Step 6: Run the tests to see them pass**
+
+Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer::`
+Expected: PASS, the 6 new tests and every earlier composer test. Clippy and fmt clean.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add client/src-tauri
+git commit -m "feat(client): the native queue, Send now and Send and push now in the composer hub"
+```
+
+---
+
+### Task A2-5: The queue panel, the push chord and "You (queued)"
+
+**Depends on:** A2-4, Task 6 (the composer store and view).
+
+**Qt reference:**
+- `tray/src/ActivityView.cpp`: the panel 1280-1292, its state 1890-1895, the tooltip 1477-1487, "You (queued)" 1030.
+- `tray/src/MessageComposer.cpp:399-406, 833-847` (the push chord) and `tray/src/Shortcuts.cpp:39-41, 61, 70` (the chords).
+- `tray/src/SessionsWindowShortcuts.cpp:242` (`queue.sendNow`).
+
+**Files:**
+- Modify: `client/src/types.ts` (`QueueView`, `ComposerView.queue`), `client/src/bridge.ts` (`queueSendNow`, `sendPush`)
+- Modify: `client/src/store/composer.ts`, `client/src/store/composer.test.ts` (`push`, `sendNow`)
+- Create: `client/src/ui/sessions/chords.ts`, `client/src/ui/sessions/chords.test.ts`
+- Create: `client/src/ui/sessions/QueuePanel.tsx`
+- Modify: `client/src/ui/sessions/Composer.tsx` (the push chord), `client/src/ui/sessions/SessionDetail.tsx` (the panel and the window chord)
+- Modify: `client/src/ui/sessions/transcript.ts`, `client/src/ui/sessions/transcript.test.ts` ("You (queued)")
+- Modify: `client/src/ui/styles/detail.css`
+
+**Interfaces:**
+- Consumes: A2-4's commands and `QueueView`.
+- Produces:
+
+```ts
+// types.ts
+export interface QueueView { id: string; text: string; hint: string; can_send_now: boolean; enabled: boolean; label: string }
+// ComposerView gains: queue: QueueView | null
+// ComposerPort gains: push(handle, rev, text, position, anchor): Promise<SendReply>; sendNow(queueId: string | null): Promise<boolean>
+// ComposerStore gains: push(), sendNow(queueId?)
+// chords.ts
+export const MAC: boolean;
+export function createPushChord(mac: boolean): { feed(e: ChordKey, hasSelection: boolean): "push" | "consumed" | "pass" };
+export function isSendNowChord(e: ChordKey, mac: boolean): boolean;
+```
+
+- [ ] **Step 1: Write the failing tests.** `client/src/ui/sessions/chords.test.ts`:
+
+```ts
+import { describe, expect, it } from "vitest";
+import { createPushChord, isSendNowChord, type ChordKey } from "./chords";
+
+const key = (k: string, over: Partial<ChordKey> = {}): ChordKey => ({ key: k, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, ...over });
+
+describe("composer chords", () => {
+  it("Control-X then Control-S pushes on macOS, whatever is selected", () => {
+    const chord = createPushChord(true);
+    expect(chord.feed(key("x", { ctrlKey: true }), true)).toBe("consumed");
+    expect(chord.feed(key("Control", { ctrlKey: true, repeat: true }), true)).toBe("pass");
+    expect(chord.feed(key("s", { ctrlKey: true }), true)).toBe("push");
+  });
+
+  it("elsewhere Ctrl+X with a selection cuts, and anything else disarms", () => {
+    const chord = createPushChord(false);
+    expect(chord.feed(key("x", { ctrlKey: true }), true)).toBe("pass");
+    expect(chord.feed(key("x", { ctrlKey: true }), false)).toBe("consumed");
+    expect(chord.feed(key("a"), false)).toBe("pass");
+    expect(chord.feed(key("s", { ctrlKey: true }), false)).toBe("pass");
+  });
+
+  it("Send now is Command or Ctrl with Shift and Return", () => {
+    expect(isSendNowChord(key("Enter", { metaKey: true, shiftKey: true }), true)).toBe(true);
+    expect(isSendNowChord(key("Enter", { ctrlKey: true, shiftKey: true }), true)).toBe(false);
+    expect(isSendNowChord(key("Enter", { ctrlKey: true, shiftKey: true }), false)).toBe(true);
+    expect(isSendNowChord(key("Enter", { ctrlKey: true }), false)).toBe(false);
+  });
+});
+```
+
+In `client/src/store/composer.test.ts`:
+- Task 6's `view()` fixture gains `queue: null`.
+- Its `fakes()` port gains:
+  - `push: async (_h, rev, text, position, anchor) => { calls.push(`push ${rev} ${text} ${position} ${anchor}`); return reply; }`;
+  - `sendNow: async (id) => { calls.push(`send-now ${id}`); return true; }`.
+
+```ts
+  it("push sends the field with a push, and a sending field sends the queue now", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view());
+      c.input("also lint", 9, 9);
+      await c.push();
+      expect(f.calls).toEqual(["edit 1 also lint", "push 1 also lint 9 9"]);
+      c.apply(view({ sending: true }));
+      await c.push();
+      expect(f.calls.at(-1)).toBe("send-now null");
+    });
+  });
+```
+
+In `transcript.test.ts`:
+
+```ts
+  it("a queued prompt reads You (queued)", () => {
+    const items = buildTranscript([{ seq: 1, type: "UserPromptQueued", at: 10, detail: "also lint" }] as ActivityEvent[]);
+    expect([items[0].label, items[0].receipt]).toEqual(["You (queued)", "Queued at this time"]);
+  });
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cd client && npm test -- src/ui/sessions/chords.test.ts src/store/composer.test.ts src/ui/sessions/transcript.test.ts`
+Expected: FAIL.
+
+- [ ] **Step 3: Write `client/src/ui/sessions/chords.ts`:**
+
+```ts
+/** The keys a chord reads from a KeyboardEvent. */
+export interface ChordKey { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean; repeat?: boolean }
+
+/** macOS: Qt's "Ctrl" is Command and its "Meta" the Control key. */
+export const MAC = typeof navigator !== "undefined" && /Mac/.test(navigator.platform || navigator.userAgent);
+
+const MODIFIERS = new Set(["Control", "Meta", "Alt", "Shift"]);
+
+/**
+ * Send and push now (Qt's message.push): Control-X, Control-S on macOS
+ * (Meta+X, Meta+S) and Ctrl+X, Ctrl+S elsewhere. Elsewhere Ctrl+X with a
+ * selection is the editor's Cut and arms nothing.
+ */
+export function createPushChord(mac: boolean) {
+  let armed = false;
+  const control = (e: ChordKey) => e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
+  return {
+    feed(e: ChordKey, hasSelection: boolean): "push" | "consumed" | "pass" {
+      const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+      if (armed) {
+        if (MODIFIERS.has(e.key)) return "pass";
+        armed = false;
+        return control(e) && k === "s" ? "push" : "pass";
+      }
+      if (control(e) && k === "x" && (mac || !hasSelection)) { armed = true; return "consumed"; }
+      return "pass";
+    },
+  };
+}
+
+/** Send queued messages now (Qt's queue.sendNow): Command+Shift+Return on macOS, Ctrl+Shift+Return elsewhere. */
+export function isSendNowChord(e: ChordKey, mac: boolean): boolean {
+  return e.key === "Enter" && e.shiftKey && !e.altKey && (mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey);
+}
+```
+
+- [ ] **Step 4: The store and the bridge.**
+
+```ts
+// bridge.ts
+export const queueSendNow = (queueId: string | null) => desktop<boolean>("queue_send_now", { queue_id: queueId });
+export const sendPush = (handle: number, rev: number, text: string, position: number, anchor: number) =>
+  desktop<SendReply>("send_push", { handle, rev, text, position, anchor });
+```
+
+In `store/composer.ts`, `ComposerPort` gains `push` and `sendNow`; the app's port maps them to `bridge.sendPush` and `bridge.queueSendNow`. The store gains:
+
+```ts
+    /** Send and push now: a message on its way makes it Send now (MessageComposer::push). */
+    async push() {
+      const h = handle();
+      if (h === undefined) return;
+      if (view()?.sending) { await port.sendNow(null); return; }
+      await flush();
+      reply(await port.push(h, rev, text(), selection().end, selection().start));
+    },
+    async sendNow(queueId?: string) { await port.sendNow(queueId ?? null); },
+```
+
+- [ ] **Step 5: The panel.** Write `client/src/ui/sessions/QueuePanel.tsx`:
+
+```tsx
+import { Show } from "solid-js";
+import { composer } from "../../store/composer";
+
+/** "Queued in agent" (ActivityView.cpp:1280-1292): the agent's own queue, read-only, with its Send now. */
+export function QueuePanel() {
+  return (
+    <Show when={composer.view()?.queue}>{(q) => (
+      <div class="act-queue" role="region" aria-label="Queued in agent">
+        <div class="act-queue-head">
+          <b>Queued in agent</b><span class="grow" />
+          <button class="btn small" disabled={!q().enabled} title={q().hint} onClick={() => void composer.sendNow(q().id)}>{q().label}</button>
+        </div>
+        <div class="act-queue-text wrap-pre" title={q().text}>{q().text}</div>
+      </div>
+    )}</Show>
+  );
+}
+```
+
+```css
+.act-queue { margin: 0 0 8px; padding: 8px 12px; background: var(--z-color-surface); border: 1px solid var(--z-color-border); border-radius: var(--z-radius-md); }
+.act-queue-head { display: flex; align-items: center; gap: 8px; }
+.act-queue-head b { color: var(--z-color-muted); font-weight: 600; }
+.act-queue-text { max-height: 100px; overflow-y: auto; user-select: text; }
+```
+
+- [ ] **Step 6: Place it and bind the chords.**
+  - In `SessionDetail.tsx`, `<QueuePanel />` goes between `<ActivityView />` and the composer column, inside `activity-wrap`, so it shares the Activity column.
+  - The detail view listens for the window chord while the Sessions page shows a session:
+
+```tsx
+onMount(() => {
+  const onKey = (e: KeyboardEvent) => {
+    if (!isSendNowChord(e, MAC) || !selected()) return;
+    e.preventDefault();
+    void composer.sendNow();
+  };
+  window.addEventListener("keydown", onKey);
+  onCleanup(() => window.removeEventListener("keydown", onKey));
+});
+```
+
+  - In `Composer.tsx`, the editor's `onKey` feeds the push chord first:
+
+```tsx
+  const chord = createPushChord(MAC);
+  const onKey = (e: KeyboardEvent) => {
+    if (e.isComposing) return;
+    const step = chord.feed(e, editor.selectionStart !== editor.selectionEnd);
+    if (step !== "pass") { e.preventDefault(); if (step === "push") void composer.push(); return; }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void composer.send(); }
+    else if (e.key === "Escape" && act().stop.shown && !act().stop.disabled) { e.preventDefault(); void composer.interrupted().then(() => act().stop.action()); }
+  };
+```
+
+  No button and no tooltip names either chord (owner rule): Qt has no push button, and the Send now tooltip is the queue's hint alone.
+  - In `transcript.ts`, a `UserPromptQueued` item is labelled "You (queued)". This rule is checked before A2-3's "You (answer)", in Qt's order (`ActivityView.cpp:1030-1031`). The receipt rule stays: "Queued at this time" until a matching submit follows.
+
+- [ ] **Step 7: Run the checks**
+
+Run: `cd client && npm test -- src/ui/sessions/chords.test.ts src/store/composer.test.ts src/ui/sessions/transcript.test.ts && npm run check && npm test && python3 ../scripts/check-ui-separators.py`
+Expected: PASS; no type errors; no separators.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add client/src
+git commit -m "feat(client): the Queued in agent panel, Send now, and the Send and push now chord"
+```
+
+---
+
+### Task A2-6: OpenCode's inbox: Queued, Not delivered and Remove
+
+**Bar:** Qt's only Remove of a queued message. The owner's daily agents are Claude, Codex and Kimi, so this task is planned here but lands after the switch unless the owner rules otherwise (open question in the report). It is independent of A2-1 to A2-3.
+
+**Depends on:**
+- R8 (`InboxFacts`, `inbox_removable`, the `REMOVE_*` texts, `Action::RemoveQueued`, `actions::allowed_with`, `Lane::Inbox`);
+- A2-4;
+- Task 4b (`Followed.events`) and Task 7 (`transcript.ts` local rows).
+
+**Qt reference:**
+- `tray/src/ActivityView.cpp:1034-1038, 1069-1087`;
+- `tray/src/SessionsWindow.cpp`: 1011-1019, 3978-3979, 4433-4467, 4471.
+
+**Files:**
+- Modify: `client/src-tauri/src/composer/queue.rs` (`InboxView`, `inbox_part`, `queue_remove`, the result; tests)
+- Modify: `client/src-tauri/src/composer/mod.rs` (`ComposerView.inbox`), `client/src-tauri/src/lib.rs` (`queue_remove`)
+- Modify: `client/src/types.ts`, `client/src/bridge.ts` (`queueRemove`)
+- Modify: `client/src/ui/sessions/types.ts` (`TranscriptItem.inbox`), `client/src/ui/sessions/transcript.ts`, `client/src/ui/sessions/transcript.test.ts`
+- Modify: `client/src/ui/sessions/Activity.tsx` (the note, Remove and its dialog)
+- Modify: `client/src/store/composer.test.ts` (the `view()` fixture gains `inbox: { shown: false, ready: false, busy: false, removing: null, run: "", conversation: "" }`)
+
+**Interfaces:**
+- Produces:
+
+```rust
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct InboxView { pub shown: bool, pub ready: bool, pub busy: bool, pub removing: Option<String>, pub run: String, pub conversation: String }
+impl Composers { pub fn queue_remove(&self, message_id: &str, run: &str, conversation: &str); }
+// ComposerView gains: pub inbox: InboxView
+// command: queue_remove(message_id, run, conversation)
+```
+
+```ts
+export interface InboxView { shown: boolean; ready: boolean; busy: boolean; removing: string | null; run: string; conversation: string }
+// TranscriptItem gains: inbox?: { state: "queued" | "not_delivered"; messageId?: string }
+```
+
+- [ ] **Step 1: Write the failing tests.** In `composer/queue.rs`'s tests:
+
+```rust
+    fn opencode(delivery: &str) -> (Value, Vec<Value>) {
+        let mut details = ready();
+        details["allowed_actions"] = json!(["remove_queued", "forget"]);
+        let event = json!({"seq": 4, "type": "UserPromptSubmit", "detail": "later", "message_id": "msg_abc123", "delivery_state": delivery});
+        (details, vec![event])
+    }
+
+    fn events(details: Value, events: Vec<Value>) -> zerus_client_core::Batch {
+        let mut batch = state(details);
+        batch.activity.push(zerus_client_core::ActivityOut {
+            computer: zerus_client_core::ComputerId::from("studio"), key: "run:run-1".into(), kind: "events".into(),
+            payload: json!({"events": events, "cursor": 4}),
+        });
+        batch
+    }
+
+    #[test]
+    fn a_not_delivered_message_is_removed_after_the_check() {
+        let root = dir("inbox");
+        let (c, fake) = send_hub(&root);
+        lock(&fake.row).agent = "opencode".into();
+        *lock(&fake.outcome) = Box::new(|_, id| Outcome::Done { receipt: json!({"status": "completed", "request_id": id}), cleanup: None });
+        let (details, list) = opencode("not_delivered");
+        c.open(Some(crate::composer::tests::session()));
+        c.observe(&events(details, list));
+        let view = until(&c, |v| v.inbox.ready);
+        assert!(view.inbox.shown);
+        c.queue_remove("msg_abc123", "run-1", "conv-1");
+        until(&c, |v| !v.inbox.busy && v.inbox.removing.is_none());
+        let Some((_, Action::RemoveQueued { message_id }, _)) = sent(&fake).last().cloned() else { panic!("no removal") };
+        assert_eq!(message_id, "msg_abc123");
+        assert_eq!(c.take_events(), vec![notice("Queued message removed.")]);
+    }
+
+    #[test]
+    fn a_message_that_changed_is_not_removed() {
+        let root = dir("inbox-changed");
+        let (c, fake) = send_hub(&root);
+        lock(&fake.row).agent = "opencode".into();
+        let (details, list) = opencode("queued");
+        c.open(Some(crate::composer::tests::session()));
+        c.observe(&events(details, list));
+        until(&c, |v| v.inbox.ready);
+        c.queue_remove("msg_abc123", "run-1", "conv-1");
+        assert_eq!(c.take_events(), vec![ComposerEvent::Notice { text: "The queued message changed. Check Activity before removing it.".into(), error: true, transient: false }]);
+        assert!(sent(&fake).is_empty());
+    }
+```
+
+In `transcript.test.ts`:
+
+```ts
+  it("OpenCode's inbox states replace the receipt", () => {
+    const items = buildTranscript([
+      { seq: 1, type: "UserPromptSubmit", at: 10, detail: "a", delivery_state: "queued", message_id: "msg_a" },
+      { seq: 2, type: "UserPromptSubmit", at: 11, detail: "b", delivery_state: "not_delivered", message_id: "msg_b" },
+    ] as ActivityEvent[]);
+    expect(items.map((i) => i.receipt)).toEqual(["Queued", "Not delivered"]);
+    expect(items[1].inbox).toEqual({ state: "not_delivered", messageId: "msg_b" });
+  });
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer::queue:: && npm test -- src/ui/sessions/transcript.test.ts`
+Expected: FAIL.
+
+- [ ] **Step 3: The hub part.** `Queue` gains `removing: Option<(String, String, String)>` (composer key, message id, session name). In `queue.rs`:
+
+```rust
+use zerus_client_core::actions::allowed_with;
+use zerus_client_core::input_queue::InboxFacts;
+
+/// What Activity needs for OpenCode's Remove (`ActivityView.cpp:1077-1087`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct InboxView { pub shown: bool, pub ready: bool, pub busy: bool, pub removing: Option<String>, pub run: String, pub conversation: String }
+
+impl Composers {
+    pub(crate) fn inbox_part(&self, hub: &Hub) -> InboxView {
+        let Some(ctx) = self.context(hub) else { return InboxView::default() };
+        let details = ctx.details.as_deref().cloned().unwrap_or_default();
+        let shown = details["allowed_actions"].as_array().is_some_and(|list| list.iter().any(|a| a == "remove_queued"));
+        let busy = hub.queue.removing.is_some();
+        InboxView {
+            shown,
+            ready: ctx.facts.cmd == "opencode" && ctx.online && !ctx.facts.inspect_error && !busy
+                && !text(&details, "run_id").is_empty() && allowed_with(&ctx.row, &details, "remove_queued"),
+            busy,
+            removing: hub.queue.removing.as_ref().filter(|(key, _, _)| *key == ctx.key).map(|(_, id, _)| id.clone()),
+            run: text(&details, "run_id").to_owned(),
+            conversation: text(&details, "conversation_id").to_owned(),
+        }
+    }
+
+    /// Remove, after the confirmation, with the identity the dialog showed
+    /// (`removeQueuedMessage` 4446-4467): sent only while the same
+    /// conversation still reports that message as not delivered.
+    pub fn queue_remove(&self, message_id: &str, run: &str, conversation: &str) {
+        let mut hub = self.lock();
+        let Some(ctx) = self.context(&hub) else { return };
+        let details = ctx.details.as_deref().cloned().unwrap_or_default();
+        let events: Vec<Value> = hub.followed.events.iter().cloned().collect();
+        let facts = InboxFacts {
+            cmd: &ctx.facts.cmd, online: ctx.online, inspect_error: ctx.facts.inspect_error, busy: hub.queue.removing.is_some(),
+            allowed: allowed_with(&ctx.row, &details, "remove_queued"), details: &details, events: &events,
+        };
+        if hub.closed || text(&details, "run_id") != run || text(&details, "conversation_id") != conversation
+            || !rules::inbox_removable(&facts, message_id) {
+            self.event(&mut hub, ComposerEvent::Notice { text: rules::REMOVE_CHANGED.into(), error: true, transient: false });
+            drop(hub);
+            self.changed();
+            return;
+        }
+        hub.queue.removing = Some((ctx.key.clone(), message_id.to_owned(), ctx.session.name.clone()));
+        drop(hub);
+        self.changed();
+        let target = Target { computer: ctx.session.computer.clone(), name: ctx.session.name.clone(), run_id: run.to_owned(), conversation_id: conversation.to_owned() };
+        let (me, key, name, id) = (self.clone(), ctx.key.clone(), ctx.session.name.clone(), message_id.to_owned());
+        (self.0.deps.spawn)(Box::new(move || {
+            let outcome = (me.0.deps.dispatch)(target, Action::RemoveQueued { message_id: id }, uuid::Uuid::new_v4().to_string())
+                .unwrap_or_else(|error| Outcome::Uncertain { detail: error });
+            me.queue_removed(&key, &name, &outcome);
+        }));
+    }
+
+    /// 1013-1019: the selected session hears the result; another hears only a failure.
+    fn queue_removed(&self, key: &str, name: &str, outcome: &Outcome) {
+        let mut hub = self.lock();
+        hub.queue.removing = None;
+        let current = hub.open_key.as_deref() == Some(key);
+        let failure = match outcome {
+            Outcome::Done { .. } => None,
+            Outcome::Failed { detail } | Outcome::Uncertain { detail } => Some(detail.clone()),
+        };
+        match (current, failure) {
+            (true, None) => self.event(&mut hub, ComposerEvent::Notice { text: rules::REMOVED.into(), error: false, transient: false }),
+            (true, Some(detail)) => self.event(&mut hub, ComposerEvent::Notice { text: detail, error: true, transient: false }),
+            (false, Some(detail)) => self.event(&mut hub, ComposerEvent::Notice {
+                text: format!("Could not remove the queued message from {name}: {detail}"), error: true, transient: false }),
+            (false, None) => {}
+        }
+        drop(hub);
+        self.changed();
+        if current {
+            self.refresh_details();
+        }
+    }
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn queue_remove(state: tauri::State<'_, Composers>, message_id: String, run: String, conversation: String) {
+    state.queue_remove(&message_id, &run, &conversation);
+}
+```
+
+`ComposerView` gains `pub inbox: InboxView`, filled by `self.inbox_part(hub)`. Register `composer::queue::queue_remove` in `lib.rs`.
+
+- [ ] **Step 4: The transcript and Activity.**
+  - In `transcript.ts`, a user event with `delivery_state` `queued` or `not_delivered`:
+    - takes the receipt "Queued" or "Not delivered" in place of "Sent" / "Queued at this time";
+    - carries `inbox: { state, messageId: e.message_id }`.
+  - In `Activity.tsx`, an item with `inbox.state === "not_delivered"` shows the note "Still waiting in OpenCode's queue. It runs first with your next message unless you remove it.". With `composer.view()?.inbox.shown` and a `messageId`, it also shows a button:
+    - "Removing…" (disabled) while `inbox.removing` is this id;
+    - "Remove" (disabled) while `inbox.busy`;
+    - "Remove", enabled when `inbox.ready`.
+
+    Remove opens a confirmation dialog (`<dialog class="dlg" role="alertdialog">`, as A2-3's cold dialog):
+    - the title "Remove queued message";
+    - the text "Remove this queued message? It is still waiting in OpenCode's queue and runs first with your next message unless you remove it.";
+    - Cancel first (default, focused, Escape);
+    - a danger button "Remove" (`btn solid-danger`), which calls `bridge.queueRemove(messageId, inbox.run, inbox.conversation)` with the identity captured when the dialog opened.
+
+    ```ts
+    // bridge.ts
+    export const queueRemove = (messageId: string, run: string, conversation: string) => desktop<void>("queue_remove", { message_id: messageId, run, conversation });
+    ```
+
+- [ ] **Step 5: Run the checks**
+
+Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml composer:: && npm test && npm run check && python3 ../scripts/check-ui-separators.py`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add client/src client/src-tauri
+git commit -m "feat(client): OpenCode's queued and not delivered messages, with a confirmed Remove"
+```
+
+---
+
+# Part A, continued
+
+Tasks 8-12 complete Part A. Task 12 runs the smoke for Part A and Part A2.
+
 ### Task 8: Dropped files: composer attach, Terminal paste and stage
 
 **Depends on:** A2 `zerus-5wmh.9.4` (#404): `Action::StageFiles {paths, expected_created}` and its `staged` receipt; `Session.created` from #406; Tasks 2, 3a and 6.
@@ -7644,7 +11282,7 @@ git commit -m "feat(client): the Processes tab and Settings > Processes"
 
 ### Task 12: Fixtures, the Part A smoke run, docs and follow-ups
 
-**Depends on:** Tasks 1-11 as merged.
+**Depends on:** Tasks 1-11 and A2-1 to A2-5 as merged (A2-6 too when it lands first).
 
 **Files:**
 - Create: `client/src-tauri/tests/support/fake_hgs_phase4.py`
@@ -7652,7 +11290,15 @@ git commit -m "feat(client): the Processes tab and Settings > Processes"
   - a warm prompt cache on `claude/sample-project/api-refactor`'s Activity state (`session_usage.prompt_cache: {status: warm, expires_at: BASE_AT + 1800}`, where S2 reads it);
   - a cold `cache_hint` on `codex/sample-project/pagination`;
   - a sent message with one attachment (`attachments: [{name: "orders.json", request_id: "req-fixture-1", index: 0, mime: "application/json", size: 812}]`) on api-refactor;
-  - a paused `claude/sample-project/review` (already in the fixture) with `resumable: true`.
+  - a paused `claude/sample-project/review` (already in the fixture) with `resumable: true`;
+  - (A2) `claude/sample-project/docs-pass`'s Activity state with `phase: input`, `activity: busy` and one AskUserQuestion card:
+    - `question_id: "tool:fixture-1"`, a 64-character `question_hash`, the row's run and conversation;
+    - `source: hook`, `answer_transport: claude_hook`, `can_answer: true`;
+    - one question "Which checks should run?" with the options "Unit" and "UI" and `allow_other: true`.
+  - (A2) `kimi/sample-project/flaky-test`'s state with `phase: approval` and an approval card:
+    - `source: kimi_tool_approval`, `approval: true`, `approval_choices: false`, `can_answer: true`;
+    - one question "Run rm -rf build?" with the options `allow` and `deny`.
+  - (A2) `codex/sample-project/release-notes`'s state with `activity: busy`, `phase: working` and `input_queue: {id: "queue-fixture", text: "↳ also update the changelog", can_send_now: true, hint: "Interrupt the current turn and send pending messages now"}`.
 - Modify: `client/src/ui/PerfHost.tsx` (`?phase4-smoke=1`)
 - Modify: `client/src-tauri/src/commands.rs` and `client/src-tauri/src/lib.rs` (`smoke_log`)
 - Modify: `client/README.md`
@@ -7667,6 +11313,9 @@ git commit -m "feat(client): the Processes tab and Settings > Processes"
   - `resume NAME [--fresh] ...`: exit 0;
   - `compact-context NAME --json` and `clear-context NAME --json`: `submitted` receipts echoing the request;
   - `processes NAME --output ID ...`: `{id, run_id, conversation_id, output: "running 42 tests\n", truncated: false}`; `--stop ID`: `{id, run_id, conversation_id, status: "requested"}`;
+  - (A2) `answer NAME --json`: `{status: "answered", request_id, name, question_id, question_hash: expected_question_hash, run_id: expected_run_id, conversation_id: expected_conversation_id}` from its stdin;
+  - (A2) `send-now NAME --json`: `{status: "submitted", request_id, name, run_id: expected_run_id, conversation_id: expected_conversation_id, queue_id}`;
+  - (A2) `session-action NAME --json` with `action: remove_queued`: `{status: "completed", request_id, name, run_id: expected_run_id, conversation_id: expected_conversation_id}`;
   - `--help`: the watch-v1 marker line only;
   - anything else exits 2.
 
@@ -7679,6 +11328,23 @@ git commit -m "feat(client): the Processes tab and Settings > Processes"
   6. `start`: select the paused `claude/sample-project/review`, Send, expect "Start the session to send?", choose "Resume and send", and expect `resume` in the log, then the waiting text.
   7. `processes`: set `processesEnabled` (not persisted), open Processes, expect three groups, and wait for the output "running 42 tests".
   8. `preview`: hover the fixture message's `orders.json` chip and expect a ready preview.
+  9. `question` (A2):
+     - select `claude/sample-project/docs-pass`;
+     - expect the card "Agent needs your answer" and no editor;
+     - choose "Unit" and Submit;
+     - expect one `answer` call whose stdin carries `question_id: "tool:fixture-1"`, the fixture's `expected_question_hash`, run and conversation, and `selected_option_ids: ["opt_0_0"]`;
+     - expect the status "Answer sent. Waiting for the agent…".
+  10. `approval` (A2):
+      - select `kimi/sample-project/flaky-test`;
+      - expect "Approve once (3)" disabled;
+      - call `questions.setActive(true)` (a headless window may not report focus) and wait 3.2 s;
+      - click Approve once;
+      - expect one `answer` call with `selected_option_ids: ["allow"]`.
+  11. `queue` (A2):
+      - select `codex/sample-project/release-notes`;
+      - expect "Queued in agent" with the fixture text;
+      - click Send now;
+      - expect one `send-now` call with `queue_id: "queue-fixture"` and the notice "Send now requested. Waiting for the agent to accept the queue.".
 
   The command the hook reads the fake's log with, in `commands.rs` (live builds only, registered beside `perf_log`):
 
@@ -7708,6 +11374,12 @@ pub fn smoke_log() -> Result<Vec<serde_json::Value>, String> {
     - block reasons, the cold cache, resume and compact, local rows;
     - drafts: the app's one store at `<app data>/drafts` (`drafts-replay` in a replay), shared with voice; Qt's store read, never written; the one exit hook on quit and on SIGTERM;
   - "Attachments": limits, the `zerus-file` scheme, the cache bound and pins, Open and R2;
+  - "Questions and the native queue" (A2):
+    - the card's rules and its drafts' keys;
+    - the answer path and its uncertain outcome;
+    - the queue panel and Send now;
+    - Send and push now's chord;
+    - OpenCode's inbox when A2-6 is in;
   - "Phase 4 smoke run": the commands, as in Step 2.
 
   Note in "Rules" that Part B adds voice and video, Native UI and the external entries.
@@ -7716,10 +11388,8 @@ pub fn smoke_log() -> Result<Vec<serde_json::Value>, String> {
   - One Beads child of `zerus-5wmh` per composer part outside this phase (Decisions); each description names its Qt files and states that the control keeps its place disabled with its "Arrives with …" text until then:
     - model settings and the OpenCode picker;
     - file references;
-    - Send and push now with the native queue;
     - suggestions;
     - the subagent composer;
-    - question answers;
     - the Usage limit and Recovery chips.
 
     No paths outside the repository go into Beads text: no workspace or home paths.
@@ -7745,7 +11415,7 @@ env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_
 
 Expected:
 - every step logs `phase4-smoke ...: done` and the run exits 0;
-- `log.ndjson` shows exactly one `send` per Send, with the message only in stdin.
+- `log.ndjson` shows exactly one `send` per Send, one `answer` per Submit or Approve once, and one `send-now` per Send now, with message and answer text only in stdin.
 
 Keep the raw log with its sha256 and the executed test counts for the handoff.
 
@@ -8237,9 +11907,11 @@ git commit -m "feat(client): open terminal, folder shell, folder and externally"
   - media lines 212-214 and row 296: Task 13;
   - Native UI, row 302: Task 14;
   - opening files and pickers, row 301: Tasks 3a, 9 and 15;
-  - terminal launch, row 294: Task 15 (R5).
+  - terminal launch, row 294: Task 15 (R5);
+  - Actions ("request identities, expected run and conversation, … unknown outcomes are never replayed") for answers, Send now and OpenCode's Remove: R7, R8 and Tasks A2-1 to A2-6;
+  - "the composer, questions and banners share the column" (Frontend): A2-3 and A2-5.
 
   The epic's menu entries (Open terminal, Open native DeepSeek UI, Open folder, Open shell in session folder, Show running commands) are in Tasks 11, 14 and 15.
 - **Review Focus:** each line names its owning test above.
-- **Not in this plan:** the composer parts listed in Decisions, filed by Task 12; Windows ConPTY (T1b, `zerus-5wmh.9.16`); macOS microphone and camera entitlements (M1 and M2, with the coordinator); the voice driver itself (M1c, the events session's).
+- **Not in this plan:** the composer parts listed in Decisions, filed by Task 12; automatic tool approvals (a separate opt-in, off by default; nothing in A2 answers without a click); Windows ConPTY (T1b, `zerus-5wmh.9.16`); macOS microphone and camera entitlements (M1 and M2, with the coordinator); the voice driver itself (M1c, the events session's).
 - **Review of 2026-10-28** (the coordinator's amendments and a review pass): one draft store and one exit hook shared with M1c and the organization branch; R3 and R4 delivered and Task 13 rebound to them; Qt's stores read-only with a byte-for-byte test; the unknown-delivery rules made explicit and tested (stale questions, exit while saving); no digests per view; rename collisions keep both drafts; Tasks 3 and 4 split; each task adds only what it uses.

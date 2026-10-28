@@ -9,6 +9,7 @@
 
 pub mod actions;
 pub mod attachments;
+pub mod attention;
 pub mod batch;
 pub mod cache;
 #[cfg(windows)]

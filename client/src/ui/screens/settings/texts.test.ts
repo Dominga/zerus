@@ -374,6 +374,13 @@ describe("Settings texts", () => {
     expect(qt).toContain(`"${template}"`);
     expect(source("About.tsx")).toContain(shown);
   });
+  it("About names the build as UpdateController::installedVersion does", () => {
+    const updates = fs.readFileSync(new URL("tray/src/UpdateController.cpp", repo), "utf8");
+    expect(updates).toContain('tr("%1 (local changes %2)")');
+    expect(source("about-version.ts")).toContain("`${version} (local changes ${source})`");
+    expect(updates).toContain('QString("%1 (%2)")');
+    expect(source("about-version.ts")).toContain("`${version} (${source})`");
+  });
   it.each(KEYBOARD)("Keyboard shows Qt's %s", (text) => {
     expect(keyboard).toContain(`"${text}"`);
     expect(source("Keyboard.tsx")).toContain(text);

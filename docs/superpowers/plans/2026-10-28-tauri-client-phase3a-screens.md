@@ -51,6 +51,7 @@ Every write keeps its place, label and Qt enablement shape but stays disabled wi
 >   - It lists all windows in the mockup's layout. The bar takes Qt's threshold colour (`AccountUsage::color`), followed by "Resets d MMM HH:mm" and the forecast line.
 >   - Meters on rows, cards and the Overview use the pace tone.
 >   - The cached `account_status` of `account ls` seeds windows, balances, credits, identity and `checked_at` until the first `account inspect` answers. Qt seeds identity and `checked_at` only.
+>   - Every seeded value shows its check time until `account inspect` answers (coordinator review, 2026-10-28): `Usage.seeded` is true while the values come from the cached `account_status`. The Accounts usage panel shows "Checked HH:MM" on each seeded window and in its header instead of "Updated"; the Overview account card shows "Checked HH:MM" under its meters; every meter tooltip starts with it.
 > - **`usage.ts` gaps 1-4 and 7 of the inventory close here:**
 >   - an adapter from the projected window;
 >   - a missing reset counts as current;
@@ -59,6 +60,7 @@ Every write keeps its place, label and Qt enablement shape but stays disabled wi
 >   - the tooltip gains identity lines, balances and the refresh notes.
 > - **Projects:**
 >   - `swarm get` runs every 5 s only while Projects is visible, with a 10 s timeout. `project ls` is not read: it serves only Qt's one-time legacy import, a write for 3c.
+>   - The organization is not only a Projects read (coordinator review, 2026-10-28): Qt's SwarmController polls it for the whole session, and it drives the Sessions grouping and Move to project. `zerus-5wmh.30` adds a watch-v1 `organization` topic (events session) and `zerus-5wmh.31` groups the Sessions list by it. Until `.30` lands, Projects polls `swarm get` while visible. `views/projects.rs` projects the organization independently of its source (`SwarmState::finish` takes the reply value), so when `.30` lands the topic feeds the same projection, the visibility condition is dropped and `.31` reuses it.
 >   - The Worktrees panel and its `worktrees` read move to phase 5 (`zerus-5wmh.10`).
 >   - "Open folder" stays disabled until 3c (it needs a platform module), and "New session…" until phase 5.
 >   - The legacy import is 3c.
@@ -217,7 +219,7 @@ pub struct Balance { pub kind: String, pub balance: String, pub currency: String
 pub struct Credits { pub balance: String, pub unlimited: bool }
 pub struct Usage { pub status, pub provider, pub label, pub auth_status: String, pub checked_at: Option<f64>, pub identity: Identity,
                    pub windows: Vec<Window>, pub balances: Vec<Balance>, pub credits: Option<Credits>,
-                   pub refreshing: bool, pub refresh_error: bool, pub offline: bool }
+                   pub refreshing: bool, pub refresh_error: bool, pub offline: bool, pub seeded: bool }
 pub fn parse_iso(text: &str) -> Option<f64>;
 pub fn reset_seconds(value: Option<&Value>) -> Option<f64>;
 pub fn window(value: &Value) -> Option<Window>;
@@ -468,6 +470,8 @@ fn member_states_and_texts_follow_qt() {
     assert_eq!(studio.usage.status, "offline");
     assert_eq!(studio.usage.windows.iter().map(|w| w.resets_at).collect::<Vec<_>>(), [Some(1793005200.0), Some(1793400000.0)]);
     assert_eq!(studio.usage.checked_at, Some(1793000100.0));
+    assert!(studio.usage.seeded, "the cached inspection is marked until inspect answers");
+    assert!(!member(&view, "claude-work").usage.seeded, "an answered inspect is not seeded");
     assert!(member(&view, "kimi-studio").usage.offline && member(&view, "kimi-studio").state == Offline);
     // Qt's lenient rule: a peer is offline only after its stream failed.
     for (status, attempt, up) in [("reconnecting", 0, true), ("probing", 0, true), ("unsupported", 0, true), ("live", 0, true),
@@ -715,6 +719,9 @@ pub struct Usage {
     pub refresh_error: bool,
     /// The machine is offline.
     pub offline: bool,
+    /// The windows, balances and credits come from the cached `account_status`
+    /// of `account ls`; the view shows "Checked HH:MM" until inspect answers.
+    pub seeded: bool,
 }
 
 const MONTH_DAYS: [i64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
@@ -1156,6 +1163,7 @@ fn profile_usage(entry: &FleetEntry, raw: &Value, r: &UsageRef, state: &Accounts
             u.windows = cached.windows;
             u.balances = cached.balances;
             u.credits = cached.credits;
+            u.seeded = true;
         } else if matches!(u.status.as_str(), "unavailable" | "offline") && u.identity == Identity::default() {
             u.identity = cached.identity;
             u.checked_at = cached.checked_at;
@@ -3523,7 +3531,7 @@ export const projected = (extra: Partial<ProjectedWindow> = {}): ProjectedWindow
 export const usageOf = (extra: Partial<Usage> = {}): Usage => ({
   status: "ok", provider: "claude", label: "Work", auth_status: "", checked_at: null,
   identity: { email: "", name: "", plan: "", organization: "", account_id: "", auth_method: "" },
-  windows: [], balances: [], credits: null, refreshing: false, refresh_error: false, offline: false, ...extra,
+  windows: [], balances: [], credits: null, refreshing: false, refresh_error: false, offline: false, seeded: false, ...extra,
 });
 ```
 
@@ -3868,6 +3876,8 @@ export interface Usage {
   label: string;
   auth_status: string;
   checked_at: number | null;
+  /** The values come from the cached account status until inspect answers. */
+  seeded: boolean;
   identity: Identity;
   windows: ProjectedWindow[];
   balances: { kind: string; balance: string; currency: string }[];
@@ -4429,7 +4439,10 @@ export function accountTooltip(u: Usage, now: number) {
     if (f) lines.push(f);
   }
   for (const b of u.balances) lines.push(`${b.kind}: ${b.balance} ${b.currency}`);
-  if (u.checked_at !== null) lines.push(`Updated ${clock(u.checked_at)}`);
+  if (u.checked_at !== null) {
+    if (u.seeded) lines.unshift(`Checked ${clock(u.checked_at)}`);
+    else lines.push(`Updated ${clock(u.checked_at)}`);
+  }
   if (u.refreshing) lines.push("Updating… Previous values remain visible.");
   else if (u.refresh_error) lines.push("Update failed. Showing the last available values.");
   if (u.offline) lines.push("Machine is offline.");
@@ -4698,7 +4711,7 @@ import { machineCards } from "../../store/machines";
 import { accountsPage, loadAccounts, setAccountMachine, setRequestedProfile } from "../../store/accounts";
 import { createOverview, type MachineCardModel, type OverviewStats } from "../../store/overview";
 import { setMachineFilter, setPage, setProjectFilter, setSelectedKey, setStateFilter, type StateFilter } from "../../store/ui";
-import { accountTooltip, summaryText, usageLoading, windowsAt } from "../lib/usage";
+import { accountTooltip, clock, summaryText, usageLoading, windowsAt } from "../lib/usage";
 import { accountIdentity, accountTone, accountsNote, cpuFigure, level, loadTip, memoryFigure, sampleNote, sampleTip, sessionsLabel } from "./overview-ui";
 
 // Overview (DashboardPage.cpp), ported from design/webui/src/screens/Dashboard.tsx:
@@ -4786,6 +4799,7 @@ function AccountCard(props: { a: Account; now: number }) {
         <span class="grow" />
         <span class="ov-ausage tabular">
           <UsageMeters windows={windowsAt(usage().windows, props.now)} loading={usageLoading(usage())} compact summary={summaryText(usage())} />
+          <Show when={usage().seeded && usage().checked_at !== null}><span class="dim">Checked {clock(usage().checked_at!)}</span></Show>
         </span>
       </span>
     </button>
@@ -5806,7 +5820,7 @@ function UsagePanel(props: { a: Account }) {
       <div class="row">
         <h3>Account usage</h3>
         <span class="grow" />
-        <Show when={u().checked_at !== null}><span class="dim">Updated {clock(u().checked_at!)}</span></Show>
+        <Show when={u().checked_at !== null}><span class="dim">{u().seeded ? "Checked" : "Updated"} {clock(u().checked_at!)}</span></Show>
       </div>
       <p class="muted">Shared by sessions using this account.</p>
       <Show when={u().offline}><Status>Machine is offline. Showing the last available account data.</Status></Show>
@@ -5826,6 +5840,7 @@ function UsagePanel(props: { a: Account }) {
             </div>
             <div class="row dim">
               <Show when={w().resets}><span>{w().resets}</span></Show>
+              <Show when={u().seeded && u().checked_at !== null}><span>Checked {clock(u().checked_at!)}</span></Show>
               <span class="grow" />
               <span class="acct-pace">{w().forecast}</span>
             </div>

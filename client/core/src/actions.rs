@@ -101,6 +101,20 @@ pub enum Action {
         #[serde(default)]
         expected_created: Option<i64>,
     },
+    /// `hgs send-now NAME --json` (`requestQueueSendNow`): the agent sends
+    /// its native queue now, when it still is the queue `queue_id` names.
+    /// Built in Rust from the inspected queue, never from webview JSON.
+    #[serde(skip_deserializing)]
+    SendNow {
+        queue_id: String,
+    },
+    /// `hgs session-action NAME --json` with `remove_queued`
+    /// (`requestRemoveQueued`): removes one OpenCode inbox message that was
+    /// not delivered. Built in Rust after the owner confirmed it.
+    #[serde(skip_deserializing)]
+    RemoveQueued {
+        message_id: String,
+    },
 }
 
 /// One `hgs` call: arguments (with a leading `@alias` for a peer), standard
@@ -390,6 +404,40 @@ pub fn invocation(
                 args.extend(["--generation".to_owned(), generation.clone()]);
             }
             (args, None, 45, 45, None)
+        }
+        Action::SendNow { queue_id } => {
+            let input = json!({
+                "request_id": request_id,
+                "expected_run_id": target.run_id,
+                "expected_conversation_id": target.conversation_id,
+                "queue_id": queue_id,
+            });
+            (
+                vec!["send-now".to_owned(), name, "--json".to_owned()],
+                Some(serde_json::to_vec(&input).map_err(|error| error.to_string())?),
+                20,
+                35,
+                Some(request_id.to_owned()),
+            )
+        }
+        Action::RemoveQueued { message_id } => {
+            if !native_message_id(message_id) {
+                return Err("Choose the exact queued OpenCode message.".to_owned());
+            }
+            let input = json!({
+                "request_id": request_id,
+                "action": "remove_queued",
+                "expected_run_id": target.run_id,
+                "expected_conversation_id": target.conversation_id,
+                "message_id": message_id,
+            });
+            (
+                vec!["session-action".to_owned(), name, "--json".to_owned()],
+                Some(serde_json::to_vec(&input).map_err(|error| error.to_string())?),
+                15,
+                45,
+                Some(request_id.to_owned()),
+            )
         }
         Action::ClearContext { dismiss_prompt } => {
             let mut input = json!({
@@ -694,6 +742,8 @@ pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit:
             classify_send(target, invocation, agent_id.as_deref(), exit)
         }
         Action::StopProcess { process_id, .. } => classify_stop(target, process_id, exit),
+        Action::SendNow { queue_id } => classify_send_now(target, invocation, queue_id, exit),
+        Action::RemoveQueued { .. } => classify_remove_queued(target, invocation, exit),
         Action::MarkRead { .. } => classify_read(target, exit),
         Action::Archive | Action::Terminate => classify_write(exit, true),
         _ => classify_write(exit, false),
@@ -737,6 +787,110 @@ fn classify_session_action(
                 done(receipt, None)
             } else {
                 failed("Invalid acknowledgement. Check Terminal before retrying.")
+            }
+        }
+    }
+}
+
+/// OpenCode's message ID as `hgs` checks it: `msg_` and at most 128 ASCII
+/// letters, digits, `_` and `-`.
+fn native_message_id(id: &str) -> bool {
+    id.strip_prefix("msg_").is_some_and(|rest| {
+        (1..=124).contains(&rest.len())
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    })
+}
+
+/// `requestQueueSendNow`'s outcome. A start that failed sent nothing; a
+/// timeout, a broken transfer, an abnormal end or "delivery uncertain" may
+/// have sent the queue. Success needs the receipt to echo the request,
+/// session, run, conversation and queue.
+fn classify_send_now(
+    target: &Target,
+    invocation: &Invocation,
+    queue_id: &str,
+    exit: Exit,
+) -> Outcome {
+    const UNCONFIRMED: &str =
+        "Could not confirm sending the queue. Check Terminal before retrying.";
+    match exit {
+        Exit::StartFailed(error) => failed(error),
+        Exit::TimedOut => uncertain("Queue action timed out. Check Terminal before retrying."),
+        Exit::WriteFailed => uncertain("Queue action failed. Check Terminal before retrying."),
+        Exit::Abnormal { stderr } => {
+            uncertain(trimmed_stderr(&stderr).unwrap_or_else(|| UNCONFIRMED.to_owned()))
+        }
+        Exit::Code { code, stderr, .. } if code != 0 => {
+            let detail = trimmed_stderr(&stderr).unwrap_or_else(|| UNCONFIRMED.to_owned());
+            if stderr.to_lowercase().contains("delivery uncertain") {
+                uncertain(detail)
+            } else {
+                failed(detail)
+            }
+        }
+        Exit::Code { stdout, .. } => {
+            let receipt: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+            let field = |key: &str| receipt.get(key).and_then(Value::as_str);
+            let echoed = field("status") == Some("submitted")
+                && invocation.request_id.is_some()
+                && field("request_id") == invocation.request_id.as_deref()
+                && field("name") == Some(target.name.as_str())
+                && field("run_id") == Some(target.run_id.as_str())
+                && field("conversation_id") == Some(target.conversation_id.as_str())
+                && field("queue_id") == Some(queue_id);
+            if echoed {
+                done(receipt, None)
+            } else {
+                uncertain("Invalid queue acknowledgement. Check Terminal before retrying.")
+            }
+        }
+    }
+}
+
+/// The scoped `runSessionAction` for `remove_queued`. A durable receipt that
+/// echoes the request reports failed, uncertain or completed; nothing is
+/// retried, and what may have removed the message is uncertain.
+fn classify_remove_queued(target: &Target, invocation: &Invocation, exit: Exit) -> Outcome {
+    const INCOMPLETE: &str = "Could not complete the request. Check the session before retrying.";
+    match exit {
+        Exit::StartFailed(error) => failed(error),
+        Exit::WriteFailed => uncertain("Transfer failed. Check the session before retrying."),
+        Exit::TimedOut => uncertain("Request timed out. Check the session before retrying."),
+        Exit::Abnormal { stderr } => {
+            uncertain(trimmed_stderr(&stderr).unwrap_or_else(|| INCOMPLETE.to_owned()))
+        }
+        Exit::Code { code, stderr, .. } if code != 0 => {
+            failed(trimmed_stderr(&stderr).unwrap_or_else(|| INCOMPLETE.to_owned()))
+        }
+        Exit::Code { stdout, .. } => {
+            let receipt: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+            let field = |key: &str| receipt.get(key).and_then(Value::as_str);
+            let identity = invocation.request_id.is_some()
+                && field("request_id") == invocation.request_id.as_deref()
+                && field("name") == Some(target.name.as_str())
+                && field("run_id") == Some(target.run_id.as_str())
+                && field("conversation_id") == Some(target.conversation_id.as_str());
+            let reason: String = field("error")
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(STDERR_CHARS)
+                .collect();
+            match field("status") {
+                Some("failed") if identity => failed(if reason.is_empty() {
+                    "The queued message was not removed.".to_owned()
+                } else {
+                    reason
+                }),
+                Some("uncertain") if identity => uncertain(if reason.is_empty() {
+                    "The result was not confirmed. Refresh before trying again.".to_owned()
+                } else {
+                    format!("The result was not confirmed ({reason}). Refresh before trying again.")
+                }),
+                Some("completed") if identity => done(receipt, None),
+                _ => uncertain("Invalid acknowledgement. Check the session before retrying."),
             }
         }
     }
@@ -930,6 +1084,15 @@ pub fn allowed(row: &ViewRow, operation: &str) -> bool {
     match &row.allowed_actions {
         Some(list) => list.iter().any(|action| action == operation),
         None => row.agent != "opencode" || matches!(operation, "rename" | "forget"),
+    }
+}
+
+/// `NativeSessionCapabilities::action` with the inspection: its
+/// `allowed_actions` list wins over the row's.
+pub fn allowed_with(row: &ViewRow, details: &Value, operation: &str) -> bool {
+    match details.get("allowed_actions").and_then(Value::as_array) {
+        Some(list) => list.iter().any(|action| action.as_str() == Some(operation)),
+        None => allowed(row, operation),
     }
 }
 
@@ -1969,5 +2132,219 @@ mod tests {
             parse_reference(Exit::WriteFailed),
             Err("exit code -1".to_owned())
         );
+    }
+
+    #[test]
+    fn send_now_input_and_outcomes() {
+        let t = target("studio");
+        let action = Action::SendNow {
+            queue_id: "q-1".into(),
+        };
+        let inv = invocation(&t, &action, "req-9").unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "@studio",
+                "send-now",
+                "claude/sample-project/review",
+                "--json"
+            ]
+        );
+        assert_eq!(inv.timeout, Duration::from_secs(35));
+        assert_eq!(
+            invocation(&target(""), &action, "r").unwrap().timeout,
+            Duration::from_secs(20)
+        );
+        let input: Value = serde_json::from_slice(inv.stdin.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            input,
+            json!({"request_id": "req-9", "expected_run_id": "run-1",
+                   "expected_conversation_id": "conv-1", "queue_id": "q-1"})
+        );
+        let outcome = |exit: Exit| classify(&t, &action, &inv, exit);
+        let receipt = json!({"status": "submitted", "request_id": "req-9", "name": "claude/sample-project/review",
+                             "run_id": "run-1", "conversation_id": "conv-1", "queue_id": "q-1"});
+        assert!(matches!(
+            outcome(exit(0, receipt.to_string().as_bytes(), "")),
+            Outcome::Done { .. }
+        ));
+        for (key, value) in [
+            ("status", "requested"),
+            ("request_id", "other"),
+            ("name", "other"),
+            ("run_id", "other"),
+            ("conversation_id", "other"),
+            ("queue_id", "q-2"),
+        ] {
+            let mut changed = receipt.clone();
+            changed[key] = json!(value);
+            assert_eq!(
+                outcome(exit(0, changed.to_string().as_bytes(), "")),
+                uncertain("Invalid queue acknowledgement. Check Terminal before retrying."),
+                "{key}"
+            );
+        }
+        assert_eq!(
+            outcome(Exit::StartFailed("no hgs".into())),
+            failed("no hgs")
+        );
+        assert_eq!(
+            outcome(Exit::TimedOut),
+            uncertain("Queue action timed out. Check Terminal before retrying.")
+        );
+        assert_eq!(
+            outcome(Exit::WriteFailed),
+            uncertain("Queue action failed. Check Terminal before retrying.")
+        );
+        assert_eq!(
+            outcome(Exit::Abnormal { stderr: "".into() }),
+            uncertain("Could not confirm sending the queue. Check Terminal before retrying.")
+        );
+        assert_eq!(
+            outcome(exit(
+                1,
+                b"",
+                "hgs: The native queue is no longer visible; nothing was sent\n"
+            )),
+            failed("hgs: The native queue is no longer visible; nothing was sent")
+        );
+        assert_eq!(
+            outcome(exit(1, b"", "Delivery uncertain: check Terminal")),
+            uncertain("Delivery uncertain: check Terminal")
+        );
+    }
+
+    #[test]
+    fn remove_queued_input_and_outcomes() {
+        let t = target("");
+        let action = Action::RemoveQueued {
+            message_id: "msg_01H-abc_9".into(),
+        };
+        let inv = invocation(&t, &action, "req-3").unwrap();
+        assert_eq!(
+            inv.args,
+            ["session-action", "claude/sample-project/review", "--json"]
+        );
+        assert_eq!(inv.timeout, Duration::from_secs(15));
+        assert_eq!(
+            invocation(&target("mac"), &action, "r").unwrap().timeout,
+            Duration::from_secs(45)
+        );
+        let input: Value = serde_json::from_slice(inv.stdin.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            input,
+            json!({"request_id": "req-3", "action": "remove_queued", "expected_run_id": "run-1",
+                   "expected_conversation_id": "conv-1", "message_id": "msg_01H-abc_9"})
+        );
+        let outcome = |exit: Exit| classify(&t, &action, &inv, exit);
+        let receipt = |status: &str, error: &str| {
+            json!({"status": status, "request_id": "req-3", "name": "claude/sample-project/review",
+                   "run_id": "run-1", "conversation_id": "conv-1", "error": error})
+            .to_string()
+        };
+        assert!(matches!(
+            outcome(exit(0, receipt("completed", "").as_bytes(), "")),
+            Outcome::Done { .. }
+        ));
+        assert_eq!(
+            outcome(exit(0, receipt("failed", "").as_bytes(), "")),
+            failed("The queued message was not removed.")
+        );
+        assert_eq!(
+            outcome(exit(0, receipt("failed", " already sent ").as_bytes(), "")),
+            failed("already sent")
+        );
+        assert_eq!(
+            outcome(exit(0, receipt("uncertain", "").as_bytes(), "")),
+            uncertain("The result was not confirmed. Refresh before trying again.")
+        );
+        assert_eq!(
+            outcome(exit(
+                0,
+                receipt("uncertain", "socket closed").as_bytes(),
+                ""
+            )),
+            uncertain("The result was not confirmed (socket closed). Refresh before trying again.")
+        );
+        let invalid = uncertain("Invalid acknowledgement. Check the session before retrying.");
+        assert_eq!(
+            outcome(exit(0, receipt("submitted", "").as_bytes(), "")),
+            invalid
+        );
+        let mut other: Value = serde_json::from_str(&receipt("completed", "")).unwrap();
+        other["run_id"] = json!("run-2");
+        assert_eq!(outcome(exit(0, other.to_string().as_bytes(), "")), invalid);
+        assert_eq!(outcome(Exit::StartFailed("gone".into())), failed("gone"));
+        assert_eq!(
+            outcome(Exit::WriteFailed),
+            uncertain("Transfer failed. Check the session before retrying.")
+        );
+        assert_eq!(
+            outcome(Exit::TimedOut),
+            uncertain("Request timed out. Check the session before retrying.")
+        );
+        assert_eq!(
+            outcome(exit(2, b"", "")),
+            failed("Could not complete the request. Check the session before retrying.")
+        );
+    }
+
+    #[test]
+    fn a_bad_message_id_is_refused() {
+        let refused = Err("Choose the exact queued OpenCode message.".to_owned());
+        for id in [
+            "",
+            "msg_",
+            "message_1",
+            "msg_a b",
+            "msg_a/b",
+            &format!("msg_{}", "x".repeat(125)),
+        ] {
+            let action = Action::RemoveQueued {
+                message_id: id.to_owned(),
+            };
+            assert_eq!(invocation(&target(""), &action, "r"), refused, "{id}");
+        }
+        let longest = Action::RemoveQueued {
+            message_id: format!("msg_{}", "x".repeat(124)),
+        };
+        assert!(invocation(&target(""), &longest, "r").is_ok());
+    }
+
+    #[test]
+    fn queue_actions_never_come_from_webview_json() {
+        assert!(
+            serde_json::from_value::<Action>(json!({"kind": "send_now", "queue_id": "q"})).is_err()
+        );
+        assert!(serde_json::from_value::<Action>(
+            json!({"kind": "remove_queued", "message_id": "msg_a"})
+        )
+        .is_err());
+        // The same shape still reads an ordinary action.
+        assert!(serde_json::from_value::<Action>(json!({"kind": "pause"})).is_ok());
+    }
+
+    #[test]
+    fn allowed_with_prefers_details() {
+        let opencode = ViewRow {
+            agent: "opencode".into(),
+            ..ViewRow::default()
+        };
+        assert!(!allowed_with(&opencode, &json!({}), "remove_queued"));
+        assert!(allowed_with(
+            &opencode,
+            &json!({"allowed_actions": ["remove_queued"]}),
+            "remove_queued"
+        ));
+        let reported = ViewRow {
+            allowed_actions: Some(vec!["remove_queued".into()]),
+            ..opencode.clone()
+        };
+        assert!(allowed_with(&reported, &json!({}), "remove_queued"));
+        assert!(!allowed_with(
+            &reported,
+            &json!({"allowed_actions": ["rename"]}),
+            "remove_queued"
+        ));
     }
 }

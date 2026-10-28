@@ -18,6 +18,7 @@ pub mod details;
 pub mod drafts;
 pub mod external_file;
 pub mod fleet;
+pub mod input_queue;
 pub mod launch;
 pub mod legacy;
 pub mod local_messages;

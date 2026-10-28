@@ -3128,6 +3128,18 @@ fn check(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
 /// Applies one human, lead or member request. The dispatcher records its own
 /// changes directly.
 pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    // N14: the word is checked again on the stored team inside the change. Two
+    // requests sent at once both pass the CLI's pre-check on their own read;
+    // the store serializes them, and only the second sees the first's record.
+    if let Some(event) = input["owner_word_event"].as_i64() {
+        let allowed = input["owner_word_count"].as_u64().unwrap_or(1).max(1) as usize;
+        let change = input["owner_word_change"].as_str().unwrap_or("this change");
+        ensure!(
+            team.owner_word_allowed_again(event, allowed, change),
+            "That word was already used for {}; ask the owner again",
+            team.owner_word_used(event).unwrap_or_default()
+        );
+    }
     // F285: a stored team with discarded drafts is compacted on its next
     // change - the dead records leave and the drafts close the gaps - so the
     // change that follows sees live numbers only.
@@ -3273,9 +3285,10 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             let active = team.members.iter().filter(|m| m.state != MemberState::Removed).count();
             let id = member.id.clone();
             let role = member.role.clone();
-            // U32: the lead adds on the owner's verified word even at a full
-            // cap: the cap grows by exactly the count the sentence names, within
-            // the tree's session budget, in this same change.
+            // U32/N7: the lead adds on the owner's verified word even at a full
+            // cap: the cap grows by one for each add, and a count word ("add two
+            // backends") pays for that many adds, within the tree's session
+            // budget, in this same change.
             let on_word = input["roster_word"].as_bool() == Some(true)
                 && matches!(actor, Actor::Member(lead) if *lead == team.lead)
                 && input["owner_word_event"].is_i64();
@@ -3283,8 +3296,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             if active >= team.settings.max_members {
                 ensure!(on_word, "The team already has its {} members", team.settings.max_members);
                 let old = team.settings.max_members;
-                let count = input["owner_word_count"].as_u64().unwrap_or(1).max(1) as usize;
-                let new = old.saturating_add(count);
+                let new = old.saturating_add(1);
                 let budget = input["tree_sessions"].as_u64().map(|budget| budget as usize).unwrap_or(team.settings.tree_sessions as usize);
                 ensure!(new <= budget, "The whole tree runs at most {budget} sessions; the team keeps {old} members");
                 team.settings.max_members = new;
@@ -4579,6 +4591,43 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert_eq!(empty, "A budget needs a label");
+    }
+
+    /// N14: the word is checked again inside the change, on the stored team. Two
+    /// requests sent at once both pass the CLI's pre-check on their own read;
+    /// the second must still refuse the word the first already spent, whatever
+    /// operation it is for.
+    #[test]
+    fn the_stored_team_refuses_a_word_another_request_spent() {
+        let mut team = Team {
+            id: "t".into(),
+            name: "T".into(),
+            lead: "lead".into(),
+            status: TeamStatus::Running,
+            settings: Settings { max_members: 6, ..Default::default() },
+            ..Default::default()
+        };
+        team.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
+        team.members.push(Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), ..Default::default() });
+        let none = BTreeSet::new();
+        let mut events = Vec::new();
+        let word = |change: &str| {
+            json!({"roster_word":true,"owner_word_event":7,"owner_word_change":change,
+                "owner_word_checked":{"text":"убери dev из состава","at":1.0,"event":7}})
+        };
+        let mut remove = word("the roster change");
+        remove["member"] = json!("dev");
+        apply(&mut team, "remove-member", &remove, &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(team.owner_word_uses(7), 1);
+        // The same sentence cannot pay for the cap change, even on a copy of the
+        // team both requests loaded before either wrote.
+        let mut settings = word("the roster change");
+        settings["settings"] = json!({"max_members":7});
+        let error = apply(&mut team, "settings", &settings, &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already used"), "{error}");
+        assert_eq!(team.settings.max_members, 6, "the refused change moved nothing");
     }
 
     #[test]

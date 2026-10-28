@@ -1304,6 +1304,10 @@ fn configure_is_checked_at_the_click_and_never_retried() {
         page.begin_configure(true, 91, NOW_MS),
         Err("Choose a retention of 1 to 90 days.".into())
     );
+    assert_eq!(
+        page.view(NOW_MS).status,
+        "Choose a retention of 1 to 90 days."
+    );
     // The same or a longer retention is made at once, pinned to the
     // epoch of the read.
     let change = page.begin_configure(false, 90, NOW_MS).unwrap();
@@ -1372,6 +1376,17 @@ fn a_purge_waits_for_a_fresh_epoch_and_the_persons_confirmation() {
     let view = shown(&mut page);
     assert!(!view.mutating && !view.purge_pending && view.can_change_local);
     assert_eq!(page.purge_confirmed(), None);
+    // Leaving while the check runs: its answer ends the purge, unasked.
+    page.begin_purge(NOW_MS).unwrap();
+    page.purge_cancelled();
+    assert!(shown(&mut page).mutating);
+    assert!(!page.purge_checked(Ok(parsed(vec![])), NOW_MS));
+    let view = shown(&mut page);
+    assert!(!view.mutating && !view.purge_pending && view.can_change_local);
+    // The next purge asks again.
+    page.begin_purge(NOW_MS).unwrap();
+    assert!(page.purge_checked(Ok(parsed(vec![])), NOW_MS));
+    page.purge_cancelled();
     // A cancel outside a purge leaves a running change alone.
     page.begin_configure(true, 90, NOW_MS).unwrap();
     page.purge_cancelled();

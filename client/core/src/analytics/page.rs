@@ -32,6 +32,8 @@ pub const NOT_CURRENT_APPLY: &str =
     "Local analytics epoch is stale or unknown. Refresh before applying.";
 pub const NOT_CURRENT_PURGE: &str =
     "Local analytics epoch is stale or unknown. Refresh before purging.";
+/// A retention the page does not offer.
+pub const RETENTION: &str = "Choose a retention of 1 to 90 days.";
 
 /// Whether a summary was generated within the last five minutes (a minute
 /// ahead tolerated).
@@ -335,6 +337,10 @@ pub struct Page {
     busy: bool,
     mutating: bool,
     purge_epoch: Option<String>,
+    /// A purge's check of the latest epoch runs.
+    purge_checking: bool,
+    /// The person left while that check ran: it ends the purge.
+    purge_abandoned: bool,
     /// Apply locally waits for the person to confirm a shorter retention.
     configure: Option<Configure>,
     status: String,
@@ -680,7 +686,8 @@ impl Page {
             return Err(reason);
         }
         if !(1..=90).contains(&retention_days) {
-            return Err("Choose a retention of 1 to 90 days.".into());
+            self.status = RETENTION.into();
+            return Err(RETENTION.into());
         }
         let Some(local) = self.local_fresh(now_ms) else {
             return Err(NOT_CURRENT_APPLY.into());
@@ -737,12 +744,18 @@ impl Page {
         }
         let range = self.applied.ok_or_else(|| NOT_CURRENT_PURGE.to_owned())?;
         self.mutating = true;
+        self.purge_checking = true;
         Ok(range)
     }
 
     /// The latest summary before a purge: a fresh one from a known epoch
     /// waits for confirmation, anything else ends the purge.
     pub fn purge_checked(&mut self, reply: Result<Summary, String>, now_ms: i64) -> bool {
+        self.purge_checking = false;
+        if std::mem::take(&mut self.purge_abandoned) {
+            self.mutating = false;
+            return false;
+        }
         let checked = reply.and_then(|summary| {
             if fresh(&summary, now_ms) && self.epochs.accept(&summary) {
                 Ok(summary.source_epoch)
@@ -768,10 +781,14 @@ impl Page {
         self.purge_epoch.take()
     }
 
-    /// The person cancelled (or left the page) while asked.
+    /// The person cancelled (or left the page) while asked, or left it
+    /// while the check before the question still ran: that check then
+    /// ends the purge instead of asking.
     pub fn purge_cancelled(&mut self) {
         if self.purge_epoch.take().is_some() {
             self.mutating = false;
+        } else if self.purge_checking {
+            self.purge_abandoned = true;
         }
     }
 

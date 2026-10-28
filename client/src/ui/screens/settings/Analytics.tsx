@@ -66,6 +66,9 @@ export function AnalyticsSection() {
     readRows();
   };
   const fetchView = () => { void invoke<View>("analytics_view").then(apply, failed); };
+  // The clicks that may open a question, still on their way.
+  let changing: Promise<unknown> = Promise.resolve();
+  const change = <T,>(call: Promise<T>) => { changing = Promise.all([changing, call.catch(() => {})]); return call; };
   const refresh = () => {
     if (!inTauri()) return;
     setOffset(0);
@@ -76,8 +79,10 @@ export function AnalyticsSection() {
     if (!inTauri()) return;
     let gone = false;
     let stop: (() => void) | undefined;
+    // Once listening, the view is read again: an answer that came before
+    // would otherwise wait for the next one.
     listen<{ refresh: boolean }>("analytics-changed", (e) => { if (e.payload.refresh) refresh(); else fetchView(); })
-      .then((off) => { if (gone) off(); else stop = off; }, () => {});
+      .then((off) => { if (gone) off(); else { stop = off; fetchView(); } }, () => {});
     // The page starts from the last read's computers and days, as Qt's
     // controls keep them; a question left from an earlier visit is
     // cancelled; then the section reads, as Qt's does when opened.
@@ -97,8 +102,13 @@ export function AnalyticsSection() {
       gone = true;
       stop?.();
       clearInterval(timer);
-      if (view()?.purge_pending) void invoke("analytics_purge", { confirm: false }).catch(() => {});
-      if (view()?.shorten_pending) void invoke("analytics_configure_answer", { confirm: false }).catch(() => {});
+      // Whatever the last view showed, once the clicks still on their way
+      // have answered: a question asked meanwhile is cancelled too, and a
+      // cancel with none open does nothing.
+      void changing.then(() => Promise.all([
+        invoke("analytics_configure_answer", { confirm: false }),
+        invoke("analytics_purge", { confirm: false }),
+      ])).catch(() => {});
     });
   });
   createEffect(on([provider, offset], () => { if (inTauri() && view()?.report) readRows(); }, { defer: true }));
@@ -115,8 +125,12 @@ export function AnalyticsSection() {
   // this computer's read; a shorter retention is asked first
   // (shorten_pending), and the status says why a click does nothing.
   const applyLocal = () => {
-    void invoke<View>("analytics_configure", { enabled: enabled(), retentionDays: retention() }).then(apply, failed);
+    void change(invoke<View>("analytics_configure", { enabled: enabled(), retentionDays: retention() })).then(apply, failed);
   };
+  // A question's answer; one that failed asks again (the page still
+  // holds its question).
+  const answer = (command: string) => (yes: boolean) =>
+    invoke<View>(command, { confirm: yes }).then(apply, (error) => { failed(error); throw error; });
   const openReview = () => {
     void invoke<string | null>("analytics_review").then((text) => { if (text) setReview(text); }, failed);
   };
@@ -194,7 +208,7 @@ export function AnalyticsSection() {
         <Actions>
           <button type="button" class="btn primary" disabled={!view()?.can_change_local} onClick={applyLocal}>Apply locally</button>
           <button type="button" class="btn danger" disabled={!view()?.can_change_local}
-            onClick={() => void invoke<View>("analytics_purge_check").then(apply, failed)}>
+            onClick={() => void change(invoke<View>("analytics_purge_check")).then(apply, failed)}>
             <Icon name="trash" size={13} />Purge local history…
           </button>
         </Actions>
@@ -207,13 +221,13 @@ export function AnalyticsSection() {
         {(days) => (
           <Question title="Shorten local analytics history?" yes="Shorten retention"
             text={`Keep only the latest ${days()} UTC days of agent analytics on this computer. Older daily aggregates will be deleted. Speech statistics and durable delivery receipts are unaffected.`}
-            answer={(yes) => void invoke<View>("analytics_configure_answer", { confirm: yes }).then(apply, failed)} />
+            answer={answer("analytics_configure_answer")} />
         )}
       </Show>
       <Show when={view()?.purge_pending}>
         <Question title="Purge local agent analytics?" yes="Purge local history"
           text="Permanently delete all retained agent analytics on this computer. Speech statistics, other computers and durable delivery receipts are unaffected. Collection keeps its current enabled/disabled setting."
-          answer={(yes) => void invoke<View>("analytics_purge", { confirm: yes }).then(apply, failed)} />
+          answer={answer("analytics_purge")} />
       </Show>
       <Show when={review()}>
         {(text) => <Review text={text()} close={(save) => {
@@ -226,10 +240,14 @@ export function AnalyticsSection() {
   );
 }
 
-/** A destructive question: the action, or Cancel (the default). */
-function Question(props: { title: string; text: string; yes: string; answer: (yes: boolean) => void }) {
+/** A destructive question: the action, or Cancel (the default). An answer
+ *  that could not be delivered asks again. */
+function Question(props: { title: string; text: string; yes: string; answer: (yes: boolean) => Promise<unknown> }) {
   let dialog: HTMLDialogElement | undefined;
-  const answer = (yes: boolean) => { if (dialog?.open) dialog.close(); props.answer(yes); };
+  const answer = (yes: boolean) => {
+    if (dialog?.open) dialog.close();
+    props.answer(yes).catch(() => { if (dialog?.isConnected && !dialog.open) dialog.showModal(); });
+  };
   onCleanup(() => { if (dialog?.open) dialog.close(); });
   return (
     <dialog class="dlg" ref={(el) => { dialog = el; queueMicrotask(() => el.showModal()); }} aria-labelledby="analytics-question-title"

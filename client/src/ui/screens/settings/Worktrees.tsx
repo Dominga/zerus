@@ -34,8 +34,10 @@ export function WorktreesSection() {
     if (!inTauri()) return;
     let gone = false;
     let stop: (() => void) | undefined;
+    // Once listening, the view is read again: a request that answered
+    // before would otherwise leave the page busy.
     listen("worktree-policy-changed", () => page.changed())
-      .then((off) => { if (gone) off(); else stop = off; }, () => {});
+      .then((off) => { if (gone) off(); else { stop = off; page.changed(); } }, () => {});
     const mine = () => page.open();
     reopen = mine;
     // The section reads when it opens, as SettingsPage does, unless a

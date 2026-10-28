@@ -344,9 +344,20 @@ impl Organization {
         }
     }
 
-    /// Runs one edit; answers once the first apply that carries it ended.
-    /// A failed one answers `Kept`, and the edit stays pending for the next tick.
+    /// [`Organization::submit_with`] for an intent built beforehand (the
+    /// tests, which run on Unix).
+    #[cfg(all(test, unix))]
     pub fn submit(&self, intent: Intent) -> EditOutcome {
+        self.submit_with(move |_| intent)
+    }
+
+    /// Runs one edit; answers once the first apply that carries it ended.
+    /// A failed one answers `Kept`, and the edit stays pending for the next
+    /// tick. The intent is built under the hub's lock from the pump's
+    /// grouping (hub, then pump: the documented order), so Delete and Sort
+    /// read their members from the organization the edit applies to, never
+    /// from one a state replaced in between.
+    fn submit_with(&self, intent: impl FnOnce(&Pump) -> Intent) -> EditOutcome {
         if !self.0.allowed {
             return EditOutcome::Refused {
                 detail: REPLAY_NEEDS_HGS.into(),
@@ -359,6 +370,7 @@ impl Organization {
                     detail: STOPPED.into(),
                 };
             }
+            let intent = intent(&self.0.pump);
             let ticket = match hub.sync.edit(&intent, self.now()) {
                 Ok(ticket) => ticket,
                 Err(detail) => return EditOutcome::Refused { detail },
@@ -704,17 +716,16 @@ impl Drop for Stop {
     }
 }
 
+/// Runs `intent` off the main thread; it is built under the hub's lock
+/// ([`Organization::submit_with`]).
 async fn edit(
     state: State<'_, Organization>,
-    intent: impl FnOnce(&Organization) -> Intent + Send + 'static,
+    intent: impl FnOnce(&Pump) -> Intent + Send + 'static,
 ) -> Result<EditOutcome, String> {
     let organization = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let intent = intent(&organization);
-        organization.submit(intent)
-    })
-    .await
-    .map_err(|error| error.to_string())
+    tauri::async_runtime::spawn_blocking(move || organization.submit_with(intent))
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Move to project for one session or a selection: one `swarm apply` with
@@ -766,10 +777,8 @@ pub async fn delete_project(
     project: String,
     destination: String,
 ) -> Result<EditOutcome, String> {
-    edit(state, move |organization| {
-        let members = organization
-            .0
-            .pump
+    edit(state, move |pump| {
+        let members = pump
             .members_of(&project)
             .into_iter()
             .map(|(member, _)| member)
@@ -798,8 +807,8 @@ pub async fn sort_project(
     state: State<'_, Organization>,
     project: String,
 ) -> Result<EditOutcome, String> {
-    edit(state, move |organization| {
-        let members = by_name(organization.0.pump.members_of(&project));
+    edit(state, move |pump| {
+        let members = by_name(pump.members_of(&project));
         Intent::Sort { project, members }
     })
     .await
@@ -1605,6 +1614,33 @@ mod tests {
         wait_until("Projects to get the failure", || {
             calls.lock().unwrap().last() == Some(&failed)
         });
+        fake.finish(organization);
+    }
+
+    /// Delete and Sort read their members with the hub's lock held, so a
+    /// state adopted between the read and the edit cannot slip in.
+    #[test]
+    fn delete_and_sort_read_their_members_under_the_hub_lock() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        pump.push(row("run:1", "claude/sample-project/review"));
+        let organization = fake.organization(&pump, true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        let held = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let outcome = {
+            let held = Arc::clone(&held);
+            let shared = Arc::clone(&organization.0);
+            organization.submit_with(move |pump| {
+                held.store(shared.hub.try_lock().is_err(), Ordering::SeqCst);
+                Intent::Sort {
+                    project: "alpha".into(),
+                    members: by_name(pump.members_of("alpha")),
+                }
+            })
+        };
+        assert!(held.load(Ordering::SeqCst), "built under the hub's lock");
+        assert_eq!(outcome, EditOutcome::Done { conflicts: 0 });
         fake.finish(organization);
     }
 }

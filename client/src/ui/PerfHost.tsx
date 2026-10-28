@@ -6,6 +6,7 @@ import { multi, peek, selectedKey, setMulti, setPeek, setSelectedKey, setStateFi
 import { clearMulti } from "./sessions/organize";
 import { archive, archiveRows } from "../store/archive";
 import { activity } from "../store/session";
+import { ARCHIVED_POLL_MS, archiveActivity } from "../store/archiveActivity";
 import { markAllRead, markNeedsAttention, markRead } from "../store/marks";
 import { copyFolder, copyName, copyCommand, detailsFor, followedFor, lastCopied, copyReference, end, perform, notices } from "../store/actions";
 import { panelPlace } from "./sessions/archive-dates";
@@ -461,6 +462,20 @@ async function actionsSmoke(allowed: boolean) {
       .then(() => true, () => false);
     log(`actions-smoke archive-inspect: ${inspected ? "done" : "failed (no details within 15 s)"} ${archived.archiveId ?? "(no id)"}`);
     if (!inspected) bad++;
+    {
+      // Its recorded Activity: the fake's `inspect` entry answers synthetic events, read through the
+      // archived store (never the live follow) and shown read-only, with no notice or live line.
+      const pane = () => document.querySelector(".detail .activity");
+      const items = () => pane()?.querySelectorAll("[id^='item-']").length ?? 0;
+      const shown = await until(() => archiveActivity.events().length > 0 && items() > 0, 15_000, "no archived Activity").then(() => true, () => false);
+      const problem = !shown ? "no events shown within 15 s"
+        : activity.target()?.id === archivedKey ? "the archived row is followed live"
+        : pane()?.querySelector(".notice, .act-live") ? "a notice or a live line shows" : "";
+      log(`actions-smoke archive-activity: ${problem ? `failed (${problem})` : `done (${archiveActivity.events().length} events)`}`);
+      if (problem) bad++;
+      // One poll, so the fake's log shows the next read after the reply's cursor.
+      await sleep(ARCHIVED_POLL_MS + 500);
+    }
     // Restore, Forget archived and Clear archive on the loaded archived row. The fake answers
     // `resume NAME --archive ID -d` and `kill NAME --archive ID` with a plain success (its log.ndjson
     // holds both argv lines); the live row never appears, so the restore stays pending, as in Qt.

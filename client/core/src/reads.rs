@@ -82,7 +82,18 @@ pub enum Read {
         cursor: String,
         query: String,
     },
+    /// `hgs [@host] inspect NAME --after AFTER --skip-processes --archive ID`
+    /// (5 s, 15 s on a peer): the recorded Activity of one archived session
+    /// (`HgsClient::requestInspection`). [`archived_activity`] gives it typed.
+    ArchivedActivity {
+        name: String,
+        archive_id: String,
+        after: i64,
+    },
 }
+
+/// Qt's `requestInspection` text for a reply that is not a JSON object.
+pub const ACTIVITY_INVALID: &str = "Invalid activity response";
 
 /// The rows an archive page asks for (`ArchiveBrowser`).
 pub const ARCHIVE_PAGE_ROWS: usize = 50;
@@ -107,6 +118,7 @@ impl Read {
                 | Self::Analytics { .. }
                 | Self::ProcessOutput { .. }
                 | Self::ArchivePage { .. }
+                | Self::ArchivedActivity { .. }
         )
     }
 
@@ -149,8 +161,9 @@ pub enum ReadError {
     },
     /// The computer's hgs does not have this read.
     Unsupported,
-    /// An archive page failed Qt's checks (or did not parse); `message` is
-    /// one of Qt's three texts, to show unchanged.
+    /// An archive page failed Qt's checks (or did not parse), or an archived
+    /// Activity reply was not an object; `message` is Qt's text, to show
+    /// unchanged.
     ArchiveInvalid {
         message: String,
     },
@@ -347,6 +360,32 @@ pub fn invocation(computer: &ComputerId, read: &Read) -> Result<Invocation, Read
                 timeout(30, 30, computer),
             )
         }
+        Read::ArchivedActivity {
+            name,
+            archive_id,
+            after,
+        } => {
+            if name.is_empty() || archive_id.is_empty() {
+                return Err(bad(ARCHIVE_IDENTITY_INVALID));
+            }
+            let after = after.to_string();
+            (
+                arguments(
+                    computer,
+                    &[
+                        "inspect",
+                        name,
+                        "--after",
+                        &after,
+                        "--skip-processes",
+                        "--archive",
+                        archive_id,
+                    ],
+                ),
+                None,
+                timeout(5, 15, computer),
+            )
+        }
     };
     Ok(Invocation {
         args,
@@ -429,12 +468,14 @@ pub fn decode(read: &Read, exit: Exit) -> Result<Value, ReadError> {
             .map(|version| Value::String(version.to_owned()))
             .ok_or_else(|| invalid("not an hgs version"));
     }
-    if matches!(read, Read::ArchivePage { .. }) && serde_json::from_slice::<Value>(&stdout).is_err()
-    {
-        return Err(archive_invalid(ARCHIVE_PAGE_INVALID));
-    }
-    let value: Value =
-        serde_json::from_slice(&stdout).map_err(|error| invalid(&error.to_string()))?;
+    // One parse; the archive reads word a reply they cannot use as Qt does.
+    let value = match (read, serde_json::from_slice::<Value>(&stdout)) {
+        (Read::ArchivedActivity { .. }, Ok(value @ Value::Object(_))) => value,
+        (Read::ArchivedActivity { .. }, _) => return Err(archive_invalid(ACTIVITY_INVALID)),
+        (Read::ArchivePage { .. }, Err(_)) => return Err(archive_invalid(ARCHIVE_PAGE_INVALID)),
+        (_, Ok(value)) => value,
+        (_, Err(error)) => return Err(invalid(&error.to_string())),
+    };
     if let Read::ArchivePage {
         from,
         until,
@@ -629,8 +670,8 @@ pub fn archive_page_cancellable(
 /// Standard error an archive page failure shows, at most (Qt's `left(4000)`).
 const ARCHIVE_FAILURE_CHARS: usize = 4000;
 
-/// Qt's `failureDetail` (HgsClient.cpp 466-479) for an archive page whose
-/// `hgs` did not end with exit 0: "timed out", "cannot start '{hgs}':
+/// Qt's `failureDetail` (HgsClient.cpp 466-479) for an archive page or an
+/// archived Activity whose `hgs` did not end with exit 0: "timed out", "cannot start '{hgs}':
 /// {error}", or the trimmed standard error, else "exit code {n}". Only the
 /// archive read words its failures so; the other reads keep theirs.
 fn archive_failure(hgs: &Path, exit: &Exit) -> Option<ReadError> {
@@ -677,6 +718,80 @@ fn page(data: &Value) -> ArchivePage {
             .and_then(Value::as_f64)
             .map(|p| p as u64),
     }
+}
+
+/// The recorded Activity of one archived session: one `inspect` reply.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ArchivedActivity {
+    /// The reply's `events`, unchanged.
+    pub events: Vec<Value>,
+    pub replace_events: bool,
+    pub conversation_id: String,
+    pub run_id: String,
+    pub cleared_conversations: Vec<String>,
+    /// The journal cursor the next read asks `--after` (Qt's `data.cursor`).
+    pub cursor: i64,
+    /// The other top-level fields, what the transcript reads of a `state`.
+    pub summary: Value,
+}
+
+/// Reads the Activity window of an archived session after `after` (5 s here,
+/// 15 s on a peer, at most [`READ_LIMIT`]). Failures are worded as Qt's
+/// `failureDetail`; a reply that is not an object is "Invalid activity
+/// response". An empty name or archive id is refused before any call.
+pub fn archived_activity(
+    hgs: &Path,
+    computer: &ComputerId,
+    name: &str,
+    archive_id: &str,
+    after: i64,
+) -> Result<ArchivedActivity, ReadError> {
+    let request = Read::ArchivedActivity {
+        name: name.to_owned(),
+        archive_id: archive_id.to_owned(),
+        after,
+    };
+    let invocation = invocation(computer, &request)?;
+    let exit = limited(hgs, &invocation, request.limit())?;
+    if let Some(error) = archive_failure(hgs, &exit) {
+        return Err(error);
+    }
+    let Value::Object(mut object) = decode(&request, exit)? else {
+        return Err(archive_invalid(ACTIVITY_INVALID));
+    };
+    let text = |object: &mut serde_json::Map<String, Value>, key: &str| match object.remove(key) {
+        Some(Value::String(text)) => text,
+        _ => String::new(),
+    };
+    let events = match object.remove("events") {
+        Some(Value::Array(events)) => events,
+        _ => Vec::new(),
+    };
+    let replace_events = object.remove("replace_events") == Some(Value::Bool(true));
+    let cleared_conversations = match object.remove("cleared_conversations") {
+        Some(Value::Array(ids)) => ids
+            .into_iter()
+            .filter_map(|id| id.as_str().map(str::to_owned))
+            .collect(),
+        _ => Vec::new(),
+    };
+    let cursor = object
+        .remove("cursor")
+        .and_then(|cursor| {
+            cursor
+                .as_i64()
+                .or_else(|| cursor.as_f64().map(|n| n as i64))
+        })
+        .unwrap_or(0);
+    Ok(ArchivedActivity {
+        events,
+        replace_events,
+        conversation_id: text(&mut object, "conversation_id"),
+        run_id: text(&mut object, "run_id"),
+        cleared_conversations,
+        cursor,
+        summary: Value::Object(object),
+    })
 }
 
 fn limited(hgs: &Path, invocation: &Invocation, limit: usize) -> Result<Exit, ReadError> {
@@ -1335,6 +1450,49 @@ mod tests {
             super::invocation(&ComputerId::local(), &read).unwrap().args,
             ["archives", "--json"]
         );
+    }
+
+    #[test]
+    fn an_archived_activity_asks_as_qt_does() {
+        let read = Read::ArchivedActivity {
+            name: "alpha".into(),
+            archive_id: "a1".into(),
+            after: 42,
+        };
+        let peer = invocation(&peer(), &read).unwrap();
+        assert_eq!(
+            peer.args,
+            [
+                "@studio",
+                "inspect",
+                "alpha",
+                "--after",
+                "42",
+                "--skip-processes",
+                "--archive",
+                "a1"
+            ]
+        );
+        assert_eq!(peer.timeout, Duration::from_secs(15));
+        let local = invocation(&ComputerId::local(), &read).unwrap();
+        assert_eq!(local.args[0], "inspect");
+        assert_eq!(local.timeout, Duration::from_secs(5));
+        assert_eq!(read.limit(), READ_LIMIT);
+        for (name, id) in [("", "a1"), ("alpha", "")] {
+            let bad = Read::ArchivedActivity {
+                name: name.into(),
+                archive_id: id.into(),
+                after: 0,
+            };
+            assert!(matches!(
+                invocation(&ComputerId::local(), &bad),
+                Err(ReadError::BadRequest { message }) if message == ARCHIVE_IDENTITY_INVALID
+            ));
+        }
+        assert!(matches!(
+            decode(&read, code("[]")),
+            Err(ReadError::ArchiveInvalid { message }) if message == ACTIVITY_INVALID
+        ));
     }
 
     #[test]

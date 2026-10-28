@@ -49,7 +49,8 @@ export function eventKey(e: ActivityEvent): string {
   return `t${e.type ?? ""}:${e.at ?? ""}:${(e.detail ?? "").slice(0, 48)}`;
 }
 
-const seqOf = (e: ActivityEvent) => (typeof e.seq === "number" && e.seq > 0 ? e.seq : undefined);
+/** An event's journal seq, when it has one (above 0). */
+export const seqOf = (e: ActivityEvent) => (typeof e.seq === "number" && e.seq > 0 ? e.seq : undefined);
 
 function payloadEvents(payload: unknown): { events: ActivityEvent[]; cursor?: number } {
   if (Array.isArray(payload)) return { events: payload as ActivityEvent[] };

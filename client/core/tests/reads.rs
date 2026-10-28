@@ -254,3 +254,71 @@ fn an_oversized_attachment_reply_is_ended_with_qt_s_text() {
         Err("no such message".into())
     );
 }
+
+fn activity_reads(reply: Value) -> Value {
+    json!({"@studio inspect alpha --after 7 --skip-processes --archive a1": reply.clone(),
+           "inspect alpha --after 7 --skip-processes --archive a1": reply})
+}
+
+#[test]
+fn an_archived_activity_read_keeps_events_and_splits_the_rest() {
+    let reply = json!({
+        "events": [{"seq": 8, "type": "message", "future": {"x": 1}}, {"seq": 9}],
+        "replace_events": true, "conversation_id": "c1", "run_id": "r1",
+        "cleared_conversations": ["c0"], "cursor": 9,
+        "prompt": "hi", "last_message": "done",
+    });
+    let fake = Fake::new(activity_reads(json!({"stdout": reply.to_string()})));
+    for computer in [ComputerId::local(), ComputerId::from("studio")] {
+        let got = reads::archived_activity(&fake.hgs, &computer, "alpha", "a1", 7).unwrap();
+        assert_eq!(got.events, reply["events"].as_array().unwrap().clone());
+        assert!(got.replace_events);
+        assert_eq!(
+            (
+                got.conversation_id.as_str(),
+                got.run_id.as_str(),
+                got.cursor
+            ),
+            ("c1", "r1", 9)
+        );
+        assert_eq!(got.cleared_conversations, ["c0"]);
+        assert_eq!(got.summary, json!({"prompt": "hi", "last_message": "done"}));
+    }
+}
+
+#[test]
+fn an_archived_activity_without_options_is_an_append_window() {
+    let fake = Fake::new(activity_reads(json!({"stdout": "{}"})));
+    let got = reads::archived_activity(&fake.hgs, &ComputerId::local(), "alpha", "a1", 7).unwrap();
+    assert!(got.events.is_empty() && !got.replace_events);
+    assert_eq!((got.cursor, got.conversation_id.as_str()), (0, ""));
+}
+
+#[test]
+fn archived_activity_refusals_and_failures_use_qt_texts() {
+    let fake = Fake::new(json!({
+        "inspect alpha --after 7 --skip-processes --archive a1": {"stdout": "[1]"},
+        "inspect alpha --after 1 --skip-processes --archive a1": {"stdout": "nope"},
+        "inspect alpha --after 2 --skip-processes --archive a1": {"exit": 3, "stderr": "  boom \n"},
+        "inspect alpha --after 3 --skip-processes --archive a1": {"exit": 4},
+    }));
+    let local = ComputerId::local();
+    let message = |after| match reads::archived_activity(&fake.hgs, &local, "alpha", "a1", after) {
+        Err(error) => error.to_string(),
+        Ok(got) => panic!("{got:?}"),
+    };
+    assert_eq!(message(7), "Invalid activity response");
+    assert_eq!(message(1), "Invalid activity response");
+    assert_eq!(message(2), "boom");
+    assert_eq!(message(3), "exit code 4");
+    let before = fake.calls().len();
+    for (name, id) in [("", "a1"), ("alpha", "")] {
+        assert_eq!(
+            reads::archived_activity(&fake.hgs, &local, name, id, 0)
+                .unwrap_err()
+                .to_string(),
+            "Invalid archived session identity. Refresh the archive."
+        );
+    }
+    assert_eq!(fake.calls().len(), before, "refused before any call");
+}

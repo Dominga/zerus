@@ -27,7 +27,7 @@ pub use batch::ProcessesOut;
 pub use batch::{ActivityOut, Batch, Coalescer, ComputerOut, KeyOut, ReplaceOut, RowOut};
 pub use fleet::{Fleet, FollowError};
 pub use processes::{ProcessesState, ProcessesUpdate};
-pub use run::{run, run_with_env};
+pub use run::{run, run_limited, run_with_env, TooLarge};
 pub use state::{ActivityState, CatalogState};
 pub use stream::{StreamEvent, StreamHandle, Timing};
 pub use view::ViewRow;

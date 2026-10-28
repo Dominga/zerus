@@ -192,7 +192,8 @@ impl Grouping {
                     // The new name stays in the old one's project until the catalog follows.
                     let membership = Arc::make_mut(&mut self.membership);
                     if let Some(project) = membership.remove(&old) {
-                        membership.entry(member.clone()).or_insert(project);
+                        // Like Layout::rename and Renamed: the old name's project wins.
+                        membership.insert(member.clone(), project);
                     }
                 }
                 self.renames.push((old, member.clone()));
@@ -205,7 +206,10 @@ impl Grouping {
         if self.loaded {
             self.place(at, member, title.to_owned(), seq);
         } else {
-            // Before the first catalog nothing touches the layout.
+            // Before the first catalog the row is only recorded: no placement,
+            // no rank, no group. A rename above has already moved the layout's
+            // place, but cannot move membership (none is known yet); the hub's
+            // Renamed intent settles it (Task 6).
             self.rows.insert(
                 at,
                 Slot {
@@ -437,7 +441,12 @@ impl Grouping {
 
     /// A reloaded webview: everything again.
     pub fn resend(&mut self) {
-        self.dirty = self.rows.keys().cloned().collect();
+        // Before the first catalog rows have no group yet; present sends them.
+        self.dirty = if self.loaded {
+            self.rows.keys().cloned().collect()
+        } else {
+            BTreeSet::new()
+        };
         self.sent = None;
         self.headers_dirty = true;
     }
@@ -792,19 +801,80 @@ mod tests {
 
     #[test]
     fn a_layout_grown_past_the_bound_is_pruned_by_row_changes() {
-        let stale: Vec<String> = (0..super::super::layout::MAX_MEMBERS + 1100)
-            .map(|n| format!("old\nsession-{n}"))
-            .collect();
-        let mut layout = Layout::default();
-        layout.place("ungrouped", &stale, None);
-        let mut grouping = Grouping::new(layout);
+        let rows = |tag: &str| Change::Replace {
+            computer: ComputerId::local(),
+            rows: (0..super::super::layout::MAX_MEMBERS / 2 + 600)
+                .map(|n| {
+                    (
+                        format!("run:{tag}{n}"),
+                        row("workstation", &format!("claude/{tag}/s{n}")),
+                    )
+                })
+                .collect(),
+        };
+        let mut grouping = Grouping::new(Layout::default());
         present(&mut grouping, &organization(&[], &[]), 1);
-        grouping.observe(&upsert("run:1", "workstation", "claude/p/a"));
-        assert!(
-            grouping.layout.len() < 10,
-            "{} members left",
-            grouping.layout.len()
+        grouping.observe(&rows("a"));
+        grouping.observe(&Change::Replace {
+            computer: ComputerId::local(),
+            rows: vec![],
+        });
+        let kept = super::super::layout::MAX_MEMBERS / 2 + 600;
+        assert_eq!(
+            grouping.layout.len(),
+            kept,
+            "below the bound: nothing pruned yet"
         );
+        grouping.observe(&rows("b"));
+        assert_eq!(
+            grouping.layout.len(),
+            kept,
+            "only the observe path can have dropped the first rows"
+        );
+    }
+
+    #[test]
+    fn a_resend_before_the_catalog_sends_no_placeholders() {
+        let mut grouping = Grouping::new(Layout::default());
+        for n in 0..3 {
+            grouping.observe(&upsert(
+                &format!("run:{n}"),
+                "workstation",
+                &format!("claude/p/{n}"),
+            ));
+        }
+        grouping.resend();
+        assert!(grouping.take().0.is_empty());
+        present(&mut grouping, &organization(&[], &[]), 1);
+        let (groups, _) = grouping.take();
+        assert_eq!(groups.len(), 3);
+        assert!(groups.iter().all(|g| g.group == "ungrouped"));
+        assert!(grouping.take().0.is_empty(), "each row once");
+    }
+
+    #[test]
+    fn a_rename_onto_a_stale_member_takes_the_old_project_and_place() {
+        let member = |name: &str| format!("workstation\nclaude/p/{name}");
+        let mut grouping = Grouping::new(Layout::default());
+        for (key, name) in [("run:1", "x"), ("run:2", "old"), ("run:3", "z")] {
+            grouping.observe(&upsert(key, "workstation", &format!("claude/p/{name}")));
+        }
+        let org = organization(
+            &[&member("x"), &member("old"), &member("z")],
+            &[&member("new")],
+        );
+        present(&mut grouping, &org, 1);
+        let _ = grouping.take();
+        grouping.observe(&upsert("run:2", "workstation", "claude/p/new"));
+        assert_eq!(
+            grouping
+                .members_of("alpha")
+                .iter()
+                .map(|m| m.0.clone())
+                .collect::<Vec<_>>(),
+            [member("x"), member("new"), member("z")]
+        );
+        assert!(grouping.members_of("beta").is_empty());
     }
 
     #[test]

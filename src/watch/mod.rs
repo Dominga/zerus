@@ -228,8 +228,8 @@ fn read_controls<R: BufRead>(mut input: R, inputs: mpsc::Sender<Input>, pending:
 enum Writers {
     #[default]
     None,
-    /// Rows of these journal names.
-    Names(Vec<String>),
+    /// Rows of these journal names, with the latest one's time.
+    Names(Vec<(String, Option<f64>)>),
     /// Too many rows to tell.
     All,
 }
@@ -1096,7 +1096,7 @@ impl<'a> Watch<'a> {
         for job in jobs {
             let pool = self.git_pool.get_or_insert_with(|| {
                 let results = self.git_results.clone();
-                git::Pool::spawn(git::WORKERS, move |done| {
+                git::Pool::spawn(git::WORKERS, Some(source::state_root().join("watch-git")), move |done| {
                     let _ = results.send(Input::Git(done));
                 })
             });
@@ -1111,22 +1111,22 @@ impl<'a> Watch<'a> {
             Writers::None => {}
             Writers::All => self.git.touch_all(now),
             Writers::Names(journals) => {
-                let names: BTreeSet<&str> = self
+                let journals: BTreeMap<&str, Option<f64>> = journals.iter().map(|(journal, at)| (journal.as_str(), *at)).collect();
+                let names: BTreeMap<&str, Option<f64>> = self
                     .identities
                     .values()
                     .flatten()
-                    .filter(|(_, journal)| journals.contains(journal))
-                    .map(|(name, _)| name.as_str())
+                    .filter_map(|(name, journal)| Some((name.as_str(), *journals.get(journal.as_str())?)))
                     .collect();
-                let dirs: Vec<PathBuf> = self
-                    .rows
-                    .iter()
-                    .filter(|(_, row)| row["name"].as_str().is_some_and(|name| names.contains(name)))
-                    .flat_map(|(_, row)| ["cwd", "cwd_canonical", "git_root"].map(|field| row[field].as_str().unwrap_or("")))
-                    .filter(|dir| !dir.is_empty())
-                    .map(PathBuf::from)
-                    .collect();
-                self.git.touch(&dirs, now);
+                for (_, row) in &self.rows {
+                    let Some(at) = row["name"].as_str().and_then(|name| names.get(name)) else { continue };
+                    let dirs: Vec<PathBuf> = ["cwd", "cwd_canonical", "git_root"]
+                        .iter()
+                        .filter_map(|field| row[*field].as_str().filter(|dir| !dir.is_empty()))
+                        .map(PathBuf::from)
+                        .collect();
+                    self.git.touch(&dirs, *at, now);
+                }
             }
         }
         if self.git.is_empty() {

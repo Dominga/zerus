@@ -31,7 +31,7 @@ pub use batch::ProcessesOut;
 pub use batch::TasksOut;
 pub use batch::{ActivityOut, Batch, Coalescer, ComputerOut, KeyOut, ReplaceOut, RowOut};
 pub use fleet::{Fleet, FollowError};
-pub use machine::MachineMeta;
+pub use machine::{LocalHost, MachineMeta};
 pub use processes::{ProcessesState, ProcessesUpdate};
 pub use reads::{Read, ReadError};
 pub use run::{run, run_limited, run_with_env, TooLarge};

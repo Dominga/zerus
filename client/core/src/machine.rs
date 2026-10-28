@@ -1,6 +1,6 @@
 //! A computer's machine card data, projected from its `catalog.meta`: the
-//! host, hgs version, platform, the latest metrics sample and desktop
-//! presence. Every field is optional, as an older host may lack it; a field of
+//! host, hgs version, platform, the latest metrics sample, desktop presence,
+//! whether it runs local sessions and its Windows session host. Every field is optional, as an older host may lack it; a field of
 //! the wrong type reads as missing. Projects, peers, preferences and archive
 //! paging stay out.
 use serde::{Deserialize, Serialize};
@@ -15,8 +15,29 @@ pub struct MachineMeta {
     pub platform: Option<String>,
     /// Whether the listing behind the meta succeeded.
     pub ok: Option<bool>,
+    /// `false` on a control console, which runs no local sessions; absent
+    /// (None) means local sessions run.
+    pub local_sessions: Option<bool>,
+    /// The Windows session host as found; None elsewhere.
+    pub local_host: Option<LocalHost>,
     pub metrics: Metrics,
     pub presence: Presence,
+}
+
+/// The Windows session host of `local_host`, as `hgs ls --json` reports it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LocalHost {
+    /// `not-installed`, `stopped`, `running` or `unavailable`.
+    pub state: Option<String>,
+    pub pid: Option<u64>,
+    /// The host protocol version.
+    pub protocol: Option<u64>,
+    /// Which ConPTY the host uses, such as `bundled` or `inbox`.
+    pub conpty: Option<String>,
+    pub integrity: Option<String>,
+    pub windows_session: Option<u64>,
+    /// Why an unavailable host did not answer.
+    pub error: Option<String>,
 }
 
 /// The latest metrics sample.
@@ -78,11 +99,25 @@ impl MachineMeta {
     pub fn project(meta: &Value) -> Self {
         let metrics = meta.get("metrics").unwrap_or(&Value::Null);
         let presence = meta.get("desktop_presence").unwrap_or(&Value::Null);
+        let local_host = meta
+            .get("local_host")
+            .filter(|host| host.is_object())
+            .map(|host| LocalHost {
+                state: text(host, "state"),
+                pid: count(host, "pid"),
+                protocol: count(host, "protocol"),
+                conpty: text(host, "conpty"),
+                integrity: text(host, "integrity"),
+                windows_session: count(host, "windows_session"),
+                error: text(host, "error"),
+            });
         Self {
             host: text(meta, "host"),
             hgs_version: text(meta, "hgs_version"),
             platform: text(metrics, "platform"),
             ok: flag(meta, "ok"),
+            local_sessions: flag(meta, "local_sessions"),
+            local_host,
             metrics: Metrics {
                 cpu_percent: number(metrics, "cpu_percent"),
                 cpu_count: count(metrics, "cpu_count"),
@@ -144,5 +179,47 @@ mod tests {
         assert_eq!(older.metrics.memory_used_bytes, None);
         assert_eq!(older.presence, Presence::default());
         assert_eq!(MachineMeta::project(&Value::Null), MachineMeta::default());
+    }
+
+    #[test]
+    fn a_control_console_and_its_windows_session_host_are_carried() {
+        let console = json!({
+            "host": "office-pc", "ok": true, "local_sessions": false,
+            "local_host": {"state": "running", "pid": 4242, "protocol": 1, "conpty": "bundled",
+                           "integrity": "medium", "windows_session": 1, "error": null},
+            "metrics": {"platform": "windows"}
+        });
+        let machine = MachineMeta::project(&console);
+        assert_eq!(machine.local_sessions, Some(false));
+        assert_eq!(
+            machine.local_host,
+            Some(LocalHost {
+                state: Some("running".into()),
+                pid: Some(4242),
+                protocol: Some(1),
+                conpty: Some("bundled".into()),
+                integrity: Some("medium".into()),
+                windows_session: Some(1),
+                error: None,
+            })
+        );
+        // A host that did not answer keeps only its state and error, and a
+        // mistyped field reads as None.
+        let unavailable = MachineMeta::project(&json!({"local_sessions": "no", "local_host":
+            {"state": "unavailable", "pid": null, "protocol": "1", "conpty": true, "error": "busy"}}));
+        assert_eq!(unavailable.local_sessions, None);
+        let host = unavailable.local_host.unwrap();
+        assert_eq!(
+            (host.state.as_deref(), host.error.as_deref()),
+            (Some("unavailable"), Some("busy"))
+        );
+        assert_eq!((host.pid, host.protocol, host.conpty), (None, None, None));
+        // Unix listings have neither; a non-object host is none.
+        let unix = MachineMeta::project(&json!({"host": "workstation", "local_host": "x"}));
+        assert_eq!((unix.local_sessions, unix.local_host), (None, None));
+        // Both take part in the change comparison.
+        let mut stopped = console.clone();
+        stopped["local_host"]["state"] = json!("stopped");
+        assert_ne!(MachineMeta::project(&stopped), machine);
     }
 }

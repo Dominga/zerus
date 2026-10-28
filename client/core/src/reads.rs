@@ -380,6 +380,159 @@ pub fn read(hgs: &Path, computer: &ComputerId, read: &Read) -> Result<Value, Rea
     decode(read, limited(hgs, &invocation, read.limit())?)
 }
 
+/// The largest attachment reply: 10 MiB as base64 plus its metadata.
+pub const ATTACHMENT_LIMIT: usize = crate::attachments::MAX_ATTACHMENT_BYTES * 4 / 3 + 8192;
+
+/// One attachment of an Activity message, as its message names it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct AttachmentRef {
+    /// The session's name.
+    pub name: String,
+    /// The message's `request_id`.
+    pub request_id: String,
+    /// The file's `index` in the message, -1 when it has none.
+    pub index: i64,
+    pub conversation_id: String,
+    #[serde(default)]
+    pub archive_id: Option<String>,
+    /// A subagent's ID for a subagent's message.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+}
+
+/// An attachment read back: its metadata without `data_base64`, and the
+/// bytes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttachmentRead {
+    pub metadata: Value,
+    pub bytes: Vec<u8>,
+}
+
+/// An attachment kept in the private cache for viewing or opening.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CachedAttachment {
+    pub metadata: Value,
+    pub local_path: std::path::PathBuf,
+}
+
+/// `hgs [@host] attachment NAME --request ID --index N --conversation C
+/// [--archive A] [--agent G]`, 10 s here and 45 s on a peer
+/// (`HgsClient::requestAttachment`).
+pub fn attachment_invocation(
+    computer: &ComputerId,
+    file: &AttachmentRef,
+) -> Result<Invocation, ReadError> {
+    if computer.alias().is_some_and(|alias| !valid_alias(alias)) {
+        return Err(bad("not a computer alias"));
+    }
+    if [&file.name, &file.request_id, &file.conversation_id]
+        .iter()
+        .any(|value| value.is_empty() || value.chars().any(char::is_control))
+    {
+        return Err(bad(
+            "an attachment needs its session, message and conversation",
+        ));
+    }
+    let index = file.index.to_string();
+    let mut words = vec![
+        "attachment",
+        file.name.as_str(),
+        "--request",
+        file.request_id.as_str(),
+        "--index",
+        index.as_str(),
+        "--conversation",
+        file.conversation_id.as_str(),
+    ];
+    if let Some(archive) = file.archive_id.as_deref().filter(|id| !id.is_empty()) {
+        words.extend(["--archive", archive]);
+    }
+    if let Some(agent) = file.agent_id.as_deref().filter(|id| !id.is_empty()) {
+        words.extend(["--agent", agent]);
+    }
+    Ok(Invocation {
+        args: arguments(computer, &words),
+        stdin: None,
+        timeout: timeout(10, 45, computer),
+        request_id: None,
+    })
+}
+
+/// Checks an attachment reply: the same message and index, and nonempty
+/// strictly decoded bytes of at most 10 MiB.
+pub fn decode_attachment(file: &AttachmentRef, exit: Exit) -> Result<AttachmentRead, ReadError> {
+    use base64::Engine;
+    let stdout = output(exit)?;
+    if stdout.len() > ATTACHMENT_LIMIT {
+        return Err(ReadError::TooLarge {
+            limit: ATTACHMENT_LIMIT,
+        });
+    }
+    let invalid_reply = || invalid("Invalid attachment response. Try again.");
+    let Ok(Value::Object(mut object)) = serde_json::from_slice::<Value>(&stdout) else {
+        return Err(invalid_reply());
+    };
+    let encoded = object.remove("data_base64");
+    let bytes = encoded
+        .as_ref()
+        .and_then(Value::as_str)
+        .and_then(|text| base64::engine::general_purpose::STANDARD.decode(text).ok())
+        .ok_or_else(invalid_reply)?;
+    if object.get("request_id").and_then(Value::as_str) != Some(file.request_id.as_str())
+        || object.get("index").and_then(Value::as_f64) != Some(file.index as f64)
+        || bytes.is_empty()
+        || bytes.len() > crate::attachments::MAX_ATTACHMENT_BYTES
+    {
+        return Err(invalid_reply());
+    }
+    Ok(AttachmentRead {
+        metadata: Value::Object(object),
+        bytes,
+    })
+}
+
+/// Reads one attachment of an Activity message. Blocks; callers run it off
+/// the UI thread.
+pub fn read_attachment(
+    hgs: &Path,
+    computer: &ComputerId,
+    file: &AttachmentRef,
+) -> Result<AttachmentRead, ReadError> {
+    let invocation = attachment_invocation(computer, file)?;
+    decode_attachment(file, limited(hgs, &invocation, ATTACHMENT_LIMIT)?)
+}
+
+/// Reads one attachment and keeps it in the private cache under `cache_root`
+/// ([`crate::attachments::store_at`]), so a preview and Open share one copy.
+pub fn fetch_attachment(
+    hgs: &Path,
+    computer: &ComputerId,
+    file: &AttachmentRef,
+    cache_root: &Path,
+) -> Result<CachedAttachment, String> {
+    let read = read_attachment(hgs, computer, file).map_err(|error| attachment_message(&error))?;
+    let name = read
+        .metadata
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let local_path = crate::attachments::store_at(cache_root, name, &read.bytes)
+        .ok_or_else(|| "Could not save the attachment.".to_owned())?;
+    Ok(CachedAttachment {
+        metadata: read.metadata,
+        local_path,
+    })
+}
+
+/// The Qt client's text for a failed attachment read.
+pub fn attachment_message(error: &ReadError) -> String {
+    match error {
+        ReadError::TooLarge { .. } => "Attachment response is too large.".into(),
+        ReadError::Invalid { message } => message.clone(),
+        other => other.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,6 +547,93 @@ mod tests {
             stdout: stdout.as_bytes().to_vec(),
             stderr: String::new(),
         }
+    }
+
+    fn file_ref() -> AttachmentRef {
+        AttachmentRef {
+            name: "claude/sample-project/review".into(),
+            request_id: "req-1".into(),
+            index: 0,
+            conversation_id: "conv-1".into(),
+            archive_id: None,
+            agent_id: None,
+        }
+    }
+
+    #[test]
+    fn attachment_reads_use_qt_arguments_and_timeouts() {
+        let local = attachment_invocation(&ComputerId::local(), &file_ref()).unwrap();
+        assert_eq!(
+            local.args,
+            [
+                "attachment",
+                "claude/sample-project/review",
+                "--request",
+                "req-1",
+                "--index",
+                "0",
+                "--conversation",
+                "conv-1"
+            ]
+        );
+        assert_eq!(local.timeout, Duration::from_secs(10));
+        let mut file = file_ref();
+        file.archive_id = Some("a-7".into());
+        file.agent_id = Some("agent-2".into());
+        let remote = attachment_invocation(&peer(), &file).unwrap();
+        assert_eq!(&remote.args[0], "@studio");
+        assert_eq!(
+            &remote.args[9..],
+            ["--archive", "a-7", "--agent", "agent-2"]
+        );
+        assert_eq!(remote.timeout, Duration::from_secs(45));
+        file.request_id.clear();
+        assert!(matches!(
+            attachment_invocation(&peer(), &file),
+            Err(ReadError::BadRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn attachment_replies_must_match_and_decode() {
+        let decoded = decode_attachment(
+            &file_ref(),
+            code(r#"{"request_id":"req-1","index":0,"name":"a.txt","mime":"text/plain","data_base64":"aGk="}"#),
+        )
+        .unwrap();
+        assert_eq!(decoded.bytes, b"hi");
+        assert_eq!(
+            decoded.metadata,
+            json!({"request_id": "req-1", "index": 0, "name": "a.txt", "mime": "text/plain"})
+        );
+        let error = ReadError::Invalid {
+            message: "Invalid attachment response. Try again.".into(),
+        };
+        let invalid = Err(error.clone());
+        for reply in [
+            r#"{"request_id":"req-2","index":0,"data_base64":"aGk="}"#,
+            r#"{"request_id":"req-1","index":1,"data_base64":"aGk="}"#,
+            r#"{"request_id":"req-1","index":0,"data_base64":"not base64!"}"#,
+            r#"{"request_id":"req-1","index":0,"data_base64":""}"#,
+            r#"{"request_id":"req-1","index":0}"#,
+            r#"["not an object"]"#,
+        ] {
+            assert_eq!(
+                decode_attachment(&file_ref(), code(reply)),
+                invalid,
+                "{reply}"
+            );
+        }
+        assert_eq!(
+            attachment_message(&error),
+            "Invalid attachment response. Try again."
+        );
+        assert_eq!(
+            attachment_message(&ReadError::TooLarge {
+                limit: ATTACHMENT_LIMIT
+            }),
+            "Attachment response is too large."
+        );
     }
 
     #[test]

@@ -15,11 +15,19 @@ mod platform;
 mod pump;
 #[cfg(feature = "live")]
 mod replay;
+#[cfg(feature = "live")]
+mod screens;
 
 use tauri::{AppHandle, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 /// The label of the one window this phase opens.
 pub const MAIN_WINDOW: &str = "main";
+
+/// Tests that start child processes hold this shared; the tests that sample
+/// this process's tree hold it alone, since a child that exits mid-sample
+/// leaves the tree's memory total unknown.
+#[cfg(all(test, unix))]
+pub(crate) static PROCESS_TREE: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 /// Builds the app and runs its event loop until the last window closes.
 pub fn run() {
@@ -36,6 +44,8 @@ pub fn run() {
                 // A replay never touches the real read marks.
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 app.manage(actions::Actions::new(dir.join(actions::marks_file(replay))));
+                let pump = app.state::<commands::AppState>().pump();
+                app.manage(screens::Screens::tauri(app.handle().clone(), pump));
             }
             let display = display::display_name();
             if !display::headless_allowed(std::env::var("ZERUS_CLIENT_HEADLESS").is_ok_and(|v| v == "1"), display.as_deref()) {
@@ -78,6 +88,12 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::session_reference,
         actions::copy_command,
         clipboard::copy_text,
+        screens::screen_visible,
+        screens::accounts_view,
+        screens::machines_view,
+        screens::machine_resolve,
+        screens::machine_check,
+        screens::projects_view,
     ]
 }
 
@@ -99,8 +115,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     ]
 }
 
-/// Creates the main window. Platform webview configuration (macOS: the
-/// display-rate preference) is applied to the builder here, before `build`.
+/// Creates the main window and applies the platform display-rate preference:
+/// macOS before the webview is built, Linux through its public settings API.
 pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     // ZERUS_CLIENT_QUERY opens a given state (`select=<session name>`) for
     // headless screenshots and scripted measurements, as the mockup's URL
@@ -134,11 +150,20 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
                 builder.with_webview_configuration(platform::macos::webview_configuration(mtm));
         }
     }
-    builder.build()
+    let window = builder.build()?;
+    #[cfg(target_os = "linux")]
+    if !keep_default_preference() {
+        window.with_webview(|webview| {
+            if let Err(error) = platform::linux::disable_near_60fps(&webview.inner()) {
+                eprintln!("zerus-client: could not disable the near-60 fps preference: {error}");
+            }
+        })?;
+    }
+    Ok(window)
 }
 
-/// `ZERUS_CLIENT_PERF_PREFERENCE=default` leaves the macOS WebKit frame-rate
-/// preference at its default: the must-fail control run of the measurement.
+/// `ZERUS_CLIENT_PERF_PREFERENCE=default` leaves the macOS and Linux WebKit
+/// frame-rate preference at its default: the must-fail control run of the measurement.
 pub fn keep_default_preference() -> bool {
     std::env::var("ZERUS_CLIENT_PERF_PREFERENCE").is_ok_and(|value| value == "default")
 }

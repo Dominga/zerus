@@ -56,7 +56,7 @@ export function UsageMeters(props: { windows: UsageWindow[]; loading?: boolean; 
   const indicator = () => props.indicator ?? "rails";
   const bar = () => (props.compact ? 20 : 34);
   const slots = () => (props.loading ? [undefined, undefined] : props.windows.slice(0, 2));
-  const countdownShown = (w?: UsageWindow) => indicator() === "marker-countdown" && !props.compact && !!w && current(w);
+  const countdownShown = (w?: UsageWindow) => indicator() === "marker-countdown" && !props.compact && !!w && current(w) && w.resetsIn !== null;
   return (
     <span class="usage-meters" classList={{ compact: props.compact }}>
       <Show when={props.loading || props.windows.length} fallback={<span class="um-summary">{props.summary ?? "limits n/a"}</span>}>
@@ -74,7 +74,7 @@ export function UsageMeters(props: { windows: UsageWindow[]; loading?: boolean; 
                 <Show when={countdownShown(w)}>
                   <span class="um-countdown tabular">
                     <svg width="8" height="22" viewBox="0 0 8 22" aria-hidden="true"><path d="M.5 6.5H6.5L3.5 11L6.5 15.5H.5L3.5 11Z" /></svg>
-                    {countdown(w!.resetsIn)}
+                    {countdown(w!.resetsIn!)}
                   </span>
                 </Show>
               </Show>

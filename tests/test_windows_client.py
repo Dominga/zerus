@@ -622,7 +622,8 @@ class WindowsClient(unittest.TestCase):
         process = subprocess.Popen([str(HGS), '@peer', 'watch', '--json'], env=env, stdin=subprocess.PIPE,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         lines = queue.Queue()
-        threading.Thread(target=lambda: [lines.put(line) for line in process.stdout] + [lines.put(None)], daemon=True).start()
+        reader = threading.Thread(target=lambda: [lines.put(line) for line in process.stdout] + [lines.put(None)], daemon=True)
+        reader.start()
         def frame(seconds=10):
             line = lines.get(timeout=seconds)
             if line is None:
@@ -644,6 +645,7 @@ class WindowsClient(unittest.TestCase):
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=10)
+            reader.join(timeout=10)
             for pipe in (process.stdin, process.stdout, process.stderr):
                 if not pipe.closed:
                     pipe.close()

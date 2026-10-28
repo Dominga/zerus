@@ -862,6 +862,8 @@ mod tests {
             .join("../core/tests/fixtures/views/swarm.json");
         let swarm: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let failed = "Project sync unavailable: hgs did not answer in time";
+        // Showing Projects published its empty view; only the call's event counts.
+        h.events();
         h.screens
             .organization(Arc::new(swarm), "sample".into(), (failed.into(), true));
         let view = h.screens.projects();

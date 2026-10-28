@@ -50,7 +50,7 @@ pub use machine::{LocalHost, MachineMeta};
 pub use organization::{OrganizationSnapshot, OrganizationState, OrganizationUpdate};
 pub use processes::{ProcessesState, ProcessesUpdate};
 pub use reads::{Read, ReadError};
-pub use run::{run, run_limited, run_with_env, TooLarge};
+pub use run::{run, run_cancellable, run_limited, run_with_env, Stopped, TooLarge};
 pub use state::{ActivityState, CatalogState};
 pub use stream::{StreamEvent, StreamHandle, Timing};
 pub use tasks::{TasksState, TasksUpdate};

@@ -48,6 +48,7 @@ pub fn run() {
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
                 readsync::start(actions.clone());
                 app.manage(actions);
+                app.manage(actions::ArchiveReads::default());
                 app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
                 app.manage(screens::Screens::tauri(app.handle().clone(), pump));
@@ -96,6 +97,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::update_attention_marks,
         actions::session_reference,
         actions::copy_command,
+        actions::archive_page,
+        actions::cancel_archive_pages,
         clipboard::copy_text,
         screens::screen_visible,
         screens::accounts_view,

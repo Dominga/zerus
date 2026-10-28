@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRoot } from "solid-js";
 import { createCatalog, toSession } from "./catalog";
-import { createActions, type Followed } from "./actions";
+import { createActions, withArchived, type Followed } from "./actions";
 import { createMarks, type MarksPort } from "./marks";
 import { notificationsState, snapshotOf } from "../ui/sessions/actions-ui";
 import * as bridge from "../bridge";
@@ -84,6 +84,19 @@ describe("perform", () => {
       expect(out.outcome).toBe("failed");
       expect(a.notices().map((n) => n.text)).toEqual(["This session changed. Open its actions again."]);
       expect(a.notices()[0].tone).toBe("info");
+      dispose();
+    });
+  });
+
+  it("never evicts the notice being added, even over five sticky ones", () => {
+    createRoot((dispose) => {
+      const a = setup();
+      for (let i = 0; i < 5; i++) a.notify("info", `Worktree kept ${i}`, true);
+      a.notify("info", "Archive: 5 of 5 completed.");
+      const texts = a.notices().map((n) => n.text);
+      expect(texts).toHaveLength(5);
+      expect(texts).toContain("Archive: 5 of 5 completed.");
+      expect(texts).not.toContain("Worktree kept 0");
       dispose();
     });
   });
@@ -231,6 +244,36 @@ describe("perform", () => {
       for (let i = 0; i < 8; i++) await a.perform(session(), { kind: "pause" });
       expect(a.notices()).toHaveLength(5);
       expect(a.notices().every((n) => n.sticky)).toBe(true);
+      dispose();
+    });
+  });
+
+  it("quietly shows only the worktree lines, for a selection batch", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      mocked.runAction.mockResolvedValueOnce(done()).mockResolvedValueOnce({ outcome: "failed", detail: "x" });
+      expect(await a.perform(session(), { kind: "pause" }, { quiet: true })).toMatchObject({ outcome: "done" });
+      expect(await a.perform(session(), { kind: "forget_binding" }, { quiet: true })).toEqual({ outcome: "failed", detail: "x" });
+      expect(await a.perform(session({ run_id: "run-2" }), { kind: "pause" }, { quiet: true })).toMatchObject({ outcome: "failed" });
+      expect(a.notices()).toEqual([]);
+      mocked.runAction.mockResolvedValueOnce(done({ status: "kept", path: "/home/example/wt", common_dir: "/home/example/.git", reason: "uncommitted changes" }));
+      await a.perform(session(), { kind: "terminate" }, { quiet: true });
+      expect(a.notices()).toEqual([expect.objectContaining({ tone: "warn", text: "Worktree kept for review: uncommitted changes", sticky: true })]);
+      mocked.runAction.mockResolvedValueOnce(done({ status: "removed", path: "/home/example/wt", common_dir: "/home/example/.git", reason: null }));
+      await a.perform(session(), { kind: "archive" }, { quiet: true });
+      expect(a.notices().map((n) => n.text)).toEqual(["Worktree kept for review: uncommitted changes", "Worktree removed automatically. The branch and archived conversation are kept."]);
+      dispose();
+    });
+  });
+
+  it("returns each notice's id, so it can be dismissed", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      const first = a.notify("info", "one");
+      const second = a.notify("info", "two");
+      expect(first).not.toBe(second);
+      a.dismiss(first);
+      expect(a.notices().map((n) => n.text)).toEqual(["two"]);
       dispose();
     });
   });
@@ -781,6 +824,169 @@ describe("toggleMute", () => {
       hold.resolve(prefs(true, 4, "other"));
       await flush();
       expect(a.pendingNotifications("", "conv-17").total).toBe(0);
+      dispose();
+    });
+  });
+});
+
+describe("forget", () => {
+  const opened = (extra: Partial<{ binding: boolean; run: string; conversation: string }> = {}) => ({ binding: false, run: "run-1", conversation: "conv-1", ...extra });
+  const oc = { agent: "opencode", state: "running", allowed: "forget rename" } as Partial<ViewRow>;
+
+  it("forgets a saved session with kill and the write notice", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut({ state: "paused" }));
+      mocked.runAction.mockResolvedValue(done());
+      const out = await a.forget(session({ state: "paused" }), opened());
+      expect(out.outcome).toBe("done");
+      expect(mocked.runAction.mock.calls[0][1]).toEqual({ kind: "forget" });
+      expect(a.notices()).toMatchObject([{ tone: "info", text: "Session updated. Refreshing…" }]);
+      dispose();
+    });
+  });
+
+  it("shows a failed forget as a sticky detail", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut({ state: "paused" }));
+      mocked.runAction.mockResolvedValue({ outcome: "failed", detail: "no way" });
+      await a.forget(session({ state: "paused" }), opened());
+      expect(a.notices()).toMatchObject([{ tone: "error", text: "no way", sticky: true }]);
+      dispose();
+    });
+  });
+
+  it("forgets an OpenCode binding with its run and conversation", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut(oc));
+      mocked.runAction.mockResolvedValue(done());
+      await a.forget(session(oc), opened({ binding: true }));
+      expect(mocked.runAction.mock.calls[0][0]).toMatchObject({ run_id: "run-1", conversation_id: "conv-1" });
+      expect(mocked.runAction.mock.calls[0][1]).toEqual({ kind: "forget_binding" });
+      expect(a.notices()).toMatchObject([{ tone: "info", text: "Zerus forgot claude/sample-project/a. The conversation stays in OpenCode." }]);
+      dispose();
+    });
+  });
+
+  it("shows a failed binding forget as a sticky error", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut(oc));
+      mocked.runAction.mockResolvedValue({ outcome: "failed", detail: "stale" });
+      await a.forget(session(oc), opened({ binding: true }));
+      expect(a.notices()).toMatchObject([{ tone: "error", text: "stale", sticky: true }]);
+      dispose();
+    });
+  });
+
+  it("uses plain forget for a binding without a run id", async () => {
+    await createRoot(async (dispose) => {
+      const bare = { ...oc, run_id: undefined } as Partial<ViewRow>;
+      const a = setup(rowOut(bare));
+      mocked.runAction.mockResolvedValue(done());
+      await a.forget(session(bare), opened({ binding: true, run: "" }));
+      expect(mocked.runAction.mock.calls[0][1]).toEqual({ kind: "forget" });
+      dispose();
+    });
+  });
+
+  it("refuses with the sticky state-changed notice when the binding kind changed", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut({ state: "paused" }));
+      const dialog = session({ state: "paused" });
+      a.applyBatch(batchOf({ upserts: [rowOut({ ...oc, state: "paused" })] }));
+      await a.forget(dialog, opened());
+      expect(mocked.runAction).not.toHaveBeenCalled();
+      expect(a.notices()).toMatchObject([{ tone: "error", text: "The session state changed. Open its actions again.", sticky: true }]);
+      dispose();
+    });
+  });
+
+  it("refuses when a saved session started running", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut({ state: "paused" }));
+      const dialog = session({ state: "paused" });
+      a.applyBatch(batchOf({ upserts: [rowOut({ state: "running" })] }));
+      await a.forget(dialog, opened());
+      expect(mocked.runAction).not.toHaveBeenCalled();
+      expect(a.notices()).toMatchObject([{ text: "The session state changed. Open its actions again.", sticky: true }]);
+      dispose();
+    });
+  });
+
+  it("refuses a scoped forget when the run or conversation changed", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut(oc));
+      const dialog = session(oc);
+      a.applyBatch(batchOf({ upserts: [rowOut({ ...oc, run_id: "run-2" })] }));
+      await a.forget(dialog, opened({ binding: true }));
+      expect(mocked.runAction).not.toHaveBeenCalled();
+      expect(a.notices()).toMatchObject([{ text: "The session state changed. Open its actions again.", sticky: true }]);
+      dispose();
+    });
+  });
+
+  it("makes no call and no notice offline", async () => {
+    await createRoot(async (dispose) => {
+      const off = setup(rowOut({ state: "paused" }), () => false);
+      await off.forget(session({ state: "paused" }), opened());
+      expect(mocked.runAction).not.toHaveBeenCalled();
+      expect(off.notices()).toEqual([]);
+      dispose();
+    });
+  });
+
+  it("raises the sticky state-changed notice when the row vanished", async () => {
+    await createRoot(async (dispose) => {
+      const gone = setup(rowOut({ state: "paused" }));
+      gone.applyBatch(batchOf({ removes: [{ computer: "", key: "run:a" }] }));
+      await gone.forget(session({ state: "paused" }), opened());
+      expect(mocked.runAction).not.toHaveBeenCalled();
+      expect(gone.notices()).toMatchObject([{ tone: "error", text: "The session state changed. Open its actions again.", sticky: true }]);
+      dispose();
+    });
+  });
+});
+
+describe("archived rows (the Archive view)", () => {
+  const ARCHIVE_ID = "10000000-0000-4000-8000-000000000001";
+  const archived = () => toSession("", `archive:${ARCHIVE_ID}`, view({ state: "archived", status: "ended", archive_id: ARCHIVE_ID, archived_at: 1_789_000_000 }));
+
+  it("an archived selection inspects with its archive id (inspect --archive ID)", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      const row = archived();
+      expect(a.detailsFor(row, true, { value: undefined, settled: true })).toBeUndefined();
+      await flush();
+      expect(mocked.inspectSession).toHaveBeenCalledTimes(1);
+      expect(mocked.inspectSession).toHaveBeenCalledWith({ computer: "", name: "claude/sample-project/a", run_id: "run-1", conversation_id: "conv-1" }, ARCHIVE_ID);
+      expect(a.detailsFor(row, true, { value: undefined, settled: true })?.run_id).toBe("run-1");
+      dispose();
+    });
+  });
+
+  it("the click-time recheck finds a loaded archived row, so Copy restore command passes its archive id", async () => {
+    await createRoot(async (dispose) => {
+      const catalog = createCatalog();
+      const row = archived();
+      mocked.copyCommand.mockResolvedValue("hgs resume claude/sample-project/a --archive id");
+      const plain = createActions(catalog.catalog);
+      expect(await plain.copyCommand(snapshotOf(row))).toEqual({ outcome: "failed", detail: "This session is no longer available. Open its actions again." });
+      const a = createActions(withArchived(catalog.catalog, (key) => (key === row.key ? row : undefined)));
+      expect(await a.copyCommand(snapshotOf(row))).toMatchObject({ outcome: "done" });
+      expect(mocked.copyCommand).toHaveBeenCalledWith("", "claude/sample-project/a", ARCHIVE_ID);
+      expect(a.stillListed(snapshotOf(row))?.archiveId).toBe(ARCHIVE_ID);
+      dispose();
+    });
+  });
+
+  it("an archived rename runs with its archive id while the archived row is loaded", async () => {
+    await createRoot(async (dispose) => {
+      const catalog = createCatalog();
+      const row = archived();
+      mocked.runAction.mockResolvedValue(done());
+      const a = createActions(withArchived(catalog.catalog, (key) => (key === row.key ? row : undefined)));
+      const rename = { kind: "rename", new_name: "claude/sample-project/b", archive_id: ARCHIVE_ID } as const;
+      expect(await a.perform(snapshotOf(row), rename)).toMatchObject({ outcome: "done" });
+      expect(mocked.runAction).toHaveBeenCalledWith({ computer: "", name: "claude/sample-project/a", run_id: "run-1", conversation_id: "conv-1" }, rename);
       dispose();
     });
   });

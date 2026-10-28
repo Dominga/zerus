@@ -3,8 +3,9 @@ import { createStore } from "solid-js/store";
 import * as bridge from "../bridge";
 import { catalog as appCatalog, computerOffline, type CatalogState } from "./catalog";
 import { marks as appMarks, type Marks } from "./marks";
-import { copyState, detailsFromInspection, MUTE_PENDING, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type PendingNotifications } from "../ui/sessions/actions-ui";
+import { copyState, detailsFromInspection, MUTE_PENDING, STATE_CHANGED, forgetsBindingOnly, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type ForgetScope, type PendingNotifications } from "../ui/sessions/actions-ui";
 import type { Action, Details, Outcome, Target } from "../types";
+import type { Session } from "../ui/sessions/types";
 
 // Guarded session actions. Every action is one call to the Rust side; a call
 // is never repeated. A rejected call is an unknown outcome and is shown as a
@@ -25,7 +26,6 @@ export interface Followed { value: Record<string, unknown> | undefined; settled:
 const MAX_NOTICES = 5;
 const INFO_MS = 6000;
 const CHANGED = "This session changed. Open its actions again.";
-const STATE_CHANGED = "The session state changed. Open its actions again.";
 const MUTE_CHANGED = "The shared notification setting changed while this request was pending. Refresh the session.";
 export const GONE = "This session is no longer available. Open its actions again.";
 const ALREADY_STOPPED = ["hgs: This turn is no longer working", "This turn is no longer working"];
@@ -39,7 +39,7 @@ const failed = (detail: string): Outcome => ({ outcome: "failed", detail });
  * it they have no target. The other actions name the session only.
  */
 export function targetOf(s: Pick<ActionRow, "computer" | "name" | "runId" | "conversationId">, kind: Action["kind"]): Target | undefined {
-  const identity = kind === "interrupt" || kind === "mark_read" || kind === "terminate";
+  const identity = kind === "interrupt" || kind === "mark_read" || kind === "terminate" || kind === "forget_binding";
   if (identity && (!s.runId || (kind !== "terminate" && !s.conversationId))) return undefined;
   return { computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.conversationId ?? "" };
 }
@@ -61,18 +61,21 @@ export function createActions(
 
   function dismiss(id: number) { setList((all) => all.filter((n) => n.id !== id)); }
 
-  /** Adds a notice; over the cap, the oldest non-sticky one goes first, then the oldest. */
-  function notify(tone: Notice["tone"], text: string, sticky = false) {
+  /** Adds a notice and returns its id; over the cap, the oldest other non-sticky one goes first, then the oldest other; the new one stays. */
+  function notify(tone: Notice["tone"], text: string, sticky = false): number {
     const id = nextId++;
     setList((all) => {
       const next = [...all, { id, tone, text, sticky }];
       while (next.length > MAX_NOTICES) {
-        const loose = next.findIndex((n) => !n.sticky);
+        // Never the notice being added: it is the last entry.
+        const others = next.slice(0, -1);
+        const loose = others.findIndex((n) => !n.sticky);
         next.splice(loose < 0 ? 0 : loose, 1);
       }
       return next;
     });
     if (!sticky) setTimeout(() => dismiss(id), INFO_MS);
+    return id;
   }
 
   const updating = (computer: string, name: string) => !!writes[sessionId(computer, name)];
@@ -88,9 +91,15 @@ export function createActions(
       return;
     }
     if (out.outcome === "failed") { notify("error", out.detail, true); return; }
+    if (action.kind === "forget_binding") { notify("info", `Zerus forgot ${row.name}. The conversation stays in OpenCode.`); return; }
     if (action.kind === "rename") notify("info", "Session renamed. Refreshing…");
     else notify("info", "Session updated. Refreshing…");
-    const cleanup = out.cleanup;
+    reportCleanup(out);
+  }
+
+  /** The worktree lines of an Archive or Terminate (Qt's worktreeCleanupFinished), shown also during a selection batch. */
+  function reportCleanup(out: Outcome) {
+    const cleanup = out.outcome === "done" ? out.cleanup : null;
     if (!cleanup) return;
     if (cleanup.status === "removed") notify("info", "Worktree removed automatically. The branch and archived conversation are kept.");
     else if (cleanup.status === "kept" || cleanup.status === "unconfirmed") {
@@ -118,17 +127,30 @@ export function createActions(
    * Runs an action from a menu, header button or dialog. `row` is what the
    * entry was built from; the action runs only while the listed row still
    * has that run (or, without a run id, still exists). A busy session is a
-   * silent no-op.
+   * silent no-op. `quiet` is a selection batch's item (Qt's finishSelectionAction):
+   * the batch words the outcome, and only the worktree lines show.
    */
-  async function perform(row: ActionRow, action: Action): Promise<Outcome> {
+  async function perform(row: ActionRow, action: Action, options: { quiet?: boolean } = {}): Promise<Outcome> {
     const live = catalog.rows[row.key];
     const target = targetOf(row, action.kind);
     if (!live || !target || (row.runId && live.runId !== row.runId)) {
-      notify("info", CHANGED);
+      if (!options.quiet) notify("info", CHANGED);
       return failed(CHANGED);
     }
     const { out, busy } = await call(target, action);
-    if (!busy) report(action, out, row);
+    if (!busy) { if (options.quiet) reportCleanup(out); else report(action, out, row); }
+    return out;
+  }
+
+  /**
+   * A computer-wide call (Pause all, Resume all): one per computer at a time,
+   * no session named. Qt's writeDone words the outcome; nothing is retried.
+   */
+  async function performComputer(computer: string, action: Extract<Action, { kind: "pause_all" | "resume_all" }>): Promise<Outcome> {
+    const { out, busy } = await call({ computer, name: "", run_id: "", conversation_id: "" }, action);
+    if (busy) return out;
+    if (out.outcome === "failed") notify("error", out.detail, true);
+    else notify("info", "Session updated. Refreshing…");
     return out;
   }
 
@@ -146,6 +168,41 @@ export function createActions(
       return failed(STATE_CHANGED);
     }
     return perform(row, { kind: action });
+  }
+
+  /**
+   * The Forget saved session confirmation's click (terminateSession,
+   * 5799-5818). The row must be as when the dialog opened: running-and-not-a-
+   * binding and binding-only both unchanged, and a scoped forget also the same
+   * run and conversation (the selected row's details win over the row);
+   * otherwise nothing runs and the sticky notice says so. A scoped forget
+   * (a binding with a run) is `forget_binding`, any other is `kill`.
+   * An offline computer ends silently, as in Qt; a vanished row raises the same notice.
+   */
+  async function forget(row: ActionRow, opened: ForgetScope): Promise<Outcome> {
+    if (!online(row.computer)) return failed("offline");
+    const live = catalog.rows[row.key];
+    if (!live) {
+      // Rows are keyed by run, so a vanished row may be the same session on a new run; Qt refuses a scoped forget then.
+      notify("error", STATE_CHANGED, true);
+      return failed(STATE_CHANGED);
+    }
+    const now = selectedDetails(live);
+    const binding = forgetsBindingOnly(live, now);
+    if ((live.state === "running" && !binding) || binding !== opened.binding) {
+      notify("error", STATE_CHANGED, true);
+      return failed(STATE_CHANGED);
+    }
+    if (opened.binding && opened.run) {
+      const run = now ? now.run_id : live.runId ?? "";
+      const conversation = now ? now.conversation_id : live.conversationId ?? "";
+      if (run !== opened.run || conversation !== opened.conversation) {
+        notify("error", STATE_CHANGED, true);
+        return failed(STATE_CHANGED);
+      }
+      return perform({ ...row, runId: run, conversationId: conversation }, { kind: "forget_binding" });
+    }
+    return perform(row, { kind: "forget" });
   }
 
   /**
@@ -339,7 +396,7 @@ export function createActions(
     return out;
   }
 
-  return { perform, end, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify };
+  return { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify };
 }
 
 type FollowSource = { target(): { id: string } | undefined; summary(): Record<string, unknown> | undefined; loaded(): boolean; ended(): boolean; error(): unknown };
@@ -359,5 +416,17 @@ let selection: () => Selection = () => ({});
 /** Hands the store the selected row and open subagent (session.ts), which this module cannot import: ui.ts reads the page. */
 export function bindSelection(source: () => Selection) { selection = source; }
 
-const app = createActions(appCatalog, (computer) => !computerOffline(computer), () => selection());
-export const { perform, end, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify } = app;
+/**
+ * The rows the actions look up by key: the catalog's, then the loaded archived
+ * rows (Qt's entries hold both). Only lookups by key are answered.
+ */
+export function withArchived(catalog: Pick<CatalogState, "rows">, archived: (key: string) => Session | undefined): Pick<CatalogState, "rows"> {
+  return { rows: new Proxy({} as CatalogState["rows"], { get: (_, key) => (typeof key === "string" ? catalog.rows[key] ?? archived(key) : undefined) }) };
+}
+
+let archivedRow: (key: string) => Session | undefined = () => undefined;
+/** Hands the store the loaded archived rows (store/archive.ts), which this module cannot import: archive.ts reads ui.ts. */
+export function bindArchivedRows(lookup: (key: string) => Session | undefined) { archivedRow = lookup; }
+
+const app = createActions(withArchived(appCatalog, (key) => archivedRow(key)), (computer) => !computerOffline(computer), () => selection());
+export const { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify } = app;

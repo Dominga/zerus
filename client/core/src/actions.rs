@@ -76,6 +76,35 @@ pub enum Action {
         #[serde(default)]
         expected_created: Option<i64>,
     },
+    /// `hgs resume NAME --fresh -d`: a new conversation for a stopped session
+    /// (`startFreshSession`).
+    StartFresh,
+    /// `hgs kill NAME` as Forget saved session; its own kind so notices and
+    /// logs tell it from Terminate's Kill (`killSession`).
+    Forget,
+    /// `hgs session-action NAME --json` with `"action":"forget"`: the OpenCode
+    /// binding forget (`requestForgetBinding`).
+    ForgetBinding,
+    /// `hgs resume NAME --archive ID -d`: Restore an archived session
+    /// (`restoreArchive`). An empty id is refused before any call.
+    Restore {
+        archive_id: String,
+    },
+    /// `hgs kill NAME --archive ID`: Forget an archived session
+    /// (`forgetArchive`). An empty id is refused before any call.
+    ForgetArchive {
+        archive_id: String,
+    },
+    /// `hgs pause --all`: every live session of the computer (`pauseAll`).
+    /// `count` is the live sessions the menu counted; it sets the timeout.
+    /// Computer-wide: the target's session name is empty and ignored.
+    PauseAll {
+        count: u32,
+    },
+    /// `hgs resume --all -d`: every saved session of the computer (`resumeAll`).
+    ResumeAll {
+        count: u32,
+    },
 }
 
 /// One `hgs` call: arguments (with a leading `@alias` for a peer), standard
@@ -189,7 +218,11 @@ pub fn invocation(
     action: &Action,
     request_id: &str,
 ) -> Result<Invocation, String> {
-    let name = target.name.clone();
+    let name = if matches!(action, Action::PauseAll { .. } | Action::ResumeAll { .. }) {
+        String::new()
+    } else {
+        target.name.clone()
+    };
     let (mut args, stdin, local, peer, request) = match action {
         Action::Interrupt { turn_started } => {
             let input = json!({
@@ -254,7 +287,7 @@ pub fn invocation(
             (args, None, 45, 60, None)
         }
         // A local kill is a tmux kill-session; a peer's goes through SSH.
-        Action::Kill => (vec!["kill".to_owned(), name], None, 5, 15, None),
+        Action::Kill | Action::Forget => (vec!["kill".to_owned(), name], None, 5, 15, None),
         Action::Send {
             text,
             attachments,
@@ -320,6 +353,72 @@ pub fn invocation(
                     "--stage".to_owned(),
                     "--json".to_owned(),
                 ],
+                Some(serde_json::to_vec(&input).map_err(|error| error.to_string())?),
+                15,
+                45,
+                Some(request_id.to_owned()),
+            )
+        }
+        Action::StartFresh => {
+            let mut args = vec!["resume".to_owned(), name, "--fresh".to_owned()];
+            if !target.run_id.is_empty() {
+                args.extend(["--expected-run-id".to_owned(), target.run_id.clone()]);
+            }
+            args.push("-d".to_owned());
+            (args, None, 30, 30, None)
+        }
+        Action::Restore { archive_id } | Action::ForgetArchive { archive_id } => {
+            // Archive identity must never collapse to a generic resume or
+            // kill of a reused name (`restoreArchive`, `forgetArchive`).
+            if archive_id.is_empty() {
+                return Err("Missing archive identity".into());
+            }
+            let restore = matches!(action, Action::Restore { .. });
+            let mut args = vec![
+                if restore { "resume" } else { "kill" }.to_owned(),
+                name,
+                "--archive".to_owned(),
+                archive_id.clone(),
+            ];
+            if restore {
+                args.push("-d".to_owned());
+                (args, None, 30, 30, None)
+            } else {
+                (args, None, 5, 15, None)
+            }
+        }
+        Action::PauseAll { count } => {
+            let secs = 15 + 30 * u64::from((*count).clamp(1, 10000));
+            (
+                vec!["pause".to_owned(), "--all".to_owned()],
+                None,
+                secs,
+                secs,
+                None,
+            )
+        }
+        Action::ResumeAll { count } => {
+            let secs = 15 + 15 * u64::from((*count).clamp(1, 10000));
+            (
+                vec!["resume".to_owned(), "--all".to_owned(), "-d".to_owned()],
+                None,
+                secs,
+                secs,
+                None,
+            )
+        }
+        Action::ForgetBinding => {
+            if target.run_id.is_empty() || target.conversation_id.is_empty() {
+                return Err("the session has no run or conversation to forget".into());
+            }
+            let input = json!({
+                "request_id": request_id,
+                "action": "forget",
+                "expected_run_id": target.run_id,
+                "expected_conversation_id": target.conversation_id,
+            });
+            (
+                vec!["session-action".to_owned(), name, "--json".to_owned()],
                 Some(serde_json::to_vec(&input).map_err(|error| error.to_string())?),
                 15,
                 45,
@@ -700,6 +799,7 @@ pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit:
             classify_send(target, invocation, agent_id.as_deref(), exit)
         }
         Action::StopProcess { process_id, .. } => classify_stop(target, process_id, exit),
+        Action::ForgetBinding => classify_forget_binding(target, invocation, exit),
         Action::MarkRead { .. } => classify_read(target, exit),
         Action::Archive | Action::Terminate => classify_write(exit, true),
         _ => classify_write(exit, false),
@@ -824,6 +924,49 @@ fn classify_stop(target: &Target, process_id: &str, exit: Exit) -> Outcome {
             }
         }
         exit => failed(failure_detail(exit)),
+    }
+}
+
+/// The scoped `runSessionAction` (`HgsClient.cpp:2169-2245`) for the OpenCode
+/// forget: only a `completed` receipt naming this request, session, run and
+/// conversation is done; a durable `failed` or `uncertain` one is never retried.
+fn classify_forget_binding(target: &Target, invocation: &Invocation, exit: Exit) -> Outcome {
+    const FALLBACK: &str = "Could not complete the request. Check the session before retrying.";
+    match exit {
+        Exit::TimedOut => failed("Request timed out. Check the session before retrying."),
+        Exit::WriteFailed => failed("Transfer failed. Check the session before retrying."),
+        Exit::StartFailed(error) => failed(error),
+        Exit::Abnormal { stderr } => {
+            failed(trimmed_stderr(&stderr).unwrap_or_else(|| FALLBACK.to_owned()))
+        }
+        Exit::Code { code, stderr, .. } if code != 0 => {
+            failed(trimmed_stderr(&stderr).unwrap_or_else(|| FALLBACK.to_owned()))
+        }
+        Exit::Code { stdout, .. } => {
+            let receipt: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+            let field = |key: &str| receipt.get(key).and_then(Value::as_str);
+            let identity = invocation.request_id.is_some()
+                && field("request_id") == invocation.request_id.as_deref()
+                && field("name") == Some(target.name.as_str())
+                && field("run_id") == Some(target.run_id.as_str())
+                && field("conversation_id") == Some(target.conversation_id.as_str());
+            let reason = field("error")
+                .map(|text| text.trim().chars().take(STDERR_CHARS).collect::<String>())
+                .filter(|text| !text.is_empty());
+            match (identity, field("status")) {
+                (true, Some("failed")) => {
+                    failed(reason.unwrap_or_else(|| "The session was not forgotten.".to_owned()))
+                }
+                (true, Some("uncertain")) => failed(match reason {
+                    Some(reason) => format!(
+                        "The result was not confirmed ({reason}). Refresh before trying again."
+                    ),
+                    None => "The result was not confirmed. Refresh before trying again.".to_owned(),
+                }),
+                (true, Some("completed")) => done(receipt, None),
+                _ => failed("Invalid acknowledgement. Check the session before retrying."),
+            }
+        }
     }
 }
 
@@ -1629,6 +1772,57 @@ mod tests {
     }
 
     #[test]
+    fn pause_all_and_resume_all_are_computer_wide_with_scaled_timeouts() {
+        let secs = |c: &str, a: Action| invocation(&target(c), &a, "u").unwrap().timeout.as_secs();
+        assert_eq!(
+            invocation(&target(""), &Action::PauseAll { count: 3 }, "u")
+                .unwrap()
+                .args,
+            ["pause", "--all"]
+        );
+        assert_eq!(
+            invocation(&target("mac"), &Action::PauseAll { count: 3 }, "u")
+                .unwrap()
+                .args,
+            ["@mac", "pause", "--all"]
+        );
+        assert_eq!(
+            invocation(&target(""), &Action::ResumeAll { count: 3 }, "u")
+                .unwrap()
+                .args,
+            ["resume", "--all", "-d"]
+        );
+        assert_eq!(
+            invocation(&target("mac"), &Action::ResumeAll { count: 3 }, "u")
+                .unwrap()
+                .args,
+            ["@mac", "resume", "--all", "-d"]
+        );
+        for c in ["", "mac"] {
+            assert_eq!(secs(c, Action::PauseAll { count: 3 }), 15 + 90);
+            assert_eq!(secs(c, Action::PauseAll { count: 0 }), 45);
+            assert_eq!(secs(c, Action::PauseAll { count: 99999 }), 15 + 30 * 10000);
+            assert_eq!(secs(c, Action::ResumeAll { count: 3 }), 15 + 45);
+            assert_eq!(secs(c, Action::ResumeAll { count: 0 }), 30);
+            assert_eq!(secs(c, Action::ResumeAll { count: 99999 }), 15 + 15 * 10000);
+        }
+        assert_eq!(
+            serde_json::to_value(Action::PauseAll { count: 2 }).unwrap(),
+            json!({"kind": "pause_all", "count": 2})
+        );
+        let inv = invocation(&target(""), &Action::PauseAll { count: 1 }, "u").unwrap();
+        assert!(matches!(
+            classify(
+                &target(""),
+                &Action::PauseAll { count: 1 },
+                &inv,
+                exit0(b"", "")
+            ),
+            Outcome::Done { cleanup: None, .. }
+        ));
+    }
+
+    #[test]
     fn timeouts_differ_for_this_computer_and_a_peer() {
         let secs = |computer: &str, action: Action| {
             invocation(&target(computer), &action, "u")
@@ -1685,6 +1879,282 @@ mod tests {
             Outcome::Failed {
                 detail: "timed out".into()
             }
+        );
+    }
+
+    #[test]
+    fn start_fresh_resumes_with_fresh_and_the_run_guard() {
+        let t = target("");
+        let inv = invocation(&t, &Action::StartFresh, "u").unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "resume",
+                "claude/sample-project/review",
+                "--fresh",
+                "--expected-run-id",
+                "run-1",
+                "-d"
+            ]
+        );
+        assert_eq!((inv.stdin.clone(), inv.request_id.clone()), (None, None));
+        assert_eq!(inv.timeout.as_secs(), 30);
+        let mut no_run = target("mac");
+        no_run.run_id.clear();
+        let inv = invocation(&no_run, &Action::StartFresh, "u").unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "@mac",
+                "resume",
+                "claude/sample-project/review",
+                "--fresh",
+                "-d"
+            ]
+        );
+        assert_eq!(inv.timeout.as_secs(), 30);
+        let line = "ZERUS_WORKTREE_CLEANUP {\"status\":\"removed\",\"path\":\"/home/example/wt\",\"common_dir\":\"/home/example/.git\"}\n";
+        assert!(matches!(
+            classify(&t, &Action::StartFresh, &inv, exit0(b"", line)),
+            Outcome::Done { cleanup: None, .. }
+        ));
+        assert_eq!(
+            classify(&t, &Action::StartFresh, &inv, Exit::TimedOut),
+            Outcome::Failed {
+                detail: "timed out".into()
+            }
+        );
+    }
+
+    #[test]
+    fn restore_and_forget_archive_name_the_archive() {
+        let restore = Action::Restore {
+            archive_id: "a1".into(),
+        };
+        let forget = Action::ForgetArchive {
+            archive_id: "a1".into(),
+        };
+        let inv = invocation(&target(""), &restore, "u").unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "resume",
+                "claude/sample-project/review",
+                "--archive",
+                "a1",
+                "-d"
+            ]
+        );
+        assert_eq!(inv.stdin, None);
+        assert_eq!(inv.timeout.as_secs(), 30);
+        let inv = invocation(&target("mac"), &restore, "u").unwrap();
+        assert_eq!(inv.args[..2], ["@mac", "resume"]);
+        assert_eq!(inv.args.last().unwrap(), "-d");
+        assert_eq!(inv.timeout.as_secs(), 30);
+        let inv = invocation(&target(""), &forget, "u").unwrap();
+        assert_eq!(
+            inv.args,
+            ["kill", "claude/sample-project/review", "--archive", "a1"]
+        );
+        assert_eq!(inv.timeout.as_secs(), 5);
+        let inv = invocation(&target("mac"), &forget, "u").unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "@mac",
+                "kill",
+                "claude/sample-project/review",
+                "--archive",
+                "a1"
+            ]
+        );
+        assert_eq!(inv.timeout.as_secs(), 15);
+        assert_eq!(
+            serde_json::to_value(&restore).unwrap(),
+            json!({"kind": "restore", "archive_id": "a1"})
+        );
+        assert_eq!(
+            serde_json::to_value(&forget).unwrap(),
+            json!({"kind": "forget_archive", "archive_id": "a1"})
+        );
+        for action in [
+            Action::Restore {
+                archive_id: String::new(),
+            },
+            Action::ForgetArchive {
+                archive_id: String::new(),
+            },
+        ] {
+            assert_eq!(
+                invocation(&target("mac"), &action, "u").unwrap_err(),
+                "Missing archive identity"
+            );
+        }
+    }
+
+    #[test]
+    fn forget_kills_like_kill_but_is_its_own_kind() {
+        let inv = invocation(&target("mac"), &Action::Forget, "u").unwrap();
+        assert_eq!(inv.args, ["@mac", "kill", "claude/sample-project/review"]);
+        assert_eq!(inv.stdin, None);
+        assert_eq!(inv.timeout.as_secs(), 15);
+        assert_eq!(
+            invocation(&target(""), &Action::Forget, "u")
+                .unwrap()
+                .timeout
+                .as_secs(),
+            5
+        );
+        assert_ne!(Action::Forget, Action::Kill);
+        assert_eq!(
+            serde_json::to_value(Action::Forget).unwrap(),
+            json!({"kind": "forget"})
+        );
+        assert_eq!(
+            serde_json::to_value(Action::StartFresh).unwrap(),
+            json!({"kind": "start_fresh"})
+        );
+        assert_eq!(
+            serde_json::to_value(Action::ForgetBinding).unwrap(),
+            json!({"kind": "forget_binding"})
+        );
+        assert!(matches!(
+            classify(&target(""), &Action::Forget, &inv, exit0(b"", "")),
+            Outcome::Done { cleanup: None, .. }
+        ));
+        assert_eq!(
+            classify(&target(""), &Action::Forget, &inv, Exit::WriteFailed),
+            Outcome::Failed {
+                detail: "could not send the request".into()
+            }
+        );
+    }
+
+    #[test]
+    fn forget_binding_sends_its_identity_through_session_action() {
+        let inv = invocation(&target("mac"), &Action::ForgetBinding, "req-9").unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "@mac",
+                "session-action",
+                "claude/sample-project/review",
+                "--json"
+            ]
+        );
+        assert_eq!(inv.timeout.as_secs(), 45);
+        assert_eq!(inv.request_id.as_deref(), Some("req-9"));
+        let input: Value = serde_json::from_slice(inv.stdin.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            input,
+            json!({"request_id":"req-9","action":"forget","expected_run_id":"run-1","expected_conversation_id":"conv-1"})
+        );
+        assert!(!String::from_utf8(inv.stdin.unwrap()).unwrap().contains(' '));
+        let local = invocation(&target(""), &Action::ForgetBinding, "r").unwrap();
+        assert_eq!(local.timeout.as_secs(), 15);
+        for clear in [0, 1] {
+            let mut t = target("");
+            if clear == 0 {
+                t.run_id.clear()
+            } else {
+                t.conversation_id.clear()
+            }
+            assert!(invocation(&t, &Action::ForgetBinding, "r").is_err());
+        }
+    }
+
+    #[test]
+    fn forget_binding_follows_the_scoped_receipt_rules() {
+        let t = target("");
+        let a = Action::ForgetBinding;
+        let inv = invocation(&t, &a, "req-3").unwrap();
+        let receipt = |status: &str, error: Option<&str>, request: &str, run: &str| {
+            let mut value = json!({"status": status, "request_id": request,
+                "name": "claude/sample-project/review", "run_id": run, "conversation_id": "conv-1"});
+            if let Some(error) = error {
+                value["error"] = json!(error);
+            }
+            serde_json::to_vec(&value).unwrap()
+        };
+        let failed = |detail: &str| Outcome::Failed {
+            detail: detail.into(),
+        };
+        let run = |bytes: Vec<u8>| classify(&t, &a, &inv, exit0(&bytes, ""));
+        assert!(matches!(
+            run(receipt("completed", None, "req-3", "run-1")),
+            Outcome::Done { .. }
+        ));
+        assert_eq!(
+            run(receipt("failed", Some(" nope "), "req-3", "run-1")),
+            failed("nope")
+        );
+        assert_eq!(
+            run(receipt("failed", None, "req-3", "run-1")),
+            failed("The session was not forgotten.")
+        );
+        assert_eq!(
+            run(receipt("uncertain", Some("lost"), "req-3", "run-1")),
+            failed("The result was not confirmed (lost). Refresh before trying again.")
+        );
+        assert_eq!(
+            run(receipt("uncertain", None, "req-3", "run-1")),
+            failed("The result was not confirmed. Refresh before trying again.")
+        );
+        let invalid = failed("Invalid acknowledgement. Check the session before retrying.");
+        assert_eq!(run(receipt("completed", None, "other", "run-1")), invalid);
+        assert_eq!(run(receipt("completed", None, "req-3", "run-2")), invalid);
+        assert_eq!(run(receipt("failed", Some("x"), "other", "run-1")), invalid);
+        assert_eq!(run(receipt("submitted", None, "req-3", "run-1")), invalid);
+        assert_eq!(run(b"{}".to_vec()), invalid);
+        assert_eq!(run(b"not json".to_vec()), invalid);
+        assert_eq!(
+            classify(&t, &a, &inv, Exit::TimedOut),
+            failed("Request timed out. Check the session before retrying.")
+        );
+        assert_eq!(
+            classify(&t, &a, &inv, Exit::WriteFailed),
+            failed("Transfer failed. Check the session before retrying.")
+        );
+        assert_eq!(
+            classify(
+                &t,
+                &a,
+                &inv,
+                Exit::Code {
+                    code: 1,
+                    stdout: vec![],
+                    stderr: " boom \n".into()
+                }
+            ),
+            failed("boom")
+        );
+        assert_eq!(
+            classify(
+                &t,
+                &a,
+                &inv,
+                Exit::Code {
+                    code: 2,
+                    stdout: vec![],
+                    stderr: String::new()
+                }
+            ),
+            failed("Could not complete the request. Check the session before retrying.")
+        );
+        assert_eq!(
+            classify(
+                &t,
+                &a,
+                &inv,
+                Exit::Abnormal {
+                    stderr: String::new()
+                }
+            ),
+            failed("Could not complete the request. Check the session before retrying.")
+        );
+        assert_eq!(
+            classify(&t, &a, &inv, Exit::StartFailed("no hgs".into())),
+            failed("no hgs")
         );
     }
 

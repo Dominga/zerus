@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type Outcome, type ReadMark, type Target } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ArchivePage, type Batch, type ComputerId, type Details, type Outcome, type ReadMark, type Target } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 
@@ -226,6 +226,28 @@ export async function sessionReference(target: Target, archiveId: string | null)
 export async function copyCommand(computer: string, name: string, archiveId: string | null): Promise<string> {
   if (!inTauri()) throw "Actions need the desktop app.";
   return invoke<string>("copy_command", { computer, name, archiveId });
+}
+
+/**
+ * One checked page of a computer's archive (`archive_page`, `hgs [@alias] archives --json`);
+ * `request` is the archive store's request number. Rejects with Qt's text for
+ * an invalid page, "superseded" when a newer request of that computer or a
+ * cancel replaced it, or the hgs failure.
+ */
+export async function archivePage(computer: string, from: number, until: number, cursor: string, query: string, request: number): Promise<ArchivePage> {
+  if (!inTauri()) throw "Archive pages need the desktop app.";
+  return invoke<ArchivePage>("archive_page", { computer, from, until, cursor, query, request });
+}
+
+/**
+ * Cancels every archive page request numbered `through` or lower (Qt's
+ * cancelArchivePages), also one that has not started yet: their `hgs` ends
+ * and they answer "superseded". Outside the app, and in a build without
+ * archive reads, there is nothing to cancel.
+ */
+export async function cancelArchivePages(through: number): Promise<void> {
+  if (!inTauri()) return;
+  await invoke<null>("cancel_archive_pages", { through }).catch(() => {});
 }
 
 /** Puts text on the clipboard: from Rust in the app, the page's clipboard in a browser. */

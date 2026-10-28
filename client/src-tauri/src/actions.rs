@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use tauri::State;
@@ -26,8 +27,9 @@ use zerus_client_core::actions::{
 use zerus_client_core::details::{details_invocation, parse_details, Details};
 use zerus_client_core::marks::{AttentionMarks, Mark};
 use zerus_client_core::readmarks::{ReadMark, ReadMarks};
+use zerus_client_core::reads::{self, ArchivePage};
 use zerus_client_core::shell::{current_shell, open_command};
-use zerus_client_core::{default_hgs, run, Action, Batch, Outcome, Target};
+use zerus_client_core::{default_hgs, run, Action, Batch, ComputerId, Outcome, Target};
 
 /// A session by computer id and session name, the action's lane and, for a
 /// message, the agent it goes to ("" for the session's own agent).
@@ -468,7 +470,13 @@ pub async fn dispatch(state: &Actions, target: Target, action: Action) -> Result
     if blocked() {
         return Ok(failed(REPLAY_NEEDS_HGS));
     }
-    let Some(_claim) = state.flight.claim(Lane::key(&target, &action)) else {
+    // Pause all and Resume all are computer-wide: one per computer at a time,
+    // whatever session name the caller sent.
+    let mut key = Lane::key(&target, &action);
+    if matches!(action, Action::PauseAll { .. } | Action::ResumeAll { .. }) {
+        key.1 = String::new();
+    }
+    let Some(_claim) = state.flight.claim(key) else {
         return match Lane::of(&action) {
             Lane::Send => Ok(failed(ALREADY_SENDING)),
             _ => Err("busy".into()),
@@ -569,6 +577,121 @@ pub async fn session_reference(
     parse_reference(exit)
 }
 
+/// The archive page requests in flight: per computer the newest one's
+/// request number and cancel flag, and the number through which every
+/// request is cancelled. Request numbers come from the frontend's archive
+/// store and only grow, as Qt's `m_archiveRequest`, so the order in which the
+/// commands start does not matter: a late older request never cancels a
+/// newer one, and a request issued before a cancel stays cancelled however
+/// late it starts (`HgsClient::requestArchivePage`, `cancelArchivePages`).
+#[derive(Default)]
+pub struct ArchiveReads {
+    state: Mutex<ArchiveRegistry>,
+}
+
+#[derive(Default)]
+struct ArchiveRegistry {
+    latest: std::collections::HashMap<String, (u64, Arc<AtomicBool>)>,
+    cancelled_through: u64,
+}
+
+impl ArchiveReads {
+    /// Starts request `request` for `computer`. It starts cancelled when the
+    /// cancel mark covers it or the computer has a request at least as new;
+    /// otherwise it cancels the computer's older request and takes its place.
+    fn begin(&self, computer: &str, request: u64) -> Arc<AtomicBool> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let newer = state
+            .latest
+            .get(computer)
+            .is_some_and(|(current, _)| request <= *current);
+        if request <= state.cancelled_through || newer {
+            return Arc::new(AtomicBool::new(true));
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        if let Some((_, older)) = state
+            .latest
+            .insert(computer.to_owned(), (request, Arc::clone(&flag)))
+        {
+            older.store(true, Ordering::Relaxed);
+        }
+        flag
+    }
+
+    /// Cancels every request numbered `through` or lower, also those that
+    /// have not started yet; later requests keep running.
+    fn cancel_through(&self, through: u64) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.cancelled_through = state.cancelled_through.max(through);
+        state.latest.retain(|_, (request, flag)| {
+            let cancelled = *request <= through;
+            if cancelled {
+                flag.store(true, Ordering::Relaxed);
+            }
+            !cancelled
+        });
+    }
+
+    /// Forgets a finished request unless a newer one replaced it.
+    fn finish(&self, computer: &str, request: u64) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state
+            .latest
+            .get(computer)
+            .is_some_and(|(current, _)| *current == request)
+        {
+            state.latest.remove(computer);
+        }
+    }
+}
+
+/// One checked page of the computer's archive (30 s, Qt's validation).
+/// `request` is the archive store's request number. A newer request for the
+/// same computer, or a cancel through this number, ends this one's `hgs` and
+/// answers it `Err("superseded")`; the store ignores it. A reply that fails
+/// Qt's checks is `Err` with one of Qt's three texts and no rows.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn archive_page(
+    state: State<'_, ArchiveReads>,
+    computer: String,
+    from: f64,
+    until: f64,
+    cursor: String,
+    query: String,
+    request: u64,
+) -> Result<ArchivePage, String> {
+    if blocked() {
+        return Err(REPLAY_NEEDS_HGS.to_owned());
+    }
+    let flag = state.begin(&computer, request);
+    if flag.load(Ordering::Relaxed) {
+        return Err("superseded".into());
+    }
+    let hgs = default_hgs();
+    let id = ComputerId::from(computer.as_str());
+    let job = Arc::clone(&flag);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        reads::archive_page_cancellable(&hgs, &id, from, until, &cursor, &query, &job)
+    })
+    .await
+    .map_err(|error| error.to_string());
+    state.finish(&computer, request);
+    // An answer that arrived as a newer request or a cancel came is dropped too.
+    if flag.load(Ordering::Relaxed) {
+        return Err("superseded".into());
+    }
+    result?.map_err(|error| error.to_string())
+}
+
+/// Cancels every archive page request numbered `through` or lower, where Qt
+/// calls `cancelArchivePages`: their `hgs` ends and they answer
+/// `Err("superseded")`, also one that starts after this.
+#[tauri::command]
+pub fn cancel_archive_pages(state: State<'_, ArchiveReads>, through: u64) {
+    state.cancel_through(through);
+}
+
 /// The command that opens the session in a terminal, written for this
 /// computer's shell (`TrayAgent.cpp:742-745`).
 #[tauri::command]
@@ -629,6 +752,74 @@ pub fn update_attention_marks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_newer_archive_request_of_a_computer_cancels_the_older() {
+        let reads = ArchiveReads::default();
+        let first = reads.begin("studio", 1);
+        let other = reads.begin("laptop", 2);
+        assert!(!first.load(Ordering::Relaxed));
+        let second = reads.begin("studio", 3);
+        assert!(first.load(Ordering::Relaxed));
+        assert!(!second.load(Ordering::Relaxed));
+        assert!(
+            !other.load(Ordering::Relaxed),
+            "computers do not cancel each other"
+        );
+        reads.finish("studio", 1);
+        let third = reads.begin("studio", 4);
+        assert!(
+            second.load(Ordering::Relaxed),
+            "a stale finish forgot nothing"
+        );
+        assert!(!third.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_late_older_archive_request_never_cancels_the_newer() {
+        let reads = ArchiveReads::default();
+        let newer = reads.begin("studio", 5);
+        let older = reads.begin("studio", 4);
+        assert!(older.load(Ordering::Relaxed), "the older starts cancelled");
+        assert!(!newer.load(Ordering::Relaxed));
+        let duplicate = reads.begin("studio", 5);
+        assert!(
+            duplicate.load(Ordering::Relaxed),
+            "an equal number is not newer"
+        );
+        assert!(!newer.load(Ordering::Relaxed));
+        reads.finish("studio", 4);
+        let next = reads.begin("studio", 6);
+        assert!(
+            newer.load(Ordering::Relaxed),
+            "finishing the older kept the newer registered"
+        );
+        assert!(!next.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn cancelling_archive_pages_cancels_through_the_mark() {
+        let reads = ArchiveReads::default();
+        let studio = reads.begin("studio", 1);
+        let laptop = reads.begin("laptop", 2);
+        let later = reads.begin("desk", 4);
+        reads.cancel_through(3);
+        assert!(studio.load(Ordering::Relaxed));
+        assert!(laptop.load(Ordering::Relaxed));
+        assert!(
+            !later.load(Ordering::Relaxed),
+            "a request issued after the cancel keeps running"
+        );
+        // Issued before the cancel, started after it.
+        assert!(reads.begin("studio", 3).load(Ordering::Relaxed));
+        assert!(reads.begin("other", 2).load(Ordering::Relaxed));
+        assert!(!reads.begin("studio", 5).load(Ordering::Relaxed));
+        // A lower mark arriving late lowers nothing.
+        reads.cancel_through(1);
+        assert!(reads.begin("other", 3).load(Ordering::Relaxed));
+        reads.finish("studio", 1);
+        assert!(!later.load(Ordering::Relaxed));
+    }
 
     #[test]
     fn replay_needs_an_explicit_hgs() {
@@ -899,6 +1090,17 @@ mod tests {
             Action::Pause,
             Action::Terminate,
             Action::Kill,
+            Action::StartFresh,
+            Action::Forget,
+            Action::ForgetBinding,
+            Action::Restore {
+                archive_id: "a1".into(),
+            },
+            Action::ForgetArchive {
+                archive_id: "a1".into(),
+            },
+            Action::PauseAll { count: 1 },
+            Action::ResumeAll { count: 1 },
             Action::StageFiles {
                 paths: vec![],
                 expected_created: None,

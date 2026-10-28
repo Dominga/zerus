@@ -488,7 +488,9 @@ Rules (`SessionsWindow.cpp:5758-5826`):
 ```ts
 export type SelectionAction = "compact" | "expand" | "mark_read" | "review_later" | "pause" | "resume" | "archive" | "move" | "forget" | "terminate";
 export function applies(s: Session, a: SelectionAction, online: boolean, updating: boolean): boolean;   // selectionActionApplies
-export function run(a: SelectionAction, rows: ActionRow[], options?: { clearArchive?: boolean }): Promise<void>;
+export function run(a: SelectionAction, rows: SelectionRow[], options?: { clearArchive?: boolean; paged?: boolean }): Promise<void>;
+// SelectionRow = ActionRow plus `status` and `reviewLater` (needed for "needs attention").
+// Batch items call `perform(row, action, { quiet: true })`, which suppresses the single-session notices.
 export const running: () => boolean;     // Qt's m_pending while a batch runs
 ```
 
@@ -585,6 +587,7 @@ Rules (`SessionsWindow.cpp:2844-2893`, `HgsClient.cpp:1326-1343`):
 - **Each row:** `state == "archived"`, a non-empty name, `archive_id` a lowercase hyphenated UUID, and `archived_at` a number in `[from, until)`; else "Invalid archived session identity. Refresh the archive.".
 - **The reply:** rows projected with `view::row` (with `archived_at`), plus `next_cursor`, `previous_cursor`, `total` and `position`.
 - **Cancellation:** a newer request for the same computer cancels the older one; its answer is dropped (`cancelArchivePages`).
+- **Cancel all:** leaving the filter, a hosts change, a query change and Refresh cancel every archive read (`cancel_archive_pages`, Qt `cancelArchivePages`).
 
 - [ ] Tests for each check through `decode` and one fake `hgs` page. Commit `feat(client): archive page read`.
 
@@ -596,7 +599,7 @@ Rules (`ArchiveBrowser.cpp`, `ArchiveDatePicker.cpp`):
   - A page that comes back empty while rows were shown is the error "Archive changed. Refresh to start a new view.".
   - Pages load only while the Archive filter shows the list.
   - A query change cancels pages and reloads after 300 ms.
-- **Date range:** the picker's periods and custom range, default the last 30 days (`m_first = today - 29`). `from >= until` loads nothing.
+- **Date range:** the picker's periods and custom range. The default is All dates (`m_period = 0`); the custom range starts at the last 30 days (`m_first = today - 29`). `from >= until` loads nothing.
 - **Status:**
   - "Loading archive…" while loading;
   - one computer with a window: "{a}–{b} of {total}", or "{shown} shown of {total}";
@@ -636,13 +639,16 @@ An empty archive id fails before any call with "Missing archive identity". The o
 
 Rules:
 - **Restore session** (5302-5304, 5360-5361, 5542-5560):
-  - The change entry of an archived row is enabled when available, `resumable`, `archiveId` is set, no live row on the same computer has the name (`archiveNameOccupied`), and `allowed("restore")`.
-  - A restore of the same session already pending, or 64 restores pending, gives the sticky "Finish or refresh the earlier restores before restoring another session.".
+  - The change entry of an archived row is enabled when available, `resumable`, `archiveId` is set, no live row on the same computer has the name (`archiveNameOccupied`). It does not read `allowed("restore")`: Qt's header (`m_changeAction`, 3897-3898) does not, and the client's right-click selects the row first, so its context menu is Qt's selected-row case, which reuses `m_changeAction` (5360). The batch's Resume / restore still needs `allowed("restore")` (`SessionSelection.cpp` 94-96).
+  - A restore of the same session already pending, another single restore still running (`m_restoreWriteKey`), or 64 restores pending, gives the sticky "Finish or refresh the earlier restores before restoring another session.". In a batch, a second instance of a name restored earlier in the run meets the same limit ("{name}: earlier restores still need a refresh", `SessionSelection.cpp` 336-338), or "session changed or is unavailable" once the catalog lists its live row. A restore stays pending until its live row appears running or its call fails. Qt's limit also counts `m_restoredInspections`, which the client does not have (see the last rule below).
 - **After a successful restore** (1958-1969, 3281-3336):
-  - The archive refreshes.
+  - The archive refreshes (Forget keeps its refresh too). A successful rename or Move to archive also refreshes the archive (`SessionsWindow.cpp:1917`).
+  - The batch's Compact/Expand and E's archived calls find loaded archived rows (the store's `archive.row(key)`), not only catalog rows.
   - When the restored row is still selected under the Archive filter, the filter becomes All; other scopes stay.
-  - When the live row of that name appears with the restored conversation, the selection follows it.
+  - While its restore is pending, the archived row stays the selected row after the archive reloads (Qt's `selected()`, 3136-3139).
+  - When the live row of that name appears with the restored conversation, the selection follows it; a live row without a conversation is followed too (3322-3323).
   - When it appears with another conversation, the selection clears with the sticky "The restored conversation could not be verified." Qt adds "Your archived draft remains in Saved drafts."; the client has no saved drafts before phase 4 (`zerus-5wmh.9`), which restores the full text.
+  - Only the single restore of the selected row is followed (`m_restoreKey`). A batch, a state filter or search change, a Rename or a Forget archived session cancels the follow; then a verified live row only clears a selection still on the archived row (3297-3305).
   - Phase 2's details matching on run and conversation already keeps old-run details from enabling controls (Qt's `awaitingRestoredInspection`).
 - **Forget archived session** (5378-5380, 5771-5774):
   - The end entry is enabled when available, `allowed("forget")` and `archiveId` is set.
@@ -700,6 +706,54 @@ Controller rulings during Piece B:
 - The attention and reply keys use the view agent (dsh keyed as `deepseek`) rather than Qt's raw `cmd`.
 - `set_notifications` answering "busy" (its lane is taken) is shown as the pending reason "A shared notification change is pending. Wait for its result."
 
+Controller rulings during Piece C:
+- Menu-launched Start fresh and Forget saved session run the click-time pre-check before their dialogs, as the copy entries do.
+- The header's Start fresh and Clear session follow Qt's main-context rule: neither shows while a subagent is open.
+- Forget archived session stays disabled until the Archive view (`zerus-5wmh.32`).
+- Task C4 added the README part and the smoke steps for PR 3.
+
+Controller rulings during Piece F:
+- The batch-running flag disables every write entry (Qt's m_pending).
+- Archived Resume and Forget are not counted until Piece E binds its hooks.
+- Move to project is disabled with "Arrives with project organisation." until the organization stream's move lands.
+- Pause all and Resume all are computer-wide calls on their own write claim.
+- The client shows machines as headings, since its menus have no submenus.
+- The selection bar needs more than one selected row, since the client has no single-row bulk mode.
+- The batch Terminate omits Qt's worktree checkbox and "Stop {n} sessions" labels until `zerus-5wmh.10`.
+- Task F4 added the README part and the smoke steps for PR 4.
+
+Controller rulings during Piece D:
+- Pages are kept on leaving the Archive filter and the default range is All dates, both as Qt (the first draft of D2 said otherwise).
+- Archived rows are flat cards until `zerus-5wmh.40` (Qt groups them by project).
+- The archived Activity pane waits for `zerus-5wmh.42`.
+- The paging-computer scan reads catalog rows while some live computer has no rows (Qt rebuilds its hosts on every refresh).
+- Task D4 added the README part and the smoke steps for PR 5.
+- Archive reads carry the store's request number, counted from the app's start so a reload never reuses one: a read at or below the cancel mark, or older than its computer's current read, starts cancelled and never cancels a newer one (Qt's synchronous `requestArchivePage` and `cancelArchivePages`).
+- The archive read's failure texts are Qt's `failureDetail` ("timed out", "cannot start '{hgs}': {error}", the trimmed standard error up to 4000 characters, or "exit code {n}"); other actions keep the client's shared texts.
+- The date panel renders through a Portal, since a fixed element inside the transformed strip overlay was misplaced. As Qt's popup, it keeps a hover-opened peek open (`SessionPanelDock.h:50-56`), Escape closes it first and Tab wraps inside it.
+- Archived rows show neither Open terminal nor the Mute and Mark group, as Qt's `showSessionMenu`.
+- Parked: numbering from the clock assumes it does not step back across a reload; a child ended by a signal with no standard error reads "hgs ended abnormally" where Qt shows "exit code {n}".
+
 Deviations from Qt, both from owner rules:
 - Attention marks and read replies are capped at 20 000 entries per map (bounded caches); Qt keeps them without a bound.
 - "Deselect all (Esc)" is "Deselect all" (no obvious keyboard hints).
+
+Deviations from Qt after Piece D:
+- The date inputs show the browser's empty date field instead of "Any date" (`ArchiveDatePicker.cpp`); the hint says "All archived dates (no date limits)".
+- An empty Archive list, loading or not, shows the client's "No matching sessions" card with its "Show all sessions" button. Qt shows an empty list and says "No matching sessions" only in the footer count (`SessionsWindowRows.cpp:473`). With no live row at all the client footer is empty, where Qt's reads the same text. Both sit in `SessionList.tsx` outside the agreed ArchiveBar line, so they stay.
+
+Controller rulings during Piece E:
+- The archive reloads once after a write batch ends (Clear archive included). Qt's own path (`SessionsWindow.cpp:1916`) never runs, because its deferred step leaves the selection running, so this is kept as a deviation.
+- Restore follows Qt without `allowed("restore")` in the header (`SessionsWindow.cpp:3897-3898`) and in the context menu, since every client context menu is Qt's selectedTarget case (5360). A batch's Resume / restore still reads it (`SessionSelection.cpp:94-96`).
+- A second archived instance of the same name in one batch reaches the restore limit: "earlier restores still need a refresh" (`SessionSelection.cpp:336-338`).
+- A thrown restore shows the sticky error notice with the error text, as a failed outcome does.
+- Task E3 added the README part and the smoke steps for PR 6.
+
+Deviations from Qt after Piece E:
+- "Session restored. Refreshing its current state…" and Qt's restored-inspection set (`m_restoredInspections`) in the 64 limit are not ported; the control gating rests on the details matching run and conversation.
+- "Updating session on {machine}…" is absent, as for every client change entry.
+- Qt's local launch question before a restore (`confirmLocalStart`) has no client counterpart, as for Resume.
+- The header's Forget archived on a retained archived source (after the archive reloaded) refuses at click time with the client's pre-check text, "This session is no longer available. Open its actions again."; Qt opens the dialog and refuses at confirmation with "…Refresh the list and open its actions again."
+- The restore follow is cancelled by the state filter, the search, a running batch, Rename and Forget archived; other single writes (pause, resume, terminate, start fresh) do not cancel it, as they act on another selected row.
+- The restore's conversation is the row's conversation id; Qt prefers `m_details`, which the client only returns when it matches the row's conversation.
+- A live row of a restored name that appears during a batch by another path is seen by the batch's occupied check only through a tracked restore (`taken`); otherwise `hgs` decides and the item counts as failed.

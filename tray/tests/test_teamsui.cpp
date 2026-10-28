@@ -706,6 +706,7 @@ private slots:
     void designerQuestionIsAnsweredInTheWindow();
     void coordinatorQueuesASecondMessageWithCancel();
     void coordinatorTakesPastedImagesAndFiles();
+    void terminalDraftIsShownAndSentFromTheConversation();
     void catalogEditorMarksManualEdits();
     void boardScrollsInsteadOfSqueezingColumns();
     void planningBoardScrollsInsteadOfSqueezingColumns();
@@ -5876,6 +5877,73 @@ else:print('{}')
     QVERIFY(sends().first()["text"].toString().contains("[Image #1]"));
     // Sent: the field and the files clear.
     QTRY_VERIFY(input->toPlainText().isEmpty()); QTRY_VERIFY(!files->isVisible());
+}
+
+// Owner, 2026-10-28: with text in the agent's Terminal input no window could
+// send. The refusal shows that draft with Send it, which presses Enter in
+// Terminal only for the draft shown; the owner's own message stays.
+void TestTeamsUi::terminalDraftIsShownAndSentFromTheConversation()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString program = dir.filePath("hgs");
+    QVERIFY(FakeCli::install(program, R"PY(#!/usr/bin/env python3
+import json,os,sys
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a=a[1:]
+here=__file__
+draft=os.path.exists(here+'.draft')
+if a[:1]==['inspect']:
+ print(json.dumps({'name':a[1],'run_id':'run-1','conversation_id':'conv-1','runtime_state':'live','process_state':'running',
+  'activity':'idle','phase':'idle','cursor':0,'events':[]}))
+elif a[:1]==['send']:
+ body=json.load(sys.stdin)
+ if draft:
+  sys.stderr.write('hgs: terminal has a draft, dialog, or unrecognized prompt; open Terminal and return to an empty agent prompt\n');sys.exit(1)
+ print(json.dumps({'request_id':body['request_id'],'name':a[1],'run_id':'run-1','conversation_id':'conv-1','status':'submitted','text':body['text']}))
+elif a[:1]==['terminal']:
+ body=json.load(sys.stdin)
+ open(here+'.terminal','a').write(json.dumps(body)+'\n')
+ base={'request_id':body['request_id'],'name':a[1],'run_id':'run-1','conversation_id':'conv-1'}
+ if body['action']=='draft':
+  print(json.dumps(dict(base,status='draft',draft_supported=True,draft='fix the build' if draft else None,draft_hash='a'*64)))
+ else:
+  os.remove(here+'.draft');print(json.dumps(dict(base,status='submitted')))
+else:print('{}')
+)PY"));
+    QFile(program + ".draft").open(QIODevice::WriteOnly);
+    TeamConversation::setPollInterval(100);
+    const auto restore = qScopeGuard([] { TeamConversation::setPollInterval(2000); });
+    HgsClient client(FakeCli::program(program));
+    TeamConversation conversation(&client);
+    QString opened;
+    conversation.openTerminal = [&](const QString &host, const QString &name) { opened = host + '|' + name; };
+    conversation.setSession({}, "claude/checkout/lead");
+    conversation.resize(560, 420); conversation.show();
+    auto *input = conversation.findChild<QPlainTextEdit *>("teamConversationInput");
+    auto *sendButton = conversation.findChild<QPushButton *>("teamConversationSend");
+    auto *bar = conversation.findChild<QFrame *>("teamConversationTerminalDraft");
+    QVERIFY(bar); QVERIFY(!bar->isVisible());
+    QTRY_VERIFY(sendButton->isEnabled());
+    QTest::qWait(300);   // the first read of the session
+    input->setPlainText("Also re-run the migrations"); sendButton->click();
+    QTRY_VERIFY(bar->isVisible());
+    QVERIFY(bar->findChild<QLabel *>("terminalDraftText")->text().contains("fix the build"));
+    QCOMPARE(input->toPlainText(), QString("Also re-run the migrations"));
+    bar->findChild<QPushButton *>("terminalDraftOpen")->click();
+    QCOMPARE(opened, QString("|claude/checkout/lead"));
+    bar->findChild<QPushButton *>("terminalDraftSend")->click();
+    QTRY_VERIFY(!bar->isVisible());
+    QList<QJsonObject> calls; QFile file(program + ".terminal"); QVERIFY(file.open(QIODevice::ReadOnly));
+    for (const auto &line : file.readAll().split('\n')) if (!line.isEmpty()) calls << QJsonDocument::fromJson(line).object();
+    QCOMPARE(calls.size(), 2);
+    QCOMPARE(calls[0]["action"].toString(), QString("draft"));
+    QCOMPARE(calls[1]["action"].toString(), QString("submit_draft"));
+    QCOMPARE(calls[1]["draft_hash"].toString(), QString(64, 'a'));
+    QCOMPARE(calls[1]["expected_run_id"].toString(), QString("run-1"));
+    // The owner's message is still there and now goes.
+    QCOMPARE(input->toPlainText(), QString("Also re-run the migrations"));
+    sendButton->click();
+    QTRY_VERIFY(input->toPlainText().isEmpty());
 }
 
 void TestTeamsUi::coordinatorQueuesASecondMessageWithCancel()

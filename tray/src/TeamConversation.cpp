@@ -3,6 +3,7 @@
 #include "CacheStatus.h"
 #include "HeldInputBar.h"
 #include "HgsClient.h"
+#include "TerminalDraftBar.h"
 #include "QuestionCard.h"
 #include "TeamWidgets.h"
 #include "CacheStatus.h"
@@ -108,6 +109,11 @@ TeamConversation::TeamConversation(HgsClient *client, QWidget *parent) : QWidget
     m_held->cancel = [this](const QString &id, const QString &text) {
         m_cancels.insert(m_client->requestCancelHeld(m_host, m_name, id), text);
     };
+    // Text left in the agent's Terminal input holds every send: show it here.
+    m_terminalDraft = new TerminalDraftBar(m_client); m_terminalDraft->setObjectName("teamConversationTerminalDraft");
+    v->addWidget(m_terminalDraft);
+    m_terminalDraft->openTerminal = [this] { if (openTerminal) openTerminal(m_host, m_name); };
+    m_terminalDraft->submitted = [this] { m_status->hide(); m_openTerminal->hide(); poll(); };
     auto *bottom = new QWidget; bottom->setObjectName("teamConversationBottom");
     auto *bv = new QVBoxLayout(bottom); bv->setContentsMargins(10, 6, 10, 10); bv->setSpacing(6);
     m_asks = new QWidget; m_asksLayout = new QHBoxLayout(m_asks); m_asksLayout->setContentsMargins(0, 0, 0, 0); m_asksLayout->setSpacing(6);
@@ -163,6 +169,7 @@ TeamConversation::TeamConversation(HgsClient *client, QWidget *parent) : QWidget
         if (request != m_sendRequest) return;
         m_sendRequest = 0; m_send->setEnabled(true); m_sentFiles.clear(); updateSend();
         showRefusal(error, uncertain);
+        if (!uncertain && error.contains(QStringLiteral("has a draft"))) m_terminalDraft->check();
         if (sent) sent(error.isEmpty() ? tr("Not sent") : error);
     });
     QObject::connect(m_client, &HgsClient::heldCancelFinished, this, [this](quint64 request, const QString &, const QString &, bool ok, const QJsonObject &receipt, const QString &error) {
@@ -205,6 +212,7 @@ void TeamConversation::setSession(const QString &host, const QString &name)
     m_input->setEnabled(m_designer || !name.isEmpty()); m_send->setEnabled((m_designer || !name.isEmpty()) && !m_sendRequest && !m_starting);
     if (!name.isEmpty() && m_starting) { m_starting = false; m_input->clear(); }
     m_status->hide(); m_openTerminal->hide();
+    m_terminalDraft->setSession(host, name, {}, {});
     m_questionChoice.clear(); renderQuestion();
     m_attach->setEnabled(!name.isEmpty());
     if (m_designer) {
@@ -229,6 +237,7 @@ void TeamConversation::setTheme(bool dark)
     m_view->setTheme(dark);
     m_question->setTheme(dark);
     m_held->setColors(c.fg, c.muted, c.border, c.surface);
+    m_terminalDraft->setColors(c.fg, c.muted, c.border, c.surface);
     m_attach->setIcon(workspaceIcon("attachment", colorsFor(dark).text2));
     m_view->setBubbles(WorkspaceSkin::current().view(QStringLiteral("activity")) == QLatin1String("bubbles"));
     if (m_designer) {
@@ -685,6 +694,9 @@ void TeamConversation::renderHeld()
     const QString agent = !m_agentName.isEmpty() ? m_agentName
         : m_details.value("agent").toString().isEmpty() ? tr("the agent") : m_details.value("agent").toString();
     m_held->setHeld(m_name.isEmpty() ? QJsonArray() : held, agent);
+    // Messages waiting for an agent that is not working: a Terminal draft may hold them.
+    m_terminalDraft->setSession(m_host, m_name, m_details.value("run_id").toString(), m_details.value("conversation_id").toString());
+    if (!held.isEmpty() && m_details.value("activity").toString() != QLatin1String("busy")) m_terminalDraft->check(true);
 }
 
 // A refusal names what holds the message. At a dialog, draft or unknown prompt

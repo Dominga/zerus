@@ -1430,6 +1430,16 @@ lists when Stop sends Escape; while Codex reports that turn interrupted and its
 input holds exactly them, Activity says the queued follow-ups are back in Codex's
 input. An edited draft, any other draft and follow-ups Stop did not see listed
 keep the general notice to return Terminal to an empty prompt.
+
+Text left in Claude's or Codex's own input holds every message sent from
+Activity or a team window. When a send is refused for it, or messages wait
+while the agent is not working, Activity and the team conversations show that
+draft above the message field with **Send it** and **Open Terminal**. Send it
+presses Enter in Terminal only while the input still holds exactly the draft
+shown (`hgs terminal <session> --json` with `"action":"draft"`, then
+`"action":"submit_draft"` and its `draft_hash`; a replayed request ID returns
+its receipt and presses nothing). Your own message stays in its field. HGS
+never types into, edits or clears the draft.
 Uncertain interruption is not repeated. Stop notices name the original session
 and computer even if you navigate away. If the turn has already ended or is
 waiting for input, no interruption is sent and no action is needed; Zerus refreshes

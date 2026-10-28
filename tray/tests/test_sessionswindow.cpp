@@ -405,6 +405,7 @@ private slots:
     void durableSubmissionKeepsGuiResponsive();
     void coldCacheConfirmationPreservesDraftAndPinsConversation();
     void coldCacheDialogRefreshedIdentityStillSends();
+    void heldMessagesShowTheTerminalDraftThatHoldsThem();
     void stoppedDshSessionStartsAndSends();
     void nativeColdCacheChoiceKeepsExactAnswer_data();
     void nativeColdCacheChoiceKeepsExactAnswer();
@@ -5316,6 +5317,49 @@ void TestSessionsWindow::coldCacheDialogRefreshedIdentityStillSends()
     QCOMPARE(payload["text"].toString(),QString("Send after the start"));
     // The receipt clears the sending state a moment after the fixture writes.
     QTRY_VERIFY(!composer->isSending(composer->sessionKey()));
+}
+
+// Owner, 2026-10-28: text in the agent's Terminal input held every message
+// sent from Activity. While messages wait for an agent that is not working,
+// Activity shows that draft with Send it (Enter in Terminal for exactly it).
+void TestSessionsWindow::heldMessagesShowTheTerminalDraftThatHoldsThem()
+{
+    QTemporaryDir temp; const auto program = temp.filePath("hgs");
+    QFile fixture(program); QVERIFY(fixture.open(QIODevice::WriteOnly));
+    fixture.write(R"PY(#!/usr/bin/env python3
+import json,os,pathlib,sys
+a=sys.argv[1:]
+if a[0].startswith('@'):a=a[1:]
+here=pathlib.Path(__file__).parent
+draft=(here/'draft').exists()
+if a[0]=='inspect':
+ print(json.dumps({'tracked':True,'run_id':'run-one','conversation_id':'conv-one','runtime_state':'live','process_state':'running',
+  'activity':'idle','phase':'idle','input_hold_supported':True,
+  'held_inputs':[{'request_id':'held-1','text':'Also run the tests','queued_at':1.0}] if draft else []}))
+elif a[0]=='terminal':
+ body=json.load(sys.stdin)
+ with open(here/'terminal.jsonl','a') as f:f.write(json.dumps(body)+'\n')
+ base={'request_id':body['request_id'],'name':a[1],'run_id':'run-one','conversation_id':'conv-one'}
+ if body['action']=='draft':print(json.dumps(dict(base,status='draft',draft_supported=True,draft='fix the build' if draft else None,draft_hash='b'*64)))
+ else:(here/'draft').unlink();print(json.dumps(dict(base,status='submitted')))
+else:print('{}')
+)PY"); fixture.close(); QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
+    QFile(temp.filePath("draft")).open(QIODevice::WriteOnly);
+    SessionsWindow window(FakeCli::program(program)); window.setFleet(fleet());
+    window.setDetailsPollForTests(300, 24 * 60 * 60 * 1000); window.show(); window.showSession({}, "codex/hgs/dashboard");
+    auto *bar = window.findChild<QFrame *>("sessionTerminalDraft"); QVERIFY(bar);
+    QTRY_VERIFY_WITH_TIMEOUT(bar->isVisible(), 15000);
+    QVERIFY(bar->findChild<QLabel *>("terminalDraftText")->text().contains("fix the build"));
+    bar->findChild<QPushButton *>("terminalDraftSend")->click();
+    QTRY_VERIFY_WITH_TIMEOUT(!bar->isVisible(), 15000);
+    QList<QJsonObject> calls; QFile log(temp.filePath("terminal.jsonl")); QVERIFY(log.open(QIODevice::ReadOnly));
+    for (const auto &line : log.readAll().split('\n')) if (!line.isEmpty()) calls << QJsonDocument::fromJson(line).object();
+    QVERIFY(!calls.isEmpty());
+    QCOMPARE(calls.last()["action"].toString(), QString("submit_draft"));
+    QCOMPARE(calls.last()["draft_hash"].toString(), QString(64, 'b'));
+    QCOMPARE(calls.last()["expected_run_id"].toString(), QString("run-one"));
+    // Nothing waits any more: the bar stays hidden.
+    QTest::qWait(1000); QVERIFY(!bar->isVisible());
 }
 
 void TestSessionsWindow::clearInspectionUpdatesActivityAndCountersImmediately()

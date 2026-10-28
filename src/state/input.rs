@@ -749,6 +749,55 @@ pub(super) fn codex_draft(record: &Value, screen: &str, cursor_y: usize) -> Opti
     Some(std::iter::once(first).chain(rows).collect::<Vec<_>>().join("\n").trim_end().to_owned())
 }
 
+/// The whole draft in Claude's input: the prompt row right under its upper
+/// separator, then indented rows up to the lower separator. The cursor must
+/// stand inside it, so a dialog or the transcript's own prompt rows never
+/// count; dim placeholder text is not a draft. `screen` is the styled capture.
+pub(super) fn claude_draft(screen: &str, cursor_y: usize) -> Option<String> {
+    let mut style = TerminalStyle::default();
+    let rows: Vec<String> = screen
+        .lines()
+        .map(|row| styled_cells(row, &mut style).into_iter().map(|(ch, dim, _)| if dim { ' ' } else { ch }).collect())
+        .collect();
+    let separator = |row: &str| {
+        let row = row.trim_end();
+        !row.starts_with(char::is_whitespace) && row.chars().count() >= 12 && row.chars().all(|ch| "─━╌".contains(ch))
+    };
+    let tail = |row: &str| -> Option<String> {
+        let mut chars = row.strip_prefix('❯').or_else(|| row.strip_prefix('>'))?.chars();
+        match chars.next() {
+            None => Some(String::new()),
+            // Native Claude uses a non-breaking space after its prompt glyph.
+            Some(ch) if ch.is_whitespace() => Some(chars.collect()),
+            _ => None,
+        }
+    };
+    let start = (1..=cursor_y.min(rows.len().checked_sub(1)?)).rev().find(|&i| tail(&rows[i]).is_some())?;
+    if !separator(&rows[start - 1]) {
+        return None;
+    }
+    let end = (start + 1..rows.len().min(start + 400)).find(|&i| separator(&rows[i]))?;
+    if !(start..end).contains(&cursor_y) {
+        return None;
+    }
+    let first = tail(&rows[start])?;
+    let rest = rows[start + 1..end].iter().map(|row| row.strip_prefix("  ").unwrap_or(row.trim_start()));
+    let text = std::iter::once(first.as_str()).chain(rest).map(str::trim_end).collect::<Vec<_>>().join("\n");
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// The draft in the native composer, for the owner to see and submit from any
+/// window (owner, 2026-10-28: text left in Terminal blocked every send).
+/// Claude reads the styled capture, Codex the plain one; other agents none.
+pub(super) fn native_draft(record: &Value, styled: &str, plain: &str, cursor_y: usize) -> Option<String> {
+    match string(record, "agent") {
+        "claude" => claude_draft(styled, cursor_y),
+        "codex" => codex_draft(record, plain, cursor_y).filter(|draft| !draft.trim().is_empty()),
+        _ => None,
+    }
+}
+
 pub(super) fn safe_filename(name: &str, index: usize) -> String {
     let name: String = name
         .chars()
@@ -1169,6 +1218,26 @@ mod tests {
             assert!(!composer_empty("claude", &screen.replace("❯\u{a0}", replacement), 2, 1));
         }
         assert!(!composer_empty("claude", screen, 3, 1));
+    }
+    #[test]
+    fn claude_draft_reads_the_composer_only() {
+        let rule = "────────────────────────────────────────";
+        let screen = |input: &str| format!("❯ Use the tool now.\n\n● Done.\n\n{rule}\n{input}\n{rule}\n  ⏸ manual mode on · ? for shortcuts\n");
+        assert_eq!(claude_draft(&screen("❯\u{a0}fix the build"), 5).as_deref(), Some("fix the build"));
+        let multi = screen("❯ first line\n  second line\n    indented");
+        assert_eq!(claude_draft(&multi, 7).as_deref(), Some("first line\nsecond line\n  indented"));
+        // Empty, a dim placeholder, the cursor outside, or a chooser: no draft.
+        assert_eq!(claude_draft(&screen("❯\u{a0}"), 5), None);
+        assert_eq!(claude_draft(&screen("❯ \x1b[2mTry \"fix lint errors\"\x1b[0m"), 5), None);
+        assert_eq!(claude_draft(&screen("❯ fix the build"), 0), None);
+        assert_eq!(claude_draft(&screen("❯ fix the build"), 7), None);
+        let chooser = format!("{rule}\n ☐ Model switch\n\n❯ 1. Switch automatically\n  2. Stay\n{rule}\n  3. Chat about this\n");
+        assert_eq!(claude_draft(&chooser, 3), None);
+        // No lower separator: an unknown layout is unread.
+        assert_eq!(claude_draft(&format!("{rule}\n❯ draft\n"), 1), None);
+        let record = json!({"agent":"claude"});
+        assert_eq!(native_draft(&record, &screen("❯ fix it"), "", 5).as_deref(), Some("fix it"));
+        assert_eq!(native_draft(&json!({"agent":"kimi"}), &screen("❯ fix it"), "", 5), None);
     }
     #[test]
     fn placeholder_is_not_a_draft_or_dialog() {

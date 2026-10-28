@@ -807,6 +807,32 @@ quint64 HgsClient::requestTeam(const QString &host, const QString &operation, co
     return request;
 }
 
+quint64 HgsClient::requestTerminalDraft(const QString &host, const QString &name, const QString &run, const QString &conversation,
+                                        const QString &submitHash)
+{
+    const quint64 request = ++m_terminalDraftRequest;
+    QJsonObject input{{"request_id", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                      {"action", submitHash.isEmpty() ? QStringLiteral("draft") : QStringLiteral("submit_draft")},
+                      {"expected_run_id", run}, {"expected_conversation_id", conversation}};
+    if (!submitHash.isEmpty()) input["draft_hash"] = submitHash;
+    QStringList args{QStringLiteral("terminal"), name, QStringLiteral("--json")};
+    if (!host.isEmpty()) args.prepend('@' + host);
+    runHgs(m_hgs, args, host.isEmpty() ? 15000 : 45000, this,
+        [this, request](const QByteArray &bytes) {
+            const auto data = QJsonDocument::fromJson(bytes);
+            if (!data.isObject()) return emit terminalDraftFailed(request, tr("Invalid Terminal response"));
+            const auto result = data.object();
+            // A refused Enter is a receipt; an uncertain one may have arrived.
+            const QString status = result.value("status").toString();
+            if (status == QLatin1String("failed")) return emit terminalDraftFailed(request, result.value("error").toString(tr("Not sent")));
+            if (status == QLatin1String("uncertain"))
+                return emit terminalDraftFailed(request, tr("Enter may have reached Terminal; check it before sending again. %1").arg(result.value("error").toString()));
+            emit terminalDraftReady(request, result);
+        }, [this, request](const QString &, const QString &error) { emit terminalDraftFailed(request, error); },
+        QJsonDocument(input).toJson(QJsonDocument::Compact));
+    return request;
+}
+
 int HgsClient::taskTimeoutMs(const QStringList &arguments) {
     const QString action = arguments.value(0);
     return action == QLatin1String("send") || action == QLatin1String("cancel") || action == QLatin1String("message") ? 90000 : 30000;

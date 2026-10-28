@@ -250,6 +250,10 @@ public:
     // WhiteWh fork: `hgs [@host] team <operation> --json` with `input` on stdin
     // (agent teams). A change carries its own request_id; none is retried.
     quint64 requestTeam(const QString &host, const QString &operation, const QJsonObject &input);
+    // The draft in the agent's own Terminal input (owner, 2026-10-28): read it,
+    // or with submitHash press Enter only while it is still exactly that draft.
+    quint64 requestTerminalDraft(const QString &host, const QString &name, const QString &run, const QString &conversation,
+                                 const QString &submitHash = {});
     // `hgs task <arguments>` on this computer, whose replica holds the project's
     // tasks. A prompt, report or comment travels on stdin; the reply is the JSON object.
     quint64 requestTask(const QStringList &arguments, const QString &input = {});
@@ -438,6 +442,8 @@ signals:
     void swarmFailed(quint64 request, const QString &error);
     void teamReady(quint64 request, const QString &host, const QString &operation, const QJsonObject &result);
     void teamFailed(quint64 request, const QString &host, const QString &operation, const QString &error);
+    void terminalDraftReady(quint64 request, const QJsonObject &result);
+    void terminalDraftFailed(quint64 request, const QString &error);
     void taskReady(quint64 request, const QJsonObject &result);
     void taskFailed(quint64 request, const QString &error);
     void sessionHostReady(quint64 request, const QJsonObject &result);
@@ -557,6 +563,7 @@ private:
     quint64 m_mobileRequest = 0;
     quint64 m_swarmRequest = 0;
     quint64 m_teamRequest = 0;
+    quint64 m_terminalDraftRequest = 0;
     quint64 m_taskRequest = 0;
     quint64 m_sessionHostRequest = 0;
     quint64 m_accountRequest = 0;

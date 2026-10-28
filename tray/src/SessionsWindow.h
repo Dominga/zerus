@@ -777,6 +777,7 @@ private:
     // U35: the messages hgs holds for the selected session, with Cancel; the
     // ones just queued per session until a read lists them; cancels in flight.
     class HeldInputBar *m_heldBar = nullptr;
+    class TerminalDraftBar *m_terminalDraft = nullptr;
     QHash<QString, QJsonArray> m_justHeld;
     QHash<quint64, QPair<QString, QString>> m_heldCancels;
     void renderHeld();

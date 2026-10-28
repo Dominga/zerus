@@ -23,6 +23,7 @@ pub mod run;
 pub mod shell;
 pub mod state;
 pub mod stream;
+pub mod swarm;
 pub mod tasks;
 pub mod terminal;
 pub mod view;

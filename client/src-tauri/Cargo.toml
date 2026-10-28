@@ -38,6 +38,8 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
 zerus-watch-protocol = { path = "../../crates/watch-protocol" }
 uuid = { version = "1", features = ["v4"] }
+# The composer's cache details show the expiry in local time (Qt's `d MMM HH:mm:ss`).
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # The pure-Rust core (watch streams, catalog state, per-frame batches).
 zerus-client-core = { path = "../core", optional = true }
 zerus-client-media = { path = "../media", optional = true }

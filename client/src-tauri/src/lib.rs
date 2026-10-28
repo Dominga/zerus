@@ -164,8 +164,55 @@ pub fn run() {
                             tauri::async_runtime::spawn_blocking(job);
                         }),
                         notify: std::sync::Arc::new(move || notify_pump.poke()),
+                        clock: std::sync::Arc::new(|| {
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_or(0.0, |d| d.as_secs_f64())
+                        }),
+                        rows: {
+                            let pump = app.state::<commands::AppState>().pump();
+                            std::sync::Arc::new(move |computer: &str, key: &str, name: &str| {
+                                pump.row(computer, key)
+                                    .or_else(|| pump.row_named(computer, name))
+                                    .map(|row| (row, pump.online(computer)))
+                            })
+                        },
+                        facts: {
+                            let actions = app.state::<actions::Actions>().inner().clone();
+                            let pump = app.state::<commands::AppState>().pump();
+                            std::sync::Arc::new(move |computer: &str, name: &str| {
+                                actions.session_write(computer, name, || {
+                                    (pump.row_named(computer, name), pump.online(computer))
+                                })
+                            })
+                        },
+                        inspect: {
+                            // A replay without an explicit ZERUS_CLIENT_HGS never reaches the real CLI.
+                            let allowed = actions::actions_allowed(
+                                std::env::var("ZERUS_CLIENT_REPLAY").ok().as_deref(),
+                                std::env::var("ZERUS_CLIENT_HGS").ok().as_deref(),
+                            );
+                            let hgs = zerus_client_core::default_hgs();
+                            std::sync::Arc::new(
+                                move |target: &zerus_client_core::Target, archive: Option<&str>| {
+                                    if !allowed {
+                                        return None;
+                                    }
+                                    let inv = zerus_client_core::details::details_invocation(target, archive);
+                                    match zerus_client_core::run_limited(&hgs, &inv, &[], 8 << 20) {
+                                        Ok(zerus_client_core::Exit::Code { code: 0, stdout, .. }) => {
+                                            serde_json::from_slice(&stdout).ok()
+                                        }
+                                        _ => None,
+                                    }
+                                },
+                            )
+                        },
                     },
                 ));
+                // The cache chip's minute and the inspect fallback; it sleeps
+                // while no composer is open.
+                app.state::<composer::Composers>().start_ticker();
             }
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             exit_on_signals(app.handle().clone());
@@ -456,6 +503,10 @@ mod tests {
                     });
                 }),
                 notify: Arc::new(|| {}),
+                clock: Arc::new(|| 1_793_000_100.0),
+                rows: Arc::new(|_, _, _| None),
+                facts: Arc::new(|_, _| None),
+                inspect: Arc::new(|_, _| None),
             },
         );
         composers.open(Some(session()));

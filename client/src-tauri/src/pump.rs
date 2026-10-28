@@ -103,6 +103,47 @@ impl Pump {
             .collect()
     }
 
+    /// The last-known row of `(computer, catalog key)`.
+    pub fn row(&self, computer: &str, key: &str) -> Option<ViewRow> {
+        self.lock()
+            .mirror
+            .computers
+            .get(computer)?
+            .rows
+            .get(key)
+            .cloned()
+    }
+
+    /// The computer's live row of that name (a session that started a new
+    /// run has a new catalog key). A scan of one computer's rows, only when
+    /// the key is gone.
+    pub fn row_named(&self, computer: &str, name: &str) -> Option<ViewRow> {
+        self.lock()
+            .mirror
+            .computers
+            .get(computer)?
+            .rows
+            .values()
+            .find(|row| row.name == name && row.state != "archived")
+            .cloned()
+    }
+
+    /// Whether the computer counts as online, as the frontend's
+    /// `computerOffline` reads it: neither reconnecting nor ended.
+    pub fn online(&self, computer: &str) -> bool {
+        self.lock()
+            .mirror
+            .computers
+            .get(computer)
+            .and_then(|rows| rows.status)
+            .is_none_or(|status| {
+                !matches!(
+                    status,
+                    ComputerStatus::Reconnecting { .. } | ComputerStatus::Ended
+                )
+            })
+    }
+
     /// Drains a change sink on its own thread until every sender is gone.
     pub fn drain(&self, changes: Receiver<Change>) {
         let pump = self.clone();
@@ -247,6 +288,48 @@ mod tests {
             key: key.into(),
             row: row(name),
         }
+    }
+
+    #[test]
+    fn rows_are_looked_up_by_key_and_name() {
+        let pump = Pump::default();
+        pump.push(upsert("run:a", "claude/p/a"));
+        pump.push(Change::Computer {
+            computer: ComputerId(String::new()),
+            status: ComputerStatus::Live,
+        });
+        pump.push(Change::Computer {
+            computer: ComputerId("studio".into()),
+            status: ComputerStatus::Reconnecting { attempt: 1 },
+        });
+        let _ = pump.take(PARK);
+        assert_eq!(pump.row("", "run:a").unwrap().name, "claude/p/a");
+        assert_eq!(pump.row_named("", "claude/p/a").unwrap().name, "claude/p/a");
+        assert!(pump.online(""));
+        assert!(!pump.online("studio"));
+        assert!(
+            pump.online("unknown"),
+            "as the frontend reads it: only reconnecting or ended is offline"
+        );
+    }
+
+    #[test]
+    fn a_name_finds_only_a_live_row() {
+        let pump = Pump::default();
+        let mut archived = row("claude/p/a");
+        archived.state = "archived".into();
+        pump.push(Change::Upsert {
+            computer: ComputerId(String::new()),
+            key: "archive:a-1".into(),
+            row: archived,
+        });
+        assert!(pump.row_named("", "claude/p/a").is_none());
+        assert!(pump.row("", "run:gone").is_none() && pump.row("studio", "run:a").is_none());
+        pump.push(Change::Computer {
+            computer: ComputerId(String::new()),
+            status: ComputerStatus::Ended,
+        });
+        assert!(!pump.online(""));
     }
 
     #[test]

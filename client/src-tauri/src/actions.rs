@@ -16,7 +16,7 @@
 //! their own lanes, as Qt's `m_queueSendRequest` and `m_removeQueuedRequest`,
 //! and so does an answer, one per session (`m_answersInFlight`).
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -31,7 +31,7 @@ use zerus_client_core::marks::{AttentionMarks, Mark};
 use zerus_client_core::readmarks::{ReadMark, ReadMarks};
 use zerus_client_core::reads::{self, ArchivePage};
 use zerus_client_core::shell::{current_shell, open_command};
-use zerus_client_core::{default_hgs, run, Action, Batch, ComputerId, Outcome, Target};
+use zerus_client_core::{default_hgs, run, Action, Batch, ComputerId, Outcome, Target, ViewRow};
 
 /// A session by computer id and session name, the action's lane and, for a
 /// message, the agent it goes to ("" for the session's own agent).
@@ -114,6 +114,61 @@ impl Drop for Claim {
     }
 }
 
+/// What a session's running write is, for the send rules (`BlockFacts`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteKind {
+    Update,
+    Terminate,
+}
+
+impl WriteKind {
+    pub fn of(action: &Action) -> Self {
+        match action {
+            Action::Terminate | Action::Kill => Self::Terminate,
+            _ => Self::Update,
+        }
+    }
+}
+
+/// The running writes by computer and session name ("" for a computer-wide one).
+type Writes = Arc<Mutex<HashMap<(String, String), WriteKind>>>;
+
+/// Clears a session's write kind when its call ends.
+pub struct WriteMark {
+    writes: Writes,
+    key: (String, String),
+}
+
+impl Drop for WriteMark {
+    fn drop(&mut self) {
+        self.writes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.key);
+    }
+}
+
+/// A call's claimed lane and, for a session write, its kind; both end when
+/// it drops.
+pub(crate) struct Running {
+    _claim: Claim,
+    _write: Option<WriteMark>,
+}
+
+/// Whether a call blocks messages to its session while it runs: a session
+/// write (Qt's `m_pending`, `m_renameKey` and `m_terminating`). A Terminal
+/// file drop shares the write lane but is not one: Qt's
+/// `m_terminalDropRequest` never blocks a message (`messageBlockReason`,
+/// `SessionsWindow.cpp:4386-4432`).
+fn blocks_messages(action: &Action) -> bool {
+    Lane::of(action) == Lane::Write && !matches!(action, Action::StageFiles { .. })
+}
+
+/// Terminations that succeeded, kept as Qt keeps `m_terminating` after the
+/// call (`SessionsWindow.cpp:1932-1934`) until the listing no longer shows
+/// that run running (`reconcileTerminations`, 3106-3115). At most this many.
+const TERMINATED: usize = 64;
+
 /// The managed state of the action commands; clones share it.
 #[derive(Clone)]
 pub struct Actions {
@@ -121,6 +176,10 @@ pub struct Actions {
     marks: Arc<Mutex<ReadMarks>>,
     /// Wakes the read-mark delivery worker (`readsync.rs`).
     pub(crate) wake: crate::readsync::Wake,
+    writes: Writes,
+    /// Computer, session name and the run each succeeded termination ended,
+    /// oldest first.
+    terminated: Arc<Mutex<VecDeque<(String, String, String)>>>,
 }
 
 impl Actions {
@@ -130,7 +189,107 @@ impl Actions {
             flight: InFlight::default(),
             marks: Arc::new(Mutex::new(ReadMarks::load(marks_path))),
             wake: crate::readsync::Wake::default(),
+            writes: Arc::default(),
+            terminated: Arc::default(),
         }
+    }
+
+    /// The kind of the write that runs for the session: its own, or one for
+    /// its whole computer (Pause all, Resume all), which Qt's `m_pending`
+    /// also counts.
+    pub fn write_kind(&self, computer: &str, name: &str) -> Option<WriteKind> {
+        let writes = self.writes.lock().unwrap_or_else(PoisonError::into_inner);
+        writes
+            .get(&(computer.to_owned(), name.to_owned()))
+            .or_else(|| writes.get(&(computer.to_owned(), String::new())))
+            .copied()
+    }
+
+    fn mark_write(&self, computer: &str, name: &str, action: &Action) -> WriteMark {
+        let key = (computer.to_owned(), name.to_owned());
+        self.writes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key.clone(), WriteKind::of(action));
+        WriteMark {
+            writes: Arc::clone(&self.writes),
+            key,
+        }
+    }
+
+    /// Claims `key`'s lane for `action`, None while a call already runs in
+    /// it. A session write also marks its kind (`write_kind`) under the
+    /// claimed computer and name, so Pause all and Resume all mark their
+    /// whole computer.
+    pub(crate) fn begin(&self, key: Key, action: &Action) -> Option<Running> {
+        let (computer, name) = (key.0.clone(), key.1.clone());
+        let claim = self.flight.claim(key)?;
+        let write = blocks_messages(action).then(|| self.mark_write(&computer, &name, action));
+        Some(Running {
+            _claim: claim,
+            _write: write,
+        })
+    }
+
+    /// A call ended: a termination that succeeded stays one for the send
+    /// rules (`session_write`). Called before its `Running` drops, so the
+    /// session never looks free in between.
+    pub(crate) fn finished(&self, target: &Target, action: &Action, outcome: &Outcome) {
+        if WriteKind::of(action) != WriteKind::Terminate || !matches!(outcome, Outcome::Done { .. })
+        {
+            return;
+        }
+        let mut terminated = self
+            .terminated
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        terminated
+            .retain(|(computer, name, _)| computer != &target.computer || name != &target.name);
+        terminated.push_back((
+            target.computer.clone(),
+            target.name.clone(),
+            target.run_id.clone(),
+        ));
+        while terminated.len() > TERMINATED {
+            terminated.pop_front();
+        }
+    }
+
+    /// The session's write for the send rules: one that runs (`write_kind`),
+    /// or a termination that succeeded while its run still shows. `live`
+    /// gives the computer's live row of that name and whether the computer
+    /// is online; it is asked only while such a termination is kept. As in
+    /// Qt, the row must be the run the termination ended (`isTerminating`,
+    /// `SessionsWindow.cpp:3100-3104`), and only an online computer whose
+    /// row no longer runs that run lets it go (`reconcileTerminations`).
+    pub fn session_write(
+        &self,
+        computer: &str,
+        name: &str,
+        live: impl FnOnce() -> (Option<ViewRow>, bool),
+    ) -> Option<WriteKind> {
+        if let Some(kind) = self.write_kind(computer, name) {
+            return Some(kind);
+        }
+        let run = self
+            .terminated
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|(c, n, _)| c == computer && n == name)
+            .map(|(_, _, run)| run.clone())?;
+        let (row, online) = live();
+        let same_run = row
+            .as_ref()
+            .filter(|row| row.run_id.as_deref() == Some(run.as_str()));
+        if online && same_run.is_none_or(|row| row.state != "running") {
+            self.terminated
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .retain(|(c, n, r)| c != computer || n != name || r != &run);
+            return None;
+        }
+        same_run.map(|_| WriteKind::Terminate)
     }
 
     /// `queue_read_marks`: merges each mark into the pending ones
@@ -492,6 +651,19 @@ pub async fn dispatch(state: &Actions, target: Target, action: Action) -> Result
     if blocked() {
         return Ok(failed(REPLAY_NEEDS_HGS));
     }
+    dispatch_with(state, target, action, run).await
+}
+
+/// `dispatch` past its replay guard, with the runner that starts `hgs`:
+/// the core's `run`, or in tests a stand-in that starts no process.
+async fn dispatch_with(
+    state: &Actions,
+    target: Target,
+    action: Action,
+    runner: impl FnOnce(&std::path::Path, &zerus_client_core::Invocation) -> zerus_client_core::Exit
+        + Send
+        + 'static,
+) -> Result<Outcome, String> {
     if let Some(refusal) = refused_before_claim(&target, &action) {
         return Ok(failed(refusal));
     }
@@ -501,7 +673,9 @@ pub async fn dispatch(state: &Actions, target: Target, action: Action) -> Result
     if matches!(action, Action::PauseAll { .. } | Action::ResumeAll { .. }) {
         key.1 = String::new();
     }
-    let Some(_claim) = state.flight.claim(key) else {
+    // The claim, and for a session write its kind for the send rules
+    // (`write_kind`), held until the call ends.
+    let Some(_running) = state.begin(key, &action) else {
         return match Lane::of(&action) {
             Lane::Send => Ok(failed(ALREADY_SENDING)),
             Lane::Answer => Ok(failed(ALREADY_ANSWERING)),
@@ -534,13 +708,17 @@ pub async fn dispatch(state: &Actions, target: Target, action: Action) -> Result
     let (call_target, call_action) = (target.clone(), action.clone());
     let ran = tauri::async_runtime::spawn_blocking(move || {
         let inv = invocation(&call_target, &call_action, &request_id)?;
-        let exit = run(&hgs, &inv);
+        let exit = runner(&hgs, &inv);
         Ok::<_, String>((inv, exit))
     })
     .await
     .map_err(|error| error.to_string())?;
     match ran {
-        Ok((inv, exit)) => Ok(classify(&target, &action, &inv, exit)),
+        Ok((inv, exit)) => {
+            let outcome = classify(&target, &action, &inv, exit);
+            state.finished(&target, &action, &outcome);
+            Ok(outcome)
+        }
         Err(refusal) => Ok(failed(refusal)),
     }
 }
@@ -778,6 +956,265 @@ pub fn update_attention_marks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_running_write_reports_its_kind() {
+        let actions = Actions::new(
+            std::env::temp_dir().join(format!("zerus-kinds-{}.json", std::process::id())),
+        );
+        assert_eq!(actions.write_kind("", "claude/sample-project/review"), None);
+        let guard = actions.mark_write("", "claude/sample-project/review", &Action::Terminate);
+        assert_eq!(
+            actions.write_kind("", "claude/sample-project/review"),
+            Some(WriteKind::Terminate)
+        );
+        drop(guard);
+        assert_eq!(actions.write_kind("", "claude/sample-project/review"), None);
+        assert_eq!(WriteKind::of(&Action::Pause), WriteKind::Update);
+    }
+
+    fn review() -> Target {
+        Target {
+            computer: "studio".into(),
+            name: "claude/sample-project/review".into(),
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+        }
+    }
+
+    #[test]
+    fn a_dispatched_write_marks_its_kind_until_it_ends() {
+        let actions = Actions::new(std::env::temp_dir().join("zerus-begin-test-marks.json"));
+        let target = review();
+        let kind = || actions.write_kind("studio", "claude/sample-project/review");
+        let kill = actions
+            .begin(Lane::key(&target, &Action::Kill), &Action::Kill)
+            .unwrap();
+        assert_eq!(kind(), Some(WriteKind::Terminate));
+        assert_eq!(
+            actions.write_kind("studio", "claude/sample-project/other"),
+            None,
+            "another session of the computer takes messages"
+        );
+        assert!(
+            actions
+                .begin(Lane::key(&target, &Action::Pause), &Action::Pause)
+                .is_none(),
+            "one write per session"
+        );
+        assert_eq!(
+            kind(),
+            Some(WriteKind::Terminate),
+            "a refused claim marks nothing"
+        );
+        drop(kill);
+        assert_eq!(kind(), None);
+        let rename = Action::Rename {
+            new_name: "claude/sample-project/review-2".into(),
+            archive_id: None,
+        };
+        let renaming = actions.begin(Lane::key(&target, &rename), &rename).unwrap();
+        assert_eq!(kind(), Some(WriteKind::Update));
+        drop(renaming);
+        // Other lanes, and a Terminal file drop on the write lane, block no message.
+        let stage = Action::StageFiles {
+            paths: vec![],
+            expected_created: None,
+        };
+        for action in [
+            Action::Interrupt { turn_started: 1.0 },
+            Action::MarkRead {
+                reply_id: None,
+                attention_signature: None,
+            },
+            Action::StopProcess {
+                process_id: "p1".into(),
+                archive_id: None,
+                generation: None,
+            },
+            stage,
+        ] {
+            let running = actions.begin(Lane::key(&target, &action), &action).unwrap();
+            assert_eq!(kind(), None, "{action:?}");
+            drop(running);
+        }
+    }
+
+    #[test]
+    fn dispatch_marks_a_write_for_the_length_of_its_call() {
+        use zerus_client_core::Exit;
+        let actions = Actions::new(std::env::temp_dir().join("zerus-dispatch-test-marks.json"));
+        let call = |action: Action, code: i32| {
+            let (seen, during) = (actions.clone(), Arc::new(Mutex::new(None)));
+            let record = Arc::clone(&during);
+            let outcome = tauri::async_runtime::block_on(dispatch_with(
+                &actions,
+                review(),
+                action,
+                move |_, _| {
+                    *record.lock().unwrap() =
+                        Some(seen.write_kind("studio", "claude/sample-project/review"));
+                    Exit::Code {
+                        code,
+                        stdout: Vec::new(),
+                        stderr: String::new(),
+                    }
+                },
+            ))
+            .unwrap();
+            let during = during.lock().unwrap().expect("the stand-in ran");
+            (outcome, during)
+        };
+        let still_running = || {
+            actions.session_write("studio", "claude/sample-project/review", || {
+                (live("running", "run-1"), true)
+            })
+        };
+        let (outcome, during) = call(Action::Pause, 1);
+        assert!(matches!(outcome, Outcome::Failed { .. }));
+        assert_eq!(during, Some(WriteKind::Update), "marked while it runs");
+        assert_eq!(
+            actions.write_kind("studio", "claude/sample-project/review"),
+            None
+        );
+        let (outcome, during) = call(Action::Terminate, 1);
+        assert!(matches!(outcome, Outcome::Failed { .. }));
+        assert_eq!(during, Some(WriteKind::Terminate));
+        assert_eq!(still_running(), None, "a failed termination is over");
+        let (outcome, during) = call(Action::Terminate, 0);
+        assert!(matches!(outcome, Outcome::Done { .. }));
+        assert_eq!(during, Some(WriteKind::Terminate));
+        assert_eq!(
+            actions.write_kind("studio", "claude/sample-project/review"),
+            None
+        );
+        assert_eq!(
+            still_running(),
+            Some(WriteKind::Terminate),
+            "a done termination holds while its run still runs"
+        );
+        let (_, during) = call(Action::Interrupt { turn_started: 1.0 }, 0);
+        assert_eq!(during, None, "an interrupt is no write");
+    }
+
+    #[test]
+    fn pause_all_marks_every_session_of_its_computer() {
+        let actions = Actions::new(std::env::temp_dir().join("zerus-all-test-marks.json"));
+        let mut key = Lane::key(&review(), &Action::PauseAll { count: 2 });
+        key.1 = String::new();
+        let all = actions.begin(key, &Action::PauseAll { count: 2 }).unwrap();
+        assert_eq!(
+            actions.write_kind("studio", "claude/sample-project/review"),
+            Some(WriteKind::Update)
+        );
+        assert_eq!(
+            actions.write_kind("laptop", "claude/sample-project/review"),
+            None
+        );
+        drop(all);
+        assert_eq!(
+            actions.write_kind("studio", "claude/sample-project/review"),
+            None
+        );
+    }
+
+    fn live(state: &str, run: &str) -> Option<ViewRow> {
+        Some(ViewRow {
+            name: "claude/sample-project/review".into(),
+            state: state.into(),
+            run_id: Some(run.into()),
+            ..ViewRow::default()
+        })
+    }
+
+    #[test]
+    fn a_finished_termination_holds_until_its_run_stops_running() {
+        let actions = Actions::new(std::env::temp_dir().join("zerus-ended-test-marks.json"));
+        let target = review();
+        let done = Outcome::Done {
+            receipt: serde_json::Value::Null,
+            cleanup: None,
+        };
+        let write = |live: Option<ViewRow>, online: bool| {
+            actions.session_write("studio", "claude/sample-project/review", || (live, online))
+        };
+        actions.finished(&target, &Action::Terminate, &failed("refused"));
+        actions.finished(&target, &Action::Pause, &done);
+        assert_eq!(
+            write(live("running", "run-1"), true),
+            None,
+            "only a done termination stays"
+        );
+        actions.finished(&target, &Action::Terminate, &done);
+        assert_eq!(
+            write(live("running", "run-1"), true),
+            Some(WriteKind::Terminate)
+        );
+        assert_eq!(
+            write(live("running", "run-1"), false),
+            Some(WriteKind::Terminate)
+        );
+        assert_eq!(
+            write(live("paused", "run-1"), false),
+            Some(WriteKind::Terminate),
+            "an offline listing proves nothing"
+        );
+        assert_eq!(write(live("running", "run-2"), false), None, "another run");
+        assert_eq!(
+            write(live("running", "run-1"), true),
+            Some(WriteKind::Terminate)
+        );
+        // Online, and the run no longer runs: it is let go for good.
+        assert_eq!(write(live("paused", "run-1"), true), None);
+        assert_eq!(write(live("running", "run-1"), true), None);
+        // Online, and no live row of that name at all: likewise.
+        actions.finished(&target, &Action::Kill, &done);
+        assert_eq!(write(None, false), None, "offline: nothing to compare");
+        assert_eq!(
+            write(live("running", "run-1"), false),
+            Some(WriteKind::Terminate),
+            "still kept"
+        );
+        assert_eq!(write(None, true), None);
+        assert_eq!(write(live("running", "run-1"), true), None);
+        // A running write answers first, without asking for the row.
+        let running = actions
+            .begin(Lane::key(&target, &Action::Pause), &Action::Pause)
+            .unwrap();
+        assert_eq!(
+            actions.session_write("studio", "claude/sample-project/review", || unreachable!()),
+            Some(WriteKind::Update)
+        );
+        drop(running);
+    }
+
+    #[test]
+    fn finished_terminations_are_bounded() {
+        let actions = Actions::new(std::env::temp_dir().join("zerus-bound-test-marks.json"));
+        let done = Outcome::Done {
+            receipt: serde_json::Value::Null,
+            cleanup: None,
+        };
+        for n in 0..TERMINATED + 6 {
+            let mut target = review();
+            target.name = format!("claude/sample-project/s-{n}");
+            actions.finished(&target, &Action::Kill, &done);
+        }
+        let kept = actions.terminated.lock().unwrap().len();
+        assert_eq!(kept, TERMINATED);
+        let held = |n: usize| {
+            let name = format!("claude/sample-project/s-{n}");
+            let row = ViewRow {
+                name: name.clone(),
+                state: "running".into(),
+                run_id: Some("run-1".into()),
+                ..ViewRow::default()
+            };
+            actions.session_write("studio", &name, || (Some(row), true))
+        };
+        assert_eq!(held(0), None, "the oldest went first");
+        assert_eq!(held(TERMINATED + 5), Some(WriteKind::Terminate));
+    }
 
     #[test]
     fn a_newer_archive_request_of_a_computer_cancels_the_older() {

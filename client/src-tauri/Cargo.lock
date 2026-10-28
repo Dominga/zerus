@@ -5245,6 +5245,7 @@ dependencies = [
 name = "zerus-client"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "gtk",
  "libc",
  "objc2",

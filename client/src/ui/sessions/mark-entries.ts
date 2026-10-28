@@ -1,6 +1,6 @@
 import { GONE, notify, stillListed } from "../../store/actions";
 import { markAllRead, markNeedsAttention, markRead, unreadReplies } from "../../store/marks";
-import { computerOffline } from "../../store/catalog";
+import { computerFresh } from "../../store/catalog";
 import { needsAttention, type MenuEntry } from "../../store/ui";
 import type { AttentionFacts } from "../../store/attention";
 import { snapshotOf, type ActionRow } from "./actions-ui";
@@ -41,7 +41,7 @@ export function runMarkNeedsAttention(row: ActionRow): boolean {
 export function markEntry(s: Session): Extract<MenuEntry, { label: string }> | undefined {
   if (s.state === "archived") return undefined;
   const row = snapshotOf(s);
-  return markReadChip(s, !computerOffline(s.computer)).active
+  return markReadChip(s, computerFresh(s.computer)).active
     ? { label: "Mark as read", icon: "check-check", action: () => { runMarkRead(row); } }
     : { label: "Mark needs attention", icon: "bell", hint: REVIEW_HINT, action: () => { runMarkNeedsAttention(row); } };
 }

@@ -1,6 +1,6 @@
 import { createMemo, createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
-import { catalog, computerOffline, orderedRows } from "./catalog";
+import { catalog, computerFresh, orderedRows } from "./catalog";
 import { documentVisibility } from "./visibility";
 import { isActive, needsAttention } from "./attention";
 import type { Session, Status } from "../ui/sessions/types";
@@ -97,8 +97,8 @@ export const selected = createMemo<Session | undefined>(() => {
   return key ? catalog.rows[key] ?? archivedRow(key) : undefined;
 });
 
-/** The window's online state of a row: its computer's stream is not down (the card's Offline). */
-const online = (s: Session) => !computerOffline(s.computer);
+/** The window's online state of a row: its computer's rows are current (Qt's `entry.online`). */
+const online = (s: Session) => computerFresh(s.computer);
 
 export function matchesFilter(s: Session, f: StateFilter): boolean {
   switch (f) {

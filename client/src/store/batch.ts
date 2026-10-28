@@ -1,5 +1,5 @@
 import { batch as together, createSignal } from "solid-js";
-import { catalog as appCatalog, computerOffline, type CatalogState } from "./catalog";
+import { catalog as appCatalog, computerFresh, computerOffline, type CatalogState } from "./catalog";
 import { dismiss as appDismiss, notify as appNotify, perform as appPerform, performComputer as appPerformComputer, updating as appUpdating, type Notice } from "./actions";
 import { markNeedsAttention as appMarkNeedsAttention, markRead as appMarkRead } from "./marks";
 import { compactRows, needsAttention, setCompactRows } from "./ui";
@@ -208,7 +208,7 @@ const app = createBatch({
   notify: appNotify,
   dismiss: appDismiss,
   compact: { get: (key) => !!compactRows[key], set: (key, compact) => setCompactRows(key, compact) },
-  attention: (s) => needsAttention(s as Session, !computerOffline(s.computer)),
+  attention: (s) => needsAttention(s as Session, computerFresh(s.computer)),
   markRead: appMarkRead,
   markNeedsAttention: appMarkNeedsAttention,
   // Without the dialog nothing destructive runs.

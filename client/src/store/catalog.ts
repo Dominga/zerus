@@ -4,6 +4,7 @@ import { createStore, produce, reconcile, unwrap } from "solid-js/store";
 import type { Batch, ComputerId, RowOut, ViewRow } from "../types";
 import type { AgentKind, Session, Status } from "../ui/sessions/types";
 import { marks as appMarks, type RowMarks } from "./marks";
+import { connectionOf } from "./overview";
 
 // The catalog: every live session row of every computer, keyed by
 // computer + "\n" + catalog key. A batch is one reactive transaction. An
@@ -281,6 +282,17 @@ export const orderedRows = () => catalog.order.map((id) => catalog.rows[id]).fil
 export function computerOffline(computer: ComputerId): boolean {
   const status = catalog.computers[computer]?.status;
   return status === "reconnecting" || status === "ended";
+}
+
+/**
+ * The window's online state of a computer's rows, as the Overview's: its
+ * stream is live or polled. Qt decides both alike: the Sessions list's
+ * `entry.online` (SessionsWindow.cpp:3207-3213) is the Dashboard's
+ * `machine.fresh` (DashboardPage.cpp:411-412), so a computer still
+ * connecting, probing or unsupported is not online.
+ */
+export function computerFresh(computer: ComputerId): boolean {
+  return connectionOf(catalog.computers[computer]?.status).fresh;
 }
 
 export type { RowOut };

@@ -27,7 +27,9 @@ import { archiveCount, archiveTip } from "../../store/archive";
 import { stillListed } from "../../store/actions";
 import { counts, matchesFilter, selected, setMachineFilter, setSearch, setSelectedKey, setStateFilter } from "../../store/ui";
 import { catalog } from "../../store/catalog";
+import { applies } from "../../store/batch";
 import { listRows } from "./model";
+import { markEntry } from "./mark-entries";
 import { snapshotOf } from "./actions-ui";
 import { emptyBatch, type ArchivePage, type ViewRow } from "../../types";
 
@@ -53,6 +55,31 @@ describe("the window's attention in the app", () => {
     applyBatch({ ...emptyBatch(), removes: [{ computer: "attention-peer", key: "run:ask" }],
       computers: [{ computer: "attention-peer", status: "ended", attempt: 0 }] });
     expect(row()).toBeUndefined();
+  });
+});
+
+describe("the window's online state in the app", () => {
+  it("is the Overview's: a computer still connecting counts as Qt's unreachable box in the list, the batch and Mark as read (SessionsWindow.cpp:3207-3213)", () => {
+    const asking: ViewRow = { name: "claude/p/wait", agent: "claude", status: "attention", phase: "approval", state: "running",
+      needs_action: true, needs_attention: true, child_attention: false };
+    applyBatch({ ...emptyBatch(), computers: [{ computer: "connecting-peer", status: "probing", attempt: 0 }],
+      replaces: [{ computer: "connecting-peer", rows: [{ computer: "connecting-peer", key: "run:wait", row: asking }] }] });
+    const row = () => catalog.rows["connecting-peer\nrun:wait"];
+    const before = counts().attention;
+    expect(matchesFilter(row(), "attention")).toBe(false);
+    expect(applies(row(), "mark_read", true, false)).toBe(false);
+    expect(markEntry(row())?.label).toBe("Mark needs attention");
+    applyBatch({ ...emptyBatch(), computers: [{ computer: "connecting-peer", status: "live", attempt: 0 }] });
+    expect(matchesFilter(row(), "attention")).toBe(true);
+    expect(counts().attention).toBe(before + 1);
+    expect(applies(row(), "mark_read", true, false)).toBe(true);
+    expect(markEntry(row())?.label).toBe("Mark as read");
+    for (const status of ["unsupported", "polled"]) {
+      applyBatch({ ...emptyBatch(), computers: [{ computer: "connecting-peer", status, attempt: 0 }] });
+      expect(matchesFilter(row(), "attention")).toBe(status === "polled");
+    }
+    applyBatch({ ...emptyBatch(), removes: [{ computer: "connecting-peer", key: "run:wait" }],
+      computers: [{ computer: "connecting-peer", status: "ended", attempt: 0 }] });
   });
 });
 

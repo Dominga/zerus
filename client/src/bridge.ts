@@ -1,6 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type Outcome, type ReadMark, type Target } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 
@@ -243,4 +243,33 @@ export function onScreensChanged(listener: (screen: Screen) => void): () => void
     stopped = true;
     stop?.();
   };
+}
+
+const DESKTOP_TERMINAL = "Terminal needs the desktop app.";
+
+export async function terminalConnect(view: string, target: TerminalTarget, cols: number, rows: number, onEvent: (m: ArrayBuffer | TerminalFinished) => void): Promise<TerminalConnected> {
+  if (!inTauri()) throw DESKTOP_TERMINAL;
+  const channel = new Channel<ArrayBuffer | TerminalFinished>();
+  channel.onmessage = onEvent;
+  return invoke<TerminalConnected>("terminal_connect", { view, target, cols, rows, on_event: channel });
+}
+export async function terminalWrite(view: string, generation: number, bytes: Uint8Array): Promise<void> {
+  if (!inTauri()) return;
+  await invoke("terminal_write", bytes, { headers: { "x-zerus-view": view, "x-zerus-generation": String(generation) } });
+}
+export async function terminalResize(view: string, generation: number, cols: number, rows: number): Promise<void> {
+  if (inTauri()) await invoke("terminal_resize", { view, generation, cols, rows });
+}
+export function terminalAck(view: string, generation: number): void {
+  if (inTauri()) void invoke("terminal_ack", { view, generation }).catch(() => {});
+}
+export async function terminalDisconnect(view: string): Promise<string | null> {
+  return inTauri() ? invoke<string | null>("terminal_disconnect", { view }) : null;
+}
+export async function terminalRetarget(view: string, target: TerminalTarget): Promise<boolean> {
+  return inTauri() ? invoke<boolean>("terminal_retarget", { view, target }) : true;
+}
+export async function terminalStatus(input: { facts: TerminalFacts; details: unknown; state: string; online: boolean; restored_pending: boolean; name: string; machine: string }): Promise<TerminalStatus> {
+  if (!inTauri()) return { supported: false, available: false, reason: DESKTOP_TERMINAL, idle: "", connecting: "", disconnected: "" };
+  return invoke<TerminalStatus>("terminal_status", { input });
 }

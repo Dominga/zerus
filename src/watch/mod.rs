@@ -12,6 +12,7 @@ mod catalog;
 mod git;
 mod processes;
 mod stamps;
+mod tasks;
 mod writer;
 
 use crate::cli::{Error, Result};
@@ -76,6 +77,8 @@ enum Input {
     Git(git::Done),
     /// A process inventory read finished on a worker.
     Processes(processes::Done),
+    /// A task list read finished on a worker.
+    Tasks(tasks::Done),
     End,
 }
 
@@ -137,6 +140,7 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             ),
             Ok(Input::Git(done)) => watch.git_done(done),
             Ok(Input::Processes(done)) => watch.processes_done(done),
+            Ok(Input::Tasks(done)) => watch.tasks_done(done),
             Ok(Input::End) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
@@ -158,6 +162,7 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         watch.resync_activity();
         watch.flush_git();
         watch.flush_processes();
+        watch.flush_tasks();
     }
 }
 
@@ -332,6 +337,8 @@ struct Watch<'a> {
     git_results: mpsc::Sender<Input>,
     processes: processes::Processes,
     processes_pool: Option<processes::Pool>,
+    tasks: tasks::Tasks,
+    tasks_pool: Option<tasks::Pool>,
     writers: Writers,
 }
 
@@ -376,6 +383,8 @@ impl<'a> Watch<'a> {
             git_results,
             processes: processes::Processes::new(),
             processes_pool: None,
+            tasks: tasks::Tasks::new(),
+            tasks_pool: None,
             writers: Writers::None,
         }
     }
@@ -388,7 +397,7 @@ impl<'a> Watch<'a> {
             stream: uuid::Uuid::new_v4().to_string(),
             heartbeat_ms: protocol::HEARTBEAT_MS,
             max_frame_bytes: protocol::MAX_FRAME_BYTES,
-            topics: [topic::CATALOG, topic::CATALOG_META, topic::ACTIVITY, topic::GIT, topic::PROCESSES].map(str::to_owned).to_vec(),
+            topics: [topic::CATALOG, topic::CATALOG_META, topic::ACTIVITY, topic::GIT, topic::PROCESSES, topic::TASKS].map(str::to_owned).to_vec(),
             limits: protocol::Limits::default(),
         };
         self.out.put(&Body::Hello(hello));
@@ -821,6 +830,10 @@ impl<'a> Watch<'a> {
             let jobs = self.processes.pulse(now);
             self.run_processes(jobs);
         }
+        if !self.tasks.is_empty() {
+            let jobs = self.tasks.pulse(now, stamps::files);
+            self.run_tasks(jobs);
+        }
     }
 
     fn open_journal(&mut self) {
@@ -1215,6 +1228,86 @@ impl<'a> Watch<'a> {
         });
     }
 
+    // ---- Tasks -------------------------------------------------------------
+
+    fn subscribe_tasks(&mut self, project: Option<&str>) {
+        let Some(project) = project.filter(|project| {
+            !project.is_empty() && project.len() <= tasks::PROJECT_BYTES && !project.chars().any(char::is_control)
+        }) else {
+            self.out.error("bad_request", "a tasks subscription names its project ID", Some(topic::TASKS), None);
+            return;
+        };
+        if !self.tasks.contains(project) && self.tasks.len() >= protocol::TASKS_SUBSCRIPTIONS {
+            self.out.error(
+                "too_many_subscriptions",
+                &format!("a stream follows the tasks of at most {} projects", protocol::TASKS_SUBSCRIPTIONS),
+                Some(topic::TASKS),
+                Some(project),
+            );
+            return;
+        }
+        let job = self.tasks.subscribe(project, Instant::now());
+        self.run_tasks([job]);
+    }
+
+    /// Hands reads to the task list worker, started with the first one.
+    fn run_tasks(&mut self, jobs: impl IntoIterator<Item = tasks::Job>) {
+        for job in jobs {
+            let pool = self.tasks_pool.get_or_insert_with(|| {
+                let results = self.git_results.clone();
+                tasks::Pool::spawn(tasks::WORKERS, move |done| {
+                    let _ = results.send(Input::Tasks(done));
+                })
+            });
+            pool.run(job);
+        }
+    }
+
+    fn tasks_done(&mut self, done: tasks::Done) {
+        let key = done.key.clone();
+        let config = self.config;
+        let store = |id: &str| {
+            let dir = crate::tasks::store_dir(config, id);
+            vec![dir.join("tasks"), dir]
+        };
+        if let Some(error) = self.tasks.done(done, store) {
+            self.out.failure("tasks_failed", &error, Some(topic::TASKS), Some(&key));
+        }
+    }
+
+    /// Sends changed task lists as paged snapshots unless the client is
+    /// behind; the latest of each project goes out once it catches up.
+    fn flush_tasks(&mut self) {
+        if !self.tasks.pending() || self.out.writer.backlog() > DEFER_BYTES {
+            return;
+        }
+        let out = &mut self.out;
+        self.tasks.flush(|key, listing, digest| {
+            let items = listing["tasks"].as_array().cloned().unwrap_or_default();
+            let mut pages = activity::event_pages(items, PAGE_LIMIT);
+            if pages.is_empty() {
+                pages.push(Vec::new());
+            }
+            let count = pages.len();
+            for (page, items) in pages.into_iter().enumerate() {
+                let last = page + 1 == count;
+                let body = Body::Snapshot(protocol::Snapshot {
+                    topic: topic::TASKS.into(),
+                    key: Some(key.into()),
+                    items: Some(items),
+                    value: last.then(|| tasks::summary(listing, digest)),
+                    page: page as u32,
+                    last,
+                    cursor: 0,
+                });
+                if !out.put(&body) {
+                    return false;
+                }
+            }
+            true
+        });
+    }
+
     // ---- Control -----------------------------------------------------------
 
     fn control(&mut self, text: &str) {
@@ -1238,6 +1331,10 @@ impl<'a> Watch<'a> {
                     if let Some(path) = &subscription.path {
                         self.git.unsubscribe(path);
                     }
+                } else if subscription.topic == topic::TASKS {
+                    if let Some(project) = &subscription.project {
+                        self.tasks.unsubscribe(project);
+                    }
                 } else if let Some(session) = subscription.session.as_ref().filter(|_| subscription.topic == topic::PROCESSES) {
                     self.processes.unsubscribe(&session.key());
                 } else if let Some(session) = subscription.session.filter(|_| subscription.topic == topic::ACTIVITY) {
@@ -1253,6 +1350,7 @@ impl<'a> Watch<'a> {
             topic::CATALOG | topic::CATALOG_META => return,
             topic::GIT => return self.subscribe_git(request.path.as_deref()),
             topic::PROCESSES => return self.subscribe_processes(request.session),
+            topic::TASKS => return self.subscribe_tasks(request.project.as_deref()),
             topic::ACTIVITY => {}
             other => {
                 self.out.error(
@@ -1453,6 +1551,7 @@ mod tests {
                 Input::Dropped => "<dropped>".into(),
                 Input::Git(done) => format!("<git {}>", done.path),
                 Input::Processes(done) => format!("<processes {}>", done.key),
+                Input::Tasks(done) => format!("<tasks {}>", done.key),
                 Input::End => "<end>".into(),
             })
             .collect()

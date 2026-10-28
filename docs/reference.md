@@ -4030,8 +4030,8 @@ Kimi, DeepSeek and OpenCode messages arrive only through `state`.
 
 A session that leaves the catalog ends its subscription with the error
 `subscription_ended`. Unsubscribe stops it. A stream follows at most 16 sessions;
-more fail with `too_many_subscriptions`. Other topics (such as `tasks`)
-fail with `unsupported_topic`; read them with their commands.
+more fail with `too_many_subscriptions`. A topic `hello` does not list fails
+with `unsupported_topic`; read it with its command.
 
 ```json
 {"op":"subscribe","topic":"git","path":"/home/user/sample-project"}
@@ -4068,6 +4068,19 @@ reads of one session start at least 2 s apart. A session that leaves the
 catalog ends with `subscription_ended`, and an inspection that fails sends a
 non-fatal `inspect_failed`. A stream follows the processes of at most 16
 sessions (`limits.processes_subscriptions`).
+
+The `tasks` topic follows one project's task list:
+`{"op":"subscribe","topic":"tasks","project":"<project ID>"}`, keyed by the
+project as subscribed. Each list goes out as a whole `snapshot` in pages: its
+`items` are the task views exactly as `hgs task list --project ID --json` lists
+them, in that order, and the last page's `value` is `{project, damaged,
+digest}`, where `digest` identifies the list, so a client can skip an
+unchanged list after subscribing again. A worker thread reads the list. A
+project is read again when a stat of its task store changes and at least every
+30 s, at most once a second, and the list goes out only when its digest
+changed. A list that cannot be read, such as an unknown project, sends a
+non-fatal `tasks_failed`. A stream follows at most 8 projects
+(`limits.tasks_subscriptions`).
 
 The stream checks its sources every 250 ms. It stats the bindings, read marks,
 notification preferences, waits, launches, renames, name routes, the archive

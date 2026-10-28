@@ -25,6 +25,7 @@ vi.mock("./ui", () => ({
   setProjectFilter: vi.fn(),
   setSearch: vi.fn(),
   setCollapsed: vi.fn(),
+  setDetailTab: vi.fn(),
   collapsed: { "sample-project": true } as Record<string, boolean>,
   revealRow: vi.fn(),
   toast: vi.fn(),
@@ -61,6 +62,15 @@ describe("desk wiring", () => {
     expect(shown.revealRow).toHaveBeenCalledWith("mac\nclaude/sample-project/review");
     stopDesk();
     expect(stop).toHaveBeenCalled();
+  });
+
+  it("opens a clicked notification's session on Activity, a menu row on the tab it had", async () => {
+    const open = await opener();
+    open({ computer: "mac", key: "run:folded" });
+    expect(shown.setDetailTab).not.toHaveBeenCalled();
+    open({ computer: "mac", key: "run:folded", attention: true });
+    expect(shown.setDetailTab).toHaveBeenCalledWith("activity");
+    expect(shown.setSelectedKey).toHaveBeenLastCalledWith("mac\nrun:folded");
   });
 
   it("clears every filter first, as Qt's showSession does", async () => {

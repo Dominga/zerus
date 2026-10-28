@@ -1,8 +1,8 @@
 import { deskPage, deskTakePending, onDeskNotice, onOpenSession, type OpenSession } from "../bridge";
 import { catalog, rowId } from "./catalog";
 import {
-  collapsed, revealRow, setCollapsed, setMachineFilter, setPage, setProjectFilter, setSearch, setSelectedKey,
-  setStateFilter, setSubagentOpen, toast,
+  collapsed, revealRow, setCollapsed, setDetailTab, setMachineFilter, setPage, setProjectFilter, setSearch,
+  setSelectedKey, setStateFilter, setSubagentOpen, toast,
 } from "./ui";
 
 // The menu bar and attention notifications open sessions and show notices
@@ -11,9 +11,11 @@ import {
 /**
  * Shows the session's row (Qt's `SessionsWindow::showSession`): every filter
  * cleared, the session list shown, its project expanded, the row selected
- * and scrolled to.
+ * and scrolled to. A clicked notification's session opens on its Activity
+ * tab first (`SessionsWindow::showAttentionSession`).
  */
 export function openSession(target: OpenSession): void {
+  if (target.attention) setDetailTab("activity");
   const id = rowId(target.computer, target.key);
   setStateFilter("all");
   setMachineFilter([]);

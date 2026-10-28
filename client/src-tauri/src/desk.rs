@@ -5,22 +5,34 @@
 //! command (Qt's "Open in"), open a saved session's row, or quit. A session
 //! or notice the webview cannot take yet waits in [`Pending`] until it asks.
 //!
+//! The same thread applies this device's marks the moment they change and,
+//! when this build posts them, decides the attention notifications
+//! ([`Attention`]): once per batch of inputs it observes the computers that
+//! changed, and every computer each [`SWEEP`], so a retry fires
+//! (`TrayAgent::observeAttention`). A clicked notification opens its session
+//! or reports it gone ([`DeskLoop`]).
+//!
 //! [`Bar`] is the status item's state apart from AppKit: what reaches it
 //! ([`Gate`]), the Dock badge, the menus that are tracking, and the action
 //! each item of the menu names.
 // The menu bar exists only on macOS in this phase; Linux keeps the Qt GUI.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use tauri::{AppHandle, Emitter, Manager};
-use zerus_client_core::menubar::{tray_conf_value, Apply, Desk, Entry, Face, Gate, OpenMode};
+use zerus_client_core::attention::{self, Changes, Host, Resolution, Tracker, CLICK_WAIT};
+use zerus_client_core::menubar::{
+    tray_conf_value, Apply, Desk, DeviceMarks, Entry, Face, Gate, OpenMode,
+};
 use zerus_client_core::shell;
 use zerus_client_core::{Change, ComputerId};
 
@@ -30,16 +42,37 @@ pub const PACE: Duration = Duration::from_millis(250);
 pub const MODE_FILE: &str = "menubar.json";
 /// At most this many notices wait for the webview.
 pub const PENDING_NOTICES: usize = 8;
+/// Every listed computer is observed again at least this often, so a failed
+/// delivery's retry fires without a new listing.
+pub const SWEEP: Duration = Duration::from_secs(10);
+/// The tracker's state, in the data directory.
+pub const ATTENTION_FILE: &str = "attention-observed.json";
+/// Banners for optional questions (`QuestionNotificationSettings.h`).
+pub const OPTIONAL_QUESTIONS: &str = "notifications/optionalQuestions";
 
 pub enum DeskInput {
     Change(Box<Change>),
     Mode(OpenMode),
+    /// This device's attention marks or its pending read marks changed: the
+    /// desk reads them again (`FleetState::setReadState`).
+    Marks,
+    /// A notification's default action (`MacAttentionNotifier.mm:20-28`).
+    Clicked(String),
+    /// A delivery failed (`AttentionNotifier::failed`).
+    Failed {
+        token: String,
+        detail: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenSession {
     pub computer: String,
     pub key: String,
+    /// A clicked notification's session: its detail opens on Activity
+    /// (`SessionsWindow::showAttentionSession`, `SessionsWindow.cpp:2837-2842`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attention: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +161,8 @@ pub struct DeskState {
     mode: Mutex<OpenMode>,
     dir: PathBuf,
     inbox: Mutex<Inbox>,
+    /// Zerus is the active app: the tracker's foreground test.
+    focused: Arc<AtomicBool>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -201,9 +236,20 @@ pub fn menu_bar_change(change: &Change) -> bool {
     )
 }
 
-/// Taps the pump and starts the desk thread. Call before the fleet starts,
-/// so the first catalog reaches the menu bar.
-pub fn start(app: &AppHandle, pump: &crate::pump::Pump, dir: PathBuf, mode: OpenMode) {
+/// Loads the tracker on the desk thread, so its file is never read on the
+/// main thread.
+pub type LoadAttention = Box<dyn FnOnce() -> Attention + Send>;
+
+/// Taps the pump, hears this device's marks change and starts the desk
+/// thread. Call before the fleet starts, so the first catalog reaches the menu
+/// bar; `attention` when this build posts notifications.
+pub fn start(
+    app: &AppHandle,
+    pump: &crate::pump::Pump,
+    dir: PathBuf,
+    mode: OpenMode,
+    attention: Option<LoadAttention>,
+) {
     let (sender, inputs) = mpsc::channel();
     let tap = sender.clone();
     pump.tap(Box::new(move |change: &Change| {
@@ -211,39 +257,440 @@ pub fn start(app: &AppHandle, pump: &crate::pump::Pump, dir: PathBuf, mode: Open
             let _ = tap.send(DeskInput::Change(Box::new(change.clone())));
         }
     }));
+    // The marks reach the desk the moment they change, from the window's
+    // commands or a settled read mark, so the menu bar follows a click in the
+    // window at once.
+    let marks = |sender: &Sender<DeskInput>| -> crate::actions::Listener {
+        let sender = sender.clone();
+        Box::new(move || {
+            let _ = sender.send(DeskInput::Marks);
+        })
+    };
+    if let Some(actions) = app.try_state::<crate::actions::Actions>() {
+        actions.listener.set(marks(&sender));
+    }
+    if let Some(attention) = app.try_state::<crate::actions::Attention>() {
+        attention.listener.set(marks(&sender));
+    }
+    let focused = Arc::new(AtomicBool::new(false));
     app.manage(DeskState {
         sender: Mutex::new(sender),
         mode: Mutex::new(mode),
         dir,
         inbox: Mutex::new(Inbox::default()),
+        focused: Arc::clone(&focused),
     });
     let handle = app.clone();
     std::thread::Builder::new()
         .name("zerus-client-desk".into())
-        .spawn(move || run(handle, inputs, mode))
+        .spawn(move || run(handle, inputs, mode, attention, focused))
         .expect("the desk thread starts");
 }
 
-fn run(app: AppHandle, inputs: Receiver<DeskInput>, mut mode: OpenMode) {
-    let mut desk = Desk::default();
-    // The menu with Open Zerus and Quit, before any change arrives or when the
-    // fleet does not start: Qt builds its menu at once (`TrayAgent.cpp:252-254`).
-    publish(&app, &desk, mode);
-    while let Ok(first) = inputs.recv() {
-        for input in std::iter::once(first).chain(std::iter::from_fn(|| inputs.try_recv().ok())) {
+/// The desk thread's input, for the notifier's clicks and failures.
+pub fn sender(app: &AppHandle) -> Option<Sender<DeskInput>> {
+    app.try_state::<DeskState>()
+        .map(|state| lock(&state.sender).clone())
+}
+
+/// Whether Zerus is the active app (`Qt::ApplicationActive`): an active
+/// Zerus consumes attention edges without banners.
+pub fn set_focused(app: &AppHandle, focused: bool) {
+    if let Some(state) = app.try_state::<DeskState>() {
+        state.focused.store(focused, Ordering::Relaxed);
+    }
+}
+
+/// Attention notifications, when this build posts them: the tracker and the
+/// file it is kept in.
+pub struct Attention {
+    pub tracker: Tracker,
+    pub path: PathBuf,
+}
+
+impl Attention {
+    /// The tracker with its saved state: the client's own file; only when
+    /// there is none, Qt's `attention/observed` from `qt` (Decision 11).
+    pub fn load(path: PathBuf, qt: impl FnOnce() -> Option<Vec<u8>>) -> Self {
+        let saved = match std::fs::read(&path) {
+            Ok(bytes) => attention::seed(Some(&bytes), None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                attention::seed(None, qt().as_deref())
+            }
+            Err(error) => {
+                eprintln!("zerus-client: could not read {}: {error}", path.display());
+                Map::new()
+            }
+        };
+        Self {
+            tracker: Tracker::new(saved),
+            path,
+        }
+    }
+
+    fn save(&self) {
+        let written = serde_json::to_vec(self.tracker.state())
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| write_private(&self.path, &bytes));
+        if let Err(error) = written {
+            eprintln!(
+                "zerus-client: could not save {}: {error}",
+                self.path.display()
+            );
+        }
+    }
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+        })
+}
+
+/// One round of the tracker. Each listed computer is observed: all of them
+/// with `only` None, else those in `only`. Each peer in `only` that left the
+/// fleet is observed with no rows, so its banners go (`TrayAgent.cpp:460-462`).
+pub fn observe_round(
+    tracker: &mut Tracker,
+    desk: &Desk,
+    only: Option<&BTreeSet<ComputerId>>,
+    now: i64,
+    focused: bool,
+    notice_id: &mut dyn FnMut() -> String,
+) -> Changes {
+    let mut all = Changes::default();
+    let mut add = |changes: Changes| {
+        all.raised.extend(changes.raised);
+        all.cleared.extend(changes.cleared);
+    };
+    for (computer, state) in desk.computers() {
+        if !state.listed || only.is_some_and(|only| !only.contains(computer)) {
+            continue;
+        }
+        // Notices name a peer by its alias and this computer by its host
+        // (Qt's `box.host`), empty before its card arrives.
+        let label = computer
+            .alias()
+            .map_or_else(|| state.host.clone().unwrap_or_default(), str::to_owned);
+        add(tracker.observe(
+            &Host {
+                alias: &computer.0,
+                label: &label,
+                ok: state.fresh(),
+                rows: &state.rows,
+            },
+            now,
+            focused,
+            &mut *notice_id,
+        ));
+    }
+    let empty = BTreeMap::new();
+    for computer in only.into_iter().flatten() {
+        if computer.alias().is_some() && !desk.computers().contains_key(computer) {
+            add(tracker.observe(
+                &Host {
+                    alias: &computer.0,
+                    label: &computer.0,
+                    ok: true,
+                    rows: &empty,
+                },
+                now,
+                focused,
+                &mut *notice_id,
+            ));
+        }
+    }
+    all
+}
+
+/// A clicked notification waiting for its session (`m_pendingTarget`).
+struct Click {
+    target: Map<String, Value>,
+    deadline: Instant,
+}
+
+/// What one round reads from the app.
+pub struct Context<'a> {
+    pub now: Instant,
+    /// Seconds since the epoch, the tracker's clock.
+    pub unix: i64,
+    /// Zerus is the active app.
+    pub focused: bool,
+    /// `notifications/optionalQuestions`, read when the tracker observes.
+    pub optional_questions: &'a mut dyn FnMut() -> bool,
+    /// This device's marks, read when they changed.
+    pub marks: &'a mut dyn FnMut() -> Option<DeviceMarks>,
+    /// A new notice ID for each banner.
+    pub notice_id: &'a mut dyn FnMut() -> String,
+}
+
+/// What one round asks of the app.
+#[derive(Debug, Default, PartialEq)]
+pub struct Outcome {
+    /// The status item's state may have changed: offer it again.
+    pub publish: bool,
+    /// An "Open in" choice to save.
+    pub save_mode: Option<OpenMode>,
+    /// A notification was clicked: open the window (`showSessions`).
+    pub show: bool,
+    /// Banners to withdraw, then post.
+    pub changes: Changes,
+    /// The clicked notification's session.
+    pub open: Option<(ComputerId, String)>,
+    /// Notices for the window, kept until its page asks.
+    pub notices: Vec<String>,
+    /// Notices only for a window that exists (`if (m_sessionsWindow)`,
+    /// `TrayAgent.cpp:200`).
+    pub window_notices: Vec<String>,
+}
+
+/// The desk thread's state apart from the app: the desk, the tracker and a
+/// clicked notification.
+pub struct DeskLoop {
+    pub desk: Desk,
+    mode: OpenMode,
+    pub attention: Option<Attention>,
+    click: Option<Click>,
+    swept: Instant,
+}
+
+impl DeskLoop {
+    pub fn new(mode: OpenMode, attention: Option<Attention>, now: Instant) -> Self {
+        Self {
+            desk: Desk::default(),
+            mode,
+            attention,
+            click: None,
+            swept: now,
+        }
+    }
+
+    pub fn mode(&self) -> OpenMode {
+        self.mode
+    }
+
+    /// How long the thread may wait for an input: until the next sweep, or
+    /// until a clicked notification's wait ends.
+    pub fn wait(&self, now: Instant) -> Duration {
+        let mut wait = SWEEP;
+        if self.attention.is_some() {
+            wait = (self.swept + SWEEP).saturating_duration_since(now);
+        }
+        if let Some(click) = &self.click {
+            wait = wait.min(click.deadline.saturating_duration_since(now));
+        }
+        wait
+    }
+
+    /// One batch of inputs: the changes, then this device's marks, then one
+    /// observation of the computers they touched, then the clicked session.
+    pub fn round(
+        &mut self,
+        inputs: impl IntoIterator<Item = DeskInput>,
+        cx: &mut Context,
+    ) -> Outcome {
+        let mut outcome = Outcome::default();
+        let mut dirty = BTreeSet::new();
+        let mut marks = false;
+        for input in inputs {
             match input {
                 DeskInput::Change(change) => {
-                    desk.observe(&change);
+                    if let Some(computer) = self.desk.observe(&change) {
+                        dirty.insert(computer);
+                        outcome.publish = true;
+                    }
                 }
                 DeskInput::Mode(chosen) => {
-                    mode = chosen;
-                    store_mode(&app, chosen);
+                    self.mode = chosen;
+                    outcome.save_mode = Some(chosen);
+                    outcome.publish = true;
+                }
+                DeskInput::Marks => marks = true,
+                DeskInput::Clicked(token) => {
+                    // A token that does not decode opens nothing (`TrayAgent.cpp:176-179`).
+                    if let Some(target) = attention::target(&token) {
+                        self.click = Some(Click {
+                            target,
+                            deadline: cx.now + CLICK_WAIT,
+                        });
+                        outcome.show = true;
+                    }
+                }
+                DeskInput::Failed { token, detail } => {
+                    eprintln!("Zerus: notification: {detail}");
+                    if let Some(attention) = self.attention.as_mut() {
+                        attention.tracker.delivery_failed(&token, cx.unix);
+                    }
+                    outcome
+                        .window_notices
+                        .push(format!("System notification was not delivered: {detail}"));
                 }
             }
         }
-        publish(&app, &desk, mode);
+        // Read once however many changes were announced.
+        if marks {
+            if let Some(device) = (cx.marks)() {
+                if self.desk.set_marks(device) {
+                    outcome.publish = true;
+                    dirty.extend(self.desk.computers().keys().cloned());
+                }
+            }
+        }
+        if let Some(attention) = self.attention.as_mut() {
+            if cx.now >= self.swept + SWEEP {
+                self.swept = cx.now;
+                dirty.extend(self.desk.computers().keys().cloned());
+            }
+            if !dirty.is_empty() {
+                // Qt reads the setting at each observation (`TrayAgent.cpp:554`).
+                attention
+                    .tracker
+                    .set_optional_questions((cx.optional_questions)());
+                outcome.changes = observe_round(
+                    &mut attention.tracker,
+                    &self.desk,
+                    Some(&dirty),
+                    cx.unix,
+                    cx.focused,
+                    cx.notice_id,
+                );
+            }
+            if attention.tracker.take_changed() {
+                attention.save();
+            }
+        }
+        // A live stream is the current listing Qt asks for at the click; a
+        // stale one waits for its rows up to `CLICK_WAIT` (`TrayAgent.cpp:188-192`).
+        if let Some(click) = &self.click {
+            match attention::resolve(&click.target, &self.desk, cx.now >= click.deadline) {
+                Resolution::Open { computer, key } => {
+                    outcome.open = Some((computer, key));
+                    self.click = None;
+                }
+                Resolution::Gone(name) => {
+                    outcome.notices.push(attention::gone_text(&name));
+                    self.click = None;
+                }
+                Resolution::Waiting => {}
+            }
+        }
+        outcome
+    }
+}
+
+/// This device's marks as the overlay reads them: the attention marks and
+/// read replies, and the read marks still waiting for their host.
+fn device_marks(app: &AppHandle) -> Option<DeviceMarks> {
+    let (marks, replies) = app.try_state::<crate::actions::Attention>()?.marks();
+    let pending = app
+        .try_state::<crate::actions::Actions>()
+        .map(|actions| actions.pending_marks())
+        .unwrap_or_default();
+    Some(DeviceMarks::new(marks, replies, pending))
+}
+
+fn optional_questions(app: &AppHandle) -> bool {
+    app.try_state::<crate::settings::Store>()
+        .is_some_and(|store| store.0.flag(OPTIONAL_QUESTIONS))
+}
+
+fn run(
+    app: AppHandle,
+    inputs: Receiver<DeskInput>,
+    mode: OpenMode,
+    attention: Option<LoadAttention>,
+    focused: Arc<AtomicBool>,
+) {
+    let mut state = DeskLoop::new(mode, None, Instant::now());
+    // The menu with Open Zerus and Quit, before any change arrives or when the
+    // fleet does not start: Qt builds its menu at once (`TrayAgent.cpp:252-254`).
+    publish(&app, &state.desk, mode);
+    // The persisted marks before the first row arrives, so the counts are
+    // right before any window opens.
+    if let Some(marks) = device_marks(&app) {
+        state.desk.set_marks(marks);
+    }
+    state.attention = attention.map(|load| load());
+    loop {
+        let first = match inputs.recv_timeout(state.wait(Instant::now())) {
+            Ok(input) => Some(input),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+        let batch = first
+            .into_iter()
+            .chain(std::iter::from_fn(|| inputs.try_recv().ok()));
+        let outcome = state.round(
+            batch,
+            &mut Context {
+                now: Instant::now(),
+                unix: unix_now(),
+                focused: focused.load(Ordering::Relaxed),
+                optional_questions: &mut || optional_questions(&app),
+                marks: &mut || device_marks(&app),
+                notice_id: &mut || uuid::Uuid::new_v4().to_string(),
+            },
+        );
+        apply(&app, &state, outcome);
         std::thread::sleep(PACE);
     }
+}
+
+/// Does what a round asked, in Qt's order: banners, then the window.
+fn apply(app: &AppHandle, state: &DeskLoop, outcome: Outcome) {
+    if let Some(mode) = outcome.save_mode {
+        // Task 4: the desk thread saves the choice, off the main thread.
+        store_mode(app, mode);
+    }
+    if outcome.publish {
+        publish(app, &state.desk, state.mode());
+    }
+    deliver(app, outcome.changes);
+    if outcome.show {
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Err(error) = crate::lifecycle::show_main(&handle) {
+                eprintln!("zerus-client: could not open the window: {error}");
+            }
+        });
+    }
+    if let Some((computer, key)) = outcome.open {
+        open(
+            app,
+            OpenSession {
+                computer: computer.0,
+                key,
+                attention: true,
+            },
+        );
+    }
+    for text in outcome.notices {
+        window_notice(app, "Zerus", &text);
+    }
+    if app.get_webview_window(crate::MAIN_WINDOW).is_some() {
+        for text in outcome.window_notices {
+            window_notice(app, "Zerus", &text);
+        }
+    }
+}
+
+/// Withdraws, then posts, on the main thread (`TrayAgent.cpp:558-559`).
+/// Other platforms post nothing in this phase.
+fn deliver(app: &AppHandle, changes: Changes) {
+    if changes.raised.is_empty() && changes.cleared.is_empty() {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            crate::platform::macos_notify::deliver(&handle, changes.cleared, changes.raised)
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, changes);
 }
 
 fn publish(app: &AppHandle, desk: &Desk, mode: OpenMode) {
@@ -293,10 +740,17 @@ pub fn page_loaded(webview: &tauri::Webview) {
 
 /// Opens the window on a session's row (`TrayAgent.cpp:214-216`).
 pub fn open_session(app: &AppHandle, computer: &ComputerId, key: &str) {
-    let target = OpenSession {
-        computer: computer.0.clone(),
-        key: key.to_owned(),
-    };
+    open(
+        app,
+        OpenSession {
+            computer: computer.0.clone(),
+            key: key.to_owned(),
+            attention: false,
+        },
+    );
+}
+
+fn open(app: &AppHandle, target: OpenSession) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Err(error) = crate::lifecycle::show_main(&handle) {
@@ -314,7 +768,6 @@ pub fn open_session(app: &AppHandle, computer: &ComputerId, key: &str) {
 }
 
 /// A notice inside the window (Qt's `showNotificationNotice`).
-#[allow(dead_code)] // Task 6's notifier is its first caller.
 pub fn window_notice(app: &AppHandle, title: &str, text: &str) {
     let notice = Notice {
         title: title.to_owned(),
@@ -654,6 +1107,665 @@ impl Bar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+    use zerus_client_core::attention::Tracker;
+    use zerus_client_core::marks::Mark;
+    use zerus_client_core::{ComputerStatus, ViewRow};
+
+    fn asking(name: &str) -> ViewRow {
+        let mut row = ViewRow {
+            name: name.into(),
+            state: "running".into(),
+            activity: "waiting".into(),
+            phase: Some("approval".into()),
+            run_id: Some(format!("run-{name}")),
+            ..ViewRow::default()
+        };
+        row.notify.needs_action = true;
+        row.notify.attention_id = "r".into();
+        row
+    }
+
+    fn listed(desk: &mut Desk, computer: &str, rows: Vec<ViewRow>) {
+        let id = ComputerId::from(computer);
+        desk.observe(&Change::Replace {
+            computer: id.clone(),
+            rows: rows
+                .into_iter()
+                .map(|row| (row.name.clone(), row))
+                .collect(),
+        });
+        desk.observe(&Change::Computer {
+            computer: id,
+            status: ComputerStatus::Live,
+        });
+    }
+
+    #[test]
+    fn a_round_observes_listed_computers_and_withdraws_removed_peers() {
+        let mut desk = Desk::default();
+        listed(&mut desk, "", vec![asking("claude/p/here")]);
+        listed(&mut desk, "mac", vec![asking("claude/p/there")]);
+        desk.observe(&Change::Computer {
+            computer: ComputerId::from("studio"),
+            status: ComputerStatus::Probing,
+        });
+        let mut tracker = Tracker::new(serde_json::Map::new());
+        let mut next = 0;
+        let mut id = || {
+            next += 1;
+            format!("notice-{next}")
+        };
+        let first = observe_round(&mut tracker, &desk, None, 1000, false, &mut id);
+        assert_eq!(
+            first.raised.len(),
+            2,
+            "a computer that has not listed is skipped"
+        );
+        let mac_token = first
+            .raised
+            .iter()
+            .find(|notice| notice.body.contains(" / mac\n"))
+            .unwrap()
+            .token
+            .clone();
+        desk.observe(&Change::Computer {
+            computer: ComputerId::from("mac"),
+            status: ComputerStatus::Ended,
+        });
+        let only: BTreeSet<ComputerId> = [ComputerId::from("mac")].into();
+        let removed = observe_round(&mut tracker, &desk, Some(&only), 1001, false, &mut id);
+        assert_eq!(
+            removed.cleared,
+            vec![mac_token],
+            "a peer that left withdraws its banners"
+        );
+        let local_only: BTreeSet<ComputerId> = [ComputerId::local()].into();
+        assert!(
+            observe_round(&mut tracker, &desk, Some(&local_only), 1002, false, &mut id)
+                .raised
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_round_observes_only_the_computers_it_names() {
+        let mut desk = Desk::default();
+        listed(&mut desk, "", vec![asking("claude/p/here")]);
+        listed(&mut desk, "mac", vec![asking("claude/p/there")]);
+        let mut tracker = Tracker::new(serde_json::Map::new());
+        let mut next = 0;
+        let mut id = || {
+            next += 1;
+            format!("notice-{next}")
+        };
+        let local: BTreeSet<ComputerId> = [ComputerId::local()].into();
+        let first = observe_round(&mut tracker, &desk, Some(&local), 1000, false, &mut id);
+        assert_eq!(first.raised.len(), 1);
+        assert!(first.raised[0].body.starts_with("claude/p/here / \n"));
+        assert!(
+            !tracker.state().contains_key("mac"),
+            "the peer waits for its turn"
+        );
+        let mac: BTreeSet<ComputerId> = [ComputerId::from("mac")].into();
+        let second = observe_round(&mut tracker, &desk, Some(&mac), 1001, false, &mut id);
+        assert_eq!(second.raised.len(), 1);
+        assert!(
+            second.cleared.is_empty(),
+            "a peer still listed is not taken for one that left"
+        );
+        // This computer is never taken for a peer that left.
+        let mut fresh = Tracker::new(serde_json::Map::new());
+        observe_round(
+            &mut fresh,
+            &Desk::default(),
+            Some(&local),
+            1000,
+            false,
+            &mut id,
+        );
+        assert!(fresh.state().is_empty());
+        // Its notices name it by its card's host.
+        desk.observe(&Change::Machine {
+            computer: ComputerId::local(),
+            machine: zerus_client_core::MachineMeta {
+                host: Some("workstation".into()),
+                ..Default::default()
+            },
+        });
+        let mut named = Tracker::new(serde_json::Map::new());
+        let raised = observe_round(&mut named, &desk, Some(&local), 1000, false, &mut id).raised;
+        assert!(raised[0].body.starts_with("claude/p/here / workstation\n"));
+    }
+
+    /// A desk thread's state with a tracker in `dir`, and what its rounds read.
+    struct Thread {
+        state: DeskLoop,
+        start: Instant,
+        focused: bool,
+        optional: bool,
+        marks: Option<DeviceMarks>,
+        marks_read: usize,
+        optional_read: usize,
+        notices: usize,
+    }
+
+    impl Thread {
+        fn new(dir: &Path) -> Self {
+            let start = Instant::now();
+            let attention = Attention::load(dir.join(ATTENTION_FILE), || None);
+            Self {
+                state: DeskLoop::new(OpenMode::Terminal, Some(attention), start),
+                start,
+                focused: false,
+                optional: false,
+                marks: None,
+                marks_read: 0,
+                optional_read: 0,
+                notices: 0,
+            }
+        }
+
+        /// One round `at` seconds after the start.
+        fn round(&mut self, at: f64, inputs: Vec<DeskInput>) -> Outcome {
+            let marks = self.marks.clone();
+            let optional = self.optional;
+            let mut read = 0;
+            let mut optional_read = 0;
+            let mut notices = self.notices;
+            let outcome = self.state.round(
+                inputs,
+                &mut Context {
+                    now: self.start + Duration::from_secs_f64(at),
+                    unix: 1000 + at as i64,
+                    focused: self.focused,
+                    optional_questions: &mut || {
+                        optional_read += 1;
+                        optional
+                    },
+                    marks: &mut || {
+                        read += 1;
+                        marks.clone()
+                    },
+                    notice_id: &mut || {
+                        notices += 1;
+                        format!("notice-{notices}")
+                    },
+                },
+            );
+            self.marks_read += read;
+            self.optional_read += optional_read;
+            self.notices = notices;
+            outcome
+        }
+    }
+
+    fn change(change: Change) -> DeskInput {
+        DeskInput::Change(Box::new(change))
+    }
+
+    fn replace(computer: &str, rows: Vec<ViewRow>) -> DeskInput {
+        change(Change::Replace {
+            computer: ComputerId::from(computer),
+            rows: rows
+                .into_iter()
+                .map(|row| (format!("run:{}", row.name), row))
+                .collect(),
+        })
+    }
+
+    fn status(computer: &str, status: ComputerStatus) -> DeskInput {
+        change(Change::Computer {
+            computer: ComputerId::from(computer),
+            status,
+        })
+    }
+
+    fn live(computer: &str, rows: Vec<ViewRow>) -> Vec<DeskInput> {
+        vec![
+            replace(computer, rows),
+            status(computer, ComputerStatus::Live),
+        ]
+    }
+
+    fn upsert(computer: &str, row: ViewRow) -> DeskInput {
+        change(Change::Upsert {
+            computer: ComputerId::from(computer),
+            key: format!("run:{}", row.name),
+            row,
+        })
+    }
+
+    #[test]
+    fn a_batch_observes_once_and_only_the_computers_it_changed() {
+        let dir = scratch("batch");
+        let mut thread = Thread::new(&dir);
+        let mut inputs = live("", vec![asking("claude/p/a")]);
+        inputs.extend(live("mac", vec![asking("claude/p/b")]));
+        let first = thread.round(0.0, inputs);
+        assert_eq!(first.changes.raised.len(), 2);
+        assert_eq!(
+            thread.notices, 2,
+            "one observation per computer for the batch"
+        );
+        assert!(first.publish);
+        // A change on one computer observes only it.
+        let mut row = asking("claude/p/c");
+        row.notify.attention_id = "r2".into();
+        let second = thread.round(1.0, vec![upsert("mac", row)]);
+        assert_eq!(second.changes.raised.len(), 1);
+        assert!(second.changes.raised[0]
+            .body
+            .starts_with("claude/p/c / mac\n"));
+        assert!(second.changes.cleared.is_empty());
+        assert_eq!(
+            thread.optional_read, 2,
+            "the setting is read once per observation"
+        );
+        // Nothing changed and no sweep is due: nothing is observed.
+        let quiet = thread.round(2.0, Vec::new());
+        assert_eq!(quiet, Outcome::default());
+        assert_eq!(thread.optional_read, 2, "nor is the setting read");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_state_is_saved_when_it_changes_and_read_back_first() {
+        let dir = scratch("saved");
+        let path = dir.join(ATTENTION_FILE);
+        let mut thread = Thread::new(&dir);
+        thread.round(0.0, live("", vec![asking("claude/p/a")]));
+        let saved = std::fs::read(&path).expect("saved after the first edge");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        std::fs::remove_file(&path).unwrap();
+        thread.round(1.0, live("", vec![asking("claude/p/a")]));
+        assert!(!path.exists(), "an unchanged state is not written again");
+        std::fs::write(&path, &saved).unwrap();
+        // A restart reads it: the same edge posts no second banner, and Qt's
+        // state is not even read.
+        let restarted = Attention::load(path.clone(), || panic!("Qt's state read"));
+        let mut thread = DeskLoop::new(OpenMode::Terminal, Some(restarted), Instant::now());
+        let outcome = thread.round(
+            live("", vec![asking("claude/p/a")]),
+            &mut Context {
+                now: Instant::now(),
+                unix: 2000,
+                focused: false,
+                optional_questions: &mut || false,
+                marks: &mut || None,
+                notice_id: &mut || "notice-x".into(),
+            },
+        );
+        assert!(outcome.changes.raised.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_first_start_takes_qts_state_and_a_broken_file_starts_empty() {
+        let dir = scratch("seed");
+        let path = dir.join(ATTENTION_FILE);
+        let qt = br#"{"": {"run:run-a": {"phase": "approval", "request": "r", "token": "t"}}}"#;
+        let seeded = Attention::load(path.clone(), || Some(qt.to_vec()));
+        assert_eq!(
+            seeded.tracker.state(),
+            serde_json::from_slice::<Value>(qt)
+                .unwrap()
+                .as_object()
+                .unwrap()
+        );
+        std::fs::write(&path, b"not json").unwrap();
+        let broken = Attention::load(path.clone(), || Some(qt.to_vec()));
+        assert!(broken.tracker.state().is_empty(), "never Qt's again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sweep_observes_every_computer_and_still_withdraws_a_peer_that_left() {
+        let dir = scratch("sweep");
+        let mut thread = Thread::new(&dir);
+        let mut inputs = live("", vec![asking("claude/p/a")]);
+        inputs.extend(live("mac", vec![asking("claude/p/b")]));
+        let first = thread.round(0.0, inputs);
+        let mac = first
+            .changes
+            .raised
+            .iter()
+            .find(|notice| notice.body.contains(" / mac\n"))
+            .unwrap()
+            .token
+            .clone();
+        let local = first
+            .changes
+            .raised
+            .iter()
+            .find(|notice| !notice.body.contains(" / mac\n"))
+            .unwrap()
+            .token
+            .clone();
+        assert_eq!(
+            thread.state.wait(thread.start + Duration::from_secs(4)),
+            Duration::from_secs(6)
+        );
+        // The local banner failed; its retry is due a minute later.
+        thread.round(
+            1.0,
+            vec![DeskInput::Failed {
+                token: local.clone(),
+                detail: "Refused.".into(),
+            }],
+        );
+        // The sweep comes with the peer's end in the same batch.
+        let swept = thread.round(61.0, vec![status("mac", ComputerStatus::Ended)]);
+        assert_eq!(
+            swept.changes.cleared,
+            vec![local, mac],
+            "the retried banner's old token, and the peer that left"
+        );
+        assert_eq!(
+            swept.changes.raised.len(),
+            1,
+            "the retry fired without a listing"
+        );
+        assert!(swept.changes.raised[0].body.starts_with("claude/p/a / \n"));
+        assert_eq!(
+            thread.state.wait(thread.start + Duration::from_secs(61)),
+            SWEEP,
+            "the next sweep is a full interval later"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_active_zerus_consumes_edges_and_the_setting_turns_on_optional_questions() {
+        let dir = scratch("focus");
+        let mut thread = Thread::new(&dir);
+        thread.focused = true;
+        assert!(thread
+            .round(0.0, live("", vec![asking("claude/p/a")]))
+            .changes
+            .raised
+            .is_empty());
+        thread.focused = false;
+        assert!(
+            thread
+                .round(1.0, vec![upsert("", asking("claude/p/a"))])
+                .changes
+                .raised
+                .is_empty(),
+            "a consumed edge never becomes a late banner"
+        );
+        let question = |ids: &[&str]| {
+            let mut row = ViewRow {
+                name: "claude/p/q".into(),
+                state: "running".into(),
+                activity: "idle".into(),
+                phase: Some("idle".into()),
+                run_id: Some("run-q".into()),
+                conversation_id: Some("conv-q".into()),
+                ..ViewRow::default()
+            };
+            row.notify.cmd = "claude".into();
+            row.notify.optional_reported = true;
+            row.notify.optional_count = ids.len() as i64;
+            row.notify.optional_ids = ids.iter().map(|id| (*id).to_owned()).collect();
+            row.notify.background = -1;
+            row.notify.recurring_schedules = -1;
+            row
+        };
+        thread.round(2.0, vec![upsert("", question(&["q1"]))]);
+        thread.optional = true;
+        let raised = thread.round(3.0, vec![upsert("", question(&["q1", "q2"]))]);
+        assert_eq!(
+            raised.changes.raised.len(),
+            1,
+            "only the question asked since"
+        );
+        assert_eq!(raised.changes.raised[0].title, attention::OPTIONAL_QUESTION);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn acknowledged(row: &ViewRow) -> DeviceMarks {
+        let key = zerus_client_core::marks::attention_key(
+            "",
+            &row.agent,
+            &row.name,
+            row.created,
+            row.conversation_id.as_deref().unwrap_or(""),
+        );
+        DeviceMarks::new(
+            [(
+                key,
+                Mark {
+                    review: false,
+                    acknowledged: row.attention_fingerprint.clone(),
+                },
+            )]
+            .into(),
+            BTreeMap::new(),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn marks_apply_at_once_read_once_per_batch_and_withdraw_the_banner() {
+        let dir = scratch("marks");
+        let mut thread = Thread::new(&dir);
+        let mut row = asking("claude/p/a");
+        row.attention_fingerprint = "fp-1".into();
+        let first = thread.round(0.0, live("", vec![row.clone()]));
+        assert_eq!(thread.state.desk.attention(), 1);
+        let token = first.changes.raised[0].token.clone();
+        assert_eq!(thread.marks_read, 0, "no mark changed");
+        thread.marks = Some(acknowledged(&row));
+        let marked = thread.round(1.0, vec![DeskInput::Marks, DeskInput::Marks]);
+        assert_eq!(thread.marks_read, 1, "read once for the batch");
+        assert!(marked.publish, "the counts follow the window's click");
+        assert_eq!(thread.state.desk.attention(), 0);
+        assert_eq!(
+            marked.changes.cleared,
+            vec![token],
+            "acknowledged: the banner goes"
+        );
+        let same = thread.round(2.0, vec![DeskInput::Marks]);
+        assert!(!same.publish, "the same marks change nothing");
+        assert_eq!(same.changes, Changes::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn marks_count_while_no_tracker_runs() {
+        let start = Instant::now();
+        let mut state = DeskLoop::new(OpenMode::Terminal, None, start);
+        let mut row = asking("claude/p/a");
+        row.attention_fingerprint = "fp-1".into();
+        let marks = acknowledged(&row);
+        let mut cx = Context {
+            now: Instant::now(),
+            unix: 1000,
+            focused: false,
+            optional_questions: &mut || panic!("no tracker reads the setting"),
+            marks: &mut || Some(marks.clone()),
+            notice_id: &mut || panic!("no tracker posts"),
+        };
+        state.round(live("", vec![row]), &mut cx);
+        assert_eq!(state.desk.attention(), 1);
+        assert!(state.round(vec![DeskInput::Marks], &mut cx).publish);
+        assert_eq!(state.desk.attention(), 0);
+        assert_eq!(
+            state.wait(start + Duration::from_secs(4)),
+            SWEEP,
+            "nothing to sweep"
+        );
+    }
+
+    #[test]
+    fn a_click_with_a_live_stream_resolves_at_once() {
+        let dir = scratch("click-live");
+        let mut thread = Thread::new(&dir);
+        let mut inputs = live("", vec![asking("claude/p/a")]);
+        inputs.extend(live("mac", vec![asking("claude/p/b")]));
+        let first = thread.round(0.0, inputs);
+        let token = |host: &str| {
+            first
+                .changes
+                .raised
+                .iter()
+                .find(|notice| notice.body.contains(&format!(" / {host}\n")))
+                .unwrap()
+                .token
+                .clone()
+        };
+        let opened = thread.round(1.0, vec![DeskInput::Clicked(token("mac"))]);
+        assert!(opened.show, "the window opens (`showSessions`)");
+        assert_eq!(
+            opened.open,
+            Some((ComputerId::from("mac"), "run:claude/p/b".to_owned()))
+        );
+        // Gone from a live listing: reported at once, not after 16 s.
+        let local = token("");
+        thread.round(2.0, vec![replace("", Vec::new())]);
+        let gone = thread.round(3.0, vec![DeskInput::Clicked(local)]);
+        assert!(gone.show);
+        assert_eq!(gone.open, None);
+        assert_eq!(
+            gone.notices,
+            ["This session is no longer available: claude/p/a"]
+        );
+        assert_eq!(
+            thread.round(4.0, Vec::new()).notices,
+            Vec::<String>::new(),
+            "once"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_click_with_a_stale_stream_waits_up_to_sixteen_seconds() {
+        let dir = scratch("click-stale");
+        let mut thread = Thread::new(&dir);
+        let first = thread.round(0.0, live("mac", vec![asking("claude/p/b")]));
+        let token = first.changes.raised[0].token.clone();
+        let stale = thread.round(
+            1.0,
+            vec![
+                replace("mac", Vec::new()),
+                status("mac", ComputerStatus::Reconnecting { attempt: 1 }),
+            ],
+        );
+        assert_eq!(
+            stale.changes,
+            Changes::default(),
+            "a stale listing keeps its banners (`AttentionTracker.cpp:55-81`)"
+        );
+        let waiting = thread.round(2.0, vec![DeskInput::Clicked(token.clone())]);
+        assert!(waiting.show);
+        assert_eq!((waiting.open, waiting.notices), (None, Vec::new()));
+        assert_eq!(
+            thread.state.wait(thread.start + Duration::from_secs(2)),
+            Duration::from_secs(8),
+            "the sweep comes first"
+        );
+        thread.round(10.0, Vec::new());
+        assert_eq!(
+            thread.state.wait(thread.start + Duration::from_secs(10)),
+            Duration::from_secs(8),
+            "the thread wakes when the click's wait ends"
+        );
+        // The stream comes back with the session: it opens.
+        let back = thread.round(12.0, live("mac", vec![asking("claude/p/b")]));
+        assert_eq!(
+            back.open,
+            Some((ComputerId::from("mac"), "run:claude/p/b".to_owned()))
+        );
+        // Clicked again while stale, and the session never comes back.
+        let after = thread.round(
+            13.0,
+            vec![status("mac", ComputerStatus::Reconnecting { attempt: 1 })],
+        );
+        assert_eq!(after.open, None, "opened once");
+        thread.round(13.5, vec![replace("mac", Vec::new())]);
+        thread.round(14.0, vec![DeskInput::Clicked(token)]);
+        assert_eq!(thread.round(29.9, Vec::new()).notices, Vec::<String>::new());
+        assert_eq!(
+            thread.round(30.0, Vec::new()).notices,
+            ["This session is no longer available: claude/p/b"],
+            "expired"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_token_that_does_not_decode_opens_nothing() {
+        let dir = scratch("click-bad");
+        let mut thread = Thread::new(&dir);
+        let outcome = thread.round(0.0, vec![DeskInput::Clicked("not a token".into())]);
+        assert_eq!(outcome, Outcome::default());
+        assert_eq!(thread.state.wait(thread.start), SWEEP);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_delivery_is_noted_and_retried() {
+        let dir = scratch("failed");
+        let mut thread = Thread::new(&dir);
+        let first = thread.round(0.0, live("", vec![asking("claude/p/a")]));
+        let token = first.changes.raised[0].token.clone();
+        std::fs::remove_file(dir.join(ATTENTION_FILE)).unwrap();
+        let failed = thread.round(
+            1.0,
+            vec![DeskInput::Failed {
+                token,
+                detail: "Allow it.".into(),
+            }],
+        );
+        assert_eq!(
+            failed.window_notices,
+            ["System notification was not delivered: Allow it."]
+        );
+        assert!(failed.notices.is_empty(), "only for a window that exists");
+        assert!(
+            dir.join(ATTENTION_FILE).exists(),
+            "the retry time is saved at once"
+        );
+        assert!(thread
+            .round(30.0, vec![upsert("", asking("claude/p/a"))])
+            .changes
+            .raised
+            .is_empty());
+        assert_eq!(
+            thread
+                .round(61.5, vec![upsert("", asking("claude/p/a"))])
+                .changes
+                .raised
+                .len(),
+            1,
+            "posted again a minute later"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_attention_click_opens_on_activity_and_a_menu_row_does_not_say_so() {
+        let mut open = OpenSession {
+            computer: "studio".into(),
+            key: "run:a".into(),
+            attention: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&open).unwrap(),
+            serde_json::json!({"computer": "studio", "key": "run:a"})
+        );
+        open.attention = true;
+        assert_eq!(
+            serde_json::to_value(&open).unwrap(),
+            serde_json::json!({"computer": "studio", "key": "run:a", "attention": true})
+        );
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("zcd-{}-{name}", std::process::id()));
@@ -798,6 +1910,7 @@ mod tests {
         OpenSession {
             computer: "studio".into(),
             key: key.into(),
+            attention: false,
         }
     }
 

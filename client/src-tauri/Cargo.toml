@@ -59,8 +59,10 @@ webkit2gtk = "2.0.2"
 block2 = "0.6.2"
 objc2 = { version = "0.6.4", features = ["exception"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "objc2-core-graphics", "NSAppearance", "NSApplication", "NSAttributedString", "NSBezierPath", "NSBitmapImageRep", "NSColor", "NSDockTile", "NSFont", "NSGraphics", "NSGraphicsContext", "NSImageRep", "NSMenu", "NSResponder", "NSStringDrawing"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSArray", "NSAttributedString", "NSBundle", "NSDictionary", "NSDistributedNotificationCenter", "NSGeometry", "NSNotification", "NSOperation", "NSString", "NSProcessInfo"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSArray", "NSAttributedString", "NSBundle", "NSData", "NSDictionary", "NSDistributedNotificationCenter", "NSError", "NSGeometry", "NSNotification", "NSOperation", "NSString", "NSProcessInfo", "NSUserDefaults"] }
 objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "WKPreferences", "WKWebViewConfiguration"] }
+# Attention notifications under the app's identity (platform/macos_notify.rs).
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

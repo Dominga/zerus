@@ -505,6 +505,23 @@ pub fn bundle_identifier() -> Option<String> {
         .map(|id| id.to_string())
 }
 
+/// A value Qt's QSettings saved in the running bundle's defaults domain,
+/// which is Qt's own (`com.hgdev.hgs-tray`) only under the switch identity:
+/// `group/key` is stored as `group.key`, a QByteArray as data
+/// (`qsettings_mac.cpp`). Read only, never written (Decision 11). Any thread:
+/// `NSUserDefaults` is thread-safe.
+#[cfg(feature = "live")]
+pub fn qt_default_data(key: &str) -> Option<Vec<u8>> {
+    let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
+    let key = NSString::from_str(key);
+    if let Some(data) = defaults.dataForKey(&key) {
+        return Some(data.to_vec());
+    }
+    defaults
+        .stringForKey(&key)
+        .map(|text| text.to_string().into_bytes())
+}
+
 /// LaunchServices gives an app's main thread this QoS; the LaunchAgent does
 /// not, and its `ProcessType Interactive` only lifts the clamp
 /// (`tray/src/main.cpp:256-263`). Call on the main thread.

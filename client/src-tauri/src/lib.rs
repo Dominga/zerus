@@ -19,6 +19,8 @@ mod identity;
 mod instance;
 mod lifecycle;
 mod metrics;
+#[cfg(feature = "live")]
+mod notifier;
 mod platform;
 #[cfg(feature = "live")]
 mod pump;
@@ -321,7 +323,30 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                             color
                         });
                     platform::macos_menubar::install(app.handle(), configured)?;
-                    desk::start(app.handle(), &pump, dir.clone(), desk::load_mode(&dir, conf.as_deref()));
+                    // Attention notifications under the running identity: the
+                    // switch bundle, or another build on request; never a replay.
+                    let identity = app.state::<identity::Identity>().inner().clone();
+                    let attention = identity
+                        .notifications(identity::flag("ZERUS_CLIENT_NOTIFICATIONS"), replay)
+                        .then(|| {
+                            let path = dir.join(desk::ATTENTION_FILE);
+                            // Qt's edges seed the switch bundle's first start
+                            // (Decision 11): its `attention/observed`, which the
+                            // defaults domain keeps as `attention.observed`.
+                            let switch = identity.is_switch();
+                            Box::new(move || {
+                                desk::Attention::load(path, || {
+                                    switch.then(|| platform::macos::qt_default_data("attention.observed")).flatten()
+                                })
+                            }) as desk::LoadAttention
+                        });
+                    let notifies = attention.is_some();
+                    desk::start(app.handle(), &pump, dir.clone(), desk::load_mode(&dir, conf.as_deref()), attention);
+                    if notifies {
+                        if let Some(sender) = desk::sender(app.handle()) {
+                            platform::macos_notify::install(app.handle(), sender);
+                        }
+                    }
                 }
                 if menu_bar {
                     lifecycle::start_fleet(|| app.state::<commands::AppState>().start_source());

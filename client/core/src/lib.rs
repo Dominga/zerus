@@ -12,6 +12,7 @@ pub mod attachments;
 pub mod batch;
 pub mod details;
 pub mod fleet;
+pub mod local_messages;
 pub mod machine;
 pub mod organization;
 pub mod processes;

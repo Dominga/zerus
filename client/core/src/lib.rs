@@ -47,6 +47,7 @@ pub use reads::{Read, ReadError};
 pub use run::{run, run_limited, run_with_env, TooLarge};
 pub use state::{ActivityState, CatalogState};
 pub use stream::{StreamEvent, StreamHandle, Timing};
+pub use swarm::grouping::{GroupOut, GroupingOut, HeaderOut, SyncView};
 pub use tasks::{TasksState, TasksUpdate};
 pub use view::ViewRow;
 pub use zerus_watch_protocol::SessionRef;

@@ -23,6 +23,18 @@ pub fn current_shell() -> Shell {
     }
 }
 
+/// Whether `text` may go to the clipboard (`ClipboardBackend::isCopyable`): a
+/// newline would make the shell run the command the moment it is pasted.
+pub fn copyable(text: &str) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("nothing to copy: the command is empty".to_owned());
+    }
+    if text.contains(['\n', '\r']) {
+        return Err("the command has a newline in it -- copying that is dangerous: the shell would run it the moment you paste".to_owned());
+    }
+    Ok(())
+}
+
 fn all_in(value: &str, allowed: impl Fn(char) -> bool) -> bool {
     !value.is_empty() && value.chars().all(allowed)
 }
@@ -386,5 +398,22 @@ mod tests {
             current_shell(),
             if cfg!(windows) { PowerShell } else { Posix }
         );
+    }
+
+    #[test]
+    fn copyable_text_refuses_what_qt_refuses() {
+        assert_eq!(copyable("hgs a x"), Ok(()));
+        assert_eq!(
+            copyable(" \t "),
+            Err("nothing to copy: the command is empty".to_owned())
+        );
+        assert_eq!(
+            copyable(""),
+            Err("nothing to copy: the command is empty".to_owned())
+        );
+        let newline = "the command has a newline in it -- copying that is dangerous: the shell would run it the moment you paste";
+        assert_eq!(copyable("a\nb"), Err(newline.to_owned()));
+        assert_eq!(copyable("a\rb"), Err(newline.to_owned()));
+        assert_eq!(copyable("a\n"), Err(newline.to_owned()));
     }
 }

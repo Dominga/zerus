@@ -23,6 +23,7 @@ pub const MAIN_WINDOW: &str = "main";
 /// Builds the app and runs its event loop until the last window closes.
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(commands::AppState::default())
         .invoke_handler(handler())
         .setup(|app| {
@@ -73,6 +74,9 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::run_action,
         actions::inspect_session,
         actions::pending_read_marks,
+        actions::session_reference,
+        actions::copy_command,
+        actions::copy_text,
     ]
 }
 

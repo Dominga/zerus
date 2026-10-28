@@ -25,6 +25,12 @@ pub struct Details {
     pub turn_started: f64,
     /// The inspected phase; Stop needs `working`, `tool` or `compacting`.
     pub phase: String,
+    /// The session's working directory (the raw `cwd`).
+    pub cwd: String,
+    /// `terminal_supported` and `terminal_attach_supported`, None when the
+    /// inspection has no boolean.
+    pub terminal_supported: Option<bool>,
+    pub terminal_attach_supported: Option<bool>,
 }
 
 /// `hgs [@host] inspect NAME --after 0 --skip-processes [--archive ID]`, 5 s
@@ -108,6 +114,11 @@ pub fn parse_details(target: &Target, exit: Exit) -> Option<Details> {
             .and_then(Value::as_f64)
             .unwrap_or(0.0),
         phase: text(&value, "phase"),
+        cwd: text(&value, "cwd"),
+        terminal_supported: value.get("terminal_supported").and_then(Value::as_bool),
+        terminal_attach_supported: value
+            .get("terminal_attach_supported")
+            .and_then(Value::as_bool),
     })
 }
 
@@ -270,5 +281,34 @@ mod tests {
         assert!(d.interrupt_supported);
         assert_eq!(d.turn_started, 1793000000.5);
         assert_eq!(d.phase, "tool");
+    }
+
+    #[test]
+    fn cwd_and_terminal_support_come_from_the_inspection() {
+        let t = Target {
+            computer: String::new(),
+            name: "n".into(),
+            run_id: "r".into(),
+            conversation_id: "c".into(),
+        };
+        let exit = |json: &str| Exit::Code {
+            code: 0,
+            stdout: json.as_bytes().to_vec(),
+            stderr: String::new(),
+        };
+        let none = parse_details(&t, exit(r#"{"run_id":"r","conversation_id":"c"}"#)).unwrap();
+        assert_eq!(none.cwd, "");
+        assert_eq!(
+            (none.terminal_supported, none.terminal_attach_supported),
+            (None, None)
+        );
+        let some = parse_details(
+            &t,
+            exit(r#"{"run_id":"r","conversation_id":"c","cwd":"/w/x","terminal_supported":false,"terminal_attach_supported":true}"#),
+        )
+        .unwrap();
+        assert_eq!(some.cwd, "/w/x");
+        assert_eq!(some.terminal_supported, Some(false));
+        assert_eq!(some.terminal_attach_supported, Some(true));
     }
 }

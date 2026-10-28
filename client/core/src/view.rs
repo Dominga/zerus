@@ -76,6 +76,16 @@ pub struct ViewRow {
     /// The operations the computer reports as allowed, None when it reports none.
     pub allowed_actions: Option<Vec<String>>,
     pub action_reasons: BTreeMap<String, String>,
+    /// The raw working directory (`folder` is the name people know it by).
+    pub cwd: String,
+    /// The row's `terminal_supported`, else true unless the agent is
+    /// `dsh` or `opencode` (`HgsClient.cpp:217`).
+    pub terminal_supported: bool,
+    /// The row has a boolean `terminal_supported`.
+    pub terminal_reported: bool,
+    pub terminal_attach_supported: bool,
+    /// The row has a boolean `terminal_attach_supported`.
+    pub terminal_attach_reported: bool,
 }
 
 fn text<'a>(row: &'a Value, field: &str) -> &'a str {
@@ -633,6 +643,11 @@ pub fn row(value: &Value) -> ViewRow {
         "" => text(value, "cmd"),
         agent => agent,
     };
+    let cmd = match text(value, "cmd") {
+        "" => agent,
+        cmd => cmd,
+    };
+    let flag = |field: &str| value.get(field).and_then(Value::as_bool);
     ViewRow {
         name: session.name.to_owned(),
         title: session.title(),
@@ -685,6 +700,11 @@ pub fn row(value: &Value) -> ViewRow {
                     .collect()
             })
             .unwrap_or_default(),
+        cwd: text(value, "cwd").to_owned(),
+        terminal_supported: flag("terminal_supported").unwrap_or(cmd != "dsh" && cmd != "opencode"),
+        terminal_reported: flag("terminal_supported").is_some(),
+        terminal_attach_supported: flag("terminal_attach_supported").unwrap_or(false),
+        terminal_attach_reported: flag("terminal_attach_supported").is_some(),
     }
 }
 
@@ -746,6 +766,7 @@ mod tests {
                 caption: "Not tracked".into(),
                 // Qt's default for a row without a state (`HgsClient.cpp`).
                 state: "running".into(),
+                terminal_supported: true,
                 ..ViewRow::default()
             }
         );
@@ -1021,5 +1042,25 @@ mod tests {
                 case["case"]
             );
         }
+    }
+
+    #[test]
+    fn terminal_and_cwd_fields_follow_the_qt_client() {
+        let plain = row(&json!({"cmd": "claude", "cwd": "/w/sample/project"}));
+        assert_eq!(plain.cwd, "/w/sample/project");
+        assert_eq!(plain.folder, "project");
+        assert!(plain.terminal_supported && !plain.terminal_reported);
+        assert!(!plain.terminal_attach_supported && !plain.terminal_attach_reported);
+        for cmd in ["dsh", "opencode"] {
+            assert!(!row(&json!({ "cmd": cmd })).terminal_supported, "{cmd}");
+        }
+        assert!(!row(&json!({"agent": "opencode"})).terminal_supported);
+        let reported = row(&json!({"cmd": "dsh", "terminal_supported": true,
+            "terminal_attach_supported": false}));
+        assert!(reported.terminal_supported && reported.terminal_reported);
+        assert!(!reported.terminal_attach_supported && reported.terminal_attach_reported);
+        let attach = row(&json!({"terminal_attach_supported": true, "terminal_supported": "yes"}));
+        assert!(attach.terminal_attach_supported && attach.terminal_attach_reported);
+        assert!(!attach.terminal_reported);
     }
 }

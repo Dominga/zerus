@@ -22,7 +22,7 @@ use std::{
 };
 
 const LOCK: &str = "worker.lock";
-const MARKER: &str = "worker.json";
+pub(super) const MARKER: &str = "worker.json";
 const RESTART: &str = "worker-restart.json";
 /// Seconds between restart attempts, whatever their outcome.
 const RESTART_INTERVAL: u64 = 600;

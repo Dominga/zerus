@@ -59,6 +59,8 @@ pub mod topic {
     /// One project's task list as `hgs task list --project ID --json` prints
     /// it, keyed by the project as subscribed.
     pub const TASKS: &str = "tasks";
+    /// The shared project catalog as `hgs swarm get` shows it, as keyed rows.
+    pub const ORGANIZATION: &str = "organization";
 }
 
 /// Why a catalog key was removed. Clients treat an unknown reason as unknown.

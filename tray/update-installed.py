@@ -19,8 +19,11 @@ tray/install.sh runs this whenever its build differs from the installed GUI.
    was verified: running, or, when no GUI was running and none is started,
    by its signature and its own --build-info. Then the replaced GUI becomes
    the rollback copy, or, once the Tauri client replaced the Qt GUI, goes
-   while Qt stays that copy. A failure or interrupt restores the replaced GUI
-   or keeps it in a .hgs-tray-kept-* folder and prints where. `--rollback`
+   while Qt stays that copy. A replaced bundle without its identity,
+   executable or valid signature never becomes the rollback copy, and a Zerus
+   process started meanwhile stops the change; both keep the replaced GUI. A
+   failure or interrupt restores the replaced GUI or keeps it in a
+   .hgs-tray-kept-* folder and prints where. `--rollback`
    reinstalls the rollback copy through the same steps. Links at the
    installed path, the rollback folder or its copy are refused.
 4. Start a GUI that was running through its service manager and wait for its
@@ -659,6 +662,9 @@ def take_slot(previous):
     except BaseException:
         if replaced is not None and replaced.exists() and not slot.exists():
             os.rename(replaced, slot)
+        for folder in (incoming.parent, replaced.parent if replaced is not None else None):
+            if folder is not None and folder.is_dir() and not any(folder.iterdir()):
+                folder.rmdir()
         where = [str(path) for path in (incoming, previous) if path.exists()]
         say(f'the rollback copy {slot} did not change; the replaced GUI is kept in {" and ".join(where)}')
         raise
@@ -670,16 +676,36 @@ def take_slot(previous):
         shutil.rmtree(replaced.parent)
 
 
-def settle(previous, keep):
-    """Only after the new GUI was verified running: the GUI it replaced becomes
-    the rollback copy, or goes when the slot keeps Qt (a superseded client) or
-    when it was no complete bundle. Says which."""
+def complete_bundle(bundle):
+    """Whether a bundle could run again: its Info.plist identity, its
+    CFBundleExecutable and a valid signature. An interrupted rm -rf / cp -R
+    can leave the Info.plist of a bundle without its executable."""
+    info = bundle_info(bundle)
+    if not info.get('CFBundleIdentifier'):
+        return False
+    if not (Path(bundle) / 'Contents/MacOS' / info.get('CFBundleExecutable', 'hgs-tray')).is_file():
+        return False
+    try:
+        run(['codesign', '--verify', '--deep', '--strict', bundle])
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    return True
+
+
+def settle(previous, keep, progress):
+    """Only after the new GUI was verified: the GUI it replaced becomes the
+    rollback copy, or goes when the slot keeps Qt (a superseded client). An
+    incomplete bundle never takes the slot and stays where the update keeps
+    it. Says which; `progress` notes a removal under way, which an interrupt
+    leaves partial."""
     if previous is None:
         return 'nothing was installed before'
-    if MAC and bundle_kind(previous) is None:
-        remove(previous)
-        return 'the incomplete bundle that was installed (no Info.plist identity) was removed'
+    if MAC and not complete_bundle(previous):
+        # Never removed: a check that failed for another reason must not cost a GUI.
+        return ('the replaced bundle is incomplete (no identity, executable or valid signature), '
+                'so it did not become the rollback copy')
     if keep:
+        progress['removing'] = True
         remove(previous)
         return f'the Qt GUI stays the rollback copy in {ROLLBACK}'
     take_slot(previous)
@@ -712,7 +738,7 @@ def report_kept(installed):
         say(f'earlier updates kept these copies; remove them once Zerus runs as it should: {", ".join(map(str, kept))}')
 
 
-def recovery(installed, expected, verified, kept):
+def recovery(installed, expected, verified, kept, partial=False):
     """Where things are after an update that did not finish."""
     try:
         holds = 'new' if digest(executable(installed)) == expected else 'previous'
@@ -721,7 +747,10 @@ def recovery(installed, expected, verified, kept):
     parts = [{None: f'nothing complete is installed at {installed}',
               'previous': f'{installed} keeps the previous GUI',
               'new': f'{installed} holds the new GUI' + ('' if verified else ', not verified running')}[holds]]
-    if kept:
+    if kept and partial:
+        parts.append(f'what remains of the replaced GUI in {kept} may be partial; the new GUI was verified, '
+                     'so delete it rather than putting it back')
+    elif kept:
         parts.append(f'the replaced GUI is kept in {kept}; to put it back, quit Zerus and move it to {installed}')
     return 'not finished: ' + '; '.join(parts)
 
@@ -873,6 +902,7 @@ def update(built, installed, rollback=False):
     aside = folder / 'previous' / installed.name
     saved = expected = None
     verified = done = False
+    progress = {}
     try:
         if MAC:
             run(['codesign', '--verify', '--deep', '--strict', built])
@@ -889,6 +919,8 @@ def update(built, installed, rollback=False):
             early = settings_report(before_qt=True)[0] if to_qt else []
             if switching:
                 save_settings_snapshot()
+            if gui_pids(installed):
+                raise UpdateError('Zerus started during the update; nothing was replaced')
             swap_in(stage, installed, aside)
             # Nothing starts the new GUI: its signature (swap_in) and its own
             # --build-info verify it, and then the replaced GUI settles as after a start.
@@ -901,7 +933,12 @@ def update(built, installed, rollback=False):
                 put_back(installed, aside, folder / 'new' / installed.name)
                 raise UpdateError(f'the new GUI was not verified: {error}; the previous GUI was restored') from None
             verified = True
-            settled = settle(aside if aside.exists() else None, keep)
+            # A GUI started meanwhile may run from the replaced copy: keep it.
+            if gui_pids(installed) or in_use(folder):
+                done = True
+                raise UpdateError('the new GUI is installed, but Zerus started during the update; '
+                                  'the replaced GUI was kept')
+            settled = settle(aside if aside.exists() else None, keep, progress)
             done = True
             say(f'installed {name} without starting it; {settled}')
             sweep(installed.parent, folder)
@@ -948,11 +985,20 @@ def update(built, installed, rollback=False):
                                   f'but did not start: {error}') from None
             raise UpdateError(f'the new GUI did not start{failure}; the previous GUI was restored and started')
         verified = True
-        settled = settle(aside if aside.exists() else None, keep)
-        done = True
         problems = list(early)
-        if digest(executable(installed)) != expected or not running_image_matches(new, installed):
+        # Before anything leaves: the new process runs the new build, and no
+        # other Zerus process runs, from the installed path or the replaced copy.
+        image = digest(executable(installed)) == expected and running_image_matches(new, installed)
+        others = [other for other in gui_pids(installed) if other != new]
+        if not image:
             problems.append('the running image is not the new build')
+        if others or in_use(folder):
+            problems.append(f'another Zerus process runs ({others or folder})')
+        if problems[len(early):]:
+            done = True
+            raise UpdateError('the new GUI runs, but ' + '; '.join(problems) + '; the replaced GUI was kept')
+        settled = settle(aside if aside.exists() else None, keep, progress)
+        done = True
         preserved, draft_problems = changed_drafts(saved, roots)
         problems += draft_problems
         if to_client:
@@ -985,7 +1031,7 @@ def update(built, installed, rollback=False):
                 kept = keep_aside(folder, aside)
         finally:
             if not done:
-                say(recovery(installed, expected, verified, kept))
+                say(recovery(installed, expected, verified, kept, progress.get('removing', False)))
             elif kept:
                 say(f'the replaced GUI is kept in {kept}')
 

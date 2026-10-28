@@ -310,7 +310,9 @@ class Flow(Fixture):
         super().setUp()
         self.installed = self.root / 'Applications/hgs-tray.app'
         self.slot = updater.ROLLBACK / 'hgs-tray.app'
+        # A GUI runs as `pid` while `running`: quitting stops it, a start runs pid 200.
         self.running = True
+        self.pid = 100
         # wait_started answers, in order; 200 once they run out.
         self.starts = []
         self.events = []
@@ -321,14 +323,14 @@ class Flow(Fixture):
             'say': self.lines.append,
             'MAC': True,
             'run': lambda *a, **k: '',
-            'build_info': lambda path: {'version': '0.47.0', 'versionName': self.variant(path), 'devBuildNumber': 1413},
-            'gui_pids': lambda installed: [100] if self.running else [],
-            'quit_gui': lambda pid, installed: self.events.append('quit'),
+            'build_info': self.build_info,
+            'gui_pids': lambda installed: [self.pid] if self.running else [],
+            'quit_gui': self.quit_gui,
             'socket_path': lambda pid: None,
             'native': dict,
             'start': self.start,
             'wait_started': lambda installed, path, old: self.starts.pop(0) if self.starts else 200,
-            'stop_started': lambda installed: None,
+            'stop_started': lambda installed: setattr(self, 'running', False),
             'running_image_matches': lambda pid, installed: True,
             'provenance': lambda *a: None,
         }
@@ -339,8 +341,20 @@ class Flow(Fixture):
 
     def start(self, installed):
         self.events.append(('start', self.variant(installed)))
+        self.running, self.pid = True, 200
         if self.on_start:
             self.on_start()
+
+    def quit_gui(self, pid, installed):
+        self.events.append('quit')
+        self.running = False
+
+    def build_info(self, path):
+        try:
+            variant = self.variant(path)
+        except OSError as error:
+            raise updater.UpdateError(f'{path} does not report its build identity: {error}') from None
+        return {'version': '0.47.0', 'versionName': variant, 'devBuildNumber': 1413}
 
     def variant(self, path):
         return (Path(path) / 'Contents/MacOS/hgs-tray').read_text()
@@ -488,6 +502,90 @@ class UpdateFlow(Flow):
         self.assertNotIn('.replaced-empty', listed, 'an empty folder holds nothing to recover')
         self.assertEqual((self.variant(kept), self.variant(incoming)), ('client-0', 'client-00'))
 
+    def test_a_partial_qt_never_takes_the_slot(self):
+        # An interrupted rm -rf / cp -R left Qt's Info.plist without its executable.
+        for self.running in (True, False):
+            with self.subTest(running=self.running):
+                shutil.rmtree(self.installed.parent, ignore_errors=True)
+                shutil.rmtree(updater.ROLLBACK, ignore_errors=True)
+                self.install('qt-partial', 'qt', self.installed)
+                (self.installed / 'Contents/MacOS/hgs-tray').unlink()
+                self.install('qt-old', 'qt', self.slot)
+                self.domain({'attention.observed': b'{}'})
+                self.assertEqual(updater.update(self.bundle('client', 'tauri'), self.installed), 0)
+                self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('client', 'qt-old'))
+                self.assertIn('the replaced bundle is incomplete', self.lines[-2])
+                self.assertTrue(list(self.installed.parent.glob('.hgs-tray-kept-*/previous/hgs-tray.app')))
+
+    def test_a_bundle_whose_signature_fails_never_takes_the_slot(self):
+        self.install('qt-tampered', 'qt', self.installed)
+        self.install('qt-old', 'qt', self.slot)
+        self.domain({'attention.observed': b'{}'})
+
+        def codesign(args, **kwargs):
+            if 'previous' in Path(args[-1]).parts:
+                raise subprocess.CalledProcessError(1, args)
+            return ''
+        with mock.patch.object(updater, 'run', codesign):
+            self.assertEqual(updater.update(self.bundle('client', 'tauri'), self.installed), 0)
+        self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('client', 'qt-old'))
+
+    def test_a_gui_started_during_a_stopped_update_keeps_its_bundle(self):
+        self.install('client-1', 'tauri', self.installed)
+        self.install('qt', 'qt', self.slot)
+        self.running = False
+        # Opened before the swap: nothing is replaced.
+        pids = iter([[], [100]])
+        with mock.patch.object(updater, 'gui_pids', lambda installed: next(pids, [])), \
+                self.assertRaisesRegex(updater.UpdateError, 'Zerus started during the update; nothing was replaced'):
+            updater.update(self.bundle('client-2', 'tauri'), self.installed)
+        self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('client-1', 'qt'))
+        self.assertEqual(list(self.installed.parent.glob('.hgs-tray-*')), [])
+        # Opened after the swap, from the replaced copy: it is kept.
+        swap_in = updater.swap_in
+
+        def swap(stage, installed, aside):
+            swap_in(stage, installed, aside)
+            self.running = True
+        with mock.patch.object(updater, 'swap_in', swap), \
+                self.assertRaisesRegex(updater.UpdateError, 'Zerus started during the update; the replaced GUI was kept'):
+            updater.update(self.bundle('client-2', 'tauri'), self.installed)
+        [kept] = self.installed.parent.glob('.hgs-tray-kept-*/previous/hgs-tray.app')
+        self.assertEqual((self.variant(self.installed), self.variant(kept), self.variant(self.slot)),
+                         ('client-2', 'client-1', 'qt'))
+        self.assertIn(f'the replaced GUI is kept in {kept}', self.lines[-1])
+
+    def test_another_process_or_another_image_keeps_the_replaced_gui(self):
+        for case in ('another pid', 'another image'):
+            with self.subTest(case=case):
+                shutil.rmtree(self.installed.parent, ignore_errors=True)
+                shutil.rmtree(updater.ROLLBACK, ignore_errors=True)
+                self.install('client-1', 'tauri', self.installed)
+                self.install('qt', 'qt', self.slot)
+                self.running, self.pid = True, 100
+                # A second copy shows up next to the new one (pid 200).
+                stubs = ({'gui_pids': lambda installed: ([self.pid] + [300] * (self.pid == 200)) if self.running else []}
+                         if case == 'another pid'
+                         else {'running_image_matches': lambda pid, installed: False})
+                with mock.patch.multiple(updater, **stubs), \
+                        self.assertRaisesRegex(updater.UpdateError, 'the replaced GUI was kept'):
+                    updater.update(self.bundle('client-2', 'tauri'), self.installed)
+                [kept] = self.installed.parent.glob('.hgs-tray-kept-*/previous/hgs-tray.app')
+                self.assertEqual((self.variant(self.installed), self.variant(kept), self.variant(self.slot)),
+                                 ('client-2', 'client-1', 'qt'))
+
+    def test_an_interrupted_removal_says_the_copy_may_be_partial(self):
+        self.install('client-1', 'tauri', self.installed)
+        self.install('qt', 'qt', self.slot)
+
+        def interrupted(path):
+            (path / 'Contents/MacOS/hgs-tray').unlink()
+            raise KeyboardInterrupt
+        with mock.patch.object(updater, 'remove', interrupted), self.assertRaises(KeyboardInterrupt):
+            updater.update(self.bundle('client-2', 'tauri'), self.installed)
+        self.assertIn('may be partial; the new GUI was verified, so delete it rather than putting it back', self.lines[-1])
+        self.assertNotIn('to put it back, quit Zerus and move it', self.lines[-1])
+
     def test_an_update_interrupted_twice_keeps_its_copies(self):
         # The new GUI cannot move in and the old one cannot move back: the
         # update's folder is all that is left, so it stays.
@@ -563,8 +661,10 @@ class UpdateFlow(Flow):
         self.install('qt', 'qt', self.slot)
         self.assertEqual(updater.update(self.bundle('client-2', 'tauri'), self.installed), 0)
         self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('client-2', 'qt'))
-        self.assertIn('the incomplete bundle that was installed (no Info.plist identity) was removed', self.lines[-1])
-        self.assertEqual(list(self.installed.parent.glob('.hgs-tray-*')), [])
+        self.assertIn('the replaced bundle is incomplete', self.lines[-2])
+        # Kept, never deleted: the check may have failed for another reason.
+        [kept] = self.installed.parent.glob('.hgs-tray-kept-*/previous/hgs-tray.app')
+        self.assertEqual(self.lines[-1], f'the replaced GUI is kept in {kept}')
 
     def test_an_unreadable_settings_copy_is_a_reported_problem(self):
         # N4: the check reports it and Zerus starts again; nothing raises after the quit.
@@ -656,7 +756,11 @@ class Invariants(Flow):
         '--rollback': (('client', 'tauri'), ('qt', 'qt'), None, set()),
         'second --rollback': (('qt', 'qt'), ('client', 'tauri'), None, set()),
         'install over nothing': (None, ('qt', 'qt'), ('client', 'tauri'), set()),
+        # An interrupted rm -rf / cp -R left Qt's Info.plist without its executable:
+        # it must never take the slot from the complete older Qt.
+        'partial Qt to client': (('qt-partial', 'qt'), ('qt-old', 'qt'), ('client', 'tauri'), set()),
     }
+    PARTIAL = {'partial Qt to client'}
     STARTS = ('ok', 'start() raises', 'wait times out', 'Ctrl-C in wait_started')
     # No GUI runs, so none starts: the installed copy's --build-info verifies it.
     STOPPED = ('not running', 'build-info fails', 'build-info times out', 'Ctrl-C in build-info')
@@ -686,6 +790,8 @@ class Invariants(Flow):
 
     def build_info(self, path):
         path = Path(path)
+        if not (path / 'Contents/MacOS/hgs-tray').is_file():
+            raise updater.UpdateError(f'{path} does not report its build identity')
         if path == self.installed and self.variant(path) == self.requested:
             # The stopped path's verification of the copy it installed.
             if self.mode == 'Ctrl-C in build-info':
@@ -731,6 +837,9 @@ class Invariants(Flow):
             shutil.rmtree(path, ignore_errors=True)
         if installed:
             self.install(*installed, self.installed)
+        if direction in self.PARTIAL:
+            (self.installed / 'Contents/MacOS/hgs-tray').unlink()
+            (self.installed / 'Contents/partial').write_text('the original partial bundle')
         if slot:
             self.install(*slot, self.slot)
         self.lines.clear()
@@ -758,10 +867,12 @@ class Invariants(Flow):
         named = lambda path: path in (self.installed, self.slot) or any(
             str(folder) in output for folder in (path, path.parent, path.parent.parent))
         context = f'{output}\n{sorted(map(str, bundles))}'
-        self.assertNotIn(self.installed, set(bundles) - set(complete), 'never an incomplete installed GUI')
+        if not (self.installed / 'Contents/partial').exists():
+            self.assertNotIn(self.installed, set(bundles) - set(complete), 'never an incomplete installed GUI')
         # I1, I3: every original GUI survives, where the owner can find it, unless
         # policy superseded it after the new GUI was verified running.
-        for variant in {installed and installed[0], slot[0]} - {None} - (superseded if self.verified else set()):
+        originals = {installed and direction not in self.PARTIAL and installed[0], slot[0]} - {None, False}
+        for variant in originals - (superseded if self.verified else set()):
             places = [path for path, found in complete.items() if found[0] == variant and named(path)]
             self.assertTrue(places, f'{variant} lost or unnamed: {context}')
         self.assertTrue(any(kind == 'qt' for _, kind in complete.values()), f'no complete Qt: {context}')
@@ -790,7 +901,7 @@ class Invariants(Flow):
                         point += 1
                         if point > steps:
                             break
-        self.assertGreater(cases, 900)
+        self.assertGreater(cases, 1300)
 
 
 if __name__ == '__main__':

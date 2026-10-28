@@ -3416,9 +3416,12 @@ systemd or launchd. Do not stage GUI copies in `~/Applications` or `~/.local/bin
 hand. The GUI it replaces stays aside until the new one was verified (running, or,
 for a GUI that is not running, by its signature and its own `--build-info`) and
 only then becomes the one rollback copy in `~/.local/share/hgs/desktop-previous`;
-a new GUI that does not start is replaced by it again. An interrupted update
-keeps the replaced GUI in a `.hgs-tray-kept-*` folder beside the installed one
-and prints where; later updates list such folders and never remove them. Links at the
+a new GUI that does not start is replaced by it again. A replaced bundle without
+its identity, executable or valid signature never becomes the rollback copy, and
+a Zerus process started during the update stops the change. Those cases and an
+interrupted update keep the replaced GUI in a `.hgs-tray-kept-*` folder beside
+the installed one and print where; later updates list such folders and never
+remove them. Links at the
 installed path or in the rollback folder are refused. The update confirms the
 running image, unchanged nonempty drafts and native agent and tmux processes. It records the
 installed builds in `~/.local/share/hgs/build-provenance.json`, then removes hidden

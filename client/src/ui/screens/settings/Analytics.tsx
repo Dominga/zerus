@@ -5,7 +5,7 @@ import { inTauri } from "../../../bridge";
 import { Icon } from "../../lib/icons";
 import { Actions, Check, Group, Lines, NumberField, Row, SectionHead, Select, Status, Table } from "./ui";
 import {
-  PROVIDERS, coverageText, defaultRange, detailText, displayRoute, localChange, measure, overviewText, pageText, voiceText,
+  PROVIDERS, coverageText, defaultRange, detailText, displayRoute, measure, overviewText, pageText, voiceText,
   type Report, type Row as Bucket,
 } from "./analytics-text";
 
@@ -19,7 +19,7 @@ interface View {
   status: string; busy: boolean; mutating: boolean; can_refresh: boolean; can_export: boolean; can_change_local: boolean;
   peers: string[]; peer_limit: boolean; selection: string; from: string | null; through: string | null;
   local: { enabled: boolean; retention_days: number; epoch: string; reads: number } | null;
-  report: Report | null; purge_pending: boolean;
+  report: Report | null; purge_pending: boolean; shorten_pending: number | null;
 }
 interface Rows { rows: Bucket[]; offset: number; total: number }
 
@@ -38,7 +38,6 @@ export function AnalyticsSection() {
   const [selected, setSelected] = createSignal<string | undefined>();
   const [enabled, setEnabled] = createSignal(false);
   const [retention, setRetention] = createSignal(90);
-  const [shorten, setShorten] = createSignal<{ days: number; epoch: string } | undefined>();
   const [review, setReview] = createSignal<string | undefined>();
   // A call that failed outright; the status line says why until the next view.
   const [failure, setFailure] = createSignal<string | undefined>();
@@ -80,9 +79,10 @@ export function AnalyticsSection() {
     listen<{ refresh: boolean }>("analytics-changed", (e) => { if (e.payload.refresh) refresh(); else fetchView(); })
       .then((off) => { if (gone) off(); else stop = off; }, () => {});
     // The page starts from the last read's computers and days, as Qt's
-    // controls keep them; a purge question left from an earlier visit is
+    // controls keep them; a question left from an earlier visit is
     // cancelled; then the section reads, as Qt's does when opened.
-    void invoke<View>("analytics_purge", { confirm: false }).then((last) => {
+    void invoke<View>("analytics_configure_answer", { confirm: false })
+      .then(() => invoke<View>("analytics_purge", { confirm: false })).then((last) => {
       if (last.from && last.through) {
         setSelection(last.selection);
         setFrom(last.from);
@@ -98,6 +98,7 @@ export function AnalyticsSection() {
       stop?.();
       clearInterval(timer);
       if (view()?.purge_pending) void invoke("analytics_purge", { confirm: false }).catch(() => {});
+      if (view()?.shorten_pending) void invoke("analytics_configure_answer", { confirm: false }).catch(() => {});
     });
   });
   createEffect(on([provider, offset], () => { if (inTauri() && view()?.report) readRows(); }, { defer: true }));
@@ -110,15 +111,11 @@ export function AnalyticsSection() {
     { value: "*", label: view()?.peer_limit ? "First 32 configured computers" : "All configured computers" },
     ...(view()?.peers ?? []).map((peer) => ({ value: peer, label: peer })),
   ];
-  const configure = (days: number, epoch: string) => {
-    void invoke<View>("analytics_configure", { epoch, enabled: enabled(), retentionDays: days }).then(apply, failed);
-  };
+  // Checked at the click (Qt's fresh(m_local)) and pinned to the epoch of
+  // this computer's read; a shorter retention is asked first
+  // (shorten_pending), and the status says why a click does nothing.
   const applyLocal = () => {
-    const v = view();
-    const change = v && localChange(v, retention());
-    if (!change) return;
-    if (change.ask) setShorten({ days: retention(), epoch: change.epoch });
-    else configure(retention(), change.epoch);
+    void invoke<View>("analytics_configure", { enabled: enabled(), retentionDays: retention() }).then(apply, failed);
   };
   const openReview = () => {
     void invoke<string | null>("analytics_review").then((text) => { if (text) setReview(text); }, failed);
@@ -206,11 +203,11 @@ export function AnalyticsSection() {
         <button type="button" class="btn" disabled={!view()?.can_export} onClick={openReview}><Icon name="file-text" size={14} />Review aggregate diagnostics…</button>
       </Actions>
 
-      <Show when={shorten()}>
-        {(asked) => (
+      <Show when={view()?.shorten_pending}>
+        {(days) => (
           <Question title="Shorten local analytics history?" yes="Shorten retention"
-            text={`Keep only the latest ${asked().days} UTC days of agent analytics on this computer. Older daily aggregates will be deleted. Speech statistics and durable delivery receipts are unaffected.`}
-            answer={(yes) => { const { days, epoch } = asked(); setShorten(undefined); if (yes) configure(days, epoch); }} />
+            text={`Keep only the latest ${days()} UTC days of agent analytics on this computer. Older daily aggregates will be deleted. Speech statistics and durable delivery receipts are unaffected.`}
+            answer={(yes) => void invoke<View>("analytics_configure_answer", { confirm: yes }).then(apply, failed)} />
         )}
       </Show>
       <Show when={view()?.purge_pending}>

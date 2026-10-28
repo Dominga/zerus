@@ -207,7 +207,8 @@ const APPROVALS_CLIENT = [
 ];
 
 const worktreesQt = fs.readFileSync(new URL("tray/src/WorktreeSettings.h", repo), "utf8");
-const worktreesCore = fs.readFileSync(new URL("client/core/src/worktree_policy.rs", repo), "utf8");
+const worktreesCore = ["client/core/src/worktree_policy.rs", "client/core/src/worktree_policy/page.rs"]
+  .map((path) => fs.readFileSync(new URL(path, repo), "utf8")).join("\n");
 const WORKTREES = [
   "Worktrees", "This computer", "Refresh",
   "Cleanup runs on the computer that owns each worktree, even when this window is closed. Rules are enabled by default and apply across its projects. Other computers keep their own settings.",
@@ -215,11 +216,11 @@ const WORKTREES = [
   "Periodically clean unused integrated worktrees", "Forget verified managed worktrees whose folders no longer exist",
   "Minimum inactivity for periodic cleanup",
   "Only verified Zerus-created worktrees qualify. Cleanup keeps branches and conversation history. Changed, untracked and ignored local files, sessions, running programs, locked folders and incomplete checks protect a worktree. Build folders and local configuration require review in Projects > Worktrees.",
-  "Refresh to read this computer's cleanup rules.", "Reading cleanup settings…",
-  "Cleanup settings saved on the selected computer.", "Cleanup settings loaded. Uncertain removals stay for manual review.",
-  "Apply to this computer",
+  "Refresh to read this computer's cleanup rules.", "Apply to this computer",
 ];
 const WORKTREES_CORE = [
+  "Refresh to read this computer's cleanup rules.", "Reading cleanup settings…",
+  "Cleanup settings saved on the selected computer.", "Cleanup settings loaded. Uncertain removals stay for manual review.",
   "This computer is unavailable or needs an updated hgs CLI for cleanup settings.",
   "Save was not confirmed. Refresh before changing settings again.", "Could not read cleanup settings.",
   "Computer returned invalid cleanup settings.", "worktree-maintenance-v1",

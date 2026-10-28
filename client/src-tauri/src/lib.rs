@@ -283,7 +283,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(files::start());
                 app.manage(analytics::start(app.handle()));
                 app.manage(approvals::start());
-                app.manage(worktree_policy::start());
+                app.manage(worktree_policy::start(app.handle()));
                 // A replay never touches the real read or attention marks.
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
@@ -649,6 +649,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         analytics::analytics_rows,
         analytics::analytics_age,
         analytics::analytics_configure,
+        analytics::analytics_configure_answer,
         analytics::analytics_purge_check,
         analytics::analytics_purge,
         analytics::analytics_review,
@@ -656,8 +657,9 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         analytics::analytics_save_review,
         approvals::approvals_list,
         approvals::approvals_detail,
-        worktree_policy::worktree_policy_peers,
+        worktree_policy::worktree_policy_view,
         worktree_policy::worktree_policy_read,
+        worktree_policy::worktree_policy_choose,
         worktree_policy::worktree_policy_apply,
         recovery::recovery_view,
         recovery::recovery_load,

@@ -21,7 +21,7 @@ pub mod download_cache;
 pub mod drafts;
 pub mod external_file;
 pub mod fleet;
-mod fsx;
+pub mod fsx;
 pub mod input_queue;
 pub mod launch;
 pub mod legacy;

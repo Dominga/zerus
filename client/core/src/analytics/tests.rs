@@ -701,7 +701,7 @@ fn fake_hgs(dir: &Path, help: &str, reply: &[u8], fail: bool) -> std::path::Path
     std::fs::write(
         &script,
         format!(
-            "#!/bin/sh\nhere=$(dirname \"$0\")\necho \"$* session=${{HGS_SESSION:-unset}}\" >> \"$here/calls\"\ncase \"$*\" in *--help*) cat \"$here/help\"; exit 0;; esac\ncat >/dev/null\n{answer}\n"
+            "#!/bin/sh\nhere=$(dirname \"$0\")\necho \"$* session=${{HGS_SESSION:-unset}} run=${{HGS_RUN_ID:-unset}}\" >> \"$here/calls\"\ncase \"$*\" in *--help*) cat \"$here/help\"; exit 0;; esac\ncat >/dev/null\n{answer}\n"
         ),
     )
     .unwrap();
@@ -739,7 +739,7 @@ fn an_older_cli_is_only_asked_for_help_and_errors_never_echo_its_text() {
         call_in(&hgs, &read, &attribution).unwrap_err(),
         "This computer does not support the requested analytics read."
     );
-    assert_eq!(calls(), "@old --help session=unset\n");
+    assert_eq!(calls(), "@old --help session=unset run=unset\n");
 
     // A reply past 1 MiB, and a failing CLI: Qt's words, never its stderr.
     std::fs::remove_file(dir.join("calls")).unwrap();
@@ -765,7 +765,8 @@ fn an_older_cli_is_only_asked_for_help_and_errors_never_echo_its_text() {
     ));
     let log = calls();
     assert!(
-        log.lines().all(|line| line.ends_with("session=unset")),
+        log.lines()
+            .all(|line| line.ends_with("session=unset run=unset")),
         "{log}"
     );
     assert!(log.contains("@old analytics --json"));
@@ -1149,7 +1150,7 @@ fn a_fleet_at_the_limits_is_drawn_off_the_lock() {
     let drawing = draw.render();
     let rendered = start.elapsed();
     let start = Instant::now();
-    page.drawn(drawing);
+    drop(page.drawn(drawing));
     let rows = page.rows("", 34_000);
     let view = page.view(NOW_MS);
     let input = page.diagnostic_input(NOW_MS).unwrap();
@@ -1172,18 +1173,51 @@ fn a_fleet_at_the_limits_is_drawn_off_the_lock() {
     // Loose bounds for an unoptimized build on a shared machine.
     assert!(locked < Duration::from_millis(200), "{locked:?}");
     assert!(rendered < Duration::from_secs(10), "{rendered:?}");
-    // A drawing that finishes after a newer one never replaces it.
+    // Replacing a fleet's drawing hands the old one back: only the swap
+    // happens under the lock, freeing it after.
     page.age();
-    let older = page.draw_due(NOW_MS).unwrap();
-    page.age();
-    let newer = page.draw_due(NOW_MS).unwrap();
-    page.drawn(newer.render());
-    page.speech_answered("", Err("x".into()), NOW_MS);
-    page.drawn(older.render());
+    let drawing = page.draw_due(NOW_MS).unwrap().render();
+    let start = Instant::now();
+    let replaced = page.drawn(drawing);
+    let swapped = start.elapsed();
+    let start = Instant::now();
+    drop(replaced);
+    let freed = start.elapsed();
+    eprintln!("replacing it: {swapped:?} under the lock, {freed:?} freeing the old one after");
+    assert!(swapped < Duration::from_millis(5), "{swapped:?}");
     assert_eq!(
         page.view(NOW_MS).report.unwrap().buckets,
         MAX_COMPUTERS * MAX_BUCKETS
     );
+}
+
+#[test]
+fn a_drawing_that_finishes_after_a_newer_one_never_replaces_it() {
+    // Reads every route as `count` completed turns, leaving the drawing to
+    // the test.
+    let read = |page: &mut Page, count: u64| {
+        page.refresh(ALL, "2026-01-01", "2026-01-30");
+        while let Some((route, ..)) = page.next_route() {
+            let agent = parsed(vec![bucket(first(), "codex", count)]);
+            page.summary_answered(&route, Ok(agent), NOW_MS);
+            page.speech_answered(&route, local_voice(), NOW_MS);
+        }
+        page.draw_due(NOW_MS).unwrap()
+    };
+    let totals = |page: &Page| page.view(NOW_MS).report.unwrap().totals["turn_completed"];
+    let mut page = Page::new();
+    let older = read(&mut page, 3).render();
+    let newer = read(&mut page, 5).render();
+    drop(page.drawn(newer));
+    assert_eq!(totals(&page), 5.0);
+    // The older drawing comes back untouched, for the caller to free.
+    drop(page.drawn(older));
+    assert_eq!(totals(&page), 5.0);
+    assert_eq!(page.rows("", 0).total, 1);
+    // A later drawing replaces it again.
+    let latest = read(&mut page, 7).render();
+    drop(page.drawn(latest));
+    assert_eq!(totals(&page), 7.0);
 }
 
 #[test]
@@ -1244,19 +1278,48 @@ fn a_negative_zero_reads_as_zero() {
 }
 
 #[test]
-fn configure_pins_the_reviewed_epoch_and_is_never_retried() {
+fn configure_is_checked_at_the_click_and_never_retried() {
+    use page::{Configure, CHANGING, NOT_CURRENT_APPLY, READING};
     let mut page = Page::new();
-    assert!(!page.begin_configure(""));
+    // Nothing read from this computer yet: the status says why.
+    assert_eq!(
+        page.begin_configure(true, 30, NOW_MS),
+        Err(NOT_CURRENT_APPLY.into())
+    );
+    assert_eq!(shown(&mut page).status, NOT_CURRENT_APPLY);
     page.refresh("", "2026-01-01", "2026-01-30");
+    assert_eq!(page.begin_configure(true, 30, NOW_MS), Err(READING.into()));
+    assert_eq!(shown(&mut page).status, READING);
     read_all(&mut page, &|_| (Ok(parsed(vec![])), local_voice()));
-    // The epoch is the one the view showed when the person clicked.
-    let epoch = shown(&mut page).local.unwrap().epoch;
-    assert_eq!(epoch, EPOCH);
-    assert!(page.begin_configure(&epoch));
+    // Qt checks fresh(m_local) at the click: a view that allowed the
+    // change a while ago does not.
+    assert!(shown(&mut page).can_change_local);
+    let later = NOW_MS + 301_000;
+    assert_eq!(
+        page.begin_configure(true, 30, later),
+        Err(NOT_CURRENT_APPLY.into())
+    );
+    assert!(!page.view(later).mutating);
+    assert_eq!(
+        page.begin_configure(true, 91, NOW_MS),
+        Err("Choose a retention of 1 to 90 days.".into())
+    );
+    // The same or a longer retention is made at once, pinned to the
+    // epoch of the read.
+    let change = page.begin_configure(false, 90, NOW_MS).unwrap();
+    assert_eq!(
+        change,
+        Some(Configure {
+            epoch: EPOCH.into(),
+            enabled: false,
+            retention_days: 90
+        })
+    );
     let view = shown(&mut page);
     assert_eq!(view.status, "Applying local collection settings…");
     assert!(view.mutating && !view.can_refresh && !view.can_change_local);
-    assert!(!page.begin_configure(&epoch));
+    assert_eq!(view.shorten_pending, None);
+    assert_eq!(page.begin_configure(true, 90, NOW_MS), Err(CHANGING.into()));
     assert!(!page.refresh("", "2026-01-01", "2026-01-30"));
     let unconfirmed = "Change was not confirmed. Refresh and review before another action.";
     assert!(!page.configure_answered(Err(unconfirmed.into())));
@@ -1265,7 +1328,29 @@ fn configure_pins_the_reviewed_epoch_and_is_never_retried() {
     assert!(!view.mutating && view.local.is_none() && !view.can_change_local);
     page.refresh("", "2026-01-01", "2026-01-30");
     read_all(&mut page, &|_| (Ok(parsed(vec![])), local_voice()));
-    page.begin_configure(EPOCH);
+    // A shorter retention holds the page while the person is asked.
+    assert_eq!(page.begin_configure(true, 30, NOW_MS), Ok(None));
+    let view = shown(&mut page);
+    assert_eq!(view.shorten_pending, Some(30));
+    assert!(view.mutating && !view.can_refresh && !view.can_change_local);
+    assert!(!page.refresh("", "2026-01-01", "2026-01-30"));
+    page.configure_cancelled();
+    let view = shown(&mut page);
+    assert!(!view.mutating && view.shorten_pending.is_none() && view.can_change_local);
+    assert_eq!(page.configure_confirmed(), None);
+    // Confirmed: the values and epoch of the click.
+    assert_eq!(page.begin_configure(true, 30, NOW_MS), Ok(None));
+    let change = page.configure_confirmed().unwrap();
+    assert_eq!(
+        (change.epoch.as_str(), change.enabled, change.retention_days),
+        (EPOCH, true, 30)
+    );
+    let view = shown(&mut page);
+    assert_eq!(view.status, "Applying local collection settings…");
+    assert!(view.mutating && view.shorten_pending.is_none());
+    // A cancel once the change runs leaves it alone.
+    page.configure_cancelled();
+    assert!(shown(&mut page).mutating);
     assert!(page.configure_answered(Ok(())));
 }
 
@@ -1276,8 +1361,10 @@ fn a_purge_waits_for_a_fresh_epoch_and_the_persons_confirmation() {
     read_all(&mut page, &|_| {
         (Ok(parsed(vec![bucket(first(), "codex", 3)])), local_voice())
     });
-    assert_eq!(page.begin_purge(NOW_MS), Some((first(), last())));
+    assert_eq!(page.begin_purge(NOW_MS), Ok((first(), last())));
     assert!(shown(&mut page).mutating);
+    // A second click while it checks says why nothing happens.
+    assert_eq!(page.begin_purge(NOW_MS), Err(page::CHANGING.into()));
     // Cancelled: nothing changes and nothing is left pending.
     assert!(page.purge_checked(Ok(parsed(vec![])), NOW_MS));
     assert!(shown(&mut page).purge_pending);
@@ -1286,7 +1373,7 @@ fn a_purge_waits_for_a_fresh_epoch_and_the_persons_confirmation() {
     assert!(!view.mutating && !view.purge_pending && view.can_change_local);
     assert_eq!(page.purge_confirmed(), None);
     // A cancel outside a purge leaves a running change alone.
-    page.begin_configure(EPOCH);
+    page.begin_configure(true, 90, NOW_MS).unwrap();
     page.purge_cancelled();
     assert!(shown(&mut page).mutating);
     page.configure_answered(Ok(()));
@@ -1295,7 +1382,7 @@ fn a_purge_waits_for_a_fresh_epoch_and_the_persons_confirmation() {
         (Ok(parsed(vec![bucket(first(), "codex", 3)])), local_voice())
     });
     // A stale latest summary ends the purge.
-    page.begin_purge(NOW_MS);
+    page.begin_purge(NOW_MS).unwrap();
     let mut stale = parsed(vec![]);
     stale.generated_at -= 400.0;
     assert!(!page.purge_checked(Ok(stale), NOW_MS));
@@ -1306,7 +1393,7 @@ fn a_purge_waits_for_a_fresh_epoch_and_the_persons_confirmation() {
     );
     assert!(!view.mutating);
     // The confirmed purge pins the latest epoch read, a reset one here.
-    page.begin_purge(NOW_MS);
+    page.begin_purge(NOW_MS).unwrap();
     let mut reset = parsed(vec![]);
     reset.source_epoch = RESET.into();
     reset.generated_at += 1.0;
@@ -1323,7 +1410,7 @@ fn a_purge_waits_for_a_fresh_epoch_and_the_persons_confirmation() {
         agent.generated_at += 1.0;
         (Ok(agent), local_voice())
     });
-    page.begin_purge(NOW_MS);
+    page.begin_purge(NOW_MS).unwrap();
     assert!(!page.purge_checked(
         Err("Computer unavailable. No current analytics read.".into()),
         NOW_MS
@@ -1342,7 +1429,7 @@ fn the_diagnostic_review_waits_for_reads_and_changes() {
     let text = page.diagnostic(NOW_MS).unwrap();
     assert!(text.contains("\"kind\": \"local_aggregate_diagnostics\""));
     assert!(!text.contains(MACHINE) && !text.contains("profile_id"));
-    page.begin_configure(EPOCH);
+    page.begin_configure(true, 90, NOW_MS).unwrap();
     assert!(page.diagnostic(NOW_MS).is_none());
 }
 

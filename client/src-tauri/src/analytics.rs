@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, State};
-use zerus_client_core::analytics::page::{Page, Rows, View};
+use zerus_client_core::analytics::page::{Configure, Page, Rows, View};
 use zerus_client_core::analytics::{self, Reply, Request, Speech, Summary};
 use zerus_client_core::default_hgs;
 
@@ -93,7 +93,9 @@ impl Inner {
         let draw = self.page().draw_due(now_ms());
         if let Some(draw) = draw {
             let drawing = draw.render();
-            self.page().drawn(drawing);
+            // The drawing not kept is freed here, after the page is let go.
+            let replaced = self.page().drawn(drawing);
+            drop(replaced);
         }
     }
 
@@ -175,19 +177,45 @@ impl Inner {
         (self.notify)(false);
     }
 
-    /// Apply locally with the epoch the person's view showed when they
-    /// clicked (Qt captures it before its question).
-    fn configure(self: &Arc<Self>, epoch: &str, enabled: bool, retention_days: i64) -> View {
+    /// Apply locally clicked: checked at the click as Qt does, then made at
+    /// once or, for a shorter retention, once the person confirms it
+    /// (`shorten_pending`). The status says why a click does nothing.
+    fn configure(self: &Arc<Self>, enabled: bool, retention_days: i64) -> View {
         if let Some(view) = self.refused() {
             return view;
         }
-        if !(1..=90).contains(&retention_days) || !self.page().begin_configure(epoch) {
+        let begun = self
+            .page()
+            .begin_configure(enabled, retention_days, now_ms());
+        if let Ok(Some(change)) = begun {
+            self.change(change);
+        }
+        self.view()
+    }
+
+    /// The person's answer to the shorter retention's question.
+    fn configure_answer(self: &Arc<Self>, confirm: bool) -> View {
+        if !confirm {
+            self.page().configure_cancelled();
             return self.view();
         }
+        if let Some(view) = self.refused() {
+            self.page().configure_cancelled();
+            return view;
+        }
+        let change = self.page().configure_confirmed();
+        if let Some(change) = change {
+            self.change(change);
+        }
+        self.view()
+    }
+
+    /// Runs a local change with the epoch the person's view showed.
+    fn change(self: &Arc<Self>, change: Configure) {
         let request = Request::Configure {
-            epoch: epoch.to_owned(),
-            enabled,
-            retention_days,
+            epoch: change.epoch,
+            enabled: change.enabled,
+            retention_days: change.retention_days,
         };
         let service = Arc::clone(self);
         let started = spawn("analytics-change", move || {
@@ -199,7 +227,6 @@ impl Inner {
             let unconfirmed = "Change was not confirmed. Refresh and review before another action.";
             self.page().configure_answered(Err(unconfirmed.into()));
         }
-        self.view()
     }
 
     /// Purge local history…: this computer's latest epoch is read first;
@@ -209,7 +236,7 @@ impl Inner {
             return view;
         }
         let range = self.page().begin_purge(now_ms());
-        if let Some((from, through)) = range {
+        if let Ok((from, through)) = range {
             let service = Arc::clone(self);
             let started = spawn("analytics-change", move || {
                 let latest = summary(
@@ -315,16 +342,22 @@ pub fn analytics_age(analytics: State<'_, Analytics>) -> View {
     analytics.0.view()
 }
 
-/// Apply locally, once the person confirmed a shorter retention, pinned to
-/// the epoch their view showed when they clicked.
+/// Apply locally clicked, with the controls' values: checked and pinned to
+/// this computer's current read's epoch at the click.
 #[tauri::command(async)]
 pub fn analytics_configure(
     analytics: State<'_, Analytics>,
-    epoch: String,
     enabled: bool,
     retention_days: i64,
 ) -> View {
-    analytics.0.configure(&epoch, enabled, retention_days)
+    analytics.0.configure(enabled, retention_days)
+}
+
+/// The person's answer to the shorter retention's question; anything but
+/// Shorten retention (and leaving the page) cancels.
+#[tauri::command(async)]
+pub fn analytics_configure_answer(analytics: State<'_, Analytics>, confirm: bool) -> View {
+    analytics.0.configure_answer(confirm)
 }
 
 /// Purge local history….
@@ -354,34 +387,11 @@ pub fn analytics_review_cancel(analytics: State<'_, Analytics>) {
 }
 
 /// Writes `bytes` for its owner alone, replacing the file only once it is
-/// whole (QSaveFile). Only a temporary file this call created is removed.
+/// whole and on disk (QSaveFile). The temporary file beside it has a random
+/// name, another one when that name is taken; only one this call created is
+/// removed.
 fn save_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let name = path
-        .file_name()
-        .ok_or_else(|| std::io::Error::other("no file name"))?
-        .to_string_lossy()
-        .into_owned();
-    let temporary = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temporary)?;
-    let saved = file
-        .write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| {
-            drop(file);
-            std::fs::rename(&temporary, path)
-        });
-    if saved.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    saved
+    zerus_client_core::fsx::write_private_atomic(path, bytes, true)
 }
 
 /// Save file…: asks where, then saves the reviewed text there off the main
@@ -447,29 +457,39 @@ mod tests {
         let (inner, told) = service(true);
         let views = [
             inner.refresh(None, "", "2026-01-01", "2026-01-30"),
-            inner.configure("20000000-0000-4000-8000-000000000001", true, 30),
+            inner.configure(true, 30),
+            inner.configure_answer(true),
             inner.purge_check(),
             inner.purge(true),
         ];
         for view in views {
             assert_eq!(view.status, REPLAY);
             assert!(!view.busy && !view.mutating && !view.purge_pending);
-            assert!(view.report.is_none());
+            assert!(view.shorten_pending.is_none() && view.report.is_none());
         }
         assert_eq!(told.load(Ordering::SeqCst), 0);
-        // Leaving the purge question needs no CLI and is always allowed.
+        // Leaving either question needs no CLI and is always allowed.
         assert!(!inner.purge(false).mutating);
+        assert!(!inner.configure_answer(false).mutating);
     }
 
     #[test]
-    fn a_change_the_controls_do_not_allow_is_not_sent() {
+    fn a_click_the_page_does_not_allow_says_why_and_sends_nothing() {
+        use zerus_client_core::analytics::page::{NOT_CURRENT_APPLY, NOT_CURRENT_PURGE, READING};
         let (inner, told) = service(false);
         // No local read yet: nothing to pin, nothing sent.
-        let view = inner.configure("", true, 30);
+        let view = inner.configure(true, 30);
+        assert_eq!(view.status, NOT_CURRENT_APPLY);
         assert!(!view.mutating);
-        let view = inner.configure("20000000-0000-4000-8000-000000000001", true, 91);
+        let view = inner.purge_check();
+        assert_eq!(view.status, NOT_CURRENT_PURGE);
         assert!(!view.mutating);
-        assert!(!inner.purge_check().mutating);
+        // A confirmation with no question asked sends nothing.
+        assert!(!inner.configure_answer(true).mutating);
+        // A click while a read runs (this test answers no route).
+        assert!(inner.page().refresh("", "2026-01-01", "2026-01-30"));
+        assert_eq!(inner.configure(true, 30).status, READING);
+        assert_eq!(inner.purge_check().status, READING);
         assert_eq!(told.load(Ordering::SeqCst), 0);
     }
 
@@ -497,15 +517,27 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
-        // Someone else's file at the temporary name is left alone.
-        let temporary = dir.join(format!(
-            ".zerus-aggregate-diagnostics.json.{}.tmp",
-            std::process::id()
-        ));
-        std::fs::write(&temporary, b"not ours").unwrap();
-        assert!(save_private(&path, b"new").is_err());
-        assert_eq!(std::fs::read(&temporary).unwrap(), b"not ours");
-        assert_eq!(std::fs::read(&path).unwrap(), b"{\n}\n");
+        // Someone else's files beside it are left alone, whatever their
+        // names; the save picks a random one of its own.
+        let theirs = [
+            ".zerus-aggregate-diagnostics.json.tmp".to_owned(),
+            format!(
+                ".zerus-aggregate-diagnostics.json.{}.tmp",
+                std::process::id()
+            ),
+        ];
+        for name in &theirs {
+            std::fs::write(dir.join(name), b"not ours").unwrap();
+        }
+        save_private(&path, b"new").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        for name in &theirs {
+            assert_eq!(std::fs::read(dir.join(name)).unwrap(), b"not ours");
+        }
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 3);
+        // A save that fails leaves nothing of its own behind.
+        assert!(save_private(&path.join("inside-a-file"), b"x").is_err());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

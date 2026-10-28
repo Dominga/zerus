@@ -24,6 +24,14 @@ use super::{
 pub const THIS_COMPUTER: &str = "This computer";
 /// The selection that reads this computer and every peer.
 pub const ALL: &str = "*";
+/// Why a click on Apply locally or Purge does nothing (Qt's buttons are
+/// disabled then, but this view can be up to a minute old).
+pub const READING: &str = "A read is running. Try again when it finishes.";
+pub const CHANGING: &str = "A local analytics change is running. Try again when it finishes.";
+pub const NOT_CURRENT_APPLY: &str =
+    "Local analytics epoch is stale or unknown. Refresh before applying.";
+pub const NOT_CURRENT_PURGE: &str =
+    "Local analytics epoch is stale or unknown. Refresh before purging.";
 
 /// Whether a summary was generated within the last five minutes (a minute
 /// ahead tolerated).
@@ -162,6 +170,19 @@ pub struct View {
     pub report: Option<Report>,
     /// A purge is waiting for the person's confirmation.
     pub purge_pending: bool,
+    /// Apply locally shortens the retention to these days and waits for
+    /// the person's confirmation.
+    pub shorten_pending: Option<i64>,
+}
+
+/// A local change as the person clicked it: the epoch their view's read
+/// came from and the controls' values (Qt captures all three before its
+/// question).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Configure {
+    pub epoch: String,
+    pub enabled: bool,
+    pub retention_days: i64,
 }
 
 /// A computer the drawing counted, with its whole summary.
@@ -314,6 +335,8 @@ pub struct Page {
     busy: bool,
     mutating: bool,
     purge_epoch: Option<String>,
+    /// Apply locally waits for the person to confirm a shorter retention.
+    configure: Option<Configure>,
     status: String,
     /// A drawing is due (Qt would render now).
     due: bool,
@@ -530,10 +553,15 @@ impl Page {
         })
     }
 
-    /// Keeps a finished drawing unless a newer one is already shown.
-    pub fn drawn(&mut self, drawing: Drawing) {
+    /// Keeps a finished drawing unless a newer one is already shown, and
+    /// hands back the one not kept: a fleet's drawing is large, so the
+    /// caller frees it after letting the page go.
+    #[must_use = "free the drawing not kept outside the page's lock"]
+    pub fn drawn(&mut self, drawing: Drawing) -> Drawing {
         if drawing.id > self.drawing.id {
-            self.drawing = drawing;
+            std::mem::replace(&mut self.drawing, drawing)
+        } else {
+            drawing
         }
     }
 
@@ -541,7 +569,7 @@ impl Page {
     pub fn draw(&mut self, now_ms: i64) {
         if let Some(draw) = self.draw_due(now_ms) {
             let drawing = draw.render();
-            self.drawn(drawing);
+            drop(self.drawn(drawing));
         }
     }
 
@@ -616,19 +644,74 @@ impl Page {
             }),
             report: self.drawing.report.clone(),
             purge_pending: self.purge_epoch.is_some(),
+            shorten_pending: self.configure.as_ref().map(|change| change.retention_days),
         }
     }
 
-    /// Apply locally, with the epoch the person's view showed when they
-    /// clicked it (Qt captures it before its question); the CLI compares it
-    /// atomically. False while a read or a change runs.
-    pub fn begin_configure(&mut self, epoch: &str) -> bool {
-        if !self.idle() || epoch.is_empty() {
-            return false;
+    /// Why a click that needs this computer's current read does nothing.
+    fn refused_click(&mut self, now_ms: i64, not_current: &str) -> Option<String> {
+        let reason = if self.busy {
+            READING
+        } else if self.mutating {
+            CHANGING
+        } else if self.local_fresh(now_ms).is_none() {
+            not_current
+        } else {
+            return None;
+        };
+        self.status = reason.into();
+        Some(reason.into())
+    }
+
+    /// Apply locally clicked, with Qt's checks at the click: nothing runs,
+    /// and the status says why, while a read or a change runs or without a
+    /// fresh read of this computer. Otherwise the page is held, as Qt's is
+    /// while it asks, and the change keeps the epoch of that read; the CLI
+    /// compares it atomically. A shorter retention than the read's waits
+    /// for [`Page::configure_confirmed`] (`shorten_pending`); `Ok(Some)` is
+    /// the change to make now.
+    pub fn begin_configure(
+        &mut self,
+        enabled: bool,
+        retention_days: i64,
+        now_ms: i64,
+    ) -> Result<Option<Configure>, String> {
+        if let Some(reason) = self.refused_click(now_ms, NOT_CURRENT_APPLY) {
+            return Err(reason);
         }
+        if !(1..=90).contains(&retention_days) {
+            return Err("Choose a retention of 1 to 90 days.".into());
+        }
+        let Some(local) = self.local_fresh(now_ms) else {
+            return Err(NOT_CURRENT_APPLY.into());
+        };
+        let shorter = retention_days < local.retention_days;
+        let change = Configure {
+            epoch: local.source_epoch.clone(),
+            enabled,
+            retention_days,
+        };
         self.mutating = true;
+        if shorter {
+            self.configure = Some(change);
+            return Ok(None);
+        }
         self.status = "Applying local collection settings…".into();
-        true
+        Ok(Some(change))
+    }
+
+    /// The person confirmed the shorter retention: the change to make.
+    pub fn configure_confirmed(&mut self) -> Option<Configure> {
+        let change = self.configure.take()?;
+        self.status = "Applying local collection settings…".into();
+        Some(change)
+    }
+
+    /// The person cancelled (or left the page) while asked.
+    pub fn configure_cancelled(&mut self) {
+        if self.configure.take().is_some() {
+            self.mutating = false;
+        }
     }
 
     /// The change answered; true when the page reads again (a failed or
@@ -646,13 +729,15 @@ impl Page {
     }
 
     /// Purge local history: the range to read this computer's latest epoch
-    /// for, before the person sees what a purge removes.
-    pub fn begin_purge(&mut self, now_ms: i64) -> Option<(Day, Day)> {
-        if !self.idle() || self.local_fresh(now_ms).is_none() {
-            return None;
+    /// for, before the person sees what a purge removes, or why nothing
+    /// happens (as for Apply locally).
+    pub fn begin_purge(&mut self, now_ms: i64) -> Result<(Day, Day), String> {
+        if let Some(reason) = self.refused_click(now_ms, NOT_CURRENT_PURGE) {
+            return Err(reason);
         }
+        let range = self.applied.ok_or_else(|| NOT_CURRENT_PURGE.to_owned())?;
         self.mutating = true;
-        self.applied
+        Ok(range)
     }
 
     /// The latest summary before a purge: a fresh one from a known epoch

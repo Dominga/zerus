@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  localChange, coverageText, defaultRange, describeCounters, detailText, measure, overviewText, pageText, timeText, voiceText,
+  coverageText, defaultRange, describeCounters, detailText, measure, overviewText, pageText, timeText, voiceText,
   SPEECH_COUNTERS, type ComputerReport, type Report, type Row,
 } from "./analytics-text";
 
@@ -99,13 +99,5 @@ describe("Private analytics texts", () => {
     expect(pageText(50, 10, 60)).toBe(fill(format, [51, 60, 60]));
     expect(pageText(0, 0, 0)).toBe(fill(format, [0, 0, 0]));
     expect(defaultRange(Date.UTC(2026, 2, 1, 23, 30))).toEqual({ from: "2026-01-31", through: "2026-03-01" });
-  });
-
-  it("asks before a shorter retention and pins the epoch shown at the click", () => {
-    const view = { can_change_local: true, local: { retention_days: 90, epoch: "20000000-0000-4000-8000-000000000001" } };
-    expect(localChange(view, 45)).toEqual({ epoch: "20000000-0000-4000-8000-000000000001", ask: true });
-    expect(localChange(view, 90)).toEqual({ epoch: "20000000-0000-4000-8000-000000000001", ask: false });
-    expect(localChange({ ...view, can_change_local: false }, 45)).toBeUndefined();
-    expect(localChange({ can_change_local: true, local: null }, 45)).toBeUndefined();
   });
 });

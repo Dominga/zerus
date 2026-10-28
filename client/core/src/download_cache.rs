@@ -391,7 +391,9 @@ fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// Takes the name with an empty file of its own, then renames onto it, but
 /// only while the name still holds that file; one it no longer holds is
-/// left to whoever took it.
+/// left to whoever took it. A crash between the two leaves that empty file
+/// under the final name: it keeps the name taken, as any file there does,
+/// and the next download of that name takes a numbered one.
 #[cfg(unix)]
 fn rename_onto_placeholder(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::MetadataExt;

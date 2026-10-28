@@ -13,6 +13,8 @@ use serde_json::{Map, Value};
 
 use crate::actions::{Exit, Invocation};
 
+pub mod page;
+
 /// The help line that shows the command exists.
 pub const MARKER: &str = "worktree-maintenance-v1";
 /// How long a probe or a call may run.
@@ -148,9 +150,10 @@ pub fn answer(changed: bool, exit: Option<Exit>) -> Result<Policy, String> {
 }
 
 /// The policy a change sends: the one read, its switches and grace replaced.
+/// A grace the page does not offer (1 to 8760 hours) is never sent.
 pub fn change(read: &Map<String, Value>, rules: &Rules) -> Result<Map<String, Value>, String> {
     if !(1..=8760).contains(&rules.grace_hours) {
-        return Err("Computer returned invalid cleanup settings.".into());
+        return Err("Choose a minimum inactivity of 1 to 8760 hours.".into());
     }
     let mut policy = read.clone();
     policy.insert("enabled".into(), Value::Bool(rules.enabled));
@@ -284,13 +287,138 @@ mod tests {
             answer(true, Some(Exit::TimedOut)).unwrap_err(),
             "Save was not confirmed. Refresh before changing settings again."
         );
-        assert!(change(
+        for grace_hours in [0, 8761] {
+            assert_eq!(
+                change(
+                    &policy.raw,
+                    &Rules {
+                        grace_hours,
+                        ..policy.rules.clone()
+                    }
+                )
+                .unwrap_err(),
+                "Choose a minimum inactivity of 1 to 8760 hours."
+            );
+        }
+    }
+
+    #[test]
+    fn replies_read_as_qt_reads_them() {
+        let invalid = "Computer returned invalid cleanup settings.";
+        // QJsonValue::toInt takes a whole double: 24.0 and a revision of 4.0.
+        let mut whole = reply();
+        whole["policy"]["grace_hours"] = json!(24.0);
+        whole["policy"]["revision"] = json!(4.0);
+        assert_eq!(
+            answer(false, code(&whole.to_string()))
+                .unwrap()
+                .rules
+                .grace_hours,
+            24
+        );
+        // A policy that is missing or not an object.
+        for policy in [
+            None,
+            Some(json!([])),
+            Some(json!("policy")),
+            Some(json!(null)),
+        ] {
+            let mut bad = reply();
+            match policy {
+                Some(value) => bad["policy"] = value,
+                None => {
+                    bad.as_object_mut().unwrap().remove("policy");
+                }
+            }
+            assert_eq!(answer(false, code(&bad.to_string())).unwrap_err(), invalid);
+        }
+        // A read or change that did not finish cleanly says which it was.
+        let failed = Some(Exit::Code {
+            code: 1,
+            stdout: reply().to_string().into_bytes(),
+            stderr: "private-stderr-sentinel".into(),
+        });
+        assert_eq!(
+            answer(false, failed.clone()).unwrap_err(),
+            "Could not read cleanup settings."
+        );
+        assert_eq!(
+            answer(true, failed).unwrap_err(),
+            "Save was not confirmed. Refresh before changing settings again."
+        );
+        // A change's reply is checked as a read's is.
+        assert_eq!(answer(true, code("[]")).unwrap_err(), invalid);
+        let mut stale = reply();
+        stale["policy"]["version"] = json!(2);
+        assert_eq!(answer(true, code(&stale.to_string())).unwrap_err(), invalid);
+    }
+
+    #[test]
+    fn fields_this_page_does_not_know_go_back_as_read() {
+        let mut future = reply();
+        future["policy"]["later_rule"] = json!({"after_days": 3});
+        future["policy"]["note"] = json!("kept");
+        let policy = answer(false, code(&future.to_string())).unwrap();
+        let sent = change(
             &policy.raw,
             &Rules {
-                grace_hours: 0,
-                ..policy.rules
-            }
+                missing: false,
+                ..policy.rules.clone()
+            },
         )
-        .is_err());
+        .unwrap();
+        assert_eq!(sent["later_rule"], json!({"after_days": 3}));
+        assert_eq!(sent["note"], json!("kept"));
+        assert_eq!(sent["missing"], json!(false));
+        assert_eq!(sent["revision"], json!(4));
+    }
+
+    /// A fake `hgs`: prints `help` for `--help`, else `reply`.
+    #[cfg(unix)]
+    fn fake_hgs(dir: &Path, help: &[u8], reply: &[u8]) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("help"), help).unwrap();
+        std::fs::write(dir.join("reply"), reply).unwrap();
+        let script = dir.join("hgs");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nhere=$(dirname \"$0\")\necho \"$*\" >> \"$here/calls\"\ncase \"$*\" in *--help*) cat \"$here/help\"; exit 0;; esac\ncat >/dev/null\ncat \"$here/reply\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_past_128_kib_is_refused() {
+        let dir =
+            std::env::temp_dir().join(format!("zerus-worktree-policy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let help = format!("hgs [@host] worktrees policy get|set --json   {MARKER}\n");
+        let good = reply().to_string();
+        let hgs = fake_hgs(&dir, help.as_bytes(), good.as_bytes());
+        assert_eq!(call(&hgs, "mac", None).unwrap().rules.grace_hours, 24);
+        // A reply past the limit, padded with spaces JSON would accept.
+        let padded = format!("{good}{}", " ".repeat(MAX_BYTES));
+        let hgs = fake_hgs(&dir, help.as_bytes(), padded.as_bytes());
+        assert_eq!(
+            call(&hgs, "mac", None).unwrap_err(),
+            "Could not read cleanup settings."
+        );
+        // A help past the limit: the verb is never run.
+        std::fs::remove_file(dir.join("calls")).unwrap();
+        let long_help = format!("{help}{}", "x".repeat(MAX_BYTES));
+        let hgs = fake_hgs(&dir, long_help.as_bytes(), good.as_bytes());
+        assert_eq!(
+            call(&hgs, "", None).unwrap_err(),
+            "This computer is unavailable or needs an updated hgs CLI for cleanup settings."
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("calls")).unwrap(),
+            "--help\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

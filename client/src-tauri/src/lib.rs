@@ -15,6 +15,7 @@ mod organization;
 mod platform;
 #[cfg(feature = "live")]
 mod pump;
+pub mod renderer;
 #[cfg(feature = "live")]
 mod readsync;
 #[cfg(feature = "live")]
@@ -135,6 +136,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::display_hz,
         commands::exit_app,
         commands::perf_away,
+        renderer::renderer_frame,
         actions::run_action,
         actions::set_notifications,
         actions::inspect_session,
@@ -177,6 +179,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::display_hz,
         commands::exit_app,
         commands::perf_away,
+        renderer::renderer_frame,
         clipboard::copy_text,
     ]
 }

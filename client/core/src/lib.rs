@@ -28,6 +28,7 @@ pub mod reads;
 pub mod readsync;
 pub mod run;
 pub mod send;
+pub mod session_usage;
 pub mod shell;
 pub mod state;
 pub mod stream;

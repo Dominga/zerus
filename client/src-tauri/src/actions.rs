@@ -135,7 +135,7 @@ pub fn marks_file(replay: bool) -> &'static str {
 }
 
 /// The refusal of a replay that would reach the real CLI.
-const REPLAY_NEEDS_HGS: &str = "Actions in replay mode need ZERUS_CLIENT_HGS.";
+pub(crate) const REPLAY_NEEDS_HGS: &str = "Actions in replay mode need ZERUS_CLIENT_HGS.";
 
 fn set(value: Option<&str>) -> bool {
     value.is_some_and(|v| !v.is_empty())

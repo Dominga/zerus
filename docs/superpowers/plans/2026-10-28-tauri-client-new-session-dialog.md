@@ -49,7 +49,7 @@ Project and folder edits go through the organization stream's edit Controller (Q
 
 **Rules the core already has are called, never rewritten in TypeScript.** The form's derived state, Start, the plan, repository fields, the Windows warning, creation captions and details go through commands. TypeScript holds only what Qt keeps in its views: account ranking and labels, model lists, row building, card visibility and the request bookkeeping.
 
-One scoped exception (coordinator ruling, 2026-10-28): the pure path rules of `paths.rs` (`absolute`, `clean`, `same`, `within`, `leaf`, `native`, `split`, `join`, `windows_shaped`, and the style with the build platform) and three helpers of `launch.rs` (`matching_project_folder`, `prefill_target`, `restored_folder`) are ported line for line to `client/src/ui/sessions/paths.ts`. Qt changes the dialog's folder synchronously (`selectPath` → `loadFolders` → `updateWorktrees` in one turn), and its tests depend on the reset and fill in the same turn. The shared golden fixture `client/core/tests/fixtures/folder-paths.json` pins both copies: `client/core/tests/folder_paths.rs` checks the core's answers and `paths.test.ts` the port's.
+One scoped exception (coordinator ruling, 2026-10-28): the pure path rules of `paths.rs` (`absolute`, `clean`, `same`, `within`, `leaf`, `native`, and the style with the build platform) and three helpers of `launch.rs` (`matching_project_folder`, `prefill_target`, `restored_folder`) are ported line for line to `client/src/ui/sessions/paths.ts`. Qt changes the dialog's folder synchronously (`selectPath` → `loadFolders` → `updateWorktrees` in one turn), and its tests depend on the reset and fill in the same turn. The shared golden fixture `client/core/tests/fixtures/folder-paths.json` pins both copies: `client/core/tests/folder_paths.rs` checks the core's answers and `paths.test.ts` the port's.
 
 **Tech Stack:** Rust 1.99.1 (`client/core`, `client/src-tauri`, Tauri 2; `tauri-plugin-dialog` 2 for the local folder picker, ruling D3), SolidJS 1.9 + TypeScript + Vite, vitest, Python 3 stdlib for the fake `hgs`.
 
@@ -484,8 +484,8 @@ Rules (each with its Qt lines; port the logic, not the widget code):
   1. Ask `new_session_start(input, submitted)`; `nothing` ends here.
   2. With `launch_warning(...)` text, await `confirm(text)`; Cancel ends here and changes nothing.
   3. Ask `new_session_start` again (748).
-  4. Set `submitted`, then `creation_submit(new_session_plan(input, choices))`.
-  5. Ok closes the dialog (777) and hands the id to `store/creations.ts`, which reveals its card (Task 6). An error clears `submitted` and shows the error (783-786).
+  4. Set `submitted`, then `creation_submit(new_session_plan(input, choices))`, with the input and choices read in the same turn as the click's last `new_session_start` (751-771).
+  5. `{admitted}` closes the dialog (777) and hands the id to `store/creations.ts`, which reveals its card (Task 6), also when the dialog was closed meanwhile. `{refused}` clears `submitted` and shows the text (783-786). A rejected call keeps `submitted` and shows the error: an unknown outcome is never sent again.
 
   No creating command is sent before step 4. The choices are `launch::Choices` from the state (751-771):
   - the computer's identity as `machine`;
@@ -708,7 +708,7 @@ Based on main after the organization stream's milestone PR lands (`work-e94411a3
 **Interfaces:**
 
 ```rust
-#[tauri::command] pub async fn creation_submit(state: State<'_, CreationHost>, plan: Value) -> Result<String, String>; // Ok(id) admitted; Err(text)
+#[tauri::command] pub async fn creation_submit(state: State<'_, CreationHost>, plan: Value) -> Admission; // {"admitted": id} | {"refused": text}
 #[tauri::command] pub fn creations_view(state: State<CreationHost>) -> Vec<CreationCard>;  // not bound, newest first, at most 128
 #[tauri::command] pub fn creation_details(state: State<CreationHost>, id: String) -> Option<String>; // creation::details with Qt's stamps
 #[tauri::command] pub fn creation_action(state: State<CreationHost>, id: String, action: CreationAction) -> Result<(), String>;
@@ -740,7 +740,7 @@ Rules:
       - It shows Qt's notice "Zerus: the terminal did not open" with the error, a blank line and the command (684-685).
       - The launcher runs on a worker thread, since a Konsole call may take 3 s.
   - **`Changed` and `Removed`:** emit the `creations` event.
-- **Admission** (2911-2913): `creation_submit` answers `Ok(id)` from `Creations::submit(plan)`. An error answers its text, which the store puts on the dialog's error line: `UNSAFE_URL`, `TOO_MANY`, `ADMISSION_FULL`, or `admission_error()`. The dialog never retries.
+- **Admission** (2911-2913): `creation_submit` answers `{"admitted": id}` from `Creations::submit(plan)`, or `{"refused": text}` with `UNSAFE_URL`, `TOO_MANY`, `ADMISSION_FULL` or `admission_error()`, as `CreationAdmission` in `types.ts` (the contract the store already follows, Task 2 fix round 1). A refusal clears the dialog's `submitted` and shows the text on its error line. A rejected call is not a refusal: its outcome is unknown, so the dialog stays submitted, shows the error and never sends it again. The command therefore never answers a refusal as `Err`.
 - **Placement** (Q4). Qt goes through the organization model, not raw `requestSwarm`:
   - `SessionsWindow.cpp:1564` and `:3054` call `m_organization.addFolder(group, machine, path, {}, style)`;
   - project creation and the move are `SessionOrganization` edits;

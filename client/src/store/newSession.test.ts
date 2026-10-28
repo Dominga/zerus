@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import effortIds from "../../../tests/fixtures/opencode-effort-ids.json";
 import { machineMeta, NOW, usageOf } from "./testing";
-import { createNewSessionStore, type NewSessionBridge, type NewSessionDeps, type NewSessionOptions } from "./newSession";
+import { createNewSessionStore, fleetKey, type NewSessionBridge, type NewSessionDeps, type NewSessionOptions } from "./newSession";
 import type {
-  Account, Details, Folder, LaunchAccounts, LaunchForm, LaunchShown, MachineMeta, NewSessionContext, NewSessionFormInput, Profile, Project, ProjectedWindow,
+  Account, CreationAdmission, Details, Folder, LaunchAccounts, LaunchForm, LaunchShown, MachineMeta, NewSessionContext, NewSessionFormInput, Profile, Project, ProjectedWindow,
   ProjectsView, RepositoryFields,
 } from "../types";
 import type { Session } from "../ui/sessions/types";
@@ -20,6 +20,8 @@ interface Call { command: string; args: unknown[] }
 
 /** Commands that create or change something; opening, choosing and reading send none of them. */
 const CREATING = ["creationSubmit", "createWorktree", "createDirectory", "openCodeStart", "openCodeFavorite"];
+
+const NOT_LOADED: LaunchAccounts = { loaded: false, error: null, profiles: [], groups: [] };
 
 const settle = async () => { for (let i = 0; i < 4; i++) await new Promise((resolve) => setTimeout(resolve, 0)); };
 
@@ -49,7 +51,12 @@ class World {
   online: Record<string, boolean> = { "": true, mac: true };
   cards: Record<string, MachineMeta> = { "": machineMeta("pc"), mac: machineMeta("mac") };
   warning: string | null = null;
-  admission: string | Error = "creation-1";
+  /** What `creation_submit` answers; an Error is a lost call (an unknown outcome). */
+  admission: CreationAdmission | Error = { admitted: "creation-1" };
+  /** Computers whose catalog reply is not filed yet: `launch_accounts` answers `loaded: false`. */
+  unfiled = new Set<string>();
+  /** Runs inside each `new_session_start`, with its 1-based number. */
+  onStart: ((n: number) => void) | undefined;
   localExists = true;
   projects: Project[] = [];
   swarm = "";
@@ -168,7 +175,12 @@ function bridgeOf(world: World): NewSessionBridge {
   return {
     newSessionContext: async () => { record("newSessionContext"); return world.context ?? context(); },
     newSessionForm: async (input: NewSessionFormInput) => { record("newSessionForm", input); return { shown: shownOf(input.form), automatic_available: false, automatic_path: "", project_worktree: false }; },
-    newSessionStart: async (input: NewSessionFormInput, submitted: boolean) => { record("newSessionStart", input, submitted); return !submitted && shownOf(input.form).start_enabled ? "background" : "nothing"; },
+    newSessionStart: async (input: NewSessionFormInput, submitted: boolean) => {
+      record("newSessionStart", input, submitted);
+      const answer = !submitted && shownOf(input.form).start_enabled ? "background" : "nothing";
+      world.onStart?.(world.count("newSessionStart"));
+      return answer;
+    },
     newSessionPlan: async (input, choices) => { record("newSessionPlan", input, choices); return { cmd: choices.agent, tag: input.form.name } as never; },
     launchWarning: async (local, computer) => { record("launchWarning", local, computer); return world.warning; },
     repositoryFields: async (url, destination, style, custom, fresh = null) => {
@@ -206,16 +218,26 @@ function bridgeOf(world: World): NewSessionBridge {
     openCodeStart: async (computer) => { record("openCodeStart", computer); world.flags.delete("opencode-stopped"); return world.rowCatalog(computer); },
     launchAccounts: async (computer, refresh, agent = null) => {
       record("launchAccounts", computer, refresh, agent);
+      // The core answers without rows while the reply is not filed; a held answer was built at the call.
+      const answer = world.unfiled.has(computer) ? NOT_LOADED : world.accounts(computer);
       await world.wait(`accounts:${computer}`);
-      return world.accounts(computer);
+      return answer;
     },
-    launchAccountRows: async (computer) => { record("launchAccountRows", computer); return world.accounts(computer); },
+    launchAccountRows: async (computer) => {
+      record("launchAccountRows", computer);
+      // The answer is built at the call; a held one arrives late.
+      const answer = world.unfiled.has(computer) ? NOT_LOADED : world.accounts(computer);
+      await world.wait(`rows:${world.count("launchAccountRows")}`);
+      return answer;
+    },
     launchAccountsClose: async () => { record("launchAccountsClose"); },
     onLaunchAccountsChanged: (listener) => { world.listeners.add(listener); return () => world.listeners.delete(listener); },
     creationSubmit: async (plan) => {
       record("creationSubmit", plan);
-      if (world.admission instanceof Error) throw world.admission.message;
-      return world.admission;
+      const admission = world.admission;
+      await world.wait("submit");
+      if (admission instanceof Error) throw admission.message;
+      return admission;
     },
   };
 }
@@ -438,6 +460,51 @@ describe("accounts (NewSessionDialog.cpp 865-1023)", () => {
     expect(t.state().accounts[t.row("work")].tooltip).toBe("shared@example.invalid\nlimits n/a");
   });
 
+  // 944-950: while the computer's catalog is not filed, the list keeps loading.
+  it("keeps loading while the core answers before the catalog is filed", async () => {
+    const t = setup((w) => w.unfiled.add("mac"));
+    await t.open({ agent: "claude", computer: "mac", path: "/workspace/example" });
+    expect(t.world.of("launchAccounts").map((c) => c.args)).toEqual([["mac", false, "claude"]]);
+    expect(t.state()).toMatchObject({ account: -1, accountStatus: "Loading accounts…", refreshEnabled: false });
+    expect(t.state().accounts.map((r) => r.shell)).toEqual([true]);
+    expect(t.state().form?.start_enabled).toBe(false);
+    // The reply is filed: its event brings the catalog, as Qt's accountsReady.
+    t.world.unfiled.delete("mac");
+    await t.fire("mac");
+    expect(t.state().accounts[t.state().account].id).toBe("claude");
+    expect(t.state()).toMatchObject({ accountStatus: "", refreshEnabled: true });
+    expect(t.state().form?.start_enabled).toBe(true);
+    expect(t.world.count("launchAccounts")).toBe(1);
+  });
+
+  it("takes a catalog filed before the core's late answer arrived", async () => {
+    const t = setup((w) => w.unfiled.add(""));
+    t.world.hold("accounts:");
+    await t.open({ agent: "codex" });
+    // The reply is filed, and its event sent, while the core's empty answer is on its way.
+    t.world.unfiled.delete("");
+    await t.fire("");
+    expect(t.state().account).toBe(-1);
+    t.world.release("accounts:");
+    await settle();
+    expect(t.state().accounts[t.state().account].id).toBe("other");
+    expect(t.state().accountStatus).toBe("");
+    expect(t.world.count("launchAccounts")).toBe(1);
+  });
+
+  it("drops a limits answer older than the newest", async () => {
+    const t = setup((w) => w.flags.add("missing"));
+    await t.open({ agent: "codex" });
+    t.world.hold("rows:1");
+    await t.fire("");
+    t.world.flags.delete("missing");
+    await t.fire("");
+    expect(t.state().accounts[t.row("work")].tooltip).toContain("17% used");
+    t.world.release("rows:1");
+    await settle();
+    expect(t.state().accounts[t.row("work")].tooltip).toContain("17% used");
+  });
+
   it("closing ends the dialog's account watch", async () => {
     const t = setup();
     await t.open();
@@ -492,6 +559,25 @@ describe("repository source (NewSessionDialog.cpp 590-639)", () => {
     expect(t.state().form?.start_enabled).toBe(true);
     await t.start();
     expect(t.choices()).toMatchObject({ project: id, repository: { url: "git@example.invalid:team/fresh.git", destination: "/workspace/fresh", new_project: false } });
+  });
+
+  // restoreCreationChoices 792-799: the recipe's project name comes last, after its destination.
+  it("Edit choices… keeps a repository's own new project name", async () => {
+    const t = setup((w) => { w.projects = [project("ungrouped", "Inbox", [], { is_default: true }), project("existing", "Existing")]; });
+    const recipe = { id: "failed-1", tag: "retry", account: "work", repository: true, url: "git@example.invalid:team/fresh.git",
+      target: "/workspace/fresh", new_project: true, project_name: "Team project" };
+    await t.open({ agent: "codex", recipe });
+    expect(t.state()).toMatchObject({ repository: true, destination: "/workspace/fresh", newProjectVisible: true, newProjectName: "Team project" });
+    await t.start();
+    expect(t.choices()).toMatchObject({ predecessor: "failed-1", repository: { destination: "/workspace/fresh", name: "fresh", new_project: true, project_name: "Team project" } });
+  });
+
+  it("a later edit of the restored destination names the project again", async () => {
+    const t = setup();
+    await t.open({ agent: "codex", recipe: { repository: true, url: "git@example.invalid:team/fresh.git", target: "/workspace/fresh", new_project: true, project_name: "Team project" } });
+    t.act.setDestination("/workspace/renamed");
+    await settle();
+    expect(t.state().newProjectName).toBe("renamed");
   });
 
   it("the URL names the new project until its name is edited, at most 80 characters", async () => {
@@ -951,13 +1037,19 @@ describe("Start (NewSessionDialog.cpp 743-786)", () => {
   it("asks Start twice before it submits, and sends no creating command before", async () => {
     const t = setup();
     await t.open({ agent: "codex", path: "/workspace/example" });
+    t.act.setName("at-the-click");
+    await settle();
+    // A change while Start's last question is under way is not the click's.
+    t.world.onStart = (n) => { if (n === 2) { t.act.setName("after-the-click"); t.act.chooseAccount(t.row("work")); } };
     const before = t.world.calls.length;
     await t.start();
     const sent = t.world.calls.slice(before).map((c) => c.command).filter((c) => c !== "newSessionForm");
     expect(sent).toEqual(["newSessionStart", "launchWarning", "newSessionStart", "newSessionPlan", "creationSubmit", "launchAccountsClose"]);
-    // The plan and Start read the same input.
+    // The plan and Start read the same input, and the choices of the same turn.
     const [startInput] = t.world.of("newSessionStart")[1].args as [NewSessionFormInput];
-    expect(t.world.of("newSessionPlan")[0].args[0]).toEqual(startInput);
+    const [planInput, choices] = t.world.of("newSessionPlan")[0].args as [NewSessionFormInput, Json];
+    expect(planInput).toEqual(startInput);
+    expect(choices).toMatchObject({ name: "at-the-click", account: "other", agent: startInput.form.agent, path: startInput.form.path });
   });
 
   it("two Start clicks submit once", async () => {
@@ -976,7 +1068,7 @@ describe("Start (NewSessionDialog.cpp 743-786)", () => {
   });
 
   it("a refused admission keeps every choice and shows the reason", async () => {
-    const t = setup((w) => { w.admission = new Error("Too many creations are waiting. Let one finish first."); });
+    const t = setup((w) => { w.admission = { refused: "Too many creations are waiting. Let one finish first." }; });
     await t.open({ agent: "codex", path: "/workspace/example" });
     await t.choose("work");
     t.act.setName("keep-me");
@@ -987,10 +1079,37 @@ describe("Start (NewSessionDialog.cpp 743-786)", () => {
     expect(t.state().accounts[t.state().account].id).toBe("work");
     expect(t.world.admitted).toEqual([]);
     // The next Start submits again: only a refusal clears the submission.
-    t.world.admission = "creation-2";
+    t.world.admission = { admitted: "creation-2" };
     await t.start();
     expect(t.world.count("creationSubmit")).toBe(2);
     expect(t.world.admitted).toEqual(["creation-2"]);
+  });
+
+  // The contract Task 5 implements: a refusal clears the submission; a lost call is an unknown outcome.
+  it("a lost submission keeps it submitted and is never sent again", async () => {
+    const t = setup((w) => { w.admission = new Error("hgs did not answer"); });
+    await t.open({ agent: "codex", path: "/workspace/example" });
+    await t.start();
+    expect(t.store.newSession()).toBeDefined();
+    expect(t.state()).toMatchObject({ error: "hgs did not answer", submitted: true });
+    t.world.admission = { admitted: "creation-2" };
+    await t.start();
+    expect(t.world.count("creationSubmit")).toBe(1);
+    expect(t.world.admitted).toEqual([]);
+  });
+
+  it("an admission after the dialog closed still reaches the creations", async () => {
+    const t = setup();
+    await t.open({ agent: "codex", path: "/workspace/example" });
+    t.world.hold("submit");
+    const started = t.store.startNewSession(async () => true);
+    await settle();
+    expect(t.world.count("creationSubmit")).toBe(1);
+    t.store.closeNewSession();
+    t.world.release("submit");
+    await started;
+    expect(t.world.admitted).toEqual(["creation-1"]);
+    expect(t.store.newSession()).toBeUndefined();
   });
 
   it("carries the computer's identity and the folder's project row", async () => {
@@ -1051,12 +1170,36 @@ describe("opening (SessionsWindow::showNewSession 2895-2928)", () => {
     expect(t.state().folders[t.state().folder].id).toBe("f1");
   });
 
+  it("a failure while opening disposes the dialog it made", async () => {
+    const t = setup();
+    const recipe = Object.defineProperty({}, "tag", { enumerable: true, get: () => { throw new Error("unreadable recipe"); } });
+    await t.open({ agent: "codex", recipe });
+    expect(t.store.newSession()).toBeUndefined();
+    expect(t.world.notices).toEqual([{ tone: "error", text: "unreadable recipe", sticky: true }]);
+    expect(t.world.count("launchAccountsClose")).toBe(1);
+    expect(t.world.listeners.size).toBe(0);
+    expect(t.world.ticks.length).toBe(0);
+    await t.open();
+    expect(t.store.newSession()).toBeDefined();
+  });
+
   it("opens one dialog at a time and starts from Qt's defaults", async () => {
     const t = setup();
     await t.open();
     await t.open({ agent: "claude" });
     expect(t.world.count("newSessionContext")).toBe(1);
     expect(t.state()).toMatchObject({ name: "work-1a2b3c4d", openTerminal: false, autoPreferred: true, agent: "codex" });
+  });
+
+  // setFleet (478-486) runs for every fleet change the form reads, the session host included (launch.rs 178-185).
+  it("the fleet key changes with this computer's session host", () => {
+    const card = machineMeta("pc", {}, { platform: "windows", local_sessions: false });
+    const key = (local: MachineMeta) => fleetKey({ "": local, mac: machineMeta("mac") }, ["mac"], () => true);
+    const before = key(card);
+    expect(key({ ...card })).toBe(before);
+    expect(key({ ...card, local_host: { state: "stopped", pid: null, protocol: 1, conpty: "bundled", integrity: "medium", windows_session: null, error: null } })).not.toBe(before);
+    expect(key({ ...card, local_sessions: true })).not.toBe(before);
+    expect(fleetKey({ "": card }, ["mac"], (c) => c !== "mac")).not.toBe(fleetKey({ "": card }, ["mac"], () => true));
   });
 
   it("selectedHostTarget names a single peer filter only", () => {

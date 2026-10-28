@@ -1,5 +1,5 @@
 {
-  "description": "Folder paths in their computer's form (client/core/src/paths.rs) and New session's folder helpers (launch.rs matching_project_folder, prefill_target, restored_folder). The core test core/tests/folder_paths.rs and the TypeScript port client/src/ui/sessions/paths.ts (paths.test.ts) both check every answer; regenerate the answers with `cargo test --test folder_paths -- --ignored` after a core change. In styles, \"build\" is the platform the client was built for.",
+  "description": "Folder paths in their computer's form (client/core/src/paths.rs: of, absolute, clean, same, within, leaf, native) and New session's folder helpers (launch.rs matching_project_folder, prefill_target, restored_folder). The core test core/tests/folder_paths.rs and the TypeScript port client/src/ui/sessions/paths.ts (paths.test.ts) both check every answer; regenerate the answers with `cargo test --test folder_paths -- --ignored` after a core change. In styles, \"build\" is the platform the client was built for.",
   "matching_project_folder": [
     {
       "answer": "/workspace/example-work-one",
@@ -523,23 +523,14 @@
         "absolute": false,
         "clean": "",
         "leaf": "",
-        "native": "",
-        "split": [
-          ".",
-          ""
-        ]
+        "native": ""
       },
       "windows": {
         "absolute": false,
         "clean": "",
         "leaf": "",
-        "native": "",
-        "split": [
-          ".",
-          ""
-        ]
-      },
-      "windows_shaped": false
+        "native": ""
+      }
     },
     {
       "path": "/",
@@ -547,23 +538,14 @@
         "absolute": true,
         "clean": "/",
         "leaf": "",
-        "native": "/",
-        "split": [
-          "/",
-          ""
-        ]
+        "native": "/"
       },
       "windows": {
         "absolute": false,
         "clean": "/",
         "leaf": "",
-        "native": "\\",
-        "split": [
-          "/",
-          ""
-        ]
-      },
-      "windows_shaped": false
+        "native": "\\"
+      }
     },
     {
       "path": "//",
@@ -571,23 +553,14 @@
         "absolute": true,
         "clean": "/",
         "leaf": "",
-        "native": "//",
-        "split": [
-          "/",
-          ""
-        ]
+        "native": "//"
       },
       "windows": {
         "absolute": false,
         "clean": "/",
         "leaf": "",
-        "native": "\\\\",
-        "split": [
-          "/",
-          ""
-        ]
-      },
-      "windows_shaped": false
+        "native": "\\\\"
+      }
     },
     {
       "path": "/a/b/",
@@ -595,23 +568,14 @@
         "absolute": true,
         "clean": "/a/b",
         "leaf": "",
-        "native": "/a/b/",
-        "split": [
-          "/a/b",
-          ""
-        ]
+        "native": "/a/b/"
       },
       "windows": {
         "absolute": false,
         "clean": "/a/b",
         "leaf": "",
-        "native": "\\a\\b\\",
-        "split": [
-          "/a/b",
-          ""
-        ]
-      },
-      "windows_shaped": false
+        "native": "\\a\\b\\"
+      }
     },
     {
       "path": "/a//b/./c/..",
@@ -619,23 +583,14 @@
         "absolute": true,
         "clean": "/a/b",
         "leaf": "..",
-        "native": "/a//b/./c/..",
-        "split": [
-          "/a//b/./c",
-          ".."
-        ]
+        "native": "/a//b/./c/.."
       },
       "windows": {
         "absolute": false,
         "clean": "/a/b",
         "leaf": "..",
-        "native": "\\a\\\\b\\.\\c\\..",
-        "split": [
-          "/a//b/./c",
-          ".."
-        ]
-      },
-      "windows_shaped": false
+        "native": "\\a\\\\b\\.\\c\\.."
+      }
     },
     {
       "path": "a/../..",
@@ -643,23 +598,14 @@
         "absolute": false,
         "clean": "..",
         "leaf": "..",
-        "native": "a/../..",
-        "split": [
-          "a/..",
-          ".."
-        ]
+        "native": "a/../.."
       },
       "windows": {
         "absolute": false,
         "clean": "..",
         "leaf": "..",
-        "native": "a\\..\\..",
-        "split": [
-          "a/..",
-          ".."
-        ]
-      },
-      "windows_shaped": false
+        "native": "a\\..\\.."
+      }
     },
     {
       "path": "../a",
@@ -667,23 +613,14 @@
         "absolute": false,
         "clean": "../a",
         "leaf": "a",
-        "native": "../a",
-        "split": [
-          "..",
-          "a"
-        ]
+        "native": "../a"
       },
       "windows": {
         "absolute": false,
         "clean": "../a",
         "leaf": "a",
-        "native": "..\\a",
-        "split": [
-          "..",
-          "a"
-        ]
-      },
-      "windows_shaped": false
+        "native": "..\\a"
+      }
     },
     {
       "path": "./",
@@ -691,23 +628,14 @@
         "absolute": false,
         "clean": ".",
         "leaf": "",
-        "native": "./",
-        "split": [
-          ".",
-          ""
-        ]
+        "native": "./"
       },
       "windows": {
         "absolute": false,
         "clean": ".",
         "leaf": "",
-        "native": ".\\",
-        "split": [
-          ".",
-          ""
-        ]
-      },
-      "windows_shaped": false
+        "native": ".\\"
+      }
     },
     {
       "path": "/..",
@@ -715,23 +643,14 @@
         "absolute": true,
         "clean": "/..",
         "leaf": "..",
-        "native": "/..",
-        "split": [
-          "/",
-          ".."
-        ]
+        "native": "/.."
       },
       "windows": {
         "absolute": false,
         "clean": "/",
         "leaf": "..",
-        "native": "\\..",
-        "split": [
-          "/",
-          ".."
-        ]
-      },
-      "windows_shaped": false
+        "native": "\\.."
+      }
     },
     {
       "path": "/../a",
@@ -739,23 +658,14 @@
         "absolute": true,
         "clean": "/../a",
         "leaf": "a",
-        "native": "/../a",
-        "split": [
-          "/..",
-          "a"
-        ]
+        "native": "/../a"
       },
       "windows": {
         "absolute": false,
         "clean": "/a",
         "leaf": "a",
-        "native": "\\..\\a",
-        "split": [
-          "/..",
-          "a"
-        ]
-      },
-      "windows_shaped": false
+        "native": "\\..\\a"
+      }
     },
     {
       "path": "/a/../..",
@@ -763,23 +673,14 @@
         "absolute": true,
         "clean": "/..",
         "leaf": "..",
-        "native": "/a/../..",
-        "split": [
-          "/a/..",
-          ".."
-        ]
+        "native": "/a/../.."
       },
       "windows": {
         "absolute": false,
         "clean": "/",
         "leaf": "..",
-        "native": "\\a\\..\\..",
-        "split": [
-          "/a/..",
-          ".."
-        ]
-      },
-      "windows_shaped": false
+        "native": "\\a\\..\\.."
+      }
     },
     {
       "path": "C:\\",
@@ -787,23 +688,14 @@
         "absolute": false,
         "clean": "C:\\",
         "leaf": "C:\\",
-        "native": "C:\\",
-        "split": [
-          ".",
-          "C:\\"
-        ]
+        "native": "C:\\"
       },
       "windows": {
         "absolute": true,
         "clean": "C:/",
         "leaf": "",
-        "native": "C:\\",
-        "split": [
-          "C:/",
-          ""
-        ]
-      },
-      "windows_shaped": true
+        "native": "C:\\"
+      }
     },
     {
       "path": "c:/",
@@ -811,23 +703,14 @@
         "absolute": false,
         "clean": "c:",
         "leaf": "",
-        "native": "c:/",
-        "split": [
-          "c:",
-          ""
-        ]
+        "native": "c:/"
       },
       "windows": {
         "absolute": true,
         "clean": "c:/",
         "leaf": "",
-        "native": "c:\\",
-        "split": [
-          "c:/",
-          ""
-        ]
-      },
-      "windows_shaped": true
+        "native": "c:\\"
+      }
     },
     {
       "path": "C:",
@@ -835,23 +718,14 @@
         "absolute": false,
         "clean": "C:",
         "leaf": "C:",
-        "native": "C:",
-        "split": [
-          ".",
-          "C:"
-        ]
+        "native": "C:"
       },
       "windows": {
         "absolute": false,
         "clean": "C:",
         "leaf": "C:",
-        "native": "C:",
-        "split": [
-          ".",
-          "C:"
-        ]
-      },
-      "windows_shaped": false
+        "native": "C:"
+      }
     },
     {
       "path": "C:work",
@@ -859,23 +733,14 @@
         "absolute": false,
         "clean": "C:work",
         "leaf": "C:work",
-        "native": "C:work",
-        "split": [
-          ".",
-          "C:work"
-        ]
+        "native": "C:work"
       },
       "windows": {
         "absolute": false,
         "clean": "C:work",
         "leaf": "C:work",
-        "native": "C:work",
-        "split": [
-          ".",
-          "C:work"
-        ]
-      },
-      "windows_shaped": false
+        "native": "C:work"
+      }
     },
     {
       "path": "C:\\work\\..\\..",
@@ -883,23 +748,14 @@
         "absolute": false,
         "clean": "C:\\work\\..\\..",
         "leaf": "C:\\work\\..\\..",
-        "native": "C:\\work\\..\\..",
-        "split": [
-          ".",
-          "C:\\work\\..\\.."
-        ]
+        "native": "C:\\work\\..\\.."
       },
       "windows": {
         "absolute": true,
         "clean": "C:/",
         "leaf": "..",
-        "native": "C:\\work\\..\\..",
-        "split": [
-          "C:/work/..",
-          ".."
-        ]
-      },
-      "windows_shaped": true
+        "native": "C:\\work\\..\\.."
+      }
     },
     {
       "path": "C:/a/./b/",
@@ -907,23 +763,14 @@
         "absolute": false,
         "clean": "C:/a/b",
         "leaf": "",
-        "native": "C:/a/./b/",
-        "split": [
-          "C:/a/./b",
-          ""
-        ]
+        "native": "C:/a/./b/"
       },
       "windows": {
         "absolute": true,
         "clean": "C:/a/b",
         "leaf": "",
-        "native": "C:\\a\\.\\b\\",
-        "split": [
-          "C:/a/./b",
-          ""
-        ]
-      },
-      "windows_shaped": true
+        "native": "C:\\a\\.\\b\\"
+      }
     },
     {
       "path": "\\\\server\\share",
@@ -931,23 +778,14 @@
         "absolute": false,
         "clean": "\\\\server\\share",
         "leaf": "\\\\server\\share",
-        "native": "\\\\server\\share",
-        "split": [
-          ".",
-          "\\\\server\\share"
-        ]
+        "native": "\\\\server\\share"
       },
       "windows": {
         "absolute": true,
         "clean": "//server/share",
         "leaf": "",
-        "native": "\\\\server\\share",
-        "split": [
-          "//server",
-          "share"
-        ]
-      },
-      "windows_shaped": true
+        "native": "\\\\server\\share"
+      }
     },
     {
       "path": "//server/share/",
@@ -955,23 +793,14 @@
         "absolute": true,
         "clean": "/server/share",
         "leaf": "",
-        "native": "//server/share/",
-        "split": [
-          "//server/share",
-          ""
-        ]
+        "native": "//server/share/"
       },
       "windows": {
         "absolute": true,
         "clean": "//server/share",
         "leaf": "",
-        "native": "\\\\server\\share\\",
-        "split": [
-          "//server/share",
-          ""
-        ]
-      },
-      "windows_shaped": true
+        "native": "\\\\server\\share\\"
+      }
     },
     {
       "path": "//server",
@@ -979,23 +808,14 @@
         "absolute": true,
         "clean": "/server",
         "leaf": "server",
-        "native": "//server",
-        "split": [
-          "/",
-          "server"
-        ]
+        "native": "//server"
       },
       "windows": {
         "absolute": false,
         "clean": "//server",
         "leaf": "server",
-        "native": "\\\\server",
-        "split": [
-          "/",
-          "server"
-        ]
-      },
-      "windows_shaped": false
+        "native": "\\\\server"
+      }
     },
     {
       "path": "//server/",
@@ -1003,23 +823,14 @@
         "absolute": true,
         "clean": "/server",
         "leaf": "",
-        "native": "//server/",
-        "split": [
-          "//server",
-          ""
-        ]
+        "native": "//server/"
       },
       "windows": {
         "absolute": false,
         "clean": "//server",
         "leaf": "",
-        "native": "\\\\server\\",
-        "split": [
-          "//server",
-          ""
-        ]
-      },
-      "windows_shaped": false
+        "native": "\\\\server\\"
+      }
     },
     {
       "path": "\\\\?\\C:\\x",
@@ -1027,23 +838,14 @@
         "absolute": false,
         "clean": "\\\\?\\C:\\x",
         "leaf": "\\\\?\\C:\\x",
-        "native": "\\\\?\\C:\\x",
-        "split": [
-          ".",
-          "\\\\?\\C:\\x"
-        ]
+        "native": "\\\\?\\C:\\x"
       },
       "windows": {
         "absolute": false,
         "clean": "//?/C:/x",
         "leaf": "x",
-        "native": "\\\\?\\C:\\x",
-        "split": [
-          "//?/C:",
-          "x"
-        ]
-      },
-      "windows_shaped": true
+        "native": "\\\\?\\C:\\x"
+      }
     },
     {
       "path": "\\\\.\\pipe",
@@ -1051,23 +853,14 @@
         "absolute": false,
         "clean": "\\\\.\\pipe",
         "leaf": "\\\\.\\pipe",
-        "native": "\\\\.\\pipe",
-        "split": [
-          ".",
-          "\\\\.\\pipe"
-        ]
+        "native": "\\\\.\\pipe"
       },
       "windows": {
         "absolute": false,
         "clean": "//./pipe",
         "leaf": "",
-        "native": "\\\\.\\pipe",
-        "split": [
-          "//.",
-          "pipe"
-        ]
-      },
-      "windows_shaped": true
+        "native": "\\\\.\\pipe"
+      }
     },
     {
       "path": "\\work",
@@ -1075,23 +868,14 @@
         "absolute": false,
         "clean": "\\work",
         "leaf": "\\work",
-        "native": "\\work",
-        "split": [
-          ".",
-          "\\work"
-        ]
+        "native": "\\work"
       },
       "windows": {
         "absolute": false,
         "clean": "/work",
         "leaf": "work",
-        "native": "\\work",
-        "split": [
-          "/",
-          "work"
-        ]
-      },
-      "windows_shaped": false
+        "native": "\\work"
+      }
     },
     {
       "path": "//server/share/../..",
@@ -1099,23 +883,14 @@
         "absolute": true,
         "clean": "/",
         "leaf": "..",
-        "native": "//server/share/../..",
-        "split": [
-          "//server/share/..",
-          ".."
-        ]
+        "native": "//server/share/../.."
       },
       "windows": {
         "absolute": true,
         "clean": "//server/share",
         "leaf": "..",
-        "native": "\\\\server\\share\\..\\..",
-        "split": [
-          "//server/share/..",
-          ".."
-        ]
-      },
-      "windows_shaped": true
+        "native": "\\\\server\\share\\..\\.."
+      }
     },
     {
       "path": "x//y/",
@@ -1123,23 +898,14 @@
         "absolute": false,
         "clean": "x/y",
         "leaf": "",
-        "native": "x//y/",
-        "split": [
-          "x//y",
-          ""
-        ]
+        "native": "x//y/"
       },
       "windows": {
         "absolute": false,
         "clean": "x/y",
         "leaf": "",
-        "native": "x\\\\y\\",
-        "split": [
-          "x//y",
-          ""
-        ]
-      },
-      "windows_shaped": false
+        "native": "x\\\\y\\"
+      }
     },
     {
       "path": "/a/b/..",
@@ -1147,23 +913,14 @@
         "absolute": true,
         "clean": "/a",
         "leaf": "..",
-        "native": "/a/b/..",
-        "split": [
-          "/a/b",
-          ".."
-        ]
+        "native": "/a/b/.."
       },
       "windows": {
         "absolute": false,
         "clean": "/a",
         "leaf": "..",
-        "native": "\\a\\b\\..",
-        "split": [
-          "/a/b",
-          ".."
-        ]
-      },
-      "windows_shaped": false
+        "native": "\\a\\b\\.."
+      }
     },
     {
       "path": "D:/x/../../y",
@@ -1171,23 +928,14 @@
         "absolute": false,
         "clean": "y",
         "leaf": "y",
-        "native": "D:/x/../../y",
-        "split": [
-          "D:/x/../..",
-          "y"
-        ]
+        "native": "D:/x/../../y"
       },
       "windows": {
         "absolute": true,
         "clean": "D:/y",
         "leaf": "y",
-        "native": "D:\\x\\..\\..\\y",
-        "split": [
-          "D:/x/../..",
-          "y"
-        ]
-      },
-      "windows_shaped": true
+        "native": "D:\\x\\..\\..\\y"
+      }
     },
     {
       "path": "\\\\server\\share\\dir\\..",
@@ -1195,23 +943,14 @@
         "absolute": false,
         "clean": "\\\\server\\share\\dir\\..",
         "leaf": "\\\\server\\share\\dir\\..",
-        "native": "\\\\server\\share\\dir\\..",
-        "split": [
-          ".",
-          "\\\\server\\share\\dir\\.."
-        ]
+        "native": "\\\\server\\share\\dir\\.."
       },
       "windows": {
         "absolute": true,
         "clean": "//server/share",
         "leaf": "..",
-        "native": "\\\\server\\share\\dir\\..",
-        "split": [
-          "//server/share/dir",
-          ".."
-        ]
-      },
-      "windows_shaped": true
+        "native": "\\\\server\\share\\dir\\.."
+      }
     },
     {
       "path": ".",
@@ -1219,23 +958,14 @@
         "absolute": false,
         "clean": ".",
         "leaf": ".",
-        "native": ".",
-        "split": [
-          ".",
-          "."
-        ]
+        "native": "."
       },
       "windows": {
         "absolute": false,
         "clean": ".",
         "leaf": ".",
-        "native": ".",
-        "split": [
-          ".",
-          "."
-        ]
-      },
-      "windows_shaped": false
+        "native": "."
+      }
     },
     {
       "path": "..",
@@ -1243,23 +973,14 @@
         "absolute": false,
         "clean": "..",
         "leaf": "..",
-        "native": "..",
-        "split": [
-          ".",
-          ".."
-        ]
+        "native": ".."
       },
       "windows": {
         "absolute": false,
         "clean": "..",
         "leaf": "..",
-        "native": "..",
-        "split": [
-          ".",
-          ".."
-        ]
-      },
-      "windows_shaped": false
+        "native": ".."
+      }
     },
     {
       "path": "a/./b",
@@ -1267,23 +988,14 @@
         "absolute": false,
         "clean": "a/b",
         "leaf": "b",
-        "native": "a/./b",
-        "split": [
-          "a/.",
-          "b"
-        ]
+        "native": "a/./b"
       },
       "windows": {
         "absolute": false,
         "clean": "a/b",
         "leaf": "b",
-        "native": "a\\.\\b",
-        "split": [
-          "a/.",
-          "b"
-        ]
-      },
-      "windows_shaped": false
+        "native": "a\\.\\b"
+      }
     },
     {
       "path": "/../..",
@@ -1291,23 +1003,14 @@
         "absolute": true,
         "clean": "/../..",
         "leaf": "..",
-        "native": "/../..",
-        "split": [
-          "/..",
-          ".."
-        ]
+        "native": "/../.."
       },
       "windows": {
         "absolute": false,
         "clean": "/",
         "leaf": "..",
-        "native": "\\..\\..",
-        "split": [
-          "/..",
-          ".."
-        ]
-      },
-      "windows_shaped": false
+        "native": "\\..\\.."
+      }
     },
     {
       "path": "a/..",
@@ -1315,23 +1018,14 @@
         "absolute": false,
         "clean": ".",
         "leaf": "..",
-        "native": "a/..",
-        "split": [
-          "a",
-          ".."
-        ]
+        "native": "a/.."
       },
       "windows": {
         "absolute": false,
         "clean": ".",
         "leaf": "..",
-        "native": "a\\..",
-        "split": [
-          "a",
-          ".."
-        ]
-      },
-      "windows_shaped": false
+        "native": "a\\.."
+      }
     },
     {
       "path": "../..",
@@ -1339,23 +1033,14 @@
         "absolute": false,
         "clean": "../..",
         "leaf": "..",
-        "native": "../..",
-        "split": [
-          "..",
-          ".."
-        ]
+        "native": "../.."
       },
       "windows": {
         "absolute": false,
         "clean": "../..",
         "leaf": "..",
-        "native": "..\\..",
-        "split": [
-          "..",
-          ".."
-        ]
-      },
-      "windows_shaped": false
+        "native": "..\\.."
+      }
     },
     {
       "path": "a/b/../../..",
@@ -1363,23 +1048,14 @@
         "absolute": false,
         "clean": "..",
         "leaf": "..",
-        "native": "a/b/../../..",
-        "split": [
-          "a/b/../..",
-          ".."
-        ]
+        "native": "a/b/../../.."
       },
       "windows": {
         "absolute": false,
         "clean": "..",
         "leaf": "..",
-        "native": "a\\b\\..\\..\\..",
-        "split": [
-          "a/b/../..",
-          ".."
-        ]
-      },
-      "windows_shaped": false
+        "native": "a\\b\\..\\..\\.."
+      }
     },
     {
       "path": "/a/./../b",
@@ -1387,23 +1063,14 @@
         "absolute": true,
         "clean": "/b",
         "leaf": "b",
-        "native": "/a/./../b",
-        "split": [
-          "/a/./..",
-          "b"
-        ]
+        "native": "/a/./../b"
       },
       "windows": {
         "absolute": false,
         "clean": "/b",
         "leaf": "b",
-        "native": "\\a\\.\\..\\b",
-        "split": [
-          "/a/./..",
-          "b"
-        ]
-      },
-      "windows_shaped": false
+        "native": "\\a\\.\\..\\b"
+      }
     },
     {
       "path": "C:/..",
@@ -1411,23 +1078,14 @@
         "absolute": false,
         "clean": ".",
         "leaf": "..",
-        "native": "C:/..",
-        "split": [
-          "C:",
-          ".."
-        ]
+        "native": "C:/.."
       },
       "windows": {
         "absolute": true,
         "clean": "C:/",
         "leaf": "..",
-        "native": "C:\\..",
-        "split": [
-          "C:/",
-          ".."
-        ]
-      },
-      "windows_shaped": true
+        "native": "C:\\.."
+      }
     },
     {
       "path": "C:/../x",
@@ -1435,23 +1093,14 @@
         "absolute": false,
         "clean": "x",
         "leaf": "x",
-        "native": "C:/../x",
-        "split": [
-          "C:/..",
-          "x"
-        ]
+        "native": "C:/../x"
       },
       "windows": {
         "absolute": true,
         "clean": "C:/x",
         "leaf": "x",
-        "native": "C:\\..\\x",
-        "split": [
-          "C:/..",
-          "x"
-        ]
-      },
-      "windows_shaped": true
+        "native": "C:\\..\\x"
+      }
     },
     {
       "path": "//server/share/a/../../..",
@@ -1459,23 +1108,14 @@
         "absolute": true,
         "clean": "/",
         "leaf": "..",
-        "native": "//server/share/a/../../..",
-        "split": [
-          "//server/share/a/../..",
-          ".."
-        ]
+        "native": "//server/share/a/../../.."
       },
       "windows": {
         "absolute": true,
         "clean": "//server/share",
         "leaf": "..",
-        "native": "\\\\server\\share\\a\\..\\..\\..",
-        "split": [
-          "//server/share/a/../..",
-          ".."
-        ]
-      },
-      "windows_shaped": true
+        "native": "\\\\server\\share\\a\\..\\..\\.."
+      }
     },
     {
       "path": "\\\\server\\share\\a",
@@ -1483,23 +1123,14 @@
         "absolute": false,
         "clean": "\\\\server\\share\\a",
         "leaf": "\\\\server\\share\\a",
-        "native": "\\\\server\\share\\a",
-        "split": [
-          ".",
-          "\\\\server\\share\\a"
-        ]
+        "native": "\\\\server\\share\\a"
       },
       "windows": {
         "absolute": true,
         "clean": "//server/share/a",
         "leaf": "a",
-        "native": "\\\\server\\share\\a",
-        "split": [
-          "//server/share",
-          "a"
-        ]
-      },
-      "windows_shaped": true
+        "native": "\\\\server\\share\\a"
+      }
     },
     {
       "path": "Ä/ß",
@@ -1507,23 +1138,14 @@
         "absolute": false,
         "clean": "Ä/ß",
         "leaf": "ß",
-        "native": "Ä/ß",
-        "split": [
-          "Ä",
-          "ß"
-        ]
+        "native": "Ä/ß"
       },
       "windows": {
         "absolute": false,
         "clean": "Ä/ß",
         "leaf": "ß",
-        "native": "Ä\\ß",
-        "split": [
-          "Ä",
-          "ß"
-        ]
-      },
-      "windows_shaped": false
+        "native": "Ä\\ß"
+      }
     },
     {
       "path": "/a/b\\c",
@@ -1531,23 +1153,14 @@
         "absolute": true,
         "clean": "/a/b\\c",
         "leaf": "b\\c",
-        "native": "/a/b\\c",
-        "split": [
-          "/a",
-          "b\\c"
-        ]
+        "native": "/a/b\\c"
       },
       "windows": {
         "absolute": false,
         "clean": "/a/b/c",
         "leaf": "c",
-        "native": "\\a\\b\\c",
-        "split": [
-          "/a/b",
-          "c"
-        ]
-      },
-      "windows_shaped": false
+        "native": "\\a\\b\\c"
+      }
     },
     {
       "path": "/workspace/example",
@@ -1555,23 +1168,14 @@
         "absolute": true,
         "clean": "/workspace/example",
         "leaf": "example",
-        "native": "/workspace/example",
-        "split": [
-          "/workspace",
-          "example"
-        ]
+        "native": "/workspace/example"
       },
       "windows": {
         "absolute": false,
         "clean": "/workspace/example",
         "leaf": "example",
-        "native": "\\workspace\\example",
-        "split": [
-          "/workspace",
-          "example"
-        ]
-      },
-      "windows_shaped": false
+        "native": "\\workspace\\example"
+      }
     },
     {
       "path": "/workspace/example-work-one/",
@@ -1579,23 +1183,14 @@
         "absolute": true,
         "clean": "/workspace/example-work-one",
         "leaf": "",
-        "native": "/workspace/example-work-one/",
-        "split": [
-          "/workspace/example-work-one",
-          ""
-        ]
+        "native": "/workspace/example-work-one/"
       },
       "windows": {
         "absolute": false,
         "clean": "/workspace/example-work-one",
         "leaf": "",
-        "native": "\\workspace\\example-work-one\\",
-        "split": [
-          "/workspace/example-work-one",
-          ""
-        ]
-      },
-      "windows_shaped": false
+        "native": "\\workspace\\example-work-one\\"
+      }
     },
     {
       "path": "C:/Work/Example",
@@ -1603,23 +1198,14 @@
         "absolute": false,
         "clean": "C:/Work/Example",
         "leaf": "Example",
-        "native": "C:/Work/Example",
-        "split": [
-          "C:/Work",
-          "Example"
-        ]
+        "native": "C:/Work/Example"
       },
       "windows": {
         "absolute": true,
         "clean": "C:/Work/Example",
         "leaf": "Example",
-        "native": "C:\\Work\\Example",
-        "split": [
-          "C:/Work",
-          "Example"
-        ]
-      },
-      "windows_shaped": true
+        "native": "C:\\Work\\Example"
+      }
     },
     {
       "path": "c:\\work\\example\\",
@@ -1627,23 +1213,14 @@
         "absolute": false,
         "clean": "c:\\work\\example\\",
         "leaf": "c:\\work\\example\\",
-        "native": "c:\\work\\example\\",
-        "split": [
-          ".",
-          "c:\\work\\example\\"
-        ]
+        "native": "c:\\work\\example\\"
       },
       "windows": {
         "absolute": true,
         "clean": "c:/work/example",
         "leaf": "",
-        "native": "c:\\work\\example\\",
-        "split": [
-          "c:/work/example",
-          ""
-        ]
-      },
-      "windows_shaped": true
+        "native": "c:\\work\\example\\"
+      }
     },
     {
       "path": "//Server/Share/Example",
@@ -1651,23 +1228,14 @@
         "absolute": true,
         "clean": "/Server/Share/Example",
         "leaf": "Example",
-        "native": "//Server/Share/Example",
-        "split": [
-          "//Server/Share",
-          "Example"
-        ]
+        "native": "//Server/Share/Example"
       },
       "windows": {
         "absolute": true,
         "clean": "//Server/Share/Example",
         "leaf": "Example",
-        "native": "\\\\Server\\Share\\Example",
-        "split": [
-          "//Server/Share",
-          "Example"
-        ]
-      },
-      "windows_shaped": true
+        "native": "\\\\Server\\Share\\Example"
+      }
     },
     {
       "path": "/a/😀",
@@ -1675,23 +1243,14 @@
         "absolute": true,
         "clean": "/a/😀",
         "leaf": "😀",
-        "native": "/a/😀",
-        "split": [
-          "/a",
-          "😀"
-        ]
+        "native": "/a/😀"
       },
       "windows": {
         "absolute": false,
         "clean": "/a/😀",
         "leaf": "😀",
-        "native": "\\a\\😀",
-        "split": [
-          "/a",
-          "😀"
-        ]
-      },
-      "windows_shaped": false
+        "native": "\\a\\😀"
+      }
     },
     {
       "path": "C:/😀/../x",
@@ -1699,23 +1258,14 @@
         "absolute": false,
         "clean": "C:/x",
         "leaf": "x",
-        "native": "C:/😀/../x",
-        "split": [
-          "C:/😀/..",
-          "x"
-        ]
+        "native": "C:/😀/../x"
       },
       "windows": {
         "absolute": true,
         "clean": "C:/x",
         "leaf": "x",
-        "native": "C:\\😀\\..\\x",
-        "split": [
-          "C:/😀/..",
-          "x"
-        ]
-      },
-      "windows_shaped": true
+        "native": "C:\\😀\\..\\x"
+      }
     },
     {
       "path": "\\\\server\\share\\",
@@ -1723,23 +1273,14 @@
         "absolute": false,
         "clean": "\\\\server\\share\\",
         "leaf": "\\\\server\\share\\",
-        "native": "\\\\server\\share\\",
-        "split": [
-          ".",
-          "\\\\server\\share\\"
-        ]
+        "native": "\\\\server\\share\\"
       },
       "windows": {
         "absolute": true,
         "clean": "//server/share",
         "leaf": "",
-        "native": "\\\\server\\share\\",
-        "split": [
-          "//server/share",
-          ""
-        ]
-      },
-      "windows_shaped": true
+        "native": "\\\\server\\share\\"
+      }
     },
     {
       "path": "relative/../x/./y",
@@ -1747,23 +1288,14 @@
         "absolute": false,
         "clean": "x/y",
         "leaf": "y",
-        "native": "relative/../x/./y",
-        "split": [
-          "relative/../x/.",
-          "y"
-        ]
+        "native": "relative/../x/./y"
       },
       "windows": {
         "absolute": false,
         "clean": "x/y",
         "leaf": "y",
-        "native": "relative\\..\\x\\.\\y",
-        "split": [
-          "relative/../x/.",
-          "y"
-        ]
-      },
-      "windows_shaped": false
+        "native": "relative\\..\\x\\.\\y"
+      }
     }
   ],
   "prefill_target": [

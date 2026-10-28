@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type Outcome, type ReadMark, type Target } from "./types";
-import type { LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
+import type { CreationAdmission, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 
@@ -265,10 +265,10 @@ export const newSessionStart = (input: NewSessionFormInput, submitted: boolean) 
 /** The plan at the click: the form's fields and what the core derives from them come from `input`, as Start reads them. */
 export const newSessionPlan = (input: NewSessionFormInput, choices: LaunchChoices) => desktop<LaunchPlan>("new_session_plan", { input, choices });
 /**
- * Background creation's admission (Task 5's `creation_submit`): the admitted creation's id; a rejection is the
- * refusal's text, which the dialog shows. Never retried.
+ * Background creation's admission (Task 5's `creation_submit`): `{ admitted: id }` or `{ refused: text }`. A
+ * rejected call is a lost answer, an unknown outcome: never sent again.
  */
-export const creationSubmit = (plan: LaunchPlan) => desktop<string>("creation_submit", { plan });
+export const creationSubmit = (plan: LaunchPlan) => desktop<CreationAdmission>("creation_submit", { plan });
 /** The Windows-session warning's text when Start must ask first; `computer` is "" for this one. */
 export const launchWarning = (local: MachineMeta, computer: ComputerId) => desktop<string | null>("launch_warning", { local, computer });
 /** The repository fields; `fresh` (the old record's folder name, kept even when empty) starts them anew on another computer or style. */

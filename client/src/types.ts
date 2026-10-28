@@ -343,6 +343,11 @@ export interface RepositoryFields {
   destination: string;
   suggested: string; can_submit: boolean;
 }
+/**
+ * `creation_submit`'s answer (Task 5): the admitted creation's id, or the refusal's text. A rejected call is
+ * neither: its outcome is unknown, so the dialog stays submitted and nothing sends it again.
+ */
+export type CreationAdmission = { admitted: string } | { refused: string };
 /** New session's account rows of the dialog's computer (`screens.rs`). */
 export interface LaunchAccounts {
   /** A catalog reply (good or failed) was filed since the dialog chose this computer. */

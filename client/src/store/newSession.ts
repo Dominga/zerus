@@ -1,7 +1,7 @@
 import { createEffect, createMemo, createRoot, createSignal, on, untrack } from "solid-js";
 import * as bridge from "../bridge";
 import type {
-  Account, ComputerId, Details, Folder, LaunchAccounts, LaunchChoices, LaunchForm, LaunchPlan, LaunchProject, LaunchShown, MachineMeta,
+  Account, ComputerId, CreationAdmission, Details, Folder, LaunchAccounts, LaunchChoices, LaunchForm, LaunchPlan, LaunchProject, LaunchShown, MachineMeta,
   NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, Project, ProjectsView, RepositoryFields,
 } from "../types";
 import type { Session } from "../ui/sessions/types";
@@ -263,6 +263,8 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
   let url = "", field = "", newProjectName = "";
   let repository: { host: string; style: PathStyle; fields: RepositoryFields | undefined; request: number; pending: boolean } | undefined;
   let focusUrl = 0;
+  /** Repository answers to requests up to this one leave the project name as the recipe set it (794-799). */
+  let nameFloor = 0;
 
   // Accounts.
   let accountHost = "";
@@ -274,6 +276,10 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
   let rows: AccountRow[] = [];
   let accountIndex = -1;
   let accountStyle: PathStyle | undefined;
+  /** The account request whose core answer came before its catalog was filed: it stays loading (944-950). */
+  let accountAwaiting = 0;
+  /** The newest rows read for new limits; an older answer is dropped. */
+  let usageRequest = 0;
 
   // OpenCode models.
   const picker = new ModelPicker();
@@ -532,7 +538,7 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
       record.fields = fields;
       record.pending = false;
       field = fields.field;
-      if (!customProjectName) newProjectName = fields.name.slice(0, 80);
+      if (!customProjectName && request > nameFloor) newProjectName = fields.name.slice(0, 80);
       updateForm();
     }, () => {
       if (closed || repository !== record || record.request !== request) return;
@@ -694,23 +700,56 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     accountStatus = "Loading accounts…";
     const request = next();
     accountRequest = request;
+    accountAwaiting = 0;
     const computer = host();
     b.launchAccounts(computer, refresh, init.agent || null).then((answer: LaunchAccounts) => {
       if (closed || request !== accountRequest || computer !== host()) return;
-      accountRequest = 0;
-      accountLoaded = true;
-      accounts = answer.profiles.slice(0, 256);
-      groups = answer.groups;
-      accountStatus = answer.error ?? "";
-      updateAccounts();
+      // The core waited without a filed reply: Qt's request stays pending until hgs
+      // answers, so the list keeps loading and the reply's event brings the catalog.
+      if (!answer.loaded) {
+        accountAwaiting = request;
+        checkArrival();
+        return;
+      }
+      catalogArrived(answer);
     }, (failure) => {
       if (closed || request !== accountRequest || computer !== host()) return;
       accountRequest = 0;
+      accountAwaiting = 0;
       accountLoaded = true;
       accountStatus = `Could not load accounts: ${errorText(failure)}`;
       updateAccounts();
     });
     updateAccounts();
+  }
+
+  /** The computer's catalog arrived (Qt's accountsReady, 380-388): rows are grouped from it. */
+  function catalogArrived(answer: LaunchAccounts) {
+    accountRequest = 0;
+    accountAwaiting = 0;
+    usageRequest = 0;
+    accountLoaded = true;
+    accounts = answer.profiles.slice(0, 256);
+    groups = answer.groups;
+    accountStatus = answer.error ?? "";
+    updateAccounts();
+  }
+
+  /** While the request awaits its filed reply, the rows read without a read take its place once they are loaded. */
+  function checkArrival() {
+    const request = accountAwaiting;
+    if (!request || closed) return;
+    const computer = host();
+    b.launchAccountRows(computer).then((answer) => {
+      if (closed || request !== accountRequest || request !== accountAwaiting || computer !== host() || !answer.loaded) return;
+      catalogArrived(answer);
+    }, () => {});
+  }
+
+  /** The hub's catalog or limits changed for the dialog's computer, or the minute passed. */
+  function rowsChanged() {
+    if (accountAwaiting && accountAwaiting === accountRequest) checkArrival();
+    else refreshUsage();
   }
 
   function cachedEmail(provider: string, id: string): string {
@@ -748,8 +787,11 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
   function refreshUsage() {
     if (!machines.length || closed) return;
     const computer = host();
+    const request = next();
+    usageRequest = request;
     b.launchAccountRows(computer).then((answer) => {
-      if (closed || computer !== host() || accountHost !== computer) return;
+      if (closed || request !== usageRequest || computer !== host() || accountHost !== computer) return;
+      usageRequest = 0;
       // The catalog's grouping stays until the dialog reads the next catalog.
       groups = groups.map((g) => {
         const fresh = answer.groups.find((f) => f.key === g.key);
@@ -1090,15 +1132,31 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
       if (closed) return undefined;
       if (warning && !(await confirm(warning))) return undefined;
       if (closed) return undefined;
+      // The form and its choices are read in one turn, as Qt builds the plan (751-771).
       const input = formInput();
+      const picked = choices();
       if ((await b.newSessionStart(input, submitted)) !== "background" || closed) return undefined;
       // One Start submits once: set before the submission, cleared only by a refusal.
       submitted = true;
       emit();
-      const plan = await b.newSessionPlan(input, choices());
-      const id = await b.creationSubmit(plan);
-      return { id, plan };
+      const plan = await b.newSessionPlan(input, picked);
+      if (closed) return undefined;
+      let admission: CreationAdmission;
+      try {
+        admission = await b.creationSubmit(plan);
+      } catch (failure) {
+        // A lost call is an unknown outcome: it stays submitted, and nothing sends it again.
+        if (!closed) { setError(errorText(failure)); updateForm(); }
+        return undefined;
+      }
+      if ("refused" in admission) {
+        submitted = false;
+        if (!closed) { setError(admission.refused); updateForm(); }
+        return undefined;
+      }
+      return { id: admission.admitted, plan };
     } catch (failure) {
+      // Nothing was sent: Start's questions and the plan create nothing.
       if (closed) return undefined;
       submitted = false;
       setError(errorText(failure));
@@ -1123,6 +1181,8 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
       if (plan.new_project === true) {
         setProjectIndex(projectList.findIndex((p) => p.newProject));
         newProjectName = string(plan.project_name).slice(0, 80);
+        // Qt sets the name last; the destination's answers still on their way must not replace it.
+        nameFloor = ticket;
       }
     } else {
       const [folder, auto] = restoredFolder(plan);
@@ -1168,9 +1228,9 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
 
   const events = b.onLaunchAccountsChanged((computer) => {
     // The hub's catalog or limits changed for the dialog's computer: rows change in place.
-    if (!closed && computer === host() && accountHost === computer) refreshUsage();
+    if (!closed && computer === host() && accountHost === computer) rowsChanged();
   });
-  const timer = deps.every(USAGE_MS, refreshUsage);
+  const timer = deps.every(USAGE_MS, () => { if (!closed) rowsChanged(); });
 
   function dispose() {
     if (closed) return;
@@ -1278,6 +1338,7 @@ export function createNewSessionStore(deps: NewSessionDeps) {
   async function openNewSession(options: NewSessionOptions = {}): Promise<void> {
     if (dialog || opening) return;
     opening = true;
+    let made: Dialog | undefined;
     try {
       const view = deps.projects();
       const projects = view.projects;
@@ -1294,6 +1355,7 @@ export function createNewSessionStore(deps: NewSessionDeps) {
       const started = await deps.bridge.newSessionContext();
       buildStyle = started.build_style;
       const open = createDialog(deps, started, { host: computer, agent: options.agent ?? "", project: launchProject }, emit);
+      made = open;
       open.setProjectExplicit(!!options.project);
       open.setSwarm(view.swarm_id);
       open.setGroups(projects, launchProject);
@@ -1316,6 +1378,8 @@ export function createNewSessionStore(deps: NewSessionDeps) {
       dialog = open;
       emit();
     } catch (failure) {
+      // A dialog made before the failure ends its timer, listener and watch.
+      if (made && made !== dialog) made.dispose();
       deps.notify("error", errorText(failure), true);
     } finally {
       opening = false;
@@ -1349,8 +1413,9 @@ export function createNewSessionStore(deps: NewSessionDeps) {
     const open = dialog;
     if (!open) return;
     const admitted = await open.start(confirm);
-    if (!admitted || dialog !== open) return;
-    closeNewSession();
+    if (!admitted) return;
+    if (dialog === open) closeNewSession();
+    // An admitted creation reaches its card whatever became of the dialog.
     for (const listener of admittedListeners) listener(admitted.id, admitted.plan);
   }
 
@@ -1371,6 +1436,19 @@ export function createNewSessionStore(deps: NewSessionDeps) {
     /** Machine cards or peers changed (the app calls this from its fleet effect). */
     fleetChanged: () => { if (dialog) untrack(() => dialog?.fleetChanged()); },
   };
+}
+
+/**
+ * What the open dialog reads of the fleet: the computers, whose card is ok
+ * and its host name, and this computer's platform, local sessions and session
+ * host (`can_enable_local_sessions`, launch.rs 178-185). A change runs setFleet.
+ */
+export function fleetKey(cards: Record<ComputerId, MachineMeta>, peers: string[], online: (computer: ComputerId) => boolean): string {
+  const local = cards[""];
+  return JSON.stringify([
+    peers, ["", ...peers].map((id) => [online(id), cards[id]?.host ?? null]),
+    local?.platform ?? null, local?.local_sessions ?? null, local?.local_host ?? null,
+  ]);
 }
 
 // The app's store: the catalog's machine cards and computers, the Projects
@@ -1408,10 +1486,7 @@ const app = createNewSessionStore({
 
 // Fleet updates reach the open dialog (SessionsWindow 2692).
 createRoot(() => {
-  createEffect(on(() => {
-    const ids = peersOf();
-    return JSON.stringify([ids, ["", ...ids].map((id) => [onlineOf(id), machineCards[id]?.host ?? null]), machineCards[""]?.platform ?? null, machineCards[""]?.local_sessions ?? null]);
-  }, () => app.fleetChanged(), { defer: true }));
+  createEffect(on(() => fleetKey(machineCards, peersOf(), onlineOf), () => app.fleetChanged(), { defer: true }));
 });
 
 /** The open dialog, one at a time. */

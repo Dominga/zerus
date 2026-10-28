@@ -1,7 +1,8 @@
 import type { LaunchProject, PathStyle } from "../../types";
 
 // Folder paths in the form of the computer they belong to, and New session's
-// folder helpers: a line-for-line port of client/core/src/paths.rs and of
+// folder helpers: a line-for-line port of client/core/src/paths.rs (`of`,
+// `absolute`, `clean`, `same`, `within`, `leaf`, `native`) and of
 // client/core/src/launch.rs `matching_project_folder`, `prefill_target` and
 // `restored_folder`, with the same names where JavaScript allows.
 //
@@ -56,15 +57,6 @@ const device = (path: string[]) => server(path) === 3 && (path[2] === "?" || pat
 const chars = (path: string) => Array.from(path);
 
 const slashes = (path: string) => path.replaceAll("\\", "/");
-
-/**
- * A drive or UNC path in either separator form (also "\\?\" and "\\.\"
- * paths): a Windows folder, which the swarm catalog must never receive.
- */
-export function windowsShaped(path: string): boolean {
-  const text = chars(path);
-  return drive(text) || share(text) > 0;
-}
 
 /**
  * POSIX: a leading '/'. Windows: a drive root ("C:\", "c:/") or a share
@@ -164,19 +156,6 @@ export function leaf(path: string, style: Style): string {
 export function native(path: string, style: Style): string {
   return style === "posix" ? path : path.replaceAll("/", "\\");
 }
-
-/** `QFileInfo(path).path()` and `fileName()`: the parent ("/" for "/repo", "C:/" for "C:/repo") and the last name. */
-export function split(path: string, style: Style): [string, string] {
-  const text = style === "posix" ? path : slashes(path);
-  const at = text.lastIndexOf("/");
-  if (at < 0) return [".", text];
-  // The root keeps its separator: "/" and, on Windows, "X:/".
-  const root = at === 0 || (style === "windows" && at === 2 && drive(chars(text)));
-  return [root ? text.slice(0, at + 1) : text.slice(0, at), text.slice(at + 1)];
-}
-
-/** `QDir(parent).filePath(name)`: one '/' between them. */
-export const join = (parent: string, name: string) => (parent.endsWith("/") ? `${parent}${name}` : `${parent}/${name}`);
 
 // launch.rs
 

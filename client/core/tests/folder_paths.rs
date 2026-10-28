@@ -1,5 +1,6 @@
 //! The shared golden fixture `tests/fixtures/folder-paths.json`: folder paths
-//! in their computer's form (`paths.rs`) and New session's folder helpers
+//! in their computer's form (`paths.rs`: `of`, `absolute`, `clean`, `same`,
+//! `within`, `leaf`, `native`) and New session's folder helpers
 //! (`launch::matching_project_folder`, `prefill_target`, `restored_folder`).
 //! The desktop client's TypeScript port (`client/src/ui/sessions/paths.ts`)
 //! checks the same answers in `paths.test.ts`, so the two cannot drift.
@@ -40,13 +41,11 @@ fn style_name(style: Style) -> &'static str {
 
 /// One path's answers in one style.
 fn single(path: &str, style: Style) -> Value {
-    let (parent, name) = paths::split(path, style);
     json!({
         "absolute": paths::absolute(path, style),
         "clean": paths::clean(path, style),
         "leaf": paths::leaf(path, style),
         "native": paths::native(path, style),
-        "split": [parent, name],
     })
 }
 
@@ -55,9 +54,11 @@ fn answered(fixture: &Value) -> Value {
     let mut out = fixture.clone();
     for entry in out["paths"].as_array_mut().expect("paths") {
         let path = text(entry, "path");
-        entry["posix"] = single(&path, Style::Posix);
-        entry["windows"] = single(&path, Style::Windows);
-        entry["windows_shaped"] = json!(paths::windows_shaped(&path));
+        *entry = json!({
+            "path": path,
+            "posix": single(&path, Style::Posix),
+            "windows": single(&path, Style::Windows),
+        });
     }
     for entry in out["pairs"].as_array_mut().expect("pairs") {
         let (path, folder) = (text(entry, "path"), text(entry, "folder"));

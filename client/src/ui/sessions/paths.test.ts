@@ -19,9 +19,7 @@ describe("folder paths (paths.rs)", () => {
         expect(paths.clean(entry.path, style), `clean ${label}`).toBe(want.clean);
         expect(paths.leaf(entry.path, style), `leaf ${label}`).toBe(want.leaf);
         expect(paths.native(entry.path, style), `native ${label}`).toBe(want.native);
-        expect(paths.split(entry.path, style), `split ${label}`).toEqual(want.split);
       }
-      expect(paths.windowsShaped(entry.path), `windows_shaped ${JSON.stringify(entry.path)}`).toBe(entry.windows_shaped);
     }
   });
 
@@ -44,11 +42,6 @@ describe("folder paths (paths.rs)", () => {
     }
   });
 
-  it("joins a parent and a name with one separator", () => {
-    expect(paths.join("/", "repo")).toBe("/repo");
-    expect(paths.join("/srv", "repo")).toBe("/srv/repo");
-    expect(paths.join("C:/", "repo")).toBe("C:/repo");
-  });
 });
 
 describe("New session's folder helpers (launch.rs)", () => {

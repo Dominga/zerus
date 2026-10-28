@@ -193,7 +193,7 @@ last two followed by one as displayed again.
 `ZERUS_CLIENT_PERF_LABEL` names the platform, `ZERUS_CLIENT_PERF_HZ`
 overrides the display rate (`display_hz`), `ZERUS_CLIENT_PERF_REPRESENTATIVE=0`
 marks Xvfb runs and `ZERUS_CLIENT_PERF_PREFERENCE=default` keeps WebKit's
-near-60 fps preference on macOS and Linux (the control run). The page is cross-origin
+near-60 fps preference on macOS (the control run). The page is cross-origin
 isolated (COOP and COEP headers) for precise timers.
 
 Screenshots of real sessions are never committed; the fixtures are synthetic

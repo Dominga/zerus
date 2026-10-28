@@ -4286,7 +4286,6 @@ dependencies = [
  "tauri",
  "tauri-build",
  "uuid",
- "webkit2gtk",
  "zerus-client-core",
  "zerus-watch-protocol",
 ]

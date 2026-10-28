@@ -625,7 +625,9 @@ class WindowsClient(unittest.TestCase):
         threading.Thread(target=lambda: [lines.put(line) for line in process.stdout] + [lines.put(None)], daemon=True).start()
         def frame(seconds=10):
             line = lines.get(timeout=seconds)
-            self.assertIsNotNone(line, 'the stream ended early: ' + process.stderr.read().decode(errors='replace'))
+            if line is None:
+                # Read only once hgs ended: stderr stays open while it runs.
+                self.fail('the stream ended early: ' + process.stderr.read().decode(errors='replace'))
             return json.loads(line)
         try:
             self.assertEqual(frame(20), {'t': 'hello'})

@@ -293,6 +293,12 @@ impl Controller {
     /// the edits order `projects` only, and the screen follows
     /// `project_order` first, so a pending create, delete or reorder shows
     /// where hgs will place it.
+    /// The last `swarm get` as observed, without pending edits: shared, not
+    /// rebuilt.
+    pub fn observed_value(&self) -> Option<Arc<Value>> {
+        self.value.clone()
+    }
+
     pub fn presented_value(&self) -> Option<Arc<Value>> {
         let value = self.value.as_ref()?;
         match &self.desired {

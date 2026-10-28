@@ -174,16 +174,30 @@ fn pair_and_revoke_name_the_pinned_commands_qt_runs() {
     );
     assert_eq!(
         pinned("mac", "revoke-phone", "p1", "ws-1", "https://relay.example.com"),
-        "hgs @mac mobile revoke-phone p1 --workspace ws-1 --server https://relay.example.com --json"
+        format!(
+            "hgs {} mobile revoke-phone p1 --workspace ws-1 --server https://relay.example.com --json",
+            shell_word("@mac")
+        )
     );
-    // Without both pins Qt sends neither; odd words are quoted.
+    // Without both pins Qt sends neither.
     assert_eq!(
         pinned("", "invite", "", "ws-1", ""),
         "hgs mobile invite --json"
     );
+    // Odd words are quoted for the terminal they are typed into: a POSIX
+    // shell, or PowerShell on Windows, where @ splats and , makes an array.
+    assert_eq!(posix_word("it's mine"), "'it'\\''s mine'");
+    assert_eq!(posix_word("@mac"), "@mac");
+    assert_eq!(powershell_word("it's mine"), "'it''s mine'");
+    assert_eq!(powershell_word("@mac"), "'@mac'");
+    assert_eq!(powershell_word("a,b"), "'a,b'");
+    assert_eq!(
+        powershell_word("https://relay.example.com"),
+        "https://relay.example.com"
+    );
     assert_eq!(
         pinned("", "revoke-phone", "it's mine", "", ""),
-        "hgs mobile revoke-phone 'it'\\''s mine' --json"
+        format!("hgs mobile revoke-phone {} --json", shell_word("it's mine"))
     );
 }
 

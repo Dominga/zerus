@@ -122,15 +122,17 @@ function PhonesPanel(props: { view?: View; refresh: () => void }) {
 function DeliveryPanel(props: { view?: View; set: (value: string) => void }) {
   const value = () => props.view?.delivery ?? "";
   const busy = () => !!props.view?.delivery_busy;
+  // Qt disables the choice while the shared setting could not be read.
+  const usable = () => !busy() && !props.view?.delivery_failed && !!props.view?.delivery;
   // Made again when the value or its call changes, so a choice that was not
   // saved never stays shown.
-  const shown = () => `${value()}|${busy()}`;
+  const shown = () => `${value()}|${usable()}`;
   return (
     <Group title="Phone notifications">
       <label class="set-label" for="mobile-delivery">When I'm not at a computer, send notifications to my phone</label>
       <Show when={shown()} keyed>
         <Select id="mobile-delivery" label="When I'm not at a computer, send notifications to my phone" value={value()}
-          disabled={busy() || !props.view?.delivery} onChange={props.set} options={DELIVERY} />
+          disabled={!usable()} onChange={props.set} options={DELIVERY} />
       </Show>
       <Show when={props.view?.delivery_status}>{(text) => <Status kind={busy() ? "busy" : "muted"}>{text()}</Status>}</Show>
       <Show when={props.view?.delivery_outdated}>{(text) => <Status kind="warn">{text()}</Status>}</Show>

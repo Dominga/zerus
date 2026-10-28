@@ -10,7 +10,7 @@ function deferred<T>() {
 const settle = () => new Promise((done) => setTimeout(done, 0));
 const view = (change: Partial<View> = {}): View => ({
   workspace: null, workspace_error: null, workspace_busy: false, phones: null, phones_busy: false,
-  delivery: "away_5", delivery_busy: false, delivery_status: "", delivery_outdated: null, delivery_worker: null,
+  delivery: "away_5", delivery_busy: false, delivery_status: "", delivery_outdated: null, delivery_worker: null, delivery_failed: false,
   version: 1, ...change,
 });
 
@@ -48,6 +48,15 @@ describe("the Mobile connection page", () => {
     await settle();
     h.page.refreshWorkspace();
     h.page.refreshPhones();
+    h.page.setDelivery("away");
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it("offers no choice while the timing could not be read", async () => {
+    const h = harness();
+    h.page.open();
+    h.calls[0].reply.resolve(view({ delivery_failed: true, delivery_status: "Could not read the shared setting: timed out" }));
+    await settle();
     h.page.setDelivery("away");
     expect(h.calls).toHaveLength(1);
   });

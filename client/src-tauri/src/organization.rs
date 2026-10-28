@@ -211,9 +211,10 @@ impl Organization {
 
     /// The last `swarm get` observed (its `worker`, `peers` and
     /// `preferences` included), as Qt's SwarmController hands its snapshot
-    /// to Settings; None before the first.
+    /// to Settings; None before the first. Shared as observed: pending edits
+    /// are not applied to it, so nothing is rebuilt under the hub's lock.
     pub fn swarm_snapshot(&self) -> Option<Arc<Value>> {
-        self.lock().sync.presented_value()
+        self.lock().sync.observed_value()
     }
 
     pub fn set_presented(&self, presented: Presented) {

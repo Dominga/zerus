@@ -34,6 +34,8 @@ pub struct View {
     pub delivery_outdated: Option<String>,
     /// This computer's sync service is outdated.
     pub delivery_worker: Option<String>,
+    /// The timing could not be read: nothing to choose until it is.
+    pub delivery_failed: bool,
     /// Grows with every change: a view older than one shown is stale.
     pub version: u64,
 }
@@ -50,6 +52,9 @@ pub struct Page {
     workspace: Option<Workspace>,
     workspace_error: Option<String>,
     workspace_busy: bool,
+    /// The last connection revision read, kept across failed reads, as Qt
+    /// keeps its snapshot and clears only `known`.
+    revision: Option<String>,
     phones: Option<Phones>,
     phones_busy: bool,
     phones_queued: bool,
@@ -61,6 +66,8 @@ pub struct Page {
     confirmed: Option<(String, i64)>,
     outdated: Option<String>,
     worker_since: Option<i64>,
+    /// A snapshot with a worker was seen.
+    worker_seen: bool,
     worker: bool,
     version: u64,
 }
@@ -101,9 +108,10 @@ impl Page {
         match answer {
             Ok(workspace) => {
                 let changed = self
-                    .workspace
+                    .revision
                     .as_ref()
-                    .is_some_and(|known| known.config_revision != workspace.config_revision);
+                    .is_some_and(|known| *known != workspace.config_revision);
+                self.revision = Some(workspace.config_revision.clone());
                 self.workspace = Some(workspace);
                 self.workspace_error = None;
                 changed
@@ -210,6 +218,20 @@ impl Page {
         }
     }
 
+    /// A timing call that could not start: it fails, and so does the read a
+    /// failed save asks for, so no call stays held.
+    pub fn delivery_unstarted(&mut self, now_ms: i64) {
+        while self
+            .delivery_answered(Err("hgs did not respond".into()), now_ms)
+            .is_some()
+        {}
+    }
+
+    /// A sweep that could not start ends, with a refresh merged meanwhile.
+    pub fn phones_unstarted(&mut self, failed: Phones) {
+        while self.phones_answered(failed.clone()) {}
+    }
+
     /// MobileDeliverySettings::setSwarmSnapshot: the 5-second swarm read
     /// keeps the timing current and names direct peers too old for it, or
     /// a local sync service that stays outdated.
@@ -221,13 +243,20 @@ impl Page {
             self.delivery_status.clone(),
         );
         // An older hgs reports no worker and leaves the notice unchanged.
+        // Qt follows the read from the start; this page sees it only while
+        // open, so a service already stale when first seen is named at once.
         if let Some(state) = snapshot["worker"].as_object() {
             let stale = state.get("running").and_then(Value::as_bool) == Some(true)
                 && state.get("current").and_then(Value::as_bool) != Some(true);
+            let first = !std::mem::replace(&mut self.worker_seen, true);
             if !stale {
                 self.worker_since = None;
             } else if self.worker_since.is_none() {
-                self.worker_since = Some(now_ms);
+                self.worker_since = Some(if first {
+                    now_ms - WORKER_NOTICE_MS
+                } else {
+                    now_ms
+                });
             }
             self.worker = self
                 .worker_since
@@ -307,6 +336,7 @@ impl Page {
             delivery_busy: self.delivery_call.is_some(),
             delivery_status: self.delivery_status.clone(),
             delivery_outdated: self.outdated.clone(),
+            delivery_failed: self.load_failed,
             delivery_worker: self.worker.then(|| {
                 format!(
                     "The sync service on this computer is outdated and must be restarted ({}, or sign out and back in). Until then this computer may stop syncing projects and this choice.",
@@ -350,6 +380,35 @@ mod tests {
             view.workspace_error.as_deref(),
             Some("Workspace operation was not confirmed.")
         );
+        // The revision survives a failed read: a change across it still
+        // reads the phones again, and the same one does not.
+        page.read_workspace();
+        assert!(page.workspace_answered(Ok(read("c"))));
+        page.read_workspace();
+        page.workspace_answered(Err("timed out".into()));
+        page.read_workspace();
+        assert!(!page.workspace_answered(Ok(read("c"))));
+        page.read_workspace();
+        page.workspace_answered(Err("timed out".into()));
+        page.read_workspace();
+        assert!(page.workspace_answered(Ok(read("d"))));
+    }
+
+    #[test]
+    fn calls_that_cannot_start_leave_nothing_held() {
+        let mut page = Page::new();
+        page.read_delivery();
+        page.delivery_answered(Ok("away".into()), 0);
+        assert!(page.set_delivery("away_5").is_some());
+        page.delivery_unstarted(0);
+        assert!(!page.view().delivery_busy);
+        assert!(page.read_delivery().is_some());
+        // A sweep with a refresh merged into it.
+        assert!(page.read_phones());
+        page.read_phones();
+        page.phones_unstarted(Phones::default());
+        assert!(!page.view().phones_busy);
+        assert!(page.read_phones());
     }
 
     #[test]
@@ -409,14 +468,20 @@ mod tests {
             page.view().delivery_status,
             "Saved. Your other computers and the phone receive it with the next sync."
         );
-        // A failed read says so until a value comes in.
+        // A failed read says so, with nothing to choose, until a value
+        // comes in; the value shown before stays shown.
         let mut failed = Page::new();
         failed.read_delivery();
+        failed.delivery_answered(Ok("away_5".into()), 0);
+        failed.read_delivery();
         failed.delivery_answered(Err(String::new()), 0);
+        let view = failed.view();
         assert_eq!(
-            failed.view().delivery_status,
+            view.delivery_status,
             "Could not read the shared setting: unexpected response from hgs"
         );
+        assert!(view.delivery_failed);
+        assert_eq!(view.delivery.as_deref(), Some("away_5"));
         failed.swarm_snapshot(&json!({"preferences": {"mobile_delivery": "away"}}), 0);
         let view = failed.view();
         assert_eq!(
@@ -467,7 +532,12 @@ mod tests {
         assert!(page.view().delivery_outdated.is_some());
         page.swarm_snapshot(&json!({"peers": {}}), 19_500);
         assert!(page.view().delivery_outdated.is_none());
-        // A stale sync service is named after 30 s, and forgotten once current.
+        // A service that turns stale while the page watches is named after
+        // 30 s, and forgotten once current.
+        page.swarm_snapshot(
+            &json!({"worker": {"running": true, "current": true}}),
+            19_800,
+        );
         let stale = json!({"worker": {"running": true, "current": false}});
         page.swarm_snapshot(&stale, 20_000);
         assert!(page.view().delivery_worker.is_none());
@@ -488,6 +558,10 @@ mod tests {
             61_000,
         );
         assert!(page.view().delivery_worker.is_none());
+        // One already stale when the page first sees it is named at once.
+        let mut opened = Page::new();
+        opened.swarm_snapshot(&stale, 5);
+        assert!(opened.view().delivery_worker.is_some());
         // An unchanged snapshot makes no newer view.
         let version = page.view().version;
         page.swarm_snapshot(

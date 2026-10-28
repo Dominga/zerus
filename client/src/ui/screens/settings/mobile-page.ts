@@ -15,6 +15,8 @@ export interface View {
   phones: Phones | null; phones_busy: boolean;
   delivery: string | null; delivery_busy: boolean; delivery_status: string;
   delivery_outdated: string | null; delivery_worker: string | null;
+  /** The timing could not be read: nothing to choose until it is. */
+  delivery_failed: boolean;
   /** Grows with every change in the app. */
   version: number;
 }
@@ -46,7 +48,7 @@ export function createMobile(io: MobileIo, show: (state: MobileState) => void) {
     refreshPhones() { if (!state.view?.phones_busy) call(() => io.refreshPhones()); },
     setDelivery(value: string) {
       const view = state.view;
-      if (!view || view.delivery_busy || view.delivery === value) return;
+      if (!view || view.delivery_busy || view.delivery_failed || view.delivery === value) return;
       call(() => io.setDelivery(value));
     },
   };

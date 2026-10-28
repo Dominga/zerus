@@ -238,8 +238,8 @@ selected row, under the heading "N selected sessions", followed by "Deselect all
   attention one that does not; every other action needs the computer online, no
   write pending for the session and an operation the row allows (Resume / restore
   is Resume for a live-listed saved session and Restore for an archived one);
-  Move always applies. Archived Resume and Forget are not counted until the
-  Archive view binds them (`zerus-5wmh.32`).
+  Move always applies. Only listed rows count: a search or filter hides rows from the selection, and vanished sessions drop out. Archived Resume and Forget are not counted until the
+  archive hooks are bound (Piece E, `zerus-5wmh.17`).
 - Move to project is shown with its count, disabled, with the hint "Arrives with
   project organisation." until the organisation stream's move lands.
 - Forget and Terminate first confirm. The title is the action, the text
@@ -273,7 +273,7 @@ heading with the machine name, "Pause all (LIVE)" and "Resume all in background
 (SAVED)". LIVE counts the running sessions, SAVED the resumable ones that are
 not running; archived rows are skipped. Pause all is enabled when the computer
 is online, LIVE is above 0 and every live session is idle and resumable and
-has a running process; otherwise "Some sessions are busy or context is not
+whose process has not exited; otherwise "Some sessions are busy or context is not
 tracked" appears. Rows of OpenCode or a host without bulk lifecycle are not
 counted and show "OpenCode uses individual Pause / Resume controls" with the
 hint "OpenCode sessions are excluded; use their individual Pause / Resume

@@ -77,3 +77,14 @@ describe("selectionMenu", () => {
     expect((items[2] as { disabled?: boolean }).disabled).toBe(true);
   });
 });
+
+describe("visibleSelected", () => {
+  const card = (key: string) => ({ type: "card", id: key, session: { key } as never, expandable: false, expanded: false, compactRow: false }) as never;
+  it("counts only the listed card rows whose key is selected", async () => {
+    const { visibleSelected } = await import("./selection-ui");
+    const listed = [{ type: "header", id: "h:p" } as never, card("a"), card("b"), { type: "child", id: "a/c" } as never];
+    // "gone" vanished from the catalog, "hidden" is filtered out of the list, "a/c" is a child row.
+    const sel = { a: true, b: false, gone: true, hidden: true, "a/c": true };
+    expect(visibleSelected(listed, sel).map((s) => s.key)).toEqual(["a"]);
+  });
+});

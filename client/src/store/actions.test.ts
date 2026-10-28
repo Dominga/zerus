@@ -88,6 +88,19 @@ describe("perform", () => {
     });
   });
 
+  it("never evicts the notice being added, even over five sticky ones", () => {
+    createRoot((dispose) => {
+      const a = setup();
+      for (let i = 0; i < 5; i++) a.notify("info", `Worktree kept ${i}`, true);
+      a.notify("info", "Archive: 5 of 5 completed.");
+      const texts = a.notices().map((n) => n.text);
+      expect(texts).toHaveLength(5);
+      expect(texts).toContain("Archive: 5 of 5 completed.");
+      expect(texts).not.toContain("Worktree kept 0");
+      dispose();
+    });
+  });
+
   it("refuses when the row is gone", async () => {
     await createRoot(async (dispose) => {
       const a = setup();

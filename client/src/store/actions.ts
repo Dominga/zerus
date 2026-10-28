@@ -60,13 +60,15 @@ export function createActions(
 
   function dismiss(id: number) { setList((all) => all.filter((n) => n.id !== id)); }
 
-  /** Adds a notice and returns its id; over the cap, the oldest non-sticky one goes first, then the oldest. */
+  /** Adds a notice and returns its id; over the cap, the oldest other non-sticky one goes first, then the oldest other; the new one stays. */
   function notify(tone: Notice["tone"], text: string, sticky = false): number {
     const id = nextId++;
     setList((all) => {
       const next = [...all, { id, tone, text, sticky }];
       while (next.length > MAX_NOTICES) {
-        const loose = next.findIndex((n) => !n.sticky);
+        // Never the notice being added: it is the last entry.
+        const others = next.slice(0, -1);
+        const loose = others.findIndex((n) => !n.sticky);
         next.splice(loose < 0 ? 0 : loose, 1);
       }
       return next;

@@ -1,4 +1,6 @@
 import type { MenuEntry } from "../../store/ui";
+import type { Row } from "./model";
+import type { Session } from "./types";
 import { MOVE_LATER, SELECTION_ACTIONS, selectionText, type SelectionAction, type SelectionRow } from "./selection";
 
 // The selection bar and the selection context menu, after Qt's
@@ -88,4 +90,15 @@ export function selectionMenu(count: (a: SelectionAction) => number, selected: n
     { separator: true },
     { label: "Deselect all", action: deselect },
   ];
+}
+
+/**
+ * The selected rows (Qt's selectionEntries): the listed session cards whose key
+ * is selected. Vanished sessions and rows hidden by a search or filter are not
+ * selected for any count or action.
+ */
+export function visibleSelected(rows: readonly Row[], selected: Readonly<Record<string, boolean>>): Session[] {
+  const out: Session[] = [];
+  for (const r of rows) if (r.type === "card" && selected[r.session.key]) out.push(r.session);
+  return out;
 }

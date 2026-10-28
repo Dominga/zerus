@@ -8,14 +8,16 @@
 //! the canonical root, nonempty, at most 10 MiB) and no link leads to it.
 //! Windows webviews ask `http://zerus-file.localhost/...` instead. Only the
 //! main webview gets answers, and only to GET. Range requests answer 206, as
-//! media elements seek with them. Bytes reach the webview only this way or as
-//! raw IPC bodies, never as JSON.
+//! media elements seek with them; a cached copy is read only as far as the
+//! range needs. Bytes reach the webview only this way or as raw IPC bodies,
+//! never as JSON.
 //!
 //! The path is percent-decoded once, before any check: the webview's
 //! `convertFileSrc` encodes it whole. A response names the type `sniff`
 //! finds in the bytes, never one a webview would run as a page.
 
-use std::io::Read;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -104,15 +106,59 @@ fn decode(path: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// One `bytes=a-b`, `bytes=a-` or `bytes=-n` range of `len` bytes, its end
-/// clamped to the last byte. None for anything else: another unit, several
-/// ranges, a number with a sign, space or other character, a start past the
-/// last byte or after the end, an empty suffix, or an empty file.
-fn range(spec: &str, len: usize) -> Option<(usize, usize)> {
-    let (unit, set) = spec.trim().split_once('=')?;
-    if !unit.eq_ignore_ascii_case("bytes") {
-        return None;
+/// What a request's `Range` asks of a file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wanted {
+    /// No range, an `If-Range`, or a unit other than bytes (RFC 9110 §14.2).
+    Whole,
+    /// Bytes `start..=end`, the end clamped to the last byte.
+    Part(usize, usize),
+    /// 416: not one satisfiable byte range.
+    Unsatisfiable,
+}
+
+/// The `Range` of a request for `len` bytes. An `If-Range` never matches,
+/// since these answers carry no validator, so the whole file answers then.
+/// Two `Range` fields, or one that is not text, are unsatisfiable.
+fn wanted(headers: &tauri::http::HeaderMap, len: usize) -> Wanted {
+    let ranges: Vec<_> = headers.get_all(header::RANGE).iter().collect();
+    match ranges.as_slice() {
+        [] => Wanted::Whole,
+        _ if headers.contains_key(header::IF_RANGE) => Wanted::Whole,
+        [one] => one
+            .to_str()
+            .map_or(Wanted::Unsatisfiable, |spec| range(spec, len)),
+        _ => Wanted::Unsatisfiable,
     }
+}
+
+/// One `Range` field: a unit other than `bytes` is ignored (RFC 9110
+/// §14.2); a field without a unit token is unsatisfiable, and so is a
+/// bytes range `byte_range` refuses.
+fn range(spec: &str, len: usize) -> Wanted {
+    let Some((unit, set)) = spec.trim().split_once('=') else {
+        return Wanted::Unsatisfiable;
+    };
+    let token = !unit.is_empty()
+        && unit
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+    if !token {
+        Wanted::Unsatisfiable
+    } else if !unit.eq_ignore_ascii_case("bytes") {
+        Wanted::Whole
+    } else {
+        byte_range(set, len).map_or(Wanted::Unsatisfiable, |(start, end)| {
+            Wanted::Part(start, end)
+        })
+    }
+}
+
+/// One `a-b`, `a-` or `-n` byte range of `len` bytes, its end clamped to the
+/// last byte. None for anything else: several ranges, a number with a sign,
+/// space or other character, a start past the last byte or after the end,
+/// an empty suffix, or an empty file.
+fn byte_range(set: &str, len: usize) -> Option<(usize, usize)> {
     let (first, last) = set.trim().split_once('-')?;
     // Digits only; a number too large for `usize` is past any file.
     let number = |text: &str| {
@@ -222,13 +268,37 @@ fn draft_file(composers: &Composers, rest: &str) -> Option<Arc<[u8]>> {
     Some(Arc::clone(&attachment.bytes))
 }
 
-/// A cached copy's bytes. `cached_at` refused anything over 10 MiB, and the
-/// read stops there too, should the file have grown since.
-fn read_copy(file: &Path) -> Option<Vec<u8>> {
-    read_at_most(
-        std::fs::File::open(file).ok()?,
-        attachments::MAX_ATTACHMENT_BYTES,
-    )
+/// The bytes a type is sniffed from.
+const HEAD_BYTES: usize = 64 * 1024;
+
+/// A cached copy, opened once, and its size, taken from the open handle: a
+/// regular file of at most 10 MiB.
+fn open_copy(file: &Path) -> Option<(File, usize)> {
+    let handle = File::open(file).ok()?;
+    let metadata = handle.metadata().ok()?;
+    let len = usize::try_from(metadata.len()).ok()?;
+    (metadata.is_file() && len <= attachments::MAX_ATTACHMENT_BYTES).then_some((handle, len))
+}
+
+/// The bytes `part` names of an open copy, with its served type: the whole
+/// file (at most 10 MiB, should it have grown since it was opened) typed
+/// from its head, or only the range's bytes, typed from a head read first.
+/// A copy that shrank so the range is short answers nothing.
+fn read_copy(mut handle: File, part: Option<(usize, usize)>) -> Option<(String, Vec<u8>)> {
+    let Some((start, end)) = part else {
+        let bytes = read_at_most(&mut handle, attachments::MAX_ATTACHMENT_BYTES)?;
+        return Some((served_type(&bytes[..bytes.len().min(HEAD_BYTES)]), bytes));
+    };
+    let mut head = Vec::new();
+    (&mut handle)
+        .take(HEAD_BYTES as u64)
+        .read_to_end(&mut head)
+        .ok()?;
+    let count = end - start + 1;
+    handle.seek(SeekFrom::Start(start as u64)).ok()?;
+    let mut part = Vec::with_capacity(count);
+    handle.take(count as u64).read_to_end(&mut part).ok()?;
+    (part.len() == count).then(|| (served_type(&head), part))
 }
 
 /// All of `source` when it holds at most `limit` bytes. It reads at most
@@ -239,33 +309,33 @@ fn read_at_most(source: impl Read, limit: usize) -> Option<Vec<u8>> {
     (bytes.len() <= limit).then_some(bytes)
 }
 
-/// The whole file, or the one range the request names. A `Range` that is
-/// not one satisfiable byte range answers 416; an `If-Range` never matches
-/// (these answers carry no validator), so the whole file answers then.
-fn answer(request: &Request<Vec<u8>>, bytes: &[u8]) -> Response<Vec<u8>> {
-    let len = bytes.len();
-    let headers = request.headers();
-    let ranges: Vec<_> = headers.get_all(header::RANGE).iter().collect();
-    let wanted = match ranges.as_slice() {
-        [] => None,
-        _ if headers.contains_key(header::IF_RANGE) => None,
-        [one] => match one.to_str().ok().and_then(|spec| range(spec, len)) {
-            Some(wanted) => Some(wanted),
-            None => return unsatisfiable(len),
-        },
-        _ => return unsatisfiable(len),
+/// A file of `len` bytes, whole or the one range the request names; `read`
+/// gives the served type and the bytes of the whole file (None) or of the
+/// range, or nothing when the file is gone.
+fn answer(
+    request: &Request<Vec<u8>>,
+    len: usize,
+    read: impl FnOnce(Option<(usize, usize)>) -> Option<(String, Vec<u8>)>,
+) -> Response<Vec<u8>> {
+    let part = match wanted(request.headers(), len) {
+        Wanted::Whole => None,
+        Wanted::Part(start, end) => Some((start, end)),
+        Wanted::Unsatisfiable => return unsatisfiable(len),
+    };
+    let Some((mime, body)) = read(part) else {
+        return status(StatusCode::NOT_FOUND);
     };
     let builder = guarded(Response::builder())
-        .header(header::CONTENT_TYPE, served_type(bytes))
+        .header(header::CONTENT_TYPE, mime)
         .header(header::ACCEPT_RANGES, "bytes");
-    match wanted {
+    match part {
         Some((start, end)) => finish(
             builder
                 .status(StatusCode::PARTIAL_CONTENT)
                 .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}")),
-            bytes[start..=end].to_vec(),
+            body,
         ),
-        None => finish(builder.status(StatusCode::OK), bytes.to_vec()),
+        None => finish(builder.status(StatusCode::OK), body),
     }
 }
 
@@ -290,19 +360,25 @@ pub fn respond(
         return status(StatusCode::NOT_FOUND);
     };
     if let Some(rest) = path.strip_prefix("draft/") {
-        match draft_file(composers, rest) {
-            Some(bytes) => answer(request, &bytes),
-            None => status(StatusCode::NOT_FOUND),
-        }
+        let Some(bytes) = draft_file(composers, rest) else {
+            return status(StatusCode::NOT_FOUND);
+        };
+        answer(request, bytes.len(), |part| {
+            let mime = served_type(&bytes[..bytes.len().min(HEAD_BYTES)]);
+            Some(match part {
+                Some((start, end)) => (mime, bytes[start..=end].to_vec()),
+                None => (mime, bytes.to_vec()),
+            })
+        })
     } else if let Some(relative) = path.strip_prefix("cache/") {
         let copy = composers.cache().copy(relative).and_then(|file| {
             attachments::touch(&file);
-            read_copy(&file)
+            open_copy(&file)
         });
-        match copy {
-            Some(bytes) => answer(request, &bytes),
-            None => status(StatusCode::NOT_FOUND),
-        }
+        let Some((handle, len)) = copy else {
+            return status(StatusCode::NOT_FOUND);
+        };
+        answer(request, len, |part| read_copy(handle, part))
     } else {
         status(StatusCode::NOT_FOUND)
     }
@@ -312,6 +388,7 @@ pub fn respond(
 mod tests {
     use super::*;
     use crate::composer::tests::{dir, hub, session, until, Scratch};
+    use std::io::Write;
     use zerus_client_core::attachments::Selection;
 
     fn get(path: &str, range: Option<&str>) -> Request<Vec<u8>> {
@@ -459,8 +536,22 @@ mod tests {
             "decoded once"
         );
         for bad in [
-            "%", "%2", "x%2", "%zz", "%+F", "%-1", "% 1", "%00", "a%0Ab", "%7F", "a\u{1}b",
-            "%ff%fe", "%C3",
+            "%",
+            "%2",
+            "x%2",
+            "%zz",
+            "%+F",
+            "%-1",
+            "% 1",
+            "%00",
+            "a%0Ab",
+            "%7F",
+            "a\u{1}b",
+            "%ff%fe",
+            "%C3",
+            "%C0%AE%C0%AE",
+            "%C0%AF",
+            "%C0%AE%C0%AE%C0%AFx",
         ] {
             assert_eq!(decode(bad), None, "{bad:?}");
         }
@@ -501,6 +592,14 @@ mod tests {
             format!("cache/{}/shot.png", digest.to_uppercase()),
             format!("cache/{}/shot.png", &digest[1..]),
             "cache/%252e%252e/outside.txt".to_owned(),
+            // Overlong UTF-8 for `.` and `/`, which some decoders take as such.
+            "cache/%C0%AE%C0%AE/outside.txt".to_owned(),
+            "cache/%C0%AE%C0%AE%C0%AFoutside.txt".to_owned(),
+            format!("cache/{digest}%C0%AF%C0%AE%C0%AE%C0%AFoutside.txt"),
+            format!("cache/{digest}%C0%AFshot.png"),
+            // A `..` that leads back to a real copy.
+            format!("cache/{digest}/../{digest}/shot.png"),
+            format!("cache/{digest}/..%2F{digest}%2Fshot.png"),
             format!("cache/{absolute}"),
             format!("cache/{}", urlencode(&absolute)),
             format!("cache//{absolute}"),
@@ -549,6 +648,7 @@ mod tests {
         for relative in [
             "../outside.txt".to_owned(),
             format!("{digest}/../shot.png"),
+            format!("{digest}/../{digest}/shot.png"),
             format!("{digest}/sub/shot.png"),
             format!("{digest}/.partial-1-0"),
             format!("{digest}/a:b"),
@@ -598,8 +698,27 @@ mod tests {
         let limit = respond(&c, "main", &get(&format!("cache/{digest}/limit.bin"), None));
         assert_eq!(limit.status(), 200);
         assert_eq!(limit.body().len(), attachments::MAX_ATTACHMENT_BYTES);
-        // The read itself stops at the limit, should a copy grow after its check.
-        assert_eq!(read_copy(&folder.join("large.bin")), None);
+        // The size comes from the open handle, which must be a file within
+        // the bound; the read itself stops at the limit, should a copy grow
+        // after it was opened.
+        assert!(open_copy(&folder.join("large.bin")).is_none());
+        assert!(open_copy(&folder.join("folder.png")).is_none());
+        assert_eq!(
+            open_copy(&folder.join("limit.bin")).map(|(_, len)| len),
+            Some(attachments::MAX_ATTACHMENT_BYTES)
+        );
+        let (handle, _) = open_copy(&folder.join("limit.bin")).unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(folder.join("limit.bin"))
+            .unwrap()
+            .write_all(b"grown")
+            .unwrap();
+        assert_eq!(
+            read_copy(handle, None),
+            None,
+            "a copy that grew past the bound after it was opened"
+        );
         let mut larger = std::io::Cursor::new(vec![b'x'; 64]);
         assert_eq!(read_at_most(&mut larger, 16), None);
         assert_eq!(larger.position(), 17, "one byte past the limit, no more");
@@ -633,6 +752,10 @@ mod tests {
             format!("cache/{linked}/shot.png"),
             format!("cache/{digest}/again.png"),
             format!("cache/{twin}/shot.png"),
+            // A link reached through `..`.
+            format!("cache/{digest}/../{twin}/shot.png"),
+            format!("cache/{twin}/../{digest}/shot.png"),
+            format!("cache/{linked}/../{digest}/shot.png"),
         ] {
             assert_eq!(status_of(&c, &path), 404, "{path}");
         }
@@ -656,7 +779,11 @@ mod tests {
             ("Bytes=2-5", (2, 5)),
             (" bytes= 2-5 ", (2, 5)),
         ] {
-            assert_eq!(range(spec, ten), Some(wanted), "{spec}");
+            assert_eq!(range(spec, ten), Wanted::Part(wanted.0, wanted.1), "{spec}");
+        }
+        // Another unit is ignored (RFC 9110 §14.2): the whole file answers.
+        for spec in ["items=2-5", "Items=0-1", "none=", "x-unit=whatever"] {
+            assert_eq!(range(spec, ten), Wanted::Whole, "{spec}");
         }
         for spec in [
             "bytes=10-",
@@ -682,16 +809,23 @@ mod tests {
             "bytes=0-1,",
             "bytes=2-5-7",
             "bytes =2-5",
-            "items=2-5",
+            " =2-5",
+            "=2-5",
+            "by tes=2-5",
+            "bytes;=2-5",
             "2-5",
             "",
             "bytes=99999999999999999999999999-",
         ] {
-            assert_eq!(range(spec, ten), None, "{spec}");
+            assert_eq!(range(spec, ten), Wanted::Unsatisfiable, "{spec}");
         }
-        assert_eq!(range("bytes=0-", 0), None, "an empty file has no range");
-        assert_eq!(range("bytes=-1", 0), None);
-        assert_eq!(range("bytes=0-0", 1), Some((0, 0)));
+        assert_eq!(
+            range("bytes=0-", 0),
+            Wanted::Unsatisfiable,
+            "an empty file has no range"
+        );
+        assert_eq!(range("bytes=-1", 0), Wanted::Unsatisfiable);
+        assert_eq!(range("bytes=0-0", 1), Wanted::Part(0, 0));
     }
 
     #[test]
@@ -721,7 +855,7 @@ mod tests {
             "bytes=5-2",
             "bytes=abc-5",
             "bytes=0-1,4-5",
-            "items=0-1",
+            "bytes =0-1",
             "bytes=-0",
         ] {
             let response = respond(&c, "main", &get(&path, Some(bad)));
@@ -767,13 +901,68 @@ mod tests {
         );
         assert_eq!(whole.body(), content);
         assert_eq!(whole.headers()["content-length"], "10");
+        // RFC 9110 §14.2: a unit the server does not know is ignored.
+        for unknown in ["items=0-1", "lines=2-"] {
+            let whole = respond(&c, "main", &get(&path, Some(unknown)));
+            assert_eq!(whole.status(), 200, "{unknown}");
+            assert_eq!(whole.body(), content, "{unknown}");
+            assert!(whole.headers().get("content-range").is_none());
+        }
+    }
+
+    #[test]
+    fn a_range_reads_only_its_bytes_of_the_cached_copy() {
+        let root = dir("range-reads");
+        let (c, _, _) = cached_shot(&root);
+        // A PNG longer than the 64 KiB head the type is sniffed from.
+        let mut content = b"\x89PNG\r\n\x1a\n".to_vec();
+        content.extend((0..200_000u32).map(|i| (i % 251) as u8));
+        let cached = attachments::store_at(c.cache().root(), "long.png", &content).unwrap();
+        let relative = cached
+            .strip_prefix(c.cache().root())
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let path = format!("cache/{relative}");
+        let len = content.len();
+        for (spec, start, end) in [
+            ("bytes=0-99", 0, 99),
+            ("bytes=70000-70099", 70_000, 70_099),
+            ("bytes=65530-65545", 65_530, 65_545),
+            ("bytes=150000-", 150_000, len - 1),
+            ("bytes=-1000", len - 1000, len - 1),
+            ("bytes=199000-999999", 199_000, len - 1),
+        ] {
+            let part = respond(&c, "main", &get(&path, Some(spec)));
+            assert_eq!(part.status(), 206, "{spec}");
+            assert_eq!(part.body().as_slice(), &content[start..=end], "{spec}");
+            assert_eq!(part.headers()["content-type"], "image/png", "{spec}");
+            assert_eq!(
+                part.headers()["content-range"],
+                format!("bytes {start}-{end}/{len}").as_str()
+            );
+        }
+        let whole = respond(&c, "main", &get(&path, None));
+        assert_eq!(whole.body().as_slice(), content.as_slice());
+        assert_eq!(whole.headers()["content-type"], "image/png");
+        // A copy that shrank after it was opened answers nothing for a range
+        // past its new end.
+        let (handle, opened) = open_copy(&cached).unwrap();
+        assert_eq!(opened, len);
+        File::options()
+            .write(true)
+            .open(&cached)
+            .unwrap()
+            .set_len(1000)
+            .unwrap();
+        assert_eq!(read_copy(handle, Some((70_000, 70_099))), None);
     }
 
     #[test]
     fn draft_paths_name_a_live_composer_and_its_list() {
         let root = dir("draft-paths");
-        let file = root.join("clip.bin");
-        std::fs::write(&file, b"0123456789").unwrap();
+        let file = root.join("clip.png");
+        std::fs::write(&file, b"\x89PNG\r\n\x1a\n0123456789").unwrap();
         let (c, _) = hub(&root);
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
@@ -790,7 +979,16 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(view.attachments[0].path, format!("draft/{handle}/{list}/0"));
-        assert_eq!(status_of(&c, &format!("draft/{handle}/{list}/0")), 200);
+        let whole = respond(&c, "main", &get(&format!("draft/{handle}/{list}/0"), None));
+        assert_eq!(whole.status(), 200);
+        assert_eq!(whole.headers()["content-type"], "image/png");
+        let part = respond(
+            &c,
+            "main",
+            &get(&format!("draft/{handle}/{list}/0"), Some("bytes=8-11")),
+        );
+        assert_eq!(part.body(), b"0123");
+        assert_eq!(part.headers()["content-type"], "image/png");
         // `convertFileSrc` encodes the path whole.
         assert_eq!(
             status_of(&c, &format!("draft%2F{handle}%2F{list}%2F0")),

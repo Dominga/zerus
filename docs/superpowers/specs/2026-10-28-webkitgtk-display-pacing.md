@@ -247,5 +247,5 @@ Real-display attempts were refused before opening a window because the KDE
 session was locked and both outputs were in standby. No real-display 144 Hz
 qualification was performed. The owner then deferred this work until after
 feature parity and asked for no further display runs now. Raw commands, exit
-codes, logs and JSON are preserved under `/w/hgdev/webkit-vblank/evidence/`;
+codes, logs and JSON are preserved in the task's WebKit evidence directory;
 rAF intervals alone are not compositor-phase validation.

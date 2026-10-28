@@ -486,7 +486,7 @@ export const running: () => boolean;     // Qt's m_pending while a batch runs
 Rules (`SessionSelection.cpp`):
 - **`sameInstance`** (25-29): name, archive id, `created`, run, conversation and state.
 - **Applicability** (84-108):
-  - Compact and expand use the row preference. Move always applies; its action is `zerus-5wmh.18` and stays as the owner session builds it.
+  - Compact and expand use the row preference. Move always applies; its write is the organization stream's move function (`zerus-5wmh.18`). Until that is merged the entry is disabled with "Arrives with project organisation.".
   - Mark read applies to a row that is not archived and needs attention; review later to one that is not archived and does not.
   - Every other action needs the computer online, no write pending for the session, and `allowed(operation)`. The operation is `pause`, `restore` or `resume`, `archive`, `forget` or `terminate`.
   - Pause: running, resumable, idle and not exited.
@@ -666,7 +666,13 @@ Each task gets a spec review against the Qt lines quoted for it, then a quality 
 - the merge commit goes to the owner session, which rebuilds the Mac dev app;
 - the design session hears that the piece is ready for the owner to try.
 
-## Open questions for the owner (sent to the design session)
+## Owner rulings and deviations from Qt
 
-1. The restore follow-up's text without Saved drafts (Task E2).
-2. Phase 1's "Copied" toast for Copy session name goes, since Qt shows no notice (Task A3).
+Ruled by the design session on 2026-10-28:
+1. The restore follow-up shows only "The restored conversation could not be verified." until the client has Saved drafts; `zerus-5wmh.9` restores the second sentence (Task E2).
+2. Copy session name shows no notice, as Qt; phase 1's "Copied" toast goes (Task A3).
+3. Batch Move to project belongs to the organization stream (`zerus-5wmh.18`, branch `work-e94411a3-org`). The batch runner offers the entry, but the write calls that stream's move function with its swarm apply rules; the organization is never written separately. Until that piece is merged, batch Move stays disabled with "Arrives with project organisation." (Task F1).
+
+Deviations from Qt, both from owner rules:
+- Attention marks and read replies are capped at 20 000 entries per map (bounded caches); Qt keeps them without a bound.
+- "Deselect all (Esc)" is "Deselect all" (no obvious keyboard hints).

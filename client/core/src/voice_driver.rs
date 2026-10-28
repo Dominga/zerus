@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -66,10 +66,10 @@ pub enum Out {
         rms: f32,
         peak: f32,
     },
-    /// A round video's preview frame (square JPEG, about 15 a second);
-    /// mirrored for a front camera.
-    Frame {
-        data_base64: String,
+    /// A round video's preview starts: its frames (square JPEG) arrive on
+    /// the frames sink, to be mirrored when `mirrored` (a front camera).
+    /// Once per recording.
+    Preview {
         mirrored: bool,
     },
     /// Ask this and answer [`Input::Confirm`] with its ticket.
@@ -151,16 +151,24 @@ pub struct VoiceDriver {
 
 impl VoiceDriver {
     /// Starts the driver. `ids` gives fresh lower-case UUIDs; `sink` is
-    /// called on the driver's thread.
+    /// called on the driver's thread. `frames` gets a round video's preview
+    /// frames as JPEG bytes, never queued: at most [`FRAME_RATE`] a second,
+    /// always the latest, older ones dropped.
     pub fn start(
         hgs: PathBuf,
         drafts: Arc<DraftStore>,
         capture: Box<dyn Capture>,
         sink: Box<dyn Fn(Out) + Send>,
+        frames: Box<dyn Fn(Vec<u8>) + Send>,
         ids: impl FnMut() -> String + Send + 'static,
     ) -> VoiceDriver {
         let (inbox, messages) = mpsc::channel();
         let feed = inbox.clone();
+        let slot = Arc::new(FrameSlot::default());
+        let pump = Arc::clone(&slot);
+        let _ = std::thread::Builder::new()
+            .name("voice-frames".into())
+            .spawn(move || pump.run(frames));
         let thread = std::thread::Builder::new()
             .name("voice-composer".into())
             .spawn(move || {
@@ -176,6 +184,7 @@ impl VoiceDriver {
                     asks: HashMap::new(),
                     playing: false,
                     last: None,
+                    frames: slot,
                 }
                 .run(messages)
             })
@@ -204,6 +213,74 @@ impl Drop for VoiceDriver {
     }
 }
 
+/// Preview frames a second, at most.
+pub const FRAME_RATE: u32 = 15;
+
+/// The latest preview frame, waiting for the pump; never a queue.
+#[derive(Default)]
+struct FrameSlot {
+    state: Mutex<FrameState>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct FrameState {
+    latest: Option<Vec<u8>>,
+    /// The mirroring announced for this recording.
+    announced: Option<bool>,
+    ended: bool,
+}
+
+impl FrameSlot {
+    /// A new recording: nothing announced or waiting.
+    fn reset(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.latest = None;
+        state.announced = None;
+    }
+
+    /// Keeps the frame as the latest; true when this recording's mirroring
+    /// must be announced first.
+    fn offer(&self, jpeg: Vec<u8>, mirrored: bool) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let announce = state.announced != Some(mirrored);
+        state.announced = Some(mirrored);
+        state.latest = Some(jpeg);
+        self.ready.notify_one();
+        announce
+    }
+
+    fn end(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.ended = true;
+        state.latest = None;
+        self.ready.notify_one();
+    }
+
+    fn run(&self, frames: Box<dyn Fn(Vec<u8>) + Send>) {
+        let pace = Duration::from_secs(1) / FRAME_RATE;
+        loop {
+            let frame = {
+                let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                while state.latest.is_none() && !state.ended {
+                    state = self
+                        .ready
+                        .wait(state)
+                        .unwrap_or_else(PoisonError::into_inner);
+                }
+                if state.ended {
+                    return;
+                }
+                state.latest.take()
+            };
+            if let Some(frame) = frame {
+                frames(frame);
+            }
+            std::thread::sleep(pace);
+        }
+    }
+}
+
 struct Loop {
     composer: VoiceComposer,
     hgs: PathBuf,
@@ -217,6 +294,7 @@ struct Loop {
     asks: HashMap<u64, bool>,
     playing: bool,
     last: Option<Shown>,
+    frames: Arc<FrameSlot>,
 }
 
 impl Loop {
@@ -231,6 +309,7 @@ impl Loop {
             let effects = match messages.recv_timeout(wait) {
                 Ok(Message::Quit) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                     self.capture.cancel();
+                    self.frames.end();
                     return;
                 }
                 Ok(message) => self.handle(message),
@@ -299,12 +378,10 @@ impl Loop {
                     (self.sink)(Out::Level { rms, peak });
                     Vec::new()
                 }
-                RecorderEvent::Frame { jpeg, mirrored } => {
-                    use base64::Engine;
-                    (self.sink)(Out::Frame {
-                        data_base64: base64::engine::general_purpose::STANDARD.encode(jpeg),
-                        mirrored,
-                    });
+                // Frames go to the slot from the recorder's thread; only the
+                // announcement passes through here.
+                RecorderEvent::Frame { mirrored, .. } => {
+                    (self.sink)(Out::Preview { mirrored });
                     Vec::new()
                 }
                 RecorderEvent::Recorded { pcm, video } => composer.recorded(pcm, video),
@@ -323,12 +400,26 @@ impl Loop {
             match effect {
                 Effect::Record { video, microphone } => {
                     let feed = Mutex::new(self.feed.clone());
+                    let frames = Arc::clone(&self.frames);
+                    frames.reset();
                     self.capture.start(
                         video,
                         &microphone,
                         Box::new(move |event| {
+                            let message = match event {
+                                RecorderEvent::Frame { jpeg, mirrored } => {
+                                    if !frames.offer(jpeg, mirrored) {
+                                        return;
+                                    }
+                                    RecorderEvent::Frame {
+                                        jpeg: Vec::new(),
+                                        mirrored,
+                                    }
+                                }
+                                event => event,
+                            };
                             if let Ok(feed) = feed.lock() {
-                                let _ = feed.send(Message::Recorder(event));
+                                let _ = feed.send(Message::Recorder(message));
                             }
                         }),
                     );

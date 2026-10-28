@@ -108,6 +108,7 @@ fn a_recording_is_saved_previewed_sent_once_and_cleared() {
         Box::new(move |out| {
             let _ = sink.lock().unwrap().send(out);
         }),
+        Box::new(|_| {}),
         move || id(next.fetch_add(1, Ordering::SeqCst) + 1),
     );
     let target = Target {
@@ -221,4 +222,89 @@ fn a_recording_is_saved_previewed_sent_once_and_cleared() {
         calls.lock().unwrap().last().map(String::as_str),
         Some("cancel")
     );
+}
+
+#[test]
+fn preview_frames_are_never_queued_and_mirroring_is_announced_once() {
+    let folder = Folder(std::env::temp_dir().join(format!(
+        "zerus-voice-frames-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )));
+    std::fs::create_dir_all(&folder.0).unwrap();
+    let drafts = Arc::new(DraftStore::open(folder.0.join("drafts")));
+    let events: Events = Arc::new(Mutex::new(None));
+    let (sink, outs) = mpsc::channel();
+    let sink = Mutex::new(sink);
+    let (frame_sink, frames) = mpsc::channel();
+    let frame_sink = Mutex::new(frame_sink);
+    let next = AtomicU64::new(0);
+    let driver = VoiceDriver::start(
+        folder.0.join("no-hgs"),
+        drafts,
+        Box::new(FakeCapture {
+            events: Arc::clone(&events),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }),
+        Box::new(move |out| {
+            let _ = sink.lock().unwrap().send(out);
+        }),
+        Box::new(move |jpeg| {
+            let _ = frame_sink.lock().unwrap().send(jpeg);
+            // A slow webview.
+            std::thread::sleep(Duration::from_millis(30));
+        }),
+        move || id(next.fetch_add(1, Ordering::SeqCst) + 1),
+    );
+    driver.input(Input::Update {
+        target: Target {
+            key: "local\nclaude/p/fix".into(),
+            session: "claude/p/fix".into(),
+            run: "run-1".into(),
+            conversation: "conv-1".into(),
+            available: true,
+            ..Target::default()
+        },
+        input_visible: true,
+        preferences: Preferences {
+            video_mode: true,
+            ..Preferences::default()
+        },
+    });
+    wait(
+        &outs,
+        |out| matches!(out, Out::Shown { shown } if shown.voice_enabled),
+    );
+    driver.input(Input::Press);
+    wait(&outs, state(State::Starting));
+    let fire = |event| (events.lock().unwrap().as_ref().unwrap())(event);
+    fire(RecorderEvent::Started);
+    // A camera far faster than the webview: 300 frames at once.
+    for index in 0..300u32 {
+        fire(RecorderEvent::Frame {
+            jpeg: index.to_be_bytes().to_vec(),
+            mirrored: true,
+        });
+    }
+    assert_eq!(
+        wait(&outs, |out| matches!(out, Out::Preview { .. })),
+        Out::Preview { mirrored: true }
+    );
+    std::thread::sleep(Duration::from_millis(400));
+    let delivered: Vec<Vec<u8>> = frames.try_iter().collect();
+    assert!(
+        !delivered.is_empty() && delivered.len() <= 3,
+        "{} frames",
+        delivered.len()
+    );
+    assert_eq!(
+        delivered.last().unwrap(),
+        &299u32.to_be_bytes().to_vec(),
+        "the latest frame wins"
+    );
+    // No second announcement for the same recording.
+    while let Ok(out) = outs.try_recv() {
+        assert!(!matches!(out, Out::Preview { .. }), "{out:?}");
+    }
+    driver.close();
 }

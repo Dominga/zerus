@@ -76,7 +76,13 @@ fn encoder(choices: &[(&'static str, &'static str)]) -> Option<&'static str> {
 
 /// Why video cannot be recorded here, None when it can: GStreamer must
 /// start and have an H.264 and an AAC encoder and the other elements.
+/// Probed once per process (the first probe scans GStreamer's registry).
 pub fn missing() -> Option<String> {
+    static PROBE: OnceLock<Option<String>> = OnceLock::new();
+    PROBE.get_or_init(probe).clone()
+}
+
+fn probe() -> Option<String> {
     if let Err(error) = init() {
         return Some(error);
     }

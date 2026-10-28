@@ -1,6 +1,7 @@
 //! Guarded session actions: the `hgs` calls the Qt client makes
 //! (`tray/src/HgsClient.cpp`) and the rules that turn their exits into outcomes.
 use crate::attachments::{self, Attachment};
+use crate::questions;
 use crate::view::ViewRow;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -114,6 +115,14 @@ pub enum Action {
     #[serde(skip_deserializing)]
     RemoveQueued {
         message_id: String,
+    },
+    /// `hgs answer NAME --json` (`requestAnswerQuestion`): the answers to one
+    /// pending question, pinned to its exact id, hash, run and conversation.
+    /// Built in Rust from the inspected question and the held answer draft.
+    #[serde(skip_deserializing)]
+    Answer {
+        question: Value,
+        answers: Vec<questions::AnswerItem>,
     },
 }
 
@@ -420,6 +429,16 @@ pub fn invocation(
                 Some(request_id.to_owned()),
             )
         }
+        Action::Answer { question, answers } => {
+            let input = answer_input(&target.name, question, answers, request_id)?;
+            (
+                vec!["answer".to_owned(), name, "--json".to_owned()],
+                Some(input),
+                30,
+                45,
+                Some(request_id.to_owned()),
+            )
+        }
         Action::RemoveQueued { message_id } => {
             if !native_message_id(message_id) {
                 return Err("Choose the exact queued OpenCode message.".to_owned());
@@ -535,6 +554,11 @@ pub fn invocation(
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// While a send to the same session and agent is in flight.
 pub const ALREADY_SENDING: &str = "A message to this session is already being sent.";
+/// The answer lane of a session is busy.
+pub const ALREADY_ANSWERING: &str = "An answer to this session is already being sent.";
+/// The largest answer `hgs answer` takes on standard input, and the largest
+/// acknowledgement it reads back.
+const MAXIMUM_ANSWER_BYTES: usize = 64 * 1024;
 
 /// `requestSendMessage`'s checks and standard input.
 fn send_input(
@@ -744,6 +768,9 @@ pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit:
         Action::StopProcess { process_id, .. } => classify_stop(target, process_id, exit),
         Action::SendNow { queue_id } => classify_send_now(target, invocation, queue_id, exit),
         Action::RemoveQueued { .. } => classify_remove_queued(target, invocation, exit),
+        Action::Answer { question, answers } => {
+            classify_answer(target, invocation, question, answers, exit)
+        }
         Action::MarkRead { .. } => classify_read(target, exit),
         Action::Archive | Action::Terminate => classify_write(exit, true),
         _ => classify_write(exit, false),
@@ -787,6 +814,164 @@ fn classify_session_action(
                 done(receipt, None)
             } else {
                 failed("Invalid acknowledgement. Check Terminal before retrying.")
+            }
+        }
+    }
+}
+
+fn field<'a>(value: &'a Value, key: &str) -> &'a str {
+    value.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+/// A native startup request that may come before a conversation exists:
+/// folder trust, Claude's permission mode, Codex's hooks review and update.
+fn startup_request(question: &Value) -> bool {
+    let (source, transport, id, hash) = (
+        field(question, "source"),
+        field(question, "answer_transport"),
+        field(question, "question_id"),
+        field(question, "question_hash"),
+    );
+    if hash.len() != 64 {
+        return false;
+    }
+    let trust = ["claude", "codex", "kimi"].into_iter().any(|provider| {
+        source == format!("{provider}_folder_trust")
+            && transport == format!("{provider}_tui")
+            && id == format!("{provider}-trust:{hash}")
+    });
+    trust
+        || (source == "claude_permission_mode"
+            && transport == "claude_tui"
+            && id == format!("claude-permissions:{hash}"))
+        || (source == "codex_hooks_trust"
+            && transport == "codex_tui"
+            && id == format!("codex-hooks-trust:{hash}"))
+        || (source == "codex_update"
+            && transport == "codex_tui"
+            && id == format!("codex-update:{hash}"))
+}
+
+/// A Codex optional question answered asynchronously.
+fn async_question(question: &Value) -> bool {
+    field(question, "source") == "codex_async"
+        && question.get("optional").and_then(Value::as_bool) == Some(true)
+}
+
+/// Every answer is a Skip of a Codex optional question that allows it.
+fn skipping(question: &Value, answers: &[questions::AnswerItem]) -> bool {
+    async_question(question)
+        && question.get("can_skip").and_then(Value::as_bool) == Some(true)
+        && questions::all_skips(answers)
+}
+
+/// A request identity as `QUuid` reads one: 8-4-4-4-12 hexadecimal digits.
+fn uuid_shaped(id: &str) -> bool {
+    let parts: Vec<&str> = id.split('-').collect();
+    parts.len() == 5
+        && parts.iter().zip([8, 4, 4, 4, 12]).all(|(part, length)| {
+            part.len() == length && part.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+}
+
+/// `requestAnswerQuestion`'s refusals and standard input.
+fn answer_input(
+    name: &str,
+    question: &Value,
+    answers: &[questions::AnswerItem],
+    request_id: &str,
+) -> Result<Vec<u8>, String> {
+    const NOT_READY: &str =
+        "This request is not ready to answer. Wait for an updated request or open Terminal.";
+    let can_answer = question.get("can_answer").and_then(Value::as_bool) == Some(true);
+    if name.is_empty()
+        || field(question, "question_id").is_empty()
+        || field(question, "question_hash").is_empty()
+        || field(question, "run_id").is_empty()
+        || (field(question, "conversation_id").is_empty() && !startup_request(question))
+        || answers.is_empty()
+        || (!can_answer && !skipping(question, answers))
+    {
+        return Err(NOT_READY.to_owned());
+    }
+    if !uuid_shaped(request_id) {
+        return Err("The approval journal request identity is invalid.".to_owned());
+    }
+    let input = json!({
+        "request_id": request_id,
+        "question_id": field(question, "question_id"),
+        "expected_question_hash": field(question, "question_hash"),
+        "expected_run_id": field(question, "run_id"),
+        "expected_conversation_id": field(question, "conversation_id"),
+        "answers": answers,
+    });
+    let bytes = serde_json::to_vec(&input).map_err(|error| error.to_string())?;
+    if bytes.len() > MAXIMUM_ANSWER_BYTES {
+        return Err("The answers exceed 64 KiB.".to_owned());
+    }
+    Ok(bytes)
+}
+
+/// `requestAnswerQuestion`'s outcome. Only a failed start, or a plain exit 1
+/// without "delivery uncertain", is a definite failure; anything else may
+/// have answered. Success needs the receipt to echo the request, session,
+/// question, hash, run and conversation.
+fn classify_answer(
+    target: &Target,
+    invocation: &Invocation,
+    question: &Value,
+    answers: &[questions::AnswerItem],
+    exit: Exit,
+) -> Outcome {
+    const TIMED_OUT: &str = "Answer delivery timed out. Check Terminal before retrying.";
+    let detail = |stderr: &str, code: i32| {
+        let text: String = stderr.trim().chars().take(FAILURE_STDERR_CHARS).collect();
+        if text.is_empty() {
+            format!("Answer transfer failed (exit {code}).")
+        } else {
+            text
+        }
+    };
+    match exit {
+        Exit::StartFailed(error) => failed(format!("Cannot start hgs: {error}")),
+        // Qt's runner keeps waiting for its timeout after a broken transfer.
+        Exit::TimedOut | Exit::WriteFailed => uncertain(TIMED_OUT),
+        Exit::Abnormal { stderr } => uncertain(detail(&stderr, -1)),
+        Exit::Code { code, stderr, .. } if code != 0 => {
+            if code == 1 && !stderr.to_lowercase().contains("delivery uncertain") {
+                failed(detail(&stderr, code))
+            } else {
+                uncertain(detail(&stderr, code))
+            }
+        }
+        Exit::Code { stdout, .. } => {
+            if stdout.len() > MAXIMUM_ANSWER_BYTES {
+                return uncertain(
+                    "The answer acknowledgement is too large. Check Terminal before retrying.",
+                );
+            }
+            let receipt: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+            let status = field(&receipt, "status");
+            let submitted = async_question(question)
+                && !skipping(question, answers)
+                && status == "submitted"
+                && receipt.get("skipped").and_then(Value::as_bool) != Some(true);
+            let echoed = (status == "answered" || submitted)
+                && invocation.request_id.is_some()
+                && receipt.get("request_id").and_then(Value::as_str)
+                    == invocation.request_id.as_deref()
+                && field(&receipt, "name") == target.name
+                && field(&receipt, "question_id") == field(question, "question_id")
+                && field(&receipt, "question_hash") == field(question, "question_hash")
+                && field(&receipt, "run_id") == field(question, "run_id")
+                && receipt
+                    .get("conversation_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|conversation| conversation == field(question, "conversation_id"));
+            if echoed {
+                done(receipt, None)
+            } else {
+                uncertain("The answer acknowledgement is invalid. Check Terminal before retrying.")
             }
         }
     }
@@ -2346,5 +2531,252 @@ mod tests {
             &json!({"allowed_actions": ["rename"]}),
             "remove_queued"
         ));
+    }
+
+    const REQUEST: &str = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+
+    fn asked() -> Value {
+        json!({"question_id": "q-1", "question_hash": "h-1", "run_id": "run-1",
+               "conversation_id": "conv-1", "source": "hook", "can_answer": true,
+               "questions": [{"id": "q_0"}]})
+    }
+
+    fn chosen() -> Vec<questions::AnswerItem> {
+        vec![questions::AnswerItem::Choice {
+            question_id: "q_0".into(),
+            selected_option_ids: vec!["pg".into()],
+            text: String::new(),
+        }]
+    }
+
+    #[test]
+    fn answer_input_is_qts() {
+        let t = target("studio");
+        let action = Action::Answer {
+            question: asked(),
+            answers: chosen(),
+        };
+        let inv = invocation(&t, &action, REQUEST).unwrap();
+        // The answers never go into the arguments.
+        assert_eq!(
+            inv.args,
+            [
+                "@studio",
+                "answer",
+                "claude/sample-project/review",
+                "--json"
+            ]
+        );
+        assert_eq!(inv.timeout, Duration::from_secs(45));
+        assert_eq!(
+            invocation(&target(""), &action, REQUEST).unwrap().timeout,
+            Duration::from_secs(30)
+        );
+        let input: Value = serde_json::from_slice(inv.stdin.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            input,
+            json!({"request_id": REQUEST, "question_id": "q-1", "expected_question_hash": "h-1",
+                   "expected_run_id": "run-1", "expected_conversation_id": "conv-1",
+                   "answers": [{"question_id": "q_0", "selected_option_ids": ["pg"], "text": ""}]})
+        );
+        // A startup request may come before the conversation.
+        let hash = "f".repeat(64);
+        let trust = json!({"question_id": format!("claude-trust:{hash}"), "question_hash": hash,
+            "run_id": "run-1", "conversation_id": "", "source": "claude_folder_trust",
+            "answer_transport": "claude_tui", "can_answer": true});
+        let action = Action::Answer {
+            question: trust,
+            answers: chosen(),
+        };
+        assert!(invocation(&t, &action, REQUEST).is_ok());
+        // A Skip of a Codex optional question that allows it.
+        let skip = json!({"question_id": "cx", "question_hash": "h", "run_id": "run-1",
+            "conversation_id": "conv-1", "source": "codex_async", "optional": true,
+            "can_skip": true, "can_answer": false});
+        let action = Action::Answer {
+            question: skip,
+            answers: vec![questions::AnswerItem::Skip {
+                question_id: "q_0".into(),
+                skip: true,
+            }],
+        };
+        let input: Value =
+            serde_json::from_slice(&invocation(&t, &action, REQUEST).unwrap().stdin.unwrap())
+                .unwrap();
+        assert_eq!(
+            input["answers"],
+            json!([{"question_id": "q_0", "skip": true}])
+        );
+    }
+
+    #[test]
+    fn answer_refusals() {
+        let t = target("");
+        let not_ready = Err(
+            "This request is not ready to answer. Wait for an updated request or open Terminal."
+                .to_owned(),
+        );
+        let refused = |question: Value, answers: Vec<questions::AnswerItem>| {
+            invocation(&t, &Action::Answer { question, answers }, REQUEST)
+        };
+        for key in ["question_id", "question_hash", "run_id", "conversation_id"] {
+            let mut question = asked();
+            question[key] = json!("");
+            assert_eq!(refused(question, chosen()), not_ready, "{key}");
+        }
+        assert_eq!(refused(asked(), Vec::new()), not_ready);
+        let mut closed = asked();
+        closed["can_answer"] = json!(false);
+        assert_eq!(refused(closed, chosen()), not_ready);
+        // A startup form needs its exact id and a 64-character hash.
+        let near = json!({"question_id": "claude-trust:abc", "question_hash": "abc", "run_id": "r",
+            "conversation_id": "", "source": "claude_folder_trust", "answer_transport": "claude_tui", "can_answer": true});
+        assert_eq!(refused(near, chosen()), not_ready);
+        assert_eq!(
+            invocation(
+                &t,
+                &Action::Answer {
+                    question: asked(),
+                    answers: chosen()
+                },
+                "not-a-uuid"
+            ),
+            Err("The approval journal request identity is invalid.".to_owned())
+        );
+        let huge = vec![questions::AnswerItem::Choice {
+            question_id: "q_0".into(),
+            selected_option_ids: Vec::new(),
+            text: "x".repeat(70_000),
+        }];
+        assert_eq!(
+            refused(asked(), huge),
+            Err("The answers exceed 64 KiB.".to_owned())
+        );
+        assert!(serde_json::from_value::<Action>(
+            json!({"kind": "answer", "question": {}, "answers": []})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn answer_outcomes() {
+        let t = target("");
+        let outcome = |question: Value, answers: Vec<questions::AnswerItem>, exit: Exit| {
+            let action = Action::Answer { question, answers };
+            let inv = invocation(&t, &action, REQUEST).unwrap();
+            classify(&t, &action, &inv, exit)
+        };
+        let receipt = json!({"status": "answered", "request_id": REQUEST, "name": "claude/sample-project/review",
+            "question_id": "q-1", "question_hash": "h-1", "run_id": "run-1", "conversation_id": "conv-1"});
+        let ok = |receipt: &Value| exit(0, receipt.to_string().as_bytes(), "");
+        assert!(matches!(
+            outcome(asked(), chosen(), ok(&receipt)),
+            Outcome::Done { .. }
+        ));
+        let invalid =
+            uncertain("The answer acknowledgement is invalid. Check Terminal before retrying.");
+        for key in [
+            "request_id",
+            "name",
+            "question_id",
+            "question_hash",
+            "run_id",
+            "conversation_id",
+        ] {
+            let mut changed = receipt.clone();
+            changed[key] = json!("other");
+            assert_eq!(outcome(asked(), chosen(), ok(&changed)), invalid, "{key}");
+        }
+        let mut missing = receipt.clone();
+        missing.as_object_mut().unwrap().remove("conversation_id");
+        assert_eq!(outcome(asked(), chosen(), ok(&missing)), invalid);
+        // Submitted only for a Codex optional question's real answer.
+        let mut submitted = receipt.clone();
+        submitted["status"] = json!("submitted");
+        assert_eq!(outcome(asked(), chosen(), ok(&submitted)), invalid);
+        let mut codex = asked();
+        codex["source"] = json!("codex_async");
+        codex["optional"] = json!(true);
+        codex["can_skip"] = json!(true);
+        assert!(matches!(
+            outcome(codex.clone(), chosen(), ok(&submitted)),
+            Outcome::Done { .. }
+        ));
+        let mut skipped = submitted.clone();
+        skipped["skipped"] = json!(true);
+        assert_eq!(outcome(codex.clone(), chosen(), ok(&skipped)), invalid);
+        let skip = vec![questions::AnswerItem::Skip {
+            question_id: "q_0".into(),
+            skip: true,
+        }];
+        assert_eq!(outcome(codex, skip, ok(&submitted)), invalid);
+        // Failures: only a failed start or a plain exit 1 is definite.
+        assert_eq!(
+            outcome(asked(), chosen(), Exit::StartFailed("no such file".into())),
+            failed("Cannot start hgs: no such file")
+        );
+        assert_eq!(
+            outcome(
+                asked(),
+                chosen(),
+                exit(1, b"", "hgs: the question changed\n")
+            ),
+            failed("hgs: the question changed")
+        );
+        assert_eq!(
+            outcome(asked(), chosen(), exit(1, b"", "")),
+            failed("Answer transfer failed (exit 1).")
+        );
+        assert_eq!(
+            outcome(
+                asked(),
+                chosen(),
+                exit(1, b"", "Delivery Uncertain: check Terminal")
+            ),
+            uncertain("Delivery Uncertain: check Terminal")
+        );
+        assert_eq!(
+            outcome(asked(), chosen(), exit(2, b"", "")),
+            uncertain("Answer transfer failed (exit 2).")
+        );
+        let timed_out = uncertain("Answer delivery timed out. Check Terminal before retrying.");
+        assert_eq!(outcome(asked(), chosen(), Exit::TimedOut), timed_out);
+        assert_eq!(outcome(asked(), chosen(), Exit::WriteFailed), timed_out);
+        assert_eq!(
+            outcome(
+                asked(),
+                chosen(),
+                Exit::Abnormal {
+                    stderr: String::new()
+                }
+            ),
+            uncertain("Answer transfer failed (exit -1).")
+        );
+        let big = vec![b' '; 70_000];
+        assert_eq!(
+            outcome(asked(), chosen(), exit(0, &big, "")),
+            uncertain("The answer acknowledgement is too large. Check Terminal before retrying.")
+        );
+    }
+
+    #[test]
+    fn an_uncertain_answer_is_never_retried() {
+        // An uncertain outcome is reported once; the card then locks Submit
+        // until Allow retry, and a new attempt is a new request identity.
+        let shown = questions::Question::from_value(&asked());
+        let mut draft = questions::AnswerDraft::default();
+        draft.begin_sending();
+        draft.set_error(
+            "Answer delivery timed out. Check Terminal before retrying.",
+            true,
+        );
+        let ctx = questions::CardContext {
+            available: true,
+            ..questions::CardContext::default()
+        };
+        assert!(!questions::card(&shown, &draft, &ctx).submit.enabled);
+        assert!(!draft.sending && draft.uncertain);
+        draft.allow_retry();
+        assert!(!draft.uncertain);
     }
 }

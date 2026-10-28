@@ -441,11 +441,12 @@ impl<'a> Session<'a> {
                 format!("{main}: {extra}")
             }
         };
-        let activity_detail = text(self.row, "activity_detail");
+        // The user's own answers read as "Your answer: ..." (QuestionReply).
+        let activity_detail = &crate::questions::activity_detail_preview(self.row);
         let tool_detail = text(self.row, "tool_detail");
-        let prompt = text(self.row, "prompt");
+        let prompt = &crate::questions::prompt_preview(self.row);
         if self.needs_action() {
-            return [activity_detail, tool_detail, prompt]
+            return [activity_detail.as_str(), tool_detail, prompt.as_str()]
                 .into_iter()
                 .find(|value| !value.is_empty())
                 .unwrap_or("")

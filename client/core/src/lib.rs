@@ -29,6 +29,7 @@ pub mod process_view;
 pub mod processes;
 #[cfg(unix)]
 mod pty;
+pub mod questions;
 pub mod readmarks;
 pub mod reads;
 pub mod repository;

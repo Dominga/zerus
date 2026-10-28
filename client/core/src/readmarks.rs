@@ -2,8 +2,8 @@
 //! restart keeps retrying (`tray/src/ReadMarks.h`).
 use crate::view::ViewRow;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -17,9 +17,18 @@ pub struct ReadMark {
 }
 
 impl ReadMark {
+    /// Marks neither a reply nor an attention signature (`ReadMark::isEmpty`).
+    pub fn is_empty(&self) -> bool {
+        self.reply_id.as_deref().is_none_or(str::is_empty)
+            && self
+                .attention_signature
+                .as_deref()
+                .is_none_or(str::is_empty)
+    }
+
     /// A newer mark for the same run and conversation keeps the field it does
     /// not set; a mark for another run or conversation replaces the old one.
-    fn merged(old: &ReadMark, mut next: ReadMark) -> ReadMark {
+    pub(crate) fn merged(old: &ReadMark, mut next: ReadMark) -> ReadMark {
         if old.run_id != next.run_id || old.conversation_id != next.conversation_id {
             return next;
         }
@@ -37,6 +46,8 @@ impl ReadMark {
 pub struct ReadMarks {
     path: PathBuf,
     marks: BTreeMap<(String, String), ReadMark>,
+    /// Marks added by [`ReadMarks::add_all`] and not yet written.
+    unsaved: bool,
 }
 
 impl ReadMarks {
@@ -50,7 +61,11 @@ impl ReadMarks {
             .into_iter()
             .map(|mark| ((mark.computer.clone(), mark.name.clone()), mark))
             .collect();
-        Self { path, marks }
+        Self {
+            path,
+            marks,
+            unsaved: false,
+        }
     }
 
     /// Merges the mark into what is pending for its session, then saves.
@@ -62,6 +77,33 @@ impl ReadMarks {
         };
         self.marks.insert(key, mark);
         self.save();
+    }
+
+    /// Merges each mark that is not empty (`ReadMarkStore::add`); an empty
+    /// field counts as unset, as in Qt. Only in memory: the delivery worker
+    /// writes them ([`ReadMarks::flush`]) before it sends any, so the caller
+    /// does no file I/O.
+    pub fn add_all(&mut self, marks: impl IntoIterator<Item = ReadMark>) {
+        let mut added = false;
+        for mut mark in marks.into_iter().filter(|mark| !mark.is_empty()) {
+            mark.reply_id = mark.reply_id.filter(|id| !id.is_empty());
+            mark.attention_signature = mark.attention_signature.filter(|s| !s.is_empty());
+            let key = (mark.computer.clone(), mark.name.clone());
+            let mark = match self.marks.get(&key) {
+                Some(old) => ReadMark::merged(old, mark),
+                None => mark,
+            };
+            self.marks.insert(key, mark);
+            added = true;
+        }
+        self.unsaved |= added;
+    }
+
+    /// Writes marks [`ReadMarks::add_all`] added since the last save.
+    pub fn flush(&mut self) {
+        if self.unsaved {
+            self.save();
+        }
     }
 
     pub fn pending(&self) -> Vec<ReadMark> {
@@ -80,6 +122,21 @@ impl ReadMarks {
         let before = self.marks.len();
         self.marks
             .retain(|(owner, name), _| owner != computer || names.contains(name.as_str()));
+        let dropped = self.marks.len() != before;
+        if dropped {
+            self.save();
+        }
+        dropped
+    }
+
+    /// Drops the marks for computers this computer no longer lists as peers
+    /// (`publishReadMarks` in `tray/src/TrayAgent.cpp`): they can never be
+    /// written. This computer's marks (`computer` "") stay. Returns true when
+    /// it dropped any (then saves).
+    pub fn drop_orphans(&mut self, peers: &BTreeSet<String>) -> bool {
+        let before = self.marks.len();
+        self.marks
+            .retain(|(owner, _), _| owner.is_empty() || peers.contains(owner));
         let dropped = self.marks.len() != before;
         if dropped {
             self.save();
@@ -114,35 +171,48 @@ impl ReadMarks {
         settled
     }
 
-    /// Writes a temporary file beside the target, then renames it over it. A
-    /// failure keeps the marks in memory; the next change tries again.
-    fn save(&self) {
+    /// A failure keeps the marks in memory; the next change tries again.
+    fn save(&mut self) {
+        self.unsaved = false;
         let list: Vec<&ReadMark> = self.marks.values().collect();
-        let Ok(bytes) = serde_json::to_vec(&list) else {
-            return;
-        };
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let mut temporary = self.path.clone().into_os_string();
-        temporary.push(format!(
-            ".{}-{}.tmp",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let temporary = PathBuf::from(temporary);
-        if let Some(folder) = self.path.parent().filter(|f| !f.as_os_str().is_empty()) {
-            let _ = std::fs::create_dir_all(folder);
-        }
-        if std::fs::write(&temporary, bytes).is_err()
-            || std::fs::rename(&temporary, &self.path).is_err()
-        {
-            let _ = std::fs::remove_file(&temporary);
+        let written = serde_json::to_vec(&list)
+            .map_err(std::io::Error::from)
+            .and_then(|bytes| write_atomically(&self.path, &bytes));
+        if let Err(error) = written {
+            eprintln!(
+                "zerus-client: could not save read marks to {}: {error}",
+                self.path.display()
+            );
         }
     }
+}
+
+/// Writes a temporary file beside `path`, then renames it over it, so a
+/// reader sees the old file or the new one, never a part. Creates the folder.
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut temporary = path.to_path_buf().into_os_string();
+    temporary.push(format!(
+        ".{}-{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let temporary = PathBuf::from(temporary);
+    if let Some(folder) = path.parent().filter(|f| !f.as_os_str().is_empty()) {
+        std::fs::create_dir_all(folder)?;
+    }
+    let written =
+        std::fs::write(&temporary, bytes).and_then(|()| std::fs::rename(&temporary, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     struct Temp(PathBuf);
     impl Temp {
@@ -311,6 +381,84 @@ mod tests {
         assert!(marks.drop_unlisted("laptop", &HashSet::new()));
         assert!(marks.drop_unlisted("mac", &HashSet::new()));
         assert!(marks.is_empty());
+    }
+
+    #[test]
+    fn adding_several_merges_them_and_skips_empty_marks() {
+        let temp = Temp::new("add-all");
+        let mut marks = ReadMarks::load(temp.0.clone());
+        let mut other = mark("run-2", Some("r2"), None);
+        other.name = "claude/sample-project/other".into();
+        marks.add_all([
+            mark("run-1", Some("r1"), None),
+            // An empty field is no field, as in Qt: it keeps the older value.
+            mark("run-1", Some(""), Some("s1")),
+            mark("run-1", None, None),
+            other.clone(),
+        ]);
+        let expected = vec![other, mark("run-1", Some("r1"), Some("s1"))];
+        assert_eq!(marks.pending(), expected);
+        // Kept in memory until flushed: the caller does no file I/O.
+        assert!(!temp.0.exists());
+        marks.flush();
+        assert_eq!(ReadMarks::load(temp.0.clone()).pending(), expected);
+        // Only empty marks: nothing changes, and nothing is written.
+        let temp = Temp::new("add-all-empty");
+        let mut empty = ReadMarks::load(temp.0.clone());
+        empty.add_all([mark("run-1", Some(""), None)]);
+        empty.flush();
+        assert!(!temp.0.exists());
+    }
+
+    #[test]
+    fn a_flush_writes_only_unsaved_marks() {
+        let temp = Temp::new("flush");
+        let mut marks = ReadMarks::load(temp.0.clone());
+        marks.add_all([mark("run-1", Some("r1"), None)]);
+        marks.flush();
+        std::fs::remove_file(&temp.0).unwrap();
+        // Nothing new: no write.
+        marks.flush();
+        assert!(!temp.0.exists());
+        // Any save writes the added marks too, and leaves nothing to flush.
+        marks.add_all([mark("run-1", None, Some("s1"))]);
+        let mut other = mark("run-2", Some("r2"), None);
+        other.name = "claude/sample-project/other".into();
+        marks.add(other);
+        assert_eq!(ReadMarks::load(temp.0.clone()).pending().len(), 2);
+        std::fs::remove_file(&temp.0).unwrap();
+        marks.flush();
+        assert!(!temp.0.exists());
+    }
+
+    #[test]
+    fn marks_for_computers_no_longer_configured_are_dropped() {
+        let temp = Temp::new("orphans");
+        let mut marks = ReadMarks::load(temp.0.clone());
+        let on = |computer: &str| {
+            let mut m = mark("run-1", Some("r1"), None);
+            m.computer = computer.into();
+            m
+        };
+        marks.add(on(""));
+        marks.add(on("laptop"));
+        marks.add(on("removed"));
+        let peers: BTreeSet<String> = ["laptop".to_owned(), "studio".to_owned()].into();
+        assert!(marks.drop_orphans(&peers));
+        // This computer's marks always stay.
+        assert_eq!(marks.pending(), vec![on(""), on("laptop")]);
+        assert_eq!(ReadMarks::load(temp.0.clone()).pending().len(), 2);
+        assert!(!marks.drop_orphans(&peers));
+        assert!(marks.drop_orphans(&BTreeSet::new()));
+        assert_eq!(marks.pending(), vec![on("")]);
+    }
+
+    #[test]
+    fn a_mark_without_reply_or_signature_is_empty() {
+        assert!(mark("run-1", None, None).is_empty());
+        assert!(mark("run-1", Some(""), Some("")).is_empty());
+        assert!(!mark("run-1", Some("r1"), None).is_empty());
+        assert!(!mark("run-1", None, Some("s1")).is_empty());
     }
 
     #[test]

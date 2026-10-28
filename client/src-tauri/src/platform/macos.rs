@@ -80,6 +80,13 @@ pub struct PreferenceOutcome {
 
 impl PreferenceOutcome {
     /// True when the configuration renders at the display rate as far as WebKit says.
+    #[cfg_attr(
+        target_os = "macos",
+        allow(
+            dead_code,
+            reason = "used by client/perf-probe-mac, which includes this file by path"
+        )
+    )]
     pub fn applied(&self) -> bool {
         self.error.is_none() && self.after == Some(false)
     }
@@ -143,6 +150,13 @@ pub fn feature_key(feature: &AnyObject) -> Option<String> {
 }
 
 /// The feature's display name (`-[_WKFeature name]`).
+#[cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "used by client/perf-probe-mac, which includes this file by path"
+    )
+)]
 pub fn feature_name(feature: &AnyObject) -> Option<String> {
     guarded(|| {
         if !responds(feature, sel!(name)) {
@@ -187,6 +201,13 @@ pub fn find_feature(key: &str) -> Result<(Retained<AnyObject>, usize), SpiError>
 
 /// Keys of WebKit features whose key contains any of `fragments` (diagnostics:
 /// shows a renamed key).
+#[cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "used by client/perf-probe-mac, which includes this file by path"
+    )
+)]
 pub fn feature_keys_matching(fragments: &[&str]) -> Result<Vec<String>, SpiError> {
     let list = features()?;
     guarded(|| {
@@ -260,6 +281,13 @@ pub fn set_near_60fps(preferences: &WKPreferences, enabled: bool) -> PreferenceO
 
 /// The near-60 fps preference of `preferences` (for example a live webview's
 /// `configuration.preferences`), or None when the SPI or the key is missing.
+#[cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "used by client/perf-probe-mac, which includes this file by path"
+    )
+)]
 pub fn preference_state_of(preferences: &WKPreferences) -> Option<bool> {
     let (feature, _) = find_feature(FEATURE_KEY).ok()?;
     is_enabled(preferences, &feature).ok()
@@ -268,6 +296,13 @@ pub fn preference_state_of(preferences: &WKPreferences) -> Option<bool> {
 /// The near-60 fps preference read back from the last configuration that
 /// `webview_configuration` made: Some(false) renders at the display rate,
 /// Some(true) stays near 60 fps, None when the SPI failed or none was made.
+#[cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "used by client/perf-probe-mac, which includes this file by path"
+    )
+)]
 pub fn preference_state() -> Option<bool> {
     match LAST_STATE.load(Ordering::Relaxed) {
         1 => Some(false),
@@ -307,6 +342,13 @@ pub fn configure(
 }
 
 /// "Version 27.0.1 (Build 26A434)" from NSProcessInfo.
+#[cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "used by client/perf-probe-mac, which includes this file by path"
+    )
+)]
 pub fn macos_version() -> String {
     NSProcessInfo::processInfo()
         .operatingSystemVersionString()
@@ -338,6 +380,13 @@ pub fn screen_max_fps(_mtm: MainThreadMarker) -> Option<i64> {
 }
 
 /// The CGDirectDisplayID of the screen a window (an NSWindow) is on.
+#[cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "used by client/perf-probe-mac, which includes this file by path"
+    )
+)]
 pub fn window_display_id(window: &AnyObject) -> Option<u32> {
     guarded(|| {
         // SAFETY: screen returns the window's NSScreen or nil.
@@ -411,6 +460,13 @@ extern "C" fn count_frame(
 /// counted for `duration` after a 200 ms warm-up. Blocks the calling thread; the
 /// callbacks run on CoreVideo's own thread, so any thread may call it. Needs a
 /// display; None when CoreVideo refuses.
+#[cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "the display-link control of the client/bench/README.md procedure"
+    )
+)]
 pub fn display_link_hz(display: Option<u32>, duration: Duration) -> Option<f64> {
     // SAFETY: plain CoreVideo calls; the counter outlives the link (stopped and released below).
     unsafe {

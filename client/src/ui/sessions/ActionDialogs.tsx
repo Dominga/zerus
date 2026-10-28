@@ -1,18 +1,33 @@
-import { For, Show, createEffect, createMemo, createSignal, untrack } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, untrack } from "solid-js";
 import { Icon } from "../lib/icons";
 import { catalog, computerOffline } from "../../store/catalog";
-import { change, copyCommand, copyFolder, copyName, copyReference, dismiss, end, interrupting, notices, perform, reading, updating } from "../../store/actions";
+import { GONE, change, copyCommand, copyFolder, copyName, copyReference, dismiss, end, forget, interrupting, notices, notify, perform, stillListed, pendingNotifications, toggleMute, updating } from "../../store/actions";
+import { bindBatchConfirm, running } from "../../store/batch";
+import { cancelRestoreFollow, forgetArchived, refreshArchiveWhenDone, restoreSession } from "../../store/restores";
 import type { MenuEntry } from "../../store/ui";
-import type { Details } from "../../types";
+import type { Details, Outcome } from "../../types";
 import type { Session } from "./types";
-import { copyState, dialogReducer, menuState, renameParts, renameProblem, snapshotOf, terminateCopy, type ActionRow, type DialogEvent } from "./actions-ui";
+import { FRESH_CHANGED, STATE_CHANGED, archiveNameOccupied, canStartStopped, FRESH_TIP, copyState, dialogReducer, freshCopy, freshEntry, freshStillValid, menuState, notificationsState, renameParts, renameProblem, forgetArchivedCopy, forgetCopy, forgetOpening, snapshotOf, terminateCopy, terminates, type ForgetScope, type ActionRow, type DialogEvent } from "./actions-ui";
+import type { BatchConfirmation } from "./selection";
 
-// The guarded session actions: the entries both menus share, the Rename and
-// Terminate dialogs, and the notices the action store raises.
+// The guarded session actions: the entries both menus share, the Rename,
+// Terminate, Forget (saved or archived), Start fresh and selection dialogs,
+// and the notices the action store raises. An archived row's change entry is
+// Restore session (store/restores.ts). While a selection batch runs
+// (store/batch.ts, Qt's m_pending) every write entry here is off. A
+// successful Rename or Move to archive reloads the archive pages (Qt's
+// writeDone, SessionsWindow.cpp 1917).
 
 const [open, dispatch] = createSignal<ReturnType<typeof dialogReducer>>(undefined, { equals: false });
 const send = (event: DialogEvent) => dispatch(dialogReducer(open(), event));
 const closeDialog = () => send({ type: "close" });
+
+// A selection's Forget or Terminate asks here; any way out but the confirm button is a Cancel.
+bindBatchConfirm((copy) => new Promise<boolean>((resolve) => {
+  let answered = false;
+  const answer = (confirmed: boolean) => { if (!answered) { answered = true; resolve(confirmed); } };
+  send({ type: "open", kind: "batch", copy, answer });
+}));
 
 type Item = Extract<MenuEntry, { label: string }> & { action: () => void };
 
@@ -22,32 +37,41 @@ type Item = Extract<MenuEntry, { label: string }> & { action: () => void };
  * snapshot of the row as it is now, which the store checks against the
  * listed row when they run.
  */
-export function actionEntries(s: Session, details?: Details, options: { context?: boolean } = {}): { change: Item; stop: Item & { shown: boolean }; markRead: Item; rename: Item; archive?: Item; end: Item } {
+export function actionEntries(s: Session, details?: Details, options: { context?: boolean } = {}): { change: Item; stop: Item & { shown: boolean }; rename: Item; archive?: Item; end: Item } {
   const row = snapshotOf(s);
-  const m = menuState(row, !computerOffline(s.computer), updating(s.computer, s.name), details,
-    { context: options.context, reading: reading(s.computer, s.name), interrupting: interrupting(s.computer, s.name) });
-  const hint = (enabled: boolean, reason?: string) => (enabled ? undefined : reason);
   const archived = row.state === "archived";
+  const m = menuState(row, !computerOffline(s.computer), updating(s.computer, s.name), details, {
+    context: options.context, interrupting: interrupting(s.computer, s.name), batchRunning: running(),
+    // Qt's archiveNameOccupied: one scan of the live rows, for an archived row only.
+    occupied: archived && archiveNameOccupied(row, catalog.rows),
+  });
+  const hint = (enabled: boolean, reason?: string) => (enabled ? undefined : reason);
   return {
     change: {
       label: m.change.label, icon: archived || row.state !== "running" ? "play" : "pause", disabled: !m.change.enabled, hint: hint(m.change.enabled, m.change.reason),
-      action: () => { void change(row); },
+      action: () => { void (archived ? restoreSession(row) : change(row)); },
     },
     stop: {
       label: "Stop", icon: "circle-stop", shown: m.stop.visible, disabled: !m.stop.enabled, hint: hint(m.stop.enabled, m.stop.reason),
       action: () => { if (details) void perform(row, { kind: "interrupt", turn_started: details.turn_started }); },
     },
-    markRead: {
-      label: m.markRead.label, icon: m.markRead.label === "Mark as read" ? "check-check" : "bell", disabled: !m.markRead.enabled, hint: hint(m.markRead.enabled, m.markRead.reason),
-      action: () => { void perform(row, { kind: "mark_read", reply_id: row.replyId ?? null, attention_signature: row.attentionSignature ?? null }); },
-    },
     rename: { label: "Rename…", icon: "pencil", disabled: !m.rename, action: () => send({ type: "open", kind: "rename", row }) },
     archive: m.archive.visible
-      ? { label: "Move to archive", icon: "archive", disabled: !m.archive.enabled, hint: hint(m.archive.enabled, m.archive.reason), action: () => { void perform(row, { kind: "archive" }); } }
+      ? { label: "Move to archive", icon: "archive", disabled: !m.archive.enabled, hint: hint(m.archive.enabled, m.archive.reason), action: () => { void perform(row, { kind: "archive" }).then(refreshArchiveWhenDone); } }
       : undefined,
     end: {
       label: m.end.label, icon: m.end.label === "Terminate session…" ? "circle-stop" : "trash", danger: true, disabled: !m.end.enabled, hint: hint(m.end.enabled, m.end.reason),
-      action: () => send({ type: "open", kind: "terminate", row }),
+      action: () => {
+        // Qt's click-time GONE pre-check first; a forget names the run and conversation in view.
+        if (terminates(row, details)) { send({ type: "open", kind: "terminate", row }); return; }
+        const live = stillListed(row);
+        if (!live) return;
+        // An archived row is keyed by its archive id; Qt's key also holds the name.
+        if (archived && live.name !== row.name) { notify("info", GONE, true); return; }
+        const opening = forgetOpening(row, live, details);
+        if (opening === "changed") { notify("error", STATE_CHANGED, true); return; }
+        send({ type: "open", kind: "forget", ...opening });
+      },
     },
   };
 }
@@ -68,12 +92,53 @@ export function copyEntries(s: Session, details?: Details): { command: Item; nam
   };
 }
 
+/**
+ * The Mute or Unmute entry of a row's context menu (Qt's contextToggleMute),
+ * undefined for an archived row. Its hint is always shown: the reason it is
+ * off, else what it does.
+ */
+export function muteEntry(s: Session): Item | undefined {
+  const row = snapshotOf(s);
+  const m = notificationsState(row, !computerOffline(s.computer), pendingNotifications(s.computer, s.conversationId));
+  if (!m) return undefined;
+  return { label: m.label, icon: row.muted ? "bell" : "bell-off", disabled: !m.enabled, hint: m.hint, action: () => { void toggleMute(row); } };
+}
+
+/**
+ * The Start fresh entry of a paused or stopped row (Qt's contextStartFresh and
+ * the header's m_freshAction), undefined for other rows. Clicking runs the
+ * click-time recheck, then asks.
+ */
+export function freshActionEntry(s: Session, header = false): Item | undefined {
+  const row = snapshotOf(s);
+  const m = freshEntry(row, !computerOffline(s.computer), updating(s.computer, s.name), running());
+  if (!m) return undefined;
+  return {
+    label: "Start fresh…", icon: "clear", disabled: !m.enabled, hint: header ? FRESH_TIP : m.hint,
+    action: () => {
+      const live = stillListed(row);
+      // Qt returns silently when the session can no longer start fresh.
+      if (live && canStartStopped(live, !computerOffline(live.computer), updating(live.computer, live.name), running())) send({ type: "open", kind: "fresh", row: snapshotOf(live) });
+    },
+  };
+}
+
 /** The listed rows, for the rename dialog's check of names in use. */
 function* listedRows(): Iterable<Session> {
   for (const id of catalog.order) {
     const row = catalog.rows[id];
     if (row) yield row;
   }
+}
+
+/**
+ * The Rename dialog's call (Qt's renameSession, then writeDone): a rename
+ * cancels a pending restore's follow (Qt clears m_restoreKey) and a success
+ * reloads the archive pages (1917).
+ */
+export function renameSession(row: ActionRow, newName: string): Promise<Outcome> {
+  cancelRestoreFollow();
+  return perform(row, { kind: "rename", new_name: newName, archive_id: row.archiveId ?? null }).then(refreshArchiveWhenDone);
 }
 
 /** Qt's rename dialog: the agent and project stay; only the tag after them is edited. */
@@ -90,7 +155,7 @@ function RenameDialog(props: { row: ActionRow; close: () => void }) {
     const tag = value();
     if (tag === oldTag || renameProblem(tag, props.row, listedRows())) return;
     props.close();
-    void perform(props.row, { kind: "rename", new_name: prefix + tag, archive_id: props.row.archiveId ?? null });
+    void renameSession(props.row, prefix + tag);
   };
   return (
     <form onSubmit={submit}>
@@ -130,7 +195,81 @@ function TerminateDialog(props: { row: ActionRow; close: () => void }) {
 }
 
 /**
- * One modal host for the two dialogs. In one code path it opens the modal,
+ * Forget saved session or Forget archived session (Qt terminateSession): the
+ * confirm button acts only on the instance the dialog named.
+ */
+function ForgetDialog(props: { row: ActionRow; bound: ForgetScope; close: () => void }) {
+  const archived = props.row.state === "archived";
+  const copy = archived ? forgetArchivedCopy(props.row) : forgetCopy(props.row, props.bound.binding);
+  return (
+    <>
+      <div class="dlg-head"><Icon name="triangle-alert" size={18} class="accent" /><h2 id="action-dlg-title">{copy.title}</h2></div>
+      <div class="dlg-body">
+        <div class="confirm-body" id="action-dlg-body">{copy.text}</div>
+        <div class="dlg-detail">{copy.detail}</div>
+      </div>
+      <div class="dlg-foot">
+        <span class="spacer" />
+        <button type="button" class="btn primary" data-initial autofocus onClick={props.close}>Cancel</button>
+        <button type="button" class="btn solid-danger" onClick={() => { props.close(); void (archived ? forgetArchived(props.row) : forget(props.row, props.bound)); }}>{copy.confirm}</button>
+      </div>
+    </>
+  );
+}
+
+function FreshDialog(props: { row: ActionRow; close: () => void }) {
+  const copy = freshCopy(props.row);
+  const confirm = () => {
+    props.close();
+    const live = catalog.rows[props.row.key];
+    if (!live || !freshStillValid(snapshotOf(live), props.row, !computerOffline(live.computer), updating(live.computer, live.name), running())) {
+      notify("error", FRESH_CHANGED, true);
+      return;
+    }
+    notify("info", `Starting ${props.row.name} with a new conversation…`);
+    void perform(snapshotOf(live), { kind: "start_fresh" });
+  };
+  return (
+    <>
+      <div class="dlg-head"><Icon name="triangle-alert" size={18} class="accent" /><h2 id="action-dlg-title">{copy.title}</h2></div>
+      <div class="dlg-body"><div class="confirm-body" id="action-dlg-body" style={{ "white-space": "pre-line" }}>{copy.text}</div></div>
+      <div class="dlg-foot">
+        <span class="spacer" />
+        <button type="button" class="btn primary" data-initial autofocus onClick={props.close}>Cancel</button>
+        <button type="button" class="btn solid-danger" onClick={confirm}>{copy.confirm}</button>
+      </div>
+    </>
+  );
+}
+
+/**
+ * A selection's Forget or Terminate (Qt's confirmSelectionAction): the text,
+ * the targets behind a disclosure as Qt's detailed text, Cancel focused and
+ * the default. Closing it any other way (Escape, another dialog) answers no.
+ */
+function BatchDialog(props: { copy: BatchConfirmation; answer: (confirmed: boolean) => void; close: () => void }) {
+  onCleanup(() => props.answer(false));
+  return (
+    <>
+      <div class="dlg-head"><Icon name="triangle-alert" size={18} class="accent" /><h2 id="action-dlg-title">{props.copy.title}</h2></div>
+      <div class="dlg-body">
+        <div class="confirm-body" id="action-dlg-body" style={{ "white-space": "pre-line" }}>{props.copy.text}</div>
+        <details class="dlg-detail">
+          <summary>Show details</summary>
+          <div style={{ "white-space": "pre-line", "max-height": "160px", overflow: "auto" }}>{props.copy.details.join("\n")}</div>
+        </details>
+      </div>
+      <div class="dlg-foot">
+        <span class="spacer" />
+        <button type="button" class="btn primary" data-initial autofocus onClick={props.close}>Cancel</button>
+        <button type="button" class="btn solid-danger" onClick={() => { props.answer(true); props.close(); }}>{props.copy.confirm}</button>
+      </div>
+    </>
+  );
+}
+
+/**
+ * One modal host for the dialogs. In one code path it opens the modal,
  * then focuses the dialog's initial control (the tag field with its text
  * selected, or Cancel). Escape closes through the dialog's own cancel.
  */
@@ -148,10 +287,12 @@ export function ActionDialogs() {
     });
   });
   return (
-    <dialog class="dlg" ref={el} role={open()?.kind === "terminate" ? "alertdialog" : "dialog"} aria-labelledby="action-dlg-title"
-      aria-describedby={open()?.kind === "terminate" ? "action-dlg-body" : undefined} style={{ width: "460px" }} onClose={closeDialog}>
+    <dialog class="dlg" ref={el} role={open()?.kind === "rename" || !open() ? "dialog" : "alertdialog"} aria-labelledby="action-dlg-title"
+      aria-describedby={open() && open()?.kind !== "rename" ? "action-dlg-body" : undefined} style={{ width: "460px" }} onClose={closeDialog}>
       <Show when={open()} keyed>
-        {(p) => (p.kind === "rename" ? <RenameDialog row={p.row} close={closeDialog} /> : <TerminateDialog row={p.row} close={closeDialog} />)}
+        {(p) => (p.kind === "rename" ? <RenameDialog row={p.row} close={closeDialog} />
+          : p.kind === "fresh" ? <FreshDialog row={p.row} close={closeDialog} /> : p.kind === "forget" ? <ForgetDialog row={p.row} bound={p.bound} close={closeDialog} />
+          : p.kind === "batch" ? <BatchDialog copy={p.copy} answer={p.answer} close={closeDialog} /> : p.kind === "terminate" ? <TerminateDialog row={p.row} close={closeDialog} /> : null)}
       </Show>
     </dialog>
   );

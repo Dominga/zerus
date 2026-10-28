@@ -1,4 +1,5 @@
 import { createMemo } from "solid-js";
+import { archiveRows } from "../../store/archive";
 import { orderedRows } from "../../store/catalog";
 import { collapsed, stateFilter, matchesFilter, search, machineFilter, projectFilter, expandedChildren, compactRows, projectOrder } from "../../store/ui";
 import type { Session, Subagent } from "./types";
@@ -31,6 +32,7 @@ export function sessionMatchesSearch(s: Session, q: string): boolean {
 }
 
 export const listRows = createMemo<Row[]>(() => {
+  if (stateFilter() === "archived") return archiveRows();
   const f = stateFilter();
   const q = search().trim();
   const hosts = machineFilter();

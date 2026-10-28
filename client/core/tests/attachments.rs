@@ -1,7 +1,9 @@
 //! The attachment cache and file reads on a real disk, in a private scratch
 //! folder per test.
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use zerus_client_core::attachments::{
     cached_at, prepare, read_file, read_stored, store_at, Attachment, StoredFile,

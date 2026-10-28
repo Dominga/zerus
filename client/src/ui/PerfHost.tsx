@@ -2,9 +2,19 @@ import { Show, Suspense, createSignal, lazy, onCleanup, onMount } from "solid-js
 import { invoke } from "@tauri-apps/api/core";
 import { listRows } from "./sessions/model";
 import { orderedRows } from "../store/catalog";
-import { selectedKey, setSelectedKey } from "../store/ui";
+import { multi, peek, selectedKey, setMulti, setPeek, setSelectedKey, setStateFilter, setStripMode, stateFilter, stripMode } from "../store/ui";
+import { clearMulti } from "./sessions/organize";
+import { archive, archiveRows } from "../store/archive";
 import { activity } from "../store/session";
-import { copyFolder, copyName, copyCommand, lastCopied, copyReference, end, perform } from "../store/actions";
+import { markAllRead, markNeedsAttention, markRead } from "../store/marks";
+import { copyFolder, copyName, copyCommand, detailsFor, followedFor, lastCopied, copyReference, end, perform, notices } from "../store/actions";
+import { panelPlace } from "./sessions/archive-dates";
+import { run, running, runMachine } from "../store/batch";
+import { machineEntries } from "./sessions/machine-batch";
+import { forgetArchived, restoreSession } from "../store/restores";
+import { clearArchiveMenuEntry } from "./sessions/selection-live";
+import { computerOffline } from "../store/catalog";
+import { selectionSnapshot } from "./sessions/selection";
 import { snapshotOf, terminateCopy, type ActionRow } from "./sessions/actions-ui";
 import type { Action, Outcome } from "../types";
 import { inTauri, metrics, pumpStats } from "../bridge";
@@ -280,12 +290,137 @@ async function autoRun(config: PerfConfig) {
 // set to any value but auto so that exit_app is allowed) is the end-to-end check
 // of the guarded actions: with ZERUS_CLIENT_REPLAY supplying the catalog and
 // ZERUS_CLIENT_HGS a fake hgs, it selects the replay session (its details come
-// from the Activity state value, or one inspect), runs pause, resume, rename,
+// from the Activity state value, or one inspect), runs start fresh, forget and
+// forget binding (through `perform`, as the dialogs confirm), pause, resume, rename,
 // archive, the end call the Terminate dialog picks for it through the
 // dialog's confirmation (`end`), then the other end call (terminate or kill)
-// once each, and exits 0 (1 when an outcome failed).
+// once each, and exits 0 (1 when an outcome failed). Before the writes it marks
+// the session read, marks all as read (logging the count) and marks the session
+// as needing attention last; `?actions-smoke=marks` then only waits for the
+// session and reports whether that review mark survived a restart. Before them it
+// switches to the Archive filter, logs the archive page's status text and row count,
+// checks that the date panel opens in the page's body at its button while the list
+// panel is transformed, and selects the archived row, waiting for its details
+// (`inspect --archive ID`).
 const SMOKE_SESSION = "claude/sample-project/review";
 const SMOKE_RENAMED = "claude/sample-project/review-renamed";
+
+async function marksAfterRestart(allowed: boolean) {
+  const exit = (code: number) => invoke("exit_app", { code }).catch(() => {});
+  if (!allowed) {
+    log("actions-smoke not started: it needs ZERUS_CLIENT_REPLAY, ZERUS_CLIENT_HGS and ZERUS_CLIENT_PERF");
+    return;
+  }
+  try {
+    await until(() => orderedRows().some((s) => s.name === SMOKE_SESSION && s.runId), 30_000, "the replay session did not appear");
+    // The stored marks load a moment after the catalog; give them time to apply.
+    const review = await until(() => !!orderedRows().find((s) => s.name === SMOKE_SESSION)?.reviewLater, 5_000, "no review mark").then(() => true, () => false);
+    log(`actions-smoke marks-after-restart: review ${review}`);
+    await exit(review ? 0 : 1);
+  } catch (error) {
+    log(`actions-smoke failed: ${String(error)}`);
+    await exit(1);
+  }
+}
+
+/**
+ * Opens the Archive bar's date panel while the list panel carries a transform
+ * (as the strip's peek overlay does): the panel must be in the page's body,
+ * placed at the picker button in viewport coordinates, and Escape must close
+ * it with the focus back on the button.
+ */
+async function datePanelPlacement(): Promise<{ ok: boolean; text: string }> {
+  const list = document.querySelector<HTMLElement>(".sp-panel");
+  const picker = document.querySelector<HTMLButtonElement>(".archive-bar .archive-period");
+  if (!list || !picker) return { ok: false, text: "failed (no Archive bar)" };
+  list.style.transform = "translateX(37px)";
+  try {
+    picker.click();
+    const pop = () => document.querySelector<HTMLElement>(".archive-pop");
+    const want = () => panelPlace(picker.getBoundingClientRect(), pop()?.getBoundingClientRect().height ?? 0, { width: innerWidth, height: innerHeight });
+    const at = () => { const r = pop()?.getBoundingClientRect(); return r ? { left: r.left, top: r.top } : undefined; };
+    const placed = await until(() => { const r = at(), w = want(); return !!r && Math.abs(r.left - w.left) < 1 && Math.abs(r.top - w.top) < 1; }, 3000, "misplaced")
+      .then(() => true, () => false);
+    const outside = !!pop() && !pop()!.closest(".sp-panel");
+    const r = at(), w = want();
+    pop()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    const closed = await until(() => !pop(), 2000, "still open").then(() => true, () => false);
+    const focused = document.activeElement === picker;
+    const ok = placed && outside && closed && focused;
+    return { ok, text: `${ok ? "done" : "failed"} (in the body ${outside}, at ${r ? `${Math.round(r.left)},${Math.round(r.top)}` : "none"} for ${Math.round(w.left)},${Math.round(w.top)}, closed ${closed}, focus on the picker ${focused})` };
+  } finally {
+    list.style.transform = "";
+  }
+}
+
+/**
+ * The date panel over a hover-opened strip peek. Qt keeps a hover peek open
+ * while a popup is active (SessionPanelDock.h 50-56) and its popup keeps the
+ * keyboard: Shift+Tab and Tab wrap inside the panel; Escape with the focus
+ * outside the panel closes only the panel (the peek and a selection stay);
+ * the pointer leaving the list while the panel is open keeps the peek; once
+ * the panel closed, the next leave closes it.
+ */
+async function peekWithDatePanel(): Promise<{ ok: boolean; text: string }> {
+  const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
+  const pop = () => document.querySelector<HTMLElement>(".archive-pop");
+  const key = (name: string, shiftKey = false, target: EventTarget = document.activeElement ?? document.body) =>
+    target.dispatchEvent(new KeyboardEvent("keydown", { key: name, shiftKey, bubbles: true, cancelable: true }));
+  const wasStrip = stripMode();
+  setPeek(false);
+  setStripMode(true);
+  try {
+    await until(() => !!document.querySelector(".strip-col"), 2000, "no strip").catch(() => {});
+    const section = document.querySelector<HTMLElement>("section.sessions-pane");
+    // Each part starts from a peek the hover opened, so one failure does not hide another.
+    const hover = async () => {
+      if (peek()) return true;
+      document.querySelector(".strip-col")?.dispatchEvent(new PointerEvent("pointerenter"));
+      return until(() => peek(), 2000, "no peek").then(() => true, () => false);
+    };
+    const hovered = await hover();
+    const picker = document.querySelector<HTMLButtonElement>(".sp-panel .archive-bar .archive-period");
+    if (!hovered || !section || !picker) return { ok: false, text: `failed (the hover opened the peek ${hovered}, picker ${!!picker})` };
+    const open = async () => { picker.click(); return until(() => document.activeElement?.id === "archive-from", 2000, "not open").then(() => true, () => false); };
+    const opened = await open();
+    const controls = [...(pop()?.querySelectorAll<HTMLElement>("input:not([disabled]), button:not([disabled])") ?? [])];
+    key("Tab", true);
+    const back = !!controls.length && document.activeElement === controls.at(-1);
+    key("Tab");
+    const forward = !!controls.length && document.activeElement === controls[0];
+    // Escape with the focus outside the panel and a selection: only the panel closes.
+    const rows = orderedRows().slice(0, 2);
+    for (const r of rows) setMulti(r.key, true);
+    (document.activeElement as HTMLElement | null)?.blur();
+    key("Escape", false, document.body);
+    await sleep(50);
+    const escaped = !pop() && peek() && rows.length === 2 && rows.every((r) => !!multi[r.key]);
+    clearMulti();
+    // Leaving while the panel is open keeps the peek.
+    const reopened = (await hover()) && (await open());
+    section.dispatchEvent(new PointerEvent("pointerleave"));
+    await sleep(800);
+    const kept = peek() && !!pop();
+    key("Escape");
+    section.dispatchEvent(new PointerEvent("pointerenter"));
+    await sleep(500);
+    const stayed = peek() && !pop();
+    // With the panel closed, the next leave closes the peek.
+    section.dispatchEvent(new PointerEvent("pointerleave"));
+    const closed = await until(() => !peek(), 2000, "kept").then(() => true, () => false);
+    const ok = opened && back && forward && escaped && reopened && kept && stayed && closed;
+    return {
+      ok,
+      text: `${ok ? "done" : "failed"} (Shift+Tab wraps ${back}, Tab wraps ${forward}, Escape outside the panel closed only the panel ${escaped}, `
+        + `leaving with the panel open kept the peek ${kept}, back inside it stayed ${stayed}, the next leave closed it ${closed})`,
+    };
+  } finally {
+    pop()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    clearMulti();
+    setPeek(false);
+    setStripMode(wasStrip);
+  }
+}
 
 async function actionsSmoke(allowed: boolean) {
   const exit = (code: number) => invoke("exit_app", { code }).catch(() => {});
@@ -303,22 +438,140 @@ async function actionsSmoke(allowed: boolean) {
     setSelectedKey(row().key);
     const chosen = terminateCopy(row()).action;
     log(`actions-smoke end call the Terminate dialog picks: ${chosen}`);
+    // The Archive view first: the fake answers `archives --json` with one archived row.
+    // Its status text and row count are logged, then the row is selected so that its
+    // details are read with `inspect --archive ID` (the argv is in the fake's log.ndjson).
+    const keep = row().key;
+    let bad = 0;
+    setStateFilter("archived");
+    await until(() => archive.pages()[archive.computers()[0]?.computer ?? ""]?.loaded === true, 15_000, "the archive page did not load");
+    log(`actions-smoke archive-page: ${archive.status().summary} (${archiveRows().length} rows)`);
+    const archivedKey = archive.rows()[0]?.key;
+    if (!archivedKey) throw new Error("the archive page has no row");
+    const panel = await datePanelPlacement();
+    log(`actions-smoke archive-date-panel: ${panel.text}`);
+    if (!panel.ok) bad++;
+    const hover = await peekWithDatePanel();
+    log(`actions-smoke archive-date-panel-peek: ${hover.text}`);
+    if (!hover.ok) bad++;
+    setSelectedKey(archivedKey);
+    // The details the header and the menus read, from `inspect --archive ID`; bounded.
+    const archived = archive.row(archivedKey)!;
+    const inspected = await until(() => !!detailsFor(archived, !computerOffline(archived.computer), followedFor(archivedKey)), 15_000, "no details")
+      .then(() => true, () => false);
+    log(`actions-smoke archive-inspect: ${inspected ? "done" : "failed (no details within 15 s)"} ${archived.archiveId ?? "(no id)"}`);
+    if (!inspected) bad++;
+    // Restore, Forget archived and Clear archive on the loaded archived row. The fake answers
+    // `resume NAME --archive ID -d` and `kill NAME --archive ID` with a plain success (its log.ndjson
+    // holds both argv lines); the live row never appears, so the restore stays pending, as in Qt.
+    const errorsSince = (id: number) => notices().filter((n) => n.id > id && n.tone === "error").map((n) => n.text);
+    const lastNoticeId = () => notices().reduce((m, n) => Math.max(m, n.id), 0);
+    // Pages load only while the Archive filter is shown, so a user looks at it again after the restore.
+    const settled = async () => {
+      setStateFilter("archived");
+      await sleep(300);
+      await until(() => archive.pages()[archive.computers()[0]?.computer ?? ""]?.loaded === true && !!archive.row(archivedKey), 15_000, "the archive did not reload");
+    };
+    {
+      const before = lastNoticeId();
+      await restoreSession(snapshotOf(archived));
+      const errors = errorsSince(before);
+      // A restore that was not enabled returns silently and leaves the Archive filter on.
+      const switched = stateFilter() === "all";
+      log(`actions-smoke restore: ${errors.length || !switched ? `failed (${errors.join(" / ") || "the entry did not run"})` : "done"} (state filter now ${stateFilter()})`);
+      if (errors.length || !switched) bad++;
+      await settled();
+    }
+    {
+      const before = lastNoticeId();
+      await forgetArchived(snapshotOf(archive.row(archivedKey)!));
+      const errors = errorsSince(before);
+      log(`actions-smoke forget-archived: ${errors.length ? `failed (${errors.join(" / ")})` : "done"}`);
+      if (errors.length) bad++;
+      await settled();
+    }
+    {
+      // Through the menu entry the batch menu shows; its confirmation dialog is answered by pressing its own button.
+      // The fake's archived row is built to be forgettable, so a disabled entry is a failure.
+      const entry = clearArchiveMenuEntry();
+      if (!("label" in entry) || entry.disabled) {
+        log(`actions-smoke clear-archive: failed (${"label" in entry ? entry.label : "no entry"} is disabled)`);
+        bad++;
+      } else {
+        const before = lastNoticeId();
+        entry.action?.();
+        const button = (): HTMLButtonElement | undefined =>
+          [...document.querySelectorAll<HTMLButtonElement>("dialog[open] button.solid-danger")].find((b) => b.textContent === "Clear archive");
+        const asked = await until(() => !!button(), 5000, "no confirmation").then(() => true, () => false);
+        if (!asked) { log("actions-smoke clear-archive: failed (the confirmation did not open)"); bad++; }
+        else {
+          button()!.click();
+          await until(() => !running() && notices().some((n) => n.id > before && /\d+ of \d+ completed/.test(n.text)), 15_000, "the batch did not end")
+            .then(() => {}, () => {});
+          const fresh = notices().filter((n) => n.id > before);
+          const failed = fresh.some((n) => n.tone === "error") || !fresh.length;
+          log(`actions-smoke clear-archive: ${failed ? "failed" : "done"} (${fresh.map((n) => n.text).join(" / ")})`);
+          if (failed) bad++;
+          await settled().catch(() => {});
+        }
+      }
+    }
+    setStateFilter("all");
+    setSelectedKey(keep);
+    const local = (ok: boolean): Outcome => (ok ? { outcome: "done", receipt: null, cleanup: null } : { outcome: "failed", detail: "the row changed" });
     const steps: [string, () => Promise<Outcome>][] = [
+      ["mark as read", async () => local(markRead(row()))],
+      ["mark all as read", async () => { log(`actions-smoke mark-all-as-read: ${markAllRead()} marked`); return local(true); }],
+      ["mark needs attention", async () => local(markNeedsAttention(row()))],
       ["copy session reference", () => copyReference(row())],
       ["copy connect command", () => copyCommand(row())],
       ["copy session name", () => copyName(row())],
       ["copy folder path", () => copyFolder(row())],
+      ["start fresh", () => perform(row(), { kind: "start_fresh" })],
+      ["forget", () => perform(row(), { kind: "forget" })],
+      ["forget binding", () => perform(row(), { kind: "forget_binding" })],
       ...([{ kind: "pause" }, { kind: "resume" }, { kind: "rename", new_name: SMOKE_RENAMED, archive_id: null }, { kind: "archive" }] as Action[])
         .map((action): [string, () => Promise<Outcome>] => [action.kind, () => perform(row(), action)]),
       [chosen, () => end(row(), chosen)],
       ...(["terminate", "kill"] as const).filter((kind) => kind !== chosen)
         .map((kind): [string, () => Promise<Outcome>] => [kind, () => perform(row(), { kind })]),
     ];
-    let bad = 0;
+    // Batch steps go through the store the selection bar uses and the helper the batch menu uses.
+    const live = () => {
+      const s = orderedRows().find((r) => r.name === SMOKE_SESSION);
+      if (!s) throw new Error("the replay session is gone");
+      return s;
+    };
+    const lastId = () => notices().reduce((m, n) => Math.max(m, n.id), 0);
+    const since = (id: number) => notices().filter((n) => n.id > id);
+    const lastNotice = () => notices().at(-1)?.text ?? "(no notice)";
+    for (const action of ["review_later", "mark_read"] as const) {
+      const before = lastId();
+      await run(action, [selectionSnapshot(live())]);
+      const text = since(before).length ? since(before).map((n) => n.text).join(" / ") : "(skipped: the action does not apply to the replay row by Qt's rules)";
+      log(`actions-smoke batch-${action.replace("_", "-")}: ${text}`);
+    }
+    for (const kind of ["pause_all", "resume_all"] as const) {
+      const row = live();
+      const entry = machineEntries({
+        machine: row.machine || "this computer", computer: row.computer, online: !computerOffline(row.computer), batchRunning: running(),
+        rows: orderedRows().filter((r) => r.computer === row.computer),
+        start: () => {},
+      }).find((e) => "label" in e && e.label.startsWith(kind === "pause_all" ? "Pause all" : "Resume all"));
+      const name = kind === "pause_all" ? "pause-all" : "resume-all";
+      if (!entry || !("label" in entry) || entry.disabled) { log(`actions-smoke ${name}: skipped (${entry && "label" in entry ? entry.label : "no entry"} is disabled for the replay row by Qt's rules)`); continue; }
+      const count = Number(/\((\d+)\)/.exec(entry.label)?.[1] ?? 0);
+      const before = lastId();
+      await runMachine(row.computer, row.machine || "this computer", kind, count);
+      const fresh = since(before);
+      const failed = fresh.some((n) => n.tone === "error");
+      log(`actions-smoke ${name}: ${failed ? "failed" : "done"} (${fresh.map((n) => n.text).join(" / ")})`);
+      if (failed) bad++;
+    }
     for (const [kind, step] of steps) {
       const out = await step();
       const text = kind.startsWith("copy ") && out.outcome === "done" ? ` ${lastCopied()}` : "";
-      log(`actions-smoke ${kind.startsWith("copy ") ? `copy-${kind.slice(5).replace(/ /g, "-")}` : kind}: ${out.outcome}${out.outcome === "failed" ? ` (${out.detail})` : ""}${text}`);
+      log(`actions-smoke ${kind.startsWith("copy ") ? `copy-${kind.slice(5).replace(/ /g, "-")}` : kind.replace(/ /g, "-")}: ${out.outcome}${out.outcome === "failed" ? ` (${out.detail})` : ""}${text}`);
       if (out.outcome === "failed") bad++;
     }
     await exit(bad ? 1 : 0);
@@ -381,7 +634,9 @@ export function PerfHost() {
       const native = await invoke<PerfConfig>("perf_config").catch(() => undefined);
       if (native) setConfig({ ...native, mode: native.mode ?? urlMode });
     }
-    if (new URLSearchParams(location.search).get("actions-smoke") === "1" && inTauri()) void actionsSmoke(!!config().actions_smoke);
+    const smoke = new URLSearchParams(location.search).get("actions-smoke");
+    if (smoke === "1" && inTauri()) void actionsSmoke(!!config().actions_smoke);
+    if (smoke === "marks" && inTauri()) void marksAfterRestart(!!config().actions_smoke);
     if (new URLSearchParams(location.search).get("screens-smoke") === "1" && inTauri()) void screensSmoke(!!config().actions_smoke);
     if (config().mode === "auto") {
       setOpen(true);

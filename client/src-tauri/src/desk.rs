@@ -30,9 +30,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use zerus_client_core::attention::{self, Changes, Host, Resolution, Tracker, CLICK_WAIT};
+use zerus_client_core::marks::Mark;
 use zerus_client_core::menubar::{
     tray_conf_value, Apply, Desk, DeviceMarks, Entry, Face, Gate, OpenMode,
 };
+use zerus_client_core::readmarks::ReadMark;
 use zerus_client_core::shell;
 use zerus_client_core::{Change, ComputerId};
 
@@ -369,6 +371,11 @@ pub fn observe_round(
         if !state.listed || only.is_some_and(|only| !only.contains(computer)) {
             continue;
         }
+        // A stopped stream sends `Replace(empty)` before `Ended`: a current
+        // computer with no rows withdraws every banner it posted and forgets
+        // them, so the next start would post them again. No code path stops
+        // the source today: the fleet lives as long as the process, and a
+        // removed peer's banners go anyway (`TrayAgent.cpp:460-462`).
         // Notices name a peer by its alias and this computer by its host
         // (Qt's `box.host`), empty before its card arrives.
         let label = computer
@@ -411,8 +418,10 @@ struct Click {
     deadline: Instant,
 }
 
-/// What one round reads from the app.
+/// What one round reads from the app, and the status item it offers.
 pub struct Context<'a> {
+    /// Offers the status item its face, tooltip, menu and badge.
+    pub publish: &'a mut dyn FnMut(&Desk, OpenMode),
     pub now: Instant,
     /// Seconds since the epoch, the tracker's clock.
     pub unix: i64,
@@ -429,7 +438,7 @@ pub struct Context<'a> {
 /// What one round asks of the app.
 #[derive(Debug, Default, PartialEq)]
 pub struct Outcome {
-    /// The status item's state may have changed: offer it again.
+    /// The round offered the status item again.
     pub publish: bool,
     /// An "Open in" choice to save.
     pub save_mode: Option<OpenMode>,
@@ -467,10 +476,6 @@ impl DeskLoop {
         }
     }
 
-    pub fn mode(&self) -> OpenMode {
-        self.mode
-    }
-
     /// How long the thread may wait for an input: until the next sweep, or
     /// until a clicked notification's wait ends.
     pub fn wait(&self, now: Instant) -> Duration {
@@ -484,8 +489,26 @@ impl DeskLoop {
         wait
     }
 
-    /// One batch of inputs: the changes, then this device's marks, then one
-    /// observation of the computers they touched, then the clicked session.
+    /// Start-up: the menu goes out first, with Open Zerus and Quit, before
+    /// any change arrives or when the fleet does not start, as Qt builds its
+    /// menu at once (`TrayAgent.cpp:252-254`); then this device's persisted
+    /// marks apply, so the counts are right from the first row, before any
+    /// window opens.
+    pub fn start(
+        &mut self,
+        publish: &mut dyn FnMut(&Desk, OpenMode),
+        marks: &mut dyn FnMut() -> Option<DeviceMarks>,
+    ) {
+        publish(&self.desk, self.mode);
+        if let Some(marks) = marks() {
+            self.desk.set_marks(marks);
+        }
+    }
+
+    /// One batch of inputs in three steps: the changes and this device's
+    /// marks; the status item, whose counts never wait for the tracker or
+    /// the settings store; then one observation of the computers they
+    /// touched, and the clicked session.
     pub fn round(
         &mut self,
         inputs: impl IntoIterator<Item = DeskInput>,
@@ -538,6 +561,9 @@ impl DeskLoop {
                 }
             }
         }
+        if outcome.publish {
+            (cx.publish)(&self.desk, self.mode);
+        }
         if let Some(attention) = self.attention.as_mut() {
             if cx.now >= self.swept + SWEEP {
                 self.swept = cx.now;
@@ -580,15 +606,43 @@ impl DeskLoop {
     }
 }
 
+/// The attention marks as the desk last copied them: a change of the read
+/// marks alone copies no attention map, and an unchanged map is never copied
+/// under the lock the window's updates take.
+#[derive(Default)]
+pub struct MarksCache {
+    version: Option<u64>,
+    marks: BTreeMap<String, Mark>,
+    replies: BTreeMap<String, String>,
+}
+
+impl MarksCache {
+    /// This device's marks: `read` gives the attention maps unless their
+    /// version is still the one it is passed; `pending` are the read marks
+    /// waiting for their host.
+    pub fn device(
+        &mut self,
+        read: impl FnOnce(Option<u64>) -> Option<crate::actions::MarkMaps>,
+        pending: Vec<ReadMark>,
+    ) -> DeviceMarks {
+        if let Some((version, marks, replies)) = read(self.version) {
+            self.version = Some(version);
+            self.marks = marks;
+            self.replies = replies;
+        }
+        DeviceMarks::new(self.marks.clone(), self.replies.clone(), pending)
+    }
+}
+
 /// This device's marks as the overlay reads them: the attention marks and
 /// read replies, and the read marks still waiting for their host.
-fn device_marks(app: &AppHandle) -> Option<DeviceMarks> {
-    let (marks, replies) = app.try_state::<crate::actions::Attention>()?.marks();
+fn device_marks(app: &AppHandle, cache: &mut MarksCache) -> Option<DeviceMarks> {
+    let attention = app.try_state::<crate::actions::Attention>()?;
     let pending = app
         .try_state::<crate::actions::Actions>()
         .map(|actions| actions.pending_marks())
         .unwrap_or_default();
-    Some(DeviceMarks::new(marks, replies, pending))
+    Some(cache.device(|seen| attention.marks_since(seen), pending))
 }
 
 fn optional_questions(app: &AppHandle) -> bool {
@@ -604,14 +658,10 @@ fn run(
     focused: Arc<AtomicBool>,
 ) {
     let mut state = DeskLoop::new(mode, None, Instant::now());
-    // The menu with Open Zerus and Quit, before any change arrives or when the
-    // fleet does not start: Qt builds its menu at once (`TrayAgent.cpp:252-254`).
-    publish(&app, &state.desk, mode);
-    // The persisted marks before the first row arrives, so the counts are
-    // right before any window opens.
-    if let Some(marks) = device_marks(&app) {
-        state.desk.set_marks(marks);
-    }
+    let mut cache = MarksCache::default();
+    state.start(&mut |desk, mode| publish(&app, desk, mode), &mut || {
+        device_marks(&app, &mut cache)
+    });
     state.attention = attention.map(|load| load());
     loop {
         let first = match inputs.recv_timeout(state.wait(Instant::now())) {
@@ -625,27 +675,26 @@ fn run(
         let outcome = state.round(
             batch,
             &mut Context {
+                publish: &mut |desk, mode| publish(&app, desk, mode),
                 now: Instant::now(),
                 unix: unix_now(),
                 focused: focused.load(Ordering::Relaxed),
                 optional_questions: &mut || optional_questions(&app),
-                marks: &mut || device_marks(&app),
+                marks: &mut || device_marks(&app, &mut cache),
                 notice_id: &mut || uuid::Uuid::new_v4().to_string(),
             },
         );
-        apply(&app, &state, outcome);
+        apply(&app, outcome);
         std::thread::sleep(PACE);
     }
 }
 
-/// Does what a round asked, in Qt's order: banners, then the window.
-fn apply(app: &AppHandle, state: &DeskLoop, outcome: Outcome) {
+/// Does what a round asked after it offered the status item, in Qt's order:
+/// banners, then the window.
+fn apply(app: &AppHandle, outcome: Outcome) {
     if let Some(mode) = outcome.save_mode {
         // Task 4: the desk thread saves the choice, off the main thread.
         store_mode(app, mode);
-    }
-    if outcome.publish {
-        publish(app, &state.desk, state.mode());
     }
     deliver(app, outcome.changes);
     if outcome.show {
@@ -1109,7 +1158,6 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use zerus_client_core::attention::Tracker;
-    use zerus_client_core::marks::Mark;
     use zerus_client_core::{ComputerStatus, ViewRow};
 
     fn asking(name: &str) -> ViewRow {
@@ -1248,6 +1296,9 @@ mod tests {
         marks_read: usize,
         optional_read: usize,
         notices: usize,
+        /// The status item's offers (with the attention count) and the
+        /// settings reads, in order.
+        steps: Vec<String>,
     }
 
     impl Thread {
@@ -1263,6 +1314,7 @@ mod tests {
                 marks_read: 0,
                 optional_read: 0,
                 notices: 0,
+                steps: Vec::new(),
             }
         }
 
@@ -1273,13 +1325,20 @@ mod tests {
             let mut read = 0;
             let mut optional_read = 0;
             let mut notices = self.notices;
+            let steps = std::cell::RefCell::new(Vec::new());
             let outcome = self.state.round(
                 inputs,
                 &mut Context {
+                    publish: &mut |desk, _| {
+                        steps
+                            .borrow_mut()
+                            .push(format!("publish {}", desk.attention()))
+                    },
                     now: self.start + Duration::from_secs_f64(at),
                     unix: 1000 + at as i64,
                     focused: self.focused,
                     optional_questions: &mut || {
+                        steps.borrow_mut().push("settings".into());
                         optional_read += 1;
                         optional
                     },
@@ -1296,6 +1355,7 @@ mod tests {
             self.marks_read += read;
             self.optional_read += optional_read;
             self.notices = notices;
+            self.steps.extend(steps.into_inner());
             outcome
         }
     }
@@ -1334,6 +1394,128 @@ mod tests {
             key: format!("run:{}", row.name),
             row,
         })
+    }
+
+    #[test]
+    fn the_counts_go_out_before_the_tracker_reads_the_settings_store() {
+        // The settings store may still be loading (Qt's seed): the face,
+        // tooltip and badge never wait for it.
+        let dir = scratch("publish-first");
+        let mut thread = Thread::new(&dir);
+        thread.round(0.0, live("", vec![asking("claude/p/a")]));
+        assert_eq!(thread.steps, ["publish 1", "settings"]);
+        thread.steps.clear();
+        let mut row = asking("claude/p/a");
+        row.attention_fingerprint = "fp-1".into();
+        thread.marks = Some(acknowledged(&row));
+        thread.round(1.0, vec![upsert("", row), DeskInput::Marks]);
+        assert_eq!(
+            thread.steps,
+            ["publish 0", "settings"],
+            "once per round, with the marks applied"
+        );
+        thread.steps.clear();
+        thread.round(2.0, Vec::new());
+        assert!(thread.steps.is_empty(), "nothing changed: nothing offered");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn start_up_offers_the_menu_first_then_applies_the_persisted_marks() {
+        let mut row = asking("claude/p/a");
+        row.attention_fingerprint = "fp-1".into();
+        let marks = acknowledged(&row);
+        let mut state = DeskLoop::new(OpenMode::Clipboard, None, Instant::now());
+        let steps = std::cell::RefCell::new(Vec::new());
+        state.start(
+            &mut |desk, mode| {
+                steps
+                    .borrow_mut()
+                    .push(format!("publish {} {:?}", desk.computers().len(), mode))
+            },
+            &mut || {
+                steps.borrow_mut().push("marks".into());
+                Some(marks.clone())
+            },
+        );
+        assert_eq!(
+            steps.into_inner(),
+            ["publish 0 Clipboard", "marks"],
+            "ruling 1: the empty menu goes out before anything is read"
+        );
+        // Ruling 2: the first row already counts this device's marks.
+        let mut offered = Vec::new();
+        state.round(
+            live("", vec![row]),
+            &mut Context {
+                publish: &mut |desk, _| offered.push(desk.attention()),
+                now: Instant::now(),
+                unix: 1000,
+                focused: false,
+                optional_questions: &mut || false,
+                marks: &mut || panic!("no mark changed since the start"),
+                notice_id: &mut || "notice-1".into(),
+            },
+        );
+        assert_eq!(offered, [0], "acknowledged before the window ever opened");
+    }
+
+    #[test]
+    fn the_attention_maps_are_copied_only_after_they_changed() {
+        let mut cache = MarksCache::default();
+        let mark = |review: bool| {
+            BTreeMap::from([(
+                "k".to_owned(),
+                Mark {
+                    review,
+                    acknowledged: String::new(),
+                },
+            )])
+        };
+        let pending = |run: &str| ReadMark {
+            computer: "mac".into(),
+            name: "claude/p/a".into(),
+            run_id: run.into(),
+            conversation_id: "conv-a".into(),
+            reply_id: Some("r1".into()),
+            attention_signature: None,
+        };
+        let mut asked = Vec::new();
+        let first = cache.device(
+            |seen| {
+                asked.push(seen);
+                Some((3, mark(true), BTreeMap::new()))
+            },
+            vec![pending("run-1")],
+        );
+        assert_eq!(
+            first,
+            DeviceMarks::new(mark(true), BTreeMap::new(), vec![pending("run-1")])
+        );
+        // A read mark changed alone: the attention maps are not copied again.
+        let second = cache.device(
+            |seen| {
+                asked.push(seen);
+                None
+            },
+            vec![pending("run-2")],
+        );
+        assert_eq!(
+            second,
+            DeviceMarks::new(mark(true), BTreeMap::new(), vec![pending("run-2")])
+        );
+        let third = cache.device(
+            |seen| {
+                asked.push(seen);
+                Some((4, mark(false), BTreeMap::new()))
+            },
+            Vec::new(),
+        );
+        assert_eq!(
+            third,
+            DeviceMarks::new(mark(false), BTreeMap::new(), Vec::new())
+        );
+        assert_eq!(asked, [None, Some(3), Some(3)]);
     }
 
     #[test]
@@ -1393,6 +1575,7 @@ mod tests {
         let outcome = thread.round(
             live("", vec![asking("claude/p/a")]),
             &mut Context {
+                publish: &mut |_, _| {},
                 now: Instant::now(),
                 unix: 2000,
                 focused: false,
@@ -1585,6 +1768,7 @@ mod tests {
         row.attention_fingerprint = "fp-1".into();
         let marks = acknowledged(&row);
         let mut cx = Context {
+            publish: &mut |_, _| {},
             now: Instant::now(),
             unix: 1000,
             focused: false,

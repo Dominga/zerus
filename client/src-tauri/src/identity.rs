@@ -128,6 +128,16 @@ pub fn current(config_identifier: &str) -> Identity {
     Identity::new(config_identifier)
 }
 
+/// Whether the notifier runs: the build posts (`Identity::notifications`)
+/// and the process is an app bundle. Only a bundled app has a notification
+/// center: asking for one in `cargo run` or `tauri dev` raises an exception,
+/// which aborts.
+// Only the macOS live build has a notifier.
+#[cfg_attr(not(all(target_os = "macos", feature = "live")), allow(dead_code))]
+pub fn notifier_runs(posts: bool, bundled: bool) -> bool {
+    posts && bundled
+}
+
 /// `NAME=1` in the environment.
 // Only the Linux and macOS single instance asks it so far.
 #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
@@ -173,6 +183,13 @@ mod tests {
             !Identity::new("dev.zerus.next").notifications(true, true),
             "not even on request"
         );
+    }
+
+    #[test]
+    fn a_process_without_a_bundle_never_runs_the_notifier() {
+        assert!(notifier_runs(true, true));
+        assert!(!notifier_runs(true, false), "cargo run and tauri dev");
+        assert!(!notifier_runs(false, true));
     }
 
     #[test]

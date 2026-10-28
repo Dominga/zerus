@@ -326,7 +326,12 @@ struct AttentionState {
     dirty: bool,
     writing: bool,
     closed: bool,
+    /// Counts the changes, so a reader copies the maps only after one.
+    version: u64,
 }
+
+/// Both attention maps by key, and the version they were copied at.
+pub type MarkMaps = (u64, BTreeMap<String, Mark>, BTreeMap<String, String>);
 
 impl Attention {
     pub fn new(path: PathBuf) -> Self {
@@ -351,14 +356,21 @@ impl Attention {
         }
     }
 
-    /// Both maps by key, once the file has been read (the desk's marks).
-    pub fn marks(&self) -> (BTreeMap<String, Mark>, BTreeMap<String, String>) {
-        self.shared
-            .loaded()
+    /// Both maps by key once the file has been read, with their version;
+    /// None while the version is still `seen`. The maps hold up to 20 000
+    /// entries each and the window's updates take this lock on the main
+    /// thread, so a reader copies them only after they changed.
+    pub fn marks_since(&self, seen: Option<u64>) -> Option<MarkMaps> {
+        let state = self.shared.loaded();
+        if seen == Some(state.version) {
+            return None;
+        }
+        let (marks, replies) = state
             .marks
             .as_ref()
             .map(AttentionMarks::snapshot)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        Some((state.version, marks, replies))
     }
 
     #[cfg(test)]
@@ -381,6 +393,7 @@ impl Attention {
                 .is_some_and(|store| store.update(marks, replies));
             if changed {
                 state.dirty = true;
+                state.version += 1;
                 self.shared.signal.notify_all();
             }
             changed
@@ -1519,13 +1532,27 @@ mod tests {
             BTreeMap::from([(key.clone(), Some("r1".to_owned()))]),
         );
         assert_eq!(calls.swap(0, Ordering::SeqCst), 1, "a read reply");
+        let (version, marks, replies) = attention.marks_since(None).expect("a first copy");
+        assert_eq!(marks, BTreeMap::from([(key.clone(), review.clone())]));
+        assert_eq!(replies, BTreeMap::from([(key.clone(), "r1".to_owned())]));
         assert_eq!(
-            attention.marks(),
-            (
-                BTreeMap::from([(key.clone(), review)]),
-                BTreeMap::from([(key, "r1".to_owned())])
-            )
+            attention.marks_since(Some(version)),
+            None,
+            "unchanged: nothing is copied"
         );
+        attention.update(
+            BTreeMap::from([(key.clone(), Some(review))]),
+            BTreeMap::new(),
+        );
+        assert_eq!(
+            attention.marks_since(Some(version)),
+            None,
+            "an update that changes nothing keeps the version"
+        );
+        attention.update(BTreeMap::from([(key, None)]), BTreeMap::new());
+        let (next, marks, _) = attention.marks_since(Some(version)).expect("changed");
+        assert_ne!(next, version);
+        assert!(marks.is_empty());
         attention.flush();
         let _ = std::fs::remove_file(&path);
     }

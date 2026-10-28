@@ -326,8 +326,12 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     // Attention notifications under the running identity: the
                     // switch bundle, or another build on request; never a replay.
                     let identity = app.state::<identity::Identity>().inner().clone();
-                    let attention = identity
-                        .notifications(identity::flag("ZERUS_CLIENT_NOTIFICATIONS"), replay)
+                    let posts = identity.notifications(identity::flag("ZERUS_CLIENT_NOTIFICATIONS"), replay);
+                    let bundled = platform::macos::bundle_identifier().is_some();
+                    if posts && !bundled {
+                        eprintln!("zerus-client: notifications need an app bundle; this process has none, so none post");
+                    }
+                    let attention = identity::notifier_runs(posts, bundled)
                         .then(|| {
                             let path = dir.join(desk::ATTENTION_FILE);
                             // Qt's edges seed the switch bundle's first start

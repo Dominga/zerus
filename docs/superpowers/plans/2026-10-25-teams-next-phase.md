@@ -1152,6 +1152,62 @@ answered; a denial cannot carry an explanation.
   lead's inbox, the stage chips) needs a team status API through the connector
   and relay first; it is a feature of its own for the owner to plan.
 
+### U45-U52. Team customization for outside users (owner, 2026-10-28)
+
+An outside user moving a pipeline of their own (a tracker, dispatch scripts,
+pre-review gates, a landing queue) onto Zerus teams asked for these. Every one
+is opt-in: a team, role or task that sets none of the new fields behaves
+exactly as today, and the existing tests keep passing unchanged. The owner
+sets them in the catalog, the team settings or the plan; members never do.
+
+- **U45. A model per task, and a task for a role.** A task may name
+  `models` (the models allowed for it) and `role` instead of an assignee. A
+  member may list `models` it can switch between (`[{model, effort}]`;
+  default: only its launch model). A task for a role goes to a free member of
+  that role whose list allows one of the task's models; before the hand-out
+  Zerus switches the member's model and effort through the agent's native
+  settings change (Claude, Codex, DeepSeek where the agent supports it) and
+  hands out only after the change is confirmed. A refused or unconfirmed
+  change leaves the task waiting with its reason, never on the wrong model.
+  Rebalancing keeps a task's model rule.
+- **U46. The context before a task.** A role or member may set
+  `context_before_task: none | compact | clear` (default `none`). Before each
+  hand-out, a pipeline stage's included, Zerus runs the agent's native
+  compact or clear, waits for its confirmation and only then hands out; an
+  agent without the command gets `none` with a note in the feed. The hand-off
+  text then names only the task's own input.
+- **U47. A stage Zerus runs itself.** A pipeline preset (U36) may hold a
+  `command` stage: a command, its expected exit code and a time limit. Zerus
+  runs it in the stage's folder as a detached run (`hgs run`), with no model;
+  the exit code is the verdict, and a return carries the output's tail as the
+  finding to the implementer. Only the owner's catalog defines the command.
+- **U48. Landing and a branch per task.** A preset may end with a `land`
+  stage: a `command` stage run once the earlier stages pass, whose exit codes
+  map to accepted, returned to the implementer (conflict, red) or held for
+  the lead (busy, infrastructure). A team may set `branch_per_task` with a
+  name template (`task/{id}`): each hand-out starts the task's branch in the
+  member's folder from the team's base, so a squash landing never brings back
+  work already landed. Default: one branch per member, as today.
+- **U49. Scale and drain.** `scale {role, agent, model, count}` adds several
+  members at once (the owner, or the lead on the owner's word naming the
+  count); `drain {member}` lets a member finish its current attempt, hands it
+  nothing new, then stops its session and removes it.
+- **U50. One list of what waits for the owner.** A desktop page lists, across
+  all teams, every item that waits for the owner: draft phases, reports or
+  permissions escalated to the owner, the owner's word asked for, finished
+  teams. It only reads what the teams already record. The phone follows with
+  the team status API (U44).
+- **U51. An intake for urgent tasks.** The owner may create an intake key for
+  a team in Zerus state. A process presenting it (a health watcher) may add
+  tasks only as one urgent phase, bounded in size, with the key named in the
+  feed; it gets none of the owner's other rights. Without a key, as today,
+  only the owner and the lead change a plan.
+- **U52. Restart a member that crashed.** A team may set `restart_crashed`
+  (default off). A member session that exits on its own (not stopped by the
+  owner, not a usage limit) is launched again into the same folder at most
+  three times an hour, its open attempt returned as unconfirmed for the lead;
+  the feed records each restart.
+
 ## Phases 37-40 (replanned 2026-10-27)
 
 Phase 36 closed without its own build: its review findings and the build go to

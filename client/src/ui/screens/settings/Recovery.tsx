@@ -13,7 +13,9 @@ import { saveOutcome } from "./recovery-wait";
 // core's recovery_settings keeps it in step in the background, and Save is
 // checked against the policy this page loaded its form from.
 
-interface RecoveryView { status: string; error: string; busy: boolean; can_save: boolean; has_machines: boolean; has_policy: boolean; saves: number }
+/** `known`: this computer's machine card has arrived; until then the
+ *  service reads nothing and the page offers nothing. */
+interface RecoveryView { status: string; error: string; busy: boolean; can_save: boolean; known: boolean; has_machines: boolean; has_policy: boolean; saves: number }
 interface Form { enabled: boolean; rules: Record<string, boolean>; session_limit_mode: string; delays: Record<string, string> }
 
 const RULES = [
@@ -132,7 +134,7 @@ export function RecoverySection() {
       <div class="rec-rules"><For each={RULES}>{rule}</For></div>
       <div class="set-note"><Lines text={HELP} /></div>
       <Show when={view()?.status}>{(status) => <Status kind={statusKind()}>{status()}</Status>}</Show>
-      <Show when={view() && !view()!.has_machines}>
+      <Show when={view()?.known && !view()!.has_machines}>
         <div class="set-actions"><button type="button" class="btn" onClick={() => setPage("machines")}>Open Machines</button></div>
       </Show>
       <Show when={message()}>{(text) => <Status kind={text() === "Saved." ? "ok" : "error"}>{text()}</Status>}</Show>

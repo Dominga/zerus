@@ -3083,6 +3083,7 @@ The status item shows Qt's tile, which AppKit draws from pure geometry (`IconFac
   - `desk::{PACE, DeskInput { Change(Box<Change>), Mode(OpenMode) }, DeskState, OpenSession { computer, key }, Notice { title, text }, Pending { open, notices }, PENDING_NOTICES, MODE_FILE, load_mode(&Path, Option<&str>) -> OpenMode, save_mode, write_private(&Path, &[u8]) -> io::Result<()>, tray_conf() -> Option<String>, menu_bar_change(&Change) -> bool, start(&AppHandle, &Pump, PathBuf, OpenMode), open_session(&AppHandle, &ComputerId, &str), open_running(&AppHandle, &ComputerId, &str), set_mode(&AppHandle, OpenMode), tray_notify(&str, &str), window_notice(&AppHandle, &str, &str), desk_take_pending (command)}`. Task 6 extends `DeskInput` and `run`.
   - `macos_menubar::{TRAY, TILE_PIXELS, MenuAction, MenuBarState, install(&AppHandle, Option<Rgb>), offer(&AppHandle, Face, String, Vec<Entry>, Option<String>), menu_event(&AppHandle, &str), render(&Tile) -> Option<Vec<u8>>}`.
   - Frontend: `bridge.{OpenSession, DeskNotice, DeskPending, onOpenSession, onDeskNotice, deskTakePending}`; `store/desk.{openSession, startDesk}`.
+- As shipped: `Inbox` (with the page generation), `store_mode` on the desk thread and `page_loading` supersede these snippets.
 
 - [ ] **Step 1: Write the failing core tests**
 
@@ -3538,6 +3539,8 @@ Add `tap: Option<Tap>,` to `struct Inner`. In `Pump::push`, call it first:
 ```
 
 - [ ] **Step 7: Write `desk.rs` above its tests**
+
+As shipped: `Inbox` (with the page generation), `store_mode` on the desk thread and `page_loading` supersede these snippets.
 
 ```rust
 //! The menu-bar item's data and actions. The pump taps every change into a

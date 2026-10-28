@@ -2,7 +2,9 @@ import { createMemo, createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
 import { catalog, orderedRows } from "./catalog";
 import { documentVisibility } from "./visibility";
+import { isActive, needsAttention } from "./attention";
 import type { Session, Status } from "../ui/sessions/types";
+export { isActive, needsAttention };
 
 // Interface state of the first screen: page, selection, filters, list layout,
 // menus and toasts. Data lives in store/catalog.ts and store/activity.ts.
@@ -85,13 +87,6 @@ export const selected = createMemo<Session | undefined>(() => {
   const key = selectedKey();
   return key ? catalog.rows[key] : undefined;
 });
-
-/** Needs attention: actionable, unread reply or review later (muted rows are listed, not counted). */
-export const needsAttention = (s: Session) => s.status === "attention" || (s.unread && s.status !== "offline") || !!s.reviewLater;
-
-/** Active = current work OR Scheduled OR Needs attention OR a local draft. */
-export const isActive = (s: Session) =>
-  s.status === "working" || s.status === "background" || s.status === "scheduled" || s.status === "waiting" || needsAttention(s) || s.draft;
 
 export function matchesFilter(s: Session, f: StateFilter): boolean {
   switch (f) {

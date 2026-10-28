@@ -169,6 +169,8 @@ pub const KEYS: &[Key] = &[
         kind: Kind::Text(""),
         seeded: false,
     },
+    // Automatic recovery: the newest shared policy known (recovery_settings).
+    key(crate::recovery_settings::SHARED_POLICY_KEY, Kind::Text("")),
     // Files (DownloadCache), Updates (UpdateController.cpp).
     key("downloads/folder", Kind::Text("")),
     key("downloads/cacheBytes", Kind::Long { default: 0, min: 0 }),

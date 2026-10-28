@@ -53,7 +53,11 @@ impl Computer {
         let mut guard = self.catalog.lock().unwrap_or_else(PoisonError::into_inner);
         let (state, seq) = &mut *guard;
         *seq += 1;
-        let frame = Frame { v: VERSION, seq: *seq, body };
+        let frame = Frame {
+            v: VERSION,
+            seq: *seq,
+            body,
+        };
         for change in state.apply(&self.id, &frame) {
             let _ = sink.send(change);
         }
@@ -84,11 +88,19 @@ fn load(path: &Path) -> std::io::Result<(Vec<Body>, HashMap<String, Log>)> {
     let text = std::fs::read_to_string(path)?;
     let mut script = Vec::new();
     let mut logs: HashMap<String, Log> = HashMap::new();
-    for (number, line) in text.lines().enumerate().filter(|(_, line)| !line.trim().is_empty()) {
+    for (number, line) in text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+    {
         let body = match decode(line) {
             Ok(frame) => frame.body,
             Err(error) => {
-                eprintln!("zerus-client: {}:{}: skipped: {error}", path.display(), number + 1);
+                eprintln!(
+                    "zerus-client: {}:{}: skipped: {error}",
+                    path.display(),
+                    number + 1
+                );
                 continue;
             }
         };
@@ -115,17 +127,31 @@ fn load(path: &Path) -> std::io::Result<(Vec<Body>, HashMap<String, Log>)> {
 
 impl Replay {
     /// Loads every file of the list and starts one playback thread per computer.
-    pub fn start(list: &OsStr, interval: Duration, sink: Sender<Change>) -> std::io::Result<Replay> {
+    pub fn start(
+        list: &OsStr,
+        interval: Duration,
+        sink: Sender<Change>,
+    ) -> std::io::Result<Replay> {
         let mut computers = Vec::new();
         for (index, entry) in std::env::split_paths(list).enumerate() {
             let text = entry.to_string_lossy().into_owned();
             let (alias, path) = match text.split_once('=') {
                 Some((alias, path)) if index > 0 => (alias.to_owned(), PathBuf::from(path)),
                 _ if index == 0 => (String::new(), entry.clone()),
-                _ => (entry.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), entry.clone()),
+                _ => (
+                    entry
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    entry.clone(),
+                ),
             };
             let (script, logs) = load(&path)?;
-            let computer = Arc::new(Computer { id: ComputerId(alias), catalog: Mutex::new((CatalogState::default(), 0)), logs });
+            let computer = Arc::new(Computer {
+                id: ComputerId(alias),
+                catalog: Mutex::new((CatalogState::default(), 0)),
+                logs,
+            });
             computers.push(computer.clone());
             let sink = sink.clone();
             std::thread::Builder::new()
@@ -141,7 +167,9 @@ impl Replay {
 
     /// Serves a session's Activity as a subscription would.
     pub fn follow(&self, computer: &str, key: &str, after: Option<i64>, tail: u32) {
-        let Some(c) = self.computer(computer) else { return };
+        let Some(c) = self.computer(computer) else {
+            return;
+        };
         c.set_followed(key, true);
         let empty = Log::default();
         let log = c.logs.get(key).unwrap_or(&empty);
@@ -150,7 +178,12 @@ impl Replay {
                 let tail = (tail as usize).min(TAIL);
                 log.events[log.events.len().saturating_sub(tail)..].to_vec()
             }
-            Some(after) => log.events.iter().filter(|e| seq_of(e) > after).cloned().collect(),
+            Some(after) => log
+                .events
+                .iter()
+                .filter(|e| seq_of(e) > after)
+                .cloned()
+                .collect(),
         };
         let mut reads: Vec<Vec<Value>> = events.chunks(READ).map(<[Value]>::to_vec).collect();
         if reads.is_empty() {
@@ -158,10 +191,26 @@ impl Replay {
         }
         for read in reads {
             let cursor = read.last().map(seq_of).or(after).unwrap_or(0);
-            c.apply(Body::Events(Events { topic: topic::ACTIVITY.into(), key: key.into(), events: read, cursor }), &self.sink);
+            c.apply(
+                Body::Events(Events {
+                    topic: topic::ACTIVITY.into(),
+                    key: key.into(),
+                    events: read,
+                    cursor,
+                }),
+                &self.sink,
+            );
         }
         if let Some((value, rev)) = &log.state {
-            c.apply(Body::State(State { topic: topic::ACTIVITY.into(), key: key.into(), value: value.clone(), rev: *rev }), &self.sink);
+            c.apply(
+                Body::State(State {
+                    topic: topic::ACTIVITY.into(),
+                    key: key.into(),
+                    value: value.clone(),
+                    rev: *rev,
+                }),
+                &self.sink,
+            );
         }
     }
 }
@@ -175,7 +224,9 @@ impl Replay {
 }
 
 fn play(computer: &Computer, script: Vec<Body>, interval: Duration, sink: &Sender<Change>) {
-    let first_pause = script.iter().position(|body| matches!(body, Body::Heartbeat(_)));
+    let first_pause = script
+        .iter()
+        .position(|body| matches!(body, Body::Heartbeat(_)));
     for body in &script {
         if matches!(body, Body::Heartbeat(_)) {
             std::thread::sleep(interval);
@@ -228,20 +279,35 @@ mod tests {
         }
         assert!(replaced > 20, "snapshot rows: {replaced}");
 
-        let (key, log) = replay.computers[0].logs.iter().max_by_key(|(_, log)| log.events.len()).unwrap();
+        let (key, log) = replay.computers[0]
+            .logs
+            .iter()
+            .max_by_key(|(_, log)| log.events.len())
+            .unwrap();
         assert!(log.events.len() >= 1000);
         let newest = seq_of(log.events.last().unwrap());
         replay.follow("", key, None, 100);
         let got = activity(&rx);
-        let ActivityUpdate::Events { events, cursor } = &got[0].1 else { panic!("events first") };
+        let ActivityUpdate::Events { events, cursor } = &got[0].1 else {
+            panic!("events first")
+        };
         assert_eq!(events.len(), 100);
         assert_eq!(*cursor, newest);
-        assert!(matches!(got.last().unwrap().1, ActivityUpdate::State { .. }));
+        assert!(matches!(
+            got.last().unwrap().1,
+            ActivityUpdate::State { .. }
+        ));
 
         // An older read: everything after `after`, in reads of 200.
         let after = seq_of(&log.events[log.events.len() - 450]);
         replay.follow("", key, Some(after), 100);
-        let reads: Vec<usize> = activity(&rx).iter().filter_map(|(_, u)| match u { ActivityUpdate::Events { events, .. } => Some(events.len()), _ => None }).collect();
+        let reads: Vec<usize> = activity(&rx)
+            .iter()
+            .filter_map(|(_, u)| match u {
+                ActivityUpdate::Events { events, .. } => Some(events.len()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(reads, [200, 200, 49]);
     }
 }

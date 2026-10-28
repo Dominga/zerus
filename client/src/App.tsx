@@ -1,6 +1,7 @@
 import { For, Match, Show, Switch, createEffect, createMemo, onCleanup, onMount } from "solid-js";
 import { Rail } from "./ui/components/Rail";
 import { MenuLayer, Toasts } from "./ui/components/Overlays";
+import { ActionDialogs, ActionNotices } from "./ui/sessions/ActionDialogs";
 import { SessionList } from "./ui/sessions/SessionList";
 import { SessionDetail } from "./ui/sessions/SessionDetail";
 import { Icon } from "./ui/lib/icons";
@@ -94,6 +95,8 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <StatusBar mode={props.mode} />
       <MenuLayer />
       <Toasts />
+      <ActionDialogs />
+      <ActionNotices />
       <PerfHost />
     </div>
   );

@@ -7,12 +7,14 @@
 //! missing ones default, so a newer or older `hgs` never fails a row.
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 
 /// The longest `summary`, in characters; longer text ends with an ellipsis.
 pub const SUMMARY_CHARS: usize = 240;
 
 /// One session card.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ViewRow {
     /// The session's full name, its identity in `hgs` commands.
     pub name: String,
@@ -55,6 +57,25 @@ pub struct ViewRow {
     pub turn_started: Option<f64>,
     pub run_id: Option<String>,
     pub conversation_id: Option<String>,
+    /// The raw `state` (`running`, `paused`, `stopped`, `archived`, ...);
+    /// `running` when the row lists none (a live session).
+    pub state: String,
+    pub tracked: bool,
+    pub resumable: bool,
+    pub activity: String,
+    pub process_state: String,
+    pub archive_id: Option<String>,
+    /// The latest reply and the attention it raised, for marking them read.
+    pub reply_id: Option<String>,
+    pub attention_signature: Option<String>,
+    /// The row has the key `attention_signature`: its computer shares read marks.
+    pub shared_read: bool,
+    /// The read mark of this conversation, None when it belongs to another one.
+    pub read_reply_id: Option<String>,
+    pub read_attention_signature: Option<String>,
+    /// The operations the computer reports as allowed, None when it reports none.
+    pub allowed_actions: Option<Vec<String>>,
+    pub action_reasons: BTreeMap<String, String>,
 }
 
 fn text<'a>(row: &'a Value, field: &str) -> &'a str {
@@ -633,6 +654,37 @@ pub fn row(value: &Value) -> ViewRow {
         turn_started: session.turn_started(),
         run_id: some(session.run_id),
         conversation_id: some(session.conversation_id),
+        // A live row lists no state; Qt reads it as running (`HgsClient.cpp`).
+        state: session.state.to_owned(),
+        tracked: session.tracked,
+        resumable: value
+            .get("resumable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        activity: session.activity.to_owned(),
+        process_state: session.process_state.to_owned(),
+        archive_id: some(text(value, "archive_id")),
+        reply_id: some(text(value, "reply_id")),
+        attention_signature: some(text(value, "attention_signature")),
+        shared_read: session.shared_read(),
+        read_reply_id: some(session.read_mark("reply_id")),
+        read_attention_signature: some(session.read_mark("attention_signature")),
+        allowed_actions: value
+            .get("allowed_actions")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            }),
+        action_reasons: object(value, "action_reasons")
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(key, reason)| Some((key.clone(), reason.as_str()?.to_owned())))
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -692,9 +744,12 @@ mod tests {
             ViewRow {
                 status: "ready".into(),
                 caption: "Not tracked".into(),
+                // Qt's default for a row without a state (`HgsClient.cpp`).
+                state: "running".into(),
                 ..ViewRow::default()
             }
         );
+        assert_eq!(row(&json!({"state": "paused"})).state, "paused");
         let not_object = row(&json!([1, 2]));
         assert_eq!(not_object.status, "ready");
     }
@@ -921,5 +976,50 @@ mod tests {
             assert!(value.get(field).is_some(), "{field}");
         }
         assert_eq!(value["updated_at"], 2.5);
+    }
+
+    #[test]
+    fn action_fields_follow_the_catalog_row() {
+        let view = row(
+            &json!({"name": "claude/p/t", "conversation_id": "conv-1", "state": "paused",
+            "resumable": true, "archive_id": "a1", "allowed_actions": ["rename"],
+            "action_reasons": {"pause": "already paused", "x": 3},
+            "attention_signature": "sig", "reply_id": "rep-1",
+            "read": {"conversation_id": "conv-1", "reply_id": "rep-0"}}),
+        );
+        assert_eq!(view.allowed_actions, Some(vec!["rename".to_owned()]));
+        assert!(view.shared_read);
+        assert_eq!(view.read_reply_id.as_deref(), Some("rep-0"));
+        assert_eq!(view.read_attention_signature, None);
+        assert_eq!(view.state, "paused");
+        assert!(view.resumable);
+        assert_eq!(view.archive_id.as_deref(), Some("a1"));
+        assert_eq!(view.reply_id.as_deref(), Some("rep-1"));
+        assert_eq!(view.action_reasons.len(), 1);
+        let other = row(
+            &json!({"conversation_id": "conv-1", "attention_signature": "sig",
+            "read": {"conversation_id": "conv-2", "reply_id": "rep-0"}}),
+        );
+        assert_eq!(other.read_reply_id, None);
+        assert_eq!(row(&json!({"name": "a/b/c"})).allowed_actions, None);
+        assert!(!row(&json!({"name": "a/b/c"})).shared_read);
+    }
+
+    /// The rows the frontend's action tests build their menus from
+    /// (`tests/fixtures/action-rows.json`) are what this projection gives.
+    #[test]
+    fn the_shared_action_rows_are_the_projection() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/action-rows.json")).unwrap();
+        let cases = fixture["rows"].as_array().unwrap();
+        assert!(cases.len() >= 4);
+        for case in cases {
+            assert_eq!(
+                serde_json::to_value(row(&case["hgs"])).unwrap(),
+                case["view"],
+                "{}",
+                case["case"]
+            );
+        }
     }
 }

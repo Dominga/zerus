@@ -7,6 +7,7 @@ import {
   emphasis, childStatus, gitTooltip, paletteIndex, folderOf,
 } from "./SessionCard";
 import { catalog } from "../../store/catalog";
+import { actionEntries } from "./ActionDialogs";
 import {
   selectedKey, setSelectedKey, collapsed, setCollapsed, setExpandedChildren, expandedChildren,
   setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
@@ -96,6 +97,7 @@ function copy(text: string, what: string) {
 
 function sessionMenu(s: Session): MenuEntry[] {
   const live = s.status !== "paused" && s.status !== "ended";
+  const act = actionEntries(s, undefined, { context: true });
   return [
     { label: compactRows[s.key] ? "Expand session row" : "Compact session row", icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setRowCompact(s.key, !compactRows[s.key]) },
     { label: "Expand all collapsed", icon: "expand-row", disabled: !Object.values(compactRows).some(Boolean), action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
@@ -106,20 +108,20 @@ function sessionMenu(s: Session): MenuEntry[] {
     { label: "Copy connect command", icon: "copy", disabled: LATER },
     { separator: true },
     { label: s.muted ? "Unmute" : "Mute", icon: s.muted ? "bell" : "bell-off", disabled: LATER },
-    s.unread || s.status === "attention" ? { label: "Mark as read", icon: "check-check", disabled: LATER } : { label: "Mark needs attention", icon: "bell", disabled: LATER },
+    act.markRead,
     { separator: true },
-    { label: live ? "Pause session" : "Resume session", icon: live ? "pause" : "play", disabled: LATER },
+    act.change,
     { label: live ? "Clear session…" : "Start fresh…", icon: "clear", disabled: LATER },
-    { label: "Rename…", icon: "pencil", kbd: "F2", disabled: LATER },
+    act.rename,
     { label: "Fork session…", icon: "git-fork", disabled: LATER },
-    { label: "Move to archive", icon: "archive", disabled: LATER },
+    ...(act.archive ? [act.archive] : []),
     { label: "Move to project…", icon: "folder", disabled: LATER },
     { separator: true },
     { label: "Copy session name", icon: "copy", action: () => copy(s.name, "The session name is on the clipboard") },
     { label: "Copy session reference", icon: "link", disabled: LATER },
     { label: "Copy folder path", icon: "copy", disabled: LATER },
     { separator: true },
-    live ? { label: "Terminate session…", icon: "circle-stop", danger: true, disabled: LATER } : { label: "Forget saved session…", icon: "trash", danger: true, disabled: LATER },
+    act.end,
   ];
 }
 

@@ -57,6 +57,128 @@ env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=
   sh -c 'RUSTUP_TOOLCHAIN=1.99.1 ZERUS_CLIENT_REPLAY=$PWD/fixtures/replay.ndjson npx tauri dev'
 ```
 
+## Actions
+
+The session menus, the header and the Rename and Terminate dialogs run guarded
+actions through the `hgs` CLI (`core/src/actions.rs`, `src-tauri/src/actions.rs`),
+with Qt's enablement, confirmations and texts (`actions-ui.ts`). A peer's call
+is prefixed with `@alias` and uses the longer timeout. Every call is made with
+the child's own environment: the agent attribution (`HGS_SESSION`,
+`HGS_RUN_ID`) is never passed on.
+
+| Action | Arguments (`NAME` is the session name) | Standard input | Timeout here, peer |
+| --- | --- | --- | --- |
+| Stop (interrupt) | `interrupt NAME --json` | JSON: `request_id`, `expected_run_id`, `expected_conversation_id`, `expected_turn_started` | 15 s, 45 s |
+| Mark as read | `read NAME --json` | JSON: `run_id`, `conversation_id`, `reply_id`, `attention_signature` | 15 s, 35 s |
+| Pause | `pause NAME` | none | 45 s, 45 s |
+| Resume | `resume NAME -d` | none | 30 s, 30 s |
+| Rename | `rename NAME NEW [--archive ID]` | none | 5 s, 15 s |
+| Move to archive | `archive NAME` | none | 30 s, 45 s |
+| Terminate a tracked Codex, Claude or Kimi session | `terminate NAME --expected-run-id RUN` | none | 45 s, 60 s |
+| Terminate any other live session | `kill NAME` | none | 5 s, 15 s |
+
+Outcome rules:
+
+- A call is made once and never repeated. A timeout, a failed hand-over or an
+  abnormal end is an unknown outcome, shown as a failure and never replayed.
+  Stop words them "Request timed out. Check Terminal before retrying." and
+  "Transfer failed. Check Terminal before retrying."; the other actions show
+  "timed out" or the trimmed standard error `hgs` printed.
+- Stop succeeds only when the receipt echoes the request id, session name, run
+  id and conversation id of the call (status `submitted`); anything else is
+  "Invalid acknowledgement. Check Terminal before retrying." Its notices are
+  Qt's: "Interrupt sent to NAME (COMPUTER). Waiting for the agent to stop…",
+  "Stop NAME (COMPUTER): the turn already ended or is waiting for input. No
+  action needed." when `hgs` answers "This turn is no longer working", and
+  otherwise a sticky "Stop NAME (COMPUTER) failed: …" with "Open Terminal to
+  check the agent before trying again."
+- Pause, Resume, Rename and kill succeed on exit 0. Move to archive and
+  terminate also read the single worktree report line on standard error: a
+  removed worktree gives an information notice, a kept or unconfirmed one a
+  sticky warning with its reason. Otherwise a failure shows the trimmed
+  standard error.
+- An entry acts on the row as it was when its menu, button or dialog was
+  built. If the listed row has another run id by then (or, for a row without
+  one, is gone), nothing runs and the notice says "This session changed. Open
+  its actions again." Stop, Mark as read and terminate need the row's run id
+  (Stop and Mark as read also its conversation id); the other actions name
+  the session only.
+- One write per session at a time. While it runs the session's entries show
+  "Updating…"; another write for that session is a silent no-op (the Rust side
+  answers `busy`). Stop and read marks each run in their own lane: Stop waits
+  only for its own interrupt, as in Qt, and a read mark never holds up a write.
+  Mark as read stays available while a write runs.
+- Terminate stops a tracked Codex, Claude or Kimi session into Archive and
+  kills any other live session; the confirmation says which. After the
+  confirmation (and after a menu's Pause or Resume) the session must still be
+  running, or still not running, as it was; otherwise nothing runs and the
+  notice says "The session state changed. Open its actions again."
+- Rename edits only the tag after the agent and project, with Qt's tag rule
+  ("Enter a session name.", "Remove spaces at the beginning or end.", "Names
+  cannot contain /, : or . or control characters.") and "This name is already
+  in use on COMPUTER." for a live session of that name on the same computer.
+- Stop is shown while the selected session's turn works (`working`, `tool` or
+  `compacting`) and enabled when its computer is online and the details say
+  `interrupt_supported`; it sends the details' run, conversation and
+  `turn_started`. Hosts never list `interrupt` among the allowed actions.
+- Details (allowed actions and their reasons, `auth_required`, Stop's fields)
+  come from the followed session's Activity `state` value when it names the
+  row's run and conversation. Only when the subscription answered without one
+  does the client run one read-only `inspect`, refetched when the run,
+  conversation or state changes, and never while the computer is offline.
+- Mark as read sends the reply and attention the menu showed; if a newer reply
+  or question arrived meanwhile, nothing runs and the notice says "A new reply
+  or question arrived. Open the menu again to mark it as read." The row shows
+  read once the host's snapshot reports it. The mark is saved before the call
+  in `read-marks.json` in the app data directory (`app_data_dir`, e.g.
+  `~/.local/share/<bundle id>/` on Linux; a replay uses
+  `read-marks-replay.json`) so a restart keeps it. It is dropped once a row
+  shows the host settled it, or when a complete snapshot of its computer no
+  longer lists the session. While a mark is pending and a batch (an upsert or
+  a snapshot) shows its row unread again for the same reply and attention
+  signature, the call is retried quietly, at most once per 5 s per session
+  (a person's Mark as read counts too). A host without shared read state keeps
+  the entry disabled.
+
+Forgetting, restoring, attention marks and sending arrive in later phases; their
+entries are disabled with a reason.
+
+### Actions smoke run
+
+`ZERUS_CLIENT_QUERY=actions-smoke=1` (hook in `src/ui/PerfHost.tsx`, beside the
+perf hooks) checks the actions end to end without the real `hgs`. It starts only
+when the native side reports replay mode (`ZERUS_CLIENT_REPLAY`), an explicit
+`ZERUS_CLIENT_HGS` and `ZERUS_CLIENT_PERF` (any value but `auto`; `exit_app` is
+allowed only in a measurement run); otherwise it logs why and does nothing. In
+replay mode `run_action` and `inspect_session` refuse unless
+`ZERUS_CLIENT_HGS` is set ("Actions in replay mode need ZERUS_CLIENT_HGS."), so
+a replay never drives the real CLI.
+
+Put `core/tests/support/fake_hgs_actions.py` as `hgs` in a scratch folder with a
+`config.json` beside it containing `{"reply":{"exit":0}}` (exit 0 without
+output is a success for the write actions; `echo_interrupt` parses standard
+input and fails on writes that have none). The fake logs each call to
+`log.ndjson` beside it. Run it only with the headless environment:
+
+```sh
+S=$(mktemp -d); cp core/tests/support/fake_hgs_actions.py $S/hgs
+echo '{"reply":{"exit":0}}' > $S/config.json
+env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=1 \
+  WEBKIT_DISABLE_DMABUF_RENDERER=1 ZERUS_CLIENT_REPLAY=$PWD/fixtures/replay.ndjson \
+  ZERUS_CLIENT_HGS=$S/hgs ZERUS_CLIENT_QUERY=actions-smoke=1 ZERUS_CLIENT_PERF=smoke \
+  xvfb-run -a -s "-screen 0 1440x900x24" src-tauri/target/release/zerus-client
+cat $S/log.ndjson
+```
+
+The hook selects `claude/sample-project/review` (its details come from the
+replay's Activity state value or, as here, one `inspect` of the fake), runs
+pause, resume, rename (to `claude/sample-project/review-renamed`) and archive,
+then the end call the Terminate dialog picks for the row through the dialog's
+confirmation (`kill`, since the replay row is not tracked), then the other end
+call (`terminate`), once each through the store the menus use. It logs each
+outcome to stderr (`zerus-client perf: actions-smoke ...`) and exits 0, or 1
+when an outcome failed.
+
 ## Measurement run
 
 `ZERUS_CLIENT_PERF=auto` runs the Diagnostics scenarios unattended (`src/perf`),

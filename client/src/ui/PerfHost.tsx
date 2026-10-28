@@ -4,6 +4,9 @@ import { listRows } from "./sessions/model";
 import { orderedRows } from "../store/catalog";
 import { selectedKey, setSelectedKey } from "../store/ui";
 import { activity } from "../store/session";
+import { end, perform } from "../store/actions";
+import { snapshotOf, terminateCopy, type ActionRow } from "./sessions/actions-ui";
+import type { Action, Outcome } from "../types";
 import { inTauri, metrics, pumpStats } from "../bridge";
 import { restoreSettings, setSetting } from "../store/settings";
 import type { ScenarioResult } from "../perf/scenarios";
@@ -32,6 +35,7 @@ interface PerfConfig {
   representative?: boolean;
   preference?: string;
   display?: string | null;
+  actions_smoke?: boolean;
 }
 
 /** Resolves once `ready` holds; fails after `ms`. Timers, not frames: rAF stops while a window is hidden. */
@@ -268,6 +272,53 @@ async function autoRun(config: PerfConfig) {
   }
 }
 
+// `?actions-smoke=1` (ZERUS_CLIENT_QUERY=actions-smoke=1, with ZERUS_CLIENT_PERF
+// set to any value but auto so that exit_app is allowed) is the end-to-end check
+// of the guarded actions: with ZERUS_CLIENT_REPLAY supplying the catalog and
+// ZERUS_CLIENT_HGS a fake hgs, it selects the replay session (its details come
+// from the Activity state value, or one inspect), runs pause, resume, rename,
+// archive, the end call the Terminate dialog picks for it through the
+// dialog's confirmation (`end`), then the other end call (terminate or kill)
+// once each, and exits 0 (1 when an outcome failed).
+const SMOKE_SESSION = "claude/sample-project/review";
+const SMOKE_RENAMED = "claude/sample-project/review-renamed";
+
+async function actionsSmoke(allowed: boolean) {
+  const exit = (code: number) => invoke("exit_app", { code }).catch(() => {});
+  if (!allowed) {
+    log("actions-smoke not started: it needs ZERUS_CLIENT_REPLAY, ZERUS_CLIENT_HGS and ZERUS_CLIENT_PERF");
+    return;
+  }
+  try {
+    await until(() => orderedRows().some((s) => s.name === SMOKE_SESSION && s.runId), 30_000, "the replay session did not appear");
+    const row = (): ActionRow => {
+      const s = orderedRows().find((r) => r.name === SMOKE_SESSION);
+      if (!s) throw new Error("the replay session is gone");
+      return snapshotOf(s);
+    };
+    setSelectedKey(row().key);
+    const chosen = terminateCopy(row()).action;
+    log(`actions-smoke end call the Terminate dialog picks: ${chosen}`);
+    const steps: [string, () => Promise<Outcome>][] = [
+      ...([{ kind: "pause" }, { kind: "resume" }, { kind: "rename", new_name: SMOKE_RENAMED, archive_id: null }, { kind: "archive" }] as Action[])
+        .map((action): [string, () => Promise<Outcome>] => [action.kind, () => perform(row(), action)]),
+      [chosen, () => end(row(), chosen)],
+      ...(["terminate", "kill"] as const).filter((kind) => kind !== chosen)
+        .map((kind): [string, () => Promise<Outcome>] => [kind, () => perform(row(), { kind })]),
+    ];
+    let bad = 0;
+    for (const [kind, step] of steps) {
+      const out = await step();
+      log(`actions-smoke ${kind}: ${out.outcome}${out.outcome === "failed" ? ` (${out.detail})` : ""}`);
+      if (out.outcome === "failed") bad++;
+    }
+    await exit(bad ? 1 : 0);
+  } catch (error) {
+    log(`actions-smoke failed: ${String(error)}`);
+    await exit(1);
+  }
+}
+
 const onScenarioStart = (id: string, index: number, total: number) => log(`scenario ${index + 1}/${total} ${id} start`);
 const onScenarioEnd = (id: string, index: number, total: number, ms: number, result: ScenarioResult) => {
   finished.push(result);
@@ -290,6 +341,7 @@ export function PerfHost() {
       const native = await invoke<PerfConfig>("perf_config").catch(() => undefined);
       if (native) setConfig({ ...native, mode: native.mode ?? urlMode });
     }
+    if (new URLSearchParams(location.search).get("actions-smoke") === "1" && inTauri()) void actionsSmoke(!!config().actions_smoke);
     if (config().mode === "auto") {
       setOpen(true);
       void autoRun(config());

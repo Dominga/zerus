@@ -41,7 +41,10 @@ mod live {
     }
 
     fn replay_interval() -> Duration {
-        let ms = std::env::var("ZERUS_CLIENT_REPLAY_INTERVAL_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(900);
+        let ms = std::env::var("ZERUS_CLIENT_REPLAY_INTERVAL_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(900);
         Duration::from_millis(ms)
     }
 
@@ -52,23 +55,41 @@ mod live {
             let mut source = self.source.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(running) = source.as_ref() {
                 self.pump.resend();
-                return Ok(match running { Source::Fleet(_) => "live", Source::Replay(_) => "replay" }.into());
+                return Ok(match running {
+                    Source::Fleet(_) => "live",
+                    Source::Replay(_) => "replay",
+                }
+                .into());
             }
             let (sink, changes) = mpsc::channel();
-            let (started, mode) = match std::env::var_os("ZERUS_CLIENT_REPLAY").filter(|list| !list.is_empty()) {
-                Some(list) => {
-                    let replay = Replay::start(&list, replay_interval(), sink).map_err(|error| format!("replay: {error}"))?;
-                    (Source::Replay(replay), "replay")
-                }
-                None => (Source::Fleet(Fleet::start(default_hgs(), sink)), "live"),
-            };
+            let (started, mode) =
+                match std::env::var_os("ZERUS_CLIENT_REPLAY").filter(|list| !list.is_empty()) {
+                    Some(list) => {
+                        let replay = Replay::start(&list, replay_interval(), sink)
+                            .map_err(|error| format!("replay: {error}"))?;
+                        (Source::Replay(replay), "replay")
+                    }
+                    None => (Source::Fleet(Fleet::start(default_hgs(), sink)), "live"),
+                };
             self.pump.drain(changes);
             *source = Some(started);
             Ok(mode.into())
         }
 
-        pub fn follow(&self, computer: String, key: String, session: SessionRef, after: Option<i64>, tail: u32) -> Result<(), String> {
-            match self.source.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+        pub fn follow(
+            &self,
+            computer: String,
+            key: String,
+            session: SessionRef,
+            after: Option<i64>,
+            tail: u32,
+        ) -> Result<(), String> {
+            match self
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
                 Some(Source::Fleet(fleet)) => {
                     let computer = ComputerId(computer);
                     // Following the same session again is a no-op in the core, so
@@ -76,7 +97,9 @@ mod live {
                     if after.is_some() {
                         fleet.unfollow(&computer, &key);
                     }
-                    fleet.follow(&computer, &key, session, after, tail).map_err(|error| error.to_string())?
+                    fleet
+                        .follow(&computer, &key, session, after, tail)
+                        .map_err(|error| error.to_string())?
                 }
                 Some(Source::Replay(replay)) => replay.follow(&computer, &key, after, tail),
                 None => return Err("not started".into()),
@@ -85,7 +108,12 @@ mod live {
         }
 
         pub fn unfollow(&self, computer: String, key: String) -> Result<(), String> {
-            match self.source.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+            match self
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
                 // Not followed (it ended meanwhile) is not an error.
                 Some(Source::Fleet(fleet)) => {
                     fleet.unfollow(&ComputerId(computer), &key);
@@ -103,8 +131,12 @@ const NO_LIVE: &str = "this build has no live data source (cargo feature `live` 
 
 /// Runs blocking work on the blocking pool, off the main thread.
 #[cfg(feature = "live")]
-async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
-    tauri::async_runtime::spawn_blocking(work).await.map_err(|error| error.to_string())?
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 /// Starts the data source; "live" (hgs watch) or "replay" (a fixture).
@@ -128,9 +160,20 @@ pub async fn start(state: State<'_, AppState>) -> Result<String, String> {
 /// beyond what the evaluated-script path should carry.
 #[cfg(feature = "live")]
 #[tauri::command]
-pub async fn next_batch(state: State<'_, AppState>) -> Result<tauri::ipc::Response, String> {
+pub async fn next_batch(
+    state: State<'_, AppState>,
+    actions: State<'_, crate::actions::Actions>,
+) -> Result<tauri::ipc::Response, String> {
     let live = Arc::clone(&state.live);
-    let bytes = blocking(move || serde_json::to_vec(&live.pump.take(crate::pump::PARK)).map_err(|error| error.to_string())).await?;
+    let actions = actions.inner().clone();
+    let bytes = blocking(move || {
+        let batch = live.pump.take(crate::pump::PARK);
+        // The host's rows settle pending read marks, whether they arrive as
+        // single upserts or inside a computer's snapshot.
+        actions.observe(&batch);
+        serde_json::to_vec(&batch).map_err(|error| error.to_string())
+    })
+    .await?;
     Ok(tauri::ipc::Response::new(bytes))
 }
 
@@ -157,19 +200,36 @@ pub async fn follow(
     #[cfg(feature = "live")]
     {
         let live = Arc::clone(&state.live);
-        let session = zerus_watch_protocol::SessionRef { name, run_id, conversation_id };
+        let session = zerus_watch_protocol::SessionRef {
+            name,
+            run_id,
+            conversation_id,
+        };
         let tail = tail.unwrap_or(zerus_watch_protocol::ACTIVITY_TAIL as u32);
         blocking(move || live.follow(computer, key, session, after, tail)).await
     }
     #[cfg(not(feature = "live"))]
     {
-        let _ = (&state, computer, key, name, run_id, conversation_id, after, tail);
+        let _ = (
+            &state,
+            computer,
+            key,
+            name,
+            run_id,
+            conversation_id,
+            after,
+            tail,
+        );
         Err(NO_LIVE.into())
     }
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn unfollow(state: State<'_, AppState>, computer: String, key: String) -> Result<(), String> {
+pub async fn unfollow(
+    state: State<'_, AppState>,
+    computer: String,
+    key: String,
+) -> Result<(), String> {
     #[cfg(feature = "live")]
     {
         let live = Arc::clone(&state.live);
@@ -200,7 +260,19 @@ pub fn perf_config() -> Value {
         "preference": if crate::keep_default_preference() { "default" } else { "display-rate" },
         // `:N` is an X server (Xvfb); `wayland-N` is a desktop session.
         "display": crate::display::display_name(),
+        // The actions smoke runs only on a replay with an explicit fake hgs.
+        "actions_smoke": actions_smoke_allowed(),
     })
+}
+
+#[cfg(feature = "live")]
+fn actions_smoke_allowed() -> bool {
+    crate::actions::smoke_env_allowed()
+}
+
+#[cfg(not(feature = "live"))]
+fn actions_smoke_allowed() -> bool {
+    false
 }
 
 fn perf_mode() -> bool {
@@ -215,12 +287,17 @@ pub fn save_perf(path: String, json: String) -> Result<String, String> {
         return Err("not a measurement run (ZERUS_CLIENT_PERF is not set)".into());
     }
     let path = match path.is_empty() {
-        true => std::env::var("ZERUS_CLIENT_PERF_OUT").map_err(|_| "ZERUS_CLIENT_PERF_OUT is not set".to_owned())?,
+        true => std::env::var("ZERUS_CLIENT_PERF_OUT")
+            .map_err(|_| "ZERUS_CLIENT_PERF_OUT is not set".to_owned())?,
         false => path,
     };
     let path = std::path::PathBuf::from(path);
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("{}: {error}", parent.display()))?;
     }
     std::fs::write(&path, json).map_err(|error| format!("{}: {error}", path.display()))?;
     Ok(path.display().to_string())
@@ -298,7 +375,10 @@ pub fn perf_away(
 pub fn metrics(window_ms: Option<u64>) -> Value {
     let pid = std::process::id();
     match window_ms {
-        Some(ms) => crate::metrics::process_tree_metrics_over(pid, std::time::Duration::from_millis(ms.clamp(100, 60_000))),
+        Some(ms) => crate::metrics::process_tree_metrics_over(
+            pid,
+            std::time::Duration::from_millis(ms.clamp(100, 60_000)),
+        ),
         None => crate::metrics::process_tree_metrics(pid),
     }
 }

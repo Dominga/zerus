@@ -123,6 +123,20 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow): Sessio
     turnStarted: typeof v.turn_started === "number" && v.turn_started > 0 ? v.turn_started : undefined,
     runId: optional(v.run_id),
     conversationId: optional(v.conversation_id),
+    cmd: text(v.agent),
+    // A row without a state is running, as Qt's HgsClient reads it.
+    state: typeof v.state === "string" ? v.state : "running",
+    tracked: !!v.tracked,
+    resumable: !!v.resumable,
+    activity: text(v.activity),
+    processState: text(v.process_state),
+    archiveId: optional(v.archive_id),
+    replyId: optional(v.reply_id),
+    attentionSignature: optional(v.attention_signature),
+    sharedRead: !!v.shared_read,
+    allowed: Array.isArray(v.allowed_actions) ? v.allowed_actions.join(" ") : undefined,
+    archiveReason: optional(v.action_reasons?.archive),
+    terminateReason: optional(v.action_reasons?.terminate),
   };
 }
 

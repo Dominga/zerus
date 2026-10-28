@@ -8,13 +8,17 @@
 //! and the "Event stream" section of `docs/reference.md`.
 
 pub mod actions;
+pub mod attachments;
 pub mod batch;
+pub mod cache;
 pub mod details;
+pub mod drafts;
 pub mod fleet;
 pub mod legacy;
 pub mod machine;
 pub mod marks;
 pub mod organization;
+pub mod process_view;
 pub mod processes;
 #[cfg(unix)]
 mod pty;
@@ -22,6 +26,7 @@ pub mod readmarks;
 pub mod reads;
 pub mod readsync;
 pub mod run;
+pub mod send;
 pub mod shell;
 pub mod state;
 pub mod stream;

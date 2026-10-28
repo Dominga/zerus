@@ -5,7 +5,9 @@
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use zerus_client_core::reads::{self, Read, ReadError, ANALYTICS_MARKER, READ_LIMIT};
+use zerus_client_core::reads::{
+    self, AttachmentRef, Read, ReadError, ANALYTICS_MARKER, ATTACHMENT_LIMIT, READ_LIMIT,
+};
 use zerus_client_core::ComputerId;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -196,4 +198,59 @@ fn live_reads() {
             started.elapsed()
         );
     }
+}
+
+fn attachment_ref() -> AttachmentRef {
+    AttachmentRef {
+        name: "claude/sample-project/review".into(),
+        request_id: "req-1".into(),
+        index: 1,
+        conversation_id: "conv-1".into(),
+        archive_id: None,
+        agent_id: None,
+    }
+}
+
+#[test]
+fn an_attachment_is_read_and_cached_once_for_preview_and_open() {
+    let fake = Fake::new(json!({
+        "@studio attachment claude/sample-project/review --request req-1 --index 1 --conversation conv-1": {
+            "stdout": r#"{"request_id":"req-1","index":1,"name":"notes: v1.txt","mime":"text/plain","bytes":5,"data_base64":"aGVsbG8="}"#
+        },
+    }));
+    let cache = fake.dir.join("cache");
+    let studio = ComputerId::from("studio");
+    let cached = reads::fetch_attachment(&fake.hgs, &studio, &attachment_ref(), &cache).unwrap();
+    assert_eq!(std::fs::read(&cached.local_path).unwrap(), b"hello");
+    assert!(cached.local_path.starts_with(&cache));
+    assert!(cached.local_path.ends_with("notes_ v1.txt"));
+    assert!(cached.metadata.get("data_base64").is_none());
+    assert_eq!(cached.metadata["mime"], "text/plain");
+    // The same file again reuses the cached copy.
+    let again = reads::fetch_attachment(&fake.hgs, &studio, &attachment_ref(), &cache).unwrap();
+    assert_eq!(again.local_path, cached.local_path);
+}
+
+#[test]
+fn an_oversized_attachment_reply_is_ended_with_qt_s_text() {
+    let fake = Fake::new(json!({
+        "attachment claude/sample-project/review --request req-1 --index 1 --conversation conv-1": {
+            "stdout": "x", "repeat": ATTACHMENT_LIMIT + 1
+        },
+        "attachment claude/sample-project/review --request req-1 --index 1 --conversation conv-2": {
+            "stderr": "no such message", "exit": 1
+        },
+    }));
+    let local = ComputerId::local();
+    let cache = fake.dir.join("cache");
+    assert_eq!(
+        reads::fetch_attachment(&fake.hgs, &local, &attachment_ref(), &cache),
+        Err("Attachment response is too large.".into())
+    );
+    let mut other = attachment_ref();
+    other.conversation_id = "conv-2".into();
+    assert_eq!(
+        reads::fetch_attachment(&fake.hgs, &local, &other, &cache),
+        Err("no such message".into())
+    );
 }

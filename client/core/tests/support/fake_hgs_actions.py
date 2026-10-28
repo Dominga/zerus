@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """A fake `hgs` for the client action tests. Reads `config.json` beside itself:
-{"reply": {"exit": 0, "stdout": <object or "echo_interrupt">, "stdout_text": "<raw text instead of stdout>", "stderr": "", "sleep": 0, "log_env": [], "read_stdin": true, "linger": 0},
+{"reply": {"exit": 0, "stdout": <object, "echo_interrupt", "echo_send" or "echo_stage">, "stdout_text": "<raw text instead of stdout>", "stderr": "", "sleep": 0, "log_env": [], "read_stdin": true, "linger": 0},
  "replies": [{"match": [<args after an @alias>], ...the same keys as "reply"}]}
 The first entry of the optional "replies" whose "match" is a prefix of the arguments
 (without a leading @alias) answers; otherwise "reply" does.
@@ -29,6 +29,14 @@ if out == "echo_interrupt":
     args = [a for a in sys.argv[1:] if not a.startswith("@")]
     out = {"status": "submitted", "request_id": request["request_id"], "name": args[1],
            "run_id": request["expected_run_id"], "conversation_id": request["expected_conversation_id"]}
+elif out in ("echo_send", "echo_stage"):
+    request = json.loads(data)
+    args = [a for a in sys.argv[1:] if not a.startswith("@")]
+    out = {"status": "submitted" if out == "echo_send" else "staged", "request_id": request["request_id"],
+           "name": args[1], "run_id": request["expected_run_id"],
+           "conversation_id": request["expected_conversation_id"]}
+    if "agent_id" in request:
+        out["agent_id"] = request["agent_id"]
 if out is not None:
     sys.stdout.write(json.dumps(out))
 if "stdout_text" in config:

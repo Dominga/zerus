@@ -57,7 +57,21 @@ const KEYBOARD_FILLED: [string, string][] = [
   ["Already used by %1. Reassign?", "Already used by ${separatedList("],
 ];
 
+const ABOUT_FILLED: [string, string][] = [
+  ["Zerus %1", "`Zerus ${installed()}`"],
+  ["hgs CLI %1", "`hgs CLI ${version}`"],
+];
+const ABOUT = ["About", "hgs CLI version unavailable", "hgs CLI: checking…", "Open Zerus repository on GitHub"];
+
 describe("Settings texts", () => {
+  it.each(ABOUT)("About shows Qt's %s", (text) => {
+    expect(qt).toContain(`"${text}"`);
+    expect(source("About.tsx")).toContain(text);
+  });
+  it.each(ABOUT_FILLED)("About fills in Qt's %s", (template, shown) => {
+    expect(qt).toContain(`"${template}"`);
+    expect(source("About.tsx")).toContain(shown);
+  });
   it.each(KEYBOARD)("Keyboard shows Qt's %s", (text) => {
     expect(keyboard).toContain(`"${text}"`);
     expect(source("Keyboard.tsx")).toContain(text);

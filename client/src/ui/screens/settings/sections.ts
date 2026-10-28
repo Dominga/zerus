@@ -3,6 +3,7 @@ import { setPage } from "../../../store/ui";
 import { AppearanceSection } from "./Appearance";
 import { SessionsSection } from "./Sessions";
 import { KeyboardSection } from "./Keyboard";
+import { AboutSection, refreshAbout } from "./About";
 
 // Settings sections in Qt's order (tray/src/SettingsPage.h:43, Worktrees
 // inserted at :140). A section shows once it has a component; `refresh` runs
@@ -34,7 +35,7 @@ export const SECTIONS: readonly Section[] = [
   { id: "voice", label: "Voice input", icon: "mic" },
   { id: "keyboard", label: "Keyboard", icon: "keyboard", component: KeyboardSection },
   { id: "analytics", label: "Private analytics", icon: "gauge" },
-  { id: "about", label: "About", icon: "info" },
+  { id: "about", label: "About", icon: "info", component: AboutSection, refresh: refreshAbout },
 ];
 
 /** The sections the client has so far, in Qt's order. */

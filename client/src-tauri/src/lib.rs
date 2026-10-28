@@ -492,6 +492,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         settings::settings_set,
         desk::desk_take_pending,
         settings::window_layer_supported,
+        settings::hgs_version,
+        settings::open_repository,
         actions::run_action,
         actions::set_notifications,
         actions::inspect_session,

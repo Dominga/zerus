@@ -128,6 +128,53 @@ pub fn window_layer_supported() -> bool {
     keep_above_supported()
 }
 
+/// `hgs --version` on this computer, for Settings > About
+/// (SettingsPage.h:147-150); `None` when it cannot be read.
+#[tauri::command]
+pub async fn hgs_version() -> Option<String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let local = zerus_client_core::ComputerId::local();
+        zerus_client_core::reads::read(
+            &zerus_client_core::default_hgs(),
+            &local,
+            &zerus_client_core::reads::Read::Version,
+        )
+        .ok()
+        .and_then(|version| version.as_str().map(str::to_owned))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// The repository Settings > About opens (SettingsPage.h:151-154). The
+/// address is fixed here: the webview cannot pass one.
+pub const REPOSITORY: &str = "https://github.com/ufna/zerus";
+
+/// Opens the repository in the default browser.
+#[tauri::command]
+pub fn open_repository() -> Result<(), String> {
+    let program = if cfg!(target_os = "macos") {
+        "/usr/bin/open"
+    } else if cfg!(windows) {
+        "explorer.exe"
+    } else {
+        "xdg-open"
+    };
+    let mut child = std::process::Command::new(program)
+        .arg(REPOSITORY)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Could not open {REPOSITORY}: {error}"))?;
+    // Reaped off the caller: the opener may stay until the browser starts.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 /// Every setting, as Qt would read it, and the store's revision.
 #[tauri::command]
 pub async fn settings_get(store: State<'_, Store>) -> Result<Value, String> {

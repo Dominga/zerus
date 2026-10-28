@@ -42,20 +42,19 @@ uuid = { version = "1", features = ["v4"] }
 zerus-client-core = { path = "../core", optional = true }
 zerus-client-media = { path = "../media", optional = true }
 
-# Unix: SIGTERM, SIGINT and SIGHUP run the exit hook, so drafts reach the disk.
+# Unix: SIGTERM, SIGINT and SIGHUP quit through the exit hook (signals.rs),
+# so drafts reach the disk.
 [target.'cfg(unix)'.dependencies]
-signal-hook = "0.3"
+libc = "0.2"
 
 # Linux: the refresh rate of the window's monitor (display.rs); the same gtk as tauri's.
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
-libc = "0.2"
 webkit2gtk = "2.0.2"
 
 # macOS: process metrics through libproc, and the WebKit preference that lets
 # page rendering follow the display rate (platform/macos.rs).
 [target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2"
 objc2 = { version = "0.6.4", features = ["exception"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSProcessInfo"] }
 objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "WKPreferences", "WKWebViewConfiguration"] }

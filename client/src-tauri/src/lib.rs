@@ -19,6 +19,8 @@ mod pump;
 mod replay;
 #[cfg(feature = "live")]
 mod screens;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod signals;
 #[cfg(feature = "live")]
 mod terminal;
 #[cfg(feature = "media")]
@@ -105,9 +107,9 @@ pub fn run() {
                         notify: std::sync::Arc::new(move || notify_pump.poke()),
                     },
                 ));
-                #[cfg(unix)]
-                exit_on_signals(app.handle().clone());
             }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            exit_on_signals(app.handle().clone());
             let display = display::display_name();
             if !display::headless_allowed(std::env::var("ZERUS_CLIENT_HEADLESS").is_ok_and(|v| v == "1"), display.as_deref()) {
                 eprintln!("zerus-client: ZERUS_CLIENT_HEADLESS=1 but the display is {display:?}, not an X server; no window opens (set GDK_BACKEND=x11)");
@@ -174,27 +176,26 @@ fn close_drafts(composers: Option<&composer::Composers>, flush_store: impl FnOnc
     flush_store();
 }
 
-/// SIGTERM, SIGINT or SIGHUP: the exit hook runs here first (drafts reach the
-/// disk even if the event loop is stuck), then the app exits, which runs the
-/// hook again harmlessly. Should the event loop not end the process, it ends
-/// five seconds later.
-#[cfg(all(unix, feature = "live"))]
+/// SIGTERM, SIGINT or SIGHUP (`signals.rs`, Qt's `TerminationSignals`):
+/// the app quits through the one exit hook (`app.exit` ends in
+/// `RunEvent::Exit`). The hook also runs here first, so drafts reach the
+/// disk even if the event loop is stuck; running it twice is harmless.
+/// Should the process not end, it ends five seconds after the signal; a
+/// second signal ends it at once (SA_RESETHAND).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn exit_on_signals(app: AppHandle) {
-    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
-    let Ok(mut signals) = signal_hook::iterator::Signals::new([SIGTERM, SIGINT, SIGHUP]) else {
-        return;
-    };
-    std::thread::Builder::new()
-        .name("zerus-signals".into())
-        .spawn(move || {
-            if signals.forever().next().is_some() {
-                exit(&app);
-                app.exit(0);
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                std::process::exit(0);
-            }
-        })
-        .expect("the signal thread starts");
+    let installed = signals::install(move |_signal| {
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            std::process::exit(0);
+        });
+        #[cfg(feature = "live")]
+        exit(&app);
+        app.exit(0);
+    });
+    if let Err(error) = installed {
+        eprintln!("zerus-client: termination signals keep their default action: {error}");
+    }
 }
 
 /// The commands the frontend may call. The session actions need the core's
@@ -374,6 +375,80 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    /// Runs only in a child that the signal tests start (`ZERUS_SIGNAL_PROBE`).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn signal_probe_in_a_child_only() {
+        let (quit, quitting) = std::sync::mpsc::channel();
+        let handled = match std::env::var("ZERUS_SIGNAL_PROBE").as_deref() {
+            Ok(_) => signals::install(move |signal| {
+                let _ = quit.send(signal);
+            })
+            .unwrap(),
+            Err(_) => return,
+        };
+        println!("handled {handled:?}");
+        if std::env::var("ZERUS_SIGNAL_PROBE").as_deref() == Ok("twice") {
+            // SAFETY: raising a signal at this process.
+            unsafe { libc::raise(libc::SIGTERM) };
+            let signal = quitting.recv_timeout(Duration::from_secs(5)).unwrap();
+            println!("quit {signal}");
+            unsafe { libc::raise(libc::SIGTERM) };
+            std::thread::sleep(Duration::from_secs(1));
+            println!("survived the second");
+        }
+    }
+
+    /// This test binary again, running only the probe, with SIGTERM and
+    /// SIGINT at their default action and SIGHUP ignored, as `nohup` starts
+    /// a program.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn probe(kind: &str) -> std::process::Output {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "tests::signal_probe_in_a_child_only",
+                "--nocapture",
+            ])
+            .env("ZERUS_SIGNAL_PROBE", kind);
+        // SAFETY: only async-signal-safe calls between fork and exec.
+        unsafe {
+            command.pre_exec(|| {
+                libc::signal(libc::SIGTERM, libc::SIG_DFL);
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+        command.output().unwrap()
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_signal_ignored_at_start_stays_ignored() {
+        let output = probe("kept");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}");
+        let expected = format!("handled [{}, {}]", libc::SIGTERM, libc::SIGINT);
+        assert!(stdout.contains(&expected), "{stdout}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_second_signal_ends_a_quitting_process() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = probe("twice");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(&format!("quit {}", libc::SIGTERM)),
+            "{stdout}"
+        );
+        assert!(!stdout.contains("survived the second"), "{stdout}");
+        assert_eq!(output.status.signal(), Some(libc::SIGTERM));
     }
 
     #[test]

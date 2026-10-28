@@ -6,9 +6,13 @@
 //! whenever it changed.
 //!
 //! Text protocol: the webview owns the text while the user types and sends
-//! `composer_edit` with a growing `rev`; Rust applies only a higher one. When
-//! Rust changes the text itself (a load, an attach or remove, a delivery's
-//! end, a restore), it bumps `text_epoch` and the webview takes `text`.
+//! `composer_edit` with a growing `rev` and the `text_epoch` its text is
+//! based on; Rust applies only a higher `rev` of the current epoch. When
+//! Rust changes the text itself (a load, an attach or remove, an Undo, a
+//! delivery's end, a restore), it bumps `text_epoch` and the webview takes
+//! `text`, so an edit typed over the older text cannot bring back or drop a
+//! file mention. A locked composer (a rename under way) hands its text back
+//! the same way (Qt's `restoreDraft`).
 //!
 //! Bounded: at most 64 composers and 128 MiB of their attachments in memory
 //! (the open one and a busy one are never dropped, nor one whose save is
@@ -432,23 +436,31 @@ impl Composers {
                     composer.save_failed = false;
                 }
                 hub.stored_keys.retain(|k| k != old);
+                hub.order.retain(|k| k != old);
             }
             Err(error) => {
+                // Qt (`MessageComposer.cpp:795-798`): the moved draft goes
+                // back to its old key marked with the refusal, and the new
+                // key reloads with no message.
                 if let Some(mut moved) = hub.composers.remove(new) {
-                    moved.key = old.to_owned();
-                    moved.renaming = false;
-                    // Its saves answered under the new key and were ignored:
-                    // save it again so a failure shows and is retried.
-                    self.save(&mut moved);
-                    hub.composers.insert(old.to_owned(), moved);
-                    hub.order.retain(|k| k != old);
-                    hub.order.push_front(old.to_owned());
+                    // A newer composer of the old key (a rename back) stays:
+                    // the moved draft's saves reached the disk before the
+                    // rename, so dropping it loses nothing.
+                    if !hub.composers.contains_key(old) {
+                        moved.key = old.to_owned();
+                        moved.renaming = false;
+                        moved.storage_error = Some(error);
+                        // Its saves answered under the new key and were
+                        // ignored: save it again. Only a failure replaces the
+                        // refusal; a later save clears it, as in Qt.
+                        self.save_with(&mut moved, true);
+                        hub.composers.insert(old.to_owned(), moved);
+                        hub.order.retain(|k| k != old);
+                        hub.order.push_front(old.to_owned());
+                    }
                 }
                 if hub.open_key.as_deref() == Some(new) {
                     self.ensure(&mut hub, new);
-                    if let Some(here) = hub.composers.get_mut(new) {
-                        here.show_error(error);
-                    }
                 }
             }
         }
@@ -505,6 +517,12 @@ impl Composers {
 
     /// Saves as the user types; a later save of the same key replaces it.
     pub(crate) fn save(&self, composer: &mut Composer) {
+        self.save_with(composer, false);
+    }
+
+    /// `keep_error`: a success leaves the storage error shown (a refused
+    /// rename's mark survives the hub's own save of the moved draft).
+    fn save_with(&self, composer: &mut Composer, keep_error: bool) {
         composer.saves += 1;
         composer.saving = true;
         let me = self.clone();
@@ -512,11 +530,18 @@ impl Composers {
         self.0
             .store
             .save(&composer.key, composer.stored(), move |result| {
-                me.saved(&key, handle, revision, result)
+                me.saved(&key, handle, revision, keep_error, result)
             });
     }
 
-    fn saved(&self, key: &str, handle: u64, revision: u64, result: Result<(), String>) {
+    fn saved(
+        &self,
+        key: &str,
+        handle: u64,
+        revision: u64,
+        keep_error: bool,
+        result: Result<(), String>,
+    ) {
         let mut hub = self.lock();
         let Some(composer) = hub
             .composers
@@ -527,7 +552,9 @@ impl Composers {
         };
         composer.saving = false;
         composer.save_failed = result.is_err();
-        composer.storage_error = result.err();
+        if result.is_err() || !keep_error {
+            composer.storage_error = result.err();
+        }
         let retry = composer.save_failed;
         self.trim(&mut hub);
         drop(hub);
@@ -557,13 +584,37 @@ impl Composers {
         }));
     }
 
-    /// The editor changed (`MessageComposer.cpp:370-379`).
-    pub fn edit(&self, handle: u64, rev: u64, text: String, position: i64, anchor: i64) {
+    /// The editor changed (`MessageComposer.cpp:367-379`). `epoch` is the
+    /// `text_epoch` the webview's text is based on; an edit over older text
+    /// is ignored, and the webview takes the newer text from the view.
+    pub fn edit(
+        &self,
+        handle: u64,
+        rev: u64,
+        epoch: u64,
+        text: String,
+        position: i64,
+        anchor: i64,
+    ) {
         let mut hub = self.lock();
+        let closed = hub.closed;
         let Some(composer) = Self::editable(&mut hub, handle) else {
+            // Qt's `restoreDraft`: a locked composer (a rename under way)
+            // hands its text back under a new epoch.
+            let mut handed_back = false;
+            if !closed {
+                if let Some(locked) = Self::by_handle(&mut hub, handle).filter(|c| c.loaded) {
+                    locked.text_epoch += 1;
+                    handed_back = true;
+                }
+            }
+            drop(hub);
+            if handed_back {
+                self.changed();
+            }
             return;
         };
-        if rev <= composer.rev {
+        if epoch != composer.text_epoch || rev <= composer.rev {
             return;
         }
         composer.rev = rev;
@@ -688,7 +739,29 @@ impl Composers {
         let Some(composer) = Self::editable(&mut hub, handle) else {
             return;
         };
-        if composer.draft.attachments.len() >= attachments::MAX_ATTACHMENTS {
+        let Some((_, removed)) = composer.removed.as_ref() else {
+            return;
+        };
+        // The file returns only within the message's limits (`addAttachment`);
+        // a refused Undo stays available.
+        let total = removed.bytes.len()
+            + composer
+                .draft
+                .attachments
+                .iter()
+                .map(|a| a.bytes.len())
+                .sum::<usize>();
+        let refusal = if composer.draft.attachments.len() >= attachments::MAX_ATTACHMENTS {
+            Some("Attach up to 8 files per message.")
+        } else if total > attachments::MAX_TOTAL_BYTES {
+            Some("Attachments: 10 MiB per file, 20 MiB per message.")
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            composer.show_error(refusal);
+            drop(hub);
+            self.changed();
             return;
         }
         let Some((index, attachment)) = composer.removed.take() else {
@@ -802,17 +875,22 @@ impl Composers {
     pub(crate) fn view_of(&self, hub: &Hub, key: &str) -> Option<ComposerView> {
         let composer = hub.composers.get(key)?;
         let too_long = composer.draft.text.len() > MAX_TEXT_BYTES;
-        let (status, status_error) = if let Some(error) = &composer.storage_error {
-            (error.clone(), true)
+        let status = if let Some(error) = &composer.storage_error {
+            error.clone()
         } else if let Some(waiting) = &composer.waiting {
-            (waiting.clone(), false)
+            waiting.clone()
         } else if composer.error || composer.uncertain {
-            (composer.notice.clone(), true)
+            composer.notice.clone()
         } else if too_long {
-            ("Message exceeds 64 KiB.".to_owned(), true)
+            "Message exceeds 64 KiB.".to_owned()
         } else {
-            (String::new(), false)
+            String::new()
         };
+        // Qt's `ownError` (`MessageComposer.cpp:1202`): an uncertain mark
+        // alone is a caution, not an error.
+        let status_error = (composer.waiting.is_none() && composer.error)
+            || too_long
+            || composer.storage_error.is_some();
         let locked = composer.busy() || !composer.loaded;
         Some(ComposerView {
             handle: composer.handle,
@@ -888,16 +966,18 @@ pub fn composer_edit(
     state: State<'_, Composers>,
     handle: u64,
     rev: u64,
+    epoch: u64,
     text: String,
     position: i64,
     anchor: i64,
 ) {
-    state.edit(handle, rev, text, position, anchor);
+    state.edit(handle, rev, epoch, text, position, anchor);
 }
 
 /// Attach files: the native picker (`attachFiles`), then the reads. As in
-/// Qt, the picker opens only for the open composer that takes files, and
-/// its choice is dropped when another session was opened meanwhile.
+/// Qt, the picker is modal to the main window, opens only for the open
+/// composer that takes files, and its choice is dropped when another
+/// session was opened meanwhile.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn composer_pick(
     app: tauri::AppHandle,
@@ -906,16 +986,20 @@ pub async fn composer_pick(
     start: usize,
     end: usize,
 ) -> Result<(), String> {
+    use tauri::Manager;
     use tauri_plugin_dialog::DialogExt;
     let composers = state.inner().clone();
     if !composers.can_attach(handle) {
         return Ok(());
     }
+    let window = app.get_webview_window(crate::MAIN_WINDOW);
     let picked = tauri::async_runtime::spawn_blocking(move || {
-        app.dialog()
-            .file()
-            .set_title("Attach files")
-            .blocking_pick_files()
+        // The window handle is asked of the main thread: never block it here.
+        let mut dialog = app.dialog().file().set_title("Attach files");
+        if let Some(window) = &window {
+            dialog = dialog.set_parent(window);
+        }
+        dialog.blocking_pick_files()
     })
     .await
     .map_err(|error| error.to_string())?;
@@ -961,8 +1045,16 @@ pub async fn composer_paste_image(
     let InvokeBody::Raw(png) = request.body() else {
         return Err("a pasted image must be a raw body".into());
     };
-    state.paste_image(handle, png.clone(), Selection { start, end });
+    state.paste_image(handle, pasted_bytes(png), Selection { start, end });
     Ok(())
+}
+
+/// The part of a pasted body the core needs: the IPC lends the body, so it
+/// is copied, but never beyond 10 MiB and one byte. The core reads the size
+/// from the PNG header and refuses a larger file with Qt's text, so the
+/// outcome is the same as with the whole body.
+fn pasted_bytes(body: &[u8]) -> Vec<u8> {
+    body[..body.len().min(attachments::MAX_ATTACHMENT_BYTES + 1)].to_vec()
 }
 
 #[tauri::command]
@@ -990,19 +1082,65 @@ pub(crate) mod tests {
 
     pub(crate) const KEY: &str = "studio\nclaude/sample-project/review";
 
-    pub(crate) fn dir(name: &str) -> PathBuf {
+    /// A test's own folder, `zerus-composer-{name}-{pid}` in the temp
+    /// folder, removed when the test ends. Declared first in a test, it ends
+    /// last: the draft stores opened in it write what is still queued, then
+    /// the folder goes.
+    pub(crate) struct Scratch {
+        path: PathBuf,
+        stores: std::cell::RefCell<Vec<Arc<DraftStore>>>,
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            for store in self.stores.get_mut().drain(..) {
+                store.flush();
+            }
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    pub(crate) fn dir(name: &str) -> Scratch {
         let dir =
             std::env::temp_dir().join(format!("zerus-composer-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        Scratch {
+            path: dir,
+            stores: Default::default(),
+        }
     }
 
-    /// The test's draft store under `root/drafts`. A test that drops its hub
-    /// and opens another keeps this, as the app's `Drafts` does: a store must
-    /// never drop on its own writer thread.
-    pub(crate) fn drafts(root: &Path) -> Arc<DraftStore> {
-        Arc::new(DraftStore::open(root.join("drafts")))
+    /// Holds the store's writer until the returned sender sends (at most
+    /// five seconds): whatever is queued after this waits.
+    pub(crate) fn hold(store: &DraftStore) -> std::sync::mpsc::Sender<()> {
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        store.index(
+            IndexPage {
+                limit: 1,
+                before: None,
+            },
+            move |_| {
+                let _ = gate.recv_timeout(Duration::from_secs(5));
+            },
+        );
+        release
+    }
+
+    /// The test's draft store under `root/drafts`. The folder keeps it to
+    /// the end of the test, as the app's `Drafts` keeps the app's: a store
+    /// must never drop on its own writer thread.
+    pub(crate) fn drafts(root: &Scratch) -> Arc<DraftStore> {
+        let store = Arc::new(DraftStore::open(root.join("drafts")));
+        root.stores.borrow_mut().push(Arc::clone(&store));
+        store
     }
 
     pub(crate) fn hub_on(store: &Arc<DraftStore>) -> (Composers, Arc<AtomicUsize>) {
@@ -1022,7 +1160,7 @@ pub(crate) mod tests {
         (composers, notified)
     }
 
-    pub(crate) fn hub(root: &Path) -> (Composers, Arc<AtomicUsize>) {
+    pub(crate) fn hub(root: &Scratch) -> (Composers, Arc<AtomicUsize>) {
         hub_on(&drafts(root))
     }
 
@@ -1064,7 +1202,7 @@ pub(crate) mod tests {
         let (c, _) = hub_on(&store);
         let view = c.open(Some(session())).unwrap();
         let view = until(&c, |v| v.loaded && v.handle == view.handle);
-        c.edit(view.handle, 1, "hello".into(), 5, 5);
+        c.edit(view.handle, 1, view.text_epoch, "hello".into(), 5, 5);
         c.flush();
         store.flush();
         drop(c);
@@ -1082,7 +1220,14 @@ pub(crate) mod tests {
         let (c, _) = hub_on(&store);
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
-        c.edit(view.handle, 1, "typed before quitting".into(), 0, 0);
+        c.edit(
+            view.handle,
+            1,
+            view.text_epoch,
+            "typed before quitting".into(),
+            0,
+            0,
+        );
         // The exit hook's order: the hub closes, then the store writes everything queued.
         c.flush();
         store.flush();
@@ -1090,7 +1235,14 @@ pub(crate) mod tests {
             read_draft(&root.join("drafts"), KEY).draft.draft.text,
             "typed before quitting"
         );
-        c.edit(view.handle, 2, "after the exit".into(), 0, 0);
+        c.edit(
+            view.handle,
+            2,
+            view.text_epoch,
+            "after the exit".into(),
+            0,
+            0,
+        );
         assert_eq!(
             c.current().unwrap().text,
             "typed before quitting",
@@ -1131,10 +1283,17 @@ pub(crate) mod tests {
         let (c, _) = hub(&root);
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
-        c.edit(view.handle, 2, "newer".into(), 0, 0);
-        c.edit(view.handle, 1, "older".into(), 0, 0);
+        c.edit(view.handle, 2, view.text_epoch, "newer".into(), 0, 0);
+        c.edit(view.handle, 1, view.text_epoch, "older".into(), 0, 0);
         assert_eq!(c.current().unwrap().text, "newer");
-        c.edit(view.handle, 2, "the same revision".into(), 0, 0);
+        c.edit(
+            view.handle,
+            2,
+            view.text_epoch,
+            "the same revision".into(),
+            0,
+            0,
+        );
         assert_eq!(c.current().unwrap().text, "newer");
     }
 
@@ -1144,7 +1303,14 @@ pub(crate) mod tests {
         let (c, _) = hub(&root);
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
-        c.edit(view.handle, 1, "x".repeat(64 * 1024 + 1), 0, 0);
+        c.edit(
+            view.handle,
+            1,
+            view.text_epoch,
+            "x".repeat(64 * 1024 + 1),
+            0,
+            0,
+        );
         let view = c.current().unwrap();
         assert_eq!(view.status, "Message exceeds 64 KiB.");
         assert!(view.status_error && !view.can_send);
@@ -1159,7 +1325,7 @@ pub(crate) mod tests {
         let (c, _) = hub_on(&store);
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
-        c.edit(view.handle, 1, "see".into(), 3, 3);
+        c.edit(view.handle, 1, view.text_epoch, "see".into(), 3, 3);
         c.attach_paths(view.handle, vec![file], Selection { start: 3, end: 3 });
         let view = until(&c, |v| v.attachments.len() == 1 && !v.attaching);
         assert_eq!(view.text, "see [File #1] ");
@@ -1239,7 +1405,14 @@ pub(crate) mod tests {
         let (c, _) = hub_on(&store);
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
-        c.edit(view.handle, 1, "kept across a rename".into(), 0, 0);
+        c.edit(
+            view.handle,
+            1,
+            view.text_epoch,
+            "kept across a rename".into(),
+            0,
+            0,
+        );
         let mut renamed = session();
         renamed.name = "claude/sample-project/review-2".into();
         c.open(Some(renamed));
@@ -1247,6 +1420,10 @@ pub(crate) mod tests {
             v.key == "studio\nclaude/sample-project/review-2" && v.loaded
         });
         assert_eq!(view.text, "kept across a rename");
+        assert!(
+            !c.lock().order.contains(&KEY.to_owned()),
+            "the old key leaves the eviction order"
+        );
         store.flush();
         assert_eq!(read_draft(&root.join("drafts"), KEY).draft.draft.text, "");
     }
@@ -1261,13 +1438,19 @@ pub(crate) mod tests {
         let (c, _) = hub_on(&store);
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
-        c.edit(view.handle, 1, "moving".into(), 0, 0);
+        c.edit(view.handle, 1, view.text_epoch, "moving".into(), 0, 0);
         let mut renamed = session();
         renamed.name = "claude/sample-project/review-2".into();
         c.open(Some(renamed));
         let view = until(&c, |v| v.loaded && v.text == "already here");
-        assert_eq!(view.status, zerus_client_core::drafts::ALREADY_EXISTS);
+        // Qt's placement: the new key reloads with no message, and the moved
+        // draft is marked under its old key, past the hub's own save of it.
+        assert!(view.status.is_empty() && !view.status_error, "{view:?}");
         store.flush();
+        assert_eq!(
+            c.lock().composers[KEY].storage_error.as_deref(),
+            Some(zerus_client_core::drafts::ALREADY_EXISTS)
+        );
         assert_eq!(
             read_draft(&root.join("drafts"), KEY).draft.draft.text,
             "moving",
@@ -1292,14 +1475,14 @@ pub(crate) mod tests {
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
         let _ = c.take_draft_keys();
-        c.edit(view.handle, 1, "x".into(), 1, 1);
+        c.edit(view.handle, 1, view.text_epoch, "x".into(), 1, 1);
         assert_eq!(c.take_draft_keys(), Some(vec![KEY.to_owned()]));
         assert_eq!(
             c.take_draft_keys(),
             None,
             "unchanged keys are not sent again"
         );
-        c.edit(view.handle, 2, String::new(), 0, 0);
+        c.edit(view.handle, 2, view.text_epoch, String::new(), 0, 0);
         assert_eq!(c.take_draft_keys(), Some(vec![]));
     }
 
@@ -1312,8 +1495,8 @@ pub(crate) mod tests {
         assert!(c.take_view().is_some());
         assert!(c.take_view().is_none());
         let before = notified.load(Ordering::SeqCst);
-        let handle = c.current().unwrap().handle;
-        c.edit(handle, 1, "y".into(), 1, 1);
+        let view = c.current().unwrap();
+        c.edit(view.handle, 1, view.text_epoch, "y".into(), 1, 1);
         assert!(
             notified.load(Ordering::SeqCst) > before,
             "a change wakes the pump"
@@ -1411,7 +1594,7 @@ pub(crate) mod tests {
             view.text, "",
             "a Qt draft comes over only through Saved drafts' recovery"
         );
-        c.edit(view.handle, 1, "mine".into(), 4, 4);
+        c.edit(view.handle, 1, view.text_epoch, "mine".into(), 4, 4);
         c.attach_paths(view.handle, vec![file], Selection { start: 4, end: 4 });
         let view = until(&c, |v| v.attachments.len() == 1 && !v.attaching);
         c.remove(view.handle, 0);
@@ -1453,7 +1636,7 @@ pub(crate) mod tests {
             session.name = format!("claude/p/held-{n}");
             c.open(Some(session));
             let view = until(&c, |v| v.loaded && v.key.ends_with(&format!("/held-{n}")));
-            c.edit(view.handle, 1, "x".into(), 1, 1);
+            c.edit(view.handle, 1, view.text_epoch, "x".into(), 1, 1);
         }
         store.flush();
         assert_eq!(c.lock().composers.len(), COMPOSERS);
@@ -1502,7 +1685,14 @@ pub(crate) mod tests {
         let (c, _) = hub_on(&store);
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
-        c.edit(view.handle, 1, "kept in memory".into(), 0, 0);
+        c.edit(
+            view.handle,
+            1,
+            view.text_epoch,
+            "kept in memory".into(),
+            0,
+            0,
+        );
         let view = until(&c, |v| v.status_error);
         assert!(
             view.status.starts_with("Draft not saved"),
@@ -1555,5 +1745,247 @@ pub(crate) mod tests {
         assert!(!c.can_attach(first) && c.can_attach(second));
         c.flush();
         assert!(!c.can_attach(second), "nothing attaches after the exit");
+    }
+
+    const RENAMED: &str = "studio\nclaude/sample-project/review-2";
+
+    fn renamed() -> SessionRef {
+        let mut renamed = session();
+        renamed.name = "claude/sample-project/review-2".into();
+        renamed
+    }
+
+    #[test]
+    fn undo_stays_within_the_message_limits() {
+        let root = dir("undo-limits");
+        let files: Vec<PathBuf> = ["a", "b", "c"]
+            .iter()
+            .map(|name| {
+                let file = root.join(format!("{name}.bin"));
+                let bytes = vec![name.as_bytes()[0]; attachments::MAX_ATTACHMENT_BYTES];
+                std::fs::write(&file, bytes).unwrap();
+                file
+            })
+            .collect();
+        let store = drafts(&root);
+        let (c, _) = hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.attach_paths(view.handle, vec![files[0].clone()], Selection::default());
+        let view = until(&c, |v| v.attachments.len() == 1 && !v.attaching);
+        c.remove(view.handle, 0);
+        c.attach_paths(view.handle, files[1..].to_vec(), Selection::default());
+        let view = until(&c, |v| v.attachments.len() == 2 && !v.attaching);
+        c.undo_remove(view.handle);
+        let view = c.current().unwrap();
+        assert_eq!(
+            view.attachments.len(),
+            2,
+            "a third 10 MiB file passes 20 MiB"
+        );
+        assert_eq!(
+            view.status,
+            "Attachments: 10 MiB per file, 20 MiB per message."
+        );
+        assert!(view.status_error);
+        assert_eq!(
+            view.removed.as_deref(),
+            Some("a.bin"),
+            "Undo stays available"
+        );
+        c.flush();
+        store.flush();
+        drop(c);
+        let (again, _) = hub_on(&store);
+        again.open(Some(session()));
+        let view = until(&again, |v| v.loaded);
+        assert!(view.status.is_empty(), "no restore error: {}", view.status);
+        let kept: Vec<(&str, u64)> = view
+            .attachments
+            .iter()
+            .map(|a| (a.name.as_str(), a.bytes))
+            .collect();
+        let size = attachments::MAX_ATTACHMENT_BYTES as u64;
+        assert_eq!(kept, [("b.bin", size), ("c.bin", size)], "no copy lost");
+    }
+
+    #[test]
+    fn an_edit_over_the_text_before_a_remove_is_refused() {
+        let root = dir("epoch-remove");
+        let file = root.join("a.txt");
+        std::fs::write(&file, "a").unwrap();
+        let store = drafts(&root);
+        let (c, _) = hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.attach_paths(view.handle, vec![file], Selection::default());
+        let before = until(&c, |v| v.attachments.len() == 1 && !v.attaching);
+        c.remove(before.handle, 0);
+        let after = c.current().unwrap();
+        assert!(after.text_epoch > before.text_epoch);
+        // Typed over the text that still names the file.
+        let stale = format!("{}typed", before.text);
+        c.edit(before.handle, 1, before.text_epoch, stale, 0, 0);
+        assert_eq!(c.current().unwrap().text, after.text);
+        store.flush();
+        let disk = read_draft(&root.join("drafts"), KEY).draft.draft.text;
+        assert_eq!(disk, after.text);
+        assert!(!disk.contains("[File #1]"));
+    }
+
+    #[test]
+    fn an_edit_over_the_text_before_an_undo_is_refused() {
+        let root = dir("epoch-undo");
+        let file = root.join("a.txt");
+        std::fs::write(&file, "a").unwrap();
+        let store = drafts(&root);
+        let (c, _) = hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.attach_paths(view.handle, vec![file], Selection::default());
+        let view = until(&c, |v| v.attachments.len() == 1 && !v.attaching);
+        c.remove(view.handle, 0);
+        let removed = c.current().unwrap();
+        c.undo_remove(view.handle);
+        let restored = c.current().unwrap();
+        assert!(restored.text_epoch > removed.text_epoch);
+        // Typed over the text without the mention.
+        let stale = format!("{}typed", removed.text);
+        c.edit(view.handle, 1, removed.text_epoch, stale, 0, 0);
+        let now = c.current().unwrap();
+        assert_eq!(now.text, restored.text);
+        assert!(now.text.contains("[File #1]"), "the restored mention stays");
+        store.flush();
+        let disk = read_draft(&root.join("drafts"), KEY).draft.draft.text;
+        assert!(disk.contains("[File #1]"));
+    }
+
+    #[test]
+    fn an_edit_during_a_rename_is_refused_and_handed_back() {
+        let root = dir("rename-edit");
+        let store = drafts(&root);
+        let mut there = StoredDraft::default();
+        there.draft.text = "already here".into();
+        store.save_durable(RENAMED, there, |_| {});
+        let (c, _) = hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.edit(view.handle, 1, view.text_epoch, "moving".into(), 6, 6);
+        let release = hold(&store);
+        c.open(Some(renamed()));
+        let during = c.current().unwrap();
+        assert!(!during.loaded, "a rename locks the composer");
+        let typed = "typed during the rename".to_owned();
+        c.edit(during.handle, 2, during.text_epoch, typed, 0, 0);
+        let handed = c.current().unwrap();
+        assert!(
+            handed.text_epoch > during.text_epoch,
+            "the text is handed back"
+        );
+        assert_eq!(handed.text, "moving");
+        release.send(()).unwrap();
+        until(&c, |v| v.loaded && v.text == "already here");
+        store.flush();
+        assert_eq!(
+            read_draft(&root.join("drafts"), RENAMED).draft.draft.text,
+            "already here",
+            "the draft already at the new name stays"
+        );
+        assert_eq!(
+            read_draft(&root.join("drafts"), KEY).draft.draft.text,
+            "moving"
+        );
+    }
+
+    #[test]
+    fn a_rename_back_keeps_the_newer_composer() {
+        let root = dir("rename-back");
+        let store = drafts(&root);
+        let mut there = StoredDraft::default();
+        there.draft.text = "already here".into();
+        store.save_durable(RENAMED, there, |_| {});
+        let (c, _) = hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.edit(view.handle, 1, view.text_epoch, "first".into(), 5, 5);
+        let release = hold(&store);
+        c.open(Some(renamed()));
+        // Renamed back while the store still has the first rename queued.
+        let back = c.open(Some(session())).unwrap();
+        release.send(()).unwrap();
+        let view = until(&c, |v| v.loaded && v.key == KEY);
+        assert_eq!(view.handle, back.handle, "the newer composer stays");
+        assert_eq!(view.text, "first");
+        store.flush();
+        assert_eq!(
+            read_draft(&root.join("drafts"), KEY).draft.draft.text,
+            "first"
+        );
+        assert_eq!(
+            read_draft(&root.join("drafts"), RENAMED).draft.draft.text,
+            "already here"
+        );
+    }
+
+    #[test]
+    fn the_open_composer_is_never_trimmed() {
+        let root = dir("open-kept");
+        let (c, _) = hub(&root);
+        {
+            let mut hub = c.lock();
+            for n in 0..COMPOSERS {
+                let key = format!("studio\nclaude/p/failed-{n}");
+                let mut composer = Composer::new(1000 + n as u64, key.clone());
+                composer.loaded = true;
+                composer.draft.text = format!("only in memory {n}");
+                composer.save_failed = true;
+                hub.composers.insert(key.clone(), composer);
+                hub.order.push_back(key);
+            }
+        }
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.edit(view.handle, 1, view.text_epoch, "applied".into(), 7, 7);
+        assert_eq!(c.current().unwrap().text, "applied");
+        assert_eq!(c.lock().composers.len(), COMPOSERS + 1);
+    }
+
+    #[test]
+    fn an_uncertain_mark_alone_is_a_caution() {
+        let root = dir("caution");
+        let (c, _) = hub(&root);
+        c.open(Some(session()));
+        until(&c, |v| v.loaded);
+        {
+            let mut hub = c.lock();
+            let composer = hub.composers.get_mut(KEY).unwrap();
+            composer.uncertain = true;
+            composer.notice = zerus_client_core::drafts::INTERRUPTED.into();
+        }
+        let view = c.current().unwrap();
+        assert_eq!(view.status, zerus_client_core::drafts::INTERRUPTED);
+        assert!(!view.status_error && !view.can_send);
+    }
+
+    #[test]
+    fn a_pasted_body_is_copied_up_to_the_limit() {
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        png.extend(100u32.to_be_bytes());
+        png.extend(100u32.to_be_bytes());
+        png.resize(attachments::MAX_ATTACHMENT_BYTES + 4096, 0);
+        let copied = pasted_bytes(&png);
+        assert_eq!(copied.len(), attachments::MAX_ATTACHMENT_BYTES + 1);
+        assert_eq!(copied[..24], png[..24]);
+        let root = dir("paste-bound");
+        let (c, _) = hub(&root);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.paste_image(view.handle, copied, Selection::default());
+        let view = until(&c, |v| !v.attaching);
+        assert!(view.attachments.is_empty());
+        assert_eq!(
+            view.status,
+            "Attachments: 10 MiB per file, 20 MiB per message."
+        );
     }
 }

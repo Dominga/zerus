@@ -834,9 +834,11 @@ pub(super) fn decide_group(record:&Value,question:&Value,answers:&Value) {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn hand_over(record:&Value,question:&Value,calls:&[String],waiting:&[String],missing:&[String],
     verdict:&subagents_confirm::Verdict,carry_rule:bool,answered:bool)->Result<()> {
-    if verdict.remember {let _ = subagents_confirm::allow_session(record);}
     let carrier=waiting.first().map(String::as_str).filter(|_|carry_rule);
     subagents_confirm::decide(string(record,"conversation_id"),calls,verdict,carrier);
+    // After the group's answer: a hook that saw the session allowance first
+    // printed a bare allow, without the rule it carries (fork build 97).
+    if verdict.remember {let _ = subagents_confirm::allow_session(record);}
     let ends_turn=!verdict.allow&&verdict.message.is_empty();
     let delivered=answer_channel::batch_delivered(record,waiting,std::time::Duration::from_secs(3),ends_turn)?;
     if delivered==0&&!answered {

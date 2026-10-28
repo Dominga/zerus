@@ -278,8 +278,15 @@ impl RecoverySync {
         &self.best
     }
 
+    /// Whether this computer's machine card has arrived (or was assumed,
+    /// see [`assumed_card`]): until then the page offers nothing.
+    pub fn known(&self) -> bool {
+        self.known
+    }
+
+    /// Whether a machine keeps a policy; false until this computer is known.
     pub fn has_machines(&self) -> bool {
-        !self.hosts().is_empty()
+        self.known && !self.hosts().is_empty()
     }
 
     pub fn busy(&self) -> bool {
@@ -306,11 +313,17 @@ impl RecoverySync {
 
     /// Whether a save has a machine to go to: this one, or a reachable peer.
     pub fn can_save(&self) -> bool {
-        !self.busy() && !self.best.is_empty() && (self.local || self.save_target().is_some())
+        self.known
+            && !self.busy()
+            && !self.best.is_empty()
+            && (self.local || self.save_target().is_some())
     }
 
     /// The synchronization line under the page.
     pub fn status(&self) -> String {
+        if !self.known {
+            return String::new();
+        }
         if !self.has_machines() {
             return if self.enable_offered {
                 "To configure automatic recovery, enable local sessions for this computer in Machines or add a remote machine."
@@ -451,6 +464,16 @@ impl RecoverySync {
             .map(|host| self.send(host, Op::Sync, policy.clone()))
             .collect()
     }
+}
+
+/// How long the service waits for this computer's machine card.
+pub const CARD_WAIT: Duration = Duration::from_secs(30);
+
+/// The card the service goes by: this computer's, or, once [`CARD_WAIT`]
+/// has passed without one (no `hgs`, a watch that keeps failing), a card
+/// that keeps local sessions, as Qt's RecoverySync starts with them.
+pub fn assumed_card(card: Option<MachineMeta>, waited: Duration) -> Option<MachineMeta> {
+    card.or_else(|| (waited >= CARD_WAIT).then(MachineMeta::default))
 }
 
 /// One period of the service, as SessionsWindow drives Qt's RecoverySync:

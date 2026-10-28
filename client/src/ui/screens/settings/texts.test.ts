@@ -132,7 +132,39 @@ const RECOVERY_CORE = [
   "this machine", "Use 1–16 values: delays from 1 to 86400 seconds; −1 or 0 may only be last, and 0 needs a preceding delay.",
 ];
 
+const filesQt = fs.readFileSync(new URL("tray/src/DownloadCacheSettings.cpp", repo), "utf8");
+const cacheQt = fs.readFileSync(new URL("tray/src/DownloadCache.cpp", repo), "utf8");
+const cacheCore = fs.readFileSync(new URL("client/core/src/download_cache.rs", repo), "utf8");
+const FILES = [
+  "Files",
+  "Download and open reuses a verified saved copy from the same machine and path. Show file selects it in your file manager. Download again gets a fresh copy; Download… lets you choose where to save. Existing files are preserved.",
+  "Downloaded files", "Never clear", "Limit size", "Keep copies", "Maximum size",
+  "Never clear is the default. With a limit, Zerus removes its least recently used downloaded copies first. Files you add or edit are kept. Downloads in progress and copies used in the last minute are protected, so usage can briefly exceed the limit. This setting applies to this computer.",
+  "Checking downloaded files…", "Apply", "Limit downloaded files?", "Apply limit",
+];
+const FILES_CORE = [
+  "Cannot create the downloaded files folder.", "The downloaded files folder is unavailable or is a link.",
+  "The downloaded files cache is busy.", "Cannot read the downloaded files index.",
+  "The downloaded files index is invalid. Existing files were preserved.", "Cannot save the downloaded files index.",
+  "Some older downloaded copies could not be removed.", "The downloaded files index is a link.",
+  "Cannot prepare the local download.", "The downloaded file source is invalid.", "The prepared download is unavailable.",
+  "The downloaded copy could not be verified.", "Cannot save the downloaded copy in its cache folder.",
+  "Cannot find an unused name for the downloaded copy.",
+];
+
 describe("Settings texts", () => {
+  it.each(FILES)("Files shows Qt's %s", (text) => {
+    expect(filesQt).toContain(`"${text}"`);
+    expect(source("Files.tsx")).toContain(text);
+  });
+  it("Files fills in Qt's limit question", () => {
+    expect(filesQt).toContain('"Zerus will automatically delete its oldest downloaded copies when they exceed %1. Files you added or edited will be kept."');
+    expect(source("Files.tsx")).toContain("Zerus will automatically delete its oldest downloaded copies when they exceed ${formatDataSize(props.bytes)}. Files you added or edited will be kept.");
+  });
+  it.each(FILES_CORE)("the download cache says Qt's %s", (text) => {
+    expect(cacheQt).toContain(`"${text}"`);
+    expect(cacheCore).toContain(`"${text}"`);
+  });
   it.each(RECOVERY)("Automatic recovery shows Qt's %s", (text) => {
     expect(recoveryQt).toContain(`"${text}"`);
     expect(source("Recovery.tsx")).toContain(text);

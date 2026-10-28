@@ -5,6 +5,7 @@ import { SessionsSection } from "./Sessions";
 import { KeyboardSection } from "./Keyboard";
 import { VoiceSection, refreshVoice } from "./Voice";
 import { RecoverySection, refreshRecovery } from "./Recovery";
+import { FilesSection } from "./Files";
 import { AboutSection, refreshAbout } from "./About";
 
 // Settings sections in Qt's order (tray/src/SettingsPage.h:43, Worktrees
@@ -31,7 +32,7 @@ export const SECTIONS: readonly Section[] = [
   { id: "processes", label: "Processes", icon: "activity" },
   { id: "updates", label: "Updates", icon: "download" },
   { id: "mobile", label: "Mobile connection", icon: "smartphone" },
-  { id: "files", label: "Files", icon: "hard-drive" },
+  { id: "files", label: "Files", icon: "hard-drive", component: FilesSection },
   { id: "worktrees", label: "Worktrees", icon: "folder-git-2" },
   { id: "approvals", label: "Automatic approvals", icon: "shield-check" },
   { id: "voice", label: "Voice input", icon: "mic", component: VoiceSection, refresh: refreshVoice },

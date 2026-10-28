@@ -359,6 +359,43 @@ fn nothing_is_read_or_written_before_this_computer_is_known() {
 }
 
 #[test]
+fn the_page_offers_nothing_before_this_computer_is_known() {
+    let stored = Value::Object(envelope(&latest())).to_string();
+    let sync = RecoverySync::new(&stored);
+    assert!(!sync.known());
+    assert!(!sync.has_machines());
+    assert!(!sync.can_save());
+    assert_eq!(sync.status(), "");
+    let sync = known(&stored);
+    assert!(sync.has_machines());
+    assert!(sync.can_save());
+}
+
+#[test]
+fn a_card_that_never_comes_is_assumed_to_keep_local_sessions() {
+    // No hgs, or a watch that keeps failing: after the wait the service goes
+    // by Qt's default and reads this computer.
+    let mut sync = RecoverySync::new("");
+    let before = assumed_card(None, CARD_WAIT - Duration::from_secs(1));
+    assert!(before.is_none());
+    assert!(tick(&mut sync, before.as_ref(), None, true).is_empty());
+    let after = assumed_card(None, CARD_WAIT);
+    let read = calls(&tick(&mut sync, after.as_ref(), None, true));
+    assert_eq!(
+        read.iter()
+            .map(|call| (call.host.as_str(), call.op))
+            .collect::<Vec<_>>(),
+        [("", Op::Get)]
+    );
+    // A card that arrives is always the one used.
+    let console = card(Some(false));
+    assert_eq!(
+        assumed_card(Some(console.clone()), CARD_WAIT),
+        Some(console)
+    );
+}
+
+#[test]
 fn a_console_alone_names_machines_as_qt_does() {
     let mut sync = RecoverySync::new("");
     tick(&mut sync, Some(&card(Some(false))), Some(Vec::new()), true);

@@ -46,6 +46,11 @@ pub struct SyncView {
     pub status: String,
     pub status_error: bool,
     pub conflicts: usize,
+    /// A one-time warning the hub raises, such as saved project changes it
+    /// could not apply; cleared once a catalog state is adopted. Absent from
+    /// the JSON when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 impl Default for SyncView {
@@ -57,6 +62,7 @@ impl Default for SyncView {
             status: String::new(),
             status_error: false,
             conflicts: 0,
+            notice: None,
         }
     }
 }
@@ -520,6 +526,29 @@ mod tests {
 
     fn present(grouping: &mut Grouping, org: &Value, revision: u64) {
         grouping.present(org, Arc::new(members(org)), revision);
+    }
+
+    #[test]
+    fn a_notice_reaches_the_headers_json_only_while_set() {
+        let mut grouping = Grouping::default();
+        let (_, out) = grouping.take();
+        let json = serde_json::to_value(out.unwrap()).unwrap();
+        assert!(json.get("notice").is_none(), "absent when there is none");
+        grouping.set_sync(SyncView {
+            notice: Some("The saved project changes were not applied.".into()),
+            ..SyncView::default()
+        });
+        let (_, out) = grouping.take();
+        let json = serde_json::to_value(out.unwrap()).unwrap();
+        assert_eq!(
+            json["notice"],
+            "The saved project changes were not applied."
+        );
+        let back: GroupingOut = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            back.sync.notice.as_deref(),
+            Some("The saved project changes were not applied.")
+        );
     }
 
     fn assigned(groups: &[GroupOut]) -> Vec<(&str, &str)> {

@@ -85,8 +85,20 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("Zerus Next failed to start");
+        .build(tauri::generate_context!())
+        .expect("Zerus Next failed to start")
+        .run(|app, event| {
+            // Pending project edits and the layout reach the disk before the process ends.
+            #[cfg(feature = "live")]
+            if matches!(event, tauri::RunEvent::Exit) {
+                use tauri::Manager;
+                if let Some(organization) = app.try_state::<organization::Organization>() {
+                    organization.flush();
+                }
+            }
+            #[cfg(not(feature = "live"))]
+            let _ = (app, event);
+        });
 }
 
 /// The commands the frontend may call. The session actions need the core's

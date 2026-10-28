@@ -326,6 +326,7 @@ impl Controller {
             status,
             status_error,
             conflicts: self.conflicts,
+            notice: None,
         }
     }
 

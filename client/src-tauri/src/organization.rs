@@ -10,16 +10,20 @@
 //! removed once they settled; a restart loads it and sends it after the first
 //! state, as Qt does (SessionsWindow.cpp:2496, 1661; SwarmController.cpp:76-89).
 //! A draft file that cannot be used is never applied: it is moved aside
-//! before any new draft is written. The webview never receives the
-//! organization itself.
+//! before any new draft is written, and the list shows why until the first
+//! state. [`Organization::flush`] writes both files as the app quits. The
+//! webview never receives the organization itself.
 //!
-//! Locks: the hub's, then the pump's (a publish hands the pump the presented
-//! organization). The snapshot source, `hgs`, the draft and layout files,
+//! Locks: the writer's, then the hub's, then the pump's (a publish hands the
+//! pump the presented organization). The writer orders the draft and layout
+//! writes of the worker and `flush`. The snapshot source, `hgs`, the files,
 //! the edits' answers and the Projects callback all run without the hub's
-//! lock, and the worker is woken after it is released.
+//! lock, `hgs` also without the writer's, and the worker is woken after the
+//! hub's lock is released.
 
 use std::collections::HashMap;
 use std::io;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
@@ -51,7 +55,8 @@ pub type SnapshotSource = Arc<dyn Fn() -> Option<OrganizationSnapshot> + Send + 
 /// controller's status line to the Projects screen (Task 9), as Qt's
 /// `statusChanged` reaches its Projects page (SessionsWindow.cpp:1653).
 /// It runs without the hub's lock, one call at a time, and a call never
-/// follows a newer one; it must not call back into [`Organization`].
+/// follows a newer one; it must not call back into [`Organization`]. A
+/// panic in it is caught and logged.
 pub type Presented = Arc<dyn Fn(Arc<Value>, String, (String, bool)) + Send + Sync>;
 
 /// One call of [`Presented`], made once the hub's lock is released.
@@ -88,7 +93,9 @@ struct Hub {
     /// The Projects call, numbered, made once the lock is released.
     announce: Option<(u64, Announce)>,
     announcements: u64,
-    /// The worker is gone: edits answer `Kept(STOPPED)`.
+    /// Why the saved draft was not applied, shown until the first state is adopted.
+    notice: Option<String>,
+    /// The worker is gone: the list says so, and edits answer `Kept(STOPPED)`.
     stopped: bool,
 }
 
@@ -97,15 +104,23 @@ struct Shared {
     wake: Condvar,
     /// The last Projects call made, so a late one never overtakes a newer one.
     announced: Mutex<u64>,
+    /// The draft and layout writes of the worker and of `flush`.
+    writer: Mutex<Writer>,
     pump: Pump,
     hgs: PathBuf,
     allowed: bool,
     layout: PathBuf,
     draft: PathBuf,
     clock: Instant,
-    /// Passes the worker finished, so a test can tell it ran.
+    /// Passes the worker started, so a test can tell when it acted.
+    #[cfg(test)]
+    passes: std::sync::atomic::AtomicUsize,
+    /// Passes the worker finished with nothing due, so a test can tell it ran.
     #[cfg(test)]
     parked: std::sync::atomic::AtomicUsize,
+    /// Makes the worker's next pass panic, so a test can stop it.
+    #[cfg(test)]
+    fail: std::sync::atomic::AtomicBool,
 }
 
 /// The managed state of the organization commands; clones share it. The
@@ -125,15 +140,16 @@ impl Organization {
             pump.load_layout(&bytes);
         }
         // A blocked replay sends nothing, so it takes up no draft either.
-        let (saved, aside) = if allowed {
+        let saved = if allowed {
             saved_draft(&draft_path)
         } else {
-            (None, false)
+            Saved::default()
         };
         let organization = Self(Arc::new(Shared {
             hub: Mutex::default(),
             wake: Condvar::new(),
             announced: Mutex::new(0),
+            writer: Mutex::new(Writer::new(saved.aside)),
             pump,
             hgs,
             allowed,
@@ -141,24 +157,33 @@ impl Organization {
             draft: draft_path,
             clock: Instant::now(),
             #[cfg(test)]
+            passes: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
             parked: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            fail: std::sync::atomic::AtomicBool::new(false),
         }));
         {
             let mut hub = organization.lock();
             // The last run's pending edits (Qt's start, SwarmController.cpp:76-89):
             // shown at once, sent after the first state.
-            if let Some(saved) = saved {
-                hub.sync.restore(saved);
+            if let Some(draft) = saved.draft {
+                hub.sync.restore(draft);
             }
+            hub.notice = saved.notice;
             organization.publish(&mut hub);
             organization.release(hub);
         }
-        organization.spawn(aside);
+        organization.spawn();
         organization
     }
 
     fn lock(&self) -> MutexGuard<'_, Hub> {
         self.0.hub.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn writer(&self) -> MutexGuard<'_, Writer> {
+        self.0.writer.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn now(&self) -> u64 {
@@ -212,7 +237,10 @@ impl Organization {
                 };
                 let mut hub = self.lock();
                 let now = self.now();
-                hub.sync.observe(observation, now);
+                if hub.sync.observe(observation, now) {
+                    // The list shows a catalog now; the dropped draft's notice goes.
+                    hub.notice = None;
+                }
                 hub
             }
             OrganizationUpdate::Failed { message, .. } => {
@@ -236,9 +264,14 @@ impl Organization {
 
     fn view(&self, hub: &Hub) -> SyncView {
         let mut view = hub.sync.view();
+        view.notice = hub.notice.clone();
         if !self.0.allowed {
             view.ready = false;
             view.reason = Some(REPLAY_NEEDS_HGS.into());
+        }
+        if hub.stopped {
+            view.ready = false;
+            view.reason = Some(STOPPED.into());
         }
         view
     }
@@ -273,7 +306,8 @@ impl Organization {
     }
 
     /// Drops the lock, then answers the settled edits and makes the queued
-    /// Projects call.
+    /// Projects call. A panic in that call is logged, so it stops neither
+    /// the worker nor the drain thread.
     fn release(&self, mut hub: MutexGuard<'_, Hub>) {
         let answers = std::mem::take(&mut hub.answers);
         let announce = hub.announce.take();
@@ -289,7 +323,14 @@ impl Organization {
                 .unwrap_or_else(PoisonError::into_inner);
             if number > *announced {
                 *announced = number;
-                presented(value, default, status);
+                let call = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    presented(value, default, status)
+                }));
+                if call.is_err() {
+                    eprintln!(
+                        "zerus-client: the Projects screen's update panicked; project sync goes on"
+                    );
+                }
             }
         }
     }
@@ -326,6 +367,17 @@ impl Organization {
         })
     }
 
+    /// Writes the pending draft and the layout now, as the app quits. It
+    /// takes the worker's writer, so their writes never interleave, and it
+    /// never runs `hgs`: an edit made while an apply runs is in the draft,
+    /// which the next start sends.
+    pub fn flush(&self) {
+        let mut writer = self.writer();
+        let hub = self.save_draft(self.lock(), &mut writer);
+        self.release(hub);
+        writer.save_layout(&self.0.pump, &self.0.layout);
+    }
+
     fn settle(hub: &mut Hub, settled: Vec<(Ticket, EditOutcome)>) {
         for (ticket, outcome) in settled {
             if let Some(sender) = hub.waiting.remove(&ticket) {
@@ -334,17 +386,16 @@ impl Organization {
         }
     }
 
-    fn spawn(&self, aside: bool) {
+    fn spawn(&self) {
         let shared = Arc::downgrade(&self.0);
         std::thread::Builder::new()
             .name("zerus-organization".into())
             .spawn(move || {
                 let _stop = Stop(shared.clone());
-                let mut worker = Worker::new(aside);
                 // Each pass waits at most a second, so the thread ends soon
                 // after the last handle.
                 while let Some(shared) = shared.upgrade() {
-                    Organization(shared).pass(&mut worker);
+                    Organization(shared).pass();
                 }
             })
             .expect("the organization thread starts");
@@ -353,15 +404,26 @@ impl Organization {
     /// One pass of the worker: renames, the draft file, a due apply, the
     /// layout, then a wait until the next flush or tick (at most 1 s), or
     /// until a state or an edit wakes it.
-    fn pass(&self, worker: &mut Worker) {
+    fn pass(&self) {
+        #[cfg(test)]
+        {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.0.passes.fetch_add(1, SeqCst);
+            if self.0.fail.load(SeqCst) {
+                panic!("a test stops the organization worker");
+            }
+        }
+        let mut writer = self.writer();
         let mut hub = self.lock();
         self.renames(&mut hub);
-        hub = self.save_draft(hub, worker);
+        hub = self.save_draft(hub, &mut writer);
         match hub.sync.due(self.now()) {
             Due::Apply(invocation) => {
-                // The list shows the apply running while `hgs` runs without the lock.
+                // The list shows the apply running while `hgs` runs without
+                // the hub's lock, and `flush` may write meanwhile.
                 self.publish(&mut hub);
                 self.release(hub);
+                drop(writer);
                 let exit = run_limited(&self.0.hgs, &invocation, &[], Read::Swarm.limit())
                     .unwrap_or_else(|too| Exit::Abnormal {
                         stderr: ReadError::TooLarge { limit: too.cap }.to_string(),
@@ -385,9 +447,10 @@ impl Organization {
             Due::Nothing => {}
         }
         self.release(hub);
-        if worker.saved.elapsed() >= SAVE_EVERY {
-            worker.save_layout(&self.0.pump, &self.0.layout);
+        if writer.saved.elapsed() >= SAVE_EVERY {
+            writer.save_layout(&self.0.pump, &self.0.layout);
         }
+        drop(writer);
         let hub = self.lock();
         #[cfg(test)]
         self.0
@@ -431,19 +494,19 @@ impl Organization {
         }
     }
 
-    /// Writes the draft file while it lags the pending edits, without the
-    /// hub's lock: an edit is on disk before the apply that carries it, and
-    /// the file goes once the edits settled (SessionsWindow.cpp:2496). Only
-    /// a write that succeeded is confirmed; a failed one is offered again on
-    /// the next pass.
+    /// Writes the draft file while it lags the pending edits, under the
+    /// writer's lock and without the hub's: an edit is on disk before the
+    /// apply that carries it, and the file goes once the edits settled
+    /// (SessionsWindow.cpp:2496). Only a write that succeeded is confirmed;
+    /// a failed one is offered again on the next pass.
     fn save_draft<'a>(
         &'a self,
         mut hub: MutexGuard<'a, Hub>,
-        worker: &mut Worker,
+        writer: &mut Writer,
     ) -> MutexGuard<'a, Hub> {
         while let Some((change, write)) = hub.sync.take_draft() {
             self.release(hub);
-            let written = worker.store_draft(&self.0.draft, &write);
+            let written = writer.store_draft(&self.0.draft, &write);
             hub = self.lock();
             if !written {
                 break;
@@ -454,21 +517,40 @@ impl Organization {
     }
 }
 
+/// The draft of the last run, as `new` takes it up.
+#[derive(Default)]
+struct Saved {
+    draft: Option<Draft>,
+    /// An unusable draft is still in place: the writer moves it first.
+    aside: bool,
+    /// Why the draft was not applied, for the list.
+    notice: Option<String>,
+}
+
 /// The draft of the last run. One that cannot be used is never applied: the
-/// reason goes to the log and the file aside before any new draft replaces
-/// it. The flag says it is still in place, so the worker moves it first.
-fn saved_draft(path: &Path) -> (Option<Draft>, bool) {
+/// reason goes to the log and the list, and the file aside before any new
+/// draft replaces it.
+fn saved_draft(path: &Path) -> Saved {
     match draft::load(path) {
-        Load::Missing => (None, false),
-        Load::Loaded(draft) => (Some(draft), false),
+        Load::Missing => Saved::default(),
+        Load::Loaded(draft) => Saved {
+            draft: Some(draft),
+            ..Saved::default()
+        },
         Load::Dropped(reason) => {
-            eprintln!("zerus-client: the saved project changes were not applied: {reason}");
-            match set_aside(path) {
-                Ok(()) => (None, false),
+            let notice = format!("The saved project changes were not applied: {reason}");
+            eprintln!("zerus-client: {notice}");
+            let aside = match set_aside(path) {
+                Ok(()) => false,
                 Err(error) => {
                     eprintln!("zerus-client: the unusable draft could not be moved aside: {error}");
-                    (None, true)
+                    true
                 }
+            };
+            Saved {
+                draft: None,
+                aside,
+                notice: Some(notice),
             }
         }
     }
@@ -507,18 +589,21 @@ impl Throttle {
     }
 }
 
-/// The worker's state between passes.
-struct Worker {
+/// What the draft and layout writes keep between them, behind the writer's lock.
+struct Writer {
     /// An unusable draft is still in place; no draft is written before it moved.
     aside: bool,
     saved: Instant,
-    /// A layout whose write failed, written again with the next save.
+    /// The newest layout whose write failed, written again with the next save.
     layout: Option<Vec<u8>>,
     draft_log: Throttle,
     layout_log: Throttle,
+    /// Layout saves done, so a test can tell one more ran.
+    #[cfg(test)]
+    saves: usize,
 }
 
-impl Worker {
+impl Writer {
     fn new(aside: bool) -> Self {
         Self {
             aside,
@@ -526,6 +611,8 @@ impl Worker {
             layout: None,
             draft_log: Throttle::default(),
             layout_log: Throttle::default(),
+            #[cfg(test)]
+            saves: 0,
         }
     }
 
@@ -554,20 +641,32 @@ impl Worker {
     /// Saves a changed layout through a temporary file and a rename.
     fn save_layout(&mut self, pump: &Pump, path: &Path) {
         self.saved = Instant::now();
-        let Some(bytes) = pump.take_layout().or_else(|| self.layout.take()) else {
-            return;
-        };
-        if let Err(error) = draft::write(path, &bytes) {
-            if self.layout_log.allow() {
-                eprintln!("zerus-client: the project layout was not saved: {error}");
+        let bytes = match pump.take_layout() {
+            // Newer than any layout kept from a failed write, which goes.
+            Some(bytes) => {
+                self.layout = None;
+                Some(bytes)
             }
-            self.layout = Some(bytes);
+            None => self.layout.take(),
+        };
+        if let Some(bytes) = bytes {
+            if let Err(error) = draft::write(path, &bytes) {
+                if self.layout_log.allow() {
+                    eprintln!("zerus-client: the project layout was not saved: {error}");
+                }
+                self.layout = Some(bytes);
+            }
+        }
+        #[cfg(test)]
+        {
+            self.saves += 1;
         }
     }
 }
 
-/// Runs when the worker ends. After a panic the hub outlives it: the edits
-/// waiting on it, and later ones, answer `Kept(STOPPED)`.
+/// Runs when the worker ends. After a panic the hub outlives it: the list
+/// shows that project sync stopped, and the edits waiting on the worker, and
+/// later ones, answer `Kept(STOPPED)`.
 struct Stop(Weak<Shared>);
 
 impl Drop for Stop {
@@ -575,22 +674,20 @@ impl Drop for Stop {
         let Some(shared) = self.0.upgrade() else {
             return;
         };
-        let (waiting, answers) = {
-            let mut hub = shared.hub.lock().unwrap_or_else(PoisonError::into_inner);
-            hub.stopped = true;
-            (
-                std::mem::take(&mut hub.waiting),
-                std::mem::take(&mut hub.answers),
-            )
-        };
-        for (sender, outcome) in answers {
-            let _ = sender.send(outcome);
-        }
+        let organization = Organization(shared);
+        let mut hub = organization.lock();
+        hub.stopped = true;
+        let waiting = std::mem::take(&mut hub.waiting);
         for sender in waiting.into_values() {
-            let _ = sender.send(EditOutcome::Kept {
-                detail: STOPPED.into(),
-            });
+            hub.answers.push((
+                sender,
+                EditOutcome::Kept {
+                    detail: STOPPED.into(),
+                },
+            ));
         }
+        organization.publish(&mut hub);
+        organization.release(hub);
     }
 }
 
@@ -828,6 +925,27 @@ mod tests {
         organization.0.parked.load(Ordering::SeqCst)
     }
 
+    /// The passes the worker started.
+    fn passes(organization: &Organization) -> usize {
+        organization.0.passes.load(Ordering::SeqCst)
+    }
+
+    /// The layout saves done; taken under the writer's lock, so a save in
+    /// progress is counted once it ended.
+    fn saves(organization: &Organization) -> usize {
+        organization.writer().saves
+    }
+
+    /// Whether the list's headers name `project` `name`, taking the batch.
+    fn header_named(pump: &Pump, project: &str, name: &str) -> bool {
+        pump.take(Duration::ZERO).grouping.is_some_and(|grouping| {
+            grouping
+                .headers
+                .iter()
+                .any(|header| header.id == project && header.name == name)
+        })
+    }
+
     /// The input of a logged `swarm apply`.
     fn input(line: &str) -> Value {
         let entry: Value = serde_json::from_str(line).unwrap();
@@ -987,7 +1105,16 @@ mod tests {
         );
         assert_eq!(fake.applies().len(), 1);
         assert!(fake.draft().exists(), "the kept edit stays on disk");
+        let before = passes(&organization);
         organization.observe(&state("d1"));
+        // The 5 s tick would take five idle passes; the state sends it at once.
+        wait_until("the resend, or three more passes", || {
+            fake.applies().len() >= 2 || passes(&organization) > before + 2
+        });
+        assert!(
+            fake.applies().len() >= 2,
+            "the state sent it again within two passes"
+        );
         wait_until("the resend to land", || fake.settled_after(2));
         let log = fake.applies();
         assert_eq!(log.len(), 2, "one resend, and no more once it landed");
@@ -1073,6 +1200,13 @@ mod tests {
         let pump = Pump::default();
         let organization = fake.organization(&pump, true);
         assert!(!fake.draft().exists(), "moved before the worker starts");
+        let notice = pump.take(crate::pump::PARK).grouping.unwrap().sync.notice;
+        assert!(
+            notice.as_deref().is_some_and(|notice| notice.starts_with(
+                "The saved project changes were not applied: the draft file is not a draft: "
+            )),
+            "the list says why: {notice:?}"
+        );
         let aside: Vec<String> = std::fs::read_dir(&fake.dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -1082,11 +1216,146 @@ mod tests {
         organization.set_source(snapshot("d1"));
         let passes = parked(&organization);
         organization.observe(&state("d1"));
+        let grouping = pump.take(crate::pump::PARK).grouping.unwrap();
+        assert!(grouping.loaded);
+        assert_eq!(grouping.sync.notice, None, "gone with the first state");
         wait_until("a pass after the first state", || {
             parked(&organization) > passes
         });
         assert!(fake.applies().is_empty());
         assert!(!fake.draft().exists());
+        fake.finish(organization);
+    }
+
+    // Review fix round 1: a layout kept from a failed write is older than one
+    // taken later, and never overwrites it.
+    #[test]
+    fn a_layout_that_could_not_be_saved_never_overwrites_a_newer_one() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        // A folder in the layout's place: saves fail and keep their bytes.
+        std::fs::create_dir(fake.layout()).unwrap();
+        pump.set_collapsed("alpha", true);
+        let first = saves(&organization);
+        wait_until("a failed save", || saves(&organization) > first);
+        assert!(fake.layout().is_dir());
+        {
+            // Between two saves, the folder goes and a newer layout comes.
+            let _writer = organization.writer();
+            std::fs::remove_dir(fake.layout()).unwrap();
+            pump.set_collapsed("alpha", false);
+            pump.set_collapsed("ungrouped", true);
+        }
+        wait_until("the newer layout", || fake.layout().is_file());
+        let newer = std::fs::read(fake.layout()).unwrap();
+        assert!(String::from_utf8_lossy(&newer).contains("ungrouped"));
+        let after = saves(&organization);
+        wait_until("one more save", || saves(&organization) > after);
+        assert_eq!(
+            std::fs::read(fake.layout()).unwrap(),
+            newer,
+            "the failed layout never comes back"
+        );
+        fake.finish(organization);
+    }
+
+    // Review fix round 1: quitting writes what the worker could not yet. An
+    // edit made while an apply runs is on disk after `flush`, which runs no hgs.
+    #[test]
+    fn flush_writes_an_edit_made_while_an_apply_runs() {
+        let fake = Fake::new(json!([{"stdout": full("d2"), "gate": "go"}]));
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        let first = {
+            let organization = organization.clone();
+            std::thread::spawn(move || organization.submit(move_to_inbox()))
+        };
+        wait_until("the apply to start", || fake.applies().len() == 1);
+        let second = {
+            let organization = organization.clone();
+            std::thread::spawn(move || {
+                organization.submit(Intent::Rename {
+                    project: "alpha".into(),
+                    name: "Beta".into(),
+                })
+            })
+        };
+        wait_until("the rename in the list", || {
+            header_named(&pump, "alpha", "Beta")
+        });
+        let Load::Loaded(before) = draft::load(&fake.draft()) else {
+            panic!("no draft before the apply");
+        };
+        assert_eq!(before.desired["projects"][0]["name"], "Alpha");
+        organization.flush();
+        let Load::Loaded(saved) = draft::load(&fake.draft()) else {
+            panic!("no draft after flush");
+        };
+        assert_eq!(saved.desired["projects"][0]["name"], "Beta");
+        assert_eq!(saved.desired["projects"][1]["sessions"], json!([R]));
+        assert_eq!(fake.applies().len(), 1, "flush runs no hgs");
+        std::fs::write(fake.dir.join("go"), b"").unwrap();
+        assert_eq!(first.join().unwrap(), EditOutcome::Done { conflicts: 0 });
+        assert_eq!(second.join().unwrap(), EditOutcome::Done { conflicts: 0 });
+        fake.finish(organization);
+    }
+
+    // Review fix round 1: a worker that stopped shows in the list before
+    // anyone tries an edit, and edits answer Kept.
+    #[test]
+    fn a_stopped_worker_shows_in_the_list_before_any_edit() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        assert!(pump.take(crate::pump::PARK).grouping.unwrap().sync.ready);
+        organization.0.fail.store(true, Ordering::SeqCst);
+        organization.0.wake.notify_all();
+        wait_until("the list to show it", || {
+            pump.take(Duration::ZERO).grouping.is_some_and(|grouping| {
+                !grouping.sync.ready && grouping.sync.reason.as_deref() == Some(STOPPED)
+            })
+        });
+        assert_eq!(
+            organization.submit(move_to_inbox()),
+            EditOutcome::Kept {
+                detail: STOPPED.into()
+            }
+        );
+        assert!(fake.applies().is_empty());
+        fake.finish(organization);
+    }
+
+    // Review fix round 1: a panic in the Projects callback is logged, and the
+    // worker goes on to the next edit.
+    #[test]
+    fn a_panicking_projects_callback_leaves_the_worker_running() {
+        let fake = Fake::landing();
+        let organization = fake.organization(&Pump::default(), true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        organization.set_presented(Arc::new(|_, _, _| {
+            if std::thread::current().name() == Some("zerus-organization") {
+                panic!("the Projects callback panics on the worker");
+            }
+        }));
+        assert_eq!(
+            organization.submit(move_to_inbox()),
+            EditOutcome::Done { conflicts: 0 }
+        );
+        let rename = Intent::Rename {
+            project: "alpha".into(),
+            name: "Beta".into(),
+        };
+        assert_eq!(
+            organization.submit(rename),
+            EditOutcome::Done { conflicts: 0 },
+            "the worker still runs edits"
+        );
         fake.finish(organization);
     }
 

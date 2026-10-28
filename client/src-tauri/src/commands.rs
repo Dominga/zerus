@@ -56,6 +56,15 @@ mod live {
         pub organization: OnceLock<Organization>,
     }
 
+    /// Follows this computer's organization: the catalog is shared, so its
+    /// copy is the one the hub edits. A Fleet starts once, so this logs at
+    /// most once.
+    fn follow_organization(fleet: &Fleet) {
+        if let Err(error) = fleet.follow_organization(&ComputerId::local()) {
+            eprintln!("zerus-client: project sync cannot follow this computer's catalog: {error}");
+        }
+    }
+
     fn replay_interval() -> Duration {
         let ms = std::env::var("ZERUS_CLIENT_REPLAY_INTERVAL_MS")
             .ok()
@@ -97,8 +106,7 @@ mod live {
                     None => {
                         let fleet = Fleet::start(default_hgs(), sink);
                         if organization.is_some() {
-                            // The catalog is shared: this computer's is the one followed.
-                            let _ = fleet.follow_organization(&ComputerId::local());
+                            follow_organization(&fleet);
                         }
                         (Source::Fleet(fleet), "live")
                     }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  ALL_UNTIL, addDays, applyDraft, draftHint, draftValid, editDraft, initialRange, localDay, panelPlace, pickerLabel, rangeBounds, rangeCaption,
+  ALL_UNTIL, addDays, applyDraft, draftHint, draftValid, editDraft, initialRange, localDay, panelPlace, pickerLabel, tabTarget, rangeBounds, rangeCaption,
   stageDraft, startOfDay, type DateRange,
 } from "./archive-dates";
 
@@ -115,5 +115,17 @@ describe("the picker panel's place (openPanel), in viewport coordinates", () => 
     expect(panelPlace({ left: 1300, top: 120, bottom: 152 }, 300, view).left).toBe(952);
     expect(panelPlace({ left: 2, top: 10, bottom: 40 }, 880, view)).toEqual({ left: 8, top: 8, width: 480 });
     expect(panelPlace(button, 300, { width: 400, height: 900 })).toEqual({ left: 8, top: 158, width: 384 });
+  });
+});
+
+describe("Tab inside the panel (Qt's popup keeps the focus in it)", () => {
+  it("wraps from the last control to the first and back, and brings an outside focus in", () => {
+    expect(tabTarget(4, 3, false)).toBe(0);
+    expect(tabTarget(4, 0, true)).toBe(3);
+    expect(tabTarget(4, 1, false)).toBe(2);
+    expect(tabTarget(4, 2, true)).toBe(1);
+    expect(tabTarget(4, -1, false)).toBe(0);
+    expect(tabTarget(4, -1, true)).toBe(3);
+    expect(tabTarget(0, -1, false)).toBeUndefined();
   });
 });

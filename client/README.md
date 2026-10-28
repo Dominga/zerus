@@ -426,7 +426,12 @@ The hook first switches to the Archive filter, waits for the page and logs
 the date panel while the list panel carries a transform (as the strip's peek
 does) and logs `actions-smoke archive-date-panel: done (...)` when the panel is
 in the page's body at the picker button and Escape closed it with the focus
-back on the button. It selects the archived row, waits up to 15 s for its
+back on the button. Over a hover-opened strip peek it then logs
+`actions-smoke archive-date-panel-peek: done (...)` when Shift+Tab and Tab wrap
+inside the panel, Escape with the focus outside it closes only the panel (the
+peek and a selection stay), leaving the list with the panel open keeps the peek
+(as Qt keeps a hover peek under a popup) and, once it closed, the next leave
+closes the peek. It selects the archived row, waits up to 15 s for its
 details and logs `actions-smoke archive-inspect: done <archive id>` (or
 `failed`); the fake's `log.ndjson` then holds `archives --json` (with the page
 query on standard input) and an `inspect NAME ... --archive ID` call. It

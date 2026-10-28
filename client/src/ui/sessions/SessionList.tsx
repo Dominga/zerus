@@ -8,7 +8,7 @@ import {
 } from "./SessionCard";
 import { catalog, computerOffline } from "../../store/catalog";
 import { archiveCount, archiveTip } from "../../store/archive";
-import { ArchiveBar } from "./ArchiveBar";
+import { ArchiveBar, datePanelOpen } from "./ArchiveBar";
 import { detailsFor, followedFor, updating } from "../../store/actions";
 import { running } from "../../store/batch";
 import { TOOL_WIDTH, machineMenu, runSelection, selectedRows, selectionContextMenu, selectionCount } from "./selection-live";
@@ -359,7 +359,7 @@ export function SessionList() {
   // pointer has been outside for 350 ms. Menus and an active search keep it open.
   let enterTimer: number | undefined, leaveTimer: number | undefined;
   let hoverOpened = false;
-  const keepOpen = () => !!menu() || searchFocused() || search().length > 0;
+  const keepOpen = () => !!menu() || searchFocused() || search().length > 0 || datePanelOpen();
   const onStripEnter = () => {
     clearTimeout(leaveTimer);
     if (!stripMode() || peek()) return;

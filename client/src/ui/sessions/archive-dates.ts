@@ -137,3 +137,14 @@ export function panelPlace(button: ButtonBox, height: number, viewport: { width:
   const top = below + height <= viewport.height - 8 ? below : button.top - height - 6;
   return { left, top: Math.max(8, Math.min(top, viewport.height - height - 8)), width };
 }
+
+/**
+ * The control Tab (or Shift+Tab, `back`) moves to among the panel's `count`
+ * controls from `index` (-1: the focus is outside the panel): it wraps, so the
+ * focus stays in the panel as in Qt's popup. Undefined without controls.
+ */
+export function tabTarget(count: number, index: number, back: boolean): number | undefined {
+  if (count <= 0) return undefined;
+  if (index < 0) return back ? count - 1 : 0;
+  return (index + (back ? -1 : 1) + count) % count;
+}

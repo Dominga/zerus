@@ -3,12 +3,19 @@ import { Portal } from "solid-js/web";
 import { Icon } from "../lib/icons";
 import { archive, buttonText } from "../../store/archive";
 import {
-  MAX_DAY, MIN_DAY, PERIODS, applyDraft, draftHint, draftReversed, draftValid, editDraft, panelPlace, pickerLabel, rangeCaption, stageDraft, type Draft, type Period,
+  MAX_DAY, MIN_DAY, PERIODS, applyDraft, draftHint, draftReversed, draftValid, editDraft, panelPlace, pickerLabel, rangeCaption, stageDraft, tabTarget, type Draft, type Period,
 } from "./archive-dates";
 
 // The Archive bar above the list under the Archive filter (Qt's
 // ArchiveBrowser): the date range and Refresh, the status with Newer and
 // Older, then the errors by machine.
+
+const [open, setOpen] = createSignal(false);
+/**
+ * The date panel is open: a popup, so a hover-opened strip peek stays open
+ * under it (Qt's activePopupWidget, SessionPanelDock.h 50-56).
+ */
+export const datePanelOpen = open;
 
 export function ArchiveBar() {
   const [width, setWidth] = createSignal(0);
@@ -57,7 +64,6 @@ export function ArchiveBar() {
 function DatePicker() {
   let button: HTMLButtonElement | undefined;
   let panel: HTMLDivElement | undefined;
-  const [open, setOpen] = createSignal(false);
   const [draft, setDraft] = createSignal<Draft>({ period: 0, from: "", until: "" });
   const [place, setPlace] = createSignal({ left: 0, top: 0, width: 480 });
 
@@ -88,9 +94,23 @@ function DatePicker() {
       e.preventDefault();
       close();
     };
+    // The popup keeps the keyboard: Escape closes it wherever the focus is,
+    // before the list's own Escape (peek, selection); Tab and Shift+Tab wrap
+    // inside it.
+    const keys = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); return; }
+      if (e.key !== "Tab" || !panel) return;
+      const controls = [...panel.querySelectorAll<HTMLElement>("input:not([disabled]), button:not([disabled])")];
+      const next = tabTarget(controls.length, controls.indexOf(document.activeElement as HTMLElement), e.shiftKey);
+      e.preventDefault();
+      if (next !== undefined) controls[next].focus();
+    };
     const t = setTimeout(() => addEventListener("mousedown", outside));
-    onCleanup(() => { clearTimeout(t); removeEventListener("mousedown", outside); });
+    addEventListener("keydown", keys, true);
+    onCleanup(() => { clearTimeout(t); removeEventListener("mousedown", outside); removeEventListener("keydown", keys, true); });
   });
+  // Leaving the Archive filter unmounts the panel with the bar.
+  onCleanup(() => setOpen(false));
 
   return (
     <>
@@ -105,8 +125,7 @@ function DatePicker() {
         <Portal>
         <div class="archive-pop" ref={panel} role="dialog" aria-label="Archived date"
           style={{ left: `${place().left}px`, top: `${place().top}px`, width: `${place().width}px` }}
-          onPointerDown={(e) => e.stopPropagation()}
-          onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } }}>
+          onPointerDown={(e) => e.stopPropagation()}>
           <div class="archive-pop-title">Archived date</div>
           <div class="archive-pop-body">
             <div class="archive-pop-custom">

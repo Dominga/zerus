@@ -2,7 +2,8 @@ import { Show, Suspense, createSignal, lazy, onCleanup, onMount } from "solid-js
 import { invoke } from "@tauri-apps/api/core";
 import { listRows } from "./sessions/model";
 import { orderedRows } from "../store/catalog";
-import { selectedKey, setSelectedKey, setStateFilter } from "../store/ui";
+import { multi, peek, selectedKey, setMulti, setPeek, setSelectedKey, setStateFilter, setStripMode, stripMode } from "../store/ui";
+import { clearMulti } from "./sessions/organize";
 import { archive, archiveRows } from "../store/archive";
 import { activity } from "../store/session";
 import { markAllRead, markNeedsAttention, markRead } from "../store/marks";
@@ -346,6 +347,75 @@ async function datePanelPlacement(): Promise<{ ok: boolean; text: string }> {
   }
 }
 
+/**
+ * The date panel over a hover-opened strip peek. Qt keeps a hover peek open
+ * while a popup is active (SessionPanelDock.h 50-56) and its popup keeps the
+ * keyboard: Shift+Tab and Tab wrap inside the panel; Escape with the focus
+ * outside the panel closes only the panel (the peek and a selection stay);
+ * the pointer leaving the list while the panel is open keeps the peek; once
+ * the panel closed, the next leave closes it.
+ */
+async function peekWithDatePanel(): Promise<{ ok: boolean; text: string }> {
+  const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
+  const pop = () => document.querySelector<HTMLElement>(".archive-pop");
+  const key = (name: string, shiftKey = false, target: EventTarget = document.activeElement ?? document.body) =>
+    target.dispatchEvent(new KeyboardEvent("keydown", { key: name, shiftKey, bubbles: true, cancelable: true }));
+  const wasStrip = stripMode();
+  setPeek(false);
+  setStripMode(true);
+  try {
+    await until(() => !!document.querySelector(".strip-col"), 2000, "no strip").catch(() => {});
+    const section = document.querySelector<HTMLElement>("section.sessions-pane");
+    // Each part starts from a peek the hover opened, so one failure does not hide another.
+    const hover = async () => {
+      if (peek()) return true;
+      document.querySelector(".strip-col")?.dispatchEvent(new PointerEvent("pointerenter"));
+      return until(() => peek(), 2000, "no peek").then(() => true, () => false);
+    };
+    const hovered = await hover();
+    const picker = document.querySelector<HTMLButtonElement>(".sp-panel .archive-bar .archive-period");
+    if (!hovered || !section || !picker) return { ok: false, text: `failed (the hover opened the peek ${hovered}, picker ${!!picker})` };
+    const open = async () => { picker.click(); return until(() => document.activeElement?.id === "archive-from", 2000, "not open").then(() => true, () => false); };
+    const opened = await open();
+    const controls = [...(pop()?.querySelectorAll<HTMLElement>("input:not([disabled]), button:not([disabled])") ?? [])];
+    key("Tab", true);
+    const back = !!controls.length && document.activeElement === controls.at(-1);
+    key("Tab");
+    const forward = !!controls.length && document.activeElement === controls[0];
+    // Escape with the focus outside the panel and a selection: only the panel closes.
+    const rows = orderedRows().slice(0, 2);
+    for (const r of rows) setMulti(r.key, true);
+    (document.activeElement as HTMLElement | null)?.blur();
+    key("Escape", false, document.body);
+    await sleep(50);
+    const escaped = !pop() && peek() && rows.length === 2 && rows.every((r) => !!multi[r.key]);
+    clearMulti();
+    // Leaving while the panel is open keeps the peek.
+    const reopened = (await hover()) && (await open());
+    section.dispatchEvent(new PointerEvent("pointerleave"));
+    await sleep(800);
+    const kept = peek() && !!pop();
+    key("Escape");
+    section.dispatchEvent(new PointerEvent("pointerenter"));
+    await sleep(500);
+    const stayed = peek() && !pop();
+    // With the panel closed, the next leave closes the peek.
+    section.dispatchEvent(new PointerEvent("pointerleave"));
+    const closed = await until(() => !peek(), 2000, "kept").then(() => true, () => false);
+    const ok = opened && back && forward && escaped && reopened && kept && stayed && closed;
+    return {
+      ok,
+      text: `${ok ? "done" : "failed"} (Shift+Tab wraps ${back}, Tab wraps ${forward}, Escape outside the panel closed only the panel ${escaped}, `
+        + `leaving with the panel open kept the peek ${kept}, back inside it stayed ${stayed}, the next leave closed it ${closed})`,
+    };
+  } finally {
+    pop()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    clearMulti();
+    setPeek(false);
+    setStripMode(wasStrip);
+  }
+}
+
 async function actionsSmoke(allowed: boolean) {
   const exit = (code: number) => invoke("exit_app", { code }).catch(() => {});
   if (!allowed) {
@@ -375,6 +445,9 @@ async function actionsSmoke(allowed: boolean) {
     const panel = await datePanelPlacement();
     log(`actions-smoke archive-date-panel: ${panel.text}`);
     if (!panel.ok) bad++;
+    const hover = await peekWithDatePanel();
+    log(`actions-smoke archive-date-panel-peek: ${hover.text}`);
+    if (!hover.ok) bad++;
     setSelectedKey(archivedKey);
     // The details the header and the menus read, from `inspect --archive ID`; bounded.
     const archived = archive.row(archivedKey)!;

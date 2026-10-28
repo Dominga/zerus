@@ -441,3 +441,10 @@ pub fn display_link_hz(display: Option<u32>, duration: Duration) -> Option<f64> 
         (elapsed > 0.0).then(|| frames as f64 / elapsed)
     }
 }
+
+/// The running bundle's identifier; None outside a bundle (`cargo run`, tests).
+pub fn bundle_identifier() -> Option<String> {
+    objc2_foundation::NSBundle::mainBundle()
+        .bundleIdentifier()
+        .map(|id| id.to_string())
+}

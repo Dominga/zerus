@@ -130,7 +130,8 @@ Outcome rules:
   or question arrived meanwhile, nothing runs and the notice says "A new reply
   or question arrived. Open the menu again to mark it as read." The row shows
   read once the host's snapshot reports it. The mark is saved before the call
-  in `read-marks.json` in the app data directory (`app_data_dir`, e.g.
+  in `read-marks.json` in the client's data directory (Tauri's `app_data_dir`
+  formula with the running bundle's identifier, `identity.rs`, e.g.
   `~/.local/share/<bundle id>/` on Linux; a replay uses
   `read-marks-replay.json`) so a restart keeps it. It is dropped once a row
   shows the host settled it, or when a complete snapshot of its computer no

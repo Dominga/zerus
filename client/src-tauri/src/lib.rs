@@ -6,9 +6,13 @@
 
 #[cfg(feature = "live")]
 mod actions;
+mod cli;
 mod clipboard;
 mod commands;
 mod display;
+mod identity;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod instance;
 mod metrics;
 mod platform;
 #[cfg(feature = "live")]
@@ -29,23 +33,125 @@ pub const MAIN_WINDOW: &str = "main";
 #[cfg(all(test, unix))]
 pub(crate) static PROCESS_TREE: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
-/// Builds the app and runs its event loop until the last window closes.
+/// What `run` settled before the app starts.
+pub struct Startup {
+    pub identity: identity::Identity,
+    /// The claimed single-instance socket and the activations it receives.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub instance: Option<instance::Claimed>,
+}
+
+/// Parses Qt's command line and answers `--help`, `--version` and
+/// `--build-info`. It then takes the single-instance socket, or hands the
+/// activation to the running instance and returns, and runs the app.
 pub fn run() {
-    tauri::Builder::default()
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let options = match cli::parse(&args) {
+        Ok(cli::Command::Run(options)) => options,
+        Ok(cli::Command::Help) => {
+            print!("{}", cli::usage());
+            return;
+        }
+        Ok(cli::Command::Version) => {
+            print!("{}", cli::version_line(&cli::BUILD));
+            return;
+        }
+        Ok(cli::Command::BuildInfo) => {
+            println!("{}", cli::build_info(&cli::BUILD));
+            return;
+        }
+        Err(error) => {
+            eprint!("zerus-client: {error}\n\n{}", cli::usage());
+            std::process::exit(2);
+        }
+    };
+    for option in &options.ignored {
+        eprintln!("zerus-client: {option} is accepted for the Qt GUI's command line and not used");
+    }
+    // Before any thread starts: the core's `default_hgs` reads it.
+    if let Some(hgs) = &options.hgs {
+        std::env::set_var("ZERUS_CLIENT_HGS", hgs);
+    }
+    let context = tauri::generate_context!();
+    let identity = identity::current(&context.config().identifier);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let instance = match identity.instance_name(identity::flag("ZERUS_CLIENT_SINGLE_INSTANCE")) {
+        None => None,
+        Some(name) => {
+            let activation = if options.opens_sessions(identity.is_switch()) {
+                instance::Activation::Sessions
+            } else {
+                instance::Activation::Show
+            };
+            match instance::claim(&name, identity.launchd_label(), activation) {
+                instance::Claim::Claimed(claimed) => Some(claimed),
+                instance::Claim::Forwarded => {
+                    eprintln!("zerus-client: already running");
+                    return;
+                }
+                instance::Claim::Failed(error) => {
+                    eprintln!("zerus-client: cannot claim the socket: {error}");
+                    std::process::exit(3);
+                }
+            }
+        }
+    };
+    launch(
+        context,
+        Startup {
+            identity,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            instance,
+        },
+    );
+}
+
+/// The client's private data directory: the running bundle's identifier
+/// (Decision 5). Tauri's `app_data_dir` names the compile-time identifier,
+/// which a switch build promotes at signing, so the client never calls it.
+#[cfg_attr(not(feature = "live"), allow(dead_code))]
+pub(crate) fn data_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
+    use tauri::Manager;
+    app.state::<identity::Identity>().data_dir_now()
+}
+
+/// Builds the app and runs its event loop until the last window closes.
+fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
+    let identity = startup.identity;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let (listening, activations) = match startup.instance {
+        Some(claimed) => (Some(claimed.listening), Some(claimed.activations)),
+        None => (None, None),
+    };
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
-        .manage(commands::AppState::default())
+        .manage(commands::AppState::default());
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let builder = builder.manage(instance::InstanceState(std::sync::Mutex::new(listening)));
+    builder
         .invoke_handler(handler())
-        .setup(|app| {
+        .setup(move |app| {
+            use tauri::Manager;
+            // The one source of the client's data directory (Decision 5).
+            app.manage(identity);
             #[cfg(feature = "live")]
             {
-                use tauri::Manager;
-                let dir = app.path().app_data_dir()?;
+                let dir = data_dir(app.handle());
                 std::fs::create_dir_all(&dir)?;
                 // A replay never touches the real read marks.
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 app.manage(actions::Actions::new(dir.join(actions::marks_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
                 app.manage(screens::Screens::tauri(app.handle().clone(), pump));
+            }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if let Some(activations) = activations {
+                // Task 3 shows the window on `sessions`.
+                std::thread::spawn(move || {
+                    for activation in activations {
+                        eprintln!("zerus-client: activation {activation:?}");
+                    }
+                });
             }
             let display = display::display_name();
             if !display::headless_allowed(std::env::var("ZERUS_CLIENT_HEADLESS").is_ok_and(|v| v == "1"), display.as_deref()) {
@@ -62,7 +168,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("Zerus Next failed to start");
 }
 

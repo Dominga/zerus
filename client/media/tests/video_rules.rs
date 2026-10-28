@@ -88,3 +88,33 @@ fn a_finished_recording_is_checked_as_qt_checks_it() {
     }
     assert!(finish(2_500, 640, 480, 1, 2_500 * 32 + 31_000, None).is_ok());
 }
+
+#[test]
+fn a_bgra_frame_becomes_a_square_jpeg() {
+    // 4x2 BGRA: a red left half and a blue right half, rows padded to 20 bytes.
+    let mut frame = Vec::new();
+    for _ in 0..2 {
+        for x in 0..4 {
+            frame.extend(if x < 2 {
+                [0, 0, 255, 255]
+            } else {
+                [255, 0, 0, 255]
+            });
+        }
+        frame.extend([0; 4]);
+    }
+    // The centered square is columns 1-2: one red pixel, one blue.
+    let rgb = square_rgb(&frame, 4, 2, 20, 2).unwrap();
+    assert_eq!(rgb, [255, 0, 0, 0, 0, 255, 255, 0, 0, 0, 0, 255]);
+    // Averaged down to one pixel: purple.
+    assert_eq!(square_rgb(&frame, 4, 2, 20, 1).unwrap(), [127, 0, 127]);
+    assert!(
+        square_rgb(&frame, 4, 2, 8, 1).is_none(),
+        "a stride shorter than a row"
+    );
+    let encoded = jpeg(&rgb, 2, 70).unwrap();
+    assert!(encoded.starts_with(&[0xff, 0xd8]));
+    let gray = vec![128u8; 160 * 160 * 3];
+    let poster = poster_from_rgb(&gray).unwrap();
+    assert!(poster.starts_with(&[0xff, 0xd8]) && poster.len() <= POSTER_BYTES);
+}

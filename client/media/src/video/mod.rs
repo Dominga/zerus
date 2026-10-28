@@ -14,6 +14,8 @@ use std::time::Duration;
 
 #[cfg(all(target_os = "linux", feature = "video"))]
 pub mod linux;
+#[cfg(all(target_os = "macos", feature = "video"))]
+pub mod macos;
 
 /// The largest video file.
 pub const MAX_BYTES: u64 = 10 * 1024 * 1024;
@@ -158,13 +160,80 @@ pub fn finish(
     Ok(meta)
 }
 
+/// The centered square of a BGRA frame (`stride` bytes a row), scaled to
+/// `side` px by averaging, as RGB.
+pub fn square_rgb(
+    bgra: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    side: usize,
+) -> Option<Vec<u8>> {
+    let square = width.min(height);
+    if side == 0
+        || square == 0
+        || stride < width * 4
+        || bgra.len() < stride * (height - 1) + width * 4
+    {
+        return None;
+    }
+    let (left, top) = ((width - square) / 2, (height - square) / 2);
+    let mut rgb = Vec::with_capacity(side * side * 3);
+    for row in 0..side {
+        let (y0, y1) = (
+            top + row * square / side,
+            top + ((row + 1) * square / side).max(row * square / side + 1),
+        );
+        for column in 0..side {
+            let (x0, x1) = (
+                left + column * square / side,
+                left + ((column + 1) * square / side).max(column * square / side + 1),
+            );
+            let mut sum = [0u32; 3];
+            for y in y0..y1.min(top + square) {
+                for x in x0..x1.min(left + square) {
+                    let at = y * stride + x * 4;
+                    sum[0] += u32::from(bgra[at + 2]);
+                    sum[1] += u32::from(bgra[at + 1]);
+                    sum[2] += u32::from(bgra[at]);
+                }
+            }
+            let count = ((y1.min(top + square) - y0) * (x1.min(left + square) - x0)).max(1) as u32;
+            rgb.extend(sum.map(|channel| (channel / count) as u8));
+        }
+    }
+    Some(rgb)
+}
+
+/// RGB pixels of a `side` px square as JPEG.
+pub fn jpeg(rgb: &[u8], side: u16, quality: u8) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    jpeg_encoder::Encoder::new(&mut out, quality)
+        .encode(rgb, side, side, jpeg_encoder::ColorType::Rgb)
+        .ok()?;
+    Some(out)
+}
+
+/// A poster from a 160 px RGB square: the first quality that fits 8 KiB.
+pub fn poster_from_rgb(rgb: &[u8]) -> Option<Vec<u8>> {
+    poster(
+        POSTER_QUALITIES
+            .iter()
+            .filter_map(|quality| jpeg(rgb, POSTER_SIDE as u16, *quality)),
+    )
+}
+
 /// Why this build cannot record video, None when it can.
 pub fn video_reason() -> Option<String> {
     #[cfg(all(target_os = "linux", feature = "video"))]
     {
         linux::missing()
     }
-    #[cfg(not(all(target_os = "linux", feature = "video")))]
+    #[cfg(all(target_os = "macos", feature = "video"))]
+    {
+        None
+    }
+    #[cfg(not(all(any(target_os = "linux", target_os = "macos"), feature = "video")))]
     {
         Some(UNAVAILABLE.into())
     }

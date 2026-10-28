@@ -8,6 +8,8 @@
 mod actions;
 mod clipboard;
 mod commands;
+#[cfg(feature = "live")]
+mod composer;
 mod display;
 mod metrics;
 mod platform;
@@ -33,6 +35,26 @@ pub struct Drafts(pub std::sync::Arc<zerus_client_core::drafts::DraftStore>);
 /// The label of the one window this phase opens.
 pub const MAIN_WINDOW: &str = "main";
 
+/// The root of every private path of the client: the draft store, read marks
+/// and any later file. Tauri's `app_data_dir` for now; the Mac switch build
+/// replaces this body, since there Tauri reports the compile-time identifier
+/// rather than the running bundle's. Nothing else asks Tauri for it.
+#[cfg_attr(not(feature = "live"), allow(dead_code))]
+pub(crate) fn data_dir(app: &AppHandle) -> std::path::PathBuf {
+    use tauri::Manager;
+    app.path()
+        .app_data_dir()
+        .expect("the platform has an app data directory")
+}
+
+/// The client's own draft store under its data directory: `drafts`, or
+/// `drafts-replay` in a replay, so a replay never touches the real drafts.
+/// Qt's store is only ever read (Saved drafts and its recovery).
+#[cfg(feature = "live")]
+fn drafts_root(data_dir: &std::path::Path, replay: bool) -> std::path::PathBuf {
+    data_dir.join(zerus_client_core::drafts::dir(replay))
+}
+
 /// Tests that start child processes hold this shared; the tests that sample
 /// this process's tree hold it alone, since a child that exits mid-sample
 /// leaves the tree's memory total unknown.
@@ -43,6 +65,7 @@ pub(crate) static PROCESS_TREE: std::sync::RwLock<()> = std::sync::RwLock::new((
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(commands::AppState::default())
         .manage(window_visibility::Visibility::default())
         .invoke_handler(handler())
@@ -50,7 +73,7 @@ pub fn run() {
             #[cfg(feature = "live")]
             {
                 use tauri::Manager;
-                let dir = app.path().app_data_dir()?;
+                let dir = data_dir(app.handle());
                 std::fs::create_dir_all(&dir)?;
                 // A replay never touches the real read marks.
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
@@ -66,11 +89,24 @@ pub fn run() {
                 ));
                 // A replay never touches the real drafts either.
                 let drafts = std::sync::Arc::new(zerus_client_core::drafts::DraftStore::open(
-                    dir.join(zerus_client_core::drafts::dir(replay)),
+                    drafts_root(&dir, replay),
                 ));
                 #[cfg(feature = "media")]
                 app.manage(voice::Voices::new(std::sync::Arc::clone(&drafts)));
                 app.manage(Drafts(drafts));
+                let drafts = std::sync::Arc::clone(&app.state::<Drafts>().0);
+                let notify_pump = app.state::<commands::AppState>().pump();
+                app.manage(composer::Composers::new(
+                    drafts,
+                    composer::Deps {
+                        spawn: std::sync::Arc::new(|job: composer::Job| {
+                            tauri::async_runtime::spawn_blocking(job);
+                        }),
+                        notify: std::sync::Arc::new(move || notify_pump.poke()),
+                    },
+                ));
+                #[cfg(unix)]
+                exit_on_signals(app.handle().clone());
             }
             let display = display::display_name();
             if !display::headless_allowed(std::env::var("ZERUS_CLIENT_HEADLESS").is_ok_and(|v| v == "1"), display.as_deref()) {
@@ -111,8 +147,8 @@ pub fn run() {
         });
 }
 
-/// Before the app quits: recordings under way are cancelled and every
-/// draft save already queued reaches the disk.
+/// Before the app quits: recordings under way are cancelled, the hubs take
+/// no more changes, and every draft save already queued reaches the disk.
 #[cfg(feature = "live")]
 fn exit(app: &AppHandle) {
     use tauri::Manager;
@@ -120,9 +156,45 @@ fn exit(app: &AppHandle) {
     if let Some(voices) = app.try_state::<voice::Voices>() {
         voices.close_all();
     }
-    if let Some(drafts) = app.try_state::<Drafts>() {
-        drafts.0.flush();
+    let composers = app.try_state::<composer::Composers>();
+    close_drafts(composers.as_deref(), || {
+        if let Some(drafts) = app.try_state::<Drafts>() {
+            drafts.0.flush();
+        }
+    });
+}
+
+/// The composers close before the store's last flush: an attach read under
+/// way ends and its save is queued first, and nothing is queued after it.
+#[cfg(feature = "live")]
+fn close_drafts(composers: Option<&composer::Composers>, flush_store: impl FnOnce()) {
+    if let Some(composers) = composers {
+        composers.flush();
     }
+    flush_store();
+}
+
+/// SIGTERM, SIGINT or SIGHUP: the exit hook runs here first (drafts reach the
+/// disk even if the event loop is stuck), then the app exits, which runs the
+/// hook again harmlessly. Should the event loop not end the process, it ends
+/// five seconds later.
+#[cfg(all(unix, feature = "live"))]
+fn exit_on_signals(app: AppHandle) {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    let Ok(mut signals) = signal_hook::iterator::Signals::new([SIGTERM, SIGINT, SIGHUP]) else {
+        return;
+    };
+    std::thread::Builder::new()
+        .name("zerus-signals".into())
+        .spawn(move || {
+            if signals.forever().next().is_some() {
+                exit(&app);
+                app.exit(0);
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                std::process::exit(0);
+            }
+        })
+        .expect("the signal thread starts");
 }
 
 /// The commands the frontend may call. The session actions need the core's
@@ -160,6 +232,14 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         terminal::terminal_disconnect,
         terminal::terminal_retarget,
         terminal::terminal_status,
+        composer::composer_open,
+        composer::composer_edit,
+        composer::composer_pick,
+        composer::composer_attach,
+        composer::composer_paste_image,
+        composer::composer_remove,
+        composer::composer_undo_remove,
+        composer::composer_allow_retry,
         #[cfg(feature = "media")]
         voice::voice_open,
         #[cfg(feature = "media")]
@@ -242,4 +322,75 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 /// frame-rate preference at its default: the must-fail control run of the measurement.
 pub fn keep_default_preference() -> bool {
     std::env::var("ZERUS_CLIENT_PERF_PREFERENCE").is_ok_and(|value| value == "default")
+}
+
+#[cfg(all(test, feature = "live"))]
+mod tests {
+    use super::*;
+    use composer::tests::{dir, drafts, session, until, KEY};
+    use composer::{Composers, Deps, Job};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use zerus_client_core::attachments::Selection;
+    use zerus_client_core::drafts::read_draft;
+
+    #[test]
+    fn the_exit_closes_the_composers_before_the_store_flushes() {
+        let root = dir("exit-order");
+        let file = root.join("notes.txt");
+        std::fs::write(&file, "attached while quitting").unwrap();
+        let store = drafts(&root);
+        // An attach read still under way when the app quits.
+        let composers = Composers::new(
+            Arc::clone(&store),
+            Deps {
+                spawn: Arc::new(|job: Job| {
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(200));
+                        job();
+                    });
+                }),
+                notify: Arc::new(|| {}),
+            },
+        );
+        composers.open(Some(session()));
+        let view = until(&composers, |v| v.loaded);
+        composers.attach_paths(view.handle, vec![file], Selection::default());
+        let mut at_flush = None;
+        close_drafts(Some(&composers), || {
+            at_flush = composers.current();
+            store.flush();
+        });
+        let at_flush = at_flush.unwrap();
+        assert!(
+            !at_flush.attaching && at_flush.attachments.len() == 1,
+            "the store flushed before the composers closed: {at_flush:?}"
+        );
+        assert_eq!(
+            read_draft(&root.join("drafts"), KEY)
+                .draft
+                .draft
+                .attachments
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_draft_store_is_the_clients_own() {
+        let data = std::path::Path::new("/home/example/.local/share/dev.zerus.next");
+        assert_eq!(drafts_root(data, false), data.join("drafts"));
+        assert_eq!(
+            drafts_root(data, true),
+            data.join("drafts-replay"),
+            "a replay never touches the real drafts"
+        );
+        if let Some(qt) = zerus_client_core::drafts::qt_root() {
+            let root = drafts_root(data, false);
+            assert!(
+                !root.starts_with(&qt) && !qt.starts_with(&root),
+                "Qt's store is only read"
+            );
+        }
+    }
 }

@@ -206,6 +206,25 @@ const APPROVALS_CLIENT = [
   "Automatic approvals are turned on in the Qt client. They work only while the Qt client is running; this client does not approve tool requests.",
 ];
 
+const worktreesQt = fs.readFileSync(new URL("tray/src/WorktreeSettings.h", repo), "utf8");
+const worktreesCore = fs.readFileSync(new URL("client/core/src/worktree_policy.rs", repo), "utf8");
+const WORKTREES = [
+  "Worktrees", "This computer", "Refresh",
+  "Cleanup runs on the computer that owns each worktree, even when this window is closed. Rules are enabled by default and apply across its projects. Other computers keep their own settings.",
+  "Enable automatic worktree cleanup", "Clean integrated worktrees after the last session is archived or terminated",
+  "Periodically clean unused integrated worktrees", "Forget verified managed worktrees whose folders no longer exist",
+  "Minimum inactivity for periodic cleanup",
+  "Only verified Zerus-created worktrees qualify. Cleanup keeps branches and conversation history. Changed, untracked and ignored local files, sessions, running programs, locked folders and incomplete checks protect a worktree. Build folders and local configuration require review in Projects > Worktrees.",
+  "Refresh to read this computer's cleanup rules.", "Reading cleanup settings…",
+  "Cleanup settings saved on the selected computer.", "Cleanup settings loaded. Uncertain removals stay for manual review.",
+  "Apply to this computer",
+];
+const WORKTREES_CORE = [
+  "This computer is unavailable or needs an updated hgs CLI for cleanup settings.",
+  "Save was not confirmed. Refresh before changing settings again.", "Could not read cleanup settings.",
+  "Computer returned invalid cleanup settings.", "worktree-maintenance-v1",
+];
+
 describe("Settings texts", () => {
   it.each(ANALYTICS)("Private analytics shows Qt's %s", (text) => {
     expect(analyticsQt).toContain(`"${text}"`);
@@ -235,6 +254,14 @@ describe("Settings texts", () => {
   });
   it.each(APPROVALS_CLIENT)("Automatic approvals shows the client's %s", (text) => {
     expect(source("Approvals.tsx")).toContain(text);
+  });
+  it.each(WORKTREES)("Worktrees shows Qt's %s", (text) => {
+    expect(worktreesQt).toContain(`"${text}"`);
+    expect(source("Worktrees.tsx")).toContain(text);
+  });
+  it.each(WORKTREES_CORE)("the cleanup policy says Qt's %s", (text) => {
+    expect(worktreesQt).toContain(`"${text}"`);
+    expect(worktreesCore).toContain(`"${text}"`);
   });
   it.each(FILES)("Files shows Qt's %s", (text) => {
     expect(filesQt).toContain(`"${text}"`);

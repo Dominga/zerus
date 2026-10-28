@@ -52,6 +52,8 @@ mod voice;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod watchdog;
 mod window_visibility;
+#[cfg(feature = "live")]
+mod worktree_policy;
 
 use tauri::{AppHandle, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
@@ -281,6 +283,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(files::start());
                 app.manage(analytics::start(app.handle()));
                 app.manage(approvals::start());
+                app.manage(worktree_policy::start());
                 // A replay never touches the real read or attention marks.
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
@@ -653,6 +656,9 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         analytics::analytics_save_review,
         approvals::approvals_list,
         approvals::approvals_detail,
+        worktree_policy::worktree_policy_peers,
+        worktree_policy::worktree_policy_read,
+        worktree_policy::worktree_policy_apply,
         recovery::recovery_view,
         recovery::recovery_load,
         recovery::recovery_save,

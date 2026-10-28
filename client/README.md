@@ -691,6 +691,42 @@ window pauses everything. `src/ui/styles/motion.test.ts` checks that every
 keyframe animates only transforms and opacity and that every endless animation
 is in those lists.
 
+## Renderer (Linux)
+
+WebKitGTK picks its renderer when GTK starts, so `main` calls
+`renderer::choose()` first, before Tauri, GTK or any thread (`src-tauri/src/renderer.rs`).
+On NVIDIA Wayland the shared-memory renderer repaints the whole window every
+frame (about 30% app CPU at idle with motion); DMA-BUF with
+`__NV_DISABLE_EXPLICIT_SYNC=1` costs about 6%, and DMA-BUF without that variable
+dies at start with Wayland Error 71. Evidence and the full policy:
+`bench/results/spike-29-webkitgtk-idle-2026-10-28.md`.
+
+`ZERUS_CLIENT_RENDERER` is the only switch; there is no setting.
+
+- `auto` (default): with `WEBKIT_DISABLE_DMABUF_RENDERER` absent, NVIDIA Wayland gets
+  `__NV_DISABLE_EXPLICIT_SYNC=1` (never overwritten if you set it) and everything else is
+  left to WebKit. With the variable set to `0` it behaves as `dmabuf`; set to anything
+  else it is respected and the client stays on shared memory ("set by the system").
+- `dmabuf`: `WEBKIT_DISABLE_DMABUF_RENDERER=0`, plus the NVIDIA variable on NVIDIA Wayland.
+- `shm`: `WEBKIT_DISABLE_DMABUF_RENDERER=1`.
+
+NVIDIA means `/proc/driver/nvidia/version`, a DRM card bound to the `nvidia` driver and
+`nvidia_drm` modeset `Y`. Wayland is decided as GDK does: `GDK_BACKEND` unset or
+`wayland*` and a compositor socket; `GDK_BACKEND=x11` changes nothing. An unknown value
+counts as `auto`.
+
+The DMA-BUF paths write a crash marker, `renderer-marker.json` (`renderer`, `driver`,
+`written_at`), in the client's private data directory (next to the read marks, for
+example `~/.local/share/dev.zerus.next/`), before GTK starts. The webview clears it
+through `renderer_frame` after the second animation frame following load. A marker
+found at start means the last DMA-BUF start never reached a frame: that start uses
+shared memory and the marker stays. A marker of another driver version is dropped and
+DMA-BUF is retried once. An early exit before the first frame keeps shared memory until
+the driver changes; deleting `renderer-marker.json` in the app data folder retries DMA-BUF.
+The decision (`renderer`, `reason`, `nvidia`, `wayland`,
+`marker_state`) is logged at start and in the `renderer` field of `perf_config`.
+A blank window is not detected. Known gap: on the GL path a minimised window keeps painting.
+
 ## Rules
 
 - The UI never separates values with dots (U+00B7, U+2022, U+2219, U+22C5,

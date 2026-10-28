@@ -15,6 +15,8 @@ mod platform;
 mod pump;
 pub mod renderer;
 #[cfg(feature = "live")]
+mod readsync;
+#[cfg(feature = "live")]
 mod replay;
 #[cfg(feature = "live")]
 mod screens;
@@ -42,9 +44,13 @@ pub fn run() {
                 use tauri::Manager;
                 let dir = app.path().app_data_dir()?;
                 std::fs::create_dir_all(&dir)?;
-                // A replay never touches the real read marks.
+                // A replay never touches the real read or attention marks.
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
-                app.manage(actions::Actions::new(dir.join(actions::marks_file(replay))));
+                let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
+                readsync::start(actions.clone());
+                app.manage(actions);
+                app.manage(actions::ArchiveReads::default());
+                app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
                 app.manage(screens::Screens::tauri(app.handle().clone(), pump));
             }
@@ -85,10 +91,16 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::perf_away,
         renderer::renderer_frame,
         actions::run_action,
+        actions::set_notifications,
         actions::inspect_session,
         actions::pending_read_marks,
+        actions::queue_read_marks,
+        actions::attention_marks,
+        actions::update_attention_marks,
         actions::session_reference,
         actions::copy_command,
+        actions::archive_page,
+        actions::cancel_archive_pages,
         clipboard::copy_text,
         screens::screen_visible,
         screens::accounts_view,

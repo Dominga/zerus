@@ -22,6 +22,20 @@ export interface ViewRow {
   attention?: string | boolean | null;
   unread?: boolean;
   muted?: boolean;
+  /** The row's notification preferences pass Qt's validation, and their revision. */
+  shared_notifications?: boolean;
+  notification_revision?: number | null;
+  /** `created`, in whole seconds (it keys a conversation-less attention mark). */
+  created?: number;
+  /** What a local attention mark compares (Qt's `attentionFingerprint`). */
+  attention_fingerprint?: string;
+  /** The session needs the person's action (approval, input, error, recovery). */
+  needs_action?: boolean;
+  /** `status` and `caption` with the attention acknowledged. */
+  acknowledged_status?: string;
+  acknowledged_caption?: string;
+  /** A finished reply of a live conversation; the marks decide whether it shows unread. */
+  unread_candidate?: boolean;
   machine?: string;
   project?: string;
   /** The folder people know the checkout by (a name, not a path). */
@@ -31,6 +45,8 @@ export interface ViewRow {
   effort?: string | null;
   summary?: string;
   updated_at?: number | null;
+  /** When an archived row was archived (epoch seconds). */
+  archived_at?: number | null;
   /** When the current turn, compaction or background job started (the Working clock). */
   turn_started?: number | null;
   run_id?: string | null;
@@ -57,6 +73,7 @@ export interface ViewRow {
   terminal_reported?: boolean;
   terminal_attach_supported?: boolean;
   terminal_attach_reported?: boolean;
+  bulk_lifecycle_supported?: boolean;
 }
 
 export interface RowOut { computer: ComputerId; key: string; row: ViewRow }
@@ -111,7 +128,15 @@ export type Action =
   | { kind: "rename"; new_name: string; archive_id: string | null }
   | { kind: "archive" }
   | { kind: "terminate" }
-  | { kind: "kill" };
+  | { kind: "kill" }
+  | { kind: "start_fresh" }
+  | { kind: "forget" }
+  | { kind: "forget_binding" }
+  | { kind: "restore"; archive_id: string }
+  | { kind: "forget_archive"; archive_id: string }
+  /** Computer-wide: the target's session name is empty and ignored. */
+  | { kind: "pause_all"; count: number }
+  | { kind: "resume_all"; count: number };
 
 export interface WorktreeCleanup { status: string; path: string; common_dir: string; reason?: string | null }
 
@@ -247,3 +272,12 @@ export const emptyMachines = (error: string | null = null): MachinesView => ({
 export const emptyProjects = (status = ""): ProjectsView => ({
   loaded: false, refreshing: false, status, status_error: status !== "", conflicts: 0, unconnected: [], notice: null, projects: [],
 });
+
+/** One checked page of a computer's archive (`archive_page`). */
+export interface ArchivePage {
+  rows: ViewRow[];
+  next_cursor: string;
+  previous_cursor: string | null;
+  total: number;
+  position: number | null;
+}

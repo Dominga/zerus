@@ -352,6 +352,43 @@ class TrayUpdate(unittest.TestCase):
         result = self.update(self.build('dev-1414'))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("'dev-1414'", self.installed.read_text())
+    def test_a_refused_install_changes_nothing_in_either_mode(self):
+        # Important: the guard runs right after the build, before the plugin, the
+        # icons, the launcher and the unit, with and without the live update.
+        plugin = self.home / '.local/lib/hgs-tray/plugins/libhgs-tray-native-ui.so'
+        written = [plugin, self.home / '.config/systemd/user/hgs-tray.service',
+                   self.home / '.local/share/applications/hgs-tray.desktop', self.home / '.local/share/icons']
+        for restart in ('1', '0'):
+            with self.subTest(restart=restart):
+                for path in written:
+                    shutil.rmtree(path) if path.is_dir() else path.unlink(missing_ok=True)
+                (self.root / 'systemctl').unlink(missing_ok=True)
+                self.build('dev-1413', self.installed)
+                pid = self.launch('dev-1413') if restart == '1' else None
+                install = self.installer(self.build('third'), b'new plugin')
+                result = subprocess.run(['bash', str(install)], env=dict(self.env, HGS_TRAY_RESTART=restart),
+                                        capture_output=True, text=True, timeout=90)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Dev build 1413', result.stderr)
+                self.assertIn('Nothing was replaced', result.stderr)
+                self.assertIn("'dev-1413'", self.installed.read_text())
+                self.assertEqual([path for path in written if path.exists()], [])
+                self.assertFalse((self.root / 'systemctl').exists(), 'nothing was started or enabled')
+                if pid:
+                    self.assertEqual(self.running(), [('dev-1413', pid)])
+
+
+class InstallerOrder(unittest.TestCase):
+    def test_the_guard_runs_before_the_first_change_on_macos_too(self):
+        script = (REPO / 'tray/install.sh').read_text()
+        mac = script[:script.index('# --- 3. LaunchAgent')]
+        check = mac.index('update-installed.py" --check')
+        self.assertLess(check, mac.index('mkdir -p "${HOME}/Applications"'))
+        self.assertLess(check, mac.index('rm -rf "${APP_DEST}"'))
+        self.assertLess(check, script.index('printf \'%s\\n\' "${NEW_PLIST}" > "${PLIST_DEST}"'))
+        linux = script[script.index('# --- 2. binary'):]
+        self.assertLess(linux.index('update-installed.py" --check'), linux.index('install -Dm755'))
+
 
 if __name__ == '__main__':
     unittest.main()

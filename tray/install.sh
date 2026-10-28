@@ -85,14 +85,19 @@ trap 'rm -rf "${LOCAL_STAGE}"' EXIT
 ditto "${BUILD_APP}" "${LOCAL_STAGE}/hgs-tray.app"
 BUILD_APP="${LOCAL_STAGE}/hgs-tray.app"
 python3 "${SCRIPT_DIR}/sign-local-macos.py" "${BUILD_APP}" "${APP_DEST}"
+# The numbered Dev guard before anything is replaced (docs/reference.md); without
+# the live update, also no switch between Qt and the client.
+if [ "${RESTART_RUNNING}" = "1" ]; then
+    python3 "${SCRIPT_DIR}/update-installed.py" --check "${BUILD_APP}" "${APP_DEST}" --live
+else
+    python3 "${SCRIPT_DIR}/update-installed.py" --check "${BUILD_APP}" "${APP_DEST}"
+fi
 mkdir -p "${HOME}/Applications"
 if [ "$(bundle_cdhash "${BUILD_APP}")" != "$(bundle_cdhash "${APP_DEST}")" ]; then
     if [ "${RESTART_RUNNING}" = "1" ]; then
         # Replaced in step 4, once the LaunchAgent below is current.
         UPDATE=1
     else
-        # The numbered Dev guard, and no switch between Qt and the client without the live update.
-        python3 "${SCRIPT_DIR}/update-installed.py" --check "${BUILD_APP}" "${APP_DEST}"
         # rm перед cp: cp -R поверх существующего бандла смешал бы старые файлы с новыми.
         rm -rf "${APP_DEST}"
         cp -R "${BUILD_APP}" "${APP_DEST}"
@@ -169,6 +174,8 @@ cmake --build "${SCRIPT_DIR}/build" -j"${JOBS}"
 # --- 2. binary ------------------------------------------------------------------
 echo "[2/4] Installing binary to ~/.local/bin..."
 BIN_DEST="${HOME}/.local/bin/hgs-tray"
+# The numbered Dev guard before anything is replaced (docs/reference.md).
+python3 "${SCRIPT_DIR}/update-installed.py" --check "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}" --live
 RELOAD=0
 mkdir -p "${HOME}/.local/bin"
 if ! cmp -s "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}" 2>/dev/null; then
@@ -176,8 +183,6 @@ if ! cmp -s "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}" 2>/dev/null; then
         # Replaced in step 4, once the unit below is current.
         UPDATE=1
     else
-        # The numbered Dev guard (docs/reference.md).
-        python3 "${SCRIPT_DIR}/update-installed.py" --check "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}"
         install -Dm755 "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}.new"
         mv -f "${BIN_DEST}.new" "${BIN_DEST}"
         RELOAD=1

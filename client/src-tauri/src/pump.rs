@@ -1,17 +1,22 @@
 //! From the core's change sink to `next_batch`: one thread drains the sink
 //! into the coalescer, and `next_batch` takes everything pending, parking
 //! up to [`PARK`] while nothing is. A mirror of the last-known rows, statuses,
-//! machine cards and organizations lets a reloaded webview start from the full
-//! catalog.
+//! and machine cards lets a reloaded webview start from the full catalog. The
+//! organization never reaches the webview: [`Grouping`] turns it into each
+//! row's project and the headers (zerus-5wmh.31).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use serde_json::Value;
+use zerus_client_core::swarm::edit::Intent;
+use zerus_client_core::swarm::grouping::{Grouping, SyncView};
+use zerus_client_core::swarm::layout::Layout;
 use zerus_client_core::views::FleetEntry;
 use zerus_client_core::{
-    Batch, Change, Coalescer, ComputerId, ComputerStatus, MachineMeta, OrganizationUpdate, ViewRow,
+    Batch, Change, Coalescer, ComputerId, ComputerStatus, MachineMeta, ViewRow,
 };
 
 /// The longest `next_batch` waits for a change before it returns an empty batch.
@@ -23,6 +28,7 @@ struct Inner {
     /// A change arrived since the last take.
     dirty: bool,
     mirror: Mirror,
+    grouping: Grouping,
 }
 
 /// Shared by the drain thread and the commands.
@@ -38,7 +44,13 @@ impl Pump {
     pub fn push(&self, change: Change) {
         let mut inner = self.lock();
         inner.mirror.observe(&change);
+        inner.grouping.observe(&change);
         inner.coalescer.push(change);
+        self.wake(inner);
+    }
+
+    /// Marks the pump dirty and wakes a parked `take`.
+    fn wake(&self, mut inner: MutexGuard<'_, Inner>) {
         inner.dirty = true;
         drop(inner);
         self.0 .1.notify_all();
@@ -53,19 +65,90 @@ impl Pump {
             .wait_timeout_while(inner, park, |inner| !inner.dirty)
             .unwrap_or_else(PoisonError::into_inner);
         inner.dirty = false;
-        inner.coalescer.take()
+        let mut batch = inner.coalescer.take();
+        // The organization stays in Rust; the webview gets each row's project
+        // and the headers (zerus-5wmh.31), only when they changed.
+        batch.organizations.clear();
+        let (groups, grouping) = inner.grouping.take();
+        batch.groups = groups;
+        batch.grouping = grouping;
+        batch
     }
 
     /// Queues the full last-known catalog again (a reloaded webview starts empty).
     pub fn resend(&self) {
         let mut inner = self.lock();
+        inner.grouping.resend();
         let changes = inner.mirror.changes();
         for change in changes {
             inner.coalescer.push(change);
         }
-        inner.dirty = true;
-        drop(inner);
-        self.0 .1.notify_all();
+        self.wake(inner);
+    }
+
+    // The commands that call the grouping methods below arrive with the next task.
+    #[allow(dead_code)]
+    /// The organization the list shows; `revision` changes whenever it does.
+    pub fn present(
+        &self,
+        organization: &Value,
+        membership: Arc<BTreeMap<String, String>>,
+        revision: u64,
+        sync: SyncView,
+    ) {
+        let mut inner = self.lock();
+        inner.grouping.present(organization, membership, revision);
+        inner.grouping.set_sync(sync);
+        self.wake(inner);
+    }
+
+    #[allow(dead_code)]
+    pub fn set_sync(&self, sync: SyncView) {
+        let mut inner = self.lock();
+        inner.grouping.set_sync(sync);
+        self.wake(inner);
+    }
+
+    /// An edit the user made, applied to the list at once.
+    #[allow(dead_code)]
+    pub fn edited(&self, intent: &Intent) {
+        let mut inner = self.lock();
+        inner.grouping.edited(intent);
+        self.wake(inner);
+    }
+
+    #[allow(dead_code)]
+    pub fn set_collapsed(&self, project: &str, collapsed: bool) {
+        let mut inner = self.lock();
+        inner.grouping.set_collapsed(project, collapsed);
+        self.wake(inner);
+    }
+
+    #[allow(dead_code)]
+    pub fn members_of(&self, project: &str) -> Vec<(String, String)> {
+        self.lock().grouping.members_of(project)
+    }
+
+    #[allow(dead_code)]
+    pub fn default_project(&self) -> String {
+        self.lock().grouping.default_project().to_owned()
+    }
+
+    #[allow(dead_code)]
+    pub fn take_renames(&self) -> Vec<(String, String)> {
+        self.lock().grouping.take_renames()
+    }
+
+    #[allow(dead_code)]
+    pub fn take_layout(&self) -> Option<Vec<u8>> {
+        self.lock().grouping.take_layout()
+    }
+
+    #[allow(dead_code)]
+    pub fn load_layout(&self, bytes: &[u8]) {
+        let mut inner = self.lock();
+        inner.grouping = Grouping::new(Layout::from_json(bytes));
+        self.wake(inner);
     }
 
     /// The fleet as the screens see it: every computer whose status has not
@@ -99,11 +182,22 @@ impl Pump {
 
     /// Drains a change sink on its own thread until every sender is gone.
     pub fn drain(&self, changes: Receiver<Change>) {
+        self.drain_with(changes, |_| {});
+    }
+
+    #[allow(dead_code)]
+    /// Like [`Pump::drain`], running `observe` on each change just before it is queued.
+    pub fn drain_with(
+        &self,
+        changes: Receiver<Change>,
+        observe: impl Fn(&Change) + Send + 'static,
+    ) {
         let pump = self.clone();
         std::thread::Builder::new()
             .name("zerus-client-pump".into())
             .spawn(move || {
                 for change in changes {
+                    observe(&change);
                     pump.push(change);
                 }
             })
@@ -124,9 +218,6 @@ struct Rows {
     status: Option<ComputerStatus>,
     /// The latest card data; an `ended` status drops it.
     machine: Option<MachineMeta>,
-    /// The latest organization state (shared, not copied); an `ended` status
-    /// or update drops it.
-    organization: Option<OrganizationUpdate>,
     order: Vec<String>,
     rows: HashMap<String, ViewRow>,
 }
@@ -167,7 +258,6 @@ impl Mirror {
                 entry.status = Some(*status);
                 if *status == ComputerStatus::Ended {
                     entry.machine = None;
-                    entry.organization = None;
                 }
             }
             Change::Machine { computer, machine } => {
@@ -176,15 +266,10 @@ impl Mirror {
                     .or_default()
                     .machine = Some(machine.clone())
             }
-            Change::Organization { computer, update } => {
-                let entry = self.computers.entry(computer.0.clone()).or_default();
-                match update {
-                    OrganizationUpdate::State { .. } => entry.organization = Some(update.clone()),
-                    OrganizationUpdate::Ended => entry.organization = None,
-                    OrganizationUpdate::Failed { .. } => {}
-                }
-            }
-            Change::Activity { .. } | Change::Processes { .. } | Change::Tasks { .. } => {}
+            Change::Organization { .. }
+            | Change::Activity { .. }
+            | Change::Processes { .. }
+            | Change::Tasks { .. } => {}
         }
     }
 
@@ -201,12 +286,6 @@ impl Mirror {
                 out.push(Change::Machine {
                     computer: ComputerId(computer.clone()),
                     machine: machine.clone(),
-                });
-            }
-            if let Some(update) = &rows.organization {
-                out.push(Change::Organization {
-                    computer: ComputerId(computer.clone()),
-                    update: update.clone(),
                 });
             }
             let list = rows
@@ -227,6 +306,7 @@ impl Mirror {
 mod tests {
     use super::*;
     use std::time::Instant;
+    use zerus_client_core::OrganizationUpdate;
 
     fn row(name: &str) -> ViewRow {
         ViewRow {
@@ -416,41 +496,139 @@ mod tests {
         );
     }
 
+    fn organization() -> Value {
+        serde_json::json!({"default_project": "ungrouped", "projects": [
+            {"id": "alpha", "name": "Alpha", "sessions": ["workstation\nclaude/p/a"]},
+            {"id": "ungrouped", "name": "Inbox", "sessions": []}]})
+    }
+
+    fn local() -> ComputerId {
+        ComputerId(String::new())
+    }
+
+    fn present(pump: &Pump, organization: &Value) {
+        pump.present(
+            organization,
+            Arc::new(zerus_client_core::swarm::members(organization)),
+            1,
+            SyncView::default(),
+        );
+    }
+
+    fn a_row() -> Change {
+        Change::Replace {
+            computer: local(),
+            rows: vec![(
+                "run:a".into(),
+                ViewRow {
+                    machine: "workstation".into(),
+                    name: "claude/p/a".into(),
+                    ..ViewRow::default()
+                },
+            )],
+        }
+    }
+
     #[test]
-    fn resend_replays_the_latest_organization_until_it_or_its_computer_ends() {
-        let state = |digest: &str| Change::Organization {
-            computer: ComputerId(String::new()),
+    fn the_batch_carries_each_rows_project_and_the_headers_never_the_organization() {
+        let pump = Pump::default();
+        pump.push(a_row());
+        let organization = organization();
+        pump.push(Change::Organization {
+            computer: local(),
             update: OrganizationUpdate::State {
-                value: std::sync::Arc::new(serde_json::json!({"digest": digest})),
-                digest: digest.into(),
-                membership: std::sync::Arc::default(),
+                value: Arc::new(serde_json::json!({"organization": organization.clone()})),
+                digest: "d1".into(),
+                membership: Arc::default(),
             },
+        });
+        present(&pump, &organization);
+        let batch = pump.take(PARK);
+        assert!(
+            batch.organizations.is_empty(),
+            "the organization stays in Rust"
+        );
+        assert_eq!(batch.groups.len(), 1);
+        assert_eq!(batch.groups[0].group, "alpha");
+        assert_eq!(batch.grouping.as_ref().unwrap().headers.len(), 2);
+        let json = serde_json::to_string(&batch).unwrap();
+        assert!(!json.contains("organizations") && !json.contains("\"sessions\""));
+        pump.resend();
+        let again = pump.take(PARK);
+        assert_eq!(
+            again.groups.len(),
+            1,
+            "a reloaded webview gets every row's project again"
+        );
+        assert!(again.grouping.is_some());
+        assert!(again.organizations.is_empty());
+    }
+
+    #[test]
+    fn a_collapse_wakes_a_parked_take() {
+        let pump = Pump::default();
+        pump.push(a_row());
+        present(&pump, &organization());
+        let _ = pump.take(PARK);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let parked = {
+            let pump = pump.clone();
+            std::thread::spawn(move || {
+                tx.send(pump.take(Duration::from_secs(30))).unwrap();
+            })
         };
+        // Let the take park; the assertion below does not depend on the timing,
+        // since a collapse before the park is still pending when it starts.
+        std::thread::sleep(Duration::from_millis(50));
+        pump.set_collapsed("alpha", true);
+        let batch = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the collapse woke the parked take");
+        assert!(batch.grouping.unwrap().headers[0].collapsed);
+        parked.join().unwrap();
+    }
+
+    #[test]
+    fn resend_replays_the_grouping_of_the_latest_organization_until_its_computer_ends() {
         let pump = Pump::default();
         pump.push(Change::Computer {
-            computer: ComputerId(String::new()),
+            computer: local(),
             status: ComputerStatus::Live,
         });
-        pump.push(state("d1"));
-        pump.push(state("d2"));
+        pump.push(a_row());
         pump.push(Change::Organization {
-            computer: ComputerId(String::new()),
+            computer: local(),
             update: OrganizationUpdate::Failed {
                 code: "organization_failed".into(),
                 message: "damaged".into(),
             },
         });
+        present(&pump, &organization());
         let _ = pump.take(PARK);
         pump.resend();
         let batch = pump.take(PARK);
-        assert_eq!(batch.organizations.len(), 1);
-        assert_eq!(batch.organizations[0].payload["digest"], "d2");
+        assert!(batch.organizations.is_empty());
+        assert_eq!(batch.groups.len(), 1);
+        assert!(batch.grouping.is_some());
         pump.push(Change::Organization {
-            computer: ComputerId(String::new()),
+            computer: local(),
             update: OrganizationUpdate::Ended,
+        });
+        pump.push(Change::Replace {
+            computer: local(),
+            rows: vec![],
+        });
+        pump.push(Change::Computer {
+            computer: local(),
+            status: ComputerStatus::Ended,
         });
         let _ = pump.take(PARK);
         pump.resend();
-        assert!(pump.take(PARK).organizations.is_empty());
+        let batch = pump.take(PARK);
+        assert!(batch.organizations.is_empty());
+        assert!(
+            batch.groups.is_empty(),
+            "no stale project for an ended computer's rows"
+        );
     }
 }

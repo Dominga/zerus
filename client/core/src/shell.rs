@@ -2,6 +2,7 @@
 //! GUI's `SessionCommands` (`tray/src/SessionCommands.h`) and
 //! `WindowsCommandLine` (`tray/src/WindowsCommandLine.h`), so a copied command
 //! addresses the same CLI and session as the terminal action.
+use crate::paths;
 use serde::{Deserialize, Serialize};
 
 /// The shell a copied command is written for: POSIX sh on Unix, PowerShell
@@ -110,6 +111,24 @@ fn windows_command_line(arguments: &[String]) -> String {
         .collect()
 }
 
+/// The `CreateProcess` command line of `program` and `arguments` as `QProcess`
+/// builds it (`WindowsCommandLine::build`): the program with backslashes, in
+/// quotes when it has a space, then a space before each argument (so two
+/// after the program).
+pub fn windows_program_line(program: &str, arguments: &[String]) -> String {
+    let mut line = String::new();
+    if !program.is_empty() {
+        let quoted = !program.starts_with('"') && !program.ends_with('"') && program.contains(' ');
+        let name = if quoted {
+            format!("\"{program}\"")
+        } else {
+            program.to_owned()
+        };
+        line = name.replace('/', "\\") + " ";
+    }
+    line + &windows_command_line(arguments)
+}
+
 /// The command line for `hgs` with `arguments` in `shell`; an empty `hgs`
 /// means the bare name found on PATH.
 pub fn command(hgs: &str, arguments: &[String], shell: Shell) -> String {
@@ -174,6 +193,36 @@ pub fn open_command(
     shell: Shell,
 ) -> String {
     command(hgs, &open_arguments(computer, name, archive_id), shell)
+}
+
+/// The command line of a shell in `directory` (`SessionCommands::folderShell`):
+/// on this computer a login shell there, or PowerShell's `Set-Location` on
+/// Windows; on a peer, which is POSIX, `hgs machine ssh` into it. None when
+/// the path is no absolute folder of that computer.
+pub fn folder_shell(hgs: &str, computer: &str, directory: &str, shell: Shell) -> Option<String> {
+    let windows = computer.is_empty() && shell == Shell::PowerShell;
+    let style = if windows {
+        paths::Style::Windows
+    } else {
+        paths::Style::Posix
+    };
+    if !paths::absolute(directory, style) || directory.contains('\0') {
+        return None;
+    }
+    if windows {
+        return Some(format!(
+            "Set-Location -LiteralPath {}",
+            power_shell_quote(&paths::native(directory, style))
+        ));
+    }
+    if computer.is_empty() {
+        return Some(format!(
+            "cd -- {} && exec \"${{SHELL:-/bin/sh}}\" -l",
+            shell_quote(directory)
+        ));
+    }
+    let arguments = ["machine", "ssh", computer, "--directory", directory].map(str::to_owned);
+    Some(command(hgs, &arguments, shell))
 }
 
 #[cfg(test)]

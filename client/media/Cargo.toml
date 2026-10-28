@@ -1,0 +1,43 @@
+[package]
+name = "zerus-client-media"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.99"
+license = "MIT"
+description = "Microphone capture for the Zerus desktop client's voice messages"
+publish = false
+
+# Device capture for client/src-tauri's `media` feature: cpal on its own
+# thread, converted by zerus-client-core's PcmConverter. Linux needs the ALSA
+# development package to build it; nothing else in the client does.
+[features]
+# Round video messages. Linux records through GStreamer, which needs its
+# development package to build and, at run time, an H.264 and an AAC
+# encoder plugin (video_reason names a missing one).
+video = ["dep:gstreamer", "dep:gstreamer-app"]
+
+[dependencies]
+base64 = "0.22"
+cpal = "0.18"
+# Preview frames and posters on the platforms whose cameras give raw frames.
+jpeg-encoder = "0.7"
+serde_json = "1"
+zerus-client-core = { path = "../core" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gstreamer = { version = "0.25", optional = true }
+gstreamer-app = { version = "0.25", optional = true }
+
+# The microphone permission (AVCaptureDevice authorization) before capture.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSEnumerator", "NSError", "NSObject", "NSString", "NSURL", "NSValue"] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "dispatch2", "objc2-core-media", "objc2-core-video", "AVAssetWriter", "AVAssetWriterInput", "AVCaptureAudioDataOutput", "AVCaptureDevice", "AVCaptureInput", "AVCaptureOutputBase", "AVCaptureSession", "AVCaptureVideoDataOutput", "AVMediaFormat", "AVVideoSettings"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "objc2-core-video", "CMBase", "CMFormatDescription", "CMSampleBuffer", "CMTime"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["std", "bitflags", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
+
+# Round video on Windows: Media Foundation's source reader and sink writer.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant"] }

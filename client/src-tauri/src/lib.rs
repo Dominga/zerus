@@ -22,8 +22,15 @@ pub mod renderer;
 mod replay;
 #[cfg(feature = "live")]
 mod screens;
+#[cfg(feature = "media")]
+mod voice;
 
 use tauri::{AppHandle, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+
+/// The app's one draft store, shared by the composers (and voice), so every
+/// draft key has one writer.
+#[cfg(feature = "live")]
+pub struct Drafts(pub std::sync::Arc<zerus_client_core::drafts::DraftStore>);
 
 /// The label of the one window this phase opens.
 pub const MAIN_WINDOW: &str = "main";
@@ -85,6 +92,13 @@ pub fn run() {
                 }));
                 app.manage(organization);
                 app.manage(screens);
+                // A replay never touches the real drafts either.
+                let drafts = std::sync::Arc::new(zerus_client_core::drafts::DraftStore::open(
+                    dir.join(zerus_client_core::drafts::dir(replay)),
+                ));
+                #[cfg(feature = "media")]
+                app.manage(voice::Voices::new(std::sync::Arc::clone(&drafts)));
+                app.manage(Drafts(drafts));
             }
             let display = display::display_name();
             if !display::headless_allowed(std::env::var("ZERUS_CLIENT_HEADLESS").is_ok_and(|v| v == "1"), display.as_deref()) {
@@ -103,22 +117,30 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("Zerus Next failed to start")
-        .run(|app, event| {
-            // The app's one exit hook: every stream that must reach the disk
-            // before the process ends adds its flush to this block.
-            if matches!(event, tauri::RunEvent::Exit) {
-                // Pending project edits and the layout.
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
                 #[cfg(feature = "live")]
-                {
-                    use tauri::Manager;
-                    if let Some(organization) = app.try_state::<organization::Organization>() {
-                        organization.flush();
-                    }
-                }
+                exit(_app);
             }
-            // Borrowed, never moved, so code added after it still builds.
-            let _ = (&app, &event);
         });
+}
+
+/// Before the app quits: pending project edits and the layout reach the
+/// disk, recordings under way are cancelled and every draft save already
+/// queued reaches the disk.
+#[cfg(feature = "live")]
+fn exit(app: &AppHandle) {
+    use tauri::Manager;
+    if let Some(organization) = app.try_state::<organization::Organization>() {
+        organization.flush();
+    }
+    #[cfg(feature = "media")]
+    if let Some(voices) = app.try_state::<voice::Voices>() {
+        voices.close_all();
+    }
+    if let Some(drafts) = app.try_state::<Drafts>() {
+        drafts.0.flush();
+    }
 }
 
 /// The commands the frontend may call. The session actions need the core's
@@ -164,6 +186,16 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         screens::machine_resolve,
         screens::machine_check,
         screens::projects_view,
+        #[cfg(feature = "media")]
+        voice::voice_open,
+        #[cfg(feature = "media")]
+        voice::voice_input,
+        #[cfg(feature = "media")]
+        voice::voice_close,
+        #[cfg(feature = "media")]
+        voice::voice_microphones,
+        #[cfg(feature = "media")]
+        voice::voice_video,
     ]
 }
 

@@ -245,8 +245,29 @@ fn kept_setting(command: &str) -> bool {
     matches!(command, "subagents-confirm" | "session-upload-block")
 }
 
+/// What a `@host` that is a WSL profile of this computer runs: every command
+/// in that distribution, except a download, which publishes on this Windows
+/// client, and a `kept_setting`, which never leaves this computer. None for
+/// any other host.
+fn wsl_forward(config: &Config, target: &str, command: &str, args: &[String], dry: bool) -> Option<Result<i32>> {
+    if target.is_empty() || config.is_self(target) {
+        return None;
+    }
+    let profile = crate::wsl::profile(config, target)?;
+    if kept_setting(command) {
+        return Some(setting_command(false, command, args, dry));
+    }
+    // Download publishes on this Windows client. Its output path must
+    // never be forwarded as a Linux receiver destination.
+    if command == "download" {
+        return Some(crate::download::dispatch(config, target, args, dry));
+    }
+    Some(crate::wsl::run(profile, command, args, dry))
+}
+
 /// A `kept_setting` command. Only this computer's: its owner gate trusts a set
-/// from a process outside every agent session, which an SSH hop cannot prove.
+/// from a process outside every agent session, which an SSH hop or a WSL
+/// distribution cannot prove.
 fn setting_command(local: bool, command: &str, args: &[String], dry: bool) -> Result<i32> {
     if !local {
         return Err(Error::new(1, format!("hgs {command} changes the computer it runs on; run it on that computer")));
@@ -542,15 +563,8 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
         return Ok(1);
     };
     let args = &args[index + 1..];
-    if !target.is_empty() && !config.is_self(&target) {
-        if let Some(profile) = crate::wsl::profile(&config, &target) {
-            // Download publishes on this Windows client. Its output path must
-            // never be forwarded as a Linux receiver destination.
-            if command == "download" {
-                return crate::download::dispatch(&config, &target, args, dry);
-            }
-            return crate::wsl::run(profile, command, args, dry);
-        }
+    if let Some(result) = wsl_forward(&config, &target, command, args, dry) {
+        return result;
     }
     match command.as_str() {
         "--expect-machine" => {
@@ -2637,6 +2651,39 @@ mod tests {
         });
         for command in ["claude", "sh", "subagents", "session-upload", "__state"] {
             assert!(!kept_setting(command), "{command}");
+        }
+    }
+
+    /// A WSL profile of this computer gets every other command, but not the
+    /// settings this computer keeps: they are refused before the forward.
+    #[test]
+    fn kept_settings_never_go_to_a_wsl_profile() {
+        let mut config = Config {
+            home: String::new(),
+            dir: PathBuf::new(),
+            state: PathBuf::new(),
+            selves: vec!["this-box".into()],
+            peers: Vec::new(),
+            base_peers: Vec::new(),
+            peers_from_environment: false,
+            machines: Default::default(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        config.machines.insert("ubuntu".into(), crate::machines::Connection {
+            transport: crate::wsl::Transport::WslLocal,
+            wsl: Some(crate::wsl::WslConnection { distribution: "Ubuntu".into(), user: "dev".into(), hgs_path: String::new() }),
+            ..Default::default()
+        });
+        config.machines.insert("peer".into(), crate::machines::Connection::default());
+        let get = ["get", "--json"].map(String::from);
+        for command in ["subagents-confirm", "session-upload-block"] {
+            let refused = wsl_forward(&config, "ubuntu", command, &get, false).unwrap().unwrap_err();
+            assert_eq!(refused.message, format!("hgs {command} changes the computer it runs on; run it on that computer"));
+            // Neither a configured SSH peer nor this computer is a WSL profile.
+            for host in ["", "this-box", "peer"] {
+                assert!(wsl_forward(&config, host, command, &get, false).is_none(), "{host}");
+            }
         }
     }
 

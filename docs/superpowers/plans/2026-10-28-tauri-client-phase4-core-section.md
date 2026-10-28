@@ -1,14 +1,17 @@
-# Tauri Client Phase 4: Rust and Core Section (Terminal, Attachments, Processes)
+# Tauri Client Phase 4: Rust and Core Section (Terminal, Attachments, Send Flow, Processes, Media)
 
 > **For agentic workers:** this is a section for the web client session's phase 4
 > plan (`zerus-5wmh.9`). That session merges it into its own plan; the events
 > session implements the tasks marked **core**. Steps use checkbox (`- [ ]`)
 > syntax for tracking.
 
-**Goal:** The Rust side of three phase 4 features, with Qt's exact behaviour:
+**Goal:** The Rust side of the phase 4 features, with Qt's exact behaviour:
 - the session Terminal, a PTY around `hgs a`;
 - the composer's attachments and the guarded send;
-- the Processes tab's output and stop.
+- the send flow around it: block reasons, the cold cache, resume-then-send,
+  compact-to-send, failed local messages and durable drafts;
+- the Processes tab's output and stop;
+- voice and round video capture.
 
 The webview renders. `client/core` owns processes, PTYs, limits, file staging and
 outcome rules, all pure Rust without Tauri. `client/src-tauri` exposes them as
@@ -32,6 +35,19 @@ commands and channels.
 - `tray/src/AttachmentViewer.h`: `AttachmentFiles::storeAt` and `cachedAt`.
 - `tray/src/ProcessView.cpp`: `active`, `stoppable`, `status`, `outputRevision`.
 - `docs/reference.md`: "Processes launched by agents".
+- Send flow, in `tray/src/SessionsWindow.cpp`:
+  - `messageBlockReason`, about 4386-4432;
+  - `contextActionReason`, about 3660;
+  - `messageAction` (retry, delete, inspect), about 4470-4527;
+  - `compactToSend` and `continueAfterCompact`, about 4536-4625;
+  - `canStartStopped`, `startToSend`, `continueAfterStart`, about 4672-4805;
+  - `sendMessage` with the cold cache dialog, about 4806-4853;
+  - `deliverMessage`, `finishMessage`, `reconcileMessages`, about 4855-4990.
+- `tray/src/CacheStatus.h`: `expired`, `warning`, `chipState`, `details`.
+- `tray/src/ComposerDraftStore.cpp`, `MessageComposer.cpp` (Saved drafts, about
+  1232) and `tray/update-installed.py` (`drafts_dir`, `snapshot`, `changed_drafts`).
+- `tray/src/speech/`: `SpeechRecorder`, `SpeechClient`, `SpeechComposer`, `RoundVideo`;
+  `services/mobile/relay/src/voice_video.rs` (the video payload's limits).
 
 ## Global constraints
 
@@ -225,9 +241,247 @@ commands and channels.
   already comes from the `processes` topic (phase 2b).
 - [ ] Unit tests for each rule, and fake `hgs` tests for the read and the stop.
 
+## Send flow (design's phase 2 review)
+
+These tasks wrap A2. The core holds the rules and the state; the webview shows
+the texts and asks the questions. Every rule is a pure function or a state
+machine without threads, so the tests need no process. src-tauri feeds them the
+selected session's inspection states from the activity follow and runs the
+actions they return on `Lane::Write`.
+
+### Task S1 (core): send block reasons
+
+**Files:** `client/core/src/send.rs` (new), `client/core/tests/send.rs`.
+
+- [ ] `send::block_reason(&BlockFacts, details: Option<&Value>) -> Option<String>`,
+  Qt's `messageBlockReason` in its order. `BlockFacts` carries what the
+  inspection does not: a start-to-send or compaction waiting for this session, a
+  context reset, a termination or model settings change in flight, `online`,
+  the row state, a pending session update or rename, `cmd`, the inspection
+  error and `tracked`. The 22 rules and texts, from
+  "Waiting for the session to start. This exact message will be sent
+  automatically when ready. Cancel send to edit." to "Waiting for the agent to
+  confirm its input state.", including the agent's own `*_message_can_send`
+  and `*_message_reason` fields (resume, first, interrupted, provider error).
+- [ ] `send::context_action_reason(details, "compact" | "clear")` and its
+  sentence form, as Qt's `contextActionReason` and `contextReasonSentence`.
+- [ ] A table test with one case per rule, each proving the rules before it
+  take precedence.
+
+### Task S2 (core): the cold cache
+
+**Files:** `client/core/src/cache.rs` (new).
+
+- [ ] `cache::expired(details, now)`: `cache_hint.status == "cold"`, or a warm
+  `prompt_cache` whose `expires_at` has passed.
+- [ ] `cache::warning(details)` and `cache::chip(details, now)`
+  (`{state, label, short}`: "Cold cache"/"Cold", "Clear suggested"/"/clear",
+  "Cache ~{n}m"/"~{n}m") and `cache::details(details, recorded)`, with
+  `CacheStatus.h`'s texts.
+- [ ] `cache::cold_prompt(details, compacting, clearing) -> ColdPrompt`: the
+  title "Continue with a cold cache?", the body (the warning, a blank line,
+  then Qt's paragraph), and three choices with `enabled` and a reason each:
+  "Send with full context", "Compact and continue" (enabled when
+  `compact_context_supported` and no compaction runs) and "Clear context"
+  (enabled when `clear_context_supported` and no clear runs). The send itself
+  repeats the check (S3): a session that turned cold after the prompt is not
+  sent without consent.
+
+### Task S3 (core): resume-then-send and compact-to-send
+
+**Files:** `client/core/src/send.rs`.
+
+- [ ] `send::can_start_stopped(&BlockFacts, row)`: online, `paused` or
+  `stopped`, tracked, `cmd` in codex, claude or kimi, nothing pending for the
+  session and no start-to-send anywhere (Qt allows one at a time).
+- [ ] `send::start_choices(row, context_usage)`: Qt's "Start the session to
+  send?" question, its informative text and three choices: "Resume and send"
+  and "Resume, compact and send" (both enabled only when `resumable`), and
+  "Start fresh and send".
+- [ ] `Continuation`, a state machine per session key. Inputs:
+  - the chosen start;
+  - the draft's current text and attachments;
+  - action outcomes;
+  - inspection states;
+  - the clock.
+
+  Outputs: one action (resume, start fresh, compact with a fresh command UUID,
+  or the A2 send with `expected_compaction_id`), the composer's waiting text, or
+  a cancellation text.
+  - Before the start it checks the identity again: key, host, name, created,
+    run and conversation. A change gives "The session changed. Your draft was
+    kept without sending." and a changed draft gives "Draft changed. Send it
+    when you are ready.".
+  - After a start it waits for a new run. A fresh start that keeps the
+    conversation, or a resume that opens another one, gives "The agent opened
+    an unexpected conversation. Your draft was kept without sending.".
+  - The new run must be ready: tracked, live, running, idle, no error and no
+    unanswered resume or first-message gate. After 180 s it gives "The agent
+    did not become ready. Check Terminal; your draft was kept without sending.".
+  - A compaction must report a matching `compact_context_request.request_id`
+    as `completed`, with the same run and conversation, before the send.
+    `unchanged` gives "No history could be compacted. Your draft was kept
+    without sending."; `failed`, `cancelled` and `uncertain` give "Compaction
+    did not complete. Check Terminal; your draft was kept without sending.";
+    after 600 s, "Compaction was not confirmed. Check Terminal; your draft was
+    kept without sending.".
+  - The intent is removed before its send is returned, so duplicate inspection
+    states never send twice. No step is ever replayed after an unknown outcome.
+  - The send counts as consent to the full context (Qt's `contextChosen`).
+- [ ] Tests drive each transition and each cancellation with synthetic
+  inspection states, and prove one send at most per continuation.
+
+### Task S4 (core): local messages, retry, delete and inspect
+
+**Files:** `client/core/src/local_messages.rs` (new).
+
+- [ ] `LocalMessages`: rows per session key, at most 50 per session (oldest
+  dropped first), in memory as in Qt. The pump's mirror replays them after a
+  webview reload. A session renamed in place moves its rows.
+- [ ] `sending(key, request_id, text, files, run, conversation)`. It replaces
+  earlier failed rows with the same ID, or the same text and attachments.
+- [ ] `finished(request_id, Outcome)`:
+  - success sets `sent`, the receipt's `request_id` (also on each file with its
+    index), `submitted_text` and `submitted_at`;
+  - failure sets `error` with `uncertain`, and an uncertain detail becomes
+    "Delivery is not confirmed. Check Terminal before retrying. {error}".
+- [ ] `reconcile(key, details, events)` drops rows that the agent's own history
+  now shows. That is a sent row matched by `attachment_messages`, by a
+  `UserPromptSubmit`, `UserPromptQueued` or `TurnStarted` event, or by
+  `voice_messages` for a voice row. It also drops rows from another run or
+  conversation, except rows still `sending`.
+- [ ] `retry_allowed(row, details, block_reason)`: only a definite `error`
+  (never `uncertain`), with the current run and conversation, no block reason
+  and no retry read in flight. Retry re-reads the attachments from the cache
+  and checks the identity again. A cold session goes through S2's consent.
+- [ ] `delete` removes an `error` row. `inspect` routes:
+  - `dsh` to Native UI;
+  - a session with a terminal to Terminal;
+  - otherwise a refresh, with "Refreshing the native session. Check its
+    provider configuration on {machine} if the error remains.".
+
+### Task S5 (core): durable drafts
+
+**Files:** `client/core/src/drafts.rs` (new), `client/core/tests/drafts.rs`.
+
+- [ ] Qt's store format, version 1, so drafts can move between the clients:
+  - one private (0700) folder per key, named by the SHA-256 of the key;
+  - `draft.json` with `{version, key, text, position, anchor, label, form_state, next_attachment_number, sending, uncertain, attachments: [{name, mime, reference, sha256, bytes}]}`;
+  - immutable `<sha256>.bin` attachment snapshots (0600).
+  - Writes are atomic: temporary file, fsync, rename. Blobs are written before
+    the manifest; blobs the manifest no longer names are removed after it.
+- [ ] One writer thread with ordered operations. Edits of the same key
+  coalesce, but a durable save, a load or the index seals the queue, so no
+  later edit jumps ahead of it (Qt's `DraftWrites`). `flush()` runs on quit and
+  on SIGTERM before the process exits.
+- [ ] `load(key)` validates the version, the key, at most 8 attachments, and
+  the sizes and hashes. A failure keeps the files and reports "Could not
+  restore this draft completely. Saved files have been kept locally.". A draft
+  saved as `sending` or `uncertain` loads as uncertain, with "Delivery was
+  interrupted. Check Activity or Terminal before sending again.".
+- [ ] `index()` lists Saved drafts: nonempty drafts only, the label, the first
+  nonblank line cut to 200 chars, the modification time and the attachment
+  count. Manifests over 1 MiB are skipped. It includes drafts of ended and
+  archived sessions.
+  - `owner(key)` parses Qt's key kinds: message `machine\nsession[\narchive]`,
+    subagent (4 parts), question, voice, task, task description and task
+    comment.
+- [ ] `rename(old, new)` refuses an existing nonempty target with "Another draft
+  already exists here. Recover the previous one from Saved drafts.".
+- [ ] **Location: needs a decision (design).** The Tauri client and the Qt GUI
+  can run at the same time during the migration. Two writers on one key would
+  race, so the recommendation is:
+  - the client's own root (`<app data>/drafts`), in the same format;
+  - Saved drafts also lists Qt's store (`hgdev/hgs-tray.conf.drafts`, or the
+    plist sibling on macOS) read-only;
+  - recovering a Qt draft copies it into the client's store.
+
+  `tray/update-installed.py` snapshots and verifies only Qt's folder, so the
+  client's installer and updater need the same graceful quit, snapshot and
+  check for its own root. That belongs to the packaging work.
+- [ ] Tests:
+  - ordering under coalescing;
+  - a crash between the blob and manifest writes;
+  - hash and size validation;
+  - the index with ended-session drafts;
+  - rename collisions;
+  - private permissions on Unix.
+
+## Media: voice and round video (proposal, before building)
+
+Voice and round video capture, encoding and transcription are the events
+session's; the recorder controls, the mode switch, the player and the progress
+ring are the web client's (spec lines 212-214).
+
+**What Qt sends.** Voice does not use the A1 staging or `send`.
+- Qt talks to `hgs [@host] voice NAME --json` (actions `profiles`, `submit`,
+  `status` and `cancel`, with the request identity and the expected run and
+  conversation).
+- For dictation into a draft, it talks to `hgs speech --json` (actions
+  `draft_profiles`, `draft_submit`, `draft_status` and `draft_cancel`).
+- Before the first call it checks `hgs --help` for `voice ... --json` and
+  shows "Voice messages need an updated hgs CLI on the conversation computer."
+  when it is missing.
+- The audio is `{format: "pcm_s16le", sample_rate: 16000, channels: 1, data_base64}`,
+  at most 120 s.
+- A round video adds `{format: "mp4", data_base64, duration_ms, width, height,
+  poster_base64?}`. `voice_video.rs` checks it: `ftyp`, `moov` and `mdat`
+  boxes, at most 10 MiB and 60 s, 16-1920 px per side, and a duration within
+  1 s of the PCM.
+- Every player plays H.264 with AAC: WKWebView, WebKitGTK, WebView2, Android,
+  iOS and Qt. So that is the encoding.
+
+**Proposed layout:**
+- `client/core/src/voice.rs`, pure:
+  - the PCM converter, porting `SpeechPcmConverter` (8-192 kHz and up to 32
+    channels in; 16 kHz mono s16le out; capped at 3,840,000 bytes);
+  - the payload builders and reply checks (`schema: 1`, at most 1 MiB);
+  - the capability probe;
+  - the voice composer's states (Idle, Starting, Recording, Saving, Preview,
+    Submitting, Uncertain);
+  - the voice draft under the key `voice-message-draft\n{session key}` in S5's
+    store.
+
+  The core holds the captured PCM and MP4 bytes, so no file path is needed.
+- `client/media` (new crate), which src-tauri uses behind a `media` feature:
+  - audio through `cpal` on its own thread, with a level meter (RMS and peak,
+    about 30 Hz);
+  - the round video per platform: AVFoundation with `AVAssetWriter` through
+    `objc2` on macOS; GStreamer (`v4l2src`/`pipewiresrc`, an H.264 and AAC
+    encoder, `mp4mux`) through `gstreamer-rs` on Linux; Media Foundation's
+    source reader and sink writer on Windows.
+
+  The camera format closest to 640x480 at 15 fps or more is chosen. Video is
+  24 fps at 700 kbit/s and audio 64 kbit/s mono. Recording stops at 59 s or
+  10 MiB less 128 KiB. The `cpal` audio feeds both the AAC track and the PCM,
+  so nothing is decoded afterwards (unlike Qt's `extractAudio`). The poster is
+  a 160 px JPEG of at most 8 KiB.
+- src-tauri commands:
+  - `voice_start`, `voice_stop` and `voice_cancel`;
+  - the level stream on a Channel;
+  - a preview frame stream for the video: a square crop, about 15 fps, 240 px
+    JPEG, with a mirror flag. A native preview surface cannot sit inside the
+    webview on every platform.
+  - The result is the voice composer's state, not a file path.
+- Permission texts as Qt's: "Allow camera and microphone access, then hold
+  Video again." and "A camera and microphone are required to record video.".
+
+**Proposed order:**
+- M1: voice audio (core, plus `cpal` in `client/media`), on every platform.
+- M2: round video on macOS.
+- M3: round video on Linux.
+- M4: round video on Windows.
+
+The `getUserMedia` path stays a fallback after per-engine permission and
+`MediaRecorder` format checks (spec row 296).
+
+Native UI (DeepSeek) is the web client's (spec row 302). A rule it needs from
+the core comes as a small pure function, like `terminal::available`.
+
 ## Order and collisions
 
-T1, T2, A1, A2, A3 and P1 are core-only new modules. The events session can
-start them now; they collide with no open branch. T3 and the views are the web
+T1, T2, A1, A2, A3, P1 and S1-S5 are core-only new modules. The events
+session can start them now; they collide with no open branch. S3 and S4 need A2;
+S2 is needed by S3; S5 is independent. M1 waits for the layout to be agreed. T3 and the views are the web
 client session's. `actions.rs` and `reads.rs` gain variants only, never changed
 behaviour. Each task is one PR, merged on a green CI gate.

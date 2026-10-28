@@ -488,7 +488,9 @@ Rules (`SessionsWindow.cpp:5758-5826`):
 ```ts
 export type SelectionAction = "compact" | "expand" | "mark_read" | "review_later" | "pause" | "resume" | "archive" | "move" | "forget" | "terminate";
 export function applies(s: Session, a: SelectionAction, online: boolean, updating: boolean): boolean;   // selectionActionApplies
-export function run(a: SelectionAction, rows: ActionRow[], options?: { clearArchive?: boolean }): Promise<void>;
+export function run(a: SelectionAction, rows: SelectionRow[], options?: { clearArchive?: boolean; paged?: boolean }): Promise<void>;
+// SelectionRow = ActionRow plus `status` and `reviewLater` (needed for "needs attention").
+// Batch items call `perform(row, action, { quiet: true })`, which suppresses the single-session notices.
 export const running: () => boolean;     // Qt's m_pending while a batch runs
 ```
 
@@ -705,6 +707,16 @@ Controller rulings during Piece C:
 - The header's Start fresh and Clear session follow Qt's main-context rule: neither shows while a subagent is open.
 - Forget archived session stays disabled until the Archive view (`zerus-5wmh.32`).
 - Task C4 added the README part and the smoke steps for PR 3.
+
+Controller rulings during Piece F:
+- The batch-running flag disables every write entry (Qt's m_pending).
+- Archived Resume and Forget are not counted until Piece E binds its hooks.
+- Move to project is disabled with "Arrives with project organisation." until the organization stream's move lands.
+- Pause all and Resume all are computer-wide calls on their own write claim.
+- The client shows machines as headings, since its menus have no submenus.
+- The selection bar needs more than one selected row, since the client has no single-row bulk mode.
+- The batch Terminate omits Qt's worktree checkbox and "Stop {n} sessions" labels until `zerus-5wmh.10`.
+- Task F4 added the README part and the smoke steps for PR 4.
 
 Deviations from Qt, both from owner rules:
 - Attention marks and read replies are capped at 20 000 entries per map (bounded caches); Qt keeps them without a bound.

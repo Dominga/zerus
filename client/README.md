@@ -75,6 +75,8 @@ the child's own environment: the agent attribution (`HGS_SESSION`,
 | Pause | `pause NAME` | none | 45 s, 45 s |
 | Resume | `resume NAME -d` | none | 30 s, 30 s |
 | Start fresh | `resume NAME --fresh [--expected-run-id RUN] -d` | none | 30 s, 30 s |
+| Pause all, one computer | `pause --all` | none | 15 s + 30 s per live session, same on a peer |
+| Resume all in background, one computer | `resume --all -d` | none | 15 s + 15 s per saved session, same on a peer |
 | Rename | `rename NAME NEW [--archive ID]` | none | 5 s, 15 s |
 | Move to archive | `archive NAME` | none | 30 s, 45 s |
 | Terminate a tracked Codex, Claude or Kimi session | `terminate NAME --expected-run-id RUN` | none | 45 s, 60 s |
@@ -217,6 +219,70 @@ the Archive view (`zerus-5wmh.32`); their entries are disabled with a reason.
 Sending, the Mark read chip of the composer toolbar and the
 Open terminal entries arrive with phase 4. The copy entries below are live.
 
+### Batches
+
+Selecting more than one row shows the selection bar above the list (the client
+has no single-row bulk mode). The same actions are in the context menu of a
+selected row, under the heading "N selected sessions", followed by "Deselect all".
+
+- Tools, in this order: Compact session rows, Expand session rows, Mark as
+  read, Mark needs attention, Pause, Resume / restore, Move to archive, Move to
+  project, Forget, Terminate. The tool text is "ACTION (COUNT)" and the hint
+  "ACTION — COUNT of N selected sessions". A tool with a count of 0 is hidden
+  from the bar; the others that do not fit move into "More actions for selected
+  sessions". The close button has the hint "Deselect all".
+- A tool is enabled when its count is above 0, and, except Compact and Expand,
+  when no batch is running. The count is the number of selected rows the action
+  applies to, by Qt's rules: Compact and Expand follow the row preference; Mark
+  as read needs a row that is not archived and needs attention, Mark needs
+  attention one that does not; every other action needs the computer online, no
+  write pending for the session and an operation the row allows (Resume / restore
+  is Resume for a live-listed saved session and Restore for an archived one);
+  Move always applies. Archived Resume and Forget are not counted until the
+  Archive view binds them (`zerus-5wmh.32`).
+- Move to project is shown with its count, disabled, with the hint "Arrives with
+  project organisation." until the organisation stream's move lands.
+- Forget and Terminate first confirm. The title is the action, the text
+  "Forget N selected sessions?" or "Terminate N selected sessions?", then
+  Qt's suffixes: what is removed or stopped and what is kept, the OpenCode line
+  when bindings are forgotten, and "K unavailable or inapplicable sessions will
+  be left as they are." when some selected rows do not apply. "Show details"
+  lists "MACHINE / NAME" per target. The buttons are Cancel (focused and the
+  default) and "Forget N sessions" or "Terminate N sessions"; Cancel runs nothing.
+  Qt's "Remove working folders after stopping" checkbox and its "Stop N
+  sessions" labels arrive with `zerus-5wmh.10`.
+- Mark as read and Mark needs attention run through the marks store at once and
+  report "ACTION: C of N sessions updated."; an error notice that stays when
+  the counts differ.
+- The other actions run one session at a time. Before each call the row is
+  read again by its key and must be the same instance as when the menu opened
+  (name, archive id, `created`, run, conversation and state) and still
+  apply; otherwise the item fails with "MACHINE / NAME: session changed or is
+  unavailable" and no call is made. Each item shows "ACTION: I / N…"; the end
+  shows "ACTION: D of N completed." and, when items failed, "F failed or
+  changed; refresh before retrying." with the first three errors, as a notice
+  that stays. A call is made once and never retried, and a failure does not stop
+  the next item. The calls are the single-session ones of the table above, with
+  their own success and failure notices replaced by the batch's.
+- While a batch (or a Pause all or Resume all) runs, every write entry is
+  disabled, the header shows "Updating…" and a second batch does not start. Stop
+  and the copy entries are not writes.
+
+Pause all and Resume all are in the batch menu, one group per computer: a
+heading with the machine name, "Pause all (LIVE)" and "Resume all in background
+(SAVED)". LIVE counts the running sessions, SAVED the resumable ones that are
+not running; archived rows are skipped. Pause all is enabled when the computer
+is online, LIVE is above 0 and every live session is idle and resumable and
+has a running process; otherwise "Some sessions are busy or context is not
+tracked" appears. Rows of OpenCode or a host without bulk lifecycle are not
+counted and show "OpenCode uses individual Pause / Resume controls" with the
+hint "OpenCode sessions are excluded; use their individual Pause / Resume
+controls." The calls are `pause --all` and `resume --all -d` (table above), take
+the computer-wide write claim and name no session. They show "Pausing sessions
+on MACHINE…" or "Resuming sessions on MACHINE…", then "Session updated.
+Refreshing…" or the trimmed standard error as a notice that stays, and are never
+retried.
+
 ### Mute and Unmute
 
 The entry changes the notification preferences a host shares with all devices.
@@ -325,6 +391,20 @@ confirmation (`kill`, since the replay row is not tracked), then the other end
 call (`terminate`), once each through the store the menus use. It logs each
 outcome to stderr (`zerus-client perf: actions-smoke ...`) and exits 0, or 1
 when an outcome failed.
+
+Then the batch steps, before the marks: `run("review_later", [row])` and
+`run("mark_read", [row])` through the batch store the selection bar uses
+(`actions-smoke batch-review-later: ...` and `batch-mark-read: ...` log the
+notice text, or that the step was skipped because the action does not apply to
+the replay row by Qt's rules), and Pause all and Resume all for the row's
+computer, enabled by the same `machineEntries` rules as the batch menu and
+started through `runMachine` (`actions-smoke pause-all: ...` and `resume-all:
+...`; a started call puts `pause --all` or `resume --all -d` into `log.ndjson`).
+A step the rules disable logs `skipped (...)` instead of being forced. In the
+replay fixture the row already needs attention (Mark needs attention is
+skipped), Pause all is disabled because some sessions are not idle, and Resume
+all has no saved session, so only `batch-mark-read` runs; the two calls are
+covered by the core's fake-hgs test.
 
 The marks must survive a restart. Mark needs attention runs last of the three
 so the first run ends with the session marked for review, and the replay keeps

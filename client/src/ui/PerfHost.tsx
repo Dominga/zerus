@@ -5,7 +5,11 @@ import { orderedRows } from "../store/catalog";
 import { selectedKey, setSelectedKey } from "../store/ui";
 import { activity } from "../store/session";
 import { markAllRead, markNeedsAttention, markRead } from "../store/marks";
-import { copyFolder, copyName, copyCommand, lastCopied, copyReference, end, perform } from "../store/actions";
+import { copyFolder, copyName, copyCommand, lastCopied, copyReference, end, perform, notices } from "../store/actions";
+import { run, running, runMachine } from "../store/batch";
+import { machineEntries } from "./sessions/machine-batch";
+import { computerOffline } from "../store/catalog";
+import { selectionSnapshot } from "./sessions/selection";
 import { snapshotOf, terminateCopy, type ActionRow } from "./sessions/actions-ui";
 import type { Action, Outcome } from "../types";
 import { inTauri, metrics, pumpStats } from "../bridge";
@@ -341,6 +345,38 @@ async function actionsSmoke(allowed: boolean) {
         .map((kind): [string, () => Promise<Outcome>] => [kind, () => perform(row(), { kind })]),
     ];
     let bad = 0;
+    // Batch steps go through the store the selection bar uses and the helper the batch menu uses.
+    const live = () => {
+      const s = orderedRows().find((r) => r.name === SMOKE_SESSION);
+      if (!s) throw new Error("the replay session is gone");
+      return s;
+    };
+    const lastId = () => notices().reduce((m, n) => Math.max(m, n.id), 0);
+    const since = (id: number) => notices().filter((n) => n.id > id);
+    const lastNotice = () => notices().at(-1)?.text ?? "(no notice)";
+    for (const action of ["review_later", "mark_read"] as const) {
+      const before = lastId();
+      await run(action, [selectionSnapshot(live())]);
+      const text = since(before).length ? since(before).map((n) => n.text).join(" / ") : "(skipped: the action does not apply to the replay row by Qt's rules)";
+      log(`actions-smoke batch-${action.replace("_", "-")}: ${text}`);
+    }
+    for (const kind of ["pause_all", "resume_all"] as const) {
+      const row = live();
+      const entry = machineEntries({
+        machine: row.machine || "this computer", computer: row.computer, online: !computerOffline(row.computer), batchRunning: running(),
+        rows: orderedRows().filter((r) => r.computer === row.computer),
+        start: () => {},
+      }).find((e) => "label" in e && e.label.startsWith(kind === "pause_all" ? "Pause all" : "Resume all"));
+      const name = kind === "pause_all" ? "pause-all" : "resume-all";
+      if (!entry || !("label" in entry) || entry.disabled) { log(`actions-smoke ${name}: skipped (${entry && "label" in entry ? entry.label : "no entry"} is disabled for the replay row by Qt's rules)`); continue; }
+      const count = Number(/\((\d+)\)/.exec(entry.label)?.[1] ?? 0);
+      const before = lastId();
+      await runMachine(row.computer, row.machine || "this computer", kind, count);
+      const fresh = since(before);
+      const failed = fresh.some((n) => n.tone === "error");
+      log(`actions-smoke ${name}: ${failed ? "failed" : "done"} (${fresh.map((n) => n.text).join(" / ")})`);
+      if (failed) bad++;
+    }
     for (const [kind, step] of steps) {
       const out = await step();
       const text = kind.startsWith("copy ") && out.outcome === "done" ? ` ${lastCopied()}` : "";

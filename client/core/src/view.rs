@@ -103,6 +103,10 @@ pub struct ViewRow {
     pub terminal_attach_supported: bool,
     /// The row has a boolean `terminal_attach_supported`.
     pub terminal_attach_reported: bool,
+    /// The row's `bulk_lifecycle_supported`, else true unless the agent is
+    /// `opencode` (`HgsClient.cpp:218`).
+    #[serde(default)]
+    pub bulk_lifecycle_supported: bool,
 }
 
 fn text<'a>(row: &'a Value, field: &str) -> &'a str {
@@ -932,6 +936,7 @@ pub fn row(value: &Value) -> ViewRow {
         terminal_reported: flag("terminal_supported").is_some(),
         terminal_attach_supported: flag("terminal_attach_supported").unwrap_or(false),
         terminal_attach_reported: flag("terminal_attach_supported").is_some(),
+        bulk_lifecycle_supported: flag("bulk_lifecycle_supported").unwrap_or(cmd != "opencode"),
     }
 }
 
@@ -997,6 +1002,7 @@ mod tests {
                 // Qt's default for a row without a state (`HgsClient.cpp`).
                 state: "running".into(),
                 terminal_supported: true,
+                bulk_lifecycle_supported: true,
                 ..ViewRow::default()
             }
         );
@@ -1275,6 +1281,25 @@ mod tests {
                 case["case"]
             );
         }
+    }
+
+    #[test]
+    fn bulk_lifecycle_defaults_to_true_except_for_opencode() {
+        assert!(row(&json!({"cmd": "claude"})).bulk_lifecycle_supported);
+        assert!(!row(&json!({"cmd": "opencode"})).bulk_lifecycle_supported);
+        assert!(!row(&json!({"agent": "opencode"})).bulk_lifecycle_supported);
+        assert!(
+            row(&json!({"cmd": "opencode", "bulk_lifecycle_supported": true}))
+                .bulk_lifecycle_supported
+        );
+        assert!(
+            !row(&json!({"cmd": "claude", "bulk_lifecycle_supported": false}))
+                .bulk_lifecycle_supported
+        );
+        assert!(
+            row(&json!({"cmd": "claude", "bulk_lifecycle_supported": "no"}))
+                .bulk_lifecycle_supported
+        );
     }
 
     #[test]

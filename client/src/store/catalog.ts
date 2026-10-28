@@ -149,6 +149,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     terminalReported: !!v.terminal_reported,
     terminalAttachSupported: !!v.terminal_attach_supported,
     terminalAttachReported: !!v.terminal_attach_reported,
+    bulkLifecycle: v.bulk_lifecycle_supported ?? text(v.agent) !== "opencode",
     // The host's values the marks overlay reads.
     created: typeof v.created === "number" ? Math.trunc(v.created) : 0,
     fingerprint: text(v.attention_fingerprint),

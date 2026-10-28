@@ -140,6 +140,18 @@ export function createActions(
   }
 
   /**
+   * A computer-wide call (Pause all, Resume all): one per computer at a time,
+   * no session named. Qt's writeDone words the outcome; nothing is retried.
+   */
+  async function performComputer(computer: string, action: Extract<Action, { kind: "pause_all" | "resume_all" }>): Promise<Outcome> {
+    const { out, busy } = await call({ computer, name: "", run_id: "", conversation_id: "" }, action);
+    if (busy) return out;
+    if (out.outcome === "failed") notify("error", out.detail, true);
+    else notify("info", "Session updated. Refreshing…");
+    return out;
+  }
+
+  /**
    * The Terminate confirmation's click: the session must still terminate
    * (a live session that is not an OpenCode binding) as when the dialog
    * opened; then `action` is the call the dialog chose. A computer that went
@@ -381,7 +393,7 @@ export function createActions(
     return out;
   }
 
-  return { perform, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify };
+  return { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify };
 }
 
 type FollowSource = { target(): { id: string } | undefined; summary(): Record<string, unknown> | undefined; loaded(): boolean; ended(): boolean; error(): unknown };
@@ -402,4 +414,4 @@ let selection: () => Selection = () => ({});
 export function bindSelection(source: () => Selection) { selection = source; }
 
 const app = createActions(appCatalog, (computer) => !computerOffline(computer), () => selection());
-export const { perform, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify } = app;
+export const { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify } = app;

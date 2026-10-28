@@ -437,11 +437,17 @@ pub async fn run_action(
     if blocked() {
         return Ok(failed(REPLAY_NEEDS_HGS));
     }
-    let Some(_claim) = state.flight.claim((
-        target.computer.clone(),
-        target.name.clone(),
-        Lane::of(&action),
-    )) else {
+    // Pause all and Resume all are computer-wide: one per computer at a time,
+    // whatever session name the caller sent.
+    let name = if matches!(action, Action::PauseAll { .. } | Action::ResumeAll { .. }) {
+        String::new()
+    } else {
+        target.name.clone()
+    };
+    let Some(_claim) = state
+        .flight
+        .claim((target.computer.clone(), name, Lane::of(&action)))
+    else {
         return Err("busy".into());
     };
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -866,6 +872,8 @@ mod tests {
             Action::StartFresh,
             Action::Forget,
             Action::ForgetBinding,
+            Action::PauseAll { count: 1 },
+            Action::ResumeAll { count: 1 },
         ] {
             assert_eq!(Lane::of(&action), Lane::Write);
         }

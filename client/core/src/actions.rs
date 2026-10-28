@@ -48,6 +48,16 @@ pub enum Action {
     /// `hgs session-action NAME --json` with `"action":"forget"`: the OpenCode
     /// binding forget (`requestForgetBinding`).
     ForgetBinding,
+    /// `hgs pause --all`: every live session of the computer (`pauseAll`).
+    /// `count` is the live sessions the menu counted; it sets the timeout.
+    /// Computer-wide: the target's session name is empty and ignored.
+    PauseAll {
+        count: u32,
+    },
+    /// `hgs resume --all -d`: every saved session of the computer (`resumeAll`).
+    ResumeAll {
+        count: u32,
+    },
 }
 
 /// One `hgs` call: arguments (with a leading `@alias` for a peer), standard
@@ -150,7 +160,11 @@ pub fn invocation(
     action: &Action,
     request_id: &str,
 ) -> Result<Invocation, String> {
-    let name = target.name.clone();
+    let name = if matches!(action, Action::PauseAll { .. } | Action::ResumeAll { .. }) {
+        String::new()
+    } else {
+        target.name.clone()
+    };
     let (mut args, stdin, local, peer, request) = match action {
         Action::Interrupt { turn_started } => {
             let input = json!({
@@ -223,6 +237,26 @@ pub fn invocation(
             }
             args.push("-d".to_owned());
             (args, None, 30, 30, None)
+        }
+        Action::PauseAll { count } => {
+            let secs = 15 + 30 * u64::from((*count).clamp(1, 10000));
+            (
+                vec!["pause".to_owned(), "--all".to_owned()],
+                None,
+                secs,
+                secs,
+                None,
+            )
+        }
+        Action::ResumeAll { count } => {
+            let secs = 15 + 15 * u64::from((*count).clamp(1, 10000));
+            (
+                vec!["resume".to_owned(), "--all".to_owned(), "-d".to_owned()],
+                None,
+                secs,
+                secs,
+                None,
+            )
         }
         Action::ForgetBinding => {
             if target.run_id.is_empty() || target.conversation_id.is_empty() {
@@ -1003,6 +1037,57 @@ mod tests {
             invocation(&no_run, &Action::Terminate, "u").unwrap().args,
             ["terminate", "claude/sample-project/review"]
         );
+    }
+
+    #[test]
+    fn pause_all_and_resume_all_are_computer_wide_with_scaled_timeouts() {
+        let secs = |c: &str, a: Action| invocation(&target(c), &a, "u").unwrap().timeout.as_secs();
+        assert_eq!(
+            invocation(&target(""), &Action::PauseAll { count: 3 }, "u")
+                .unwrap()
+                .args,
+            ["pause", "--all"]
+        );
+        assert_eq!(
+            invocation(&target("mac"), &Action::PauseAll { count: 3 }, "u")
+                .unwrap()
+                .args,
+            ["@mac", "pause", "--all"]
+        );
+        assert_eq!(
+            invocation(&target(""), &Action::ResumeAll { count: 3 }, "u")
+                .unwrap()
+                .args,
+            ["resume", "--all", "-d"]
+        );
+        assert_eq!(
+            invocation(&target("mac"), &Action::ResumeAll { count: 3 }, "u")
+                .unwrap()
+                .args,
+            ["@mac", "resume", "--all", "-d"]
+        );
+        for c in ["", "mac"] {
+            assert_eq!(secs(c, Action::PauseAll { count: 3 }), 15 + 90);
+            assert_eq!(secs(c, Action::PauseAll { count: 0 }), 45);
+            assert_eq!(secs(c, Action::PauseAll { count: 99999 }), 15 + 30 * 10000);
+            assert_eq!(secs(c, Action::ResumeAll { count: 3 }), 15 + 45);
+            assert_eq!(secs(c, Action::ResumeAll { count: 0 }), 30);
+            assert_eq!(secs(c, Action::ResumeAll { count: 99999 }), 15 + 15 * 10000);
+        }
+        assert_eq!(
+            serde_json::to_value(Action::PauseAll { count: 2 }).unwrap(),
+            json!({"kind": "pause_all", "count": 2})
+        );
+        let inv = invocation(&target(""), &Action::PauseAll { count: 1 }, "u").unwrap();
+        assert!(matches!(
+            classify(
+                &target(""),
+                &Action::PauseAll { count: 1 },
+                &inv,
+                exit0(b"", "")
+            ),
+            Outcome::Done { cleanup: None, .. }
+        ));
     }
 
     #[test]

@@ -109,6 +109,33 @@ fn a_kill_through_the_fake_is_one_call_without_input() {
 }
 
 #[test]
+fn pause_all_through_the_fake_is_one_computer_wide_call() {
+    let fake = Fake::new(r#"{"reply":{"exit":0}}"#);
+    let mut t = target();
+    t.name.clear();
+    t.run_id.clear();
+    t.conversation_id.clear();
+    for (action, argv) in [
+        (
+            Action::PauseAll { count: 2 },
+            serde_json::json!(["pause", "--all"]),
+        ),
+        (
+            Action::ResumeAll { count: 2 },
+            serde_json::json!(["resume", "--all", "-d"]),
+        ),
+    ] {
+        let inv = invocation(&t, &action, "u").unwrap();
+        assert!(matches!(
+            classify(&t, &action, &inv, run(&fake.hgs, &inv)),
+            Outcome::Done { cleanup: None, .. }
+        ));
+        assert_eq!(fake.log().last().unwrap()["argv"], argv);
+    }
+    assert_eq!(fake.log().len(), 2);
+}
+
+#[test]
 fn a_hanging_hgs_times_out_and_is_killed() {
     let fake = Fake::new(r#"{"reply":{"exit":0,"sleep":30}}"#);
     let mut inv = invocation(&target(), &Action::Pause, "u").unwrap();

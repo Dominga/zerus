@@ -23,7 +23,8 @@ vi.mock("../../bridge", () => ({
 
 import * as bridge from "../../bridge";
 import { applyBatch, catalog } from "../../store/catalog";
-import { run, running } from "../../store/batch";
+import { run, running, runMachine } from "../../store/batch";
+import { notices } from "../../store/actions";
 import { actionEntries, freshActionEntry } from "./ActionDialogs";
 import { emptyBatch, type Outcome } from "../../types";
 
@@ -67,5 +68,35 @@ describe("single-session entries while a selection batch runs", () => {
     await batch;
     expect(running()).toBe(false);
     expect(actionEntries(b, undefined, { context: true }).change.disabled).toBe(false);
+  });
+});
+
+describe("Pause all and Resume all (runMachine)", () => {
+  const texts = () => notices().map((n) => `${n.tone}:${n.text}`);
+  it("announces, holds the running flag for the one guarded call and words the outcome", async () => {
+    let finish: (o: Outcome) => void = () => {};
+    mocked.runAction.mockReturnValueOnce(new Promise((r) => { finish = r; }));
+    const before = texts().length;
+    const call = runMachine("mac", "mac mini", "pause_all", 3);
+    await flush();
+    expect(running()).toBe(true);
+    expect(texts().slice(before)).toEqual(["info:Pausing sessions on mac mini…"]);
+    expect(mocked.runAction).toHaveBeenCalledWith({ computer: "mac", name: "", run_id: "", conversation_id: "" }, { kind: "pause_all", count: 3 });
+    // A second machine-wide call or a batch cannot start meanwhile.
+    await runMachine("", "box", "resume_all", 1);
+    expect(mocked.runAction).toHaveBeenCalledTimes(1);
+    finish({ outcome: "done", receipt: {}, cleanup: null });
+    await call;
+    expect(running()).toBe(false);
+    expect(texts().slice(before)).toEqual(["info:Pausing sessions on mac mini…", "info:Session updated. Refreshing…"]);
+  });
+  it("shows a failure's detail and never retries", async () => {
+    mocked.runAction.mockResolvedValueOnce({ outcome: "failed", detail: "timed out" });
+    const before = texts().length;
+    await runMachine("", "box", "resume_all", 2);
+    expect(texts().slice(before)).toEqual(["info:Resuming sessions on box…", "error:timed out"]);
+    expect(mocked.runAction).toHaveBeenCalledTimes(1);
+    expect(mocked.runAction).toHaveBeenCalledWith(expect.anything(), { kind: "resume_all", count: 2 });
+    expect(running()).toBe(false);
   });
 });

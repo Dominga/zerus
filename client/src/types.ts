@@ -71,6 +71,7 @@ export interface ViewRow {
   terminal_reported?: boolean;
   terminal_attach_supported?: boolean;
   terminal_attach_reported?: boolean;
+  bulk_lifecycle_supported?: boolean;
 }
 
 export interface RowOut { computer: ComputerId; key: string; row: ViewRow }
@@ -127,7 +128,10 @@ export type Action =
   | { kind: "kill" }
   | { kind: "start_fresh" }
   | { kind: "forget" }
-  | { kind: "forget_binding" };
+  | { kind: "forget_binding" }
+  /** Computer-wide: the target's session name is empty and ignored. */
+  | { kind: "pause_all"; count: number }
+  | { kind: "resume_all"; count: number };
 
 export interface WorktreeCleanup { status: string; path: string; common_dir: string; reason?: string | null }
 

@@ -102,6 +102,12 @@ describe("applyBatch", () => {
 });
 
 describe("toSession", () => {
+  it("takes bulk lifecycle from the row, else from the agent", () => {
+    expect(toSession("", "k", view("a", { agent: "claude" })).bulkLifecycle).toBe(true);
+    expect(toSession("", "k", view("a", { agent: "opencode" })).bulkLifecycle).toBe(false);
+    expect(toSession("", "k", view("a", { agent: "opencode", bulk_lifecycle_supported: true })).bulkLifecycle).toBe(true);
+    expect(toSession("", "k", view("a", { agent: "claude", bulk_lifecycle_supported: false })).bulkLifecycle).toBe(false);
+  });
   it("derives the presentation status from status kinds and raw phases", () => {
     expect(statusOf(view("a", { status: "working" }))).toBe("working");
     expect(statusOf(view("a", { status: "", phase: "approval" }))).toBe("attention");

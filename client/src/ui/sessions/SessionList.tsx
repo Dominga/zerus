@@ -8,7 +8,8 @@ import {
 } from "./SessionCard";
 import { catalog, computerOffline } from "../../store/catalog";
 import { detailsFor, followedFor, updating } from "../../store/actions";
-import { applies, run, running } from "../../store/batch";
+import { applies, run, running, runMachine } from "../../store/batch";
+import { MACHINES_WAITING, machineEntries } from "./machine-batch";
 import { selectionSnapshot, type SelectionAction, type SelectionRow } from "./selection";
 import { barTools, countable, selectionMenu, splitTools, toolEntry } from "./selection-ui";
 import { actionEntries, copyEntries, freshActionEntry, muteEntry } from "./ActionDialogs";
@@ -160,8 +161,31 @@ function headerMenu(project: string): MenuEntry[] {
   ];
 }
 
+/** Pause all and Resume all per computer (Qt's populateBatchActions): this computer first, then the peers. */
+function machineMenu(): MenuEntry[] {
+  const computers = new Set<string>(Object.keys(catalog.computers));
+  const rows: Record<string, Session[]> = {};
+  for (const id of catalog.order) {
+    const r = catalog.rows[id];
+    if (!r) continue;
+    computers.add(r.computer);
+    (rows[r.computer] ??= []).push(r);
+  }
+  const sorted = [...computers].sort((a, b) => (a === "" ? -1 : b === "" ? 1 : 0));
+  const entries = sorted.flatMap((computer): MenuEntry[] => {
+    const own = rows[computer] ?? [];
+    const machine = own[0]?.machine || computer || "this computer";
+    return machineEntries({
+      machine, computer, online: !computerOffline(computer), batchRunning: running(), rows: own,
+      start: (kind, count) => { void runMachine(computer, machine, kind, count); },
+    });
+  });
+  return entries.length ? [...entries, { separator: true }] : [{ label: MACHINES_WAITING, disabled: true }, { separator: true }];
+}
+
 function batchMenu(): MenuEntry[] {
   return [
+    ...machineMenu(),
     { label: "Expand all collapsed", icon: "expand-row", action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
     markAllEntry(),
     { label: "Clear archive…", icon: "trash", danger: true, disabled: LATER },

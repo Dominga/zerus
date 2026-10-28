@@ -1,6 +1,6 @@
 import { batch as together, createSignal } from "solid-js";
 import { catalog as appCatalog, computerOffline, type CatalogState } from "./catalog";
-import { dismiss as appDismiss, notify as appNotify, perform as appPerform, updating as appUpdating, type Notice } from "./actions";
+import { dismiss as appDismiss, notify as appNotify, perform as appPerform, performComputer as appPerformComputer, updating as appUpdating, type Notice } from "./actions";
 import { markNeedsAttention as appMarkNeedsAttention, markRead as appMarkRead } from "./marks";
 import { compactRows, needsAttention, setCompactRows } from "./ui";
 import { FORGET_ARCHIVE_LATER, RESTORE_LATER, snapshotOf, type ActionRow } from "../ui/sessions/actions-ui";
@@ -163,7 +163,18 @@ export function createBatch(deps: BatchDeps) {
     deps.notify(summary.failed ? "error" : "info", summary.text, summary.failed);
   }
 
-  return { applies, run, running };
+  /**
+   * Holds the running flag (Qt's m_pending) for a machine-wide call; false
+   * when a batch or another such call already runs and nothing happened.
+   */
+  async function exclusive(task: () => Promise<void>): Promise<boolean> {
+    if (running()) return false;
+    setRunning(true);
+    try { await task(); } finally { setRunning(false); }
+    return true;
+  }
+
+  return { applies, run, running, exclusive };
 }
 
 let confirmer: ((copy: BatchConfirmation) => Promise<boolean>) | undefined;
@@ -190,4 +201,16 @@ const app = createBatch({
   archive: () => archiveCalls,
 });
 
-export const { applies, run, running } = app;
+export const { applies, run, running, exclusive } = app;
+
+/**
+ * Pause all or Resume all on one computer (Qt's pauseAll and resumeAll with
+ * their notices): the progress notice, then the guarded call, holding the
+ * running flag meanwhile. The call is never repeated.
+ */
+export async function runMachine(computer: string, machine: string, kind: "pause_all" | "resume_all", count: number): Promise<void> {
+  await exclusive(async () => {
+    appNotify("info", `${kind === "pause_all" ? "Pausing" : "Resuming"} sessions on ${machine}…`);
+    await appPerformComputer(computer, { kind, count });
+  });
+}

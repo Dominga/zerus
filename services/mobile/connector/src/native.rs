@@ -137,6 +137,11 @@ pub type NativeResult = Result<Output, NativeError>;
 #[allow(async_fn_in_trait)]
 pub trait Native {
     async fn call(&self, call: Call) -> NativeResult;
+    /// The native CLI as a command for a long-lived child such as
+    /// `hgs watch --json`; None where native calls are not processes.
+    fn command(&self) -> Option<Command> {
+        None
+    }
 }
 
 /// `Connector.native`'s argv rewriting: worktree catalogs go through the
@@ -302,6 +307,14 @@ impl Drop for Owned {
 }
 
 impl Native for Process {
+    fn command(&self) -> Option<Command> {
+        let mut command = Command::new(&self.hgs);
+        for key in CONTEXT_KEYS {
+            command.env_remove(key);
+        }
+        Some(command)
+    }
+
     async fn call(&self, call: Call) -> NativeResult {
         let stdin = match &call.payload {
             None => None,

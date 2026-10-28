@@ -621,6 +621,17 @@ mod tests {
         // folder and its copy.
         let cache = c.cache();
         for folder in ["plain".to_owned(), digest.to_uppercase()] {
+            // A case-insensitive file system (macOS) already has the upper-case
+            // name as the digest folder: its real copy must still be refused.
+            if cache.root().join(&folder).exists() {
+                assert_eq!(
+                    status_of(&c, &format!("cache/{folder}/shot.png")),
+                    404,
+                    "{folder}"
+                );
+                assert_eq!(cache.copy(&format!("{folder}/shot.png")), None, "{folder}");
+                continue;
+            }
             std::fs::create_dir(cache.root().join(&folder)).unwrap();
             std::fs::write(cache.root().join(&folder).join("x.txt"), b"not a copy").unwrap();
             assert_eq!(

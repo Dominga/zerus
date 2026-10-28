@@ -228,6 +228,21 @@ which then names the new conversation instead of the restored one. A sent first
 message or an archive restore still waits for that confirmation.
 Unknown flags or noninteractive modes such as `codex exec` are not guessed.
 The original positional prompt is never replayed during resume.
+For Kimi Code whose help advertises a non-interactive `--prompt`, Zerus removes
+the initial message from native arguments and the saved resume recipe, then
+submits it through the ordinary guarded send path for the exact launched run.
+Folder trust and setup remain manual. `inspect` includes `launch_prompt` with
+a preview of at most 200 characters plus an ellipsis, request ID and status.
+The full text stays only in the launching supervisor until ordinary guarded
+submission stores its input receipt. Errors are limited to 512 characters plus
+an ellipsis. An undelivered message is cancelled when its child exits or shuts
+down. After an attempted submission there is no automatic retry, including on
+refusal or an uncertain delivery. Review
+the preview and ordinary input receipt before sending it manually.
+Capability detection and native spawn use the same resolved executable after
+account environment setup. A custom `run_kimi.sh` keeps its own argument
+contract and is never invoked a second time for help; `--bare` selects the
+native Kimi launch behavior described here.
 
 A launch interrupted before conversation confirmation is not a Saved session.
 Repeat the same command without `--fresh`; the diagnostic attempt is preserved in

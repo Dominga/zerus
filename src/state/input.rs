@@ -104,6 +104,14 @@ fn validate(request: &Request) -> Result<Vec<Vec<u8>>> {
         .collect()
 }
 
+pub(super) fn validate_launch_prompt(text: &str) -> Result<()> {
+    validate(&Request {
+        request_id: uuid::Uuid::new_v4().to_string(), text: text.into(),
+        expected_run_id: "launch".into(), expected_conversation_id: String::new(),
+        attachments: Vec::new(), expected_compaction_id: String::new(),
+    }).map(|_| ())
+}
+
 /// Provider TUIs can defer SessionStart until their first submitted turn.
 /// Only supervised fresh runs or verifiable native Codex forks are candidates;
 /// checked_input separately proves a fork's owned child history before delivery.
@@ -158,6 +166,10 @@ fn checked_record(name: &str, request: &Request) -> Result<Value> {
 
 pub(super) fn checked_ready(name: &str, run_id: &str, conversation_id: &str) -> Result<Value> {
     checked_input(name, run_id, conversation_id, false)
+}
+
+pub(super) fn launch_ready(name: &str, run_id: &str, conversation_id: &str) -> Result<()> {
+    checked_terminal(&checked_input(name, run_id, conversation_id, true)?, true)
 }
 
 /// A resume before its deferred SessionStart, verified as for its first message.

@@ -195,9 +195,9 @@ class KimiNativeCI(unittest.TestCase):
                 return record, image, admission
             def launch(argv, **kwargs):
                 reservation = json.loads((output / 'evidence/reservation.json').read_text())
-                self.assertEqual((reservation['state'], reservation['versions'], reservation['native_cases']), ('SPENT', ['2.3.1'], 12))
+                self.assertEqual((reservation['state'], reservation['versions'], reservation['native_cases']), ('SPENT', ['2.3.1'], len(ci.METHODS)))
                 self.assertIn('HGS_KIMI_TEST_RECORD', kwargs['env'])
-                ci.write(Path(argv[5]), dict(tests=12, started=list(ci.METHODS), completed=list(ci.METHODS),
+                ci.write(Path(argv[5]), dict(tests=len(ci.METHODS), started=list(ci.METHODS), completed=list(ci.METHODS),
                           failures=0, errors=0, skipped=0, expected_failures=0, unexpected_successes=0))
                 return object()
             with mock.patch.object(sys, 'argv', [str(ci.__file__), '--source-sha', sha, '--hgs', str(hgs),
@@ -219,7 +219,7 @@ class KimiNativeCI(unittest.TestCase):
                 selected.assert_called_once()
             receipt = json.loads((output / 'evidence/receipt.json').read_text())
             self.assertEqual((receipt['outcome'], receipt['completed_versions'], receipt['native_cases']),
-                             ('FAIL', 0, None) if failure else ('PASS', 1, 12))
+                             ('FAIL', 0, None) if failure else ('PASS', 1, len(ci.METHODS)))
 
     def test_tmux_installer_keeps_linux_defaults_and_explicitly_enables_macos_unicode(self):
         # Only configure argv is under test. All network, archive, hash, make
@@ -329,7 +329,7 @@ class KimiNativeCI(unittest.TestCase):
                 self.fetch(Response(b'image'))
 
     def test_exit_zero_without_exact_cases_and_clean_result_is_not_a_pass(self):
-        good = dict(tests=12, started=list(ci.METHODS), completed=list(ci.METHODS), failures=0,
+        good = dict(tests=len(ci.METHODS), started=list(ci.METHODS), completed=list(ci.METHODS), failures=0,
                     errors=0, skipped=0, expected_failures=0, unexpected_successes=0)
         self.assertTrue(ci.outcome(good, 0))
         self.assertFalse(ci.outcome(good, 1))
@@ -337,7 +337,7 @@ class KimiNativeCI(unittest.TestCase):
             for value in (None, False, 0.0, 1):
                 with self.subTest(name=name, value=value):
                     self.assertFalse(ci.outcome(dict(good, **{name: value}), 0))
-        for value in (0, 11, 13, 12.0, '12'):
+        for value in (0, len(ci.METHODS) - 1, len(ci.METHODS) + 1, float(len(ci.METHODS)), str(len(ci.METHODS))):
             self.assertFalse(ci.outcome(dict(good, tests=value), 0))
         for name in ('started', 'completed'):
             self.assertFalse(ci.outcome(dict(good, **{name: list(ci.METHODS[:-1])}), 0))

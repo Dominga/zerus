@@ -11,9 +11,9 @@
 //! (`m_interruptRequest`), and a quiet retry never makes a confirmed write
 //! answer busy.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use tauri::State;
 use zerus_client_core::actions::{classify, invocation, parse_reference, reference_invocation};
@@ -96,9 +96,10 @@ impl Actions {
         }
     }
 
-    /// `queue_read_marks`: merges each mark into the pending ones and saves
-    /// them before any delivery (`ReadMarkStore::add`), wakes the delivery
-    /// worker and returns what is pending.
+    /// `queue_read_marks`: merges each mark into the pending ones
+    /// (`ReadMarkStore::add`), wakes the delivery worker and returns what is
+    /// pending. No file I/O: the worker writes the marks before it sends any
+    /// ([`Actions::flush_marks`]).
     pub fn queue_marks(&self, marks: Vec<ReadMark>) -> Vec<ReadMark> {
         let pending = {
             let mut store = self.marks.lock().unwrap_or_else(PoisonError::into_inner);
@@ -107,6 +108,33 @@ impl Actions {
         };
         self.wake.notify();
         pending
+    }
+
+    /// Writes the marks `queue_read_marks` added since the last save.
+    pub(crate) fn flush_marks(&self) {
+        self.marks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .flush();
+    }
+
+    /// Drops the marks for computers the local listing no longer names
+    /// (`publishReadMarks`): they can never be written. `peers` is asked only
+    /// while marks wait, and None (no listing named its peers yet) drops
+    /// nothing. This computer's marks stay.
+    pub fn drop_orphans(&self, peers: impl FnOnce() -> Option<BTreeSet<String>>) {
+        let waiting = !self
+            .marks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty();
+        let Some(peers) = waiting.then(peers).flatten() else {
+            return;
+        };
+        self.marks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drop_orphans(&peers);
     }
 
     /// The marks not settled yet.
@@ -184,9 +212,12 @@ pub fn attention_file(replay: bool) -> &'static str {
 }
 
 /// The device's attention marks and read replies (`attention_marks`,
-/// `update_attention_marks`).
+/// `update_attention_marks`). Updates change memory in call order; a writer
+/// thread reads the file at start and writes the latest state after each
+/// change, so the main thread never waits for the disk. Dropping it lets the
+/// writer save what is pending, then end.
 pub struct Attention {
-    marks: Mutex<AttentionMarks>,
+    shared: Arc<AttentionShared>,
 }
 
 /// Both maps by key, as the frontend receives them.
@@ -196,32 +227,137 @@ pub struct AttentionSnapshot {
     pub replies: BTreeMap<String, String>,
 }
 
+struct AttentionShared {
+    state: Mutex<AttentionState>,
+    /// Signals a load, a change, a finished write and the end.
+    signal: Condvar,
+}
+
+#[derive(Default)]
+struct AttentionState {
+    /// None until the writer thread has read the file.
+    marks: Option<AttentionMarks>,
+    /// A change the file does not have yet.
+    dirty: bool,
+    writing: bool,
+    closed: bool,
+}
+
 impl Attention {
     pub fn new(path: PathBuf) -> Self {
-        Self {
-            marks: Mutex::new(AttentionMarks::load(path)),
+        let shared = Arc::new(AttentionShared {
+            state: Mutex::new(AttentionState::default()),
+            signal: Condvar::new(),
+        });
+        let writer = Arc::clone(&shared);
+        let file = path.clone();
+        let spawned = std::thread::Builder::new()
+            .name("zerus-attention-marks".into())
+            .spawn(move || writer.write_changes(file));
+        if let Err(error) = spawned {
+            // Kept in memory only: commands still answer.
+            eprintln!("zerus-client: the attention-marks writer did not start: {error}");
+            shared.lock().marks = Some(AttentionMarks::load(path));
+            shared.signal.notify_all();
         }
+        Self { shared }
     }
 
+    #[cfg(test)]
     pub fn snapshot(&self) -> AttentionSnapshot {
-        let (marks, replies) = self
-            .marks
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .snapshot();
-        AttentionSnapshot { marks, replies }
+        self.shared.snapshot()
     }
 
-    /// A delta: `Some` writes an entry, `None` removes it; then saves.
+    /// A delta: `Some` writes an entry, `None` removes it. Memory only; the
+    /// writer thread saves a change.
     pub fn update(
         &self,
         marks: BTreeMap<String, Option<Mark>>,
         replies: BTreeMap<String, Option<String>>,
     ) {
-        self.marks
-            .lock()
+        let mut state = self.shared.loaded();
+        if let Some(store) = state.marks.as_mut() {
+            if store.update(marks, replies) {
+                state.dirty = true;
+                self.shared.signal.notify_all();
+            }
+        }
+    }
+
+    /// Waits until the file holds every change made so far.
+    #[cfg(test)]
+    pub fn flush(&self) {
+        let state = self.shared.lock();
+        let _state = self
+            .shared
+            .signal
+            .wait_while(state, |state| {
+                state.marks.is_none() || state.dirty || state.writing
+            })
+            .unwrap_or_else(PoisonError::into_inner);
+    }
+}
+
+impl Drop for Attention {
+    fn drop(&mut self) {
+        self.shared.lock().closed = true;
+        self.shared.signal.notify_all();
+    }
+}
+
+impl AttentionShared {
+    fn lock(&self) -> std::sync::MutexGuard<'_, AttentionState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The state once the file has been read.
+    fn loaded(&self) -> std::sync::MutexGuard<'_, AttentionState> {
+        self.signal
+            .wait_while(self.lock(), |state| state.marks.is_none())
             .unwrap_or_else(PoisonError::into_inner)
-            .update(marks, replies);
+    }
+
+    fn snapshot(&self) -> AttentionSnapshot {
+        let state = self.loaded();
+        let (marks, replies) = state
+            .marks
+            .as_ref()
+            .map(AttentionMarks::snapshot)
+            .unwrap_or_default();
+        AttentionSnapshot { marks, replies }
+    }
+
+    /// The writer thread: reads the file, then writes the latest state after
+    /// each change (changes made meanwhile go into one write). A copy is taken
+    /// under the lock and written without it.
+    fn write_changes(&self, path: PathBuf) {
+        let loaded = AttentionMarks::load(path);
+        self.lock().marks = Some(loaded);
+        self.signal.notify_all();
+        loop {
+            let contents = {
+                let mut state = self
+                    .signal
+                    .wait_while(self.lock(), |state| !state.dirty && !state.closed)
+                    .unwrap_or_else(PoisonError::into_inner);
+                if !state.dirty {
+                    return;
+                }
+                state.dirty = false;
+                state.writing = true;
+                state.marks.as_ref().map(AttentionMarks::contents)
+            };
+            if let Some(contents) = contents {
+                if let Err(error) = contents.write() {
+                    eprintln!(
+                        "zerus-client: could not save attention marks to {}: {error}",
+                        contents.path().display()
+                    );
+                }
+            }
+            self.lock().writing = false;
+            self.signal.notify_all();
+        }
     }
 }
 
@@ -376,23 +512,30 @@ pub fn pending_read_marks(state: State<'_, Actions>) -> Vec<ReadMark> {
 }
 
 /// Queues read marks for their hosts (`FleetState::queueRead`): each is merged
-/// into the pending mark of its session and saved before any delivery; the
-/// worker (`readsync.rs`) delivers them. Returns the pending marks. Not async,
-/// so calls apply in the order the frontend makes them.
+/// into the pending mark of its session; the worker (`readsync.rs`) writes
+/// them to the file before it sends any, then delivers them. Returns the
+/// pending marks. Not async, so calls apply in the order the frontend makes
+/// them; it does no file I/O.
 #[tauri::command]
 pub fn queue_read_marks(state: State<'_, Actions>, marks: Vec<ReadMark>) -> Vec<ReadMark> {
     state.queue_marks(marks)
 }
 
-/// The device's attention marks and read replies by key.
+/// The device's attention marks and read replies by key. Async: the first
+/// call may wait for the writer thread's read of the file, and a snapshot at
+/// the cap is large, so neither runs on the main thread.
 #[tauri::command]
-pub fn attention_marks(state: State<'_, Attention>) -> AttentionSnapshot {
-    state.snapshot()
+pub async fn attention_marks(state: State<'_, Attention>) -> Result<AttentionSnapshot, String> {
+    let shared = Arc::clone(&state.shared);
+    tauri::async_runtime::spawn_blocking(move || shared.snapshot())
+        .await
+        .map_err(|error| error.to_string())
 }
 
-/// Writes (`Some`) or removes (`None`) attention marks and read replies, then
-/// saves; each map keeps its 20 000 newest written entries. Not async, so
-/// updates apply in the order the frontend makes them.
+/// Writes (`Some`) or removes (`None`) attention marks and read replies; each
+/// map keeps its 20 000 newest written entries. Not async, so updates apply in
+/// the order the frontend makes them; the change is in memory at once and the
+/// writer thread saves it.
 #[tauri::command]
 pub fn update_attention_marks(
     state: State<'_, Attention>,
@@ -452,20 +595,55 @@ mod tests {
         let expected = vec![mark("claude/sample-project/review", Some("r1"), Some("s1"))];
         assert_eq!(pending, expected);
         assert_eq!(actions.pending_marks(), expected);
-        // Saved before any delivery.
-        assert_eq!(ReadMarks::load(path.clone()).pending(), expected);
+        // The command does no file I/O; the worker flushes before it sends.
+        assert!(!path.exists());
         assert!(actions.wake.wait(std::time::Duration::ZERO));
+        actions.flush_marks();
+        assert_eq!(ReadMarks::load(path.clone()).pending(), expected);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn marks_for_computers_no_longer_configured_are_dropped_once_peers_are_known() {
+        let path =
+            std::env::temp_dir().join(format!("zerus-actions-orphans-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let actions = Actions::new(path.clone());
+        let on = |computer: &str| ReadMark {
+            computer: computer.into(),
+            name: "claude/sample-project/review".into(),
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+            reply_id: Some("r1".into()),
+            attention_signature: None,
+        };
+        actions.queue_marks(vec![on(""), on("laptop"), on("removed")]);
+        // Peers not known yet (no listing named them): nothing is dropped.
+        actions.drop_orphans(|| None);
+        assert_eq!(actions.pending_marks().len(), 3);
+        let peers: BTreeSet<String> = ["laptop".to_owned()].into();
+        actions.drop_orphans(|| Some(peers.clone()));
+        assert_eq!(actions.pending_marks(), vec![on(""), on("laptop")]);
+        assert_eq!(ReadMarks::load(path.clone()).pending().len(), 2);
+        // Without marks the peer list is not even asked for.
+        let empty = Actions::new(path.with_extension("empty"));
+        empty.drop_orphans(|| panic!("asked for peers"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn attention_path(test: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "zerus-actions-attention-{}-{test}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        path
     }
 
     #[test]
     fn attention_updates_merge_and_persist() {
         use zerus_client_core::marks::Mark;
-        let path = std::env::temp_dir().join(format!(
-            "zerus-actions-attention-{}.json",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
+        let path = attention_path("merge");
         let key = r#"["mac","claude","conv-1"]"#.to_owned();
         let other = r#"["mac","claude","conv-2"]"#.to_owned();
         let attention = Attention::new(path.clone());
@@ -487,6 +665,7 @@ mod tests {
             replies: BTreeMap::from([(key, "r1".to_owned())]),
         };
         assert_eq!(attention.snapshot(), expected);
+        attention.flush();
         assert_eq!(Attention::new(path.clone()).snapshot(), expected);
         // What the frontend receives.
         assert_eq!(
@@ -496,6 +675,50 @@ mod tests {
                 "replies": {r#"["mac","claude","conv-1"]"#: "r1"},
             })
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_writer_thread_saves_only_changes() {
+        let path = attention_path("changes");
+        let key = r#"["mac","claude","conv-1"]"#.to_owned();
+        let attention = Attention::new(path.clone());
+        let reply = |value: &str| BTreeMap::from([(key.clone(), Some(value.to_owned()))]);
+        attention.update(BTreeMap::new(), reply("r1"));
+        attention.flush();
+        assert!(path.exists());
+        std::fs::remove_file(&path).unwrap();
+        // The value it holds already: no change, nothing written.
+        attention.update(BTreeMap::new(), reply("r1"));
+        attention.flush();
+        assert!(!path.exists());
+        attention.update(BTreeMap::new(), reply("r2"));
+        attention.flush();
+        assert_eq!(Attention::new(path.clone()).snapshot().replies[&key], "r2");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_file_is_read_off_the_calling_thread_and_written_when_dropped() {
+        let path = attention_path("load");
+        std::fs::write(&path, r#"{"replies":[["k","r1"]]}"#).unwrap();
+        let attention = Attention::new(path.clone());
+        // The first answer waits for the writer thread's read.
+        assert_eq!(
+            attention.snapshot().replies,
+            BTreeMap::from([("k".to_owned(), "r1".to_owned())])
+        );
+        attention.update(
+            BTreeMap::new(),
+            BTreeMap::from([("k".to_owned(), Some("r2".to_owned()))]),
+        );
+        drop(attention);
+        // Dropped with a change pending: the writer still saves it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while Attention::new(path.clone()).snapshot().replies["k"] != "r2" {
+            assert!(std::time::Instant::now() < deadline, "the change was saved");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let _ = std::fs::remove_file(&path);
     }
 

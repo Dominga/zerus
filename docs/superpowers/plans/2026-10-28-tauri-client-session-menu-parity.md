@@ -310,7 +310,7 @@ Rules:
   - failed: 10 s doubled per failure, at most 300 s;
   - a changed mark resets its counters;
   - a mark no longer pending is forgotten when it finishes.
-- **The worker** (`client/src-tauri/src/readsync.rs`): a thread that every 5 s, and whenever marks are added, takes `due`, runs each `MarkRead` through `run` (the phase 2 invocation and `classify`) and reports `finished`. Phase 2's frontend quiet retry and its read lane go away, since this worker owns delivery.
+- **The worker** (`client/src-tauri/src/readsync.rs`): a thread that every 5 s, and whenever marks are added, takes `due`, runs each `MarkRead` through `run` (the phase 2 invocation and `classify`) and reports `finished`. Phase 2's frontend quiet retry goes away in Task B3, since this worker owns delivery; the Rust Read lane stays, and the worker claims it for each call. Each wake first writes the marks `queue_read_marks` added (the command itself does no file I/O), and marks for computers the local listing no longer names are dropped once the peers are known (`publishReadMarks`, `TrayAgent.cpp:578-587`; marks for this computer stay).
   - A delivery shows no notice, as Qt (`markFinished` has no visible receiver).
   - Settling stays `Actions::observe` (phase 2): a mark is saved before any call, and an empty replace never drops pending marks.
 - **Queueing from the frontend:** a new command `queue_read_marks(marks: Vec<ReadMark>) -> Vec<ReadMark>` merges each mark into `ReadMarks` (`add`, which saves before any delivery), wakes the worker and returns the pending marks. Phase 2's `run_action` with `MarkRead` stays callable, but the UI no longer uses it.

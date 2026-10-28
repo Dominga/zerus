@@ -140,20 +140,24 @@ Outcome rules:
   (a person's Mark as read counts too). A host without shared read state keeps
   the entry disabled.
 - Read marks reach their hosts through a worker in the Rust app, as Qt's
-  `ReadMarkSync` does. `queue_read_marks` merges marks into `read-marks.json`
-  before any call and wakes it; otherwise it wakes every 5 s. At most four
+  `ReadMarkSync` does. `queue_read_marks` merges marks in memory and wakes it;
+  otherwise it wakes every 5 s. Each wake first writes new marks to
+  `read-marks.json`, so a mark is saved before any call. At most four
   `hgs read` calls run at once, each free slot going to the computer with the
   fewest. Until a snapshot settles a mark, a delivered one is sent again after
   120 s (doubling to 960 s while its host applies only part of it) and a
   failed one after 10 s, doubling to 300 s; a changed mark goes at once. Each
   call takes its session's read lane; a busy lane leaves the mark for the next
-  wake. A delivery shows no notice. A replay without `ZERUS_CLIENT_HGS` sends
-  nothing.
+  wake. A delivery shows no notice. Once this computer's listing names its
+  peers, marks for a computer it no longer names are dropped (this computer's
+  stay). A replay without `ZERUS_CLIENT_HGS` sends nothing.
 - This device's attention marks (marked for review, the acknowledged
   attention) and the read replies of hosts without shared read state are kept
   in `attention-marks.json` (a replay uses `attention-marks-replay.json`).
-  `update_attention_marks` writes or removes entries; each map keeps its
-  20 000 newest written entries, and the file lists them in write order.
+  `update_attention_marks` writes or removes entries in memory; each map keeps
+  its 20 000 newest written entries. A writer thread reads the file at start
+  and saves the latest state after each change, listing entries in write
+  order, so the window never waits for the disk.
 
 Forgetting, restoring, attention marks and sending arrive in later phases; their
 entries are disabled with a reason. The copy entries below are live.

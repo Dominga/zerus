@@ -7,8 +7,10 @@
 //! Each call claims its session's read lane; a session whose read lane is busy
 //! is left for the next wake. Writes and interrupts keep their own lanes: a
 //! read never blocks a write, and Stop never waits for one. A delivery shows no
-//! notice, as in Qt (`markFinished` has no visible receiver). Marks are saved
-//! before any call (`queue_read_marks`) and settled by `Actions::observe`.
+//! notice, as in Qt (`markFinished` has no visible receiver). Each wake first
+//! writes the marks `queue_read_marks` added, so a mark is saved before any
+//! call while the command itself does no file I/O. Marks are settled by
+//! `Actions::observe`.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -60,15 +62,18 @@ struct Worker {
     sync: Arc<Mutex<ReadSync>>,
     run: Runner,
     clock: Clock,
+    /// False in a replay without `ZERUS_CLIENT_HGS`: marks are saved, never sent.
+    deliver: bool,
 }
 
 impl Worker {
-    fn new(actions: Actions, run: Runner, clock: Clock) -> Self {
+    fn new(actions: Actions, run: Runner, clock: Clock, deliver: bool) -> Self {
         Self {
             actions,
             sync: Arc::new(Mutex::new(ReadSync::new())),
             run,
             clock,
+            deliver,
         }
     }
 
@@ -76,6 +81,11 @@ impl Worker {
     /// session's read lane is free goes to its own thread; one whose lane is
     /// busy is left for the next wake. Returns the delivery threads.
     fn pump(&self) -> Vec<JoinHandle<()>> {
+        // Saved before any call (`ReadMarkStore::add` before `setPending`).
+        self.actions.flush_marks();
+        if !self.deliver {
+            return Vec::new();
+        }
         let pending = self.actions.pending_marks();
         let due = {
             let mut sync = lock(&self.sync);
@@ -142,17 +152,16 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// Starts the worker for the app's marks. In replay mode without an explicit
-/// `ZERUS_CLIENT_HGS` it sends nothing, so a replay never drives the real CLI.
+/// `ZERUS_CLIENT_HGS` it only saves queued marks and sends nothing, so a
+/// replay never drives the real CLI.
 pub fn start(actions: Actions) {
-    if crate::actions::blocked() {
-        return;
-    }
+    let deliver = !crate::actions::blocked();
     let started = Instant::now();
     let run: Runner = Arc::new(|inv: &Invocation| zerus_client_core::run(&default_hgs(), inv));
     let clock: Clock =
         Arc::new(move || i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX));
     let wake = actions.wake.clone();
-    let worker = Worker::new(actions, run, clock);
+    let worker = Worker::new(actions, run, clock, deliver);
     let spawned = std::thread::Builder::new()
         .name("zerus-read-marks".into())
         .spawn(move || loop {
@@ -172,7 +181,7 @@ mod tests {
     use super::*;
     use crate::actions::Lane;
     use serde_json::{json, Value};
-    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicI64, Ordering};
 
     struct Temp(std::path::PathBuf);
     impl Temp {
@@ -222,6 +231,15 @@ mod tests {
 
     impl Fixture {
         fn new(test: &str, answer: impl Fn(&Invocation) -> Exit + Send + Sync + 'static) -> Self {
+            Self::with(test, true, answer)
+        }
+
+        /// `deliver` false: a replay without `ZERUS_CLIENT_HGS`.
+        fn with(
+            test: &str,
+            deliver: bool,
+            answer: impl Fn(&Invocation) -> Exit + Send + Sync + 'static,
+        ) -> Self {
             let temp = Temp::new(test);
             let actions = Actions::new(temp.0.clone());
             let calls = Arc::new(Mutex::new(Vec::new()));
@@ -233,7 +251,7 @@ mod tests {
             });
             let clock_now = Arc::clone(&now);
             let clock: Clock = Arc::new(move || clock_now.load(Ordering::SeqCst));
-            let worker = Worker::new(actions.clone(), run, clock);
+            let worker = Worker::new(actions.clone(), run, clock, deliver);
             Self {
                 _temp: temp,
                 actions,
@@ -395,14 +413,19 @@ mod tests {
 
     #[test]
     fn at_most_four_calls_run_at_once() {
-        let running = Arc::new(AtomicUsize::new(0));
-        let most = Arc::new(AtomicUsize::new(0));
-        let (r, m) = (Arc::clone(&running), Arc::clone(&most));
+        // Each call waits inside the runner until the test opens the gate, so
+        // four calls in there at the same time prove they run concurrently.
+        let gate = Arc::new((Mutex::new((0_usize, false)), Condvar::new()));
+        let inside = Arc::clone(&gate);
         let f = Fixture::new("four", move |_| {
-            let now = r.fetch_add(1, Ordering::SeqCst) + 1;
-            m.fetch_max(now, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(100));
-            r.fetch_sub(1, Ordering::SeqCst);
+            let (state, signal) = &*inside;
+            let mut state = state.lock().unwrap();
+            state.0 += 1;
+            signal.notify_all();
+            let (state, _) = signal
+                .wait_timeout_while(state, Duration::from_secs(10), |state| !state.1)
+                .unwrap();
+            assert!(state.1, "the test opened the gate");
             exit(0, applied(true, true))
         });
         f.actions.queue_marks(
@@ -412,14 +435,62 @@ mod tests {
         );
         let first = f.worker.pump();
         assert_eq!(first.len(), 4);
-        // The loop does not wait for them, and no fifth call starts meanwhile.
+        let (state, signal) = &*gate;
+        let arrived = signal
+            .wait_timeout_while(state.lock().unwrap(), Duration::from_secs(10), |state| {
+                state.0 < 4
+            })
+            .unwrap()
+            .0
+             .0;
+        assert_eq!(arrived, 4, "four calls inside the runner at once");
+        // The loop did not wait for them, and no fifth call starts meanwhile.
         assert!(f.worker.pump().is_empty());
+        assert_eq!(f.calls().len(), 4);
+        state.lock().unwrap().1 = true;
+        signal.notify_all();
         for thread in first {
             thread.join().unwrap();
         }
         assert_eq!(f.pump(), 2);
-        assert_eq!(most.load(Ordering::SeqCst), 4);
         assert_eq!(f.calls().len(), 6);
+    }
+
+    #[test]
+    fn queued_marks_are_on_disk_before_the_first_call() {
+        let path = Arc::new(Mutex::new(None::<std::path::PathBuf>));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (reader, record) = (Arc::clone(&path), Arc::clone(&seen));
+        let f = Fixture::new("saved-first", move |_| {
+            let file = reader.lock().unwrap().clone().unwrap();
+            record
+                .lock()
+                .unwrap()
+                .push(zerus_client_core::readmarks::ReadMarks::load(file).pending());
+            exit(0, applied(true, true))
+        });
+        *path.lock().unwrap() = Some(f._temp.0.clone());
+        let m = mark("mac", "s", Some("r1"), None);
+        f.actions.queue_marks(vec![m.clone()]);
+        // Queueing does no file I/O.
+        assert!(!f._temp.0.exists());
+        assert_eq!(f.pump(), 1);
+        assert_eq!(*seen.lock().unwrap(), vec![vec![m]]);
+    }
+
+    #[test]
+    fn a_replay_without_hgs_saves_marks_but_sends_none() {
+        let f = Fixture::with("replay", false, |_| exit(0, applied(true, true)));
+        let m = mark("mac", "s", Some("r1"), None);
+        f.actions.queue_marks(vec![m.clone()]);
+        assert_eq!(f.pump(), 0);
+        f.at(600_000);
+        assert_eq!(f.pump(), 0);
+        assert!(f.calls().is_empty());
+        assert_eq!(
+            zerus_client_core::readmarks::ReadMarks::load(f._temp.0.clone()).pending(),
+            vec![m]
+        );
     }
 
     #[test]

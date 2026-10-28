@@ -5,9 +5,13 @@
 //! Qt keeps both maps without a bound. Here each holds at most [`CAP`]
 //! entries, the oldest written dropped first, and the file lists entries in
 //! write order so that order survives a restart.
+//!
+//! [`AttentionMarks::update`] changes memory only; the app saves on a writer
+//! thread from [`AttentionMarks::contents`], so no caller waits for the disk.
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use crate::readmarks::write_atomically;
 
@@ -60,47 +64,65 @@ impl AttentionMarks {
         (self.marks.snapshot(), self.replies.snapshot())
     }
 
-    /// `Some` writes the entry (it becomes the newest written), `None` removes
-    /// it. Then each map keeps its [`CAP`] newest entries and the file is
-    /// replaced atomically. An update that changes nothing writes nothing.
+    /// `Some` writes the entry (it becomes the newest written) unless it holds
+    /// that value already, `None` removes it. Then each map keeps its [`CAP`]
+    /// newest entries. Memory only: returns true when anything changed, so
+    /// the caller saves.
     pub fn update(
         &mut self,
         marks: BTreeMap<String, Option<Mark>>,
         replies: BTreeMap<String, Option<String>>,
-    ) {
+    ) -> bool {
         let changed = self.marks.apply(marks) | self.replies.apply(replies);
         if changed {
             self.marks.cap(CAP);
             self.replies.cap(CAP);
-            self.save();
+        }
+        changed
+    }
+
+    /// A copy of what the file holds, to write without holding these marks.
+    pub fn contents(&self) -> Contents {
+        Contents {
+            path: self.path.clone(),
+            file: File {
+                marks: self.marks.in_order(),
+                replies: self.replies.in_order(),
+            },
         }
     }
 
-    /// A failure keeps the marks in memory; the next change tries again.
-    fn save(&self) {
-        let file = FileRef {
-            marks: self.marks.in_order().collect(),
-            replies: self.replies.in_order().collect(),
-        };
-        if let Ok(bytes) = serde_json::to_vec(&file) {
-            write_atomically(&self.path, &bytes);
-        }
+    /// Replaces the file atomically with the current marks.
+    pub fn save(&self) -> io::Result<()> {
+        self.contents().write()
+    }
+}
+
+/// The marks as [`AttentionMarks::contents`] copied them.
+pub struct Contents {
+    path: PathBuf,
+    file: File,
+}
+
+impl Contents {
+    /// Replaces the file atomically (a temporary file beside it, then a
+    /// rename), creating its folder.
+    pub fn write(&self) -> io::Result<()> {
+        write_atomically(&self.path, &serde_json::to_vec(&self.file)?)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 }
 
 /// The file: each map as `[key, value]` pairs, oldest written first.
-#[derive(Default, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 struct File {
     #[serde(default)]
     marks: Vec<(String, Mark)>,
     #[serde(default)]
     replies: Vec<(String, String)>,
-}
-
-#[derive(Serialize)]
-struct FileRef<'a> {
-    marks: Vec<(&'a str, &'a Mark)>,
-    replies: Vec<(&'a str, &'a String)>,
 }
 
 /// A map that remembers the order its keys were last written in.
@@ -120,12 +142,16 @@ impl<V> Default for Written<V> {
     }
 }
 
-impl<V: Clone> Written<V> {
-    /// Writes or removes each entry; true when it wrote or removed any.
+impl<V: Clone + PartialEq> Written<V> {
+    /// Writes or removes each entry; true when it changed any. Writing the
+    /// value an entry holds is no change and keeps its place.
     fn apply(&mut self, changes: BTreeMap<String, Option<V>>) -> bool {
         let mut changed = false;
         for (key, value) in changes {
             changed |= match value {
+                Some(value) if self.entries.get(&key).is_some_and(|(_, old)| *old == value) => {
+                    false
+                }
                 Some(value) => {
                     self.put(key, value);
                     true
@@ -171,13 +197,16 @@ impl<V: Clone> Written<V> {
             .collect()
     }
 
-    /// Oldest written first.
-    fn in_order(&self) -> impl Iterator<Item = (&str, &V)> {
-        self.order.values().filter_map(|key| {
-            self.entries
-                .get(key)
-                .map(|(_, value)| (key.as_str(), value))
-        })
+    /// A copy, oldest written first.
+    fn in_order(&self) -> Vec<(String, V)> {
+        self.order
+            .values()
+            .filter_map(|key| {
+                self.entries
+                    .get(key)
+                    .map(|(_, value)| (key.clone(), value.clone()))
+            })
+            .collect()
     }
 }
 
@@ -231,25 +260,33 @@ mod tests {
         let temp = Temp::new("update");
         let mut store = AttentionMarks::load(temp.0.clone());
         assert_eq!(store.snapshot(), (BTreeMap::new(), BTreeMap::new()));
-        store.update(
+        assert!(store.update(
             marks(&[
                 (KEY, Some(mark(true, ""))),
                 (FALLBACK, Some(mark(false, "fp"))),
             ]),
             replies(&[(KEY, Some("r1"))]),
-        );
-        store.update(marks(&[(FALLBACK, None)]), BTreeMap::new());
+        ));
+        assert!(store.update(marks(&[(FALLBACK, None)]), BTreeMap::new()));
         let expected = (
             BTreeMap::from([(KEY.to_owned(), mark(true, ""))]),
             BTreeMap::from([(KEY.to_owned(), "r1".to_owned())]),
         );
         assert_eq!(store.snapshot(), expected);
+        // An update only changes memory; the caller saves.
+        assert!(!temp.0.exists());
+        store.save().unwrap();
         assert_eq!(AttentionMarks::load(temp.0.clone()).snapshot(), expected);
-        // Removing a key that is not there, or an empty update, changes nothing.
-        store.update(marks(&[("missing", None)]), replies(&[("missing", None)]));
-        store.update(BTreeMap::new(), BTreeMap::new());
-        assert_eq!(AttentionMarks::load(temp.0.clone()).snapshot(), expected);
-        store.update(BTreeMap::new(), replies(&[(KEY, Some("r2"))]));
+        // Removing a key that is not there, writing the value already stored,
+        // or an empty update, changes nothing.
+        assert!(!store.update(marks(&[("missing", None)]), replies(&[("missing", None)])));
+        assert!(!store.update(
+            marks(&[(KEY, Some(mark(true, "")))]),
+            replies(&[(KEY, Some("r1"))])
+        ));
+        assert!(!store.update(BTreeMap::new(), BTreeMap::new()));
+        assert!(store.update(BTreeMap::new(), replies(&[(KEY, Some("r2"))])));
+        store.contents().write().unwrap();
         assert_eq!(
             AttentionMarks::load(temp.0.clone()).snapshot().1,
             BTreeMap::from([(KEY.to_owned(), "r2".to_owned())])
@@ -282,8 +319,11 @@ mod tests {
             marks(&[("a", Some(mark(false, "fp")))]),
             replies(&[("x", Some("r2"))]),
         );
-        // Writing an old key again makes it the newest.
+        // Writing an old key again makes it the newest; the same value again
+        // is no change and keeps its place.
         store.update(marks(&[("b", Some(mark(false, "")))]), BTreeMap::new());
+        store.update(BTreeMap::new(), replies(&[("y", Some("r1"))]));
+        store.save().unwrap();
         let file: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&temp.0).unwrap()).unwrap();
         assert_eq!(
@@ -333,6 +373,7 @@ mod tests {
         assert!(!marks_now.contains_key("old-b") && !replies_now.contains_key("old-b"));
         assert_eq!(marks_now["old-a"], mark(false, "fp"));
         assert_eq!(replies_now["old-a"], "r2");
+        store.save().unwrap();
         // The order survives a restart: old-a goes next, then the bulk in key order.
         let mut reloaded = AttentionMarks::load(temp.0.clone());
         reloaded.update(marks(&[("new-1", Some(mark(true, "")))]), BTreeMap::new());
@@ -343,6 +384,7 @@ mod tests {
         assert_eq!(replies_now.len(), CAP);
         reloaded.update(marks(&[("new-2", Some(mark(true, "")))]), BTreeMap::new());
         assert!(!reloaded.snapshot().0.contains_key(&first[0]));
+        reloaded.save().unwrap();
         assert_eq!(AttentionMarks::load(temp.0.clone()).snapshot().0.len(), CAP);
     }
 
@@ -387,6 +429,16 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_save_reports_its_error() {
+        let temp = Temp::new("blocked");
+        // A file where the folder should be.
+        std::fs::write(&temp.0, "x").unwrap();
+        let mut store = AttentionMarks::load(temp.0.join("attention-marks.json"));
+        store.update(marks(&[(KEY, Some(mark(true, "")))]), BTreeMap::new());
+        assert!(store.save().is_err());
+    }
+
+    #[test]
     fn a_save_leaves_no_temporary_file() {
         let folder = std::env::temp_dir().join(format!(
             "zerus-attention-marks-{}-folder",
@@ -395,8 +447,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&folder);
         let path = folder.join("attention-marks.json");
         // The folder is created on the first save.
-        AttentionMarks::load(path.clone())
-            .update(marks(&[(KEY, Some(mark(true, "")))]), BTreeMap::new());
+        let mut store = AttentionMarks::load(path.clone());
+        store.update(marks(&[(KEY, Some(mark(true, "")))]), BTreeMap::new());
+        store.save().unwrap();
         let names: Vec<String> = std::fs::read_dir(&folder)
             .unwrap()
             .flatten()

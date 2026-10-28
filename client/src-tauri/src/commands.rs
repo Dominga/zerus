@@ -24,6 +24,13 @@ impl AppState {
     pub fn pump(&self) -> crate::pump::Pump {
         self.live.pump.clone()
     }
+
+    /// Starts the data source now, before any window loads: the menu bar and
+    /// notifications need the fleet while the window is closed. A later
+    /// `start` from the webview finds it running and resends the catalog.
+    pub fn start_source(&self) -> Result<String, String> {
+        self.live.start()
+    }
 }
 
 #[cfg(feature = "live")]

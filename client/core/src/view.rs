@@ -110,6 +110,21 @@ pub struct ViewRow {
     /// `opencode` (`HgsClient.cpp:218`).
     #[serde(default)]
     pub bulk_lifecycle_supported: bool,
+    /// What the menu bar and notifications read; never sent to the frontend.
+    #[serde(skip)]
+    pub notify: NotifyFacts,
+}
+
+/// What the menu bar and attention notifications read beyond the card. It is
+/// never serialized: the frontend does not receive it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NotifyFacts {
+    /// `attached > 0`: a terminal client is attached (`TrayMenu.cpp:30` shows "● ").
+    pub attached: bool,
+    /// `SessionInfo::needsAction` (`tray/src/HgsClient.h:109-116`).
+    pub needs_action: bool,
+    /// The host's read mark names the current attention signature.
+    pub acknowledged: bool,
 }
 
 fn text<'a>(row: &'a Value, field: &str) -> &'a str {
@@ -941,6 +956,11 @@ pub fn row(value: &Value) -> ViewRow {
         terminal_reported: flag("terminal_supported").is_some(),
         terminal_attach_supported: flag("terminal_attach_supported").unwrap_or(false),
         terminal_attach_reported: flag("terminal_attach_supported").is_some(),
+        notify: NotifyFacts {
+            attached: value.get("attached").and_then(Value::as_i64).unwrap_or(0) > 0,
+            needs_action: session.needs_action(),
+            acknowledged: session.attention_acknowledged(),
+        },
         bulk_lifecycle_supported: flag("bulk_lifecycle_supported").unwrap_or(cmd != "opencode"),
     }
 }
@@ -1325,6 +1345,23 @@ mod tests {
         let attach = row(&json!({"terminal_attach_supported": true, "terminal_supported": "yes"}));
         assert!(attach.terminal_attach_supported && attach.terminal_attach_reported);
         assert!(!attach.terminal_reported);
+    }
+
+    #[test]
+    fn notify_facts_carry_attachment_action_and_acknowledgement() {
+        let busy = row(&json!({
+            "name": "claude/sample-project/review", "attached": 2, "tracked": true,
+            "phase": "approval", "conversation_id": "c", "attention_signature": "sig",
+            "read": {"conversation_id": "c", "attention_signature": "sig"}
+        }));
+        assert!(busy.notify.attached);
+        assert!(busy.notify.needs_action);
+        assert!(busy.notify.acknowledged);
+        let quiet =
+            row(&json!({"name": "codex/sample-project/docs", "attached": 0, "tracked": true}));
+        assert!(!quiet.notify.attached && !quiet.notify.needs_action && !quiet.notify.acknowledged);
+        // The frontend never receives the facts.
+        assert!(serde_json::to_value(&busy).unwrap().get("notify").is_none());
     }
 
     fn fingerprint_row() -> Value {

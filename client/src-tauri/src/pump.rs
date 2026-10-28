@@ -2,7 +2,7 @@
 //! into the coalescer, and `next_batch` takes everything pending, parking
 //! up to [`PARK`] while nothing is. A mirror of the last-known rows, statuses,
 //! machine cards and organizations lets a reloaded webview start from the full
-//! catalog.
+//! catalog. A [`Tap`] sees every change as it arrives (the menu bar's desk).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::Receiver;
@@ -17,12 +17,16 @@ use zerus_client_core::{
 /// The longest `next_batch` waits for a change before it returns an empty batch.
 pub const PARK: Duration = Duration::from_millis(250);
 
+/// Receives every change before the coalescer folds it (the desk thread).
+pub type Tap = Box<dyn Fn(&Change) + Send>;
+
 #[derive(Default)]
 struct Inner {
     coalescer: Coalescer,
     /// A change arrived since the last take.
     dirty: bool,
     mirror: Mirror,
+    tap: Option<Tap>,
 }
 
 /// Shared by the drain thread and the commands.
@@ -37,6 +41,9 @@ impl Pump {
     /// Queues one change and wakes a parked `take`.
     pub fn push(&self, change: Change) {
         let mut inner = self.lock();
+        if let Some(tap) = &inner.tap {
+            tap(&change);
+        }
         inner.mirror.observe(&change);
         inner.coalescer.push(change);
         inner.dirty = true;
@@ -48,6 +55,11 @@ impl Pump {
     pub fn poke(&self) {
         self.lock().dirty = true;
         self.0 .1.notify_all();
+    }
+
+    /// Hands every later change to `tap` as well.
+    pub fn tap(&self, tap: Tap) {
+        self.lock().tap = Some(tap);
     }
 
     /// Everything pending, waiting up to `park` while nothing is.
@@ -247,6 +259,20 @@ mod tests {
             key: key.into(),
             row: row(name),
         }
+    }
+
+    #[test]
+    fn the_tap_sees_every_change() {
+        let pump = Pump::default();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        pump.tap(Box::new(move |change: &Change| {
+            let _ = sender.send(change.computer().clone());
+        }));
+        pump.push(Change::Computer {
+            computer: ComputerId::from("mac"),
+            status: ComputerStatus::Live,
+        });
+        assert_eq!(receiver.try_recv(), Ok(ComputerId::from("mac")));
     }
 
     #[test]

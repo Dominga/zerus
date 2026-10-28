@@ -33,7 +33,10 @@ pub fn seed_source(identifier: &str) -> Option<QtStore> {
 pub fn open(app: &AppHandle, dir: &Path) -> Store {
     let settings = Settings::open(
         dir.join("settings.json"),
-        seed_source(&app.config().identifier),
+        seed_source(&{
+            use tauri::Manager;
+            app.state::<crate::identity::Identity>().bundle_id.clone()
+        }),
     );
     let handle = app.clone();
     settings.subscribe(Box::new(move |key, value| {

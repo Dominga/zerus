@@ -20,6 +20,7 @@ import {
   setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
   setMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter,
   multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, menu, subagentOpen, projectOrder, setProjectOrder,
+  revealing, setRevealing,
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
 import type { Session } from "./types";
@@ -329,6 +330,16 @@ function slide(el: HTMLElement | undefined, width: number, opening: boolean, don
 
 export function SessionList() {
   const list = useRows(false);
+  // A row the menu bar or a notification opened (Qt's revealRow): scrolled to
+  // once the list has it; another selection drops the request.
+  createEffect(on([revealing, list.rows, selectedKey], ([id, rows, selected]) => {
+    if (!id) return;
+    if (selected !== id) { setRevealing(undefined); return; }
+    const index = rows.findIndex((r) => r.id === id);
+    if (index < 0) return;
+    setRevealing(undefined);
+    requestAnimationFrame(() => list.virtualizer.scrollToIndex(index, { align: "center" }));
+  }));
   let panel: HTMLDivElement | undefined;
   let section: HTMLElement | undefined;
   const [panelVisible, setPanelVisible] = createSignal(!stripMode());

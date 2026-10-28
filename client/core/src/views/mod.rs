@@ -7,8 +7,11 @@ use crate::ComputerId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod accounts;
+pub mod machines;
 pub mod projects;
 pub mod schedule;
+pub mod usage;
 
 /// One computer of the fleet as the screens see it: the Tauri pump's mirror
 /// of the stream statuses and machine cards. An ended computer is not listed.
@@ -50,14 +53,10 @@ pub(crate) fn text(value: &Value, key: &str) -> String {
         .to_owned()
 }
 
-// Used by the usage and machine projections of Tasks 1 and 2.
-#[allow(dead_code)]
 pub(crate) fn flag(value: &Value, key: &str) -> bool {
     value.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
-// Used by the usage projection of Task 1.
-#[allow(dead_code)]
 pub(crate) fn number(value: &Value, key: &str) -> Option<f64> {
     value
         .get(key)
@@ -66,8 +65,6 @@ pub(crate) fn number(value: &Value, key: &str) -> Option<f64> {
 }
 
 /// A whole non-negative number, also when sent as a float such as `300.0`.
-// Used by the usage projection of Task 1.
-#[allow(dead_code)]
 pub(crate) fn whole(value: &Value, key: &str) -> Option<u64> {
     let found = value.get(key)?;
     found.as_u64().or_else(|| {

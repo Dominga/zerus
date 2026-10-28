@@ -514,3 +514,28 @@ pub fn raise_main_thread_qos() {
         libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0)
     };
 }
+
+/// Runs `beat` on the main thread every `every`, in the common run-loop modes,
+/// so an open menu or a modal panel does not stop it, as Qt's `QTimer` does
+/// not stop (the watchdog's heartbeat). The run loop keeps the timer for the
+/// life of the app.
+pub fn heartbeat(_mtm: MainThreadMarker, every: Duration, beat: impl Fn() + 'static) {
+    let block =
+        block2::RcBlock::new(move |_timer: std::ptr::NonNull<objc2_foundation::NSTimer>| beat());
+    // SAFETY: the binding asks for a block that may run on any thread. This one
+    // is made on the main thread (`_mtm`) and only the main run loop, below,
+    // calls it, so what it captures never leaves the main thread. The repeating
+    // timer owns the block.
+    let timer = unsafe {
+        objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(
+            every.as_secs_f64(),
+            true,
+            &block,
+        )
+    };
+    // SAFETY: Foundation's constant mode name; the main run loop, on the main thread.
+    unsafe {
+        objc2_foundation::NSRunLoop::mainRunLoop()
+            .addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes)
+    };
+}

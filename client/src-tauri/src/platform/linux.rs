@@ -68,3 +68,13 @@ pub fn disable_near_60fps(view: &WebView) -> Result<(), String> {
     unsafe { (api.unref_list)(features) };
     result
 }
+
+/// Runs `beat` on the main thread every `every` (the watchdog's heartbeat): a
+/// GLib timeout on the default main context, which nested dialog loops keep
+/// dispatching. Call on the main thread.
+pub fn heartbeat(every: std::time::Duration, beat: impl Fn() + 'static) {
+    gtk::glib::timeout_add_local(every, move || {
+        beat();
+        gtk::glib::ControlFlow::Continue
+    });
+}

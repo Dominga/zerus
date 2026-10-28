@@ -176,11 +176,17 @@ fn reopen(app: &AppHandle) {
 /// The one run-loop exit hook (Decision 15). `RunEvent::Exit` ends every
 /// quit: Quit, a signal (`signals.rs`) and the updater's quit event (tao's
 /// `applicationWillTerminate`). Other work before the process ends (drafts,
-/// organization) joins here, before the socket goes; the Dock badge goes
-/// first, as `~MacApplicationBadge` clears it. Qt's `QLocalServer`
+/// organization) joins here, before the socket goes. The main-thread
+/// watchdog stops first, so a slow flush never ends in an abort (Task 8);
+/// then the Dock badge goes, as `~MacApplicationBadge` clears it. Qt's `QLocalServer`
 /// outlives the tray agent whose `aboutToQuit` flushes (`main.cpp:340`,
 /// `:378`), so the socket is removed last, as `QLocalServer::close` does.
 fn exit(app: &AppHandle) {
+    // Quitting is not a hang (`Watchdog::stop`).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(dog) = app.try_state::<crate::watchdog::Watchdog>() {
+        dog.stop();
+    }
     #[cfg(all(target_os = "macos", feature = "live"))]
     crate::platform::macos_menubar::clear_badge(app);
     // Settings, voice, composers and drafts reach the disk while the socket

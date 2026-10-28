@@ -177,13 +177,17 @@ fn place(sync: &Controller) -> String {
 fn persist(sync: &mut Controller, path: &Path) {
     if let Some(change) = sync.take_draft() {
         draft::store(path, &change).unwrap();
+        sync.draft_written();
     }
 }
 
 /// A new instance of the client: it loads the draft the last one saved.
 fn restarted(path: &Path) -> Controller {
     let mut sync = Controller::default();
-    sync.restore(draft::load(path).expect("the last run saved a draft"));
+    match draft::load(path) {
+        draft::Load::Loaded(saved) => sync.restore(saved),
+        other => panic!("the last run saved a draft: {other:?}"),
+    }
     sync
 }
 

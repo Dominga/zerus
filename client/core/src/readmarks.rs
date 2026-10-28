@@ -114,14 +114,15 @@ impl ReadMarks {
         settled
     }
 
-    /// Replaces the file through a temporary one ([`write_private_atomic`]). A
-    /// failure keeps the marks in memory; the next change tries again.
+    /// Replaces the file through a temporary one ([`write_private_atomic`]),
+    /// without a flush to disk: it runs under the marks' lock on the batch
+    /// path. A failure keeps the marks in memory; the next change tries again.
     fn save(&self) {
         let list: Vec<&ReadMark> = self.marks.values().collect();
         let Ok(bytes) = serde_json::to_vec(&list) else {
             return;
         };
-        let _ = write_private_atomic(&self.path, &bytes);
+        let _ = write_private_atomic(&self.path, &bytes, false);
     }
 }
 

@@ -12,7 +12,8 @@
 //! (src/swarm/model.rs:126-201, 298-312; coordinator ruling, 2026-10-28).
 //!
 //! Pending edits survive a restart as Qt's do: [`Controller::take_draft`]
-//! gives the draft file's next content ([`super::draft`]), and
+//! gives the draft file's next content ([`super::draft`]) until
+//! [`Controller::draft_written`] confirms it is on disk, and
 //! [`Controller::restore`] takes it back at start. Nothing is sent before the
 //! first state, and the draft then goes out from its saved base and versions
 //! (SwarmController.cpp:76-89, 191-206).
@@ -207,8 +208,21 @@ pub struct Controller {
     ended: bool,
     /// A draft of the last run waits for the first state (Qt's `start`, 76-89).
     restored: bool,
-    /// Pending edits changed since the draft file was last given out.
-    draft_changed: bool,
+    /// Counts the changes of the pending edits that the draft file follows.
+    draft_change: u64,
+    /// The change [`Controller::take_draft`] last gave out.
+    draft_offered: u64,
+    /// The change the draft file holds: the hub's write of it succeeded.
+    draft_saved: u64,
+    /// The newest state refused while edits were pending or an apply ran.
+    /// The source sends a state only when the catalog changes, so it does
+    /// not come again: edits that settle without a call take it, where Qt's
+    /// next tick reads the catalog once base and desired match (100). An
+    /// acknowledged write keeps it only when it shows the write.
+    held: Option<Observation>,
+    /// A state already moved this failure streak's tick to now; the next
+    /// ones wait for the 5 s tick, as Qt resends at most once per tick.
+    tick_pulled: bool,
     /// The operations the last acknowledged write made, per token, until a state shows them.
     guard: BTreeMap<String, Value>,
     guard_until: u64,
@@ -331,9 +345,15 @@ impl Controller {
     /// (SwarmController.cpp:204-206), or while it lacks this client's last
     /// write. After a failed apply it is the tick that sends it again, where
     /// Qt's `refresh` would send `apply` instead of reading (96-101).
+    ///
+    /// A refused state is held ([`Controller`]'s `held`) for when the
+    /// edits settle. The first state of a failure streak moves the tick to
+    /// now; later ones leave it, so a refused apply goes out at most once
+    /// per 5 s however often the catalog changes.
     pub fn observe(&mut self, observation: Observation, now: u64) -> bool {
         self.ended = false;
         if self.busy() {
+            self.held = Some(observation);
             return false;
         }
         if self.pending() {
@@ -346,24 +366,24 @@ impl Controller {
                     self.restored = false;
                     self.flush_at = Some(now + FLUSH_MS);
                 }
-            } else if self.refresh_at.is_some() {
+            } else if self.refresh_at.is_some() && !self.tick_pulled {
                 self.refresh_at = Some(now);
+                self.tick_pulled = true;
             }
+            self.held = Some(observation);
             return false;
         }
-        if now < self.guard_until {
-            let shows = |token: &String, ops: &Value| {
-                let heads = observation.versions.get(token).and_then(Value::as_array);
-                ops.as_array()
-                    .into_iter()
-                    .flatten()
-                    .all(|op| heads.is_some_and(|heads| heads.contains(op)))
-            };
-            if !self.guard.iter().all(|(token, ops)| shows(token, ops)) {
-                return false;
-            }
+        self.offer(observation, now)
+    }
+
+    /// Adopts a state unless the guard holds it back: while it runs, a state
+    /// without this client's last write counts as older.
+    fn offer(&mut self, observation: Observation, now: u64) -> bool {
+        if now < self.guard_until && !shows(&observation, &self.guard) {
+            return false;
         }
         self.guard.clear();
+        self.held = None;
         self.adopt(observation);
         true
     }
@@ -392,7 +412,7 @@ impl Controller {
         let next = edit::apply(current, intent)?;
         self.desired_membership = Some(Arc::new(members(&next)));
         self.desired = Some(next);
-        self.draft_changed = true;
+        self.draft_change += 1;
         self.revision += 1;
         self.tickets += 1;
         self.queued.push(self.tickets);
@@ -420,8 +440,14 @@ impl Controller {
             // the base again, which differs at most in the local order.
             self.desired = None;
             self.desired_membership = None;
-            self.draft_changed = true;
+            self.draft_change += 1;
             self.revision += 1;
+            self.tick_pulled = false;
+            // Qt reads on its next tick (100); here the state refused under
+            // the edits is the newest one, and the source sends no other.
+            if let Some(held) = self.held.take() {
+                self.offer(held, now);
+            }
             return Due::Settled(saved(tickets));
         }
         // send (102-110): the held base, desired and versions. After a
@@ -451,7 +477,7 @@ impl Controller {
     fn acknowledged(&mut self, sent: Sent, reply: Value, now: u64) -> Vec<(Ticket, EditOutcome)> {
         self.refresh_at = None;
         // A new base and versions for the edits made meanwhile, or none left (persist, 205, 209).
-        self.draft_changed = true;
+        self.draft_change += 1;
         let written = reply["written"].as_object().cloned().unwrap_or_default();
         for (token, ops) in &written {
             self.versions.insert(token.clone(), ops.clone());
@@ -475,6 +501,14 @@ impl Controller {
             .iter()
             .map(|ticket| (*ticket, outcome.clone()))
             .collect();
+        self.tick_pulled = false;
+        // hgs answers from the store it saved under the write's lock
+        // (src/swarm/mod.rs:225-250): a held state that shows the write was
+        // read after it and is at least as new as the reply. Any other is
+        // older than the write.
+        if written.is_empty() || !self.held.as_ref().is_some_and(|held| shows(held, &written)) {
+            self.held = None;
+        }
         if self.desired.as_ref() == Some(&sent.desired) {
             self.desired = None;
             self.desired_membership = None;
@@ -487,6 +521,11 @@ impl Controller {
             let guard = std::mem::take(&mut self.guard);
             self.adopt(observation);
             self.guard = guard;
+            if let Some(held) = self.held.take() {
+                if held.digest != self.digest {
+                    self.offer(held, now);
+                }
+            }
         } else {
             self.base = Some(sent.desired);
         }
@@ -529,14 +568,18 @@ impl Controller {
         self.revision += 1;
     }
 
-    /// The draft file's next content, once after pending edits changed: the
-    /// base, desired state and versions while edits are pending, else its
-    /// removal. Qt saves its draft with every change (SessionsWindow.cpp:2496)
-    /// and its base and versions with `persist` (SwarmController.cpp:111-130).
+    /// The draft file's next content while the file does not hold the
+    /// pending edits' last change: the base, desired state and versions
+    /// while edits are pending, else its removal. Qt saves its draft with
+    /// every change (SessionsWindow.cpp:2496) and its base and versions with
+    /// `persist` (SwarmController.cpp:111-130). It is given again until the
+    /// hub confirms the write with [`Controller::draft_written`], as `persist`
+    /// remembers only checkpoints that were saved (116-129).
     pub fn take_draft(&mut self) -> Option<DraftWrite> {
-        if !std::mem::take(&mut self.draft_changed) {
+        if self.draft_change == self.draft_saved {
             return None;
         }
+        self.draft_offered = self.draft_change;
         Some(match (&self.base, &self.desired) {
             (Some(base), Some(desired)) => DraftWrite::Save(
                 Draft::new(base.clone(), desired.clone(), self.versions.clone()).to_json(),
@@ -544,6 +587,26 @@ impl Controller {
             _ => DraftWrite::Remove,
         })
     }
+
+    /// The hub wrote what [`Controller::take_draft`] last gave. A change made
+    /// after that is given next; without this call, the same is given again.
+    pub fn draft_written(&mut self) {
+        self.draft_saved = self.draft_offered;
+    }
+}
+
+/// Whether `observation`'s heads hold every operation of `written`, per token.
+fn shows<'a>(
+    observation: &Observation,
+    written: impl IntoIterator<Item = (&'a String, &'a Value)>,
+) -> bool {
+    written.into_iter().all(|(token, ops)| {
+        let heads = observation.versions.get(token).and_then(Value::as_array);
+        ops.as_array()
+            .into_iter()
+            .flatten()
+            .all(|op| heads.is_some_and(|heads| heads.contains(op)))
+    })
 }
 
 #[cfg(test)]
@@ -622,6 +685,16 @@ mod tests {
 
     fn place(sync: &Controller) -> String {
         crate::swarm::members(sync.presented().unwrap().0)[R].clone()
+    }
+
+    /// What the hub does after each change: the draft file follows, and the
+    /// write succeeds.
+    fn written(sync: &mut Controller) -> Option<DraftWrite> {
+        let change = sync.take_draft();
+        if change.is_some() {
+            sync.draft_written();
+        }
+        change
     }
 
     #[test]
@@ -977,26 +1050,26 @@ mod tests {
             other => panic!("no draft saved: {other:?}"),
         };
         let mut sync = ready();
-        assert_eq!(sync.take_draft(), None, "nothing pending");
+        assert_eq!(written(&mut sync), None, "nothing pending");
         sync.edit(&to("beta"), 0).unwrap();
         let seen = state("d1", "alpha", &["op-1"]);
-        let draft = saved(sync.take_draft());
+        let draft = saved(written(&mut sync));
         assert_eq!(
             draft.base, seen["organization"],
             "the base the edit started from"
         );
         assert_eq!(Value::Object(draft.versions), seen["versions"]);
         assert_eq!(crate::swarm::members(&draft.desired)[R], "beta");
-        assert_eq!(sync.take_draft(), None, "written once");
+        assert_eq!(written(&mut sync), None, "written once");
         let _ = input(sync.due(120));
         sync.edit(&to("ungrouped"), 200).unwrap();
         assert_eq!(
-            crate::swarm::members(&saved(sync.take_draft()).desired)[R],
+            crate::swarm::members(&saved(written(&mut sync)).desired)[R],
             "ungrouped",
             "an edit during the apply"
         );
         sync.finish(reply(state("d2", "beta", &["op-2"]), &["op-2"]), 300);
-        let draft = saved(sync.take_draft());
+        let draft = saved(written(&mut sync));
         assert_eq!(
             crate::swarm::members(&draft.base)[R],
             "beta",
@@ -1009,13 +1082,17 @@ mod tests {
         );
         let _ = input(sync.due(420));
         sync.finish(Exit::TimedOut, 10_420);
-        assert_eq!(sync.take_draft(), None, "a failure changes nothing pending");
+        assert_eq!(
+            written(&mut sync),
+            None,
+            "a failure changes nothing pending"
+        );
         let _ = input(sync.due(10_420 + REFRESH_MS));
         sync.finish(
             reply(state("d3", "ungrouped", &["op-3"]), &["op-3"]),
             15_600,
         );
-        assert_eq!(sync.take_draft(), Some(DraftWrite::Remove), "settled");
+        assert_eq!(written(&mut sync), Some(DraftWrite::Remove), "settled");
     }
 
     // Qt's start with a saved draft (SwarmController.cpp:76-89) and its first reply (191-206).
@@ -1306,5 +1383,207 @@ mod tests {
             crate::swarm::members(&sent["desired"]),
             BTreeMap::from([(R2.to_owned(), "beta".to_owned())])
         );
+    }
+
+    /// `state` with alpha under another name, as another writer renamed it.
+    fn renamed_alpha(digest: &str, heads: &[&str]) -> Value {
+        let mut value = state(digest, "alpha", heads);
+        value["organization"]["projects"][0]["name"] = json!("Alpha 2");
+        value
+    }
+
+    fn alpha(sync: &Controller) -> String {
+        crate::swarm::projects(sync.presented().unwrap().0)[0]["name"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    // Review I1 (fix round 1): the source sends a state only when the catalog
+    // changes, so one refused under the edits must be taken when they settle
+    // without a call, where Qt's next tick reads (SwarmController.cpp:100).
+    #[test]
+    fn a_state_refused_under_edits_is_adopted_when_they_settle_without_a_call() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        assert!(!sync.observe(observation(renamed_alpha("d2", &["op-1"])), 50));
+        let back = sync.edit(&to("alpha"), 60).unwrap();
+        match sync.due(180) {
+            Due::Settled(settled) => assert_eq!(
+                settled,
+                [
+                    (1, EditOutcome::Done { conflicts: 0 }),
+                    (back, EditOutcome::Done { conflicts: 0 })
+                ]
+            ),
+            _ => panic!("nothing to send"),
+        }
+        assert_eq!(sync.digest(), "d2", "the newest state");
+        assert_eq!(alpha(&sync), "Alpha 2");
+        assert_eq!(
+            sync.presented_value().unwrap()["digest"],
+            "d2",
+            "and the Projects screen"
+        );
+        assert_eq!(sync.next_due(), None);
+    }
+
+    #[test]
+    fn a_restored_draft_that_settles_without_a_call_adopts_the_first_state() {
+        let seen = state("d1", "alpha", &["op-1"]);
+        let mut sync = Controller::default();
+        sync.restore(Draft::new(
+            seen["organization"].clone(),
+            seen["organization"].clone(),
+            Map::new(),
+        ));
+        assert!(!sync.observe(observation(renamed_alpha("d2", &["op-1"])), 1_000));
+        assert!(matches!(sync.due(1_000 + FLUSH_MS), Due::Settled(_)));
+        assert_eq!(sync.digest(), "d2");
+        assert_eq!(alpha(&sync), "Alpha 2", "the catalog, not the saved base");
+        assert!(sync.presented_value().is_some());
+        assert_eq!(sync.view().status, LOCAL);
+        assert_eq!(written(&mut sync), Some(DraftWrite::Remove));
+    }
+
+    // A held state older than this client's write stays out: within the
+    // guard, a state without the write is older (the guard's rule).
+    #[test]
+    fn a_held_state_without_the_acknowledged_write_is_not_adopted_when_edits_settle() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let _ = input(sync.due(120));
+        sync.edit(&to("ungrouped"), 200).unwrap();
+        sync.finish(reply(state("d2", "beta", &["op-2"]), &["op-2"]), 300);
+        // Read before the write, delivered while the next edit is pending.
+        assert!(!sync.observe(observation(state("d1", "alpha", &["op-1"])), 350));
+        let back = sync.edit(&to("beta"), 360).unwrap();
+        assert!(
+            matches!(sync.due(480), Due::Settled(settled) if settled.len() == 2 && settled[1].0 == back)
+        );
+        assert_eq!(place(&sync), "beta", "the acknowledged write stays");
+        assert!(
+            sync.observe(observation(state("d3", "beta", &["op-2"])), 500),
+            "the next state with the write is adopted"
+        );
+    }
+
+    // hgs answers from the store it saved under the write's lock
+    // (src/swarm/mod.rs:225-250): a state seen during the apply that shows
+    // the write is at least as new as the reply.
+    #[test]
+    fn a_newer_state_seen_during_the_apply_is_adopted_after_its_reply() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let _ = input(sync.due(120));
+        let mut newer = renamed_alpha("d3", &["op-2"]);
+        newer["organization"]["projects"][0]["sessions"] = json!([]);
+        newer["organization"]["projects"][1]["sessions"] = json!([R]);
+        assert!(!sync.observe(observation(newer), 200), "an apply runs");
+        sync.finish(reply(state("d2", "beta", &["op-2"]), &["op-2"]), 300);
+        assert_eq!(sync.digest(), "d3");
+        assert_eq!(
+            (place(&sync), alpha(&sync)),
+            ("beta".to_owned(), "Alpha 2".to_owned())
+        );
+        // A state that lacks the write was read before it: the reply stays.
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let _ = input(sync.due(120));
+        assert!(!sync.observe(observation(renamed_alpha("d0", &["op-1"])), 200));
+        sync.finish(reply(state("d2", "beta", &["op-2"]), &["op-2"]), 300);
+        assert_eq!((sync.digest(), alpha(&sync)), ("d2", "Alpha".to_owned()));
+    }
+
+    // A state read before an acknowledged write is dropped with the reply,
+    // so edits that settle after the guard ended never bring it back.
+    #[test]
+    fn a_state_older_than_an_acknowledged_write_is_dropped_with_the_reply() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let _ = input(sync.due(120));
+        assert!(!sync.observe(observation(state("d0", "alpha", &["op-1"])), 200));
+        sync.edit(&to("ungrouped"), 250).unwrap();
+        sync.finish(reply(state("d2", "beta", &["op-2"]), &["op-2"]), 300);
+        let _ = input(sync.due(420));
+        sync.finish(Exit::TimedOut, 10_500);
+        sync.edit(&to("beta"), 11_000).unwrap();
+        assert!(matches!(sync.due(11_120), Due::Settled(_)));
+        const { assert!(11_120 > 300 + GUARD_MS, "the guard has ended") };
+        assert_eq!(place(&sync), "beta", "the acknowledged write stays");
+    }
+
+    // Review I3 (fix round 1): Qt's persist remembers only checkpoints that
+    // were saved (SwarmController.cpp:116-129).
+    #[test]
+    fn a_draft_whose_write_failed_is_given_again_until_one_succeeds() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let first = sync.take_draft();
+        assert!(matches!(first, Some(DraftWrite::Save(_))));
+        // The hub's write failed: no draft_written.
+        assert_eq!(sync.take_draft(), first, "given again on the next tick");
+        sync.edit(&to("ungrouped"), 50).unwrap();
+        let Some(DraftWrite::Save(bytes)) = sync.take_draft() else {
+            panic!("no draft")
+        };
+        assert_eq!(
+            crate::swarm::members(&Draft::from_json(&bytes).unwrap().desired)[R],
+            "ungrouped"
+        );
+        // A change after the draft was given is not lost by its write.
+        sync.edit(&to("beta"), 60).unwrap();
+        sync.draft_written();
+        let Some(DraftWrite::Save(bytes)) = written(&mut sync) else {
+            panic!("the newer change is given")
+        };
+        assert_eq!(
+            crate::swarm::members(&Draft::from_json(&bytes).unwrap().desired)[R],
+            "beta"
+        );
+        assert_eq!(sync.take_draft(), None);
+        // The removal is retried the same way.
+        let _ = input(sync.due(180));
+        sync.finish(reply(state("d2", "beta", &["op-2"]), &["op-2"]), 300);
+        assert_eq!(sync.take_draft(), Some(DraftWrite::Remove));
+        assert_eq!(
+            sync.take_draft(),
+            Some(DraftWrite::Remove),
+            "the removal failed"
+        );
+        sync.draft_written();
+        assert_eq!(sync.take_draft(), None);
+    }
+
+    // Review M2 (fix round 1): Qt resends at most once per 5 s tick.
+    #[test]
+    fn a_burst_of_states_after_a_failure_moves_the_tick_once_per_streak() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let first = input(sync.due(120));
+        sync.finish(Exit::TimedOut, 1_000);
+        assert!(!sync.observe(observation(state("d2", "alpha", &["op-1"])), 1_100));
+        assert_eq!(input(sync.due(1_100)), first, "the first state is the tick");
+        sync.finish(Exit::TimedOut, 1_200);
+        let tick = 1_200 + REFRESH_MS;
+        for now in (1_300..tick).step_by(100) {
+            assert!(!sync.observe(
+                observation(state(&format!("d{now}"), "alpha", &["op-1"])),
+                now
+            ));
+            assert!(
+                matches!(sync.due(now), Due::Nothing),
+                "no resend before the tick, at {now}"
+            );
+        }
+        assert_eq!(sync.next_due(), Some(tick));
+        assert_eq!(input(sync.due(tick)), first);
+        // An acknowledgement ends the streak: the next failure's first state moves the tick again.
+        sync.finish(reply(state("d3", "beta", &["op-2"]), &["op-2"]), tick + 100);
+        sync.edit(&to("ungrouped"), tick + 200).unwrap();
+        let _ = input(sync.due(tick + 320));
+        sync.finish(Exit::TimedOut, tick + 400);
+        assert!(!sync.observe(observation(state("d4", "beta", &["op-2"])), tick + 500));
+        assert!(matches!(sync.due(tick + 500), Due::Apply(_)));
     }
 }

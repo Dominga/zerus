@@ -41,6 +41,7 @@ use zerus_client_core::swarm::draft::{self, Draft, DraftWrite, Load};
 use zerus_client_core::swarm::edit::Intent;
 use zerus_client_core::swarm::grouping::{by_name, SyncView};
 use zerus_client_core::swarm::sync::{Controller, Due, EditOutcome, Observation, Ticket, STOPPED};
+use zerus_client_core::swarm::{self, Folder};
 use zerus_client_core::{run_limited, Change, Exit, OrganizationSnapshot, OrganizationUpdate};
 
 use crate::actions::REPLAY_NEEDS_HGS;
@@ -346,6 +347,33 @@ impl Organization {
                 }
             }
         }
+    }
+
+    /// A project's folders in the organization the list shows (Qt's
+    /// `m_organization`, which New session copies, SessionsWindow.cpp:2923):
+    /// at most [`swarm::FOLDERS`], read under the hub's lock without `hgs`.
+    /// An unknown project, or no state yet, has none.
+    pub fn project_folders(&self, project: &str) -> Vec<Folder> {
+        let hub = self.lock();
+        hub.sync
+            .presented()
+            .and_then(|(organization, _)| {
+                swarm::projects(organization)
+                    .iter()
+                    .find(|listed| swarm::project_id(listed) == project)
+                    .map(swarm::folders)
+            })
+            .unwrap_or_default()
+    }
+
+    /// The catalog's `swarm_id`, empty before the first state: New session
+    /// infers a folder's project only from this swarm
+    /// (SessionsWindow.cpp:2922).
+    pub fn swarm_id(&self) -> String {
+        let value = self.lock().sync.presented_value();
+        value
+            .and_then(|value| value["swarm_id"].as_str().map(str::to_owned))
+            .unwrap_or_default()
     }
 
     /// [`Organization::submit_with`] for an intent built beforehand (the
@@ -827,6 +855,14 @@ pub async fn sort_project(
         Intent::Sort { project, members }
     })
     .await
+}
+
+/// New session's copy of a project's folders (SessionsWindow.cpp:2923,
+/// NewSessionDialog.cpp:651): [`Organization::project_folders`], off the
+/// main thread. It never runs `hgs`.
+#[tauri::command(async)]
+pub fn project_folders(state: State<'_, Organization>, project: String) -> Vec<Folder> {
+    state.project_folders(&project)
 }
 
 /// Expand or collapse a project: this device's layout, no `hgs`. Off the
@@ -1684,6 +1720,102 @@ mod tests {
         );
         assert!(fake.applies().is_empty());
         assert!(!fake.draft().exists());
+        fake.finish(organization);
+    }
+
+    /// The topic's rows for a `swarm get` object, as the server sends them
+    /// (src/watch/organization.rs): the summary, a row per project and its
+    /// members, and the versions.
+    fn topic_rows(full: &Value) -> std::collections::BTreeMap<String, Value> {
+        let mut rows = std::collections::BTreeMap::new();
+        let mut summary = full.clone();
+        summary.as_object_mut().unwrap().remove("versions");
+        let projects = full["organization"]["projects"].as_array().unwrap();
+        summary["organization"]["projects"] =
+            json!(projects.iter().map(|p| p["id"].clone()).collect::<Vec<_>>());
+        rows.insert("organization".to_owned(), summary);
+        for project in projects {
+            let id = project["id"].as_str().unwrap();
+            let mut row = project.clone();
+            let sessions = row.as_object_mut().unwrap().remove("sessions").unwrap();
+            row["session_chunks"] = json!(1);
+            rows.insert(format!("project:{id}"), row);
+            rows.insert(format!("members:{id}:0"), json!({ "sessions": sessions }));
+        }
+        rows
+    }
+
+    /// The state the core reports for `full` (`OrganizationState::take`).
+    fn state_of(full: &Value) -> Change {
+        let mut value = full.clone();
+        value.as_object_mut().unwrap().remove("versions");
+        Change::Organization {
+            computer: ComputerId::local(),
+            update: OrganizationUpdate::State {
+                membership: Arc::new(zerus_client_core::swarm::members(&value["organization"])),
+                digest: value["digest"].as_str().unwrap().to_owned(),
+                value: Arc::new(value),
+            },
+        }
+    }
+
+    /// New session's copy of a project's folders (SessionsWindow.cpp:2923):
+    /// the same from the topic's rows and from `swarm get`, read without hgs.
+    #[test]
+    fn project_folders_are_the_same_from_the_topic_and_from_swarm_get() {
+        let mut catalog = full("d1");
+        catalog["swarm_id"] = json!("swarm-1");
+        catalog["organization"]["projects"][0]["folders"] = json!([
+            {"id": "f1", "machine": "workstation", "machine_id": "m-1", "path": "/home/example/src/sample-project", "name": ""},
+            {"machine": "studio", "path": "/srv/docs", "name": "Docs", "machine_name": "Studio"},
+            {"id": "f3", "machine": "", "path": "/srv/no-computer"},
+            {"id": "f4", "machine": "workstation", "path": "relative"},
+            {"id": "f5", "machine": "workstation", "path": "/home/example/src/sample-project"}]);
+        let rebuilt = zerus_client_core::organization::rebuild(&topic_rows(&catalog)).unwrap();
+        let mut answers = Vec::new();
+        for value in [rebuilt, catalog.clone()] {
+            let fake = Fake::landing();
+            let organization = fake.organization(&Pump::default(), true);
+            assert!(
+                organization.project_folders("alpha").is_empty(),
+                "no state yet"
+            );
+            assert_eq!(organization.swarm_id(), "");
+            organization.set_source(snapshot("d1"));
+            organization.observe(&state_of(&value));
+            answers.push(organization.project_folders("alpha"));
+            assert!(organization.project_folders("gone").is_empty());
+            assert!(organization.project_folders("ungrouped").is_empty());
+            assert_eq!(organization.swarm_id(), "swarm-1");
+            fake.finish(organization);
+        }
+        assert_eq!(answers[0], answers[1]);
+        let keys: Vec<&str> = answers[0].iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(keys, ["f1", "studio\n/srv/docs"]);
+        assert_eq!(answers[0][1].id, "", "a missing id stays empty");
+        assert_eq!(
+            serde_json::to_value(&answers[0][1]).unwrap(),
+            json!({"id": "", "key": "studio\n/srv/docs", "machine": "studio", "path": "/srv/docs", "name": "Docs", "machine_id": "", "machine_name": "Studio"})
+        );
+    }
+
+    #[test]
+    fn project_folders_answer_at_most_folders() {
+        let mut catalog = full("d1");
+        let many: Vec<Value> = (0..swarm::FOLDERS + 5)
+            .map(|n| json!({"id": format!("f{n}"), "machine": "workstation", "path": format!("/srv/{n}")}))
+            .collect();
+        catalog["organization"]["projects"][0]["folders"] = json!(many);
+        let fake = Fake::landing();
+        let organization = fake.organization(&Pump::default(), true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state_of(&catalog));
+        let folders = organization.project_folders("alpha");
+        assert_eq!(folders.len(), swarm::FOLDERS);
+        assert_eq!(
+            folders[swarm::FOLDERS - 1].key,
+            format!("f{}", swarm::FOLDERS - 1)
+        );
         fake.finish(organization);
     }
 }

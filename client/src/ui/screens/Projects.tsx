@@ -34,7 +34,7 @@ const [allSwarm, setAllSwarm] = createSignal(false);
 
 const disabled = (label: string, icon: string, hint: string): MenuEntry => ({ label, icon, disabled: true, hint });
 /** No folder selected: Qt's selectedFolder() is an empty folder. */
-const NO_FOLDER: Folder = { id: "", name: "", path: "", computer: "", machine: "" };
+const NO_FOLDER: Folder = { id: "", key: "", name: "", path: "", computer: "", machine: "" };
 
 export function ProjectsScreen() {
   const view = projectsPage;

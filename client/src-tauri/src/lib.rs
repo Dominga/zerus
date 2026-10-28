@@ -190,6 +190,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         organization::move_project,
         organization::sort_project,
         organization::set_project_collapsed,
+        organization::project_folders,
         screens::screen_visible,
         screens::accounts_view,
         screens::machines_view,

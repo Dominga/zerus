@@ -3,7 +3,7 @@ import { createRoot, createSignal } from "solid-js";
 import { nextSort, projectColor, showAskedProject, shownProjects, sortFolders } from "./projects-ui";
 import { emptyProjects, type Folder, type Project } from "../../types";
 
-const folder = (name: string, computer: string, path: string): Folder => ({ id: name, name, computer, machine: computer, path });
+const folder = (name: string, computer: string, path: string): Folder => ({ id: name, key: name, name, computer, machine: computer, path });
 const project = (id: string, accessible: boolean, color: string | null = null): Project =>
   ({ id, name: id, color, accessible, is_default: false, palette: 3, folders: [] });
 

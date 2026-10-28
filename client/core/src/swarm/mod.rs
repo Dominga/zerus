@@ -3,6 +3,8 @@
 //!
 //! - [`member`], [`members`] and [`default_project`]: Qt's membership rules
 //!   (tray/src/SessionOrganization.cpp);
+//! - [`folders`]: the one parser of a project's folders, with Qt's rules
+//!   (SessionOrganization.cpp:36-44), for Projects and New session;
 //! - [`edit`]: the menus' edits, as the desired side of `swarm apply`;
 //! - [`layout`]: this device's collapsed projects, session order and default;
 //! - [`grouping`]: each row's project and rank and the headers, sent to the
@@ -21,8 +23,10 @@ pub mod grouping;
 pub mod layout;
 pub mod sync;
 
+use crate::paths::windows_shaped;
+use serde::Serialize;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The Inbox: the project of sessions no project lists, unless this device
 /// or the catalog names another (SessionOrganization.cpp:52-58).
@@ -33,6 +37,8 @@ pub const INBOX_NAME: &str = "General";
 pub const INBOX_COLOR: &str = "#8d9baa";
 /// The most projects the list shows (phase 3a's bound).
 pub const MAX_PROJECTS: usize = 500;
+/// The most folders of one project that Projects and New session read.
+pub const FOLDERS: usize = 200;
 /// Shown while project sync has not read the catalog yet.
 pub const STARTING: &str = "Project sync is starting.";
 
@@ -54,6 +60,72 @@ pub fn projects(organization: &Value) -> &[Value] {
 
 pub fn project_id(project: &Value) -> &str {
     project.get("id").and_then(Value::as_str).unwrap_or("")
+}
+
+/// A project folder as SessionOrganization keeps it
+/// (SessionOrganization.cpp:36-44).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Folder {
+    /// The catalog's `id`, empty when it has none. Never made up here.
+    pub id: String,
+    /// The folder's identity on this side only: `id` when it has one, else
+    /// `machine` + `\n` + `path`. It stands where Qt makes up a random id
+    /// (SessionOrganization.cpp:42), and it is never sent to `hgs` as a
+    /// folder id: edits build their desired side from the catalog's own
+    /// folders ([`edit::apply`]).
+    pub key: String,
+    pub machine: String,
+    pub path: String,
+    pub name: String,
+    pub machine_id: String,
+    pub machine_name: String,
+}
+
+fn field(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned()
+}
+
+/// A project's folders, as Qt reads them (SessionOrganization.cpp:36-44):
+/// a folder without a computer, with a path neither absolute ("/") nor
+/// Windows-shaped (this computer's drive or UNC folders), or with the
+/// computer and path of an earlier one is left out. At most [`FOLDERS`].
+pub fn folders(project: &Value) -> Vec<Folder> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for folder in project
+        .get("folders")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if out.len() == FOLDERS {
+            break;
+        }
+        let machine = field(folder, "machine");
+        let path = field(folder, "path");
+        if machine.is_empty() || (!path.starts_with('/') && !windows_shaped(&path)) {
+            continue;
+        }
+        let place = format!("{machine}\n{path}");
+        if !seen.insert(place.clone()) {
+            continue;
+        }
+        let id = field(folder, "id");
+        out.push(Folder {
+            key: if id.is_empty() { place } else { id.clone() },
+            id,
+            name: field(folder, "name"),
+            machine_id: field(folder, "machine_id"),
+            machine_name: field(folder, "machine_name"),
+            machine,
+            path,
+        });
+    }
+    out
 }
 
 /// A project's explicit members.
@@ -150,5 +222,85 @@ mod tests {
         assert_eq!(default_project(&without, None), "alpha");
         assert_eq!(default_project(&json!({"projects": []}), None), INBOX);
         assert_eq!(default_project(&json!(null), None), INBOX);
+    }
+
+    fn folder(id: Option<&str>, machine: &str, path: &str) -> Value {
+        let mut folder = json!({"machine": machine, "path": path, "name": "", "machine_id": "m-1", "machine_name": "Workstation"});
+        if let Some(id) = id {
+            folder["id"] = json!(id);
+        }
+        folder
+    }
+
+    fn keys(project: &Value) -> Vec<String> {
+        folders(project).into_iter().map(|f| f.key).collect()
+    }
+
+    // SessionOrganization.cpp:36-44: no computer, a path neither absolute nor
+    // Windows-shaped, and a repeated computer and path are left out.
+    #[test]
+    fn a_folder_without_a_computer_or_a_folder_path_is_left_out() {
+        let project = json!({"folders": [
+            folder(Some("no-machine"), "", "/srv/a"),
+            folder(Some("relative"), "workstation", "srv/a"),
+            folder(Some("empty-path"), "workstation", ""),
+            folder(Some("backslash"), "workstation", "\\work"),
+            folder(Some("drive-relative"), "workstation", "C:work"),
+            folder(Some("posix"), "workstation", "/srv/a"),
+            folder(Some("drive"), "win-lab", "C:\\Users\\example"),
+            folder(Some("share"), "win-lab", "\\\\server\\share\\docs"),
+            json!("not a folder"),
+            json!({"machine": 7, "path": "/srv/b", "id": "not-text"})]});
+        assert_eq!(keys(&project), ["posix", "drive", "share"]);
+        assert!(folders(&json!({"id": "alpha"})).is_empty());
+        assert!(folders(&json!({"folders": {"machine": "workstation"}})).is_empty());
+    }
+
+    #[test]
+    fn a_repeated_computer_and_path_keeps_the_first() {
+        let project = json!({"folders": [
+            folder(Some("first"), "workstation", "/srv/a"),
+            folder(Some("again"), "workstation", "/srv/a"),
+            folder(None, "workstation", "/srv/a"),
+            folder(Some("other-computer"), "studio", "/srv/a"),
+            folder(Some("other-path"), "workstation", "/srv/a/")]});
+        assert_eq!(keys(&project), ["first", "other-computer", "other-path"]);
+    }
+
+    #[test]
+    fn a_folder_without_an_id_keeps_it_empty_and_is_keyed_by_its_place() {
+        let got = folders(&json!({"folders": [folder(None, "workstation", "/srv/a")]}));
+        assert_eq!(
+            got,
+            [Folder {
+                id: String::new(),
+                key: "workstation\n/srv/a".into(),
+                machine: "workstation".into(),
+                path: "/srv/a".into(),
+                name: String::new(),
+                machine_id: "m-1".into(),
+                machine_name: "Workstation".into(),
+            }]
+        );
+        let empty = folders(&json!({"folders": [folder(Some(""), "workstation", "/srv/b")]}));
+        assert_eq!(
+            (empty[0].id.as_str(), empty[0].key.as_str()),
+            ("", "workstation\n/srv/b")
+        );
+        let named = folders(&json!({"folders": [folder(Some("f1"), "workstation", "/srv/c")]}));
+        assert_eq!((named[0].id.as_str(), named[0].key.as_str()), ("f1", "f1"));
+    }
+
+    #[test]
+    fn at_most_folders_are_read() {
+        let list: Vec<Value> = (0..FOLDERS + 20)
+            .map(|n| folder(Some(&format!("f{n}")), "workstation", &format!("/srv/{n}")))
+            .collect();
+        let mut with_bad = vec![folder(Some("bad"), "", "/srv/x")];
+        with_bad.extend(list);
+        let got = folders(&json!({ "folders": with_bad }));
+        assert_eq!(got.len(), FOLDERS);
+        assert_eq!(got[0].key, "f0", "a left-out folder takes no place");
+        assert_eq!(got[FOLDERS - 1].key, format!("f{}", FOLDERS - 1));
     }
 }

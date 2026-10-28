@@ -1,8 +1,7 @@
 import { createSignal } from "solid-js";
-import type { Folder } from "../../types";
 import { openFolderSession, openNewSession, selectedHostTarget } from "../../store/newSession";
 import { notify } from "../../store/actions";
-import type { AccountRow, ComputerRow, FolderRow, ProjectRow } from "./newsession-ui";
+import type { AccountRow, ComputerRow, FolderRow, LaunchFolder, ProjectRow } from "./newsession-ui";
 
 // The New session dialog's entry points and the logic its view keeps
 // (NewSessionDialog.tsx renders it): every place Qt opens the dialog, the
@@ -24,7 +23,7 @@ export const newSessionForProject = (project: string) => { void openNewSession({
  * 533-541). Qt shows why it could not open in the Projects status line; here
  * that text is a notice.
  */
-export async function newSessionInFolder(project: string, folder: Folder): Promise<void> {
+export async function newSessionInFolder(project: string, folder: LaunchFolder): Promise<void> {
   const problem = await openFolderSession(project, folder);
   if (problem) notify("warn", problem);
 }
@@ -125,4 +124,5 @@ export function createConfirm() {
 export const computerKey = (row: ComputerRow) => row.target;
 export const accountKey = (row: AccountRow) => row.key;
 export const projectKey = (row: ProjectRow) => (row.newProject ? "\nnew" : row.id);
-export const folderKey = (row: FolderRow) => `${row.id}\n${row.path}`;
+export const folderKey = (row: FolderRow) => `${row.key}\n${row.path}`;
+

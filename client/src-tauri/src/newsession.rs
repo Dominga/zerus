@@ -446,9 +446,12 @@ pub struct Context {
     /// computer's folder style before it reports a platform.
     pub build_style: Style,
     pub remembered: Remembered,
+    /// The catalog's `swarm_id`, empty before one arrives: a folder's
+    /// project inference counts only from this swarm (SessionsWindow.cpp:2922).
+    pub swarm: String,
 }
 
-/// A new dialog's context.
+/// A new dialog's context; the command adds the swarm.
 pub fn context() -> Context {
     Context {
         branch: launch::generated_branch(&uuid::Uuid::new_v4().simple().to_string()),
@@ -459,6 +462,7 @@ pub fn context() -> Context {
             accounts: json!({}),
             open_terminal: false,
         },
+        swarm: String::new(),
     }
 }
 
@@ -637,9 +641,16 @@ async fn blocking<T: Send + 'static>(
         .map_err(|error| error.to_string())?
 }
 
+/// A new dialog's context, with the swarm of the organization the list
+/// shows (`crate::organization`): a read of what the app holds.
 #[tauri::command(async)]
-pub fn new_session_context() -> Context {
-    context()
+pub fn new_session_context(app: AppHandle) -> Context {
+    use tauri::Manager;
+    let swarm = app
+        .try_state::<crate::organization::Organization>()
+        .map(|organization| organization.swarm_id())
+        .unwrap_or_default();
+    Context { swarm, ..context() }
 }
 
 #[tauri::command(async)]
@@ -1134,6 +1145,7 @@ mod tests {
         );
         assert_eq!(first.own_windows_session, launch::own_windows_session());
         assert_eq!(first.build_style, paths::build());
+        assert_eq!(first.swarm, "");
     }
 
     #[test]

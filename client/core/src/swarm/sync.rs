@@ -826,6 +826,48 @@ mod tests {
         );
     }
 
+    // A folder without an id is keyed by its computer and path on this side
+    // only (swarm::folders). The apply carries the catalog's folders as they
+    // are: no id is added, and the key never reaches hgs.
+    #[test]
+    fn a_folder_key_made_here_never_reaches_the_apply() {
+        let raw = json!([
+            {"machine": "workstation", "path": "/home/example/src/sample-project", "name": "", "machine_id": "m-1"},
+            {"id": "f2", "machine": "studio", "path": "/srv/docs", "name": "Docs"}]);
+        let mut value = state("d1", "alpha", &["op-1"]);
+        value["organization"]["projects"][0]["folders"] = raw.clone();
+        let mut sync = Controller::default();
+        assert!(sync.observe(observation(value), 0));
+        let read = crate::swarm::folders(&crate::swarm::projects(sync.presented().unwrap().0)[0]);
+        let key = read[0].key.clone();
+        assert_eq!(
+            (read[0].id.as_str(), key.as_str()),
+            ("", "workstation\n/home/example/src/sample-project")
+        );
+        sync.edit(
+            &Intent::Rename {
+                project: "alpha".into(),
+                name: "Alpha two".into(),
+            },
+            0,
+        )
+        .unwrap();
+        sync.edit(&to("beta"), 0).unwrap();
+        let Due::Apply(invocation) = sync.due(FLUSH_MS) else {
+            panic!("no apply");
+        };
+        let stdin = invocation.stdin.unwrap();
+        let sent: Value = serde_json::from_slice(&stdin).unwrap();
+        for side in ["base", "desired"] {
+            assert_eq!(sent[side]["projects"][0]["folders"], raw, "{side}");
+        }
+        assert_eq!(sent["desired"]["projects"][0]["name"], "Alpha two");
+        assert_eq!(crate::swarm::members(&sent["desired"])[R], "beta");
+        let text = String::from_utf8(stdin).unwrap();
+        let escaped = serde_json::to_string(&key).unwrap();
+        assert!(!text.contains(&key) && !text.contains(escaped.trim_matches('"')));
+    }
+
     #[test]
     fn edits_during_an_apply_follow_from_what_was_sent_with_only_written_fields_advanced() {
         let mut sync = ready();

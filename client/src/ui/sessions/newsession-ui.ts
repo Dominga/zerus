@@ -1,4 +1,4 @@
-import type { Account, Folder, MachineMeta, PathStyle, Profile, Project, Usage } from "../../types";
+import type { Account, Folder, FolderOut, HeaderOut, MachineMeta, PathStyle, Profile, Usage } from "../../types";
 import { current, fromProjected, period, providerName, severest, windowsAt, type Tone, type UsageWindow } from "../lib/usage";
 import { absolute, clean, leaf, native, same } from "./paths";
 
@@ -29,13 +29,18 @@ export interface ComputerRow {
 /** This computer's host name, "" before it reports one. */
 export const localHost = (fleet: Fleet) => fleet.local?.host ?? "";
 
+/** A project the dialog lists: an organization header (store/organization.ts, Qt's setGroups 512-521). */
+export type ListedProject = Pick<HeaderOut, "id" | "name" | "color" | "palette" | "accessible">;
+/** A project's folders as the dialog copied them (`project_folders`, SessionsWindow.cpp:2923). */
+export interface ProjectFolders { folders: readonly FolderOut[] }
+
 /**
  * This computer when it runs local sessions, then the peers, the previous
  * choice and the project's folders' computers (this one only with local
  * sessions; an identified folder's only when its computer is configured).
  * A computer whose card is not ok reads "{computer} (offline)" (ruling D5).
  */
-export function computerRows(fleet: Fleet, previous: string, project: Project | undefined): ComputerRow[] {
+export function computerRows(fleet: Fleet, previous: string, project: ProjectFolders | undefined): ComputerRow[] {
   const host = localHost(fleet);
   // A control-only computer (hgs.exe on Windows) starts sessions on remote machines only.
   const local = fleet.local?.local_sessions !== false;
@@ -63,14 +68,14 @@ export function computerChoice(rows: ComputerRow[], previous: string): number {
   return Math.max(0, rows.findIndex((row) => row.target === previous));
 }
 
-export interface ProjectRow { id: string; name: string; color: string | null; newProject: boolean }
+export interface ProjectRow { id: string; name: string; color: string | null; palette: number; newProject: boolean }
 
 export const NEW_PROJECT = "New project…";
 
-/** The accessible projects, plus "New project…" for a repository source. */
-export function projectRows(projects: Project[], repository: boolean): ProjectRow[] {
-  const rows: ProjectRow[] = projects.filter((p) => p.accessible).map((p) => ({ id: p.id, name: p.name, color: p.color, newProject: false }));
-  if (repository) rows.push({ id: "", name: NEW_PROJECT, color: null, newProject: true });
+/** The accessible projects in the organization's order, plus "New project…" for a repository source. */
+export function projectRows(projects: readonly ListedProject[], repository: boolean): ProjectRow[] {
+  const rows: ProjectRow[] = projects.filter((p) => p.accessible).map((p) => ({ id: p.id, name: p.name, color: p.color, palette: p.palette, newProject: false }));
+  if (repository) rows.push({ id: "", name: NEW_PROJECT, color: null, palette: 0, newProject: true });
   return rows;
 }
 
@@ -83,8 +88,8 @@ export function projectChoice(rows: ProjectRow[], at: { keepNew: boolean; select
 }
 
 export interface FolderRow {
-  /** The project folder's id, "" for a custom path. */
-  id: string;
+  /** The project folder's `FolderOut.key`, "" for a custom path. */
+  key: string;
   /** The cleaned path in its computer's stored form. */
   path: string;
   name: string;
@@ -97,16 +102,16 @@ export interface FolderRow {
  * browsed path) when none of them is it; the index of `custom`, else the
  * first row, else -1.
  */
-export function folderRows(project: Project | undefined, host: string, local: string, style: PathStyle, custom: string): { rows: FolderRow[]; index: number } {
+export function folderRows(project: ProjectFolders | undefined, host: string, local: string, style: PathStyle, custom: string): { rows: FolderRow[]; index: number } {
   const rows: FolderRow[] = [];
-  const add = (id: string, raw: string, name: string) => {
+  const add = (key: string, raw: string, name: string) => {
     const path = clean(raw, style);
     const last = leaf(path, style);
-    rows.push({ id, path, name: name || (last || native(path, style)), tooltip: native(path, style) });
+    rows.push({ key, path, name: name || (last || native(path, style)), tooltip: native(path, style) });
   };
   for (const folder of project?.folders ?? []) {
     if ((folder.machine === local ? "" : folder.machine) !== host) continue;
-    add(folder.id, folder.path, folder.name);
+    add(folder.key, folder.path, folder.name);
   }
   let index = rows.length ? 0 : -1;
   if (custom) {
@@ -274,6 +279,9 @@ export function refreshRows(rows: AccountRow[], groups: Account[], choice: Accou
 
 // The Projects entries.
 
+/** A folder a Projects entry starts from: the screen's `Folder` or the organization's `FolderOut`. */
+export type LaunchFolder = Pick<Folder | FolderOut, "key" | "machine" | "path">;
+
 export interface LaunchEnvironment {
   /** This computer's host name, "" before it reports one. */
   localHost: string;
@@ -285,10 +293,11 @@ export interface LaunchEnvironment {
 /**
  * Why a project folder cannot start a session (`folderLaunchProblem`), ""
  * when it can. `localExists` is whether this computer's folder exists
- * (`local_folder_exists`); it is asked only for a folder here.
+ * (`local_folder_exists`); it is asked only for a folder here. Qt's empty
+ * id is no folder selected: every listed folder has a key.
  */
-export function folderLaunchProblem(folder: Folder, env: LaunchEnvironment, localExists: boolean | undefined): string {
-  if (!folder.id) return "Select a folder for the new session.";
+export function folderLaunchProblem(folder: LaunchFolder, env: LaunchEnvironment, localExists: boolean | undefined): string {
+  if (!folder.key) return "Select a folder for the new session.";
   if (!folder.machine || !env.localHost) return "Waiting for this computer's identity.";
   const local = folder.machine === env.localHost;
   if (!env.online(local ? "" : folder.machine)) return `Reconnect ${folder.machine} to start a session in this folder.`;

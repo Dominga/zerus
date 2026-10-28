@@ -27,7 +27,7 @@ vi.mock("../../store/actions", () => ({ notify: (tone: string, text: string) => 
 const view = await import("./newsession-view");
 
 const key = (init: Partial<KeyboardEvent>) => ({ key: "n", code: "KeyN", ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, preventDefault: vi.fn(), ...init });
-const folder = (id: string, machine: string, path: string): Folder => ({ id, name: path.split("/").pop() ?? path, path, computer: machine, machine });
+const folder = (id: string, machine: string, path: string): Folder => ({ id, key: id, name: path.split("/").pop() ?? path, path, computer: machine, machine });
 
 beforeEach(() => {
   store.host = "mac";

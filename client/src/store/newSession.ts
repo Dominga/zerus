@@ -1,13 +1,13 @@
 import { createEffect, createMemo, createRoot, createSignal, on, untrack } from "solid-js";
 import * as bridge from "../bridge";
 import type {
-  Account, ComputerId, CreationAdmission, Details, Folder, LaunchAccounts, LaunchChoices, LaunchForm, LaunchPlan, LaunchProject, LaunchShown, MachineMeta,
-  NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, Project, ProjectsView, RepositoryFields,
+  Account, ComputerId, CreationAdmission, Details, FolderOut, HeaderOut, LaunchAccounts, LaunchChoices, LaunchForm, LaunchPlan, LaunchProject, LaunchShown, MachineMeta,
+  NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields,
 } from "../types";
 import type { Session } from "../ui/sessions/types";
 import {
   accountRows, computerChoice, computerRows, folderLaunchProblem, folderRows, projectChoice, projectRows, refreshRows,
-  type AccountChoice, type AccountRow, type ComputerRow, type Fleet, type FolderRow, type ProjectRow,
+  type AccountChoice, type AccountRow, type ComputerRow, type Fleet, type FolderRow, type LaunchFolder, type ProjectRow,
 } from "../ui/sessions/newsession-ui";
 import { markFavorite } from "../ui/sessions/opencode-models";
 import { array, object, string, type Json } from "../ui/lib/json";
@@ -15,7 +15,7 @@ import { createOpenCode, type OpenCodeView } from "./newSessionOpencode";
 import { absolute, clean, matchingProjectFolder, native, of, prefillTarget, restoredFolder } from "../ui/sessions/paths";
 import { catalog, computerOffline } from "./catalog";
 import { machineCards, requestMachine } from "./machines";
-import { projectsPage, requestProject } from "./projects";
+import { defaultProject as organizationDefault, groupOf, grouping, setProjectToShow } from "./organization";
 import { detailsFor, followedFor, notify } from "./actions";
 import { machineFilter, selected, setPage } from "./ui";
 import { snapshotOf } from "../ui/sessions/actions-ui";
@@ -38,7 +38,7 @@ export interface NewSessionOptions {
   project?: string;
   /** "" or the alias; the single selected computer filter when left out (`selectedHostTarget`). */
   computer?: string;
-  /** A project folder id (`selectFolder`). */
+  /** A project folder's `FolderOut.key` (`selectFolder`). */
   folder?: string;
   /** A folder path (`selectPath(path, false)`). */
   path?: string;
@@ -52,7 +52,7 @@ export interface NewSessionOptions {
 export type NewSessionBridge = Pick<typeof bridge,
   | "newSessionContext" | "newSessionForm" | "newSessionStart" | "newSessionPlan" | "launchWarning" | "repositoryFields" | "worktreeSnapshot"
   | "worktreeCatalog" | "pickLocalFolder" | "localFolderExists" | "openCodeModels" | "openCodeFavorite" | "openCodeStart" | "launchAccounts"
-  | "launchAccountRows" | "launchAccountsClose" | "onLaunchAccountsChanged" | "creationSubmit">;
+  | "launchAccountRows" | "launchAccountsClose" | "onLaunchAccountsChanged" | "creationSubmit" | "projectFolders">;
 
 export interface NewSessionDeps {
   bridge: NewSessionBridge;
@@ -62,7 +62,10 @@ export interface NewSessionDeps {
   peers(): string[];
   /** The computer's card is ok. */
   online(computer: ComputerId): boolean;
-  projects(): ProjectsView;
+  /** The organization's project headers in its order and its default project (store/organization.ts). */
+  organization(): { headers: readonly HeaderOut[]; defaultProject: string };
+  /** A Sessions row's project (`groupOf`, Qt's groupFor). */
+  groupOf(rowId: string): string;
   /** The selected session row and its details (Qt's m_details), for a generic open. */
   selection(): { row: Session; details?: Details } | undefined;
   /** The Sessions computer filters as computers ("" is this computer). */
@@ -195,6 +198,8 @@ const EMPTY: Json = Object.freeze({}) as Json;
 const AGENTS = ["codex", "claude", "kimi", "dsh", "opencode"];
 const INBOX = "ungrouped";
 const FOLDER_CHANGED = "This project folder changed. Select it again.";
+/** The folders of one project the dialog keeps (`project_folders` answers at most these). */
+const FOLDERS = 200;
 /** The verified catalogs one dialog keeps (Qt keeps them for the dialog's life; this bounds them). */
 const VERIFIED = 64;
 const USAGE_MS = 60_000;
@@ -237,9 +242,17 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
   let name = branch;
   let openTerminal = context.remembered.open_terminal;
 
-  // Projects, computers and folders.
-  let projects: Project[] = [];
+  // Projects, computers and folders. The projects are the organization's
+  // headers at open (setGroups 512-521). Each project's folders are copied the
+  // first time the dialog needs them (Qt copies the organization as it opens,
+  // SessionsWindow.cpp:2923) and kept for the dialog's life. Qt copies it
+  // again only after the dialog's own project write (useRepository 651),
+  // which the repository flow brings (Tasks 4 and 5): until then nothing
+  // drops a copy.
+  let headers: readonly HeaderOut[] = [];
   let defaultProject = INBOX;
+  const projectFolders = new Map<string, FolderOut[]>();
+  const folderReads = new Map<string, Promise<void>>();
   let projectList: ProjectRow[] = [];
   let projectIndex = -1;
   let machines: ComputerRow[] = [];
@@ -307,16 +320,21 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
   const projectRow = () => projectList[projectIndex];
   const projectId = () => projectRow()?.id ?? "";
   const isNewProject = () => !!projectRow()?.newProject;
-  const group = (id: string) => (id ? projects.find((p) => p.id === id) : undefined);
+  /** A listed project with its copied folders; none while they are read, as Qt shows a project without folders. */
+  const group = (id: string) => {
+    const header = id ? headers.find((h) => h.id === id) : undefined;
+    return header ? { id: header.id, name: header.name, folders: projectFolders.get(header.id) ?? [] } : undefined;
+  };
   const path = () => folders[folderIndex]?.path ?? "";
-  const folderId = () => folders[folderIndex]?.id ?? "";
+  /** The chosen row's project folder key, "" for a custom path. */
+  const listedKey = () => folders[folderIndex]?.key ?? "";
   const agent = () => rows[accountIndex]?.provider ?? preferredAgent;
   const account = () => rows[accountIndex]?.id ?? "";
   const implicitInbox = () => !projectExplicit && projectId() === INBOX;
   const machineName = () => host() || localHostName();
 
   /** The project as the core reads it: folders named by "" for this computer. */
-  function launchProject(project: Project | undefined): LaunchProject | null {
+  function launchProject(project: { id: string; name: string; folders: readonly FolderOut[] } | undefined): LaunchProject | null {
     if (!project) return null;
     const local = localHostName();
     return { id: project.id, name: project.name, folders: project.folders.map((f) => ({ machine: f.machine === local ? "" : f.machine, path: f.path })) };
@@ -335,7 +353,7 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     const form: LaunchForm = {
       no_machine: machines.length === 0, can_enable_local_sessions: false, online: online(host()), agent: agent(), name,
       account_count: rows.length, account_selected: accountIndex >= 0, account_loading: accountRequest !== 0, account_preset: accountPreset,
-      path: path(), listed_folder: folderId() !== "", folder_online: folderIndex >= 0 && folderAvailable, prefill_pending: prefillRequest !== 0,
+      path: path(), listed_folder: listedKey() !== "", folder_online: folderIndex >= 0 && folderAvailable, prefill_pending: prefillRequest !== 0,
       catalog_pending: catalogRequest !== 0, catalog_worktrees: worktreeCatalog.stale !== true && array(worktreeCatalog.worktrees).length > 0,
       auto_preferred: autoPreferred, creation_failed: false, implicit_inbox: implicitInbox(), branch, style: style(host()), stage: "idle",
       repository: repositorySource ? {
@@ -373,19 +391,40 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
 
   // Projects, computers and folders.
 
-  function setGroups(list: Project[], selectedProject: string) {
+  function setGroups(list: readonly HeaderOut[], fallback: string, selectedProject: string) {
     prefillRequest = 0;
     const keepNew = repositorySource && isNewProject() && !selectedProject;
-    projects = list;
-    defaultProject = list.find((p) => p.is_default)?.id ?? INBOX;
-    projectList = projectRows(projects, repositorySource);
+    headers = list;
+    defaultProject = fallback;
+    projectList = projectRows(headers, repositorySource);
     projectIndex = projectChoice(projectList, { keepNew, selected: selectedProject, initial: init.project, fallback: defaultProject });
+    void readFolders(projectId());
     loadMachines();
     loadFolders();
   }
 
+  /**
+   * Copies a project's folders once (`project_folders`). The answer refills
+   * the computers and folders while that project is chosen; a late one for
+   * another project is kept and changes nothing.
+   */
+  function readFolders(id: string): Promise<void> {
+    if (!id || projectFolders.has(id)) return Promise.resolve();
+    const running = folderReads.get(id);
+    if (running) return running;
+    const read = b.projectFolders(id).then((list) => {
+      folderReads.delete(id);
+      if (closed) return;
+      projectFolders.set(id, list.slice(0, FOLDERS));
+      if (projectId() === id) { loadMachines(); loadFolders(); }
+    }, () => { folderReads.delete(id); });
+    folderReads.set(id, read);
+    return read;
+  }
+
   function projectChanged() {
     prefillRequest = 0;
+    void readFolders(projectId());
     loadMachines();
     loadFolders();
   }
@@ -433,7 +472,7 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     const custom = selectedPath || previous || browsed.get(host()) || "";
     const built = folderRows(group(projectId()), host(), localHostName(), st, custom);
     const same = built.rows.length === folders.length && folderHost === host()
-      && built.rows.every((row, i) => row.id === folders[i].id && row.path === folders[i].path && row.name === folders[i].name);
+      && built.rows.every((row, i) => row.key === folders[i].key && row.path === folders[i].path && row.name === folders[i].name);
     // Messages stay until the folder choice changes.
     if (!same || folderIndex !== built.index) error = "";
     if (!same) { folders = built.rows; folderHost = host(); }
@@ -445,17 +484,18 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     updateWorktrees();
   }
 
-  function selectFolder(id: string): boolean {
+  /** Qt's selectFolder(folderId), by the folder's key. */
+  function selectFolder(key: string): boolean {
     prefillRequest = 0;
     const project = group(projectId());
     if (!project) return false;
-    const found = project.folders.find((f) => f.id === id);
+    const found = project.folders.find((f) => f.key === key);
     if (!found) return false;
     const target = found.machine === localHostName() ? "" : found.machine;
     const machine = machines.findIndex((m) => m.target === target);
     if (machine < 0) return false;
     setMachineIndex(machine);
-    const index = folders.findIndex((f) => f.id === id);
+    const index = folders.findIndex((f) => f.key === key);
     if (index < 0) return false;
     browsed.delete(host());
     if (index !== folderIndex) { folderIndex = index; folderChanged(); }
@@ -486,7 +526,7 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     if (repositorySource && !enabled) repositoryNewProject = isNewProject();
     repositorySource = enabled;
     const newIndex = projectList.findIndex((p) => p.newProject);
-    if (enabled && newIndex < 0) projectList = projectRows(projects, true);
+    if (enabled && newIndex < 0) projectList = projectRows(headers, true);
     else if (!enabled && newIndex >= 0) {
       if (projectIndex === newIndex) setProjectIndex(Math.max(0, projectList.findIndex((p) => !p.newProject && p.id === defaultProject)));
       projectList = projectList.filter((p) => !p.newProject);
@@ -827,7 +867,7 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     return {
       host: host(), machine: card?.host || host(), agent: agent(), account: account(), name, project: projectId(),
       project_name: projectRow()?.name ?? "", implicit_inbox: implicitInbox(), swarm, path: path(), auto_preferred: autoPreferred,
-      automatic_available: false, branch, catalog: worktreeCatalog, automatic_path: "", listed_folder: folderId() !== "", project_worktree: false,
+      automatic_available: false, branch, catalog: worktreeCatalog, automatic_path: "", listed_folder: listedKey() !== "", project_worktree: false,
       model, effort: model ? oc.effort() : "", open_terminal: openTerminal,
       repository: repositorySource ? {
         url: fields?.url ?? url, parent: fields?.parent ?? "", name: fields?.name ?? "", destination: fields?.destination ?? "",
@@ -1010,6 +1050,8 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     selectPath: (target: string, automaticWorktree?: boolean) => selectPath(target, automaticWorktree),
     setProjectExplicit: (explicit: boolean) => { projectExplicit = explicit; },
     setSwarm: (id: string) => { swarm = id; },
+    /** Settles once the chosen project's folders are copied. */
+    foldersRead: () => readFolders(projectId()),
     closed: () => closed,
   };
 }
@@ -1047,13 +1089,12 @@ export function createNewSessionStore(deps: NewSessionDeps) {
     opening = true;
     let made: Dialog | undefined;
     try {
-      const view = deps.projects();
-      const projects = view.projects;
-      const fallback = projects.find((p) => p.is_default)?.id ?? INBOX;
+      const organization = deps.organization();
+      const headers = organization.headers;
       const selection = deps.selection();
-      const named = (text: string) => projects.find((p) => p.id === text || p.name === text)?.id;
-      // The selected session's project, else the default; a project option matching an id or name wins.
-      let launchProject = (selection && named(selection.row.project)) || fallback;
+      const named = (text: string) => headers.find((p) => p.id === text || p.name === text)?.id;
+      // The selected row's project, else the default; a project option matching an id or name wins (2896-2900).
+      let launchProject = selection ? deps.groupOf(selection.row.key) : organization.defaultProject;
       if (options.project) launchProject = named(options.project) ?? launchProject;
       // Only generic creation inherits the selected session; other entries carry their own target.
       const generic = !options.project && !options.folder && !options.path && options.account == null;
@@ -1067,8 +1108,10 @@ export function createNewSessionStore(deps: NewSessionDeps) {
       });
       made = open;
       open.setProjectExplicit(!!options.project);
-      open.setSwarm(view.swarm_id);
-      open.setGroups(projects, launchProject);
+      open.setSwarm(started.swarm);
+      open.setGroups(headers, organization.defaultProject, launchProject);
+      // Qt copies the organization as the dialog opens (2923); what follows reads the chosen project's folders.
+      await open.foldersRead();
       if (context) {
         const details = context.details;
         const folder = typeof details?.cwd === "string" ? details.cwd : context.row.cwdPath;
@@ -1107,7 +1150,7 @@ export function createNewSessionStore(deps: NewSessionDeps) {
    * computer's form; whether it is this computer's. `exists` is whether this
    * computer's folder exists, left out while unread. Reactive; reads nothing.
    */
-  function folderLaunch(folder: Folder, exists?: boolean): { problem: string; shown: string; local: boolean } {
+  function folderLaunch(folder: LaunchFolder, exists?: boolean): { problem: string; shown: string; local: boolean } {
     const local = deps.cards()[""];
     const localHost = local?.host ?? "";
     if (!local?.platform && buildStyle() === undefined) void ensureBuildStyle();
@@ -1117,23 +1160,24 @@ export function createNewSessionStore(deps: NewSessionDeps) {
   }
 
   /** Whether this computer's folder exists (`local_folder_exists`, a read); undefined for another computer's. */
-  async function folderExists(folder: Folder): Promise<boolean | undefined> {
+  async function folderExists(folder: LaunchFolder): Promise<boolean | undefined> {
     await ensureBuildStyle();
     if (!folderLaunch(folder).local) return undefined;
     try { return await deps.bridge.localFolderExists(folder.path); } catch { return false; }
   }
 
   /** ProjectsDialog::newFolderSession (533-541): "" when the dialog opens, else why it cannot. */
-  async function openFolderSession(projectId: string, folder: Folder): Promise<string> {
-    const project = deps.projects().projects.find((p) => p.id === projectId);
-    const present = !!project?.folders.some((f) => f.id === folder.id && f.machine === folder.machine && f.path === folder.path);
-    if (!present) return FOLDER_CHANGED;
+  async function openFolderSession(projectId: string, folder: LaunchFolder): Promise<string> {
+    // Still the project's folder in the organization the list shows, by its key, computer and path.
+    let listed: FolderOut[];
+    try { listed = await deps.bridge.projectFolders(projectId); } catch (failure) { return errorText(failure); }
+    if (!listed.some((f) => f.key === folder.key && f.machine === folder.machine && f.path === folder.path)) return FOLDER_CHANGED;
     await ensureBuildStyle();
     const first = folderLaunch(folder);
     const problem = !first.problem && first.local ? folderLaunch(folder, await folderExists(folder)).problem : first.problem;
     if (problem) return problem;
     const localHost = deps.cards()[""]?.host ?? "";
-    await openNewSession({ project: projectId, computer: folder.machine === localHost ? "" : folder.machine, folder: folder.id });
+    await openNewSession({ project: projectId, computer: folder.machine === localHost ? "" : folder.machine, folder: folder.key });
     return "";
   }
 
@@ -1180,8 +1224,9 @@ export function fleetKey(cards: Record<ComputerId, MachineMeta>, peers: string[]
   ]);
 }
 
-// The app's store: the catalog's machine cards and computers, the Projects
-// view, the selected session and the Sessions computer filter.
+// The app's store: the catalog's machine cards and computers, the
+// organization's projects, the selected session and the Sessions computer
+// filter.
 
 const peersOf = () => {
   const ids = new Set<string>([...Object.keys(catalog.computers), ...Object.keys(machineCards)]);
@@ -1195,7 +1240,8 @@ const app = createNewSessionStore({
   cards: () => machineCards,
   peers: peersOf,
   online: onlineOf,
-  projects: () => projectsPage(),
+  organization: () => ({ headers: grouping().headers, defaultProject: organizationDefault() }),
+  groupOf: (rowId) => groupOf(rowId),
   selection: () => {
     const row = selected();
     if (!row) return undefined;
@@ -1207,7 +1253,8 @@ const app = createNewSessionStore({
     return row ? row.computer : name;
   }),
   notify: (tone, text, sticky) => notify(tone, text, sticky),
-  openProjects: (project) => { setPage("projects"); requestProject(project); },
+  // Qt 281: reject(), then projectFoldersRequested(id); the store closed the dialog before this.
+  openProjects: (project) => { setProjectToShow(project); setPage("projects"); },
   openMachines: () => { setPage("machines"); requestMachine(""); },
   every: (ms, run) => { const timer = setInterval(run, ms); return () => clearInterval(timer); },
   now: () => Date.now() / 1000,
@@ -1222,11 +1269,11 @@ createRoot(() => {
 export const newSession: () => NewSessionState | undefined = app.newSession;
 export const newSessionActions: NewSessionActions = app.actions;
 export const openNewSession = (options?: NewSessionOptions): Promise<void> => app.openNewSession(options);
-export const openFolderSession = (project: string, folder: Folder): Promise<string> => app.openFolderSession(project, folder);
+export const openFolderSession = (project: string, folder: LaunchFolder): Promise<string> => app.openFolderSession(project, folder);
 /** The Projects entries' state for a folder: its problem ("" when it can start a session) and its path as shown. */
-export const folderLaunch = (folder: Folder, exists?: boolean) => app.folderLaunch(folder, exists);
+export const folderLaunch = (folder: LaunchFolder, exists?: boolean) => app.folderLaunch(folder, exists);
 /** Whether this computer's folder exists; undefined for another computer's (no read). */
-export const folderExists = (folder: Folder): Promise<boolean | undefined> => app.folderExists(folder);
+export const folderExists = (folder: LaunchFolder): Promise<boolean | undefined> => app.folderExists(folder);
 export const selectedHostTarget = (): string => app.selectedHostTarget();
 /** Cancel, Escape and the close button (`reject`, 476): with no foreground work, closing is always allowed. */
 export const closeNewSession = (): void => app.closeNewSession();

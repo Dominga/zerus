@@ -6,9 +6,8 @@ import { closeNewSession, newSession, newSessionActions as act, startNewSession,
 import { machineCards } from "../../store/machines";
 import { catalog, agentKind } from "../../store/catalog";
 import { connectionOf, osOf } from "../../store/overview";
-import { projectsPage } from "../../store/projects";
 import { now } from "../../store/ui";
-import { projectColor } from "../screens/projects-ui";
+import { projectColor } from "./organization-ui";
 import { launchWindows, type AccountRow } from "./newsession-ui";
 import { WARNING_BUTTONS, WARNING_TITLE, accountKey, computerKey, createConfirm, folderKey, projectKey } from "./newsession-view";
 import type { Json } from "../lib/json";
@@ -208,10 +207,10 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
   const folderOf = (key: string) => s().folders.find((row) => folderKey(row) === key);
 
   const projectOption = (key: string) => {
+    // The project's colour as the Sessions list's header shows it.
     const color = () => {
       const row = projectOf(key);
-      const listed = row && !row.newProject ? projectsPage().projects.find((p) => p.id === row.id) : undefined;
-      return listed ? projectColor(listed) : row?.color ?? undefined;
+      return row && !row.newProject ? projectColor(row) : undefined;
     };
     return (
       <>

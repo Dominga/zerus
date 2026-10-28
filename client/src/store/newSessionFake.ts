@@ -1,8 +1,8 @@
 import { machineMeta, NOW, usageOf } from "./testing";
 import { createNewSessionStore, type NewSessionBridge, type NewSessionDeps, type NewSessionOptions } from "./newSession";
 import type {
-  Account, CreationAdmission, Details, Folder, LaunchAccounts, LaunchForm, LaunchShown, MachineMeta, NewSessionContext, NewSessionFormInput, Profile, Project, ProjectedWindow,
-  ProjectsView, RepositoryFields,
+  Account, CreationAdmission, Details, FolderOut, HeaderOut, LaunchAccounts, LaunchForm, LaunchShown, MachineMeta, NewSessionContext, NewSessionFormInput, Profile,
+  ProjectedWindow, RepositoryFields,
 } from "../types";
 import type { Session } from "../ui/sessions/types";
 
@@ -21,6 +21,9 @@ export const CREATING = ["creationSubmit", "createWorktree", "createDirectory", 
 export const NOT_LOADED: LaunchAccounts = { loaded: false, error: null, profiles: [], groups: [] };
 
 export const settle = async () => { for (let i = 0; i < 4; i++) await new Promise((resolve) => setTimeout(resolve, 0)); };
+
+/** A project of the fake organization: its header and the folders `project_folders` answers. */
+export type FakeProject = HeaderOut & { folders: FolderOut[] };
 
 export function deferred() {
   let release!: () => void;
@@ -57,7 +60,9 @@ export class World {
   /** Runs inside each `new_session_start`, with its 1-based number. */
   onStart: ((n: number) => void) | undefined;
   localExists = true;
-  projects: Project[] = [];
+  projects: FakeProject[] = [];
+  /** Sessions rows' projects (`groupOf`); a row it does not name is in the default project. */
+  groups: Record<string, string> = {};
   swarm = "";
   extraModel: Json | undefined;
   selection: { row: Session; details?: Details } | undefined;
@@ -170,7 +175,7 @@ export function shownOf(f: LaunchForm): LaunchShown {
 
 export function bridgeOf(world: World): NewSessionBridge {
   const record = (command: string, ...args: unknown[]) => { world.calls.push({ command, args }); };
-  const context = (): NewSessionContext => ({ branch: "work-1a2b3c4d", own_windows_session: null, build_style: "posix", remembered: { agent: "", accounts: {}, open_terminal: false } });
+  const context = (): NewSessionContext => ({ branch: "work-1a2b3c4d", own_windows_session: null, build_style: "posix", remembered: { agent: "", accounts: {}, open_terminal: false }, swarm: world.swarm });
   return {
     newSessionContext: async () => { record("newSessionContext"); return world.context ?? context(); },
     newSessionForm: async (input: NewSessionFormInput) => { record("newSessionForm", input); return { shown: shownOf(input.form), automatic_available: false, automatic_path: "", project_worktree: false }; },
@@ -232,6 +237,13 @@ export function bridgeOf(world: World): NewSessionBridge {
     },
     launchAccountsClose: async () => { record("launchAccountsClose"); },
     onLaunchAccountsChanged: (listener) => { world.listeners.add(listener); return () => world.listeners.delete(listener); },
+    // The organization's copy answers at once, or after its gate; the list is the folders at the call.
+    projectFolders: async (project) => {
+      record("projectFolders", project);
+      const listed = world.projects.find((p) => p.id === project)?.folders.map((f) => ({ ...f })) ?? [];
+      await world.wait(`folders:${project}`);
+      return listed;
+    },
     creationSubmit: async (plan) => {
       record("creationSubmit", plan);
       const admission = world.admission;
@@ -245,17 +257,19 @@ export function bridgeOf(world: World): NewSessionBridge {
 // Optional parts of the world a test sets.
 export interface World { context?: NewSessionContext; picked?: string }
 
+const defaultOf = (world: World) => world.projects.find((p) => p.is_default)?.id ?? "ungrouped";
+
 export function setup(configure: (world: World) => void = () => {}) {
   const world = new World();
   world.projects = [project("ungrouped", "Inbox", [], { is_default: true })];
   configure(world);
-  const projectsView = (): ProjectsView => ({ loaded: true, status: "", status_error: false, conflicts: 0, unconnected: [], notice: null, projects: world.projects, swarm_id: world.swarm });
   const deps: NewSessionDeps = {
     bridge: bridgeOf(world),
     cards: () => world.cards,
     peers: () => ["mac"],
     online: (computer) => world.online[computer] ?? false,
-    projects: projectsView,
+    organization: () => ({ headers: world.projects.map(({ folders: _folders, ...header }) => header), defaultProject: defaultOf(world) }),
+    groupOf: (rowId) => world.groups[rowId] ?? defaultOf(world),
     selection: () => world.selection,
     hostFilters: () => world.filters,
     notify: (tone, text, sticky = false) => world.notices.push({ tone, text, sticky }),
@@ -280,8 +294,10 @@ export function setup(configure: (world: World) => void = () => {}) {
   return { world, store, open, state, act, row, choose, fire, tick, start, choices, values, star };
 }
 
-export function project(id: string, name: string, folders: Folder[] = [], extra: Partial<Project> = {}): Project {
-  return { id, name, color: null, accessible: true, is_default: false, palette: 0, folders, ...extra };
+export function project(id: string, name: string, folders: FolderOut[] = [], extra: Partial<FakeProject> = {}): FakeProject {
+  return { id, name, color: null, accessible: true, collapsed: false, is_default: false, palette: 0, folders, ...extra };
 }
-export const folder = (id: string, machine: string, path: string): Folder => ({ id, name: path.split("/").pop() ?? path, path, computer: machine, machine });
+/** A folder as the organization holds it; `id` "" has none, and its key is its computer and path. */
+export const folder = (id: string, machine: string, path: string): FolderOut =>
+  ({ id, key: id || `${machine}\n${path}`, machine, path, name: "", machine_id: "", machine_name: "" });
 

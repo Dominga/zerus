@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ArchivePage, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type ArchivedActivity } from "./types";
-import type { CreationAdmission, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
+import type { CreationAdmission, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 
@@ -318,6 +318,15 @@ export async function moveProject(project: string, before: string | null): Promi
 export async function sortProject(project: string): Promise<EditOutcome> {
   if (!inTauri()) return refusedOutside();
   return invoke<EditOutcome>("sort_project", { project });
+}
+
+/**
+ * A project's folders in the organization the Sessions list shows, at most 200 (New session's copy,
+ * SessionsWindow.cpp:2923). A read of what the app holds, never `hgs`; outside the app there are none.
+ */
+export async function projectFolders(project: string): Promise<FolderOut[]> {
+  if (!inTauri()) return [];
+  return invoke<FolderOut[]>("project_folders", { project });
 }
 
 /** Expand or collapse a project: this device's layout, no `hgs`. */

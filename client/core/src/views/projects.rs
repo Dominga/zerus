@@ -5,18 +5,26 @@
 //! Sessions list groups by, this device's default project and the write
 //! controller's status line (src-tauri's `Screens::organization`).
 use super::{items, text};
-use crate::swarm::sync::{unavailable, OUTDATED};
+use crate::swarm::{
+    self,
+    sync::{unavailable, OUTDATED},
+};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-/// The most projects, and folders per project, the screen lists.
+/// The most projects the screen lists; each lists at most
+/// [`swarm::FOLDERS`] folders.
 const PROJECTS: usize = 500;
-const FOLDERS: usize = 200;
 
+/// A folder as the screen lists it: [`swarm::folders`] with the shown name
+/// and computer.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Folder {
+    /// The catalog's id, empty when it has none.
     pub id: String,
+    /// [`swarm::Folder::key`]: New session's identity of the folder.
+    pub key: String,
     /// `name`, else the path's last part (ProjectsDialog.cpp:300).
     pub name: String,
     pub path: String,
@@ -105,22 +113,23 @@ pub(crate) fn status_of(snapshot: &Value) -> (String, bool) {
     }
 }
 
-fn folder(value: &Value) -> Folder {
-    let path = text(value, "path");
-    let name = text(value, "name");
-    let machine = text(value, "machine");
-    let machine_name = text(value, "machine_name");
+fn folder(folder: swarm::Folder) -> Folder {
     Folder {
-        id: text(value, "id"),
-        name: if name.is_empty() { leaf(&path) } else { name },
-        computer: if machine_name.is_empty() {
-            machine.clone()
+        id: folder.id,
+        key: folder.key,
+        name: if folder.name.is_empty() {
+            leaf(&folder.path)
         } else {
-            machine_name
+            folder.name
         },
-        machine,
-        machine_id: text(value, "machine_id"),
-        path,
+        computer: if folder.machine_name.is_empty() {
+            folder.machine.clone()
+        } else {
+            folder.machine_name
+        },
+        machine: folder.machine,
+        machine_id: folder.machine_id,
+        path: folder.path,
     }
 }
 
@@ -199,11 +208,7 @@ impl SwarmState {
                 accessible: p.get("accessible").and_then(Value::as_bool).unwrap_or(true),
                 is_default: text(p, "id") == default,
                 palette: index % 8,
-                folders: items(p, "folders")
-                    .iter()
-                    .take(FOLDERS)
-                    .map(folder)
-                    .collect(),
+                folders: swarm::folders(p).into_iter().map(folder).collect(),
             })
             .collect();
         // A configured SSH connection permits session access; it does not join
@@ -286,6 +291,89 @@ mod tests {
         );
         assert_eq!(leaf("C:\\Users\\example\\docs"), "docs");
         assert_eq!(leaf("/"), "/");
+    }
+
+    // One parser (swarm::folders): the screen lists what New session reads,
+    // with Qt's rules (SessionOrganization.cpp:36-44) and the same bound.
+    #[test]
+    fn the_screen_lists_the_folders_new_session_reads() {
+        let mut snapshot = fixture("swarm.json");
+        let sample = snapshot["organization"]["projects"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|p| p["id"] == "sample")
+            .unwrap();
+        let listed = sample["folders"].as_array_mut().unwrap();
+        listed.push(
+            json!({"id": "f3", "name": "", "path": "relative/docs", "machine": "workstation"}),
+        );
+        listed.push(json!({"id": "f4", "name": "", "path": "/home/example/src/sample-project", "machine": "workstation"}));
+        listed.push(
+            json!({"name": "", "path": "/srv/no-id", "machine": "studio", "machine_id": "m-2"}),
+        );
+        let raw = sample.clone();
+        let mut swarm = SwarmState::default();
+        swarm.finish(Ok(snapshot));
+        let view = swarm.view(&peers());
+        let shown = &view
+            .projects
+            .iter()
+            .find(|p| p.id == "sample")
+            .unwrap()
+            .folders;
+        let read = crate::swarm::folders(&raw);
+        assert_eq!(
+            shown
+                .iter()
+                .map(|f| (
+                    f.id.as_str(),
+                    f.key.as_str(),
+                    f.machine.as_str(),
+                    f.path.as_str(),
+                    f.machine_id.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            read.iter()
+                .map(|f| (
+                    f.id.as_str(),
+                    f.key.as_str(),
+                    f.machine.as_str(),
+                    f.path.as_str(),
+                    f.machine_id.as_str()
+                ))
+                .collect::<Vec<_>>(),
+        );
+        let keys: Vec<&str> = shown.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["f1", "f2", "studio\n/srv/no-id"],
+            "the relative and the repeated folder are left out"
+        );
+        assert_eq!(
+            (
+                shown[2].id.as_str(),
+                shown[2].name.as_str(),
+                shown[2].computer.as_str()
+            ),
+            ("", "no-id", "studio")
+        );
+    }
+
+    #[test]
+    fn a_project_lists_at_most_folders() {
+        let mut snapshot = fixture("swarm.json");
+        let many: Vec<Value> = (0..crate::swarm::FOLDERS + 5)
+            .map(|n| json!({"id": format!("f{n}"), "path": format!("/srv/{n}"), "machine": "workstation"}))
+            .collect();
+        snapshot["organization"]["projects"][0]["folders"] = json!(many);
+        let mut swarm = SwarmState::default();
+        swarm.finish(Ok(snapshot));
+        let view = swarm.view(&peers());
+        assert!(view
+            .projects
+            .iter()
+            .any(|p| p.folders.len() == crate::swarm::FOLDERS));
     }
 
     // G2: New session's folder check matches the project inference to this

@@ -306,7 +306,11 @@ export interface MachinesView {
   machines: MachineRow[]; effective: Effective | null; check: CheckResult | null; busy: boolean;
 }
 export interface Folder {
-  id: string; name: string; path: string; computer: string; machine: string;
+  /** The catalog's id, "" when it has none. */
+  id: string;
+  /** New session's identity of the folder (`FolderOut.key`). */
+  key: string;
+  name: string; path: string; computer: string; machine: string;
   /** The computer's identity, "" for none (New session lists an identified folder's computer only when it is configured). */
   machine_id?: string;
 }
@@ -402,6 +406,25 @@ export interface NewSessionContext {
   /** The platform this client was built for: this computer's folder style before it reports a platform. */
   build_style: PathStyle;
   remembered: { agent: string; accounts: Record<string, Record<string, string>>; open_terminal: boolean };
+  /** The catalog's swarm, "" before one arrives: a folder's project inference counts only from it. */
+  swarm: string;
+}
+/**
+ * A project folder as the organization holds it (client/core `swarm::Folder`, Qt's
+ * SessionOrganization::Folder): `project_folders` answers at most 200 of them.
+ */
+export interface FolderOut {
+  /** The catalog's id, "" when it has none; never made up. */
+  id: string;
+  /** The folder's identity here: `id`, else `machine` + "\n" + `path`. Never sent to hgs as a folder id. */
+  key: string;
+  machine: string;
+  path: string;
+  /** "" when the catalog names none. */
+  name: string;
+  /** The computer's identity, "" for none. */
+  machine_id: string;
+  machine_name: string;
 }
 export interface RepositoryFields {
   url: string; parent: string; name: string;

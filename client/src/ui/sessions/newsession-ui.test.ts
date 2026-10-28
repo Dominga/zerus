@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { machineMeta, NOW, usageOf } from "../../store/testing";
-import type { Account, Folder, Profile, Project, ProjectedWindow, Usage } from "../../types";
+import type { Account, FolderOut, Profile, ProjectedWindow, Usage } from "../../types";
 import {
   accountRows, computerChoice, computerRows, folderLaunchProblem, folderRows, launchSummary, launchWindows, projectChoice, projectRows, type AccountChoice, type Fleet,
+  type ListedProject, type ProjectFolders,
 } from "./newsession-ui";
 
 // The New session dialog's view rules (tray/src/NewSessionDialog.cpp:
@@ -14,11 +15,12 @@ const fleet = (extra: Partial<Fleet> = {}): Fleet => ({
   local: machineMeta("pc"), peers: ["mac"], online: () => true, ...extra,
 });
 
-const folder = (id: string, machine: string, path: string, extra: Partial<Folder> = {}): Folder =>
-  ({ id, name: path.split("/").pop() ?? path, path, computer: machine, machine, ...extra });
+/** A folder as the organization holds it (`FolderOut`): its key is its id, else its computer and path. */
+const folder = (id: string, machine: string, path: string, extra: Partial<FolderOut> = {}): FolderOut =>
+  ({ id, key: id || `${machine}\n${path}`, machine, path, name: "", machine_id: "", machine_name: "", ...extra });
 
-const project = (id: string, folders: Folder[] = [], extra: Partial<Project> = {}): Project =>
-  ({ id, name: id, color: null, accessible: true, is_default: false, palette: 0, folders, ...extra });
+const project = (id: string, folders: FolderOut[] = [], extra: Partial<ListedProject> = {}): ListedProject & ProjectFolders =>
+  ({ id, name: id, color: null, accessible: true, palette: 0, folders, ...extra });
 
 const window = (used: number, minutes: number | null, extra: Partial<ProjectedWindow> = {}): ProjectedWindow =>
   ({ id: `w${minutes}`, label: "", used, minutes, resets_at: NOW + 3600, ...extra });
@@ -84,13 +86,14 @@ describe("computers (loadMachines 487-510)", () => {
 });
 
 describe("projects (setGroups 512-521)", () => {
-  const projects = [project("inbox", [], { name: "Inbox", is_default: true }), project("work", [], { name: "Work" }), project("hidden", [], { accessible: false })];
+  const projects = [project("inbox", [], { name: "Inbox" }), project("work", [], { name: "Work", palette: 3 }), project("hidden", [], { accessible: false })];
 
   it("lists accessible projects and New project… for a repository", () => {
     expect(projectRows(projects, false).map((r) => r.name)).toEqual(["Inbox", "Work"]);
     const rows = projectRows(projects, true);
     expect(rows.map((r) => r.name)).toEqual(["Inbox", "Work", "New project…"]);
     expect(rows[2]).toMatchObject({ id: "", newProject: true });
+    expect(rows[1]).toEqual({ id: "work", name: "Work", color: null, palette: 3, newProject: false });
   });
 
   it("keeps New project…, then the selected one, the initial name and the default", () => {
@@ -107,15 +110,18 @@ describe("folders (loadFolders 536-580)", () => {
 
   it("lists the project's folders on the computer, then a custom path", () => {
     const plain = folderRows(example, "", "pc", "posix", "");
-    expect(plain.rows.map((r) => [r.id, r.path, r.name])).toEqual([["f1", "/workspace/example", "example"], ["f3", "/workspace/docs", "Docs"]]);
+    expect(plain.rows.map((r) => [r.key, r.path, r.name])).toEqual([["f1", "/workspace/example", "example"], ["f3", "/workspace/docs", "Docs"]]);
     expect(plain.index).toBe(0);
     const listed = folderRows(example, "", "pc", "posix", "/workspace/docs");
     expect(listed.index).toBe(1);
     expect(listed.rows.length).toBe(2);
     const custom = folderRows(example, "", "pc", "posix", "/workspace/other/");
-    expect(custom.rows[2]).toEqual({ id: "", path: "/workspace/other", name: "other", tooltip: "/workspace/other" });
+    expect(custom.rows[2]).toEqual({ key: "", path: "/workspace/other", name: "other", tooltip: "/workspace/other" });
     expect(custom.index).toBe(2);
-    expect(folderRows(example, "mac", "pc", "posix", "").rows.map((r) => r.id)).toEqual(["f2"]);
+    expect(folderRows(example, "mac", "pc", "posix", "").rows.map((r) => r.key)).toEqual(["f2"]);
+    // A folder without an id is listed by its key: its computer and path.
+    const unnamed = project("p", [folder("", "pc", "/workspace/plain")]);
+    expect(folderRows(unnamed, "", "pc", "posix", "").rows[0]).toMatchObject({ key: "pc\n/workspace/plain", name: "plain" });
     expect(folderRows(undefined, "", "pc", "posix", "").index).toBe(-1);
   });
 
@@ -123,7 +129,7 @@ describe("folders (loadFolders 536-580)", () => {
     const windows = project("p", [folder("f1", "pc", "C:/Work/Example")]);
     expect(folderRows(windows, "", "pc", "windows", "c:\\work\\example").index).toBe(0);
     const root = folderRows(windows, "", "pc", "windows", "D:\\");
-    expect(root.rows[1]).toEqual({ id: "", path: "D:/", name: "D:\\", tooltip: "D:\\" });
+    expect(root.rows[1]).toEqual({ key: "", path: "D:/", name: "D:\\", tooltip: "D:\\" });
   });
 });
 
@@ -233,7 +239,9 @@ describe("folderLaunchProblem (ProjectsDialog.cpp 523-532)", () => {
   const env = { localHost: "pc", online: (computer: string) => computer !== "mac", style: () => "posix" as const };
 
   it("names the four problems", () => {
-    expect(folderLaunchProblem(folder("", "pc", "/srv/a"), env, true)).toBe("Select a folder for the new session.");
+    expect(folderLaunchProblem({ ...folder("", "pc", "/srv/a"), key: "" }, env, true)).toBe("Select a folder for the new session.");
+    // Qt makes up an id for a folder without one (SessionOrganization.cpp:42); here its key stands for it.
+    expect(folderLaunchProblem(folder("", "pc", "/srv/a"), env, true)).toBe("");
     expect(folderLaunchProblem(folder("f", "", "/srv/a"), env, true)).toBe("Waiting for this computer's identity.");
     expect(folderLaunchProblem(folder("f", "pc", "/srv/a"), { ...env, localHost: "" }, true)).toBe("Waiting for this computer's identity.");
     expect(folderLaunchProblem(folder("f", "mac", "/srv/a"), env, true)).toBe("Reconnect mac to start a session in this folder.");

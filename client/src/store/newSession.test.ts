@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { machineMeta } from "./testing";
 import { fleetKey } from "./newSession";
-import { folder, NOT_LOADED, project, settle, setup, type Json } from "./newSessionFake";
+import { folder, NOT_LOADED, project, settle, setup, type Json, type World } from "./newSessionFake";
 import type { Details, MachineMeta, NewSessionFormInput } from "../types";
 import type { Session } from "../ui/sessions/types";
 
@@ -14,7 +14,7 @@ vi.mock("../bridge", () => ({}));
 describe("accounts (NewSessionDialog.cpp 865-1023)", () => {
   // macOS gives the dialog's first focus to the list: while it loads, its only row (Run shell) is no choice.
   it("focusWhileCatalogLoadsKeepsRememberedAgent", async () => {
-    const t = setup((w) => { w.context = { branch: "work-1a2b3c4d", own_windows_session: null, build_style: "posix", remembered: { agent: "claude", accounts: {}, open_terminal: false } }; });
+    const t = setup((w) => { w.context = { branch: "work-1a2b3c4d", own_windows_session: null, build_style: "posix", remembered: { agent: "claude", accounts: {}, open_terminal: false }, swarm: "" }; });
     t.world.hold("accounts:mac");
     await t.open({ computer: "mac" });
     expect(t.state().accounts.length).toBe(1);
@@ -26,7 +26,7 @@ describe("accounts (NewSessionDialog.cpp 865-1023)", () => {
 
   // A remembered agent this computer lacks falls back to the first agent, not the shell.
   it("unavailableRememberedAgentSelectsFirstAgent", async () => {
-    const t = setup((w) => { w.flags.add("machine-accounts"); w.context = { branch: "work-1a2b3c4d", own_windows_session: null, build_style: "posix", remembered: { agent: "kimi", accounts: {}, open_terminal: false } }; });
+    const t = setup((w) => { w.flags.add("machine-accounts"); w.context = { branch: "work-1a2b3c4d", own_windows_session: null, build_style: "posix", remembered: { agent: "kimi", accounts: {}, open_terminal: false }, swarm: "" }; });
     await t.open();
     expect(t.row("pc-claude")).toBe(0);
     expect(t.state().account).toBe(0);
@@ -34,7 +34,7 @@ describe("accounts (NewSessionDialog.cpp 865-1023)", () => {
   });
 
   it("rememberedAndExplicitMissingAccounts", async () => {
-    const t = setup((w) => { w.context = { branch: "work-1a2b3c4d", own_windows_session: null, build_style: "posix", remembered: { agent: "", accounts: { "": { codex: "gone" } }, open_terminal: false } }; });
+    const t = setup((w) => { w.context = { branch: "work-1a2b3c4d", own_windows_session: null, build_style: "posix", remembered: { agent: "", accounts: { "": { codex: "gone" } }, open_terminal: false }, swarm: "" }; });
     await t.open({ agent: "codex", path: "/workspace/example" });
     expect(t.state().accounts.length).toBe(5);
     expect(t.state().accounts[t.state().account].id).toBe("other");
@@ -513,13 +513,18 @@ describe("Start (NewSessionDialog.cpp 743-786)", () => {
 });
 
 describe("opening (SessionsWindow::showNewSession 2895-2928)", () => {
-  const row = (extra: Partial<Session>) => ({ computer: "mac", cwdPath: "/srv/session", cwdCanonical: "/srv/canonical", project: "Work", ...extra } as Session);
+  const row = (extra: Partial<Session>) => ({ key: "mac\nrow-1", computer: "mac", cwdPath: "/srv/session", cwdCanonical: "/srv/canonical", project: "Docs", ...extra } as Session);
 
-  it("takes the selected session's project, else the default; a project option wins and makes it explicit", async () => {
+  it("takes the selected row's project from the organization, else the default; a project option wins and makes it explicit", async () => {
     const projects = [project("ungrouped", "Inbox", [], { is_default: true }), project("work", "Work"), project("docs", "Docs")];
-    const t = setup((w) => { w.projects = projects; w.selection = { row: row({}) }; });
+    // The row's catalog project name is not its organization project: groupOf is (Qt's groupFor).
+    const t = setup((w) => { w.projects = projects; w.selection = { row: row({}) }; w.groups = { "mac\nrow-1": "work" }; });
     await t.open();
     expect(t.state().projects[t.state().project].id).toBe("work");
+    t.store.closeNewSession();
+    t.world.groups = {};
+    await t.open();
+    expect(t.state().projects[t.state().project].id).toBe("ungrouped");
     t.store.closeNewSession();
     t.world.selection = undefined;
     await t.open();
@@ -555,7 +560,7 @@ describe("opening (SessionsWindow::showNewSession 2895-2928)", () => {
     expect(t.world.count("launchAccountsClose")).toBe(1);
     await t.open({ project: "work", folder: "f1" });
     expect(t.state().folderPath).toBe("/srv/a");
-    expect(t.state().folders[t.state().folder].id).toBe("f1");
+    expect(t.state().folders[t.state().folder].key).toBe("f1");
   });
 
   it("a failure while opening disposes the dialog it made", async () => {
@@ -613,6 +618,98 @@ describe("opening (SessionsWindow::showNewSession 2895-2928)", () => {
   });
 });
 
+describe("the organization's projects and folders (SessionsWindow.cpp:2923, NewSessionDialog.cpp:512-575)", () => {
+  const world = (w: World) => {
+    w.projects = [
+      project("work", "Work", [folder("f1", "pc", "/srv/work"), folder("f2", "lab", "/srv/lab")], { is_default: true }),
+      project("hidden", "Hidden", [], { accessible: false }),
+      project("docs", "Docs", [folder("", "pc", "/srv/docs")]),
+    ];
+  };
+
+  it("lists the accessible projects in the organization's order", async () => {
+    const t = setup(world);
+    await t.open();
+    expect(t.state().projects.map((p) => p.id)).toEqual(["work", "docs"]);
+  });
+
+  it("copies a project's folders once, at open and on its first choice, and keeps the copy", async () => {
+    const t = setup(world);
+    await t.open();
+    expect(t.world.of("projectFolders").map((c) => c.args)).toEqual([["work"]]);
+    expect(t.state().folders.map((f) => f.path)).toEqual(["/srv/work"]);
+    expect(t.state().computers.map((c) => c.target)).toEqual(["", "mac", "lab"]);
+    t.world.projects[0].folders = [folder("f9", "pc", "/srv/changed")];
+    t.act.chooseProject(t.state().projects.findIndex((p) => p.id === "docs"));
+    await settle();
+    expect(t.state().folders.map((f) => [f.key, f.path])).toEqual([["pc\n/srv/docs", "/srv/docs"]]);
+    t.act.chooseProject(t.state().projects.findIndex((p) => p.id === "work"));
+    await settle();
+    // Qt's copy at open: a later organization change does not reach this dialog.
+    expect(t.state().folders.map((f) => f.path)).toEqual(["/srv/work"]);
+    expect(t.world.of("projectFolders").map((c) => c.args)).toEqual([["work"], ["docs"]]);
+    expect(t.world.creating()).toEqual([]);
+  });
+
+  it("shows a project without folders until its copy arrives, then refills", async () => {
+    const t = setup(world);
+    await t.open();
+    t.world.hold("folders:docs");
+    t.act.chooseProject(t.state().projects.findIndex((p) => p.id === "docs"));
+    await settle();
+    expect(t.state().folders).toEqual([]);
+    expect(t.state().computers.map((c) => c.target)).toEqual(["", "mac"]);
+    t.world.release("folders:docs");
+    await settle();
+    expect(t.state().folders.map((f) => f.path)).toEqual(["/srv/docs"]);
+    expect(t.state().folder).toBe(0);
+  });
+
+  it("keeps a late copy for a project no longer chosen, and it changes nothing", async () => {
+    const t = setup(world);
+    await t.open();
+    t.world.hold("folders:docs");
+    t.act.chooseProject(t.state().projects.findIndex((p) => p.id === "docs"));
+    t.act.chooseProject(t.state().projects.findIndex((p) => p.id === "work"));
+    await settle();
+    const before = t.state();
+    t.world.release("folders:docs");
+    await settle();
+    expect(t.state().folders).toEqual(before.folders);
+    expect(t.state().computers).toEqual(before.computers);
+    t.act.chooseProject(t.state().projects.findIndex((p) => p.id === "docs"));
+    // The kept copy answers at once.
+    expect(t.state().folders.map((f) => f.path)).toEqual(["/srv/docs"]);
+    expect(t.world.count("projectFolders")).toBe(2);
+  });
+
+  it("opens only once the chosen project's folders are copied", async () => {
+    const t = setup(world);
+    t.world.hold("folders:work");
+    const opening = t.store.openNewSession({ project: "work", folder: "f1" });
+    await settle();
+    expect(t.store.newSession()).toBeUndefined();
+    t.world.release("folders:work");
+    await opening;
+    await settle();
+    expect(t.state().folders[t.state().folder]).toMatchObject({ key: "f1", path: "/srv/work" });
+    expect(t.world.notices).toEqual([]);
+  });
+
+  // A folder without an id is selected by its key (its computer and path); its id stays empty.
+  it("selects a project folder by its key", async () => {
+    const t = setup(world);
+    await t.open({ project: "docs", folder: "pc\n/srv/docs" });
+    expect(t.state().folders[t.state().folder].key).toBe("pc\n/srv/docs");
+    await t.start();
+    expect(t.choices()).toMatchObject({ project: "docs", listed_folder: true, path: "/srv/docs" });
+    t.store.closeNewSession();
+    expect(await t.store.openFolderSession("docs", folder("", "pc", "/srv/docs"))).toBe("");
+    await settle();
+    expect(t.state().folders[t.state().folder].key).toBe("pc\n/srv/docs");
+  });
+});
+
 describe("the Projects entries (ProjectsDialog.cpp 523-541)", () => {
   it("checks the folder is still the project's and can start a session", async () => {
     const f1 = folder("f1", "pc", "/srv/a"), remote = folder("f2", "mac", "/srv/b");
@@ -629,7 +726,7 @@ describe("the Projects entries (ProjectsDialog.cpp 523-541)", () => {
     t.world.localExists = true;
     expect(await t.store.openFolderSession("work", f1)).toBe("");
     await settle();
-    expect(t.state().folders[t.state().folder].id).toBe("f1");
+    expect(t.state().folders[t.state().folder].key).toBe("f1");
     expect(t.world.of("localFolderExists").map((c) => c.args)).toEqual([["/srv/a"], ["/srv/a"]]);
   });
 });
@@ -666,7 +763,7 @@ describe("reads only (Review Focus 1 and 2)", () => {
     await settle();
     expect(t.world.creating()).toEqual([]);
     const commands = new Set(t.world.calls.map((c) => c.command));
-    for (const command of commands) expect(["newSessionContext", "newSessionForm", "repositoryFields", "worktreeSnapshot", "worktreeCatalog", "pickLocalFolder", "openCodeModels", "launchAccounts", "launchAccountsClose"]).toContain(command);
+    for (const command of commands) expect(["newSessionContext", "projectFolders", "newSessionForm", "repositoryFields", "worktreeSnapshot", "worktreeCatalog", "pickLocalFolder", "openCodeModels", "launchAccounts", "launchAccountsClose"]).toContain(command);
   });
 
   it("the prefill's late answer after a folder change does nothing", async () => {
@@ -692,7 +789,7 @@ describe("reads only (Review Focus 1 and 2)", () => {
       w.selection = { row: { computer: "", cwdPath: "/workspace/example-work-one", cwdCanonical: "", project: "Example" } as Session };
     });
     await t.open({ agent: "codex" });
-    expect(t.state().folders[t.state().folder].id).toBe("f1");
+    expect(t.state().folders[t.state().folder].key).toBe("f1");
     expect(t.state().folderPath).toBe("/workspace/example");
     // The verified catalog travels with the form for that folder.
     const input = t.world.of("newSessionForm").at(-1)?.args[0] as NewSessionFormInput;

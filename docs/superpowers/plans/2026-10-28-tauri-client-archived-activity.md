@@ -63,7 +63,7 @@ The store and component touch points go to the owner session before the PR.
 - The typed reply:
   - `events`: the array as `ActivityEvent` values, unchanged;
   - `replace_events`: a boolean;
-  - `conversation_id`, `run_id`, `cleared_conversations`;
+  - `conversation_id`, `run_id`, `cleared_conversations`, and `cursor` (Qt's `data.cursor`, the next `--after`);
   - `summary`: the remaining top-level fields the transcript builder reads from a live `state` value (`buildTranscript(events, summary)`).
 - In `client/src-tauri`, add `archived_activity(computer, name, archive_id, after)`. It runs on the blocking pool, refuses in replay mode without `ZERUS_CLIENT_HGS` (as the other reads do), and allows one read in flight per computer, name and archive id. A second read answers "busy", which the store ignores, as Qt's `return false`.
 - In `bridge.ts`, add `archivedActivity(...)`, with a browser fallback that rejects. Add the types to `types.ts`.

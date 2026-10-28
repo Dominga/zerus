@@ -701,6 +701,73 @@ pub async fn archive_page(
     result?.map_err(|error| error.to_string())
 }
 
+/// The archived Activity reads in flight, one per computer, name and archive
+/// id (Qt's `m_inspectionsInFlight`).
+#[derive(Default)]
+pub struct ActivityReads {
+    running: Mutex<HashSet<String>>,
+}
+
+/// An archived Activity read's place in [`ActivityReads`]; dropping it frees
+/// the key.
+struct ActivitySlot<'a> {
+    reads: &'a ActivityReads,
+    key: String,
+}
+
+impl ActivityReads {
+    /// Takes the key of a read, or None when that read is already running.
+    fn begin(&self, computer: &str, name: &str, archive_id: &str) -> Option<ActivitySlot<'_>> {
+        let key = format!("{computer}\n{name}\n{archive_id}");
+        let mut running = self.running.lock().unwrap_or_else(PoisonError::into_inner);
+        running
+            .insert(key.clone())
+            .then(|| ActivitySlot { reads: self, key })
+    }
+}
+
+impl Drop for ActivitySlot<'_> {
+    fn drop(&mut self) {
+        self.reads
+            .running
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.key);
+    }
+}
+
+/// The text the frontend ignores: a read of that row is already running.
+pub const ACTIVITY_BUSY: &str = "busy";
+
+/// The recorded Activity of one archived session after cursor `after`
+/// (`hgs [@alias] inspect NAME --after N --skip-processes --archive ID`).
+/// One read per computer, name and archive id: a second answers `Err("busy")`
+/// at once, which the store ignores (Qt's `requestInspection` returns false).
+/// Any other `Err` is Qt's failure text.
+#[tauri::command]
+pub async fn archived_activity(
+    state: State<'_, ActivityReads>,
+    computer: String,
+    name: String,
+    archive_id: String,
+    after: i64,
+) -> Result<reads::ArchivedActivity, String> {
+    if blocked() {
+        return Err(crate::screens::REPLAY_NEEDS_HGS.to_owned());
+    }
+    let Some(_slot) = state.begin(&computer, &name, &archive_id) else {
+        return Err(ACTIVITY_BUSY.to_owned());
+    };
+    let hgs = default_hgs();
+    let id = ComputerId::from(computer.as_str());
+    tauri::async_runtime::spawn_blocking(move || {
+        reads::archived_activity(&hgs, &id, &name, &archive_id, after)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+}
+
 /// Cancels every archive page request numbered `through` or lower, where Qt
 /// calls `cancelArchivePages`: their `hgs` ends and they answer
 /// `Err("superseded")`, also one that starts after this.
@@ -769,6 +836,18 @@ pub fn update_attention_marks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_archived_activity_read_runs_per_computer_name_and_archive() {
+        let reads = ActivityReads::default();
+        let first = reads.begin("studio", "alpha", "a1").unwrap();
+        assert!(reads.begin("studio", "alpha", "a1").is_none());
+        assert!(reads.begin("studio", "alpha", "a2").is_some());
+        assert!(reads.begin("studio", "beta", "a1").is_some());
+        assert!(reads.begin("laptop", "alpha", "a1").is_some());
+        drop(first);
+        assert!(reads.begin("studio", "alpha", "a1").is_some());
+    }
 
     #[test]
     fn a_newer_archive_request_of_a_computer_cancels_the_older() {

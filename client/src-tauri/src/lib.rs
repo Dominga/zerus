@@ -49,6 +49,7 @@ pub fn run() {
                 readsync::start(actions.clone());
                 app.manage(actions);
                 app.manage(actions::ArchiveReads::default());
+                app.manage(actions::ActivityReads::default());
                 app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
                 app.manage(screens::Screens::tauri(app.handle().clone(), pump));
@@ -98,6 +99,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::session_reference,
         actions::copy_command,
         actions::archive_page,
+        actions::archived_activity,
         actions::cancel_archive_pages,
         clipboard::copy_text,
         screens::screen_visible,

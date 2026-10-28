@@ -969,25 +969,38 @@ mod tests {
     }
 
     #[test]
-    fn a_grandchild_holding_the_output_does_not_hold_the_run() {
+    fn a_grandchild_holding_the_output_does_not_hold_the_run_and_is_ended() {
         // C2: the direct child exits at once, but the grandchild it started
-        // keeps the output pipe open for a minute. The tree ends with the run
-        // and the joins are bounded, so the call returns at once.
+        // keeps the output pipe open and would write a marker a few seconds
+        // later. The run returns at once and the whole tree ended with it, so
+        // the marker never appears: a detached grandchild is not left behind.
         let dir = temp();
+        let marker = dir.path().join("late.txt");
         #[cfg(windows)]
-        let plan = Plan {
-            template: "test".into(),
-            program: "cmd".into(),
-            argv: vec!["/c".into(), "start /b ping -n 60 127.0.0.1".into()],
-            commit: None,
+        let plan = {
+            let script = dir.path().join("late.bat");
+            std::fs::write(&script, format!("@ping -n 4 127.0.0.1 >nul\r\n@echo late>\"{}\"\r\n", marker.display())).unwrap();
+            Plan {
+                template: "test".into(),
+                program: "cmd".into(),
+                argv: vec!["/c".into(), format!("start /b {}", script.display())],
+                commit: None,
+            }
         };
         #[cfg(unix)]
-        let plan = Plan { template: "test".into(), program: "sh".into(), argv: vec!["-c".into(), "sleep 60 &".into()], commit: None };
+        let plan = Plan {
+            template: "test".into(),
+            program: "sh".into(),
+            argv: vec!["-c".into(), format!("(sleep 3; echo late > '{}') &", marker.display())],
+            commit: None,
+        };
         let started = Instant::now();
         let outcome = execute(&plan, dir.path(), Duration::from_secs(120), &[]);
         assert!(!outcome.timed_out, "{outcome:?}");
         assert_eq!(outcome.exit, Some(0), "{outcome:?}");
         assert!(started.elapsed() < Duration::from_secs(30), "the run waited for the grandchild: {:?}", started.elapsed());
+        std::thread::sleep(Duration::from_secs(5));
+        assert!(!marker.exists(), "the grandchild outlived the run and wrote {}", marker.display());
     }
 
     #[test]

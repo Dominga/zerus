@@ -3852,12 +3852,29 @@ would be a surprise.
 **DeepSeek members' folders.** A DeepSeek session's sandbox needs full control
 (WRITE_DAC and WRITE_OWNER) of the folder it confines. When Zerus creates a
 member's worktree or clone it adds this user's explicit, inheritable FullControl
-entry to that new folder, so the sandbox starts there. A folder Zerus did not
+entry to that new folder, so the sandbox starts there. The grant is asked for
+only where it is needed: `hgs worktrees create --sandbox`, passed for a DeepSeek
+member or session. Every other worktree, including the desktop's New session for
+Claude or Codex, is created without touching its ACLs, so a share or a file
+system without ACL support cannot turn a created checkout into a failed create.
+A folder Zerus did not
 create (a direct, existing or custom folder) is checked first: when a right is
 missing the session does not start, and the member's error — shown in the Lead's
 inbox — says `the DeepSeek sandbox needs full control of <folder>` with the
 one-line fix `icacls "<folder>" /grant *<SID>:(OI)(CI)F`. A member never repairs
 ACLs itself: it reports the exact error to the Lead.
+
+**DeepSeek session-log upload.** Zerus starts and resumes DeepSeek sessions with
+the official session-log upload off, unless the owner turns the block off in
+Settings. The promise is checked, not assumed: a session whose own records still
+accept an upload after its launch is marked, and `hgs ls`, the team status, the
+session card and the account on the Accounts page say
+`DeepSeek session-log upload still active`. A host that was already running when
+the block was turned on keeps the state it started with; a session launched or
+resumed into it says
+`DeepSeek session-log upload may still be active: the running DeepSeek host was started before the block`
+until that host is restarted (which Zerus never does by itself — it would close
+the live agents).
 
 **Updates.** The portable zip has no installer or self-update. Stable releases
 after 0.42.2 and nightly releases carry the same tested zip. A portable

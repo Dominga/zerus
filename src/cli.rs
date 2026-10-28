@@ -126,7 +126,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] worktrees --path PATH [--refresh] [--json]   existing checkouts as JSON
        hgs [@host] git-status --path PATH --json   read-only checkout/publication status
        hgs [@host] git-diff --path PATH --json     read-only diff against HEAD (256 KiB)
-       hgs [@host] worktrees create --path REPO --branch NAME --destination PATH [--base HEAD] [--json]
+       hgs [@host] worktrees create --path REPO --branch NAME --destination PATH [--base HEAD] [--clone] [--sandbox] [--json]
        hgs [@host] worktrees create ... --request-id UUID --receipt --json   durable creation, no replay
        hgs [@host] worktrees status|cancel --request-id UUID --json   original creation receipt
        Worktree creation ABI: worktree-requests-v1

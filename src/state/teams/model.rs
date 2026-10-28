@@ -371,6 +371,11 @@ pub(crate) struct Member {
     /// episode withdraws it for that session, not for the next one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit_session: Option<SessionRef>,
+    /// N30: when this member's remote reset request was last refreshed. A
+    /// refresh on another computer costs an `hgs` call with a 60 s bound, so a
+    /// slow peer is asked once a minute, never on every tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_refreshed_at: Option<f64>,
     /// H6: a swapped member's new session starts even before its next task.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub launch_after_swap: bool,

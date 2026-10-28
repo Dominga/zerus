@@ -141,12 +141,6 @@ pub(crate) fn uploaded_after(records: &[Value], since_seconds: f64) -> bool {
     records.iter().any(|record| is_acceptance(record) && record["time"].as_f64().is_some_and(|time| time >= since_ms))
 }
 
-/// A session still uploads when any record is the plugin's acceptance event.
-#[cfg(test)]
-pub(crate) fn uploading(records: &[Value]) -> bool {
-    records.iter().any(is_acceptance)
-}
-
 /// `hgs session-upload-block get|set --json`.
 pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     if args.len() != 2 || args[1] != "--json" {
@@ -191,9 +185,9 @@ mod tests {
 
     #[test]
     fn a_recorded_session_with_an_acceptance_event_still_uploads() {
-        let clean = vec![json!({"type":"session-log-deepseek/delivery-accepted"})];
-        assert!(uploading(&clean));
-        assert!(!uploading(&[json!({"type":"user"}), json!({"type":"assistant"})]));
+        let clean = vec![json!({"type":"session-log-deepseek/delivery-accepted","time":2_000_500.0})];
+        assert!(uploaded_after(&clean, 1_500.0));
+        assert!(!uploaded_after(&[json!({"type":"user"}), json!({"type":"assistant"})], 0.0));
         assert!(overlay_row()["insert"][0]["config"]["enabled"] == false);
     }
 

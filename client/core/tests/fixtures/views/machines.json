@@ -1,0 +1,4 @@
+{"environment_override":false,"local":"workstation","revision":"rev-3","machines":[
+ {"alias":"studio","connection":{"enabled":true,"hostname":"studio.example","identity_file":"","port":2222,"user":"person"},"enabled":true,"inherited":false,"source":"local"},
+ {"alias":"build-01","connection":{},"enabled":true,"inherited":true,"source":"config"},
+ {"alias":"old-mac","connection":{"enabled":false},"enabled":false,"inherited":false,"source":"local"}]}

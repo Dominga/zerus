@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { toSession } from "../../store/catalog";
 import {
-  canStartStopped, headerClearSlot, copyState, detailsFromInspection, freshCopy, freshEntry, freshStillValid, identityOk, notificationsState, notificationsStillAllowed, dialogReducer, menuItemActivates, menuState, renameParts, renameProblem, snapshotOf, tagProblem, terminal, terminateCopy, forgetCopy, forgetsBindingOnly, FORGET_ARCHIVE_LATER,
+  canStartStopped, headerClearSlot, copyState, detailsFromInspection, freshCopy, freshEntry, freshStillValid, identityOk, notificationsState, notificationsStillAllowed, dialogReducer, menuItemActivates, menuState, renameParts, renameProblem, snapshotOf, tagProblem, terminal, terminateCopy, forgetCopy, forgetsBindingOnly, forgetOpening, FORGET_ARCHIVE_LATER,
 } from "./actions-ui";
 import fixture from "../../../core/tests/fixtures/action-rows.json";
 import type { Details, ViewRow } from "../../types";
@@ -400,6 +400,33 @@ describe("header Start fresh slot", () => {
     expect(headerClearSlot(true, "running")).toBe("clear");
     expect(headerClearSlot(false, "stopped")).toBeUndefined();
     expect(headerClearSlot(false, "running")).toBeUndefined();
+  });
+  it("shows neither for an archived row", () => {
+    expect(headerClearSlot(true, "archived")).toBeUndefined();
+  });
+});
+
+describe("forget polish", () => {
+  it("reads the row's forget reason when details have none", () => {
+    const r = row({ state: "paused", allowed_actions: ["rename"], action_reasons: { forget: "Row says no" } });
+    expect(r.forgetReason).toBe("Row says no");
+    expect(menuState(r, true, false).end.reason).toBe("Row says no");
+    expect(menuState(r, true, false, details({ allowed_actions: ["rename"], action_reasons: { forget: "Detail" } })).end.reason).toBe("Detail");
+  });
+  it("refuses at click time when running-ness changed, else binds the dialog to the live row", () => {
+    const menu = snapshotOf(row({ state: "paused" }));
+    expect(forgetOpening(menu, snapshotOf(row({ state: "running" })))).toBe("changed");
+    const live = snapshotOf(row({ state: "paused", run_id: "r2", conversation_id: "c2" }));
+    expect(forgetOpening(menu, live)).toMatchObject({ row: { runId: "r2" }, bound: { binding: false, run: "r2", conversation: "c2" } });
+    const oc = snapshotOf(row({ agent: "opencode", state: "running", allowed_actions: ["forget", "rename"], run_id: "r3" }));
+    expect(forgetOpening(oc, oc, details({ run_id: "d1", conversation_id: "dc" }))).toMatchObject({ bound: { binding: true, run: "d1", conversation: "dc" } });
+  });
+  it("requires a scope for a forget dialog", () => {
+    const a = snapshotOf(row({ state: "paused" }));
+    const bound = { binding: false, run: "r1", conversation: "c1" };
+    expect(dialogReducer(undefined, { type: "open", kind: "forget", row: a, bound })).toEqual({ kind: "forget", row: a, bound });
+    // @ts-expect-error a forget without its scope does not type-check
+    dialogReducer(undefined, { type: "open", kind: "forget", row: a });
   });
 });
 

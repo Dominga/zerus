@@ -881,15 +881,23 @@ describe("forget", () => {
     });
   });
 
-  it("makes no call and no notice offline or when the row vanished", async () => {
+  it("makes no call and no notice offline", async () => {
     await createRoot(async (dispose) => {
       const off = setup(rowOut({ state: "paused" }), () => false);
       await off.forget(session({ state: "paused" }), opened());
+      expect(mocked.runAction).not.toHaveBeenCalled();
+      expect(off.notices()).toEqual([]);
+      dispose();
+    });
+  });
+
+  it("raises the sticky state-changed notice when the row vanished", async () => {
+    await createRoot(async (dispose) => {
       const gone = setup(rowOut({ state: "paused" }));
       gone.applyBatch(batchOf({ removes: [{ computer: "", key: "run:a" }] }));
       await gone.forget(session({ state: "paused" }), opened());
       expect(mocked.runAction).not.toHaveBeenCalled();
-      expect(off.notices()).toEqual([]);
+      expect(gone.notices()).toMatchObject([{ tone: "error", text: "The session state changed. Open its actions again.", sticky: true }]);
       dispose();
     });
   });

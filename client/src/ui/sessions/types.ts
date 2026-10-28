@@ -90,6 +90,7 @@ export interface Session {
   /** The host's reasons for a disallowed archive or terminate. */
   archiveReason?: string;
   terminateReason?: string;
+  forgetReason?: string;
   /** The raw working directory (`cwd` is the folder name). */
   cwdPath: string;
   /** The row's terminal support, and whether the host reported it (NativeSessionCapabilities::terminal). */

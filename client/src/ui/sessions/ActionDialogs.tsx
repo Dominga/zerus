@@ -5,7 +5,7 @@ import { change, copyCommand, copyFolder, copyName, copyReference, dismiss, end,
 import type { MenuEntry } from "../../store/ui";
 import type { Details } from "../../types";
 import type { Session } from "./types";
-import { FRESH_CHANGED, FRESH_TIP, copyState, dialogReducer, freshCopy, freshEntry, freshStillValid, menuState, notificationsState, renameParts, renameProblem, forgetCopy, forgetsBindingOnly, snapshotOf, terminateCopy, terminates, type ForgetScope, type ActionRow, type DialogEvent } from "./actions-ui";
+import { FRESH_CHANGED, STATE_CHANGED, canStartStopped, FRESH_TIP, copyState, dialogReducer, freshCopy, freshEntry, freshStillValid, menuState, notificationsState, renameParts, renameProblem, forgetCopy, forgetOpening, snapshotOf, terminateCopy, terminates, type ForgetScope, type ActionRow, type DialogEvent } from "./actions-ui";
 
 // The guarded session actions: the entries both menus share, the Rename and
 // Terminate dialogs, and the notices the action store raises.
@@ -46,9 +46,11 @@ export function actionEntries(s: Session, details?: Details, options: { context?
       action: () => {
         // Qt's click-time GONE pre-check first; a forget names the run and conversation in view.
         if (terminates(row, details)) { send({ type: "open", kind: "terminate", row }); return; }
-        if (!stillListed(row)) return;
-        const binding = row.state !== "archived" && forgetsBindingOnly(row, details);
-        send({ type: "open", kind: "forget", row, bound: { binding, run: details ? details.run_id : row.runId ?? "", conversation: details ? details.conversation_id : row.conversationId ?? "" } });
+        const live = stillListed(row);
+        if (!live) return;
+        const opening = forgetOpening(row, live, details);
+        if (opening === "changed") { notify("error", STATE_CHANGED, true); return; }
+        send({ type: "open", kind: "forget", ...opening });
       },
     },
   };
@@ -93,7 +95,11 @@ export function freshActionEntry(s: Session, header = false): Item | undefined {
   if (!m) return undefined;
   return {
     label: "Start fresh…", icon: "clear", disabled: !m.enabled, hint: header ? FRESH_TIP : m.hint,
-    action: () => { const live = stillListed(row); if (live) send({ type: "open", kind: "fresh", row: snapshotOf(live) }); },
+    action: () => {
+      const live = stillListed(row);
+      // Qt returns silently when the session can no longer start fresh.
+      if (live && canStartStopped(live, !computerOffline(live.computer), updating(live.computer, live.name))) send({ type: "open", kind: "fresh", row: snapshotOf(live) });
+    },
   };
 }
 
@@ -182,7 +188,7 @@ function FreshDialog(props: { row: ActionRow; close: () => void }) {
     props.close();
     const live = catalog.rows[props.row.key];
     if (!live || !freshStillValid(snapshotOf(live), props.row, !computerOffline(live.computer), updating(live.computer, live.name))) {
-      notify("warn", FRESH_CHANGED, true);
+      notify("error", FRESH_CHANGED, true);
       return;
     }
     notify("info", `Starting ${props.row.name} with a new conversation…`);
@@ -224,7 +230,7 @@ export function ActionDialogs() {
       aria-describedby={open()?.kind === "terminate" || open()?.kind === "fresh" || open()?.kind === "forget" ? "action-dlg-body" : undefined} style={{ width: "460px" }} onClose={closeDialog}>
       <Show when={open()} keyed>
         {(p) => (p.kind === "rename" ? <RenameDialog row={p.row} close={closeDialog} />
-          : p.kind === "fresh" ? <FreshDialog row={p.row} close={closeDialog} /> : p.kind === "forget" && p.bound ? <ForgetDialog row={p.row} bound={p.bound} close={closeDialog} /> : <TerminateDialog row={p.row} close={closeDialog} />)}
+          : p.kind === "fresh" ? <FreshDialog row={p.row} close={closeDialog} /> : p.kind === "forget" ? <ForgetDialog row={p.row} bound={p.bound} close={closeDialog} /> : p.kind === "terminate" ? <TerminateDialog row={p.row} close={closeDialog} /> : null)}
       </Show>
     </dialog>
   );

@@ -3,7 +3,7 @@ import { createStore } from "solid-js/store";
 import * as bridge from "../bridge";
 import { catalog as appCatalog, computerOffline, type CatalogState } from "./catalog";
 import { marks as appMarks, type Marks } from "./marks";
-import { copyState, detailsFromInspection, MUTE_PENDING, forgetsBindingOnly, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type ForgetScope, type PendingNotifications } from "../ui/sessions/actions-ui";
+import { copyState, detailsFromInspection, MUTE_PENDING, STATE_CHANGED, forgetsBindingOnly, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type ForgetScope, type PendingNotifications } from "../ui/sessions/actions-ui";
 import type { Action, Details, Outcome, Target } from "../types";
 
 // Guarded session actions. Every action is one call to the Rust side; a call
@@ -25,7 +25,6 @@ export interface Followed { value: Record<string, unknown> | undefined; settled:
 const MAX_NOTICES = 5;
 const INFO_MS = 6000;
 const CHANGED = "This session changed. Open its actions again.";
-const STATE_CHANGED = "The session state changed. Open its actions again.";
 const MUTE_CHANGED = "The shared notification setting changed while this request was pending. Refresh the session.";
 export const GONE = "This session is no longer available. Open its actions again.";
 const ALREADY_STOPPED = ["hgs: This turn is no longer working", "This turn is no longer working"];
@@ -156,12 +155,16 @@ export function createActions(
    * run and conversation (the selected row's details win over the row);
    * otherwise nothing runs and the sticky notice says so. A scoped forget
    * (a binding with a run) is `forget_binding`, any other is `kill`.
-   * An offline computer or a vanished row ends silently, as in Qt.
+   * An offline computer ends silently, as in Qt; a vanished row raises the same notice.
    */
   async function forget(row: ActionRow, opened: ForgetScope): Promise<Outcome> {
     if (!online(row.computer)) return failed("offline");
     const live = catalog.rows[row.key];
-    if (!live) return failed("gone");
+    if (!live) {
+      // Rows are keyed by run, so a vanished row may be the same session on a new run; Qt refuses a scoped forget then.
+      notify("error", STATE_CHANGED, true);
+      return failed(STATE_CHANGED);
+    }
     const now = selectedDetails(live);
     const binding = forgetsBindingOnly(live, now);
     if ((live.state === "running" && !binding) || binding !== opened.binding) {

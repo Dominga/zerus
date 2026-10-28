@@ -10,7 +10,7 @@ import type { Session } from "./types";
 /** The session fields the action rules read: a catalog row, or a snapshot of one. */
 export type ActionRow = Pick<Session,
   | "key" | "computer" | "name" | "machine" | "cmd" | "state" | "tracked" | "resumable" | "activity" | "processState"
-  | "archiveId" | "attention" | "unread" | "sharedRead" | "allowed" | "archiveReason" | "terminateReason" | "phase"
+  | "archiveId" | "attention" | "unread" | "sharedRead" | "allowed" | "archiveReason" | "terminateReason" | "forgetReason" | "phase"
   | "runId" | "conversationId" | "replyId" | "attentionSignature" | "created" | "fingerprint"
   | "cwdPath" | "terminalSupported" | "terminalReported" | "terminalAttachSupported" | "terminalAttachReported"
   | "muted" | "sharedNotifications" | "notificationRevision" | "notificationConflict">;
@@ -20,7 +20,7 @@ export function snapshotOf(s: ActionRow): ActionRow {
   return {
     key: s.key, computer: s.computer, name: s.name, machine: s.machine, cmd: s.cmd, state: s.state, tracked: s.tracked,
     resumable: s.resumable, activity: s.activity, processState: s.processState, archiveId: s.archiveId, attention: s.attention,
-    unread: s.unread, sharedRead: s.sharedRead, allowed: s.allowed, archiveReason: s.archiveReason, terminateReason: s.terminateReason,
+    unread: s.unread, sharedRead: s.sharedRead, allowed: s.allowed, archiveReason: s.archiveReason, terminateReason: s.terminateReason, forgetReason: s.forgetReason,
     phase: s.phase, runId: s.runId, conversationId: s.conversationId, replyId: s.replyId, attentionSignature: s.attentionSignature,
     created: s.created, fingerprint: s.fingerprint,
     cwdPath: s.cwdPath, terminalSupported: s.terminalSupported, terminalReported: s.terminalReported,
@@ -112,7 +112,7 @@ export function allowedOp(s: Pick<ActionRow, "allowed" | "cmd">, op: string, det
 }
 
 const reasonFor = (s: ActionRow, op: "archive" | "terminate" | "forget", details?: Details) =>
-  details?.action_reasons?.[op] || (op === "archive" ? s.archiveReason : op === "terminate" ? s.terminateReason : undefined) || NO_REASON;
+  details?.action_reasons?.[op] || (op === "archive" ? s.archiveReason : op === "terminate" ? s.terminateReason : s.forgetReason) || NO_REASON;
 
 /** An OpenCode session that allows forget and not terminate: Forget removes only its Zerus binding. */
 export const forgetsBindingOnly = (s: Pick<ActionRow, "allowed" | "cmd">, details?: Details) =>
@@ -290,11 +290,13 @@ export function copyState(s: ActionRow, online: boolean, details?: Details): Cop
 
 export const FRESH_HINT = "Start with a new conversation and the same folder, account and model";
 export const FRESH_TIP = "Start this stopped session with a new conversation and the same folder, account and model.";
+/** Qt's refusal when running-ness changed since the menu opened (shared with the store). */
+export const STATE_CHANGED = "The session state changed. Open its actions again.";
 export const FRESH_CHANGED = "The session changed. Open its actions again.";
 
 /** The header's Start fresh or Clear session slot (Qt 3808-3809): only in the main context, never with a subagent open. */
 export function headerClearSlot(mainContext: boolean, state: ActionRow["state"]): "fresh" | "clear" | undefined {
-  if (!mainContext) return undefined;
+  if (!mainContext || state === "archived") return undefined;
   return state === "paused" || state === "stopped" ? "fresh" : "clear";
 }
 
@@ -329,15 +331,31 @@ export function freshStillValid(live: ActionRow, shown: ActionRow, online: boole
     && canStartStopped(live, online, updating, batchRunning);
 }
 
+/**
+ * Qt's click-time check for Forget: running-ness must be as when the menu
+ * opened ("changed"), else the dialog names the live row, with the run and
+ * conversation in view (the selected row's details win).
+ */
+export function forgetOpening(menuRow: ActionRow, live: ActionRow, details?: Details): "changed" | { row: ActionRow; bound: ForgetScope } {
+  if ((live.state === "running") !== (menuRow.state === "running")) return "changed";
+  const row = snapshotOf(live);
+  const binding = row.state !== "archived" && forgetsBindingOnly(row, details);
+  return { row, bound: { binding, run: details ? details.run_id : row.runId ?? "", conversation: details ? details.conversation_id : row.conversationId ?? "" } };
+}
+
 export type DialogKind = "rename" | "terminate" | "fresh" | "forget";
 /** What a forget dialog named: whether it forgets an OpenCode binding, and the run and conversation then in view. */
 export interface ForgetScope { binding: boolean; run: string; conversation: string }
-export type DialogState = { kind: DialogKind; row: ActionRow; bound?: ForgetScope } | undefined;
-export type DialogEvent = { type: "open"; kind: DialogKind; row: ActionRow; bound?: ForgetScope } | { type: "close" };
+export type DialogOpen =
+  | { kind: "rename" | "terminate" | "fresh"; row: ActionRow }
+  | { kind: "forget"; row: ActionRow; bound: ForgetScope };
+export type DialogState = DialogOpen | undefined;
+export type DialogEvent = ({ type: "open" } & DialogOpen) | { type: "close" };
 
 /** One dialog at a time: opening replaces whatever is open, closing clears it. */
 export function dialogReducer(_state: DialogState, event: DialogEvent): DialogState {
-  return event.type === "open" ? (event.bound ? { kind: event.kind, row: event.row, bound: event.bound } : { kind: event.kind, row: event.row }) : undefined;
+  if (event.type !== "open") return undefined;
+  return event.kind === "forget" ? { kind: "forget", row: event.row, bound: event.bound } : { kind: event.kind, row: event.row };
 }
 
 /** A disabled menu item neither closes the menu nor runs its action. */

@@ -191,24 +191,24 @@ Outcome rules:
   `--expected-run-id` (omitted when the row has none) and the notice says "Starting NAME with a
   new conversation…". The header offers it in the main context only, in place of
   Clear session, and not at all while a subagent is open.
-- Forget saved session ends a saved session that is not running. The dialog
+- Forget saved session ends a saved session that is not running, or an OpenCode binding (usually running). The dialog
   "Forget saved session?" says "Remove NAME from HGS? The agent's native
   conversation history is kept." and, for an OpenCode session that only keeps
   a binding, "Forget NAME in Zerus? The conversation stays in OpenCode; only
   Zerus forgets it." with the computer named below; Cancel is the default.
   On confirmation the session must be as when the dialog opened (still not
-  running, the same binding-only case and, for a binding, the same run and
+  running unless it is an OpenCode binding, the same binding-only case and, for a binding, the same run and
   conversation); otherwise nothing runs and the sticky notice says "The
   session state changed. Open its actions again." A binding with a run goes
   through `session-action`, any other session through `kill`; an offline
-  computer or a vanished row ends silently. Forgetting an archived session
+  computer ends silently; a vanished row raises the same notice. Forgetting an archived session
   stays disabled until the Archive view (`zerus-5wmh.32`).
 - The binding forget counts only when the receipt echoes the request id,
   session name, run id and conversation id of the call with status
   `completed`; anything else is a failure and is never replayed. Success shows
   "Zerus forgot NAME. The conversation stays in OpenCode."
 - Start fresh and Forget saved session first recheck the listed row when the
-  entry is clicked: a session that is gone or whose conversation changed opens
+  entry is clicked: a session that is gone or whose conversation or `created` changed opens
   no dialog and shows "This session is no longer available. Open its actions
   again."
 

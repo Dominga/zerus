@@ -3,11 +3,13 @@
 //! and creating a worktree with its receipt.
 //!
 //! Every call blocks; callers run it off the UI thread. Two reads of the same
-//! folder share one call in the caller.
+//! folder share one call in the caller. A call that names its computer
+//! (`--expect-machine`) runs through [`run_guarded`].
 //!
 //! Reference: `tray/src/HgsClient.cpp` (`requestWorktrees`, `worktreeSnapshot`,
 //! `saveWorktreeSnapshots`, `worktreeCacheKey`, `invalidateWorktreeCache`,
-//! `createWorktree`, `worktreeReceipt`, `cleanupError`, `guardMachine`).
+//! `createWorktree`, `worktreeReceipt`, `cleanupError`, `guardMachine`,
+//! `runHgs`).
 use crate::actions::{Exit, Invocation};
 use crate::ComputerId;
 use serde_json::{Map, Value};
@@ -41,9 +43,61 @@ pub fn guard(args: &mut Vec<String>, expected_machine: &str) {
     if expected_machine.is_empty() {
         return;
     }
-    let at = usize::from(args.first().is_some_and(|first| first.starts_with('@')));
+    let at = guard_at(args);
     args.insert(at, "--expect-machine".into());
     args.insert(at + 1, expected_machine.into());
+}
+
+/// What `hgs --help` shows when it verifies `--expect-machine`.
+pub const GUARDED_MARKER: &str = "guarded-create-v1";
+/// Why a guarded call did not run on an older hgs.
+pub const GUARDED_UNSUPPORTED: &str =
+    "The selected CLI cannot verify this creation's computer. Update hgs before continuing.";
+
+fn guard_at(args: &[String]) -> usize {
+    usize::from(args.first().is_some_and(|first| first.starts_with('@')))
+}
+
+/// Whether a call names the computer it must reach (`--expect-machine` after
+/// the `@alias`); `runHgs` probes such a call's hgs first.
+pub fn guarded(invocation: &Invocation) -> bool {
+    invocation
+        .args
+        .get(guard_at(&invocation.args))
+        .is_some_and(|word| word == "--expect-machine")
+}
+
+/// `hgs [@host] --help`, 15 s: the probe before a guarded call.
+pub fn guard_probe(invocation: &Invocation) -> Invocation {
+    let mut args: Vec<String> = invocation.args[..guard_at(&invocation.args)].to_vec();
+    args.push("--help".into());
+    self::invocation(args, 15)
+}
+
+/// The probe's answer: Ok when the hgs verifies the computer, otherwise why
+/// the guarded call does not run.
+pub fn guard_supported(exit: Exit) -> Result<(), String> {
+    match exit {
+        Exit::Code {
+            code: 0, stdout, ..
+        } if String::from_utf8_lossy(&stdout).contains(GUARDED_MARKER) => Ok(()),
+        Exit::Code { code: 0, .. } => Err(GUARDED_UNSUPPORTED.into()),
+        exit => object(exit).map(|_| ()),
+    }
+}
+
+/// Runs a call as `runHgs` does: a guarded call only after its hgs shows the
+/// marker, so an older CLI never runs it without checking the computer. Err
+/// is why the probe stopped it.
+pub fn run_guarded(
+    hgs: &Path,
+    invocation: &Invocation,
+    run: impl FnOnce(&Path, &Invocation) -> Exit,
+) -> Result<Exit, String> {
+    if guarded(invocation) {
+        guard_supported(crate::run::run(hgs, &guard_probe(invocation)))?;
+    }
+    Ok(run(hgs, invocation))
 }
 
 fn invocation(args: Vec<String>, seconds: u64) -> Invocation {
@@ -621,6 +675,52 @@ mod tests {
         assert_eq!(saved.as_object().unwrap().len(), SNAPSHOTS);
         assert!(catalogs.snapshot("", "/home/example/r5").is_none());
         assert!(catalogs.snapshot("", "/home/example/r6").is_some());
+    }
+
+    #[test]
+    fn a_guarded_call_runs_only_after_its_hgs_shows_the_marker() {
+        let peer = ComputerId::from("peer");
+        let guarded_call = verified_invocation(&peer, "/srv/repo", "m-1");
+        assert!(guarded(&guarded_call));
+        assert!(!guarded(&catalog_invocation(&peer, "/srv/repo", false)));
+        assert!(!guarded(&verified_invocation(&peer, "/srv/repo", "")));
+        let probe = guard_probe(&guarded_call);
+        assert_eq!(probe.args, ["@peer", "--help"]);
+        assert_eq!(probe.timeout, Duration::from_secs(15));
+        let local = verified_invocation(&ComputerId::local(), "/srv/repo", "m-1");
+        assert!(guarded(&local));
+        assert_eq!(guard_probe(&local).args, ["--help"]);
+        let help = |text: &str| Exit::Code {
+            code: 0,
+            stdout: text.as_bytes().to_vec(),
+            stderr: String::new(),
+        };
+        assert_eq!(
+            guard_supported(help("usage ... guarded-create-v1 ...")),
+            Ok(())
+        );
+        assert_eq!(
+            guard_supported(help("usage: hgs")),
+            Err(GUARDED_UNSUPPORTED.into())
+        );
+        assert_eq!(
+            guard_supported(Exit::Code {
+                code: 2,
+                stdout: Vec::new(),
+                stderr: " offline \n".into()
+            }),
+            Err("offline".into())
+        );
+        assert_eq!(guard_supported(Exit::TimedOut), Err("timed out".into()));
+        // A probe that cannot run stops the guarded call; an unguarded call
+        // runs without one.
+        let missing = Path::new("/nonexistent/hgs");
+        assert!(run_guarded(missing, &guarded_call, |_, _| unreachable!()).is_err());
+        let plain = catalog_invocation(&peer, "/srv/repo", false);
+        assert_eq!(
+            run_guarded(missing, &plain, |_, _| Exit::TimedOut),
+            Ok(Exit::TimedOut)
+        );
     }
 
     #[test]

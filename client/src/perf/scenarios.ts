@@ -121,6 +121,33 @@ export interface PerfReport {
   settings: Omit<Plan, "hz" | "hzSource">;
   scenarios: ScenarioResult[];
   resources?: Record<string, unknown>;
+  /** Where the Activity scenario's session came from (unattended runs); counts only. */
+  activity_source?: ActivitySource;
+}
+
+/** Which Activity the run measured: a replay or the live catalog, its size, scroll range and older pages read. Counts only, no names. */
+export interface ActivitySource {
+  replay: boolean;
+  events: number;
+  scroll_px: number;
+  older_pages: number;
+}
+
+/** The most sessions a live run tries for an Activity that scrolls. */
+export const ACTIVITY_CANDIDATE_CAP = 16;
+
+/**
+ * The sessions an unattended run tries for its Activity, a chosen one first.
+ * A live run stops at the cap; a replay run tries every card, so the long
+ * fixture session is found whatever the list order.
+ */
+export function activityCandidates(selected: string | undefined, cards: readonly string[], replay: boolean): string[] {
+  const all = [...new Set([selected, ...cards].filter((id): id is string => !!id))];
+  return replay ? all : all.slice(0, ACTIVITY_CANDIDATE_CAP);
+}
+
+export function activitySource(replay: boolean, best: { events: number; range: number; pages: number } | undefined): ActivitySource {
+  return { replay, events: best?.events ?? 0, scroll_px: Math.max(0, Math.floor(best?.range ?? 0)), older_pages: best?.pages ?? 0 };
 }
 
 export function summarize(values: readonly number[]): Summary {
@@ -399,7 +426,8 @@ export async function runScenario(id: ScenarioId, targets: DiagnosticsTargets, s
     case "activity-scroll": {
       const element = id === "list-scroll" ? targets.scrollList() : targets.scrollActivity();
       if (!element) return skipped(id, "pacing", "interval_ms", "no scroll container");
-      if (element.scrollHeight - element.clientHeight < plan.stepPx * 4) return skipped(id, "pacing", "interval_ms", "nothing to scroll");
+      const range = element.scrollHeight - element.clientHeight;
+      if (range < plan.stepPx * 4) return skipped(id, "pacing", "interval_ms", `nothing to scroll (${Math.max(0, Math.floor(range))} px)`);
       const top = element.scrollTop;
       try {
         return pacingResult(id, plan, await pacingRuns(plan, () => undefined, element));

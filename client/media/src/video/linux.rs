@@ -253,16 +253,18 @@ fn description(
     let decode = if jpeg { "jpegdec ! " } else { "" };
     let location = path.to_str().ok_or(NO_STORAGE)?.replace('"', "");
     Ok(format!(
+        // The preview and poster sinks keep one frame nobody pulls once stopping
+        // starts; waiting for it on EOS would hold back the pipeline's EOS.
         "capsfilter name=camcaps ! {decode}videoconvert ! videorate ! video/x-raw,framerate=24/1 ! tee name=t \
          t. ! queue ! videoconvert ! {h264} ! h264parse ! queue ! mux. \
          t. ! queue leaky=downstream max-size-buffers=1 ! videorate drop-only=true max-rate={PREVIEW_FPS} \
             ! videocrop left={left} right={right} top={top} bottom={bottom} ! videoscale ! videoconvert \
             ! video/x-raw,format=I420,width={PREVIEW_SIDE},height={PREVIEW_SIDE} ! tee name=p \
          p. ! queue leaky=downstream max-size-buffers=1 ! jpegenc quality=70 \
-            ! appsink name=preview max-buffers=1 drop=true sync=false \
+            ! appsink name=preview max-buffers=1 drop=true sync=false wait-on-eos=false \
          p. ! queue leaky=downstream max-size-buffers=1 ! videoscale ! videoconvert \
             ! video/x-raw,format=RGB,width={POSTER_SIDE},height={POSTER_SIDE} \
-            ! appsink name=poster max-buffers=1 drop=true sync=false \
+            ! appsink name=poster max-buffers=1 drop=true sync=false wait-on-eos=false \
          appsrc name=audio is-live=true do-timestamp=true format=time caps=\"{audio}\" \
             ! audioconvert ! audioresample ! audio/x-raw,channels=1 ! {aac} ! aacparse ! queue ! mux. \
          mp4mux name=mux faststart=true ! filesink location=\"{location}\""

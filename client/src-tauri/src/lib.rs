@@ -122,6 +122,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         voice::voice_microphones,
         #[cfg(feature = "media")]
         voice::voice_video_available,
+        #[cfg(feature = "media")]
+        voice::voice_video_reason,
     ]
 }
 

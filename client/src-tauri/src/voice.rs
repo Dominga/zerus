@@ -13,7 +13,7 @@ use zerus_client_core::default_hgs;
 use zerus_client_core::drafts::DraftStore;
 use zerus_client_core::voice_composer::{Inserted, Preferences, Target};
 use zerus_client_core::voice_driver::{Input, Out, VoiceDriver};
-use zerus_client_media::{microphones, video_available, MediaCapture};
+use zerus_client_media::{microphones, video_available, video_reason, MediaCapture};
 
 /// Voice drivers open at once; a composer closes its own when it goes.
 pub const MAX_DRIVERS: usize = 32;
@@ -218,8 +218,20 @@ pub async fn voice_microphones() -> Result<Vec<MicrophoneRow>, String> {
         .collect())
 }
 
-/// Whether this build records round video; the Video mode hides without.
+/// Whether this build records round video here; the Video mode hides
+/// without. Probing GStreamer can take a moment the first time.
 #[tauri::command]
-pub fn voice_video_available() -> bool {
-    video_available()
+pub async fn voice_video_available() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(video_available)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Why round video is unavailable here (a missing encoder, or a build
+/// without video), None when it is available: Video's tooltip.
+#[tauri::command]
+pub async fn voice_video_reason() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(video_reason)
+        .await
+        .map_err(|error| error.to_string())
 }

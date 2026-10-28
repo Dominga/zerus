@@ -29,6 +29,11 @@ pub enum RecorderEvent {
         rms: f32,
         peak: f32,
     },
+    /// A round video's preview frame: a square JPEG.
+    Frame {
+        jpeg: Vec<u8>,
+        mirrored: bool,
+    },
     Recorded {
         pcm: Vec<u8>,
         video: Option<Video>,
@@ -60,6 +65,12 @@ pub enum Out {
     Level {
         rms: f32,
         peak: f32,
+    },
+    /// A round video's preview frame (square JPEG, about 15 a second);
+    /// mirrored for a front camera.
+    Frame {
+        data_base64: String,
+        mirrored: bool,
     },
     /// Ask this and answer [`Input::Confirm`] with its ticket.
     Ask {
@@ -286,6 +297,14 @@ impl Loop {
                 }
                 RecorderEvent::Level { rms, peak } => {
                     (self.sink)(Out::Level { rms, peak });
+                    Vec::new()
+                }
+                RecorderEvent::Frame { jpeg, mirrored } => {
+                    use base64::Engine;
+                    (self.sink)(Out::Frame {
+                        data_base64: base64::engine::general_purpose::STANDARD.encode(jpeg),
+                        mirrored,
+                    });
                     Vec::new()
                 }
                 RecorderEvent::Recorded { pcm, video } => composer.recorded(pcm, video),

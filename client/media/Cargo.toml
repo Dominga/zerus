@@ -10,9 +10,21 @@ publish = false
 # Device capture for client/src-tauri's `media` feature: cpal on its own
 # thread, converted by zerus-client-core's PcmConverter. Linux needs the ALSA
 # development package to build it; nothing else in the client does.
+[features]
+# Round video messages. Linux records through GStreamer, which needs its
+# development package to build and, at run time, an H.264 and an AAC
+# encoder plugin (video_reason names a missing one).
+video = ["dep:gstreamer", "dep:gstreamer-app"]
+
 [dependencies]
+base64 = "0.22"
 cpal = "0.18"
+serde_json = "1"
 zerus-client-core = { path = "../core" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gstreamer = { version = "0.25", optional = true }
+gstreamer-app = { version = "0.25", optional = true }
 
 # The microphone permission (AVCaptureDevice authorization) before capture.
 [target.'cfg(target_os = "macos")'.dependencies]

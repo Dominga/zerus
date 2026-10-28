@@ -22,6 +22,9 @@ live = ["dep:zerus-client-core"]
 # Voice messages: microphone capture through client/media (cpal). Linux
 # builds need the ALSA development package; nothing else does.
 media = ["live", "dep:zerus-client-media"]
+# Round video messages on Linux through GStreamer (its development package
+# to build; an H.264 and an AAC encoder plugin at run time).
+video = ["media", "zerus-client-media/video"]
 
 [dependencies]
 tauri = { version = "2", features = [] }

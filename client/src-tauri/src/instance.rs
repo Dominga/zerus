@@ -761,7 +761,12 @@ fn listen(listener: UnixListener, deliver: impl Fn(Activation) + Send + 'static)
                 let deadline = Instant::now() + LINE_WAIT;
                 let mut line = Vec::new();
                 let mut byte = [0u8; 1];
-                let _ = stream.set_read_timeout(Some(LINE_WAIT));
+                // macOS refuses a timeout once the peer has closed, as a second
+                // start does right after its line. Its bytes are buffered then:
+                // read them without blocking, so no read can wait unbounded.
+                if stream.set_read_timeout(Some(LINE_WAIT)).is_err() {
+                    let _ = stream.set_nonblocking(true);
+                }
                 let complete = loop {
                     let left = deadline.saturating_duration_since(Instant::now());
                     if line.len() >= 64 || left.is_zero() {

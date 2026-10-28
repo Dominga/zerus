@@ -62,7 +62,7 @@ export interface ViewRow {
 export interface RowOut { computer: ComputerId; key: string; row: ViewRow }
 export interface KeyOut { computer: ComputerId; key: string; reason?: string | null }
 export interface ReplaceOut { computer: ComputerId; rows: RowOut[] }
-export type ComputerStatus = "probing" | "unsupported" | "live" | "reconnecting" | "ended";
+export type ComputerStatus = "probing" | "unsupported" | "live" | "polled" | "reconnecting" | "ended";
 export interface ComputerOut { computer: ComputerId; status: ComputerStatus | string; attempt: number }
 export type ActivityKind = "events" | "replace" | "event" | "state" | "ended";
 export interface ActivityOut { computer: ComputerId; key: string; kind: ActivityKind | string; payload: unknown }
@@ -72,13 +72,14 @@ export interface Batch {
   removes: KeyOut[];
   replaces: ReplaceOut[];
   computers: ComputerOut[];
+  machines?: MachineOut[];
   activity: ActivityOut[];
 }
 
-export const emptyBatch = (): Batch => ({ upserts: [], removes: [], replaces: [], computers: [], activity: [] });
+export const emptyBatch = (): Batch => ({ upserts: [], removes: [], replaces: [], computers: [], machines: [], activity: [] });
 
 export const isEmptyBatch = (b: Batch) =>
-  !b.upserts.length && !b.removes.length && !b.replaces.length && !b.computers.length && !b.activity.length;
+  !b.upserts.length && !b.removes.length && !b.replaces.length && !b.computers.length && !b.machines?.length && !b.activity.length;
 
 /** One Activity event as `inspect` returns it; unknown fields are kept. */
 export interface ActivityEvent {
@@ -149,3 +150,100 @@ export interface ReadMark {
   reply_id: string | null;
   attention_signature: string | null;
 }
+
+/** A computer's machine card from its `catalog.meta` (client/core `machine.rs`); an older host leaves fields null. */
+export interface MachineMetrics {
+  cpu_percent: number | null;
+  cpu_count: number | null;
+  /** `available`, `warming` or `unavailable`. */
+  cpu_state: string | null;
+  cpu_interval_seconds: number | null;
+  load_1: number | null;
+  load_5: number | null;
+  load_15: number | null;
+  memory_used_bytes: number | null;
+  memory_total_bytes: number | null;
+  memory_available_bytes: number | null;
+  uptime_seconds: number | null;
+  /** Unix seconds. */
+  sampled_at: number | null;
+}
+/** This Windows computer's session host. */
+export interface LocalHost { state: string | null; pid: number | null; protocol: number | null; conpty: string | null; integrity: string | null; windows_session: number | null; error: string | null }
+export interface MachineMeta {
+  host: string | null;
+  hgs_version: string | null;
+  platform: string | null;
+  ok: boolean | null;
+  metrics: MachineMetrics;
+  presence: { idle_seconds: number | null; locked: boolean | null; locked_seconds: number | null };
+  /** False only on a control console. */
+  local_sessions: boolean | null;
+  local_host: LocalHost | null;
+}
+export interface MachineOut { computer: ComputerId; machine: MachineMeta }
+
+// The screen views the Rust side projects (client/core `views`, client/src-tauri `screens.rs`).
+
+export type Screen = "overview" | "projects" | "machines" | "accounts";
+export interface ProjectedWindow { id: string; label: string; used: number; minutes: number | null; resets_at: number | null }
+export interface Identity { email: string; name: string; plan: string; organization: string; account_id: string; auth_method: string }
+export interface Usage {
+  status: string;
+  provider: string;
+  label: string;
+  auth_status: string;
+  checked_at: number | null;
+  /** The values come from the cached account status until inspect answers. */
+  seeded: boolean;
+  identity: Identity;
+  windows: ProjectedWindow[];
+  balances: { kind: string; balance: string; currency: string }[];
+  credits: { balance: string; unlimited: boolean } | null;
+  refreshing: boolean;
+  refresh_error: boolean;
+  offline: boolean;
+}
+export type MemberState = "ready" | "offline" | "not-installed" | "apikey" | "signed-out" | "keychain" | "desktop" | "unavailable" | "expired" | "checking" | "unknown";
+export interface OpenCodeInfo { providers: { label: string; connection: string; models: string }[]; truncated: boolean; stale_catalog_at: number | null; stopped: boolean }
+export interface Profile {
+  key: string; host: ComputerId; machine: string; id: string; label: string; provider: string;
+  native: boolean; installed: boolean; is_default: boolean; home: string; auth_revision: string; online: boolean;
+  state: MemberState; detail: string; signed_in: boolean;
+  permission: string; permission_label: string; permission_hint: string; model_supported: boolean; model_text: string;
+  usage: Usage; opencode: OpenCodeInfo | null;
+}
+export interface Account {
+  key: string; label: string; provider: string; installed: boolean; machines: string[]; members: Profile[];
+  usage: Usage; permission: string; identity_lines: string[]; identity_note: string;
+}
+export interface AccountHost { computer: ComputerId; name: string; label: string; online: boolean }
+export interface AccountsView {
+  hosts: AccountHost[]; accounts: Account[]; overview: Account[]; snapshot: boolean; loading: boolean;
+  pending: number; loaded_machines: number; busy: boolean; notices: string[]; no_hosts: string | null;
+  /** Accounts left out by the per-view bound. */
+  truncated: number;
+}
+export interface MachineRow { alias: string; enabled: boolean; source: string; inherited: boolean; hostname: string; user: string; port: number | null; identity_file: string; origin: string }
+export interface Effective { alias: string; pending: boolean; error: boolean; text: string; hostname: string; user: string; port: string; key: string }
+export interface CheckResult { alias: string; pending: boolean; error: boolean; text: string }
+export interface MachinesView {
+  loaded: boolean; refreshing: boolean; error: string | null; local: string; environment_override: boolean;
+  machines: MachineRow[]; effective: Effective | null; check: CheckResult | null; busy: boolean;
+}
+export interface Folder { id: string; name: string; path: string; computer: string; machine: string }
+export interface Project { id: string; name: string; color: string | null; accessible: boolean; is_default: boolean; palette: number; folders: Folder[] }
+export interface ProjectsView {
+  loaded: boolean; refreshing: boolean; status: string; status_error: boolean; conflicts: number;
+  unconnected: string[]; notice: string | null; projects: Project[];
+}
+
+export const emptyAccounts = (notices: string[] = []): AccountsView => ({
+  hosts: [], accounts: [], overview: [], snapshot: notices.length > 0, loading: false, pending: 0, loaded_machines: 0, busy: false, notices, no_hosts: null, truncated: 0,
+});
+export const emptyMachines = (error: string | null = null): MachinesView => ({
+  loaded: false, refreshing: false, error, local: "", environment_override: false, machines: [], effective: null, check: null, busy: false,
+});
+export const emptyProjects = (status = ""): ProjectsView => ({
+  loaded: false, refreshing: false, status, status_error: status !== "", conflicts: 0, unconnected: [], notice: null, projects: [],
+});

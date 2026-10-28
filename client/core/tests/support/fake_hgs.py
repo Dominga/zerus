@@ -23,7 +23,11 @@ When the steps run out the process exits 0 (EOF on stdout). Every invocation,
 control line and EOF is appended to `log.ndjson` with its time.
 
 `hgs [@alias] swarm get` prints `swarm-get.json` beside this script, which a
-test may rewrite; without it the call exits 2.
+test may rewrite; without it the call exits 2. For polling tests, `hgs [@alias]
+ls --json` prints `ls-<alias or local>.json`, and `hgs [@alias] inspect NAME
+--after N [--skip-processes]` prints `inspect-<alias or local>.json` with only
+the events after N (the newest 100 for 0) and `cursor` at the newest event;
+without the file either call exits 2.
 """
 import json
 import os
@@ -149,6 +153,28 @@ def main():
         return 0
     if args == ["watch", "--json"]:
         return watch(host, spec, config)
+    reply = os.path.join(HERE, "%s-" + (host or "local") + ".json")
+    if args == ["ls", "--json"]:
+        if not os.path.exists(reply % "ls"):
+            return 2
+        with open(reply % "ls", encoding="utf-8") as handle:
+            sys.stdout.write(handle.read())
+        return 0
+    if args and args[0] == "inspect":
+        if not os.path.exists(reply % "inspect"):
+            return 2
+        with open(reply % "inspect", encoding="utf-8") as handle:
+            data = json.load(handle)
+        after = int(args[args.index("--after") + 1]) if "--after" in args else 0
+        events = data.get("events", [])
+        newest = max([event.get("seq", 0) for event in events] + [0])
+        data["events"] = [event for event in events if event.get("seq", 0) > after][-100:]
+        data["cursor"] = newest
+        if "--skip-processes" in args:
+            data.pop("processes", None)
+            data.pop("process_work", None)
+        sys.stdout.write(json.dumps(data))
+        return 0
     if args == ["swarm", "get"]:
         path = os.path.join(HERE, "swarm-get.json")
         if not os.path.exists(path):

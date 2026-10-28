@@ -14,7 +14,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::identity::Platform;
@@ -684,9 +684,17 @@ pub enum Claim {
     Failed(String),
 }
 
-/// The claimed socket, kept in the app state until the app exits. Holding
-/// it is its use until the exit hook takes it out.
-pub struct InstanceState(#[allow(dead_code)] pub Mutex<Option<Listening>>);
+/// The claimed socket, kept in the app state until the app exits.
+pub struct InstanceState(pub Mutex<Option<Listening>>);
+
+impl InstanceState {
+    /// The exit hook's last step: the socket goes, unless another instance
+    /// replaced it. Tauri never drops its managed state, so this is the only
+    /// place the file is removed.
+    pub fn release(&self) {
+        drop(self.0.lock().unwrap_or_else(PoisonError::into_inner).take());
+    }
+}
 
 /// Takes the single-instance socket named `name`, or hands `activation` to
 /// the instance that holds it.
@@ -1252,8 +1260,11 @@ mod tests {
             0o600,
             "only this user may connect"
         );
-        drop(first.listening);
+        // The exit hook's path: the app state hands the socket back.
+        let state = InstanceState(Mutex::new(Some(first.listening)));
+        state.release();
         assert!(!paths.socket.exists(), "quitting removes the socket");
+        state.release();
     }
 
     #[test]
@@ -1267,7 +1278,7 @@ mod tests {
         };
         fs::remove_file(&paths.socket).unwrap();
         let _replacement = UnixListener::bind(&paths.socket).unwrap();
-        drop(first.listening);
+        InstanceState(Mutex::new(Some(first.listening))).release();
         assert!(paths.socket.exists(), "the replacement's socket stays");
     }
 

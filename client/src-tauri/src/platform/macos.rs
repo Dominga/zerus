@@ -448,3 +448,13 @@ pub fn bundle_identifier() -> Option<String> {
         .bundleIdentifier()
         .map(|id| id.to_string())
 }
+
+/// LaunchServices gives an app's main thread this QoS; the LaunchAgent does
+/// not, and its `ProcessType Interactive` only lifts the clamp
+/// (`tray/src/main.cpp:256-263`). Call on the main thread.
+pub fn raise_main_thread_qos() {
+    // SAFETY: changes the calling thread's own QoS class.
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0)
+    };
+}

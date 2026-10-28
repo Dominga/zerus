@@ -20,8 +20,6 @@ impl Options {
     /// Whether the window opens: the switch bundle follows Qt's
     /// `AppConfig::opensSessions` on macOS (only `--sessions`); other builds
     /// keep opening their window unless started with `--background`.
-    // Only the Linux and macOS single instance asks it so far.
-    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
     pub fn opens_sessions(&self, switch: bool) -> bool {
         self.sessions || (!switch && !self.background)
     }

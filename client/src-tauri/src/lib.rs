@@ -13,6 +13,7 @@ mod display;
 mod identity;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod instance;
+mod lifecycle;
 mod metrics;
 mod platform;
 #[cfg(feature = "live")]
@@ -21,6 +22,8 @@ mod pump;
 mod replay;
 #[cfg(feature = "live")]
 mod screens;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod signals;
 
 use tauri::{AppHandle, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
@@ -36,6 +39,8 @@ pub(crate) static PROCESS_TREE: std::sync::RwLock<()> = std::sync::RwLock::new((
 /// What `run` settled before the app starts.
 pub struct Startup {
     pub identity: identity::Identity,
+    /// Started with `--sessions`, or a build that opens its window by default.
+    pub opens_sessions: bool,
     /// The claimed single-instance socket and the activations it receives.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub instance: Option<instance::Claimed>,
@@ -74,11 +79,12 @@ pub fn run() {
     }
     let context = tauri::generate_context!();
     let identity = identity::current(&context.config().identifier);
+    let opens_sessions = options.opens_sessions(identity.is_switch());
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let instance = match identity.instance_name(identity::flag("ZERUS_CLIENT_SINGLE_INSTANCE")) {
         None => None,
         Some(name) => {
-            let activation = if options.opens_sessions(identity.is_switch()) {
+            let activation = if opens_sessions {
                 instance::Activation::Sessions
             } else {
                 instance::Activation::Show
@@ -96,10 +102,13 @@ pub fn run() {
             }
         }
     };
+    #[cfg(target_os = "macos")]
+    platform::macos::raise_main_thread_qos();
     launch(
         context,
         Startup {
             identity,
+            opens_sessions,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             instance,
         },
@@ -115,9 +124,13 @@ pub(crate) fn data_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
     app.state::<identity::Identity>().data_dir_now()
 }
 
-/// Builds the app and runs its event loop until the last window closes.
+/// Builds the app and runs its event loop. A build with a menu-bar item
+/// starts hidden unless asked for the window, and runs until it quits.
 fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
     let identity = startup.identity;
+    let opens_sessions = startup.opens_sessions;
+    // Only the macOS build has a menu-bar item in this phase; Linux keeps Qt.
+    let menu_bar = cfg!(target_os = "macos");
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let (listening, activations) = match startup.instance {
         Some(claimed) => (Some(claimed.listening), Some(claimed.activations)),
@@ -125,10 +138,16 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
     };
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
-        .manage(commands::AppState::default());
+        .manage(commands::AppState::default())
+        .manage(lifecycle::Lifecycle { menu_bar });
+    // tao activates the app when it finishes launching, taking the focus from
+    // the app in front; a menu-bar build activates only to show its window.
+    #[cfg(target_os = "macos")]
+    let builder = builder.activate_ignoring_other_apps(!menu_bar);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let builder = builder.manage(instance::InstanceState(std::sync::Mutex::new(listening)));
-    builder
+    #[allow(unused_mut)]
+    let mut app = builder
         .invoke_handler(handler())
         .setup(move |app| {
             use tauri::Manager;
@@ -143,33 +162,74 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(actions::Actions::new(dir.join(actions::marks_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
                 app.manage(screens::Screens::tauri(app.handle().clone(), pump));
+                if menu_bar {
+                    app.state::<commands::AppState>().start_source()?;
+                }
             }
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            if let Some(activations) = activations {
-                // Task 3 shows the window on `sessions`.
-                std::thread::spawn(move || {
-                    for activation in activations {
-                        eprintln!("zerus-client: activation {activation:?}");
-                    }
-                });
+            {
+                if let Some(activations) = activations {
+                    forward_activations(app.handle().clone(), activations);
+                }
+                let handle = app.handle().clone();
+                signals::install(move |signal| {
+                    eprintln!("zerus-client: quitting on signal {signal}");
+                    handle.exit(0);
+                })?;
             }
             let display = display::display_name();
             if !display::headless_allowed(std::env::var("ZERUS_CLIENT_HEADLESS").is_ok_and(|v| v == "1"), display.as_deref()) {
                 eprintln!("zerus-client: ZERUS_CLIENT_HEADLESS=1 but the display is {display:?}, not an X server; no window opens (set GDK_BACKEND=x11)");
                 std::process::exit(3);
             }
-            let window = create_main_window(app.handle())?;
-            // An unattended measurement needs frames: keep its window in front
-            // and focused for the run, which ends by exiting the app.
-            if std::env::var("ZERUS_CLIENT_PERF").is_ok_and(|mode| mode == "auto") {
-                if let Err(error) = window.set_always_on_top(true).and_then(|()| window.set_focus()) {
-                    eprintln!("zerus-client perf: could not bring the window to the front: {error}");
+            if lifecycle::window_at_start(opens_sessions, menu_bar) {
+                let window = lifecycle::show_main(app.handle())?;
+                // An unattended measurement needs frames: keep its window in front
+                // and focused for the run, which ends by exiting the app.
+                if std::env::var("ZERUS_CLIENT_PERF").is_ok_and(|mode| mode == "auto") {
+                    if let Err(error) = window.set_always_on_top(true).and_then(|()| window.set_focus()) {
+                        eprintln!("zerus-client perf: could not bring the window to the front: {error}");
+                    }
                 }
             }
+            lifecycle::sync_policy(app.handle());
             Ok(())
         })
-        .run(context)
+        .build(context)
         .expect("Zerus Next failed to start");
+    #[cfg(target_os = "macos")]
+    lifecycle::prepare(
+        &mut app,
+        lifecycle::window_at_start(opens_sessions, menu_bar),
+    );
+    app.run(|app, event| {
+        lifecycle::on_event(app, &event);
+    });
+}
+
+/// A `sessions` line from a later start opens and raises the window; `show`
+/// changes nothing visible (`main.cpp:424-433`).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn forward_activations(
+    app: tauri::AppHandle,
+    activations: std::sync::mpsc::Receiver<instance::Activation>,
+) {
+    std::thread::Builder::new()
+        .name("zerus-client-activations".into())
+        .spawn(move || {
+            for activation in activations {
+                eprintln!("zerus-client: activation {activation:?}");
+                if activation == instance::Activation::Sessions {
+                    let target = app.clone();
+                    let _ = app.run_on_main_thread(move || {
+                        if let Err(error) = lifecycle::show_main(&target) {
+                            eprintln!("zerus-client: could not open the window: {error}");
+                        }
+                    });
+                }
+            }
+        })
+        .expect("the activation thread starts");
 }
 
 /// The commands the frontend may call. The session actions need the core's

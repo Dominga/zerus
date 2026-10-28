@@ -67,6 +67,9 @@ fn found(name: &str) -> bool {
     gst::ElementFactory::find(name).is_some()
 }
 
+/// How long stopping may take to finish the file before it is refused.
+const FINISH_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn encoder(choices: &[(&'static str, &'static str)]) -> Option<&'static str> {
     choices
         .iter()
@@ -651,7 +654,9 @@ fn record(
     }
     let _ = audio.end_of_stream();
     pipeline.send_event(gst::event::Eos::new());
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // A loaded machine may need a while to encode what is queued and write
+    // the file; the window shows Preparing meanwhile.
+    let deadline = Instant::now() + FINISH_TIMEOUT;
     let mut ended = false;
     while !ended && Instant::now() < deadline {
         if let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) {
@@ -669,12 +674,20 @@ fn record(
         }
     }
     teardown(&pipeline);
+    // Every refusal shows Qt's one text; the log says which check it was.
+    let invalid = |why: String| {
+        eprintln!("zerus-client-media: video recording refused: {why}");
+        super::INVALID.to_owned()
+    };
     if !ended {
-        return Err(super::INVALID.into());
+        return Err(invalid(format!(
+            "the file was not finished within {} s",
+            FINISH_TIMEOUT.as_secs()
+        )));
     }
-    let mp4 = std::fs::read(&path).map_err(|_| super::INVALID.to_owned())?;
+    let mp4 = std::fs::read(&path).map_err(|error| invalid(format!("cannot read it: {error}")))?;
     if mp4.len() as u64 > MAX_BYTES {
-        return Err(super::INVALID.into());
+        return Err(invalid(format!("{} bytes", mp4.len())));
     }
     let pcm = session.into_pcm();
     let poster = last_poster.and_then(|rgb| poster(posters(&rgb)));
@@ -686,7 +699,16 @@ fn record(
         pcm.len(),
         poster.as_deref(),
     )
-    .map_err(str::to_owned)?;
+    .map_err(|error| {
+        if error == super::INVALID {
+            invalid(format!(
+                "{duration_ms} ms at {}x{}",
+                camera.width, camera.height
+            ))
+        } else {
+            error.to_owned()
+        }
+    })?;
     events(VideoEvent::Completed { pcm, mp4, meta });
     drop(folder);
     Ok(())

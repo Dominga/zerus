@@ -1,0 +1,4 @@
+{"id":"claude-work","provider":"claude","label":"Work","home":"/home/example/.config/hgs/accounts/claude-work","host":"workstation","status":"ok","auth_status":"signed_in","source":"oauth","checked_at":1793000300,
+ "identity":{"email":"person@example.com","name":"Example Person","plan":"max","organization":"","auth_method":"oauth","account_id":"acct-1"},
+ "windows":[{"id":"five_hour","label":"","used_percent":12.0,"window_minutes":300,"resets_at":"2026-10-26T09:00:00Z"},{"id":"seven_day","label":"","used_percent":40.0,"window_minutes":10080,"resets_at":1793400000},{"id":"seven_day_sonnet","label":"Sonnet","used_percent":5.0,"window_minutes":10080,"resets_at":1793400000}],
+ "balances":[],"credits":{"balance":"12.5","unlimited":false}}

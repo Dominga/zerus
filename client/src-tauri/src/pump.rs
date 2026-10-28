@@ -9,6 +9,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use zerus_client_core::views::FleetEntry;
 use zerus_client_core::{
     Batch, Change, Coalescer, ComputerId, ComputerStatus, MachineMeta, OrganizationUpdate, ViewRow,
 };
@@ -65,6 +66,35 @@ impl Pump {
         inner.dirty = true;
         drop(inner);
         self.0 .1.notify_all();
+    }
+
+    /// The fleet as the screens see it: every computer whose status has not
+    /// ended, this computer first (the mirror is keyed by the id's string,
+    /// and "" sorts first), with its machine card's host, platform and the
+    /// control-console fields. Without a card a computer keeps local sessions.
+    pub fn fleet(&self) -> Vec<FleetEntry> {
+        let inner = self.lock();
+        inner
+            .mirror
+            .computers
+            .iter()
+            .filter_map(|(computer, rows)| {
+                let status = rows.status?;
+                if status == ComputerStatus::Ended {
+                    return None;
+                }
+                let machine = rows.machine.as_ref();
+                Some(FleetEntry {
+                    computer: ComputerId(computer.clone()),
+                    status: status.name().to_owned(),
+                    attempt: status.attempt(),
+                    local_sessions: machine.and_then(|m| m.local_sessions).unwrap_or(true),
+                    local_host: machine.is_some_and(|m| m.local_host.is_some()),
+                    host: machine.and_then(|m| m.host.clone()),
+                    platform: machine.and_then(|m| m.platform.clone()),
+                })
+            })
+            .collect()
     }
 
     /// Drains a change sink on its own thread until every sender is gone.
@@ -281,6 +311,47 @@ mod tests {
             .collect();
         assert_eq!(keys, ["run:b", "run:c"]);
         assert_eq!(batch.computers[0].status, "live");
+    }
+
+    #[test]
+    fn the_fleet_lists_unended_computers_with_their_cards_this_computer_first() {
+        let pump = Pump::default();
+        for (computer, status) in [
+            ("studio", ComputerStatus::Reconnecting { attempt: 2 }),
+            ("", ComputerStatus::Live),
+            ("old", ComputerStatus::Ended),
+        ] {
+            pump.push(Change::Computer {
+                computer: ComputerId(computer.into()),
+                status,
+            });
+        }
+        let card = MachineMeta {
+            host: Some("workstation".into()),
+            platform: Some("windows".into()),
+            local_sessions: Some(false),
+            local_host: Some(zerus_client_core::machine::LocalHost::default()),
+            ..MachineMeta::default()
+        };
+        pump.push(Change::Machine {
+            computer: ComputerId(String::new()),
+            machine: card,
+        });
+        let fleet = pump.fleet();
+        let rows: Vec<(&str, &str, u32)> = fleet
+            .iter()
+            .map(|e| (e.computer.0.as_str(), e.status.as_str(), e.attempt))
+            .collect();
+        assert_eq!(rows, [("", "live", 0), ("studio", "reconnecting", 2)]);
+        assert!(!fleet[0].local_sessions && fleet[0].local_host);
+        assert_eq!(
+            (fleet[0].host.as_deref(), fleet[0].platform.as_deref()),
+            (Some("workstation"), Some("windows"))
+        );
+        assert!(
+            fleet[1].local_sessions && fleet[1].host.is_none(),
+            "no card yet: local sessions assumed"
+        );
     }
 
     fn machine(computer: &str, cpu: f64) -> Change {

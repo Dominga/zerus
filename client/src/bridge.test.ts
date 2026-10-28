@@ -37,6 +37,19 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 const batch = (key: string): Batch => ({ ...emptyBatch(), removes: [{ computer: "", key, reason: null }] });
 
 describe("pump", () => {
+  it("keeps machine cards and counts a batch of only cards as content", async () => {
+    const src = source();
+    const h = host();
+    const got: Batch[] = [];
+    pump(src.s, (b) => got.push(b), h.h);
+    src.answer({ machines: [{ computer: "", machine: { host: "workstation" } }] } as unknown as Batch);
+    await settle();
+    h.runFrames();
+    expect(got).toHaveLength(1);
+    expect(got[0].machines).toHaveLength(1);
+    expect(got[0].upserts).toEqual([]);
+  });
+
   it("applies a batch in the next frame and asks again only after it", async () => {
     const src = source();
     const page = host();

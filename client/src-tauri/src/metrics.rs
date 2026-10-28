@@ -742,6 +742,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn own_process_tree_reports_rss_cpu_and_children() {
+        let _tree = crate::PROCESS_TREE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut child = std::process::Command::new("sleep")
             .arg("5")
             .spawn()
@@ -791,6 +794,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn own_process_tree_on_macos() {
+        let _tree = crate::PROCESS_TREE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let value = process_tree_metrics_over(std::process::id(), Duration::from_millis(100));
         assert_eq!(value["source"], "proc_pidinfo", "{value}");
         assert!(value["total"]["rss_bytes"].as_u64().unwrap() > 0, "{value}");

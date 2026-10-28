@@ -9,6 +9,10 @@ import { snapshotOf, terminateCopy, type ActionRow } from "./sessions/actions-ui
 import type { Action, Outcome } from "../types";
 import { inTauri, metrics, pumpStats } from "../bridge";
 import { restoreSettings, setSetting } from "../store/settings";
+import { setPage, type Page } from "../store/ui";
+import { accountsPage } from "../store/accounts";
+import { machinesPage } from "../store/machines";
+import { projectsPage } from "../store/projects";
 import type { ScenarioResult } from "../perf/scenarios";
 
 // The measurement panel (src/perf), loaded on demand: `?perf=1` in the window
@@ -324,6 +328,37 @@ async function actionsSmoke(allowed: boolean) {
   }
 }
 
+// `?screens-smoke=1` (ZERUS_CLIENT_QUERY=screens-smoke=1, in the environment
+// the actions smoke needs) shows Overview, Machines, Accounts and Projects in
+// turn on the replay catalog with a fake hgs answering the reads. It waits
+// until each view loaded, logs "screens-smoke <screen>: shown", holds the page
+// 3 s (for a screenshot) and exits 0, or 1 when a view did not load in 30 s.
+async function screensSmoke(allowed: boolean) {
+  const exit = (code: number) => invoke("exit_app", { code }).catch(() => {});
+  if (!allowed) {
+    log("screens-smoke not started: it needs ZERUS_CLIENT_REPLAY, ZERUS_CLIENT_HGS and ZERUS_CLIENT_PERF");
+    return;
+  }
+  const steps: [Page, string, () => boolean][] = [
+    ["dashboard", "overview", () => accountsPage().snapshot && accountsPage().overview.length > 0],
+    ["machines", "machines", () => machinesPage().loaded],
+    ["accounts", "accounts", () => accountsPage().snapshot && accountsPage().pending === 0],
+    ["projects", "projects", () => projectsPage().loaded],
+  ];
+  try {
+    for (const [target, name, ready] of steps) {
+      setPage(target);
+      await until(ready, 30_000, `${name} did not load`);
+      log(`screens-smoke ${name}: shown`);
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+    await exit(0);
+  } catch (error) {
+    log(`screens-smoke failed: ${String(error)}`);
+    await exit(1);
+  }
+}
+
 const onScenarioStart = (id: string, index: number, total: number) => log(`scenario ${index + 1}/${total} ${id} start`);
 const onScenarioEnd = (id: string, index: number, total: number, ms: number, result: ScenarioResult) => {
   finished.push(result);
@@ -347,6 +382,7 @@ export function PerfHost() {
       if (native) setConfig({ ...native, mode: native.mode ?? urlMode });
     }
     if (new URLSearchParams(location.search).get("actions-smoke") === "1" && inTauri()) void actionsSmoke(!!config().actions_smoke);
+    if (new URLSearchParams(location.search).get("screens-smoke") === "1" && inTauri()) void screensSmoke(!!config().actions_smoke);
     if (config().mode === "auto") {
       setOpen(true);
       void autoRun(config());

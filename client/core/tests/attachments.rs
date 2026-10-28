@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use zerus_client_core::attachments::{
-    cached_at, prepare, read_file, read_stored, store_at, Attachment, StoredFile,
+    cached_at, prepare, prune, read_file, read_stored, store_at, touch, Attachment, StoredFile,
     MAX_ATTACHMENT_BYTES,
 };
 
@@ -58,11 +58,18 @@ fn copies_are_content_addressed_private_and_reused() {
         assert_eq!(mode(&root.join(HELLO_SHA256)), 0o700);
         assert_eq!(mode(&path), 0o600);
     }
-    // An identical copy is reused as it is.
-    let modified = fs::metadata(&path).unwrap().modified().unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    // An identical copy is reused, not rewritten (it is only marked used).
+    #[cfg(unix)]
+    let inode = {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(&path).unwrap().ino()
+    };
     assert_eq!(store_at(&root, "notes: v1.txt", b"hello").unwrap(), path);
-    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+    }
     // A damaged copy is replaced; no temporary file stays behind.
     fs::write(&path, b"HELLO").unwrap();
     assert_eq!(store_at(&root, "notes: v1.txt", b"hello").unwrap(), path);
@@ -198,4 +205,37 @@ fn chosen_files_are_read_with_qt_texts() {
             assert_eq!(error, "Cannot read locked.txt: Permission denied");
         }
     }
+}
+
+#[test]
+fn the_cache_drops_its_least_recently_used_copies_but_never_a_pinned_one() {
+    let scratch = Scratch::new("prune");
+    let root = scratch.0.join("cache");
+    let mut paths = Vec::new();
+    for index in 0..5u8 {
+        paths.push(store_at(&root, &format!("{index}.bin"), &vec![index + 1; 1000]).unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    // The oldest is pinned (open for preview); the second is used again.
+    touch(&paths[1]);
+    let pinned = fs::canonicalize(&paths[0]).unwrap();
+    let report = prune(&root, 2500, |path| {
+        fs::canonicalize(path).is_ok_and(|path| path == pinned)
+    });
+    assert_eq!(report.removed, 3);
+    assert_eq!(report.bytes, 2000);
+    assert!(paths[0].exists(), "pinned");
+    assert!(paths[1].exists(), "recently used");
+    for path in &paths[2..4] {
+        assert!(
+            !path.exists() && !path.parent().unwrap().exists(),
+            "evicted with its folder"
+        );
+    }
+    assert!(!paths[4].exists());
+    // Under the limit nothing goes; nothing but digest folders is touched.
+    fs::write(root.join("stray.txt"), vec![0; 10_000]).unwrap();
+    assert_eq!(prune(&root, 1500, |_| false).removed, 1, "the older copy");
+    assert!(root.join("stray.txt").exists());
+    assert_eq!(prune(&root, 1_000_000, |_| false).removed, 0);
 }

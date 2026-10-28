@@ -1,7 +1,9 @@
 """On macOS: switch, client update and rollback with ad-hoc signed fake
 bundles (com.example.zerus-switch-test) in a fake HOME. lsregister is replaced
 by /usr/bin/true and `defaults` by a fixture, so neither LaunchServices nor a
-real settings domain changes. No GUI runs: every update takes the stopped path."""
+real settings domain changes. No GUI runs: quitting, starting and waiting are
+recorded stand-ins, so launchd and the real com.hgdev.hgs-tray agent are never
+reached, while codesign checks every copy for real."""
 import importlib.util
 import json
 import os
@@ -41,11 +43,16 @@ class MacSwitch(unittest.TestCase):
             patcher = mock.patch.object(updater, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
-        # The live path would quit and start the real com.hgdev.hgs-tray agent.
-        def refuse(*args):
-            raise AssertionError('the live path must not run in this test')
-        for name, value in {'gui_pids': lambda installed: [], 'quit_gui': refuse, 'start': refuse,
-                            'stop_started': refuse}.items():
+        # Stand-ins for everything that would reach launchd or a running GUI.
+        self.calls = []
+        for name, value in {'gui_pids': lambda installed: [100] if installed.exists() else [],
+                            'quit_gui': lambda pid, installed: self.calls.append('quit'),
+                            'start': lambda installed: self.calls.append(('start', self.variant(installed))),
+                            'wait_started': lambda installed, path, old: 200,
+                            'stop_started': lambda installed: self.calls.append('stop'),
+                            'socket_path': lambda pid: None, 'native': dict,
+                            'running_image_matches': lambda pid, installed: True,
+                            'provenance': lambda *args: None}.items():
             patcher = mock.patch.object(updater, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -70,7 +77,9 @@ class MacSwitch(unittest.TestCase):
         return json.loads(subprocess.check_output([str(updater.executable(path)), '--build-info']))['versionName']
 
     def test_switch_client_update_and_rollback(self):
+        # Nothing is installed yet, so nothing runs: Qt is installed without a start.
         self.assertEqual(updater.update(self.bundle('qt', 'qt'), self.installed), 0)
+        self.assertEqual(self.calls, [])
         self.assertEqual(updater.update(self.bundle('client-1', 'tauri'), self.installed), 0)
         slot = updater.ROLLBACK / 'hgs-tray.app'
         self.assertEqual((self.variant(self.installed), self.variant(slot)), ('client-1', 'qt'))
@@ -82,6 +91,9 @@ class MacSwitch(unittest.TestCase):
         self.assertEqual(updater.roll_back_installed(self.installed), 0)
         self.assertEqual((self.variant(self.installed), self.variant(slot)), ('qt', 'client-2'))
         subprocess.run(['codesign', '--verify', '--deep', '--strict', str(self.installed)], check=True)
+        subprocess.run(['codesign', '--verify', '--deep', '--strict', str(slot)], check=True)
+        self.assertEqual(self.calls, ['quit', ('start', 'client-1'), 'quit', ('start', 'client-2'), 'quit', ('start', 'qt')])
+        self.assertEqual(list(self.installed.parent.glob('.hgs-tray-*')), [], 'nothing kept: every start was verified')
 
 
 if __name__ == '__main__':

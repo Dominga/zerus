@@ -211,13 +211,27 @@ class TrayUpdate(unittest.TestCase):
         self.assertEqual(self.leftovers(), [])
 
     def test_stopped_gui_is_replaced_without_starting_it(self):
+        # Nothing verifies a GUI that is not started: the rollback copy stays,
+        # and the replaced GUI is kept where the update says.
+        slot = self.home / '.local/share/hgs/desktop-previous/hgs-tray'
+        self.build('zero', slot)
         self.build('first', self.installed)
         result = self.update(self.build('second'))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("'second'", self.installed.read_text())
-        self.assertIn("'first'", (self.home / '.local/share/hgs/desktop-previous/hgs-tray').read_text())
+        self.assertIn("'zero'", slot.read_text())
+        [kept] = self.installed.parent.glob('.hgs-tray-kept-*/previous/hgs-tray')
+        self.assertIn("'first'", kept.read_text())
+        self.assertIn(f'the replaced GUI is kept in {kept}', result.stdout)
         self.assertFalse((self.root / 'systemctl').exists())
         self.assertEqual(self.running(), [])
+        # A later update reports it and never removes it.
+        os.utime(kept.parents[1], (time.time() - 7200,) * 2)
+        result = self.update(self.build('third'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f'earlier updates kept these copies; remove them once Zerus runs as it should: {kept.parents[1]}',
+                      result.stdout)
+        self.assertIn("'first'", kept.read_text())
 
     def test_update_removes_only_old_unused_leftover_folders(self):
         folder = self.installed.parent
@@ -238,7 +252,9 @@ class TrayUpdate(unittest.TestCase):
         leftover('.zerus-0.41.Abm', ['previous/hgs-tray', 'previous/hgs_state.py'])
         leftover('.hgs-tray-update-interrupted', ['hgs-tray'])
         kept = [leftover('.zerus-notes', ['notes.txt']), leftover('.zerus-recent', age=0),
-                leftover('.zerus-deep', ['a/b/hgs-tray']), leftover('.other-stage')]
+                leftover('.zerus-deep', ['a/b/hgs-tray']), leftover('.other-stage'),
+                # An interrupted update's set-aside GUI may be the only copy.
+                leftover('.hgs-tray-update-set-aside', ['previous/hgs-tray'])]
         running = leftover('.zerus-running', ['hgs-tray'])
         self.script(running / 'hgs-tray', f'#!{sys.executable}\nimport time\ntime.sleep(60)\n')
         os.utime(running, (time.time() - 7200,) * 2)
@@ -248,10 +264,13 @@ class TrayUpdate(unittest.TestCase):
         self.build('first', self.installed)
         result = self.update(self.build('second'))
         self.assertEqual(result.returncode, 0, result.stderr)
+        # The stopped update keeps the GUI it replaced: nothing verified the new one.
+        [stopped] = [p.name for p in folder.iterdir() if p.name.startswith('.hgs-tray-kept-')]
         self.assertEqual(sorted(p.name for p in folder.iterdir() if p.name.startswith('.')),
-                         sorted([p.name for p in kept] + ['.zerus-running', '.zerus-link']))
+                         sorted([p.name for p in kept] + ['.zerus-running', '.zerus-link', stopped]))
         self.assertIn('removed 4 leftover folders', result.stdout)
         self.assertIn('.zerus-notes: it holds files other than installer copies', result.stdout)
+        self.assertIn('.hgs-tray-update-set-aside: it holds files other than installer copies', result.stdout)
         self.assertIn('.zerus-running: a process still uses it', result.stdout)
         self.assertTrue((self.root / 'builds').exists())
 

@@ -8,16 +8,21 @@
 
 tray/install.sh runs this whenever its build differs from the installed GUI.
 
-1. Copy the build into a unique folder beside the installed GUI; the folder is
-   removed on every outcome.
+1. Copy the build into a unique folder beside the installed GUI.
 2. If the installed GUI is running, quit it the way its Quit action does:
    SIGTERM when the process handles it (current builds flush drafts on that
    signal), otherwise the tray menu over D-Bus on Linux or the quit event on
    macOS. A GUI that does not quit keeps running and nothing is replaced.
-3. Keep exactly one rollback copy (~/.local/share/hgs/desktop-previous) and move
-   the new GUI into place. Once the Tauri client replaced the Qt GUI, Qt stays
-   that one rollback copy; `--rollback` reinstalls the copy through the same
-   steps.
+3. Move the installed GUI aside into that folder and the new GUI into place.
+   No GUI is deleted, and the one rollback copy
+   (~/.local/share/hgs/desktop-previous) does not change, until the new GUI
+   was verified running. Then the replaced GUI becomes the rollback copy, or,
+   once the Tauri client replaced the Qt GUI, goes while Qt stays that copy.
+   A failure or interrupt restores the replaced GUI or keeps it in a
+   .hgs-tray-kept-* folder and prints where; so does an update of a GUI that
+   is not running, which starts nothing. `--rollback` reinstalls the rollback
+   copy through the same steps. Links at the installed path, the rollback
+   folder or its copy are refused.
 4. Start a GUI that was running through its service manager and wait for its
    single-instance socket; a new GUI that does not start is replaced by the
    previous one again. Then confirm the running image, the unchanged nonempty
@@ -43,6 +48,7 @@ waits for the old GUI to quit and the new one to start.
 """
 import argparse
 import datetime
+import errno
 import hashlib
 import json
 import os
@@ -71,7 +77,10 @@ UNIT = 'hgs-tray.service'
 NATIVE = {'codex', 'claude', 'kimi', 'dsh', 'node', 'codex-code-mode'}
 # Hidden folders that earlier hand-made updates (and an interrupted run of this
 # one) left beside the installed GUI, and the installer copies they may hold.
-LEGACY = ('.zerus-', '.hgs-tray-update-')
+UPDATE_PREFIX = '.hgs-tray-update-'
+LEGACY = ('.zerus-', UPDATE_PREFIX)
+# An update folder that keeps a replaced GUI: never removed automatically.
+KEPT_PREFIX = '.hgs-tray-kept-'
 LEGACY_FILES = {'hgs-tray', 'hgs', 'hgs_state.py'}
 LEGACY_AGE = 3600
 # Slow machines may allow longer; the defaults match the verified manual updates.
@@ -372,10 +381,11 @@ def bundle_kind(bundle):
 
 
 def keeps_slot(installed_kind, slot_kind, new_kind):
-    """Whether the one rollback copy stays. Once it holds Qt and the client
-    replaces itself, Qt stays the switch's rollback target; the replaced
-    client waits only for this update's own restore."""
-    return installed_kind == 'tauri' and slot_kind == 'qt' and new_kind == 'tauri'
+    """Whether the one rollback copy stays. Once it holds Qt, it stays the
+    switch's rollback target while the client replaces anything but Qt
+    itself: a client, an incomplete bundle or nothing. The replaced client
+    waits only for this update's own restore."""
+    return slot_kind == 'qt' and new_kind == 'tauri' and installed_kind != 'qt'
 
 
 def client_drafts_root(identifier):
@@ -517,7 +527,8 @@ def legacy_copies(folder):
             if MAC and name == 'hgs-tray.app':
                 copies.append(path)
                 dirs.remove(name)
-            elif depth >= 1:
+            elif depth >= 1 or (name == 'previous' and folder.name.startswith(UPDATE_PREFIX)):
+                # This updater's set-aside GUI may be the only copy of it.
                 return None
         for name in files:
             path = base / name
@@ -577,66 +588,142 @@ def sweep(parent, current):
 
 # --- the update ---------------------------------------------------------------
 
+def refuse_links(installed):
+    """Never follow a link at the installed path, the rollback folder or its slot."""
+    for path in (installed, ROLLBACK, ROLLBACK / installed.name):
+        if path.is_symlink():
+            raise UpdateError(f'{path} is a symbolic link; nothing was replaced')
+
+
 def rollback_dir():
     """The private folder of the one rollback copy and the Qt settings copy."""
+    if ROLLBACK.is_symlink():
+        raise UpdateError(f'{ROLLBACK} is a symbolic link; nothing was replaced')
     ROLLBACK.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(ROLLBACK, 0o700)
     return ROLLBACK
 
 
-def replace(stage, installed, aside=None):
-    """Move the stage into place; return where the replaced GUI went, None when
-    nothing was installed. The replaced GUI becomes the one rollback copy, or,
-    with `aside`, waits there only for this update's own restore. The slot
-    changes only when there is a GUI to put in it."""
-    previous = None
+def put_back(installed, previous, new):
+    """Move the GUI at the installed path to `new` and `previous` back into place."""
     if installed.exists() or installed.is_symlink():
-        if aside is None:
-            previous = rollback_dir() / installed.name
-            if previous.exists() or previous.is_symlink():
-                remove(previous)
-        else:
-            aside.mkdir(parents=True, exist_ok=True)
-            previous = aside / installed.name
-    try:
-        if previous is not None:
-            shutil.move(str(installed), str(previous))
-        os.rename(stage, installed)
-    except BaseException:
-        # Refused or interrupted: the replaced GUI goes back where it was.
-        if previous is not None and previous.exists() and not installed.exists():
-            shutil.move(str(previous), str(installed))
-        raise
-    if previous is not None:
-        unregister(previous)
-    if MAC:
-        run(['codesign', '--verify', '--deep', '--strict', installed])
-        register(installed)
-    return previous
-
-
-def roll_back(installed, previous):
-    if previous is None or not previous.exists():
-        return False
-    stop_started(installed)
-    remove(installed)
-    shutil.move(str(previous), str(installed))
+        new.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(installed, new)
+    os.rename(previous, installed)
     register(installed)
-    return True
+
+
+def swap_in(stage, installed, aside):
+    """Move the installed GUI to `aside` and the stage into place, registered.
+    Nothing is deleted and the rollback copy does not change; on any failure
+    or interrupt the replaced GUI moves back."""
+    present = installed.exists()
+    if present:
+        aside.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(installed, aside)
+    try:
+        os.rename(stage, installed)
+        if MAC:
+            run(['codesign', '--verify', '--deep', '--strict', installed])
+            register(installed)
+        if present:
+            unregister(aside)
+    except BaseException:
+        if present and aside.exists():
+            put_back(installed, aside, stage)
+        raise
 
 
 def take_slot(previous):
-    """Once a rollback's GUI runs, the GUI it replaced becomes the one rollback
-    copy, unregistered. Until then the slot keeps the copy it installed from."""
+    """After a verified start, the replaced GUI becomes the one rollback copy,
+    unregistered. The old copy leaves the slot only once the new one is in it;
+    an interrupted step puts the old copy back and says where the new one is."""
     slot = rollback_dir() / previous.name
-    incoming = slot.with_name(f'.{slot.name}.incoming')
-    if incoming.exists() or incoming.is_symlink():
-        remove(incoming)
-    shutil.move(str(previous), str(incoming))
-    if slot.exists() or slot.is_symlink():
-        remove(slot)
-    os.rename(incoming, slot)
+    incoming = Path(tempfile.mkdtemp(prefix='.incoming-', dir=ROLLBACK)) / previous.name
+    replaced = None
+    try:
+        try:
+            os.rename(previous, incoming)
+        except OSError as error:
+            if error.errno != errno.EXDEV:
+                raise
+            # Another file system: the original goes once the copy is in the slot.
+            if previous.is_dir():
+                shutil.copytree(previous, incoming, symlinks=True)
+            else:
+                shutil.copy2(previous, incoming)
+        if slot.exists():
+            replaced = Path(tempfile.mkdtemp(prefix='.replaced-', dir=ROLLBACK)) / slot.name
+            os.rename(slot, replaced)
+        os.rename(incoming, slot)
+    except BaseException:
+        if replaced is not None and replaced.exists() and not slot.exists():
+            os.rename(replaced, slot)
+        where = [str(path) for path in (incoming, previous) if path.exists()]
+        say(f'the rollback copy {slot} did not change; the replaced GUI is kept in {" and ".join(where)}')
+        raise
+    incoming.parent.rmdir()
     unregister(slot)
+    if previous.exists():
+        remove(previous)
+    if replaced is not None:
+        shutil.rmtree(replaced.parent)
+
+
+def settle(previous, keep):
+    """Only after the new GUI was verified running: the GUI it replaced becomes
+    the rollback copy, or goes when the slot keeps Qt (a superseded client) or
+    when it was no complete bundle. Says which."""
+    if previous is None:
+        return 'nothing was installed before'
+    if MAC and bundle_kind(previous) is None:
+        remove(previous)
+        return 'the incomplete bundle that was installed (no Info.plist identity) was removed'
+    if keep:
+        remove(previous)
+        return f'the Qt GUI stays the rollback copy in {ROLLBACK}'
+    take_slot(previous)
+    return f'the replaced GUI is the rollback copy in {ROLLBACK}'
+
+
+def keep_aside(folder, aside):
+    """An update folder that still holds the replaced GUI is kept, renamed so
+    that sweep() never removes it; any other is removed, since it holds only
+    copies of the build. Returns the kept GUI's path, or None."""
+    if not (aside.exists() or aside.is_symlink()):
+        shutil.rmtree(folder)
+        return None
+    kept = folder.with_name(KEPT_PREFIX + folder.name[len(UPDATE_PREFIX):])
+    try:
+        os.rename(folder, kept)
+    except BaseException:
+        # sweep() keeps a folder with a set-aside GUI under its own name too.
+        return aside
+    return kept / aside.relative_to(folder)
+
+
+def report_kept(installed):
+    """Copies that earlier updates kept for recovery: listed, never removed."""
+    kept = sorted(installed.parent.glob(KEPT_PREFIX + '*')) if installed.parent.is_dir() else []
+    if ROLLBACK.is_dir() and not ROLLBACK.is_symlink():
+        kept += sorted(path for path in ROLLBACK.iterdir()
+                       if path.name.startswith(('.incoming-', '.replaced-')) and path.is_dir() and any(path.iterdir()))
+    if kept:
+        say(f'earlier updates kept these copies; remove them once Zerus runs as it should: {", ".join(map(str, kept))}')
+
+
+def recovery(installed, expected, verified, kept):
+    """Where things are after an update that did not finish."""
+    try:
+        holds = 'new' if digest(executable(installed)) == expected else 'previous'
+    except OSError:
+        holds = None
+    parts = [{None: f'nothing complete is installed at {installed}',
+              'previous': f'{installed} keeps the previous GUI',
+              'new': f'{installed} holds the new GUI' + ('' if verified else ', not verified running')}[holds]]
+    if kept:
+        parts.append(f'the replaced GUI is kept in {kept}; to put it back, quit Zerus and move it to {installed}')
+    return 'not finished: ' + '; '.join(parts)
 
 
 def installed_build_info(installed):
@@ -650,7 +737,8 @@ def installed_build_info(installed):
 # The rule as docs/reference.md states it ("Installation, configuration and
 # diagnostics"); a test keeps the two equal.
 DEV_GUARD = ('A numbered Dev installation is replaced only by a numbered Dev build or by a local preview build: '
-             'configure tray/build with -DZERUS_DEV_BUILD_NUMBER=N, the CI sequence of the main push the build comes from, '
+             'configure tray/build with -DZERUS_DEV_BUILD_NUMBER=N, or build the Tauri client with '
+             'ZERUS_DEV_BUILD_NUMBER=N in its environment, N being the CI sequence of the main push the build comes from, '
              'or build an owner-requested branch preview with ZERUS_LOCAL_PREVIEW_LABEL.')
 
 
@@ -719,8 +807,7 @@ def save_settings_snapshot():
     exported = export_settings()
     if exported is None:
         raise UpdateError(f'cannot read the {PREFERENCES} settings to keep a copy; nothing was replaced')
-    SETTINGS_SNAPSHOT.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(SETTINGS_SNAPSHOT.parent, 0o700)
+    rollback_dir()
     fd, temporary = tempfile.mkstemp(dir=SETTINGS_SNAPSHOT.parent, prefix=f'.{SETTINGS_SNAPSHOT.name}.')
     with os.fdopen(fd, 'wb') as f:
         f.write(exported[0])
@@ -736,7 +823,13 @@ def settings_report(before_qt=False):
     exported = export_settings()
     if exported is None:
         return [f'cannot read the {PREFERENCES} settings to compare them with {SETTINGS_SNAPSHOT}'], []
-    changed, added, cocoa = settings_changes(plistlib.loads(SETTINGS_SNAPSHOT.read_bytes()), exported[1])
+    try:
+        kept = plistlib.loads(SETTINGS_SNAPSHOT.read_bytes())
+    except (OSError, ValueError) as error:
+        kept = error
+    if not isinstance(kept, dict):
+        return [f'cannot read the copy of the Qt settings {SETTINGS_SNAPSHOT} ({kept})'], []
+    changed, added, cocoa = settings_changes(kept, exported[1])
     problems = []
     if changed:
         problems.append(f'Qt settings changed or missing: {", ".join(changed)} (the copy is {SETTINGS_SNAPSHOT})')
@@ -750,14 +843,13 @@ def settings_report(before_qt=False):
 
 def update(built, installed, rollback=False):
     built, installed = built.resolve(), installed.absolute()
+    refuse_links(installed)
     info = build_info(built)
     slot = ROLLBACK / installed.name
     new_info = bundle_info(built) if MAC else {}
     old_info = bundle_info(installed) if MAC else {}
     old_kind = bundle_kind(installed) if MAC else None
     new_kind = bundle_kind(built) if MAC else None
-    # A rollback installs from the slot, which it leaves alone until the copy runs.
-    slot_kind = bundle_kind(slot) if MAC and not rollback else None
     if not rollback and installed.exists():
         refusal = numbered_refusal(installed_build_info(installed), info)
         if refusal:
@@ -768,25 +860,22 @@ def update(built, installed, rollback=False):
     # restore them); a client checks them once it runs.
     to_qt = MAC and old_kind == 'tauri' and new_kind == 'qt'
     to_client = MAC and new_kind == 'tauri'
-    keep = keeps_slot(old_kind, slot_kind, new_kind)
+    # A rollback installs from the slot, whose copy stays until the new GUI runs.
+    keep = not rollback and keeps_slot(old_kind, bundle_kind(slot) if MAC else None, new_kind)
     roots = draft_roots(old_info, new_info)
-    if MAC:
-        run(['codesign', '--verify', '--deep', '--strict', built])
+    name = info.get('versionName', info['version'])
+    report_kept(installed)
     installed.parent.mkdir(parents=True, exist_ok=True)
-    folder = Path(tempfile.mkdtemp(prefix='.hgs-tray-update-', dir=installed.parent))
-    # The replaced GUI waits in this update's folder while the slot must stay:
-    # Qt across a client update, or the copy a rollback installs from.
-    aside = folder / 'previous' if keep or rollback else None
-    saved = None
-    if keep:
-        kept = f'the Qt GUI stays the rollback copy in {ROLLBACK}'
-    elif rollback:
-        kept = f'the replaced GUI is the rollback copy in {ROLLBACK}'
-    else:
-        kept = f'previous GUI kept in {ROLLBACK}'
+    folder = Path(tempfile.mkdtemp(prefix=UPDATE_PREFIX, dir=installed.parent))
+    stage = folder / installed.name
+    # The replaced GUI waits here until the new one was verified running; only
+    # then may it leave (settle()). A failure or interrupt keeps or restores it.
+    aside = folder / 'previous' / installed.name
+    saved = expected = None
+    verified = done = False
     try:
-        stage = folder / installed.name
         if MAC:
+            run(['codesign', '--verify', '--deep', '--strict', built])
             shutil.copytree(built, stage, symlinks=True)
             run(['codesign', '--verify', '--deep', '--strict', stage])
         else:
@@ -797,49 +886,64 @@ def update(built, installed, rollback=False):
         if len(pids) > 1:
             raise UpdateError(f'several copies of Zerus are running ({pids}); quit them, then run the installer again')
         if not pids:
-            early = settings_report(before_qt=True) if to_qt else ([], [])
+            early = settings_report(before_qt=True)[0] if to_qt else []
             if switching:
                 save_settings_snapshot()
-            previous = replace(stage, installed, aside)
-            if rollback and previous is not None:
-                take_slot(previous)
-            name = info.get('versionName', info['version'])
-            say(f'replaced the stopped GUI with {name}; {kept}' if previous is not None
-                else f'installed {name}; nothing was installed before')
+            swap_in(stage, installed, aside)
+            # Nothing starts the new GUI, so nothing verifies it: the rollback
+            # copy stays and the replaced GUI is kept.
+            kept = keep_aside(folder, aside)
+            done = True
+            say(f'installed {name} without starting it; ' + (
+                f'the rollback copy did not change and the replaced GUI is kept in {kept}' if kept
+                else 'nothing was installed before'))
             sweep(installed.parent, folder)
-            if early[0]:
-                raise UpdateError('the new GUI is installed, but ' + '; '.join(early[0]))
+            if early:
+                raise UpdateError('the new GUI is installed, but ' + '; '.join(early))
             return 0
         pid = pids[0]
         path, before = socket_path(pid), native()
         say(f'quitting Zerus (pid {pid}) so it saves its drafts')
         quit_gui(pid, installed)
         try:
-            early = settings_report(before_qt=True) if to_qt else ([], [])
+            early = settings_report(before_qt=True)[0] if to_qt else []
             SNAPSHOTS.mkdir(mode=0o700, parents=True, exist_ok=True)
             saved = Path(tempfile.mkdtemp(prefix='drafts-', dir=SNAPSHOTS))
             os.rmdir(saved)
             snapshot(saved, roots)
             if switching:
                 save_settings_snapshot()
-            previous = replace(stage, installed, aside)
-        except (OSError, subprocess.CalledProcessError, UpdateError) as error:
-            # The previous GUI is still installed: bring it back before reporting.
-            start(installed)
+            swap_in(stage, installed, aside)
+        except Exception as error:
+            # swap_in() moved the previous GUI back if it had moved it.
+            try:
+                start(installed)
+            except Exception as again:
+                raise UpdateError(f'{error}; the previous GUI did not start again: {again}') from None
             raise UpdateError(f'{error}; the previous GUI was started again') from None
         installed_at = now()
-        start(installed)
-        new = wait_started(installed, path, pid)
+        try:
+            start(installed)
+            new = wait_started(installed, path, pid)
+            failure = ''
+        except Exception as error:
+            new, failure = None, f' ({error})'
         if new is None:
-            restored = roll_back(installed, previous)
-            if restored:
+            stop_started(installed)
+            if not aside.exists():
+                raise UpdateError('the new GUI did not start' + failure)
+            put_back(installed, aside, folder / 'new' / installed.name)
+            try:
                 start(installed)
                 wait_started(installed, path, pid)
-            raise UpdateError('the new GUI did not start' + ('; the previous GUI was restored and started'
-                                                             if restored else ''))
-        if rollback and previous is not None:
-            take_slot(previous)
-        problems = list(early[0])
+            except Exception as error:
+                raise UpdateError(f'the new GUI did not start{failure}; the previous GUI was restored '
+                                  f'but did not start: {error}') from None
+            raise UpdateError(f'the new GUI did not start{failure}; the previous GUI was restored and started')
+        verified = True
+        settled = settle(aside if aside.exists() else None, keep)
+        done = True
+        problems = list(early)
         if digest(executable(installed)) != expected or not running_image_matches(new, installed):
             problems.append('the running image is not the new build')
         preserved, draft_problems = changed_drafts(saved, roots)
@@ -860,30 +964,31 @@ def update(built, installed, rollback=False):
         shutil.rmtree(saved)
         saved = None
         sweep(installed.parent, folder)
-        say(f'Zerus {info.get("versionName", info["version"])} runs as pid {new}; {preserved} nonempty drafts kept, '
-            f'{retained} native processes untouched; {kept}')
+        say(f'Zerus {name} runs as pid {new}; {preserved} nonempty drafts kept, '
+            f'{retained} native processes untouched; {settled}')
         return 0
     except UpdateError:
         if saved is not None and saved.exists():
             say(f'drafts saved when Zerus quit remain in {saved}')
         raise
     finally:
-        if folder.exists():
-            if installed.exists() or installed.is_symlink():
-                shutil.rmtree(folder)
-            else:
-                # Interrupted between the moves: its copies may be the only ones left.
-                say(f'nothing is installed at {installed}; {folder} keeps the copies of this update')
+        kept = None
+        try:
+            if folder.exists():
+                kept = keep_aside(folder, aside)
+        finally:
+            if not done:
+                say(recovery(installed, expected, verified, kept))
+            elif kept:
+                say(f'the replaced GUI is kept in {kept}')
 
 
 def roll_back_installed(installed):
     """Reinstall the one rollback copy (after the switch: the last Qt GUI)
     through the same quit, snapshot, start and verification as an update."""
     installed = installed.absolute()
+    refuse_links(installed)
     previous = ROLLBACK / installed.name
-    for path in (previous, installed):
-        if path.is_symlink():
-            raise UpdateError(f'{path} is a symbolic link; nothing was replaced')
     if not previous.exists():
         raise UpdateError(f'there is no rollback copy in {ROLLBACK}; nothing was replaced')
     say(f'reinstalling the rollback copy {previous}')
@@ -904,7 +1009,7 @@ def main():
         if args.live and not args.check:
             chosen = []
         elif args.installed_gui and len(chosen) == 1 and not args.paths:
-            print(gui_kind(bundle_info(args.installed_gui)) if args.installed_gui.exists() else 'none')
+            print(bundle_kind(args.installed_gui) or 'none')
             return 0
         elif args.rollback and len(chosen) == 1 and not args.paths:
             return roll_back_installed(args.rollback)

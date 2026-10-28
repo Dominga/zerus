@@ -3413,9 +3413,14 @@ restarts native agents, tmux servers or DeepSeek hosts. A changed build replaces
 running Zerus through `tray/update-installed.py`, the only supported live update:
 Zerus quits as its Quit action does, so drafts are saved, then starts again through
 systemd or launchd. Do not stage GUI copies in `~/Applications` or `~/.local/bin` by
-hand. The update keeps one rollback copy in `~/.local/share/hgs/desktop-previous`,
-restores it when the new GUI does not start, and confirms the running image,
-unchanged nonempty drafts and native agent and tmux processes. It records the
+hand. The GUI it replaces stays aside until the new one was verified running and
+only then becomes the one rollback copy in `~/.local/share/hgs/desktop-previous`;
+a new GUI that does not start is replaced by it again. An interrupted update, or
+one that replaces a GUI that is not running and so starts nothing, keeps the
+replaced GUI in a `.hgs-tray-kept-*` folder beside the installed one and prints
+where; later updates list such folders and never remove them. Links at the
+installed path or in the rollback folder are refused. The update confirms the
+running image, unchanged nonempty drafts and native agent and tmux processes. It records the
 installed builds in `~/.local/share/hgs/build-provenance.json`, then removes hidden
 `.zerus-*` staging folders left beside the GUI by earlier hand-made updates once
 they are an hour old, hold only installer copies and no process uses them. A
@@ -3429,8 +3434,9 @@ The installer refuses to put an unnumbered build over a numbered Dev
 installation (AGENTS.md), right after its build and before it changes anything,
 for the live update and `HGS_TRAY_RESTART=0` alike. A numbered Dev installation is
 replaced only by a numbered Dev build or by a local preview build: configure
-`tray/build` with `-DZERUS_DEV_BUILD_NUMBER=N`, the CI sequence of the main push
-the build comes from, or build an owner-requested branch preview with
+`tray/build` with `-DZERUS_DEV_BUILD_NUMBER=N`, or build the Tauri client with
+`ZERUS_DEV_BUILD_NUMBER=N` in its environment, N being the CI sequence of the
+main push the build comes from, or build an owner-requested branch preview with
 `ZERUS_LOCAL_PREVIEW_LABEL`. The label is at most 32 lowercase letters and
 digits in hyphen-separated words; it needs a clean Git checkout and no Dev
 number, and the build shows as `DEV_VERSION-preview.LABEL.COMMIT`. The Qt GUI

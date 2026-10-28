@@ -1109,6 +1109,9 @@ answered; a denial cannot carry an explanation.
     lead had to take it from the member's last message. A queued report must
     store its whole text or nothing, and a member must be able to replace a
     placeholder before the lead decides.
+  - `hgs team expect` from a DeepSeek member's sandbox is refused ("the sandbox
+    blocks the team store") instead of being queued in the member's folder like
+    a report, ask or commit, so a sandboxed member cannot declare a budget.
   - After the lead answers a permission with `hgs team answer`, the next
     question sync records the same question again as answered "by unknown":
     the answer leaves `pending` set. The answer clears it.

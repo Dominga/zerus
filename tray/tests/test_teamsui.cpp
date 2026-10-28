@@ -5869,6 +5869,7 @@ else:print('{}')
     const auto restore = qScopeGuard([] { TeamConversation::setPollInterval(2000); });
     HgsClient client(FakeCli::program(program));
     TeamConversation conversation(&client);
+    QSignalSpy inspections(&client, &HgsClient::inspectionReady);
     conversation.setSession({}, "claude/checkout/lead");
     conversation.resize(560, 420); conversation.show();
     auto *attach = conversation.findChild<QPushButton *>("teamConversationAttach");
@@ -5876,7 +5877,12 @@ else:print('{}')
     auto *input = conversation.findChild<QPlainTextEdit *>("teamConversationInput");
     auto *sendButton = conversation.findChild<QPushButton *>("teamConversationSend");
     QTRY_VERIFY(sendButton->isEnabled());
-    QTest::qWait(300);   // the first read of the session
+    // Sending needs the exact inspected identity, not merely an enabled button.
+    WAIT_VERIFY(std::any_of(inspections.cbegin(), inspections.cend(), [](const QList<QVariant> &reply) {
+        const auto detail = reply.at(2).toJsonObject();
+        return reply.at(0).toString().isEmpty() && reply.at(1).toString() == "claude/checkout/lead"
+            && detail["run_id"] == "run-1" && detail["conversation_id"] == "conv-1";
+    }));
     QImage image(8, 8, QImage::Format_ARGB32); image.fill(Qt::red);
     QGuiApplication::clipboard()->setImage(image);
     input->setFocus(); input->insertPlainText("Look at "); input->paste();

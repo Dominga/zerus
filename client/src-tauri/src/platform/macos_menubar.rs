@@ -67,7 +67,7 @@ pub fn install(app: &AppHandle, configured: Option<Rgb>) -> tauri::Result<()> {
         )
     };
     let first = tile_image(&face, colour);
-    let drawn = first.is_some().then(|| (face, colour));
+    let drawn = first.is_some().then_some((face, colour));
     TrayIconBuilder::with_id(TRAY)
         .icon(first.unwrap_or_else(blank))
         .icon_as_template(false)

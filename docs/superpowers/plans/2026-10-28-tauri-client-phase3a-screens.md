@@ -69,7 +69,7 @@ Every write keeps its place, label and Qt enablement shape but stays disabled wi
 >   - Machine label colours and styles and the project "vivid" style are not hgs data. 3a shows the defaults (a project's own `color`, else the palette slot by index) and persists no edits (3c).
 >   - "All swarm projects" works for the session without being saved.
 > - **This plan's own boundary choices:**
->   - `MachineMeta` (PR #391) gains `local_sessions` and `local_host`. The Overview, Accounts and Machines need the control-console flag and Qt's Windows session-host line, and `catalog.meta` is their only source.
+>   - `MachineMeta` carries `local_sessions` and `local_host`: the events session added them to PR #391 (e0ad51e3) at this plan's request, with the producer's types (`Host::listing_json`, `src/host/admin.rs`: `protocol` and `windows_session` numbers, `conpty` a string such as "bundled"). The Overview, Accounts and Machines need the control-console flag and Qt's Windows session-host line, and `catalog.meta` is their only source.
 >   - The Machines connection state line and summary are computed in the frontend from `Batch.computers`, with the same `connectionOf` table as the Overview. The Rust Machines view carries the `machine ls` rows and the resolve and check texts. A Rust state line would need a second, throttled push of stream state that the webview already holds.
 >   - The fleet the hub reads is `Pump::fleet()`: the pump's mirror of statuses and machine cards. It is the one source that covers live and replay alike.
 >   - Qt's middle-dot joins become parentheses or commas (the dots rule): "New sessions: opus (high)" and "API key, 2 accounts".
@@ -155,7 +155,6 @@ client/core/src/views/schedule.rs      Screen, Poll, the timing of AccountsState
                                        ensure_usage, dispatch, finish_usage, reading)
 client/core/src/views/machines.rs      MachinesState, MachineRow, Effective, CheckResult, MachinesView
 client/core/src/views/projects.rs      SwarmState, Project, Folder, ProjectsView, leaf()
-client/core/src/machine.rs             MachineMeta gains local_sessions and local_host (LocalHost)
 client/core/src/lib.rs                 pub mod views
 client/core/tests/fixtures/views/*.json   synthetic read replies for the view and hub tests
 client/core/tests/support/fake_hgs_reads.py  a reply may sleep (concurrency tests)
@@ -1567,13 +1566,12 @@ git commit -m "feat(client): usage windows and the accounts projection for the s
 
 ---
 
-### Task 2: Read timing, Machines and Projects views, and the console fields of `MachineMeta`
+### Task 2: Read timing, Machines and Projects views
 
 **Files:**
 - Create (replacing the Task 1 one-line stubs): `client/core/src/views/schedule.rs`, `client/core/src/views/machines.rs`, `client/core/src/views/projects.rs`
 - Create: `client/core/tests/fixtures/views/machines.json`, `resolve-studio.json`, `check-studio.json`, `swarm.json`, `swarm-old.json`
-- Modify: `client/core/src/machine.rs` (PR #391): `local_sessions`, `local_host`
-- Test: unit tests in the three new files and in `machine.rs`
+- Test: unit tests in the three new files. `MachineMeta.local_sessions` and `local_host` come with PR #391 (its test `a_control_console_and_its_windows_session_host_are_carried`); this task only consumes them.
 
 **Interfaces:**
 - Consumes: `AccountsState`, `CatalogSlot`, `UsageSlot`, `UsageRef` and the helpers of `views/mod.rs` (Task 1); `MachineMeta::project` (PR #391).
@@ -1611,9 +1609,10 @@ pub struct ProjectsView { loaded, refreshing, status, status_error, conflicts: u
 pub struct SwarmState { pub poll: Poll, /* last valid snapshot, status */ }   // Default polls every 5 s
 impl SwarmState { pub fn finish(&mut self, reply: Result<Value, String>); pub fn view(&self, peers: &[String]) -> ProjectsView }
 pub fn leaf(path: &str) -> String;
-// machine.rs
+// machine.rs (PR #391, consumed as is)
 pub struct MachineMeta { ..., pub local_sessions: Option<bool>, pub local_host: Option<LocalHost> }
-pub struct LocalHost { pub state, pub conpty, pub integrity, pub error: Option<String>, pub pid, pub windows_session: Option<u64> }
+pub struct LocalHost { pub state: Option<String>, pub pid: Option<u64>, pub protocol: Option<u64>, pub conpty: Option<String>,
+                       pub integrity: Option<String>, pub windows_session: Option<u64>, pub error: Option<String> }
 ```
 
 Rules:
@@ -1960,24 +1959,7 @@ fn an_older_hgs_or_a_failed_read_keeps_the_last_catalog() {
 }
 ```
 
-In `machine.rs`, a new test beside PR #391's:
-
-```rust
-#[test]
-fn a_control_console_and_its_session_host_project_to_the_card() {
-    let meta = json!({"host": "win-lab", "local_sessions": false,
-        "local_host": {"state": "running", "pid": 4120, "protocol": 1, "conpty": "2", "integrity": "Medium", "windows_session": 1},
-        "metrics": {"platform": "windows"}});
-    let machine = MachineMeta::project(&meta);
-    assert_eq!(machine.local_sessions, Some(false));
-    let host = machine.local_host.unwrap();
-    assert_eq!((host.state.as_deref(), host.pid, host.conpty.as_deref(), host.windows_session), (Some("running"), Some(4120), Some("2"), Some(1)));
-    assert_eq!(MachineMeta::project(&json!({"host": "workstation"})).local_sessions, None);
-    assert_eq!(MachineMeta::project(&json!({"local_host": "yes"})).local_host, None);
-}
-```
-
-- [ ] **Step 3: Run** `cargo +1.99.1 test --manifest-path client/core/Cargo.toml --target-dir target/client-core views:: machine::`. Expected: compile errors (`Poll`, `MachinesState`, `SwarmState`, `local_sessions` not found).
+- [ ] **Step 3: Run** `cargo +1.99.1 test --manifest-path client/core/Cargo.toml --target-dir target/client-core views::`. Expected: compile errors (`Poll`, `MachinesState`, `SwarmState` not found).
 
 - [ ] **Step 4: Implement.**
 
@@ -2629,54 +2611,14 @@ impl SwarmState {
 }
 ```
 
-In `client/core/src/machine.rs`, add to `MachineMeta` after `ok`:
-
-```rust
-    /// `local_sessions`: false only on a control console (the key is missing otherwise).
-    pub local_sessions: Option<bool>,
-    /// `local_host`: this Windows computer's session host.
-    pub local_host: Option<LocalHost>,
-```
-
-the struct after `Presence`:
-
-```rust
-/// This Windows computer's session host (`catalog.meta.local_host`), as
-/// MachinesPage reads it; Qt reads `conpty` and `integrity` as text.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct LocalHost {
-    pub state: Option<String>,
-    pub pid: Option<u64>,
-    pub conpty: Option<String>,
-    pub integrity: Option<String>,
-    pub windows_session: Option<u64>,
-    pub error: Option<String>,
-}
-```
-
-and in `MachineMeta::project`, after `ok: flag(meta, "ok"),`:
-
-```rust
-            local_sessions: flag(meta, "local_sessions"),
-            local_host: meta.get("local_host").filter(|host| host.is_object()).map(|host| LocalHost {
-                state: text(host, "state"),
-                pid: count(host, "pid"),
-                conpty: text(host, "conpty"),
-                integrity: text(host, "integrity"),
-                windows_session: count(host, "windows_session"),
-                error: text(host, "error"),
-            }),
-```
-
-PR #391's batch and pump tests build `MachineMeta { .., ..Default::default() }`, so they compile unchanged.
 
 - [ ] **Step 5: Run** the core tests, clippy and fmt as in Task 1 Step 5. Expected: PASS, no warnings.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add client/core/src/views client/core/src/machine.rs client/core/tests/fixtures/views
-git commit -m "feat(client): read timing, Machines and Projects views, console fields of the machine card"
+git add client/core/src/views client/core/tests/fixtures/views
+git commit -m "feat(client): read timing, Machines and Projects views"
 ```
 
 ---
@@ -3901,7 +3843,7 @@ export interface MachineMetrics {
   sampled_at: number | null;
 }
 /** This Windows computer's session host. */
-export interface LocalHost { state: string | null; pid: number | null; conpty: string | null; integrity: string | null; windows_session: number | null; error: string | null }
+export interface LocalHost { state: string | null; pid: number | null; protocol: number | null; conpty: string | null; integrity: string | null; windows_session: number | null; error: string | null }
 export interface MachineMeta {
   host: string | null;
   hgs_version: string | null;
@@ -5146,14 +5088,14 @@ describe("machines page", () => {
       origin: "This device runs Zerus. Add a remote machine to manage its agents over SSH.",
     });
     expect(localState(undefined, "workstation").name).toBe("workstation");
-    const host = { state: "running", pid: 4120, conpty: "2", integrity: "Medium", windows_session: 1, error: null };
+    const host = { state: "running", pid: 4120, protocol: 1, conpty: "bundled", integrity: "Medium", windows_session: 1, error: null };
     const console = localState(machineMeta("win-lab", {}, { platform: "windows", local_sessions: false, local_host: host }), "");
     expect(console).toMatchObject({
       console: true, canEnable: true, formHidden: true, line: "This computer: control console",
       origin: "This computer is a control console: agents run on the remote machines you add here, over SSH. Enable local sessions to run them on this computer too.",
-      sessionHost: "Session host: running, PID 4120, 2 ConPTY, Medium integrity, Windows session 1",
+      sessionHost: "Session host: running, PID 4120, bundled ConPTY, Medium integrity, Windows session 1",
     });
-    expect(sessionHostLine({ state: "not-installed", pid: null, conpty: null, integrity: null, windows_session: null, error: "access denied" }))
+    expect(sessionHostLine({ state: "not-installed", pid: null, protocol: null, conpty: null, integrity: null, windows_session: null, error: "access denied" }))
       .toBe("Session host: not installed: access denied");
   });
 

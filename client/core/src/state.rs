@@ -407,6 +407,10 @@ impl CatalogState {
         let Some(confirmed) = preferences.as_object() else {
             return Vec::new();
         };
+        // Qt's matchingSession (`FleetState.cpp:187-195`) also compares the
+        // archive and `created`; the action's target carries neither. A live
+        // row has no archive, and one run ID names one run, which has one
+        // `created`: the run check below covers them.
         let found = self.rows.iter_mut().find(|(_, row)| {
             row.name == target.name
                 && row.conversation_id.as_deref().unwrap_or("") == target.conversation_id
@@ -429,9 +433,12 @@ impl CatalogState {
             muted: confirmed.get("muted") == Some(&Value::Bool(true)),
             suppressed: confirmed.get("suppressed").cloned().unwrap_or(Value::Null),
         };
-        if incoming < current
-            || (incoming == current && row.notify.preferences.as_ref() != Some(&applied))
-        {
+        let same = row
+            .notify
+            .preferences
+            .as_ref()
+            .is_some_and(|kept| kept.same(&applied));
+        if incoming < current || (incoming == current && !same) {
             return Vec::new();
         }
         row.muted = applied.muted;
@@ -935,9 +942,11 @@ impl<'a> Before<'a> {
         if row.shared_notifications {
             let previous = old.notification_revision.unwrap_or(-1);
             let incoming = row.notification_revision.unwrap_or(-1);
-            if incoming > previous
-                || (incoming == previous && row.notify.preferences == old.notify.preferences)
-            {
+            let same = match (&row.notify.preferences, &old.notify.preferences) {
+                (Some(new), Some(old)) => new.same(old),
+                (new, old) => new == old,
+            };
+            if incoming > previous || (incoming == previous && same) {
                 return;
             }
             if incoming == previous {
@@ -1368,6 +1377,58 @@ mod tests {
             row_of(&other, "run:run").notify.optional_count,
             -1,
             "another conversation starts unknown"
+        );
+    }
+
+    #[test]
+    fn preferences_compare_numbers_by_value_as_qt_does() {
+        // QJsonObject ==: a baseline's 12 equals 12.0 (Qt 6 QJsonValue).
+        let peer = ComputerId::from("peer");
+        let main = |at: Value| json!({"run_id": "run", "phase": "approval", "request_id": "", "started_at": at});
+        let mut state = CatalogState::new();
+        state.apply(
+            &peer,
+            &snapshot(
+                1,
+                &[(
+                    "run:run",
+                    asking_row("run", "a", Some(preferences(true, 2, main(json!(12))))),
+                )],
+            ),
+        );
+        let listed = state.apply(
+            &peer,
+            &upsert(
+                2,
+                "run:run",
+                asking_row("run", "a", Some(preferences(true, 2, main(json!(12.0))))),
+            ),
+        );
+        assert_eq!(
+            row_of(&listed, "run:run").notification_error,
+            None,
+            "the same preferences, no conflict"
+        );
+        let target = crate::actions::Target {
+            computer: "peer".into(),
+            name: "codex/project/session".into(),
+            run_id: "run".into(),
+            conversation_id: "conversation".into(),
+        };
+        let again = state.apply_notification_preferences(
+            &peer,
+            &target,
+            &preferences(true, 2, main(json!(12))),
+        );
+        assert_eq!(again.len(), 1, "the same revision and value is accepted");
+        let other = state.apply_notification_preferences(
+            &peer,
+            &target,
+            &preferences(true, 2, main(json!(12.5))),
+        );
+        assert!(
+            other.is_empty(),
+            "another value of the same revision is not"
         );
     }
 

@@ -195,6 +195,35 @@ pub struct Preferences {
     pub suppressed: Value,
 }
 
+impl Preferences {
+    /// Equal as Qt compares preference objects (`QJsonObject ==`):
+    /// numbers by value, so a baseline's `12` equals `12.0`.
+    pub fn same(&self, other: &Preferences) -> bool {
+        self.muted == other.muted && json_equal(&self.suppressed, &other.suppressed)
+    }
+}
+
+/// Qt 6's `QJsonValue ==`: an integer and a double compare as doubles
+/// (`12 == 12.0`), two integers exactly; arrays and objects compare their
+/// members so.
+pub fn json_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => match (x.as_i64(), y.as_i64()) {
+            (Some(x), Some(y)) => x == y,
+            _ => x.as_f64() == y.as_f64(),
+        },
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(x, y)| json_equal(x, y))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .all(|(key, x)| y.get(key).is_some_and(|y| json_equal(x, y)))
+        }
+        _ => a == b,
+    }
+}
+
 fn text<'a>(row: &'a Value, field: &str) -> &'a str {
     row.get(field).and_then(Value::as_str).unwrap_or("")
 }
@@ -1319,6 +1348,29 @@ mod tests {
         );
         let older = row(&json!({"name": "x"})).notify;
         assert!(!older.optional_reported);
+    }
+
+    #[test]
+    fn json_equal_compares_numbers_as_qt_does() {
+        assert!(json_equal(
+            &json!({"a": [12, {"b": 1.0}]}),
+            &json!({"a": [12.0, {"b": 1}]})
+        ));
+        assert!(!json_equal(&json!({"a": 12}), &json!({"a": 12.5})));
+        assert!(!json_equal(&json!({"a": 12}), &json!({"a": 12, "b": null})));
+        assert!(!json_equal(&json!([1, 2]), &json!([1])));
+        assert!(!json_equal(&json!("12"), &json!(12)));
+        assert!(json_equal(
+            &json!(9_007_199_254_740_993_i64),
+            &json!(9_007_199_254_740_993_i64)
+        ));
+        assert!(
+            !json_equal(
+                &json!(9_007_199_254_740_993_i64),
+                &json!(9_007_199_254_740_992_i64)
+            ),
+            "integers exactly"
+        );
     }
 
     #[test]

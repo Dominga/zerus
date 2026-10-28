@@ -135,7 +135,7 @@ tar czf - -C "$here" --exclude='tray/build' --exclude='tray/.cache' \
   --exclude='client/node_modules' --exclude='client/dist' --exclude='client/*/target' \
   --exclude='client/src-tauri/gen' \
   tray client crates/watch-protocol/Cargo.toml crates/watch-protocol/src DEV_VERSION VERSION \
-  | ssh -o BatchMode=yes "$host" 'mkdir -p ~/.local/src/hgs && cd ~/.local/src/hgs && rm -rf client/src client/core/src client/media/src client/src-tauri/src crates/watch-protocol/src && tar xzf -'
+  | ssh -o BatchMode=yes "$host" 'mkdir -p ~/.local/src/hgs && cd ~/.local/src/hgs && rm -rf client/src client/core/src client/media/src client/src-tauri/src client/src-tauri/capabilities crates/watch-protocol/src && tar xzf -'
 # PATH неинтерактивного ssh на маке — без Homebrew; cmake/brew tray/install.sh ищет сам
 # (find_tool в его маковской ветке). Signing uses the Mac's existing keychain;
 # an optional exact identity selector travels as one literal environment value.

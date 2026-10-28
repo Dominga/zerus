@@ -97,8 +97,17 @@ sys.exit(subprocess.run(['sh', '-c', command], input=data).returncode)
         self.assertFalse((self.root / 'unexpected').exists())
 
     def test_the_client_sources_travel_and_the_gui_choice_is_forwarded(self):
+        # Source folders are replaced, so a file deleted upstream is not built in.
+        stale = self.home / '.local/src/hgs/client/src-tauri/capabilities/removed.json'
+        stale.parent.mkdir(parents=True)
+        stale.write_text('{}')
+        cache = self.home / '.local/src/hgs/client/src-tauri/target/kept'
+        cache.parent.mkdir(parents=True)
+        cache.write_text('build cache')
         result = self.run_install('fixture-mac', HGS_MAC_GUI='client')
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(stale.exists())
+        self.assertTrue(cache.exists())
         tray = [line.split() for line in (self.root / 'transport.log.tar').read_text().splitlines()
                 if 'tray' in line.split()]
         self.assertEqual(len(tray), 1)
@@ -188,13 +197,18 @@ class TrayInstallGui(unittest.TestCase):
             'uname': '#!/bin/sh\necho Darwin\n',
             'brew': '#!/bin/sh\necho /opt/fixture/qt\n',
             'cmake': f'#!/bin/sh\necho "cmake $*" >> "{self.log}"\nexit 3\n',
-            # npm ci succeeds; the build stops the installer before signing.
-            'npm': f'#!/bin/sh\necho "npm $*" >> "{self.log}"\n[ "$1" = ci ] && exit 0\nexit 3\n',
+            # npm ci succeeds; the build records its Cargo settings and stops the
+            # installer before signing.
+            'npm': f'#!/bin/sh\necho "npm $*" >> "{self.log}"\n[ "$1" = ci ] && exit 0\n'
+                   f'echo "$CARGO_TARGET_DIR $CARGO_BUILD_JOBS" > "{self.root}/cargo.env"\nexit 3\n',
         }.items():
             (tools / name).write_text(text)
             (tools / name).chmod(0o755)
         self.home = self.root / 'home'
-        self.env = dict(os.environ, HOME=str(self.home), PATH=str(tools) + os.pathsep + os.environ['PATH'])
+        # The caller's GUI choice and restart mode never reach these runs.
+        self.env = {k: v for k, v in os.environ.items()
+                    if not k.startswith('HGS_MAC_') and k not in ('HGS_TRAY_RESTART', 'CARGO_TARGET_DIR', 'CARGO_BUILD_JOBS')}
+        self.env.update(HOME=str(self.home), PATH=str(tools) + os.pathsep + os.environ['PATH'])
 
     def install(self, **settings):
         return subprocess.run(['bash', str(self.root / 'tray/install.sh')], env=dict(self.env, **settings),
@@ -208,6 +222,16 @@ class TrayInstallGui(unittest.TestCase):
         self.assertEqual(log, ['npm ci --no-audit --no-fund',
                                f'npm exec -- tauri build --config {config} --bundles app'])
         self.assertEqual(json.loads(config.read_text())['identifier'], 'com.hgdev.hgs-tray.local')
+        jobs = subprocess.run(['getconf', '_NPROCESSORS_ONLN'], capture_output=True, text=True).stdout.strip() or '4'
+        self.assertEqual((self.root / 'cargo.env').read_text().split(),
+                         [str(self.root / 'client/src-tauri/target'), jobs])
+
+    def test_the_bundle_is_built_where_the_installer_takes_it_from(self):
+        # A caller's CARGO_TARGET_DIR would leave an older Zerus.app to be installed.
+        result = self.install(HGS_MAC_GUI='client', CARGO_TARGET_DIR=str(self.root / 'elsewhere'), CARGO_BUILD_JOBS='2')
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertEqual((self.root / 'cargo.env').read_text().split(),
+                         [str(self.root / 'client/src-tauri/target'), '2'])
 
     def test_an_installed_client_stays_the_client_and_qt_stays_qt(self):
         app = self.home / 'Applications/hgs-tray.app/Contents'

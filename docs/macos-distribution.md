@@ -455,7 +455,7 @@ The client behaves as Qt does at the points other tools rely on:
 - **Notifications.** It posts Qt's attention notifications under the same identifiers (`zerus.attention.<token>`). Qt's saved `attention.observed` seeds the client's state once, so banners Qt delivered are withdrawn and stay clickable. Qt's update notices ("Zerus update available") are not ported yet (`zerus-5wmh.12.4`).
 - **Main-thread watchdog.** Qt's: a main thread silent for 30 s aborts the client, so launchd's `KeepAlive Crashed` restarts it, with a hold around sleep and dark wakes. The menu and modal panels do not stop its heartbeat.
 
-The client keeps its own data in `~/Library/Application Support/com.hgdev.hgs-tray/`: read marks, `attention-observed.json`, `menubar.json` and its drafts root, `drafts/`. It reads Qt's settings domain, `~/.config/hgs/tray.conf` and Qt's drafts, and never writes them. Its settings start at their defaults and its read marks start fresh, since the hosts' read state is authoritative; the one-time draft import (`zerus-5wmh.13.1`) copies Qt's drafts and the dev app's drafts into its drafts root, reading both read-only. AppKit writes its own keys into the shared defaults domain: the status item's position and visibility (`NSStatusItem …`) and, where used, window and panel state (`NSWindow Frame …`, `NSNav…`). The updater reports them after each client update.
+The client keeps its own data in `~/Library/Application Support/com.hgdev.hgs-tray/`: read marks, `attention-observed.json`, `menubar.json` and its drafts root, `drafts/`. It reads Qt's settings domain, `~/.config/hgs/tray.conf` and Qt's drafts, and never writes them. Its settings are seeded once, at its first start, from Qt's values (coordinator ruling: "Seed it once from Qt's values with Qt's types and defaults, and never write Qt's store"). The seed reads Qt's domain read-only through `defaults export`, records itself in `settings.json` (source, time, keys) and never runs again, so a later Qt edit is not imported. Three exceptions: the client's own `client/…` settings start at their defaults; the microphone (`speech/microphone`) must be chosen again, because Qt keeps a device id the client cannot use; and automatic approvals stay off, since Qt's choice is kept only as `automaticApprovals/qtEnabledAtSwitch` so the page can say Qt had them on (`zerus-5wmh.54`). Read marks start fresh, since the hosts' read state is authoritative; the one-time draft import (`zerus-5wmh.13.1`) copies Qt's drafts and the dev app's drafts into its drafts root, reading both read-only. AppKit writes its own keys into the shared defaults domain: the status item's position and visibility (`NSStatusItem …`) and, where used, window and panel state (`NSWindow Frame …`, `NSNav…`). The updater reports them after each client update.
 
 ### Building and installing
 
@@ -467,9 +467,9 @@ HGS_MAC_GUI=client bash tray/install.sh
 ```
 
 - **Choosing the GUI.** `HGS_MAC_GUI=client` chooses the client; later runs keep whichever GUI is installed (`HGS_MAC_GUI=qt` chooses Qt again). `mac-install.sh` ships the client sources and forwards `HGS_MAC_GUI`, but its tarball has no Git metadata and cannot make a numbered build.
-- **The build.** It needs npm and Rust 1.99.1 on the Mac. With the `media` feature present, the build enables it.
+- **The build.** It needs npm and Rust 1.99.1 on the Mac. With the `media` feature present, the build enables it. It always builds into `client/src-tauri/target`, whatever `CARGO_TARGET_DIR` says, since the installer takes the bundle from there, and the installer's job count bounds Cargo as it bounds the Qt build (`CARGO_BUILD_JOBS` overrides it).
 - **The updater at the switch.** `tray/update-installed.py`:
-  1. quits Qt with the Apple Event, so Qt saves its drafts;
+  1. quits Qt as its Quit action does, so Qt saves its drafts: SIGTERM, which current builds handle, or the quit Apple Event for an older one;
   2. snapshots Qt's drafts and the client's drafts root;
   3. exports Qt's settings with `defaults export com.hgdev.hgs-tray` to `~/.local/share/hgs/desktop-previous/com.hgdev.hgs-tray.plist`;
   4. sets Qt aside, removed from LaunchServices, and installs the client; the rollback folder does not change yet;
@@ -487,7 +487,7 @@ HGS_MAC_GUI=client bash tray/install.sh
 python3 tray/update-installed.py --rollback ~/Applications/hgs-tray.app
 ```
 
-The rollback reinstalls exactly the rollback copy through the same quit, snapshot, start and verification steps. After the switch, that copy is the last Qt bundle. It compares Qt's settings with the copy taken at the switch before Qt starts. If they differ, quit Zerus and run `defaults import com.hgdev.hgs-tray ~/.local/share/hgs/desktop-previous/com.hgdev.hgs-tray.plist`. Use `HGS_MAC_GUI=qt` on later installs to stay on Qt.
+The rollback reinstalls exactly the rollback copy through the same quit, snapshot, start and verification steps. After the switch, that copy is the last Qt bundle. It compares Qt's settings with the copy taken at the switch before Qt starts. If they differ, quit Zerus, run `defaults import com.hgdev.hgs-tray ~/.local/share/hgs/desktop-previous/com.hgdev.hgs-tray.plist`, then `launchctl kickstart gui/$(id -u)/com.hgdev.hgs-tray`, since KeepAlive Crashed does not restart a clean quit. The client then becomes the rollback copy. Drafts typed in the client after the switch stay in `~/Library/Application Support/com.hgdev.hgs-tray/drafts/`, where Qt does not see them. Use `HGS_MAC_GUI=qt` on later installs to stay on Qt.
 
 ### Privacy identity
 
@@ -503,18 +503,17 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
 
 **Before the merge (Task 7).** The numbered Dev guard also refuses unnumbered `tray/install.sh` and `mac-install.sh` runs over a numbered Dev install on arch and on the Mac, including `HGS_TRAY_RESTART=0`. Tell the events and menu-parity sessions before Task 7 reaches main: their ad hoc installs then need `ZERUS_DEV_BUILD_NUMBER` or a local preview label (`ZERUS_LOCAL_PREVIEW_LABEL`, `docs/reference.md`), both from a clean Git checkout. `mac-install.sh` ships a tarball without `.git`, so it can make neither; on a Mac with a numbered Dev install it then updates the CLI and stops at the GUI with the refusal.
 
-**What the switch does not carry over (coordinator ruling).** Settings start at their defaults and read marks start fresh; the hosts' read state stays authoritative. Qt's drafts and the dev app's drafts reach the client through its one-time import (`zerus-5wmh.13.1`) at its first start, which reads both stores read-only; step 7 checks its marker. In-app update notices are missing after the switch, accepted until `zerus-5wmh.12.4`; the coordinator rolls Dev out by hand meanwhile.
+**What the switch carries over (coordinator rulings).** Settings are seeded once from Qt's, read-only, except the client's own `client/…` settings (defaults), the microphone (chosen again) and automatic approvals (off; Qt's choice is only recorded). Read marks start fresh; the hosts' read state stays authoritative. Qt's drafts and the dev app's drafts reach the client through its one-time import (`zerus-5wmh.13.1`) at its first start, which reads both stores read-only; step 7 checks its marker. In-app update notices are missing after the switch, accepted until `zerus-5wmh.12.4`; the coordinator rolls Dev out by hand meanwhile.
 
 1. **Prepare the clean checkout** (no display). In the clean clone used for Dev rollouts:
    ```sh
    git fetch origin && git switch --detach SHA_OF_THAT_MAIN_PUSH
    export ZERUS_DEV_BUILD_NUMBER=N
    ```
-2. **Compare the privacy identity** (no display, Terminal). The installed app is read only through `codesign`, and the switch bundle is checked and signed in a scratch folder:
+2. **Compare the privacy identity** (no display, Terminal, in the clean clone of step 1). The installed app is read only through `codesign`, and the switch bundle is checked and signed in a scratch folder. The `$(…)` that adds the `media` feature splits into words in zsh and bash alike, where a variable would not in zsh:
    ```sh
-   cd client && npm ci --no-audit --no-fund
+   cd "$(git rev-parse --show-toplevel)/client" && npm ci --no-audit --no-fund
    python3 scripts/switch-config.py src-tauri/target/switch.conf.json
-   # Unquoted $(...) splits into words in zsh and bash alike; a variable would not in zsh.
    RUSTUP_TOOLCHAIN=1.99.1 npx tauri build --config src-tauri/target/switch.conf.json --bundles app \
      $(grep -q '^media = ' src-tauri/Cargo.toml && echo --features media)
    S="$(mktemp -d)"; ditto src-tauri/target/release/bundle/macos/Zerus.app "$S/hgs-tray.app"
@@ -523,7 +522,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    python3 ../tray/sign-local-macos.py "$S/hgs-tray.app" ~/Applications/hgs-tray.app
    codesign -d -r- ~/Applications/hgs-tray.app 2>&1 | grep designated
    codesign -d -r- "$S/hgs-tray.app" 2>&1 | grep designated
-   rm -rf "$S"
+   rm -rf "$S"; cd ..
    ```
    `sign-local-macos.py` must print "privacy identity matches the installed application". Report both `designated =>` lines to the owner privately; they contain the team. Equal requirements carry the TCC and Notification Center grants over. Different ones need the owner's decision, because the grants would be asked for again.
 3. **Check the socket path** (no display, read-only):
@@ -589,8 +588,9 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
 
    If `list-scroll` or `activity-scroll` fails the harness criteria, zerus-5wmh.36 joins the switch bar. Otherwise it stays after the switch (coordinator, 2026-10-28).
 5. **Agree the moment with the owner.** Qt flushes its drafts when it quits, but the owner should not be typing.
-6. **Switch** (Terminal). From the clean checkout, with `ZERUS_DEV_BUILD_NUMBER` still set, run only the GUI installer, not the CLI `install.sh`:
+6. **Switch** (Terminal). From the root of the clean clone, with `ZERUS_DEV_BUILD_NUMBER` still set, run only the GUI installer, not the CLI `install.sh`:
    ```sh
+   cd "$(git rev-parse --show-toplevel)"
    HGS_MAC_GUI=client bash tray/install.sh 2>&1 | tee ~/zerus-switch.log
    ```
    Expected lines:
@@ -605,7 +605,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    cat ~/.local/share/hgs/build-provenance.json
    launchctl print gui/$(id -u)/com.hgdev.hgs-tray | grep -E 'state =|program ='
    ls ~/.local/share/hgs/desktop-previous/
-   ls -d ~/Applications/.hgs-tray-kept-* 2>/dev/null
+   find ~/Applications -maxdepth 1 -name '.hgs-tray-kept-*'
    lsof -n -a -c hgs-tray -U -F n | grep '/hgs-tray$'
    python3 -c 'import json, pathlib; m = json.loads((pathlib.Path.home() / "Library/Application Support/com.hgdev.hgs-tray/drafts/.imported-v1.json").read_text()); print(m["version"], m["report"].get("unfinished"))'
    ```
@@ -614,20 +614,21 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    - the agent is running `~/Applications/hgs-tray.app/Contents/MacOS/hgs-tray`;
    - the rollback folder holds `hgs-tray.app` (Qt) and `com.hgdev.hgs-tray.plist`, and no `.hgs-tray-kept-*` folder exists;
    - the socket is at the path from step 3;
-   - the draft import marker, `<data dir>/drafts/.imported-v1.json` with the data directory `~/Library/Application Support/com.hgdev.hgs-tray`, prints `1 None`: version 1, with no `unfinished`. A missing marker or an `unfinished` list means the import runs again at the next start; report its line from `~/Library/Logs/hgs-tray.log` (`drafts import: …`).
+   - the draft import marker, `<data dir>/drafts/.imported-v1.json` with the data directory `~/Library/Application Support/com.hgdev.hgs-tray`, prints `1 None`: version 1, with no `unfinished`. The marker is written only once the import finished, so a missing one (the command fails) means it did not: it runs again at the next start; report its `drafts import: …` line from `~/Library/Logs/hgs-tray.log`.
 8. **Confirm** (**display**; the coordinator's job, done with the owner):
    - one menu-bar item;
    - notifications post without a new permission prompt (when step 2 matched);
    - a click on a banner Qt delivered before the switch opens its session;
    - a click while Zerus is not running: quit Zerus from its menu (launchd leaves a clean exit alone), then click one of its banners in Notification Center. Zerus starts and opens that session. If it starts but the session stays closed, the click that launched it was lost: the notification delegate is set during setup, and the fix is to set it in `applicationWillFinishLaunching` (Task 6); file a bead and tell webui. The instance the click started runs outside launchd, so quit it and run `launchctl kickstart gui/$(id -u)/com.hgdev.hgs-tray` to bring back the supervised one;
-   - the owner's sessions, drafts in Qt's store and settings are where they were. Qt drafts and the dev app's drafts appear in the client (the import of step 7); the client's own settings start at their defaults;
+   - the owner's sessions, and the drafts in Qt's store, are where they were; Qt drafts and the dev app's drafts appear in the client (the import of step 7);
+   - the settings seed: an ordinary Qt setting carried over (for example the theme in Settings > Appearance), automatic approvals are off, and Voice input asks for the microphone again;
    - after the Mac's next sleep and wake, `launchctl print gui/$(id -u)/com.hgdev.hgs-tray | grep 'pid ='` shows the same pid as before, and `~/Library/Logs/hgs-tray.log` has no `main thread unresponsive` line.
 9. **Later Dev rollouts.** Run the same `bash tray/install.sh` with the new `N` and without `HGS_MAC_GUI`. The installed client is kept, and Qt stays the rollback copy: there is no second slot. A new client that does not start is replaced by the client it replaced, automatically. The numbered Dev guard refuses a run without `ZERUS_DEV_BUILD_NUMBER` or a local preview label.
 10. **Rollback.** From the clean checkout, in Terminal:
     ```sh
     python3 tray/update-installed.py --rollback ~/Applications/hgs-tray.app
     ```
-    Qt comes back with its drafts, and the client moves into the rollback folder. If the updater reports changed Qt settings, quit Zerus and run `defaults import com.hgdev.hgs-tray ~/.local/share/hgs/desktop-previous/com.hgdev.hgs-tray.plist`. Use `HGS_MAC_GUI=qt` on later installs to stay on Qt, and file a bead for the cause. The Qt bundle stays the rollback copy until the owner retires Qt.
+    Qt comes back with its drafts, and the client moves into the rollback folder, so a second `--rollback` returns to the client. If the updater reports changed Qt settings, quit Zerus, run `defaults import com.hgdev.hgs-tray ~/.local/share/hgs/desktop-previous/com.hgdev.hgs-tray.plist`, then `launchctl kickstart gui/$(id -u)/com.hgdev.hgs-tray` (KeepAlive Crashed does not restart a clean quit). Drafts typed in the client after the switch stay in `~/Library/Application Support/com.hgdev.hgs-tray/drafts/`, where Qt does not see them. Use `HGS_MAC_GUI=qt` on later installs to stay on Qt, and file a bead for the cause.
 
 ## Mac App Store
 

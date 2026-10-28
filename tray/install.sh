@@ -74,6 +74,10 @@ if [ "${GUI}" = "client" ]; then
     NPM="$(find_tool npm)" || { echo "hgs-tray: npm not found (brew install node)" >&2; exit 1; }
     export PATH="${HOME}/.cargo/bin:$(dirname "${NPM}"):${PATH}"
     export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.99.1}"
+    # The bundle is taken from client/src-tauri/target below, whatever the caller's
+    # CARGO_TARGET_DIR; one JOBS bounds this build and the Qt one alike.
+    export CARGO_TARGET_DIR="${CLIENT_DIR}/src-tauri/target"
+    export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-${JOBS}}"
     (cd "${CLIENT_DIR}" && "${NPM}" ci --no-audit --no-fund)
     SWITCH_CONFIG="${CLIENT_DIR}/src-tauri/target/switch.conf.json"
     python3 "${CLIENT_DIR}/scripts/switch-config.py" "${SWITCH_CONFIG}"

@@ -461,5 +461,7 @@ Mac switch, 2026-10-28 (plan `docs/superpowers/plans/2026-10-28-tauri-client-mac
   update entries (no update controller yet, row 300); update notices follow in
   `zerus-5wmh.12.4`. The main-thread watchdog (row 297) is Qt's, and the status
   item is never updated while its menu is open.
-- The client's data directory follows the running bundle's identifier; settings
-  start at their defaults and read marks start fresh at the switch.
+- The client's data directory follows the running bundle's identifier. At the
+  switch its settings are seeded once, read-only, from Qt's (except the client's
+  own `client/` settings, the microphone and automatic approvals, which stay
+  off), and read marks start fresh.

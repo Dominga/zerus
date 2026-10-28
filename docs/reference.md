@@ -3425,6 +3425,21 @@ is closed from its tray menu, or the installer asks you to quit it first. Use
 `HGS_TRAY_RESTART=0 ./tray/install.sh` to stage a GUI update while keeping a running
 workspace and its unsaved drafts. The new UI starts on the next launch.
 
+The live update and `HGS_TRAY_RESTART=0` both refuse to put an unnumbered build
+over a numbered Dev installation (AGENTS.md). A numbered Dev installation is
+replaced only by a numbered Dev build or by a local preview build: set
+`ZERUS_DEV_BUILD_NUMBER` to the CI sequence of the main push the build comes
+from, or build an owner-requested branch preview with
+`ZERUS_LOCAL_PREVIEW_LABEL`. The label is at most 32 lowercase letters and
+digits in hyphen-separated words; it needs a clean Git checkout and no Dev
+number, and the build shows as `DEV_VERSION-preview.LABEL.COMMIT`. The Qt GUI
+reads it as a CMake cache variable (configure `tray/build` with
+`-DZERUS_DEV_BUILD_NUMBER= -DZERUS_LOCAL_PREVIEW_LABEL=task-board` before
+running `tray/install.sh`); the Tauri client reads the environment variable
+when it builds. Clear the label before building main again. On macOS, a switch
+between the Qt GUI and the Tauri client always takes the live update, never
+`HGS_TRAY_RESTART=0`.
+
 Linux installs the binary under `~/.local/bin`, a systemd user service under
 `~/.config/systemd/user` and a launcher under `~/.local/share/applications`.
 The launcher is not a second autostart entry. The service belongs to

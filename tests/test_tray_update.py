@@ -27,7 +27,7 @@ import json, os, pathlib, signal, socket, sys
 VARIANT = {variant!r}
 root = pathlib.Path(os.environ['TRAY_FIXTURE'])
 if sys.argv[1:] == ['--build-info']:
-    print(json.dumps({{'version': '0.42.0', 'versionName': VARIANT, 'devBuildNumber': 0,
+    print(json.dumps({{'version': '0.42.0', 'versionName': VARIANT, 'devBuildNumber': int(VARIANT[4:]) if VARIANT.startswith('dev-') else 0,
                       'sourceCommit': VARIANT.ljust(40, '0'), 'sourceDirty': False}}))
     sys.exit(0)
 if VARIANT == 'broken':
@@ -263,7 +263,7 @@ class TrayUpdate(unittest.TestCase):
         self.assertIn('kept: missing', result.stderr)
         [snapshot] = (self.home / '.local/state/hgs/desktop-update').iterdir()
         self.assertIn(str(snapshot), result.stdout)
-        self.assertEqual(json.loads((snapshot / 'kept/draft.json').read_text())['text'], 'unsent text')
+        self.assertEqual(json.loads((snapshot / 'qt/kept/draft.json').read_text())['text'], 'unsent text')
         self.assertEqual(snapshot.stat().st_mode & 0o777, 0o700)
 
     def installer(self, build, plugin=None):
@@ -309,6 +309,49 @@ class TrayUpdate(unittest.TestCase):
         self.assertNotIn('restart', calls)
         self.assertIn('--user enable --now hgs-tray.service', calls)
 
+
+    def rollback(self):
+        return subprocess.run([sys.executable, str(UPDATER), '--rollback', str(self.installed)], env=self.env,
+                              capture_output=True, text=True, timeout=60)
+
+    def test_rollback_reinstalls_the_kept_copy(self):
+        self.launch('first')
+        self.draft('kept', 'unsent text')
+        result = self.update(self.build('second'))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.rollback()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('reinstalling the rollback copy', result.stdout)
+        self.assertEqual([variant for variant, _ in self.running()], ['first'])
+        self.assertIn("'first'", self.installed.read_text())
+        self.assertIn("'second'", (self.home / '.local/share/hgs/desktop-previous/hgs-tray').read_text())
+        self.assertEqual(json.loads((self.drafts / 'kept/draft.json').read_text())['text'], 'unsent text')
+        self.assertEqual((self.root / 'activations').read_text(), 'sessions\nsessions\n')
+
+    def test_rollback_without_a_copy_changes_nothing(self):
+        self.build('first', self.installed)
+        result = self.rollback()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('there is no rollback copy', result.stderr)
+        self.assertIn("'first'", self.installed.read_text())
+
+    def test_an_unnumbered_build_never_replaces_a_numbered_dev_install(self):
+        # AGENTS.md and docs/reference.md: the live update and HGS_TRAY_RESTART=0 refuse alike.
+        self.build('dev-1413', self.installed)
+        result = self.update(self.build('second'))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Dev build 1413', result.stderr)
+        self.assertIn('ZERUS_LOCAL_PREVIEW_LABEL', result.stderr)
+        install = self.installer(self.build('third'))
+        result = subprocess.run(['bash', str(install)], env=dict(self.env, HGS_TRAY_RESTART='0'),
+                                capture_output=True, text=True, timeout=90)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Dev build 1413', result.stderr)
+        self.assertIn("'dev-1413'", self.installed.read_text())
+        self.assertFalse((self.root / 'systemctl').exists(), 'nothing was started or enabled')
+        result = self.update(self.build('dev-1414'))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("'dev-1414'", self.installed.read_text())
 
 if __name__ == '__main__':
     unittest.main()

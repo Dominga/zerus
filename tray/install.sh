@@ -91,6 +91,8 @@ if [ "$(bundle_cdhash "${BUILD_APP}")" != "$(bundle_cdhash "${APP_DEST}")" ]; th
         # Replaced in step 4, once the LaunchAgent below is current.
         UPDATE=1
     else
+        # The numbered Dev guard, and no switch between Qt and the client without the live update.
+        python3 "${SCRIPT_DIR}/update-installed.py" --check "${BUILD_APP}" "${APP_DEST}"
         # rm перед cp: cp -R поверх существующего бандла смешал бы старые файлы с новыми.
         rm -rf "${APP_DEST}"
         cp -R "${BUILD_APP}" "${APP_DEST}"
@@ -174,6 +176,8 @@ if ! cmp -s "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}" 2>/dev/null; then
         # Replaced in step 4, once the unit below is current.
         UPDATE=1
     else
+        # The numbered Dev guard (docs/reference.md).
+        python3 "${SCRIPT_DIR}/update-installed.py" --check "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}"
         install -Dm755 "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}.new"
         mv -f "${BIN_DEST}.new" "${BIN_DEST}"
         RELOAD=1

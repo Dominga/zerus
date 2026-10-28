@@ -2,6 +2,9 @@
 """Replace the installed desktop GUI with a new build, keeping drafts and native agents.
 
     update-installed.py <built hgs-tray | hgs-tray.app> <installed path>
+    update-installed.py --rollback <installed path>
+    update-installed.py --installed-gui <installed path>
+    update-installed.py --check <built hgs-tray | hgs-tray.app> <installed path>
 
 tray/install.sh runs this whenever its build differs from the installed GUI.
 
@@ -12,26 +15,38 @@ tray/install.sh runs this whenever its build differs from the installed GUI.
    signal), otherwise the tray menu over D-Bus on Linux or the quit event on
    macOS. A GUI that does not quit keeps running and nothing is replaced.
 3. Keep exactly one rollback copy (~/.local/share/hgs/desktop-previous) and move
-   the new GUI into place.
+   the new GUI into place. Once the Tauri client replaced the Qt GUI, Qt stays
+   that one rollback copy; `--rollback` reinstalls the copy through the same
+   steps.
 4. Start a GUI that was running through its service manager and wait for its
    single-instance socket; a new GUI that does not start is replaced by the
    previous one again. Then confirm the running image, the unchanged nonempty
    drafts and the native agent and tmux processes, and record
-   ~/.local/share/hgs/build-provenance.json.
+   ~/.local/share/hgs/build-provenance.json. Drafts of Qt and of the Tauri
+   client (`<app data>/drafts`) are both snapshotted and verified. At a
+   Qt-to-client switch on macOS, Qt's settings are exported beside the rollback
+   copy and checked afterwards.
 5. Remove hidden leftover folders of earlier hand-made updates beside the
    installed GUI (.zerus-*, stale .hgs-tray-update-*) when they are at least an
    hour old, hold only installer copies and no process uses them.
+
+A numbered Dev installation is replaced only by a numbered build or a local
+preview build (DEV_GUARD); `--check` applies that guard for HGS_TRAY_RESTART=0,
+which replaces the GUI on disk only, and refuses a switch between Qt and the
+client there.
 
 Native agents, tmux servers and other services are never signalled. When a check
 fails, the private draft snapshot is kept and its location printed.
 HGS_TRAY_QUIT_TIMEOUT and HGS_TRAY_START_TIMEOUT (seconds, default 35) bound the
 waits for the old GUI to quit and the new one to start.
 """
+import argparse
 import datetime
 import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import shutil
 import signal
@@ -61,6 +76,16 @@ LEGACY_AGE = 3600
 # Slow machines may allow longer; the defaults match the verified manual updates.
 QUIT_SECONDS = float(os.environ.get('HGS_TRAY_QUIT_TIMEOUT') or 35)
 START_SECONDS = float(os.environ.get('HGS_TRAY_START_TIMEOUT') or 35)
+LSREGISTER = Path('/System/Library/Frameworks/CoreServices.framework/Frameworks/'
+                  'LaunchServices.framework/Support/lsregister')
+DEFAULTS = 'defaults'
+# Qt's QSettings domain, which is also the NSUserDefaults domain of any bundle
+# with this identifier (the Tauri switch bundle included).
+PREFERENCES = 'com.hgdev.hgs-tray'
+# Kept beside the Qt rollback copy at the switch (docs/macos-distribution.md).
+SETTINGS_SNAPSHOT = ROLLBACK / f'{PREFERENCES}.plist'
+# Keys AppKit and WebKit write into a bundle's defaults domain; every other key is Qt's.
+COCOA_PREFIXES = ('NS', 'Apple', 'WebKit', 'WebView', 'com.apple.', '_')
 
 
 class UpdateError(Exception):
@@ -325,41 +350,102 @@ def stop_started(installed):
 
 # --- files and checks -----------------------------------------------------------
 
-def snapshot(destination):
-    source = drafts_dir()
-    if not source.exists():
-        destination.mkdir(mode=0o700)
-        return 0
-    if any(p.is_symlink() for p in source.rglob('*')):
-        raise UpdateError(f'draft storage {source} contains symbolic links; nothing was replaced')
-    shutil.copytree(source, destination)
-    for p in destination.rglob('*'):
-        os.chmod(p, 0o700 if p.is_dir() else 0o600)
-    os.chmod(destination, 0o700)
-    return sum(1 for _ in destination.rglob('draft.json'))
+def bundle_info(bundle):
+    """A bundle's Info.plist; {} without one (a Linux binary, a missing bundle)."""
+    try:
+        return plistlib.loads((Path(bundle) / 'Contents/Info.plist').read_bytes())
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return {}
 
 
-def changed_drafts(saved):
+def gui_kind(info):
+    """'tauri' for the Tauri client's switch bundle (Info.plist ZerusGUI), else 'qt'."""
+    return 'tauri' if info.get('ZerusGUI') == 'tauri' else 'qt'
+
+
+def keeps_slot(installed_kind, slot_kind, new_kind):
+    """Whether the one rollback copy stays. Once it holds Qt and the client
+    replaces itself, Qt stays the switch's rollback target; the replaced
+    client waits only for this update's own restore."""
+    return installed_kind == 'tauri' and slot_kind == 'qt' and new_kind == 'tauri'
+
+
+def client_drafts_root(identifier):
+    """The Tauri client's drafts root, `<app data>/drafts`: Tauri's
+    app_data_dir formula with the running bundle's identifier."""
+    if MAC:
+        return HOME / 'Library/Application Support' / identifier / 'drafts'
+    return Path(os.environ.get('XDG_DATA_HOME') or str(HOME / '.local/share')) / identifier / 'drafts'
+
+
+def draft_roots(*infos):
+    """Qt's drafts root, then the drafts root of each Tauri client among the bundles."""
+    roots = [('qt', drafts_dir())]
+    for info in infos:
+        identifier = info.get('CFBundleIdentifier')
+        if gui_kind(info) == 'tauri' and identifier:
+            root = (f'client-{identifier}', client_drafts_root(identifier))
+            if root not in roots:
+                roots.append(root)
+    return roots
+
+
+def register(bundle):
+    """Refresh LaunchServices' record of the installed bundle; never a global reset."""
+    if MAC and LSREGISTER.exists():
+        subprocess.run([str(LSREGISTER), '-f', str(bundle)], capture_output=True)
+
+
+def unregister(bundle):
+    """Forget a bundle copy that left the installed path, so a notification
+    click or `open -b com.hgdev.hgs-tray` cannot launch it."""
+    if MAC and LSREGISTER.exists() and Path(bundle).suffix == '.app':
+        subprocess.run([str(LSREGISTER), '-u', str(bundle)], capture_output=True)
+
+
+def snapshot(destination, roots):
+    """Private copies of every drafts root, one folder per root."""
+    destination.mkdir(mode=0o700)
+    count = 0
+    for label, source in roots:
+        target = destination / label
+        if not source.exists():
+            target.mkdir(mode=0o700)
+            continue
+        if source.is_symlink() or any(p.is_symlink() for p in source.rglob('*')):
+            raise UpdateError(f'draft storage {source} contains symbolic links; nothing was replaced')
+        shutil.copytree(source, target)
+        for p in target.rglob('*'):
+            os.chmod(p, 0o700 if p.is_dir() else 0o600)
+        os.chmod(target, 0o700)
+        count += sum(1 for _ in target.rglob('draft.json'))
+    return count
+
+
+def changed_drafts(saved, roots):
     """Nonempty drafts saved when the old GUI quit that are missing or different now."""
-    current, problems, preserved = drafts_dir(), [], 0
-    for before in saved.rglob('draft.json'):
-        relative = before.relative_to(saved).parent
-        original = json.loads(before.read_text())
-        if not (original.get('text') or original.get('attachments') or original.get('form_state')):
-            continue
-        after = current / relative / 'draft.json'
-        if not after.exists():
-            problems.append(f'{relative}: missing')
-            continue
-        restored = json.loads(after.read_text())
-        if any(original.get(key) != restored.get(key) for key in ('key', 'text', 'attachments', 'form_state')):
-            problems.append(f'{relative}: changed')
-            continue
-        for attachment in original.get('attachments') or []:
-            blob = after.parent / (attachment['sha256'] + '.bin')
-            if not blob.exists() or digest(blob) != attachment['sha256']:
-                problems.append(f'{relative}: attachment changed')
-        preserved += 1
+    problems, preserved = [], 0
+    for label, current in roots:
+        prefix = '' if label == 'qt' else f'{label} '
+        kept = saved / label
+        for before in sorted(kept.rglob('draft.json')):
+            relative = before.relative_to(kept).parent
+            original = json.loads(before.read_text())
+            if not (original.get('text') or original.get('attachments') or original.get('form_state')):
+                continue
+            after = current / relative / 'draft.json'
+            if not after.exists():
+                problems.append(f'{prefix}{relative}: missing')
+                continue
+            restored = json.loads(after.read_text())
+            if any(original.get(key) != restored.get(key) for key in ('key', 'text', 'attachments', 'form_state')):
+                problems.append(f'{prefix}{relative}: changed')
+                continue
+            for attachment in original.get('attachments') or []:
+                blob = after.parent / (attachment['sha256'] + '.bin')
+                if not blob.exists() or digest(blob) != attachment['sha256']:
+                    problems.append(f'{prefix}{relative}: attachment changed')
+            preserved += 1
     return preserved, problems
 
 
@@ -473,12 +559,8 @@ def sweep(parent, current):
         if in_use(folder):
             say(f'kept {folder}: a process still uses it')
             continue
-        if MAC:
-            register = Path('/System/Library/Frameworks/CoreServices.framework/Frameworks/'
-                            'LaunchServices.framework/Support/lsregister')
-            for bundle in copies:
-                if bundle.suffix == '.app' and register.exists():
-                    subprocess.run([str(register), '-u', str(bundle)], capture_output=True)
+        for bundle in copies:
+            unregister(bundle)
         shutil.rmtree(folder)
         removed.append(folder.name)
     if removed:
@@ -487,14 +569,20 @@ def sweep(parent, current):
 
 # --- the update ---------------------------------------------------------------
 
-def replace(stage, installed):
-    """Keep the installed GUI as the only rollback copy, then move the stage into place."""
-    previous = ROLLBACK / installed.name
-    ROLLBACK.mkdir(parents=True, exist_ok=True)
-    if previous.exists() or previous.is_symlink():
-        remove(previous)
+def replace(stage, installed, aside=None):
+    """Move the stage into place. The installed GUI becomes the one rollback
+    copy, or, with `aside`, waits there only for this update's own restore."""
+    if aside is None:
+        previous = ROLLBACK / installed.name
+        ROLLBACK.mkdir(parents=True, exist_ok=True)
+        if previous.exists() or previous.is_symlink():
+            remove(previous)
+    else:
+        aside.mkdir(parents=True, exist_ok=True)
+        previous = aside / installed.name
     if installed.exists():
         shutil.move(str(installed), str(previous))
+        unregister(previous)
     try:
         os.rename(stage, installed)
     except OSError:
@@ -503,30 +591,147 @@ def replace(stage, installed):
         raise
     if MAC:
         run(['codesign', '--verify', '--deep', '--strict', installed])
-        register = Path('/System/Library/Frameworks/CoreServices.framework/Frameworks/'
-                        'LaunchServices.framework/Support/lsregister')
-        if register.exists():
-            subprocess.run([str(register), '-f', str(installed)], capture_output=True)
+        register(installed)
+    return previous
 
 
-def roll_back(installed):
-    previous = ROLLBACK / installed.name
+def roll_back(installed, previous):
     if not previous.exists():
         return False
     stop_started(installed)
     remove(installed)
     shutil.move(str(previous), str(installed))
+    register(installed)
     return True
 
 
-def update(built, installed):
+def installed_build_info(installed):
+    """The installed GUI's --build-info, None when it cannot tell (an old build)."""
+    try:
+        return build_info(installed)
+    except UpdateError:
+        return None
+
+
+# The rule as docs/reference.md states it ("Installation, configuration and
+# diagnostics"); a test keeps the two equal.
+DEV_GUARD = ('A numbered Dev installation is replaced only by a numbered Dev build or by a local preview build: '
+             'set ZERUS_DEV_BUILD_NUMBER to the CI sequence of the main push the build comes from, '
+             'or build an owner-requested branch preview with ZERUS_LOCAL_PREVIEW_LABEL.')
+
+
+def numbered_refusal(installed_info, new_info):
+    """Why a build may not replace the installed GUI: a numbered Dev install
+    is replaced only by a numbered build or an explicit local preview (AGENTS.md)."""
+    installed = int((installed_info or {}).get('devBuildNumber') or 0)
+    if installed > 0 and not int(new_info.get('devBuildNumber') or 0) and not new_info.get('previewLabel'):
+        return (f'the installed GUI is Dev build {installed} and this build has neither a Dev number '
+                f'nor a local preview label. {DEV_GUARD}')
+    return None
+
+
+def check_replace(built, installed):
+    """For an install that replaces the GUI on disk without the live update
+    (HGS_TRAY_RESTART=0): the numbered Dev guard, and on macOS no change
+    between Qt and the client, which only the live update may make."""
+    built, installed = Path(built).resolve(), Path(installed).absolute()
+    if not installed.exists():
+        return 0
+    refusal = numbered_refusal(installed_build_info(installed), build_info(built))
+    if refusal:
+        raise UpdateError(refusal + ' Nothing was replaced.')
+    if MAC and gui_kind(bundle_info(built)) != gui_kind(bundle_info(installed)):
+        raise UpdateError('switching between the Qt GUI and the Tauri client needs the live update; '
+                          'run tray/install.sh without HGS_TRAY_RESTART=0. Nothing was replaced.')
+    return 0
+
+
+def export_settings():
+    """Qt's settings domain as cfprefsd serves it (never the plist file), or None."""
+    result = subprocess.run([DEFAULTS, 'export', PREFERENCES, '-'], capture_output=True)
+    if result.returncode:
+        return None
+    try:
+        return result.stdout, plistlib.loads(result.stdout)
+    except (ValueError, plistlib.InvalidFileException):
+        return None
+
+
+def cocoa_key(key):
+    return key.startswith(COCOA_PREFIXES)
+
+
+def value_bytes(value):
+    return plistlib.dumps({'value': value}, fmt=plistlib.FMT_XML, sort_keys=True)
+
+
+def settings_changes(before, after):
+    """Qt keys that changed or vanished, other non-Cocoa keys that appeared,
+    and the Cocoa keys written, each sorted."""
+    changed = sorted(k for k, v in before.items()
+                     if not cocoa_key(k) and (k not in after or value_bytes(after[k]) != value_bytes(v)))
+    added = sorted(k for k in after if k not in before and not cocoa_key(k))
+    cocoa = sorted(k for k, v in after.items()
+                   if cocoa_key(k) and (k not in before or value_bytes(before[k]) != value_bytes(v)))
+    return changed, added, cocoa
+
+
+def save_settings_snapshot():
+    """At the switch, keep Qt's settings beside the Qt rollback copy (0600)."""
+    exported = export_settings()
+    if exported is None:
+        raise UpdateError(f'cannot read the {PREFERENCES} settings to keep a copy; nothing was replaced')
+    SETTINGS_SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=SETTINGS_SNAPSHOT.parent, prefix=f'.{SETTINGS_SNAPSHOT.name}.')
+    with os.fdopen(fd, 'wb') as f:
+        f.write(exported[0])
+    os.replace(temporary, SETTINGS_SNAPSHOT)
+    say(f'kept a copy of the Qt settings in {SETTINGS_SNAPSHOT}')
+
+
+def settings_report(rollback=False):
+    """Qt's keys against the copy kept at the switch: problems and notes."""
+    if not SETTINGS_SNAPSHOT.exists():
+        return [], []
+    exported = export_settings()
+    if exported is None:
+        return [f'cannot read the {PREFERENCES} settings to compare them with {SETTINGS_SNAPSHOT}'], []
+    changed, added, cocoa = settings_changes(plistlib.loads(SETTINGS_SNAPSHOT.read_bytes()), exported[1])
+    problems = []
+    if changed:
+        problems.append(f'Qt settings changed or missing: {", ".join(changed)} (the copy is {SETTINGS_SNAPSHOT})')
+        if rollback:
+            problems.append(f'with Zerus quit, restore them with: defaults import {PREFERENCES} {SETTINGS_SNAPSHOT}')
+    if added:
+        problems.append(f"settings written that are neither Qt's nor Cocoa's: {', '.join(added)}")
+    notes = [f'Cocoa settings written since the switch: {", ".join(cocoa)}'] if cocoa else []
+    return problems, notes
+
+
+def update(built, installed, rollback=False):
     built, installed = built.resolve(), installed.absolute()
     info = build_info(built)
+    slot = ROLLBACK / installed.name
+    new_info = bundle_info(built) if MAC else {}
+    old_info = bundle_info(installed) if MAC else {}
+    old_kind = gui_kind(old_info) if installed.exists() else None
+    new_kind = gui_kind(new_info)
+    # A rollback consumes the slot it installs from.
+    slot_kind = gui_kind(bundle_info(slot)) if MAC and slot.exists() and not rollback else None
+    if not rollback and installed.exists():
+        refusal = numbered_refusal(installed_build_info(installed), info)
+        if refusal:
+            raise UpdateError(refusal + ' Nothing was replaced.')
+    switching = MAC and old_kind == 'qt' and new_kind == 'tauri'
+    keep = keeps_slot(old_kind, slot_kind, new_kind)
+    roots = draft_roots(old_info, new_info)
     if MAC:
         run(['codesign', '--verify', '--deep', '--strict', built])
     installed.parent.mkdir(parents=True, exist_ok=True)
     folder = Path(tempfile.mkdtemp(prefix='.hgs-tray-update-', dir=installed.parent))
+    aside = folder / 'previous' if keep else None
     saved = None
+    kept = (f'the Qt GUI stays the rollback copy in {ROLLBACK}' if keep else f'previous GUI kept in {ROLLBACK}')
     try:
         stage = folder / installed.name
         if MAC:
@@ -540,20 +745,29 @@ def update(built, installed):
         if len(pids) > 1:
             raise UpdateError(f'several copies of Zerus are running ({pids}); quit them, then run the installer again')
         if not pids:
-            replace(stage, installed)
-            say(f'replaced the stopped GUI with {info.get("versionName", info["version"])}')
+            # Before Qt can run again: the client must not have changed its settings.
+            early = settings_report(rollback=True) if MAC and rollback else ([], [])
+            if switching:
+                save_settings_snapshot()
+            replace(stage, installed, aside)
+            say(f'replaced the stopped GUI with {info.get("versionName", info["version"])}; {kept}')
             sweep(installed.parent, folder)
+            if early[0]:
+                raise UpdateError('the previous GUI is installed, but ' + '; '.join(early[0]))
             return 0
         pid = pids[0]
         path, before = socket_path(pid), native()
         say(f'quitting Zerus (pid {pid}) so it saves its drafts')
         quit_gui(pid, installed)
+        early = settings_report(rollback=True) if MAC and rollback else ([], [])
         try:
             SNAPSHOTS.mkdir(mode=0o700, parents=True, exist_ok=True)
             saved = Path(tempfile.mkdtemp(prefix='drafts-', dir=SNAPSHOTS))
             os.rmdir(saved)
-            snapshot(saved)
-            replace(stage, installed)
+            snapshot(saved, roots)
+            if switching:
+                save_settings_snapshot()
+            previous = replace(stage, installed, aside)
         except (OSError, subprocess.CalledProcessError, UpdateError) as error:
             # The previous GUI is still installed: bring it back before reporting.
             start(installed)
@@ -562,17 +776,22 @@ def update(built, installed):
         start(installed)
         new = wait_started(installed, path, pid)
         if new is None:
-            restored = roll_back(installed)
+            restored = roll_back(installed, previous)
             if restored:
                 start(installed)
                 wait_started(installed, path, pid)
             raise UpdateError('the new GUI did not start' + ('; the previous GUI was restored and started'
                                                              if restored else ''))
-        problems = []
+        problems = list(early[0])
         if digest(executable(installed)) != expected or not running_image_matches(new, installed):
             problems.append('the running image is not the new build')
-        preserved, draft_problems = changed_drafts(saved)
+        preserved, draft_problems = changed_drafts(saved, roots)
         problems += draft_problems
+        if MAC and not rollback and 'tauri' in (old_kind, new_kind):
+            late, notes = settings_report()
+            problems += late
+            for note in notes:
+                say(note)
         after = native()
         replaced = [p for p, value in before.items() if p in after and after[p] != value]
         if replaced:
@@ -585,7 +804,7 @@ def update(built, installed):
         saved = None
         sweep(installed.parent, folder)
         say(f'Zerus {info.get("versionName", info["version"])} runs as pid {new}; {preserved} nonempty drafts kept, '
-            f'{retained} native processes untouched; previous GUI kept in {ROLLBACK}')
+            f'{retained} native processes untouched; {kept}')
         return 0
     except UpdateError:
         if saved is not None and saved.exists():
@@ -596,15 +815,41 @@ def update(built, installed):
             shutil.rmtree(folder)
 
 
+def roll_back_installed(installed):
+    """Reinstall the one rollback copy (after the switch: the last Qt GUI)
+    through the same quit, snapshot, start and verification as an update."""
+    installed = installed.absolute()
+    previous = ROLLBACK / installed.name
+    if not previous.exists():
+        raise UpdateError(f'there is no rollback copy in {ROLLBACK}; nothing was replaced')
+    say(f'reinstalling the rollback copy {previous}')
+    return update(previous, installed, rollback=True)
+
+
 def main():
-    if len(sys.argv) != 3:
-        print(__doc__.split('\n\n')[1], file=sys.stderr)
-        return 2
+    usage = __doc__.split('\n\n')[1]
+    parser = argparse.ArgumentParser(usage=usage, add_help=False)
+    parser.add_argument('--rollback', metavar='INSTALLED', type=Path)
+    parser.add_argument('--installed-gui', metavar='INSTALLED', type=Path)
+    parser.add_argument('--check', nargs=2, metavar=('BUILT', 'INSTALLED'), type=Path)
+    parser.add_argument('paths', nargs='*', type=Path)
+    args = parser.parse_args()
+    chosen = [option for option in (args.rollback, args.installed_gui, args.check) if option]
     try:
-        return update(Path(sys.argv[1]), Path(sys.argv[2]))
+        if args.installed_gui and len(chosen) == 1 and not args.paths:
+            print(gui_kind(bundle_info(args.installed_gui)) if args.installed_gui.exists() else 'none')
+            return 0
+        if args.rollback and len(chosen) == 1 and not args.paths:
+            return roll_back_installed(args.rollback)
+        if args.check and len(chosen) == 1 and not args.paths:
+            return check_replace(*args.check)
+        if len(args.paths) == 2 and not chosen:
+            return update(*args.paths)
     except UpdateError as error:
         print(f'hgs-tray update failed: {error}', file=sys.stderr)
         return 1
+    print(usage, file=sys.stderr)
+    return 2
 
 
 if __name__ == '__main__':

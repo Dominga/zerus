@@ -37,6 +37,8 @@ mod signals;
 mod terminal;
 #[cfg(feature = "media")]
 mod voice;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod watchdog;
 mod window_visibility;
 
 use tauri::{AppHandle, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -354,6 +356,10 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 }
             }
             lifecycle::sync_policy(app.handle());
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if app.state::<identity::Identity>().watchdog(identity::flag("ZERUS_CLIENT_WATCHDOG")) {
+                app.manage(start_watchdog()?);
+            }
             Ok(())
         })
         .build(context)
@@ -388,6 +394,29 @@ fn forward_activations(
             }
         })
         .expect("the activation thread starts");
+}
+
+/// The main-thread watchdog (Task 8): Qt's thresholds, a heartbeat on the main
+/// thread and, on macOS, the hold around sleep. The returned value keeps it running.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn start_watchdog() -> std::io::Result<watchdog::Watchdog> {
+    let limits = watchdog::Limits::QT;
+    let dog = watchdog::Watchdog::start(limits, watchdog::now_ms, |silent| {
+        watchdog::abort_on_hang(silent)
+    })?;
+    let pulse = dog.pulse();
+    #[cfg(target_os = "macos")]
+    {
+        platform::macos::heartbeat(limits.beat_every(), move || pulse.beat(watchdog::now_ms()));
+        platform::macos_power::observe(dog.pulse());
+    }
+    #[cfg(target_os = "linux")]
+    platform::linux::heartbeat(limits.beat_every(), move || pulse.beat(watchdog::now_ms()));
+    eprintln!(
+        "zerus-client: main-thread watchdog on ({} s)",
+        limits.hang_ms / 1000
+    );
+    Ok(dog)
 }
 
 /// Before the app quits (`lifecycle::exit`, before the socket goes): recordings under way are cancelled, the hubs take

@@ -61,6 +61,13 @@ impl Identity {
         self.is_switch().then_some(LAUNCHD_LABEL)
     }
 
+    /// Whether the main-thread watchdog runs: the switch bundle, which launchd
+    /// restarts after the watchdog's abort, or another build on request
+    /// (`ZERUS_CLIENT_WATCHDOG=1`).
+    pub fn watchdog(&self, requested: bool) -> bool {
+        self.is_switch() || requested
+    }
+
     /// Tauri's `app_data_dir` formula (`dirs::data_dir`), with this identifier:
     /// `XDG_DATA_HOME` counts only as an absolute path.
     pub fn data_dir(
@@ -190,5 +197,18 @@ mod tests {
             ),
             Path::new("C:/Users/example/AppData/Roaming/dev.zerus.next")
         );
+    }
+
+    #[test]
+    fn only_the_switch_bundle_runs_the_watchdog_unless_asked() {
+        assert!(
+            Identity::new("com.hgdev.hgs-tray").watchdog(false),
+            "launchd restarts it"
+        );
+        assert!(
+            !Identity::new("dev.zerus.next").watchdog(false),
+            "a dev run is never aborted"
+        );
+        assert!(Identity::new("dev.zerus.next").watchdog(true));
     }
 }

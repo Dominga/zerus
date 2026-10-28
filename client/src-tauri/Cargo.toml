@@ -59,7 +59,7 @@ webkit2gtk = "2.0.2"
 block2 = "0.6.2"
 objc2 = { version = "0.6.4", features = ["exception"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "objc2-core-graphics", "NSAppearance", "NSApplication", "NSAttributedString", "NSBezierPath", "NSBitmapImageRep", "NSColor", "NSDockTile", "NSFont", "NSGraphics", "NSGraphicsContext", "NSImageRep", "NSMenu", "NSResponder", "NSStringDrawing"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSArray", "NSAttributedString", "NSBundle", "NSDictionary", "NSDistributedNotificationCenter", "NSGeometry", "NSNotification", "NSOperation", "NSString", "NSProcessInfo"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSArray", "NSAttributedString", "NSBundle", "NSDate", "NSDictionary", "NSDistributedNotificationCenter", "NSGeometry", "NSNotification", "NSOperation", "NSRunLoop", "NSString", "NSProcessInfo", "NSTimer"] }
 objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "WKPreferences", "WKWebViewConfiguration"] }
 
 [build-dependencies]

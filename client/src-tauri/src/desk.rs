@@ -772,7 +772,7 @@ mod tests {
         assert_eq!(inbox.notice(notice.clone()), None);
         let pending = inbox.take();
         assert_eq!(pending.open, Some(target("a")));
-        assert_eq!(pending.notices, [notice.clone()]);
+        assert_eq!(pending.notices, std::slice::from_ref(&notice));
         assert_eq!(inbox.take(), Pending::default(), "taken once");
         assert_eq!(
             inbox.open(target("b")),

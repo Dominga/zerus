@@ -8,6 +8,7 @@ vi.hoisted(() => {
 });
 vi.mock("../../bridge", () => ({
   archivePage: vi.fn(),
+  cancelArchivePages: vi.fn(async () => {}),
   runAction: vi.fn(),
   inspectSession: vi.fn(),
   pendingReadMarks: vi.fn(async () => []),
@@ -22,7 +23,7 @@ vi.mock("../../bridge", () => ({
 
 import * as bridge from "../../bridge";
 import { applyBatch } from "../../store/catalog";
-import { archiveCount } from "../../store/archive";
+import { archiveCount, archiveTip } from "../../store/archive";
 import { stillListed } from "../../store/actions";
 import { matchesFilter, selected, setMachineFilter, setSearch, setSelectedKey, setStateFilter } from "../../store/ui";
 import { listRows } from "./model";
@@ -57,6 +58,8 @@ describe("the Archive view in the app", () => {
     const rows = listRows();
     expect(rows.map((r) => r.type === "card" && [r.session.name, r.session.machine])).toEqual([["codex/example/a2", "workstation"], ["codex/example/a1", "workstation"]]);
     expect(archiveCount()).toBe("2+");
+    expect(archiveTip()).toBe("Archive / 2 loaded; more can be loaded in Archive");
+    expect(mocked.cancelArchivePages).toHaveBeenCalled();
     const key = `\narchive:${uuid(2)}`;
     expect(rows[0].id).toBe(key);
     if (rows[0].type === "card") expect(matchesFilter(rows[0].session, "archived")).toBe(true);

@@ -565,6 +565,16 @@ impl ArchiveReads {
         flag
     }
 
+    /// Cancels every computer's request and forgets them all
+    /// (`HgsClient::cancelArchivePages` deletes every archive job).
+    fn cancel_all(&self) {
+        let mut latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
+        for flag in latest.values() {
+            flag.store(true, Ordering::Relaxed);
+        }
+        latest.clear();
+    }
+
     /// Forgets a finished request unless a newer one replaced it.
     fn finish(&self, computer: &str, flag: &Arc<AtomicBool>) {
         let mut latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
@@ -605,6 +615,13 @@ pub async fn archive_page(
         return Err("superseded".into());
     }
     result?.map_err(|error| error.to_string())
+}
+
+/// Cancels every computer's archive page request, where Qt calls
+/// `cancelArchivePages`: their `hgs` ends and they answer `Err("superseded")`.
+#[tauri::command]
+pub fn cancel_archive_pages(state: State<'_, ArchiveReads>) {
+    state.cancel_all();
 }
 
 /// The command that opens the session in a terminal, written for this
@@ -688,6 +705,27 @@ mod tests {
             "a stale finish forgot nothing"
         );
         assert!(!third.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn cancelling_archive_pages_cancels_every_computer() {
+        let reads = ArchiveReads::default();
+        let studio = reads.begin("studio");
+        let laptop = reads.begin("laptop");
+        reads.cancel_all();
+        assert!(studio.load(Ordering::Relaxed));
+        assert!(laptop.load(Ordering::Relaxed));
+        reads.finish("studio", &studio);
+        let next = reads.begin("studio");
+        assert!(
+            !next.load(Ordering::Relaxed),
+            "a request after the cancel runs"
+        );
+        assert_eq!(
+            reads.latest.lock().unwrap().len(),
+            1,
+            "the cancel forgot every older request"
+        );
     }
 
     #[test]

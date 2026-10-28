@@ -87,6 +87,13 @@ export function countText(count: number, pages: Pages, hosts: readonly PagingCom
   return `${count}${paged && (!known || hasMoreOf(pages, hosts)) ? "+" : ""}`;
 }
 
+/** The Archive filter's tooltip (SessionsWindowRows.cpp 564): "{caption} / {n} loaded", and whether more can be loaded; the plain count without paging. */
+export function tipText(caption: string, count: number, pages: Pages, hosts: readonly PagingComputer[]): string {
+  if (!hosts.length) return `${caption} / ${count}`;
+  const partial = !totalsKnownOf(pages, hosts) || hasMoreOf(pages, hosts);
+  return `${caption} / ${count} loaded${partial ? "; more can be loaded in Archive" : ""}`;
+}
+
 /** ArchiveBrowser::updateStatus. `valid`: the range's from is below its until. */
 export function statusOf(pages: Pages, hosts: readonly PagingComputer[], valid: boolean): ArchiveStatus {
   let busy = false, more = false, newer = false, single = "", shown = 0;
@@ -189,6 +196,8 @@ export function archiveListRows(rows: readonly ArchivedSession[], scope: ListSco
 export interface ArchiveDeps {
   /** One page of a computer's archive; rejects with Qt's text, "superseded" or the hgs failure. */
   read(computer: ComputerId, from: number, until: number, cursor: string, query: string): Promise<ArchivePage>;
+  /** Ends every read in flight (Qt's cancelArchivePages); their answers are discarded by token anyway. */
+  cancel(): void;
   /** The Archive filter shows the list. */
   active(): boolean;
   /** The search text; the archive query is it trimmed. */
@@ -199,8 +208,6 @@ export interface ArchiveDeps {
 
 const sameHosts = (a: readonly PagingComputer[], b: readonly PagingComputer[]) =>
   a.length === b.length && a.every((h, i) => h.computer === b[i].computer && h.machine === b[i].machine);
-const sameIds = (a: readonly PagingComputer[], b: readonly PagingComputer[]) =>
-  a.length === b.length && a.every((h, i) => h.computer === b[i].computer);
 const errorText = (error: unknown) => (typeof error === "string" ? error : error instanceof Error ? error.message : String(error));
 
 /** The archive store; call it inside a reactive root. */
@@ -273,6 +280,7 @@ export function createArchive(deps: ArchiveDeps) {
   function refresh() {
     clearTimeout(delay);
     delay = undefined;
+    deps.cancel();
     dropPages();
     navigate(false);
   }
@@ -280,19 +288,30 @@ export function createArchive(deps: ArchiveDeps) {
   function setQuery(text: string) {
     if (text === query) return;
     query = text;
+    deps.cancel();
     dropPages();
     clearTimeout(delay);
     delay = setTimeout(() => { delay = undefined; refresh(); }, QUERY_DELAY_MS);
   }
 
-  /** ArchiveBrowser::configure: the paging computers and whether the Archive filter shows the list. */
+  /**
+   * ArchiveBrowser::configure: the paging computers and whether the Archive
+   * filter shows the list. A computer or a machine name that changed drops
+   * every page, so no row keeps an old name.
+   */
   function configure(next: readonly PagingComputer[], show: boolean) {
-    const different = !sameIds(next, untrack(hosts));
+    const different = !sameHosts(next, untrack(hosts));
     batch(() => {
-      if (!show && active) setPages((all) => Object.fromEntries(Object.entries(all).map(([id, p]) => [id, p.request ? { ...p, request: 0 } : p])));
+      if (!show && active) {
+        deps.cancel();
+        setPages((all) => Object.fromEntries(Object.entries(all).map(([id, p]) => [id, p.request ? { ...p, request: 0 } : p])));
+      }
       active = show;
-      setHosts(next);
-      if (different) dropPages();
+      if (different) {
+        deps.cancel();
+        setHosts(next);
+        dropPages();
+      }
     });
     const all = untrack(pages);
     const initial = next.some((h) => { const p = all[h.computer]; return !p || (!p.loaded && !p.request && !p.error); });
@@ -341,6 +360,7 @@ export function createArchive(deps: ArchiveDeps) {
     /** Some computer pages its archive. */
     paged: () => hosts().length > 0,
     countText: (count: number) => countText(count, pages(), hosts()),
+    tipText: (caption: string, count: number) => tipText(caption, count, pages(), hosts()),
     window: windowChanges,
     computers: hosts,
   };
@@ -358,11 +378,13 @@ function* catalogRows(): Iterable<Session> {
  * The app's archive: pages while the Archive filter shows the Sessions list,
  * the search text as the query, the live computers inside the machine filter.
  * `archiveRows` is the Archive filter's list (model.ts), `archiveCount` its
- * count chip; the selection and the actions also find the loaded archived rows.
+ * count chip and `archiveTip` the chip's tooltip; the selection and the
+ * actions also find the loaded archived rows.
  */
-export const { archive, archiveRows, archiveCount } = createRoot(() => {
+export const { archive, archiveRows, archiveCount, archiveTip } = createRoot(() => {
   const archive = createArchive({
     read: (computer, from, until, cursor, query) => bridge.archivePage(computer, from, until, cursor, query),
+    cancel: () => { void bridge.cancelArchivePages(); },
     active: () => stateFilter() === "archived" && page() === "sessions",
     query: search,
     computers: () => pagingComputers(catalog.computers, catalogRows(), machineFilter()),
@@ -374,7 +396,7 @@ export const { archive, archiveRows, archiveCount } = createRoot(() => {
     const scope = { machines: machineFilter(), projects: projectFilter() };
     return archive.rows().filter((s) => inScope(s, scope)).length;
   });
-  return { archive, archiveRows, archiveCount: () => archive.countText(counted()) };
+  return { archive, archiveRows, archiveCount: () => archive.countText(counted()), archiveTip: () => archive.tipText("Archive", counted()) };
 });
 
 bindSelectedRows(archive.row);

@@ -7,7 +7,7 @@ import {
   emphasis, childStatus, gitTooltip, paletteIndex, folderOf,
 } from "./SessionCard";
 import { catalog, computerOffline } from "../../store/catalog";
-import { archiveCount } from "../../store/archive";
+import { archiveCount, archiveTip } from "../../store/archive";
 import { ArchiveBar } from "./ArchiveBar";
 import { detailsFor, followedFor, updating } from "../../store/actions";
 import { running } from "../../store/batch";
@@ -33,12 +33,12 @@ const projectColor = (project: string) => `var(--z-entity-palette-${paletteIndex
 const LATER = true;
 
 // Five state filters, in SessionsWindow order, then the scope filters.
-const FILTERS: { id: StateFilter; icon: string; tip: string; count: () => string }[] = [
+const FILTERS: { id: StateFilter; icon: string; tip: string; count: () => string; tipText?: () => string }[] = [
   { id: "all", icon: "all", tip: "All sessions", count: () => String(counts().all) },
   { id: "attention", icon: "attention", tip: "Needs attention", count: () => String(counts().attention) },
   { id: "active", icon: "active", tip: "Active: working, scheduled, waiting, needs attention or a draft", count: () => String(counts().active) },
   { id: "paused", icon: "paused", tip: "Saved sessions (paused or stopped)", count: () => String(counts().paused) },
-  { id: "archived", icon: "archived", tip: "Archive", count: archiveCount },
+  { id: "archived", icon: "archived", tip: "Archive", count: archiveCount, tipText: archiveTip },
 ];
 
 const filterTone = (id: StateFilter) => ({
@@ -427,7 +427,7 @@ export function SessionList() {
         <div class="sp-filters" role="toolbar" aria-label="State filter">
           <For each={FILTERS}>
             {(f) => (
-              <button class="fchip" classList={{ on: stateFilter() === f.id, ...filterTone(f.id) }} data-tip={`${f.tip} / ${f.count()}`}
+              <button class="fchip" classList={{ on: stateFilter() === f.id, ...filterTone(f.id) }} data-tip={f.tipText?.() ?? `${f.tip} / ${f.count()}`}
                 aria-pressed={stateFilter() === f.id} onClick={() => setStateFilter(f.id)}>
                 <Icon name={f.icon} size={16} />
                 <span class="tabular">{f.count()}</span>
@@ -634,7 +634,7 @@ function Strip(props: { onEnter: () => void; onToggle: () => void }) {
       </button>
       <div class="strip-filters" classList={{ single: shown().length < 2 }}>
         <For each={shown()}>{(f) => (
-          <button class="fchip" classList={{ on: stateFilter() === f.id, ...filterTone(f.id) }} aria-pressed={stateFilter() === f.id} data-tip={`${f.tip} / ${f.count()}`} data-tip-pos="right" onClick={() => setStateFilter(f.id)}>
+          <button class="fchip" classList={{ on: stateFilter() === f.id, ...filterTone(f.id) }} aria-pressed={stateFilter() === f.id} data-tip={f.tipText?.() ?? `${f.tip} / ${f.count()}`} data-tip-pos="right" onClick={() => setStateFilter(f.id)}>
             <Icon name={f.icon} size={16} /><span class="tabular">{f.count()}</span>
           </button>
         )}</For>

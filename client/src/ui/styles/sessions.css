@@ -192,12 +192,8 @@
   /* Skeleton cards while the first snapshot arrives. */
   .skel-card { height: 84px; margin: 4px 2px 6px; padding: 8px 12px; display: grid; gap: 9px; align-content: start; border-radius: 8px; border: 1px solid var(--z-color-divider); }
 
-  /* Archive browser rows. */
-  .sp-scroll.archive { contain: none; margin-top: 0; }
-  .sp-scroll.archive .rowhit { position: relative; }
+  /* Archive browser. */
   .archive-bar { display: flex; align-items: center; gap: 8px; padding: 4px 4px 8px; }
-  .archive-day { padding: 10px 6px 4px; font-size: var(--fs-2xs); font-weight: 600; letter-spacing: .4px; text-transform: uppercase; color: var(--z-color-dim); }
-  .archive-more { margin: 10px auto; display: flex; }
   /* Archive bar (ArchiveBrowser): the date range and Refresh, the status with
      Newer and Older, the errors. The margin offsets the list's -7 px. */
   .archive-browser { display: flex; flex-direction: column; gap: 6px; margin-bottom: 7px; }

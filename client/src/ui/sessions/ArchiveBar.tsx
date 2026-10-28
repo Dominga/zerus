@@ -28,7 +28,7 @@ export function ArchiveBar() {
         </button>
       </div>
       <div class="archive-bar">
-        <span class="archive-status ell" title={status().hint}>{status().summary}</span>
+        <span class="archive-status ell" title={status().hint} aria-description={status().hint}>{status().summary}</span>
         <Show when={status().newer.visible}>
           <button class="btn small archive-nav" title="Newer sessions" aria-label="Newer sessions" disabled={!status().newer.enabled} onClick={() => archive.newer()}>
             <Icon name="chevron-left" size={14} />{buttonText(width(), "Newer")}
@@ -50,7 +50,8 @@ export function ArchiveBar() {
 /**
  * The archived date (ArchiveDatePicker): a button with the applied range, and
  * a panel where the quick ranges and the two dates change only the draft;
- * Apply range commits it, Cancel, Escape or a click outside drop it.
+ * Apply range commits it, Cancel, Escape or a click outside drop it, and
+ * focus returns to the picker button.
  */
 function DatePicker() {
   let button: HTMLButtonElement | undefined;
@@ -85,7 +86,12 @@ function DatePicker() {
     const top = below + height <= innerHeight - 8 ? below : r.top - height - 6;
     setPlace((p) => ({ ...p, top: Math.max(8, Math.min(top, innerHeight - height - 8)) }));
     panel.querySelector<HTMLInputElement>("input")?.focus();
-    const outside = (e: MouseEvent) => { if (!panel?.contains(e.target as Node) && !button?.contains(e.target as Node)) setOpen(false); };
+    // The press only closes the panel and focus returns to the picker, as Qt's popup consumes it.
+    const outside = (e: MouseEvent) => {
+      if (panel?.contains(e.target as Node) || button?.contains(e.target as Node)) return;
+      e.preventDefault();
+      close();
+    };
     const t = setTimeout(() => addEventListener("mousedown", outside));
     onCleanup(() => { clearTimeout(t); removeEventListener("mousedown", outside); });
   });

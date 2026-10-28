@@ -237,6 +237,16 @@ export async function archivePage(computer: string, from: number, until: number,
   return invoke<ArchivePage>("archive_page", { computer, from, until, cursor, query });
 }
 
+/**
+ * Cancels every computer's archive page request (Qt's cancelArchivePages):
+ * their `hgs` ends and they answer "superseded". Outside the app, and in a
+ * build without archive reads, there is nothing to cancel.
+ */
+export async function cancelArchivePages(): Promise<void> {
+  if (!inTauri()) return;
+  await invoke<null>("cancel_archive_pages").catch(() => {});
+}
+
 /** Puts text on the clipboard: from Rust in the app, the page's clipboard in a browser. */
 export async function copyText(text: string): Promise<void> {
   if (inTauri()) return invoke<void>("copy_text", { text });

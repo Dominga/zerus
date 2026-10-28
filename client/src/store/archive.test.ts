@@ -8,6 +8,7 @@ vi.hoisted(() => {
 });
 vi.mock("../bridge", () => ({
   archivePage: vi.fn(),
+  cancelArchivePages: vi.fn(),
   runAction: vi.fn(),
   inspectSession: vi.fn(),
   pendingReadMarks: vi.fn(async () => []),
@@ -24,7 +25,7 @@ import { createRoot, createSignal } from "solid-js";
 import * as bridge from "../bridge";
 import { toSession } from "./catalog";
 import {
-  ARCHIVE_CHANGED, archiveListRows, archivedSession, buttonText, countText, createArchive, emptyPage, pagingComputers, statusOf,
+  ARCHIVE_CHANGED, archiveListRows, archivedSession, buttonText, countText, createArchive, emptyPage, pagingComputers, statusOf, tipText,
   type ArchivedSession, type Page, type PagingComputer,
 } from "./archive";
 import { ALL_UNTIL } from "../ui/sessions/archive-dates";
@@ -51,12 +52,13 @@ function setup(options: { active?: boolean; computers?: PagingComputer[] } = {})
   const [active, setActive] = createSignal(options.active ?? true);
   const [query, setQuery] = createSignal("");
   const [computers, setComputers] = createSignal<PagingComputer[]>(options.computers ?? [LOCAL]);
+  const cancel = vi.fn();
   let archive!: ReturnType<typeof createArchive>;
-  const dispose = createRoot((d) => { archive = createArchive({ read, active, query, computers, now: () => new Date(NOW) }); return d; });
+  const dispose = createRoot((d) => { archive = createArchive({ read, cancel, active, query, computers, now: () => new Date(NOW) }); return d; });
   /** Answers the call at `i` (default: the latest) and lets its handlers run. */
   const answer = async (page: ArchivePage, i = calls.length - 1) => { calls[i].resolve(page); await flush(); };
   const fail = async (error: unknown, i = calls.length - 1) => { calls[i].reject(error); await flush(); };
-  return { archive, read, calls, answer, fail, setActive, setQuery, setComputers, dispose };
+  return { archive, read, cancel, calls, answer, fail, setActive, setQuery, setComputers, dispose };
 }
 
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); });
@@ -210,6 +212,55 @@ describe("cancellation by the store's request token", () => {
   });
 });
 
+describe("names and cancelling (ArchiveBrowser::configure, cancelArchivePages)", () => {
+  it("a machine name change drops the pages and loads again, so no row keeps the old name", async () => {
+    const t = setup();
+    await t.answer(pageOf([arow(1, 300)]));
+    expect(t.archive.rows().map((r) => r.machine)).toEqual(["Local"]);
+    t.setComputers([{ computer: "", machine: "workstation" }]);
+    expect(t.archive.rows()).toEqual([]);
+    expect(t.calls).toHaveLength(2);
+    await t.answer(pageOf([arow(1, 300)]));
+    expect(t.archive.rows().map((r) => r.machine)).toEqual(["workstation"]);
+    expect(t.archive.status().hint).toBe("workstation: 1 shown of 1");
+    t.dispose();
+  });
+
+  it("an answer for the old name is discarded", async () => {
+    const t = setup();
+    t.setComputers([{ computer: "", machine: "workstation" }]);
+    await t.answer(pageOf([arow(1, 300)]), 0);
+    expect(t.archive.rows()).toEqual([]);
+    await t.answer(pageOf([arow(2, 200)]), 1);
+    expect(t.archive.rows().map((r) => [r.name, r.machine])).toEqual([["codex/example/a2", "workstation"]]);
+    t.dispose();
+  });
+
+  it("cancels the reads in flight on leaving, a computers change, a query change and Refresh, and not on a plain re-configure", () => {
+    const t = setup({ active: false });
+    // The paging computers changed from none.
+    expect(t.cancel).toHaveBeenCalledTimes(1);
+    t.setActive(true);
+    t.setComputers([LOCAL]);
+    expect(t.cancel).toHaveBeenCalledTimes(1);
+    t.setActive(false);
+    expect(t.cancel).toHaveBeenCalledTimes(2);
+    t.setActive(true);
+    expect(t.cancel).toHaveBeenCalledTimes(2);
+    t.setComputers([LOCAL, BOX]);
+    expect(t.cancel).toHaveBeenCalledTimes(3);
+    t.setQuery("x");
+    expect(t.cancel).toHaveBeenCalledTimes(4);
+    t.setQuery(" x ");
+    expect(t.cancel).toHaveBeenCalledTimes(4);
+    const before = t.read.mock.calls.length;
+    t.archive.refresh();
+    expect(t.cancel).toHaveBeenCalledTimes(5);
+    expect(t.cancel.mock.invocationCallOrder[4]).toBeLessThan(t.read.mock.invocationCallOrder[before]);
+    t.dispose();
+  });
+});
+
 describe("the date range", () => {
   it("a changed range reloads with its bounds, an unchanged one does not, and from >= until loads nothing", async () => {
     const t = setup();
@@ -256,6 +307,16 @@ describe("totals and the count chip", () => {
     expect(countText(1, { "": page(1, { error: "boom" }), box: page(0) }, hosts)).toBe("1+");
     expect(countText(0, { "": page(0), box: page(0) }, hosts)).toBe("0");
     expect(countText(0, {}, [])).toBe("0");
+  });
+});
+
+describe("the count chip's tooltip (SessionsWindowRows.cpp 564)", () => {
+  it("says how many are loaded and whether more can be loaded, or the plain count without paging", () => {
+    const page = (rows: number, extra: Partial<Page> = {}): Page => ({ ...emptyPage(), loaded: true, total: rows, rows: Array.from({ length: rows }, () => ({}) as ArchivedSession), ...extra });
+    expect(tipText("Archive", 2, { "": page(2, { cursor: "c" }) }, [LOCAL])).toBe("Archive / 2 loaded; more can be loaded in Archive");
+    expect(tipText("Archive", 0, {}, [LOCAL])).toBe("Archive / 0 loaded; more can be loaded in Archive");
+    expect(tipText("Archive", 3, { "": page(2), box: page(1) }, [LOCAL, BOX])).toBe("Archive / 3 loaded");
+    expect(tipText("Archive", 0, {}, [])).toBe("Archive / 0");
   });
 });
 

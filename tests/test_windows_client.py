@@ -644,6 +644,9 @@ class WindowsClient(unittest.TestCase):
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=10)
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if not pipe.closed:
+                    pipe.close()
         self.assertEqual(json.loads(streams.read_text().splitlines()[-1]), dict(stdin='pipe', stdout='pipe', stderr='pipe'))
         argv = self.calls()[-1]
         self.assertIn('ServerAliveInterval=10', argv)

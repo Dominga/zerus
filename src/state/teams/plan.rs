@@ -165,7 +165,7 @@ pub(crate) fn satisfied(team: &Team, task: u32, kind: DependencyKind) -> bool {
     if hard {
         dep.status == TaskStatus::Accepted
     } else {
-        matches!(dep.status, TaskStatus::InProgress | TaskStatus::Submitted | TaskStatus::Accepted)
+        matches!(dep.status, TaskStatus::InProgress | TaskStatus::Submitted | TaskStatus::InReview | TaskStatus::InTest | TaskStatus::Accepted)
     }
 }
 

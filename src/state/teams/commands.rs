@@ -10,12 +10,12 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|add-to-phase|approve-phase|discard-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|add-to-phase|approve-phase|discard-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "add-to-phase", "approve-phase", "discard-phase", "reject-phase", "undo-reject-phase",
     "rework-phase", "reports-to", "sub-lead", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
-    "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "reassign", "take-over", "cancel",
+    "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "skip-stage", "send-back", "reassign", "take-over", "cancel",
     "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "pause-member", "resume-member", "remove-member", "settings", "finding",
     "draft", "propose",
 ];
@@ -166,7 +166,13 @@ fn attempt_member(team: &Team, attempt: &str) -> Option<String> {
     if attempt.is_empty() {
         return None;
     }
-    team.tasks.iter().flat_map(|task| &task.attempts).find(|found| found.id == attempt).map(|found| found.member.clone())
+    team.tasks
+        .iter()
+        .flat_map(|task| &task.attempts)
+        .find(|found| found.id == attempt)
+        .map(|found| found.member.clone())
+        // U36: a stage member reports with its stage run's id.
+        .or_else(|| super::pipeline::run_member(team, attempt))
 }
 
 /// A running team whose every task is decided waits for the lead to extend it
@@ -190,6 +196,8 @@ fn starts_worker(op: &str) -> bool {
     matches!(
         op,
         "approve" | "resume" | "extend" | "approve-phase" | "ask" | "reply" | "release" | "expect" | "swap-member"
+            // U36: a send-back or a skipped stage leaves work to hand out.
+            | "send-back" | "skip-stage"
             // U25: auto-accept may take a draft on enabling or after a rework.
             | "settings" | "rework-phase"
             // N6: a created draft team starts its lead and sends it the brief.
@@ -384,6 +392,15 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
             // C3: every open task says what blocks it and which action frees it.
             if let Some(waits) = super::inbox::waits(team, task, ready.contains(&task.id)) {
                 value["waits"] = waits;
+            }
+            // U36/U37: each stage run's waiting and working span.
+            let spans = super::pipeline::spans(task, now);
+            if !spans.is_empty() {
+                value["stage_spans"] = json!(spans);
+            }
+            // U36: who may take the open stage (never the implementer).
+            if task.status.in_stage() {
+                value["stage_candidates"] = json!(super::pipeline::candidates(team, task.id));
             }
         }
     }
@@ -675,6 +692,7 @@ fn summary(team: &Team) -> Value {
         "id":team.id,"name":team.name,"status":team.status,"project":team.project,"folder":team.folder,
         "lead":team.lead,"members":members,"tasks":tasks,"phases":phases,
         "accepted":count(TaskStatus::Accepted),"submitted":count(TaskStatus::Submitted),
+        "in_review":count(TaskStatus::InReview),"in_test":count(TaskStatus::InTest),
         "revision":team.revision,"updated":team.updated,
         "waiting_for_lead":waiting_for_lead(team),"pending_phase":pending_phase(team),
         "stuck_scope":plan::stuck_scope(team),"auto_accept":team.settings.auto_accept,
@@ -1610,6 +1628,11 @@ fn no_attempt_text(team: &Team, member: &str) -> String {
         .max_by_key(|task| task.id);
     let Some(task) = last else { return "You have no open attempt".into() };
     let attempt = task.attempts.iter().rev().find(|attempt| attempt.member == member);
+    // U36: a reported task in a stage of its pipeline says which.
+    if task.status.in_stage() && attempt.is_some_and(|attempt| attempt.state == AttemptState::Reported) {
+        let kind = if task.status == TaskStatus::InTest { "test" } else { "review" };
+        return format!("#{} has a report in its {kind} stage", task.id);
+    }
     let state = match attempt.map(|attempt| attempt.state) {
         Some(AttemptState::Rejected) if task.hold.is_some() => "was rejected and is held by the lead",
         Some(AttemptState::Rejected) => "was rejected and waits for another hand-out",
@@ -3572,6 +3595,58 @@ mod tests {
 
     fn finding(severity: &str, title: &str) -> Value {
         json!({"severity":severity,"title":title,"scenario":"two saves at once","task":1})
+    }
+
+    /// U36 through `hgs team`: the implementer's report enters review, status
+    /// shows the stage, its candidates and its span, the reviewer's verdict is
+    /// proven by its stage id alone, and the owner's overrides are mutations.
+    #[test]
+    fn a_pipeline_runs_through_hgs_team() {
+        use crate::state::teams::model::{Member, MemberState, TaskStatus};
+        let (mut team, attempt, _) = review_team();
+        team.members.push(Member { id: "rev".into(), role: "Reviewer".into(), agent: "claude".into(), state: MemberState::Active, ..Default::default() });
+        team.task_mut(1).unwrap().pipeline_run = super::super::pipeline::resolve(
+            &super::super::catalog::builtin(),
+            &team,
+            &crate::state::teams::model::Task { pipeline: "code".into(), ..team.task(1).unwrap().clone() },
+        );
+        with_review_team(&team, || {
+            for op in ["skip-stage", "send-back"] {
+                assert!(MUTATIONS.contains(&op) && USAGE.contains(op), "{op}");
+            }
+            let value = call("report", json!({"task":1,"attempt":attempt,"text":"Done"})).unwrap();
+            assert_eq!(value["status"], "in_review", "{value}");
+            let status = run("status", &json!({"team":"rv"}), false).unwrap();
+            let task = status["tasks"].as_array().unwrap().iter().find(|task| task["id"] == 1).unwrap().clone();
+            assert_eq!(task["status"], "in_review");
+            assert_eq!(task["stage_candidates"], json!(["rev"]), "never the implementer dev");
+            assert_eq!(task["waits"]["for"], "stage", "{task}");
+            assert_eq!(task["stage_spans"][0]["kind"], "review");
+            // The polled team list (without `list`, which may start the worker).
+            let list = list_items(&[stored()]);
+            let summary = list["items"][0].clone();
+            assert_eq!(summary["in_review"], 1, "{summary}");
+            // Stage delivery (#532) gives the review to rev.
+            let stage = Store::open(true)
+                .unwrap()
+                .mutate(None, "rv", None, |team, _| Ok(json!(super::super::pipeline::give_stage(team, 1, "rev")?)))
+                .unwrap();
+            let stage = stage.as_str().unwrap().to_owned();
+            let value = call("report", json!({"task":1,"attempt":stage,"verdict":"pass","text":"Reads well"})).unwrap();
+            assert_eq!(value["status"], "in_test", "{value}");
+            // The owner skips the test, then sends the task back with a reason.
+            let value = call("skip-stage", json!({"task":1,"reason":"No suites changed","by":"human"})).unwrap();
+            assert_eq!(value["status"], "submitted", "{value}");
+            let value = call("send-back", json!({"task":1,"reason":"Rename the endpoint","by":"human"})).unwrap();
+            assert_eq!(value["status"], "pending", "{value}");
+            let saved = stored();
+            assert_eq!(saved.task(1).unwrap().status, TaskStatus::Pending);
+            let events = run("events", &json!({"team":"rv"}), false).unwrap();
+            let kinds: Vec<String> = events["items"].as_array().unwrap().iter().map(|event| event["kind"].as_str().unwrap_or_default().to_owned()).collect();
+            for kind in ["stage_started", "stage_passed", "stage_skipped", "sent_back"] {
+                assert!(kinds.iter().any(|found| found == kind), "{kind}: {kinds:?}");
+            }
+        });
     }
 
     /// U19 (2): the lead answers a member's subagent request with hgs team

@@ -77,6 +77,10 @@ pub(crate) struct Role {
     pub prompt_off: Vec<String>,
     #[serde(default)]
     pub notes: BTreeMap<String, String>,
+    /// U36: the pipeline this role's tasks use unless the plan names one; a
+    /// docs role uses Docs. Empty falls back to the template's.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pipeline: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -139,7 +143,50 @@ pub(crate) struct Template {
     /// U25: same, owner or lead (new phases).
     #[serde(default)]
     pub phases: String,
+    /// U36: the pipeline a team from this template gives its tasks by default.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pipeline: String,
 }
+
+/// U36: one stage of a pipeline preset: what it checks and who does it, a
+/// role (its first free member) or a pinned member.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Stage {
+    /// review or test.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub member: String,
+}
+
+/// U36: a named pipeline preset ("Code: review, test, lead"): its stages after
+/// the implementer's report, the review rounds before the lead decides, the
+/// folder rule of a test stage and who gives the final acceptance.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Pipeline {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub stages: Vec<Stage>,
+    /// Returned rounds before the task goes to the lead; 0 reads as 3.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub max_rounds: u32,
+    /// hold (the test holds the task's folder) or checkout (a detached
+    /// checkout of the attempt's commits); empty reads as hold.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub folder: String,
+    /// lead, sub_lead or auto; empty reads as lead.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub accept: String,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+/// U36: the rounds a preset allows when it names none.
+pub(crate) const DEFAULT_ROUNDS: u32 = 3;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Rule {
@@ -168,6 +215,9 @@ pub(crate) struct Catalog {
     /// U28: the lead's planning rules, versioned with the catalog.
     #[serde(default = "default_planning_rules")]
     pub planning_rules: String,
+    /// U36: the pipeline presets; an old catalog has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pipelines: Vec<Pipeline>,
 }
 
 pub(crate) fn default_planning_rules() -> String {
@@ -232,7 +282,7 @@ pub(crate) struct Proposal {
     /// Given by hgs when the proposal is made.
     #[serde(default)]
     pub id: String,
-    /// role, template or rule.
+    /// role, template, rule, pipeline or planning_rules.
     pub kind: String,
     /// add, change or remove.
     pub action: String,
@@ -322,7 +372,26 @@ pub(crate) fn builtin() -> Catalog {
         },
     ];
     let routing = vec![Rule { id: "bug".into(), when: "bug fix".into(), template: "bugfix".into(), approval: "review".into(), use_: String::new() }];
-    Catalog { version: 1, roles, templates, routing, planning_rules: default_planning_rules() }
+    Catalog { version: 1, roles, templates, routing, planning_rules: default_planning_rules(), pipelines: builtin_pipelines() }
+}
+
+/// U36: the built-in presets. No template names one yet, so a team keeps
+/// today's flow until the owner picks a default.
+pub(crate) fn builtin_pipelines() -> Vec<Pipeline> {
+    let stage = |kind: &str, role: &str| Stage { kind: kind.into(), role: role.into(), member: String::new() };
+    let preset = |id: &str, name: &str, stages: Vec<Stage>, accept: &str| Pipeline {
+        id: id.into(),
+        name: name.into(),
+        stages,
+        max_rounds: DEFAULT_ROUNDS,
+        folder: "hold".into(),
+        accept: accept.into(),
+    };
+    vec![
+        preset("code", "Code: review, test, lead", vec![stage("review", "reviewer"), stage("test", "tester")], "lead"),
+        preset("docs", "Docs: review, auto", vec![stage("review", "reviewer")], "auto"),
+        preset("check", "Check: lead", Vec::new(), "lead"),
+    ]
 }
 
 pub(crate) fn load() -> anyhow::Result<Catalog> {
@@ -377,6 +446,14 @@ pub(crate) fn prompt_order_text_snapshot(snapshot: &super::model::PromptSnapshot
     prompt_order_text(&role, member_prompt, task, "")
 }
 
+/// C1: the role's own task block replaces the standard "Task #N" block only
+/// when it is in the order, switched on, and has a template to fill. An empty
+/// template (never typed, or a U25 import without one) keeps the standard
+/// block, so a hand-out never loses its title, description or criteria.
+pub(crate) fn sends_task(order: &[String], off: &[String], template: &str) -> bool {
+    order.iter().any(|key| key == "task") && !off.iter().any(|key| key == "task") && !template.trim().is_empty()
+}
+
 /// U25: the role's prompt blocks in the owner's order, skipping the ones turned
 /// off. None when the role has no order (an old catalog keeps today's text).
 pub(crate) fn prompt_order_text(role: &Role, member_prompt: &str, task: Option<&Task>, project_rules: &str) -> Option<String> {
@@ -392,7 +469,7 @@ pub(crate) fn prompt_order_text(role: &Role, member_prompt: &str, task: Option<&
             "rules" => (!project_rules.trim().is_empty()).then(|| format!("Project rules:\n{}\n", project_rules.trim())),
             "role" => (!member_prompt.trim().is_empty()).then(|| format!("Role: {}\n", member_prompt.trim())),
             "protocol" => (!role.protocol_extra.trim().is_empty()).then(|| format!("Team protocol extra:\n{}\n", role.protocol_extra.trim())),
-            "task" => task.map(|task| {
+            "task" => task.filter(|_| !role.task_template.trim().is_empty()).map(|task| {
                 let criteria = task.criteria.join("; ");
                 let rendered = role
                     .task_template
@@ -430,6 +507,11 @@ fn clean_id(id: &str) -> anyhow::Result<String> {
         "Catalog ids use letters, digits, - and _"
     );
     Ok(id.to_owned())
+}
+
+/// A team member id as `hgs team` takes it: letters, digits, - and _.
+fn member_id_shape(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 40 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Checks a whole catalog: unique ids, known roles and templates.
@@ -475,6 +557,33 @@ pub(crate) fn validate(catalog: &Catalog) -> anyhow::Result<()> {
         for task in &template.tasks {
             ensure!(task.phase >= 1, "Template {}: a task phase starts at 1", template.id);
         }
+    }
+    // U36: presets with known stage kinds and roles; "none" is reserved for
+    // a task without a pipeline.
+    ensure!(catalog.pipelines.len() <= 20, "The catalog has at most 20 pipelines");
+    let mut pipelines = BTreeMap::new();
+    for pipeline in &catalog.pipelines {
+        clean_id(&pipeline.id)?;
+        ensure!(pipeline.id != "none", "Pipeline id none is reserved for no pipeline");
+        ensure!(!pipeline.name.trim().is_empty() && pipeline.name.chars().count() <= 80, "Pipeline {} needs a name of at most 80 characters", pipeline.id);
+        ensure!(pipelines.insert(pipeline.id.clone(), ()).is_none(), "Pipeline {} is listed twice", pipeline.id);
+        ensure!(pipeline.stages.len() <= 8, "Pipeline {} has at most 8 stages", pipeline.id);
+        ensure!(pipeline.max_rounds <= 10, "Pipeline {}: at most 10 rounds", pipeline.id);
+        ensure!(matches!(pipeline.folder.as_str(), "" | "hold" | "checkout"), "Pipeline {}: folder is hold or checkout", pipeline.id);
+        ensure!(matches!(pipeline.accept.as_str(), "" | "lead" | "sub_lead" | "auto"), "Pipeline {}: accept is lead, sub_lead or auto", pipeline.id);
+        for (i, stage) in pipeline.stages.iter().enumerate() {
+            ensure!(matches!(stage.kind.as_str(), "review" | "test"), "Pipeline {} stage {}: kind is review or test", pipeline.id, i + 1);
+            ensure!(stage.role.is_empty() != stage.member.is_empty(), "Pipeline {} stage {}: name a role or a member", pipeline.id, i + 1);
+            ensure!(stage.role.is_empty() || roles.contains_key(&stage.role), "Pipeline {} stage {} names unknown role {}", pipeline.id, i + 1, stage.role);
+            ensure!(stage.member.is_empty() || member_id_shape(&stage.member), "Pipeline {} stage {}: invalid member {}", pipeline.id, i + 1, stage.member);
+        }
+    }
+    let known_pipeline = |id: &str| id.is_empty() || id == "none" || pipelines.contains_key(id);
+    for role in &catalog.roles {
+        ensure!(known_pipeline(&role.pipeline), "Role {} names unknown pipeline {}", role.id, role.pipeline);
+    }
+    for template in &catalog.templates {
+        ensure!(known_pipeline(&template.pipeline), "Template {} names unknown pipeline {}", template.id, template.pipeline);
     }
     for rule in &catalog.routing {
         clean_id(&rule.id)?;
@@ -544,6 +653,11 @@ fn apply_one(catalog: &mut Catalog, proposal: &Proposal) -> anyhow::Result<()> {
             let value: Option<Rule> = if remove { None } else { Some(serde_json::from_value(proposal.value.clone()).context("Invalid rule")?) };
             upsert(&mut catalog.routing, &proposal.target, value, |r| r.id.as_str());
         }
+        // U36: the Pipelines tab's presets, kept or rejected like the others.
+        "pipeline" => {
+            let value: Option<Pipeline> = if remove { None } else { Some(serde_json::from_value(proposal.value.clone()).context("Invalid pipeline")?) };
+            upsert(&mut catalog.pipelines, &proposal.target, value, |p| p.id.as_str());
+        }
         // U28: the planning rules are designer-editable text like roles.
         "planning_rules" => {
             ensure!(!remove, "The planning rules cannot be removed");
@@ -556,39 +670,28 @@ fn apply_one(catalog: &mut Catalog, proposal: &Proposal) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The template a goal would use: the first rule whose words all appear.
-/// N2: the prototype's routeMatch: an empty `when` never matches; "everything"
-/// or "*" always matches; otherwise any word of 3+ letters (stop words out)
-/// that appears in the goal matches.
-fn route_match(when: &str, goal_words: &BTreeSet<String>) -> bool {
-    const STOP: [&str; 16] = [
-        "the", "and", "for", "with", "any", "all", "else", "when", "use", "to", "of", "in", "on", "a", "an", "is",
-    ];
-    let lowered = when.to_lowercase();
-    let tokens: Vec<String> = lowered
-        .split(|ch: char| !ch.is_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned)
-        .collect();
-    if tokens.iter().any(|token| token == "everything" || token == "*") {
+/// The template a goal would use: the first rule that matches.
+/// N1: the prototype's routeMatch, as it is: "everything" anywhere in `when`,
+/// or a `when` that is just "*", always matches. Otherwise each run of three or
+/// more ASCII letters or digits in `when` (its stop words out) matches when the
+/// goal contains it, or its singular when it is a plural of five or more
+/// letters. An empty `when` never matches.
+fn route_match(when: &str, goal: &str) -> bool {
+    const STOP: [&str; 9] = ["label", "files", "file", "the", "and", "with", "when", "services", "src"];
+    let when = when.to_lowercase();
+    if when.contains("everything") || when.trim() == "*" {
         return true;
     }
-    tokens
-        .iter()
-        .filter(|token| token.chars().count() >= 3 && !STOP.contains(&token.as_str()))
-        .any(|token| goal_words.contains(token))
+    let goal = goal.to_lowercase();
+    when.split(|ch: char| !(ch.is_ascii_lowercase() || ch.is_ascii_digit()))
+        .filter(|word| word.len() >= 3 && !STOP.contains(word))
+        .any(|word| goal.contains(word) || (word.len() > 4 && word.ends_with('s') && goal.contains(&word[..word.len() - 1])))
 }
 
 pub(crate) fn route(catalog: &Catalog, goal: &str) -> Value {
-    let goal_words: BTreeSet<String> = goal
-        .to_lowercase()
-        .split(|ch: char| !ch.is_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned)
-        .collect();
     let mut added: Vec<String> = Vec::new();
     for rule in &catalog.routing {
-        if !route_match(&rule.when, &goal_words) {
+        if !route_match(&rule.when, goal) {
             continue;
         }
         let use_ = if rule.use_.is_empty() { &rule.template } else { &rule.use_ };
@@ -687,6 +790,10 @@ fn designer_commands(agent: &str, folder: &str, model: &str, effort: &str, brief
         if agent == "claude" {
             args.push("--allowedTools".into());
             args.extend(DESIGNER_CLAUDE_RULES.iter().map(|rule| (*rule).to_owned()));
+            // N19: --allowedTools takes every word up to the next option, so
+            // the brief comes after Claude's own `--`; launch flags (the
+            // account's permission mode, model defaults) go in before it.
+            args.push("--".into());
         }
     }
     args.push(brief.to_owned());
@@ -713,7 +820,8 @@ fn designer(input: &Value) -> anyhow::Result<Value> {
     let launch_id = uuid::Uuid::new_v4().to_string();
     // U16: before the launch, so Claude reads the answer instead of asking.
     if agent == "claude" {
-        trust_designer(agent, &folder, &crate::accounts::claude_account_config()?)?;
+        let config = crate::config::Config::load()?;
+        trust_designer(agent, &folder, &crate::accounts::claude_launch_config(&config)?)?;
     }
     let brief = designer_brief(&load()?, input["goal"].as_str().unwrap_or_default(), project);
     let args = designer_commands(agent, &folder, &model, &effort, &brief, &launch_id);
@@ -881,15 +989,43 @@ mod tests {
     }
 
     #[test]
+    fn route_ports_the_prototypes_match_with_its_stop_words_and_plurals() {
+        let rule = |id: &str, when: &str, use_: &str| Rule { id: id.into(), when: when.into(), template: String::new(), approval: String::new(), use_: use_.into() };
+        let mut catalog = builtin();
+        // N1: the prototype's own rules r1 and r2, then a "*" catch-all.
+        catalog.routing = vec![
+            rule("r1", "label \u{201c}bug\u{201d} \u{b7} \u{2264} 3 files", "bugfix"),
+            rule("r2", "services/payments/** \u{b7} **/auth/**", "+security"),
+            rule("all", "*", "feature"),
+        ];
+        validate(&catalog).unwrap();
+        // "label", "files" and "services" are stop words: they route nothing.
+        let found = route(&catalog, "Tidy the label files of the services");
+        assert_eq!((found["rule"].clone(), found["template"]["id"].clone(), found["added"].clone()), (json!("all"), json!("feature"), json!([])));
+        // A substring and a plural's singular match, as in the prototype.
+        assert_eq!(route(&catalog, "Debug the login")["rule"], "r1");
+        let found = route(&catalog, "Round the payment total (OAuth)");
+        assert_eq!((found["rule"].clone(), found["added"].clone()), (json!("all"), json!(["security"])));
+        // "*" alone always matches, so the router never falls to templates.first().
+        catalog.templates.rotate_left(1);
+        assert_ne!(catalog.templates[0].id, "feature");
+        assert_eq!(route(&catalog, "New checkout")["template"]["id"], "feature");
+        assert!(!route_match("", "anything") && !route_match("  ", "anything"));
+        assert!(route_match(" * ", "anything") && route_match("Everything else", "x"));
+    }
+
+    #[test]
     fn a_claude_designer_is_trusted_for_its_folder_and_gets_the_narrow_rules() {
-        let folder = "C:\\Users\\owner\\.local\\state\\hgs\\sessions\\team-designer";
+        let folder = "C:\\Users\\owner\\.local/state\\hgs/sessions\\team-designer";
+        // N19: Claude files a Windows project under forward slashes.
+        let key = if cfg!(windows) { "C:/Users/owner/.local/state/hgs/sessions/team-designer" } else { folder };
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join(".claude.json");
         fs::write(&config, json!({
             "oauthAccount": {"emailAddress": "owner@example.com"},
             "projects": {
                 "C:\\work\\project": {"hasTrustDialogAccepted": false, "allowedTools": ["Bash(cargo:*)"]},
-                (folder): {"allowedTools": ["Read"]}
+                (key): {"allowedTools": ["Read"]}
             }
         }).to_string()).unwrap();
         // The launch arguments carry the narrow rules after the agent flags.
@@ -899,12 +1035,22 @@ mod tests {
             assert_eq!(args[at + 1 + index], *rule, "{args:?}");
         }
         assert_eq!(args.last().unwrap(), "brief");
+        // N19: Claude reads the brief as its prompt, not as an eighth rule:
+        // its own `--` comes right after the rules, and the launch's
+        // permission flags go in before that `--`, never after the brief.
+        assert_eq!(args[at + 1 + DESIGNER_CLAUDE_RULES.len()], "--", "{args:?}");
+        let agent_at = args.iter().position(|arg| arg == "--").unwrap() + 1;
+        let mut argv: Vec<String> = std::iter::once("claude".to_owned()).chain(args[agent_at..].iter().cloned()).collect();
+        crate::accounts::apply_permissions("claude", "bypass", &mut argv);
+        let delimiter = argv.iter().position(|arg| arg == "--").unwrap();
+        assert_eq!(&argv[delimiter..], ["--", "brief"], "{argv:?}");
+        assert!(argv[..delimiter].iter().any(|arg| arg == "--permission-mode"), "{argv:?}");
         assert!(args.iter().any(|arg| arg == "Opus") && args.iter().any(|arg| arg == "high"));
         // Before the launch, exactly the designer's folder is trusted.
         assert!(trust_designer("claude", folder, &config).unwrap());
         let saved: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
-        assert_eq!(saved["projects"][folder]["hasTrustDialogAccepted"], true);
-        assert_eq!(saved["projects"][folder]["allowedTools"], json!(["Read"]), "its tools stay as Claude saved them");
+        assert_eq!(saved["projects"][key]["hasTrustDialogAccepted"], true);
+        assert_eq!(saved["projects"][key]["allowedTools"], json!(["Read"]), "its tools stay as Claude saved them");
         assert_eq!(saved["projects"]["C:\\work\\project"]["hasTrustDialogAccepted"], false, "another folder keeps its answer");
         assert_eq!(saved["projects"].as_object().unwrap().len(), 2, "no other project entry is added");
         assert_eq!(saved["oauthAccount"]["emailAddress"], "owner@example.com");
@@ -1007,6 +1153,24 @@ mod tests {
         assert!(!text.contains("Team protocol extra") && !text.contains("Do #7"), "{text}");
         role.prompt_order.clear();
         assert!(prompt_order_text(&role, &role.prompt, Some(&task), "").is_none());
+    }
+
+    #[test]
+    fn an_ordered_task_block_without_a_template_is_not_sent() {
+        // C1: an order that names "task" with an empty template sends no empty
+        // "Task:" block, and the standard block stays (sends_task is false).
+        let role = Role {
+            id: "dev".into(), name: "Dev".into(), prompt: "Write the code".into(),
+            prompt_order: vec!["role".into(), "task".into()], task_template: " \n ".into(),
+            ..Default::default()
+        };
+        let task = Task { id: 7, title: "API".into(), ..Default::default() };
+        let text = prompt_order_text(&role, &role.prompt, Some(&task), "").unwrap();
+        assert_eq!(text, "Role: Write the code\n");
+        assert!(!sends_task(&role.prompt_order, &role.prompt_off, &role.task_template));
+        assert!(sends_task(&role.prompt_order, &role.prompt_off, "#{id} {title}"));
+        assert!(!sends_task(&role.prompt_order, &["task".into()], "#{id} {title}"));
+        assert!(!sends_task(&["role".into()], &[], "#{id} {title}"));
     }
 
     #[test]

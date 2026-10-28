@@ -17,6 +17,7 @@ pub mod fleet;
 pub mod legacy;
 pub mod machine;
 pub mod organization;
+pub mod process_view;
 pub mod processes;
 #[cfg(unix)]
 mod pty;

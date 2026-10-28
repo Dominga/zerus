@@ -7,7 +7,9 @@
 //! mark each have their own lane: Qt guards Stop only by its own request
 //! (`m_interruptRequest`), and a quiet retry never makes a confirmed write
 //! answer busy. A message has its own lane per agent, as Qt's
-//! `m_messagesInFlight` keys it by host, name and agent.
+//! `m_messagesInFlight` keys it by host, name and agent. A process stop has
+//! its own lane too: Qt's Processes tab stops beside a pause or rename, one
+//! stop at a time per session.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -26,14 +28,15 @@ use zerus_client_core::{default_hgs, run, Action, Batch, Outcome, Target};
 /// message, the agent it goes to ("" for the session's own agent).
 type Key = (String, String, Lane, String);
 
-/// Writes, interrupts, read marks and messages run apart: at most one of each
-/// per session (messages: per agent).
+/// Writes, interrupts, read marks, messages and process stops run apart: at
+/// most one of each per session (messages: per agent).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Lane {
     Write,
     Interrupt,
     Read,
     Send,
+    Process,
 }
 
 impl Lane {
@@ -42,6 +45,7 @@ impl Lane {
             Action::MarkRead { .. } => Self::Read,
             Action::Interrupt { .. } => Self::Interrupt,
             Action::Send { .. } => Self::Send,
+            Action::StopProcess { .. } => Self::Process,
             _ => Self::Write,
         }
     }
@@ -419,6 +423,30 @@ mod tests {
         assert!(flight.claim(Lane::key(&target, &Action::Pause)).is_some());
         drop(main);
         assert!(flight.claim(Lane::key(&target, &send(None))).is_some());
+    }
+
+    #[test]
+    fn a_process_stop_runs_beside_session_writes_one_at_a_time() {
+        let target = Target {
+            computer: "studio".into(),
+            name: "claude/sample-project/review".into(),
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+        };
+        let stop = |id: &str| Action::StopProcess {
+            process_id: id.into(),
+            archive_id: None,
+            generation: None,
+        };
+        assert_eq!(Lane::of(&stop("job-1")), Lane::Process);
+        let flight = InFlight::default();
+        let pause = flight.claim(Lane::key(&target, &Action::Pause)).unwrap();
+        let first = flight.claim(Lane::key(&target, &stop("job-1"))).unwrap();
+        // A second stop for the same session waits, whichever process it names.
+        assert!(flight.claim(Lane::key(&target, &stop("job-2"))).is_none());
+        drop(first);
+        assert!(flight.claim(Lane::key(&target, &stop("job-2"))).is_some());
+        drop(pause);
     }
 
     #[test]

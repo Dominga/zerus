@@ -277,3 +277,37 @@ fn staged_files_through_the_fake_are_done() {
     let stdin: Value = serde_json::from_str(log[0]["stdin"].as_str().unwrap()).unwrap();
     assert_eq!(stdin["attachments"][0]["name"], "drop.txt");
 }
+
+#[test]
+fn a_process_stop_through_the_fake_is_done_once_without_input() {
+    let fake = Fake::new(
+        r#"{"reply":{"exit":0,"stdout":{"id":"job-1","run_id":"run-1","conversation_id":"conv-1","status":"requested"}}}"#,
+    );
+    let t = target();
+    let a = Action::StopProcess {
+        process_id: "job-1".into(),
+        archive_id: None,
+        generation: None,
+    };
+    let inv = invocation(&t, &a, "u").unwrap();
+    assert!(matches!(
+        classify(&t, &a, &inv, run(&fake.hgs, &inv)),
+        Outcome::Done { .. }
+    ));
+    let log = fake.log();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0]["stdin"], "");
+    assert_eq!(
+        log[0]["argv"],
+        serde_json::json!([
+            "processes",
+            "claude/sample-project/review",
+            "--stop",
+            "job-1",
+            "--run",
+            "run-1",
+            "--conversation",
+            "conv-1"
+        ])
+    );
+}

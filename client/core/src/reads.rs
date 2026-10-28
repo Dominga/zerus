@@ -60,6 +60,17 @@ pub enum Read {
     /// help lacks [`ANALYTICS_MARKER`] is [`ReadError::Unsupported`]: an
     /// older hgs would take the unknown verb as a session launch.
     Analytics { from: String, through: String },
+    /// `hgs [@host] processes NAME --output ID --run RUN --conversation C
+    /// [--archive A] [--generation G]` (45 s): one process's retained
+    /// output, `{id, run_id, conversation_id, output, truncated, status}`.
+    ProcessOutput {
+        name: String,
+        process_id: String,
+        run_id: String,
+        conversation_id: String,
+        archive_id: Option<String>,
+        generation: Option<String>,
+    },
 }
 
 impl Read {
@@ -73,6 +84,7 @@ impl Read {
                 | Self::AccountUsage { .. }
                 | Self::Recovery
                 | Self::Analytics { .. }
+                | Self::ProcessOutput { .. }
         )
     }
 
@@ -236,6 +248,40 @@ pub fn invocation(computer: &ComputerId, read: &Read) -> Result<Invocation, Read
             None,
             timeout(3, 3, computer),
         ),
+        Read::ProcessOutput {
+            name,
+            process_id,
+            run_id,
+            conversation_id,
+            archive_id,
+            generation,
+        } => {
+            if [name, process_id, run_id, conversation_id]
+                .iter()
+                .any(|value| value.is_empty() || value.chars().any(char::is_control))
+            {
+                return Err(bad(
+                    "process output needs its session, process, run and conversation",
+                ));
+            }
+            let mut words = vec![
+                "processes",
+                name.as_str(),
+                "--output",
+                process_id.as_str(),
+                "--run",
+                run_id.as_str(),
+                "--conversation",
+                conversation_id.as_str(),
+            ];
+            if let Some(archive) = archive_id.as_deref().filter(|id| !id.is_empty()) {
+                words.extend(["--archive", archive]);
+            }
+            if let Some(generation) = generation.as_deref().filter(|id| !id.is_empty()) {
+                words.extend(["--generation", generation]);
+            }
+            (arguments(computer, &words), None, timeout(45, 45, computer))
+        }
         Read::Analytics { from, through } => {
             if !date(from) || !date(through) || from > through {
                 return Err(bad(
@@ -332,7 +378,11 @@ pub fn decode(read: &Read, exit: Exit) -> Result<Value, ReadError> {
         };
     }
     let Value::Object(object) = &value else {
-        return Err(invalid("not a JSON object"));
+        return Err(invalid(if matches!(read, Read::ProcessOutput { .. }) {
+            "Invalid process response"
+        } else {
+            "not a JSON object"
+        }));
     };
     // Some commands report a refusal as {"error": "..."} on success.
     if let Some(error) = object.get("error").and_then(Value::as_str) {
@@ -634,6 +684,69 @@ mod tests {
             }),
             "Attachment response is too large."
         );
+    }
+
+    #[test]
+    fn process_output_reads_name_the_run_and_need_an_object() {
+        let read = Read::ProcessOutput {
+            name: "claude/sample-project/review".into(),
+            process_id: "job-1".into(),
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+            archive_id: None,
+            generation: Some("g-2".into()),
+        };
+        let inv = invocation(&peer(), &read).unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "@studio",
+                "processes",
+                "claude/sample-project/review",
+                "--output",
+                "job-1",
+                "--run",
+                "run-1",
+                "--conversation",
+                "conv-1",
+                "--generation",
+                "g-2"
+            ]
+        );
+        assert_eq!(inv.timeout, Duration::from_secs(45));
+        assert_eq!(
+            decode(&read, code("[]")),
+            Err(ReadError::Invalid {
+                message: "Invalid process response".into()
+            })
+        );
+        assert_eq!(
+            decode(&read, code(r#"{"id":"job-1","output":"ok"}"#)),
+            Ok(json!({"id": "job-1", "output": "ok"}))
+        );
+        let Read::ProcessOutput {
+            name,
+            process_id,
+            run_id: _,
+            conversation_id,
+            archive_id,
+            generation,
+        } = read
+        else {
+            unreachable!()
+        };
+        let empty_run = Read::ProcessOutput {
+            name,
+            process_id,
+            run_id: String::new(),
+            conversation_id,
+            archive_id,
+            generation,
+        };
+        assert!(matches!(
+            invocation(&peer(), &empty_run),
+            Err(ReadError::BadRequest { .. })
+        ));
     }
 
     #[test]

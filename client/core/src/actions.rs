@@ -55,6 +55,16 @@ pub enum Action {
         /// The compaction this message waits for (compact-to-send).
         expected_compaction_id: Option<String>,
     },
+    /// `hgs processes NAME --stop ID --run RUN --conversation C [--archive A]
+    /// [--generation G]` (`requestProcess` with stop): one stop request,
+    /// sent one at a time and never retried (`process_view::StopQueue`).
+    StopProcess {
+        process_id: String,
+        #[serde(default)]
+        archive_id: Option<String>,
+        #[serde(default)]
+        generation: Option<String>,
+    },
     /// Stage dropped files on the session's computer, as Qt's
     /// `requestStageFiles` (the `attachment` session action). The paths must
     /// be absolute paths of regular files; they are read when the call is
@@ -266,6 +276,29 @@ pub fn invocation(
                 45,
                 Some(request_id.to_owned()),
             )
+        }
+        Action::StopProcess {
+            process_id,
+            archive_id,
+            generation,
+        } => {
+            let mut args = vec![
+                "processes".to_owned(),
+                name,
+                "--stop".to_owned(),
+                process_id.clone(),
+                "--run".to_owned(),
+                target.run_id.clone(),
+                "--conversation".to_owned(),
+                target.conversation_id.clone(),
+            ];
+            if let Some(archive) = archive_id.as_ref().filter(|id| !id.is_empty()) {
+                args.extend(["--archive".to_owned(), archive.clone()]);
+            }
+            if let Some(generation) = generation.as_ref().filter(|id| !id.is_empty()) {
+                args.extend(["--generation".to_owned(), generation.clone()]);
+            }
+            (args, None, 45, 45, None)
         }
         Action::StageFiles {
             paths,
@@ -509,6 +542,7 @@ pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit:
         Action::Send { agent_id, .. } => {
             classify_send(target, invocation, agent_id.as_deref(), exit)
         }
+        Action::StopProcess { process_id, .. } => classify_stop(target, process_id, exit),
         Action::MarkRead { .. } => classify_read(target, exit),
         Action::Archive | Action::Terminate => classify_write(exit, true),
         _ => classify_write(exit, false),
@@ -610,6 +644,29 @@ fn classify_send(
                 uncertain("Delivery acknowledgement is invalid. Inspect Terminal before retrying.")
             }
         }
+    }
+}
+
+/// A stop receipt names the same process, run and conversation, and says
+/// `requested` or `already-finished`.
+fn classify_stop(target: &Target, process_id: &str, exit: Exit) -> Outcome {
+    match exit {
+        Exit::Code {
+            code: 0, stdout, ..
+        } => {
+            let receipt: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+            let field = |key: &str| receipt.get(key).and_then(Value::as_str);
+            let confirmed = field("id") == Some(process_id)
+                && field("run_id") == Some(target.run_id.as_str())
+                && field("conversation_id") == Some(target.conversation_id.as_str())
+                && matches!(field("status"), Some("requested" | "already-finished"));
+            if confirmed {
+                done(receipt, None)
+            } else {
+                failed("Stop was not confirmed")
+            }
+        }
+        exit => failed(failure_detail(exit)),
     }
 }
 
@@ -1032,6 +1089,80 @@ mod tests {
             failed("Invalid acknowledgement. Check Terminal before retrying.")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_process_stop_names_the_run_and_checks_its_receipt() {
+        let action = Action::StopProcess {
+            process_id: "job-1".into(),
+            archive_id: Some("a-7".into()),
+            generation: Some("g-2".into()),
+        };
+        let t = target("studio");
+        let inv = invocation(&t, &action, "u").unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "@studio",
+                "processes",
+                "claude/sample-project/review",
+                "--stop",
+                "job-1",
+                "--run",
+                "run-1",
+                "--conversation",
+                "conv-1",
+                "--archive",
+                "a-7",
+                "--generation",
+                "g-2"
+            ]
+        );
+        assert_eq!(inv.timeout, Duration::from_secs(45));
+        let stopped = |status: &str, id: &str| {
+            let receipt =
+                json!({"id": id, "run_id": "run-1", "conversation_id": "conv-1", "status": status});
+            classify(
+                &t,
+                &action,
+                &inv,
+                exit(0, receipt.to_string().as_bytes(), ""),
+            )
+        };
+        assert!(matches!(
+            stopped("requested", "job-1"),
+            Outcome::Done { .. }
+        ));
+        assert!(matches!(
+            stopped("already-finished", "job-1"),
+            Outcome::Done { .. }
+        ));
+        assert_eq!(
+            stopped("refused", "job-1"),
+            failed("Stop was not confirmed")
+        );
+        assert_eq!(
+            stopped("requested", "job-2"),
+            failed("Stop was not confirmed")
+        );
+        assert_eq!(
+            classify(&t, &action, &inv, exit(1, b"", "no such process\n")),
+            failed("no such process")
+        );
+        assert_eq!(
+            classify(&t, &action, &inv, Exit::TimedOut),
+            failed("timed out")
+        );
+        let from_webview: Action =
+            serde_json::from_value(json!({"kind": "stop_process", "process_id": "job-1"})).unwrap();
+        assert_eq!(
+            from_webview,
+            Action::StopProcess {
+                process_id: "job-1".into(),
+                archive_id: None,
+                generation: None
+            }
+        );
     }
 
     #[test]

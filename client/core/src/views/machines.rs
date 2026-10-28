@@ -189,9 +189,10 @@ fn check(alias: &str, pending: bool, reply: Option<&Result<Value, String>>) -> C
 }
 
 impl MachinesState {
-    /// `machine ls` on show and on Refresh; false while one runs.
+    /// `machine ls` on show and on Refresh; false while one or a check runs
+    /// (MachinesPage::reload ignores it while any request runs).
     pub fn start_list(&mut self, now: u64) -> bool {
-        self.poll.due(now, true)
+        !self.checking && self.poll.due(now, true)
     }
 
     /// A failure keeps the rows and shows the error.
@@ -379,6 +380,10 @@ mod tests {
         state.finish_list(Ok(fixture("machines.json")));
         assert!(state.start_check("studio"));
         assert!(!state.start_check("studio") && state.busy());
+        assert!(
+            !state.start_list(5),
+            "no list read while a check runs (Qt's reload)"
+        );
         assert_eq!(
             state.view().check.unwrap().text,
             "Testing SSH and checking HGS…"

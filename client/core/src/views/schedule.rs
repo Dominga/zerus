@@ -253,6 +253,41 @@ impl AccountsState {
         }
     }
 
+    /// Neither Overview nor Accounts shows: the queued inspects and any
+    /// queued follow-up `account ls` are dropped. A dropped inspect never
+    /// ran, so it is due again when a screen shows; reads already running
+    /// finish.
+    pub fn cancel_queued(&mut self) {
+        for r in std::mem::take(&mut self.queue) {
+            if let Some(slot) = self.usage.get_mut(&r.key()) {
+                slot.pending = false;
+                slot.attempted = None;
+            }
+        }
+        for slot in self.catalogs.values_mut() {
+            slot.queued = false;
+        }
+    }
+
+    /// When the next `account ls` of `hosts` or inspect of `refs` falls due,
+    /// on the hub's clock. Running and queued reads are left out (a reply
+    /// wakes the hub), and so are profiles on unreachable hosts (a fleet
+    /// change does).
+    pub fn next_due(&self, hosts: &[ComputerId], refs: &[(UsageRef, bool)]) -> Option<u64> {
+        let catalogs = hosts.iter().filter_map(|host| {
+            let slot = self.catalogs.get(host).filter(|slot| !slot.pending)?;
+            Some(slot.requested?.saturating_add(CATALOG_INTERVAL))
+        });
+        let usage = refs
+            .iter()
+            .filter(|(_, reachable)| *reachable)
+            .filter_map(|(r, _)| {
+                let slot = self.usage.get(&r.key()).filter(|slot| !slot.pending)?;
+                Some(slot.attempted?.saturating_add(USAGE_INTERVAL))
+            });
+        catalogs.chain(usage).min()
+    }
+
     /// An account read runs or waits for its turn.
     pub fn reading(&self) -> bool {
         self.running > 0
@@ -461,6 +496,78 @@ mod tests {
         );
         assert!(!s.usage[&r("c").key()].pending);
         assert!(!s.reading());
+    }
+
+    #[test]
+    fn hiding_drops_the_queued_inspects_and_follow_up_and_lets_running_reads_finish() {
+        let host = ComputerId::local();
+        let hosts = [host.clone()];
+        let all = |_: &ComputerId| true;
+        let mut s = AccountsState::default();
+        s.ensure_catalogs(&hosts, 0, false);
+        s.ensure_catalogs(&hosts, 0, true);
+        for id in ["a", "b", "c"] {
+            s.ensure_usage(&r(id), true, 0, false);
+        }
+        assert_eq!(ids(&s.dispatch(&all)), ["a", "b"]);
+        s.cancel_queued();
+        assert!(
+            s.usage[&r("a").key()].pending && s.usage[&r("b").key()].pending,
+            "running inspects finish"
+        );
+        let c = &s.usage[&r("c").key()];
+        assert!(
+            !c.pending && c.attempted.is_none(),
+            "a dropped inspect never ran"
+        );
+        let profiles: Vec<Value> = ["a", "b", "c"]
+            .iter()
+            .map(|id| json!({"id": id, "home": format!("/home/example/{id}")}))
+            .collect();
+        let listed = json!({ "profiles": profiles });
+        assert!(
+            !s.finish_catalog(&host, Ok(listed), 1, &hosts),
+            "the follow-up is dropped"
+        );
+        s.finish_usage(&r("a"), Some(reply("a", "ok")));
+        s.finish_usage(&r("b"), Some(reply("b", "ok")));
+        assert!(!s.reading());
+        s.ensure_usage(&r("c"), true, 2, false);
+        s.ensure_usage(&r("a"), true, 2, false);
+        assert_eq!(
+            ids(&s.dispatch(&all)),
+            ["c"],
+            "the dropped one is due again when a screen shows"
+        );
+    }
+
+    #[test]
+    fn the_next_due_time_is_the_earliest_catalog_or_inspect_that_is_not_running() {
+        let host = ComputerId::local();
+        let hosts = [host.clone()];
+        let mut s = AccountsState::default();
+        assert_eq!(s.next_due(&hosts, &[]), None, "nothing read yet");
+        s.ensure_catalogs(&hosts, 1_000, false);
+        assert_eq!(
+            s.next_due(&hosts, &[]),
+            None,
+            "a running catalog wakes the hub with its reply"
+        );
+        s.finish_catalog(&host, Ok(json!({"profiles": []})), 2_000, &hosts);
+        assert_eq!(s.next_due(&hosts, &[]), Some(1_000 + CATALOG_INTERVAL));
+        let refs = [(r("a"), true), (r("b"), true), (r("c"), false)];
+        for (r, reachable) in &refs {
+            s.ensure_usage(r, *reachable, 10_000, false);
+        }
+        assert_eq!(
+            s.next_due(&hosts, &refs),
+            Some(1_000 + CATALOG_INTERVAL),
+            "queued inspects and offline hosts are left out"
+        );
+        s.dispatch(&|_: &ComputerId| true);
+        s.finish_usage(&r("a"), Some(reply("a", "ok")));
+        s.ensure_catalogs(&hosts, 40_000, false);
+        assert_eq!(s.next_due(&hosts, &refs), Some(10_000 + USAGE_INTERVAL));
     }
 
     // Review Focus 5 (the timing half; the hub test in Task 3 covers visibility).

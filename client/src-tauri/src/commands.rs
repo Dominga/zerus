@@ -19,6 +19,14 @@ pub struct AppState {
 }
 
 #[cfg(feature = "live")]
+impl AppState {
+    /// The change pump, whose mirror is the screens hub's view of the fleet.
+    pub fn pump(&self) -> crate::pump::Pump {
+        self.live.pump.clone()
+    }
+}
+
+#[cfg(feature = "live")]
 mod live {
     use std::sync::{mpsc, Mutex, PoisonError};
     use std::time::Duration;

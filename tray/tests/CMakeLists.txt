@@ -478,10 +478,11 @@ target_link_libraries(test_sessionswindow PRIVATE Qt6::Test Qt6::Widgets hgs-ter
     hgs-tray-views)
 # The longest suite runs as parallel shards of its test functions and of the data
 # rows of its slowest functions, balanced by qt-shard-durations.txt. COST: see the
-# end of this file.
-foreach(shard RANGE 9)
+# end of this file. WhiteWh fork: 16 shards, since the fork's functions make the
+# suite about 2200 s on the Windows runner and ten shards ran near ctest's 240 s.
+foreach(shard RANGE 15)
     add_test(NAME sessionswindow-${shard} COMMAND ${CMAKE_COMMAND} -DTEST=$<TARGET_FILE:test_sessionswindow>
-        -DSUITE=sessionswindow -DSEED=${CMAKE_CURRENT_SOURCE_DIR}/qt-shard-durations.txt -DSHARD=${shard} -DSHARDS=10
+        -DSUITE=sessionswindow -DSEED=${CMAKE_CURRENT_SOURCE_DIR}/qt-shard-durations.txt -DSHARD=${shard} -DSHARDS=16
         -DRESULTS=${ZERUS_QT_RESULTS_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/RunQtShard.cmake)
     set_tests_properties(sessionswindow-${shard} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endforeach()
@@ -779,7 +780,7 @@ set_tests_properties(windowsdesktop PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offs
 # default order stays: on the 3-vCPU macOS runner, starting every sessionswindow
 # shard at once saved 18 s but made timing-sensitive suites fail (zerus-niu8).
 if(WIN32 AND NOT EXISTS "${CMAKE_BINARY_DIR}/Testing/Temporary/CTestCostData.txt")
-    foreach(shard RANGE 9)
+    foreach(shard RANGE 15)
         set_tests_properties(sessionswindow-${shard} PROPERTIES COST 48)
     endforeach()
     set_tests_properties(activityview PROPERTIES COST 54)

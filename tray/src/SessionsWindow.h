@@ -180,6 +180,7 @@ public:
     quint64 rowGenerationForTests() const { return m_rowGeneration; }
     bool rowsPendingForTests() const { return m_rowsPending || m_rowRequestQueued; }
     int droppedRowPreparationsForTests() const { return m_droppedRowPreparations; }
+    int postedRowPreparationsForTests() const { return m_postedRowPreparations; }
 
 signals:
     // Prepared rows of this generation were written to the list.
@@ -270,7 +271,9 @@ private:
     static inline RowPreparation s_rowPreparation = RowPreparation::Async;
     quint64 m_rowGeneration = 0;
     bool m_rowsPending = false, m_rowRequestQueued = false;
-    int m_droppedRowPreparations = 0;
+    // One row preparation in flight; requests meanwhile fold into one more.
+    bool m_rowPreparing = false, m_rowsAgain = false;
+    int m_droppedRowPreparations = 0, m_postedRowPreparations = 0;
     // One-time choices rebuild() made for the next applied rows: the row to
     // select instead of the selected session, a placed creation, a fork whose
     // terminal opens once it is selected, and a row to reveal.

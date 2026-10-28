@@ -373,6 +373,7 @@ public:
         const int at=speechSection;nav->insertItem(at,name);
         if(page->objectName().isEmpty())page->setObjectName("settingsContent");
         auto *scroll=new QScrollArea;scroll->setFrameShape(QFrame::NoFrame);scroll->setWidgetResizable(true);scroll->setWidget(page);scroll->setMinimumWidth(0);
+        page->setAutoFillBackground(false);scroll->viewport()->setAutoFillBackground(false);   // as addPage
         pages->insertWidget(at,scroll);
         for(int *later:{&speechSection,&keyboardSection,&analyticsSection,&aboutSection})if(*later>=at)++*later;
         return at;
@@ -428,6 +429,10 @@ private:
     }
     void updateResets(){for(const auto &reset:resets)reset.button->setVisible(reset.slider->isEnabled()&&reset.slider->value()!=reset.value);}
     struct Reset{QPushButton *button;QSlider *slider;int value;};QList<Reset> resets;
-    void addPage(QWidget *page){if(page->objectName().isEmpty())page->setObjectName("settingsContent");auto *scroll=new QScrollArea;scroll->setFrameShape(QFrame::NoFrame);scroll->setWidgetResizable(true);scroll->setWidget(page);scroll->setMinimumWidth(0);pages->addWidget(scroll);}
+    // QScrollArea::setWidget turns the page's background fill on, which paints
+    // the system palette (light on Windows) under a page whose own name the
+    // theme's transparent rule does not list (Worktrees, user report
+    // 2026-10-28): every page shows the theme's background instead.
+    void addPage(QWidget *page){if(page->objectName().isEmpty())page->setObjectName("settingsContent");auto *scroll=new QScrollArea;scroll->setFrameShape(QFrame::NoFrame);scroll->setWidgetResizable(true);scroll->setWidget(page);page->setAutoFillBackground(false);scroll->viewport()->setAutoFillBackground(false);scroll->setMinimumWidth(0);pages->addWidget(scroll);}
     QListWidget *nav;QStackedWidget *pages;RecoverySync *sync;RecoverySettings *recovery;QCheckBox *onTop;QLabel *onTopHint;QSlider *activityWidth;QLabel *activityWidthValue;QCheckBox *activityFullWidth;
 };

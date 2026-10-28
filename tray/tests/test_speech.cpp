@@ -585,7 +585,8 @@ private slots:
         QVERIFY(profiles.open(QIODevice::WriteOnly|QIODevice::Truncate));profiles.write(R"JSON([{"machine_id":"bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb","name":"Fixture","profiles":[{"id":"russian","name":"Russian","available":true,"profile_revision":2}]}])JSON");profiles.close();
         MessageComposer composer;composer.setSessionKey("fixture\noriginal");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
         SpeechComposer speech(executable,&composer,[&]{return target(composer);});auto *provider=composer.findChild<QComboBox *>("voiceProvider");auto *send=composer.findChild<QPushButton *>("voiceSend");
-        QTRY_COMPARE(provider->currentText(),"Selected provider (unavailable)");QVERIFY(!send->isEnabled());ComposerDraftStore::flushWrites();
+        // The profile refresh takes up to 8 s on a loaded Windows machine.
+        QTRY_COMPARE_WITH_TIMEOUT(provider->currentText(),QString("Selected provider (unavailable)"),15000);QVERIFY(!send->isEnabled());ComposerDraftStore::flushWrites();
         QCOMPARE(ComposerDraftStore().load("voice-message-draft\nfixture\noriginal").formState.value("speech").toObject().value("profile_revision").toInteger(),initialRevision);
         provider->setCurrentIndex(0);QVERIFY(send->isEnabled());ComposerDraftStore::flushWrites();const auto draft=ComposerDraftStore().load("voice-message-draft\nfixture\noriginal");
         QCOMPARE(draft.formState.value("id").toString(),id);QCOMPARE(draft.attachments[0].data,audio);QCOMPARE(draft.formState.value("speech").toObject().value("profile_revision").toInteger(),2);

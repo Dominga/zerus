@@ -2549,10 +2549,26 @@ void SessionsWindow::applyTheme()
     const QString bg = colors.background;
     const QString hover = colors.hover;
     const QString selected = colors.selected;
-    // Placeholder text is painted from the palette, not from the stylesheet:
-    // in a dark theme a light system palette would leave it near-black.
+    // The whole window follows the theme, not only what the stylesheet names:
+    // a widget it does not cover paints the palette, and a light Windows
+    // palette under the dark theme left pages and views light (Settings >
+    // Worktrees and Keyboard, user report 2026-10-28). Placeholder text is
+    // painted from the palette too.
     QPalette themedPalette = palette();
-    themedPalette.setColor(QPalette::PlaceholderText, QColor(colors.muted));
+    const QColor window(bg), text(colors.foreground), base(colors.surface), muted(colors.muted);
+    for (const auto group : {QPalette::Active, QPalette::Inactive, QPalette::Disabled}) {
+        const QColor foreground = group == QPalette::Disabled ? muted : text;
+        themedPalette.setColor(group, QPalette::Window, window);
+        themedPalette.setColor(group, QPalette::AlternateBase, window);
+        themedPalette.setColor(group, QPalette::Base, base);
+        themedPalette.setColor(group, QPalette::Button, base);
+        themedPalette.setColor(group, QPalette::ToolTipBase, base);
+        themedPalette.setColor(group, QPalette::WindowText, foreground);
+        themedPalette.setColor(group, QPalette::Text, foreground);
+        themedPalette.setColor(group, QPalette::ButtonText, foreground);
+        themedPalette.setColor(group, QPalette::ToolTipText, text);
+        themedPalette.setColor(group, QPalette::PlaceholderText, muted);
+    }
     setPalette(themedPalette);
     // WhiteWh fork: selected text needs a colour apart from the canvas. A skin whose
     // selected rows are a faint tint of it (Compact) selects text in its accent instead.
@@ -3831,7 +3847,7 @@ void SessionsWindow::rebuild()
         m_sessionsStale = true; m_rebuilding = false;
         // Rows requested or still being prepared for the list are dropped:
         // showing the page rebuilds it.
-        m_rowRequestQueued = false;
+        m_rowRequestQueued = false; m_rowsAgain = false;
         if (m_rowsPending) { ++m_rowGeneration; m_rowsPending = false; }
         return;
     }

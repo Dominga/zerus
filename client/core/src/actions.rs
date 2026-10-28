@@ -34,6 +34,10 @@ pub enum Action {
     },
     Pause,
     Resume,
+    /// `hgs resume NAME --fresh [--expected-run-id RUN] -d`
+    /// (`startFreshSession`): a new conversation in the same folder, with the
+    /// same account and model.
+    StartFresh,
     Rename {
         new_name: String,
         archive_id: Option<String>,
@@ -234,6 +238,14 @@ pub fn invocation(
             30,
             None,
         ),
+        Action::StartFresh => {
+            let mut args = vec!["resume".to_owned(), name, "--fresh".to_owned()];
+            if !target.run_id.is_empty() {
+                args.extend(["--expected-run-id".to_owned(), target.run_id.clone()]);
+            }
+            args.push("-d".to_owned());
+            (args, None, 30, 30, None)
+        }
         Action::Rename {
             new_name,
             archive_id,
@@ -1161,6 +1173,32 @@ mod tests {
             &json!({"run_id": "r", "conversation_id": "", "clear_context_supported": true})
         ));
         assert!(!clearable(&json!({"run_id": "r", "conversation_id": "c"})));
+    }
+
+    #[test]
+    fn a_fresh_start_names_the_run_it_replaces() {
+        let inv = invocation(&target("mac"), &Action::StartFresh, "u").unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "@mac",
+                "resume",
+                "claude/sample-project/review",
+                "--fresh",
+                "--expected-run-id",
+                "run-1",
+                "-d"
+            ]
+        );
+        assert_eq!(inv.timeout, Duration::from_secs(30));
+        let mut untracked = target("");
+        untracked.run_id.clear();
+        assert_eq!(
+            invocation(&untracked, &Action::StartFresh, "u")
+                .unwrap()
+                .args,
+            ["resume", "claude/sample-project/review", "--fresh", "-d"]
+        );
     }
 
     #[test]

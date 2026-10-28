@@ -37,7 +37,7 @@ fn the_journal_is_read_only_after_its_command_is_found() {
         probed(hgs, Some(Exit::StartFailed("No such file".into()))).unwrap_err(),
         "cannot start '/srv/bin/hgs': No such file"
     );
-    let list = invocation("list", &list_request(" desktop-a ", "", 0, 0));
+    let list = invocation(Operation::List, &list_request(" desktop-a ", "", 0, 0));
     assert_eq!(list.args, ["approval-log", "list"]);
     assert_eq!(list.timeout, Duration::from_secs(10));
     let sent: Value = serde_json::from_slice(&list.stdin.unwrap()).unwrap();
@@ -111,4 +111,85 @@ fn a_detail_shows_the_question_and_the_answer_chosen() {
     );
     let bare = json!({"status": "failed", "detail": ""});
     assert_eq!(detail(bare.as_object().unwrap()), "Failed");
+}
+
+/// A fake `hgs` logging its arguments and answering per case.
+#[cfg(unix)]
+fn fake(dir: &std::path::Path, help: &str, list: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = dir.join("hgs");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nhere=$(dirname \"$0\")\necho \"$*\" >> \"$here/calls\"\ncat >/dev/null\ncase \"$*\" in\n  --help) {help};;\n  'approval-log list') {list};;\n  'approval-log detail') echo '{{\"status\":\"approved\",\"detail\":\"\"}}';;\n  *) exit 9;;\nesac\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+#[cfg(unix)]
+#[test]
+fn only_the_journal_s_reads_run_and_oversized_output_fails_as_intended() {
+    let dir = std::env::temp_dir().join(format!("zerus-approvals-cli-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    struct Gone(std::path::PathBuf);
+    impl Drop for Gone {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _gone = Gone(dir.clone());
+    let calls = || std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
+    let help = "echo 'hgs approval-log begin|finish|list|detail (JSON stdin)'";
+    let hgs = fake(
+        &dir,
+        help,
+        "echo '{\"entries\":[],\"next\":null,\"previous\":null}'",
+    );
+    let mut supported = false;
+    let request = list_request("", "", 0, 0);
+    assert!(call(&hgs, Operation::List, &request, &mut supported).is_ok());
+    assert!(call(&hgs, Operation::Detail, &json!({"id": 9}), &mut supported).is_ok());
+    // The probe runs once, then only list and detail: never begin or finish.
+    assert_eq!(calls(), "--help\napproval-log list\napproval-log detail\n");
+    // A reply past the limit: the CLI's own error when it wrote one.
+    let hgs = fake(
+        &dir,
+        help,
+        "echo 'journal busy' >&2; head -c 300000 /dev/zero | tr '\\0' x; exit 3",
+    );
+    let failed = call(&hgs, Operation::List, &request, &mut supported).unwrap_err();
+    assert!(
+        failed == "journal busy" || failed == "Invalid automatic approval journal response.",
+        "{failed}"
+    );
+    let hgs = fake(&dir, help, "head -c 300000 /dev/zero | tr '\\0' x");
+    assert_eq!(
+        call(&hgs, Operation::List, &request, &mut supported).unwrap_err(),
+        "Invalid automatic approval journal response."
+    );
+    // A help past its limit is its own error, not a failed exit.
+    let hgs = fake(&dir, "head -c 300000 /dev/zero | tr '\\0' x", "true");
+    let mut fresh = false;
+    assert_eq!(
+        call(&hgs, Operation::List, &request, &mut fresh).unwrap_err(),
+        "help exceeds 262144 bytes"
+    );
+    assert!(!fresh);
+}
+
+#[test]
+fn a_reply_cut_off_at_the_limit_says_the_cli_s_error_when_it_wrote_one() {
+    assert_eq!(past_limit("  journal busy\n").unwrap_err(), "journal busy");
+    assert_eq!(
+        past_limit("").unwrap_err(),
+        "Invalid automatic approval journal response."
+    );
+    assert_eq!(
+        past_limit(&"e".repeat(3000)).unwrap_err().chars().count(),
+        2000
+    );
 }

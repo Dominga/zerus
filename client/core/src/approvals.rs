@@ -61,10 +61,27 @@ pub fn probed(hgs: &Path, exit: Option<Exit>) -> Result<(), String> {
     }
 }
 
+/// The journal's two reads; nothing else of `hgs approval-log` (its begin
+/// and finish record approvals) is ever sent from this client.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Operation {
+    List,
+    Detail,
+}
+
+impl Operation {
+    fn word(self) -> &'static str {
+        match self {
+            Operation::List => "list",
+            Operation::Detail => "detail",
+        }
+    }
+}
+
 /// `hgs approval-log list|detail` with `data` on stdin (10 s).
-pub fn invocation(operation: &str, data: &Value) -> Invocation {
+pub fn invocation(operation: Operation, data: &Value) -> Invocation {
     Invocation {
-        args: vec!["approval-log".into(), operation.into()],
+        args: vec!["approval-log".into(), operation.word().into()],
         stdin: Some(data.to_string().into_bytes()),
         timeout: Duration::from_secs(10),
         request_id: None,
@@ -116,16 +133,34 @@ pub fn answer(exit: Option<Exit>) -> Result<Map<String, Value>, String> {
 /// `supported` remembers a passed probe, as HgsClient does.
 pub fn call(
     hgs: &Path,
-    operation: &str,
+    operation: Operation,
     data: &Value,
     supported: &mut bool,
 ) -> Result<Map<String, Value>, String> {
     if !*supported {
-        let help = crate::run::run_limited(hgs, &probe(), &[], HELP_BYTES).ok();
-        probed(hgs, help)?;
+        match crate::run::run_limited(hgs, &probe(), &[], HELP_BYTES) {
+            Ok(help) => probed(hgs, Some(help))?,
+            // Qt reads all of it; a help this long is no hgs we know.
+            Err(_) => return Err(format!("help exceeds {HELP_BYTES} bytes")),
+        }
         *supported = true;
     }
-    answer(crate::run::run_limited(hgs, &invocation(operation, data), &[], MAX_REPLY).ok())
+    match crate::run::run_limited(hgs, &invocation(operation, data), &[], MAX_REPLY) {
+        Ok(exit) => answer(Some(exit)),
+        Err(too_large) => past_limit(&too_large.stderr),
+    }
+}
+
+/// A reply past the limit was cut off before its exit was known: the
+/// CLI's own error when it wrote one, as Qt shows a failed call's, else
+/// Qt's text for an oversized reply.
+fn past_limit(stderr: &str) -> Result<Map<String, Value>, String> {
+    let error: String = stderr.trim().chars().take(2000).collect();
+    Err(if error.is_empty() {
+        "Invalid automatic approval journal response.".into()
+    } else {
+        error
+    })
 }
 
 /// What a journal entry's status reads as.

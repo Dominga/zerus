@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tauri::State;
-use zerus_client_core::approvals::{self, Page};
+use zerus_client_core::approvals::{self, Operation, Page};
 use zerus_client_core::default_hgs;
 
 /// Whether the local `hgs` answered the probe, and whether this is a replay.
@@ -27,7 +27,7 @@ pub fn start() -> Approvals {
 /// Runs one journal operation off the main thread.
 async fn read(
     approvals: &Approvals,
-    operation: &'static str,
+    operation: Operation,
     data: serde_json::Value,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     if approvals.blocked {
@@ -58,7 +58,7 @@ pub async fn approvals_list(
 ) -> Result<Page, String> {
     let reply = read(
         &approvals,
-        "list",
+        Operation::List,
         approvals::list_request(&host, &session, before, after),
     )
     .await?;
@@ -68,6 +68,11 @@ pub async fn approvals_list(
 /// One entry's question and outcome, as Qt words them.
 #[tauri::command]
 pub async fn approvals_detail(approvals: State<'_, Approvals>, id: i64) -> Result<String, String> {
-    let reply = read(&approvals, "detail", serde_json::json!({ "id": id })).await?;
+    let reply = read(
+        &approvals,
+        Operation::Detail,
+        serde_json::json!({ "id": id }),
+    )
+    .await?;
     Ok(approvals::detail(&reply))
 }

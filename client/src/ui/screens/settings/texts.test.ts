@@ -240,7 +240,7 @@ describe("Settings texts", () => {
   });
   it.each(APPROVALS)("Automatic approvals shows Qt's %s", (text) => {
     expect(approvalsQt).toContain(`"${text}"`);
-    expect(source("Approvals.tsx")).toContain(text);
+    expect(source("Approvals.tsx") + source("approvals-journal.ts")).toContain(text);
   });
   it.each(APPROVALS_CORE)("the approval journal says Qt's %s", (text) => {
     expect(approvalsQt).toContain(`"${text}"`);
@@ -248,7 +248,7 @@ describe("Settings texts", () => {
   });
   it("the approval journal fills in Qt's counts and answers", () => {
     expect(approvalsQt).toContain('"%1 entries. Unconfirmed attempts require checking Activity or Terminal; they are not retried."');
-    expect(source("Approvals.tsx")).toContain("${next.entries.length} entries. Unconfirmed attempts require checking Activity or Terminal; they are not retried.");
+    expect(source("approvals-journal.ts")).toContain("${page.entries.length} entries. Unconfirmed attempts require checking Activity or Terminal; they are not retried.");
     expect(approvalsQt).toContain('"Selected answer: %1"');
     expect(approvalsCore).toContain('"Selected answer: {}"');
   });

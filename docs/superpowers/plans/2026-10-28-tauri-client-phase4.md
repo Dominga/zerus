@@ -19,7 +19,7 @@
 - **One push path.** `next_batch` keeps returning the core's `Batch` as raw JSON, flattened into an envelope that adds the projected `composer` view, the `processes_view` and the `draft_keys`. Rust recomputes them when the followed Activity's details or a fact change, and once a minute for the cache chip. The webview never calls a rule per render.
 - **Native UI** is a child webview at the tunnel URL from `hgs native-ui NAME --json`, origin-locked and incognito; without one, the system browser through `hgs native-ui NAME`.
 
-**Tech Stack:** Rust 1.99.1 (`client/core`, `client/src-tauri`, Tauri 2.12 with the `unstable` feature for child webviews), `tauri-plugin-dialog` 2, `tauri-plugin-opener` 2, `signal-hook` 0.3, `chrono` 0.4, `sha2` 0.10; SolidJS 1.9 + TypeScript + Vite, `@xterm/xterm` 6.0.0, `@xterm/addon-fit` 0.11.0, `@xterm/addon-webgl` 0.19.0, vitest; Python 3 stdlib for fixtures and fake `hgs`.
+**Tech Stack:** Rust 1.99.1 (`client/core`, `client/src-tauri`, Tauri 2.12 with the `unstable` feature for child webviews), `tauri-plugin-dialog` 2, `tauri-plugin-opener` 2, `chrono` 0.4, `sha2` 0.10; SolidJS 1.9 + TypeScript + Vite, `@xterm/xterm` 6.0.0, `@xterm/addon-fit` 0.11.0, `@xterm/addon-webgl` 0.19.0, vitest; Python 3 stdlib for fixtures and fake `hgs`.
 
 **Spec:** `docs/superpowers/specs/2026-10-27-tauri-web-ui-design.md`:
 - process model (PTY, child webview), "Parsing never happens in the webview", "Batched delivery", "Actions";
@@ -178,7 +178,7 @@ Rulings on the open questions; the tasks follow them.
   - Qt's dialog texts, buttons and the "Replace current draft?" confirmation carry over.
 - **The exit closes the hub before the store flushes.** `Composers::flush` stops new edits, attaches and sends and waits up to 2 s for attach reads under way; `Drafts.0.flush()` then writes everything queued. A send whose "sending" save is still queued never starts and reloads as uncertain.
 - **Draft attachment URLs carry no digest.** `AttachmentView.path` is `draft/{handle}/{list}/{index}`, where `list` changes with every change of the attachment list; the scheme answers it from memory without hashing, and an old URL answers 404. S3's draft marks hash an attachment list once (Task 5), not per check.
-- **Renames lock until the store answers** (Qt's `renameDraft`). A refused rename (`ALREADY_EXISTS`) keeps the moved draft under its old key and loads the draft already at the new key, so neither is overwritten.
+- **Renames lock until the store answers** (Qt's `renameDraft`). A refused rename (`ALREADY_EXISTS`) keeps the moved draft under its old key, marked with the refusal as its storage error, and loads the draft already at the new key with no message (`MessageComposer.cpp:795-798`), so neither is overwritten. A newer composer of the old key (a rename back while the first is pending) is never replaced.
 - **Tasks 3 and 4 are split** for review: 3a (the hub, drafts and attachments), 3b (the `zerus-file` scheme and the cache), 4a (the session's block reasons, cache chip and inspect fallback), 4b (the delivery and local rows).
 - **Processes are off by default, as in Qt.** This phase adds the Settings > Processes section the client's Settings screen lacks: Qt's five controls and hint (`tray/src/SettingsPage.h:109-120`), stored under the QSettings keys `processes/enabled`, `processes/activeSeconds`, `processes/backgroundSeconds`, `processes/unknownSeconds` and `processes/loadingSeconds`. This follows the screen's pattern ("Settings, as far as the client has them"); phase 3b keeps the section when it builds the full screen.
 - **Composer parts outside this phase.** Task 12 files a follow-up child of `zerus-5wmh` for each, and each keeps its Qt place, disabled with "Arrives with …":
@@ -206,9 +206,12 @@ Rulings on the open questions; the tasks follow them.
   - **Naming.** Task 4b's "questions" are the hub's own dialogs (cold cache, start). The agent's requests are "question cards" (`questions.rs`, `QuestionReply`).
 - **The push envelope.** `next_batch` serializes `{...batch, composer?, processes_view?, draft_keys?}`. Only the open composer and the followed processes are projected; `draft_keys` lists the sessions with a nonempty draft among the 200 newest drafts plus the composers in memory, so the cards' draft marks stay bounded. Part A2 adds `composer_events?`, and the composer view carries the question card, the queue panel and the inbox state.
 - **Editing protocol.**
-  - The webview owns the text while the user types and flushes `composer_edit(handle, rev, text, position, anchor)` 250 ms after the last keystroke, on blur and before any attach, paste, remove or send. Rust applies only a higher `rev`.
-  - Rust-originated text changes bump `text_epoch`; the webview takes `text` when the epoch grows: a load, an attach or remove, a delivery's end, a restore.
-  - An attach or paste locks the editor read-only until it returns.
+  - The webview owns the text while the user types and flushes `composer_edit(handle, rev, epoch, text, position, anchor)` 250 ms after the last keystroke, on blur and before any attach, paste, remove or send. `epoch` is the `text_epoch` the text is based on. Rust applies only a higher `rev` of the current epoch.
+  - Rust-originated text changes bump `text_epoch`; the webview takes `text` when the epoch grows: a load, an attach or remove, an Undo, a delivery's end, a restore.
+  - A change the composer cannot take hands the text back under a new epoch (Qt's `restoreDraft`): an edit while a rename locks it, a refused remove or Undo.
+  - An attach or paste locks the editor read-only until it returns. A remove or Undo locks it until a view with a higher epoch arrives; Rust always answers them with one.
+- Ruling (Task 3a review): composer_edit carries the text epoch; Rust ignores an edit whose epoch differs, and a busy refusal bumps the epoch to hand the text back — stale edits after remove/Undo/rename otherwise resurrect or drop file mentions — one more argument
+- Ruling (Task 3a review): refused-rename error placement follows Qt — Qt wins — none
 - **Pasted images.** PNG clipboard data goes as is. Another image type is drawn to a canvas and encoded as PNG in the webview only after `createImageBitmap` reports fewer than 32 megapixels; otherwise Qt's text appears and nothing is sent.
 - **Terminal lifecycle (Qt `TerminalView`, `SessionsWindow.cpp:1501-1505, 1637, 3456-3459, 4011-4026`).**
   - Showing the Terminal tab connects.
@@ -232,7 +235,7 @@ Rulings on the open questions; the tasks follow them.
 ## File Structure
 
 ```
-client/src-tauri/Cargo.toml              + tauri "unstable", tauri-plugin-dialog, tauri-plugin-opener, signal-hook, chrono, sha2
+client/src-tauri/Cargo.toml              + tauri "unstable", tauri-plugin-dialog, tauri-plugin-opener, chrono, sha2
 client/src-tauri/src/lib.rs              modules, Drafts (the one store), managed hubs, URI scheme, window events, the one exit hook and its signals, IPC guard
 client/src-tauri/src/actions.rs          dispatch_as (caller-given request id), write_kind (facts for the send rules)
 client/src-tauri/src/commands.rs         next_batch envelope; Live::follow_processes and unfollow_processes
@@ -2075,10 +2078,11 @@ git commit -m "feat(client): the Terminal tab on xterm.js"
 
 **Files:**
 - Create: `client/src-tauri/src/composer/mod.rs`
-- Modify: `client/src-tauri/Cargo.toml` (+ `tauri-plugin-dialog = "2"`, `[target.'cfg(unix)'.dependencies] signal-hook = "0.3"`), `client/src-tauri/Cargo.lock`
+- Create: `client/src-tauri/src/signals.rs`, verbatim from the Mac switch plan (`2026-10-28-tauri-client-mac-switch.md`, Task 3), so both branches carry the same file
+- Modify: `client/src-tauri/Cargo.toml` (+ `tauri-plugin-dialog = "2"`, `[target.'cfg(unix)'.dependencies] libc = "0.2"`), `client/src-tauri/Cargo.lock`
 - Modify: `client/src-tauri/src/pump.rs` (`poke`)
 - Modify: `client/src-tauri/src/commands.rs` (the `next_batch` envelope; `start` calls `Composers::resend`)
-- Modify: `client/src-tauri/src/lib.rs` (`Drafts` and `exit` unless M1c brought them, the managed `Composers`, the dialog plugin, the signal thread, the commands)
+- Modify: `client/src-tauri/src/lib.rs` (`Drafts` and `exit` unless M1c brought them, the managed `Composers`, the dialog plugin, the signal handlers, the commands)
 - Test: unit tests in `composer/mod.rs`; one `pump.rs` test
 
 **Interfaces:**
@@ -2100,7 +2104,7 @@ pub fn draft_key(computer: &str, name: &str, archive: Option<&str>) -> String;
 impl Composers {
     pub fn new(drafts: Arc<DraftStore>, deps: Deps) -> Self; // the app's one store, never its own
     pub fn open(&self, session: Option<SessionRef>) -> Option<ComposerView>;
-    pub fn edit(&self, handle: u64, rev: u64, text: String, position: i64, anchor: i64);
+    pub fn edit(&self, handle: u64, rev: u64, epoch: u64, text: String, position: i64, anchor: i64);
     pub fn attach_paths(&self, handle: u64, paths: Vec<PathBuf>, selection: Selection);
     pub fn paste_image(&self, handle: u64, png: Vec<u8>, selection: Selection);
     pub fn remove(&self, handle: u64, index: usize);
@@ -2122,11 +2126,19 @@ pub struct ComposerView {
 }
 // pump.rs
 impl Pump { pub fn poke(&self); }
-// commands: composer_open(session: Option<SessionRef>) -> Option<ComposerView>; composer_edit(handle, rev, text, position, anchor);
+// commands: composer_open(session: Option<SessionRef>) -> Option<ComposerView>; composer_edit(handle, rev, epoch, text, position, anchor);
 // composer_pick(handle, start, end); composer_attach(handle, paths, start, end); composer_paste_image(raw PNG; x-zerus-composer, x-zerus-start, x-zerus-end);
 // composer_remove(handle, index); composer_undo_remove(handle); composer_allow_retry(handle)
 // next_batch: {...batch, composer?: ComposerView, draft_keys?: string[]}
 ```
+
+**Review round 1** (commits `2f4260ce`, `44067e5f`; the implementation is authoritative where the code below differs):
+- `edit` takes the text epoch and ignores an edit over older text. A change the composer cannot take hands the text back under a new epoch; remove and Undo always answer with a new epoch.
+- Undo is refused past 8 files or 20 MiB, with the core's texts, and stays available.
+- A refused rename marks the moved draft under its old key and reloads the new key with no message (Qt). A newer composer of the old key is never replaced, and a successful rename takes the old key out of the eviction order.
+- `status_error` follows Qt's `ownError`: an uncertain mark alone is a caution.
+- The file picker is modal to the main window; a pasted body is copied up to 10 MiB and one byte only.
+- The termination signals use the Mac switch plan's `signals.rs`; `signal-hook` is not used.
 
 `AttachmentView.path` is `draft/{handle}/{list}/{index}`: the composer, the revision of its attachment list, and the file's place. Task 3b serves it through the `zerus-file` scheme. No digest is computed per view: a new list (an attach, remove, undo, load or send) gets new paths, so an old URL never shows another file.
 
@@ -2202,7 +2214,7 @@ pub(crate) mod tests {
         let (c, _) = hub_on(&store);
         let view = c.open(Some(session())).unwrap();
         let view = until(&c, |v| v.loaded && v.handle == view.handle);
-        c.edit(view.handle, 1, "hello".into(), 5, 5);
+        c.edit(view.handle, 1, view.text_epoch, "hello".into(), 5, 5);
         c.flush();
         store.flush();
         drop(c);
@@ -2220,12 +2232,12 @@ pub(crate) mod tests {
         let (c, _) = hub_on(&store);
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
-        c.edit(view.handle, 1, "typed before quitting".into(), 0, 0);
+        c.edit(view.handle, 1, view.text_epoch, "typed before quitting".into(), 0, 0);
         // The exit hook's order: the hub closes, then the store writes everything queued.
         c.flush();
         store.flush();
         assert_eq!(read_draft(&root.join("drafts"), KEY).draft.draft.text, "typed before quitting");
-        c.edit(view.handle, 2, "after the exit".into(), 0, 0);
+        c.edit(view.handle, 2, view.text_epoch, "after the exit".into(), 0, 0);
         assert_eq!(c.current().unwrap().text, "typed before quitting", "a closed hub takes no edits");
     }
 
@@ -2256,8 +2268,8 @@ pub(crate) mod tests {
         let (c, _) = hub(&root);
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
-        c.edit(view.handle, 2, "newer".into(), 0, 0);
-        c.edit(view.handle, 1, "older".into(), 0, 0);
+        c.edit(view.handle, 2, view.text_epoch, "newer".into(), 0, 0);
+        c.edit(view.handle, 1, view.text_epoch, "older".into(), 0, 0);
         assert_eq!(c.current().unwrap().text, "newer");
     }
 
@@ -2267,7 +2279,7 @@ pub(crate) mod tests {
         let (c, _) = hub(&root);
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
-        c.edit(view.handle, 1, "x".repeat(64 * 1024 + 1), 0, 0);
+        c.edit(view.handle, 1, view.text_epoch, "x".repeat(64 * 1024 + 1), 0, 0);
         let view = c.current().unwrap();
         assert_eq!(view.status, "Message exceeds 64 KiB.");
         assert!(view.status_error && !view.can_send);
@@ -2282,7 +2294,7 @@ pub(crate) mod tests {
         let (c, _) = hub_on(&store);
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
-        c.edit(view.handle, 1, "see".into(), 3, 3);
+        c.edit(view.handle, 1, view.text_epoch, "see".into(), 3, 3);
         c.attach_paths(view.handle, vec![file], Selection { start: 3, end: 3 });
         let view = until(&c, |v| v.attachments.len() == 1 && !v.attaching);
         assert_eq!(view.text, "see [File #1] ");
@@ -2341,7 +2353,7 @@ pub(crate) mod tests {
         let (c, _) = hub_on(&store);
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
-        c.edit(view.handle, 1, "kept across a rename".into(), 0, 0);
+        c.edit(view.handle, 1, view.text_epoch, "kept across a rename".into(), 0, 0);
         let mut renamed = session();
         renamed.name = "claude/sample-project/review-2".into();
         c.open(Some(renamed));
@@ -2361,13 +2373,15 @@ pub(crate) mod tests {
         let (c, _) = hub_on(&store);
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
-        c.edit(view.handle, 1, "moving".into(), 0, 0);
+        c.edit(view.handle, 1, view.text_epoch, "moving".into(), 0, 0);
         let mut renamed = session();
         renamed.name = "claude/sample-project/review-2".into();
         c.open(Some(renamed));
         let view = until(&c, |v| v.loaded && v.text == "already here");
-        assert_eq!(view.status, zerus_client_core::drafts::ALREADY_EXISTS);
+        // Qt's placement: no message on the new key; the moved draft carries the refusal.
+        assert!(view.status.is_empty() && !view.status_error);
         store.flush();
+        assert_eq!(c.lock().composers[KEY].storage_error.as_deref(), Some(zerus_client_core::drafts::ALREADY_EXISTS));
         assert_eq!(read_draft(&root.join("drafts"), KEY).draft.draft.text, "moving", "the moved draft stays for Saved drafts");
         assert_eq!(read_draft(&root.join("drafts"), "studio\nclaude/sample-project/review-2").draft.draft.text, "already here");
     }
@@ -2379,10 +2393,10 @@ pub(crate) mod tests {
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
         let _ = c.take_draft_keys();
-        c.edit(view.handle, 1, "x".into(), 1, 1);
+        c.edit(view.handle, 1, view.text_epoch, "x".into(), 1, 1);
         assert_eq!(c.take_draft_keys(), Some(vec![KEY.to_owned()]));
         assert_eq!(c.take_draft_keys(), None, "unchanged keys are not sent again");
-        c.edit(view.handle, 2, String::new(), 0, 0);
+        c.edit(view.handle, 2, view.text_epoch, String::new(), 0, 0);
         assert_eq!(c.take_draft_keys(), Some(vec![]));
     }
 
@@ -2395,8 +2409,8 @@ pub(crate) mod tests {
         assert!(c.take_view().is_some());
         assert!(c.take_view().is_none());
         let before = notified.load(Ordering::SeqCst);
-        let handle = c.current().unwrap().handle;
-        c.edit(handle, 1, "y".into(), 1, 1);
+        let view = c.current().unwrap();
+        c.edit(view.handle, 1, view.text_epoch, "y".into(), 1, 1);
         assert!(notified.load(Ordering::SeqCst) > before, "a change wakes the pump");
         assert_eq!(c.take_view().unwrap().text, "y");
         c.resend();
@@ -2421,9 +2435,11 @@ Expected: compile errors, the module does not exist.
 //! whenever it changed.
 //!
 //! Text protocol: the webview owns the text while the user types and sends
-//! `composer_edit` with a growing `rev`; Rust applies only a higher one. When
-//! Rust changes the text itself (a load, an attach or remove, a delivery's
-//! end, a restore), it bumps `text_epoch` and the webview takes `text`.
+//! `composer_edit` with a growing `rev` and the `text_epoch` its text is
+//! based on; Rust applies only a higher `rev` of the current epoch. When
+//! Rust changes the text itself (a load, an attach or remove, an Undo, a
+//! delivery's end, a restore), it bumps `text_epoch` and the webview takes
+//! `text`. A locked composer hands its text back the same way.
 //!
 //! Bounded: at most 64 composers and 128 MiB of their attachments in memory
 //! (the open one and a busy one are never dropped; a dropped one reloads
@@ -2827,11 +2843,29 @@ impl Composers {
         self.changed();
     }
 
-    /// The editor changed (`MessageComposer.cpp:370-379`).
-    pub fn edit(&self, handle: u64, rev: u64, text: String, position: i64, anchor: i64) {
+    /// Qt's `restoreDraft`: a change the composer cannot take now (a rename
+    /// under way, a remove or Undo it refuses) hands its text back under a
+    /// new epoch, so the webview takes the text again and unlocks its editor.
+    fn hand_back(&self, mut hub: MutexGuard<'_, Hub>, handle: u64) {
+        let mut handed_back = false;
+        if !hub.closed {
+            if let Some(composer) = Self::by_handle(&mut hub, handle).filter(|c| c.loaded) {
+                composer.text_epoch += 1;
+                handed_back = true;
+            }
+        }
+        drop(hub);
+        if handed_back {
+            self.changed();
+        }
+    }
+
+    /// The editor changed (`MessageComposer.cpp:367-379`). An edit over older
+    /// text is ignored; a locked composer hands its text back (`hand_back`).
+    pub fn edit(&self, handle: u64, rev: u64, epoch: u64, text: String, position: i64, anchor: i64) {
         let mut hub = self.lock();
-        let Some(composer) = Self::editable(&mut hub, handle) else { return };
-        if rev <= composer.rev {
+        let Some(composer) = Self::editable(&mut hub, handle) else { return self.hand_back(hub, handle) };
+        if epoch != composer.text_epoch || rev <= composer.rev {
             return;
         }
         composer.rev = rev;
@@ -3095,8 +3129,8 @@ pub fn composer_open(state: State<'_, Composers>, session: Option<SessionRef>) -
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn composer_edit(state: State<'_, Composers>, handle: u64, rev: u64, text: String, position: i64, anchor: i64) {
-    state.edit(handle, rev, text, position, anchor);
+pub fn composer_edit(state: State<'_, Composers>, handle: u64, rev: u64, epoch: u64, text: String, position: i64, anchor: i64) {
+    state.edit(handle, rev, epoch, text, position, anchor);
 }
 
 /// Attach files: the native picker (`attachFiles`), then the reads.
@@ -3235,8 +3269,13 @@ Without M1c's core change, `drafts::dir(replay)` is not there yet: use `dir.join
                         notify: std::sync::Arc::new(move || notify_pump.poke()),
                     },
                 ));
-                #[cfg(unix)]
-                exit_on_signals(app.handle().clone());
+```
+
+and, after the `live` block of `setup`:
+
+```rust
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            exit_on_signals(app.handle().clone());
 ```
 
 Add `#[cfg(feature = "live")] mod composer;`, the builder's `.plugin(tauri_plugin_dialog::init())`, and the eight composer commands in the live handler.
@@ -3265,28 +3304,29 @@ fn exit(app: &AppHandle) {
 
 Leave the `media` lines out if M1c is not on main; M1c's rebase brings them.
 
-**Termination signals** run the same hook rather than a second one:
+**Termination signals** run the same hook rather than a second one. `client/src-tauri/src/signals.rs` is the Mac switch plan's module (Task 3, Steps 1 and 4), copied verbatim with its test, so both branches carry one file: raw `sigaction` with a self-pipe and `SA_RESETHAND` (a second signal ends the process), and a signal ignored at start stays ignored, as Qt's `TerminationSignals`. Declare it `#[cfg(any(target_os = "linux", target_os = "macos"))] mod signals;` in `lib.rs`, and wire it:
 
 ```rust
-/// SIGTERM, SIGINT or SIGHUP: the exit hook runs here first (drafts reach the
-/// disk even if the event loop is stuck), then the app exits, which runs the
-/// hook again harmlessly. Should the event loop not end the process, it ends
-/// five seconds later.
-#[cfg(all(unix, feature = "live"))]
-fn exit_on_signals(app: tauri::AppHandle) {
-    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
-    let Ok(mut signals) = signal_hook::iterator::Signals::new([SIGTERM, SIGINT, SIGHUP]) else { return };
-    std::thread::Builder::new()
-        .name("zerus-signals".into())
-        .spawn(move || {
-            if signals.forever().next().is_some() {
-                exit(&app);
-                app.exit(0);
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                std::process::exit(0);
-            }
-        })
-        .expect("the signal thread starts");
+/// SIGTERM, SIGINT or SIGHUP (`signals.rs`, Qt's `TerminationSignals`):
+/// the app quits through the one exit hook (`app.exit` ends in
+/// `RunEvent::Exit`). The hook also runs here first, so drafts reach the
+/// disk even if the event loop is stuck; running it twice is harmless.
+/// Should the process not end, it ends five seconds after the signal; a
+/// second signal ends it at once (SA_RESETHAND).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn exit_on_signals(app: AppHandle) {
+    let installed = signals::install(move |_signal| {
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            std::process::exit(0);
+        });
+        #[cfg(feature = "live")]
+        exit(&app);
+        app.exit(0);
+    });
+    if let Err(error) = installed {
+        eprintln!("zerus-client: termination signals keep their default action: {error}");
+    }
 }
 ```
 
@@ -3791,7 +3831,7 @@ pub(crate) mod tests {
         let view = opened(&c, ready());
         assert!(view.available && view.block_reason.is_none() && view.unavailable_reason.is_empty());
         let handle = view.handle;
-        c.edit(handle, 1, "hello".into(), 5, 5);
+        c.edit(handle, 1, view.text_epoch, "hello".into(), 5, 5);
         assert!(c.current().unwrap().can_send);
     }
 
@@ -3805,7 +3845,7 @@ pub(crate) mod tests {
         assert_eq!(view.block_reason.as_deref(), Some("Respond to the agent in the Terminal tab."));
         assert_eq!(view.unavailable_reason, "Respond to the agent in the Terminal tab.");
         assert!(!view.available);
-        c.edit(view.handle, 1, "hi".into(), 2, 2);
+        c.edit(view.handle, 1, view.text_epoch, "hi".into(), 2, 2);
         let view = c.current().unwrap();
         assert!(!view.can_send);
         assert_eq!(view.status, "Respond to the agent in the Terminal tab.");
@@ -4267,14 +4307,14 @@ pub enum SendReply { Sending, Busy, Blocked { reason: String }, Notice { text: S
                      Cold { token: u64, prompt: ColdPrompt }, ClearContext { token: u64 } }
 #[serde(tag = "kind", rename_all = "snake_case")] pub enum Answer { Cold { action: ColdAction }, Cancel }
 impl Composers {
-    pub fn send_message(&self, handle: u64, rev: u64, text: String, position: i64, anchor: i64) -> SendReply;
+    pub fn send_message(&self, handle: u64, rev: u64, epoch: u64, text: String, position: i64, anchor: i64) -> SendReply;
     pub fn answer(&self, token: u64, answer: Answer) -> SendReply;
     pub fn retry(&self, handle: u64, id: &str) -> SendReply;   // blocking: reads the cached files
     pub fn delete_local(&self, handle: u64, id: &str);
     pub fn inspect_local(&self, handle: u64, id: &str) -> Option<Inspect>;
 }
 // crate-internal, for Task 5: Retry, Prompt, Delivery, Context::{run, conversation}, ask, delivery, deliver, delivery_finished, reconcile
-// commands: send_message(handle, rev, text, position, anchor) -> SendReply; send_answer(token, answer) -> SendReply;
+// commands: send_message(handle, rev, epoch, text, position, anchor) -> SendReply; send_answer(token, answer) -> SendReply;
 // local_retry(handle, id) -> SendReply; local_delete(handle, id); local_inspect(handle, id) -> Option<Inspect>
 ```
 
@@ -4283,7 +4323,10 @@ impl Composers {
 - One request id per delivery, made right before its one dispatch. The local row, the CLI request and the receipt check carry it, and no other delivery reuses it.
 - An `Uncertain` outcome (or an `Err`, which means the call's thread died) never resends. The draft stays, marked uncertain, and asks for Allow retry. Its row offers Check Terminal and Delete, never Retry.
 - A question's answer re-checks the composer. A busy or uncertain draft is never sent by an older question, and a delivery drops its key's open questions.
-- A closed hub (the app quits) starts nothing. A draft saved as "sending" reloads as uncertain.
+- A closed hub (the app quits) starts nothing. A draft saved as "sending" reloads as uncertain. The durable save's callback checks `closed` before it dispatches.
+- `send_message` takes the text epoch, as `composer_edit` does, and refuses (`Busy`) when it differs from the composer's: Send never delivers text typed over an older draft (Task 3a review).
+- Every write to a composer's key, the durable ones included, goes through the hub's `save` revision (`saves`), so an older answer never overwrites a newer state and a failed save is retried.
+- A send clears `removed`: Undo never brings a sent file back.
 
 - [ ] **Step 1: `dispatch_as`.** In `client/src-tauri/src/actions.rs`, `dispatch` becomes `dispatch_as(state, target, action, uuid::Uuid::new_v4().to_string())`. `dispatch_as` is the old body with the caller's `request_id` in place of the one it made. The id reaches `invocation` and the receipt check unchanged, and nothing in it retries.
 
@@ -4321,9 +4364,9 @@ impl Composers {
         let view = opened(&c, ready());
         c.attach_paths(view.handle, vec![file], zerus_client_core::attachments::Selection { start: 0, end: 0 });
         let view = until(&c, |v| v.attachments.len() == 1 && !v.attaching);
-        c.edit(view.handle, 4, "hello [File #1] ".into(), 0, 0);
+        c.edit(view.handle, 4, view.text_epoch, "hello [File #1] ".into(), 0, 0);
         assert!(c.current().unwrap().can_send);
-        assert_eq!(c.send_message(view.handle, 5, "hello [File #1] ".into(), 0, 0), SendReply::Sending);
+        assert_eq!(c.send_message(view.handle, 5, view.text_epoch, "hello [File #1] ".into(), 0, 0), SendReply::Sending);
         let view = until(&c, |v| !v.sending && v.text.is_empty());
         let calls = sent(&fake);
         assert_eq!(calls.len(), 1);
@@ -4347,7 +4390,7 @@ impl Composers {
         details["phase"] = json!("approval");
         let view = opened(&c, details);
         assert_eq!(
-            c.send_message(view.handle, 1, "hi".into(), 2, 2),
+            c.send_message(view.handle, 1, view.text_epoch, "hi".into(), 2, 2),
             SendReply::Blocked { reason: "Respond to the agent in the Terminal tab.".into() }
         );
         assert!(sent(&fake).is_empty());
@@ -4361,12 +4404,12 @@ impl Composers {
         details["cache_hint"] = json!({"status": "cold", "tokens": 120000});
         let view = opened(&c, details);
         assert_eq!(view.cache.label, "Cold cache");
-        let SendReply::Cold { token, prompt } = c.send_message(view.handle, 1, "hi".into(), 2, 2) else { panic!("no question") };
+        let SendReply::Cold { token, prompt } = c.send_message(view.handle, 1, view.text_epoch, "hi".into(), 2, 2) else { panic!("no question") };
         assert_eq!(prompt.title, "Continue with a cold cache?");
         assert!(sent(&fake).is_empty());
         assert_eq!(c.answer(token, Answer::Cancel), SendReply::Busy);
         assert_eq!(c.answer(token, Answer::Cold { action: ColdAction::Send }), SendReply::Busy, "a cancelled question is gone");
-        let SendReply::Cold { token, .. } = c.send_message(view.handle, 2, "hi".into(), 2, 2) else { panic!() };
+        let SendReply::Cold { token, .. } = c.send_message(view.handle, 2, view.text_epoch, "hi".into(), 2, 2) else { panic!() };
         assert_eq!(c.answer(token, Answer::Cold { action: ColdAction::Send }), SendReply::Sending);
         until(&c, |v| !v.sending);
         assert_eq!(sent(&fake).len(), 1);
@@ -4379,7 +4422,7 @@ impl Composers {
         let (c, fake) = send_hub_on(&store);
         *lock(&fake.outcome) = Box::new(|_, _| Outcome::Uncertain { detail: "Delivery timed out. The message may have reached the agent; inspect Terminal before retrying.".into() });
         let view = opened(&c, ready());
-        assert_eq!(c.send_message(view.handle, 1, "maybe".into(), 5, 5), SendReply::Sending);
+        assert_eq!(c.send_message(view.handle, 1, view.text_epoch, "maybe".into(), 5, 5), SendReply::Sending);
         let view = until(&c, |v| !v.sending && v.uncertain);
         assert_eq!(view.text, "maybe", "the draft comes back");
         assert!(!view.can_send);
@@ -4387,7 +4430,7 @@ impl Composers {
         assert!(row.uncertain);
         assert_eq!(row.error, "Delivery is not confirmed. Check Terminal before retrying. Delivery timed out. The message may have reached the agent; inspect Terminal before retrying.");
         assert_eq!(c.retry(view.handle, &row.id), SendReply::Busy);
-        assert_eq!(c.send_message(view.handle, 2, "maybe".into(), 5, 5), SendReply::Busy, "Send waits for Allow retry");
+        assert_eq!(c.send_message(view.handle, 2, view.text_epoch, "maybe".into(), 5, 5), SendReply::Busy, "Send waits for Allow retry");
         c.flush();
         store.flush();
         drop(c);
@@ -4404,8 +4447,8 @@ impl Composers {
         let mut details = ready();
         details["cache_hint"] = json!({"status": "cold", "tokens": 120000});
         let view = opened(&c, details);
-        let SendReply::Cold { token: first, .. } = c.send_message(view.handle, 1, "maybe".into(), 5, 5) else { panic!("no question") };
-        let SendReply::Cold { token: second, .. } = c.send_message(view.handle, 1, "maybe".into(), 5, 5) else { panic!("no question") };
+        let SendReply::Cold { token: first, .. } = c.send_message(view.handle, 1, view.text_epoch, "maybe".into(), 5, 5) else { panic!("no question") };
+        let SendReply::Cold { token: second, .. } = c.send_message(view.handle, 1, view.text_epoch, "maybe".into(), 5, 5) else { panic!("no question") };
         *lock(&fake.outcome) = Box::new(|_, _| Outcome::Uncertain { detail: "Delivery timed out.".into() });
         assert_eq!(c.answer(second, Answer::Cold { action: ColdAction::Send }), SendReply::Sending);
         until(&c, |v| !v.sending && v.uncertain);
@@ -4422,7 +4465,7 @@ impl Composers {
         // Hold the writer, so the "sending" save waits in the queue.
         let (release, held) = std::sync::mpsc::channel::<()>();
         store.load("hold", move |_| { let _ = held.recv(); });
-        assert_eq!(c.send_message(view.handle, 1, "at exit".into(), 7, 7), SendReply::Sending);
+        assert_eq!(c.send_message(view.handle, 1, view.text_epoch, "at exit".into(), 7, 7), SendReply::Sending);
         c.flush();
         release.send(()).unwrap();
         store.flush();
@@ -4437,10 +4480,10 @@ impl Composers {
         let (c, fake) = send_hub(&root);
         *lock(&fake.outcome) = Box::new(|_, _| Outcome::Failed { detail: "hgs: refused".into() });
         let view = opened(&c, ready());
-        c.send_message(view.handle, 1, "first".into(), 5, 5);
+        c.send_message(view.handle, 1, view.text_epoch, "first".into(), 5, 5);
         let view = until(&c, |v| !v.sending && v.local.first().is_some_and(|r| !r.error.is_empty()));
         let id = view.local[0].id.clone();
-        c.edit(view.handle, 9, "a newer draft".into(), 13, 13);
+        c.edit(view.handle, 9, view.text_epoch, "a newer draft".into(), 13, 13);
         *lock(&fake.outcome) = Box::new(receipt);
         assert_eq!(c.retry(view.handle, &id), SendReply::Sending);
         let view = until(&c, |v| !v.sending && v.local.iter().all(|r| r.error.is_empty()));
@@ -4458,7 +4501,7 @@ impl Composers {
         let root = dir("reconcile");
         let (c, _) = send_hub(&root);
         let view = opened(&c, ready());
-        c.send_message(view.handle, 1, "shown in history".into(), 0, 0);
+        c.send_message(view.handle, 1, view.text_epoch, "shown in history".into(), 0, 0);
         until(&c, |v| !v.sending && v.local.len() == 1);
         let mut batch = state(ready());
         batch.activity.push(ActivityOut {
@@ -4626,12 +4669,13 @@ impl Composers {
     }
 
     /// Send pressed (`MessageComposer::send` then `SessionsWindow::sendMessage`).
-    pub fn send_message(&self, handle: u64, rev: u64, text: String, position: i64, anchor: i64) -> SendReply {
-        self.edit(handle, rev, text, position, anchor);
+    pub fn send_message(&self, handle: u64, rev: u64, epoch: u64, text: String, position: i64, anchor: i64) -> SendReply {
+        self.edit(handle, rev, epoch, text, position, anchor);
         let mut hub = self.lock();
         let Some(ctx) = self.context(&hub) else { return SendReply::Busy };
         let Some(composer) = hub.composers.get(&ctx.key).filter(|c| c.handle == handle) else { return SendReply::Busy };
-        if hub.closed || !composer.loaded || composer.busy() || composer.uncertain {
+        // Text typed over an older draft (a remove, an Undo, a hand-back) is never sent.
+        if hub.closed || !composer.loaded || composer.busy() || composer.uncertain || composer.text_epoch != epoch {
             return SendReply::Busy;
         }
         let (message, attachments) = (composer.draft.text.clone(), composer.draft.attachments.clone());
@@ -4986,9 +5030,9 @@ The commands, in `send.rs` (with `use tauri::State;`):
 
 ```rust
 #[tauri::command(rename_all = "snake_case")]
-pub async fn send_message(state: State<'_, Composers>, handle: u64, rev: u64, text: String, position: i64, anchor: i64) -> Result<SendReply, String> {
+pub async fn send_message(state: State<'_, Composers>, handle: u64, rev: u64, epoch: u64, text: String, position: i64, anchor: i64) -> Result<SendReply, String> {
     let composers = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || composers.send_message(handle, rev, text, position, anchor)).await.map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || composers.send_message(handle, rev, epoch, text, position, anchor)).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -5114,7 +5158,7 @@ mod continuations {
         let view = opened(&c, details);
         assert!(view.available, "Send stays enabled to ask");
         assert_eq!(view.unavailable_reason, "Session stopped. Send asks whether to resume it or start fresh.");
-        let SendReply::Start { token, question } = c.send_message(view.handle, 1, "after start".into(), 11, 11) else { panic!("no question") };
+        let SendReply::Start { token, question } = c.send_message(view.handle, 1, view.text_epoch, "after start".into(), 11, 11) else { panic!("no question") };
         assert_eq!(question.title, "Start the session to send?");
         assert_eq!(c.answer(token, Answer::Start { choice: StartChoice::Resume }), SendReply::Sending);
         let view = until(&c, |v| v.waiting.is_some());
@@ -5147,7 +5191,7 @@ mod continuations {
         let mut details = ready();
         details["cache_hint"] = json!({"status": "cold"});
         let view = opened(&c, details.clone());
-        let SendReply::Cold { token, prompt } = c.send_message(view.handle, 1, "compact me".into(), 0, 0) else { panic!() };
+        let SendReply::Cold { token, prompt } = c.send_message(view.handle, 1, view.text_epoch, "compact me".into(), 0, 0) else { panic!() };
         assert!(prompt.choices.iter().any(|ch| ch.action == ColdAction::Compact && ch.enabled));
         assert_eq!(c.answer(token, Answer::Cold { action: ColdAction::Compact }), SendReply::Sending);
         until(&c, |v| v.compacting && v.cancel_send);
@@ -5172,14 +5216,14 @@ mod continuations {
         let (c, fake) = send_hub(&root);
         stopped(&fake);
         let view = opened(&c, ready());
-        let SendReply::Start { token, .. } = c.send_message(view.handle, 1, "kept".into(), 0, 0) else { panic!() };
+        let SendReply::Start { token, .. } = c.send_message(view.handle, 1, view.text_epoch, "kept".into(), 0, 0) else { panic!() };
         c.answer(token, Answer::Start { choice: StartChoice::Fresh });
         until(&c, |v| v.waiting.is_some());
         c.cancel_send(view.handle);
         let view = until(&c, |v| v.waiting.is_none());
         assert_eq!(view.status, "Pending send cancelled. Your draft is unchanged.");
         assert_eq!(view.text, "kept");
-        let SendReply::Start { token, .. } = c.send_message(view.handle, 2, "kept".into(), 0, 0) else { panic!() };
+        let SendReply::Start { token, .. } = c.send_message(view.handle, 2, view.text_epoch, "kept".into(), 0, 0) else { panic!() };
         c.answer(token, Answer::Start { choice: StartChoice::Resume });
         until(&c, |v| v.waiting.is_some());
         c.interrupted(view.handle);
@@ -5192,7 +5236,7 @@ mod continuations {
         let (c, fake) = send_hub(&root);
         stopped(&fake);
         let view = opened(&c, ready());
-        let SendReply::Start { token, .. } = c.send_message(view.handle, 1, "late".into(), 0, 0) else { panic!() };
+        let SendReply::Start { token, .. } = c.send_message(view.handle, 1, view.text_epoch, "late".into(), 0, 0) else { panic!() };
         c.answer(token, Answer::Start { choice: StartChoice::Resume });
         until(&c, |v| v.waiting.is_some());
         *lock(&fake.now) += 181.0;
@@ -5698,10 +5742,10 @@ function fakes(reply: SendReply = { kind: "sending" }) {
   let attachDone: (() => void) | undefined;
   const port: ComposerPort = {
     open: async () => view(),
-    edit: async (_h, rev, text) => { calls.push(`edit ${rev} ${text}`); },
+    edit: async (_h, rev, _epoch, text) => { calls.push(`edit ${rev} ${text}`); },
     pick: () => new Promise<void>((resolve) => { calls.push("pick"); attachDone = resolve; }),
     pasteImage: async (_h, bytes) => { calls.push(`paste ${bytes.length}`); },
-    send: async (_h, rev, text) => { calls.push(`send ${rev} ${text}`); return reply; },
+    send: async (_h, rev, _epoch, text) => { calls.push(`send ${rev} ${text}`); return reply; },
     answer: async (token, answer) => { calls.push(`answer ${token} ${JSON.stringify(answer)}`); return { kind: "sending" }; },
     remove: async () => {}, undo: async () => {}, allowRetry: async () => {}, cancelSend: async () => {}, interrupted: async () => {},
     clear: async (_h, run, conversation) => { calls.push(`clear ${run} ${conversation}`); return { kind: "sending" }; },
@@ -5729,6 +5773,44 @@ describe("composer store", () => {
       c.input("hello", 5, 5);
       await c.send();
       expect(f.calls.slice(1)).toEqual(["edit 4 hello", "send 4 hello"]);
+    });
+  });
+
+  it("edits and sends carry the epoch of the text they are based on", async () => {
+    const f = fakes();
+    const epochs: number[] = [];
+    const port: ComposerPort = {
+      ...f.port,
+      edit: async (_h, _rev, epoch) => { epochs.push(epoch); },
+      send: async (_h, _rev, epoch) => { epochs.push(epoch); return { kind: "sending" }; },
+    };
+    await createRoot(async () => {
+      const c = createComposer(port, f.timers);
+      c.apply(view({ text_epoch: 4 }));
+      c.input("hello", 5, 5);
+      await c.send();
+      expect(epochs).toEqual([4, 4]);
+    });
+  });
+
+  it("remove and Undo lock the editor until a view with a higher epoch arrives", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view({ text: "a [File #1] ", text_epoch: 2 }));
+      await c.remove(0);
+      expect(c.locked()).toBe(true);
+      c.input("typed while locked", 18, 18);
+      expect(c.text()).toBe("a [File #1] ");
+      c.apply(view({ text: "a  ", text_epoch: 2 }));
+      expect(c.locked()).toBe(true);
+      c.apply(view({ text: "a  ", text_epoch: 3 }));
+      expect(c.locked()).toBe(false);
+      expect(c.text()).toBe("a  ");
+      await c.undo();
+      expect(c.locked()).toBe(true);
+      c.apply(view({ text: "a  [File #1] ", text_epoch: 4 }));
+      expect(c.locked()).toBe(false);
     });
   });
 
@@ -5820,11 +5902,13 @@ import type { Answer, ClearControl, ColdPrompt, ComposerView, SendReply, Session
 
 // The open composer (Qt MessageComposer) over the Rust hub. The webview owns
 // the text while the user types: edits go to Rust 250 ms after the last key,
-// on blur and before any attach, paste or send, each with a growing `rev`.
-// Rust owns the attachments and the delivery state, and a growing
-// `text_epoch` hands the text back (a load, an attach or remove, a
-// delivery's end). One attach or paste runs at a time; the editor is
-// read-only while it does, as Qt's synchronous attach is.
+// on blur and before any attach, paste or send, each with a growing `rev`
+// and the `text_epoch` the text is based on (Rust ignores an edit over older
+// text). Rust owns the attachments and the delivery state, and a growing
+// `text_epoch` hands the text back (a load, an attach or remove, an Undo, a
+// delivery's end, a refused change). One attach or paste runs at a time; the
+// editor is read-only while it does, as Qt's synchronous attach is, and
+// during a remove or Undo until a view with a higher epoch arrives.
 
 export const EDIT_MS = 250;
 export const MAX_TEXT_BYTES = 64 * 1024;
@@ -5835,10 +5919,10 @@ const UNREADABLE = "Could not read the pasted image.";
 
 export interface ComposerPort {
   open(session: SessionRef | undefined): Promise<ComposerView | null>;
-  edit(handle: number, rev: number, text: string, position: number, anchor: number): Promise<void>;
+  edit(handle: number, rev: number, epoch: number, text: string, position: number, anchor: number): Promise<void>;
   pick(handle: number, start: number, end: number): Promise<void>;
   pasteImage(handle: number, png: Uint8Array, start: number, end: number): Promise<void>;
-  send(handle: number, rev: number, text: string, position: number, anchor: number): Promise<SendReply>;
+  send(handle: number, rev: number, epoch: number, text: string, position: number, anchor: number): Promise<SendReply>;
   answer(token: number, answer: Answer): Promise<SendReply>;
   remove(handle: number, index: number): Promise<void>;
   undo(handle: number): Promise<void>;
@@ -5880,6 +5964,8 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   const [pending, setPending] = createSignal(false);
   const [error, setError] = createSignal<string | undefined>();
   const [dialog, setDialog] = createSignal<Dialog | undefined>();
+  /** The epoch a remove or Undo waits to see exceeded; the editor is locked until then. */
+  const [handBack, setHandBack] = createSignal<number | undefined>();
   let rev = 0;
   let epoch = 0;
   let dirty = false;
@@ -5887,15 +5973,16 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
 
   const handle = () => view()?.handle;
   const tooLong = () => utf8.encode(text()).length > MAX_TEXT_BYTES;
-  const locked = () => pending() || !!view()?.attaching || !!view()?.sending || !!view()?.waiting || !view()?.loaded;
+  const locked = () => pending() || handBack() !== undefined || !!view()?.attaching || !!view()?.sending || !!view()?.waiting || !view()?.loaded;
 
   function apply(next: ComposerView | undefined) {
     batch(() => {
       if (!next) { setView(undefined); return; }
-      if (next.handle !== view()?.handle) { epoch = 0; rev = next.rev; dirty = false; }
+      if (next.handle !== view()?.handle) { epoch = 0; rev = next.rev; dirty = false; setHandBack(undefined); }
       setView(next);
       if (next.text_epoch > epoch) {
         epoch = next.text_epoch;
+        setHandBack(undefined);
         rev = Math.max(rev, next.rev);
         dirty = false;
         setText(next.text);
@@ -5911,7 +5998,7 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     const h = handle();
     if (!dirty || h === undefined) return;
     dirty = false;
-    await port.edit(h, rev, text(), selection().end, selection().start);
+    await port.edit(h, rev, epoch, text(), selection().end, selection().start);
   }
 
   function reply(r: SendReply) {
@@ -5969,13 +6056,26 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
         await port.pasteImage(h, png, selection().start, selection().end);
       });
     },
-    async remove(index: number) { const h = handle(); if (h !== undefined && !locked()) { await flush(); await port.remove(h, index); } },
-    async undo() { const h = handle(); if (h !== undefined && !locked()) await port.undo(h); },
+    /** Remove and Undo change the text in Rust: the editor stays locked until the higher epoch arrives. */
+    async remove(index: number) {
+      const h = handle();
+      if (h === undefined || locked()) return;
+      await flush();
+      setHandBack(epoch);
+      await port.remove(h, index);
+    },
+    async undo() {
+      const h = handle();
+      if (h === undefined || locked()) return;
+      await flush();
+      setHandBack(epoch);
+      await port.undo(h);
+    },
     async send() {
       const h = handle();
       if (h === undefined || locked()) return;
       await flush();
-      reply(await port.send(h, rev, text(), selection().end, selection().start));
+      reply(await port.send(h, rev, epoch, text(), selection().end, selection().start));
     },
     async answer(answer: Answer) {
       const d = dialog();
@@ -6022,13 +6122,13 @@ export async function composerPasteImage(handle: number, png: Uint8Array, start:
   await invoke("composer_paste_image", png, { headers: { "x-zerus-composer": String(handle), "x-zerus-start": String(start), "x-zerus-end": String(end) } });
 }
 export const composerOpen = (session: SessionRef | undefined) => (inTauri() ? invoke<ComposerView | null>("composer_open", { session: session ?? null }) : Promise.resolve(null));
-export const composerEdit = (handle: number, rev: number, text: string, position: number, anchor: number) => desktop<void>("composer_edit", { handle, rev, text, position, anchor });
+export const composerEdit = (handle: number, rev: number, epoch: number, text: string, position: number, anchor: number) => desktop<void>("composer_edit", { handle, rev, epoch, text, position, anchor });
 export const composerPick = (handle: number, start: number, end: number) => desktop<void>("composer_pick", { handle, start, end });
 export const composerAttach = (handle: number, paths: string[], start: number, end: number) => desktop<void>("composer_attach", { handle, paths, start, end });
 export const composerRemove = (handle: number, index: number) => desktop<void>("composer_remove", { handle, index });
 export const composerUndoRemove = (handle: number) => desktop<void>("composer_undo_remove", { handle });
 export const composerAllowRetry = (handle: number) => desktop<void>("composer_allow_retry", { handle });
-export const sendMessage = (handle: number, rev: number, text: string, position: number, anchor: number) => desktop<SendReply>("send_message", { handle, rev, text, position, anchor });
+export const sendMessage = (handle: number, rev: number, epoch: number, text: string, position: number, anchor: number) => desktop<SendReply>("send_message", { handle, rev, epoch, text, position, anchor });
 export const sendAnswer = (token: number, answer: Answer) => desktop<SendReply>("send_answer", { token, answer });
 export const sendCancel = (handle: number) => desktop<void>("send_cancel", { handle });
 export const sendInterrupted = (handle: number) => desktop<void>("send_interrupted", { handle });
@@ -6038,7 +6138,7 @@ export const localDelete = (handle: number, id: string) => desktop<void>("local_
 export const localInspect = (handle: number, id: string) => desktop<Inspect | null>("local_inspect", { handle, id });
 ```
 
-`normalize` keeps `composer` and `draft_keys`, and `isEmptyBatch` treats a batch with either as not empty.
+`normalize` keeps `composer` and `draft_keys`, and `isEmptyBatch` treats a batch with either as not empty. Rust sends each view and each key set once (`take_view`, `take_draft_keys`), so an envelope the pump discarded is not resent.
 
 - [ ] **Step 5: Route the envelope and open the composer** in `client/src/store/session.ts`:
 
@@ -6396,7 +6496,7 @@ impl Composers {
         let (c, _) = hub(&root);
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
-        c.edit(view.handle, 1, "first line\nsecond".into(), 0, 0);
+        c.edit(view.handle, 1, view.text_epoch, "first line\nsecond".into(), 0, 0);
         // The index runs on the store's writer after the queued save.
         let page = c.saved_drafts(DraftSource::Client, 10, None);
         assert_eq!(page.items.len(), 1);
@@ -9328,7 +9428,7 @@ git commit -m "feat(client): the question card, its review delay and cold cache 
 #[derive(Default)] pub(crate) struct Queue { pub(crate) pusher: Pusher, pub(crate) sending: Option<String>, pub(crate) hidden: bool, /* session */ }
 impl Composers {
     pub fn send_queue_now(&self, queue_id: Option<String>) -> bool;
-    pub fn send_push(&self, handle: u64, rev: u64, text: String, position: i64, anchor: i64) -> SendReply;
+    pub fn send_push(&self, handle: u64, rev: u64, epoch: u64, text: String, position: i64, anchor: i64) -> SendReply;
     pub(crate) fn queue_part(&self, hub: &Hub) -> Option<QueueView>;
     pub(crate) fn push_finished(&self, request: &str, ok: bool, uncertain: bool);
     pub(crate) fn queue_observed(&self);
@@ -9336,7 +9436,7 @@ impl Composers {
     pub(crate) fn push_check(&self);
 }
 // ComposerView gains: pub queue: Option<QueueView>,
-// commands: queue_send_now(queue_id: Option<String>) -> bool; send_push(handle, rev, text, position, anchor) -> SendReply
+// commands: queue_send_now(queue_id: Option<String>) -> bool; send_push(handle, rev, epoch, text, position, anchor) -> SendReply
 ```
 
 - [ ] **Step 1: Write the failing tests** at the end of `client/src-tauri/src/composer/queue.rs`:
@@ -9430,7 +9530,7 @@ mod tests {
         let (c, fake) = send_hub(&root);
         *lock(&fake.outcome) = Box::new(submitted);
         let view = opened(&c, working());
-        assert_eq!(c.send_push(view.handle, 1, "please also run lint".into(), 20, 20), SendReply::Sending);
+        assert_eq!(c.send_push(view.handle, 1, view.text_epoch, "please also run lint".into(), 20, 20), SendReply::Sending);
         until(&c, |v| !v.sending && v.text.is_empty());
         assert_eq!(send_nows(&fake), 0, "nothing is queued yet");
         c.observe(&state(queued("❯ please also run lint", true)));
@@ -9450,7 +9550,7 @@ mod tests {
         let (c, fake) = send_hub(&root);
         *lock(&fake.outcome) = Box::new(submitted);
         let view = opened(&c, queued("❯ earlier", true));
-        assert_eq!(c.send_push(view.handle, 1, String::new(), 0, 0), SendReply::Busy);
+        assert_eq!(c.send_push(view.handle, 1, view.text_epoch, String::new(), 0, 0), SendReply::Busy);
         wait_for(|| send_nows(&fake) == 1);
     }
 
@@ -9461,7 +9561,7 @@ mod tests {
         lock(&fake.row).title = "review".into();
         *lock(&fake.outcome) = Box::new(submitted);
         let view = opened(&c, working());
-        c.send_push(view.handle, 1, "later".into(), 5, 5);
+        c.send_push(view.handle, 1, view.text_epoch, "later".into(), 5, 5);
         until(&c, |v| !v.sending && v.text.is_empty());
         c.take_events();
         c.open(Some(SessionRef { computer: "studio".into(), key: "run:run-2".into(), name: "codex/sample-project/other".into(), archive_id: None }));
@@ -9474,7 +9574,7 @@ mod tests {
         let (c, fake) = send_hub(&root);
         *lock(&fake.outcome) = Box::new(submitted);
         let view = opened(&c, working());
-        c.send_push(view.handle, 1, "later".into(), 5, 5);
+        c.send_push(view.handle, 1, view.text_epoch, "later".into(), 5, 5);
         until(&c, |v| !v.sending && v.text.is_empty());
         c.take_events();
         *lock(&fake.now) += 21.0;
@@ -9595,8 +9695,8 @@ impl Composers {
     /// Send and push now (`MessageComposer::push`): with nothing typed, or a
     /// message on its way, it is Send now. Otherwise, when Send would run, it
     /// arms a push for the open session and sends as usual.
-    pub fn send_push(&self, handle: u64, rev: u64, text: String, position: i64, anchor: i64) -> SendReply {
-        self.edit(handle, rev, text.clone(), position, anchor);
+    pub fn send_push(&self, handle: u64, rev: u64, epoch: u64, text: String, position: i64, anchor: i64) -> SendReply {
+        self.edit(handle, rev, epoch, text.clone(), position, anchor);
         let mut hub = self.lock();
         let Some(key) = hub.open_key.clone() else { return SendReply::Busy };
         let Some(composer) = hub.composers.get(&key).filter(|c| c.handle == handle) else { return SendReply::Busy };
@@ -9616,7 +9716,7 @@ impl Composers {
         hub.queue.session = hub.open.clone();
         drop(hub);
         self.changed();
-        self.send_message(handle, rev, text, position, anchor)
+        self.send_message(handle, rev, epoch, text, position, anchor)
     }
 
     /// The send ended (`pushSendFinished`).
@@ -9699,9 +9799,9 @@ pub fn queue_send_now(state: tauri::State<'_, Composers>, queue_id: Option<Strin
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn send_push(state: tauri::State<'_, Composers>, handle: u64, rev: u64, text: String, position: i64, anchor: i64) -> Result<SendReply, String> {
+pub async fn send_push(state: tauri::State<'_, Composers>, handle: u64, rev: u64, epoch: u64, text: String, position: i64, anchor: i64) -> Result<SendReply, String> {
     let composers = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || composers.send_push(handle, rev, text, position, anchor)).await.map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || composers.send_push(handle, rev, epoch, text, position, anchor)).await.map_err(|e| e.to_string())
 }
 ```
 
@@ -9767,7 +9867,7 @@ git commit -m "feat(client): the native queue, Send now and Send and push now in
 // types.ts
 export interface QueueView { id: string; text: string; hint: string; can_send_now: boolean; enabled: boolean; label: string }
 // ComposerView gains: queue: QueueView | null
-// ComposerPort gains: push(handle, rev, text, position, anchor): Promise<SendReply>; sendNow(queueId: string | null): Promise<boolean>
+// ComposerPort gains: push(handle, rev, epoch, text, position, anchor): Promise<SendReply>; sendNow(queueId: string | null): Promise<boolean>
 // ComposerStore gains: push(), sendNow(queueId?)
 // chords.ts
 export const MAC: boolean;
@@ -9811,7 +9911,7 @@ describe("composer chords", () => {
 In `client/src/store/composer.test.ts`:
 - Task 6's `view()` fixture gains `queue: null`.
 - Its `fakes()` port gains:
-  - `push: async (_h, rev, text, position, anchor) => { calls.push(`push ${rev} ${text} ${position} ${anchor}`); return reply; }`;
+  - `push: async (_h, rev, _epoch, text, position, anchor) => { calls.push(`push ${rev} ${text} ${position} ${anchor}`); return reply; }`;
   - `sendNow: async (id) => { calls.push(`send-now ${id}`); return true; }`.
 
 ```ts
@@ -9888,8 +9988,8 @@ export function isSendNowChord(e: ChordKey, mac: boolean): boolean {
 ```ts
 // bridge.ts
 export const queueSendNow = (queueId: string | null) => desktop<boolean>("queue_send_now", { queue_id: queueId });
-export const sendPush = (handle: number, rev: number, text: string, position: number, anchor: number) =>
-  desktop<SendReply>("send_push", { handle, rev, text, position, anchor });
+export const sendPush = (handle: number, rev: number, epoch: number, text: string, position: number, anchor: number) =>
+  desktop<SendReply>("send_push", { handle, rev, epoch, text, position, anchor });
 ```
 
 In `store/composer.ts`, `ComposerPort` gains `push` and `sendNow`; the app's port maps them to `bridge.sendPush` and `bridge.queueSendNow`. The store gains:
@@ -9901,7 +10001,7 @@ In `store/composer.ts`, `ComposerPort` gains `push` and `sendNow`; the app's por
       if (h === undefined) return;
       if (view()?.sending) { await port.sendNow(null); return; }
       await flush();
-      reply(await port.push(h, rev, text(), selection().end, selection().start));
+      reply(await port.push(h, rev, epoch, text(), selection().end, selection().start));
     },
     async sendNow(queueId?: string) { await port.sendNow(queueId ?? null); },
 ```
@@ -11564,12 +11664,14 @@ Run: `cd client && npm test -- src/store/media.test.ts` and see it fail.
         let (c, _) = hub(&root);
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
-        c.edit(view.handle, 1, "before after".into(), 6, 6);
+        c.edit(view.handle, 1, view.text_epoch, "before after".into(), 6, 6);
         assert_eq!(c.insert_voice_text(view.handle, 1, "spoken", "op-1"), Inserted::Saved);
         assert_eq!(c.current().unwrap().text, "before spoken after");
         assert_eq!(c.insert_voice_text(view.handle, 1, "spoken", "op-1"), Inserted::Saved, "the same operation is saved again, not inserted twice");
         assert_eq!(c.current().unwrap().text, "before spoken after");
-        c.edit(view.handle, 2, "changed".into(), 7, 7);
+        // The insert changed the text in Rust: the next edit is based on its epoch.
+        let view = c.current().unwrap();
+        c.edit(view.handle, 2, view.text_epoch, "changed".into(), 7, 7);
         assert_eq!(c.insert_voice_text(view.handle, 1, "late", "op-2"), Inserted::Refused);
     }
 ```

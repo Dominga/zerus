@@ -25,6 +25,17 @@ pub const REPEAT_SECONDS: f64 = 3.0;
 /// Event revisions remembered per followed session.
 const EVENT_REVISIONS: usize = 1024;
 
+/// What an inspection holds besides the summary, as the server leaves out of
+/// Activity `state` frames.
+const NOT_STATE: [&str; 6] = [
+    "events",
+    "processes",
+    "process_work",
+    "cursor",
+    "history_truncated",
+    "replace_events",
+];
+
 /// The removal reasons a [`Change::Remove`] keeps; others become None.
 const REASONS: [&str; 4] = [
     reason::REPLACED,
@@ -178,20 +189,8 @@ impl CatalogState {
                     staged.insert(key.to_owned(), project(row, &machine));
                 }
                 if snapshot.last {
-                    self.rows = self.staged.take().unwrap_or_default();
-                    changes.push(Change::Replace {
-                        computer: computer.clone(),
-                        rows: self
-                            .rows
-                            .iter()
-                            .map(|(key, row)| (key.clone(), row.clone()))
-                            .collect(),
-                    });
-                    let rows = &self.rows;
-                    changes.extend(
-                        self.processes
-                            .retain(computer, |key| rows.contains_key(key)),
-                    );
+                    let rows = self.staged.take().unwrap_or_default();
+                    changes.extend(self.replace_rows(computer, rows));
                     if !self.live {
                         self.live = true;
                         changes.push(Change::Computer {
@@ -203,16 +202,8 @@ impl CatalogState {
             }
             Body::Snapshot(snapshot) if snapshot.topic == topic::CATALOG_META => {
                 if snapshot.last {
-                    self.meta = snapshot.value.clone();
-                    if let Some(meta) = &self.meta {
-                        let machine = crate::MachineMeta::project(meta);
-                        if self.machine.as_ref() != Some(&machine) {
-                            self.machine = Some(machine.clone());
-                            changes.push(Change::Machine {
-                                computer: computer.clone(),
-                                machine,
-                            });
-                        }
+                    if let Some(meta) = snapshot.value.clone() {
+                        changes.extend(self.set_meta(computer, meta));
                     }
                 }
             }
@@ -365,6 +356,178 @@ impl CatalogState {
             _ => {}
         }
         changes
+    }
+
+    /// Replaces every row, as a complete catalog does; followed processes of
+    /// keys it lacks end.
+    fn replace_rows(
+        &mut self,
+        computer: &ComputerId,
+        rows: BTreeMap<String, ViewRow>,
+    ) -> Vec<Change> {
+        self.rows = rows;
+        let mut changes = vec![Change::Replace {
+            computer: computer.clone(),
+            rows: self
+                .rows
+                .iter()
+                .map(|(key, row)| (key.clone(), row.clone()))
+                .collect(),
+        }];
+        let rows = &self.rows;
+        changes.extend(
+            self.processes
+                .retain(computer, |key| rows.contains_key(key)),
+        );
+        changes
+    }
+
+    /// Keeps a `catalog.meta` value; a changed machine card is a change.
+    fn set_meta(&mut self, computer: &ComputerId, meta: Value) -> Option<Change> {
+        let machine = crate::MachineMeta::project(&meta);
+        self.meta = Some(meta);
+        (self.machine.as_ref() != Some(&machine)).then(|| {
+            self.machine = Some(machine.clone());
+            Change::Machine {
+                computer: computer.clone(),
+                machine,
+            }
+        })
+    }
+
+    /// A listing of a computer without the stream (`hgs [@host] ls --json`):
+    /// its sessions replace the rows and the rest is its `catalog.meta`, as the
+    /// stream's snapshots would be. Followed sessions it lacks end.
+    pub(crate) fn listing(&mut self, computer: &ComputerId, listing: &Value) -> Vec<Change> {
+        let machine = match computer.alias() {
+            Some(alias) => alias.to_owned(),
+            None => listing["host"].as_str().unwrap_or_default().to_owned(),
+        };
+        let rows: BTreeMap<String, ViewRow> = listing["sessions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| {
+                let name = row["name"].as_str()?;
+                let key = zerus_watch_protocol::key_for(row["run_id"].as_str(), name);
+                Some((key, project(row, &machine)))
+            })
+            .collect();
+        let mut changes = self.replace_rows(computer, rows);
+        let gone: Vec<String> = self
+            .activity
+            .keys()
+            .filter(|key| !self.rows.contains_key(*key))
+            .cloned()
+            .collect();
+        for key in gone {
+            self.activity.remove(&key);
+            changes.push(activity_change(computer, &key, ActivityUpdate::Ended));
+        }
+        let mut meta = listing.clone();
+        if let Some(object) = meta.as_object_mut() {
+            object.remove("sessions");
+        }
+        changes.extend(self.set_meta(computer, meta));
+        changes
+    }
+
+    /// An `inspect NAME --after CURSOR` of a followed session without the
+    /// stream: new events after its cursor (a window replacement for its first
+    /// read, a gap or a replaced window), and its summary when that changed.
+    /// A read of another run ends the follow.
+    pub(crate) fn activity_polled(
+        &mut self,
+        computer: &ComputerId,
+        key: &str,
+        run_id: Option<&str>,
+        inspection: &Value,
+        window: bool,
+    ) -> Vec<Change> {
+        let Some(activity) = self.activity.get_mut(key) else {
+            return Vec::new();
+        };
+        let seen = inspection["run_id"].as_str().filter(|run| !run.is_empty());
+        if run_id
+            .zip(seen)
+            .is_some_and(|(wanted, seen)| wanted != seen)
+        {
+            self.activity.remove(key);
+            return vec![activity_change(computer, key, ActivityUpdate::Ended)];
+        }
+        let mut changes = Vec::new();
+        let events = inspection["events"].as_array().cloned().unwrap_or_default();
+        let cursor = inspection["cursor"].as_i64().unwrap_or(activity.cursor);
+        let replace = window
+            || inspection["history_truncated"] == true
+            || inspection["replace_events"] == true;
+        if replace {
+            changes.push(activity_change(
+                computer,
+                key,
+                ActivityUpdate::Replace { events, cursor },
+            ));
+        } else if !events.is_empty() {
+            changes.push(activity_change(
+                computer,
+                key,
+                ActivityUpdate::Events { events, cursor },
+            ));
+        }
+        activity.cursor = cursor;
+        let mut value = inspection.clone();
+        if let Some(object) = value.as_object_mut() {
+            for field in NOT_STATE {
+                object.remove(field);
+            }
+        }
+        let steady = |value: &Value| {
+            let mut value = value.clone();
+            if let Some(object) = value.as_object_mut() {
+                object.remove("goal_observed_at");
+            }
+            value
+        };
+        if activity.state.as_ref().map(steady) != Some(steady(&value)) {
+            let rev = activity.rev + 1;
+            activity.replace_state(value.clone(), rev);
+            changes.push(activity_change(
+                computer,
+                key,
+                ActivityUpdate::State { value, rev },
+            ));
+        }
+        changes
+    }
+
+    /// An `inspect NAME` of a followed session's processes without the
+    /// stream: its `{processes, process_work}` when that changed apart from
+    /// sampling times.
+    pub(crate) fn processes_polled(
+        &mut self,
+        computer: &ComputerId,
+        key: &str,
+        inspection: &Value,
+    ) -> Option<Change> {
+        let value = serde_json::json!({
+            "processes": inspection["processes"],
+            "process_work": inspection["process_work"],
+        });
+        let steady = |value: &Value| {
+            let mut value = value.clone();
+            for part in ["processes", "process_work"] {
+                if let Some(object) = value[part].as_object_mut() {
+                    object.remove("sampled_at");
+                }
+            }
+            value
+        };
+        let previous = self.processes.value(key);
+        if previous.is_some_and(|(old, _)| steady(old) == steady(&value)) {
+            return None;
+        }
+        let rev = previous.map_or(1, |(_, rev)| rev + 1);
+        self.processes.state(computer, key, &value, rev)
     }
 
     /// The rows as last known, by key.

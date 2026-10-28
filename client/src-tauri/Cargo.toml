@@ -34,6 +34,8 @@ zerus-client-core = { path = "../core", optional = true }
 # Linux: the refresh rate of the window's monitor (display.rs); the same gtk as tauri's.
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+libc = "0.2"
+webkit2gtk = "2.0.2"
 
 # macOS: process metrics through libproc, and the WebKit preference that lets
 # page rendering follow the display rate (platform/macos.rs).

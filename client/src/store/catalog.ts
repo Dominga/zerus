@@ -1,4 +1,5 @@
 import { batch } from "solid-js";
+import { applyMachines } from "./machines";
 import { createStore, produce, reconcile } from "solid-js/store";
 import type { Batch, ComputerId, RowOut, ViewRow } from "../types";
 import type { AgentKind, Session, Status } from "../ui/sessions/types";
@@ -16,7 +17,7 @@ const computerOf = (id: string) => id.slice(0, id.indexOf("\n"));
 
 export interface ComputerState {
   id: ComputerId;
-  /** probing, unsupported, live, reconnecting or ended. */
+  /** probing, unsupported, live, polled, reconnecting or ended. */
   status: string;
   /** Restart attempt while reconnecting. */
   attempt: number;
@@ -148,7 +149,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow): Sessio
 /** How long a `replaced` removal waits for the new run of the same name. */
 const REPLACED_MS = 10_000;
 
-export function createCatalog() {
+export function createCatalog(onMachines?: (b: Batch) => void) {
   const [catalog, setCatalog] = createStore<CatalogState>({ rows: {}, order: [], computers: {} });
   // `replaced` removals by computer + name, so the next run of that name can
   // inherit selection and drafts (the remove and its upsert may land in
@@ -175,6 +176,7 @@ export function createCatalog() {
   function applyBatch(b: Batch) {
     batch(() => {
       for (const c of b.computers) setCatalog("computers", c.computer, { id: c.computer, status: c.status, attempt: c.attempt ?? 0 });
+      onMachines?.(b);
       const fresh: string[] = [];
       const gone = new Set<string>();
       for (const r of b.replaces) {
@@ -234,7 +236,7 @@ export function createCatalog() {
 }
 
 /** The app's catalog. Tests build their own with `createCatalog`. */
-export const { catalog, applyBatch, moveRow, onReplaced } = createCatalog();
+export const { catalog, applyBatch, moveRow, onReplaced } = createCatalog(applyMachines);
 
 /** Rows in display order. */
 export const orderedRows = () => catalog.order.map((id) => catalog.rows[id]).filter(Boolean);

@@ -579,7 +579,10 @@ mod tests {
             vec![("a", asking("claude/p/a")), ("b", unread("claude/p/b"))],
         );
         assert_eq!(desk.badge().as_deref(), Some("2"));
+        listed(&mut desk, "studio", vec![("c", asking("claude/p/c"))]);
+        assert_eq!(desk.badge().as_deref(), Some("3"));
         status(&mut desk, "", ComputerStatus::Reconnecting { attempt: 1 });
+        // Qt badges zero on any error (`TrayAgent.cpp:541`), a current peer's attention included.
         assert_eq!(
             desk.badge(),
             None,

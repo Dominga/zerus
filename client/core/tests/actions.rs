@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use zerus_client_core::actions::{classify, invocation};
+use zerus_client_core::attachments::Attachment;
 use zerus_client_core::{run, run_with_env, Action, Exit, Outcome, Target};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -193,4 +194,86 @@ fn a_reference_through_the_fake_is_the_uri() {
     let log = fake.log();
     assert_eq!(log.len(), 1);
     assert_eq!(log[0]["argv"][0], "reference");
+}
+
+fn send(text: &str) -> Action {
+    Action::Send {
+        text: text.into(),
+        attachments: vec![Attachment {
+            name: "notes.txt".into(),
+            mime: "text/plain".into(),
+            bytes: b"file bytes".as_slice().into(),
+            reference: "[File #1]".into(),
+        }],
+        agent_id: Some("agent-7".into()),
+        expected_compaction_id: None,
+    }
+}
+
+#[test]
+fn a_send_through_the_fake_is_done_with_the_message_only_on_stdin() {
+    let fake = Fake::new(r#"{"reply":{"exit":0,"stdout":"echo_send"}}"#);
+    let t = target();
+    let a = send("private message text");
+    let inv = invocation(&t, &a, "req-1").unwrap();
+    let Outcome::Done { receipt, .. } = classify(&t, &a, &inv, run(&fake.hgs, &inv)) else {
+        panic!("a done send")
+    };
+    assert_eq!(receipt["agent_id"], "agent-7");
+    let log = fake.log();
+    assert_eq!(log.len(), 1);
+    assert_eq!(
+        log[0]["argv"],
+        serde_json::json!(["send", "claude/sample-project/review", "--json"])
+    );
+    let stdin: Value = serde_json::from_str(log[0]["stdin"].as_str().unwrap()).unwrap();
+    assert_eq!(stdin["text"], "private message text");
+    assert_eq!(stdin["attachments"][0]["data_base64"], "ZmlsZSBieXRlcw==");
+}
+
+#[test]
+fn an_unconfirmed_send_is_uncertain_and_runs_once() {
+    // The fake acknowledges another run: the message may have arrived.
+    let fake = Fake::new(
+        r#"{"reply":{"exit":0,"stdout":{"status":"submitted","request_id":"req-1","agent_id":"agent-7","name":"claude/sample-project/review","run_id":"run-2","conversation_id":"conv-1"}}}"#,
+    );
+    let t = target();
+    let a = send("hello");
+    let inv = invocation(&t, &a, "req-1").unwrap();
+    assert_eq!(
+        classify(&t, &a, &inv, run(&fake.hgs, &inv)),
+        Outcome::Uncertain {
+            detail: "Delivery acknowledgement is invalid. Inspect Terminal before retrying.".into()
+        }
+    );
+    assert_eq!(fake.log().len(), 1);
+}
+
+#[test]
+fn staged_files_through_the_fake_are_done() {
+    let fake = Fake::new(r#"{"reply":{"exit":0,"stdout":"echo_stage"}}"#);
+    let file = fake.dir.join("drop.txt");
+    std::fs::write(&file, b"dropped").unwrap();
+    let t = target();
+    let a = Action::StageFiles {
+        paths: vec![file],
+        expected_created: None,
+    };
+    let inv = invocation(&t, &a, "req-1").unwrap();
+    assert!(matches!(
+        classify(&t, &a, &inv, run(&fake.hgs, &inv)),
+        Outcome::Done { .. }
+    ));
+    let log = fake.log();
+    assert_eq!(
+        log[0]["argv"],
+        serde_json::json!([
+            "attachment",
+            "claude/sample-project/review",
+            "--stage",
+            "--json"
+        ])
+    );
+    let stdin: Value = serde_json::from_str(log[0]["stdin"].as_str().unwrap()).unwrap();
+    assert_eq!(stdin["attachments"][0]["name"], "drop.txt");
 }

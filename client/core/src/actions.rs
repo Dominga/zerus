@@ -1,8 +1,12 @@
 //! Guarded session actions: the `hgs` calls the Qt client makes
 //! (`tray/src/HgsClient.cpp`) and the rules that turn their exits into outcomes.
+use crate::attachments::{self, Attachment};
 use crate::view::ViewRow;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::fs::File;
+use std::io::Read;
+use std::path::PathBuf;
 use std::time::Duration;
 
 const CLEANUP_PREFIX: &str = "ZERUS_WORKTREE_CLEANUP ";
@@ -39,6 +43,29 @@ pub enum Action {
     /// `hgs kill NAME`: Terminate for a live session without an HGS archive
     /// (`killSession`; `SessionsWindow::terminateSession` picks it).
     Kill,
+    /// `hgs send NAME --json` (`requestSendMessage`): the message and its
+    /// files go only to standard input. Built in Rust from the held draft:
+    /// webview JSON cannot produce it, so no attachment bytes cross the IPC.
+    #[serde(skip_deserializing)]
+    Send {
+        text: String,
+        attachments: Vec<Attachment>,
+        /// A subagent's ID; none for the session's own agent.
+        agent_id: Option<String>,
+        /// The compaction this message waits for (compact-to-send).
+        expected_compaction_id: Option<String>,
+    },
+    /// Stage dropped files on the session's computer, as Qt's
+    /// `requestStageFiles` (the `attachment` session action). The paths must
+    /// be absolute paths of regular files; they are read when the call is
+    /// built, so callers build it off the UI thread.
+    StageFiles {
+        paths: Vec<PathBuf>,
+        /// The untracked session's creation time, checked by `hgs` when the
+        /// session has neither a run nor a conversation.
+        #[serde(default)]
+        expected_created: Option<i64>,
+    },
 }
 
 /// One `hgs` call: arguments (with a leading `@alias` for a peer), standard
@@ -87,10 +114,21 @@ pub enum Outcome {
     Failed {
         detail: String,
     },
+    /// The request may have taken effect: a send that timed out, ended
+    /// abnormally or returned no valid receipt. Never retried automatically.
+    Uncertain {
+        detail: String,
+    },
 }
 
 fn failed(detail: impl Into<String>) -> Outcome {
     Outcome::Failed {
+        detail: detail.into(),
+    }
+}
+
+fn uncertain(detail: impl Into<String>) -> Outcome {
+    Outcome::Uncertain {
         detail: detail.into(),
     }
 }
@@ -207,6 +245,54 @@ pub fn invocation(
         }
         // A local kill is a tmux kill-session; a peer's goes through SSH.
         Action::Kill => (vec!["kill".to_owned(), name], None, 5, 15, None),
+        Action::Send {
+            text,
+            attachments,
+            agent_id,
+            expected_compaction_id,
+        } => {
+            let input = send_input(
+                target,
+                text,
+                attachments,
+                agent_id.as_deref(),
+                expected_compaction_id.as_deref(),
+                request_id,
+            )?;
+            (
+                vec!["send".to_owned(), name, "--json".to_owned()],
+                Some(input),
+                15,
+                45,
+                Some(request_id.to_owned()),
+            )
+        }
+        Action::StageFiles {
+            paths,
+            expected_created,
+        } => {
+            let mut input = json!({
+                "request_id": request_id,
+                "expected_run_id": target.run_id,
+                "expected_conversation_id": target.conversation_id,
+                "attachments": stage_files(paths)?,
+            });
+            if let Some(created) = stage_created(target, *expected_created) {
+                input["expected_created"] = json!(created);
+            }
+            (
+                vec![
+                    "attachment".to_owned(),
+                    name,
+                    "--stage".to_owned(),
+                    "--json".to_owned(),
+                ],
+                Some(serde_json::to_vec(&input).map_err(|error| error.to_string())?),
+                15,
+                45,
+                Some(request_id.to_owned()),
+            )
+        }
     };
     let peer_call = prepend_alias(&mut args, &target.computer);
     Ok(Invocation {
@@ -215,6 +301,112 @@ pub fn invocation(
         timeout: Duration::from_secs(if peer_call { peer } else { local }),
         request_id: request,
     })
+}
+
+/// At most this much message text, in UTF-8 bytes (`MaximumMessageBytes`).
+pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+/// While a send to the same session and agent is in flight.
+pub const ALREADY_SENDING: &str = "A message to this session is already being sent.";
+
+/// `requestSendMessage`'s checks and standard input.
+fn send_input(
+    target: &Target,
+    text: &str,
+    files: &[Attachment],
+    agent_id: Option<&str>,
+    compaction_id: Option<&str>,
+    request_id: &str,
+) -> Result<Vec<u8>, String> {
+    if target.name.is_empty() || target.run_id.is_empty() {
+        return Err("Refresh the session before sending a message.".into());
+    }
+    if text.len() > MAX_MESSAGE_BYTES || files.len() > attachments::MAX_ATTACHMENTS {
+        return Err("Use at most 64 KiB of text and 8 attachments.".into());
+    }
+    let mut total = 0;
+    for file in files {
+        if file.bytes.is_empty() || file.bytes.len() > attachments::MAX_ATTACHMENT_BYTES {
+            return Err("Each attachment must be nonempty and at most 10 MiB.".into());
+        }
+        total += file.bytes.len();
+        if total > attachments::MAX_TOTAL_BYTES {
+            return Err("Attachments exceed 20 MiB in total.".into());
+        }
+    }
+    if text.trim().is_empty() && files.is_empty() {
+        return Err("Write a message or attach a file first.".into());
+    }
+    let mut input = json!({
+        "request_id": request_id,
+        "text": text,
+        "attachments": files,
+        "expected_run_id": target.run_id,
+        "expected_conversation_id": target.conversation_id,
+    });
+    if let Some(agent) = agent_id.filter(|id| !id.is_empty()) {
+        input["agent_id"] = json!(agent);
+    }
+    if let Some(compaction) = compaction_id.filter(|id| !id.is_empty()) {
+        input["expected_compaction_id"] = json!(compaction);
+    }
+    serde_json::to_vec(&input).map_err(|error| error.to_string())
+}
+
+/// `requestStageFiles`: 1-8 absolute paths of regular, readable, nonempty
+/// files of at most 10 MiB each and 20 MiB together. The type comes from the
+/// content (`attachments::sniff`), and the name is the file's own.
+fn stage_files(paths: &[PathBuf]) -> Result<Vec<Attachment>, String> {
+    if paths.is_empty() || paths.len() > attachments::MAX_ATTACHMENTS {
+        return Err("Drop between 1 and 8 files.".into());
+    }
+    let unreadable = || "Each file must be readable, nonempty, and at most 10 MiB.".to_owned();
+    let mut total = 0;
+    let mut files = Vec::with_capacity(paths.len());
+    for path in paths {
+        if !path.is_absolute() {
+            return Err(unreadable());
+        }
+        let metadata = std::fs::metadata(path).map_err(|_| unreadable())?;
+        if !metadata.is_file()
+            || metadata.len() == 0
+            || metadata.len() > attachments::MAX_ATTACHMENT_BYTES as u64
+        {
+            return Err(unreadable());
+        }
+        let mut bytes = Vec::new();
+        File::open(path)
+            .and_then(|file| {
+                file.take(attachments::MAX_ATTACHMENT_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)
+            })
+            .map_err(|_| unreadable())?;
+        total += bytes.len();
+        if bytes.is_empty()
+            || bytes.len() > attachments::MAX_ATTACHMENT_BYTES
+            || total > attachments::MAX_TOTAL_BYTES
+        {
+            return Err("Files exceed 20 MiB in total or changed during transfer.".into());
+        }
+        files.push(Attachment {
+            name: path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            mime: attachments::sniff(&bytes),
+            bytes: bytes.into(),
+            reference: String::new(),
+        });
+    }
+    Ok(files)
+}
+
+/// The creation time a stage checks: only for an untracked session, which has
+/// neither a run nor a conversation.
+fn stage_created(target: &Target, expected_created: Option<i64>) -> Option<i64> {
+    (target.run_id.is_empty() && target.conversation_id.is_empty())
+        .then_some(expected_created)
+        .flatten()
+        .filter(|created| *created >= 0)
 }
 
 /// `hgs [@host] reference NAME --json --run RUN --conversation CONVERSATION
@@ -302,15 +494,36 @@ fn trimmed_stderr(stderr: &str) -> Option<String> {
 
 pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit: Exit) -> Outcome {
     match action {
-        Action::Interrupt { .. } => classify_interrupt(target, invocation, exit),
+        Action::Interrupt { .. } => {
+            classify_session_action(target, invocation, exit, "submitted", None)
+        }
+        Action::StageFiles {
+            expected_created, ..
+        } => classify_session_action(
+            target,
+            invocation,
+            exit,
+            "staged",
+            stage_created(target, *expected_created),
+        ),
+        Action::Send { agent_id, .. } => {
+            classify_send(target, invocation, agent_id.as_deref(), exit)
+        }
         Action::MarkRead { .. } => classify_read(target, exit),
         Action::Archive | Action::Terminate => classify_write(exit, true),
         _ => classify_write(exit, false),
     }
 }
 
-/// `runSessionAction`: the receipt must echo this exact request and session.
-fn classify_interrupt(target: &Target, invocation: &Invocation, exit: Exit) -> Outcome {
+/// `runSessionAction`: the receipt must echo this exact request and session,
+/// in the state the action reaches, and the creation time it checked.
+fn classify_session_action(
+    target: &Target,
+    invocation: &Invocation,
+    exit: Exit,
+    state: &str,
+    expected_created: Option<i64>,
+) -> Outcome {
     match exit {
         Exit::TimedOut => failed("Request timed out. Check Terminal before retrying."),
         Exit::WriteFailed => failed("Transfer failed. Check Terminal before retrying."),
@@ -326,16 +539,75 @@ fn classify_interrupt(target: &Target, invocation: &Invocation, exit: Exit) -> O
         Exit::Code { stdout, .. } => {
             let receipt: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
             let field = |key: &str| receipt.get(key).and_then(Value::as_str);
-            let matches = field("status") == Some("submitted")
+            let matches = field("status") == Some(state)
                 && invocation.request_id.is_some()
                 && field("request_id") == invocation.request_id.as_deref()
                 && field("name") == Some(target.name.as_str())
                 && field("run_id") == Some(target.run_id.as_str())
-                && field("conversation_id") == Some(target.conversation_id.as_str());
+                && field("conversation_id") == Some(target.conversation_id.as_str())
+                && expected_created.is_none_or(|created| {
+                    receipt.get("created").and_then(Value::as_i64) == Some(created)
+                });
             if matches {
                 done(receipt, None)
             } else {
                 failed("Invalid acknowledgement. Check Terminal before retrying.")
+            }
+        }
+    }
+}
+
+/// `requestSendMessage`'s outcome. Only a timeout before the start, a failed
+/// start or a plain exit 1 without "delivery uncertain" is a definite
+/// failure; anything else may have reached the agent. Success needs the
+/// receipt to echo the request, agent, session, run and conversation, and a
+/// first message (no conversation yet) to say so.
+fn classify_send(
+    target: &Target,
+    invocation: &Invocation,
+    agent_id: Option<&str>,
+    exit: Exit,
+) -> Outcome {
+    let detail = |stderr: &str, code: i32| {
+        let text: String = stderr.trim().chars().take(FAILURE_STDERR_CHARS).collect();
+        if text.is_empty() {
+            format!("Message transfer failed (exit {code}).")
+        } else {
+            text
+        }
+    };
+    match exit {
+        Exit::TimedOut => uncertain(
+            "Delivery timed out. The message may have reached the agent; inspect Terminal before retrying.",
+        ),
+        Exit::WriteFailed => uncertain("Message transfer failed. Inspect Terminal before retrying."),
+        Exit::StartFailed(error) => failed(format!("Cannot start hgs: {error}")),
+        Exit::Abnormal { stderr } => uncertain(detail(&stderr, -1)),
+        Exit::Code { code, stderr, .. } if code != 0 => {
+            let text = detail(&stderr, code);
+            if code != 1 || stderr.to_lowercase().contains("delivery uncertain") {
+                uncertain(text)
+            } else {
+                failed(text)
+            }
+        }
+        Exit::Code { stdout, .. } => {
+            let receipt: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+            let field = |key: &str| receipt.get(key).and_then(Value::as_str);
+            let valid = receipt.is_object()
+                && field("status") == Some("submitted")
+                && invocation.request_id.is_some()
+                && field("request_id") == invocation.request_id.as_deref()
+                && field("agent_id").unwrap_or("") == agent_id.unwrap_or("")
+                && field("name") == Some(target.name.as_str())
+                && field("run_id") == Some(target.run_id.as_str())
+                && field("conversation_id") == Some(target.conversation_id.as_str())
+                && (!target.conversation_id.is_empty()
+                    || receipt.get("first_message") == Some(&Value::Bool(true)));
+            if valid {
+                done(receipt, None)
+            } else {
+                uncertain("Delivery acknowledgement is invalid. Inspect Terminal before retrying.")
             }
         }
     }
@@ -461,6 +733,305 @@ mod tests {
             stdout: stdout.to_vec(),
             stderr: stderr.into(),
         }
+    }
+
+    fn send(text: &str, attachments: Vec<Attachment>) -> Action {
+        Action::Send {
+            text: text.into(),
+            attachments,
+            agent_id: None,
+            expected_compaction_id: None,
+        }
+    }
+
+    fn file(name: &str, bytes: Vec<u8>) -> Attachment {
+        Attachment {
+            name: name.into(),
+            mime: "text/plain".into(),
+            bytes: bytes.into(),
+            reference: String::new(),
+        }
+    }
+
+    fn exit(code: i32, stdout: &[u8], stderr: &str) -> Exit {
+        Exit::Code {
+            code,
+            stdout: stdout.to_vec(),
+            stderr: stderr.into(),
+        }
+    }
+
+    #[test]
+    fn a_send_cannot_come_from_webview_json() {
+        let refused = serde_json::from_value::<Action>(json!({
+            "kind": "send", "text": "hi", "attachments": [],
+            "agent_id": null, "expected_compaction_id": null
+        }));
+        assert!(refused.is_err());
+        let stage: Action = serde_json::from_value(json!({
+            "kind": "stage_files", "paths": ["/home/example/a.txt"]
+        }))
+        .unwrap();
+        assert_eq!(
+            stage,
+            Action::StageFiles {
+                paths: vec!["/home/example/a.txt".into()],
+                expected_created: None
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(uncertain("x")).unwrap(),
+            json!({"outcome": "uncertain", "detail": "x"})
+        );
+    }
+
+    #[test]
+    fn a_send_checks_like_qt_before_any_process() {
+        let t = target("");
+        let refusal =
+            |target: &Target, action: &Action| invocation(target, action, "u").unwrap_err();
+        let mut no_run = t.clone();
+        no_run.run_id.clear();
+        assert_eq!(
+            refusal(&no_run, &send("hi", vec![])),
+            "Refresh the session before sending a message."
+        );
+        let limits = "Use at most 64 KiB of text and 8 attachments.";
+        assert_eq!(
+            refusal(&t, &send(&"x".repeat(MAX_MESSAGE_BYTES + 1), vec![])),
+            limits
+        );
+        assert!(invocation(&t, &send(&"x".repeat(MAX_MESSAGE_BYTES), vec![]), "u").is_ok());
+        let nine = (0..9).map(|_| file("a", vec![1])).collect();
+        assert_eq!(refusal(&t, &send("hi", nine)), limits);
+        assert_eq!(
+            refusal(&t, &send("hi", vec![file("e", vec![])])),
+            "Each attachment must be nonempty and at most 10 MiB."
+        );
+        let ten = attachments::MAX_ATTACHMENT_BYTES;
+        assert_eq!(
+            refusal(
+                &t,
+                &send(
+                    "hi",
+                    vec![
+                        file("a", vec![0; ten]),
+                        file("b", vec![0; ten]),
+                        file("c", vec![0])
+                    ]
+                )
+            ),
+            "Attachments exceed 20 MiB in total."
+        );
+        assert_eq!(
+            refusal(&t, &send(" \n\t", vec![])),
+            "Write a message or attach a file first."
+        );
+    }
+
+    #[test]
+    fn a_send_puts_the_message_only_on_stdin() {
+        let action = Action::Send {
+            text: "secret words".into(),
+            attachments: vec![Attachment {
+                reference: "[File #1]".into(),
+                ..file("a.txt", b"hi".to_vec())
+            }],
+            agent_id: Some("agent-7".into()),
+            expected_compaction_id: Some("compaction-1".into()),
+        };
+        let inv = invocation(&target("mac"), &action, "req-1").unwrap();
+        assert_eq!(
+            inv.args,
+            ["@mac", "send", "claude/sample-project/review", "--json"]
+        );
+        assert_eq!(inv.timeout, Duration::from_secs(45));
+        assert_eq!(inv.request_id.as_deref(), Some("req-1"));
+        let input: Value = serde_json::from_slice(inv.stdin.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            input,
+            json!({
+                "request_id": "req-1", "text": "secret words",
+                "attachments": [{"name": "a.txt", "mime": "text/plain", "data_base64": "aGk=", "reference": "[File #1]"}],
+                "expected_run_id": "run-1", "expected_conversation_id": "conv-1",
+                "agent_id": "agent-7", "expected_compaction_id": "compaction-1"
+            })
+        );
+        let local = invocation(&target(""), &send("hi", vec![]), "req-2").unwrap();
+        assert_eq!(local.timeout, Duration::from_secs(15));
+        let input: Value = serde_json::from_slice(local.stdin.as_ref().unwrap()).unwrap();
+        assert!(input.get("agent_id").is_none() && input.get("expected_compaction_id").is_none());
+    }
+
+    #[test]
+    fn send_outcomes_separate_certain_from_uncertain_failures() {
+        let t = target("");
+        let action = send("hi", vec![]);
+        let inv = invocation(&t, &action, "req-1").unwrap();
+        let outcome = |exit| classify(&t, &action, &inv, exit);
+        assert_eq!(
+            outcome(Exit::TimedOut),
+            uncertain("Delivery timed out. The message may have reached the agent; inspect Terminal before retrying.")
+        );
+        assert_eq!(
+            outcome(Exit::WriteFailed),
+            uncertain("Message transfer failed. Inspect Terminal before retrying.")
+        );
+        assert_eq!(
+            outcome(Exit::StartFailed("No such file or directory".into())),
+            failed("Cannot start hgs: No such file or directory")
+        );
+        assert_eq!(
+            outcome(Exit::Abnormal {
+                stderr: String::new()
+            }),
+            uncertain("Message transfer failed (exit -1).")
+        );
+        assert_eq!(
+            outcome(exit(1, b"", " no such session \n")),
+            failed("no such session")
+        );
+        assert_eq!(
+            outcome(exit(1, b"", "Delivery Uncertain: pane closed")),
+            uncertain("Delivery Uncertain: pane closed")
+        );
+        assert_eq!(
+            outcome(exit(2, b"", "")),
+            uncertain("Message transfer failed (exit 2).")
+        );
+        let receipt = json!({"status": "submitted", "request_id": "req-1", "name": "claude/sample-project/review",
+                             "run_id": "run-1", "conversation_id": "conv-1"});
+        assert!(matches!(
+            outcome(exit(0, receipt.to_string().as_bytes(), "")),
+            Outcome::Done { .. }
+        ));
+        let invalid =
+            uncertain("Delivery acknowledgement is invalid. Inspect Terminal before retrying.");
+        for (key, value) in [
+            ("status", json!("queued")),
+            ("request_id", json!("req-2")),
+            ("agent_id", json!("agent-7")),
+            ("name", json!("claude/sample-project/other")),
+            ("run_id", json!("run-2")),
+            ("conversation_id", json!(null)),
+        ] {
+            let mut changed = receipt.clone();
+            changed[key] = value;
+            assert_eq!(
+                outcome(exit(0, changed.to_string().as_bytes(), "")),
+                invalid,
+                "{key}"
+            );
+        }
+        assert_eq!(outcome(exit(0, b"not json", "")), invalid);
+        // A first message has no conversation yet and must say so.
+        let mut first = t.clone();
+        first.conversation_id.clear();
+        let inv = invocation(&first, &action, "req-1").unwrap();
+        let mut receipt = receipt.clone();
+        receipt["conversation_id"] = json!("");
+        let outcome = |receipt: &Value| {
+            classify(
+                &first,
+                &action,
+                &inv,
+                exit(0, receipt.to_string().as_bytes(), ""),
+            )
+        };
+        assert_eq!(outcome(&receipt), invalid);
+        receipt["first_message"] = json!(true);
+        assert!(matches!(outcome(&receipt), Outcome::Done { .. }));
+    }
+
+    #[test]
+    fn staged_files_are_checked_like_qt() {
+        let dir = std::env::temp_dir().join(format!("zerus-stage-unit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.txt");
+        std::fs::write(&a, b"hello").unwrap();
+        let stage = |paths: Vec<PathBuf>| Action::StageFiles {
+            paths,
+            expected_created: Some(1700),
+        };
+        let t = target("");
+        let refusal = |action: &Action| invocation(&t, action, "u").unwrap_err();
+        assert_eq!(refusal(&stage(vec![])), "Drop between 1 and 8 files.");
+        assert_eq!(
+            refusal(&stage(vec![a.clone(); 9])),
+            "Drop between 1 and 8 files."
+        );
+        let unreadable = "Each file must be readable, nonempty, and at most 10 MiB.";
+        assert_eq!(
+            refusal(&stage(vec!["a.txt".into()])),
+            unreadable,
+            "relative"
+        );
+        assert_eq!(refusal(&stage(vec![dir.clone()])), unreadable, "folder");
+        assert_eq!(refusal(&stage(vec![dir.join("missing")])), unreadable);
+        let empty = dir.join("empty");
+        std::fs::write(&empty, b"").unwrap();
+        assert_eq!(refusal(&stage(vec![empty])), unreadable);
+        #[cfg(unix)]
+        assert_eq!(
+            refusal(&stage(vec!["/dev/null".into()])),
+            unreadable,
+            "device"
+        );
+        let big = dir.join("big");
+        std::fs::write(&big, vec![0; attachments::MAX_ATTACHMENT_BYTES]).unwrap();
+        assert_eq!(
+            refusal(&stage(vec![big.clone(), big.clone(), a.clone()])),
+            "Files exceed 20 MiB in total or changed during transfer."
+        );
+        let inv = invocation(&t, &stage(vec![a.clone()]), "req-1").unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "attachment",
+                "claude/sample-project/review",
+                "--stage",
+                "--json"
+            ]
+        );
+        let input: Value = serde_json::from_slice(inv.stdin.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            input,
+            json!({"request_id": "req-1", "expected_run_id": "run-1", "expected_conversation_id": "conv-1",
+                   "attachments": [{"name": "a.txt", "mime": "text/plain", "data_base64": "aGVsbG8="}]})
+        );
+        // An untracked session checks its creation time.
+        let mut untracked = t.clone();
+        untracked.run_id.clear();
+        untracked.conversation_id.clear();
+        let action = stage(vec![a]);
+        let inv = invocation(&untracked, &action, "req-1").unwrap();
+        let input: Value = serde_json::from_slice(inv.stdin.as_ref().unwrap()).unwrap();
+        assert_eq!(input["expected_created"], json!(1700));
+        let receipt = json!({"status": "staged", "request_id": "req-1", "name": "claude/sample-project/review",
+                             "run_id": "", "conversation_id": "", "created": 1700});
+        let outcome = |receipt: &Value| {
+            classify(
+                &untracked,
+                &action,
+                &inv,
+                exit(0, receipt.to_string().as_bytes(), ""),
+            )
+        };
+        assert!(matches!(outcome(&receipt), Outcome::Done { .. }));
+        let mut other = receipt.clone();
+        other["created"] = json!(1701);
+        assert_eq!(
+            outcome(&other),
+            failed("Invalid acknowledgement. Check Terminal before retrying.")
+        );
+        other = receipt.clone();
+        other["status"] = json!("submitted");
+        assert_eq!(
+            outcome(&other),
+            failed("Invalid acknowledgement. Check Terminal before retrying.")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -60,8 +60,8 @@ export function createActions(
 
   function dismiss(id: number) { setList((all) => all.filter((n) => n.id !== id)); }
 
-  /** Adds a notice; over the cap, the oldest non-sticky one goes first, then the oldest. */
-  function notify(tone: Notice["tone"], text: string, sticky = false) {
+  /** Adds a notice and returns its id; over the cap, the oldest non-sticky one goes first, then the oldest. */
+  function notify(tone: Notice["tone"], text: string, sticky = false): number {
     const id = nextId++;
     setList((all) => {
       const next = [...all, { id, tone, text, sticky }];
@@ -72,6 +72,7 @@ export function createActions(
       return next;
     });
     if (!sticky) setTimeout(() => dismiss(id), INFO_MS);
+    return id;
   }
 
   const updating = (computer: string, name: string) => !!writes[sessionId(computer, name)];
@@ -90,7 +91,12 @@ export function createActions(
     if (action.kind === "forget_binding") { notify("info", `Zerus forgot ${row.name}. The conversation stays in OpenCode.`); return; }
     if (action.kind === "rename") notify("info", "Session renamed. Refreshing…");
     else notify("info", "Session updated. Refreshing…");
-    const cleanup = out.cleanup;
+    reportCleanup(out);
+  }
+
+  /** The worktree lines of an Archive or Terminate (Qt's worktreeCleanupFinished), shown also during a selection batch. */
+  function reportCleanup(out: Outcome) {
+    const cleanup = out.outcome === "done" ? out.cleanup : null;
     if (!cleanup) return;
     if (cleanup.status === "removed") notify("info", "Worktree removed automatically. The branch and archived conversation are kept.");
     else if (cleanup.status === "kept" || cleanup.status === "unconfirmed") {
@@ -118,17 +124,18 @@ export function createActions(
    * Runs an action from a menu, header button or dialog. `row` is what the
    * entry was built from; the action runs only while the listed row still
    * has that run (or, without a run id, still exists). A busy session is a
-   * silent no-op.
+   * silent no-op. `quiet` is a selection batch's item (Qt's finishSelectionAction):
+   * the batch words the outcome, and only the worktree lines show.
    */
-  async function perform(row: ActionRow, action: Action): Promise<Outcome> {
+  async function perform(row: ActionRow, action: Action, options: { quiet?: boolean } = {}): Promise<Outcome> {
     const live = catalog.rows[row.key];
     const target = targetOf(row, action.kind);
     if (!live || !target || (row.runId && live.runId !== row.runId)) {
-      notify("info", CHANGED);
+      if (!options.quiet) notify("info", CHANGED);
       return failed(CHANGED);
     }
     const { out, busy } = await call(target, action);
-    if (!busy) report(action, out, row);
+    if (!busy) { if (options.quiet) reportCleanup(out); else report(action, out, row); }
     return out;
   }
 

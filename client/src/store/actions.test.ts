@@ -234,6 +234,36 @@ describe("perform", () => {
       dispose();
     });
   });
+
+  it("quietly shows only the worktree lines, for a selection batch", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      mocked.runAction.mockResolvedValueOnce(done()).mockResolvedValueOnce({ outcome: "failed", detail: "x" });
+      expect(await a.perform(session(), { kind: "pause" }, { quiet: true })).toMatchObject({ outcome: "done" });
+      expect(await a.perform(session(), { kind: "forget_binding" }, { quiet: true })).toEqual({ outcome: "failed", detail: "x" });
+      expect(await a.perform(session({ run_id: "run-2" }), { kind: "pause" }, { quiet: true })).toMatchObject({ outcome: "failed" });
+      expect(a.notices()).toEqual([]);
+      mocked.runAction.mockResolvedValueOnce(done({ status: "kept", path: "/home/example/wt", common_dir: "/home/example/.git", reason: "uncommitted changes" }));
+      await a.perform(session(), { kind: "terminate" }, { quiet: true });
+      expect(a.notices()).toEqual([expect.objectContaining({ tone: "warn", text: "Worktree kept for review: uncommitted changes", sticky: true })]);
+      mocked.runAction.mockResolvedValueOnce(done({ status: "removed", path: "/home/example/wt", common_dir: "/home/example/.git", reason: null }));
+      await a.perform(session(), { kind: "archive" }, { quiet: true });
+      expect(a.notices().map((n) => n.text)).toEqual(["Worktree kept for review: uncommitted changes", "Worktree removed automatically. The branch and archived conversation are kept."]);
+      dispose();
+    });
+  });
+
+  it("returns each notice's id, so it can be dismissed", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      const first = a.notify("info", "one");
+      const second = a.notify("info", "two");
+      expect(first).not.toBe(second);
+      a.dismiss(first);
+      expect(a.notices().map((n) => n.text)).toEqual(["two"]);
+      dispose();
+    });
+  });
 });
 
 describe("targets", () => {

@@ -1,18 +1,29 @@
-import { For, Show, createEffect, createMemo, createSignal, untrack } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, untrack } from "solid-js";
 import { Icon } from "../lib/icons";
 import { catalog, computerOffline } from "../../store/catalog";
 import { change, copyCommand, copyFolder, copyName, copyReference, dismiss, end, forget, interrupting, notices, notify, perform, stillListed, pendingNotifications, toggleMute, updating } from "../../store/actions";
+import { bindBatchConfirm, running } from "../../store/batch";
 import type { MenuEntry } from "../../store/ui";
 import type { Details } from "../../types";
 import type { Session } from "./types";
 import { FRESH_CHANGED, STATE_CHANGED, canStartStopped, FRESH_TIP, copyState, dialogReducer, freshCopy, freshEntry, freshStillValid, menuState, notificationsState, renameParts, renameProblem, forgetCopy, forgetOpening, snapshotOf, terminateCopy, terminates, type ForgetScope, type ActionRow, type DialogEvent } from "./actions-ui";
+import type { BatchConfirmation } from "./selection";
 
-// The guarded session actions: the entries both menus share, the Rename and
-// Terminate dialogs, and the notices the action store raises.
+// The guarded session actions: the entries both menus share, the Rename,
+// Terminate, Forget, Start fresh and selection dialogs, and the notices the
+// action store raises. While a selection batch runs (store/batch.ts, Qt's
+// m_pending) every write entry here is off.
 
 const [open, dispatch] = createSignal<ReturnType<typeof dialogReducer>>(undefined, { equals: false });
 const send = (event: DialogEvent) => dispatch(dialogReducer(open(), event));
 const closeDialog = () => send({ type: "close" });
+
+// A selection's Forget or Terminate asks here; any way out but the confirm button is a Cancel.
+bindBatchConfirm((copy) => new Promise<boolean>((resolve) => {
+  let answered = false;
+  const answer = (confirmed: boolean) => { if (!answered) { answered = true; resolve(confirmed); } };
+  send({ type: "open", kind: "batch", copy, answer });
+}));
 
 type Item = Extract<MenuEntry, { label: string }> & { action: () => void };
 
@@ -25,7 +36,7 @@ type Item = Extract<MenuEntry, { label: string }> & { action: () => void };
 export function actionEntries(s: Session, details?: Details, options: { context?: boolean } = {}): { change: Item; stop: Item & { shown: boolean }; rename: Item; archive?: Item; end: Item } {
   const row = snapshotOf(s);
   const m = menuState(row, !computerOffline(s.computer), updating(s.computer, s.name), details,
-    { context: options.context, interrupting: interrupting(s.computer, s.name) });
+    { context: options.context, interrupting: interrupting(s.computer, s.name), batchRunning: running() });
   const hint = (enabled: boolean, reason?: string) => (enabled ? undefined : reason);
   const archived = row.state === "archived";
   return {
@@ -91,14 +102,14 @@ export function muteEntry(s: Session): Item | undefined {
  */
 export function freshActionEntry(s: Session, header = false): Item | undefined {
   const row = snapshotOf(s);
-  const m = freshEntry(row, !computerOffline(s.computer), updating(s.computer, s.name));
+  const m = freshEntry(row, !computerOffline(s.computer), updating(s.computer, s.name), running());
   if (!m) return undefined;
   return {
     label: "Start fresh…", icon: "clear", disabled: !m.enabled, hint: header ? FRESH_TIP : m.hint,
     action: () => {
       const live = stillListed(row);
       // Qt returns silently when the session can no longer start fresh.
-      if (live && canStartStopped(live, !computerOffline(live.computer), updating(live.computer, live.name))) send({ type: "open", kind: "fresh", row: snapshotOf(live) });
+      if (live && canStartStopped(live, !computerOffline(live.computer), updating(live.computer, live.name), running())) send({ type: "open", kind: "fresh", row: snapshotOf(live) });
     },
   };
 }
@@ -187,7 +198,7 @@ function FreshDialog(props: { row: ActionRow; close: () => void }) {
   const confirm = () => {
     props.close();
     const live = catalog.rows[props.row.key];
-    if (!live || !freshStillValid(snapshotOf(live), props.row, !computerOffline(live.computer), updating(live.computer, live.name))) {
+    if (!live || !freshStillValid(snapshotOf(live), props.row, !computerOffline(live.computer), updating(live.computer, live.name), running())) {
       notify("error", FRESH_CHANGED, true);
       return;
     }
@@ -208,7 +219,33 @@ function FreshDialog(props: { row: ActionRow; close: () => void }) {
 }
 
 /**
- * One modal host for the two dialogs. In one code path it opens the modal,
+ * A selection's Forget or Terminate (Qt's confirmSelectionAction): the text,
+ * the targets behind a disclosure as Qt's detailed text, Cancel focused and
+ * the default. Closing it any other way (Escape, another dialog) answers no.
+ */
+function BatchDialog(props: { copy: BatchConfirmation; answer: (confirmed: boolean) => void; close: () => void }) {
+  onCleanup(() => props.answer(false));
+  return (
+    <>
+      <div class="dlg-head"><Icon name="triangle-alert" size={18} class="accent" /><h2 id="action-dlg-title">{props.copy.title}</h2></div>
+      <div class="dlg-body">
+        <div class="confirm-body" id="action-dlg-body" style={{ "white-space": "pre-line" }}>{props.copy.text}</div>
+        <details class="dlg-detail">
+          <summary>Show details</summary>
+          <div style={{ "white-space": "pre-line", "max-height": "160px", overflow: "auto" }}>{props.copy.details.join("\n")}</div>
+        </details>
+      </div>
+      <div class="dlg-foot">
+        <span class="spacer" />
+        <button type="button" class="btn primary" data-initial autofocus onClick={props.close}>Cancel</button>
+        <button type="button" class="btn solid-danger" onClick={() => { props.answer(true); props.close(); }}>{props.copy.confirm}</button>
+      </div>
+    </>
+  );
+}
+
+/**
+ * One modal host for the dialogs. In one code path it opens the modal,
  * then focuses the dialog's initial control (the tag field with its text
  * selected, or Cancel). Escape closes through the dialog's own cancel.
  */
@@ -227,10 +264,11 @@ export function ActionDialogs() {
   });
   return (
     <dialog class="dlg" ref={el} role={open()?.kind === "rename" || !open() ? "dialog" : "alertdialog"} aria-labelledby="action-dlg-title"
-      aria-describedby={open()?.kind === "terminate" || open()?.kind === "fresh" || open()?.kind === "forget" ? "action-dlg-body" : undefined} style={{ width: "460px" }} onClose={closeDialog}>
+      aria-describedby={open() && open()?.kind !== "rename" ? "action-dlg-body" : undefined} style={{ width: "460px" }} onClose={closeDialog}>
       <Show when={open()} keyed>
         {(p) => (p.kind === "rename" ? <RenameDialog row={p.row} close={closeDialog} />
-          : p.kind === "fresh" ? <FreshDialog row={p.row} close={closeDialog} /> : p.kind === "forget" ? <ForgetDialog row={p.row} bound={p.bound} close={closeDialog} /> : p.kind === "terminate" ? <TerminateDialog row={p.row} close={closeDialog} /> : null)}
+          : p.kind === "fresh" ? <FreshDialog row={p.row} close={closeDialog} /> : p.kind === "forget" ? <ForgetDialog row={p.row} bound={p.bound} close={closeDialog} />
+          : p.kind === "batch" ? <BatchDialog copy={p.copy} answer={p.answer} close={closeDialog} /> : p.kind === "terminate" ? <TerminateDialog row={p.row} close={closeDialog} /> : null)}
       </Show>
     </dialog>
   );

@@ -1,4 +1,5 @@
 import type { Details } from "../../types";
+import type { BatchConfirmation } from "./selection";
 import type { Session } from "./types";
 
 // Which session actions are offered and with which words, after the Qt
@@ -97,6 +98,11 @@ export interface MenuOptions {
   context?: boolean;
   /** The write in flight is this session's interrupt. */
   interrupting?: boolean;
+  /**
+   * A selection batch runs (Qt's m_pending, store/batch.ts): every write entry
+   * is off, and the header's change entry reads Updating….
+   */
+  batchRunning?: boolean;
 }
 
 export const FORGET_ARCHIVE_LATER = "Forgetting archived sessions arrives with the Archive view.";
@@ -123,7 +129,7 @@ export const terminates = (s: Pick<ActionRow, "state" | "allowed" | "cmd">, deta
   s.state === "running" && !forgetsBindingOnly(s, details);
 
 export function menuState(s: ActionRow, online: boolean, updating: boolean, details?: Details, options: MenuOptions = {}): MenuState {
-  const available = online && !updating;
+  const available = online && !updating && !options.batchRunning;
   const archived = s.state === "archived";
   const running = s.state === "running";
   const idle = s.activity === "idle" || !!details?.auth_required;
@@ -152,14 +158,14 @@ export function menuState(s: ActionRow, online: boolean, updating: boolean, deta
 
   return {
     change: {
-      label: updating ? "Updating…" : archived ? "Restore session" : running ? "Pause session" : "Resume session",
+      label: updating || (options.batchRunning && !options.context) ? "Updating…" : archived ? "Restore session" : running ? "Pause session" : "Resume session",
       enabled: change,
       reason: archived ? RESTORE_LATER : undefined,
     },
     rename: allowedOp(s, "rename", details) && available && !!agent && !!project && (!archived || !!s.archiveId),
     archive: {
       visible: s.cmd !== "deepseek" && (s.state === "paused" || s.state === "stopped"),
-      enabled: (!options.context || online) && !updating && allowedOp(s, "archive", details),
+      enabled: (!options.context || online) && !updating && !options.batchRunning && allowedOp(s, "archive", details),
       reason: reasonFor(s, "archive", details),
     },
     end,
@@ -302,9 +308,9 @@ export function headerClearSlot(mainContext: boolean, state: ActionRow["state"])
 
 /**
  * Qt's canStartStopped: online, paused or stopped, tracked, a Codex, Claude or
- * Kimi session, no write pending for it. Qt's other blockers (terminating,
- * compacting, composer sending, rename in flight) have no client state yet. `batchRunning` is for Piece F's batch
- * runner (Qt: no batch running); until then callers leave it false.
+ * Kimi session, no write pending for it and no selection batch running
+ * (`batchRunning`, Qt's m_pending). Qt's other blockers (terminating,
+ * compacting, composer sending, rename in flight) have no client state yet.
  */
 export function canStartStopped(s: Pick<ActionRow, "state" | "tracked" | "cmd">, online: boolean, updating: boolean, batchRunning = false): boolean {
   return online && (s.state === "paused" || s.state === "stopped") && s.tracked && ["codex", "claude", "kimi"].includes(s.cmd)
@@ -343,18 +349,21 @@ export function forgetOpening(menuRow: ActionRow, live: ActionRow, details?: Det
   return { row, bound: { binding, run: details ? details.run_id : row.runId ?? "", conversation: details ? details.conversation_id : row.conversationId ?? "" } };
 }
 
-export type DialogKind = "rename" | "terminate" | "fresh" | "forget";
+export type DialogKind = "rename" | "terminate" | "fresh" | "forget" | "batch";
 /** What a forget dialog named: whether it forgets an OpenCode binding, and the run and conversation then in view. */
 export interface ForgetScope { binding: boolean; run: string; conversation: string }
 export type DialogOpen =
   | { kind: "rename" | "terminate" | "fresh"; row: ActionRow }
-  | { kind: "forget"; row: ActionRow; bound: ForgetScope };
+  | { kind: "forget"; row: ActionRow; bound: ForgetScope }
+  /** A selection's Forget or Terminate: `answer` gets true for the confirm button, false otherwise. */
+  | { kind: "batch"; copy: BatchConfirmation; answer: (confirmed: boolean) => void };
 export type DialogState = DialogOpen | undefined;
 export type DialogEvent = ({ type: "open" } & DialogOpen) | { type: "close" };
 
 /** One dialog at a time: opening replaces whatever is open, closing clears it. */
 export function dialogReducer(_state: DialogState, event: DialogEvent): DialogState {
   if (event.type !== "open") return undefined;
+  if (event.kind === "batch") return { kind: "batch", copy: event.copy, answer: event.answer };
   return event.kind === "forget" ? { kind: "forget", row: event.row, bound: event.bound } : { kind: event.kind, row: event.row };
 }
 

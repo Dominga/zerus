@@ -125,6 +125,31 @@ describe("menuState stop", () => {
   });
 });
 
+describe("menuState while a selection batch runs (Qt's m_pending)", () => {
+  const batch = { batchRunning: true };
+  it("turns every write entry off", () => {
+    const paused = row({ state: "paused" });
+    expect(menuState(row(), true, false, undefined, batch).change.enabled).toBe(false);
+    expect(menuState(paused, true, false, undefined, batch).change.enabled).toBe(false);
+    expect(menuState(row(), true, false, undefined, batch).rename).toBe(false);
+    expect(menuState(paused, true, false, undefined, batch).archive.enabled).toBe(false);
+    expect(menuState(paused, true, false, undefined, { ...batch, context: true }).archive.enabled).toBe(false);
+    expect(menuState(row(), true, false, undefined, batch).end.enabled).toBe(false);
+    expect(menuState(paused, true, false, undefined, batch).end.enabled).toBe(false);
+  });
+  it("reads Updating in the header and keeps the context menu's words", () => {
+    expect(menuState(row(), true, false, undefined, batch).change.label).toBe("Updating…");
+    expect(menuState(row(), true, false, undefined, { ...batch, context: true }).change.label).toBe("Pause session");
+  });
+  it("leaves Stop alone: an interrupt is not a write", () => {
+    const working = row({ phase: "tool", activity: "busy" });
+    expect(menuState(working, true, false, details({ interrupt_supported: true }), batch).stop.enabled).toBe(true);
+  });
+  it("changes nothing once the batch ends", () => {
+    expect(menuState(row(), true, false, undefined, { batchRunning: false })).toEqual(menuState(row(), true, false));
+  });
+});
+
 describe("terminateCopy", () => {
   it("stops a tracked claude into Archive", () => {
     expect(terminateCopy(row({ tracked: true }))).toEqual({
@@ -184,6 +209,16 @@ describe("dialog helpers", () => {
     expect(state?.kind).toBe("rename");
     state = dialogReducer(state, { type: "open", kind: "terminate", row: a });
     expect(state).toEqual({ kind: "terminate", row: a });
+    expect(dialogReducer(state, { type: "close" })).toBeUndefined();
+  });
+  it("opens the selection confirmation as one more dialog, replacing what is open", () => {
+    const a = snapshotOf(row());
+    const copy = { title: "Forget", text: "Forget 1 selected sessions?", details: ["box / claude/proj/a"], confirm: "Forget 1 sessions" };
+    const answer = () => {};
+    let state = dialogReducer(undefined, { type: "open", kind: "rename", row: a });
+    state = dialogReducer(state, { type: "open", kind: "batch", copy, answer });
+    expect(state).toEqual({ kind: "batch", copy, answer });
+    expect(dialogReducer(state, { type: "open", kind: "terminate", row: a })).toEqual({ kind: "terminate", row: a });
     expect(dialogReducer(state, { type: "close" })).toBeUndefined();
   });
   it("ignores disabled menu items", () => {

@@ -726,7 +726,7 @@ git commit -m "docs(client): guarded session actions and their outcome rules"
 | Open terminal, Open native DeepSeek UI, Open folder, Open shell in session folder, Show running commands | Phase 4, `zerus-5wmh.9` |
 | Copy session reference, Copy folder path, Copy connect command, Copy restore command | Phase 4, `zerus-5wmh.19` |
 | Mark needs attention, Mute and Unmute, Mark all as read, local read marks for older hosts | Phase 3, `zerus-5wmh.16` |
-| Move to project (and New project), Rename project, Project settings, Sort sessions by name, Delete project | Phase 3, `zerus-5wmh.18` |
+| Move to project (and New project), Rename project, Project settings, Sort sessions by name, Delete project | Phase 3, `zerus-5wmh.18`; plan: `docs/superpowers/plans/2026-10-28-tauri-client-organization.md` |
 | Start fresh, Restore session, Forget saved session, Forget archived session, Clear archive | Phase 5, `zerus-5wmh.17` |
 | Remove worktree after Terminate and the worktree review offer, Fork session, Clear session, Compact context | Phase 5, `zerus-5wmh.10` |
 | Multi-selection batch actions | After phase 2, `zerus-5wmh.20` |

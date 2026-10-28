@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type Outcome, type ReadMark, type Target } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ArchivePage, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type ArchivedActivity } from "./types";
 import type { CreationAdmission, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
@@ -136,10 +136,13 @@ export function pump(from: Source, onBatch: (b: Batch) => void, host: PumpHost =
   return unsubscribe;
 }
 
-/** Missing arrays default to empty, so a core that omits empty fields still applies. */
+/** Missing arrays default to empty, so a core that omits empty fields still applies. The grouping is kept: a batch of only grouping is content. */
 function normalize(b: Partial<Batch>): Batch {
   const e = emptyBatch();
-  return { upserts: b.upserts ?? e.upserts, removes: b.removes ?? e.removes, replaces: b.replaces ?? e.replaces, computers: b.computers ?? e.computers, machines: b.machines ?? [], activity: b.activity ?? e.activity };
+  return {
+    upserts: b.upserts ?? e.upserts, removes: b.removes ?? e.removes, replaces: b.replaces ?? e.replaces, computers: b.computers ?? e.computers,
+    machines: b.machines ?? [], activity: b.activity ?? e.activity, groups: b.groups ?? [], grouping: b.grouping ?? undefined,
+  };
 }
 
 /** The Activity port of the current source (follow and unfollow). */
@@ -160,16 +163,61 @@ export async function runAction(target: Target, action: Action): Promise<Outcome
   return invoke<Outcome>("run_action", { target, action });
 }
 
+/**
+ * Changes the shared notification preferences of a session; resolves with the
+ * host's confirmed `preferences`. A rejection carries the reason.
+ */
+export async function setNotifications(target: Target, muted: boolean, expectedRevision: number | null): Promise<Record<string, unknown>> {
+  if (!inTauri()) throw new Error("Actions need the desktop app.");
+  return invoke<Record<string, unknown>>("set_notifications", { target, muted, expectedRevision });
+}
+
 /** The inspect fields of a session; null when they are unavailable. */
 export async function inspectSession(target: Target, archiveId: string | null): Promise<Details | null> {
   if (!inTauri()) return null;
   return (await invoke<Details | null>("inspect_session", { target, archiveId })) ?? null;
 }
 
-/** Read marks whose delivery has not been confirmed yet. */
-export async function pendingReadMarks(): Promise<ReadMark[]> {
-  if (!inTauri()) return [];
+/** Read marks whose delivery has not been confirmed yet; undefined outside the app, which keeps no list. */
+export async function pendingReadMarks(): Promise<ReadMark[] | undefined> {
+  if (!inTauri()) return undefined;
   return invoke<ReadMark[]>("pending_read_marks");
+}
+
+/** One attention mark of this device (client/core `marks.rs`); a missing field reads as false or "". */
+export interface Mark { review: boolean; acknowledged: string }
+/**
+ * This device's attention marks and the replies it read on hosts without
+ * shared read state, by key, and each map's keys oldest written first (a
+ * JSON object's key order is the key order, not the write order).
+ */
+export interface AttentionSnapshot {
+  marks: Record<string, Mark>;
+  replies: Record<string, string>;
+  order?: { marks: string[]; replies: string[] };
+}
+
+// The commands below exist only in the live app. Outside Tauri there are no
+// marks, an update does nothing and there is no pending list, so the marks
+// store keeps its own; a build without the live feature rejects them, and the
+// store falls back the same way.
+
+/** The stored marks; the store awaits them before its first update. */
+export async function attentionMarks(): Promise<AttentionSnapshot> {
+  if (!inTauri()) return { marks: {}, replies: {}, order: { marks: [], replies: [] } };
+  return invoke<AttentionSnapshot>("attention_marks");
+}
+
+/** Writes or removes (null) only the changed entries; both maps are always sent. */
+export async function updateAttentionMarks(marks: Record<string, Mark | null>, replies: Record<string, string | null>): Promise<void> {
+  if (!inTauri()) return;
+  await invoke<null>("update_attention_marks", { marks, replies });
+}
+
+/** Merges read marks into the pending ones and wakes the Rust delivery worker; answers every pending mark (undefined outside the app). */
+export async function queueReadMarks(marks: ReadMark[]): Promise<ReadMark[] | undefined> {
+  if (!inTauri()) return undefined;
+  return invoke<ReadMark[]>("queue_read_marks", { marks });
 }
 
 /** `hgs reference` for a session: its `zerus://session?...` URI. */
@@ -184,6 +232,43 @@ export async function copyCommand(computer: string, name: string, archiveId: str
   return invoke<string>("copy_command", { computer, name, archiveId });
 }
 
+/**
+ * One checked page of a computer's archive (`archive_page`, `hgs [@alias] archives --json`);
+ * `request` is the archive store's request number. Rejects with Qt's text for
+ * an invalid page, "superseded" when a newer request of that computer or a
+ * cancel replaced it, or the hgs failure.
+ */
+export async function archivePage(computer: string, from: number, until: number, cursor: string, query: string, request: number): Promise<ArchivePage> {
+  if (!inTauri()) throw "Archive pages need the desktop app.";
+  return invoke<ArchivePage>("archive_page", { computer, from, until, cursor, query, request });
+}
+
+/** The text of `archivedActivity` rejecting because that row's read is already running. */
+export const ARCHIVED_ACTIVITY_BUSY = "busy";
+
+/**
+ * One read of an archived session's recorded Activity after cursor `after`
+ * (`archived_activity`, `hgs [@alias] inspect NAME --after N --skip-processes
+ * --archive ID`). Rejects with "busy" (`ARCHIVED_ACTIVITY_BUSY`, to ignore)
+ * while a read of the same computer, name and archive id runs, else with Qt's
+ * failure text.
+ */
+export async function archivedActivity(computer: string, name: string, archiveId: string, after: number): Promise<ArchivedActivity> {
+  if (!inTauri()) throw "Archived Activity needs the desktop app.";
+  return invoke<ArchivedActivity>("archived_activity", { computer, name, archiveId, after });
+}
+
+/**
+ * Cancels every archive page request numbered `through` or lower (Qt's
+ * cancelArchivePages), also one that has not started yet: their `hgs` ends
+ * and they answer "superseded". Outside the app, and in a build without
+ * archive reads, there is nothing to cancel.
+ */
+export async function cancelArchivePages(through: number): Promise<void> {
+  if (!inTauri()) return;
+  await invoke<null>("cancel_archive_pages", { through }).catch(() => {});
+}
+
 /** Puts text on the clipboard: from Rust in the app, the page's clipboard in a browser. */
 export async function copyText(text: string): Promise<void> {
   if (inTauri()) return invoke<void>("copy_text", { text });
@@ -191,6 +276,54 @@ export async function copyText(text: string): Promise<void> {
   if (/[\r\n]/.test(text)) throw "the command has a newline in it -- copying that is dangerous: the shell would run it the moment you paste";
   if (!navigator.clipboard) throw "The clipboard is unavailable.";
   await navigator.clipboard.writeText(text);
+}
+
+// Project organization edits (client/src-tauri `organization.rs`). Each is
+// one call, which the Rust side sends as one `hgs swarm apply`; members are
+// "<host>\n<session name>". Outside the app an edit is refused.
+
+const DESKTOP_EDIT = "Project changes need the desktop app.";
+const refusedOutside = (): EditOutcome => ({ outcome: "refused", detail: DESKTOP_EDIT });
+
+/** Move to project: every member in one apply; `before` places them before that member (a drop). */
+export async function moveToProject(members: string[], project: string, before: string | null): Promise<EditOutcome> {
+  if (!inTauri()) return refusedOutside();
+  return invoke<EditOutcome>("move_to_project", { members, project, before });
+}
+
+/** New project…, with the sessions it takes. */
+export async function createProject(name: string, members: string[]): Promise<EditOutcome> {
+  if (!inTauri()) return refusedOutside();
+  return invoke<EditOutcome>("create_project", { name, members });
+}
+
+export async function renameProject(project: string, name: string): Promise<EditOutcome> {
+  if (!inTauri()) return refusedOutside();
+  return invoke<EditOutcome>("rename_project", { project, name });
+}
+
+/** Delete project…: its members go to `destination`. */
+export async function deleteProject(project: string, destination: string): Promise<EditOutcome> {
+  if (!inTauri()) return refusedOutside();
+  return invoke<EditOutcome>("delete_project", { project, destination });
+}
+
+/** Moves a project before another, or to the end. */
+export async function moveProject(project: string, before: string | null): Promise<EditOutcome> {
+  if (!inTauri()) return refusedOutside();
+  return invoke<EditOutcome>("move_project", { project, before });
+}
+
+/** Sort sessions by name. */
+export async function sortProject(project: string): Promise<EditOutcome> {
+  if (!inTauri()) return refusedOutside();
+  return invoke<EditOutcome>("sort_project", { project });
+}
+
+/** Expand or collapse a project: this device's layout, no `hgs`. */
+export async function setProjectCollapsed(project: string, collapsed: boolean): Promise<void> {
+  if (!inTauri()) return;
+  await invoke<void>("set_project_collapsed", { project, collapsed });
 }
 
 /** What the browser build shows instead of the screen reads. */

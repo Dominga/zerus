@@ -1,9 +1,11 @@
-//! The Projects screen from `hgs swarm get`: the shared organization, its
-//! order, folders and default project, with SwarmController's status line
+//! The Projects screen from a `swarm get` object: the shared organization,
+//! its order, folders and default project, with SwarmController's status line
 //! (SwarmController.cpp:191-219) and ProjectsDialog's unconnected-computer
-//! notice (ProjectsDialog.cpp:251-263).
-use super::schedule::{Poll, SWARM_INTERVAL};
+//! notice (ProjectsDialog.cpp:251-263). The app hands it the organization the
+//! Sessions list groups by, this device's default project and the write
+//! controller's status line (src-tauri's `Screens::organization`).
 use super::{items, text};
+use crate::swarm::sync::{unavailable, OUTDATED};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -43,7 +45,6 @@ pub struct Project {
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct ProjectsView {
     pub loaded: bool,
-    pub refreshing: bool,
     pub status: String,
     pub status_error: bool,
     pub conflicts: usize,
@@ -55,22 +56,13 @@ pub struct ProjectsView {
     pub swarm_id: String,
 }
 
-/// The shared catalog's reads so far.
-#[derive(Clone, Debug)]
+/// The shared catalog as the app last handed it over.
+#[derive(Clone, Debug, Default)]
 pub struct SwarmState {
-    pub poll: Poll,
     valid: Option<Value>,
     status: Option<(String, bool)>,
-}
-
-impl Default for SwarmState {
-    fn default() -> Self {
-        Self {
-            poll: Poll::new(SWARM_INTERVAL),
-            valid: None,
-            status: None,
-        }
-    }
+    /// This device's default project, marked when the catalog lists it.
+    default: Option<String>,
 }
 
 /// The last part of a path, with either separator.
@@ -81,7 +73,9 @@ pub fn leaf(path: &str) -> String {
         .to_owned()
 }
 
-fn status_of(snapshot: &Value) -> (String, bool) {
+/// SwarmController's status line for a catalog (SwarmController.cpp:212-218),
+/// shared with the write controller ([`crate::swarm::sync`]).
+pub(crate) fn status_of(snapshot: &Value) -> (String, bool) {
     let conflicts = items(snapshot, "conflicts").len();
     let peers = snapshot.get("peers").and_then(Value::as_object);
     let total = peers.map_or(0, |peers| peers.len());
@@ -133,17 +127,13 @@ fn folder(value: &Value) -> Folder {
 impl SwarmState {
     /// Files a `swarm get` reply; anything but a schema 1 catalog keeps the last good one.
     pub fn finish(&mut self, reply: Result<Value, String>) {
-        self.poll.finish();
         match reply {
-            Err(error) => self.status = Some((format!("Project sync unavailable: {error}"), true)),
+            Err(error) => self.status = Some((unavailable(&error), true)),
             Ok(value)
                 if value.get("schema").and_then(Value::as_i64) != Some(1)
                     || !value.get("organization").is_some_and(Value::is_object) =>
             {
-                self.status = Some((
-                    "Project sync needs an updated HGS installation.".into(),
-                    true,
-                ));
+                self.status = Some((OUTDATED.into(), true));
             }
             Ok(value) => {
                 self.status = Some(status_of(&value));
@@ -152,19 +142,31 @@ impl SwarmState {
         }
     }
 
+    /// This device's default project (the Sessions list's, from its layout):
+    /// marked when listed, else the catalog's (SessionOrganization.cpp:55-58).
+    pub fn set_default(&mut self, default: Option<String>) {
+        self.default = default;
+    }
+
+    /// The write controller's status line, which replaces the one `finish`
+    /// derived. It also carries Qt's failure and schema texts
+    /// (SwarmController.cpp:69, 195), which no snapshot holds.
+    pub fn set_status(&mut self, status: String, error: bool) {
+        self.status = Some((status, error));
+    }
+
     /// The screen; `peers` are the fleet's peer aliases.
     pub fn view(&self, peers: &[String]) -> ProjectsView {
         let (status, status_error) = self.status.clone().unwrap_or_default();
         let Some(snapshot) = &self.valid else {
             return ProjectsView {
-                refreshing: self.poll.pending(),
                 status,
                 status_error,
                 ..ProjectsView::default()
             };
         };
         let organization = &snapshot["organization"];
-        let default = text(organization, "default_project");
+        let default = crate::swarm::default_project(organization, self.default.as_deref());
         let listed: Vec<&Value> = items(organization, "projects")
             .iter()
             .take(PROJECTS)
@@ -228,7 +230,6 @@ impl SwarmState {
         });
         ProjectsView {
             loaded: true,
-            refreshing: self.poll.pending(),
             status,
             status_error,
             conflicts: items(snapshot, "conflicts").len(),
@@ -372,5 +373,39 @@ mod tests {
             ("Project sync unavailable: hgs did not answer in time", true)
         );
         assert_eq!(view.projects.len(), 3);
+    }
+
+    #[test]
+    fn this_devices_default_project_is_marked_when_listed() {
+        let mut swarm = SwarmState::default();
+        swarm.finish(Ok(fixture("swarm.json")));
+        swarm.set_default(Some("sample".into()));
+        let view = swarm.view(&peers());
+        assert!(view
+            .projects
+            .iter()
+            .any(|p| p.id == "sample" && p.is_default));
+        swarm.set_default(Some("gone".into()));
+        assert!(swarm
+            .view(&peers())
+            .projects
+            .iter()
+            .any(|p| p.id == "ungrouped" && p.is_default));
+    }
+
+    #[test]
+    fn the_controllers_status_line_replaces_the_snapshots() {
+        let mut swarm = SwarmState::default();
+        swarm.finish(Ok(fixture("swarm.json")));
+        swarm.set_status(
+            "Project sync needs an updated HGS installation.".into(),
+            true,
+        );
+        let view = swarm.view(&peers());
+        assert_eq!(
+            (view.status.as_str(), view.status_error),
+            ("Project sync needs an updated HGS installation.", true)
+        );
+        assert!(view.loaded, "the organization stays");
     }
 }

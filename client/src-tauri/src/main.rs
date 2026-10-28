@@ -15,5 +15,7 @@ fn main() {
             std::process::exit(console_host::run(&arguments));
         }
     }
+    // First, before Tauri, GTK or any thread: WebKit reads its renderer variables at start.
+    zerus_client_lib::renderer::choose();
     zerus_client_lib::run();
 }

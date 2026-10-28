@@ -12,9 +12,14 @@ mod display;
 mod metrics;
 #[cfg(feature = "live")]
 mod newsession;
+#[cfg(feature = "live")]
+mod organization;
 mod platform;
 #[cfg(feature = "live")]
 mod pump;
+#[cfg(feature = "live")]
+mod readsync;
+pub mod renderer;
 #[cfg(feature = "live")]
 mod replay;
 #[cfg(feature = "live")]
@@ -53,11 +58,45 @@ pub fn run() {
                 use tauri::Manager;
                 let dir = app.path().app_data_dir()?;
                 std::fs::create_dir_all(&dir)?;
-                // A replay never touches the real read marks.
+                // A replay never touches the real read or attention marks.
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
-                app.manage(actions::Actions::new(dir.join(actions::marks_file(replay))));
+                let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
+                readsync::start(actions.clone());
+                app.manage(actions);
+                app.manage(actions::ArchiveReads::default());
+                app.manage(actions::ActivityReads::default());
+                app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
-                app.manage(screens::Screens::tauri(app.handle().clone(), pump));
+                let allowed = actions::actions_allowed(
+                    std::env::var("ZERUS_CLIENT_REPLAY").ok().as_deref(),
+                    std::env::var("ZERUS_CLIENT_HGS").ok().as_deref(),
+                );
+                let draft_path = dir.join(organization::draft_file(replay));
+                if replay {
+                    // A replay starts from the fixture's catalog: no draft of an earlier replay.
+                    let _ = zerus_client_core::swarm::draft::store(
+                        &draft_path,
+                        &zerus_client_core::swarm::draft::DraftWrite::Remove,
+                    );
+                }
+                let organization = organization::Organization::new(
+                    pump.clone(),
+                    zerus_client_core::default_hgs(),
+                    allowed,
+                    dir.join(organization::layout_file(replay)),
+                    draft_path,
+                );
+                app.state::<commands::AppState>().set_organization(organization.clone());
+                let screens = screens::Screens::tauri(app.handle().clone(), pump);
+                // Projects shows the organization the Sessions list groups by. The
+                // call only takes the screens hub's lock and emits, so it never
+                // waits for the main thread (organization::Presented).
+                let projects = screens.clone();
+                organization.set_presented(std::sync::Arc::new(move |value, default, status| {
+                    projects.organization(value, default, status)
+                }));
+                app.manage(organization);
+                app.manage(screens);
                 // New session's worktree snapshots stay in memory until
                 // `data_dir` reaches this branch (webui rule 2): then
                 // `Some(data_dir(app).join("worktree-snapshots.json"))`, or
@@ -96,11 +135,15 @@ pub fn run() {
         });
 }
 
-/// Before the app quits: recordings under way are cancelled and every
-/// draft save already queued reaches the disk.
+/// Before the app quits: pending project edits and the layout reach the
+/// disk, recordings under way are cancelled and every draft save already
+/// queued reaches the disk.
 #[cfg(feature = "live")]
 fn exit(app: &AppHandle) {
     use tauri::Manager;
+    if let Some(organization) = app.try_state::<organization::Organization>() {
+        organization.flush();
+    }
     #[cfg(feature = "media")]
     if let Some(voices) = app.try_state::<voice::Voices>() {
         voices.close_all();
@@ -126,12 +169,27 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::display_hz,
         commands::exit_app,
         commands::perf_away,
+        renderer::renderer_frame,
         actions::run_action,
+        actions::set_notifications,
         actions::inspect_session,
         actions::pending_read_marks,
+        actions::queue_read_marks,
+        actions::attention_marks,
+        actions::update_attention_marks,
         actions::session_reference,
         actions::copy_command,
+        actions::archive_page,
+        actions::archived_activity,
+        actions::cancel_archive_pages,
         clipboard::copy_text,
+        organization::move_to_project,
+        organization::create_project,
+        organization::rename_project,
+        organization::delete_project,
+        organization::move_project,
+        organization::sort_project,
+        organization::set_project_collapsed,
         screens::screen_visible,
         screens::accounts_view,
         screens::machines_view,
@@ -184,6 +242,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::display_hz,
         commands::exit_app,
         commands::perf_away,
+        renderer::renderer_frame,
         clipboard::copy_text,
     ]
 }

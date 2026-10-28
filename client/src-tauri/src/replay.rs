@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -38,9 +38,13 @@ struct Computer {
 }
 
 impl Computer {
+    fn catalog(&self) -> MutexGuard<'_, (CatalogState, u64)> {
+        self.catalog.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Marks a session followed (or not); the core emits Activity only for followed sessions.
     fn set_followed(&self, key: &str, followed: bool) {
-        let mut guard = self.catalog.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self.catalog();
         if followed {
             guard.0.follow(key);
         } else {
@@ -50,7 +54,7 @@ impl Computer {
 
     /// Applies one frame through the core with the next sequence number.
     fn apply(&self, body: Body, sink: &Sender<Change>) {
-        let mut guard = self.catalog.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self.catalog();
         let (state, seq) = &mut *guard;
         *seq += 1;
         let frame = Frame {
@@ -126,7 +130,8 @@ fn load(path: &Path) -> std::io::Result<(Vec<Body>, HashMap<String, Log>)> {
 }
 
 impl Replay {
-    /// Loads every file of the list and starts one playback thread per computer.
+    /// Loads every file of the list and starts one playback thread per
+    /// computer. This computer follows its organization from the first frame.
     pub fn start(
         list: &OsStr,
         interval: Duration,
@@ -152,6 +157,9 @@ impl Replay {
                 catalog: Mutex::new((CatalogState::default(), 0)),
                 logs,
             });
+            if index == 0 {
+                computer.catalog().0.organization_mut().follow();
+            }
             computers.push(computer.clone());
             let sink = sink.clone();
             std::thread::Builder::new()
@@ -159,6 +167,16 @@ impl Replay {
                 .spawn(move || play(&computer, script, interval, &sink))?;
         }
         Ok(Replay { computers, sink })
+    }
+
+    /// The base and versions of the replayed organization, for edits against a fake hgs.
+    pub fn organization_snapshot(&self) -> Option<zerus_client_core::OrganizationSnapshot> {
+        self.computers
+            .first()?
+            .catalog()
+            .0
+            .organization()
+            .snapshot()
     }
 
     fn computer(&self, id: &str) -> Option<&Arc<Computer>> {

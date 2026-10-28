@@ -2,17 +2,19 @@ import { For, Show, createMemo, createResource, createSignal, onCleanup } from "
 import { Icon } from "../lib/icons";
 import { MachineLabel } from "../components/MachineLabel";
 import type { Folder, Project } from "../../types";
+import { projectToShow, setProjectToShow } from "../../store/organization";
 import { projectsPage } from "../../store/projects";
 import { setMenu, type MenuEntry } from "../../store/ui";
 import { PROJECT_EDITING, WORKTREE_FLOWS } from "./reasons";
 import { folderExists, folderLaunch } from "../../store/newSession";
 import { folderButton, folderMenuEntry, newSessionInFolder } from "../sessions/newsession-view";
 import { copy } from "../../store/actions";
-import { nextSort, projectColor, shownProjects, sortFolders, type Sort, type SortColumn } from "./projects-ui";
+import { nextSort, projectColor, showAskedProject, shownProjects, sortFolders, type Sort, type SortColumn } from "./projects-ui";
 
 // Projects (ProjectsDialog.cpp), ported from design/webui/src/screens/Projects.tsx:
-// the shared project catalog of `hgs swarm get`, its folders on each computer
-// and the swarm's status. Editing (names, colours, defaults, folders, order,
+// the shared project catalog the Sessions list groups by (the organization
+// topic, with this device's default project and the project sync status), its
+// folders on each computer. Editing (names, colours, defaults, folders, order,
 // deleting, the swarm connection) arrives with project editing (3c), New
 // session with phase 5, and the Worktrees panel with phase 5.
 
@@ -47,6 +49,7 @@ export function ProjectsScreen() {
   const [launchExists] = createResource(launchFolder, folderExists);
   const launchButton = () => folderButton(folderLaunch(launchFolder(), launchExists.state === "ready" ? launchExists() : undefined), launchFolder().machine);
   const launchSelected = () => { const p = project(), f = p?.folders[selectedFolder()]; if (p && f) void newSessionInFolder(p.id, f); };
+  showAskedProject(projectToShow, () => setProjectToShow(undefined), view, choose);
 
   const folderMenu = async (e: MouseEvent, index: number) => {
     e.preventDefault();

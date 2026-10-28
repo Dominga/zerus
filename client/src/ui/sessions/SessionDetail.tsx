@@ -4,10 +4,14 @@ import { ActivityView, columnStyle } from "./Activity";
 import { AgentBadge, MachineBadge, statusOf, folderOf } from "./SessionCard";
 import { selected, setMenu, subagentOpen, type MenuEntry } from "../../store/ui";
 import { activity } from "../../store/session";
+import { activityReadOnly, type ActivitySource } from "../../store/activitySource";
+import { archiveActivity } from "../../store/archiveActivity";
 import { computerOffline } from "../../store/catalog";
 import { copyName, detailsFor, followedFor } from "../../store/actions";
-import { actionEntries } from "./ActionDialogs";
+import { headerClearSlot } from "./actions-ui";
+import { actionEntries, freshActionEntry } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
+import { markEntry } from "./mark-entries";
 
 // The session header and its Activity, after design/webui SessionDetail. The
 // composer, Terminal, Processes and the side panel move in with later phases;
@@ -35,6 +39,9 @@ function Header() {
   // inspects only once that subscription answered without one.
   const details = createMemo(() => detailsFor(s(), !computerOffline(s().computer), followedFor(s().key)));
   const act = createMemo(() => actionEntries(s(), details()));
+  const mark = createMemo(() => markEntry(s()));
+  const slot = () => headerClearSlot(!subagentOpen(), s().state);
+  const fresh = createMemo(() => freshActionEntry(s(), true));
   const actions = (): MenuEntry[] => [
     { label: "Open folder", icon: "folder-open", disabled: true },
     { label: "Open shell in session folder", icon: "square-terminal", disabled: true },
@@ -46,9 +53,9 @@ function Header() {
     { label: "Copy connect command", icon: "link", disabled: true },
     act().change,
     ...(act().stop.disabled ? [] : [act().stop]),
-    act().markRead,
+    ...(mark() ? [mark()!] : []),
     { separator: true },
-    { label: "Clear session…", icon: "clear", disabled: true },
+    ...(slot() === "fresh" && fresh() ? [fresh()!] : slot() === "clear" ? [{ label: "Clear session…", icon: "clear", disabled: true }] : []),
     ...(act().archive ? [act().archive!] : []),
     act().end,
   ];
@@ -69,7 +76,7 @@ function Header() {
         <button class="icon-btn" data-tip="Open session folder in file manager" disabled><Icon name="folder-open" size={16} /></button>
         <button class="icon-btn" data-tip="Open shell in session folder" disabled><Icon name="square-terminal" size={16} /></button>
         <button class="icon-btn" data-tip="Copy session name" onClick={() => { void copyName(snapshotOf(s())); }}><Icon name="copy" size={15} /></button>
-        <button class="icon-btn" data-tip="Clear session" disabled><Icon name="clear" size={15} /></button>
+        <Show when={slot() === "clear"}><button class="icon-btn" data-tip="Clear session" disabled><Icon name="clear" size={15} /></button></Show>
         <button class="icon-btn" data-tip="Session actions" onClick={(e) => setMenu({ x: e.clientX - 200, y: e.clientY + 12, items: actions() })}><Icon name="ellipsis" size={16} /></button>
       </div>
       <div class="dh-row2">
@@ -89,7 +96,15 @@ function Header() {
   );
 }
 
-const TABS = [{ id: "activity", label: "Activity" }] as const;
+type Tab = { id: string; label: string };
+const TABS: readonly Tab[] = [{ id: "activity", label: "Activity" }];
+
+/** The Activity of a row: an archived row's recorded one, read-only and never streamed, else the live follow. */
+export const activitySourceFor = (key: string): ActivitySource => (activityReadOnly(key) ? archiveActivity : activity);
+
+/** The tabs of a row: an archived row has no Terminal (Qt hides only that one; terminal_status answers unsupported). */
+export const detailTabs = (key: string, tabs: readonly Tab[] = TABS): readonly Tab[] =>
+  (activityReadOnly(key) ? tabs.filter((t) => t.id !== "terminal") : tabs);
 
 export function SessionDetail() {
   return (
@@ -99,14 +114,14 @@ export function SessionDetail() {
         <div class="work">
           <div class="work-main">
             <div class="detail-tabs tabs" role="tablist">
-              <For each={TABS}>{(t) => (
+              <For each={detailTabs(selected()!.key)}>{(t) => (
                 <button class="tab on" role="tab" aria-selected="true">{t.label}</button>
               )}</For>
               <span class="grow" />
             </div>
             <div class="tab-body">
               <div class="activity-wrap" style={columnStyle()}>
-                <ActivityView />
+                <ActivityView source={activitySourceFor(selected()!.key)} />
               </div>
             </div>
           </div>

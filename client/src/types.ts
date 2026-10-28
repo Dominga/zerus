@@ -22,6 +22,20 @@ export interface ViewRow {
   attention?: string | boolean | null;
   unread?: boolean;
   muted?: boolean;
+  /** The row's notification preferences pass Qt's validation, and their revision. */
+  shared_notifications?: boolean;
+  notification_revision?: number | null;
+  /** `created`, in whole seconds (it keys a conversation-less attention mark). */
+  created?: number;
+  /** What a local attention mark compares (Qt's `attentionFingerprint`). */
+  attention_fingerprint?: string;
+  /** The session needs the person's action (approval, input, error, recovery). */
+  needs_action?: boolean;
+  /** `status` and `caption` with the attention acknowledged. */
+  acknowledged_status?: string;
+  acknowledged_caption?: string;
+  /** A finished reply of a live conversation; the marks decide whether it shows unread. */
+  unread_candidate?: boolean;
   machine?: string;
   project?: string;
   /** The folder people know the checkout by (a name, not a path). */
@@ -31,6 +45,8 @@ export interface ViewRow {
   effort?: string | null;
   summary?: string;
   updated_at?: number | null;
+  /** When an archived row was archived (epoch seconds). */
+  archived_at?: number | null;
   /** When the current turn, compaction or background job started (the Working clock). */
   turn_started?: number | null;
   run_id?: string | null;
@@ -61,6 +77,7 @@ export interface ViewRow {
   terminal_reported?: boolean;
   terminal_attach_supported?: boolean;
   terminal_attach_reported?: boolean;
+  bulk_lifecycle_supported?: boolean;
 }
 
 export interface RowOut { computer: ComputerId; key: string; row: ViewRow }
@@ -71,6 +88,44 @@ export interface ComputerOut { computer: ComputerId; status: ComputerStatus | st
 export type ActivityKind = "events" | "replace" | "event" | "state" | "ended";
 export interface ActivityOut { computer: ComputerId; key: string; kind: ActivityKind | string; payload: unknown }
 
+// The Sessions list's grouping by the shared project organization
+// (client/core `swarm/grouping.rs`). The Rust side keeps the organization;
+// the webview gets each row's project and rank, and the ordered headers.
+
+/** One row's place: its project and its rank inside it. */
+export interface GroupOut { computer: ComputerId; key: string; group: string; rank: number }
+export interface HeaderOut {
+  id: string;
+  name: string;
+  /** The project's colour; null uses the palette slot. */
+  color: string | null;
+  accessible: boolean;
+  collapsed: boolean;
+  is_default: boolean;
+  palette: number;
+}
+/** The ordered headers and whether edits can run, sent when they change. */
+export interface GroupingOut {
+  /** A catalog is presented; before it, the list shows no headers. */
+  loaded: boolean;
+  default_project: string;
+  headers: HeaderOut[];
+  ready: boolean;
+  /** Why edits cannot run, for the disabled entries. */
+  reason: string | null;
+  busy: boolean;
+  status: string;
+  status_error: boolean;
+  conflicts: number;
+  /** A one-time warning, such as saved project changes that could not be applied; absent when there is none. */
+  notice?: string;
+}
+/** How a project edit ended (client/core `swarm::sync::EditOutcome`). */
+export type EditOutcome =
+  | { outcome: "done"; conflicts: number }
+  | { outcome: "kept"; detail: string }
+  | { outcome: "refused"; detail: string };
+
 export interface Batch {
   upserts: RowOut[];
   removes: KeyOut[];
@@ -78,12 +133,17 @@ export interface Batch {
   computers: ComputerOut[];
   machines?: MachineOut[];
   activity: ActivityOut[];
+  /** Each row's project and rank, for the rows whose grouping changed. */
+  groups?: GroupOut[];
+  /** The headers and the edit state, when they changed. */
+  grouping?: GroupingOut;
 }
 
 export const emptyBatch = (): Batch => ({ upserts: [], removes: [], replaces: [], computers: [], machines: [], activity: [] });
 
 export const isEmptyBatch = (b: Batch) =>
-  !b.upserts.length && !b.removes.length && !b.replaces.length && !b.computers.length && !b.machines?.length && !b.activity.length;
+  !b.upserts.length && !b.removes.length && !b.replaces.length && !b.computers.length && !b.machines?.length && !b.activity.length
+  && !b.groups?.length && !b.grouping;
 
 /** One Activity event as `inspect` returns it; unknown fields are kept. */
 export interface ActivityEvent {
@@ -115,7 +175,15 @@ export type Action =
   | { kind: "rename"; new_name: string; archive_id: string | null }
   | { kind: "archive" }
   | { kind: "terminate" }
-  | { kind: "kill" };
+  | { kind: "kill" }
+  | { kind: "start_fresh" }
+  | { kind: "forget" }
+  | { kind: "forget_binding" }
+  | { kind: "restore"; archive_id: string }
+  | { kind: "forget_archive"; archive_id: string }
+  /** Computer-wide: the target's session name is empty and ignored. */
+  | { kind: "pause_all"; count: number }
+  | { kind: "resume_all"; count: number };
 
 export interface WorktreeCleanup { status: string; path: string; common_dir: string; reason?: string | null }
 
@@ -244,7 +312,7 @@ export interface Folder {
 }
 export interface Project { id: string; name: string; color: string | null; accessible: boolean; is_default: boolean; palette: number; folders: Folder[] }
 export interface ProjectsView {
-  loaded: boolean; refreshing: boolean; status: string; status_error: boolean; conflicts: number;
+  loaded: boolean; status: string; status_error: boolean; conflicts: number;
   unconnected: string[]; notice: string | null; projects: Project[];
   /** The catalog's swarm, "" before one arrives (New session's project inference). */
   swarm_id: string;
@@ -257,7 +325,7 @@ export const emptyMachines = (error: string | null = null): MachinesView => ({
   loaded: false, refreshing: false, error, local: "", environment_override: false, machines: [], effective: null, check: null, busy: false,
 });
 export const emptyProjects = (status = ""): ProjectsView => ({
-  loaded: false, refreshing: false, status, status_error: status !== "", conflicts: 0, unconnected: [], notice: null, projects: [], swarm_id: "",
+  loaded: false, status, status_error: status !== "", conflicts: 0, unconnected: [], notice: null, projects: [], swarm_id: "",
 });
 
 // New session (client/src-tauri `newsession.rs` over client/core `launch.rs`,
@@ -357,4 +425,27 @@ export interface LaunchAccounts {
   /** The catalog's raw rows, at most 256, for the OpenCode fields. */
   profiles: Record<string, unknown>[];
   groups: Account[];
+}
+
+/** One checked page of a computer's archive (`archive_page`). */
+export interface ArchivePage {
+  rows: ViewRow[];
+  next_cursor: string;
+  previous_cursor: string | null;
+  total: number;
+  position: number | null;
+}
+
+/** One read of an archived session's recorded Activity (`archived_activity`, `hgs inspect --archive`). */
+export interface ArchivedActivity {
+  /** The reply's events, unchanged. */
+  events: ActivityEvent[];
+  replace_events: boolean;
+  conversation_id: string;
+  run_id: string;
+  cleared_conversations: string[];
+  /** The journal cursor the next read asks `--after`. */
+  cursor: number;
+  /** The other top-level fields, what `buildTranscript` reads as the summary. */
+  summary: Record<string, unknown>;
 }

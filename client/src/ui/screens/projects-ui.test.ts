@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { nextSort, projectColor, shownProjects, sortFolders } from "./projects-ui";
+import { createRoot, createSignal } from "solid-js";
+import { nextSort, projectColor, showAskedProject, shownProjects, sortFolders } from "./projects-ui";
 import { emptyProjects, type Folder, type Project } from "../../types";
 
 const folder = (name: string, computer: string, path: string): Folder => ({ id: name, name, computer, machine: computer, path });
@@ -28,5 +29,29 @@ describe("projects page", () => {
     expect(shownProjects(view, true).map((p) => p.id)).toEqual(["a", "b"]);
     expect(projectColor(view.projects[0])).toBe("#3fb950");
     expect(projectColor(view.projects[1])).toBe("var(--z-entity-palette-3)");
+  });
+});
+
+// Project settings… (SessionsWindow.cpp:2589; ProjectsDialog::selectProject, 319-322).
+describe("the project Project settings asks for", () => {
+  it("is chosen once the view lists it, and the request ends; a remote one only ends it", () => {
+    const [asked, setAsked] = createSignal<string | undefined>("b");
+    const [view, setView] = createSignal(emptyProjects());
+    const chosen: string[] = [];
+    const dispose = createRoot((dispose) => {
+      showAskedProject(asked, () => setAsked(undefined), view, (p) => chosen.push(p.id));
+      return dispose;
+    });
+    expect([chosen, asked()]).toEqual([[], "b"]);
+    const listed = { ...emptyProjects(), loaded: true, projects: [project("a", true), project("b", true), project("r", false)] };
+    setView(listed);
+    expect([chosen, asked()]).toEqual([["b"], undefined]);
+    setView({ ...listed });
+    expect(chosen).toEqual(["b"]);
+    setAsked("r");
+    expect([chosen, asked()]).toEqual([["b"], undefined]);
+    setAsked("a");
+    expect(chosen).toEqual(["b", "a"]);
+    dispose();
   });
 });

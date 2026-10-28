@@ -249,7 +249,7 @@ export function setup(configure: (world: World) => void = () => {}) {
   const world = new World();
   world.projects = [project("ungrouped", "Inbox", [], { is_default: true })];
   configure(world);
-  const projectsView = (): ProjectsView => ({ loaded: true, refreshing: false, status: "", status_error: false, conflicts: 0, unconnected: [], notice: null, projects: world.projects, swarm_id: world.swarm });
+  const projectsView = (): ProjectsView => ({ loaded: true, status: "", status_error: false, conflicts: 0, unconnected: [], notice: null, projects: world.projects, swarm_id: world.swarm });
   const deps: NewSessionDeps = {
     bridge: bridgeOf(world),
     cards: () => world.cards,

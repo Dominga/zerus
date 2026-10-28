@@ -9,6 +9,9 @@ vi.mock("../bridge", () => ({
   runAction: vi.fn(),
   inspectSession: vi.fn(),
   pendingReadMarks: vi.fn(),
+  sessionReference: vi.fn(),
+  copyCommand: vi.fn(),
+  copyText: vi.fn(),
 }));
 
 const mocked = vi.mocked(bridge);
@@ -40,6 +43,10 @@ beforeEach(() => {
   mocked.runAction.mockReset();
   mocked.inspectSession.mockReset();
   mocked.pendingReadMarks.mockReset();
+  mocked.sessionReference.mockReset();
+  mocked.copyCommand.mockReset();
+  mocked.copyText.mockReset();
+  mocked.copyText.mockResolvedValue(undefined);
   mocked.pendingReadMarks.mockResolvedValue([]);
   mocked.inspectSession.mockResolvedValue(details());
 });
@@ -547,6 +554,114 @@ describe("pending guard", () => {
       mocked.runAction.mockRejectedValue("busy");
       await a.perform(session(), { kind: "pause" });
       expect(a.notices()).toEqual([]);
+      dispose();
+    });
+  });
+});
+
+describe("copy", () => {
+  it("copies silently and reports a failure as a sticky error", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      await a.copy("claude/sample-project/a");
+      expect(mocked.copyText).toHaveBeenCalledWith("claude/sample-project/a");
+      expect(a.notices()).toEqual([]);
+      mocked.copyText.mockRejectedValue("Nothing to copy.");
+      await a.copy("x");
+      expect(a.notices()).toEqual([expect.objectContaining({ tone: "error", sticky: true, text: "Zerus: could not copy\nNothing to copy." })]);
+      dispose();
+    });
+  });
+
+  it("copies a command with the archive id only for an archived row", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      mocked.copyCommand.mockResolvedValue("hgs attach x");
+      await a.copyCommand(session());
+      expect(mocked.copyCommand).toHaveBeenCalledWith("", "claude/sample-project/a", null);
+      expect(mocked.copyText).toHaveBeenCalledWith("hgs attach x");
+      a.applyBatch(batchOf({ upserts: [rowOut({ state: "archived", archive_id: "ar1" })] }));
+      await a.copyCommand(session({ state: "archived", archive_id: "ar1" }));
+      expect(mocked.copyCommand).toHaveBeenLastCalledWith("", "claude/sample-project/a", "ar1");
+      dispose();
+    });
+  });
+
+  it("copies the reference of the details' run, then says so", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      mocked.sessionReference.mockResolvedValue("zerus://session?x=1");
+      await a.copyReference(session(), details({ run_id: "run-9", conversation_id: "conv-9" }));
+      expect(mocked.sessionReference).toHaveBeenCalledWith({ computer: "", name: "claude/sample-project/a", run_id: "run-9", conversation_id: "conv-9" }, null);
+      expect(mocked.copyText).toHaveBeenCalledWith("zerus://session?x=1");
+      expect(a.notices()).toEqual([expect.objectContaining({ tone: "info", text: "Session reference copied", sticky: false })]);
+      a.applyBatch(batchOf({ upserts: [rowOut({ state: "archived", archive_id: "ar1" })] }));
+      await a.copyReference(session({ state: "archived", archive_id: "ar1" }));
+      expect(mocked.sessionReference).toHaveBeenLastCalledWith({ computer: "", name: "claude/sample-project/a", run_id: "run-1", conversation_id: "conv-1" }, "ar1");
+      dispose();
+    });
+  });
+
+  it("shows a reference failure as a sticky error and copies nothing", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      mocked.sessionReference.mockRejectedValue("hgs: no such run");
+      await a.copyReference(session());
+      expect(mocked.copyText).not.toHaveBeenCalled();
+      expect(a.notices()).toEqual([expect.objectContaining({ tone: "error", sticky: true, text: "hgs: no such run" })]);
+      dispose();
+    });
+  });
+});
+
+describe("copy click-time recheck", () => {
+  const gone = "This session is no longer available. Open its actions again.";
+  it("copies nothing and says so when the row is gone", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      const old = session();
+      a.applyBatch(batchOf({ removes: [{ computer: "", key: "run:a" }] }));
+      for (const out of [await a.copyName(old), await a.copyCommand(old), await a.copyFolder(old), await a.copyReference(old)]) expect(out.outcome).toBe("failed");
+      expect(mocked.copyText).not.toHaveBeenCalled();
+      expect(a.notices()).toHaveLength(4);
+      expect(a.notices()[0]).toMatchObject({ text: gone, sticky: true });
+      dispose();
+    });
+  });
+
+  it("copies nothing when the conversation changed", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      const old = session();
+      a.applyBatch(batchOf({ upserts: [rowOut({ conversation_id: "conv-2" })] }));
+      await a.copyName(old);
+      expect(mocked.copyText).not.toHaveBeenCalled();
+      expect(a.notices()).toEqual([expect.objectContaining({ text: gone, sticky: true })]);
+      dispose();
+    });
+  });
+
+  it("copies the current name and folder of a renamed row", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      const old = session();
+      a.applyBatch(batchOf({ upserts: [rowOut({ name: "claude/sample-project/b", cwd: "/home/example/b" })] }));
+      await a.copyName(old);
+      expect(mocked.copyText).toHaveBeenLastCalledWith("claude/sample-project/b");
+      await a.copyFolder(old);
+      expect(mocked.copyText).toHaveBeenLastCalledWith("/home/example/b");
+      expect(a.notices()).toEqual([]);
+      dispose();
+    });
+  });
+
+  it("copies nothing for an archived row without an archive id", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut({ state: "archived" }));
+      const out = await a.copyCommand(session({ state: "archived" }));
+      expect(out.outcome).toBe("failed");
+      expect(mocked.copyCommand).not.toHaveBeenCalled();
+      expect(mocked.copyText).not.toHaveBeenCalled();
       dispose();
     });
   });

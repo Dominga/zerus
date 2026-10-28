@@ -217,6 +217,75 @@ pub fn invocation(
     })
 }
 
+/// `hgs [@host] reference NAME --json --run RUN --conversation CONVERSATION
+/// [--archive ID]`, 15 s here and 25 s on a peer (`requestSessionReference`,
+/// `HgsClient.cpp:592-604`).
+pub fn reference_invocation(target: &Target, archive_id: Option<&str>) -> Invocation {
+    let mut args = vec![
+        "reference".to_owned(),
+        target.name.clone(),
+        "--json".to_owned(),
+        "--run".to_owned(),
+        target.run_id.clone(),
+        "--conversation".to_owned(),
+        target.conversation_id.clone(),
+    ];
+    if let Some(id) = archive_id.filter(|id| !id.is_empty()) {
+        args.extend(["--archive".to_owned(), id.to_owned()]);
+    }
+    let peer = prepend_alias(&mut args, &target.computer);
+    Invocation {
+        args,
+        stdin: None,
+        timeout: Duration::from_secs(if peer { 25 } else { 15 }),
+        request_id: None,
+    }
+}
+
+const REFERENCE_PREFIX: &str = "zerus://session?";
+const REFERENCE_CHARS: usize = 8192;
+const FAILURE_STDERR_CHARS: usize = 4000;
+
+/// `failureDetail` (`HgsClient.cpp:466`): why a call failed.
+fn failure_detail(exit: Exit) -> String {
+    let (stderr, code) = match exit {
+        Exit::TimedOut => return "timed out".to_owned(),
+        Exit::StartFailed(error) => {
+            return format!(
+                "cannot start '{}': {error}",
+                crate::default_hgs().to_string_lossy()
+            )
+        }
+        Exit::Code { code, stderr, .. } => (stderr, code),
+        Exit::Abnormal { stderr } => (stderr, -1),
+        Exit::WriteFailed => (String::new(), -1),
+    };
+    let detail: String = stderr.trim().chars().take(FAILURE_STDERR_CHARS).collect();
+    if detail.is_empty() {
+        format!("exit code {code}")
+    } else {
+        detail
+    }
+}
+
+/// The session reference `hgs reference` printed: a JSON object whose `uri`
+/// starts with `zerus://session?` and is at most 8192 characters.
+pub fn parse_reference(exit: Exit) -> Result<String, String> {
+    let Exit::Code {
+        code: 0,
+        ref stdout,
+        ..
+    } = exit
+    else {
+        return Err(failure_detail(exit));
+    };
+    let uri = serde_json::from_slice::<Value>(stdout)
+        .ok()
+        .and_then(|value| value.get("uri")?.as_str().map(str::to_owned))
+        .filter(|uri| uri.starts_with(REFERENCE_PREFIX) && uri.chars().count() <= REFERENCE_CHARS);
+    uri.ok_or_else(|| "Could not read a session reference. Update hgs on this computer.".to_owned())
+}
+
 /// Puts `@alias` first for a peer; true when `computer` is a peer.
 pub(crate) fn prepend_alias(args: &mut Vec<String>, computer: &str) -> bool {
     let peer = !computer.is_empty();
@@ -769,5 +838,92 @@ mod tests {
         };
         assert!(allowed(&opencode, "rename") && allowed(&opencode, "forget"));
         assert!(!allowed(&opencode, "pause"));
+    }
+
+    const UNREADABLE: &str = "Could not read a session reference. Update hgs on this computer.";
+
+    #[test]
+    fn the_reference_call_matches_the_qt_client() {
+        let local = reference_invocation(&target(""), None);
+        assert_eq!(
+            local.args,
+            [
+                "reference",
+                "claude/sample-project/review",
+                "--json",
+                "--run",
+                "run-1",
+                "--conversation",
+                "conv-1"
+            ]
+        );
+        assert_eq!(local.timeout, Duration::from_secs(15));
+        assert!(local.stdin.is_none() && local.request_id.is_none());
+        let peer = reference_invocation(&target("mac"), Some("a1"));
+        assert_eq!(peer.args[0], "@mac");
+        assert_eq!(peer.args[1], "reference");
+        assert_eq!(peer.args[peer.args.len() - 2..], ["--archive", "a1"]);
+        assert_eq!(peer.timeout, Duration::from_secs(25));
+        let empty = reference_invocation(&target(""), Some(""));
+        assert!(!empty.args.contains(&"--archive".to_owned()));
+    }
+
+    #[test]
+    fn a_reference_is_a_session_uri_of_bounded_size() {
+        let uri = "zerus://session?machine=m&name=n";
+        let ok = exit0(format!(r#"{{"uri":"{uri}"}}"#).as_bytes(), "");
+        assert_eq!(parse_reference(ok), Ok(uri.to_owned()));
+        for bad in [
+            exit0(br#"{"uri":"https://example.com/x"}"#, ""),
+            exit0(b"not json", ""),
+            exit0(br#"{"other":1}"#, ""),
+            exit0(br#"{"uri":5}"#, ""),
+            exit0(
+                format!(r#"{{"uri":"zerus://session?{}"}}"#, "x".repeat(8193 - 16)).as_bytes(),
+                "",
+            ),
+        ] {
+            assert_eq!(parse_reference(bad), Err(UNREADABLE.to_owned()));
+        }
+        let longest = format!("zerus://session?{}", "x".repeat(8192 - 16));
+        let max = exit0(format!(r#"{{"uri":"{longest}"}}"#).as_bytes(), "");
+        assert_eq!(parse_reference(max), Ok(longest));
+    }
+
+    #[test]
+    fn a_failed_reference_call_gives_the_failure_detail() {
+        let code = |code, stderr: &str| Exit::Code {
+            code,
+            stdout: Vec::new(),
+            stderr: stderr.into(),
+        };
+        assert_eq!(parse_reference(code(1, " boom \n")), Err("boom".to_owned()));
+        assert_eq!(
+            parse_reference(code(2, "  ")),
+            Err("exit code 2".to_owned())
+        );
+        assert_eq!(
+            parse_reference(code(1, &"e".repeat(5000)))
+                .unwrap_err()
+                .chars()
+                .count(),
+            4000
+        );
+        assert_eq!(parse_reference(Exit::TimedOut), Err("timed out".to_owned()));
+        assert_eq!(
+            parse_reference(Exit::StartFailed("No such file".into())),
+            Err(format!(
+                "cannot start '{}': No such file",
+                crate::default_hgs().to_string_lossy()
+            ))
+        );
+        assert_eq!(
+            parse_reference(Exit::Abnormal { stderr: "x".into() }),
+            Err("x".to_owned())
+        );
+        assert_eq!(
+            parse_reference(Exit::WriteFailed),
+            Err("exit code -1".to_owned())
+        );
     }
 }

@@ -179,3 +179,18 @@ fn an_early_exit_without_reading_stdin_reports_its_real_exit() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn a_reference_through_the_fake_is_the_uri() {
+    use zerus_client_core::actions::{parse_reference, reference_invocation};
+    let fake =
+        Fake::new(r#"{"reply":{"exit":0,"stdout":{"uri":"zerus://session?machine=m&name=n"}}}"#);
+    let inv = reference_invocation(&target(), None);
+    assert_eq!(
+        parse_reference(run(&fake.hgs, &inv)),
+        Ok("zerus://session?machine=m&name=n".to_owned())
+    );
+    let log = fake.log();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0]["argv"][0], "reference");
+}

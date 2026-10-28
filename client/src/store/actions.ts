@@ -2,7 +2,7 @@ import { createSignal, untrack } from "solid-js";
 import { createStore } from "solid-js/store";
 import * as bridge from "../bridge";
 import { catalog as appCatalog, computerOffline, rowId, type CatalogState } from "./catalog";
-import { detailsFromInspection, snapshotOf, terminates, type ActionRow } from "../ui/sessions/actions-ui";
+import { copyState, detailsFromInspection, snapshotOf, terminates, type ActionRow } from "../ui/sessions/actions-ui";
 import type { Action, Batch, Details, Outcome, ReadMark, Target } from "../types";
 
 // Guarded session actions. Every action is one call to the Rust side; a call
@@ -26,6 +26,7 @@ const RETRY_MS = 5000;
 const CHANGED = "This session changed. Open its actions again.";
 const STATE_CHANGED = "The session state changed. Open its actions again.";
 const NEW_REPLY = "A new reply or question arrived. Open the menu again to mark it as read.";
+const GONE = "This session is no longer available. Open its actions again.";
 const ALREADY_STOPPED = ["hgs: This turn is no longer working", "This turn is no longer working"];
 
 const sessionId = (computer: string, name: string) => `${computer}\n${name}`;
@@ -42,7 +43,14 @@ export function targetOf(s: Pick<ActionRow, "computer" | "name" | "runId" | "con
   return { computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.conversationId ?? "" };
 }
 
-export function createActions(catalog: Pick<CatalogState, "rows">, online: (computer: string) => boolean = () => true) {
+/** The selected row and the open subagent, which decide whose details a copy reads. */
+export interface Selection { key?: string; subagent?: string }
+
+export function createActions(
+  catalog: Pick<CatalogState, "rows">,
+  online: (computer: string) => boolean = () => true,
+  selection: () => Selection = () => ({}),
+) {
   /** The write in flight per session (its kind), and whether an interrupt or a read mark is. */
   const [writes, setWrites] = createStore<Record<string, Action["kind"] | undefined>>({});
   const [interrupts, setInterrupts] = createStore<Record<string, boolean>>({});
@@ -210,6 +218,89 @@ export function createActions(catalog: Pick<CatalogState, "rows">, online: (comp
     return matches(value) ? value : undefined;
   }
 
+  const errorText = (error: unknown) => (typeof error === "string" ? error : error instanceof Error ? error.message : String(error));
+
+  /** The text the last successful copy put on the clipboard (the actions smoke logs it). */
+  let copied = "";
+  const lastCopied = () => copied;
+
+  /** Copies text; a failure is a sticky notice, a success shows nothing. */
+  async function copy(text: string): Promise<Outcome> {
+    try { await bridge.copyText(text); copied = text; return { outcome: "done", receipt: null, cleanup: null }; } catch (error) {
+      notify("error", `Zerus: could not copy\n${errorText(error)}`, true);
+      return failed(errorText(error));
+    }
+  }
+
+  /**
+   * Qt's click-time recheck (runSessionMenuAction): the row is looked up again
+   * by key; one that is gone, or whose conversation changed, copies nothing
+   * and raises a sticky notice. `created` joins the comparison when the row
+   * carries it. Otherwise the copy reads the live row.
+   */
+  function current(row: ActionRow): ActionRow | undefined {
+    const live = catalog.rows[row.key];
+    if (!live || (live.conversationId ?? "") !== (row.conversationId ?? "")) {
+      notify("info", GONE, true);
+      return undefined;
+    }
+    return snapshotOf(live);
+  }
+
+  /** The details of the live row while it is the selected one with no subagent open (Qt's m_details). */
+  function selectedDetails(live: ActionRow): Details | undefined {
+    const sel = selection();
+    if (sel.key !== live.key || sel.subagent) return undefined;
+    return detailsFor(live, online(live.computer), followedFor(live.key));
+  }
+
+  /** Copy session name: the live row's name. */
+  async function copyName(row: ActionRow): Promise<Outcome> {
+    const live = current(row);
+    return live ? copy(live.name) : failed(GONE);
+  }
+
+  /** Copy folder path: the selected row's current details folder, else the live row's; nothing when empty. */
+  async function copyFolder(row: ActionRow, details?: Details): Promise<Outcome> {
+    const live = current(row);
+    if (!live) return failed(GONE);
+    const folder = copyState(live, online(live.computer), details ?? selectedDetails(live)).folder;
+    return folder.enabled ? copy(folder.path) : failed("nothing to copy");
+  }
+
+  /** Copy connect command or Copy restore command (the archive id only for an archived row, which needs one). */
+  async function copyCommand(row: ActionRow): Promise<Outcome> {
+    const live = current(row);
+    if (!live) return failed(GONE);
+    const archived = live.state === "archived";
+    if (archived && !live.archiveId) return failed("nothing to copy");
+    let command: string;
+    try { command = await bridge.copyCommand(live.computer, live.name, archived ? live.archiveId ?? null : null); } catch (error) {
+      notify("error", errorText(error), true);
+      return failed(errorText(error));
+    }
+    return copy(command);
+  }
+
+  /** Copy session reference: the selected row's details name the run and conversation when present. */
+  async function copyReference(row: ActionRow, details?: Details): Promise<Outcome> {
+    const live = current(row);
+    if (!live) return failed(GONE);
+    const d = details ?? selectedDetails(live);
+    const target: Target = {
+      computer: live.computer, name: live.name,
+      run_id: d?.run_id || live.runId || "", conversation_id: d?.conversation_id || live.conversationId || "",
+    };
+    let uri: string;
+    try { uri = await bridge.sessionReference(target, live.state === "archived" ? live.archiveId ?? null : null); } catch (error) {
+      notify("error", errorText(error), true);
+      return failed(errorText(error));
+    }
+    const out = await copy(uri);
+    if (out.outcome === "done") notify("info", "Session reference copied");
+    return out;
+  }
+
   // Read-mark retry.
   let marks: ReadMark[] = [];
   const lastTry = new Map<string, number>();
@@ -246,9 +337,26 @@ export function createActions(catalog: Pick<CatalogState, "rows">, online: (comp
     }
   }
 
-  return { perform, end, change, updating, interrupting, reading, detailsFor, notices: list, dismiss, loadReadMarks, observeBatch };
+  return { perform, end, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices: list, dismiss, loadReadMarks, observeBatch };
 }
 
-const app = createActions(appCatalog, (computer) => !computerOffline(computer));
-export const { perform, end, change, updating, interrupting, reading, detailsFor, notices, dismiss, loadReadMarks, observeBatch } = app;
+type FollowSource = { target(): { id: string } | undefined; summary(): Record<string, unknown> | undefined; loaded(): boolean; ended(): boolean; error(): unknown };
+let activity: FollowSource | undefined;
+/** Hands the store the app's Activity (session.ts), which this module cannot import without a cycle. */
+export function bindActivity(source: FollowSource) { activity = source; }
+
+/** The Activity subscription of a session: its state value while it is the followed one, and whether it has answered. */
+export function followedFor(key: string): Followed {
+  if (!activity) return { value: undefined, settled: false };
+  const mine = activity.target()?.id === key;
+  const value = mine ? activity.summary() : undefined;
+  return { value, settled: mine && (value !== undefined || activity.loaded() || activity.ended() || !!activity.error()) };
+}
+
+let selection: () => Selection = () => ({});
+/** Hands the store the selected row and open subagent (session.ts), which this module cannot import: ui.ts reads the page. */
+export function bindSelection(source: () => Selection) { selection = source; }
+
+const app = createActions(appCatalog, (computer) => !computerOffline(computer), () => selection());
+export const { perform, end, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, reading, detailsFor, notices, dismiss, loadReadMarks, observeBatch } = app;
 void loadReadMarks();

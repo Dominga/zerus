@@ -169,3 +169,24 @@ export async function pendingReadMarks(): Promise<ReadMark[]> {
   if (!inTauri()) return [];
   return invoke<ReadMark[]>("pending_read_marks");
 }
+
+/** `hgs reference` for a session: its `zerus://session?...` URI. */
+export async function sessionReference(target: Target, archiveId: string | null): Promise<string> {
+  if (!inTauri()) throw "Actions need the desktop app.";
+  return invoke<string>("session_reference", { target, archiveId });
+}
+
+/** The command that opens the session in a terminal, written for this computer's shell. */
+export async function copyCommand(computer: string, name: string, archiveId: string | null): Promise<string> {
+  if (!inTauri()) throw "Actions need the desktop app.";
+  return invoke<string>("copy_command", { computer, name, archiveId });
+}
+
+/** Puts text on the clipboard: from Rust in the app, the page's clipboard in a browser. */
+export async function copyText(text: string): Promise<void> {
+  if (inTauri()) return invoke<void>("copy_text", { text });
+  if (!text.trim()) throw "nothing to copy: the command is empty";
+  if (/[\r\n]/.test(text)) throw "the command has a newline in it -- copying that is dangerous: the shell would run it the moment you paste";
+  if (!navigator.clipboard) throw "The clipboard is unavailable.";
+  await navigator.clipboard.writeText(text);
+}

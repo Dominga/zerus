@@ -88,6 +88,13 @@ export interface Session {
   /** The host's reasons for a disallowed archive or terminate. */
   archiveReason?: string;
   terminateReason?: string;
+  /** The raw working directory (`cwd` is the folder name). */
+  cwdPath: string;
+  /** The row's terminal support, and whether the host reported it (NativeSessionCapabilities::terminal). */
+  terminalSupported: boolean;
+  terminalReported: boolean;
+  terminalAttachSupported: boolean;
+  terminalAttachReported: boolean;
 }
 
 export interface ActivityItem {

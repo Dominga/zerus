@@ -141,7 +141,38 @@ Outcome rules:
   the entry disabled.
 
 Forgetting, restoring, attention marks and sending arrive in later phases; their
-entries are disabled with a reason.
+entries are disabled with a reason. The copy entries below are live.
+
+### Copy actions
+
+The copy entries build text locally or ask `hgs` for it and put it on the
+clipboard. They are not writes: they need no row lock and show no "Updating…".
+
+| Entry | Text |
+| --- | --- |
+| Copy connect command | `hgs [@alias] a NAME` |
+| Copy restore command (archived row) | `hgs [@alias] resume NAME --archive ID` |
+| Copy session reference | the `zerus://session?` URI printed by `hgs [@alias] reference NAME --json --run RUN --conversation CONVERSATION [--archive ID]` (15 s here, 25 s on a peer) |
+| Copy folder path | the `cwd` of the selected session's details, else the row's; disabled when empty |
+| Copy session name | `NAME` |
+
+- The commands are quoted with Qt's SessionCommands rules (POSIX shell; PowerShell
+  on Windows) and name the `hgs` the client runs: `ZERUS_CLIENT_HGS`, else the
+  one found on `PATH` or in the install folders.
+- The reference takes the run and conversation of the selected session's
+  details, else the row's. A reply must be a `zerus://session?` URI of at most
+  8192 characters; otherwise the notice says "Could not read a session
+  reference. Update hgs on this computer." Success shows "Session reference
+  copied".
+- The clipboard is written from Rust (tauri-plugin-clipboard-manager). A text
+  that is empty or holds a line break is refused with Qt's texts. A failure
+  shows "Zerus: could not copy" with the error. A success shows no notice,
+  except for Copy session reference. The browser build (no Tauri) copies
+  through `navigator.clipboard` with the same two checks.
+- Each copy rechecks its row when it runs, as Qt does: a session that is gone
+  or whose conversation changed copies nothing and shows "This session is no
+  longer available. Open its actions again."; otherwise the current name,
+  archive id, folder and run are copied.
 
 ### Actions smoke run
 
@@ -150,19 +181,21 @@ perf hooks) checks the actions end to end without the real `hgs`. It starts only
 when the native side reports replay mode (`ZERUS_CLIENT_REPLAY`), an explicit
 `ZERUS_CLIENT_HGS` and `ZERUS_CLIENT_PERF` (any value but `auto`; `exit_app` is
 allowed only in a measurement run); otherwise it logs why and does nothing. In
-replay mode `run_action` and `inspect_session` refuse unless
+replay mode `run_action`, `inspect_session` and `session_reference` refuse unless
 `ZERUS_CLIENT_HGS` is set ("Actions in replay mode need ZERUS_CLIENT_HGS."), so
 a replay never drives the real CLI.
 
 Put `core/tests/support/fake_hgs_actions.py` as `hgs` in a scratch folder with a
-`config.json` beside it containing `{"reply":{"exit":0}}` (exit 0 without
-output is a success for the write actions; `echo_interrupt` parses standard
-input and fails on writes that have none). The fake logs each call to
+`config.json` beside it containing
+`{"reply":{"exit":0,"stdout":{"uri":"zerus://session?machine=m&name=claude%2Fsample-project%2Freview"}}}`
+(`reference` gets that URI; the write actions ignore standard output, and exit 0
+is a success for them; `echo_interrupt` parses standard input and fails on
+writes that have none). The fake logs each call to
 `log.ndjson` beside it. Run it only with the headless environment:
 
 ```sh
 S=$(mktemp -d); cp core/tests/support/fake_hgs_actions.py $S/hgs
-echo '{"reply":{"exit":0}}' > $S/config.json
+echo '{"reply":{"exit":0,"stdout":{"uri":"zerus://session?machine=m&name=claude%2Fsample-project%2Freview"}}}' > $S/config.json
 env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=1 \
   WEBKIT_DISABLE_DMABUF_RENDERER=1 ZERUS_CLIENT_REPLAY=$PWD/fixtures/replay.ndjson \
   ZERUS_CLIENT_HGS=$S/hgs ZERUS_CLIENT_QUERY=actions-smoke=1 ZERUS_CLIENT_PERF=smoke \
@@ -171,8 +204,11 @@ cat $S/log.ndjson
 ```
 
 The hook selects `claude/sample-project/review` (its details come from the
-replay's Activity state value or, as here, one `inspect` of the fake), runs
-pause, resume, rename (to `claude/sample-project/review-renamed`) and archive,
+replay's Activity state value or, as here, one `inspect` of the fake), first
+copies the session reference, the connect command, the session name and the
+folder path through the store the menus use (the first calls `reference`; the
+fake's URI is the clipboard text), logging each as
+`actions-smoke copy-<entry>: done <the exact clipboard text>`, then runs pause, resume, rename (to `claude/sample-project/review-renamed`) and archive,
 then the end call the Terminate dialog picks for the row through the dialog's
 confirmation (`kill`, since the replay row is not tracked), then the other end
 call (`terminate`), once each through the store the menus use. It logs each

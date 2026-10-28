@@ -1,11 +1,11 @@
 import { For, Show, createEffect, createMemo, createSignal, untrack } from "solid-js";
 import { Icon } from "../lib/icons";
 import { catalog, computerOffline } from "../../store/catalog";
-import { change, dismiss, end, interrupting, notices, perform, reading, updating } from "../../store/actions";
+import { change, copyCommand, copyFolder, copyName, copyReference, dismiss, end, interrupting, notices, perform, reading, updating } from "../../store/actions";
 import type { MenuEntry } from "../../store/ui";
 import type { Details } from "../../types";
 import type { Session } from "./types";
-import { dialogReducer, menuState, renameParts, renameProblem, snapshotOf, terminateCopy, type ActionRow, type DialogEvent } from "./actions-ui";
+import { copyState, dialogReducer, menuState, renameParts, renameProblem, snapshotOf, terminateCopy, type ActionRow, type DialogEvent } from "./actions-ui";
 
 // The guarded session actions: the entries both menus share, the Rename and
 // Terminate dialogs, and the notices the action store raises.
@@ -49,6 +49,22 @@ export function actionEntries(s: Session, details?: Details, options: { context?
       label: m.end.label, icon: m.end.label === "Terminate session…" ? "circle-stop" : "trash", danger: true, disabled: !m.end.enabled, hint: hint(m.end.enabled, m.end.reason),
       action: () => send({ type: "open", kind: "terminate", row }),
     },
+  };
+}
+
+/**
+ * The copy entries (Qt's context menu, 5306-5307 and 5374-5376). `details`
+ * only for the selected session, whose folder and run they prefer. They
+ * show no hint when off, as Qt shows none.
+ */
+export function copyEntries(s: Session, details?: Details): { command: Item; name: Item; reference: Item; folder: Item } {
+  const row = snapshotOf(s);
+  const c = copyState(row, !computerOffline(s.computer), details);
+  return {
+    command: { label: c.command.label, icon: "link", disabled: !c.command.enabled, action: () => { void copyCommand(row); } },
+    name: { label: "Copy session name", icon: "copy", action: () => { void copyName(row); } },
+    reference: { label: "Copy session reference", icon: "link", disabled: !c.reference, action: () => { void copyReference(row, details); } },
+    folder: { label: "Copy folder path", icon: "copy", disabled: !c.folder.enabled, action: () => { void copyFolder(row, details); } },
   };
 }
 

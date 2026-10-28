@@ -13,9 +13,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tauri::State;
-use zerus_client_core::actions::{classify, invocation};
+use zerus_client_core::actions::{classify, invocation, parse_reference, reference_invocation};
 use zerus_client_core::details::{details_invocation, parse_details, Details};
 use zerus_client_core::readmarks::{ReadMark, ReadMarks};
+use zerus_client_core::shell::{current_shell, open_command};
 use zerus_client_core::{default_hgs, run, Action, Batch, Outcome, Target};
 
 /// A session by computer id and session name, and the action's lane.
@@ -240,6 +241,37 @@ pub async fn inspect_session(target: Target, archive_id: Option<String>) -> Opti
         .await
         .ok()?;
     parse_details(&target, exit)
+}
+
+/// `hgs reference` for the session: its `zerus://session?...` URI, or why it
+/// could not be read. A read, so it needs no in-flight guard.
+#[tauri::command]
+pub async fn session_reference(
+    target: Target,
+    archive_id: Option<String>,
+) -> Result<String, String> {
+    if blocked() {
+        return Err(REPLAY_NEEDS_HGS.to_owned());
+    }
+    let inv = reference_invocation(&target, archive_id.as_deref());
+    let hgs = default_hgs();
+    let exit = tauri::async_runtime::spawn_blocking(move || run(&hgs, &inv))
+        .await
+        .map_err(|error| error.to_string())?;
+    parse_reference(exit)
+}
+
+/// The command that opens the session in a terminal, written for this
+/// computer's shell (`TrayAgent.cpp:742-745`).
+#[tauri::command]
+pub fn copy_command(computer: String, name: String, archive_id: Option<String>) -> String {
+    open_command(
+        &default_hgs().to_string_lossy(),
+        &computer,
+        &name,
+        archive_id.as_deref(),
+        current_shell(),
+    )
 }
 
 /// Read marks the host has not shown yet, for the store to apply optimistically.

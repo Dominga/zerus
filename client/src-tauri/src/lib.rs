@@ -54,6 +54,30 @@ pub(crate) fn data_dir(app: &AppHandle) -> std::path::PathBuf {
         .expect("the platform has an app data directory")
 }
 
+/// The root of the client's disposable files, the attachment cache:
+/// Tauri's `app_cache_dir`, which follows the identifier. As with
+/// `data_dir`, nothing else asks Tauri for it, so the Mac switch build can
+/// replace this body to follow the running bundle's identity.
+#[cfg(feature = "live")]
+pub(crate) fn cache_dir(app: &AppHandle) -> std::path::PathBuf {
+    use tauri::Manager;
+    app.path()
+        .app_cache_dir()
+        .expect("the platform has an app cache directory")
+}
+
+/// The client's attachment cache under its cache folder: `attachments`, or
+/// `attachments-replay` in a replay. Qt's cache (`AttachmentViewer.h:28`,
+/// `hgdev/hgs-tray/attachments`) is another folder this client never touches.
+#[cfg(feature = "live")]
+fn attachments_root(cache_dir: &std::path::Path, replay: bool) -> std::path::PathBuf {
+    cache_dir.join(if replay {
+        "attachments-replay"
+    } else {
+        "attachments"
+    })
+}
+
 /// The client's own draft store under its data directory: `drafts`, or
 /// `drafts-replay` in a replay, so a replay never touches the real drafts.
 /// Qt's store is only ever read (Saved drafts and its recovery).
@@ -76,6 +100,28 @@ pub fn run() {
         .manage(commands::AppState::default())
         .manage(window_visibility::Visibility::default())
         .invoke_handler(handler())
+        // Draft attachments and cached files as raw bytes (`composer/files.rs`),
+        // read off the main thread.
+        .register_asynchronous_uri_scheme_protocol("zerus-file", |ctx, request, responder| {
+            #[cfg(feature = "live")]
+            {
+                use tauri::Manager;
+                let webview = ctx.webview_label().to_owned();
+                let app = ctx.app_handle().clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    let response = match app.try_state::<composer::Composers>() {
+                        Some(composers) => composer::files::respond(&composers, &webview, &request),
+                        None => tauri::http::Response::builder().status(404).body(Vec::new()).expect("a bare 404"),
+                    };
+                    responder.respond(response);
+                });
+            }
+            #[cfg(not(feature = "live"))]
+            {
+                let _ = (ctx, request);
+                responder.respond(tauri::http::Response::builder().status(404).body(Vec::new()).expect("a bare 404"));
+            }
+        })
         .setup(|app| {
             #[cfg(feature = "live")]
             {
@@ -108,8 +154,11 @@ pub fn run() {
                 app.manage(Drafts(drafts));
                 let drafts = std::sync::Arc::clone(&app.state::<Drafts>().0);
                 let notify_pump = app.state::<commands::AppState>().pump();
+                // A replay never touches the real attachment cache either.
+                let cache = attachments_root(&cache_dir(app.handle()), replay);
                 app.manage(composer::Composers::new(
                     drafts,
+                    composer::Config { cache },
                     composer::Deps {
                         spawn: std::sync::Arc::new(|job: composer::Job| {
                             tauri::async_runtime::spawn_blocking(job);
@@ -396,6 +445,9 @@ mod tests {
         // An attach read still under way when the app quits.
         let composers = Composers::new(
             Arc::clone(&store),
+            composer::Config {
+                cache: root.join("cache"),
+            },
             Deps {
                 spawn: Arc::new(|job: Job| {
                     std::thread::spawn(move || {
@@ -529,6 +581,19 @@ mod tests {
             || at_exit = Some(read_draft(&root.join("drafts"), KEY).draft.draft.text),
         );
         assert_eq!(at_exit.as_deref(), Some("typed before the signal"));
+    }
+
+    #[test]
+    fn the_attachment_cache_is_the_clients_own() {
+        let cache = std::path::Path::new("/home/example/.cache/dev.zerus.next");
+        assert_eq!(attachments_root(cache, false), cache.join("attachments"));
+        assert_eq!(
+            attachments_root(cache, true),
+            cache.join("attachments-replay"),
+            "a replay never touches the real cache"
+        );
+        let qt = std::path::Path::new("/home/example/.cache/hgdev/hgs-tray/attachments");
+        assert!(!attachments_root(cache, false).starts_with(qt) && !qt.starts_with(cache));
     }
 
     #[test]

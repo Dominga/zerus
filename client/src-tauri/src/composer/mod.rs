@@ -23,6 +23,8 @@
 //! one for the life of the process, and tests keep theirs, since a store
 //! dropped on its own writer thread would wait for itself.
 
+pub mod files;
+
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -54,6 +56,13 @@ const SAVE_RETRY: Duration = Duration::from_secs(2);
 pub struct Deps {
     pub spawn: Spawn,
     pub notify: Notify,
+}
+
+/// Where the hub keeps its files.
+pub struct Config {
+    /// The private attachment cache (`files::Cache`): the app's own cache
+    /// folder, never Qt's.
+    pub cache: PathBuf,
 }
 
 /// The session a composer belongs to, as the webview opened it.
@@ -244,6 +253,8 @@ pub(crate) struct Hub {
 pub(crate) struct Shared {
     pub(crate) hub: Mutex<Hub>,
     pub(crate) store: Arc<DraftStore>,
+    /// The private attachment cache the `zerus-file` scheme serves.
+    pub(crate) cache: Arc<files::Cache>,
     pub(crate) deps: Deps,
     /// Counts `changed` calls.
     changes: AtomicU64,
@@ -272,10 +283,11 @@ fn excerpt(attachment: &Attachment) -> Option<String> {
 impl Composers {
     /// `drafts` is the app's one draft store (`Drafts` in lib.rs), shared
     /// with voice, so every draft key has one writer.
-    pub fn new(drafts: Arc<DraftStore>, deps: Deps) -> Self {
+    pub fn new(drafts: Arc<DraftStore>, config: Config, deps: Deps) -> Self {
         let composers = Composers(Arc::new(Shared {
             hub: Mutex::new(Hub::default()),
             store: drafts,
+            cache: files::Cache::new(config.cache),
             deps,
             changes: AtomicU64::new(0),
         }));
@@ -285,6 +297,11 @@ impl Composers {
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, Hub> {
         lock(&self.0.hub)
+    }
+
+    /// The private attachment cache.
+    pub fn cache(&self) -> Arc<files::Cache> {
+        Arc::clone(&self.0.cache)
     }
 
     /// Wakes the pump: the view or the draft keys changed.
@@ -1193,6 +1210,10 @@ pub(crate) mod tests {
         let count = Arc::clone(&notified);
         let composers = Composers::new(
             Arc::clone(store),
+            // The `cache` folder beside the test's `drafts`.
+            Config {
+                cache: store.root().with_file_name("cache"),
+            },
             Deps {
                 spawn: Arc::new(|job: Job| {
                     std::thread::spawn(job);

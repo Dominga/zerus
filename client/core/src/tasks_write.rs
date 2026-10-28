@@ -386,6 +386,248 @@ pub fn created(reply: &Map<String, Value>, request_id: &str) -> Result<Value, St
     }
 }
 
+/// The intent of a task message (`saveTaskMessage`): its content, the mode
+/// and the dispatch the sender expects.
+pub fn message_intent(text: &str, files: &[Attachment], mode: &str, dispatch: &str) -> Value {
+    let content: Value = serde_json::from_str(&content(text, files)).unwrap_or(Value::Null);
+    json!({"content": content, "mode": mode, "dispatch": dispatch})
+}
+
+/// `hgs task message` for a reserved record; a recovery only checks whether
+/// the original was delivered (`--recover-only`) and sends nothing new.
+pub fn message_call(project: &str, task: &str, record: &Value, recovery: bool) -> TaskCall {
+    let intent = &record["intent"];
+    let mut args = words(&[
+        "message",
+        task,
+        "--request-id",
+        record["id"].as_str().unwrap_or(""),
+        "--mode",
+        intent["mode"].as_str().unwrap_or(""),
+        "--expect-dispatch",
+        intent["dispatch"].as_str().unwrap_or(""),
+        "--content-json",
+        "--project",
+        project,
+    ]);
+    if recovery {
+        args.push("--recover-only".into());
+    }
+    TaskCall::new(args, intent["content"].to_string())
+}
+
+/// Whether a message reply names the same task and request.
+pub fn message_delivered(reply: &Map<String, Value>, task: &str, id: &str) -> Result<(), String> {
+    if reply.get("task").and_then(|task| task["uuid"].as_str()) == Some(task)
+        && reply
+            .get("message")
+            .and_then(|message| message["request_id"].as_str())
+            == Some(id)
+    {
+        Ok(())
+    } else {
+        Err("The message reply did not match its original identity. Recovery data was kept.".into())
+    }
+}
+
+/// A reserved message: its record `{id, intent}`, whether it recovers an
+/// earlier attempt, and whether that attempt's intent differs from this one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reserved {
+    pub record: Value,
+    pub recovering: bool,
+    pub different_intent: bool,
+}
+
+/// The private recovery snapshot of a task's message, one file per task
+/// under the drafts root, so a send interrupted at any point is recovered or
+/// reported, never repeated (`TaskMessageOutbox`).
+pub mod outbox {
+    use super::Reserved;
+    use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
+    use std::collections::HashSet;
+    use std::fs;
+    use std::io::{Read, Write};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, PoisonError};
+    use std::time::{Duration, Instant};
+
+    const MAX_RECORD: u64 = 32 * 1024 * 1024;
+
+    pub fn path(root: &Path, project: &str, task: &str) -> PathBuf {
+        let digest: String = Sha256::digest(format!("{project}\n{task}").as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        root.join("task-delivery").join(format!("{digest}.json"))
+    }
+
+    fn marker(file: &Path) -> PathBuf {
+        file.with_extension("marker")
+    }
+
+    /// One message operation per task at a time, within this client.
+    static BUSY: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
+
+    struct Turn(PathBuf);
+
+    impl Turn {
+        fn take(file: &Path) -> Option<Turn> {
+            let until = Instant::now() + Duration::from_secs(1);
+            loop {
+                {
+                    let mut busy = BUSY.lock().unwrap_or_else(PoisonError::into_inner);
+                    if busy
+                        .get_or_insert_with(HashSet::new)
+                        .insert(file.to_path_buf())
+                    {
+                        return Some(Turn(file.to_path_buf()));
+                    }
+                }
+                if Instant::now() >= until {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    impl Drop for Turn {
+        fn drop(&mut self) {
+            if let Some(busy) = BUSY.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
+                busy.remove(&self.0);
+            }
+        }
+    }
+
+    fn uuid(text: &str) -> bool {
+        let text = text
+            .strip_prefix('{')
+            .and_then(|t| t.strip_suffix('}'))
+            .unwrap_or(text);
+        text.len() == 36
+            && text.char_indices().all(|(index, c)| match index {
+                8 | 13 | 18 | 23 => c == '-',
+                _ => c.is_ascii_hexdigit(),
+            })
+            && text.chars().any(|c| c != '0' && c != '-')
+    }
+
+    /// The record of an earlier attempt.
+    pub fn read(file: &Path) -> Result<Value, String> {
+        let unavailable = || {
+            "The original message recovery snapshot is unavailable. This check sent nothing."
+                .to_owned()
+        };
+        let metadata = fs::symlink_metadata(file).map_err(|_| unavailable())?;
+        if !metadata.is_file() || metadata.len() > MAX_RECORD {
+            return Err(unavailable());
+        }
+        let mut bytes = Vec::new();
+        fs::File::open(file)
+            .and_then(|f| f.take(MAX_RECORD + 1).read_to_end(&mut bytes))
+            .map_err(|_| unavailable())?;
+        let record: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        if !record["id"].as_str().is_some_and(uuid) || !record["intent"].is_object() {
+            return Err("The message recovery snapshot is invalid. Nothing was submitted.".into());
+        }
+        Ok(record)
+    }
+
+    fn write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        let temporary = path.with_extension("tmp");
+        let result = (|| {
+            let mut file = fs::File::create(&temporary)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+            }
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            fs::rename(&temporary, path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    /// Reserves a message before it is sent. An earlier attempt is reused
+    /// (recovering), with `different_intent` when its content or mode
+    /// differs; otherwise a new ID is saved first. `new_id` is the fresh ID.
+    pub fn reserve(
+        root: &Path,
+        project: &str,
+        task: &str,
+        intent: &Value,
+        new_id: &str,
+    ) -> Result<Reserved, String> {
+        let file = path(root, project, task);
+        let folder = file.parent().expect("a task-delivery folder").to_path_buf();
+        if fs::create_dir_all(&folder).is_err()
+            || fs::symlink_metadata(&folder).is_ok_and(|m| m.file_type().is_symlink())
+        {
+            return Err("Could not create private message storage.".into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(root, fs::Permissions::from_mode(0o700));
+            let _ = fs::set_permissions(&folder, fs::Permissions::from_mode(0o700));
+        }
+        let Some(_turn) = Turn::take(&file) else {
+            return Err("This task already has a message operation in progress.".into());
+        };
+        let reserved = if file.exists() || marker(&file).exists() {
+            let record = read(&file)?;
+            let different_intent = record["intent"] != *intent;
+            Reserved {
+                record,
+                recovering: true,
+                different_intent,
+            }
+        } else {
+            let record = json!({"id": new_id, "intent": intent});
+            write(&file, record.to_string().as_bytes()).map_err(|_| {
+                "Could not save the original message. Nothing was submitted.".to_owned()
+            })?;
+            Reserved {
+                record,
+                recovering: false,
+                different_intent: false,
+            }
+        };
+        let id = reserved.record["id"].as_str().unwrap_or("").to_owned();
+        write(&marker(&file), id.as_bytes()).map_err(|_| {
+            "Could not reserve the message identity. Nothing was submitted.".to_owned()
+        })?;
+        Ok(reserved)
+    }
+
+    /// Releases a delivered message's record.
+    pub fn release(root: &Path, project: &str, task: &str, id: &str) -> Result<(), String> {
+        let file = path(root, project, task);
+        let Some(_turn) = Turn::take(&file) else {
+            return Err("The message recovery record is busy.".into());
+        };
+        if file.exists() {
+            let record = read(&file)?;
+            if record["id"].as_str() != Some(id) {
+                return Err("The pending message changed; refresh this task.".into());
+            }
+            fs::remove_file(&file)
+                .map_err(|_| "Could not release the local message recovery record.".to_owned())?;
+        }
+        match fs::remove_file(marker(&file)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err("Could not update message recovery state.".into()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,5 +883,115 @@ mod tests {
         assert!(decode_files(&json!([{"name": "a", "data_base64": ""}])).is_empty());
         let nine: Vec<Value> = (0..9).map(|_| json!({"data_base64": "aGk="})).collect();
         assert!(decode_files(&Value::Array(nine)).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod outbox_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
+        let path = std::env::temp_dir().join(format!("zerus-outbox-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        Scratch(path)
+    }
+
+    const ID: &str = "11111111-1111-4111-8111-111111111111";
+    const OTHER: &str = "22222222-2222-4222-8222-222222222222";
+
+    #[test]
+    fn a_message_is_reserved_recovered_and_released() {
+        let root = scratch("cycle");
+        let intent = message_intent("hello", &[], "comment", "none");
+        let first = outbox::reserve(&root.0, "alpha", "t-1", &intent, ID).unwrap();
+        assert!(!first.recovering && !first.different_intent);
+        assert_eq!(first.record["id"], ID);
+        let call = message_call("alpha", "t-1", &first.record, false);
+        assert_eq!(
+            call.args,
+            [
+                "message",
+                "t-1",
+                "--request-id",
+                ID,
+                "--mode",
+                "comment",
+                "--expect-dispatch",
+                "none",
+                "--content-json",
+                "--project",
+                "alpha"
+            ]
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&call.input).unwrap(),
+            json!({"text": "hello", "attachments": []})
+        );
+        assert_eq!(call.invocation().timeout, Duration::from_secs(90));
+        // An interrupted send recovers the same identity, never a new one.
+        let again = outbox::reserve(&root.0, "alpha", "t-1", &intent, OTHER).unwrap();
+        assert!(again.recovering && !again.different_intent);
+        assert_eq!(again.record["id"], ID);
+        assert!(message_call("alpha", "t-1", &again.record, true)
+            .args
+            .ends_with(&["--recover-only".to_owned()]));
+        let changed = message_intent("hello!", &[], "comment", "none");
+        assert!(
+            outbox::reserve(&root.0, "alpha", "t-1", &changed, OTHER)
+                .unwrap()
+                .different_intent
+        );
+        let reply: Map<String, Value> =
+            serde_json::from_value(json!({"task": {"uuid": "t-1"}, "message": {"request_id": ID}}))
+                .unwrap();
+        assert_eq!(message_delivered(&reply, "t-1", ID), Ok(()));
+        assert_eq!(
+            message_delivered(&reply, "t-1", OTHER),
+            Err(
+                "The message reply did not match its original identity. Recovery data was kept."
+                    .into()
+            )
+        );
+        assert_eq!(
+            outbox::release(&root.0, "alpha", "t-1", OTHER),
+            Err("The pending message changed; refresh this task.".into())
+        );
+        assert_eq!(outbox::release(&root.0, "alpha", "t-1", ID), Ok(()));
+        assert!(
+            !outbox::reserve(&root.0, "alpha", "t-1", &intent, OTHER)
+                .unwrap()
+                .recovering
+        );
+    }
+
+    #[test]
+    fn a_lost_or_damaged_record_sends_nothing() {
+        let root = scratch("lost");
+        let intent = message_intent("hello", &[], "comment", "none");
+        outbox::reserve(&root.0, "alpha", "t-1", &intent, ID).unwrap();
+        let file = outbox::path(&root.0, "alpha", "t-1");
+        // The marker remains when the record is lost: nothing is sent again.
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(
+            outbox::reserve(&root.0, "alpha", "t-1", &intent, OTHER),
+            Err(
+                "The original message recovery snapshot is unavailable. This check sent nothing."
+                    .into()
+            )
+        );
+        std::fs::write(&file, r#"{"id":"not a uuid","intent":{}}"#).unwrap();
+        assert_eq!(
+            outbox::reserve(&root.0, "alpha", "t-1", &intent, OTHER),
+            Err("The message recovery snapshot is invalid. Nothing was submitted.".into())
+        );
     }
 }

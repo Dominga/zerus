@@ -490,7 +490,18 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
                 .map(|task| task.id)
                 .collect();
             open.sort_unstable();
-            let Some(previous) = open.iter().map(|id| team.task(*id).map(|task| task.phase).unwrap_or(1)).min() else {
+            // The owner (2026-10-28): name the phase right ahead of this one in
+            // the order, the one it queues behind, not the oldest phase that
+            // still has a task open ("Phase 43 starts after phase 40" read
+            // wrong while 41 and 42 were also ahead of it).
+            // A draft ahead (or one sent back) does not hold it.
+            let drafted = |n: u32| team.phases.iter().any(|other| other.n == n && other.state.is_draft());
+            let Some(previous) = open
+                .iter()
+                .map(|id| team.task(*id).map(|task| task.phase).unwrap_or(1))
+                .filter(|phase| !drafted(*phase))
+                .max_by_key(|phase| order_of(*phase))
+            else {
                 continue;
             };
             // U25: an accepted phase queued behind a running one.
@@ -4725,6 +4736,15 @@ mod tests {
         assert_eq!(value["phases"][1]["state"], "rejected");
         assert_eq!(value["phases"][1]["rejection"]["comment"], "Smaller");
         assert_eq!(value["phases"][2]["waiting"]["text"], "Starts after phase 2");
+        // Two approved phases ahead: it names the nearer one, the one it
+        // queues behind (phase 43 said "after phase 40" with 41 and 42 ahead).
+        {
+            let mut ahead = team.clone();
+            ahead.tasks.push(task(5, 5, TaskStatus::Pending));
+            ahead.phases.push(Phase { n: 5, title: "Docs".into(), state: PhaseState::Queued, tasks: vec![5], ..Default::default() });
+            let value = view_with(&ahead, &[], None);
+            assert_eq!(value["phases"][3]["waiting"]["text"], "Starts after phase 4");
+        }
         // Only the running phase can make the team Stuck.
         assert_eq!(value["stuck_scope"], json!([2]));
         // A sent-back draft waits for the lead, not the owner.

@@ -255,4 +255,80 @@ describe("read-mark retry", () => {
       dispose();
     });
   });
+
+  it("retries quietly: a failing retry adds no notice, a user mark read failure does", async () => {
+    await createRoot(async (dispose) => {
+      mocked.pendingReadMarks.mockResolvedValue([mark]);
+      mocked.runAction.mockResolvedValue({ outcome: "failed", detail: "offline" });
+      const a = setup();
+      await a.loadReadMarks();
+      const b = batchOf({ upserts: [rowOut({ unread: true, reply_id: "r1" })] });
+      a.applyBatch(b);
+      a.observeBatch(b);
+      await flush();
+      expect(mocked.runAction).toHaveBeenCalledTimes(1);
+      expect(a.notices()).toEqual([]);
+      await a.perform(rowOut({ unread: true }), { kind: "mark_read", reply_id: "r1", attention_signature: null });
+      expect(a.notices()).toMatchObject([{ tone: "error", text: "offline" }]);
+      dispose();
+    });
+  });
+
+  it("retries a mark that failed after startup on a later batch", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      await a.loadReadMarks();
+      mocked.runAction.mockResolvedValue({ outcome: "failed", detail: "offline" });
+      mocked.pendingReadMarks.mockResolvedValue([mark]);
+      await a.perform(rowOut({ unread: true }), { kind: "mark_read", reply_id: "r1", attention_signature: null });
+      expect(mocked.runAction).toHaveBeenCalledTimes(1);
+      const b = batchOf({ upserts: [rowOut({ unread: true, reply_id: "r1" })] });
+      a.applyBatch(b);
+      a.observeBatch(b);
+      await flush();
+      expect(mocked.runAction).toHaveBeenCalledTimes(2);
+      dispose();
+    });
+  });
+
+  it("does not retry an older mark against a newer reply", async () => {
+    await createRoot(async (dispose) => {
+      mocked.pendingReadMarks.mockResolvedValue([mark]);
+      const a = setup();
+      await a.loadReadMarks();
+      const b = batchOf({ upserts: [rowOut({ unread: true, reply_id: "r2" })] });
+      a.applyBatch(b);
+      a.observeBatch(b);
+      await flush();
+      expect(mocked.runAction).not.toHaveBeenCalled();
+      dispose();
+    });
+  });
+});
+
+describe("pending guard", () => {
+  it("makes no call and no notice for a second perform while pending", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      let finish: (o: Outcome) => void = () => {};
+      mocked.runAction.mockReturnValue(new Promise((r) => { finish = r; }));
+      const first = a.perform(rowOut(), { kind: "pause" });
+      await a.perform(rowOut(), { kind: "pause" });
+      expect(mocked.runAction).toHaveBeenCalledTimes(1);
+      expect(a.notices()).toEqual([]);
+      finish(done());
+      await first;
+      dispose();
+    });
+  });
+
+  it("treats a busy rejection as a silent no-op", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      mocked.runAction.mockRejectedValue("busy");
+      await a.perform(rowOut(), { kind: "pause" });
+      expect(a.notices()).toEqual([]);
+      dispose();
+    });
+  });
 });

@@ -53,25 +53,39 @@ export function createActions(catalog: Pick<CatalogState, "rows">) {
     }
   }
 
-  async function perform(entry: RowOut, action: Action): Promise<Outcome> {
+  /**
+   * The one call path. `quiet` (the background read-mark retry) shows nothing
+   * and reports whether a call was made. A session with an action already
+   * pending, or one that answers "busy", is a silent no-op.
+   */
+  async function run(entry: RowOut, action: Action, quiet: boolean): Promise<{ out: Outcome; called: boolean }> {
     const live = catalog.rows[rowId(entry.computer, entry.key)];
     const target = targetOf(entry);
     if (!live || !target || live.runId !== target.run_id) {
-      notify("info", CHANGED);
-      return failed(CHANGED);
+      if (!quiet) notify("info", CHANGED);
+      return { out: failed(CHANGED), called: false };
     }
     const id = sessionId(target.computer, target.name);
+    if (pending[id]) return { out: failed("busy"), called: false };
     setPending(id, true);
     let out: Outcome;
+    let silent = quiet;
     try {
       out = await bridge.runAction(target, action);
     } catch (error) {
-      out = failed(typeof error === "string" ? error : error instanceof Error ? error.message : String(error));
+      const detail = typeof error === "string" ? error : error instanceof Error ? error.message : String(error);
+      if (detail === "busy") silent = true;
+      out = failed(detail);
     } finally {
       setPending(id, false);
     }
-    report(action, out);
-    return out;
+    if (!silent) report(action, out);
+    if (action.kind === "mark_read") await loadReadMarks();
+    return { out, called: true };
+  }
+
+  async function perform(entry: RowOut, action: Action): Promise<Outcome> {
+    return (await run(entry, action, false)).out;
   }
 
   // Details: one inspect per session at a time; the signature is what made the
@@ -129,14 +143,18 @@ export function createActions(catalog: Pick<CatalogState, "rows">) {
       if (!row.unread) continue;
       const mark = marks.find((m) => m.computer === u.computer && m.name === row.name && m.run_id === row.run_id && m.conversation_id === (row.conversation_id ?? ""));
       if (!mark) continue;
+      // An older mark is not retried against a newer reply or attention.
+      if (mark.reply_id && row.reply_id && mark.reply_id !== row.reply_id) continue;
+      if (mark.attention_signature && row.attention_signature && mark.attention_signature !== row.attention_signature) continue;
       const id = sessionId(u.computer, row.name);
       const now = Date.now();
       const last = lastTry.get(id);
       if (last !== undefined && now - last < RETRY_MS) continue;
+      if (pending[id]) continue;
+      // Only a call that is certain to be made counts against the 5 s window.
+      if (catalog.rows[rowId(u.computer, u.key)]?.runId !== row.run_id) continue;
       lastTry.set(id, now);
-      void perform(u, { kind: "mark_read", reply_id: mark.reply_id, attention_signature: mark.attention_signature }).then((out) => {
-        if (out.outcome === "done") marks = marks.filter((m) => m !== mark);
-      });
+      void run(u, { kind: "mark_read", reply_id: mark.reply_id, attention_signature: mark.attention_signature }, true);
     }
   }
 

@@ -311,6 +311,8 @@ private slots:
     void sessionListFollowsThePrototype_data();
     void sessionListFollowsThePrototype();
     void teamMemberUnmuteRecordsItsChoice();
+    void teamMemberUnmuteOnAPeerReadsTheReplacedFleet();
+    void subagentNoteNeverHidesTheSessionHint();
     void inspectorIsAColumnOfCards_data();
     void inspectorIsAColumnOfCards();
     void teamRowBarsCountThePhaseInWork();
@@ -1912,7 +1914,11 @@ void TestSessionsWindow::sessionListFollowsThePrototype()
     };
     QStyleOptionViewItem option; option.initFrom(list); option.rect = list->visualItemRect(list->item(backend)); option.widget = list;
     const auto mute = SessionDelegate::muteRect(option, backendIndex); QVERIFY(!mute.isEmpty());
-    QTRY_VERIFY(tip(mute.center()).contains("team members are muted by default; the lead reports for them. Right-click to unmute."));
+    // N36 of #499: the team default is this desktop's own; hgs, Android and the
+    // other desktops keep notifying, so neither text says "all devices".
+    QTRY_VERIFY(tip(mute.center()).contains("Muted on this computer: team members are muted by default; the lead reports for them. Right-click to unmute."));
+    const auto spoken = list->item(backend)->data(Qt::AccessibleTextRole).toString();
+    QVERIFY2(spoken.contains("Muted on this computer: team members are muted by default") && !spoken.contains("all devices"), qPrintable(spoken));
     // 2.4: the strip names its team in the tooltip only.
     const auto strip = SessionList::teamStripRect(list->visualItemRect(list->item(lead())));
     QTRY_VERIFY(tip(strip.center() + QPoint(-strip.width() / 4, 0)).contains("Open team Checkout v2"));
@@ -2038,6 +2044,106 @@ void TestSessionsWindow::teamMemberUnmuteRecordsItsChoice()
     FleetState unchosen; auto fresh = state.local(); fresh.sessions[1].notificationPreferences = preferences(false, 0); unchosen.setLocal(fresh, 0);
     QVERIFY(!unchosen.local().sessions[1].muted);
     QVERIFY(unchosen.setTeamMembers({"\nkimi/docs/research"})); QVERIFY(unchosen.local().sessions[1].muted && unchosen.local().sessions[1].teamMuted);
+}
+
+// C2 of #499: the mute answer's signal reaches TrayAgent, which calls setFleet
+// at once and frees the window's copy of the peer's box. The unmute is built
+// from the fleet as it is after that, here with the revision another device
+// wrote meanwhile, never from the freed box.
+void TestSessionsWindow::teamMemberUnmuteOnAPeerReadsTheReplacedFleet()
+{
+    const auto preferences = [](bool muted, qint64 revision) { return QJsonObject{{"conversation_id", "member-conversation"}, {"muted", muted},
+        {"revision", revision}, {"suppressed", QJsonObject{{"reply_id", QJsonValue()}, {"attention_signature", QJsonValue()},
+        {"optional_question_ids", QJsonArray()}, {"main_attention", QJsonValue()}, {"child_attention", QJsonObject()}}}}; };
+    const QByteArray teams = R"({"items":[{"id":"team-1","name":"Infra","status":"running","lead":"lead","revision":1,
+        "members":[{"id":"lead","role":"Lead","agent":"codex","state":"active","session":{"host":"","name":"codex/hgs/dashboard"}},
+                   {"id":"reviewer","role":"Reviewer","agent":"claude","state":"active","session":{"host":"mac","name":"claude/infra/review"}}],
+        "tasks":[]}]})";
+    const QByteArray behavior = "elif c=='--help':print('session-notifications-v1')\n"
+        "elif c=='notifications':\n"
+        " payload=json.load(sys.stdin)\n"
+        " with open(__file__+'.calls','a') as output:output.write(json.dumps({'argv':sys.argv[1:],'payload':payload})+'\\n')\n"
+        " n=sum(1 for _ in open(__file__+'.calls'))\n"
+        " print(open(__file__+'.reply%d'%n).read())\n"
+        "elif c=='team' and a[1:2]==['list']:print(" + FakeCli::pythonString(QString::fromUtf8(QJsonDocument::fromJson(teams).toJson(QJsonDocument::Compact))) + ")\n"
+        "elif c=='team':print('{}')\n";
+    const auto fixture = m_dir->filePath("team-member-peer-mute"); QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + behavior)));
+    const auto reply = [&](int call, bool muted, qint64 revision) {
+        return FakeCli::replace(fixture + QString(".reply%1").arg(call), QJsonDocument(QJsonObject{{"ok", true}, {"applied", true}, {"run_id", "member-run"},
+            {"conversation_id", "member-conversation"}, {"preferences", preferences(muted, revision)}}).toJson(QJsonDocument::Compact));
+    };
+    QVERIFY(reply(1, true, 1)); QVERIFY(reply(2, false, 3));
+    const auto calls = [&] {
+        QList<QJsonObject> found; QFile file(fixture + ".calls");
+        if (file.open(QIODevice::ReadOnly)) for (const auto &line : file.readAll().split('\n')) if (!line.isEmpty()) found << QJsonDocument::fromJson(line).object();
+        return found;
+    };
+    auto state = fleet(); auto mac = *state.peer("mac");
+    auto &member = mac.sessions[0];
+    member.runId = "member-run"; member.conversationId = "member-conversation";
+    member.sharedNotifications = true; member.notificationPreferences = preferences(false, 0);
+    state.setPeer(mac, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window);
+    const auto memberOf = [&] { return state.peer("mac")->sessions.constLast(); };
+    // What TrayAgent does with the signal: its fleet takes the answer and
+    // replaces the window's at once. Since then another device has muted it
+    // again and the host lists more sessions, so a read of the freed box
+    // cannot happen to find the new one in its place.
+    connect(&window, &SessionsWindow::notificationPreferencesChanged, &window, [&](const QString &host, const QString &, const QString &, const QString &, const QJsonObject &value) {
+        QVERIFY(state.applyNotificationPreferences(host, memberOf(), value));
+        if (value.value("revision").toInteger() == 1) {
+            QVERIFY(state.applyNotificationPreferences(host, memberOf(), preferences(true, 2)));
+            auto listed = *state.peer(host);
+            for (int i = 0; i < 40; ++i) {
+                auto other = listed.sessions.constLast(); other.name = QString("claude/infra/other-%1").arg(i);
+                other.runId = QString("other-run-%1").arg(i); other.conversationId = QString("other-conversation-%1").arg(i);
+                listed.sessions.prepend(other);
+            }
+            state.setPeer(listed, QDateTime::currentMSecsSinceEpoch());
+        }
+        window.setFleet(state);
+    });
+    window.setFleet(state); window.show();
+    auto *list = window.findChild<QListWidget *>("sessionList"); QVERIFY(list);
+    const QString key = "mac\nclaude/infra/review";
+    const auto rowOf = [&](const QString &wanted) { for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(SessionRoles::Key).toString() == wanted) return i; return -1; };
+    WAIT_VERIFY(rowOf(key) >= 0 && list->item(rowOf(key))->data(SessionRoles::TeamMuted).toBool());
+    auto *menu = window.findChild<QMenu *>("sessionContextMenu"); QVERIFY(menu);
+    const auto point = list->visualItemRect(list->item(rowOf(key))).center();
+    QContextMenuEvent event(QContextMenuEvent::Mouse, point, list->viewport()->mapToGlobal(point));
+    QApplication::sendEvent(list->viewport(), &event);
+    auto *toggle = menu->findChild<QAction *>("contextToggleMute"); QVERIFY(toggle);
+    QCOMPARE(toggle->text(), QString("Unmute notifications"));
+    toggle->trigger(); menu->hide();
+    WAIT_COMPARE(calls().size(), 2);
+    QCOMPARE(calls()[0]["argv"].toArray().first().toString(), QString("@mac"));
+    QCOMPARE(calls()[0]["payload"].toObject(), (QJsonObject{{"run_id", "member-run"}, {"conversation_id", "member-conversation"}, {"muted", true}, {"expected_revision", 0}}));
+    QCOMPARE(calls()[1]["argv"].toArray().first().toString(), QString("@mac"));
+    QCOMPARE(calls()[1]["payload"].toObject(), (QJsonObject{{"run_id", "member-run"}, {"conversation_id", "member-conversation"}, {"muted", false}, {"expected_revision", 2}}));
+    WAIT_VERIFY(!list->item(rowOf(key))->data(SessionRoles::Muted).toBool());
+    QVERIFY(!memberOf().muted && !memberOf().teamMuted);
+}
+
+// N35 of #499: the record keeps its last subagent note ("allowed with its
+// group") for good. It never replaces the session's own hint; only a member's
+// ask that waits for its lead says so, in words.
+void TestSessionsWindow::subagentNoteNeverHidesTheSessionHint()
+{
+    auto state = fleet(); auto arch = state.local();
+    for (auto &s : arch.sessions) s.subagentConfirm = "allowed with its group";
+    state.setLocal(arch, QDateTime::currentMSecsSinceEpoch());
+    auto mac = *state.peer("mac"); mac.sessions[0].subagentConfirm = "asked; the team's lead answers";
+    state.setPeer(mac, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(script()); keepDetailsPollsOut(window);
+    window.setFleet(state); window.show();
+    auto *hint = window.findChild<QLabel *>("hint"); QVERIFY(hint);
+    window.showSession({}, "codex/website/navigation");
+    WAIT_COMPARE(hint->text(), QString("Conversation saved. Resume to continue with the same context."));
+    window.showSession({}, "kimi/docs/research");
+    WAIT_VERIFY2(!hint->text().contains("with its group"), qPrintable(hint->text()));
+    window.showSession("mac", "claude/infra/review");
+    WAIT_COMPARE(hint->text(), QString("The agent asks to start subagents. Its team's lead answers."));
 }
 
 void TestSessionsWindow::teamTreeShowsSubteamsAndRollsUp()
@@ -2419,6 +2525,12 @@ void TestSessionsWindow::teamAttentionReachesTheNotifications()
     QTRY_VERIFY_WITH_TIMEOUT(([&] { controller->refresh(); return cleared.size() == 1; })(), 10000);
     QCOMPARE(cleared[0][0].toString(), raised[0][0].toString());
     QCOMPARE(raised.size(), 1);
+    // N32 of #499: the tray raised a notice before this window existed; a click
+    // creates the window, whose teams are not read yet: the team opens once they are.
+    SessionsWindow opened(FakeCli::program(fixture)); opened.resize(1440, 900); opened.setFleet(plain); opened.show();
+    auto *fresh = opened.findChild<TeamController *>(); QVERIFY(fresh && fresh->teams().isEmpty());
+    opened.showTeamAttention(raised[0][0].toString());
+    WAIT_VERIFY(opened.findChild<QWidget *>("teamWorkspace") && opened.findChild<QWidget *>("teamWorkspace")->isVisible());
 }
 
 // N12 (#382): from the lead's session (its team's pill, Pause and Stop in the
@@ -7030,7 +7142,7 @@ void TestSessionsWindow::providerErrorWaitsForNativePrompt()
     auto *composer = window.findChild<MessageComposer *>("messageComposer");
     auto *send = composer->findChild<QPushButton *>("sendMessage");
     auto *status = composer->findChild<QLabel *>("messageStatus");
-    QTRY_VERIFY(status->text().contains("starting"));
+    WAIT_VERIFY(status->text().contains("starting"));
     setComposerText(composer, "повтори");
     QJsonObject details{{"tracked", true}, {"run_id", "run-one"}, {"conversation_id", "conversation-one"},
         {"runtime_state", "live"}, {"process_state", "running"}, {"activity", state=="error"?"attention":"unknown"}, {"phase", state},
@@ -8367,14 +8479,14 @@ void TestSessionsWindow::activityMarkReadKeepsReadingPosition()
     setJsonSetting("attention/sessionMarks",QJsonDocument(state.attentionMarks()).toJson(QJsonDocument::Compact));
     SessionsWindow window(program());window.resize(1000,760);window.setFleet(state);window.show();
     auto *client=window.findChild<HgsClient *>();QSignalSpy inspections(client,&HgsClient::inspectionReady);
-    window.showSession({},session.name);QTRY_VERIFY(!inspections.isEmpty());
+    window.showSession({},session.name);WAIT_VERIFY(!inspections.isEmpty());
     QJsonArray events;for(int i=1;i<=30;++i)events<<QJsonObject{{"seq",i},{"at",1791018000+i},{"type","AgentMessage"},{"detail",QString("Read message %1\n\nKeep this position and selection.").arg(i)}};
     client->inspectionReady({},session.name,{{"tracked",true},{"conversation_id",session.conversationId},{"phase","working"},{"activity","busy"},{"cursor",30},{"events",events},
         {"session_usage",QJsonObject{{"context",QJsonObject{{"used",139000},{"limit",258400}}}}}});
     auto *button=window.findChild<QPushButton *>("activityMarkRead");QVERIFY(button);QVERIFY(button->isVisible());QVERIFY(!button->icon().isNull());
     QCOMPARE(static_cast<ToolbarChip *>(button)->tone(),ChipTone::Accent);
     auto *browser=window.findChild<ActivityView *>("mainActivity")->browser();auto *composer=window.findChild<MessageComposer *>("messageComposer");
-    setComposerText(composer, "Unsent draft");QTRY_VERIFY(!window.findChild<ActivityView *>("mainActivity")->renderPending());
+    setComposerText(composer, "Unsent draft");WAIT_VERIFY(!window.findChild<ActivityView *>("mainActivity")->renderPending());
     const auto initialGeometry=browser->geometry();
     browser->setTextCursor(browser->document()->find("Read message 1"));browser->verticalScrollBar()->setValue(0);QTest::qWait(20);
     const auto selection=browser->textCursor().selectedText();QVERIFY(!selection.isEmpty());
@@ -10699,7 +10811,7 @@ void TestSessionsWindow::archiveFiltersIdentityRestoreAndForget()
     // fixed delay can let a slow subprocess replace the injected details. Selecting
     // the archive started the only inspection of it: with polls kept out, none
     // follows that reply to replace the injected prompt with the fixture's details.
-    QTRY_VERIFY(std::any_of(inspected.cbegin(), inspected.cend(), [&](const QList<QVariant> &reply) {
+    WAIT_VERIFY(std::any_of(inspected.cbegin(), inspected.cend(), [&](const QList<QVariant> &reply) {
         return reply[0].toString().isEmpty() && reply[1].toString() == recent.name
             && reply[3].toString() == recent.archiveId;
     }));
@@ -10709,7 +10821,7 @@ void TestSessionsWindow::archiveFiltersIdentityRestoreAndForget()
     details["prompt"] = "wrong older archive";
     client->inspectionReady({}, recent.name, details, "older"); QVERIFY(!activity->toPlainText().contains("wrong older archive"));
     details["prompt"] = "selected archived request";
-    client->inspectionReady({}, recent.name, details, "recent"); QTRY_VERIFY(activity->toPlainText().contains("selected archived request"));
+    client->inspectionReady({}, recent.name, details, "recent"); WAIT_VERIFY(activity->toPlainText().contains("selected archived request"));
     client->inspectionFailed({}, recent.name, "wrong failure", "older");
     QVERIFY(!window.findChild<QLabel *>("hint")->text().contains("wrong failure"));
     // A paused binding occupies the name just as a live terminal does.
@@ -10717,7 +10829,7 @@ void TestSessionsWindow::archiveFiltersIdentityRestoreAndForget()
     QVERIFY(!restore->isEnabled());
     // Free the current name; Archive restoration still requires its dedicated button.
     local.sessions.removeFirst(); state.setLocal(local, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
-    QVERIFY(restore->isEnabled()); restore->click(); QTRY_COMPARE(writes.size(), 1);
+    QVERIFY(restore->isEnabled()); restore->click(); WAIT_COMPARE(writes.size(), 1);
     QCOMPARE(writes[0][2].toString(), QString("resume\ncodex/hgs/dashboard\n--archive\nrecent\n-d"));
     QVERIFY(filter("all")->isChecked()); QCOMPARE(terminal.size(), 0);
     auto restored = recent; restored.state = "running"; restored.archiveId.clear(); restored.archivedAt = 0;
@@ -10729,7 +10841,7 @@ void TestSessionsWindow::archiveFiltersIdentityRestoreAndForget()
     QTimer::singleShot(0, [&]() {
         if (auto *dialog = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) dialog->button(QMessageBox::Yes)->click();
     });
-    window.findChild<QAction *>("forgetSessionAction")->trigger(); QTRY_COMPARE(writes.size(), 2);
+    window.findChild<QAction *>("forgetSessionAction")->trigger(); WAIT_COMPARE(writes.size(), 2);
     QCOMPARE(writes[1][2].toString(), QString("kill\ncodex/hgs/dashboard\n--archive\nolder"));
     // Archive-only machines never enable Resume all.
     BoxState archiveOnly; archiveOnly.host = "arch"; archiveOnly.ok = true; archiveOnly.sessions = {old};

@@ -46,6 +46,7 @@
 #include "ForkUpdater.h"
 #include "TeamCatalogEditor.h"
 #include "TeamAttentionNotices.h"
+#include "TeamAttentionWatch.h"
 #include <QClipboard>
 #include "TeamController.h"
 #include "TeamDesignerPage.h"
@@ -623,6 +624,8 @@ private slots:
     void init();
     void cleanup();
     void settingsPageShowsTheSubagentSetting();
+    void hgsSettingsAreReadInTheBackground();
+    void teamAttentionWatchNotifiesWithoutTheWindow();
     void aSessionRecordShowsTheUnconfirmableSubagentNote();
     void catalogModelAppliesKeptProposals();
     void taskCardOffersActionsByStatus();
@@ -3387,6 +3390,7 @@ elif a[:2]==['session-upload-block','set']:
     SettingsPage page(FakeCli::program(script));
     auto *box = page.findChild<QCheckBox *>("workspaceConfirmSubagents");
     QVERIFY(box);
+    QTRY_VERIFY(box->isEnabled());
     QCOMPARE(box->isChecked(), false);
     box->click();
     QFile calls(script + ".calls");
@@ -3398,7 +3402,8 @@ elif a[:2]==['session-upload-block','set']:
     QVERIFY2(!QUuid(id).isNull() && QUuid(id).toString(QUuid::WithoutBraces) == id, qPrintable(id));
     // The same page carries the DeepSeek upload block from #481, on by default.
     auto *upload = page.findChild<QCheckBox *>("workspaceSessionUploadBlock");
-    QVERIFY(upload && upload->isChecked());
+    QVERIFY(upload); QTRY_VERIFY(upload->isEnabled());
+    QVERIFY(upload->isChecked());
     // U22: toggling it reads get (the checked state above) and sends set with
     // block false and a canonical request id.
     calls.close();
@@ -3420,7 +3425,7 @@ elif a[:2]==['session-upload-block','set']:
         SettingsPage page(FakeCli::program(script));
         page.resize(1200, 900);
         if (auto *nav = page.findChild<QListWidget *>("settingsSections")) nav->setCurrentRow(1);
-        QCoreApplication::processEvents();
+        QTRY_VERIFY(page.findChild<QCheckBox *>("workspaceConfirmSubagents")->isEnabled() && page.findChild<QCheckBox *>("workspaceSessionUploadBlock")->isEnabled());
         const QString suffix = enabled ? "on" : "off";
         shot(&page, "u19-settings-subagents-" + suffix);
         darkPalette();
@@ -3429,6 +3434,128 @@ elif a[:2]==['session-upload-block','set']:
     }
     qputenv("FAKE_CONFIRM", "false");
     qunsetenv("FAKE_CONFIRM");
+}
+
+// N34 of #499: the settings hgs keeps are read and written in the background:
+// a slow hgs never stalls opening Zerus, a failed change says so and the box
+// returns to what hgs stores, and after each change the box shows what hgs reads.
+void TestTeamsUi::hgsSettingsAreReadInTheBackground()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString script = dir.filePath("fake-hgs");
+    QVERIFY(FakeCli::install(script, R"PY(#!/usr/bin/env python3
+import json,os,sys,time
+a=sys.argv[1:]
+store=__file__+'.'+(a[0] if a else '')
+key={'subagents-confirm':'confirm','session-upload-block':'block'}.get(a[0] if a else '')
+if key and a[1:2]==['get']:
+    time.sleep(float(open(__file__+'.sleep').read()) if os.path.exists(__file__+'.sleep') else 0)
+    print(json.dumps({key: open(store).read()=='true' if os.path.exists(store) else True}))
+elif key and a[1:2]==['set']:
+    body=json.load(sys.stdin)
+    if os.path.exists(__file__+'.fail'):
+        print('the settings store is read-only',file=sys.stderr); sys.exit(1)
+    # hgs may store something else than asked (here: never false for upload).
+    value=body.get(key) or key=='block'
+    open(store,'w').write('true' if value else 'false')
+    print(json.dumps({key: value}))
+)PY"));
+    QVERIFY(FakeCli::replace(script + ".subagents-confirm", "false"));
+    QVERIFY(FakeCli::replace(script + ".sleep", "2"));
+    QElapsedTimer opening; opening.start();
+    SettingsPage page(FakeCli::program(script));
+    // Two gets of 2 s each used to run here, one after the other.
+    QVERIFY2(opening.elapsed() < 1500, qPrintable(QString::number(opening.elapsed())));
+    auto *box = page.findChild<QCheckBox *>("workspaceConfirmSubagents"); QVERIFY(box);
+    auto *note = page.findChild<QLabel *>("workspaceConfirmSubagentsError"); QVERIFY(note);
+    auto *upload = page.findChild<QCheckBox *>("workspaceSessionUploadBlock"); QVERIFY(upload);
+    QVERIFY(!box->isEnabled() && !upload->isEnabled());   // reading
+    QTRY_VERIFY_WITH_TIMEOUT(box->isEnabled() && upload->isEnabled(), 10000);
+    QVERIFY(!box->isChecked() && upload->isChecked()); QVERIFY(note->isHidden());
+    QVERIFY(FakeCli::replace(script + ".sleep", "0"));
+    // A failed change: the box returns to the stored value and says why.
+    QVERIFY(FakeCli::replace(script + ".fail", "1"));
+    box->click(); QVERIFY(box->isChecked() && !box->isEnabled());
+    QTRY_VERIFY_WITH_TIMEOUT(box->isEnabled(), 10000);
+    QVERIFY(!box->isChecked());
+    QVERIFY(!note->isHidden());
+    QCOMPARE(note->text(), QString("Could not change this setting: the settings store is read-only"));
+    // A change that works clears the note.
+    QVERIFY(QFile::remove(script + ".fail"));
+    box->click(); QTRY_VERIFY_WITH_TIMEOUT(box->isEnabled(), 10000);
+    QVERIFY(box->isChecked()); QVERIFY(note->isHidden());
+    // The box shows what hgs then reads, not what was clicked.
+    upload->click(); QTRY_VERIFY_WITH_TIMEOUT(upload->isEnabled(), 10000);
+    QVERIFY(upload->isChecked());
+    // An hgs without the command: the default stays and the note says so.
+    QVERIFY(FakeCli::replace(script + ".subagents-confirm", "true"));
+    QTemporaryDir older; QVERIFY(older.isValid());
+    const QString old = older.filePath("old-hgs");
+    QVERIFY(FakeCli::install(old, "#!/usr/bin/env python3\nimport sys\nprint('unknown command',file=sys.stderr)\nsys.exit(2)\n"));
+    SettingsPage oldPage(FakeCli::program(old));
+    auto *oldBox = oldPage.findChild<QCheckBox *>("workspaceConfirmSubagents");
+    QTRY_VERIFY_WITH_TIMEOUT(oldBox->isEnabled(), 10000);
+    QVERIFY(oldBox->isChecked());
+    QCOMPARE(oldPage.findChild<QLabel *>("workspaceConfirmSubagentsError")->text(), QString("Could not read this setting from hgs: unknown command"));
+    // A page closed while hgs still answers: the late answer reaches nothing.
+    QVERIFY(FakeCli::replace(script + ".sleep", "1"));
+    { SettingsPage closing(FakeCli::program(script)); }
+    QTest::qWait(2500);
+}
+
+// N32 of #499: Zerus started in the tray has no Sessions window, yet a team's
+// stuck permission still reaches the notifications, once; the known items are
+// shared with the window through teams/attentionNotified.
+void TestTeamsUi::teamAttentionWatchNotifiesWithoutTheWindow()
+{
+    const auto restore = qScopeGuard([] { QSettings().remove("teams/attentionNotified"); });
+    QSettings().remove("teams/attentionNotified");
+    auto team = phasedTeam(); team["status"] = "running";
+    team["attention"] = QJsonArray{QJsonObject{{"kind", "permission"}, {"member", "Backend"}, {"since", 1000}, {"minutes", 12},
+        {"summary", "Backend waits for your answer: Bash cargo test"}}};
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString script = dir.filePath("fake-hgs");
+    QVERIFY(FakeCli::install(script, R"PY(#!/usr/bin/env python3
+import sys
+a=sys.argv[1:]
+if a[:2]==['team','list']:
+    open(__file__+'.lists','a').write('list\n')
+    print(open(__file__+'.json').read())
+else:print('{}')
+)PY"));
+    const auto list = [&](const QJsonObject &value) {
+        return FakeCli::replace(script + ".json", QJsonDocument(QJsonObject{{"items", QJsonArray{value}}}).toJson(QJsonDocument::Compact));
+    };
+    const auto lists = [&] { QFile file(script + ".lists"); return file.open(QIODevice::ReadOnly) ? int(file.readAll().count('\n')) : 0; };
+    QVERIFY(list(team));
+    HgsClient client(FakeCli::program(script));
+    TeamAttentionWatch watch(&client, nullptr, 200);
+    QSignalSpy raised(&watch, &TeamAttentionWatch::raised), cleared(&watch, &TeamAttentionWatch::cleared);
+    QTest::qWait(400); QCOMPARE(lists(), 0);   // inactive: no reads
+    watch.setActive(true);
+    QTRY_COMPARE_WITH_TIMEOUT(raised.size(), 1, 10000);
+    QCOMPARE(raised[0][1].toString(), QString("Team %1 needs you").arg(team["name"].toString()));
+    QCOMPARE(raised[0][2].toString(), QString("Backend waits for your answer: Bash cargo test · 12 min"));
+    const auto token = raised[0][0].toString();
+    QCOMPARE(QSettings().value("teams/attentionNotified").toStringList(), QStringList{token});
+    // Later polls: the same item, no second notice.
+    const int before = lists(); QTRY_VERIFY_WITH_TIMEOUT(lists() >= before + 2, 10000);
+    QCOMPARE(raised.size(), 1);
+    // The window took over and answered it: the watch stops; restarted, it
+    // starts from what the window stored and raises nothing old.
+    watch.setActive(false); const int stopped = lists(); QTest::qWait(600); QVERIFY(lists() <= stopped + 1);
+    QSettings().setValue("teams/attentionNotified", QStringList{token});
+    TeamAttentionWatch again(&client, nullptr, 200);
+    QSignalSpy raisedAgain(&again, &TeamAttentionWatch::raised), clearedAgain(&again, &TeamAttentionWatch::cleared);
+    again.setActive(true);
+    QTRY_VERIFY_WITH_TIMEOUT(lists() >= stopped + 3, 10000);
+    QCOMPARE(raisedAgain.size(), 0);
+    // Answered: the notice is withdrawn.
+    team.remove("attention"); QVERIFY(list(team));
+    QTRY_COMPARE_WITH_TIMEOUT(clearedAgain.size(), 1, 10000);
+    QCOMPARE(clearedAgain[0][0].toString(), token);
+    QVERIFY(QSettings().value("teams/attentionNotified").toStringList().isEmpty());
 }
 
 void TestTeamsUi::aSessionRecordShowsTheUnconfirmableSubagentNote()

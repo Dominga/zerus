@@ -191,6 +191,15 @@ public:
         return {fontMetrics().horizontalAdvance(text()) + insets.left() + insets.right() + 2 * margin(),
                 fontMetrics().height() + insets.top() + insets.bottom() + 2 * margin()};
     }
+protected:
+    // #542: on a line too short for the whole ID, its middle elides instead
+    // of the end being clipped; selection works on the whole ID again once it fits.
+    void paintEvent(QPaintEvent *event) override {
+        const auto area = contentsRect().adjusted(margin(), margin(), -margin(), -margin());
+        if (fontMetrics().horizontalAdvance(text()) <= area.width()) { QLabel::paintEvent(event); return; }
+        QPainter painter(this); painter.setPen(palette().color(foregroundRole())); painter.setFont(font());
+        painter.drawText(area, Qt::AlignLeft | Qt::AlignVCenter, fontMetrics().elidedText(text(), Qt::ElideMiddle, area.width()));
+    }
 };
 
 QColor tone(const QString &status, bool dark)
@@ -1486,9 +1495,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // machine, folder, branch, model, last event and Keep cache warm.
     auto *environment=m_inspector->body(InspectorCards::Environment);
     const auto envIcon=[](const char *glyph){auto *icon=new QLabel;icon->setObjectName("inspectorEnvIcon");icon->setProperty("glyph",QString::fromLatin1(glyph));icon->setFixedSize(14,14);return icon;};
-    auto *identity = new QWidget; identity->setObjectName("detailsIdentity");
-    auto *identityRow = new QHBoxLayout(identity); identityRow->setContentsMargins(0,0,0,0); identityRow->setSpacing(9);
-    m_detailsIdTitle = label(tr("Session ID"), "detailsIdentityTitle"); m_detailsIdTitle->hide();
+    m_detailsIdTitle = label(tr("Session ID"), "detailsIdentityTitle");
     m_detailsIdValue = new SessionIdentityLabel(tr("Not confirmed"));
     m_detailsIdValue->setObjectName("detailsIdentityValue"); m_detailsIdValue->setTextFormat(Qt::PlainText);
     m_detailsIdValue->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); m_detailsIdValue->setMinimumWidth(0);
@@ -1498,7 +1505,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_copySessionId->setProperty("sessionHeaderAction", true);
     configureWorkspaceIconButton(m_copySessionId, "copy", tr("Copy session ID"), m_dark);
     connect(m_copySessionId, &QPushButton::clicked, this, &SessionsWindow::copySessionIdentity);
-    identityRow->addWidget(envIcon("key")); identityRow->addWidget(m_detailsIdTitle); identityRow->addWidget(m_detailsIdValue,1); identityRow->addWidget(m_copySessionId);
+    auto *identity = new InspectorIdentityRow(envIcon("key"), m_detailsIdTitle, m_detailsIdValue, m_copySessionId);
+    identity->setObjectName("detailsIdentity");
     environment->addWidget(identity);
     for(const auto &[glyph,name,mode]:{std::tuple{"monitor","machine",Qt::ElideRight},std::tuple{"folder","folder",Qt::ElideRight},
             std::tuple{"git-branch","branch",Qt::ElideMiddle},std::tuple{"asterisk","model",Qt::ElideRight},std::tuple{"clock","last event",Qt::ElideRight}}) {

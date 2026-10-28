@@ -354,6 +354,13 @@ pub mod macos {
     }
 
     /// Whether the responsible-process lookup is available (for diagnostics).
+    #[cfg_attr(
+        target_os = "macos",
+        allow(
+            dead_code,
+            reason = "used by client/perf-probe-mac, which includes this file by path"
+        )
+    )]
     pub fn responsible_lookup_available() -> bool {
         responsible_fn().is_some()
     }

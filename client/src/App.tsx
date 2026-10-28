@@ -2,6 +2,7 @@ import { For, Match, Show, Switch, createEffect, createMemo, onCleanup, onMount 
 import { Rail } from "./ui/components/Rail";
 import { MenuLayer, Toasts } from "./ui/components/Overlays";
 import { ActionDialogs, ActionNotices } from "./ui/sessions/ActionDialogs";
+import { OrganizationDialogs } from "./ui/sessions/OrganizationDialogs";
 import { SessionList } from "./ui/sessions/SessionList";
 import { SessionDetail } from "./ui/sessions/SessionDetail";
 import { PerfHost } from "./ui/PerfHost";
@@ -83,6 +84,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <MenuLayer />
       <Toasts />
       <ActionDialogs />
+      <OrganizationDialogs />
       <ActionNotices />
       <PerfHost />
     </div>

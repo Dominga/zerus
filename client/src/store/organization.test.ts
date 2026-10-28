@@ -158,6 +158,25 @@ describe("the organization store", () => {
     expect(unsay).toHaveBeenCalledTimes(1);
   });
 
+  it("clears a kept edit's error once the Rust side's resend succeeds, only when the error ends", async () => {
+    const { org, say, unsay } = setup();
+    mocked.sortProject.mockResolvedValueOnce({ outcome: "kept", detail: "Project sync unavailable: hgs did not answer in time" });
+    await org.sortProject("alpha");
+    expect(say).toHaveBeenCalledWith("error", "Project sync unavailable: hgs did not answer in time", true, SYNC_NOTICE);
+    // The failed apply's status line, then views that keep it: nothing is cleared.
+    const failing = { status: "Project sync unavailable: hgs did not answer in time", status_error: true };
+    org.applyGrouping(batchOf({ grouping: ready(failing) }));
+    org.applyGrouping(batchOf({ grouping: ready({ ...failing, busy: true }) }));
+    org.applyGrouping(batchOf({ groups: [{ computer: "", key: "run:1", group: "alpha", rank: 1 }] }));
+    expect(unsay).not.toHaveBeenCalled();
+    // The resend went through: the status is no error any more, and the notice goes.
+    org.applyGrouping(batchOf({ grouping: ready({ status: "Project sync connected to 1 computer(s)" }) }));
+    expect(unsay).toHaveBeenCalledExactlyOnceWith(SYNC_NOTICE);
+    // A view that was never in error clears nothing.
+    org.applyGrouping(batchOf({ grouping: ready({ busy: true }) }));
+    expect(unsay).toHaveBeenCalledTimes(1);
+  });
+
   it("shows the hub's notice once as a sticky warning, and again only after it cleared", () => createRoot((dispose) => {
     const notice = "The saved project changes were not applied: the draft file is larger than 4096 bytes";
     const { org, say } = setup(ready({ notice }));

@@ -1,4 +1,4 @@
-import { createMemo, createSignal } from "solid-js";
+import { createMemo, createSignal, untrack } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import * as bridge from "../bridge";
 import { rowId } from "./catalog";
@@ -49,6 +49,8 @@ export function createOrganization(say: Say, unsay: (key: string) => void = () =
    */
   function applyGrouping(b: Batch) {
     if (b.grouping) {
+      // The Rust side resends a kept edit; once its status is no error any more, the sync notice it raised is stale.
+      if (untrack(grouping).status_error && !b.grouping.status_error) unsay(SYNC_NOTICE);
       setGrouping(b.grouping);
       // The hub's one-time warning, shown once until it clears (a dropped draft's reason).
       const notice = b.grouping.notice || undefined;

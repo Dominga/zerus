@@ -8,21 +8,20 @@ import {
 } from "./SessionCard";
 import { catalog, computerOffline } from "../../store/catalog";
 import { detailsFor, followedFor } from "../../store/actions";
-import { headerOf, setProjectCollapsed } from "../../store/organization";
+import { grouping, headerOf, moveProject, setProjectCollapsed, setProjectToShow, sortProject } from "../../store/organization";
 import { actionEntries, copyEntries } from "./ActionDialogs";
+import { moveEntry, openDeleteProjectDialog, openRenameProjectDialog } from "./OrganizationDialogs";
+import { headerEntries, projectColor } from "./organization-ui";
 import {
-  selectedKey, setSelectedKey, collapsed, setCollapsed, setExpandedChildren, expandedChildren,
+  selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
   setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
-  setMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter,
-  multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, menu, subagentOpen, projectOrder, setProjectOrder,
+  setMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, setPage,
+  multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, menu, subagentOpen,
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
 import type { Session } from "./types";
 import { motionReduced } from "../motion";
 import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem } from "./organize";
-
-/** The project band's colour: the organization's colour, else its palette slot. */
-const projectColor = (h: { color: string | null; palette: number }) => h.color ?? `var(--z-entity-palette-${h.palette})`;
 
 /** Actions that go through guarded `hgs` calls arrive in phase 2; their menu entries show disabled. */
 const LATER = true;
@@ -116,7 +115,7 @@ function sessionMenu(s: Session): MenuEntry[] {
     act.rename,
     { label: "Fork session…", icon: "git-fork", disabled: LATER },
     ...(act.archive ? [act.archive] : []),
-    { label: "Move to project…", icon: "folder", disabled: LATER },
+    moveEntry(s),
     { separator: true },
     cp.name,
     cp.reference,
@@ -126,33 +125,17 @@ function sessionMenu(s: Session): MenuEntry[] {
   ];
 }
 
-/** Moves a project one place up or down in the local list order. */
-function moveProject(project: string, step: -1 | 1) {
-  const order = projectOrder().slice();
-  const i = order.indexOf(project);
-  const j = i + step;
-  if (i < 0 || j < 0 || j >= order.length) return;
-  [order[i], order[j]] = [order[j], order[i]];
-  setProjectOrder(order);
-}
-
+/** The project header's menu (SessionsWindow.cpp:2568-2616); its rules are organization-ui.ts's. */
 function headerMenu(project: string): MenuEntry[] {
-  const at = projectOrder().indexOf(project);
-  return [
-    { label: "New session…", icon: "plus", disabled: LATER },
-    { separator: true },
-    { label: "Filter this project", icon: "funnel", action: () => setProjectFilter([project]) },
-    { separator: true },
-    { label: collapsed[project] ? "Expand project" : "Collapse project", icon: "list-tree", action: () => setCollapsed(project, !collapsed[project]) },
-    { label: "Rename project…", icon: "pencil", disabled: LATER },
-    { label: "Project settings…", icon: "settings", disabled: LATER },
-    { separator: true },
-    { label: "Move project up", icon: "arrow-up", disabled: at <= 0, action: () => moveProject(project, -1) },
-    { label: "Move project down", icon: "arrow-down", disabled: at < 0 || at >= projectOrder().length - 1, action: () => moveProject(project, 1) },
-    { label: "Sort sessions by name", icon: "list-filter", disabled: LATER },
-    { separator: true },
-    { label: "Delete project…", icon: "trash", danger: true, disabled: LATER },
-  ];
+  return headerEntries(grouping(), project, {
+    filter: () => setProjectFilter([project]),
+    collapse: (collapsed) => setProjectCollapsed(project, collapsed),
+    rename: () => openRenameProjectDialog(project),
+    settings: () => { setProjectToShow(project); setPage("projects"); },
+    move: (before) => { void moveProject(project, before); },
+    sort: () => { void sortProject(project); },
+    remove: () => openDeleteProjectDialog(project),
+  });
 }
 
 function batchMenu(): MenuEntry[] {
@@ -220,13 +203,18 @@ function FilterChips() {
     ...machineFilter().map((m) => ({ id: m, label: m, kind: "m" as const })),
     ...projectFilter().map((p) => ({ id: p, label: headerOf(p)?.name ?? p, kind: "p" as const })),
   ];
+  // A project chip matches its header band; a machine chip, or a project no longer listed, takes its name's slot.
+  const chipColor = (c: { id: string; label: string; kind: "m" | "p" }) => {
+    const h = c.kind === "p" ? headerOf(c.id) : undefined;
+    return h ? projectColor(h) : `var(--z-entity-palette-${paletteIndex(c.label)})`;
+  };
   const remove = (c: { id: string; kind: "m" | "p" }) =>
     c.kind === "m" ? setMachineFilter(machineFilter().filter((x) => x !== c.id)) : setProjectFilter(projectFilter().filter((x) => x !== c.id));
   return (
     <Show when={chips().length}>
       <div class="filter-chips">
         <For each={chips()}>{(c) => (
-          <button class="fchip-sel entity" style={{ "--entity": `var(--z-entity-palette-${paletteIndex(c.label)})` }} title="Remove filter" onClick={() => remove(c)}>
+          <button class="fchip-sel entity" style={{ "--entity": chipColor(c) }} title="Remove filter" onClick={() => remove(c)}>
             <span class="ell">{c.label}</span><Icon name="x" size={11} />
           </button>
         )}</For>

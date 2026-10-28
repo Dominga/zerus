@@ -21,9 +21,9 @@ render(() => <App mode={mode} />, document.getElementById("root")!);
 
 void startBridge(receive).then(setMode, (error) => console.error("Zerus Next: the data source did not start", error));
 
-// The first frame after load reached the page: a DMA-BUF start worked, so its crash marker goes.
+// The second frame after load reached the page: a DMA-BUF start worked, so its crash marker goes.
 if (inTauri()) {
-  const frame = () => requestAnimationFrame(() => { invoke("renderer_frame").catch(() => {}); });
+  const frame = () => requestAnimationFrame(() => requestAnimationFrame(() => { invoke("renderer_frame").catch(() => {}); }));
   if (document.readyState === "complete") frame();
   else window.addEventListener("load", frame, { once: true });
 }

@@ -294,10 +294,12 @@ counts as `auto`.
 The DMA-BUF paths write a crash marker, `renderer-marker.json` (`renderer`, `driver`,
 `written_at`), in the client's private data directory (next to the read marks, for
 example `~/.local/share/dev.zerus.next/`), before GTK starts. The webview clears it
-through `renderer_frame` after its first animation frame following load. A marker
+through `renderer_frame` after the second animation frame following load. A marker
 found at start means the last DMA-BUF start never reached a frame: that start uses
 shared memory and the marker stays. A marker of another driver version is dropped and
-DMA-BUF is retried once. The decision (`renderer`, `reason`, `nvidia`, `wayland`,
+DMA-BUF is retried once. An early exit before the first frame keeps shared memory until
+the driver changes; deleting `renderer-marker.json` in the app data folder retries DMA-BUF.
+The decision (`renderer`, `reason`, `nvidia`, `wayland`,
 `marker_state`) is logged at start and in the `renderer` field of `perf_config`.
 A blank window is not detected. Known gap: on the GL path a minimised window keeps painting.
 

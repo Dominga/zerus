@@ -9,20 +9,27 @@
 //! `ZERUS_CLIENT_RENDERER=auto|dmabuf|shm` is the only switch (default `auto`).
 //! The decision itself is the pure `decide`; detection reads a root directory so
 //! tests can use a fake tree.
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::sync::{Mutex, OnceLock};
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const DMABUF_VAR: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const NV_SYNC_VAR: &str = "__NV_DISABLE_EXPLICIT_SYNC";
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const MODE_VAR: &str = "ZERUS_CLIENT_RENDERER";
 /// The client's identifier (tauri.conf.json); its data directory is named by it.
+#[cfg(target_os = "linux")]
 const IDENTIFIER: &str = "dev.zerus.next";
+#[cfg(target_os = "linux")]
 pub const MARKER_FILE: &str = "renderer-marker.json";
 
 /// The environment the decision reads.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Env {
     /// `ZERUS_CLIENT_RENDERER`.
@@ -34,6 +41,7 @@ pub struct Env {
 }
 
 /// What the machine looks like.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Facts {
     pub nvidia: bool,
@@ -43,6 +51,7 @@ pub struct Facts {
 }
 
 /// The crash marker: a DMA-BUF start that has not reached a frame yet.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Marker {
     pub renderer: String,
@@ -50,6 +59,7 @@ pub struct Marker {
     pub written_at: u64,
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MarkerAction {
@@ -63,6 +73,7 @@ pub enum MarkerAction {
     Keep,
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Decision {
     /// `default` (WebKit's own choice), `dmabuf` or `shm`.
@@ -82,6 +93,7 @@ pub struct Decision {
 }
 
 /// The pure decision. `marker` is what the marker file holds now.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn decide(env: &Env, facts: &Facts, marker: Option<&Marker>) -> Decision {
     let mut log = Vec::new();
     let mode = match env.mode.as_deref().map(str::trim) {
@@ -182,6 +194,7 @@ pub fn decide(env: &Env, facts: &Facts, marker: Option<&Marker>) -> Decision {
 
 /// Reads the machine facts below `root` (`/` in the app). `gdk_backend`,
 /// `wayland_display` and `runtime_dir` are the environment values GDK looks at.
+#[cfg(target_os = "linux")]
 pub fn detect(
     root: &Path,
     gdk_backend: Option<&str>,
@@ -216,6 +229,7 @@ pub fn detect(
 }
 
 /// The version number of `/proc/driver/nvidia/version`'s first line, or the line itself.
+#[cfg(target_os = "linux")]
 fn driver_version(text: &str) -> Option<String> {
     let line = text.lines().next()?.trim();
     let token = line.split_whitespace().find(|t| {
@@ -228,45 +242,58 @@ fn driver_version(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Wayland as GDK decides: the backend is not forced elsewhere and a compositor socket exists.
+/// Wayland as GDK and libwayland decide: the backend list does not start with
+/// another backend (`*` and `wayland*` are Wayland-first), `XDG_RUNTIME_DIR` is
+/// set, and the compositor socket exists: `WAYLAND_DISPLAY` (absolute, or below
+/// the runtime directory) or, when that is unset, `wayland-0`. A named socket that
+/// is missing is not Wayland; there is no fallback to `wayland-0`.
+#[cfg(target_os = "linux")]
 fn wayland_session(
     gdk_backend: Option<&str>,
     wayland_display: Option<&str>,
     runtime_dir: Option<&Path>,
 ) -> bool {
     use std::os::unix::fs::FileTypeExt;
-    if gdk_backend.is_some_and(|b| !b.trim_start().starts_with("wayland") && !b.trim().is_empty()) {
+    let first = gdk_backend.and_then(|b| b.split(',').next()).map(str::trim);
+    if first.is_some_and(|b| !b.is_empty() && b != "*" && !b.starts_with("wayland")) {
         return false;
     }
-    let is_socket = |p: &Path| std::fs::metadata(p).is_ok_and(|m| m.file_type().is_socket());
-    if let Some(name) = wayland_display.filter(|n| !n.is_empty()) {
-        let path = Path::new(name);
-        let found = if path.is_absolute() {
-            is_socket(path)
-        } else {
-            runtime_dir.is_some_and(|d| is_socket(&d.join(path)))
-        };
-        if found {
-            return true;
-        }
-    }
-    runtime_dir.is_some_and(|d| is_socket(&d.join("wayland-0")))
+    let Some(runtime) = runtime_dir.filter(|d| d.is_absolute()) else {
+        return false;
+    };
+    let name = Path::new(
+        wayland_display
+            .filter(|n| !n.is_empty())
+            .unwrap_or("wayland-0"),
+    );
+    let socket = if name.is_absolute() {
+        name.to_path_buf()
+    } else {
+        runtime.join(name)
+    };
+    std::fs::metadata(socket).is_ok_and(|m| m.file_type().is_socket())
 }
 
 /// The client's private data directory, the one Tauri's `app_data_dir` gives on Linux.
+#[cfg(target_os = "linux")]
 fn data_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
+    let absolute = |name: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+    };
+    let base =
+        absolute("XDG_DATA_HOME").or_else(|| absolute("HOME").map(|h| h.join(".local/share")))?;
     Some(base.join(IDENTIFIER))
 }
 
+#[cfg(target_os = "linux")]
 fn read_marker(path: &Path) -> Option<Marker> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
 /// Temporary file (0600) plus rename, so a crash never leaves a half marker.
+#[cfg(target_os = "linux")]
 fn write_marker(path: &Path, marker: &Marker) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -291,6 +318,7 @@ fn write_marker(path: &Path, marker: &Marker) -> std::io::Result<()> {
     result
 }
 
+#[cfg(target_os = "linux")]
 fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -298,12 +326,14 @@ fn now() -> u64 {
 }
 
 /// The outcome for diagnostics and the marker path the first frame clears.
+#[cfg(target_os = "linux")]
 struct Chosen {
     decision: Decision,
     /// Set while this start's marker exists and the first frame should delete it.
     marker_path: Mutex<Option<PathBuf>>,
 }
 
+#[cfg(target_os = "linux")]
 static CHOSEN: OnceLock<Chosen> = OnceLock::new();
 
 /// Decides and applies the renderer. Call first in `main`, before any thread.
@@ -353,7 +383,6 @@ pub fn choose() {
     }
     // SAFETY: `main` calls this before Tauri, GTK or any thread exists, so no
     // other thread can read or write the environment concurrently.
-    #[allow(unused_unsafe)]
     unsafe {
         for (name, value) in &decision.set {
             std::env::set_var(name, value);
@@ -380,6 +409,7 @@ pub fn choose() {
 pub fn choose() {}
 
 /// The decision as diagnostics: renderer, reason, nvidia, wayland, marker_state.
+#[cfg(target_os = "linux")]
 pub fn diagnostics() -> serde_json::Value {
     match CHOSEN.get() {
         Some(chosen) => serde_json::to_value(&chosen.decision).unwrap_or(serde_json::Value::Null),
@@ -387,19 +417,31 @@ pub fn diagnostics() -> serde_json::Value {
     }
 }
 
-/// Deletes this start's crash marker; true when one was removed.
-fn clear_marker() -> bool {
-    let Some(chosen) = CHOSEN.get() else {
-        return false;
-    };
-    let path = chosen.marker_path.lock().ok().and_then(|mut p| p.take());
+#[cfg(not(target_os = "linux"))]
+pub fn diagnostics() -> serde_json::Value {
+    serde_json::Value::Null
+}
+
+/// Deletes the marker held in `slot` once; later calls find it empty and do nothing.
+#[cfg(target_os = "linux")]
+fn clear_marker(slot: &Mutex<Option<PathBuf>>) -> bool {
+    let path = slot.lock().ok().and_then(|mut p| p.take());
     path.is_some_and(|p| std::fs::remove_file(p).is_ok())
 }
 
 /// The first frame after load reached the page: the DMA-BUF start worked.
 #[tauri::command]
+#[cfg(target_os = "linux")]
 pub fn renderer_frame() -> bool {
-    clear_marker()
+    CHOSEN
+        .get()
+        .is_some_and(|chosen| clear_marker(&chosen.marker_path))
+}
+
+#[tauri::command]
+#[cfg(not(target_os = "linux"))]
+pub fn renderer_frame() -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -532,24 +574,31 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn x11_changes_nothing_in_auto() {
-        let f = detect(
+        let temp = Temp::new("x11");
+        let _compositor = std::os::unix::net::UnixListener::bind(temp.0.join("wayland-0")).unwrap();
+        // The same socket is Wayland without GDK_BACKEND=x11 and not with it.
+        let wayland = detect(Path::new("/nonexistent-root"), None, None, Some(&temp.0)).wayland;
+        let x11 = detect(
             Path::new("/nonexistent-root"),
             Some("x11"),
-            Some("wayland-0"),
-            Some(Path::new("/")),
-        );
-        assert!(!f.wayland);
-        let d = decide(
-            &env(None, None, None),
-            &Facts {
-                nvidia: true,
-                driver: Some("1.0".into()),
-                wayland: f.wayland,
-            },
             None,
-        );
-        assert!(d.set.is_empty());
+            Some(&temp.0),
+        )
+        .wayland;
+        assert!((wayland, x11) == (true, false));
+        let nvidia = |wayland| Facts {
+            nvidia: true,
+            driver: Some("1.0".into()),
+            wayland,
+        };
+        assert!(decide(&env(None, None, None), &nvidia(x11), None)
+            .set
+            .is_empty());
+        assert!(!decide(&env(None, None, None), &nvidia(wayland), None)
+            .set
+            .is_empty());
     }
 
     #[test]
@@ -572,7 +621,9 @@ mod tests {
         assert!(d.log[0].contains("unknown"));
     }
 
+    #[cfg(target_os = "linux")]
     struct Temp(PathBuf);
+    #[cfg(target_os = "linux")]
     impl Temp {
         fn new(test: &str) -> Self {
             let path =
@@ -582,6 +633,7 @@ mod tests {
             Temp(path)
         }
     }
+    #[cfg(target_os = "linux")]
     impl Drop for Temp {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
@@ -589,6 +641,7 @@ mod tests {
     }
 
     /// A fake /proc and /sys of an NVIDIA machine, plus a runtime dir.
+    #[cfg(target_os = "linux")]
     fn fake_machine(root: &Path, modeset: &str) {
         std::fs::create_dir_all(root.join("proc/driver/nvidia")).unwrap();
         std::fs::write(root.join("proc/driver/nvidia/version"), "NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  615.78.08  Release Build\nGCC version: gcc\n").unwrap();
@@ -613,6 +666,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn detection_reads_a_fake_tree() {
         let temp = Temp::new("detect");
         let root = temp.0.join("root");
@@ -630,27 +684,32 @@ mod tests {
                 wayland: true
             }
         );
-        // A relative and an absolute WAYLAND_DISPLAY, and a GDK_BACKEND that starts with wayland.
-        assert!(
-            detect(
-                &root,
-                Some("wayland,x11"),
-                Some("wayland-0"),
-                Some(&runtime)
-            )
-            .wayland
-        );
+        // GDK_BACKEND lists that start with wayland or *, a relative and an absolute WAYLAND_DISPLAY.
+        for backend in ["wayland,x11", "*", "*,x11"] {
+            assert!(
+                detect(&root, Some(backend), None, Some(&runtime)).wayland,
+                "{backend}"
+            );
+        }
+        let _second = std::os::unix::net::UnixListener::bind(runtime.join("wayland-1")).unwrap();
+        assert!(detect(&root, None, Some("wayland-1"), Some(&runtime)).wayland);
         let _other = std::os::unix::net::UnixListener::bind(temp.0.join("other.sock")).unwrap();
         let absolute = temp.0.join("other.sock");
-        assert!(detect(&root, None, absolute.to_str(), None).wayland);
+        assert!(detect(&root, None, absolute.to_str(), Some(&runtime)).wayland);
+        // A named socket that is missing does not fall back to wayland-0 (which exists here).
+        assert!(!detect(&root, None, Some("wayland-2"), Some(&runtime)).wayland);
+        // No runtime directory: not Wayland, even with an absolute socket.
+        assert!(!detect(&root, None, absolute.to_str(), None).wayland);
         // No socket, a plain file, or a forced X11 backend: not Wayland.
         assert!(!detect(&root, None, None, Some(&temp.0)).wayland);
         std::fs::write(temp.0.join("plain"), "").unwrap();
         assert!(!detect(&root, None, Some("plain"), Some(&temp.0)).wayland);
         assert!(!detect(&root, Some("x11"), None, Some(&runtime)).wayland);
+        assert!(!detect(&root, Some("x11,wayland"), None, Some(&runtime)).wayland);
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn detection_needs_all_three_nvidia_facts() {
         let temp = Temp::new("nvidia");
         fake_machine(&temp.0, "N");
@@ -673,6 +732,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn the_marker_round_trips_privately_and_clears() {
         let temp = Temp::new("marker");
         let path = temp.0.join("nested").join(MARKER_FILE);
@@ -689,9 +749,18 @@ mod tests {
             1,
             "no temporary left"
         );
+        // The first frame clears it once; a second clear finds nothing and does nothing.
+        let slot = Mutex::new(Some(path.clone()));
+        assert!(clear_marker(&slot));
+        assert_eq!(read_marker(&path), None);
+        write_marker(&path, &marker("615.78.08")).unwrap();
+        assert!(!clear_marker(&slot), "second clear is a no-op");
+        assert_eq!(read_marker(&path), Some(marker("615.78.08")));
+        assert!(!clear_marker(&Mutex::new(None)));
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn driver_version_comes_from_the_first_line() {
         assert_eq!(
             driver_version("NVRM version: x  570.1.2  Release\n").as_deref(),
@@ -699,5 +768,14 @@ mod tests {
         );
         assert_eq!(driver_version("odd line\n").as_deref(), Some("odd line"));
         assert_eq!(driver_version(""), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_identifier_matches_the_tauri_configuration() {
+        let config =
+            std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tauri.conf.json")).unwrap();
+        let config: serde_json::Value = serde_json::from_slice(&config).unwrap();
+        assert_eq!(config["identifier"], IDENTIFIER);
     }
 }

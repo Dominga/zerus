@@ -38,7 +38,7 @@ impl MobileSignals {
         Self
     }
 }
-fn mobile_stopped() -> bool { MOBILE_STOP.load(std::sync::atomic::Ordering::Relaxed) }
+fn mobile_stopped() -> bool { MOBILE_STOP.load(std::sync::atomic::Ordering::Relaxed) || super::worktree_requests::cancelled() }
 
 
 pub(super) struct GitError {
@@ -310,12 +310,16 @@ pub(super) fn catalog_until(path: &Path, refresh: bool, deadline: Instant) -> Va
             .and_then(|b| String::from_utf8(b).ok())
             .map(|p| json!(canonical(p.trim_end_matches('\n'))))
             .unwrap_or(Value::Null);
+        snapshot["selected_branch"] = git(&path, &["symbolic-ref", "--quiet", "--short", "HEAD"], deadline)
+            .ok().and_then(|bytes|String::from_utf8(bytes).ok())
+            .map(|branch|json!(branch.trim_end_matches('\n'))).unwrap_or(Value::Null);
         snapshot["path"] = json!(path);
         snapshot["stale"] = json!(false);
         Ok::<_, GitError>(snapshot)
     })();
     match result {
-        Ok(snapshot) => {
+        Ok(mut snapshot) => {
+            snapshot["creation_receipts_v1"] = json!(true);
             let _ = atomic(&path_cache, &snapshot.to_string());
             snapshot
         }
@@ -338,18 +342,36 @@ pub(super) fn catalog_until(path: &Path, refresh: bool, deadline: Instant) -> Va
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let action = args.first().map(String::as_str);
-    if let Some(action @ ("create" | "review" | "inspect" | "remove")) = action {
+    if let Some(action @ ("create" | "status" | "cancel" | "review" | "inspect" | "remove" | "policy" | "sweep")) = action {
         let value = match action {
+            "create" if args.iter().any(|arg| arg == "--receipt") => super::worktree_requests::create(&args[1..])?,
             "create" => create(&args[1..])?,
+            "status" | "cancel" => super::worktree_requests::control(action, &args[1..])?,
             "review" => super::worktree_cleanup::review_command(&args[1..])?,
             "inspect" => super::worktree_inspection::command(&args[1..])?,
-            _ => super::worktree_cleanup::remove_command(&args[1..])?,
+            "policy" => super::worktree_maintenance::command(&args[1..])?,
+            "sweep" if args[1..].iter().all(|a| a=="--json") => super::worktree_maintenance::Sweep::default().tick()?,
+            "sweep" => return Err("usage: hgs worktrees sweep --json (one bounded automatic cleanup step)".into()),
+            _ => {
+                let (result, attempted) = super::worktree_cleanup::remove_with_outcome(&args[1..]);
+                if let Err(detail) = &result {
+                    if args.iter().any(|s| s == "--json") {
+                        let option = |key| args.windows(2).find(|w| w[0] == key).map(|w| w[1].as_str());
+                        println!("{}", json!({"operation":"worktree_remove","outcome_version":1,
+                            "status":if attempted {"unconfirmed"} else {"kept"},
+                            "path":option("--path"),"common_dir":option("--common-dir"),
+                            "request_id":option("--request-id"),"detail":detail}));
+                    }
+                }
+                result?
+            },
         };
         println!("{value}");
         return Ok(0);
     }
     let mut path = None;
     let mut refresh = false;
+    let mut creation=false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -358,6 +380,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
                 path = Some(PathBuf::from(args.get(i).ok_or("--path needs a folder")?));
             }
             "--refresh" => refresh = true,
+            "--creation" => creation=true,
             "--json" => {}
             _ => return Err("usage: hgs worktrees --path PATH [--refresh] [--json]".into()),
         }
@@ -368,6 +391,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         return Err("worktree catalog requires an absolute folder path".into());
     }
     let mut value = catalog(&path, refresh);
+    if creation { value["worktrees"]=json!([]); }
     value["machine"] = json!(crate::config::Config::load()
         .map_err(|e| e.to_string())?
         .host());
@@ -392,7 +416,50 @@ fn inherited_upstream(read: &dyn Fn(&[&str]) -> Result<String>, base: &str) -> O
     Some((remote, merge))
 }
 
-fn create(args: &[String]) -> Result<Value> {
+/// U34: a DeepSeek member's sandbox needs full control of the folder it
+/// confines: on Windows its write grant needs WRITE_DAC and WRITE_OWNER, which
+/// a folder on a second drive does not inherit. Only the folder this call
+/// created is changed, and a failure is a member error, never a silent skip.
+/// N9: the grant is made only when the caller asks for it (a dsh member); every
+/// other worktree, including the desktop's for Claude or Codex, is left as it
+/// is, so a share or a file system without ACL support cannot turn a created
+/// worktree into a failed create. Other systems have nothing to grant.
+#[cfg(windows)]
+fn grant_for_sandbox(folder: &Path) -> Result<()> {
+    crate::platform::grant_full_control(folder).map_err(|error| {
+        format!(
+            "The folder was created, but Zerus could not give this user full control of it, which the DeepSeek sandbox needs: {error}"
+        )
+    })
+}
+#[cfg(not(windows))]
+fn grant_for_sandbox(_: &Path) -> Result<()> {
+    Ok(())
+}
+
+// N9: records the folders a test asked a grant for, so the scope is testable.
+#[cfg(test)]
+thread_local! {
+    static SANDBOX_GRANTS: std::cell::RefCell<Vec<std::path::PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(super) fn granted_worktrees() -> Vec<std::path::PathBuf> {
+    SANDBOX_GRANTS.with(|grants| std::mem::take(&mut *grants.borrow_mut()))
+}
+
+/// N9: the grant a `--sandbox` caller asks for, and nothing for any other
+/// worktree.
+fn grant_if_requested(sandbox: bool, folder: &Path) -> Result<()> {
+    if !sandbox {
+        return Ok(());
+    }
+    #[cfg(test)]
+    SANDBOX_GRANTS.with(|grants| grants.borrow_mut().push(folder.to_path_buf()));
+    grant_for_sandbox(folder)
+}
+
+pub(super) fn create(args: &[String]) -> Result<Value> {
     let mobile = args.iter().any(|value| value == "--mobile");
     let _signals = mobile.then(MobileSignals::install);
     let total_deadline = Instant::now() + Duration::from_secs(if mobile { 25 } else { 315 });
@@ -400,7 +467,14 @@ fn create(args: &[String]) -> Result<Value> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--json" | "--mobile" => {}
+            "--json" | "--mobile" | "--clone" | "--sandbox" => {
+                if args[i] == "--clone" {
+                    options.insert("--clone", "true");
+                }
+                if args[i] == "--sandbox" {
+                    options.insert("--sandbox", "true");
+                }
+            }
             key @ ("--path" | "--destination" | "--branch" | "--base" | "--common-dir" | "--request-id") => {
                 i += 1;
                 let value = args.get(i).ok_or_else(|| format!("{key} needs a value"))?;
@@ -409,7 +483,7 @@ fn create(args: &[String]) -> Result<Value> {
                 }
                 if options.insert(key, value.as_str()).is_some() { return Err(format!("duplicate {key}")); }
             }
-            _ => return Err("usage: hgs worktrees create --path REPO --destination FOLDER --branch NEW_BRANCH [--base HEAD] [--json]".into()),
+            _ => return Err("usage: hgs worktrees create --path REPO --destination FOLDER --branch NEW_BRANCH [--base HEAD] [--clone] [--sandbox] [--json]".into()),
         }
         i += 1;
     }
@@ -503,7 +577,31 @@ fn create(args: &[String]) -> Result<Value> {
     // Atomic reservation rejects simultaneous creators and existing/symlinked
     // destinations. Git accepts this empty directory but never overwrites files.
     if mobile_stopped() || Instant::now() >= total_deadline { return Err("Worktree creation cancelled before checkout".into()); }
+    super::worktree_requests::reserve_checkout()?;
     fs::create_dir(&destination).map_err(|e| format!("Cannot reserve destination: {e}"))?;
+    // N9: only a folder made for a sandboxed member is granted to it.
+    let sandbox = options.contains_key("--sandbox");
+    if options.contains_key("--clone") {
+        // B4/F10: a full clone with its own .git, so commit, merge and fetch
+        // work inside a sandboxed member's folder. Never a worktree.
+        let outcome = git(
+            &source,
+            &["clone", "--local", "--no-hardlinks", "--quiet", &source.to_string_lossy(), &destination.to_string_lossy()],
+            total_deadline.min(Instant::now() + Duration::from_secs(if mobile { 15 } else { 300 })),
+        );
+        outcome.map_err(|e| format!("{}\nCheck {} and branch '{branch}' before retrying.", e.detail, destination.display()))?;
+        let switch = git(&destination, &["switch", "--quiet", "-c", branch, &head], deadline);
+        switch.map_err(|e| format!("{}\nCheck {} and branch '{branch}' before retrying.", e.detail, destination.display()))?;
+        let actual_branch = git(&destination, &["symbolic-ref", "--quiet", "HEAD"], deadline).map_err(|e| e.detail)?;
+        if String::from_utf8_lossy(&actual_branch).trim_end_matches('\n') != reference {
+            return Err("Clone creation could not be confirmed. Inspect the destination before retrying.".into());
+        }
+        grant_if_requested(sandbox, &destination)?;
+        let upstream = upstream.map(|(remote, merge)| format!("{remote}/{}", merge.strip_prefix("refs/heads/").unwrap_or(&merge)));
+        return Ok(json!({"status":"created", "path":destination, "branch":branch, "base":base, "head":head,
+            "upstream":upstream, "clone":true, "request_id":options.get("--request-id"),
+            "machine":crate::config::Config::load().map_err(|e|e.to_string())?.host()}));
+    }
     let outcome = git(
         &source,
         &[
@@ -541,6 +639,7 @@ fn create(args: &[String]) -> Result<Value> {
                 .into(),
         );
     }
+    grant_if_requested(sandbox, &destination)?;
     // Best effort: the checkout exists either way, and a missing upstream only
     // leaves publication unverified. Never keep half of the tracking pair.
     let upstream = upstream.filter(|(remote, merge)| {
@@ -561,4 +660,22 @@ fn create(args: &[String]) -> Result<Value> {
         "managed_cleanup":managed.is_ok(), "cleanup_note":managed.err(),
         "machine":crate::config::Config::load().map_err(|e|e.to_string())?.host()}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// N9: the sandbox grant is made only when the caller asks for it; every
+    /// other worktree is created without touching its ACLs.
+    #[test]
+    fn only_a_sandboxed_worktree_asks_for_the_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("member");
+        std::fs::create_dir(&folder).unwrap();
+        grant_if_requested(false, &folder).unwrap();
+        assert!(granted_worktrees().is_empty(), "a Codex or Claude worktree is never granted");
+        grant_if_requested(true, &folder).unwrap();
+        assert_eq!(granted_worktrees(), vec![folder.clone()], "a dsh member's folder is");
+    }
 }

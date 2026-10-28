@@ -1,0 +1,216 @@
+{
+  "schema": "zerus-perf-v1",
+  "client": "tauri",
+  "created_at": "2026-10-28T06:04:15.624Z",
+  "platform": {
+    "os": "linux",
+    "label": "vblank-near60-off",
+    "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/60.5 Safari/605.1.15",
+    "hz": 144,
+    "hz_source": "manual",
+    "T_ms": 6.944444444444445,
+    "dpr": 1,
+    "cross_origin_isolated": true,
+    "timer_resolution_ms": 0.019999999998617568,
+    "reduced_motion": false,
+    "representative": true,
+    "engine": "WebKitGTK 2.54.1",
+    "webkit": {
+      "display": "wayland",
+      "gdk_backend": "wayland",
+      "gdk_monitor": {
+        "geometry": [
+          0,
+          0,
+          3440,
+          1440
+        ],
+        "size_mm": [
+          797,
+          334
+        ],
+        "refresh_mhz": 144000,
+        "scale": 1
+      },
+      "features_disabled": [
+        "PreferPageRenderingUpdatesNear60FPS"
+      ],
+      "env": {
+        "WEBKIT_DEBUG": "DisplayLink"
+      },
+      "preload": false
+    }
+  },
+  "settings": {
+    "warmupMs": 1000,
+    "runMs": 3000,
+    "runs": 1,
+    "stepPx": 16,
+    "opens": 20,
+    "openIndices": [
+      0,
+      1
+    ],
+    "syntheticInput": true
+  },
+  "scenarios": [
+    {
+      "id": "raf-light",
+      "label": "rAF on a light page",
+      "kind": "pacing",
+      "metric": "interval_ms",
+      "runs": [
+        {
+          "frames": 433,
+          "interval_ms": {
+            "count": 433,
+            "mean": 6.936720554272516,
+            "median": 4.399999999999636,
+            "p95": 16.079999999999927,
+            "p99": 16.12000000000012,
+            "over1_5T": 0.2863741339491917,
+            "over2_5T": 0,
+            "band60": 0.13625866050808313,
+            "max": 16.440000000000055
+          },
+          "verdict": {
+            "mean": true,
+            "median": false,
+            "within1_5T": false,
+            "over2_5T": true,
+            "band60": false,
+            "all": false
+          }
+        }
+      ],
+      "worst_index": 0,
+      "worst": {
+        "frames": 433,
+        "interval_ms": {
+          "count": 433,
+          "mean": 6.936720554272516,
+          "median": 4.399999999999636,
+          "p95": 16.079999999999927,
+          "p99": 16.12000000000012,
+          "over1_5T": 0.2863741339491917,
+          "over2_5T": 0,
+          "band60": 0.13625866050808313,
+          "max": 16.440000000000055
+        },
+        "verdict": {
+          "mean": true,
+          "median": false,
+          "within1_5T": false,
+          "over2_5T": true,
+          "band60": false,
+          "all": false
+        }
+      },
+      "verdict": {
+        "mean": true,
+        "median": false,
+        "within1_5T": false,
+        "over2_5T": true,
+        "band60": false,
+        "all": false
+      }
+    },
+    {
+      "id": "transform-animation",
+      "label": "rAF during a CSS transform animation",
+      "kind": "pacing",
+      "metric": "interval_ms",
+      "runs": [
+        {
+          "frames": 187,
+          "interval_ms": {
+            "count": 187,
+            "mean": 16.066524064171126,
+            "median": 16.0600000000004,
+            "p95": 16.160000000000764,
+            "p99": 16.26000000000022,
+            "over1_5T": 1,
+            "over2_5T": 0,
+            "band60": 1,
+            "max": 16.31999999999971
+          },
+          "verdict": {
+            "mean": false,
+            "median": false,
+            "within1_5T": false,
+            "over2_5T": true,
+            "band60": false,
+            "all": false
+          }
+        }
+      ],
+      "worst_index": 0,
+      "worst": {
+        "frames": 187,
+        "interval_ms": {
+          "count": 187,
+          "mean": 16.066524064171126,
+          "median": 16.0600000000004,
+          "p95": 16.160000000000764,
+          "p99": 16.26000000000022,
+          "over1_5T": 1,
+          "over2_5T": 0,
+          "band60": 1,
+          "max": 16.31999999999971
+        },
+        "verdict": {
+          "mean": false,
+          "median": false,
+          "within1_5T": false,
+          "over2_5T": true,
+          "band60": false,
+          "all": false
+        }
+      },
+      "verdict": {
+        "mean": false,
+        "median": false,
+        "within1_5T": false,
+        "over2_5T": true,
+        "band60": false,
+        "all": false
+      }
+    }
+  ],
+  "resources": {
+    "idle": {
+      "window_ms": 1024,
+      "note": "Python GTK host plus WebKit processes; the host is not the Tauri app",
+      "webkit": {
+        "processes": 2,
+        "cpu_percent": 0,
+        "rss_bytes": 259567616,
+        "pss_bytes": 158368768
+      },
+      "processes": [
+        {
+          "role": "host",
+          "name": "python3",
+          "cpu_percent": 2.93,
+          "rss_bytes": 230125568,
+          "pss_bytes": 136761344
+        },
+        {
+          "role": "network",
+          "name": "WebKitNetworkPr",
+          "cpu_percent": 0.0,
+          "rss_bytes": 66600960,
+          "pss_bytes": 28069888
+        },
+        {
+          "role": "web",
+          "name": "WebKitWebProces",
+          "cpu_percent": 0.0,
+          "rss_bytes": 192966656,
+          "pss_bytes": 130298880
+        }
+      ]
+    }
+  },
+  "harness": "client/bench/harness (synthetic screen) in client/bench/run-webkitgtk.py"
+}

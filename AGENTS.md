@@ -1,7 +1,9 @@
 # Agent instructions
 
 Zerus provides a desktop UI and the `hgs` CLI for persistent local and remote
-agent sessions. The CLI lives in `src/`; the Qt GUI lives in `tray/src/`.
+agent sessions. The CLI lives in `src/`; the Qt GUI lives in `tray/src/`;
+replicated documents (Loro) live in `crates/replica/`, the only code that
+imports Loro.
 The Rust mobile relay lives in `services/mobile/relay/` and the Rust outbound
 connector in `services/mobile/connector/`; the legacy Python connector remains in
 `services/mobile/zerus_mobile/` until every gateway has moved. Keep API v1, durable
@@ -14,6 +16,12 @@ builds with `mobile/ios/scripts/dev-install.sh` or `remote-dev-install.sh`; neve
 commit team IDs, device identifiers or signing material. TestFlight uploads run
 only from trusted main; see `docs/ios-distribution.md`.
 `design/` contains prototypes and original artwork, not runtime dependencies.
+The Tauri desktop client lives in `client/`: the SolidJS frontend in
+`client/src`, a pure-Rust core in `client/core` and the Tauri app in
+`client/src-tauri`, each its own Cargo package and lock. It grows beside the
+Qt GUI; see `docs/superpowers/specs/2026-10-27-tauri-web-ui-design.md`. Its UI
+never separates values with dots; `scripts/check-ui-separators.py` enforces it
+in CI (the Qt GUI and mobile clients are out of that rule's scope).
 
 The repository language is English. Write documentation and other project-facing
 text in English; conversations may use the user's preferred language.
@@ -22,6 +30,10 @@ text in English; conversations may use the user's preferred language.
 
 Use the `beads` skill in `.agents/skills/beads/SKILL.md` and run `bd prime` at
 session start and after compaction. Use `bd` for all durable tasks and blockers.
+Zerus product tasks received through `hgs task` are separate from Beads engineering
+tracking. For a direct request already being worked on, agents use `hgs task add
+--start` or `hgs task start REF`; plain add queues work for later. Reports by the
+exact pinned agent move its unsent queued task to In review as well.
 Use `bd remember --key <key> "<decision>"` for concise, shareable project memory.
 Do not create separate TODO or MEMORY files. Read current source before carrying
 forward a historical limitation.
@@ -74,14 +86,66 @@ New session defaults to a generated worktree for a verified Git folder, created
 only after the user selects Start session. Inspecting or opening a dialog must
 never create a worktree. Keep direct-folder launch and explicit custom/existing
 worktree choices available. Destructive UI actions require explicit confirmation.
+Opening New Team creates nothing: Start planning creates only the team draft and
+its lead session (in the team folder, never a worktree); member worktrees and
+sessions are created only by Create team.
 
-An idle agent with confirmed owned live shell or native jobs shows `Background`,
-remains in Active and accepts new messages. Native work and explicit attention
-take precedence. A native Stop ends a turn; it does not prove those jobs finished.
-Retain unread reply identity and defer reply-only badges/notifications until the
-work completes. Historical, unknown and offline jobs never establish current work.
-Keep this contract aligned across desktop, Android, shared fixtures and docs;
-changes to these status semantics need explicit owner direction.
+Worktree maintenance is configured per owning computer in Settings > Worktrees.
+Its default-enabled lifecycle, periodic integrated-checkout and missing-checkout
+rules require verified Zerus ownership and fresh session/process/file checks.
+Keep branches and all ignored local data; age and naming never authorize removal.
+An unconfirmed automatic removal stays for manual review across every trigger.
+An existing incomplete or malformed policy must fail closed, never re-enable
+default cleanup rules.
+Use bounded indexed queue reads and bounded archive metadata checks; see
+the worktree cleanup section in `docs/reference.md`.
+
+Explicit desktop termination cleanup may remove verified generated caches only
+after its Remove worktree choice and exact successful termination. Keep branch
+and archive-restore identity. Bind cleanup to the checkout ownership recorded
+at session launch and bind removal fingerprints to that nonce. Missing or
+replaced ownership, unknown local data, source changes, other occupants and
+uncertain process use require fresh manual review. Background
+maintenance continues to preserve all ignored data. Never stop unrelated system
+services to make a worktree removable; uncertain removals are never replayed.
+Termination cleanup runs in the background after its original confirmation.
+Show removed, kept and unknown outcomes with explicit review actions. Only a
+verified refusal before deletion may be checked for a new removal; never replay
+an unknown outcome. Manual acceptance of unreadable process paths lasts five
+minutes for the exact checkout review and tolerates unrelated process churn.
+Fresh known-use, session, ownership and file protections still apply; automatic
+cleanup never uses that manual acceptance.
+On Linux and macOS, Terminate must confirm the exit of the selected agent's
+verified background process trees before worktree cleanup. Pin birth identities
+before terminal teardown loses ancestry; bound verification and restore temporary
+stops on refusal. Folder paths, executable names and shared process groups never
+authorize stopping other programs. Keep Pause and native Stop semantics unchanged.
+
+A session is Working, Building, Waiting for you, Waiting for dependencies
+(always with its reason), Cooling, Cold or Stopped; Offline stays (owner
+direction U30). `hgs ls`, `inspect` and the mobile API carry `session_state`,
+`state_reason`, `build`, `last_active` and `cache_ttl`; the order and texts are
+in `docs/reference.md` and the shared `session-state-contract.json`. A build or
+test Zerus runs for the session (`hgs team run`, `hgs run`) is work: the session
+is Building right after Working, even while the agent is idle, and its reply
+badge waits for the build; explicit attention still comes first. A job the
+agent started makes the session wait only while it waits for it: a tool call
+past 30 seconds, subagents in flight, or a job under a declared team budget. A
+long-lived process it does not wait for (a dev server, watcher or tunnel, and
+its MCP servers and other services from the agent's own config, with their
+children), a job past its budget and any other job still running after the
+turn ended with nothing waiting on it are services: they show as a services icon with names, start times and whether
+they outlive the session, never make it wait, never count as Background work
+for the teams' capture gate, blocked reminder or time budget, and never defer
+the reply badge; the session is Cooling or Cold by its idle time against the
+prompt cache TTL. A session waiting for its own jobs remains in Active and
+accepts new messages. Native work and explicit attention take precedence. A
+native Stop ends a turn; it does not prove those jobs finished. Retain unread
+reply identity and defer reply-only badges/notifications while the session
+waits for its jobs. Historical, unknown and offline jobs never establish
+current work. Keep this contract aligned across desktop, Android, shared
+fixtures and docs; changes to these status semantics need explicit owner
+direction.
 
 Owner-approved independent-agent waits use `hgs wait`, separately from native
 work. Before handing off work whose acceptance or result you will wait for,
@@ -105,6 +169,16 @@ no-reply address instead if email privacy matters.
 
 ## Validation and handoff
 
+The owner evaluates features through local main builds. After a short review and
+ordinary merge of a trusted internal PR, promptly build main's CLI and GUI on the
+owner's Mac and update through the maintained installers. Do not wait for hosted
+CI, regression completion or public Dev publication. Use a clean, persistent Git
+checkout and incremental build caches, disable test targets for this build, and
+use the exact main push's CI sequence as the Dev number; the run need only exist.
+Retain local signing, source identity and the updater's draft/native-process
+checks. Monitor CI separately and track failures as follow-up work. This local
+evaluation loop does not authorize unrelated production relay changes.
+
 Session counts can reach tens of thousands or more. Histories, audit journals,
 logs and administrative views must use bounded pages, indexed queries and
 background I/O; do not load complete journals or grow per-session GUI caches
@@ -116,9 +190,14 @@ audit record durably before delivery, and retain exact run/conversation/question
 identity. Unknown delivery never authorizes replay. Ordinary questions, startup
 trust and broader persistent permission changes remain manual.
 
-Hosted Dev CI checks shared Rust/protocol contracts, Linux CLI, Arch, macOS and
-Android on main. PRs add Windows/iOS for affected desktop, native or shared paths;
-unknown change inventories retain both. Nightly and Stable run the full matrix.
+Dev publication is build-gated: successful distributables, package/source identity,
+signatures and installation checks admit Dev without waiting for the full regression
+matrix. Main regression tests run separately and keep failures visible; file and fix
+them as follow-up work without blocking an available Dev. Internal same-repository
+PRs need no additional manual trust approval for ordinary Dev integration.
+Main regressions cover shared Rust/protocol contracts, Linux CLI, Arch, macOS and
+Android. PRs add Windows/iOS for affected desktop, native or shared paths;
+unknown change inventories retain both. Nightly and Stable retain the full matrix.
 iOS TestFlight Dev uploads follow successful Nightly verification, using the exact
 source's main CI sequence. Manual checks remain available. Public
 standard GitHub runners are free; do not introduce paid larger runners or raise

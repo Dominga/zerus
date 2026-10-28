@@ -177,6 +177,7 @@ void TerminalView::setTheme(bool dark) {
       // PTY size follow the resulting FontChange.
       + (qFuzzyCompare(m_scale, 1.0) ? QString()
          : QStringLiteral(" QAbstractScrollArea#terminalScreen { font-size:%1px; }").arg(ContentScale::px(13, m_scale))));
+  m_screen->setCornerColor(WorkspaceSkin::color(WorkspaceSkin::active(), dark, QStringLiteral("surface")));
   updateButtons();
 }
 void TerminalView::setContentScale(double scale) {

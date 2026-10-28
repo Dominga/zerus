@@ -434,6 +434,23 @@ include `swarm_id`; an uninitialized/unavailable catalog has an explicit stable
 local fallback identity and no invented project list. Transient failures retain
 the previous catalog with `stale: true`.
 
+When native help names `hgs task exchange|digests --json`, the Rust connector
+also reads `hgs task digests --json` with an initialized catalog (five seconds)
+and gives each project the `tasks_digest` of its phone view: the project's
+task document and every task that is not Done. A phone exchanges a project's
+tasks with the computer whose digest differs from its own through
+`task_exchange`, a computer-scoped short read that runs
+`hgs task exchange --json` with the phone's request on stdin and answers at
+most 512 KiB of Loro updates, with a larger task in parts. The Python
+connector never offers it. The wire contract is in
+`relay/README.md` ("Phone task exchange").
+
+With `hgs task mobile-send|mobile-cancel|mobile-done --json` in native help, the
+Rust connector also offers the phone's Send now (`task_send`) and Cancel
+(`task_cancel`), computer-scoped mutations the journal runs once per identity,
+and its Done list (`task_done`), a short read in pages of 50 ("Phone task
+actions" in `relay/README.md`).
+
 Phone attachments use the existing native send payload:
 
 ```json

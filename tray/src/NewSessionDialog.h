@@ -41,6 +41,8 @@ public:
     void selectPath(const QString &path, bool automaticWorktree = true);
     void prefillSessionFolder(const QString &path, const QString &canonicalPath = {});
     void selectAccount(const QString &account);
+    // U30 (#508): a cold card's + New names the session "<name>-2".
+    void setSessionName(const QString &name);
     void setProjectExplicit(bool explicitChoice) { m_projectExplicit = explicitChoice; }
     bool implicitInbox() const;
     void setProjectCatalogSwarm(const QString &swarm) { m_projectCatalogSwarm = swarm; }
@@ -48,7 +50,11 @@ public:
 protected:
     bool eventFilter(QObject *object, QEvent *event) override;
 public:
+    void setBackgroundCreation(bool enabled) { m_backgroundCreation = enabled; }
+    void restoreCreationChoices(const QJsonObject &plan);
+    void creationAdmissionFailed(const QString &error);
 signals:
+    void creationRequested(const QJsonObject &plan);
     // addFolder: the confirmed folder outside the project that joins it once the
     // session starts, or empty. A worktree generated from it never replaces it.
     // effort: the chosen OpenCode model's variant, or empty for that model's default.
@@ -93,6 +99,9 @@ private:
     QString m_denseKey;
     quint64 m_localModelRequest = 0;
     bool m_denseDark = false, m_denseBlocked = false, m_denseSigningIn = false, m_localModelsListed = false;
+    // U25 part 8: the design's project, computer and folder menus.
+    void showDenseMenu(QComboBox *combo);
+    void createDenseProject();
     void loadMachines();
     void loadFolders(const QString &selectedPath = {});
     void browseFolder();
@@ -143,6 +152,8 @@ private:
     SessionOrganization m_projects;
     SessionOrganization *m_liveProjects=nullptr;
     bool m_cloneLaunchPending=false,m_repositorySource=false,m_customDestination=false,m_customProjectName=false,m_repositoryNewProject=false;
+    bool m_backgroundCreation=false,m_creationSubmitted=false;
+    QString m_creationPredecessor;
     RepositoryClone *m_repository=nullptr;
     MachinePlatform::Style m_repositoryStyle=MachinePlatform::Style::Posix;
     QFormLayout *m_form=nullptr;

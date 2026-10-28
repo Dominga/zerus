@@ -1,3 +1,4 @@
+#include "JsonParse.h"
 #include "SpeechClient.h"
 #include "ProcessRunner.h"
 #include <QJsonDocument>
@@ -82,14 +83,19 @@ void SpeechClient::dispatch(const QString &host, const QJsonObject &payload, Rep
     auto request = command(m_executable, host, session.isEmpty() ? QStringList{"speech", "--json"} : QStringList{"voice", session, "--json"});
     auto start = [this, request, done, redact=management(payload)](QByteArray input) mutable {
         auto command=request;command.input=std::move(input);
-        ProcessRunner::run(std::move(command), this, [done, redact](const ProcessRunner::Result &result) {
-            const auto error = failure(result, redact);
-            if (!error.isEmpty()) { done({}, error); return; }
-            QJsonParseError parse;
-            const auto json = QJsonDocument::fromJson(result.standardOutput, &parse);
-            if (result.standardOutput.size() > 1024 * 1024 || parse.error != QJsonParseError::NoError || !json.isObject()
-                || json.object().value("schema").toInt() != 1) { done({}, tr("The speech computer returned an invalid response.")); return; }
-            auto reply=json.object();reply.remove("client_dispatch_started");done(reply, {});
+        struct Prepared { QString error; bool valid = false; QJsonObject reply; };
+        ProcessRunner::run(std::move(command), this, [redact](ProcessRunner::Result result) {
+            Prepared prepared; prepared.error = failure(result, redact);
+            if (!prepared.error.isEmpty() || result.standardOutput.size() > 1024 * 1024) return prepared;
+            QString parse;
+            const auto json = JsonParse::parse(result.standardOutput, &parse);
+            prepared.valid = parse.isEmpty() && json.isObject() && json.object().value("schema").toInt() == 1;
+            if (prepared.valid) { prepared.reply = json.object(); prepared.reply.remove("client_dispatch_started"); }
+            return prepared;
+        }, [done](const Prepared &prepared) {
+            if (!prepared.error.isEmpty()) { done({}, prepared.error); return; }
+            if (!prepared.valid) { done({}, tr("The speech computer returned an invalid response.")); return; }
+            done(prepared.reply, {});
         });
     };
     if(!payload.contains("video")){start(QJsonDocument(payload).toJson(QJsonDocument::Compact));return;}

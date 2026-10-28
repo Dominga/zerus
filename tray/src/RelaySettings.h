@@ -1,5 +1,6 @@
 #pragma once
 #include "ChildProcess.h"
+#include "ProcessRunner.h"
 #include "RelayConfiguration.h"
 #include <QApplication>
 #include <QClipboard>
@@ -93,16 +94,27 @@ public:
         }
     }
 private:
-    ConfigStore store;Snapshot loaded;bool loadedOk=false;
+    // The configuration is read, parsed and written off the GUI thread
+    // (ProcessRunner::post); a status probe that finishes first waits for it.
+    struct Loaded{bool ok=false;Snapshot snapshot;QString error;};
+    ConfigStore store;Snapshot loaded;bool loadedOk=false,loading=false,saving=false;quint64 loadGeneration=0;
+    std::function<void()> probeResult;
     QLabel *configured,*status,*notice,*killMode=nullptr,*implementation=nullptr;
     QWidget *protectCommand=nullptr,*restartCommand=nullptr,*startCommand=nullptr;
     QLineEdit *url,*token,*directory;
     QPushButton *saveButton;
     QProcess *probe=nullptr;QByteArray probeOutput;
     void loadConfiguration(){
-        QString error;loadedOk=store.load(&loaded,&error);saveButton->setEnabled(loadedOk);
+        loading=true;saveButton->setEnabled(false);const auto generation=++loadGeneration;
+        ProcessRunner::post(this,[store=store]{Loaded result;result.ok=store.load(&result.snapshot,&result.error);return result;},
+            [this,generation](const Loaded &result){if(generation==loadGeneration)applyConfiguration(result);});
+    }
+    void applyConfiguration(const Loaded &result){
+        loading=false;loadedOk=result.ok;loaded=result.snapshot;saveButton->setEnabled(loadedOk&&!saving);
         token->clear();
-        if(!loadedOk){configured->setText(tr("Configured relay: unavailable"));notice->setText(error);return;}
+        if(startCommand)startCommand->setVisible(loaded.exists);
+        if(probeResult){const auto finish=std::move(probeResult);probeResult=nullptr;finish();}
+        if(!loadedOk){configured->setText(tr("Configured relay: unavailable"));notice->setText(result.error);return;}
         const auto relay=loaded.object.value("server_url").toString();
         // Invalid existing URLs may contain secrets. Never render them.
         configured->setText(loaded.exists?(validUrl(relay)?tr("Configured relay: %1").arg(relay):tr("Configured relay: invalid configuration")):tr("Configured relay: not configured"));
@@ -112,14 +124,20 @@ private:
         notice->setText(loaded.exists?tr("The configured computer credential stays hidden. Leave replacement blank to retain it for this relay."):tr("Set up this computer on the relay, then enter its issued computer credential. A phone pairing credential cannot be used here."));
     }
     void saveConfiguration(){
-        if(!loadedOk)return;
+        if(!loadedOk||loading||saving)return;
         QString error;auto prepared=prepare(loaded,{url->text(),token->text(),directory->text()},&error);
         if(!prepared){notice->setText(error);return;}
-        Snapshot saved;
-        if(!store.save(loaded,*prepared,&saved,&error)){notice->setText(error);return;}
-        loaded=std::move(saved);token->clear();
-        configured->setText(tr("Configured relay: %1").arg(loaded.object.value("server_url").toString()));
-        notice->setText(tr("Configuration saved privately. Changes apply when the connector restarts. Service status does not verify relay connectivity or that this configuration is active."));
+        saving=true;saveButton->setEnabled(false);const auto generation=loadGeneration;
+        ProcessRunner::post(this,[store=store,expected=loaded,prepared=*prepared]{Loaded result;result.ok=store.save(expected,prepared,&result.snapshot,&result.error);return result;},
+            [this,generation](const Loaded &result){
+                saving=false;saveButton->setEnabled(loadedOk&&!loading);
+                if(!result.ok){notice->setText(result.error);return;}
+                // A reload started meanwhile reads the saved file itself.
+                if(generation!=loadGeneration||loading)return;
+                loaded=result.snapshot;token->clear();
+                configured->setText(tr("Configured relay: %1").arg(loaded.object.value("server_url").toString()));
+                notice->setText(tr("Configuration saved privately. Changes apply when the connector restarts. Service status does not verify relay connectivity or that this configuration is active."));
+            });
     }
     void showKillMode(const QByteArray &mode,bool loaded){
         if(!killMode)return;
@@ -163,7 +181,11 @@ private:
             deadline->stop();
             if(probe!=p)return;
             const auto output=probeOutput+p->readAllStandardOutput();
-            if(exit==QProcess::NormalExit&&output.size()<=16384)done(output,code);
+            if(exit==QProcess::NormalExit&&output.size()<=16384){
+                // The status depends on whether a configuration exists.
+                if(loading)probeResult=[done,output,code]{done(output,code);};
+                else done(output,code);
+            }
             probe=nullptr;p->deleteLater();
         });
         connect(p,&QProcess::readyReadStandardOutput,this,[this,p]{
@@ -179,7 +201,7 @@ private:
     }
     void probeService(){
         if(probe)return;
-        showKillMode({},false);showImplementation({});
+        showKillMode({},false);showImplementation({});probeResult=nullptr;
         if(startCommand)startCommand->setVisible(loaded.exists);
 #ifdef Q_OS_LINUX
         runProbe(QStringLiteral("systemctl"),{QStringLiteral("--user"),QStringLiteral("show"),QStringLiteral("zerus-mobile-connector.service"),

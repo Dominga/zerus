@@ -1,6 +1,6 @@
 package app.zerus.mobile
 
-enum class DesktopBadgeKind { Neutral, Working, Attention, Error, Paused, Unread, Scheduled, Background, Waiting }
+enum class DesktopBadgeKind { Neutral, Working, Building, Attention, Error, Paused, Unread, Scheduled, Background, Waiting, Deps, Cooling, Cold }
 data class DesktopBadgeColors(val background: Long, val foreground: Long)
 data class DesktopSessionBadge(val caption: String, val kind: DesktopBadgeKind, val additionalUnread: Boolean)
 
@@ -8,6 +8,14 @@ data class DesktopSessionBadge(val caption: String, val kind: DesktopBadgeKind, 
 object DesktopSessionPalette {
     fun badge(session: Session, online: Boolean): DesktopSessionBadge {
         val raw = session.raw
+        // U30: a host that reports session_state speaks the seven-state contract; the words and the
+        // precedence come from it (SessionState.kt), and the older hosts keep the derivation below.
+        if (SessionStateContract.hasHostState(raw) || !online) {
+            val status = SessionStateContract.status(raw, online)
+            val muted = SessionNotificationPreferences.muted(session)
+            val kind = if (muted && status.state == SessionState.User) DesktopBadgeKind.Neutral else sessionStateKind(status.state)
+            return DesktopSessionBadge(status.caption, kind, false)
+        }
         val state = SessionFilters.status(session, online)
         val attention = raw.optBoolean("review_later") || raw.optBoolean("mobile_review_later") || online && !raw.optBoolean("attention_acknowledged") &&
             (SessionFilters.needsAction(session) || childAttention(session, online))
@@ -35,6 +43,18 @@ object DesktopSessionPalette {
         return DesktopSessionBadge(caption, kind, unread && (working || attention))
     }
 
+    /** U30: the badge kind of a host-reported state (SESSION-STATES.md section 1). */
+    fun sessionStateKind(state: SessionState): DesktopBadgeKind = when (state) {
+        SessionState.Working -> DesktopBadgeKind.Working
+        SessionState.Building -> DesktopBadgeKind.Building
+        SessionState.User -> DesktopBadgeKind.Attention
+        SessionState.Deps -> DesktopBadgeKind.Deps
+        SessionState.Cooling -> DesktopBadgeKind.Cooling
+        SessionState.Cold -> DesktopBadgeKind.Cold
+        SessionState.Stopped -> DesktopBadgeKind.Paused
+        SessionState.Offline -> DesktopBadgeKind.Neutral
+    }
+
     private fun childAttention(session: Session, online: Boolean): Boolean {
         if (!SessionFilters.currentActivity(session, online) || session.raw.string("subagent_source") == "hook_profiles") return false
         val children = session.raw.optJSONObject("subagents")?.let { roster ->
@@ -52,6 +72,11 @@ object DesktopSessionPalette {
         DesktopBadgeKind.Paused -> if (dark) DesktopBadgeColors(0xFF443654, 0xFFDEC3FF) else DesktopBadgeColors(0xFFE8DDF5, 0xFF634187)
         DesktopBadgeKind.Scheduled -> if (dark) DesktopBadgeColors(0xFF173E48, 0xFF9FE0F0) else DesktopBadgeColors(0xFFD3EDF4, 0xFF165A6B)
         DesktopBadgeKind.Neutral -> if (dark) DesktopBadgeColors(0xFF2B343E, 0xFFB6C2D0) else DesktopBadgeColors(0xFFE7EDF2, 0xFF566575)
+        // U30: the tokens of SESSION-STATES.md section 6, filled like the badge draws them.
+        DesktopBadgeKind.Building -> if (dark) DesktopBadgeColors(0xFF1B3A4A, 0xFF7FD3F2) else DesktopBadgeColors(0xFFDFF0F8, 0xFF17627F)
+        DesktopBadgeKind.Deps -> if (dark) DesktopBadgeColors(0xFF1B2A44, 0xFF6FA8FF) else DesktopBadgeColors(0xFFE6EFFB, 0xFF2F66C9)
+        DesktopBadgeKind.Cooling -> if (dark) DesktopBadgeColors(0xFF12333B, 0xFF56C8E0) else DesktopBadgeColors(0xFFE1F3F8, 0xFF137F95)
+        DesktopBadgeKind.Cold -> if (dark) DesktopBadgeColors(0xFF2A3547, 0xFF8FA6C4) else DesktopBadgeColors(0xFFE9EEF5, 0xFF55708F)
     }
 
     private enum class DetailKind { Neutral, Working, Ready, Attention, Error, Paused, Background, Waiting }

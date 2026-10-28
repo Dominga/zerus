@@ -9,6 +9,7 @@
 class QFile;
 class QNetworkAccessManager;
 class QNetworkReply;
+class QJsonObject;
 class QProcess;
 
 // WhiteWh/zerus only; upstream Zerus has no such updater. A portable Windows
@@ -43,29 +44,37 @@ public:
     static qint64 installedBuild();
     // Built with a feed and running from a portable folder.
     bool enabled() const { return m_enabled; }
+    // Manual checks are available only when a verified feed is configured.
+    bool manualAvailable() const { return m_enabled; }
+    // Check the configured feed now.
+    void checkNow();
     // A verified newer build waits next to the installation.
     bool ready() const { return m_readyBuild > 0; }
     qint64 readyBuild() const { return m_readyBuild; }
     QString status() const { return m_status; }
     void check();
     // Starts the helper that swaps the folders once this process has exited.
-    // The caller quits Zerus when it returns true.
+    // installStarted is emitted after any connector stop request completes.
     bool startInstall();
 signals:
     void changed();
     void buildReady(qint64 build);
+    void installStarted();
 
 private:
     explicit ForkUpdater(QObject *parent);
+    void fetch();
     void feedFinished(QNetworkReply *reply);
+    void applyFeed(const QJsonObject &feed);
     void download();
     void downloadFinished(QNetworkReply *reply);
     void extracted();
+    void applyExtracted(bool complete, const QString &output, const QJsonObject &info);
     void finish(const QString &status);
     QString unpacked() const;
     QString readyStatus() const;
 
-    bool m_enabled = false, m_busy = false;
+    bool m_enabled = false, m_portable = false, m_busy = false, m_installing = false;
     Layout m_layout;
     QString m_install, m_stage, m_status;
     // Where a download goes: the stage, or beside it while a ready build waits

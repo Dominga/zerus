@@ -5,6 +5,7 @@
 #include <QSettings>
 #include <QTemporaryDir>
 #include "FakeCli.h"
+#include "SettingsJson.h"
 #include "SwarmController.h"
 #include "SessionOrganization.h"
 #include "SwarmDialog.h"
@@ -234,7 +235,8 @@ print(json.dumps(result))
             QStringList result;for(const auto &p:organization["projects"].toArray())for(const auto &f:p.toObject()["folders"].toArray())result.append(f.toObject()["id"].toString());return result;};
         const auto input=[this](int request,const QString &field){return requests()[request].toObject()["input"].toObject()[field].toObject();};
         // Observed before this build: the drive folder lived only in this desktop's cache.
-        QSettings().setValue("swarm/observedOrganization",QJsonDocument(with({posix,kept})).toJson(QJsonDocument::Compact));
+        // Stored as the tray stores it: the GUI thread reads parsed settings only (SettingsJson).
+        SettingsJson::store("swarm/observedOrganization",QJsonDocument(with({posix,kept})));
         catalog({posix,peer});
         HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);
         QJsonObject ready;connect(&controller,&SwarmController::organizationReady,this,[&](const QJsonObject &value){ready=value;});
@@ -593,6 +595,29 @@ print(json.dumps(result))
             const auto input=requests().at(1).toObject()["input"].toObject();QCOMPARE(input["key"],c["key"]);QCOMPARE(input["value"],QJsonValue("p"));QCOMPARE(input["versions"].toArray(),QJsonArray({"version-a","version-b"}));
             QTRY_VERIFY(dialog->findChild<QLabel*>("swarmStatus")->text().startsWith("Choice saved"));QTRY_VERIFY(controller.settled());
             checked=true;dialog->reject();
+        });
+        QTimer timeout;timeout.setSingleShot(true);connect(&timeout,&QTimer::timeout,this,[]{if(auto *dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget()))dialog->reject();});timeout.start(10000);
+        showSwarmDialog(&client,&controller,fleet,nullptr,[]{});QVERIFY(checked);
+    }
+    void computersThatDoNotShareTasksAreNamed() {
+        HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());
+        auto snapshot=controller.snapshot();
+        snapshot["machines"]=QJsonArray{QJsonObject{{"id","node-mac"},{"name","Mac"},{"connection","mac"}},QJsonObject{{"id","node-pi"},{"name","Pi"},{"connection","pi"}},
+                                        QJsonObject{{"id","node-nas"},{"name","NAS"},{"connection","nas"}}};
+        snapshot["peers"]=QJsonObject{{"mac",QJsonObject{{"last_sync",12345},{"tasks_outdated",true}}},{"pi",QJsonObject{{"last_sync",12345}}},
+                                      {"nas",QJsonObject{{"last_sync",12345},{"error","Connection timed out"},{"tasks_outdated",true}}}};
+        controller.acceptExternal(snapshot);FleetState fleet;bool checked=false;
+        QTimer::singleShot(0,this,[&]{
+            auto *dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());QVERIFY(dialog);
+            QTimer::singleShot(50,dialog,[&,dialog]{
+                auto *table=dialog->findChild<QTableWidget*>("swarmMachines");
+                const auto status=[&](const QString &name){for(int row=0;row<table->rowCount();++row)if(table->item(row,0)->text()==name)return table->item(row,2)->text();return QString();};
+                QVERIFY2(status("Mac").endsWith(" · Update Zerus there to share tasks"),qPrintable(status("Mac")));
+                QVERIFY2(status("Pi").startsWith("Synced ")&&!status("Pi").contains("tasks"),qPrintable(status("Pi")));
+                // An error is shown as it is; the note waits for a sync that works.
+                QCOMPARE(status("NAS"),QString("Connection timed out"));
+                checked=true;dialog->reject();
+            });
         });
         QTimer timeout;timeout.setSingleShot(true);connect(&timeout,&QTimer::timeout,this,[]{if(auto *dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget()))dialog->reject();});timeout.start(10000);
         showSwarmDialog(&client,&controller,fleet,nullptr,[]{});QVERIFY(checked);

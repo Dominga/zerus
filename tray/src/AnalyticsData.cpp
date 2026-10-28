@@ -1,3 +1,4 @@
+#include "JsonParse.h"
 #include "AnalyticsData.h"
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -24,9 +25,9 @@ bool uuid(const QJsonValue &value, bool allowNil = false) {
 }
 std::optional<QJsonObject> object(const QByteArray &bytes) {
     if (bytes.size() > MaximumBytes) return {};
-    QJsonParseError error;
-    const auto document = QJsonDocument::fromJson(bytes, &error);
-    if (error.error != QJsonParseError::NoError || !document.isObject() || document.object().value("schema") != 1) return {};
+    QString error;
+    const auto document = JsonParse::parse(bytes, &error);
+    if (!error.isEmpty() || !document.isObject() || document.object().value("schema") != 1) return {};
     return document.object();
 }
 std::optional<QJsonArray> codes(const QJsonValue &value, const QStringList &allowed) {

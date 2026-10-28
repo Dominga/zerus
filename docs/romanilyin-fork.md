@@ -7,6 +7,14 @@ The initial source is WhiteWh's `whitewh/main` commit
 Existing copyright notices, application identifiers, state directories and
 conversation identities are preserved.
 
+The October 28, 2026 integration merges WhiteWh's `whitewh/main` through
+`bf2d05dee9ef92a353255e20e9bc9bea8c3c4063` with ordinary Git ancestry. It retains
+the fork's Windows/WSL transport, explicit path identity, existing OpenCode
+bindings and external workstreams alongside the incoming teams, tasks, watch
+protocol, desktop client and mobile changes. Fork update feeds remain disabled.
+Engineering tracking remains in this fork's existing Dolt database; the source
+merge does not import another fork's task database or replace local deployments.
+
 ## Scope
 
 - Require PowerShell 7 Core for native Windows shell operations.

@@ -148,7 +148,7 @@ fn input<T: serde::de::DeserializeOwned>() -> Result<T> {
         .take((MAX_BYTES + 1) as u64)
         .read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= MAX_BYTES, "mobile request is too large");
-    serde_json::from_slice(&bytes).context("invalid mobile request")
+    serde_json::from_slice(crate::state::without_bom(&bytes)).context("invalid mobile request")
 }
 
 fn options<'a>(
@@ -357,6 +357,17 @@ fn validate(request: &LocalRequest) -> Result<()> {
             }
             no_payload()?;
         }
+        // The phone's task exchange (docs/superpowers/specs/2026-10-18-task-replication-loro-design.md, "Phone").
+        "task" => match rest {
+            [action, json] if action == "exchange" && json == "--json" => {
+                ensure!(request.payload.as_ref().is_some_and(Value::is_object), "the task exchange needs its JSON request");
+            }
+            [action, json] if action == "digests" && json == "--json" => no_payload()?,
+            [action, json] if ["mobile-send", "mobile-cancel", "mobile-done"].contains(&action.as_str()) && json == "--json" => {
+                ensure!(request.payload.as_ref().is_some_and(Value::is_object), "the task action needs its JSON request");
+            }
+            _ => bail!("native operation is not allowed"),
+        },
         "repository" => {
             no_payload()?;
             let command = rest.first().context("repository action required")?;
@@ -1388,6 +1399,29 @@ mod tests {
         }
         assert!(validate(&request(&["archives", "lookup", "--json", "--all"], Some(payload))).is_err());
         assert!(validate(&request(&argv, None)).is_err());
+    }
+
+    #[test]
+    fn the_phone_s_task_exchange_admits_only_its_two_json_commands() {
+        let payload = || Some(json!({"schema": 1, "project": "project-1", "inventory": {"project": {}, "tasks": {}}}));
+        assert!(validate(&request(&["task", "exchange", "--json"], payload())).is_ok());
+        assert!(validate(&request(&["task", "digests", "--json"], None)).is_ok());
+        for action in ["mobile-send", "mobile-cancel", "mobile-done"] {
+            assert!(validate(&request(&["task", action, "--json"], payload())).is_ok(), "{action}");
+        }
+        for (args, body) in [
+            (vec!["task", "exchange"], payload()),
+            (vec!["task", "exchange", "--json"], None),
+            (vec!["task", "exchange", "--json", "extra"], payload()),
+            (vec!["task", "digests", "--json"], payload()),
+            (vec!["task", "send", "T-a1b2c3", "--json"], None),
+            (vec!["task", "list", "--project", "p"], None),
+            (vec!["task", "mobile-send"], payload()),
+            (vec!["task", "mobile-done", "--json"], None),
+            (vec!["task", "mobile-cancel", "--json", "extra"], payload()),
+        ] {
+            assert!(validate(&request(&args, body)).is_err(), "{args:?}");
+        }
     }
 
     #[test]

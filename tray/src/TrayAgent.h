@@ -20,6 +20,8 @@
 #include "AttentionTracker.h"
 #include "AttentionNotifier.h"
 #include "ApplicationBadge.h"
+#include "PrivateStoreNotices.h"
+#include <QSettings>
 
 class SessionsWindow;
 class SwarmWorkerSupervisor;
@@ -38,6 +40,9 @@ public:
     // Zerus has no parent widget and is deleted explicitly. Само меню удаляет TrayMenu или иконка трея -- кто из них,
     // см. ~TrayMenu и порядок m_menu/m_tray ниже.
     ~TrayAgent() override;
+    // The JSON values the desktop keeps in QSettings (SettingsJson.h): main()
+    // parses them before the tray and its windows read them.
+    static QStringList jsonSettings();
 
 public slots:
     void showSessions();
@@ -51,9 +56,21 @@ private slots:
 private:
     void refreshIcon();
     void observeAttention(const QString &host, const BoxState &box);
+    // WhiteWh fork, #569: a refused private store, once per (computer, path, reason).
+    void observePrivateStores(const QString &host, const BoxState &box);
+    PrivateStoreNotices m_privateStores{QSettings().value(QStringLiteral("privateStores/notified")).toStringList()};
     void migrateReadMarks(const QString &host);
     void publishReadMarks();
     void warmCaches(const QString &host, const BoxState &box);
+    // Stored read state: replies and attention marks this desktop keeps, and
+    // marks queued for hosts (ReadMarkStore). m_state reflects m_appliedReadState
+    // after each listing applied in full; while it is unchanged, a listing that
+    // FleetState::refreshListing accepts needs nothing else recomputed.
+    struct ReadState { QJsonObject replies, marks, pending; bool valid = false; };
+    static ReadState storedReadState();
+    bool readStateApplied(const ReadState &stored) const;
+    void listingRefreshed(const QString &host);
+    void updateLocalPoll(const BoxState &box);
     void resolveAttentionClick(bool final = false);
     // Одна строка, но своё имя: аргументы у TrayMenu::rebuild() одни и те же во всех
     // шести местах, откуда меню перестраивается, и перечислять их каждый раз -- шум.
@@ -65,7 +82,7 @@ private:
     void openSessionTerminal(const QString &peer, const QString &session, const QString &tty);
     void activateSessionWith(TerminalBackend &backend, const QString &peer, const QString &session, const QString &tty);
     void copyText(const QString &text);
-    void launchSession(const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &permissions = {}, const QString &localModel = {});
+    void launchSession(const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &permissions = {}, const QString &localModel = {}, const QString &expectedMachine = {});
     // Вызывать сразу после успешного backend.open(). Не про Konsole и не про D-Bus
     // -- просто спрашивает интерфейс TerminalBackend, есть ли что сказать пользователю
     // об этом конкретном открытии (см. TerminalBackend::takeAdvisory), и если да, кладёт
@@ -109,14 +126,20 @@ private:
     std::unique_ptr<AttentionNotifier> m_notifier;
     std::unique_ptr<ApplicationBadge> m_badge;
     AttentionTracker m_attention;
+    // The notification clicked last, until its session opens, and what its token names.
     QString m_pendingAttention;
+    QJsonObject m_pendingTarget;
     QTimer m_localTimer;
     QTimer m_peerTimer;
     QString m_lastError;
     QString m_localReadError;
+    ReadState m_appliedReadState;
     SessionsWindow *m_sessionsWindow = nullptr;
+    // N32 of #499: team attention notifications until the window exists.
+    class TeamAttentionWatch *m_teamWatch = nullptr;
     // Records desktop activity for phone alerts; see DesktopPresence.h.
     std::unique_ptr<DesktopPresence> m_presence;
+    class EventStreams *m_streams = nullptr;
     QString m_presenceError;
 #ifdef Q_OS_WIN
     // The tray runs `hgs swarm worker` itself on Windows (SwarmWorkerSupervisor.h).

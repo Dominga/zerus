@@ -69,6 +69,9 @@ CREATE INDEX IF NOT EXISTS file_history ON requests(updated,id) WHERE operation=
 
 CREATE INDEX IF NOT EXISTS archive_history ON requests(updated,id) WHERE operation='archive_list' AND state IN ('completed','failed','uncertain');
 
+CREATE INDEX IF NOT EXISTS task_exchange_history ON requests(updated,id) WHERE operation='task_exchange' AND state IN ('completed','failed','uncertain');
+
+CREATE INDEX IF NOT EXISTS task_done_history ON requests(updated,id) WHERE operation='task_done' AND state IN ('completed','failed','uncertain');
 -- Content-free hook diagnostics expire independently of native mutations.
 CREATE INDEX IF NOT EXISTS hook_health_history ON requests(updated,id) WHERE operation='hooks_status' AND state IN ('completed','failed','uncertain');
 
@@ -105,7 +108,7 @@ CREATE INDEX IF NOT EXISTS enrollment_pending ON enrollment_candidates(workspace
 CREATE INDEX IF NOT EXISTS enrollment_invitation_candidates ON enrollment_candidates(invitation_id,state,device_id);
 CREATE TABLE IF NOT EXISTS public_registration(id INTEGER PRIMARY KEY,workspaces BIGINT NOT NULL DEFAULT 0);
 INSERT INTO public_registration(id) VALUES(1) ON CONFLICT DO NOTHING;
-CREATE TABLE IF NOT EXISTS encrypted_requests(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),device_id TEXT NOT NULL REFERENCES devices(id),node_id TEXT NOT NULL REFERENCES nodes(id),route_id TEXT NOT NULL,body_hash TEXT NOT NULL,body TEXT NOT NULL,body_bytes BIGINT NOT NULL,state TEXT NOT NULL,result TEXT,result_hash TEXT,result_bytes BIGINT NOT NULL DEFAULT 0,reserved_bytes BIGINT NOT NULL DEFAULT 0,created DOUBLE PRECISION NOT NULL,claimed DOUBLE PRECISION,updated DOUBLE PRECISION NOT NULL,expires DOUBLE PRECISION NOT NULL,metadata_bytes BIGINT NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS encrypted_requests(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),device_id TEXT NOT NULL REFERENCES devices(id),node_id TEXT NOT NULL REFERENCES nodes(id),route_id TEXT NOT NULL,body_hash TEXT NOT NULL,body TEXT NOT NULL,body_bytes BIGINT NOT NULL,state TEXT NOT NULL,result TEXT,result_hash TEXT,result_bytes BIGINT NOT NULL DEFAULT 0,reserved_bytes BIGINT NOT NULL DEFAULT 0,created DOUBLE PRECISION NOT NULL,claimed DOUBLE PRECISION,updated DOUBLE PRECISION NOT NULL,expires DOUBLE PRECISION NOT NULL,metadata_bytes BIGINT NOT NULL DEFAULT 0,payload_class BIGINT NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS encrypted_request_queue ON encrypted_requests(node_id,state,created,id);
 CREATE INDEX IF NOT EXISTS encrypted_request_expiry ON encrypted_requests(expires,id) WHERE body_bytes>0 OR result_bytes>0 OR reserved_bytes>0;
 CREATE INDEX IF NOT EXISTS encrypted_request_active ON encrypted_requests(workspace_id,state);
@@ -130,3 +133,6 @@ CREATE TABLE IF NOT EXISTS encrypted_request_chunks(request_id TEXT NOT NULL REF
 CREATE INDEX IF NOT EXISTS encrypted_request_unaccounted ON encrypted_requests(workspace_id,id) WHERE metadata_bytes=0;
 CREATE INDEX IF NOT EXISTS encrypted_binding_unaccounted ON encrypted_route_bindings(workspace_id,node_id,route_id) WHERE metadata_bytes=0;
 CREATE INDEX IF NOT EXISTS opaque_signal_unaccounted ON opaque_signals(workspace_id,node_id,scope_id,kind) WHERE metadata_bytes=0;
+
+CREATE INDEX IF NOT EXISTS encrypted_payload_classification ON encrypted_requests(id) WHERE state='completed' AND payload_class IN (0,3) AND result_bytes>0;
+CREATE INDEX IF NOT EXISTS encrypted_read_cache_pressure ON encrypted_requests(workspace_id,updated,id) WHERE state='completed' AND payload_class=2 AND reserved_bytes=0 AND (body_bytes>0 OR result_bytes>0);

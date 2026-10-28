@@ -1,0 +1,6 @@
+# Reviewed false positives in immutable short-session-name presentation fixtures.
+# The generic-api-key rule crosses from a name ending in api into the next
+# synthetic display-name literal. These are not credentials. Keep every branch,
+# tag and default rule scanned; never replace these with path or rule ignores.
+54ece01be80c6dfb552eb9fc31a6455011fda1a2:mobile/ios/ZerusKit/Tests/ZerusKitTests/TasksPresentationTests.swift:generic-api-key:148
+54ece01be80c6dfb552eb9fc31a6455011fda1a2:mobile/android/app/src/test/java/app/zerus/mobile/TasksPresentationTest.kt:generic-api-key:134

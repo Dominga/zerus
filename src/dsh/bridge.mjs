@@ -30,25 +30,27 @@ export function apply(ctx, config) {
   const owned = new Map(), opening = new Map(), questions = new Map();
   const generation = randomUUID();
   const shellContext = new AsyncLocalStorage(), shellCalls = new Map(), jobCalls = new Map();
+  // Windows composes the official pwsh tools instead of bash; both run shell jobs.
+  const shellTools = new Set(['bash', 'pwsh']);
   const jobRegistry = ctx.get('jobs');
   if (jobRegistry) ctx.on('dispose',jobRegistry.events.subscribe({owners:'scope'},event => {
     const call = shellContext.getStore();
-    if (event.type === 'registered' && event.job.kind === 'bash' && call?.owner === event.job.owner) {
+    if (event.type === 'registered' && shellTools.has(event.job.kind) && call?.owner === event.job.owner) {
       call.jobId=event.job.id;jobCalls.set(event.job.id,call);
     }
     if (event.type === 'removed') jobCalls.delete(event.job.id);
   }));
   ctx.on('tools/execute',async (exec,next) => {
-    if (['bash', 'pwsh'].includes(exec.name)) {
-      const refused = checkCommand(exec.arguments?.command, os.homedir());
-      if (refused) {
-        const { message } = refused;
-        return {content: [{type: 'text', text: 'Error: ' + message}], isError: true,
-          error: {message, info: {name: 'CommandGuardError', code: 'HGS_COMMAND_GUARD'}}};
-      }
+    if (!shellTools.has(exec.name)) return next();
+    const refused = checkCommand(exec.arguments?.command, os.homedir());
+    if (refused) {
+      const { message } = refused;
+      return {content: [{type: 'text', text: 'Error: ' + message}], isError: true,
+        error: {message, info: {name: 'CommandGuardError', code: 'HGS_COMMAND_GUARD'}}};
     }
-    if (exec.name !== 'bash' || !exec.agent?.session?.id) return next();
-    const call={callId:exec.callId,owner:exec.agent.session.id,command:String(exec.arguments?.command ?? '').slice(0,16000),
+    if (!exec.agent?.session?.id) return next();
+    const full=String(exec.arguments?.command ?? '');
+    const call={callId:exec.callId,owner:exec.agent.session.id,command:full.slice(0,16000),exact:full.length<=16000,
       cwd:exec.arguments?.workdir?.slice(0,4096),startedAt:Date.now(),status:'running'};
     const key=JSON.stringify([call.owner,call.callId]);shellCalls.set(key,call);
     while(shellCalls.size>512)shellCalls.delete(shellCalls.keys().next().value);
@@ -186,7 +188,8 @@ export function apply(ctx, config) {
     return agent;
   };
   const publicQuestions = sessionId => [...questions.values()].filter(q => q.sessionId === sessionId)
-    .map(({ id, items, approval }) => ({ id, questions: items, approval: Boolean(approval) }));
+    .map(({ id, items, approval, tool, command }) => ({ id, questions: items, approval: Boolean(approval),
+      ...(tool ? { tool } : {}), ...(command === undefined ? {} : { command }) }));
   // A live request is the only authority for answering. Disconnecting HGS does
   // not answer, dismiss, or approve it. Native cancellation releases the wait.
   ctx.on('user-questions/request', (request, next) => {
@@ -217,7 +220,11 @@ export function apply(ctx, config) {
         questions.delete(id); request.signal?.removeEventListener('abort', abort);
         resolve(answer.answers[0].selected[0] === 'Allow once' ? 'allowed-once' : 'rejected');
       };
-      questions.set(id, { id, sessionId, approval: true, settle, items: [{ id: 'decision',
+      // A team's safe actions match the exact shell command of this call only:
+      // one Zerus cannot tie to the call, or cut short, is never shown here.
+      const call = request.callId ? shellCalls.get(JSON.stringify([sessionId, request.callId])) : undefined;
+      const command = call?.exact ? call.command : undefined;
+      questions.set(id, { id, sessionId, approval: true, settle, tool: request.toolName, command, items: [{ id: 'decision',
         header: 'Approval required', question: `Allow ${request.toolName}?`, detail: request.reason ?? request.displayReason?.en ?? '',
         options: [{ label: 'Allow once' }, { label: 'Reject' }] }] });
       request.signal?.addEventListener('abort', abort, { once: true });
@@ -317,7 +324,7 @@ export function apply(ctx, config) {
     const jobs = ctx.get('jobs');
     return { generation, baseline, page,
       lifecycleActions: agentId ? [] : ["rename", ...(!parentLive ? ["resume", "forget"] : owned.get(sessionId)?.agent === parentLive ? [...(lifecycleIdle ? ["pause"] : []), "forget"] : [])],
-      jobs: jobs && request.includeProcesses !== false ? jobOwners.flatMap(owner => jobs.list(owner).filter(job => job.kind === 'bash' && job.owner === owner)
+      jobs: jobs && request.includeProcesses !== false ? jobOwners.flatMap(owner => jobs.list(owner).filter(job => shellTools.has(job.kind) && job.owner === owner)
         .map(job => ({ ...job, callId:jobCalls.get(job.id)?.callId, controllable: owned.has(sessionId) && Boolean(ctx.agents.get(owner)) }))) : undefined,
       shellCalls:request.includeProcesses !== false ? [...shellCalls.values()].filter(call=>jobOwners.includes(call.owner)) : undefined,
       childMode: child?.mode, childSendSupported: !unstarted && child?.mode === 'continuable' && Boolean(parentLive), goal,

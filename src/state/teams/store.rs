@@ -41,6 +41,18 @@ pub(crate) fn canonical_uuid(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok_and(|id| !id.is_nil() && id.to_string() == value)
 }
 
+/// U20: a member's write the sandbox blocks says what to do, not a bare SQLite
+/// error. Everything else is passed through unchanged.
+pub(crate) fn write_error(error: impl std::fmt::Display) -> anyhow::Error {
+    let text = error.to_string();
+    if text.contains("readonly database") || text.contains("read-only database") {
+        return anyhow::anyhow!(
+            "the sandbox blocks the team store: ask for permission to run hgs team report (or ask/commit), then retry"
+        );
+    }
+    anyhow::anyhow!(text)
+}
+
 /// A member in a sandbox runs at Low integrity (DeepSeek's confined shell),
 /// which may not write files of the usual Medium label: its `hgs team
 /// report` could not record the report. The team folder and what it holds
@@ -121,6 +133,34 @@ impl Store {
         )?;
         let rows = statement.query_map(params![include_archived, limit], |row| row.get::<_, String>(0))?;
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    /// The teams that still run: Planning, Running or Paused, most recently
+    /// changed first, at most `limit`. Uses the (status, updated) index, so a
+    /// finished team's status never reads every team (C1).
+    pub(crate) fn active_teams(&self, limit: i64) -> anyhow::Result<Vec<Team>> {
+        let mut statement = self.db.prepare(
+            "SELECT payload FROM teams WHERE status IN ('planning','running','paused') ORDER BY updated DESC LIMIT ?1",
+        )?;
+        let rows = statement.query_map(params![limit], |row| row.get::<_, String>(0))?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    /// The stored receipt of an identical request, read only: a retry returns
+    /// it before the request does any outside work (L4).
+    pub(crate) fn receipt(&self, id: &str, input: &Value) -> anyhow::Result<Option<Value>> {
+        ensure!(canonical_uuid(id), "A canonical request_id is required");
+        let stored: Option<(String, String)> = self
+            .db
+            .query_row("SELECT digest,receipt FROM operations WHERE id=?1", params![id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()?;
+        match stored {
+            None => Ok(None),
+            Some((digest_text, receipt)) => {
+                ensure!(digest_text == digest(input), "This request_id was already used for another request");
+                Ok(Some(serde_json::from_str(&receipt)?))
+            }
+        }
     }
 
     /// A page of one team's feed, newest first; `before` is the previous page's
@@ -258,7 +298,16 @@ fn record(transaction: &rusqlite::Transaction, id: &str, input: &Value, receipt:
 
 #[cfg(test)]
 mod tests {
+    use super::super::model::{TeamStatus};
     use super::*;
+
+    #[test]
+    fn a_sandbox_blocked_write_says_what_to_do() {
+        let error = write_error("attempt to write a readonly database").to_string();
+        assert!(error.contains("the sandbox blocks the team store"), "{error}");
+        assert!(error.contains("hgs team report"), "{error}");
+        assert_eq!(write_error("disk I/O error").to_string(), "disk I/O error");
+    }
 
     fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
@@ -279,6 +328,161 @@ mod tests {
         assert!(store.create(REQUEST, &json!({"name":"Other"}), team("t2"), vec![]).is_err());
         assert!(store.create("not-a-uuid", &input, team("t3"), vec![]).is_err());
         assert_eq!(store.load("t1").unwrap().unwrap().revision, 1);
+    }
+
+    #[test]
+    fn the_active_teams_query_is_bounded() {
+        let (_dir, mut store) = store();
+        for n in 0..12u32 {
+            let mut t = team(&format!("t{n}"));
+            t.status = if n % 4 == 0 { TeamStatus::Running } else { TeamStatus::Done };
+            let request = format!("00000000-0000-4000-8000-{n:012}");
+            store.create(&request, &json!({}), t, vec![]).unwrap();
+        }
+        // Only the three running teams, never the nine done ones, and at most
+        // the requested limit (C1).
+        let active = store.active_teams(1000).unwrap();
+        assert_eq!(active.len(), 3);
+        assert!(active.iter().all(|team| team.status == TeamStatus::Running));
+        assert_eq!(store.active_teams(2).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_receipt_is_read_before_the_request_runs() {
+        let (_dir, mut store) = store();
+        store.create(REQUEST, &json!({"name":"Checkout"}), team("t1"), vec![]).unwrap();
+        assert_eq!(store.receipt(REQUEST, &json!({"name":"Checkout"})).unwrap().unwrap()["status"], "created");
+        assert!(store.receipt("22222222-2222-4222-8222-222222222222", &json!({})).unwrap().is_none());
+        // The same id with another request is refused, as a mutation would.
+        assert!(store.receipt(REQUEST, &json!({"name":"Other"})).is_err());
+    }
+
+    #[test]
+    fn an_extend_replay_returns_the_first_receipt() {
+        use super::super::model::{Member, TeamStatus};
+        use super::super::ops::{self, Actor};
+        use std::collections::BTreeSet;
+        let (_dir, mut store) = store();
+        let mut team = team("t1");
+        team.status = TeamStatus::Running;
+        team.members = vec![
+            Member { id: "lead".into(), agent: "claude".into(), ..Default::default() },
+            Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), ..Default::default() },
+        ];
+        store.create(REQUEST, &json!({}), team, vec![]).unwrap();
+        const EXTEND: &str = "22222222-2222-4222-8222-222222222222";
+        let input = json!({"tasks":[{"id":1,"title":"Fix","assignee":"dev"}]});
+        let extend = |store: &mut Store, input: &Value| {
+            store.mutate(Some((EXTEND, input)), "t1", None, |team, events| {
+                ops::apply(team, "extend", input, &Actor::Member("lead".into()), &BTreeSet::new(), events)
+            })
+        };
+        let first = extend(&mut store, &input).unwrap();
+        assert_eq!(first["status"], "added");
+        let again = extend(&mut store, &input).unwrap();
+        assert_eq!(again, first);
+        assert_eq!(again["revision"], json!(2));
+        assert_eq!(store.load("t1").unwrap().unwrap().phases.len(), 1);
+        assert!(extend(&mut store, &json!({"tasks":[{"id":1,"title":"Other","assignee":"dev"}]})).is_err());
+    }
+
+    #[test]
+    fn the_new_attempt_fields_survive_the_store_and_a_replay() {
+        use super::super::model::{
+            Attempt, AttemptState, Hold, Member, ReplacedReport, Report, Settings, Task, TaskStatus, TeamStatus,
+        };
+        use super::super::ops::{self, Actor};
+        use std::collections::BTreeSet;
+        let (_dir, mut store) = store();
+        let mut stored = team("t1");
+        stored.status = TeamStatus::Running;
+        stored.settings = Settings { start_timeout_seconds: 300, ..Default::default() };
+        stored.members = vec![
+            Member { id: "lead".into(), agent: "claude".into(), ..Default::default() },
+            Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), ..Default::default() },
+        ];
+        stored.tasks = vec![
+            Task {
+                id: 1,
+                title: "API".into(),
+                assignee: "dev".into(),
+                status: TaskStatus::InProgress,
+                attempts: vec![
+                    Attempt {
+                        n: 1,
+                        id: "00000000-0000-4000-8000-000000000001".into(),
+                        member: "dev".into(),
+                        state: AttemptState::Reported,
+                        sent_at: 1.0,
+                        delivered_at: Some(2.0),
+                        started_at: Some(3.0),
+                        start_warned: true,
+                        turn_ended_at: Some(4.0),
+                        turn_reply: "reply-7".into(),
+                        report: Some(Report {
+                            text: "Done".into(),
+                            at: 6.0,
+                            captured: true,
+                            replaced: vec![ReplacedReport { text: "Building".into(), at: 5.5 }],
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    Attempt {
+                        n: 2,
+                        id: "00000000-0000-4000-8000-000000000002".into(),
+                        member: "dev".into(),
+                        state: AttemptState::Delivered,
+                        sent_at: 8.0,
+                        delivered_at: Some(9.0),
+                        started_at: Some(10.0),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            Task {
+                id: 2,
+                title: "Tests".into(),
+                assignee: "dev".into(),
+                status: TaskStatus::Pending,
+                hold: Some(Hold { by: "Lead".into(), at: 7.0, reason: "Busy with #1".into() }),
+                ..Default::default()
+            },
+        ];
+        store.create(REQUEST, &json!({}), stored.clone(), vec![]).unwrap();
+        let loaded = store.load("t1").unwrap().unwrap();
+        assert_eq!(loaded.tasks, stored.tasks);
+        assert_eq!(loaded.settings.start_timeout_seconds, 300);
+        assert_eq!(loaded.tasks[1].hold.as_ref().map(|hold| hold.reason.as_str()), Some("Busy with #1"));
+
+        // A member's question, replayed with the same request: one receipt.
+        const ASK: &str = "33333333-3333-4333-8333-333333333333";
+        let input = json!({"text":"Must I keep the old JSON field?"});
+        let ask = |store: &mut Store, input: &Value| {
+            store.mutate(Some((ASK, input)), "t1", None, |team, events| {
+                ops::apply(team, "ask", input, &Actor::Member("dev".into()), &BTreeSet::new(), events)
+            })
+        };
+        let first = ask(&mut store, &input).unwrap();
+        assert_eq!((first["status"].as_str(), first["question"].as_str()), (Some("asked"), Some("q1")));
+        assert_eq!((first["task"].as_u64(), first["attempt"].as_u64()), (Some(1), Some(2)));
+        assert_eq!(ask(&mut store, &input).unwrap(), first);
+        let loaded = store.load("t1").unwrap().unwrap();
+        let questions = &loaded.tasks[0].attempts[1].questions;
+        assert_eq!(questions.len(), 1);
+        assert_eq!(
+            (questions[0].id.as_str(), questions[0].text.as_str(), questions[0].answered_at),
+            ("q1", "Must I keep the old JSON field?", None)
+        );
+        // The feed has the question once, not once per replay.
+        let feed = store.events("t1", None, PAGE).unwrap();
+        let asked: Vec<&Value> =
+            feed["items"].as_array().unwrap().iter().filter(|item| item["kind"] == "question_asked").collect();
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0]["seq"].as_i64().is_some());
+        assert_eq!(asked[0]["detail"]["question"], json!("q1"));
+        assert_eq!(loaded.revision, 2);
     }
 
     #[test]

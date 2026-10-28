@@ -27,7 +27,7 @@ protocol later; no Android-specific object is required to operate a session.
 
 ```mermaid
 flowchart LR
-    A[Android client] -->|HTTPS, device credential| R[Zerus relay]
+    A[Android client] -->|HTTPS + WebSocket hints, device credential| R[Zerus relay]
     C[Computer connector] -->|Outbound HTTPS, node credential| R
     C -->|Fixed argv and JSON stdin| H[hgs]
     H --> N[Existing native sessions]
@@ -45,9 +45,16 @@ Requiring it on every phone would add VPN provisioning and would not solve
 Android background wake delivery. The mobile protocol therefore treats Nebula
 as an optional network, independent of pairing and push.
 
-HTTP long polling is used for commands and events. It works through ordinary
-HTTPS reverse proxies and provides explicit durable claim semantics. It can
-later be replaced with a WebSocket transport without changing command identity.
+HTTP long polling carries connector commands and ordered generic events, with
+explicit durable claim and event-cursor semantics. Where the relay advertises
+`encrypted_transport.result_stream`, Android uses one authenticated WebSocket
+to watch pending receipt IDs. A ready hint triggers the ordinary encrypted
+receipt fetch immediately; fresh membership, signatures, original request and
+route binding still precede decryption and journal settlement. Re-registering
+the same IDs recovers committed results after a missed notification or socket
+disconnect, without reposting or reexecuting a command. Old servers and failed
+proxy upgrades retain bounded HTTP receipt polling. Background push remains the
+wake path; this does not introduce a background socket keepalive service.
 
 ### Sharing boundary: paired computer and direct peers
 

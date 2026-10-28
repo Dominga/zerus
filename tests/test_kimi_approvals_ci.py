@@ -21,9 +21,9 @@ spec.loader.exec_module(gate)
 
 
 class ApprovalGateControls(unittest.TestCase):
-    def test_one_latest_release_runs_seven_cases_or_discovery_fails_without_fallback(self):
+    def test_one_latest_release_runs_all_selected_cases_or_discovery_fails_without_fallback(self):
         for system, platform in (('posix', 'darwin-arm64'), ('nt', 'win32-x64')):
-            selected = gate.methods(platform)
+            selected = gate.selected_methods(platform)
             for failed in (False, True):
                 with self.subTest(system=system, discovery_failed=failed), tempfile.TemporaryDirectory(prefix='kimi-approval-selection-') as directory:
                     root = Path(directory).resolve(); runtime = root / 'runtime'; runtime.mkdir()
@@ -63,8 +63,11 @@ class ApprovalGateControls(unittest.TestCase):
                             events.append('oracle')
                             return
                         self.assertEqual(events, ['oracle', 'stage'] if system == 'nt' else ['stage'])
+                        plan = json.loads((evidence / 'plan.json').read_text())
+                        self.assertEqual((plan['native_cases'], plan['mac_shim_compiles'], tuple(plan['methods'])),
+                                         (12, 12 if system == 'posix' else 0, selected))
                         reservation = json.loads((evidence / 'reservation.json').read_text())
-                        self.assertEqual((reservation['state'], reservation['versions'], reservation['native_cases']), ('SPENT', ['2.3.1'], 7))
+                        self.assertEqual((reservation['state'], reservation['versions'], reservation['native_cases']), ('SPENT', ['2.3.1'], 12))
                         self.assertEqual((version, methods), ('2.3.1', selected))
                         self.assertIn('HGS_KIMI_TEST_RECORD', env)
                         events.append('native')
@@ -77,7 +80,7 @@ class ApprovalGateControls(unittest.TestCase):
                                   '--tmux', str(tmux), '--conpty', str(conpty), '--git-bash', str(git / 'bin/bash.exe'), '--output', str(output)]), \
                             mock.patch.object(gate, 'os', subject_os), \
                             mock.patch.object(gate, 'ROOT', root), mock.patch.object(gate, 'target', return_value=platform), \
-                            mock.patch.object(gate, 'methods', return_value=selected), \
+                            mock.patch.object(gate, 'selected_methods', return_value=selected), \
                             mock.patch.object(gate.tempfile, 'mkdtemp', return_value=str(runtime)), \
                             mock.patch.object(gate.subprocess, 'check_output', return_value='a' * 40), \
                             mock.patch.object(gate.retained, 'source_map', return_value={}), \
@@ -94,7 +97,7 @@ class ApprovalGateControls(unittest.TestCase):
                         choose.assert_called_once()
                     self.assertEqual(events, (['oracle'] if system == 'nt' else []) + ['stage'] + ([] if failed else ['native']))
                     receipt = json.loads((output / 'evidence/receipt.json').read_text())
-                    self.assertEqual((receipt['outcome'], receipt['native_cases']), ('FAIL', None) if failed else ('PASS', 7))
+                    self.assertEqual((receipt['outcome'], receipt['native_cases']), ('FAIL', None) if failed else ('PASS', 12))
 
     def test_both_platforms_keep_the_exact_seven_semantic_names(self):
         for platform in ('darwin-arm64', 'win32-x64'):
@@ -102,14 +105,50 @@ class ApprovalGateControls(unittest.TestCase):
             self.assertEqual(len(methods), 7)
             self.assertEqual(tuple(item.rsplit('.', 1)[-1] for item in methods), gate.NAMES)
 
+    def test_both_platforms_keep_the_exact_goal_names(self):
+        for platform in ('darwin-arm64', 'win32-x64'):
+            methods = gate.goal_methods(platform)
+            self.assertEqual(len(methods), 4)
+            self.assertEqual(tuple(item.rsplit('.', 1)[-1] for item in methods), gate.GOAL_NAMES)
+
+    def test_a_missing_goal_method_fails_selection(self):
+        source = (ROOT / 'tests/test_kimi_approvals_native.py').read_text(encoding='utf-8')
+        missing = '    def test_goal_yolo_cancel_does_not_start(self):\n'
+        self.assertIn(missing, source)
+        with tempfile.TemporaryDirectory(prefix='kimi-goal-selection-') as directory:
+            root = Path(directory)
+            path = root / 'tests/test_kimi_approvals_native.py'
+            path.parent.mkdir()
+            path.write_text(source.replace(missing, '    def removed_goal(self):\n', 1), encoding='utf-8')
+            with mock.patch.object(gate, 'ROOT', root), self.assertRaisesRegex(ValueError, 'exact four goal'):
+                gate.goal_methods('darwin-arm64')
+
+    def test_both_platforms_keep_the_exact_plan_name(self):
+        for platform in ('darwin-arm64', 'win32-x64'):
+            methods = gate.plan_methods(platform)
+            self.assertEqual(len(methods), 1)
+            self.assertEqual(tuple(item.rsplit('.', 1)[-1] for item in methods), gate.PLAN_NAMES)
+
+    def test_a_missing_plan_method_fails_selection(self):
+        source = (ROOT / 'tests/test_kimi_approvals_native.py').read_text(encoding='utf-8')
+        missing = '    def test_plan_review_approve(self):\n'
+        self.assertIn(missing, source)
+        with tempfile.TemporaryDirectory(prefix='kimi-plan-selection-') as directory:
+            root = Path(directory)
+            path = root / 'tests/test_kimi_approvals_native.py'
+            path.parent.mkdir()
+            path.write_text(source.replace(missing, '    def removed_plan(self):\n', 1), encoding='utf-8')
+            with mock.patch.object(gate, 'ROOT', root), self.assertRaisesRegex(ValueError, 'exact one plan'):
+                gate.plan_methods('darwin-arm64')
+
     def test_a_partial_or_skipped_result_never_qualifies(self):
-        methods = gate.methods('win32-x64')
-        good = dict(tests=7, started=list(methods), completed=list(methods), failures=0, errors=0, skipped=0,
+        methods = gate.selected_methods('win32-x64')
+        good = dict(tests=12, started=list(methods), completed=list(methods), failures=0, errors=0, skipped=0,
                     expected_failures=0, unexpected_successes=0)
         self.assertTrue(gate.qualifies(good, methods))
         for key in ('failures', 'errors', 'skipped', 'expected_failures', 'unexpected_successes'):
             self.assertFalse(gate.qualifies(dict(good, **{key: 1}), methods), key)
-        for value in (6, True, '7'):
+        for value in (11, True, '12'):
             self.assertFalse(gate.qualifies(dict(good, tests=value), methods))
         self.assertFalse(gate.qualifies(dict(good, completed=list(methods[:-1])), methods))
         self.assertFalse(gate.qualifies(dict(good, started=list(reversed(methods))), methods))
@@ -220,6 +259,10 @@ class ApprovalGateControls(unittest.TestCase):
         self.assertEqual(source.count('${{ github.event.pull_request.head.sha || github.sha }}'), 2)
         self.assertNotIn("'src/**'", source)
         self.assertNotIn("'tests/**'", source)
+        for path in ('src/state/kimi_approval.rs', 'src/state/kimi_goal.rs', 'src/state/kimi_plan.rs',
+                     'src/state/questions.rs', 'src/state/question_terminal.rs', 'src/state/mod.rs'):
+            self.assertIn("- '" + path + "'", source)
+        self.assertEqual(source.count('seven Bash, four CreateGoal and one ExitPlanMode approval cases'), 2)
         self.assertNotIn('pull_request_target:', source)
         self.assertNotIn('self-hosted', source)
         self.assertIn('os: ["macos-15", "windows-2025"]', source)

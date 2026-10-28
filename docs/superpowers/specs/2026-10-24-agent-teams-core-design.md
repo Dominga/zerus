@@ -2,6 +2,9 @@
 
 WhiteWh fork. Epic `zerus-crjf`, milestone `zerus-crjf.1`. UI and risk analysis:
 `docs/superpowers/specs/2026-10-23-agent-teams-ui.ru.md`; design package: `design/agent-teams/`.
+Phases (`extend`, `approve-phase`, `discard-phase`, `finish`), pinned tasks, waiting for the lead and the hand-off's
+"From dependencies" section: `docs/superpowers/specs/2026-10-25-team-phases.md`, which supersedes this spec where they
+differ (a team no longer becomes Done by itself).
 
 ## Owner decisions (2026-10-24)
 

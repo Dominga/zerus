@@ -76,8 +76,32 @@ inline QStringList decision(const QJsonObject &row) {
         const auto note = value.toObject();
         if (note["code"] != "ignored_data") lines << note["message"].toString();
     }
+    const auto unreadable = row["unreadable_processes"].toArray();
+    for (int i = 0; i < qMin(5, unreadable.size()); ++i) {
+        const auto process = unreadable[i].toObject();
+        lines << QObject::tr("Cannot check: %1 (PID %2)").arg(process["command"].toString()).arg(process["pid"].toInt());
+    }
+    if (unreadable.size() > 5) lines << QObject::tr("%1 more processes could not be checked.").arg(unreadable.size() - 5);
     lines.removeDuplicates();
     return lines;
+}
+inline bool processReviewable(const QJsonObject &row) {
+    const auto reasons = row["reasons"].toArray();
+    return row["kind"] == "linked" && row["verdict"] == "blocked" && reasons.size() == 1
+        && reasons[0].toObject()["code"] == "processes_unavailable"
+        && !row["fingerprint"].toString().isEmpty() && !row["process_fingerprint"].toString().isEmpty()
+        && (!localData(row) || !row["ignored_fingerprint"].toString().isEmpty());
+}
+inline bool exitCleanupReady(const QJsonObject &row) {
+    const auto kind=row["integration"].toObject()["kind"].toString();
+    return row["kind"]=="linked" && row["zerus_owned"]==true && row["archive_restore_ready"]==true
+        && (row["verdict"]=="ready" || row["verdict"]=="review")
+        && !row["fingerprint"].toString().isEmpty() && row["reasons"].isArray() && row["reasons"].toArray().isEmpty()
+        && row["changes"].toInt(-1)==0 && row["untracked"].toInt(-1)==0
+        && row["disk_complete"]==true && row["ignored_complete"]==true
+        && (kind=="ancestor" || kind=="same_tree" || kind=="equivalent_patches")
+        && row["ignored_count"].toInt(-1)>=0
+        && (row["ignored_count"].toInt(-1)==0 || row["generated_files_only"]==true);
 }
 inline bool removable(const QJsonObject &row) {
     return row["kind"] == "linked" && (row["verdict"] == "ready" || row["verdict"] == "review" || row["verdict"] == "missing")

@@ -1,6 +1,6 @@
 //! Unix (Linux and macOS) process, terminal, clipboard and file primitives.
 use super::{
-    available, capture, silent, ExitInfo, FileIdentity, Presence, Private, ProcessIdentity,
+    available, capture, silent, ExitInfo, FileIdentity, Presence, Private, PrivateRepair, ProcessIdentity,
     ProcessImage, ProcessRow, RunError,
 };
 use crate::{
@@ -161,6 +161,15 @@ pub fn private_dir(path: &Path) -> io::Result<()> {
         .mode(0o700)
         .create(path)
 }
+/// Create a directory and its missing parents, each new one owner-only, for a
+/// store whose privacy is checked (#526: on Windows each gets a protected DACL).
+pub fn owner_only_dir(path: &Path) -> io::Result<()> {
+    private_dir(path)
+}
+/// Owner-only access for a file this process has just created.
+pub fn owner_only_file(path: &Path) -> io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
 /// Whether `path` itself (a final symbolic link is not followed) is the
 /// expected kind of entry, owned by this user, closed to everyone else and,
 /// for a file, linked once.
@@ -177,6 +186,41 @@ fn private_metadata(metadata: &fs::Metadata, kind: Private) -> bool {
         Private::File => metadata.is_file() && metadata.nlink() == 1,
     }) && metadata.uid() == unsafe { libc::geteuid() }
         && metadata.mode() & 0o077 == 0
+}
+/// #569: makes the entry at `path` private when it is this user's and only too
+/// open: its mode becomes 0600 (a file) or 0700 (a folder), set through a
+/// descriptor that never follows a link. Another owner, a link, another kind
+/// of entry or a second link is refused and the entry is left as it is.
+pub fn repair_private(path: &Path, kind: Private) -> io::Result<PrivateRepair> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(PrivateRepair::Refused("it is a symbolic link".into()));
+    }
+    match kind {
+        Private::Directory if !metadata.is_dir() => return Ok(PrivateRepair::Refused("it is not a folder".into())),
+        Private::File if !metadata.is_file() => return Ok(PrivateRepair::Refused("it is not a regular file".into())),
+        Private::File if metadata.nlink() != 1 => {
+            return Ok(PrivateRepair::Refused(format!("the file has {} links", metadata.nlink())));
+        }
+        _ => {}
+    }
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Ok(PrivateRepair::Refused(format!("it is owned by uid {}", metadata.uid())));
+    }
+    let mode = metadata.mode() & 0o7777;
+    if mode & 0o077 == 0 {
+        return Ok(PrivateRepair::Private);
+    }
+    let wanted = if kind == Private::Directory { 0o700 } else { 0o600 };
+    let flags = libc::O_NOFOLLOW | libc::O_NONBLOCK | if kind == Private::Directory { libc::O_DIRECTORY } else { 0 };
+    let entry = fs::OpenOptions::new().read(true).custom_flags(flags).open(path)?;
+    // The entry opened is the one checked: never another one renamed into place.
+    let opened = entry.metadata()?;
+    if opened.ino() != metadata.ino() || opened.dev() != metadata.dev() {
+        return Ok(PrivateRepair::Refused("it changed while it was checked".into()));
+    }
+    entry.set_permissions(fs::Permissions::from_mode(wanted))?;
+    Ok(PrivateRepair::Repaired(vec![format!("mode {mode:04o} (now {wanted:04o})")]))
 }
 /// Create files owner-only.
 pub fn private_open(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
@@ -602,13 +646,11 @@ pub fn parent_and_name(pid: u32) -> io::Result<(Option<u32>, Option<String>)> {
     ))
 }
 
-/// Every other process's current directory and command name.
-#[cfg(target_os = "linux")]
+/// Read-only compatibility fixture; cleanup uses the strict sampler below.
+#[cfg(all(test, target_os = "linux"))]
 pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
     let own = std::process::id();
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return Ok(Vec::new());
-    };
+    let entries = fs::read_dir("/proc").map_err(|e|format!("Cannot inspect running processes: {e}"))?;
     Ok(entries
         .flatten()
         .filter_map(|entry| {
@@ -624,64 +666,182 @@ pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>,
         })
         .collect())
 }
-#[cfg(target_os = "macos")]
-pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
-    use std::os::unix::ffi::OsStrExt;
-    let own = std::process::id();
-    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
-    if count <= 0 {
-        return Ok(Vec::new());
-    }
-    let mut pids = vec![0 as libc::c_int; count as usize + 64];
-    let size = (pids.len() * std::mem::size_of::<libc::c_int>()) as libc::c_int;
-    let found = unsafe { libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void, size) };
-    if found <= 0 {
-        return Ok(Vec::new());
-    }
-    pids.truncate((found as usize).min(pids.len()));
-    Ok(pids
-        .into_iter()
-        .filter(|pid| *pid > 0 && *pid as u32 != own)
-        .filter_map(|pid| {
-            let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
-            let size = std::mem::size_of_val(&info) as libc::c_int;
-            let read = unsafe {
-                libc::proc_pidinfo(
-                    pid,
-                    libc::PROC_PIDVNODEPATHINFO,
-                    0,
-                    &mut info as *mut _ as *mut libc::c_void,
-                    size,
-                )
-            };
-            if read != size {
-                return None;
-            }
-            let path = &info.pvi_cdir.vip_path;
-            let bytes = unsafe {
-                std::slice::from_raw_parts(path.as_ptr() as *const u8, std::mem::size_of_val(path))
-            };
-            let end = bytes.iter().position(|b| *b == 0)?;
-            if end == 0 {
-                return None;
-            }
-            let cwd = PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..end]));
-            let mut name = [0u8; 256];
-            let length = unsafe {
-                libc::proc_name(
-                    pid,
-                    name.as_mut_ptr() as *mut libc::c_void,
-                    name.len() as u32,
-                )
-            };
-            let name = String::from_utf8_lossy(&name[..length.clamp(0, 256) as usize]).into_owned();
-            Some((pid as u32, cwd, name))
-        })
-        .collect())
-}
 /// Without a way to read other processes' directories, nothing may count as unused.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(test, not(any(target_os = "linux", target_os = "macos"))))]
 pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
+    Err("Running processes cannot be inspected on this computer".into())
+}
+
+/// Automatic cleanup needs a complete bounded sample of this user's live
+/// processes. A failed cwd/executable read is unknown, never evidence of disuse.
+#[cfg(target_os = "linux")]
+pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<super::WorktreeProcesses, String> {
+    use std::io::Read;
+    let deadline = deadline.min(std::time::Instant::now() + std::time::Duration::from_secs(2));
+    let uid = unsafe { libc::getuid() };
+    let error = || "Running process coverage is incomplete; review the worktree manually".to_owned();
+    fn read(path: &Path) -> std::io::Result<String> {
+        let mut bytes=Vec::new();
+        fs::File::open(path)?.take(65537).read_to_end(&mut bytes)?;
+        if bytes.len()>65536 { return Err(std::io::Error::other("process metadata exceeds its bound")); }
+        String::from_utf8(bytes).map_err(std::io::Error::other)
+    }
+    fn identity(path: &Path) -> std::io::Result<(String,bool,u32)> {
+        let raw=read(&path.join("stat"))?;
+        let fields:Vec<_>=raw.rsplit_once(") ").ok_or_else(||std::io::Error::other("invalid process identity"))?.1.split_whitespace().collect();
+        let start=fields.get(19).ok_or_else(||std::io::Error::other("invalid process start"))?;
+        let parent=fields.get(1).ok_or_else(||std::io::Error::other("invalid process parent"))?
+            .parse().map_err(std::io::Error::other)?;
+        Ok(((*start).to_owned(),matches!(fields.first(),Some(&"Z"|&"X")),parent))
+    }
+    fn ancestors(deadline: std::time::Instant) -> std::io::Result<std::collections::BTreeMap<u32,String>> {
+        let mut rows=std::collections::BTreeMap::new();
+        let mut pid=std::process::id();
+        while pid!=0 {
+            if rows.len()>=128 || std::time::Instant::now()>=deadline || rows.contains_key(&pid) {
+                return Err(std::io::Error::other("incomplete invocation ancestry"));
+            }
+            let (start,exited,parent)=identity(&PathBuf::from(format!("/proc/{pid}")))?;
+            if exited {return Err(std::io::Error::other("exited invocation ancestor"));}
+            rows.insert(pid,start);pid=parent;
+        }
+        Ok(rows)
+    }
+    let invocation=ancestors(deadline).map_err(|_|error())?;
+    let entries=fs::read_dir("/proc").map_err(|_|error())?;
+    let boot=read(Path::new("/proc/sys/kernel/random/boot_id")).map_err(|_|error())?;
+    let mut rows=super::WorktreeProcesses::default();
+    for (count,entry) in entries.enumerate() {
+        if count>=32768 || std::time::Instant::now()>=deadline { return Err(error()); }
+        let entry=entry.map_err(|_|error())?;
+        let Some(pid)=entry.file_name().to_str().and_then(|s|s.parse::<u32>().ok()) else {continue};
+        let path=entry.path();
+        let status=match read(&path.join("status")) {
+            Ok(status)=>status,
+            Err(e) if e.kind()==std::io::ErrorKind::NotFound=>continue,
+            Err(_)=>return Err(error()),
+        };
+        let uids=status.lines().find_map(|line|line.strip_prefix("Uid:")).ok_or_else(error)?
+            .split_whitespace().map(str::parse::<u32>).collect::<std::result::Result<Vec<_>,_>>().map_err(|_|error())?;
+        if uids.len()!=4 {return Err(error());}
+        if !uids.contains(&uid) {continue;}
+        let before=match identity(&path) {
+            Ok(before)=>before,
+            Err(e) if e.kind()==std::io::ErrorKind::NotFound=>continue,
+            Err(_)=>return Err(error()),
+        };
+        if before.1 {continue;}
+        let cwd=fs::read_link(path.join("cwd"));
+        let image=fs::read_link(path.join("exe"));
+        let after=match identity(&path) {
+            Ok(after)=>after,
+            Err(e) if e.kind()==std::io::ErrorKind::NotFound=>continue,
+            Err(_)=>return Err(error()),
+        };
+        if after.1 {continue;}
+        if before!=after {return Err(error());}
+        let name=read(&path.join("comm")).map(|s|s.trim().to_owned()).unwrap_or_default();
+        // Only access denials on stable, live, fully identified processes are
+        // reviewable. Timeouts, roster/identity errors and other IO errors stay
+        // hard failures. A readable half still protects its actual worktree.
+        let denied = |value: &std::io::Result<PathBuf>| value.as_ref().is_err_and(|e| e.kind()==std::io::ErrorKind::PermissionDenied);
+        let (cwd_denied,image_denied)=(denied(&cwd),denied(&image));
+        if (cwd.is_err() && !cwd_denied) || (image.is_err() && !image_denied) { return Err(error()); }
+        if cwd_denied || image_denied {
+            rows.unreadable.push(super::UnreadableWorktreeProcess {
+                pid, identity:format!("{}:{}",boot.trim(),before.0), command:name.clone(),
+                cwd:cwd_denied, executable:image_denied,
+                invocation_ancestor:invocation.get(&pid)==Some(&before.0),
+            });
+        }
+        if let Ok(cwd)=cwd { rows.paths.push((pid,cwd,name.clone())); }
+        if let Ok(image)=image { rows.paths.push((pid,image,name)); }
+    }
+    if std::time::Instant::now()>=deadline || ancestors(deadline).map_err(|_|error())?!=invocation {return Err(error());}
+    rows.unreadable.sort_by_key(|row|row.pid);
+    Ok(rows)
+}
+
+#[cfg(target_os = "macos")]
+pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<super::WorktreeProcesses, String> {
+    use std::os::unix::ffi::OsStrExt;
+    let deadline=deadline.min(std::time::Instant::now()+std::time::Duration::from_secs(2));
+    let uid=unsafe {libc::getuid()};
+    let error=|detail:&str|format!("Running process coverage is incomplete: {detail}; review the worktree manually");
+    fn gone(pid:i32)->bool {
+        (unsafe {libc::kill(pid,0)})<0 && std::io::Error::last_os_error().raw_os_error()==Some(libc::ESRCH)
+    }
+    fn identity(pid:i32)->std::io::Result<libc::proc_bsdinfo> {
+        let mut info:libc::proc_bsdinfo=unsafe {std::mem::zeroed()};
+        let size=std::mem::size_of_val(&info) as libc::c_int;
+        let read=unsafe {libc::proc_pidinfo(pid,libc::PROC_PIDTBSDINFO,0,&mut info as *mut _ as *mut libc::c_void,size)};
+        if read!=size {
+            // libproc can return zero for an exited PID without setting errno.
+            // Only an independent ESRCH probe proves absence; stale errno must
+            // never hide an inaccessible live process from the owned roster.
+            return Err(if gone(pid) {std::io::Error::from_raw_os_error(libc::ESRCH)}
+                else {std::io::Error::other("Owned process metadata is unavailable")});
+        }
+        Ok(info)
+    }
+    // Kernel uid-filtered rosters establish ownership before inspection. A
+    // protected foreign process need not disclose BSD info to this user. Both
+    // effective and real uid are required; an unreadable owned process still
+    // makes the sample incomplete. libproc returns bytes, not a PID count.
+    const PROC_UID_ONLY: u32 = 4;
+    const PROC_RUID_ONLY: u32 = 5;
+    let mut pids=std::collections::BTreeSet::new();
+    for kind in [PROC_UID_ONLY, PROC_RUID_ONLY] {
+        let mut buffer=vec![0 as libc::c_int;32768];
+        let bytes=(buffer.len()*std::mem::size_of::<libc::c_int>()) as libc::c_int;
+        let found=unsafe {libc::proc_listpids(kind,uid,buffer.as_mut_ptr() as *mut libc::c_void,bytes)};
+        if found<=0 || found>=bytes || !(found as usize).is_multiple_of(std::mem::size_of::<libc::c_int>()) {return Err(error("the process list could not be verified"));}
+        pids.extend(buffer.into_iter().take(found as usize/std::mem::size_of::<libc::c_int>()).filter(|pid|*pid>0));
+        if pids.len()>=32768 {return Err(error("the process list exceeded its bound"));}
+    }
+    if !pids.contains(&(std::process::id() as libc::c_int)) {return Err(error("the current process is missing from the list"));}
+    let mut rows=Vec::new();
+    for pid in pids.into_iter().filter(|pid|*pid>0) {
+        if std::time::Instant::now()>=deadline {return Err(error("the process check reached its time limit"));}
+        let before=match identity(pid) {
+            Ok(info)=>info,
+            Err(e) if e.raw_os_error()==Some(libc::ESRCH)=>continue,
+            Err(_)=>return Err(error(&format!("process {pid} could not be identified"))),
+        };
+        if before.pbi_pid!=pid as u32 {return Err(error(&format!("process {pid} returned another identity")));}
+        if (before.pbi_uid!=uid && before.pbi_ruid!=uid) || before.pbi_status==libc::SZOMB {continue;}
+        let mut info:libc::proc_vnodepathinfo=unsafe {std::mem::zeroed()};
+        let size=std::mem::size_of_val(&info) as libc::c_int;
+        let read=unsafe {libc::proc_pidinfo(pid,libc::PROC_PIDVNODEPATHINFO,0,&mut info as *mut _ as *mut libc::c_void,size)};
+        let mut image=[0u8;4096];
+        let length=unsafe {libc::proc_pidpath(pid,image.as_mut_ptr() as *mut libc::c_void,image.len() as u32)};
+        let after=match identity(pid) {
+            Ok(info)=>info,
+            Err(e) if e.raw_os_error()==Some(libc::ESRCH)=>continue,
+            Err(_)=>return Err(error(&format!("process {pid} could not be identified"))),
+        };
+        if after.pbi_status==libc::SZOMB {continue;}
+        if after.pbi_pid!=pid as u32 || (before.pbi_start_tvsec,before.pbi_start_tvusec,before.pbi_uid,before.pbi_ruid)!=(after.pbi_start_tvsec,after.pbi_start_tvusec,after.pbi_uid,after.pbi_ruid) {return Err(error(&format!("process {pid} changed while being checked")));}
+        if read!=size || length<=0 {
+            if gone(pid) {continue;}
+            return Err(error(&format!("process {pid}: {} could not be inspected", if read!=size {"its current folder"} else {"its program"})));
+        }
+        let path=&info.pvi_cdir.vip_path;
+        let bytes=unsafe {std::slice::from_raw_parts(path.as_ptr() as *const u8,std::mem::size_of_val(path))};
+        let end=bytes.iter().position(|b|*b==0).filter(|end|*end>0).ok_or_else(||error(&format!("process {pid} returned an unconfirmed path")))?;
+        let image_end=image.iter().position(|b|*b==0).filter(|end|*end>0).ok_or_else(||error(&format!("process {pid} returned an unconfirmed path")))?;
+        let cwd=PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..end]));
+        let image=PathBuf::from(std::ffi::OsStr::from_bytes(&image[..image_end]));
+        let name=unsafe {std::slice::from_raw_parts(before.pbi_comm.as_ptr() as *const u8,before.pbi_comm.len())};
+        let name=String::from_utf8_lossy(&name[..name.iter().position(|b|*b==0).unwrap_or(name.len())]).into_owned();
+        rows.push((pid as u32,cwd,name.clone()));rows.push((pid as u32,image,name));
+    }
+    if std::time::Instant::now()>=deadline {return Err(error("the process check reached its time limit"));}
+    Ok(rows.into())
+}
+
+#[cfg(not(any(target_os = "linux",target_os = "macos")))]
+pub fn worktree_processes(_deadline:std::time::Instant)->std::result::Result<super::WorktreeProcesses,String> {
     Err("Running processes cannot be inspected on this computer".into())
 }
 
@@ -724,6 +884,51 @@ pub struct PinnedProcess {
     #[cfg(target_os = "linux")]
     handle: fs::File,
 }
+
+/// A verified process state. Inspection failure is distinct from confirmed exit.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessState { Running, Stopped, Exited }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn process_state(pid: u32, birth: Option<&str>) -> std::result::Result<ProcessState, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = PathBuf::from(format!("/proc/{pid}"));
+        let read = || -> io::Result<ProcessState> {
+            if fs::metadata(&path)?.uid() != unsafe { libc::geteuid() } {
+                return Err(io::Error::other("Process ownership is unavailable"));
+            }
+            let stat = fs::read_to_string(path.join("stat"))?;
+            let fields: Vec<_> = stat.rsplit_once(')').ok_or_else(|| io::Error::other("Invalid process identity"))?.1.split_whitespace().collect();
+            if fields.len() < 20 { return Err(io::Error::other("Incomplete process identity")); }
+            Ok(if birth.is_some_and(|birth| birth != fields[19]) || matches!(fields[0], "Z" | "X") { ProcessState::Exited }
+                else if matches!(fields[0], "T" | "t") { ProcessState::Stopped } else { ProcessState::Running })
+        };
+        match read() {
+            Ok(state) => Ok(state),
+            Err(error) if error.kind() == io::ErrorKind::NotFound && presence(pid) == Presence::Gone => Ok(ProcessState::Exited),
+            Err(error) => Err(format!("Could not verify PID {pid}: {error}")),
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of_val(&info) as i32;
+        let read = unsafe { libc::proc_pidinfo(pid as i32, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut libc::c_void, size) };
+        if read != size {
+            return if presence(pid) == Presence::Gone { Ok(ProcessState::Exited) }
+                else { Err(format!("Could not verify PID {pid}")) };
+        }
+        if info.pbi_pid != pid || info.pbi_uid != unsafe { libc::geteuid() } {
+            return Err(format!("Could not verify ownership of PID {pid}"));
+        }
+        let current = format!("{}:{}", info.pbi_start_tvsec, info.pbi_start_tvusec);
+        Ok(if birth.is_some_and(|birth| birth != current) || info.pbi_status == libc::SZOMB { ProcessState::Exited }
+            else if info.pbi_status == libc::SSTOP { ProcessState::Stopped } else { ProcessState::Running })
+    }
+}
+
 impl PinnedProcess {
     pub fn pin(pid: u32, birth: &str) -> std::result::Result<Self, String> {
         #[cfg(target_os = "linux")]
@@ -762,7 +967,18 @@ impl PinnedProcess {
     pub fn kill(&self) -> std::result::Result<(), String> {
         self.signal(libc::SIGKILL)
     }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn state(&self) -> std::result::Result<ProcessState, String> {
+        process_state(self.pid, Some(&self.birth))
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn stop(&self) -> std::result::Result<(), String> { self.signal(libc::SIGSTOP) }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn resume(&self) -> std::result::Result<(), String> { self.signal(libc::SIGCONT) }
     fn signal(&self, signal: i32) -> std::result::Result<(), String> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if self.state()? == ProcessState::Exited { return Ok(()); }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         if !self.alive() {
             return Ok(());
         }
@@ -1674,6 +1890,59 @@ pub fn paste(config: &Config, session: &str, pane: &str, client: &str) -> Result
     Ok(0)
 }
 
+/// A pipe whose two ends no child of this process inherits (N33): a child
+/// holding the write end would keep the reader from ever seeing EOF.
+fn cloexec_pipe() -> std::io::Result<[i32; 2]> {
+    let mut fds = [0i32; 2];
+    #[cfg(target_os = "linux")]
+    let made = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(not(target_os = "linux"))]
+    let made = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if made < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    #[cfg(not(target_os = "linux"))]
+    for fd in fds {
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+            }
+            return Err(error);
+        }
+    }
+    Ok(fds)
+}
+
+/// H2: the current process reads `bytes` as stdin through an anonymous pipe,
+/// in memory only: a JSON request may hold a private key and must not land on
+/// disk.
+pub fn stdin_from_bytes(bytes: Vec<u8>) -> std::io::Result<()> {
+    let fds = cloexec_pipe()?;
+    // dup2 leaves the new stdin inheritable: a child (ssh for `hgs @peer`)
+    // reads it. The write end stays with this process only, so the reader
+    // sees EOF once the bytes are written (N33).
+    if unsafe { libc::dup2(fds[0], 0) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    unsafe { libc::close(fds[0]) };
+    std::thread::spawn(move || {
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let written = unsafe {
+                libc::write(fds[1], bytes[offset..].as_ptr() as *const _, bytes.len() - offset)
+            };
+            if written <= 0 {
+                break;
+            }
+            offset += written as usize;
+        }
+        unsafe { libc::close(fds[1]) };
+    });
+    Ok(())
+}
+
 /// Write the script `text` to `path` for a test to run at once. The system
 /// will not execute a file that is open for writing (ETXTBSY), and a child that
 /// another test thread starts while this process writes one keeps that
@@ -1694,6 +1963,27 @@ pub(crate) fn write_script(path: &Path, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// N33: a child started while the stdin pipe is being written never
+    /// holds its write end, so the reader sees EOF once this process closes it.
+    #[test]
+    fn the_stdin_pipe_write_end_never_reaches_a_child() {
+        let fds = cloexec_pipe().unwrap();
+        for fd in fds {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0, "fd {fd} flags {flags}");
+        }
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        unsafe { libc::close(fds[1]) };
+        assert!(unsafe { libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK) } >= 0);
+        let mut byte = [0u8; 1];
+        // EOF (0), not EAGAIN: no write end is left anywhere.
+        let read = unsafe { libc::read(fds[0], byte.as_mut_ptr() as *mut _, 1) };
+        let _ = child.kill();
+        let _ = child.wait();
+        unsafe { libc::close(fds[0]) };
+        assert_eq!(read, 0, "{}", std::io::Error::last_os_error());
+    }
 
     #[test]
     fn prepared_path_keeps_the_caller_order_and_appends_user_installers() {
@@ -1946,6 +2236,27 @@ mod tests {
         assert!(!pinned.alive());
         // Gone: no signal reaches whatever has the ID now.
         pinned.kill().unwrap();
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn pinned_process_states_distinguish_stopped_replaced_and_exited() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let birth = process_identity(child.id()).unwrap().birth;
+        let pinned = PinnedProcess::pin(child.id(), &birth).unwrap();
+        assert_eq!(pinned.state().unwrap(), ProcessState::Running);
+        assert_eq!(process_state(child.id(), Some("different birth")).unwrap(), ProcessState::Exited);
+        pinned.stop().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while pinned.state().unwrap() == ProcessState::Running && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(pinned.state().unwrap(), ProcessState::Stopped);
+        pinned.resume().unwrap();
+        pinned.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(pinned.state().unwrap(), ProcessState::Exited);
+        assert_eq!(process_state(child.id(), None).unwrap(), ProcessState::Exited);
     }
 
     #[test]

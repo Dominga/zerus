@@ -82,6 +82,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - run: python3 scripts/ci/check-source.py
+      - name: No dot separators in the web UI
+        run: python3 scripts/check-ui-separators.py
+      - name: Desktop client measurement page
+        run: python3 -m unittest discover -s client/scripts -p 'test_*.py' -v
       - name: Standalone speech HTTP contracts
         run: |
           python3 -m venv "$RUNNER_TEMP/speech-http-venv"
@@ -151,6 +155,28 @@ jobs:
           key: msrv-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: msrv-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
       - run: cargo +1.99.1 test --locked
+      - name: Replica crates (format, lints, tests, golden vectors, the mobile binding surface)
+        run: |
+          rustup component add --toolchain 1.99.1 rustfmt clippy
+          cargo +1.99.1 fmt --check --manifest-path crates/replica/Cargo.toml
+          cargo +1.99.1 clippy --locked --manifest-path crates/replica/Cargo.toml --target-dir target/replica --all-targets -- -D warnings
+          cargo +1.99.1 test --locked --manifest-path crates/replica/Cargo.toml --target-dir target/replica
+          cargo +1.99.1 fmt --check --manifest-path crates/replica-ffi/Cargo.toml
+          cargo +1.99.1 clippy --locked --manifest-path crates/replica-ffi/Cargo.toml --target-dir target/replica-ffi --all-targets -- -D warnings
+          cargo +1.99.1 test --locked --manifest-path crates/replica-ffi/Cargo.toml --target-dir target/replica-ffi
+      - name: Watch protocol crate (format, lints, tests)
+        run: |
+          cargo +1.99.1 fmt --check --manifest-path crates/watch-protocol/Cargo.toml
+          cargo +1.99.1 clippy --locked --manifest-path crates/watch-protocol/Cargo.toml --target-dir target/watch-protocol --all-targets -- -D warnings
+          cargo +1.99.1 test --locked --manifest-path crates/watch-protocol/Cargo.toml --target-dir target/watch-protocol
+      - name: Desktop client core crate (format, lints, tests)
+        run: |
+          cargo +1.99.1 fmt --check --manifest-path client/core/Cargo.toml
+          cargo +1.99.1 clippy --locked --manifest-path client/core/Cargo.toml --target-dir target/client-core --all-targets -- -D warnings
+          cargo +1.99.1 test --locked --manifest-path client/core/Cargo.toml --target-dir target/client-core
+      # Packages fail without a notice for every shipped crate; find out here.
+      - name: Rust license notices
+        run: python3 scripts/collect-licenses.py "$RUNNER_TEMP/rust-licenses"
       - name: Save Rust 1.99 cache
         if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -244,6 +270,7 @@ jobs:
           "$RUNNER_TEMP/relay-venv/bin/pip" install ./services/mobile -r services/mobile/tests/requirements.txt
           export ZERUS_RELAY_BINARY="$GITHUB_WORKSPACE/services/mobile/relay/target/debug/zerus-relay"
           export ZERUS_DIRECTORY_TEST_HGS="$GITHUB_WORKSPACE/target/debug/hgs"
+          export ZERUS_TASK_TEST_HGS="$GITHUB_WORKSPACE/target/debug/hgs"
           export PATH="$GITHUB_WORKSPACE/services/mobile/relay/target/debug:$PATH"
           "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p 'test_[!b]*.py' -v
           env -u ZERUS_RELAY_BINARY "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p 'test_mobile_speech*.py' -v
@@ -428,7 +455,7 @@ jobs:
     needs: source
     if: needs.source.outputs.run_ios == 'true'
     runs-on: macos-15
-    timeout-minutes: 40
+    timeout-minutes: 60
     env:
       SOURCE_COMMIT: ${{ needs.source.outputs.commit }}
     steps:
@@ -438,6 +465,15 @@ jobs:
           persist-credentials: false
       - name: Select Xcode 26 or later
         run: bash mobile/ios/scripts/select-xcode.sh
+      - name: Rust for the project task replica
+        run: rustup toolchain install 1.99.1 --profile minimal --target aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,aarch64-apple-darwin,x86_64-apple-darwin
+      # This check builds five Apple slices on every run: without the release profile's
+      # whole-program optimisation, which only TestFlight's smaller binary needs.
+      - name: Project task replica library
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "false"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+        run: RUSTUP_TOOLCHAIN=1.99.1 bash mobile/ios/scripts/build-replica.sh
       - name: ZerusKit tests
         working-directory: mobile/ios/ZerusKit
         run: swift test
@@ -454,7 +490,7 @@ jobs:
     name: Android unit tests and lint
     needs: source
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -474,9 +510,9 @@ jobs:
             "configuration_version": "1"
           }
           JSON
-      - name: Android platform and build tools
+      - name: Android platform, build tools and NDK
         run: |
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-36' 'build-tools;36.0.0'
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
       # Gradle caches: a monthly epoch precedes the hash of the wrapper and build
       # scripts. A dependency change restores the previous entry; a new month
       # starts afresh, so unused artifacts cannot accumulate.
@@ -487,14 +523,26 @@ jobs:
         id: gradle-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
+          # Cargo's registry and the installed cargo-ndk (with Cargo's records of it) travel along.
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: android-gradle-v1-${{ steps.gradle.outputs.epoch }}-${{ hashFiles('mobile/android/gradle/wrapper/gradle-wrapper.properties', 'mobile/android/**/*.gradle.kts') }}
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/bin/cargo-ndk
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: android-gradle-v1-${{ steps.gradle.outputs.epoch }}-${{ hashFiles('mobile/android/gradle/wrapper/gradle-wrapper.properties', 'mobile/android/**/*.gradle.kts', 'crates/replica/Cargo.lock', 'crates/replica-ffi/Cargo.lock') }}
           restore-keys: android-gradle-v1-${{ steps.gradle.outputs.epoch }}-
+      # The task replica (crates/replica-ffi) is built for every packaged ABI; cargo-ndk
+      # comes from the cache when it holds this version.
+      - name: Rust and cargo-ndk for the task replica
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --target aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+          cargo +1.99.1 install cargo-ndk --version 4.1.2 --locked
       - name: Unit tests and release lint
         working-directory: mobile/android
-        run: ./gradlew --no-daemon testDebugUnitTest lintRelease -PzerusFirebase=true
+        run: ./gradlew --no-daemon testDebugUnitTest lintRelease checkReplicaPackaging -PzerusFirebase=true
       - name: Collect approval publication and binding unit results
         if: always()
         run: |
@@ -527,6 +575,11 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/bin/cargo-ndk
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
           key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
       - name: Collect Android reports
         if: failure()

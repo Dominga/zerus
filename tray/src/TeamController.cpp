@@ -1,5 +1,6 @@
 #include "TeamController.h"
 #include "HgsClient.h"
+#include <QJsonDocument>
 #include <QUuid>
 
 namespace {
@@ -34,11 +35,19 @@ void TeamController::refresh()
     if ((m_watchCatalog || m_watchCatalogPage) && !m_catalogInFlight) refreshCatalog();
 }
 
+// C2: the lead's inbox, read with the rest of the watched team's state.
+void TeamController::refreshInbox()
+{
+    if (m_watch.isEmpty() || m_inboxRequest) return;
+    m_inboxRequest = m_client->requestTeam({}, QStringLiteral("inbox"), {{"team", m_watch}});
+}
+
 void TeamController::readWatched()
 {
     if (m_watch.isEmpty()) return;
     if (!m_statusRequest) m_statusRequest = m_client->requestTeam({}, QStringLiteral("status"), {{"team", m_watch}});
     if (!m_feedRequest) m_feedRequest = m_client->requestTeam({}, QStringLiteral("events"), {{"team", m_watch}});
+    if (!m_inboxRequest) refreshInbox();
 }
 
 const Teams::Team *TeamController::team(const QString &id) const
@@ -60,7 +69,8 @@ void TeamController::watch(const QString &team)
     m_watched = {}; m_lastStatus = {};
     m_feed.clear(); m_feedCursor = QJsonValue();
     m_statusRequest = m_feedRequest = m_olderRequest = 0;
-    emit watchedChanged(); emit feedChanged();
+    m_inbox.clear(); m_lastInbox = {}; m_inboxRequest = 0;
+    emit watchedChanged(); emit feedChanged(); emit inboxChanged();
     readWatched();
 }
 
@@ -77,13 +87,63 @@ void TeamController::loadOlder()
     m_olderRequest = m_client->requestTeam({}, QStringLiteral("events"), {{"team", m_watch}, {"before", m_feedCursor}});
 }
 
-void TeamController::act(const QString &operation, QJsonObject input, const std::function<void(bool, const QString &)> &done)
+void TeamController::act(const QString &operation, QJsonObject input, const Done &done)
 {
     if (!input.contains("team")) input.insert("team", m_watch);
     input.insert("by", "human");
-    input.insert("request_id", QUuid::createUuid().toString(QUuid::WithoutBraces));
+    // A resend after a failure keeps its request_id: the store answers the same
+    // receipt instead of applying the change twice. A success drops the id, so
+    // a later deliberate action gets a fresh one.
+    const QString key = operation + QLatin1Char('\n') + QString::fromUtf8(QJsonDocument(input).toJson(QJsonDocument::Compact));
+    QString requestId = m_retryIds.value(key);
+    if (requestId.isEmpty()) {
+        requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        if (m_retryIds.size() >= 64) m_retryIds.erase(m_retryIds.begin());
+    }
+    m_retryIds.insert(key, requestId);
+    input.insert("request_id", requestId);
     const quint64 request = m_client->requestTeam({}, operation, input);
-    m_actions.insert(request, done);
+    m_actions.insert(request, [this, key, done](bool ok, const QString &message) {
+        if (ok) m_retryIds.remove(key);
+        if (done) done(ok, message);
+    });
+}
+
+void TeamController::approvePhase(int phase, const Done &done)
+{
+    act(QStringLiteral("approve-phase"), {{"phase", phase}}, done);
+}
+
+void TeamController::discardPhase(int phase, const Done &done)
+{
+    act(QStringLiteral("discard-phase"), {{"phase", phase}}, done);
+}
+
+void TeamController::finishTeam(const QString &summary, const Done &done)
+{
+    act(QStringLiteral("finish"), {{"summary", summary}}, done);
+}
+
+void TeamController::holdTask(int task, const QString &reason, const Done &done)
+{
+    act(QStringLiteral("hold"), {{"task", task}, {"reason", reason}}, done);
+}
+
+void TeamController::releaseTask(int task, const Done &done)
+{
+    act(QStringLiteral("release"), {{"task", task}}, done);
+}
+
+void TeamController::rejectWithHold(int task, const QString &reason, const Done &done)
+{
+    // A5: the same reject, with the task parked for a later release.
+    act(QStringLiteral("reject"), {{"task", task}, {"reason", reason}, {"hold", true}}, done);
+}
+
+void TeamController::answerQuestion(const QString &question, const QString &text, const Done &done)
+{
+    // A3: `reply`, not `answer` (that one stays for native questions).
+    act(QStringLiteral("reply"), {{"question", question}, {"text", text}}, done);
 }
 
 void TeamController::call(const QString &operation, QJsonObject input, const Reply &done, bool change)
@@ -97,8 +157,12 @@ void TeamController::call(const QString &operation, QJsonObject input, const Rep
 
 void TeamController::refreshCatalog()
 {
+    // A poll's read started before a decision may land after the read that
+    // follows the decision; it would show the draft as it was.
+    const quint64 read = ++m_catalogRead;
     m_catalogInFlight = true;
-    call(QStringLiteral("catalog get"), {}, [this](bool ok, const QJsonObject &result, const QString &) {
+    call(QStringLiteral("catalog get"), {}, [this, read](bool ok, const QJsonObject &result, const QString &) {
+        if (read != m_catalogRead) return;
         m_catalogInFlight = false;
         if (!ok) return;
         const auto next = Teams::parseCatalog(result);
@@ -108,9 +172,37 @@ void TeamController::refreshCatalog()
             if (same) return;
         }
         m_catalog = Teams::parseCatalog(result);
+        Teams::rememberRoleColors(m_catalog);
         m_catalogReady = true;
         emit catalogChanged();
     }, false);
+}
+
+void TeamController::decideProposal(const QString &proposal, const QString &decision, const Reply &done)
+{
+    call(QStringLiteral("catalog decide"), {{"proposal", proposal}, {"decision", decision}}, [this, proposal, done](bool ok, const QJsonObject &result, const QString &error) {
+        if (!ok) { m_proposalErrors.insert(proposal, error); refreshCatalog(); emit catalogChanged(); }
+        else if (m_proposalErrors.remove(proposal)) emit catalogChanged();
+        if (done) done(ok, result, error);
+    });
+}
+
+void TeamController::applyDraft(const Reply &done) { draftCall(QStringLiteral("catalog apply"), done); }
+
+void TeamController::discardDraft(const Reply &done) { draftCall(QStringLiteral("catalog discard"), done); }
+
+void TeamController::draftCall(const QString &operation, const Reply &done)
+{
+    call(operation, {}, [this, done](bool ok, const QJsonObject &result, const QString &error) {
+        // Applied or discarded, the draft and its refusals are gone.
+        if (ok) m_proposalErrors.clear();
+        if (!ok || !m_draftError.isEmpty()) {
+            m_draftError = ok ? QString() : error;
+            if (!ok) refreshCatalog();
+            emit catalogChanged();
+        }
+        if (done) done(ok, result, error);
+    });
 }
 
 void TeamController::received(quint64 request, const QString &operation, const QJsonObject &result)
@@ -143,6 +235,12 @@ void TeamController::received(quint64 request, const QString &operation, const Q
         m_lastStatus = result;
         m_watched = team;
         emit watchedChanged();
+    } else if (request == m_inboxRequest) {
+        m_inboxRequest = 0;
+        if (result == m_lastInbox) return;
+        m_lastInbox = result;
+        m_inbox = Teams::parseInbox(result);
+        emit inboxChanged();
     } else if (request == m_feedRequest || request == m_olderRequest) {
         const bool older = request == m_olderRequest;
         (older ? m_olderRequest : m_feedRequest) = 0;
@@ -180,6 +278,7 @@ void TeamController::failed(quint64 request, const QString &operation, const QSt
         if (m_available || !m_teams.isEmpty()) { m_teams.clear(); m_lastList = {}; emit teamsChanged(); }
         m_available = false;
     } else if (request == m_statusRequest) m_statusRequest = 0;
+    else if (request == m_inboxRequest) m_inboxRequest = 0;
     else if (request == m_feedRequest) m_feedRequest = 0;
     else if (request == m_olderRequest) m_olderRequest = 0;
     Q_UNUSED(operation);

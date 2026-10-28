@@ -249,12 +249,21 @@ void TestComposerToolbar::openPopoverFollowsItsContent()
 
 void TestComposerToolbar::exactWidthNeedsNoShortening()
 {
-    // Five items have four gaps: a row exactly that wide keeps every full label.
+    // The two-zone row (U25 part 3): attachments and Mark as read on the left,
+    // the notices and the context on the right; 6 px between items, 12 px
+    // between the zones. A row exactly that wide keeps every full label; one
+    // pixel less shortens the lowest priority first. The widths are measured,
+    // so the machine's fonts do not decide it.
     Row row; row.show(900); QVERIFY(QTest::qWaitForWindowExposed(&row.window)); QTRY_VERIFY(row.context->isVisible());
-    int needed = row.context->sizeHint().width() + 4 * 6;
-    for (auto *chip : {row.attachments, row.read, row.recovery, row.cache}) needed += chip->labelSizeHint(false).width();
+    const int left = row.attachments->labelSizeHint(false).width() + 6 + row.read->labelSizeHint(false).width();
+    const int right = row.recovery->labelSizeHint(false).width() + 6 + row.cache->labelSizeHint(false).width() + 6 + row.context->sizeHint().width();
+    const int needed = left + 12 + right;
     row.window.resize(needed, 90); QTRY_COMPARE(row.toolbar->width(), needed); QCoreApplication::processEvents();
     for (auto *chip : {row.attachments, row.read, row.recovery, row.cache}) QVERIFY2(!chip->isCompact(), qPrintable(chip->objectName()));
+    verifyFits(row); if (QTest::currentTestFailed()) return;
+    row.window.resize(needed - 1, 90); QTRY_COMPARE(row.toolbar->width(), needed - 1); QCoreApplication::processEvents();
+    QVERIFY(row.read->isCompact());
+    for (auto *chip : {row.attachments, row.recovery, row.cache}) QVERIFY2(!chip->isCompact(), qPrintable(chip->objectName()));
     verifyFits(row);
 }
 

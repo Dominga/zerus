@@ -203,7 +203,9 @@ fn index(parent: &Value, r: &Request) -> Result<(Connection, Guard)> {
 /// Opens, creating or migrating, the private history index of `parent` in `directory`.
 fn index_in(directory: &Path, parent: &Value, r: &Request) -> Result<(Connection, Guard)> {
     private_dir(directory)?;
-    if !crate::platform::verify_private(directory, crate::platform::Private::Directory)
+    // #569: an index only too open is made private again; one that stays
+    // refused is reported with its fix.
+    if !crate::private_stores::ensure(directory, crate::platform::Private::Directory)
         .map_err(|e| e.to_string())?
     {
         return Err("Public history index directory must be private".into());
@@ -216,7 +218,7 @@ fn index_in(directory: &Path, parent: &Value, r: &Request) -> Result<(Connection
     ))
     .open(&path)
     .map_err(|e| e.to_string())?;
-    if !crate::platform::verify_private_file(&file).map_err(|e| e.to_string())? {
+    if !crate::private_stores::ensure_file(&path, &file).map_err(|e| e.to_string())? {
         return Err("Public history index file must be private".into());
     }
     drop(file);
@@ -1972,7 +1974,7 @@ pub(super) fn projection_dispatch(args: &[String]) -> Result<i32> {
     if bytes.len() > 16 * 1024 {
         return Err("History projection request exceeds bounds".into());
     }
-    let projection: ProjectionRequest = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let projection: ProjectionRequest = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e| e.to_string())?;
     let request = validate_projection(&projection)?;
     let name = &args[0];
     let parent = record(name, &request)?;
@@ -2022,7 +2024,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if bytes.len() > 16 * 1024 {
         return Err("History request exceeds bounds".into());
     }
-    let request: Request = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let request: Request = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e| e.to_string())?;
     validate(&request)?;
     let name = &args[0];
     let parent = record(name, &request)?;

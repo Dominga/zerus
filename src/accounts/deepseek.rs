@@ -14,7 +14,7 @@ pub(super) fn set_key(config: &Config, args: &[String], dry: bool) -> Result<Val
     let mut bytes = Vec::new();
     std::io::stdin().take(8193).read_to_end(&mut bytes)?;
     let input: Value =
-        serde_json::from_slice(&bytes).map_err(|_| Error::new(1, "Invalid API key request."))?;
+        serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|_| Error::new(1, "Invalid API key request."))?;
     let key = input["api_key"].as_str().unwrap_or("");
     if bytes.len() > 8192
         || key.is_empty()

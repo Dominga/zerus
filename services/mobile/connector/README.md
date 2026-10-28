@@ -50,7 +50,8 @@ advertises the computer-scoped `git_status` read. Its exact payload is
 `{request_id,path}` with an empty session; v1 uses the existing POSIX mobile
 folder contract: a leading slash, no controls and at most 4096 UTF-8 bytes.
 Windows Git transport is unsupported and unqualified in this version. It invokes only
-`hgs git-status --path PATH --json`, without stdin, within five seconds. A
+`hgs git-status --path PATH --json`, without stdin, within 25 seconds (hgs bounds
+each of its Git reads to 2 seconds, 19 seconds in all). A
 32 KiB whitelist projection keeps checkout/publication metadata, with absent
 counts remaining absent and no file lists or remote URLs. The result is
 `{schema:1,request_id,requested_path,snapshot}`: `requested_path` preserves the
@@ -237,7 +238,14 @@ One tokio `current_thread` runtime runs two loops, as Python's two tasks do:
   on two live tracked Codex sessions per heartbeat and `mobile_capabilities`.
   Every other listing key is forwarded, as Python forwards it;
   `test_bb_heartbeat` fails on any key nobody reviewed. A heartbeat beyond the
-  relay's 1 MiB or JSON limits is not sent.
+  relay's 1 MiB or JSON limits is not sent. On a computer whose `hgs --help`
+  shows `Event stream ABI: watch-v1` and paged archives, the main connector
+  follows one `hgs watch --json` (`watch_listing.rs`) and takes the listing
+  from its catalog rows and `catalog.meta`, composed as
+  `ls --json --local --no-archives` prints them, while the stream is live
+  (a frame within 30 s). Before then, after the stream ends (restarted after
+  5, 15 and 60 s, then every 5 minutes), for peers and for requests routed to
+  this computer, it runs `ls` as before. Windows hosts keep `ls`.
 - **Requests**: upload undelivered receipts, then long-poll
   (`wait=1` until the first capability probe, else 25) and run each claimed
   request in claim order, then upload again. The probe reads `hgs --help`
@@ -273,6 +281,34 @@ in the same `voice_submit`, under its existing durable UUID. Old native binaries
 refuse video before invocation; a mismatched video acknowledgement remains
 uncertain. `test_bb_voice` exercises the same media/replay contract against both
 connector implementations. See [voice and video messages](../../../docs/voice-messages.md).
+
+The phone's task exchange is this connector's own addition, which the Python
+connector never offers
+(`docs/superpowers/specs/2026-10-18-task-replication-loro-design.md`, "Phone").
+When native help names `hgs task exchange|digests --json`, `task_exchange` is
+advertised, for a peer as well when its hgs names it. The request, checked
+with the relay's own payload rules, runs `hgs task exchange --json` (30 s) with
+its payload on stdin on the machine the route names; its delivered receipt
+leaves the journal after two minutes as a short read (`TASK_READ_SQL`, beside
+the frozen Python predicates, so the journal schema is unchanged; the prune
+finds them through `journal_operation`, never by walking delivered mutation
+tombstones). hgs answers a refusal on stdout with a failing exit status, and
+its reason becomes the receipt's error. With an initialized swarm catalog every
+15 s, `hgs task digests --json` (5 s) adds each project's `tasks_digest`. A
+project without one in a heartbeat is unknown this time (another command held
+it, or the read failed), not empty. After a rollback
+to Python only the exchanges of the last two minutes stay in the journal, as
+Python's mutation tombstones. `tests/task_exchange.rs` and
+`test_bb_task_exchange` pin it.
+
+When native help also names `hgs task mobile-send|mobile-cancel|mobile-done
+--json`, the connector offers the phone's Send now (`task_send`), Cancel
+(`task_cancel`) and Done list (`task_done`), each with its payload on stdin on
+the machine the route names. Send now and Cancel are mutations: the journal
+runs each identity once, hgs's JSON refusal before anything happened fails the
+receipt with its reason, and any other outcome once the call began (a prompt
+sent but not recorded, a crash, a timeout) is uncertain. `task_done` is a short
+read like the exchange (`TASK_READ_SQL`).
 
 ## Divergences from the Python connector
 
@@ -408,3 +444,96 @@ is not evidence of Windows ACL/process behavior. `tests/windows_gateway.rs`
 runs the actual Windows ACL, hard-link, lock, revision, credential rotation and
 stop-generation controls without contacting a relay. The isolated Windows host
 and HTTPS transport suite is described in CONTRIBUTING.md.
+
+### Encrypted result cache pressure
+
+The encrypted outbox keeps permanent request IDs, signed request digests/headers,
+relay-delivery markers and timestamps after releasing result ciphertext. A
+repeat of the same ID never authorizes native execution, including a Read whose
+result cache has been released. Native request identities and outcomes are not
+changed by cache reclamation.
+
+Before admitting a new sealed result, a pressure turn targets its actual encoded
+size within the existing 256 MiB result limit. Only relay-delivered, fully stored
+Read result caches at least 120 seconds past their relay-delivery timestamp are
+eligible. This grace is not an acknowledgement of durable receipt by a phone.
+Paused clients can lose an old Read response; ordinary supported refresh creates
+a fresh safe Read identity. Mutation and Control requests are never resent or
+shortened by this policy. All-too-young, protected or unprovable caches can still
+exhaust the bound; the connector then retains the pending native receipt and
+continues bounded local pressure turns at the normal 250 ms poll cadence while
+its publisher heartbeat continues. Local quota pressure does not accumulate the
+network retry delay. Transport failures retain their exponential backoff, capped
+at 60 seconds; storage and identity conflicts remain fatal.
+
+After a claimed encrypted request is processed and its durable result is
+flushed, the request loop yields and immediately starts its next authenticated
+claim. It does not add the 250 ms idle pause to successful queued work. Empty
+long polls and local cache pressure retain their 250 ms pacing, and network
+failures retain their existing backoff. This changes neither the claim order
+nor the permanent identity and no-replay checks.
+
+Legacy adoption uses the journal's existing authenticated-admission contract:
+`receive_before` authenticates/decrypts the request before `encrypted_reserve`,
+and rejects signed Read/non-READS requests before any native dispatch. The a2
+`seal_receipt` copies the accepted class into a Computer-signed Result. The full
+request envelope/signature is not stored, so adoption does not claim to verify
+that signature again or infer a plaintext operation from ciphertext. It requires
+an exact typed stored Request/Read header and a full, cryptographically verified
+Result/Read envelope from the current authorized gateway, matching workspace,
+request/route/gateway, Phone/Computer identities, key generations and known
+membership heads. Duplicate/malformed JSON, invalid signatures, class/routing
+mismatches and unknown or retired keys remain conservative. This trusts the
+existing private, profile-bound journal writer contract; it is not provenance
+for an arbitrary foreign database or a different historical writer.
+
+An additive `read_cache_class` column records unexamined/verified/conservative
+classification; partial indexes advance past rejected legacy rows and select
+oldest verified caches. Each call examines at most 64 candidates/8 MiB, refunds
+at most 64 caches/8 MiB and checks a 20 ms original deadline between rows. The
+first finite candidate
+and first eligible trim row can each progress even if setup already exhausted
+the deadline; no deadline is renewed and no SQL/crypto preemption is claimed.
+New reader limits and budgets use `length(CAST(... AS BLOB))`, including
+malformed non-ASCII JSON. Existing counters/triggers stay unchanged: valid signed
+wire envelopes are ASCII. This is a bound on materialized signature inputs,
+not a bound on SQLite planner/metadata page I/O. One candidate is at most 2 MiB
+plus an 8 KiB header; parsing/signature verification
+runs outside a SQLite transaction and is not preempted mid-row. Previously
+classified caches are reclaimed before more signature work, avoiding adoption
+starvation. Each classification has an exact immutable-byte CAS; each eviction
+is an independent committed `result=NULL` update, and the existing result trigger
+refunds the exact bytes once. Neither insufficient admission nor cancellation of
+a later turn rolls those commits back. The existing exclusive journal lock
+fences concurrent connector owners; restart/handoff retains committed progress.
+No identity, native receipt, quota counter, snapshot or timestamp is reset.
+
+Only typed `JournalError::Refused(RETAINED_LIMIT)` becomes transport retry;
+conflicts, SQLite and I/O failures remain fatal. Reclaim does not shrink the
+SQLite file, change its journal mode, run VACUUM, decrypt stored result payloads
+or restore evicted ciphertext. An older executable ignores the additive column
+but cannot restore released Read caches.
+
+### Explicit recovery after an unobserved failed Start
+
+Ordinary Start never repeats an unknown managed-service reservation. On Linux,
+an operator may pass `failed_start_revision` to `--workspace start`: it must be
+the SHA256 of the exact current private `legacy-service-handover.json` record,
+in addition to the existing `expected_revision` configuration guard. This is a
+separate explicit recovery request, not an automatic retry or a UI fallback.
+
+Recovery requires the same verified unit and marked definition, an inactive/dead
+unit with MainPID zero and exit status 1, no previously observed managed
+generation, no pending identity transfer, a valid control record whose PID is
+absent, and a free matching receipt-directory lock. A running, activating,
+changed, cleanly stopped or ambiguous service remains refused. Any cancellation
+of an existing manager restart job must be coordinated separately; this operation
+submits no stop/restart/kill job.
+
+Before consuming that exact reservation, the connector durably records a
+`failed-start-recovery-<revision>.json` proof. The original revision cannot be
+reused after a lost response. Normal Start then updates only its marked
+definition when needed and establishes a new verified process/generation.
+Profiles, phone identity, native receipts, request IDs and the journal stay in
+place. Storage failure or incomplete recovery requires reconciliation; it never
+authorizes another automatic attempt.

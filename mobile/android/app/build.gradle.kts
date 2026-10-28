@@ -1,5 +1,6 @@
 import java.time.LocalDate
 import java.util.Properties
+import java.util.zip.ZipFile
 import java.io.File
 
 plugins {
@@ -13,6 +14,7 @@ val signingPropertiesPath = providers.gradleProperty("zerusSigningProperties").o
 val privateSigningFile = file(signingPropertiesPath)
 val privateSigning = Properties().apply { if(privateSigningFile.isFile) privateSigningFile.inputStream().use { load(it) } }
 val firebaseEnabled = providers.gradleProperty("zerusFirebase").orNull == "true"
+val readTimingEnabled = providers.gradleProperty("zerusReadTiming").orNull == "true"
 val previewVersionName = providers.gradleProperty("zerusVersionName").orNull?.also {
     require(it.matches(Regex("[A-Za-z0-9][A-Za-z0-9.+-]{0,79}"))) { "Invalid Android preview version name." }
 }
@@ -47,9 +49,60 @@ val forkVersionCode = if(forkBuild) {
     (date.year.toLong()*1000000+date.monthValue*10000+date.dayOfMonth*100+iteration).also { require(it<=Int.MAX_VALUE) }.toInt()
 } else 1
 
+// The task replica: zerus-replica through UniFFI (crates/replica-ffi), built with the
+// pinned CI toolchain. The host library gives the Kotlin bindings and is what the JVM
+// unit tests load; cargo-ndk builds the library of each packaged ABI.
+val rustToolchain = "1.99.1"
+val replicaCrate = rootProject.file("../../crates/replica-ffi")
+val replicaSources = listOf(replicaCrate, rootProject.file("../../crates/replica")).flatMap {
+    listOf(it.resolve("src"), it.resolve("Cargo.toml"), it.resolve("Cargo.lock"))
+} + replicaCrate.resolve("uniffi.toml")
+val rustBuild = layout.buildDirectory.dir("rust")
+val hostLibraryName = System.getProperty("os.name").let {
+    when {
+        it.startsWith("Mac") -> "libzerus_replica_ffi.dylib"
+        it.startsWith("Windows") -> "zerus_replica_ffi.dll"
+        else -> "libzerus_replica_ffi.so"
+    }
+}
+// A missing tool fails with what to install (mobile/android/README.md), not with a process
+// that could not start.
+fun requireTool(need: String, vararg command: String): String {
+    val output = runCatching {
+        val process = ProcessBuilder(*command).redirectErrorStream(true).start()
+        process.inputStream.bufferedReader().readText().takeIf { process.waitFor() == 0 }
+    }.getOrNull()
+    return output ?: throw GradleException("The task replica needs $need; see mobile/android/README.md, \"Build and install\".")
+}
+val hostLibrary = rustBuild.map { it.file("host/debug/$hostLibraryName") }
+val uniffiKotlin = layout.buildDirectory.dir("generated/uniffi/kotlin")
+val rustJniLibs = rustBuild.map { it.dir("jniLibs") }
+// Each packaged ABI and the Rust target its library is built for.
+val replicaAbis = mapOf("arm64-v8a" to "aarch64-linux-android", "armeabi-v7a" to "armv7-linux-androideabi", "x86_64" to "x86_64-linux-android")
+val rustHostLibrary by tasks.registering(Exec::class) {
+    inputs.files(replicaSources)
+    outputs.file(hostLibrary)
+    workingDir = replicaCrate
+    doFirst { requireTool("Rust $rustToolchain (rustup toolchain install $rustToolchain)", "cargo", "+$rustToolchain", "--version") }
+    commandLine("cargo", "+$rustToolchain", "build", "--locked", "--target-dir", rustBuild.get().dir("host").asFile.path)
+}
+val uniffiBindings by tasks.registering(Exec::class) {
+    dependsOn(rustHostLibrary)
+    inputs.file(hostLibrary)
+    inputs.files(replicaSources)
+    outputs.dir(uniffiKotlin)
+    workingDir = replicaCrate
+    doFirst { delete(uniffiKotlin) }
+    commandLine("cargo", "+$rustToolchain", "run", "--locked", "--features", "bindgen", "--bin", "uniffi-bindgen",
+        "--target-dir", rustBuild.get().dir("bindgen").asFile.path, "--", "generate",
+        "--library", hostLibrary.get().asFile.path, "--language", "kotlin", "--no-format",
+        "--out-dir", uniffiKotlin.get().asFile.path)
+}
+
 android {
     namespace = "app.zerus.mobile"
     compileSdk = 36
+    ndkVersion = "28.2.13676358"
     defaultConfig {
         applicationId = if(forkBuild) "app.zerus.mobile.romanilyin" else "app.zerus.mobile"
         minSdk = 26
@@ -62,7 +115,12 @@ android {
         manifestPlaceholders["appLabel"] = if(forkBuild) "Zerus Fork" else "Zerus"
         if(forkBuild) { versionName = "$forkVersion-fork"; versionCode = updateVersionCode ?: forkVersionCode }
 
+
+        buildConfigField("boolean", "READ_TIMING_ENABLED", readTimingEnabled.toString())
         testInstrumentationRunner = providers.gradleProperty("zerusInstrumentationRunner").orNull ?: "androidx.test.runner.AndroidJUnitRunner"
+        // The ABIs the task replica's library is built for (crates/replica-ffi). JNA's own
+        // library would otherwise add ABIs on which the replica is missing.
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
     if(privateSigningFile.isFile) signingConfigs.create("development") {
         val keyFile = File(checkNotNull(privateSigning.getProperty("storeFile")))
@@ -81,6 +139,10 @@ android {
         }
     }
     buildFeatures { compose = true; buildConfig = true }
+    sourceSets.getByName("main") {
+        java.srcDir(uniffiKotlin)
+        jniLibs.srcDir(rustJniLibs)
+    }
     if (firebaseEnabled) {
         sourceSets.getByName("main").java.srcDir("src/firebase/java")
         sourceSets.getByName("debug").manifest.srcFile("src/firebase/AndroidManifest.xml")
@@ -94,6 +156,77 @@ android {
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
     // The CI gate requires lintRelease, which also fails on the fatal vital checks.
     lint { checkReleaseBuilds = false }
+}
+val rustAndroidLibraries by tasks.registering(Exec::class) {
+    inputs.files(replicaSources)
+    outputs.dir(rustJniLibs)
+    workingDir = replicaCrate
+    val ndk = android.ndkDirectory
+    doFirst {
+        requireTool("cargo-ndk 4.1.2 (cargo install cargo-ndk --version 4.1.2 --locked)", "cargo", "+$rustToolchain", "ndk", "--version")
+        if (!ndk.isDirectory) throw GradleException("The task replica needs NDK ${android.ndkVersion} (sdkmanager 'ndk;${android.ndkVersion}'); see mobile/android/README.md, \"Build and install\".")
+        // Without rustup the targets cannot be listed; cargo then names what is missing.
+        val installed = runCatching { requireTool("rustup", "rustup", "target", "list", "--installed", "--toolchain", rustToolchain) }.getOrNull()
+        val missing = replicaAbis.values.filterNot { installed == null || installed.lines().contains(it) }
+        if (missing.isNotEmpty()) throw GradleException("The task replica needs the Rust targets ${missing.joinToString()} (rustup target add --toolchain $rustToolchain ${missing.joinToString(" ")}); see mobile/android/README.md, \"Build and install\".")
+    }
+    environment("ANDROID_NDK_HOME", ndk.path)
+    commandLine("cargo", "+$rustToolchain", "ndk", "-t", "arm64-v8a", "-t", "armeabi-v7a", "-t", "x86_64",
+        "--platform", "26", "-o", rustJniLibs.get().asFile.path, "build", "--release", "--locked",
+        "--target-dir", rustBuild.get().dir("android").asFile.path)
+}
+/** Collects the licence notices of every crate built into the library for each packaged ABI. */
+abstract class RustLicenses : Exec() {
+    @get:OutputDirectory abstract val outputDir: DirectoryProperty
+}
+// The notices for Third-party notices, as each variant's generated assets, so that whatever
+// reads the assets runs the collector first; it fails the build when a crate ships none.
+androidComponents {
+    onVariants { variant ->
+        val licenses = tasks.register<RustLicenses>("${variant.name}RustLicenses") {
+            // The collector reads the crates cargo has downloaded for the host build.
+            dependsOn(rustHostLibrary)
+            val collector = rootProject.file("../../scripts/collect-licenses.py")
+            inputs.file(collector)
+            inputs.file(replicaCrate.resolve("Cargo.lock"))
+            inputs.dir(rootProject.file("../../packaging/rust-licenses"))
+            executable = "python3"
+            doFirst { requireTool("python3", "python3", "--version") }
+            argumentProviders.add(CommandLineArgumentProvider {
+                listOf(collector.path, outputDir.get().dir("rust-licenses").asFile.path,
+                    "--manifest-path", replicaCrate.resolve("Cargo.toml").path) +
+                    replicaAbis.values.flatMap { listOf("--target", it) }
+            })
+            doFirst { project.delete(outputDir) }
+        }
+        variant.sources.assets?.addGeneratedSourceDirectory(licenses, RustLicenses::outputDir)
+    }
+}
+// Every packaged ABI carries the replica's library and the APK the notices of its crates on
+// all of them: a build that loses either fails instead of shipping without it.
+val checkReplicaPackaging by tasks.registering {
+    dependsOn("assembleDebug")
+    val apk = layout.buildDirectory.file("outputs/apk/debug/app-debug.apk")
+    doLast {
+        ZipFile(apk.get().asFile).use { zip ->
+            val entries: Set<String> = zip.entries().asSequence().map { entry -> entry.name }.toSet()
+            val notices = listOf("assets/rust-licenses/inventory.json", "assets/licenses/jna.txt", "assets/licenses/libffi.txt")
+            val missing = (replicaAbis.keys.map { "lib/$it/libzerus_replica_ffi.so" } + notices)
+                .filterNot { it in entries }
+            require(missing.isEmpty()) { "The debug APK lacks ${missing.joinToString()}" }
+            val others = entries.filter { it.startsWith("lib/") }.map { it.split('/')[1] }.toSet() - replicaAbis.keys
+            require(others.isEmpty()) { "The debug APK carries ABIs without the task replica: $others" }
+            val inventory = zip.getInputStream(zip.getEntry("assets/rust-licenses/inventory.json")).bufferedReader().use { it.readText() }
+            val targets = (groovy.json.JsonSlurper().parseText(inventory) as Map<*, *>)["targets"]
+            require(targets == replicaAbis.values.toList()) { "The notices cover $targets, not ${replicaAbis.values}" }
+        }
+    }
+}
+tasks.named("preBuild") { dependsOn(uniffiBindings) }
+tasks.matching { it.name.matches(Regex("merge.*JniLibFolders")) }.configureEach { dependsOn(rustAndroidLibraries) }
+tasks.withType<Test>().configureEach {
+    dependsOn(rustHostLibrary)
+    systemProperty("uniffi.component.zerus_replica_ffi.libraryOverride", hostLibrary.get().asFile.path)
 }
 gradle.taskGraph.whenReady {
     if(allTasks.any { it.name in setOf("packageRelease","signReleaseBundle") })
@@ -196,6 +329,9 @@ dependencies {
         }
     }
     debugImplementation("androidx.compose.ui:ui-tooling")
+    // The task replica's bindings reach the Rust library through JNA.
+    implementation("net.java.dev.jna:jna:5.17.0@aar")
+    testImplementation("net.java.dev.jna:jna:5.17.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20250517")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")

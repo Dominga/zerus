@@ -91,13 +91,30 @@ pub fn profile<'a>(config: &'a Config, alias: &str) -> Option<&'a WslConnection>
 }
 
 pub fn validate_request(args: &[String]) -> Result<()> {
-    let first = args.first().map(String::as_str).unwrap_or("");
+    // Desktop creation now binds the command to the selected machine. Keep
+    // that envelope intact for the Linux receiver to verify its own identity,
+    // while applying the same transport/supervisor restrictions inside it.
+    let mut local = args;
+    if local.first().is_some_and(|arg| arg == "--expect-machine") {
+        let expected = local.get(1).ok_or_else(|| Error::new(2, "Missing expected machine identity"))?;
+        if uuid::Uuid::parse_str(expected).ok().is_none_or(|id| id.to_string() != *expected) {
+            return Err(Error::new(2, "Expected a canonical machine identity"));
+        }
+        local = &local[2..];
+        if local.first().is_some_and(|arg| arg == "--client") {
+            if local.get(1).is_none_or(|client| client.is_empty()) {
+                return Err(Error::new(2, "--client needs a peer name"));
+            }
+            local = &local[2..];
+        }
+    }
+    let first = local.first().map(String::as_str).unwrap_or("");
     if first.is_empty()
         || first.starts_with('@')
         || first.starts_with("__")
         || (first.starts_with('-') && !matches!(first, "--help" | "-h" | "--version"))
         || args.iter().any(|a| a.contains('\0'))
-        || (first == "swarm" && args.get(1).is_some_and(|s| s == RECEIVER))
+        || (first == "swarm" && local.get(1).is_some_and(|s| s == RECEIVER))
     {
         return Err(Error::new(
             2,
@@ -323,5 +340,24 @@ mod tests {
         }
         assert!(validate_request(&["--help".into()]).is_ok());
         assert!(validate_request(&["opencode".into(), "start".into()]).is_ok());
+    }
+
+    #[test]
+    fn guarded_creation_preserves_identity_and_cannot_wrap_a_privileged_command() {
+        let identity = "11111111-2222-4333-8444-555555555555";
+        for command in [vec!["opencode", "project", "--new"], vec!["--client", "desktop", "project", "ls"]] {
+            let args: Vec<String> = ["--expect-machine", identity].into_iter().chain(command).map(String::from).collect();
+            let argv = fixture().argv(&args).unwrap();
+            assert_eq!(&argv[10..], args);
+        }
+        for command in [vec![], vec!["@peer", "ls"], vec!["--run"], vec!["__state"],
+            vec!["swarm", RECEIVER, "ls"], vec!["--expect-machine", identity, "ls"],
+            vec!["--client"], vec!["--client", "", "ls"], vec!["--client", "desktop", "__state"]] {
+            let args: Vec<String> = ["--expect-machine", identity].into_iter().chain(command).map(String::from).collect();
+            assert!(validate_request(&args).is_err(), "{args:?}");
+        }
+        for identity in ["", "not-a-uuid", "{11111111-2222-4333-8444-555555555555}"] {
+            assert!(validate_request(&["--expect-machine".into(), identity.into(), "ls".into()]).is_err());
+        }
     }
 }

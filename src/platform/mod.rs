@@ -24,6 +24,36 @@ mod windows;
 #[cfg(windows)]
 pub use windows::*;
 
+/// A completed process roster may still contain protected Linux processes whose
+/// paths the OS refuses to disclose. Keep these separate from readable paths:
+/// they require personal confirmation, never automatic cleanup authority.
+#[derive(Default)]
+pub struct WorktreeProcesses {
+    pub paths: Vec<(u32, PathBuf, String)>,
+    pub unreadable: Vec<UnreadableWorktreeProcess>,
+}
+
+#[derive(serde::Serialize)]
+pub struct UnreadableWorktreeProcess {
+    pub pid: u32,
+    pub identity: String,
+    pub command: String,
+    pub cwd: bool,
+    pub executable: bool,
+    /// Kernel-verified invocation ancestor, retained as diagnostic metadata.
+    pub invocation_ancestor: bool,
+}
+
+
+impl From<Vec<(u32, PathBuf, String)>> for WorktreeProcesses {
+    fn from(paths: Vec<(u32, PathBuf, String)>) -> Self {
+        Self {
+            paths,
+            unreadable: Vec::new(),
+        }
+    }
+}
+
 /// What a local session command reports where `local_sessions()` is false: a
 /// Windows computer whose local sessions are not enabled (spec D2). It exits with
 /// code 2.
@@ -292,6 +322,19 @@ pub enum Private {
     Directory,
     /// A regular file with a single link.
     File,
+}
+
+/// #569: what `repair_private` found at a path and did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrivateRepair {
+    /// Nothing to do: the entry is private.
+    Private,
+    /// The entry was this user's and only too open: it is private now. Each item
+    /// names an access that was removed (a Windows account, or Unix mode bits).
+    Repaired(Vec<String>),
+    /// The entry stays as it is: owned by another account, a link or reparse
+    /// point, the wrong kind of entry, or not closable by this user.
+    Refused(String),
 }
 
 /// Why a bounded child process gave no result.

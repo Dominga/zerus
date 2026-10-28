@@ -171,8 +171,9 @@ fn connection(config: &Config) -> Result<Option<Connection>> {
             ))
         }
     };
+    // #569: made private again when only too open, else reported.
     #[cfg(windows)]
-    if !crate::platform::verify_private_file(&file).unwrap_or(false) {
+    if !crate::private_stores::ensure_file(&path, &file).unwrap_or(false) {
         return Err(Error::new(
             1,
             "The mobile connection configuration must be private to this Windows user",

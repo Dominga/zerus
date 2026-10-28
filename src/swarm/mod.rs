@@ -9,6 +9,7 @@ mod session_project;
 #[cfg(unix)]
 pub(crate) use session_project::validate_payload as validate_session_project;
 mod model;
+mod replica;
 mod service;
 mod store;
 mod transport;
@@ -21,6 +22,7 @@ use store::LockedStore;
 
 #[cfg(unix)]
 pub(crate) use catalog::MOBILE_DELIVERY;
+pub(crate) use replica::{exchange_project as exchange_tasks, replicate};
 #[cfg(unix)]
 pub(crate) use store::replace;
 
@@ -58,12 +60,39 @@ pub(crate) fn verified_bindings(
         .unwrap_or_default()
 }
 
+/// `hgs ARGS…` on the swarm member behind `alias`; its JSON answer.
+pub(crate) fn remote_hgs(config: &Config, alias: &str, args: &[String]) -> Result<Value> {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    transport::run(config, alias, &words, None)
+}
+
+pub(crate) fn remote_hgs_input(config: &Config, alias: &str, args: &[String], input: &Value) -> Result<Value> {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    transport::run(config, alias, &words, Some(input))
+}
+
 /// Shared preferences for `hgs ls --json --local`. Lock-free: the store is
 /// replaced atomically and listings never wait for a sync. A missing or
 /// unreadable catalog reports the defaults.
 /// `{running, current}` for the background catalog worker.
 pub(crate) fn worker_status(config: &Config) -> Value {
     service::status(config).json()
+}
+
+/// The catalog as `swarm get` shows it, with `worker`, read without the
+/// catalog lock, without saving and without supervising the worker.
+pub(crate) fn organization(config: &Config) -> Result<Value> {
+    let mut snapshot = store::read_snapshot(config)?;
+    snapshot["worker"] = service::status(config).json();
+    Ok(snapshot)
+}
+
+/// The files [`organization`] reads, for a reader that follows changes,
+/// with the worker's marker, which a restarted worker rewrites.
+pub(crate) fn organization_files(config: &Config) -> Vec<std::path::PathBuf> {
+    let mut files = store::snapshot_files(config);
+    files.push(config.dir.join("swarm").join(service::MARKER));
+    files
 }
 
 pub(crate) fn preferences(config: &Config) -> Value {
@@ -96,6 +125,31 @@ fn preference(config: &Config, args: &[String]) -> Result<Value> {
     }
 }
 
+/// Live catalog projects as (ID, name), in the shared order.
+pub(crate) fn projects(config: &Config) -> Result<Vec<(String, String)>> {
+    let snapshot = LockedStore::load(config)?.snapshot(config);
+    Ok(snapshot["organization"]["projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| Some((p["id"].as_str()?.to_owned(), p["name"].as_str().unwrap_or_default().to_owned())))
+        .collect())
+}
+
+/// The live catalog project (ID, name) that this computer's session `name`
+/// belongs to, if any.
+pub(crate) fn session_project(config: &Config, name: &str) -> Result<Option<(String, String)>> {
+    let snapshot = LockedStore::load(config)?.snapshot(config);
+    // The snapshot names this computer's sessions "<this host>\n<session>".
+    let member = format!("{}\n{name}", config.host());
+    Ok(snapshot["organization"]["projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|p| p["sessions"].as_array().is_some_and(|all| all.iter().any(|s| s.as_str() == Some(member.as_str()))))
+        .and_then(|p| Some((p["id"].as_str()?.to_owned(), p["name"].as_str().unwrap_or_default().to_owned()))))
+}
+
 /// Persist and return the machine identity without retaining the catalog lock.
 pub(crate) fn local_node_id(config: &Config) -> Result<String> {
     let mut store = LockedStore::load(config)?;
@@ -117,7 +171,7 @@ fn input() -> Result<Value> {
         bytes.len() as u64 <= transport::MAX_BYTES,
         "swarm request is too large"
     );
-    Ok(serde_json::from_slice(&bytes)?)
+    Ok(serde_json::from_slice(crate::state::without_bom(&bytes))?)
 }
 
 pub fn dispatch(config: &Config, args: &[String], dry: bool) -> cli::Result<i32> {
@@ -162,6 +216,8 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
         "bind" => transport::bind(config,alias()?),
         "join" => transport::join(config,alias()?,serde_json::from_value(input()?)?),
         "exchange" => transport::exchange(config,serde_json::from_value(input()?)?),
+        "replica-inventory" => replica::inventory(config,serde_json::from_value(input()?)?),
+        "replica-exchange" => replica::exchange(config,serde_json::from_value(input()?)?),
         "sync" => transport::sync(config),
         "get" | "initialize" | "apply" | "export" | "resolve" | "disconnect" => {
             // Read stdin before taking the lock: slow clients cannot monopolize it.
@@ -194,6 +250,6 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             snapshot["written"] = json!(written);
             Ok(snapshot)
         }
-        _ => bail!("usage: hgs swarm get | initialize | apply | preview PEER | join PEER | sync | worker | resolve | disconnect PEER | preference get|set"),
+        _ => bail!("usage: hgs swarm get | initialize | apply | preview PEER | join PEER | sync | worker | resolve | disconnect PEER | preference get|set | replica-inventory | replica-exchange"),
     }
 }

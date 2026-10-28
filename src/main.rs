@@ -24,11 +24,21 @@ mod wsl_file;
 mod peer_channel;
 mod platform;
 mod presence;
+mod private_stores;
 mod screen;
 mod speech;
 mod status;
 mod state;
 mod swarm;
+mod tasks;
+mod watch;
+
+/// H2: the position of `--json-file` before the first `--`; arguments after it
+/// belong to the agent, never to hgs.
+fn json_file_position(argv: &[String]) -> Option<usize> {
+    let hgs = argv.iter().take_while(|arg| arg.as_str() != "--");
+    argv.iter().position(|arg| arg == "--json-file").filter(|index| *index < hgs.count())
+}
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--macos-session-service") {
@@ -41,7 +51,39 @@ fn main() {
         let args: Vec<String> = std::env::args().skip(2).collect();
         std::process::exit(host::run(&args));
     }
-    let code = match cli::dispatch(std::env::args().skip(1).collect()) {
+    // H2: `--json-file PATH` feeds the same request through an in-memory pipe
+    // for every `--json` command; a leading UTF-8 BOM is dropped and non-UTF-8
+    // input is refused. Nothing is written to disk: requests may hold keys.
+    let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(index) = json_file_position(&argv) {
+        let Some(path) = argv.get(index + 1).cloned() else {
+            eprintln!("hgs: --json-file needs a path");
+            std::process::exit(2);
+        };
+        let failure = match std::fs::read(&path) {
+            Err(error) => format!("Cannot read {path}: {error}"),
+            Ok(bytes) => match state::json_request(&bytes) {
+                Err(error) => error,
+                Ok(value) => match platform::stdin_from_bytes(value.to_string().into_bytes()) {
+                    Err(error) => format!("Cannot read the request: {error}"),
+                    Ok(()) => {
+                        argv.drain(index..=index + 1);
+                        // The file is this command's JSON request; never touch
+                        // an agent's own arguments after `--`.
+                        if !argv.iter().any(|arg| arg == "--json") {
+                            argv.insert(index, "--json".to_owned());
+                        }
+                        String::new()
+                    }
+                },
+            },
+        };
+        if !failure.is_empty() {
+            eprintln!("hgs: {failure}");
+            std::process::exit(2);
+        }
+    }
+    let code = match cli::dispatch(argv) {
         Ok(code) => code,
         Err(err) => {
             // One write (eprintln! writes each piece on its own), so that no
@@ -52,4 +94,18 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::json_file_position;
+
+    #[test]
+    fn a_json_file_flag_after_double_dash_belongs_to_the_agent() {
+        let args = |items: &[&str]| items.iter().map(|item| (*item).to_owned()).collect::<Vec<_>>();
+        assert_eq!(json_file_position(&args(&["team", "plan", "--json-file", "r.json"])), Some(2));
+        assert_eq!(json_file_position(&args(&["claude", "DIR", "--", "--json-file", "x"])), None);
+        assert_eq!(json_file_position(&args(&["--", "--json-file", "x"])), None);
+        assert_eq!(json_file_position(&args(&["team", "list"])), None);
+    }
 }

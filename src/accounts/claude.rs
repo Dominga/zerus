@@ -47,6 +47,84 @@ impl Drop for ConfigLock {
     fn drop(&mut self) { let _ = fs::remove_dir(&self.0); }
 }
 
+/// Takes Claude's own lock for `.claude.json` (a directory named
+/// `<file>.lock`, the convention its native JSON writer uses) for a bounded
+/// wait; a lock another running Claude holds is never broken.
+fn config_lock(file: &Path, busy: &str) -> Result<ConfigLock> {
+    let mut path = file.as_os_str().to_owned();
+    path.push(".lock");
+    let path = PathBuf::from(path);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(ConfigLock(path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && std::time::Instant::now() < deadline =>
+                std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(_) => return Err(Error::new(1, busy)),
+        }
+    }
+}
+
+/// The account config file the next Claude launch reads (U16): the native
+/// `~/.claude.json` unless `CLAUDE_CONFIG_DIR` names another account's folder.
+pub(super) fn account_config() -> Result<PathBuf> {
+    if let Some(directory) = env::var("CLAUDE_CONFIG_DIR").ok().filter(|value| !value.is_empty()) {
+        return Ok(Path::new(&directory).join(".claude.json"));
+    }
+    crate::platform::home()
+        .filter(|home| !home.is_empty())
+        .map(|home| Path::new(&home).join(".claude.json"))
+        .ok_or_else(|| Error::new(1, "The user home folder is unknown; the designer's folder was not trusted."))
+}
+
+/// Marks one folder trusted in Claude's account config — the project entry its
+/// start-up prompt reads. Only that folder changes: another project's answer,
+/// its tools, and the account's other settings stay as Claude saved them.
+/// Zerus passes only its own private Team designer folder; start-up trust
+/// stays manual for every other folder. `false` means it was already trusted.
+pub(super) fn trust_folder(file: &Path, folder: &str) -> Result<bool> {
+    if folder.is_empty() || folder.chars().any(char::is_control) {
+        return Err(Error::new(1, "The Team designer's folder is invalid."));
+    }
+    let _lock = config_lock(file, "Claude account settings are busy; start the designer again.")?;
+    let mut settings = match fs::File::open(file) {
+        Ok(handle) => {
+            let mut bytes = Vec::new();
+            handle.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
+            if bytes.len() > 1024 * 1024 {
+                return Err(Error::new(1, "Claude account settings are too large; the designer's folder was not trusted."));
+            }
+            serde_json::from_slice::<Value>(&bytes)
+                .map_err(|_| Error::new(1, "Claude account settings are invalid; the designer's folder was not trusted."))?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(error) => return Err(error.into()),
+    };
+    if !settings.is_object() {
+        return Err(Error::new(1, "Claude account settings are invalid; the designer's folder was not trusted."));
+    }
+    if !settings.get("projects").is_some_and(Value::is_object) {
+        settings["projects"] = json!({});
+    }
+    let entry = &mut settings["projects"][project_key(folder, cfg!(windows))];
+    if !entry.is_object() {
+        *entry = json!({});
+    }
+    if entry["hasTrustDialogAccepted"] == true {
+        return Ok(false);
+    }
+    entry["hasTrustDialogAccepted"] = json!(true);
+    super::claude_settings::write(file, &settings)?;
+    Ok(true)
+}
+
+/// N19: the key Claude files a project under. On Windows it writes the folder
+/// with forward slashes (`D:/work/app`), so a backslash key is a different
+/// project whose answer Claude never reads.
+pub(super) fn project_key(folder: &str, windows: bool) -> String {
+    if windows { folder.replace('\\', "/") } else { folder.to_owned() }
+}
+
 pub(super) fn finish_login(home: &Path) -> Result<()> {
     verify_login(home, false)?;
     finish_onboarding(home)
@@ -74,20 +152,8 @@ pub(super) fn verify_login(home: &Path, native: bool) -> Result<()> {
 }
 
 fn finish_onboarding(home: &Path) -> Result<()> {
-    // Use the same lock-directory convention as Claude's native JSON writer.
-    // Do not break a lock belonging to another running Claude process.
     let path = home.join(".claude.json");
-    let lock = home.join(".claude.json.lock");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        match fs::create_dir(&lock) {
-            Ok(()) => break,
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && std::time::Instant::now() < deadline =>
-                std::thread::sleep(std::time::Duration::from_millis(50)),
-            Err(_) => return Err(Error::new(1, "Claude account setup is busy; finish setup in its terminal.")),
-        }
-    }
-    let _lock = ConfigLock(lock);
+    let _lock = config_lock(&path, "Claude account setup is busy; finish setup in its terminal.")?;
     let file = platform::no_follow(fs::OpenOptions::new().read(true)).open(&path)?;
     if !file.metadata()?.is_file() { return Err(Error::new(1, "Claude account settings are not a regular file.")); }
     let mut bytes = Vec::new(); file.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;

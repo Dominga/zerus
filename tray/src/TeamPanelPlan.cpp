@@ -32,6 +32,15 @@ QString agentLabel(const QString &agent)
 
 void TeamPanel::savePlan(const Team &edited)
 {
+    // C4 (#548): never a whole plan from the `team list` summary: sent at its
+    // revision, it would be accepted and wipe every description, criterion,
+    // dependency and member prompt.
+    if (!edited.full) {
+        m_notice = tr("Loading the plan; your change was not sent. Try again in a moment.");
+        m_controller->watch(edited.id);
+        scheduleRender();
+        return;
+    }
     QJsonObject input = planInput(edited);
     input.insert("revision", edited.revision);
     act("plan", input);
@@ -66,8 +75,8 @@ QWidget *TeamPanel::planMembers(const Team &team, bool narrow)
         auto *line1 = row(6);
         const QString role = team.roleOf(member.id);
         line1->addWidget(new Pill(member.lead && member.role != role ? role + QStringLiteral(" · ") + member.role : role, roleColor(role, m_dark)));
-        line1->addWidget(new StatusMark(member.session.isEmpty() ? tr("Created on approval") : tr("Planning"),
-                                        member.session.isEmpty() ? c.dim : c.folder, member.session.isEmpty() ? "not_created" : "planning"));
+        line1->addWidget(new StatusMark(member.session.isEmpty() ? tr("Created on approval") : tr("Existing session"),
+                                        member.session.isEmpty() ? c.dim : c.accent, member.session.isEmpty() ? "not_created" : "working"));
         line1->addStretch();
         body->addLayout(line1);
         auto *line2 = row(6);
@@ -97,7 +106,11 @@ QWidget *TeamPanel::planMembers(const Team &team, bool narrow)
         line2->addWidget(agent, 2); line2->addWidget(model, 3);
         body->addLayout(line2);
         int tasks = 0; for (const auto &t : team.tasks) tasks += t.assignee == member.id;
-        body->addWidget(elided((member.computer.isEmpty() ? tr("this computer") : member.computer) + QStringLiteral(" · ") + tr("%n task(s)", nullptr, tasks), c.muted, 11));
+        auto *where = elided((member.session.isEmpty() ? QString() : member.session + QStringLiteral(" · "))
+                                 + (member.computer.isEmpty() ? tr("this computer") : member.computer) + QStringLiteral(" · ")
+                                 + tr("%n task(s)", nullptr, tasks), c.muted, 11);
+        where->setObjectName("teamMemberWhere");
+        body->addWidget(where);
         h->addLayout(body, 1);
         if (!member.lead) {
             auto *more = new QToolButton; more->setObjectName("teamMemberMore"); more->setText(QStringLiteral("⋯")); more->setAutoRaise(true);
@@ -119,12 +132,37 @@ QWidget *TeamPanel::planMembers(const Team &team, bool narrow)
                 savePlan(edited);
             });
             menu->addSeparator();
+            // F8: a free session joins with the context it already has.
+            auto *pick = menu->addMenu(tr("Use an existing session…"));
+            pick->setObjectName("teamMemberSessionMenu");
+            const auto choices = sessionChoices ? sessionChoices() : QList<SessionChoice>{};
+            for (const auto &choice : choices) {
+                if (team.memberOfSession(choice.host, choice.name)) continue;
+                const QString label = choice.host.isEmpty() ? choice.name : choice.name + QStringLiteral(" @") + choice.host;
+                auto *action = pick->addAction(label, this, [this, team, id = member.id, choice] {
+                    Team edited = team;
+                    for (auto &m : edited.members) if (m.id == id) {
+                        m.host = choice.host; m.session = choice.name;
+                        m.runId = choice.runId; m.conversationId = choice.conversationId;
+                        if (!choice.agent.isEmpty()) m.agent = choice.agent;
+                        m.folder = QStringLiteral("shared");   // its folder is the session's own
+                        if (!choice.directory.isEmpty()) m.directory = choice.directory;
+                    }
+                    savePlan(edited);
+                });
+                action->setToolTip(choice.directory.isEmpty() ? QString() : tr("Its folder: %1").arg(choice.directory));
+            }
+            pick->setEnabled(!pick->isEmpty());
+            pick->setToolTip(pick->isEmpty() ? tr("No free session on this computer")
+                                             : tr("Adopt a session that already has its context"));
+            menu->addSeparator();
             menu->addAction(tr("Remove from plan"), this, [this, team, id = member.id] {
                 Team edited = team;
                 edited.members.erase(std::remove_if(edited.members.begin(), edited.members.end(), [&](const Member &m) { return m.id == id; }), edited.members.end());
                 for (auto &t : edited.tasks) if (t.assignee == id) t.assignee.clear();
                 savePlan(edited);
             });
+            holdWhileOpen(menu);
             more->setMenu(menu);
             h->addWidget(more, 0, Qt::AlignTop);
         }
@@ -169,6 +207,7 @@ void TeamPanel::addMember(const Team &team, const QPoint &global)
         addWith(m);
     });
     if (!m_controller->catalogReady()) m_controller->refreshCatalog();
+    RenderHold hold(this);
     menu.exec(global);
 }
 
@@ -222,7 +261,10 @@ void TeamPanel::editTask(const Team &team, int taskId)
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     if (remove) QObject::connect(remove, &QPushButton::clicked, &dialog, [&] { removed = true; dialog.accept(); });
     form->addRow(buttons);
-    if (dialog.exec() != QDialog::Accepted) return;
+    {
+        RenderHold hold(this);
+        if (dialog.exec() != QDialog::Accepted) return;
+    }
     Team edited = team;
     if (removed) {
         edited.tasks.erase(std::remove_if(edited.tasks.begin(), edited.tasks.end(), [&](const Task &t) { return t.id == task.id; }), edited.tasks.end());
@@ -262,13 +304,34 @@ QWidget *TeamPanel::planFooter(const Team &team)
     auto *v = new QVBoxLayout(box); v->setContentsMargins(10, 8, 10, 10); v->setSpacing(6);
     if (!team.errors.isEmpty())
         v->addWidget(new StatusMark(tr("Fix %n plan error(s) to run", nullptr, int(team.errors.size())), c.warn, "stuck"));
+    // QA: the approval view lists every check command the plan will run, so the
+    // owner approves the exact commands, not just their tasks.
+    QStringList checkCommands;
+    for (const auto &task : team.tasks) if (task.isCheck() && !task.check.command.isEmpty()) checkCommands << task.check.command;
+    if (!checkCommands.isEmpty()) {
+        v->addWidget(label(tr("Checks"), c.text3, 12, true, "teamPlanChecksTitle"));
+        for (const auto &command : checkCommands) {
+            auto *line = label(QStringLiteral("• ") + command, c.text2, 11, false, "teamPlanCheck");
+            line->setFont(NewSessionDense::mono(11));
+            line->setWordWrap(true);
+            v->addWidget(line);
+        }
+    }
+    // N9: a phase approved on the owner's word shows the sentence too.
+    for (const auto &phase : team.phases) {
+        if (phase.ownerWord.isEmpty()) continue;
+        auto *word = label(tr("Phase %1 approved by Lead on your word: “%2”").arg(phase.n).arg(phase.ownerWord), c.accent, 11, false, "teamPhaseOwnerWord");
+        word->setWordWrap(true);
+        v->addWidget(word);
+    }
     auto *buttons = row(6);
     auto *approve = button(tr("Approve && Run"), "teamApprove", true);
     approve->setEnabled(team.errors.isEmpty() && !team.tasks.isEmpty());
     approve->setToolTip(team.tasks.isEmpty() ? tr("The plan has no tasks yet")
                         : team.errors.isEmpty() ? tr("Start the members and hand out the first tasks")
                                                 : tr("Fix %n plan error(s) to run", nullptr, int(team.errors.size())));
-    QObject::connect(approve, &QPushButton::clicked, this, [this] { act("approve", {}); });
+    // N8/N17: the same question as the workspace's Approve & Run.
+    QObject::connect(approve, &QPushButton::clicked, this, [this, team] { approvePlan(team); });
     auto *sendBack = button(tr("Send back to lead"), "teamSendBack");
     sendBack->setCheckable(true); sendBack->setChecked(m_sendBack);
     QObject::connect(sendBack, &QPushButton::toggled, this, [this](bool on) { m_sendBack = on; scheduleRender(); });

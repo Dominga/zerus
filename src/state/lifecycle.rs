@@ -20,6 +20,10 @@ fn codex_daemon_flag(executable: &str) -> Result<bool> {
 }
 
 fn codex_supports_no_daemon(executable: &str) -> Result<bool> {
+    Ok(agent_help(executable)?.split_whitespace().any(|word| word == "--no-daemon"))
+}
+
+pub(super) fn agent_help(executable: &str) -> Result<String> {
     use std::process::Stdio;
     // Probe capabilities without starting a conversation or inheriting a hook identity.
     let mut output = tempfile::tempfile().map_err(|e| e.to_string())?;
@@ -29,6 +33,7 @@ fn codex_supports_no_daemon(executable: &str) -> Result<bool> {
         command
             .env_remove("HGS_RUN_ID")
             .env_remove("HGS_SESSION")
+            .env("KIMI_CODE_NO_AUTO_UPDATE", "1")
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .stdout(output.try_clone().map_err(|e| e.to_string())?),
@@ -37,14 +42,14 @@ fn codex_supports_no_daemon(executable: &str) -> Result<bool> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(status) = child.try_wait().map_err(|e|e.to_string())? {
-            if !status.success() { return Err("Cannot check Codex launch capabilities (--help failed)".into()); }
+            if !status.success() { return Err(format!("Cannot check {executable} launch capabilities (--help failed)")); }
             use std::io::{Read, Seek, SeekFrom};
             output.seek(SeekFrom::Start(0)).map_err(|e|e.to_string())?;
             let mut text=String::new();output.take(128*1024).read_to_string(&mut text).map_err(|e|e.to_string())?;
-            return Ok(text.split_whitespace().any(|word|word=="--no-daemon"));
+            return Ok(text);
         }
         if Instant::now()>=deadline {
-            let _=child.kill();let _=child.wait();return Err("Codex capability check timed out".into());
+            let _=child.kill();let _=child.wait();return Err(format!("{executable} capability check timed out"));
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -73,6 +78,31 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             std::env::remove_var(key);
         }
     }
+    // Strip only a capability-verified interactive launch prompt. Never save it
+    // in the native resume recipe, where a later resume could replay it.
+    let native_kimi = ["kimi", "kimi.exe", "kimi.cmd"].contains(&Path::new(&base[0])
+        .file_name().and_then(|name| name.to_str()).unwrap_or(""));
+    let mut launch_prompt = if agent == "kimi" && native_kimi && base.len() > 1 {
+        // Resolve after the account's login shell and environment assignments.
+        // Probe and spawn the same absolute path, including PATH-local installs
+        // and Windows npm shims. A project run_kimi.sh owns its own argv contract
+        // and must never run twice just to probe help; --bare selects native Kimi.
+        let resolved = crate::platform::which(&base[0]).ok_or("Kimi is not found on the launch PATH")?;
+        let resolved = std::path::absolute(resolved).map_err(|e|e.to_string())?.to_string_lossy().into_owned();
+        let help = agent_help(&resolved)?;
+        let prompt = kimi_launch::take_prompt(&mut base, &help)?;
+        if !first.is_empty() {
+            let other = kimi_launch::take_prompt(&mut first, &help)?;
+            if other != prompt { return Err("Kimi launch prompts do not match".into()); }
+        }
+        if let Some(text) = &prompt {
+            input::validate_launch_prompt(text)?;
+            base[0] = resolved.clone();
+            if !first.is_empty() { first[0] = resolved; }
+        }
+        prompt.map(|text| kimi_launch::Prompt::new(text,
+            nonempty_env("HGS_EXPECTED_ID").or_else(|| nonempty_env("HGS_REQUESTED_ID")).unwrap_or_default()))
+    } else { None };
     if nonempty_env("HGS_ACCOUNT_ID").is_some_and(|id| !id.starts_with("native-")) {
         for key in crate::accounts::AUTH_ENV {
             std::env::remove_var(key);
@@ -227,6 +257,9 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             clear_context::carry_fresh_start(previous, &mut record);
         }
         backend::current().set_run_marker(&name, &token)?;
+        if let Some(owner)=super::worktree_lifecycle::for_folder(std::path::Path::new(string(&record,"launch_dir"))) {
+            record["worktree_owner"]=owner;
+        }
         write(&mut record)?;
         // Keep this exact newly-created binding pinned during optional initial
         // placement. A removal/replacement must not inherit the old folder's
@@ -271,7 +304,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         let started = Instant::now();
         let mut child = spawn_agent(&first, &name, &token)?;
         let child_id = child.id();
-        let status = supervisor::wait(&mut child)?;
+        let status = kimi_launch::wait(&mut child, &name, &token, launch_prompt.as_mut())?;
         let confirmed = {
             let _guard = lock(None)?;
             let current =
@@ -308,7 +341,9 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     }
     let mut child = spawn_agent(&base, &name, &token)?;
     let child_id = child.id();
-    let status = supervisor::wait(&mut child)?;
+    // The same in-memory ticket survives a definite early resume failure. Once
+    // a submission is attempted, even a refusal can never authorize a replay.
+    let status = kimi_launch::wait(&mut child, &name, &token, launch_prompt.as_mut())?;
     supervisor::finish(&name, &token, child_id, status)?;
     Ok(ExitInfo::of(status).exit_code())
 }
@@ -681,9 +716,165 @@ fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action
     Ok(0)
 }
 
+/// U3: the newest user or assistant entry time in the last part of a native
+/// transcript, or None when it has none.
+pub(super) fn transcript_last_turn(path: &std::path::Path) -> Option<f64> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(length.saturating_sub(256 * 1024))).ok()?;
+    let mut text = String::new();
+    file.take(256 * 1024).read_to_string(&mut text).ok()?;
+    let mut newest = 0.0_f64;
+    for line in text.lines() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if !matches!(event["type"].as_str(), Some("user") | Some("assistant")) {
+            continue;
+        }
+        if let Some(at) = event["timestamp"]
+            .as_str()
+            .map(|text| super::search::timestamp(&serde_json::json!(text)))
+            .filter(|at| *at > 0.0)
+            .or_else(|| event["timestamp"].as_f64())
+        {
+            newest = newest.max(at);
+        }
+    }
+    (newest > 0.0).then_some(newest)
+}
+
+/// U3: how far the transcript is behind the events Zerus recorded; behind by
+/// more than two minutes is a silent resume that would drop dialogue.
+pub(super) fn transcript_lag(transcript_at: f64, events_at: f64) -> Option<f64> {
+    (transcript_at > 0.0 && events_at > 0.0 && events_at - transcript_at > 120.0).then_some(events_at - transcript_at)
+}
+
+/// U3: the dialogue Zerus recorded after the transcript's last turn, oldest
+/// first, from a sessions events index (read-only, bounded to the newest 4000
+/// rows; task notifications are not dialogue). N2: only the session's own
+/// conversation counts. N3: the newest 400 entries are kept; the number of
+/// older ones left out is returned so the note tells the truth.
+pub(super) fn read_events(path: &std::path::Path, journal: &str, conversation: &str, since: f64) -> (Vec<serde_json::Value>, usize) {
+    if journal.is_empty() || !path.exists() {
+        return (Vec::new(), 0);
+    }
+    let Ok(db) = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return (Vec::new(), 0);
+    };
+    // N2: the conversation column narrows the rows when the record names one;
+    // an old record without a conversation id keeps the name-only read.
+    let mut found: Vec<serde_json::Value> = if conversation.is_empty() {
+        let Ok(mut statement) = db.prepare("SELECT payload FROM events WHERE name = ?1 ORDER BY seq DESC LIMIT 4000") else {
+            return (Vec::new(), 0);
+        };
+        let Ok(rows) = statement.query_map([journal], |row| row.get::<_, String>(0)) else {
+            return (Vec::new(), 0);
+        };
+        rows.flatten().filter_map(|text| serde_json::from_str::<serde_json::Value>(&text).ok()).collect()
+    } else {
+        let Ok(mut statement) =
+            db.prepare("SELECT payload FROM events WHERE name = ?1 AND conversation = ?2 ORDER BY seq DESC LIMIT 4000")
+        else {
+            return (Vec::new(), 0);
+        };
+        let Ok(rows) = statement.query_map([journal, conversation], |row| row.get::<_, String>(0)) else {
+            return (Vec::new(), 0);
+        };
+        rows.flatten().filter_map(|text| serde_json::from_str::<serde_json::Value>(&text).ok()).collect()
+    };
+    found.retain(|payload| {
+        matches!(payload["type"].as_str(), Some("UserPromptSubmit") | Some("Stop"))
+            && payload["at"].as_f64().unwrap_or(0.0) > since
+            && payload["origin"] != "task_notification"
+    });
+    found.sort_by(|a, b| {
+        a["at"].as_f64().unwrap_or(0.0).total_cmp(&b["at"].as_f64().unwrap_or(0.0))
+    });
+    // N3: keep the newest entries, not the oldest.
+    let dropped = found.len().saturating_sub(400);
+    if dropped > 0 {
+        found.drain(..dropped);
+    }
+    (found, dropped)
+}
+
+/// U3: the state's sessions events index.
+fn events_index() -> std::path::PathBuf {
+    super::root().join("sessions").join("events.sqlite3")
+}
+
+/// U3: writes the lost dialogue to the recovered folder; None when Zerus
+/// recorded none. The newest 400 entries / 400 KiB are kept, the oldest cut
+/// with a note (N3); the file goes through the state's private storage (N4).
+pub(super) fn write_recovery(
+    dir: &std::path::Path,
+    conversation: &str,
+    events: &[serde_json::Value],
+    older_cut: usize,
+) -> Option<std::path::PathBuf> {
+    if events.is_empty() {
+        return None;
+    }
+    let entry_of = |event: &serde_json::Value| {
+        format!("## {} {}\n{}\n\n", event["type"].as_str().unwrap_or_default(), event["at"], event["detail"].as_str().unwrap_or_default())
+    };
+    // N3: fill the 400 KiB budget from the newest entry backwards.
+    let mut kept: Vec<&serde_json::Value> = Vec::new();
+    let mut used = 0usize;
+    for event in events.iter().rev() {
+        let size = entry_of(event).len();
+        if used + size > 400 * 1024 {
+            break;
+        }
+        used += size;
+        kept.push(event);
+    }
+    kept.reverse();
+    let cut = older_cut + (events.len() - kept.len());
+    let mut text = String::from("# Dialogue Zerus recorded after the transcript stopped\n\n");
+    for event in &kept {
+        text.push_str(&entry_of(event));
+    }
+    if cut > 0 {
+        text.push_str(&format!("[cut: the oldest {cut} entries are not shown]\n"));
+    }
+    let path = dir.join(format!("{conversation}-{}.md", super::now().round() as i64));
+    super::atomic(&path, &text).ok()?;
+    Some(path)
+}
+
+/// N4: the resumed session was not told about the recovered dialogue; the
+/// owner gets a warning that names the file and the reason.
+pub(super) fn recovery_send_failure(name: &str, path: &std::path::Path, reason: &str) -> String {
+    format!(
+        "hgs: warning: {name} was resumed but the recovered-dialogue message was not sent ({reason}); \
+         read {} and tell the session yourself",
+        path.display()
+    )
+}
+
+/// U3: the message the resumed session reads first.
+pub(super) fn recovery_message(transcript_at: f64, path: &std::path::Path) -> String {
+    format!(
+        "Your transcript stops at {transcript_at:.0} (unix time); Zerus recorded the dialogue after it: {}. Read it before you go on.",
+        path.display()
+    )
+}
+
 pub(super) fn resume(names: &[String], dry: bool) -> Result<i32> { resume_scoped(names,dry,None) }
 
 pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_action::Scope>) -> Result<i32> {
+    // U3: the owner may accept a stale transcript explicitly.
+    let mut names = names.to_vec();
+    let mut accept_stale = false;
+    let mut with_lost = false;
+    names.retain(|name| {
+        let flag = matches!(name.as_str(), "--accept-stale" | "--with-lost-dialogue");
+        accept_stale |= flag;
+        with_lost |= name == "--with-lost-dialogue";
+        !flag
+    });
+    let names = names.as_slice();
     if scope.is_none() {archive::reconcile()?;}
     if names.len() == 3 && names[1] == "--archive" {
         return resume_archive(&names[0], &names[2], dry, scope);
@@ -708,6 +899,7 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
         names.to_vec()
     };
     let mut recipes = Vec::new();
+    let mut recovered: std::collections::BTreeMap<String, (std::path::PathBuf, f64)> = std::collections::BTreeMap::new();
     for name in names {
         if let Some(id) = &requested {
             verify_requested(&read(&name)?, &snapshot, id)?;
@@ -717,6 +909,43 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
             continue;
         }
         let record = read(&name)?;
+        // U3: compare the native transcript's last turn with the events Zerus
+        // recorded; a silent resume would drop the dialogue after it.
+        if string(&record, "agent") == "claude" {
+            let transcript = string(&record, "transcript");
+            let transcript_at = (!transcript.is_empty())
+                .then(|| transcript_last_turn(std::path::Path::new(transcript)))
+                .flatten();
+            if let Some(transcript_at) = transcript_at {
+                let journal = string(&record, "journal_name").to_owned();
+                let conversation = string(&record, "conversation_id").to_owned();
+                let (events, older_cut) = read_events(&events_index(), &journal, &conversation, transcript_at);
+                let anchor = events
+                    .last()
+                    .and_then(|event| event["at"].as_f64())
+                    .unwrap_or(record["last_event_at"].as_f64().unwrap_or(0.0));
+                if let Some(lag) = transcript_lag(transcript_at, anchor) {
+                    if with_lost {
+                        if let Some(path) = write_recovery(
+                            &super::root().join("sessions").join("recovered"),
+                            &conversation,
+                            &events,
+                            older_cut,
+                        ) {
+                            recovered.insert(name.clone(), (path, transcript_at));
+                        }
+                    }
+                    if !accept_stale && !with_lost {
+                        // The desktop reads the times and the count from the JSON tail.
+                        let details = serde_json::json!({"error":"transcript_behind","transcript_at":transcript_at,
+                            "events_at":anchor,"missing":events.len() + older_cut});
+                        return Err(format!(
+                            "{name}: the native transcript stops {lag:.0} s before the events Zerus recorded (transcript_behind); resume with --accept-stale or --with-lost-dialogue {details}"
+                        ));
+                    }
+                }
+            }
+        }
         if let Some(scope)=scope {scope.check(&record)?;}
         if archive::equivalent(&record, &archived) {
             return Err(format!(
@@ -749,6 +978,28 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
         } else {
             if let Some(scope)=scope {scope.changing();}
             backend::current().start(&spec)?;
+            // U3: the resumed session reads the recovered dialogue first.
+            if let Some((path, transcript_at)) = recovered.get(&name) {
+                let message = recovery_message(*transcript_at, path);
+                if let Ok(executable) = std::env::current_exe() {
+                    let outcome = std::process::Command::new(executable)
+                        .args(["send", &name, &message])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                    // N4: a failed send must not leave the file unannounced.
+                    match outcome {
+                        Ok(status) if status.success() => {}
+                        Ok(status) => eprintln!(
+                            "{}",
+                            recovery_send_failure(&name, path, &format!("hgs send exited with {status}"))
+                        ),
+                        Err(error) => eprintln!("{}", recovery_send_failure(&name, path, &error.to_string())),
+                    }
+                } else {
+                    eprintln!("{}", recovery_send_failure(&name, path, "the hgs executable is not known"));
+                }
+            }
             if let Some(scope)=scope {scope.result(&name,&new_run,string(&current,"conversation_id"),None);} else {println!("hgs: resuming {name}");}
         }
     }
@@ -834,5 +1085,132 @@ mod tests {
         std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(codex_daemon_flag(&launcher.to_string_lossy()), Ok(true));
         assert!(!marker.exists());
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    #[test]
+    fn a_transcript_behind_the_events_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"user\",\"timestamp\":\"2026-10-26T00:10:00Z\"}\n",
+                "{\"type\":\"assistant\",\"timestamp\":\"2026-10-26T00:11:00Z\"}\n",
+                "{\"type\":\"system\",\"timestamp\":\"2026-10-26T04:11:00Z\"}\n"
+            ),
+        )
+        .unwrap();
+        let at = transcript_last_turn(&path).unwrap();
+        let expected = super::super::search::timestamp(&serde_json::json!("2026-10-26T00:11:00Z"));
+        assert!((at - expected).abs() < 1.0, "{at} {expected}");
+        assert!(transcript_lag(at, expected + 3600.0).is_some());
+        assert!(transcript_lag(at, expected + 60.0).is_none());
+        assert!(transcript_lag(0.0, expected + 3600.0).is_none());
+        assert!(transcript_last_turn(&dir.path().join("missing.jsonl")).is_none());
+    }
+
+    #[test]
+    fn the_lost_dialogue_comes_from_the_events_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("events.sqlite3");
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch("CREATE TABLE events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);")
+            .unwrap();
+        let insert = |seq: i64, at: f64, kind: &str, detail: &str, origin: &str| {
+            let payload = serde_json::json!({"type":kind,"at":at,"detail":detail,"origin":origin}).to_string();
+            connection
+                .execute(
+                    "INSERT INTO events (seq,name,conversation,payload) VALUES (?1,'claude/x/dev','c',?2)",
+                    rusqlite::params![seq, payload],
+                )
+                .unwrap();
+        };
+        insert(1, 50.0, "UserPromptSubmit", "old", "");
+        insert(2, 200.0, "UserPromptSubmit", "keep going", "");
+        insert(3, 210.0, "Stop", "done", "");
+        insert(4, 220.0, "UserPromptSubmit", "noise", "task_notification");
+        insert(5, 230.0, "PreToolUse", "tool", "");
+        let (events, cut) = read_events(&db, "claude/x/dev", "c", 100.0);
+        assert_eq!((events.len(), cut), (2, 0), "{events:?}");
+        assert_eq!((events[0]["detail"].as_str(), events[1]["detail"].as_str()), (Some("keep going"), Some("done")));
+        let path = write_recovery(dir.path(), "c", &events, cut).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("keep going") && text.contains("# Dialogue Zerus recorded"), "{text}");
+        assert!(recovery_message(120.0, &path).contains("Your transcript stops at 120"), "{}", recovery_message(120.0, &path));
+        assert!(read_events(&db, "claude/x/other", "c", 100.0).0.is_empty());
+        assert!(read_events(&dir.path().join("missing.sqlite3"), "claude/x/dev", "c", 0.0).0.is_empty());
+        // N4: a failed recovery message names the file and the reason.
+        let warning = recovery_send_failure("claude/x/dev", &path, "hgs send exited with exit status: 1");
+        assert!(warning.contains("claude/x/dev") && warning.contains(&path.display().to_string()), "{warning}");
+        assert!(warning.contains("read") && warning.contains("hgs send exited"), "{warning}");
+    }
+
+    #[test]
+    fn the_lost_dialogue_keeps_the_newest_entries_of_the_right_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("events.sqlite3");
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch("CREATE TABLE events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);")
+            .unwrap();
+        let insert = |seq: i64, conversation: &str, at: f64, detail: &str| {
+            let payload = serde_json::json!({"type":"UserPromptSubmit","at":at,"detail":detail}).to_string();
+            connection
+                .execute(
+                    "INSERT INTO events (seq,name,conversation,payload) VALUES (?1,'claude/x/dev',?2,?3)",
+                    rusqlite::params![seq, conversation, payload],
+                )
+                .unwrap();
+        };
+        // N2: the same session name ran another conversation later; its rows
+        // must not leak into this conversation's recovery.
+        insert(1, "old", 100.0, "ancient");
+        insert(2, "current", 200.0, "first");
+        insert(3, "other", 300.0, "not mine");
+        insert(4, "current", 400.0, "second");
+        let (events, cut) = read_events(&db, "claude/x/dev", "current", 50.0);
+        assert_eq!(events.iter().map(|event| event["detail"].as_str().unwrap()).collect::<Vec<_>>(), vec!["first", "second"]);
+        assert_eq!(cut, 0);
+        // An old record without a conversation id keeps the name-only read.
+        assert_eq!(read_events(&db, "claude/x/dev", "", 50.0).0.len(), 4);
+        // N3: more than 400 entries keep the newest ones, and the note counts
+        // the oldest that were left out.
+        let db = dir.path().join("many.sqlite3");
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch("CREATE TABLE events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);")
+            .unwrap();
+        for index in 0..450 {
+            let payload = serde_json::json!({"type":"UserPromptSubmit","at":index as f64 + 1.0,"detail":format!("entry {index}")}).to_string();
+            connection
+                .execute(
+                    "INSERT INTO events (seq,name,conversation,payload) VALUES (?1,'claude/x/dev','c',?2)",
+                    rusqlite::params![index + 1, payload],
+                )
+                .unwrap();
+        }
+        let (events, cut) = read_events(&db, "claude/x/dev", "c", 0.0);
+        assert_eq!((events.len(), cut), (400, 50));
+        assert_eq!(events.first().map(|event| event["detail"].as_str().unwrap()), Some("entry 50"));
+        assert_eq!(events.last().map(|event| event["detail"].as_str().unwrap()), Some("entry 449"));
+        let path = write_recovery(dir.path(), "c", &events, cut).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("entry 449") && !text.contains("entry 49\n"), "{text}");
+        assert!(text.contains("[cut: the oldest 50 entries are not shown]"), "{text}");
+        // The 400 KiB budget also keeps the newest entries and says how many
+        // were cut.
+        let large: Vec<serde_json::Value> = (0..40)
+            .map(|index| serde_json::json!({"type":"Stop","at":index,"detail":"x".repeat(20_000)}))
+            .collect();
+        let path = write_recovery(&dir.path().join("big"), "c", &large, 0).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.len() <= 400 * 1024 + 200, "{}", text.len());
+        assert!(text.contains("[cut: the oldest "), "{text}");
     }
 }

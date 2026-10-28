@@ -39,7 +39,9 @@ fn load_writable(path: &Path) -> Result<Value> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(json!({})),
         Err(error) => return Err(format!("Shared read marks could not be read: {error}")),
     };
-    if !crate::platform::verify_private_file(&file).map_err(|error| error.to_string())? {
+    // #569: a store only too open is made private again; one that stays
+    // refused is reported (hgs status, the desktop) with its fix.
+    if !crate::private_stores::ensure_file(path, &file).map_err(|error| error.to_string())? {
         return Err("Shared read marks could not be read; the store must be a private regular file".into());
     }
     let mut text = String::new();
@@ -334,7 +336,7 @@ impl RenameGuard {
             return Ok(());
         };
         map.insert(new.to_owned(), marks);
-        atomic(
+        atomic_private(
             &self.path,
             &format!("{}\n", json!({"version": 1, "sessions": self.sessions})),
         )
@@ -459,7 +461,10 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         insert_with_owners(&mut sessions, &owner, &request.conversation, next.clone(), || {
             records().map(|records| records.iter().map(|record| journal::journal_name(record).to_owned()).collect())
         }, |key| dsh::exists(key) || opencode::exists(key))?;
-        atomic(&path(), &format!("{}\n", json!({"version": 1, "sessions": sessions})))?;
+        let path = path();
+        atomic_private(&path, &format!("{}\n", json!({"version": 1, "sessions": sessions}))).inspect_err(|error| {
+            crate::private_stores::write_failed(&path, crate::platform::Private::File, error);
+        })?;
     }
     println!("{}", json!({"ok": true, "applied": {"reply_id": reply, "attention_signature": attention}, "read": next}));
     Ok(0)
@@ -524,7 +529,7 @@ mod tests {
         let path = dir.path().join("read-marks.json");
         assert_eq!(load_writable(&path).unwrap(), json!({}));
         let legacy = json!({"version":1,"sessions":{"owner":{"conversation":{"reply_id":"one","at":1.0}}}});
-        atomic(&path, &legacy.to_string()).unwrap();
+        atomic_private(&path, &legacy.to_string()).unwrap();
         assert_eq!(load_writable(&path).unwrap(), legacy["sessions"]);
         // A legacy writer holds the same lock and replaces exactly this v1 file.
         let mut guard = RenameGuard::at(&path).unwrap();
@@ -533,10 +538,10 @@ mod tests {
         let mut old_writer: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(old_writer["version"], 1);
         old_writer["sessions"]["renamed"]["conversation"]["reply_id"] = json!("two");
-        atomic(&path, &old_writer.to_string()).unwrap();
+        atomic_private(&path, &old_writer.to_string()).unwrap();
         assert_eq!(load_writable(&path).unwrap()["renamed"]["conversation"]["reply_id"], "two");
         for text in ["{", r#"{"version":2,"sessions":{}}"#, r#"{"version":1,"sessions":[]}"#] {
-            atomic(&path, text).unwrap();
+            atomic_private(&path, text).unwrap();
             assert!(load_writable(&path).is_err());
             assert!(RenameGuard::at(&path).is_err());
             assert_eq!(fs::read_to_string(&path).unwrap(), text);
@@ -553,7 +558,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("read-marks.json");
         let target = dir.path().join("target.json");
-        atomic(&target, r#"{"version":1,"sessions":{}}"#).unwrap();
+        atomic_private(&target, r#"{"version":1,"sessions":{}}"#).unwrap();
         let unchanged = fs::read(&target).unwrap();
         symlink(&target, &path).unwrap();
         assert!(load_writable(&path).is_err());

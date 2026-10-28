@@ -1,4 +1,6 @@
 #include "AccountsPage.h"
+#include "PageCards.h"
+#include <QStyle>
 #include "AccountUsage.h"
 #include "AccountUsageStore.h"
 #include "AccountCatalog.h"
@@ -128,6 +130,14 @@ private:
     }
     QList<QLayoutItem *> items;
 };
+// U25 (spec 9): a profile's sign-in on its machine: "expired", "out"
+// (signed out) or "in" (signed in, configured, or still being checked).
+QString signState(const QJsonObject &member) {
+    const auto usage = member["usage"].toObject(); const auto status = usage["status"].toString();
+    if (status == "expired") return QStringLiteral("expired");
+    if (status == "signed_out" || usage["auth_status"] == "signed_out") return QStringLiteral("out");
+    return QStringLiteral("in");
+}
 class AccountDelegate final : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
@@ -142,7 +152,23 @@ public:
         QFont font = o.font; font.setPixelSize(14); font.setWeight(QFont::DemiBold); p->setFont(font);
         p->setPen(QColor(dark ? "#e8edf4" : "#1a2733"));
         const QRect title(r.x(), r.y() - 1, qMax(0, r.width() - pw - 10), 20);
-        p->drawText(title, Qt::AlignVCenter, QFontMetrics(font).elidedText(profile["label"].toString(), Qt::ElideRight, title.width()));
+        // U25 (spec 9): "Signed out" / "Expired" in warn beside the provider.
+        const auto state = index.data(Qt::UserRole + 1).toString();
+        int titleRight = title.right();
+        if (state == "out" || state == "expired") {
+            QFont pillFont = font; pillFont.setPixelSize(11); pillFont.setWeight(QFont::Medium);
+            const QString text = state == "expired" ? QObject::tr("Expired") : QObject::tr("Signed out");
+            const int w = QFontMetrics(pillFont).horizontalAdvance(text) + 14;
+            const QRect pill(r.right() - pw - 6 - w, r.y(), w, 18);
+            const QColor warn = PageCards::token(dark, "warn");
+            QColor fill = warn; fill.setAlphaF(.14);
+            p->setPen(Qt::NoPen); p->setBrush(fill); p->drawRoundedRect(pill, 5, 5);
+            p->setFont(pillFont); p->setPen(warn); p->drawText(pill, Qt::AlignCenter, text);
+            p->setFont(font); p->setPen(QColor(dark ? "#e8edf4" : "#1a2733"));
+            titleRight = pill.left() - 6;
+        }
+        const QRect named(title.x(), title.y(), qMax(0, titleRight - title.x()), title.height());
+        p->drawText(named, Qt::AlignVCenter, QFontMetrics(font).elidedText(profile["label"].toString(), Qt::ElideRight, named.width()));
         font.setPixelSize(11); font.setWeight(QFont::Normal); p->setFont(font); p->setPen(QColor(dark ? "#a1adbb" : "#647386"));
         const auto mode = accountPermission(profile), caption = permissionLabel(mode);
         const int badgeWidth = QFontMetrics(font).horizontalAdvance(caption) + 14;
@@ -159,7 +185,16 @@ public:
             if (x + width > tagsRight - (i + 1 < machines.size() ? 28 : 0)) {
                 p->drawText(QRect(x, r.y() + 24, qMax(0, tagsRight - x), 18), Qt::AlignVCenter, "+" + QString::number(machines.size() - i)); break;
             }
-            IdentityBadges::paint(p, QRect(x, r.y() + 24, width, 18), IdentityBadges::Machine, machine, dark); x += width + 6;
+            // A machine where the account is not signed in is struck through and pale.
+            const bool off = index.data(Qt::UserRole + 2).toStringList().contains(machine);
+            if (off) p->setOpacity(.45);
+            IdentityBadges::paint(p, QRect(x, r.y() + 24, width, 18), IdentityBadges::Machine, machine, dark);
+            if (off) {
+                p->setPen(QPen(QColor(dark ? "#e8edf4" : "#1a2733"), 1));
+                p->drawLine(QPointF(x + 6, r.y() + 33.5), QPointF(x + width - 6, r.y() + 33.5));
+                p->setOpacity(1);
+            }
+            x += width + 6;
         }
         p->restore();
     }
@@ -203,6 +238,20 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
     layout->addLayout(WorkspacePageHeader::row(title, m_refresh, m_add));
     auto *intro = label(tr("Your accounts across all machines. Choose an account to manage where it is available.")); intro->setObjectName("muted"); layout->addWidget(intro);
     auto *filters = new QHBoxLayout; m_machine = new QComboBox; m_machine->setObjectName("accountMachineFilter"); m_machine->addItem(tr("All machines"), "*"); filters->addWidget(m_machine);
+    // U25 (spec 9): All / Signed in N / Signed out N, counted on the machine filter.
+    auto *signs = new QHBoxLayout; signs->setSpacing(0);
+    m_signAll = new QPushButton(tr("All")); m_signAll->setObjectName("accountSignAll"); PageCards::segment(m_signAll, "first");
+    m_signIn = new QPushButton(tr("Signed in")); m_signIn->setObjectName("accountSignIn"); PageCards::segment(m_signIn);
+    m_signOut = new QPushButton(tr("Signed out")); m_signOut->setObjectName("accountSignOut"); PageCards::segment(m_signOut, "last");
+    m_signAll->setChecked(true);
+    for (auto *button : {m_signAll, m_signIn, m_signOut}) {
+        signs->addWidget(button);
+        connect(button, &QPushButton::clicked, this, [this, button] {
+            m_signFilter = button == m_signIn ? QStringLiteral("in") : button == m_signOut ? QStringLiteral("out") : QStringLiteral("all");
+            render();
+        });
+    }
+    filters->addLayout(signs);
     auto *summary = new QHBoxLayout; summary->setSpacing(6);
     m_summarySpinner = new BusyIndicator; m_summarySpinner->setObjectName("accountsUpdatingSpinner"); summary->addWidget(m_summarySpinner,0,Qt::AlignVCenter);
     m_summary = label(); m_summary->setObjectName("muted"); summary->addWidget(m_summary,1); filters->addLayout(summary,1); layout->addLayout(filters);
@@ -217,7 +266,21 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
     loadingLayout->addWidget(loadingHint); loadingLayout->addStretch(); m_bodyStack->addWidget(loading);
     auto *content = new QWidget; content->setObjectName("accountsContent"); m_bodyStack->addWidget(content);
     auto *body = new QHBoxLayout(content); body->setContentsMargins(0,0,0,0); body->setSpacing(20);
-    m_list = new WorkspaceList; m_list->setObjectName("accountProfiles"); m_list->setMinimumWidth(240); m_list->setMaximumWidth(360); body->addWidget(m_list, 1);
+    m_list = new WorkspaceList; m_list->setObjectName("accountProfiles"); m_list->setMinimumWidth(240); m_list->setMaximumWidth(360);
+    // The list, or "No accounts match" with Clear filters.
+    auto *listColumn = new QWidget; listColumn->setObjectName("accountListColumn"); listColumn->setMinimumWidth(240); listColumn->setMaximumWidth(360);
+    auto *listLayout = new QVBoxLayout(listColumn); listLayout->setContentsMargins(0, 0, 0, 0); listLayout->setSpacing(8);
+    listLayout->addWidget(m_list, 1);
+    m_empty = new QWidget; m_empty->setObjectName("accountsEmpty");
+    auto *emptyLayout = new QVBoxLayout(m_empty); emptyLayout->setContentsMargins(0, 24, 0, 0); emptyLayout->setSpacing(8);
+    auto *emptyText = label(tr("No accounts match")); emptyText->setObjectName("muted"); emptyText->setAlignment(Qt::AlignCenter); emptyLayout->addWidget(emptyText);
+    m_clearFilters = new QPushButton(tr("Clear filters")); m_clearFilters->setObjectName("clearAccountFilters"); emptyLayout->addWidget(m_clearFilters, 0, Qt::AlignHCenter);
+    emptyLayout->addStretch(); m_empty->hide(); listLayout->addWidget(m_empty, 1);
+    connect(m_clearFilters, &QPushButton::clicked, this, [this] {
+        m_signFilter = QStringLiteral("all"); m_signAll->setChecked(true); m_signIn->setChecked(false); m_signOut->setChecked(false);
+        if (m_machine->currentIndex() != 0) m_machine->setCurrentIndex(0); else render();
+    });
+    body->addWidget(listColumn, 1);
     m_list->setItemDelegate(new AccountDelegate(m_list)); m_list->setMouseTracking(true); m_list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_list->setStyleSheet("QListWidget#accountProfiles { background:transparent; border:0; outline:0; } QListWidget#accountProfiles::item { padding:0; border:0; }");
     auto *detailsWidget = new QWidget; detailsWidget->setObjectName("accountDetails"); detailsWidget->setMaximumWidth(720);
@@ -240,7 +303,8 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
         m_activeProfile = m_profileChoice->currentData().toString(); selectionChanged();
     });
     m_detail = label(); m_detail->setObjectName("accountMachineStatus"); m_detail->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    auto *actions = new QHBoxLayout; actions->setSpacing(12);actions->addWidget(m_detail);
+    // U25 (spec 9): the status on the left, its sign-in on the right.
+    auto *actions = new QHBoxLayout; actions->setSpacing(12);actions->addWidget(m_detail, 1);
     m_login = new QPushButton(tr("Sign in…")); m_login->setObjectName("loginAccount"); actions->addWidget(m_login);
     m_install = new QPushButton(tr("Install agent…")); m_install->setObjectName("installAccountAgent"); actions->addWidget(m_install);
     // Explicit only: inspecting accounts never starts OpenCode's shared service.
@@ -274,6 +338,12 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
     m_permissions = new QPushButton(tr("Change…")); m_permissions->setObjectName("accountPermissions");
     permissionRow->addWidget(m_permissionState);permissionRow->addWidget(m_permissions);permissionRow->addStretch();machineLayout->addLayout(permissionRow);
     connect(m_permissions, &QPushButton::clicked, this, &AccountsPage::permissions);
+    auto *modelRow = new QHBoxLayout; modelRow->setSpacing(12);
+    m_modelState = label(); m_modelState->setObjectName("accountModelState");
+    m_modelDefaults = new QPushButton(tr("Model and effort…")); m_modelDefaults->setObjectName("accountModelDefaults");
+    modelRow->addWidget(m_modelState); modelRow->addWidget(m_modelDefaults); modelRow->addStretch();
+    machineLayout->addLayout(modelRow);
+    connect(m_modelDefaults, &QPushButton::clicked, this, &AccountsPage::modelDefaults);
     m_default=new QPushButton; m_default->setObjectName("defaultAccount");machineLayout->addWidget(m_default,0,Qt::AlignLeft);
     connect(m_default,&QPushButton::clicked,this,[this]{
         const auto p=selected();if(p.isEmpty()||p["is_default"].toBool())return;
@@ -283,6 +353,12 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
     m_remove = new QPushButton(tr("Remove…")); m_remove->setObjectName("removeAccount");
     m_remove->setToolTip(tr("Remove this profile from the selected machine's Zerus catalog. You will confirm the machine and consequences before anything changes."));
     machineLayout->addSpacing(4);machineLayout->addWidget(m_remove,0,Qt::AlignLeft);details->addWidget(m_machineCard);
+    // U25 (spec 9): the teams whose members use this account.
+    QBoxLayout *teamsBox = nullptr; m_teamsCard = PageCards::card(QStringLiteral("accountTeamsCard"), &teamsBox);
+    auto *teamsTitle = label(tr("Used by teams")); teamsTitle->setStyleSheet(QStringLiteral("font-weight:600;")); teamsBox->addWidget(teamsTitle);
+    m_teamsList = new QVBoxLayout; m_teamsList->setSpacing(4); teamsBox->addLayout(m_teamsList);
+    auto *teamsNote = label(tr("Team members share this account’s limits.")); teamsNote->setObjectName("muted"); teamsBox->addWidget(teamsNote);
+    m_teamsCard->hide(); details->addWidget(m_teamsCard);
     details->addWidget(m_usage); details->addStretch();
     auto *scroll=new QScrollArea;scroll->setObjectName("accountDetailsScroll");scroll->setWidgetResizable(true);scroll->setFrameShape(QFrame::NoFrame);scroll->setAlignment(Qt::AlignLeft|Qt::AlignTop);scroll->setWidget(detailsWidget);
     scroll->setAutoFillBackground(false);scroll->viewport()->setAutoFillBackground(false);detailsWidget->setAutoFillBackground(false);body->addWidget(scroll,2);
@@ -315,16 +391,25 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
     connect(&m_client, &HgsClient::accountsReady, this, [this](quint64 id, const QString &host, const QJsonObject &data) {
         if (!m_requests.contains(id)) return;
         const QString op = m_requests.take(id).second;
-        if (!host.isEmpty() && !m_fleet.peerNames().contains(host) && host != m_explicitHost) { render(); return; }
+        if (!host.isEmpty() && !m_fleet.peerNames().contains(host) && host != m_explicitHost) { m_catalogRefreshQueued.remove(host); render(); return; }
+        if (op == "model-settings") {
+            const auto profile = m_modelProfile; m_modelProfile = {};
+            render();
+            if (profile["host"].toString() == host && profile["id"] == data["account_id"]
+                && AccountCatalog::profileKey(selected()) == AccountCatalog::profileKey(profile))
+                editModelDefaults(profile, data);
+            return;
+        }
         if (op == "start") {
             // The answer is OpenCode's catalog, not the account list: read the list again.
             emit notice(tr("OpenCode started on %1.").arg(host.isEmpty() ? m_fleet.local().host : host));
             request(host, {"ls"}); render(); return;
         }
-        if (op == "ls" || op == "add" || op == "rename" || op == "rm" || op == "restore" || op == "set-key" || op == "permissions" || op == "default") m_catalogs[host] = data;
+        if (op == "ls" || op == "add" || op == "rename" || op == "rm" || op == "restore" || op == "set-key" || op == "permissions" || op == "default" || op == "model-defaults") m_catalogs[host] = data;
+        if (op == "ls") requestQueuedCatalog(host);
         if (op == "rename" && !m_renameQueue.isEmpty()) { renameNext(); render(); return; }
         if (op != "ls") {
-            emit notice(op == "default" ? tr("Default account saved for new sessions on %1.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "permissions" ? tr("Permission mode saved for new and resumed sessions on %1.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "set-key" ? tr("DeepSeek API key saved on %1.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "restore" ? tr("Account added on %1 using its saved sign-in.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "rename" ? tr("Account name updated.") : op == "copy" ? tr("Account copied into a new profile. It is available in New session on that machine.") : op == "rm" ? tr("Account removed from %1. Add it again whenever you need it.").arg(host.isEmpty() ? m_fleet.local().host : host) : tr("Account profile created. Sign in to use it."));
+            emit notice(op == "model-defaults" ? tr("Model defaults saved for new sessions on %1.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "default" ? tr("Default account saved for new sessions on %1.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "permissions" ? tr("Permission mode saved for new and resumed sessions on %1.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "set-key" ? tr("DeepSeek API key saved on %1.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "restore" ? tr("Account added on %1 using its saved sign-in.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "rename" ? tr("Account name updated.") : op == "copy" ? tr("Account copied into a new profile. It is available in New session on that machine.") : op == "rm" ? tr("Account removed from %1. Add it again whenever you need it.").arg(host.isEmpty() ? m_fleet.local().host : host) : tr("Account profile created. Sign in to use it."));
             emit accountsChanged();
             if (op == "add" && !m_loginAfterAddId.isEmpty()) {
                 bool installed = false;
@@ -336,17 +421,20 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
             if (op == "copy") ensureCatalogs(true);
             if (op == "set-key") inspectProfiles(true);
         }
-        render();emit catalogChanged(); if (isVisible()) inspectProfiles();
+        render();emit catalogChanged(); inspectProfiles();
     });
     connect(&m_client, &HgsClient::accountsFailed, this, [this](quint64 id, const QString &host, const QString &error) {
         if (!m_requests.contains(id)) return;
         const auto op = m_requests.take(id).second;
-        if (!host.isEmpty() && !m_fleet.peerNames().contains(host) && host != m_explicitHost) { render(); return; }
-        m_loginAfterAddId.clear(); m_renameQueue.clear(); emit notice((host.isEmpty() ? tr("This machine") : host) + ": " + error,true); render();emit catalogChanged();
+        if (!host.isEmpty() && !m_fleet.peerNames().contains(host) && host != m_explicitHost) { m_catalogRefreshQueued.remove(host); render(); return; }
+        m_loginAfterAddId.clear(); m_renameQueue.clear();
+        if (op == "ls") requestQueuedCatalog(host);
+        if (op != "ls" || isVisible()) emit notice((host.isEmpty() ? tr("This machine") : host) + ": " + error,true);
+        render();emit catalogChanged();
     });
     connect(m_usageStore,&AccountUsageStore::changed,this,[this](const QString &){
         if (m_renderQueued) return; m_renderQueued = true;
-        QTimer::singleShot(0, this, [this] { m_renderQueued = false; render(); });
+        QTimer::singleShot(0, this, [this] { m_renderQueued = false; render(); emit catalogChanged(); });
     });
     auto *timer=new QTimer(this);timer->setInterval(30000);connect(timer,&QTimer::timeout,this,[this]{if(isVisible()){ensureCatalogs();inspectProfiles();}});timer->start();
     setTheme(false); selectionChanged();
@@ -358,8 +446,9 @@ void AccountsPage::setTheme(bool dark) {
     m_refresh->setTheme(dark);
     m_loadingSpinner->setTheme(dark); m_summarySpinner->setTheme(dark);
     WorkspacePageHeader::theme(m_refresh, m_add, tr("Refresh accounts"), dark);
-    m_machineCard->setStyleSheet(QString("QFrame#accountMachineCard {background:%1;border:1px solid %2;border-radius:9px;} QFrame#accountMachineCard QLabel {background:transparent;}")
-        .arg(dark ? "#1c242c" : "#ffffff",dark ? "#34414b" : "#ccd7df"));
+    // U25: the prototype's card for the machine and team blocks.
+    m_machineCard->setProperty("pageCard", true);
+    setStyleSheet(PageCards::sheet(dark));
     if (m_refresh->isRefreshing()) m_refresh->setIcon({});
     refreshAppearance(); selectionChanged();
 }
@@ -369,6 +458,13 @@ void AccountsPage::setFleet(const FleetState &fleet)
 {
     m_fleet = fleet;m_usageStore->setFleet(fleet); const QString selectedHost = m_machine->currentData().toString();
     const auto desired = accountHosts(fleet, m_explicitHost);
+    for (auto it = m_catalogRefreshQueued.begin(); it != m_catalogRefreshQueued.end();) {
+        if (!desired.contains(*it)) it = m_catalogRefreshQueued.erase(it); else ++it;
+    }
+    // Warm each newly configured machine once, even before Accounts is opened.
+    // Normal navigation/refresh handles later reads; fleet polling must not
+    // repeatedly probe all accounts in the background.
+    for (const auto &host : desired) if (!m_catalogChecked.contains(host)) request(host, {"ls"});
     bool same = m_machine->count() == desired.size() + 1;
     for (int i = 0; same && i < desired.size(); ++i)
         same = m_machine->itemData(i + 1).toString() == desired[i] && m_machine->itemText(i + 1) == machineChoice(fleet, desired[i]);
@@ -432,9 +528,11 @@ void AccountsPage::updateRefreshState()
     m_refresh->setToolTip(caption); m_refresh->setAccessibleName(caption);
     QSet<QString> loadedHosts;for(const auto &value:m_displayProfiles)loadedHosts.insert(value.toObject()["host"].toString());
     if (accountHosts(m_fleet, m_explicitHost).isEmpty()) { m_summary->setText(remoteOnlyHint(m_fleet)); return; }
-    const int accounts = m_list->count(), machines = loadedHosts.size();
-    const auto loaded = tr("%1, %2").arg(accounts == 1 ? tr("1 account") : tr("%1 accounts").arg(accounts),
+    const int accounts = m_totalAccounts, machines = loadedHosts.size();
+    auto loaded = tr("%1, %2").arg(accounts == 1 ? tr("1 account") : tr("%1 accounts").arg(accounts),
         machines == 1 ? tr("1 machine loaded") : tr("%1 machines loaded").arg(machines));
+    // U25 (spec 9): how many the filters leave.
+    if (m_list->count() != accounts) loaded += tr(" · %1 shown").arg(m_list->count());
     m_summary->setText(!m_hasSnapshot ? tr("Loading accounts…") : loaded + (pending ? tr(" (Updating… %1 remaining)").arg(pending) : QString()));
 }
 void AccountsPage::ensureCatalogs(bool force)
@@ -443,10 +541,18 @@ void AccountsPage::ensureCatalogs(bool force)
     const auto now=QDateTime::currentMSecsSinceEpoch();
     for(const auto &host:hosts) {
         bool pending=false;for(const auto &r:m_requests)if(r.first==host && r.second=="ls")pending=true;
+        if (pending) { if (force) m_catalogRefreshQueued.insert(host); continue; }
         if(!pending && (force || !m_catalogChecked.contains(host) || now-m_catalogChecked[host]>=30000)) {
             m_catalogChecked[host]=now;request(host,{"ls"});
         }
     }
+}
+void AccountsPage::requestQueuedCatalog(const QString &host)
+{
+    // Only an explicit refresh can queue this one follow-up. A failed read alone
+    // never retries. Wait for every older read so none can overwrite the refresh.
+    for (const auto &pending : m_requests) if (pending.first == host && pending.second == "ls") return;
+    if (m_catalogRefreshQueued.remove(host) && accountHosts(m_fleet, m_explicitHost).contains(host)) request(host, {"ls"});
 }
 QJsonArray AccountsPage::profiles(bool includeRemoved) const
 {
@@ -515,6 +621,9 @@ void AccountsPage::render()
     }
     m_displayProfiles=ready;
     if(!ready.isEmpty() || !pendingAccounts())m_hasSnapshot=true;
+    // Other views read the profiles above (catalogProfiles); the list renders
+    // when the page is shown (showEvent).
+    if(!isVisible())return;
     m_bodyStack->setCurrentIndex(m_hasSnapshot?1:0);
     const auto old = selected(); const QString oldKey = AccountCatalog::profileKey(old);
     const auto desiredKey=m_requestedProfile.isEmpty()?oldKey:m_requestedProfile;
@@ -522,16 +631,27 @@ void AccountsPage::render()
     const int scroll = m_list->verticalScrollBar()->value();
     QListWidgetItem *selection = nullptr;
     int row = 0;
-    QJsonArray displayed;
-    for (const auto &value : m_displayProfiles) {
-        const auto host=value.toObject()["host"].toString();
-        if (host.isEmpty() || m_fleet.peerNames().contains(host) || host==m_explicitHost) displayed.append(value);
-    }
-    for (const auto &entry : AccountCatalog::group(displayed)) {
+    const auto groups = AccountCatalog::group(catalogProfiles());
+    m_totalAccounts = groups.size();
+    int signedIn = 0, signedOut = 0;
+    for (const auto &entry : groups) {
         const auto p = entry.toObject();
-        bool visible = m_machine->currentData().toString() == "*";
-        for (const auto &member : p["members"].toArray()) visible |= member.toObject()["host"] == m_machine->currentData().toString();
+        const QString host = m_machine->currentData().toString();
+        bool visible = host == "*";
+        for (const auto &member : p["members"].toArray()) visible |= member.toObject()["host"] == host;
         if (!visible) continue;
+        // U25 (spec 9): its sign-in on the machines the filter shows; a
+        // machine where it is not signed in is named for the struck tag.
+        QString state = QStringLiteral("in"); QStringList off;
+        for (const auto &member : p["members"].toArray()) {
+            const auto m = member.toObject();
+            if (host != "*" && m["host"] != host) continue;
+            const auto one = signState(m);
+            if (one != "in") off << m["machine"].toString();
+            if (one == "expired") state = one; else if (one == "out" && state == "in") state = one;
+        }
+        if (state == "in") ++signedIn; else ++signedOut;
+        if ((m_signFilter == "in" && state != "in") || (m_signFilter == "out" && state == "in")) continue;
         QStringList machines; for (const auto &machine : p["machines"].toArray()) machines << machine.toString();
         QListWidgetItem *item = nullptr;
         for (int i = row; i < m_list->count(); ++i) {
@@ -552,10 +672,16 @@ void AccountsPage::render()
             + "\nPermissions: " + permissionLabel(accountPermission(p));
         if (item->text() != text) { item->setText(text); item->setData(Qt::AccessibleTextRole, text); }
         if (item->data(Qt::UserRole).toJsonObject() != p) item->setData(Qt::UserRole, p);
+        if (item->data(Qt::UserRole + 1).toString() != state) item->setData(Qt::UserRole + 1, state);
+        if (item->data(Qt::UserRole + 2).toStringList() != off) item->setData(Qt::UserRole + 2, off);
         if (AccountCatalog::contains(p, desiredKey)) { selection = item; m_requestedProfile.clear(); }
         ++row;
     }
     while (m_list->count() > row) delete m_list->takeItem(row);
+    m_signIn->setText(tr("Signed in %1").arg(signedIn)); m_signOut->setText(tr("Signed out %1").arg(signedOut));
+    m_signAll->setChecked(m_signFilter == "all"); m_signIn->setChecked(m_signFilter == "in"); m_signOut->setChecked(m_signFilter == "out");
+    const bool none = row == 0 && m_totalAccounts > 0;
+    m_list->setVisible(!none); m_empty->setVisible(none);
     if (selection) m_list->setCurrentItem(selection);
     if (!m_list->currentItem() && m_list->count()) m_list->setCurrentRow(0);
     m_list->verticalScrollBar()->setValue(scroll);
@@ -567,6 +693,15 @@ bool AccountsPage::changing() const
 {
     for (const auto &request : m_requests) if (request.second != "ls") return true;
     return false;
+}
+QJsonArray AccountsPage::catalogProfiles() const
+{
+    QJsonArray result;
+    for (const auto &value : m_displayProfiles) {
+        const auto host = value.toObject()["host"].toString();
+        if (host.isEmpty() || m_fleet.peerNames().contains(host) || host == m_explicitHost) result.append(value);
+    }
+    return result;
 }
 void AccountsPage::selectionChanged()
 {
@@ -586,6 +721,13 @@ void AccountsPage::selectionChanged()
     m_permissionState->setToolTip(permissionHint(p));
     m_permissionState->setStyleSheet(mode == "bypass" ? QString("color:%1;font-weight:600;").arg(m_dark ? "#ffa0aa" : "#a7243b") : QString());
     m_permissions->setToolTip(tr("Change permission defaults on %1").arg(p["machine"].toString()));
+    const bool modelSupported = has && p["model_defaults_supported"].toBool();
+    m_modelDefaults->setVisible(modelSupported); m_modelState->setVisible(modelSupported);
+    m_modelDefaults->setEnabled(modelSupported && idle && online(p["host"].toString()));
+    const auto defaults = p["model_defaults"].toObject();
+    m_modelState->setText(defaults["model"].toString().isEmpty() ? tr("New sessions: Provider settings")
+        : tr("New sessions: %1%2").arg(defaults["model"].toString(), defaults["effort"].toString().isEmpty() ? QString() : " · " + defaults["effort"].toString()));
+
     m_login->setEnabled(has && idle && online(p["host"].toString()) && p["installed"].toBool() && !nativeConfig
         && p["usage"].toObject()["identity"].toObject()["auth_method"] != "Ollama"); m_remove->setEnabled(has && idle && online(p["host"].toString()));
     const bool machines = !accountHosts(m_fleet, m_explicitHost).isEmpty();
@@ -600,7 +742,7 @@ void AccountsPage::selectionChanged()
     m_login->setText(tr("Sign in…")); m_login->setToolTip({});
     renderMachines();
     m_providerBadge->setValue(has ? p["provider"].toString() : QString());
-    if (!has) { m_title->setText(tr("Choose an account")); m_detail->clear();m_identity->clear();m_usage->hide();return; }
+    if (!has) { m_title->setText(tr("Choose an account")); m_detail->clear();m_identity->clear();m_usage->hide();m_teamsCard->hide();return; }
     m_title->setText(selectedAccount()["label"].toString());
     const auto info=selectedAccount()["usage"].toObject();const auto identity=info.value("identity").toObject();
     QStringList identityLines;QStringList seen{m_title->text().trimmed().toCaseFolded()};
@@ -669,7 +811,66 @@ void AccountsPage::selectionChanged()
         m_openCodeProvidersNote->setText(notes.join('\n'));m_openCodeProvidersNote->setVisible(!notes.isEmpty());
     }
     m_detail->setToolTip(p["home"].toString());
+    // U22/N17: the DeepSeek account whose sessions still upload - or whose host
+    // was started before the block - says so here, in the session card's words.
+    if (const auto upload = deepSeekUploadNote(p["host"].toString(), p["home"].toString(), p["provider"].toString()); !upload.isEmpty())
+        m_detail->setText(m_detail->text().isEmpty() ? upload : m_detail->text() + QLatin1Char('\n') + upload);
+    // U25 (spec 9): an account that cannot be used here says so in warn, and
+    // its sign-in becomes the primary action.
+    const bool attention = !online(p["host"].toString()) || status == "signed_out" || status == "expired";
+    if (m_detail->property("pageWarn").toBool() != attention) {
+        m_detail->setProperty("pageWarn", attention); m_detail->style()->unpolish(m_detail); m_detail->style()->polish(m_detail);
+    }
+    const bool primary = online(p["host"].toString()) && (status == "signed_out" || status == "expired");
+    if (m_login->property("pagePrimary").toBool() != primary) {
+        m_login->setProperty("pagePrimary", primary); m_login->style()->unpolish(m_login); m_login->style()->polish(m_login);
+    }
+    renderTeams(selectedAccount());
     if(isVisible())inspectSelected();
+}
+QString AccountsPage::deepSeekUploadNote(const QString &host, const QString &home, const QString &provider) const
+{
+    if (provider != QLatin1String("dsh")) return {};
+    // The local machine's accounts name it by host; peers by their alias.
+    const BoxState *box = host.isEmpty() || host == m_fleet.local().host ? &m_fleet.local() : m_fleet.peer(host);
+    if (!box) return {};
+    for (const auto &session : box->sessions) {
+        if (session.cmd != QLatin1String("dsh") || session.uploadNote.isEmpty()) continue;
+        // A profile's own home scopes the warning to its sessions; an empty
+        // profile home is the machine's default account, which keeps every one.
+        if (!home.isEmpty() && !session.accountHome.isEmpty() && session.accountHome != home) continue;
+        return session.uploadNote;
+    }
+    return {};
+}
+
+// U25 (spec 9): "Checkout v2 · Frontend, Lead (GPT)" with Open team, for every
+// team whose members use the account; hidden when none does.
+void AccountsPage::renderTeams(const QJsonObject &account)
+{
+    while (auto *item = m_teamsList->takeAt(0)) {
+        if (auto *w = item->widget()) w->deleteLater();
+        delete item;
+    }
+    QList<TeamUse> uses;
+    if (m_teamUses && !account.isEmpty()) {
+        QSet<QString> seen;
+        const auto add = [&](const QJsonObject &profile) {
+            for (const auto &use : m_teamUses(profile)) if (!seen.contains(use.team)) { seen.insert(use.team); uses << use; }
+        };
+        if (account["members"].isArray()) for (const auto &member : account["members"].toArray()) add(member.toObject());
+        else add(account);
+    }
+    for (const auto &use : std::as_const(uses)) {
+        auto *row = new QWidget; row->setObjectName("accountTeamRow"); row->setProperty("team", use.team);
+        auto *h = new QHBoxLayout(row); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(8);
+        auto *text = label(use.roles.isEmpty() ? use.name : tr("%1 · %2").arg(use.name, use.roles)); h->addWidget(text, 1);
+        auto *open = new QPushButton(tr("Open team")); open->setObjectName("accountOpenTeam"); open->setFlat(true); open->setCursor(Qt::PointingHandCursor);
+        connect(open, &QPushButton::clicked, this, [this, team = use.team] { emit openTeamRequested(team); });
+        h->addWidget(open);
+        m_teamsList->addWidget(row);
+    }
+    m_teamsCard->setVisible(!uses.isEmpty());
 }
 void AccountsPage::inspectSelected(bool refresh)
 {
@@ -1094,4 +1295,59 @@ void AccountsPage::permissions()
     dialog.adjustSize();
     if(dialog.exec()!=QDialog::Accepted || mode->currentData().toString() == p["permission_mode"].toString("provider"))return;
     request(p["host"].toString(),{"permissions",p["id"].toString(),"--mode",mode->currentData().toString(),"--revision",revision});
+}
+
+void AccountsPage::modelDefaults()
+{
+    const auto p = selected();
+    if (p.isEmpty() || !m_requests.isEmpty() || !online(p["host"].toString()) || !p["model_defaults_supported"].toBool()) return;
+    m_modelProfile = p;
+    request(p["host"].toString(), {"model-settings", p["id"].toString(), "--json"});
+}
+
+void AccountsPage::editModelDefaults(const QJsonObject &p, const QJsonObject &data)
+{
+    if (!online(p["host"].toString())) return;
+    QDialog dialog(this); dialog.setObjectName("accountModelDefaultsDialog"); dialog.setWindowTitle(tr("Default model and effort")); dialog.setMinimumWidth(480);
+    auto *layout = new QVBoxLayout(&dialog); layout->setContentsMargins(18,18,18,18); layout->setSpacing(12);
+    layout->addWidget(label(tr("%1 on %2").arg(p["label"].toString(), p["machine"].toString())));
+    auto *form = new QFormLayout;
+    auto *model = new QComboBox; model->setObjectName("defaultModel"); model->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    model->addItem(tr("Provider settings"), QString());
+    const auto models = data["models"].toArray();
+    for (const auto &value : models) {const auto entry=value.toObject(); model->addItem(entry["label"].toString(entry["id"].toString()),entry["id"].toString());}
+    const auto saved = data["defaults"].toObject();
+    int index = model->findData(saved["model"].toString());
+    if (index < 0) {model->addItem(tr("%1 (currently unavailable)").arg(saved["model"].toString()),saved["model"].toString()); index=model->count()-1;}
+    model->setCurrentIndex(index); form->addRow(tr("Model"), model);
+    auto *effort = new QComboBox; effort->setObjectName("defaultEffort"); effort->setSizeAdjustPolicy(QComboBox::AdjustToContents); form->addRow(tr("Effort"), effort);
+    layout->addLayout(form);
+    const auto native = data["provider_defaults"].toObject();
+    if (!native["model"].toString().isEmpty() || !native["effort"].toString().isEmpty()) {
+        auto *current=label(tr("Account settings: %1%2").arg(native["model"].toString(tr("Provider model")),native["effort"].toString().isEmpty()?QString():" · "+native["effort"].toString()));
+        current->setObjectName("nativeModelDefaults");layout->addWidget(current);
+    }
+    auto *hint=label();hint->setObjectName("modelDefaultsHint");layout->addWidget(hint);
+    layout->addWidget(label(tr("New conversations with this account on this machine. Existing conversations keep their model and effort. Explicit launch choices take precedence.")));
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel); layout->addWidget(buttons);
+    const auto update = [=] {
+        const auto id=model->currentData().toString(); QJsonObject chosen;
+        for (const auto &value:models) if(value.toObject()["id"]==id) {chosen=value.toObject();break;}
+        const QSignalBlocker blocker(effort);effort->clear();effort->addItem(tr("Provider default"),QString());
+        const bool supported=data["effort_supported"].toBool();
+        if(supported) for(const auto &value:chosen["effort_options"].toArray()) effort->addItem(value.toString(),value.toString());
+        if(id==saved["model"].toString()) {const int found=effort->findData(saved["effort"].toString());if(found>=0)effort->setCurrentIndex(found);}
+        effort->setEnabled(supported && !id.isEmpty() && effort->count()>1);
+        hint->setText(!supported ? tr("Kimi manages effort in its native settings. This choice sets the model for new conversations.")
+            : models.isEmpty() ? tr("Open this account's agent once, then refresh to load its models.")
+            : !id.isEmpty() && chosen.isEmpty() ? tr("This model is absent from the current account catalog. Choose another model or Provider settings.")
+            : tr("Choose the reasoning effort for the selected model, or keep its provider default."));
+        buttons->button(QDialogButtonBox::Save)->setEnabled(id.isEmpty() || !chosen.isEmpty());
+    };
+    connect(model,&QComboBox::currentIndexChanged,&dialog,update);update();
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted) return;
+    const auto chosenModel=model->currentData().toString(), chosenEffort=effort->currentData().toString();
+    if(chosenModel==saved["model"].toString() && chosenEffort==saved["effort"].toString())return;
+    request(p["host"].toString(),{"model-defaults",p["id"].toString(),"--model",chosenModel,"--effort",chosenEffort,"--revision",data["revision"].toString()});
 }

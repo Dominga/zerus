@@ -27,11 +27,11 @@ conservative change selection, including both sides of renames.
 | Job | Automatic CI | Checks |
 | --- | --- | --- |
 | Resolve commit | Always | Exact test commit and suite selection for every other job |
-| Quick checks | Always | Privacy, Gitleaks 8.30.1 on the tree and every fetched branch and tag, Python/Bash syntax, version consistency, actionlint, stable/nightly publication contracts, locked Rust 1.99 unit tests |
+| Quick checks | Always | Privacy, Gitleaks 8.30.1 on the tree and every fetched branch and tag, Python/Bash syntax, version consistency, actionlint, stable/nightly publication contracts, locked Rust 1.99 unit tests, the replica crate (format, clippy, tests, golden vectors), Rust license notices |
 | Rust relay | Always | Rust 1.99 format, clippy, and every storage contract (cross-worker ones included) on its own PostgreSQL database; every `services/mobile/tests` module, with the Rust relay fixtures on per-test PostgreSQL databases and no skips; the speech suites against the Python reference relay; the deployment image and its 256 MiB envelope |
 | Rust mobile connector | Always | Rust 1.99 format, clippy, vector, binary and journal handoff tests; the black-box suites against the Python and Rust connectors concurrently with differential traces compared against the reviewed allowlist, and a 300 s soak of the Rust build (`services/mobile/tests/BLACKBOX.md`) |
 | Rust mobile connector on macOS | Always | Cold Rust 1.99 build, unit, vector and binary tests, and the black-box modules that need no real `hgs`, journal handoffs with the Python connector included |
-| iOS core tests and simulator build | Affected PR; full nightly/stable | `swift test` for the ZerusKit core and an unsigned Release build of the app for the iOS simulator, with the newest installed Xcode 26 or later and no signing identity |
+| iOS core tests and simulator build | Affected PR; full nightly/stable | The project task replica built with Rust 1.99.1 for the iPhone, the simulator and macOS (`mobile/ios/scripts/build-replica.sh`, without the release profile's LTO in this check), then `swift test` for the ZerusKit core and an unsigned Release build of the app for the iOS simulator, with the newest installed Xcode 26 or later and no signing identity |
 | Android unit tests and lint | Always | `testDebugUnitTest` and `lintRelease` of the Firebase variant that Dev ships, with a synthetic `google-services.json` and no credentials |
 | Linux CLI | Always | Stable Rust unit tests, terminal smoke tests, Python integration modules, release build |
 | Arch desktop | Always | Qt build and all CTest suites |
@@ -82,26 +82,32 @@ Separate runner setup, dependency restoration and artifact transfer add overhead
 this split does not establish an observed speedup without hosted evidence.
 
 On upstream `main` pushes with the [Dev channel](public-distribution.md#verified-main-dev-channel)
-enabled, `ci-dev-qualification.yml` holds one qualification slot through both
-credential-free checks and the parallel unsigned Mac bundle. The bundle uses pinned
-official Qt, tests the Release GUI, then packages that same tested app; there is no
-second GUI compilation with tests disabled. Its gate requires successful checks and
-the exact run's selected bundle; a disabled Mac bundle must be skipped.
-The qualification caller reuses the former whole-CI concurrency key, so the first
-new run waits for any active old CI run to finish before starting qualification.
+enabled, `ci-dev-qualification.yml` builds the Arch package and parallel unsigned
+Mac bundle. Dev uses explicit build-only modes: no Rust package `check()` or full
+Qt regression run is on this publication path. Package layout, linked libraries,
+source/version identity, installation checks and bundle self-tests still apply.
+The build gate requires the Arch package and selected Mac bundle to succeed; a
+disabled Mac bundle must be skipped. Its independent build lock does not wait for
+an older full regression run.
 
-After the public **CI gate** admits exactly one successful check workflow,
+After the public **CI gate** admits the successful build workflow,
 `ci-dev-tail.yml` holds one separate noncancelling CI slot through Android/Mac
 signing, installation checks, candidate sealing and the monotonic Dev tag. The next
-revision can qualify while this tail runs. Signing remains in the existing protected
+revision can build while this tail runs. Signing remains in the existing protected
 workflows; source/version checks, Developer ID, notarization and disposable cask
-installation remain required. Qualification and delivery retain the same CI run ID,
-number, SHA and artifact namespace. Only trusted checks write caches; PR checks read
+installation remain required. Build and delivery retain the same CI run ID,
+number, SHA and artifact namespace. Only trusted main builds write caches; PR checks read
 them and signing/publication have no cache access.
 
 The existing **Publish Dev** workflow is the third, independently serialized lane.
-It still starts only after the entire source CI run succeeds and validates that
-run's immutable candidate. Active signing and publication are never cancelled by a
+It starts after the build/sign/seal CI run succeeds and validates that run's
+immutable candidate. The separate **CI regression** workflow starts on the same
+completion event, runs the full main test matrix against that exact commit and
+reports its own failures. Regression failures remain visible and become follow-up
+work; they do not block or retract a usable Dev build. It has read-only cache
+access and no signing or publication credentials. PR/manual, Stable and Nightly
+retain their existing test matrices. Internal same-repository PRs need no extra
+manual trust step for Dev integration. Active signing and publication are never cancelled by a
 new main push. All queues retain GitHub's default single pending entry, so newer
 pending work can replace older pending work; every revision is not promised a
 published build. Existing monotonic candidate/catalog checks reject stale delivery.
@@ -110,8 +116,8 @@ The short signed `dev-android.yml` build starts after the CI gate alongside Mac
 signing/installation. It builds `assembleRelease`, seals the APK/source and removes
 private inputs on every outcome, then uploads `zerus-dev-android-a<attempt>`.
 No runner polls the gate and no Actions token reaches this signing job. Its
-credential-free Android unit/lint check is required before signing; the signed
-build uses the same Firebase variant. Publication and the `dev` tag still wait
+credential-free Android unit/lint checks run in the independent regression lane;
+the signed build uses the same Firebase variant. Publication and the `dev` tag still wait
 for all selected candidates. With Mac enabled, the Android build overlaps its
 post-gate delivery work; with Mac disabled it adds its own short build duration.
 
@@ -174,7 +180,7 @@ save them.
 
 | Family | Job | Key after the prefix | Saved when | Bound |
 | --- | --- | --- | --- | --- |
-| `msrv-`, `cli-`, `windows-cli-` | Quick checks, CLI, Windows | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust build passed | Monthly restart; about 200–250 MB each |
+| `msrv-`, `cli-`, `windows-cli-` | Quick checks, CLI, Windows | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust build passed | Monthly restart; about 200–250 MB each; the quick checks' `target/replica` (the replica crate's own lockfile) rides under the same key |
 | `connector-` | Rust mobile connector | OS/arch, hash of `rustc +1.99.1 -Vv`, month, `services/mobile/connector/Cargo.lock` hash | Exact key missed; connector tests passed | Monthly restart; about 400 MB before compression, without incremental state |
 | `arch-cargo-v1-` | Arch package | Month, hash of `Cargo.lock` and the connector's lock | Exact key missed; package built | Cargo registry only |
 | `android-gradle-v1-` | Android | Month, hash of the Gradle wrapper properties and `*.gradle.kts` | Exact key missed; tests and lint passed | Monthly restart; about 700 MB (`~/.gradle/caches` and `wrapper`) |
@@ -377,6 +383,11 @@ from Claude's status line input in `hgs inspect` for the exact run, conversation
 model: before the first reply, after a reply, after a session-only model change, a
 compaction and a clear, and in a resumed run. In a linked worktree whose repository's
 local settings set a status line, Claude keeps that status line and no window is reported.
+`tests/test_task_context_native.py` takes the exact bytes `hgs __state hook` prints
+for a start that a fake agent's tracked launch recorded, returns them from the real
+agent's SessionStart hook, and requires the task instructions in the request the
+real Claude Code (`claude -p`) or Codex (`codex exec`) sends to its loopback model;
+it runs with the Claude and the Codex suites.
 `tests/test_claude_permission_native.py` leaves Claude's one-time auto-mode offer
 enabled for a fixture account whose default mode is manual. Claude 2.1.296 and
 2.1.308 coverage requires an answerable Activity card under the launch prompt's reply
@@ -854,8 +865,8 @@ prints folders relative to the real one, which the suites place projects by.
 
 On Linux and macOS, Claude Code runs every `tests/test_claude_*_native.py` suite
 plus the Claude clear and compaction fixtures: exact input, questions, approvals,
-trust, resume, clear, compaction, session-only model settings and the status line
-context window. Each test launches the real TUI under `env -i`, or through a tracked
+trust, resume, clear, compaction, session-only model settings, the status line
+context window and the session-start task instructions. Each test launches the real TUI under `env -i`, or through a tracked
 `hgs` launch without the caller's `ANTHROPIC_` and `CLAUDE` variables, with a fixture
 API key, a loopback or local fake API and no nonessential traffic, so no account,
 telemetry or model request leaves the runner. On Windows each agent runs its class of
@@ -968,6 +979,15 @@ signed-in account can use it. For Kimi this workflow currently discovers
 versions only. Its separate native and approval workflows qualify one latest
 Kimi release for affected PRs or manual runs. DeepSeek's latest-release keyless
 contract fixture runs in full Linux CLI CI.
+
+The Kimi native inventory includes launching with an initial message, waiting
+at folder trust without sending it, then delivering it exactly once through
+guarded input and preserving the conversation across pause/resume without
+replaying that message. The former send-after-start-only coverage missed the
+unsupported positional launch prompt. Help snapshots from native 2.1.1, 2.2.0
+and 2.3.3 cover argument construction without running historical releases in CI.
+Declining trust also verifies cancellation without delivery and bounds the
+retained inspection preview independently of the full initial message size.
 
 To test the latest releases or inspect current upstream changes locally:
 

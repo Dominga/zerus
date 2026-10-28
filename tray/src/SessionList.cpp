@@ -3,6 +3,8 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDrag>
+#include <QDataStream>
+#include <QIODevice>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFontMetrics>
@@ -54,6 +56,7 @@ SessionList::SessionList(QWidget *parent) : WorkspaceList(parent), m_token(QUuid
     connect(model(), &QAbstractItemModel::dataChanged, this, &SessionList::scheduleRowExpandButtons);
     connect(model(), &QAbstractItemModel::rowsInserted, this, &SessionList::scheduleRowExpandButtons);
     connect(model(), &QAbstractItemModel::rowsRemoved, this, &SessionList::scheduleRowExpandButtons);
+    connect(model(), &QAbstractItemModel::rowsMoved, this, &SessionList::scheduleRowExpandButtons);
     connect(model(), &QAbstractItemModel::modelReset, this, &SessionList::scheduleRowExpandButtons);
     connect(model(), &QAbstractItemModel::layoutChanged, this, &SessionList::scheduleRowExpandButtons);
     m_elapsedTimer.setInterval(1000);
@@ -248,6 +251,20 @@ bool SessionList::viewportEvent(QEvent *event)
                 else QToolTip::hideText();
                 return true;
             }
+            // U25 (spec 2.1): the project's '+'.
+            if (index.data(SessionRoles::Header).toBool() && SessionList::projectAddRect(visualItemRect(row)).contains(help->pos())) {
+                const QString project = index.data(SessionRoles::Title).toString(), folder = index.data(SessionRoles::ProjectFolder).toString();
+                QToolTip::showText(help->globalPos(), folder.isEmpty() ? tr("New session in %1").arg(project) : tr("New session in %1 (%2)").arg(project, folder),
+                                   viewport(), SessionList::projectAddRect(visualItemRect(row)));
+                return true;
+            }
+            // U25 (spec 2.3): why this session is muted.
+            if (const auto mute = SessionDelegate::muteRect(animationOption(index), index); mute.adjusted(-2, -2, 2, 2).contains(help->pos())) {
+                QToolTip::showText(help->globalPos(), index.data(SessionRoles::TeamMuted).toBool()
+                    ? tr("Muted on this computer: team members are muted by default; the lead reports for them. Right-click to unmute.")
+                    : tr("Notifications muted. Right-click to unmute."), viewport(), mute);
+                return true;
+            }
             const auto question = SessionDelegate::optionalQuestionRect(visualItemRect(row), indexFromItem(row), font(),
                 property("compact").toBool(), row->isSelected());
             if (question.contains(help->pos())) {
@@ -255,12 +272,43 @@ bool SessionList::viewportEvent(QEvent *event)
                 QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(text), viewport(), question);
                 return true;
             }
-            const auto rect = SessionDelegate::gitStatusRect(visualItemRect(row), indexFromItem(row), font(), property("compact").toBool());
-            if (rect.contains(help->pos())) {
-                const auto text = GitStatusBadge::tooltip(row->data(SessionRoles::GitStatus).toJsonObject());
-                QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(text), viewport(), rect);
+            // G6: the two progress bars name the phase they follow and the
+            // phases they count.
+            const auto team = row->data(SessionRoles::TeamLead).toMap();
+            const auto teamStrip = SessionList::teamStripRect(visualItemRect(row));
+            // U25 (spec 2.4): the strip carries only the team icon; the
+            // tooltip names the team.
+            if (!team.isEmpty() && teamStrip.contains(help->pos())) {
+                QString text = tr("Open team %1").arg(team.value("name").toString());
+                if (const auto progress = team.value("progressTooltip").toString(); !progress.isEmpty()) text += QLatin1Char('\n') + progress;
+                QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(text), viewport(), teamStrip);
                 return true;
             }
+            // U30 (#508): the cold card's actions and the state badge say what they mean.
+            const auto option = animationOption(index);
+            const auto cold = SessionDelegate::coldActionRects(option, index);
+            if (cold.first.contains(help->pos()) || cold.second.contains(help->pos())) {
+                const bool fresh = cold.first.contains(help->pos());
+                QToolTip::showText(help->globalPos(), fresh ? tr("Start a new session in the same folder and machine") : tr("Keep this session; the first message rebuilds the cache"),
+                                   viewport(), fresh ? cold.first : cold.second);
+                return true;
+            }
+            if (!SessionDelegate::rowCollapsed(index) && index.data(SessionRoles::ChildId).toString().isEmpty()) {
+                const auto status = SessionDelegate::statusForView(option, index);
+                const QRect badge = SessionDelegate::titleLayout(option, index, status).status;
+                if (badge.contains(help->pos()) && !status.shown.tooltip.isEmpty()) {
+                    QString text = status.shown.tooltip;
+                    if (!status.shown.line.isEmpty() && status.shown.key != "working") text += QLatin1Char('\n') + status.shown.line;
+                    QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(text), viewport(), badge);
+                    return true;
+                }
+            }
+            // U25 (spec 2.2): each chip names what it counts.
+            for (const auto &chip : SessionDelegate::rowChips(visualItemRect(row), index, font(), property("compact").toBool()))
+                if (chip.rect.contains(help->pos())) {
+                    QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(SessionRowChips::tooltip(chip, index)), viewport(), chip.rect);
+                    return true;
+                }
         }
     }
     if (event->type() == QEvent::ToolTip && narrow(this)) {
@@ -287,7 +335,8 @@ bool SessionList::viewportEvent(QEvent *event)
         }
     }
     if (event->type() == QEvent::Leave) {
-        setProperty("hoveredChildren", QString()); viewport()->unsetCursor(); viewport()->update();
+        setProperty("hoveredChildren", QString()); setProperty("hoveredAdd", QString()); setProperty("hoveredChip", QString());
+        viewport()->unsetCursor(); viewport()->update();
     }
     return WorkspaceList::viewportEvent(event);
 }
@@ -295,7 +344,7 @@ bool SessionList::viewportEvent(QEvent *event)
 void SessionList::mousePressEvent(QMouseEvent *e)
 {
     setKeyboardFocusVisible(false);
-    m_press = e->position().toPoint(); m_pressedGroup.clear(); m_pressedParent.clear(); m_togglePress = false;
+    m_press = e->position().toPoint(); m_pressedGroup.clear(); m_pressedParent.clear(); m_pressedAdd.clear(); m_pressedChip.clear(); m_pressedCold.clear(); m_togglePress = false;
     if (e->button() == Qt::RightButton) { e->accept(); return; }
     auto *item = itemAt(m_press);
     const bool additive = e->modifiers().testFlag(Qt::ControlModifier) || e->modifiers().testFlag(Qt::MetaModifier);
@@ -312,12 +361,20 @@ void SessionList::mousePressEvent(QMouseEvent *e)
         e->accept(); return;
     }
     if (e->button() == Qt::LeftButton) { m_bulkSelecting = false; emit bulkSelectionChanged(); }
-    if (item && !item->data(SessionRoles::LaunchId).toString().isEmpty()) { e->accept(); return; }
+    if (item && !item->data(SessionRoles::LaunchId).toString().isEmpty()&&!item->flags().testFlag(Qt::ItemIsSelectable)) { e->accept(); return; }
     m_pressedTeam.clear();
     if (e->button() == Qt::LeftButton && item && !item->data(SessionRoles::TeamLead).toMap().isEmpty()
         && teamStripRect(visualItemRect(item)).contains(m_press)) {
         m_pressedTeam = item->data(SessionRoles::TeamLead).toMap().value("id").toString();
         setFocus(); e->accept(); return;
+    }
+    // U25: the project's '+' and a card's chips act on release over them.
+    if (e->button() == Qt::LeftButton && item) {
+        const auto target = hoverTarget(m_press);
+        if (target.startsWith(QLatin1String("add:"))) { m_pressedAdd = target.mid(4); setFocus(); e->accept(); return; }
+        if (target.startsWith(QLatin1String("chip:"))) { m_pressedChip = target.mid(5); setFocus(); e->accept(); return; }
+        // U30 (#508): a cold card's + New and Resume never open the card.
+        if (target.startsWith(QLatin1String("cold:"))) { m_pressedCold = target.mid(5); setFocus(); e->accept(); return; }
     }
     if (e->button() == Qt::LeftButton && item && item->data(SessionRoles::Header).toBool()) {
         m_pressedGroup = item->data(SessionRoles::Group).toString(); setFocus(); e->accept(); return;
@@ -397,15 +454,39 @@ void SessionList::mouseDoubleClickEvent(QMouseEvent *e)
     else emit rowCompacted(key);
 }
 
+// U25: what under the pointer acts on its own: "add:<project>" for a
+// project's '+', "chip:<key>\n<kind>" for a card's chip, or nothing.
+QString SessionList::hoverTarget(const QPoint &point) const
+{
+    const auto *item = itemAt(point);
+    if (!item || narrow(this)) return {};
+    const auto index = indexFromItem(item);
+    const QRect rect = visualItemRect(item);
+    if (index.data(SessionRoles::Header).toBool())
+        return projectAddRect(rect).contains(point) ? QStringLiteral("add:") + index.data(SessionRoles::Group).toString() : QString();
+    for (const auto &chip : SessionDelegate::rowChips(rect, index, font(), property("compact").toBool()))
+        if (chip.rect.contains(point)) return QStringLiteral("chip:") + index.data(SessionRoles::Key).toString() + QLatin1Char('\n') + QString::number(chip.kind);
+    if (SessionStrip::expansion(this) >= 1) {
+        const auto cold = SessionDelegate::coldActionRects(animationOption(index), index);
+        if (cold.first.contains(point)) return QStringLiteral("cold:") + index.data(SessionRoles::Key).toString() + QStringLiteral("\nnew");
+        if (cold.second.contains(point)) return QStringLiteral("cold:") + index.data(SessionRoles::Key).toString() + QStringLiteral("\nresume");
+    }
+    return {};
+}
+
 void SessionList::mouseMoveEvent(QMouseEvent *e)
 {
     if (m_togglePress) { e->accept(); return; }
     const auto point = e->position().toPoint();
     const auto *item = itemAt(point);
     const QString hovered = childrenControlRect(item).contains(point) ? item->data(SessionRoles::Key).toString() : QString();
-    if (property("hoveredChildren").toString() != hovered) {
-        setProperty("hoveredChildren", hovered); viewport()->update();
-        if (hovered.isEmpty()) viewport()->unsetCursor(); else viewport()->setCursor(Qt::PointingHandCursor);
+    const QString target = hoverTarget(point);
+    const QString add = target.startsWith(QLatin1String("add:")) ? target.mid(4) : QString(), chip = target.startsWith(QLatin1String("chip:")) ? target.mid(5) : QString();
+    const QString cold = target.startsWith(QLatin1String("cold:")) ? target.mid(5) : QString();
+    if (property("hoveredChildren").toString() != hovered || property("hoveredAdd").toString() != add || property("hoveredChip").toString() != chip
+        || property("hoveredColdAction").toString() != cold) {
+        setProperty("hoveredChildren", hovered); setProperty("hoveredAdd", add); setProperty("hoveredChip", chip); setProperty("hoveredColdAction", cold); viewport()->update();
+        if (hovered.isEmpty() && target.isEmpty()) viewport()->unsetCursor(); else viewport()->setCursor(Qt::PointingHandCursor);
     }
     if (!m_pressedParent.isEmpty()) { e->accept(); return; }
     if (!m_pressedGroup.isEmpty() && e->buttons().testFlag(Qt::LeftButton)) {
@@ -435,6 +516,20 @@ void SessionList::mouseReleaseEvent(QMouseEvent *e)
             && (e->position().toPoint() - m_press).manhattanLength() < QApplication::startDragDistance()) emit teamActivated(id);
         e->accept(); return;
     }
+    if (!m_pressedCold.isEmpty()) {
+        const QString cold = std::exchange(m_pressedCold, {});
+        const QString target = e->button() == Qt::LeftButton ? hoverTarget(e->position().toPoint()) : QString();
+        if (target == QLatin1String("cold:") + cold) emit coldActionRequested(cold.section(QLatin1Char('\n'), 0, -2), cold.section(QLatin1Char('\n'), -1));
+        e->accept(); return;
+    }
+    if (!m_pressedAdd.isEmpty() || !m_pressedChip.isEmpty()) {
+        const QString add = std::exchange(m_pressedAdd, {}), chip = std::exchange(m_pressedChip, {});
+        const QString target = e->button() == Qt::LeftButton ? hoverTarget(e->position().toPoint()) : QString();
+        if (!add.isEmpty() && target == QLatin1String("add:") + add) emit projectNewSession(add);
+        if (!chip.isEmpty() && target == QLatin1String("chip:") + chip)
+            emit chipActivated(chip.section(QLatin1Char('\n'), 0, -2), chip.section(QLatin1Char('\n'), -1).toInt());
+        e->accept(); return;
+    }
     if (!m_pressedGroup.isEmpty()) {
         const QString id = m_pressedGroup; m_pressedGroup.clear();
         const auto *item = itemAt(e->position().toPoint());
@@ -442,7 +537,16 @@ void SessionList::mouseReleaseEvent(QMouseEvent *e)
             emit groupToggled(id);
         e->accept(); return;
     }
+    // U25 part 6: a click on the git chip also opens the inspector's Changes.
+    QString gitKey;
+    const QPoint at = e->position().toPoint();
+    if (e->button() == Qt::LeftButton && (at - m_press).manhattanLength() < QApplication::startDragDistance()) {
+        if (const auto *row = itemAt(at); row && !row->data(SessionRoles::GitStatus).toJsonObject().isEmpty()
+            && SessionDelegate::gitStatusRect(visualItemRect(row), indexFromItem(row), font(), property("compact").toBool()).contains(at))
+            gitKey = row->data(SessionRoles::Key).toString();
+    }
     QListWidget::mouseReleaseEvent(e);
+    if (!gitKey.isEmpty()) emit gitActivated(gitKey);
 }
 
 void SessionList::startDrag(Qt::DropActions)
@@ -462,19 +566,29 @@ QMimeData *SessionList::mimeData(const QList<QListWidgetItem *> &items) const
     if (items.size() != 1) return mime;
     const auto *item = items.first(); const bool group = item->data(SessionRoles::Header).toBool();
     if (!item->data(SessionRoles::ChildId).toString().isEmpty()) return mime;
-    const QJsonObject data{{"token", m_token}, {"group", group},
-        {"id", item->data(group ? SessionRoles::Group : SessionRoles::Identity).toString()}};
-    mime->setData(Mime, QJsonDocument(data).toJson(QJsonDocument::Compact));
+    QByteArray data;
+    QDataStream stream(&data, QIODevice::WriteOnly); stream.setVersion(QDataStream::Qt_6_0);
+    stream << m_token << group << item->data(group ? SessionRoles::Group : SessionRoles::Identity).toString();
+    mime->setData(Mime, data);
     return mime;
+}
+
+std::optional<SessionList::Dragged> SessionList::dragged(const QMimeData *mime)
+{
+    if (!mime || !mime->hasFormat(Mime)) return std::nullopt;
+    QDataStream stream(mime->data(Mime)); stream.setVersion(QDataStream::Qt_6_0);
+    Dragged drag;
+    stream >> drag.token >> drag.group >> drag.id;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd()) return std::nullopt;
+    return drag;
 }
 
 bool SessionList::validDrop(const QMimeData *mime) const
 {
-    if (!mime->hasFormat(Mime)) return false;
-    const auto data = QJsonDocument::fromJson(mime->data(Mime)).object();
-    if (data.value("token").toString() != m_token || data.value("id").toString().isEmpty()) return false;
-    const int role = data.value("group").toBool() ? SessionRoles::Group : SessionRoles::Identity;
-    for (int row = 0; row < count(); ++row) if (item(row)->data(role).toString() == data.value("id").toString()) return true;
+    const auto data = dragged(mime);
+    if (!data || data->token != m_token || data->id.isEmpty()) return false;
+    const int role = data->group ? SessionRoles::Group : SessionRoles::Identity;
+    for (int row = 0; row < count(); ++row) if (item(row)->data(role).toString() == data->id) return true;
     return false;
 }
 
@@ -529,31 +643,61 @@ SessionList::Placement SessionList::placement(const QPoint &point, bool movingGr
     return target;
 }
 
+const QListWidgetItem *SessionList::taskDropItem(const TaskDrag &task, const QPoint &point) const
+{
+    if (task.stage != QLatin1String("todo") && task.stage != QLatin1String("backlog")) return nullptr;
+    const auto *over = itemAt(point);
+    if (!over || over->isHidden() || over->data(SessionRoles::Group).toString() != task.projectId) return nullptr;
+    if (over->data(SessionRoles::Header).toBool()) return task.targetSession.isEmpty() ? nullptr : over;
+    const auto target = over->data(SessionRoles::TaskTarget).toStringList();
+    if (target.size() != 2) return nullptr;
+    const bool already = task.targetKnown && task.targetHost == target[0] && task.targetSession == target[1];
+    return already ? nullptr : over;
+}
+
 void SessionList::dragEnterEvent(QDragEnterEvent *e)
 {
-    if (validDrop(e->mimeData())) { e->setDropAction(Qt::MoveAction); e->accept(); } else e->ignore();
+    if (validDrop(e->mimeData()) || TaskDrag::from(e->mimeData())) { e->setDropAction(Qt::MoveAction); e->accept(); } else e->ignore();
 }
 void SessionList::dragMoveEvent(QDragMoveEvent *e)
 {
+    if (const auto task = TaskDrag::from(e->mimeData())) {
+        QListWidget::dragMoveEvent(e);   // Qt's edge auto-scroll
+        const auto *item = taskDropItem(*task, e->position().toPoint());
+        m_indicator = item ? visualItemRect(item).adjusted(3, 1, -3, -1) : QRect(); m_onGroup = m_taskDrop = item; viewport()->update();
+        if (item) { e->setDropAction(Qt::MoveAction); e->accept(); } else e->ignore();
+        return;
+    }
     if (!validDrop(e->mimeData())) { e->ignore(); return; }
     // Retain Qt's edge auto-scroll; the base drop mutation is deliberately unused.
     QListWidget::dragMoveEvent(e);
-    const auto target = placement(e->position().toPoint(), QJsonDocument::fromJson(e->mimeData()->data(Mime)).object().value("group").toBool());
+    const auto target = placement(e->position().toPoint(), dragged(e->mimeData())->group);
     m_indicator = target.indicator; m_onGroup = target.onGroup; viewport()->update();
     e->setDropAction(Qt::MoveAction); e->accept();
 }
 void SessionList::dragLeaveEvent(QDragLeaveEvent *e)
 {
-    m_indicator = {}; viewport()->update(); QListWidget::dragLeaveEvent(e);
+    m_indicator = {}; m_taskDrop = false; viewport()->update(); QListWidget::dragLeaveEvent(e);
 }
 void SessionList::dropEvent(QDropEvent *e)
 {
+    // The base drop, which would end Qt's edge scrolling, is not used.
+    stopAutoScroll();
+    if (const auto task = TaskDrag::from(e->mimeData())) {
+        const auto *item = taskDropItem(*task, e->position().toPoint());
+        m_indicator = {}; m_onGroup = m_taskDrop = false; viewport()->update();
+        if (!item) { e->ignore(); return; }
+        const auto target = item->data(SessionRoles::TaskTarget).toStringList();
+        e->setDropAction(Qt::MoveAction); e->accept();
+        emit taskDropped(*task, target.value(0), target.value(1));
+        return;
+    }
     if (!validDrop(e->mimeData())) { e->ignore(); return; }
-    const auto data = QJsonDocument::fromJson(e->mimeData()->data(Mime)).object();
-    const auto target = placement(e->position().toPoint(), data.value("group").toBool());
+    const auto data = *dragged(e->mimeData());
+    const auto target = placement(e->position().toPoint(), data.group);
     m_indicator = {}; viewport()->update();
-    if (data.value("group").toBool()) emit groupMoved(data.value("id").toString(), target.before);
-    else emit sessionMoved(data.value("id").toString(), target.group, target.before);
+    if (data.group) emit groupMoved(data.id, target.before);
+    else emit sessionMoved(data.id, target.group, target.before);
     e->setDropAction(Qt::MoveAction); e->accept();
 }
 void SessionList::keyPressEvent(QKeyEvent *e)
@@ -614,6 +758,7 @@ void SessionList::paintEvent(QPaintEvent *e)
     QPainter p(viewport()); p.setRenderHint(QPainter::Antialiasing);
     const QColor accent(property("hgsDark").toBool() ? "#8bdfc0" : "#167357");
     p.setPen(QPen(accent, 2));
+    if (m_taskDrop) p.setPen(QPen(accent, 2, Qt::DashLine));
     if (m_onGroup) { p.setBrush(Qt::NoBrush); p.drawRoundedRect(m_indicator, 5, 5); }
     else p.drawLine(m_indicator.topLeft(), m_indicator.topRight());
 }

@@ -14,7 +14,8 @@ original_review_fixture = _focus_projection.original_review_fixture
 # Fixture pin includes one-time post-resume live-label preparation; the approval harness retains exact 95ef by reverse projection.
 MAIN = ROOT / "mobile/android/app/src/main/java/app/zerus/mobile"
 # Keep the reviewed 9b217ddd/b9c1e29c reconstruction pins unchanged. The exact
-# fixtures first reverse the composed 3d33de39 workspace changes to ac601e36,
+# fixtures first reverse the reviewed task-tracker additions to 86aeab6d, then
+# the composed workspace and push-registration changes to ac601e36,
 # then the 962699e6 read-catalog/badge update and c1eebe96 mobile checkout
 # additions. None changes question eligibility or the ten verification writes.
 # No Git history or Android SDK is needed at run time.
@@ -23,7 +24,13 @@ MAIN_SHA = "7c676d33a2218da83511697f5a597c4876b946e1c130d601c265e855b7259f4b"
 UPDATES = ROOT / "tests/fixtures/question-availability-reviewed-updates.patch"
 UPDATES_SHA = "5088def68877668c9a7e261851d552cd30b0fee1806aa072a911172f6ff4f60a"
 WORKSPACE_UPDATES = ROOT / "tests/fixtures/question-availability-workspace-updates.patch"
-WORKSPACE_UPDATES_SHA = "02c52292e8713aa238f159054907c41a8bc9f605860dde2d38575dd379ca06fd"
+WORKSPACE_UPDATES_SHA = "ff2e0ae7ccf5f14a49be075a38978757f453e59f2461fda329d3d8b51a9d0443"
+# Exact 86aeab6d -> 53170eee feature delta; policy and baseline pins stay fixed.
+TASK_TRACKER_UPDATES = ROOT / "tests/fixtures/question-availability-task-tracker-updates.patch"
+TASK_TRACKER_UPDATES_SHA = "5cb5f076e3f176069d8e57d945f1286cea7763fcf37c3dbfb6f61383cf5c1e34"
+# Exact visible-refresh, foreground priority and frame-observer delta; keep historical policy pins.
+VISIBLE_REFRESH_UPDATES = ROOT / "tests/fixtures/question-availability-visible-refresh-updates.patch"
+VISIBLE_REFRESH_UPDATES_SHA = "8bea4446f1bf9964d282dc0eb90bab41f7676f2b9d576fad237cb92846e8ca83"
 WORKSPACE_BASE_SHA = {
     "ZerusViewModel.kt": "5932d92ca74ccf37da9595a580bcb1457c93c83951976606c8defa8d1ee83326",
     "MainActivity.kt": "f68902349d1e0ac939582e9e139548663f5763c430a3c566f8823d9f045645f0",
@@ -95,8 +102,28 @@ def reverse_fork_presentation(name, source):
     return source
 
 
+def reverse_host_state_presentation(name, source):
+    """Reverse exact U30 badge/preview additions without moving any policy pin."""
+    if name != "MainActivity.kt":
+        return source
+    edits = (
+        ('                    DesktopBadgeKind.Working, DesktopBadgeKind.Background, DesktopBadgeKind.Building -> Box(Modifier.size(5.dp).background(Color(colors.foreground), CircleShape))\n', '                    DesktopBadgeKind.Working, DesktopBadgeKind.Background -> Box(Modifier.size(5.dp).background(Color(colors.foreground), CircleShape))\n'),
+        ('                    DesktopBadgeKind.Scheduled, DesktopBadgeKind.Waiting, DesktopBadgeKind.Deps -> Icon(Icons.Default.Schedule, null, Modifier.size(12.dp), tint = Color(colors.foreground))\n                    DesktopBadgeKind.Cooling, DesktopBadgeKind.Cold -> Box(Modifier.size(5.dp).background(Color(colors.foreground), CircleShape))\n', '                    DesktopBadgeKind.Scheduled, DesktopBadgeKind.Waiting -> Icon(Icons.Default.Schedule, null, Modifier.size(12.dp), tint = Color(colors.foreground))\n'),
+        ('                    maxLines=if(badge.kind in setOf(DesktopBadgeKind.Waiting, DesktopBadgeKind.Deps, DesktopBadgeKind.Cooling, DesktopBadgeKind.Cold)) 1 else Int.MAX_VALUE,\n                    overflow=if(badge.kind in setOf(DesktopBadgeKind.Waiting, DesktopBadgeKind.Deps, DesktopBadgeKind.Cooling, DesktopBadgeKind.Cold)) TextOverflow.Ellipsis else TextOverflow.Clip)\n', '                    maxLines=if(badge.kind==DesktopBadgeKind.Waiting) 1 else Int.MAX_VALUE,\n                    overflow=if(badge.kind==DesktopBadgeKind.Waiting) TextOverflow.Ellipsis else TextOverflow.Clip)\n'),
+        ('                        if (SessionStateContract.hasHostState(session.raw) || !online) {\n                            // U30: line 3 names what waits, how warm the cache is, or who stopped it.\n                            SessionStateLine(session, online, onNew = { sessionActions = session },\n                                onResume = { model.open(session, preserveProject = true) })\n                        } else Text(if(online && SessionFilters.waitingIdle(session)) SessionFilters.waitingLabel(session) else session.preview.ifBlank { "Open to view activity" }, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Muted, style = MaterialTheme.typography.bodyMedium, lineHeight = 20.sp)\n', '                        Text(if(online && SessionFilters.waitingIdle(session)) SessionFilters.waitingLabel(session) else session.preview.ifBlank { "Open to view activity" }, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Muted, style = MaterialTheme.typography.bodyMedium, lineHeight = 20.sp)\n'),
+    )
+    for current, original in edits:
+        if source.count(current) != 1:
+            raise AssertionError("reviewed host-state presentation hunk is missing, changed or duplicated")
+        source = source.replace(current, original, 1)
+    return source
+
+
 def reverse_reviewed_updates(name, source):
     source = reverse_fork_presentation(name, source)
+    source = reverse_host_state_presentation(name, source)
+    source = reverse_reviewed_patch(name, source, VISIBLE_REFRESH_UPDATES, VISIBLE_REFRESH_UPDATES_SHA)
+    source = reverse_reviewed_patch(name, source, TASK_TRACKER_UPDATES, TASK_TRACKER_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, WORKSPACE_UPDATES, WORKSPACE_UPDATES_SHA)
     return reverse_reviewed_patch(name, source, UPDATES, UPDATES_SHA)
 
@@ -114,10 +141,24 @@ def original_source(name, source):
 
 
 class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
+    def test_host_state_projection_refuses_changed_or_duplicate_presentation(self):
+        source = (MAIN / "MainActivity.kt").read_text()
+        for expression in ("DesktopBadgeKind.Building", "DesktopBadgeKind.Cooling, DesktopBadgeKind.Cold",
+                           "SessionStateLine(session, online, onNew = { sessionActions = session }"):
+            with self.subTest(expression=expression):
+                self.assertIn(expression, source)
+                self.assertFalse(original_source("MainActivity.kt", source.replace(expression, "changed", 1)))
+        line = "                    DesktopBadgeKind.Cooling, DesktopBadgeKind.Cold -> Box(Modifier.size(5.dp).background(Color(colors.foreground), CircleShape))\n"
+        self.assertFalse(original_source("MainActivity.kt", source.replace(line, line + line, 1)))
+
     def test_workspace_projection_matches_reviewed_current_main_exactly(self):
         for name, digest in WORKSPACE_BASE_SHA.items():
             with self.subTest(source=name):
-                projected = reverse_reviewed_patch(name, reverse_fork_presentation(name, (MAIN / name).read_text()),
+                current = reverse_reviewed_patch(name, reverse_host_state_presentation(name, reverse_fork_presentation(name, (MAIN / name).read_text())),
+                                                VISIBLE_REFRESH_UPDATES, VISIBLE_REFRESH_UPDATES_SHA)
+                current = reverse_reviewed_patch(name, current,
+                                                TASK_TRACKER_UPDATES, TASK_TRACKER_UPDATES_SHA)
+                projected = reverse_reviewed_patch(name, current,
                                                   WORKSPACE_UPDATES, WORKSPACE_UPDATES_SHA)
                 self.assertEqual(hashlib.sha256(projected.encode()).hexdigest(), digest)
 
@@ -160,6 +201,31 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
             self.assertIn(expression, main)
             self.assertFalse(original_source("MainActivity.kt", main.replace(expression, "true", 1)))
 
+    def test_visible_refresh_projection_refuses_modified_missing_or_duplicate_hunks(self):
+        # Reversing the exact UI change must not hide a later policy edit.
+        additions = {
+            "ZerusViewModel.kt": "    private var lastHistoryReadCompletedAt=0L\n",
+            "MainActivity.kt": "            if (selected != null) ConversationRefreshStatus(model, conversationLoad)\n",
+        }
+        for name, addition in additions.items():
+            source = (MAIN / name).read_text()
+            self.assertEqual(source.count(addition), 1)
+            for replacement in (addition.rstrip("\n") + " // changed\n", "", addition + addition):
+                with self.subTest(source=name, replacement=replacement):
+                    self.assertFalse(original_source(name, source.replace(addition, replacement, 1)))
+
+    def test_task_tracker_projection_refuses_changed_missing_or_duplicate_reviewed_hunks(self):
+        additions = {
+            "ZerusViewModel.kt": "    fun stopTaskSync() { taskSyncJob?.cancel(); projectSyncs.toList().forEach { it.cancel() } }\n",
+            "MainActivity.kt": "            model.syncTasks()\n",
+        }
+        for name, addition in additions.items():
+            source = (MAIN / name).read_text()
+            self.assertEqual(source.count(addition), 1)
+            for replacement in (addition.rstrip("\n") + " // changed reviewed addition\n", "", addition + addition):
+                with self.subTest(source=name, replacement=replacement):
+                    self.assertFalse(original_source(name, source.replace(addition, replacement, 1)))
+
     def test_reverse_updates_refuse_changed_missing_or_duplicate_reviewed_hunks(self):
         source = (MAIN / "ZerusViewModel.kt").read_text()
         # These are reviewed additions, not probe markers or protected old policy.
@@ -179,6 +245,7 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
                 "    private val api = RelayApi(workspace = store.workspaceJournal)\n",
                 "    var pendingEncryptedPairings by mutableStateOf<Set<String>>(emptySet());private set\n",
                 "    fun resumeEncryptedPair(connection:Connection)=viewModelScope.launch {\n",
+                "                        AppTelemetry.encryptedWorkspaceReady(getApplication(),connection)\n",
                 "                        WorkspaceCatalogCache.preserve(connection,computers,\n",
                 "                sessions = preparedSessions; machines = newMachines.map { MachineNames.apply(it,messageState.machineAliases) }; machineOperations = newOperations; machineFeatures = newFeatures\n"):
             for changed in (addition.rstrip("\n") + " // changed reviewed addition\n", "", addition + addition):

@@ -1263,7 +1263,25 @@ pub(super) fn hook() -> Result<i32> {
     else {
         return Ok(0);
     };
-    let mut event = stdin_json()?;
+    let event = stdin_json()?;
+    let mut started = false;
+    let code = track(name, token, event, &mut started)?;
+    // The project's task commands, in the agent's context from its first turn on
+    // (docs/superpowers/specs/2026-10-13-project-task-queue-design.md); only a
+    // start this run recorded as its own conversation's, never a nested CLI's.
+    if code == 0 && started {
+        if let Some(context) =
+            nonempty_env("HGS_AGENT").and_then(|agent| crate::tasks::session_context(&agent))
+        {
+            println!("{context}");
+        }
+    }
+    Ok(code)
+}
+
+/// Records one hook event of the session `name`'s run `token`; `started` says
+/// that it was the start of the run's own conversation.
+fn track(name: String, token: String, mut event: Value, started: &mut bool) -> Result<i32> {
     if nonempty_env("HGS_AGENT").as_deref() == Some("claude") {
         if let std::borrow::Cow::Owned(prompt) = journal::pasted_text(string(&event, "prompt")) {
             event["prompt"] = json!(prompt);
@@ -1280,10 +1298,17 @@ pub(super) fn hook() -> Result<i32> {
         return Ok(2);
     }
     let _guard = lock(None)?;
-    let Some(mut record) = read_run(&name, &token)? else {
+    let panes = live()?;
+    let own = read_run(&name, &token)?;
+    let record = if continuations::foreign(own.as_ref(), sid) {
+        continuations::owner(&event, sid, &panes)?
+    } else {
+        own
+    };
+    let Some(mut record) = record else {
         return Ok(0);
     };
-    if !matches(&record, live()?.get(string(&record, "name"))) {
+    if !matches(&record, panes.get(string(&record, "name"))) {
         return Ok(0);
     }
     if let Some(scoped) = external_agents::route(&mut record, &event) {
@@ -1308,11 +1333,31 @@ pub(super) fn hook() -> Result<i32> {
         && !external_agents::main_start(&record, &event) {
         return Ok(0);
     }
-    let agent = string(&record, "agent");
-    if !events(agent).contains(&kind)
-        && !versioned_events(agent).iter().any(|(event, _)| *event == kind)
+    let agent = string(&record, "agent").to_owned();
+    if !events(&agent).contains(&kind)
+        && !versioned_events(&agent).iter().any(|(event, _)| *event == kind)
     {
         return Ok(0);
+    }
+    // U19: the owner confirms subagents before Claude starts them.
+    if subagents_confirm::confirm() {
+        if agent != "claude" && kind == "SessionStart" {
+            record["subagent_confirm"] = json!(format!("subagent confirmation not supported by {agent}"));
+        }
+        if agent == "claude" {
+            if matches!(kind, "UserPromptSubmit" | "Stop" | "SessionEnd") {
+                subagents_confirm::group_reset(sid);
+            }
+            // U19: the ask becomes Claude's permission request, which the
+            // approval channel brings to the owner, or to a member's lead.
+            if let Some(output) = subagents_confirm::pre_tool(&mut record, &event, sid) {
+                println!("{output}");
+            }
+            if kind == "PostToolUse" && subagents_confirm::subagent_tool(&event) {
+                let tool = ["tool_use_id", "tool_call_id"].iter().map(|key| string(&event, key)).find(|id| !id.is_empty()).unwrap_or_default();
+                subagents_confirm::group_remove(sid, tool);
+            }
+        }
     }
     if pause_active(&record) && ["UserPromptSubmit", "PreToolUse", "TurnStarted"].contains(&kind) {
         eprintln!("hgs is pausing this session; retry after resuming");
@@ -1340,6 +1385,7 @@ pub(super) fn hook() -> Result<i32> {
         }
         if !string(&record, "expected_id").is_empty() && sid != string(&record, "expected_id")
             && !clear_context::resumed_start(&record, &event)
+            && !clear_context::resumed_session(&event)
         {
             record["error"] = json!("agent resumed a different conversation");
             record["activity"] = json!("unknown");
@@ -1347,7 +1393,9 @@ pub(super) fn hook() -> Result<i32> {
             return Ok(0);
         }
         if sid != string(&record, "conversation_id") {
-            clear_context::observe_start(&mut record, &event);
+            // The agent's own id wins: a resume or compaction may continue in a
+            // new transcript, and the record follows it (H7).
+            clear_context::follow(&mut record, &event);
             for key in [
                 "clear_context_request",
                 "compact_context_request",
@@ -1414,10 +1462,20 @@ pub(super) fn hook() -> Result<i32> {
             journal::log_event(&record, &clear)?;
         }
     }
+    // A resume or compaction that opened a new transcript is one event in the
+    // Activity timeline (H7).
+    if changed_conversation && record["session_rebound"]["journaled"] != true {
+        if let Some(mut rebound) = clear_context::rebound_event(&record) {
+            rebound["hook_event_name"] = json!("SessionRebound");
+            journal::log_event(&record, &rebound)?;
+            record["session_rebound"]["journaled"] = json!(true);
+        }
+    }
     let hint = agent_hint::start(&mut record, &event);
     write(&mut record)?;
     if kind == "SessionStart" && string(&event, "agent_id").is_empty() {
         archive::confirm_restore(&mut record)?;
+        *started = true;
     }
     if let Some(hint) = hint {
         let stdout = io::stdout();

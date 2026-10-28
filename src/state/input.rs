@@ -39,6 +39,10 @@ struct Request {
     attachments: Vec<Attachment>,
     #[serde(default)]
     expected_compaction_id: String,
+    /// U35: hold the message in hgs while the previous input is unconfirmed
+    /// (clients that read `input_hold_supported`); otherwise it is refused.
+    #[serde(default)]
+    queue_when_unconfirmed: bool,
 }
 
 fn validate(request: &Request) -> Result<Vec<Vec<u8>>> {
@@ -104,6 +108,14 @@ fn validate(request: &Request) -> Result<Vec<Vec<u8>>> {
         .collect()
 }
 
+pub(super) fn validate_launch_prompt(text: &str) -> Result<()> {
+    validate(&Request {
+        request_id: uuid::Uuid::new_v4().to_string(), text: text.into(),
+        expected_run_id: "launch".into(), expected_conversation_id: String::new(),
+        attachments: Vec::new(), expected_compaction_id: String::new(), queue_when_unconfirmed: false,
+    }).map(|_| ())
+}
+
 /// Provider TUIs can defer SessionStart until their first submitted turn.
 /// Only supervised fresh runs or verifiable native Codex forks are candidates;
 /// checked_input separately proves a fork's owned child history before delivery.
@@ -160,6 +172,10 @@ pub(super) fn checked_ready(name: &str, run_id: &str, conversation_id: &str) -> 
     checked_input(name, run_id, conversation_id, false)
 }
 
+pub(super) fn launch_ready(name: &str, run_id: &str, conversation_id: &str) -> Result<()> {
+    checked_terminal(&checked_input(name, run_id, conversation_id, true)?, true)
+}
+
 /// A resume before its deferred SessionStart, verified as for its first message.
 pub(super) fn checked_resumed(name: &str, run_id: &str, conversation_id: &str) -> Result<Value> {
     let record = checked_input(name, run_id, conversation_id, true)?;
@@ -174,6 +190,16 @@ pub(super) fn checked_interrupted(name: &str, run_id: &str, conversation_id: &st
     let record = checked_input(name, run_id, conversation_id, true)?;
     if !clear_context::stopped(&record) {
         return Err("The session is no longer interrupted; refresh before clearing".into());
+    }
+    Ok(record)
+}
+
+/// Explicit reset after a typed native failed-turn completion. This checks the
+/// same live identity again immediately before the sole /clear submission.
+pub(super) fn checked_failed(name: &str, run_id: &str, conversation_id: &str) -> Result<Value> {
+    let record = checked_input(name, run_id, conversation_id, true)?;
+    if !clear_context::failed_turn(&record) {
+        return Err("The failed native turn is no longer settled; refresh before clearing".into());
     }
     Ok(record)
 }
@@ -319,16 +345,48 @@ fn checked_input(
     if !allow_working {
         idle_only(&record)?;
     }
-    if record["input_pending_at"]
-        .as_f64()
-        .is_some_and(|pending| record["last_event_at"].as_f64().unwrap_or(0.0) <= pending)
-    {
-        return Err("previous input has not been confirmed by the agent; inspect Terminal before sending again".into());
+    if !input_confirmed(&record) {
+        return Err(UNCONFIRMED.into());
     }
     if settings_unconfirmed(&record) {
         return Err(SETTINGS_UNCONFIRMED.into());
     }
     Ok(record)
+}
+
+pub(super) const UNCONFIRMED: &str = "previous input has not been confirmed by the agent; inspect Terminal before sending again";
+
+/// U35: the agent has taken the previous input. Any native event after it
+/// confirms it: UserPromptSubmit at once for an idle Claude or Codex, Kimi's
+/// UserPromptQueued while it works (dsh confirms in its own RPC). A working
+/// Claude or Codex queues the text in its TUI and reports UserPromptSubmit only
+/// when that turn ends, so there the text shown in its queue panel confirms it.
+fn input_confirmed(record: &Value) -> bool {
+    let Some(pending) = record["input_pending_at"].as_f64() else { return true };
+    if record["last_event_at"].as_f64().unwrap_or(0.0) > pending {
+        return true;
+    }
+    if !["claude", "codex"].contains(&string(record, "agent")) {
+        return false;
+    }
+    let request = string(record, "input_pending_request");
+    if uuid::Uuid::parse_str(request).is_err() {
+        return false;
+    }
+    let Ok(contents) = absolute_root().and_then(|root| {
+        fs::read_to_string(root.join("input_receipts").join(format!("{request}.json"))).map_err(|e| e.to_string())
+    }) else {
+        return false;
+    };
+    let receipt: Value = serde_json::from_str(&contents).unwrap_or_default();
+    receipt["status"] == "submitted"
+        && kimi_tui_choice::capture(record)
+            .is_ok_and(|screen| queued_on_screen(string(record, "agent"), &screen, string(&receipt, "submitted_text")))
+}
+
+/// Whether `screen` shows `text` in the agent's own queue panel.
+fn queued_on_screen(agent: &str, screen: &str, text: &str) -> bool {
+    !text.trim().is_empty() && input_queue::panel_text(agent, screen).is_some_and(|panel| paste_shown(&panel, text))
 }
 
 /// Keys of a model or effort change the agent may not have read yet. Unlike
@@ -411,6 +469,13 @@ fn styled_row(row: &str) -> Vec<(char, bool)> {
         .collect()
 }
 
+/// Released Codex uses a double chevron for Ultra's live composer. This is
+/// only its prefix; callers still verify the cursor, styles and full input
+/// boundary, or an exact command/draft under the usual native identity guards.
+pub(super) fn codex_prompt(row: &str) -> Option<&str> {
+    row.strip_prefix('›').or_else(|| row.strip_prefix('»'))
+}
+
 fn prompt_empty(agent: &str, row: &str, previous: &str, screen: &str, cursor: usize) -> bool {
     let styled = styled_row(row);
     let plain: String = styled.iter().map(|(ch, _)| ch).collect();
@@ -418,7 +483,7 @@ fn prompt_empty(agent: &str, row: &str, previous: &str, screen: &str, cursor: us
     match agent {
         "codex" => {
             cursor == 2
-                && (plain == "›" || plain.starts_with("› "))
+                && codex_prompt(&plain).is_some_and(|tail| tail.is_empty() || tail.starts_with(' '))
                 && styled
                     .iter()
                     .skip(2)
@@ -655,7 +720,7 @@ const DRAFT: &str = "terminal has a draft, dialog, or unrecognized prompt; open 
 const RETURNED_FOLLOW_UPS: &str =
     "The queued follow-ups are back in Codex's input as an unsent draft. Submit or clear them in Terminal.";
 
-/// The whole draft in Codex's input: its `›` row and indented continuation rows,
+/// The whole draft in Codex's input: its composer and indented continuation rows,
 /// then a blank row before the model/folder status row of its footer in the last
 /// two screen rows. The cursor must be above that blank row; any other layout is unread.
 pub(super) fn codex_draft(record: &Value, screen: &str, cursor_y: usize) -> Option<String> {
@@ -667,7 +732,7 @@ pub(super) fn codex_draft(record: &Value, screen: &str, cursor_y: usize) -> Opti
         .iter()
         .enumerate()
         .rev()
-        .find_map(|(index, row)| Some((index, row.strip_prefix('›')?)))?;
+        .find_map(|(index, row)| Some((index, codex_prompt(row)?)))?;
     let rows = &lines[start + 1..footer];
     if !(start..footer - 1).contains(&cursor_y)
         || rows.last().is_none_or(|row| !row.is_empty())
@@ -712,7 +777,76 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+/// Plain text for the session's current run and conversation (task prompts).
+pub(super) fn submit_task(session: &zerus_replica::SessionKey, text: &str, attachments: &[Value]) -> Result<Value> {
+    let name = session.session.as_str();
+    let record = read(name)?;
+    if !session.session_id.is_empty() {
+        let key = if string(&record, "launch_id").is_empty() { "run_id" } else { "launch_id" };
+        if session.session_id != format!("{key}:{}", string(&record, key)) {
+            return Err("task session identity changed; refresh the task".into());
+        }
+    }
+    let request = json!({"request_id": uuid::Uuid::new_v4().to_string(), "text": text,
+        "expected_run_id": string(&record, "run_id"),
+        "expected_conversation_id": string(&record, "conversation_id"), "attachments": attachments});
+    submit(name, request.to_string().as_bytes(), None)
+}
+
+pub(super) fn task_reply(session: &zerus_replica::SessionKey, dispatch: &str, id: &str, text: &str, attachments: &[Value]) -> Result<Value> {
+    let record = read(&session.session)?;
+    let key = if string(&record, "launch_id").is_empty() { "run_id" } else { "launch_id" };
+    if session.session_id.is_empty() || session.session_id != format!("{key}:{}", string(&record, key)) {
+        return Err("task execution identity changed; refresh before sending".into());
+    }
+    if let Ok(dispatch) = uuid::Uuid::parse_str(dispatch) {
+        let bytes = fs::read(absolute_root()?.join("input_receipts").join(format!("{dispatch}.json")))
+            .map_err(|_| "the task dispatch receipt is unavailable; delivery is not authorized")?;
+        let receipt: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        if receipt["status"] != "submitted" || string(&receipt,"run_id") != string(&record,"run_id")
+            || !string(&receipt,"conversation_id").is_empty() && receipt["conversation_id"] != record["conversation_id"] {
+            return Err("the task's dispatched run or conversation changed; refresh or hand off the task explicitly".into());
+        }
+    }
+    let request = json!({"request_id":id,"text":text,"attachments":attachments,
+        "expected_run_id":string(&record,"run_id"),"expected_conversation_id":string(&record,"conversation_id")});
+    let parsed: Request = serde_json::from_value(request.clone()).map_err(|e| e.to_string())?;
+    validate(&parsed)?;
+    Ok(request)
+}
+
+/// Recovery is read-only, even when no receipt exists. Absence after a crash
+/// does not authorize another terminal submission.
+pub(super) fn task_reply_receipt(name: &str, request: &Value) -> Result<Option<Value>> {
+    let parsed: Request = serde_json::from_value(request.clone()).map_err(|e| e.to_string())?;
+    uuid::Uuid::parse_str(&parsed.request_id).map_err(|_| "invalid message identity")?;
+    let path = absolute_root()?.join("input_receipts").join(format!("{}.json", parsed.request_id));
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    let receipt: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let digest = format!("{:x}", Sha256::digest(request.to_string().as_bytes()));
+    if string(&receipt, "digest") != digest || string(&receipt, "name") != name {
+        return Err("message receipt identity or content does not match".into());
+    }
+    Ok(Some(receipt))
+}
+
 pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Result<Value> {
+    // N34: a BOM is not part of the request or of its digest.
+    submit_with(name, crate::state::without_bom(input), recovery_id, false)
+}
+
+/// A held message, by its deliverer, through the same checks as any send.
+pub(super) fn submit_held(name: &str, input: &[u8]) -> Result<Value> {
+    submit_with(name, input, None, true)
+}
+
+fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool) -> Result<Value> {
+    // N34: a BOM is not part of the request or of its digest.
+    let input = crate::state::without_bom(input);
     let request: Request =
         serde_json::from_slice(input).map_err(|e| format!("invalid send payload: {e}"))?;
     let files = validate(&request)?;
@@ -731,14 +865,38 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
         if string(&receipt, "digest") != digest || string(&receipt, "name") != name {
             return Err("request ID was already used for different content".into());
         }
-        if receipt["status"] == "submitted" {
+        match string(&receipt, "status") {
             // Replay the exact durable acknowledgement. Reformatting parsed
             // floats can round its subsecond timestamp differently.
-            return Ok(receipt);
+            "submitted" => return Ok(receipt),
+            // U35: a held message answers with its receipt until its deliverer takes it.
+            "queued" if held => {}
+            "cancelled" if held => return Err(input_hold::CANCELLED.into()),
+            "queued" | "cancelled" | "failed" => return Ok(receipt),
+            _ => return Err("delivery uncertain: this request may already be in Terminal; do not resend automatically".into()),
         }
-        return Err("delivery uncertain: this request may already be in Terminal; do not resend automatically".into());
     }
-    let mut record = effort::apply_pending(name, checked_record(name, &request)?)?;
+    // U35: an opted-in message waits behind held ones and while the previous
+    // input is unconfirmed; every other refusal stays.
+    let opted = request.queue_when_unconfirmed && !held && recovery_id.is_none();
+    let checked = if opted && !input_hold::items(name).is_empty() {
+        Err(UNCONFIRMED.to_owned())
+    } else {
+        checked_record(name, &request)
+    };
+    let checked = match checked {
+        Err(error) if opted && error == UNCONFIRMED => {
+            let record = read(name)?;
+            if string(&record, "run_id") != request.expected_run_id
+                || string(&record, "conversation_id") != request.expected_conversation_id
+            {
+                return Err("session identity changed; refresh before sending".into());
+            }
+            return input_hold::hold(name, &request_id, &digest, input, &record, request.text.trim());
+        }
+        checked => checked?,
+    };
+    let mut record = effort::apply_pending(name, checked)?;
     if let Some(id) = recovery_id { recovery::check_submission(&record, id)?; }
     checked_terminal(&record, true)?;
     let attachments_root = root.join("attachments");
@@ -766,8 +924,15 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
     // Claude and Kimi treat a trailing backslash plus the next Enter as line
     // continuation. Paste a final newline with the literal text so our single
     // Enter submits it; never retry Enter, which could answer a subsequently
-    // opened dialog.
-    let pasted = if matches!(string(&record, "agent"), "claude" | "kimi") && text.ends_with('\\') {
+    // opened dialog. Codex also needs that newline after a trailing @ token:
+    // Enter would otherwise select its file/mention completion instead of
+    // submitting. A space still has token affinity; a newline moves the cursor
+    // off the token. Native submission trims the newline; receipts keep `text`.
+    let agent = string(&record, "agent");
+    let pasted = if (matches!(agent, "claude" | "kimi") && text.ends_with('\\'))
+        || (agent == "codex"
+            && text.split_whitespace().next_back().is_some_and(|token| token.starts_with('@')))
+    {
         format!("{text}\n")
     } else {
         text.clone()
@@ -800,6 +965,7 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
     // Preserve attachments after any possible input: the agent may read them later.
     let _ = attachments.keep();
     record["input_pending_at"] = json!(submitted_at);
+    record["input_pending_request"] = json!(request_id);
     if let Err(error) = write(&mut record) {
         cleanup();
         return Err(error);
@@ -858,7 +1024,6 @@ fn settle_codex_paste(terminal: &dyn backend::TerminalBackend, pane: &str, paste
 /// Whether `screen` shows all of `pasted` (wrapping, indentation and borders
 /// aside), only its end when it is too long to fit, or Codex's placeholder for a
 /// long paste. The whole text counts, as a reply's closing tag repeats its opening.
-#[cfg_attr(not(windows), allow(dead_code))]
 fn paste_shown(screen: &str, pasted: &str) -> bool {
     let squeeze = |text: &str| -> String {
         text.chars()
@@ -876,6 +1041,27 @@ fn paste_shown(screen: &str, pasted: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn previous_input_is_confirmed_by_a_later_event_or_the_native_queue_panel() {
+        // Any native event after the input confirms it (UserPromptSubmit,
+        // Kimi's UserPromptQueued); one at the same moment does not.
+        assert!(input_confirmed(&json!({"agent":"kimi"})));
+        assert!(!input_confirmed(&json!({"agent":"kimi","input_pending_at":10.0,"last_event_at":10.0})));
+        assert!(input_confirmed(&json!({"agent":"kimi","input_pending_at":10.0,"last_event_at":10.5})));
+        // Without a recorded request, a working Claude waits for its next event.
+        assert!(!input_confirmed(&json!({"agent":"claude","input_pending_at":10.0,"last_event_at":9.0})));
+        // A working Claude or Codex shows the text in its own queue panel.
+        let claude = "● Thinking…\n\n❯ please also check the\n  migrations\nctrl+x ctrl+s to send now\n\n❯ \n";
+        assert!(queued_on_screen("claude", claude, "please also check the migrations"));
+        assert!(!queued_on_screen("claude", claude, "a different message"));
+        assert!(!queued_on_screen("claude", "❯ please also check the migrations\n", "please also check the migrations"));
+        assert!(!queued_on_screen("claude", claude, "  "));
+        let codex = "• Working (4s • esc to interrupt)\n\n• Queued follow-up inputs\n  ↳ run the tests again\n    shift+← edit last queued message\n\n\n› Ask Codex to do anything\n";
+        assert!(queued_on_screen("codex", codex, "run the tests again"));
+        // Kimi reports the queued prompt as an event instead.
+        assert!(!queued_on_screen("kimi", claude, "please also check the migrations"));
+    }
+
     #[test]
     fn unread_settings_keys_wait_for_a_native_event() {
         let mut record = json!({"settings_unconfirmed_at": 10.0, "last_event_at": 9.0});
@@ -1042,6 +1228,19 @@ mod tests {
         ));
     }
     #[test]
+    fn codex_ultra_composer_keeps_cursor_draft_and_footer_guards() {
+        let screen = "\x1b[1m\x1b[38;2;186;130;255m»\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n  GPT-6.1-Sol ultra · /fixture\n  ? for shortcuts";
+        assert!(composer_empty("codex", screen, 2, 0));
+        assert!(!composer_empty("codex", screen, 3, 0));
+        for replacement in ["draft", "\n  multiline draft", ""] {
+            assert!(!composer_empty("codex", &screen.replace("\x1b[2mAsk Codex to do anything\x1b[0m", replacement), 2, 0));
+        }
+        assert!(!composer_empty("codex", &screen.replace("? for shortcuts", "Approve command?"), 2, 0));
+        assert!(!composer_empty("claude", screen, 2, 0));
+        let record = json!({"model":"gpt-6.1-sol"});
+        assert_eq!(codex_draft(&record, "» retained draft\n\n  GPT-6.1-Sol ultra · /fixture\n  ? for shortcuts", 0).as_deref(), Some("retained draft"));
+    }
+    #[test]
     fn codex_unshaded_single_line_model_footer() {
         let screen = "Provider error\n\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n  \x1b[38;2;246;226;183mgpt-5.6-sol default\x1b[2m\x1b[39m · \x1b[0m\x1b[38;2;171;223;167m/private/project\n";
         assert!(composer_empty("codex", screen, 2, 2));
@@ -1111,6 +1310,7 @@ mod tests {
             expected_conversation_id: String::new(),
             expected_compaction_id: String::new(),
             attachments: vec![],
+            queue_when_unconfirmed: false,
         };
         assert!(validate(&r).is_ok());
         for text in ["hi\x1b[201~", "hello\rbye", " /exit", "!rm test"] {

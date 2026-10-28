@@ -1,6 +1,7 @@
 #include "TeamNewDialog.h"
 #include "HgsClient.h"
 #include "TeamController.h"
+#include "TeamTemplateList.h"
 #include "TeamWidgets.h"
 #include <QCheckBox>
 #include <QComboBox>
@@ -12,6 +13,7 @@
 #include <QPointer>
 #include <QScrollArea>
 #include <QSpinBox>
+#include <QStandardItemModel>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -57,15 +59,20 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     auto *form = new QFormLayout; form->setLabelAlignment(Qt::AlignRight);
     m_name = new QLineEdit; m_name->setObjectName("teamNewName"); m_name->setPlaceholderText(tr("Checkout redesign"));
     form->addRow(tr("Name"), m_name);
-    m_template = combo("teamNewTemplate");
-    m_template->addItem(tr("No template"), QString());
-    for (const auto &t : teams->catalog().templates) m_template->addItem(t.name, t.id);
-    form->addRow(tr("Template"), m_template);
+    // F6: a compact list with search and favourites; it tells the form only
+    // after the whole form exists (connected at the end of the constructor).
+    m_templateList = new TeamTemplateList; m_templateList->setObjectName("teamNewTemplates");
+    m_templateList->setDark(palette().color(QPalette::Window).lightness() < 128);
+    m_templateList->setCatalog(teams->catalog());
+    form->addRow(tr("Template"), m_templateList);
     m_goal = new QPlainTextEdit; m_goal->setObjectName("teamNewGoal"); m_goal->setFixedHeight(64);
     m_goal->setPlaceholderText(tr("What the team should deliver"));
     form->addRow(tr("Goal"), m_goal);
     auto *folderRow = new QHBoxLayout;
     m_folder = new QLineEdit(folder); m_folder->setObjectName("teamNewFolder");
+    // QA #347: the folder the dialog opens with is given, not being typed: a
+    // non-Git one forces the policy to Shared at once (the note says why).
+    m_folderCommitted = !folder.isEmpty();
     auto *browse = new QPushButton(tr("Browse…")); browse->setAutoDefault(false);
     connect(browse, &QPushButton::clicked, this, [this] {
         const auto dir = QFileDialog::getExistingDirectory(this, tr("Team folder"), m_folder->text());
@@ -73,9 +80,33 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     });
     folderRow->addWidget(m_folder, 1); folderRow->addWidget(browse);
     form->addRow(tr("Folder"), folderRow);
-    m_worktrees = new QCheckBox(tr("Worktree per member")); m_worktrees->setObjectName("teamNewWorktrees"); m_worktrees->setChecked(true);
+    m_worktrees = new QCheckBox(tr("Worktree per member"), this); m_worktrees->setObjectName("teamNewWorktrees"); m_worktrees->setChecked(true);
+    m_worktrees->hide();   // B6: the folder policy combo below is the control; the box stays a child (row worktree defaults)
     m_gitNote = new QLabel; m_gitNote->setObjectName("teamNewGitNote"); m_gitNote->setWordWrap(true);
-    form->addRow(QString(), m_worktrees);
+    // B6: auto is the default for a new team - the lead picks shared, worktree
+    // or clone per member; a team that must share one folder picks Shared.
+    m_folderPolicy = combo("teamNewFolderPolicy", 200);
+    m_folderPolicy->addItem(tr("Auto — the lead picks per member"), QStringLiteral("auto"));
+    m_folderPolicy->addItem(tr("Shared folder"), QStringLiteral("shared"));
+    m_folderPolicy->addItem(tr("Worktree per member"), QStringLiteral("worktree"));
+    m_folderPolicy->setToolTip(tr("Auto lets the lead choose the folder each member works in"));
+    // N10: typing a path keeps auto; a finished non-Git path forces shared.
+    QObject::connect(m_folder, &QLineEdit::editingFinished, this, [this] { m_folderCommitted = true; validate(); });
+    QObject::connect(m_folder, &QLineEdit::textChanged, this, [this] {
+        m_folderCommitted = false;
+        // N10: a path that was being changed again is not finished, so the rule
+        // that forced shared no longer applies: back to auto until it is.
+        if (m_forcedShared) {
+            m_forcedShared = false;
+            const QSignalBlocker block(m_folderPolicy);
+            m_folderPolicy->setCurrentIndex(m_folderPolicy->findData(QStringLiteral("auto")));
+        }
+    });
+    connect(m_folderPolicy, &QComboBox::currentIndexChanged, this, [this] {
+        m_worktrees->setChecked(m_folderPolicy->currentData().toString() != QStringLiteral("shared"));
+        validate();
+    });
+    form->addRow(tr("Member folders"), m_folderPolicy);
     form->addRow(QString(), m_gitNote);
     // The lead: a new session on this computer, or an existing one.
     auto *leadRow = new QHBoxLayout;
@@ -88,7 +119,8 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     auto *existingRow = new QHBoxLayout;
     m_useExisting = new QCheckBox(tr("Use an existing session as lead")); m_useExisting->setObjectName("teamNewUseExisting");
     m_existingLead = combo("teamNewExistingLead");
-    for (const auto &s : sessions) if (s.host.isEmpty()) m_existingLead->addItem(s.name, s.name);
+    // F4: the Team designer never leads a team.
+    for (const auto &s : sessions) if (s.host.isEmpty() && !isDesignerSession(s.host, s.name)) m_existingLead->addItem(s.name, s.name);
     m_useExisting->setEnabled(m_existingLead->count() > 0);
     m_existingLead->setEnabled(false);
     existingRow->addWidget(m_useExisting); existingRow->addWidget(m_existingLead, 1);
@@ -126,7 +158,6 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     footer->addWidget(cancel); footer->addWidget(m_create);
     outer->addLayout(footer);
 
-    connect(m_template, &QComboBox::currentIndexChanged, this, [this] { applyTemplate(); });
     connect(m_name, &QLineEdit::textChanged, this, [this] { validate(); });
     connect(m_folder, &QLineEdit::textChanged, this, [this] { validate(); });
     connect(m_leadAgent, &QComboBox::currentIndexChanged, this, [this] { fillAccounts(m_leadAccount, m_leadAgent->currentData().toString(), {}); validate(); });
@@ -159,6 +190,20 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     const auto &routing = teams->catalog().routing;
     Q_UNUSED(routing);
     fillAccounts(m_leadAccount, "claude", {});
+    applyTemplate();
+    m_templateList->selected = [this](const QString &id) { m_templateId = id; applyTemplate(); };
+}
+
+TeamNewDialog::~TeamNewDialog()
+{
+    // The list is destroyed after this body; it must not apply a template then.
+    if (m_templateList) m_templateList->selected = nullptr;
+}
+
+void TeamNewDialog::selectTemplate(const QString &id)
+{
+    m_templateList->setCurrent(id);
+    m_templateId = id;
     applyTemplate();
 }
 
@@ -232,7 +277,7 @@ void TeamNewDialog::applyTemplate()
 {
     for (auto *r : m_rowList) { r->box->deleteLater(); delete r; }
     m_rowList.clear();
-    const auto *t = m_teams->catalog().templ(m_template->currentData().toString());
+    const auto *t = m_teams->catalog().templ(m_templateId);
     if (t) {
         for (const auto &seat : t->roster) {
             const auto *role = m_teams->catalog().role(seat.role);
@@ -252,13 +297,52 @@ void TeamNewDialog::applyTemplate()
     validate();
 }
 
+void TeamNewDialog::preselectExistingLead(const QString &host, const QString &name)
+{
+    if (!host.isEmpty() || name.isEmpty()) return;   // only this computer's sessions can lead here
+    const int index = m_existingLead->findData(name);
+    if (index < 0) return;
+    m_existingLead->setCurrentIndex(index);
+    m_useExisting->setChecked(true);
+    validate();
+}
+
 void TeamNewDialog::validate()
 {
+    // B6: a combo signal may reach validate before the last widgets exist; the
+    // constructor's own call runs after them all.
+    if (!m_name || !m_folder || !m_folderPolicy || !m_summary || !m_create) return;
     const Colors c = colorsFor(palette().color(QPalette::Window).lightness() < 128);
     const QString folder = m_folder->text().trimmed();
     const bool git = !folder.isEmpty() && QDir(folder).exists(QStringLiteral(".git"));
     m_worktrees->setEnabled(git);
     if (!git) m_worktrees->setChecked(false);
+    // N10: a path that is Git again with auto or worktree policy brings the
+    // worktree rows back, so members are created with worktrees.
+    else if (!m_worktrees->isChecked() && m_folderPolicy
+             && m_folderPolicy->currentData().toString() != QStringLiteral("shared"))
+        m_worktrees->setChecked(true);
+    // B6: without a Git folder only a shared folder makes sense; the worktree
+    // entry is greyed out and the note says why. QA #347: a folder that is not
+    // a Git repository shows Shared, fixed, with the reason - also for the
+    // folder the dialog opened with, not only after the field lost focus.
+    if (m_folderPolicy) {
+        if (auto *model = qobject_cast<QStandardItemModel *>(m_folderPolicy->model()))
+            if (auto *item = model->item(m_folderPolicy->findData(QStringLiteral("worktree"))))
+                item->setEnabled(git);
+        if (!git && m_folderCommitted && m_folderPolicy->currentData().toString() != "shared") {
+            // No signals: currentIndexChanged would call validate() again in the
+            // middle of this one (the crash seen in newTeamStartsTheLeadWithTheTemplate).
+            const QSignalBlocker block(m_folderPolicy);
+            m_folderPolicy->setCurrentIndex(m_folderPolicy->findData(QStringLiteral("shared")));
+            m_worktrees->setChecked(false);
+            m_forcedShared = true;
+        }
+        const bool sharedOnly = !folder.isEmpty() && !git && m_folderCommitted;
+        m_folderPolicy->setEnabled(!sharedOnly);
+        m_folderPolicy->setToolTip(sharedOnly ? tr("Folder is not a Git repository: every member works in this folder, so the policy is shared.")
+                                              : tr("Auto lets the lead choose the folder each member works in"));
+    }
     m_gitNote->setVisible(!folder.isEmpty() && !git);
     m_gitNote->setText(tr("Folder is not a Git repository — members will share one folder."));
     m_gitNote->setStyleSheet(QStringLiteral("color:%1;").arg(c.warn.name()));
@@ -328,7 +412,7 @@ void TeamNewDialog::create()
         if (role && !byRole.contains(role->id)) byRole.insert(role->id, id);
     }
     QJsonArray tasks;
-    const auto *t = m_teams->catalog().templ(m_template->currentData().toString());
+    const auto *t = m_teams->catalog().templ(m_templateId);
     if (t && m_planning->currentData() == "template") {
         for (int i = 0; i < t->tasks.size(); ++i) {
             const auto &k = t->tasks[i];
@@ -337,11 +421,13 @@ void TeamNewDialog::create()
         }
     }
     const bool worktrees = m_worktrees->isChecked();
+    const QString folderPolicy = m_folderPolicy ? m_folderPolicy->currentData().toString() : (worktrees ? QStringLiteral("worktree") : QStringLiteral("shared"));
+    QJsonObject settings{{"folder_policy", folderPolicy}, {"approval", m_review->isChecked() ? "review" : "auto"},
+                         {"max_members", m_maxMembers->value()}};
+    if (t && !t->phaseApproval.isEmpty()) settings.insert("phase_approval", t->phaseApproval);
     QJsonObject input{{"name", m_name->text().trimmed()}, {"goal", m_goal->toPlainText().trimmed()}, {"folder", m_folder->text().trimmed()},
                       {"project", m_project}, {"template", t ? t->id : QString()}, {"lead", lead}, {"members", members}, {"tasks", tasks},
-                      {"start", true},
-                      {"settings", QJsonObject{{"folder_policy", worktrees ? "worktree" : "shared"}, {"approval", m_review->isChecked() ? "review" : "auto"},
-                                               {"max_members", m_maxMembers->value()}}}};
+                      {"start", true}, {"settings", settings}};
     m_create->setEnabled(false);
     m_summary->setText(tr("Creating the team…"));
     m_teams->call(QStringLiteral("create"), input, [this, guard = QPointer<TeamNewDialog>(this)](bool ok, const QJsonObject &result, const QString &error) {

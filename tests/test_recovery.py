@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 from pathlib import Path
 import test_input as fixtures
 
@@ -99,6 +100,111 @@ class Recovery(unittest.TestCase):
     def test_codex_delivery_acknowledgement_and_cancel(self):self.exercise('codex')
     def test_claude_delivery_acknowledgement_and_cancel(self):self.exercise('claude')
     def test_kimi_delivery_acknowledgement_and_cancel(self):self.exercise('kimi')
+
+    def pending_codex_with_age(self, age):
+        self.prepare('codex');self.tick();job=self.inspect()['recovery']
+        self.command('recovery','action',payload=dict(name=self.name,id=job['id'],action='now'))
+        self.tick();self.wait_for(lambda:self.received().endswith(b'\r'))
+        path=next((self.state/'recovery/jobs').glob('*.json'))
+        job=json.loads(path.read_text());sent=time.time()-age
+        # Supplied fixture time: no real381s sleep and no extra delivery.
+        job.update(started_at=sent-1,sent_at=sent,due_at=sent)
+        job['receipt']['submitted_at']=sent+.01
+        path.write_text(json.dumps(job))
+        return job,path
+
+    def test_submitted_codex_waits_for_late_native_hook_without_resending(self):
+        job,_=self.pending_codex_with_age(381);received=self.received()
+        self.assertEqual(received.count(b'\r'),1)
+        for _ in range(3):
+            self.tick();pending=self.inspect()['recovery']
+            self.assertEqual(pending['state'],'retrying');self.assertFalse(pending['acknowledged'])
+            for key in ('id','request_id','attempt','attempts'):self.assertEqual(pending[key],job[key])
+            self.assertEqual(self.received(),received)
+        self.hook('UserPromptSubmit',prompt=job['receipt']['submitted_text']);self.tick()
+        self.assertTrue(self.inspect()['recovery']['acknowledged'])
+        import sqlite3
+        home=self.root/'.codex';home.mkdir(exist_ok=True);at=time.time()
+        with sqlite3.connect(home/'logs_2.sqlite') as db:
+            db.execute('CREATE TABLE logs(id INTEGER, ts INTEGER, ts_nanos INTEGER, thread_id TEXT, target TEXT, feedback_log_body TEXT)')
+            db.execute('INSERT INTO logs VALUES(1,?,?,?,?,?)',(int(at),int((at%1)*1e9),self.conversation_id,
+                'codex_core::session::turn','run_turn: Turn error: Selected model is at capacity. Please try a different model.'))
+        self.tick();following=self.inspect()['recovery']
+        self.assertEqual(following['state'],'waiting');self.assertTrue(following['acknowledged'])
+        for key in ('id','attempt','attempts','class_attempt'):self.assertEqual(following[key],job[key])
+        self.assertGreaterEqual(following['due_at'],at+30)
+        self.assertEqual(self.received(),received)
+
+    def test_pending_codex_ack_cancels_on_new_submitted_input(self):
+        job,_=self.pending_codex_with_age(381);self.tick()
+        self.assertEqual(self.inspect()['recovery']['state'],'retrying')
+        # A native Terminal message consumes pending input. The next actual
+        # scoped send must run cancel_for_input before any later old marker.
+        self.hook('UserPromptSubmit',prompt='An explicit new task')
+        self.command('send',self.name,'--json',payload=dict(request_id=str(uuid.uuid4()),
+            expected_run_id=self.run_id,expected_conversation_id=self.conversation_id,text='Follow the new task'))
+        self.wait_for(lambda:self.received().count(b'\r')==2)
+        self.assertEqual(self.inspect()['recovery']['state'],'cancelled')
+        received=self.received()
+        self.hook('UserPromptSubmit',prompt=job['receipt']['submitted_text']);self.tick()
+        self.assertEqual(self.inspect()['recovery']['state'],'cancelled')
+        self.assertEqual(self.received(),received)
+
+    def test_pending_codex_ack_stays_cancelled_after_policy_disable_and_reenable(self):
+        import fcntl
+        job,_=self.pending_codex_with_age(381);self.tick()
+        self.assertEqual(self.inspect()['recovery']['state'],'retrying')
+        # Hold only the fixture executor lock so policy refresh never spawns a
+        # detached worker or contacts an owner service manager on either Unix.
+        self.assertFalse((self.root/'.config/systemd/user/hgs-recovery.service').exists())
+        with (self.state/'recovery/worker.lock').open('a') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            policy=json.loads(self.policy.read_text());policy['service']=False
+            disabled=self.command('recovery','set',payload=policy)['policy']
+            self.assertEqual(self.inspect()['recovery']['state'],'cancelled')
+            disabled['service']=True
+            self.command('recovery','set',payload=disabled)
+            self.hook('UserPromptSubmit',prompt=job['receipt']['submitted_text']);self.tick()
+            self.assertEqual(self.inspect()['recovery']['state'],'cancelled')
+
+    def test_pending_codex_ack_expiry_releases_without_another_delivery(self):
+        job,_=self.pending_codex_with_age(601);received=self.received()
+        self.tick();expired=self.inspect()['recovery']
+        self.assertEqual(expired['state'],'uncertain');self.assertEqual(expired['attempt'],1)
+        self.hook('UserPromptSubmit',prompt=job['receipt']['submitted_text']);self.tick()
+        self.assertEqual(self.inspect()['recovery']['state'],'uncertain')
+        self.assertEqual(self.received(),received)
+
+    def test_pending_codex_ack_serializes_the_account_until_finite_expiry(self):
+        job,path=self.pending_codex_with_age(381);received=self.received()
+        other=self.root/'second-agent';other.mkdir()
+        name='codex/other-recovery';run=str(uuid.uuid4());conversation=str(uuid.uuid4())
+        # This child belongs to the already-owned fixture tmux server, whose
+        # registered cleanup also covers setup failure before the PID read.
+        self.tmux('new-session','-d','-s',name,'-x','100','-y','30',
+                  'env','INPUT_FIXTURE='+str(other),'python3',str(self.root/'agent.py'))
+        self.wait_for(lambda:(other/'agent-pid').exists() and (other/'agent-pid').read_text().strip())
+        pid=int((other/'agent-pid').read_text())
+        start=subprocess.check_output(['ps','-p',str(pid),'-o','lstart='],
+            env=dict(self.env,LC_ALL='C',TZ='UTC'),text=True).strip()
+        pane=self.tmux('display-message','-p','-t','='+name+':','#{pane_id}').strip()
+        self.tmux('set-option','-t','='+name+':','@hgs_run',run)
+        record=dict(self.record,name=name,run_id=run,conversation_id=conversation,pid=pid,process_start=start,pane=pane)
+        import hashlib
+        (self.state/(hashlib.sha256(name.encode()).hexdigest()+'.json')).write_text(json.dumps(record))
+        self.tick();second=self.command('inspect',name)['recovery']
+        self.command('recovery','action',payload=dict(name=name,id=second['id'],action='now'))
+        self.tick();self.assertEqual(self.command('inspect',name)['recovery']['state'],'waiting')
+        self.assertFalse((other/'received').exists());self.assertEqual(self.received(),received)
+        first=self.inspect()['recovery'];sent=time.time()-601
+        first.update(started_at=sent-1,sent_at=sent);first['receipt']['submitted_at']=sent+.01
+        path.write_text(json.dumps(first))
+        self.tick();self.assertEqual(self.inspect()['recovery']['state'],'uncertain')
+        # The next observation no longer reserves the expired job's account.
+        self.tick();self.wait_for(lambda:(other/'received').exists() and (other/'received').read_bytes().endswith(b'\r'))
+        self.assertEqual((other/'received').read_bytes().count(b'\r'),1)
+        self.assertEqual(self.command('inspect',name)['recovery']['attempt'],1)
+        self.assertEqual(self.received(),received)
 
     def test_kimi_saved_rolling_quota_recovers_once_under_the_existing_rate_policy(self):
         self.prepare('kimi')
@@ -442,6 +548,26 @@ class WorkerOwnership(unittest.TestCase):
         while not check():
             if time.monotonic()>until:self.fail('condition not reached')
             time.sleep(.05)
+
+    def test_restart_keeps_crashed_dispatch_uncertain_despite_a_submitted_receipt(self):
+        import hashlib
+        name='codex/recovery-fixture';run=str(uuid.uuid4());conversation=str(uuid.uuid4());request=str(uuid.uuid4())
+        text='[HGS automatic recovery] The previous turn stopped with a temporary provider error. Continue the current task from the existing conversation. Check any uncertain operation before repeating it.'
+        payload=dict(request_id=request,text=text,expected_run_id=run,expected_conversation_id=conversation)
+        receipt=dict(request_id=request,name=name,run_id=run,conversation_id=conversation,status='submitted',
+            transport='terminal',first_message=False,text=text,submitted_text=text,attachments=[],submitted_at=time.time(),
+            digest=hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',',':')).encode()).hexdigest())
+        job=dict(id=str(uuid.uuid4()),name=name,agent='codex',identity=[run,conversation,'model','account',None],
+            state='dispatching',action='continue_message',attempt=1,request_id=request,receipt=receipt,
+            acknowledged=False,started_at=time.time()-1,sent_at=receipt['submitted_at'])
+        directory=self.state/'recovery/jobs';directory.mkdir()
+        path=directory/(hashlib.sha256(name.encode()).hexdigest()+'.json');path.write_text(json.dumps(job))
+        worker=self.worker()
+        self.wait_for(lambda:json.loads(path.read_text()).get('state')=='uncertain')
+        stopped=json.loads(path.read_text())
+        self.assertEqual(stopped['reason'],'Recovery worker restarted during delivery; inspect the agent')
+        for key in ('attempt','request_id','receipt'):self.assertEqual(stopped[key],job[key])
+        self.hold('service.lock');self.finished(worker)
 
     def test_worker_exits_while_another_worker_holds_the_lock(self):
         self.hold('worker.lock')

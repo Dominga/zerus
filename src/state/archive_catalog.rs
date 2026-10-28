@@ -245,7 +245,7 @@ pub(crate) fn read_query() -> Result<Value> {
     if bytes.len() > 8192 {
         return Err("archive query exceeds 8 KiB".into());
     }
-    serde_json::from_slice(&bytes).map_err(|_| "invalid archive query JSON".into())
+    serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|_| "invalid archive query JSON".into())
 }
 
 pub(crate) fn validate_lookup(value: &Value) -> Result<(&str, &str)> {

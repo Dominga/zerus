@@ -90,6 +90,15 @@ worker converges within that interval. Protect database/storage capacity and
 network bandwidth separately; admission reservations do not establish a latency
 SLA or permit canceling already accepted work.
 
+Payload database admission absorbs short cross-worker bursts with at most
+250 ms of capacity waiting and bounded exponential backoff. Every attempt
+still requires the same local and shared class/total reservations; no permit or
+transaction is held during backoff, and ordinary work never borrows the team
+reserve. This is an admission wait, not a retry of a request or SQL operation.
+Existing SQL and request deadlines remain in force; the waiting budget does
+not preempt an in-progress acquisition. Sustained pressure still returns busy,
+and disconnect/shutdown releases application-owned acquisition custody.
+
 API v2 transports signed public membership and opaque ciphertext. Devices create
 their own independent signing/encryption keys and service bearer. The invitation
 secret remains solely in copied typed codes and endpoint private storage. The
@@ -115,11 +124,110 @@ workspace ID or accepts client-selected priority.
 | `POST /v2/node/snapshot` | `{computer_id,envelope}` encrypted separately for each phone and route. |
 | `GET /v2/computers` | Stable `(computer_id,gateway_id,route_id)` pages; receiver-specific ciphertext, at most 2 MiB ciphertext/page. |
 | `POST /v2/requests`, `GET /v2/requests/{id}` | `{envelope}` submission and permanent no-replay receipt with encrypted result in `envelope`. |
+| `GET /v2/stream` | Authenticated WebSocket readiness hints for up to 16 of this phone's durable request IDs; no command submission, claim or payload acknowledgement. |
 | `GET /v2/node/requests` | Claims at most one encrypted request; optional `wait <= 25` seconds. |
 | `POST /v2/node/requests/{id}/result` | `{envelope}` immutable signed encrypted outcome. Outer completion is not an authenticated native result. |
 | `POST /v2/node/signals` | Bounded generic scope/change IDs, presence (including explicit `null`) and existing delivery enum; no native names. |
 | `GET /v2/events` | Ordered generic hints with `id,computer_id,kind,scope_id,alert_kind,created_at`; phones refresh authenticated private content. |
 | `POST /v2/push`, `DELETE /v2/push` | Existing bounded provider registration/removal and generic wake delivery. |
+
+### WebSocket result readiness
+
+`encrypted_transport.result_stream` in `/v2/capabilities` advertises version 1.
+Use the same phone Bearer header and TLS endpoint as HTTP. Tokens are never
+accepted in the URL or a cookie. Send a text frame
+`{"type":"watch","request_ids":["<request UUID>"]}` to replace the watched set.
+The service sends `{"type":"ready","request_id":"<request UUID>","state":"completed"}`
+(or another terminal receipt state). This is a generic hint, not an authenticated
+native result. Fetch the usual encrypted receipt and verify fresh membership,
+signature, original request/route binding and the local journal before settling.
+
+The relay subscribes before checking committed receipt metadata. On reconnect,
+register the same pending IDs: this checks already-completed results without
+depending on an event cursor and never resubmits or reclaims a command. Existing
+ordered `/v2/events` cursor recovery and background push remain unchanged. The
+first migration replaces phone receipt polling waits; it does not make native
+execution run on the relay or replace the foreground refresh scheduler.
+
+Each socket lasts at most 60 seconds, retains its accepted-connection slot and
+existing local/shared poll admission, and rechecks authorization before hints
+and every five seconds while idle. Frames/messages are capped at 4 KiB, watches
+at 16 IDs, inbound watch messages at 128 per socket and each write at two seconds.
+No database permit is held during socket writes. Commit notifications wake other
+PostgreSQL workers; the five-second check also recovers missed notifications.
+Malformed, revoked, slow or expired sockets release their owned admission.
+
+Android multiplexes pending receipts on one socket per connection and closes an
+unused socket after ten seconds. It falls back to ordinary receipt GETs on old
+servers, unsupported proxy upgrades or disconnects, using the same IDs and the
+remaining wait budget. There is no automatic POST replay. A disconnected socket
+has a 30-second reconnect cooldown for network/upgrade failures; normal server
+rotation (close 1000) allows the next watch immediately. This foreground optimization does not create
+a background keepalive service. Reverse proxies must forward HTTP/1.1 `Upgrade`
+and `Connection: upgrade` for `/v2/stream`; their read timeout must exceed 60 seconds.
+
+Encrypted request identities, body/result digests and receipt state remain
+permanent. Their ciphertext payload cache is separate. A completed result has
+a one-hour payload ceiling (or the configured retention when shorter) only
+when both the accepted phone request and the authenticated computer result
+declare the signed visible `Read` class. Mutation, Control and mismatched
+classes retain the configured recovery period (seven days by default). An
+HTTP receipt read is not a receiving-device acknowledgement. No ciphertext is
+decrypted or native operation name exposed to make this decision. The connector
+permanently reserves every identity before native dispatch, and rejects a Read
+class paired with a non-`READS` decrypted operation before dispatch. An expired
+Read result becomes an unavailable payload on the same permanent receipt;
+resubmission of that identity cannot enqueue or execute it again.
+
+Existing encrypted expiry runs before optional legacy adoption, so a deferred
+classification cannot starve queued/claimed expiry or its byte refund.
+Older completed rows start with an unknown payload class. Bounded indexed
+maintenance classifies at most four pairs per turn, admitting another pair
+only within a 25ms between-item budget. This does not preempt an already
+admitted SQL statement or cryptographic check. A legacy request must be at
+most 128KiB and its result below the existing 2MiB envelope ceiling. Complete
+contiguous chunks, strict JSON, both accepted semantic digests, both current
+member signatures/roles, all request/workspace/device/gateway/route bindings,
+key generations and both Read classes must agree. Oversized, malformed,
+missing, revoked/unknown-key or mismatched pairs keep the original retention;
+they leave the adoption frontier as conservative records, without losing any
+payload or identity. Adoption only narrows a proved Read expiry relative to
+its original completion time. Existing transactional expiry performs the
+actual workspace/shard byte refund and leaves permanent metadata charged.
+
+The one-hour limit is a cache ceiling, not a delivery guarantee. When a new
+request would exceed its workspace byte budget, admission may reclaim oldest
+completed caches whose accepted request and signed result both proved Read,
+after a two-minute response-delivery grace. Queued, claimed, reserved, unknown,
+mismatched, Mutation and Control payloads are ineligible. Only the requesting
+workspace is considered; another workspace and its class reserves are untouched.
+
+A pressure turn reads at most 32 indexed metadata rows and reclaims at most the
+existing maximum request-plus-result envelope bytes. A 25ms check admits each
+subsequent row; it does not preempt an admitted SQL statement. It stops as soon
+as enough bytes are available. All chunk removal and exact workspace/shard
+refunds share the existing transaction and locks. Even if one batch is too small,
+a truthful BUSY response commits that safe cache-only progress without inserting
+a new request. Other errors or cancellation before commit roll it back. A
+committed prefix stays committed across restart and cannot be refunded twice.
+
+Permanent IDs, body/result hashes, completion state, completion time and their
+metadata charge remain. Resubmitting an evicted identity returns the same
+completed receipt without ciphertext and never queues it again; the connector
+also permanently reserves that ID. Result-header expiry is a separate signed
+cryptographic bound (the retained connector uses 23 hours), not the request's
+300-second transport expiry or a cache promise. No receipt GET is treated as
+an acknowledgement. A paused client can lose an unreceived Read result; the
+published Android client reports its missing envelope as uncertain. A normal
+explicit Inspect/History refresh constructs a fresh safe Read identity. No
+native mutation is automatically retried or replayed.
+
+This is bounded cache progress, not guaranteed admission: all-too-young caches,
+too little eligible cache, many tiny records, permanent metadata, active work
+or other shard occupancy can still refuse a request. The original byte quotas,
+2MiB result reservation, concurrency/class policy, seven-day Mutation/Control
+recovery and permanent receipt count remain unchanged. No limit is raised and
+no durable receiving-client acknowledgement is claimed.
 
 An optional `complete_route` UUID on `node/signals` declares the entire current
 active signal set for that route (at most 1000). Omitted scopes become inactive
@@ -674,6 +782,88 @@ Update the native CLI and connector before enabling the relay capability, then
 update clients; an older relay/CLI is reported as unavailable, not an empty page.
 No native agent or phone read-mark migration is needed.
 
+### Phone task exchange
+
+`task_exchange` is an additive capability-gated, computer-scoped read (empty
+session) that only the Rust connector offers: the phone's replica of one
+project's tasks
+(`docs/superpowers/specs/2026-10-18-task-replication-loro-design.md`, "Phone").
+The payload is exactly the request `hgs task exchange --json` reads on stdin:
+`schema` 1, `project` (at most 128 bytes, the replica's project ID),
+`inventory` (`project` and `tasks` by UUID, each a map from decimal Loro peer
+IDs to change counts), optional `updates` (at most 256, each a `task` UUID, or
+`null` for the project document, and base64 `bytes`), optional `continue`
+(`task`, the whole update's `sha256` and the `offset` of the next part) and
+optional `range`. The ordinary 1 MiB request and result bounds apply; an answer
+carries at most 512 KiB of update bytes, and a larger document comes in parts
+the phone asks for one by one. The connector invokes only
+`hgs task exchange --json` with the payload on stdin; hgs validates it again,
+and Loro merges are idempotent, so a repeated request changes nothing twice.
+
+Every process that writes a task adds a Loro peer to its version, so an
+inventory grows by roughly 30 bytes and two JSON values per edit of every task
+the phone holds. A phone whose inventory would not fit one request beside its
+updates (1 MiB and 50,000 JSON values in all) sends it in parts: `range`
+names the task UUIDs after `after` and up to `through` (canonical UUIDs in text
+order, either one left out at its end of the range), the inventory lists only
+tasks within it, and the computer answers only for that range. The project
+document belongs to the range without `after`. A computer refuses a request
+whose inventory lies outside its range.
+
+The result names `imported` (documents the phone's updates changed),
+`refused` (`uuid` and `error` of each update that did not apply), `updates`
+(the same shape as the request's), `more` and `digest` (this computer's phone
+view after the import, as its heartbeat names it). A document larger than a
+page comes as `part` (`task`, `size`, `sha256` of the whole update, `offset`
+and base64 `bytes`) with no `updates`; the phone asks for the next part with
+`continue`, and a part of an update that changed meanwhile starts again at
+offset 0. An answer with a part always says `more`. An answer with neither
+updates nor a part also names `inventory`, what this computer holds of the
+phone's view (within the range), from which the phone computes the updates
+this computer lacks and sends them in its next request. A refusal comes back as
+a failed receipt with hgs's reason, for example "the project's tasks are busy;
+try again", which a later exchange retries, or `no project "…" here`.
+`digest` and `tasks_digest` are the lowercase hexadecimal SHA-256 of the
+inventory as compact JSON with its keys sorted (`{"project":{…},"tasks":{…}}`),
+over the project document and every task that is not Done.
+
+The operation counts as a read, never reserves mutation capacity, and has its
+own `task_exchange_history` index with two-minute retention after completion;
+the established `read_history_v3` predicate stays unchanged. Apply the additive
+index to both PostgreSQL workers during the normal coordinated runtime
+replacement. A phone exchanges only when both the relay's capabilities and the
+computer's heartbeat list the operation, and the relay refuses it (409) for a
+computer that does not, so the relay, hgs and the connector update in any order.
+Each computer's heartbeat also names every project's phone-view digest
+(`mobile_projects.projects[].tasks_digest`), which the relay keeps as part of
+the opaque snapshot.
+
+### Phone task actions
+
+Three more operations of the `TASKS` family, which only the Rust connector
+offers, carry the phone's Send now, Cancel and Done list; each runs only on a
+computer whose heartbeat lists it (409 otherwise), with an empty session:
+
+- `task_send` (`schema` 1, `project`, `task` UUID, `session` at most 1024
+  characters) and `task_cancel` (`schema`, `project`, `task`, optional `reason`
+  of at most 4096 characters, which may hold lines and tabs but no other
+  control characters) are mutations: the relay keeps their durable
+  identity, mutation quota and retention as for any mutation, a duplicate
+  replays its receipt, and the connector journal runs each identity once. A
+  receipt is failed when hgs refused before anything happened, with its reason,
+  and uncertain when the outcome cannot be confirmed (for example a prompt sent
+  but not recorded). The phone exchanges the project first, so its edits reach
+  that computer, and again afterwards to show the result.
+- `task_done` (`schema`, `project`, `limit` 1–50, optional `before` with `at`
+  and `uuid`, optional `session` with `machine` and `session` for Only this
+  session, which lists and counts only the tasks sent to it) is a short read with its own `task_done_history` index and
+  two-minute retention: one page of the Done tasks newest first (`uuid`, `id`,
+  the first 200 characters of `text`, `session`, `accepted_at`), the cursor
+  `next`, `total`, `recent` (the last 7 days) and `damaged` (the page's tasks
+  that could not be read, left out of it). Opening a Done task fetches
+  its document through the exchange, with that task in the inventory.
+
+Apply the additive index with the normal coordinated runtime replacement.
 ### Git checkout status reads
 
 `git_status` is a sessionless computer read offered by the Rust connector only

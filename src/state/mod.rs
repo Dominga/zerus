@@ -19,6 +19,7 @@ pub(crate) mod voice;
 mod interrupt;
 mod clear_context;
 mod compact_context;
+mod continuations;
 mod cache_hint;
 mod claude_approval;
 mod attempts;
@@ -33,21 +34,25 @@ mod hooks;
 mod command_guard;
 pub(crate) mod hook_health;
 mod input;
+mod input_hold;
 mod input_queue;
 mod journal;
 mod kimi_cache_hint;
 mod kimi_messages;
 mod kimi_approval;
+mod kimi_goal;
 mod kimi_plan;
 mod kimi_trust;
 mod kimi_tui_choice;
 mod lifecycle;
+mod kimi_launch;
 mod provider_errors;
 mod recovery;
 mod service_worker;
 mod session_limits;
 mod provider_messages;
 mod processes;
+mod services;
 mod prompt_suggestion;
 mod question_terminal;
 mod questions;
@@ -64,10 +69,15 @@ mod resume_input;
 mod scan_cache;
 mod schedules;
 mod waits;
+pub(crate) mod watch_source;
 mod search;
 pub(crate) mod session_graph;
 mod storage;
 mod subagents;
+mod subagents_confirm;
+mod session_upload;
+mod session_state;
+mod builds;
 mod native_subagents;
 mod supervisor;
 mod tasks;
@@ -85,9 +95,17 @@ mod workspace;
 mod git_status;
 mod repositories;
 mod worktrees;
+mod worktree_requests;
 mod worktree_cleanup;
+mod worktree_caches;
 mod worktree_inspection;
 mod worktree_lifecycle;
+mod worktree_maintenance;
+
+/// Read the selected account's native catalog without starting an agent.
+pub(crate) fn account_models(provider: &str, home: &std::path::Path) -> serde_json::Value {
+    effort::account_models(provider, home)
+}
 
 /// Explicit native copy snapshot; no session is created or modified.
 pub(crate) fn download_snapshot(path: &str) -> Result<Value> {
@@ -119,6 +137,27 @@ use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use storage::*;
+
+/// Tests drive the real command entry point (`teams::commands::run`) against a
+/// private state directory: the team store, the worker lock and the session
+/// records all live there, on this thread only. It is restored even when the
+/// test panics.
+#[cfg(test)]
+pub(crate) fn with_test_state_root<T>(root: &Path, run: impl FnOnce() -> T) -> T {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            storage::set_test_root(None);
+            teams::commands::set_test_caller_identities(None);
+        }
+    }
+    storage::set_test_root(Some(root.to_path_buf()));
+    // The test process may itself run inside a session; the command must see
+    // no ambient identity so it acts as the owner.
+    teams::commands::set_test_caller_identities(Some((None, None, None)));
+    let _restore = Restore;
+    run()
+}
 
 /// The state directory the Windows session host serves (`HGS_STATE_DIR`, else
 /// the default below the home directory), not yet created or canonical.
@@ -201,6 +240,10 @@ fn account_binding(record: &Value) -> Value {
     json!({"provider":provider,"id":id,"home":agent_home,"run_id":record["run_id"]})
 }
 
+/// Tests that change HGS_STATE_DIR share this lock (they run in one process).
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(super) fn string<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or("")
 }
@@ -221,23 +264,54 @@ pub(super) fn now() -> f64 {
         .as_secs_f64()
 }
 
+/// H2, N34: JSON piped from PowerShell 5.1 starts with a UTF-8 BOM; every
+/// stdin reader parses the bytes after it.
+pub(crate) fn without_bom(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes)
+}
+
+/// H2: one JSON request from bytes: a leading UTF-8 BOM is dropped (PowerShell
+/// 5.1 adds one) and input that is not UTF-8 is refused with the hint that
+/// does not need a pipe. Every `--json` reader goes through this.
+pub(crate) fn json_request(bytes: &[u8]) -> Result<Value> {
+    let bytes = without_bom(bytes);
+    let text = std::str::from_utf8(bytes).map_err(|_| "Input is not UTF-8 (PowerShell 5.1: use --json-file)")?;
+    serde_json::from_str(text).map_err(|e| e.to_string())
+}
+
 pub(super) fn stdin_json() -> Result<Value> {
-    let mut input = String::new();
+    let mut input = Vec::new();
     io::stdin()
-        .read_to_string(&mut input)
+        .read_to_end(&mut input)
         .map_err(|e| e.to_string())?;
-    serde_json::from_str(&input).map_err(|e| e.to_string())
+    json_request(&input)
 }
 
 pub(super) fn nonempty_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
+/// C6: a global setting only you change, from a process outside every agent
+/// session. It is the gate the team owner paths use: no caller record, no dsh
+/// conversation, no hgs session or run marker, and the request says it is you
+/// (`"by":"human"`). An agent that runs `hgs subagents-confirm set` or
+/// `hgs session-upload-block set` therefore changes nothing, whatever it pipes.
+pub(crate) fn owner_request(input: &Value, what: &str) -> Result<()> {
+    let (dsh, session, run) = teams::commands::caller_identities();
+    if session_graph::caller_record().is_some() || dsh.is_some() || session.is_some() || run.is_some() {
+        return Err(format!("An agent session cannot change {what}"));
+    }
+    if string(input, "by") != "human" {
+        return Err("Add \"by\":\"human\" to act as yourself".into());
+    }
+    Ok(())
+}
+
 pub(super) fn home() -> PathBuf {
     crate::platform::home_dir().unwrap_or_else(|| "/".into())
 }
 
-fn directories(path: &str, hidden: bool) -> Result<Value> {
+fn directories(path: &str, hidden: bool, creation: bool) -> Result<Value> {
     if path.chars().any(|c| c < ' ') {
         return Err("directory paths cannot contain control characters".into());
     }
@@ -253,7 +327,8 @@ fn directories(path: &str, hidden: bool) -> Result<Value> {
         return Err(format!("not a directory: {path}"));
     }
     let mut entries = Vec::new();
-    for entry in std::fs::read_dir(&directory).map_err(|e| e.to_string())? {
+    let listing=if creation { None }else{Some(std::fs::read_dir(&directory).map_err(|e|e.to_string())?)};
+    for entry in listing.into_iter().flatten() {
         let Ok(entry) = entry else { continue };
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
@@ -277,6 +352,10 @@ fn directories(path: &str, hidden: bool) -> Result<Value> {
     let mut result = json!({"path": directory, "parent": directory.parent().unwrap_or(Path::new("/")),
         "home": home(), "directories": entries, "truncated": truncated});
     if let Ok(config) = crate::config::Config::load() {
+        if creation {
+            result["computer_id"]=json!(crate::swarm::local_node_id(&config).map_err(|e|e.to_string())?);
+            result["creation_identity_v1"]=json!(true);
+        }
         if let Some(project) = crate::swarm::directory_project(&config, &directory) {
             result["project_inference"] = project;
         }
@@ -407,7 +486,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
             .extend(telemetry::unavailable().as_object().unwrap().clone());
     }
     // Bounds question indexing for the whole listing.
-    let budget = read_marks::question_budget();
+    let shared = Shared { marks: &marks, preferences: notification_preferences.as_ref(), budget: read_marks::question_budget() };
     let mut process_work = processes::WorkSample::default();
     for record in bindings {
         if archive::equivalent(&record, &archived) {
@@ -416,22 +495,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
         let name = string(&record, "name");
         if let Some(index) = by_name.get(name) {
             if matches(&record, snapshot.get(name)) {
-                // An approval answered in Terminal sends no hook.
-                let record = claude_approval::reconcile(record);
-                let session = &mut sessions[*index];
-                session["resumable"] = json!(
-                    !string(&record, "conversation_id").is_empty()
-                        && string(&record, "error").is_empty()
-                );
-                let summary = journal::summary(&record, true);
-                session["process_work"] = process_work.summary(&record, summary["activity"] == "idle" && summary["phase"] == "idle");
-                session
-                    .as_object_mut()
-                    .ok_or("invalid session")?
-                    .extend(summary.as_object().ok_or("invalid summary")?.clone());
-                let questions = read_marks::pending_questions(&record, session, true, budget);
-                read_marks::enrich_listing(session, &marks, journal::journal_name(&record), questions);
-                notifications::enrich(session, notification_preferences.as_ref(), journal::journal_name(&record));
+                live_row(&mut sessions[*index], record, &shared, &mut process_work)?;
             }
             continue;
         }
@@ -477,12 +541,49 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
     }
     sessions.extend(dsh::snapshots()?);
     sessions.extend(opencode::snapshots()?);
+    finish_rows(sessions, &marks, &names);
+    Ok(box_value)
+}
+
+/// What every row of one listing shares besides its process sample.
+struct Shared<'a> {
+    marks: &'a Value,
+    preferences: Option<&'a notifications::Store>,
+    /// Bounds question indexing for the whole listing.
+    budget: std::time::Instant,
+}
+
+/// The row of a live session whose pane runs its saved binding `record`.
+/// `hgs watch` re-derives single rows through this same step
+/// (`watch_source::rows`).
+fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &mut processes::WorkSample) -> Result<()> {
+    // An approval answered in Terminal sends no hook.
+    let record = claude_approval::reconcile(record);
+    session["resumable"] = json!(
+        !string(&record, "conversation_id").is_empty()
+            && string(&record, "error").is_empty()
+    );
+    let summary = journal::summary(&record, true);
+    session["process_work"] = process_work.summary(&record, summary["activity"] == "idle" && summary["phase"] == "idle");
+    session
+        .as_object_mut()
+        .ok_or("invalid session")?
+        .extend(summary.as_object().ok_or("invalid summary")?.clone());
+    let questions = read_marks::pending_questions(&record, session, true, shared.budget);
+    read_marks::enrich_listing(session, shared.marks, journal::journal_name(&record), questions);
+    notifications::enrich(session, shared.preferences, journal::journal_name(&record));
+    Ok(())
+}
+
+/// The last steps of every listed row. `names` holds the session names of the
+/// pane snapshot by session ID.
+fn finish_rows(sessions: &mut [Value], marks: &Value, names: &BTreeMap<String, String>) {
     // DeepSeek and untracked live sessions are owned by their names.
     for session in sessions.iter_mut() {
         if session.get("attention_signature").is_none() {
             let owner = string(session, "name").to_owned();
             let questions=if session["agent"]=="opencode" {session["pending_questions"].as_array().cloned().unwrap_or_default()}else{Vec::new()};
-            read_marks::enrich_listing(session, &marks, &owner, Ok(Some(questions)));
+            read_marks::enrich_listing(session, marks, &owner, Ok(Some(questions)));
         }
     }
 
@@ -495,9 +596,27 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
     // The pane folders are read after the lock is released, when a session may
     // have been renamed since `snapshot`. They go by the session IDs, which a
     // rename keeps, to the names that `snapshot` listed (zerus-18u1).
-    workspace::enrich(sessions, &workspace::snapshot_cwds(&names));
+    workspace::enrich(sessions, &workspace::snapshot_cwds(names));
     waits::decorate(sessions);
-    Ok(box_value)
+    // U30: after the waits, which name a coordination reason.
+    session_state::decorate(sessions);
+}
+
+/// The rows a terminal listing starts from, before `merge_listing` adds what
+/// the saved bindings say.
+pub(crate) fn listed_rows(listing: &backend::Listing) -> Vec<Value> {
+    listing.sessions.iter().map(|row| {
+        let name = row.name.as_str();
+        let mut parts = name.splitn(3, '/'); let cmd = parts.next().unwrap_or("");
+        let project = parts.next().filter(|s| !s.is_empty()); let tag = parts.next().filter(|s| !s.is_empty());
+        let ttys: Vec<&str> = listing.clients.iter().filter_map(|client| if client.session == name { Some(client.terminal.as_str()) } else { None }).collect();
+        json!({"name":name,"cmd":cmd,"project":project,"tag":tag,"attached":row.attached,"clients":ttys,"created":row.created,"launch_id":row.launch_id})
+    }).collect()
+}
+
+/// Each listed session's immutable ID (`$N`) by its listed name.
+pub(crate) fn listed_ids(listing: &backend::Listing) -> BTreeMap<String, String> {
+    listing.sessions.iter().map(|row| (row.name.clone(), row.id.clone())).collect()
 }
 
 /// Select a tracked conversation or explicit pending request by exact ID/home.
@@ -655,6 +774,55 @@ pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference)
     Ok(output)
 }
 
+/// Pastes a task prompt or cancel message into `name` for its current run and
+/// conversation, the way `hgs send` does, and returns the durable receipt.
+pub(crate) fn submit_task_message(session: &zerus_replica::SessionKey, text: &str, attachments: &[Value]) -> Result<Value> {
+    local_sessions()?;
+    input::submit_task(session, text, attachments)
+}
+
+pub(crate) fn prepare_task_reply(session: &zerus_replica::SessionKey, dispatch: &str, id: &str, text: &str, attachments: &[Value]) -> Result<Value> {
+    local_sessions()?;
+    input::task_reply(session, dispatch, id, text, attachments)
+}
+pub(crate) fn submit_task_reply(name: &str, request: &Value) -> Result<Value> {
+    input::submit(name, request.to_string().as_bytes(), None)
+}
+pub(crate) fn task_reply_receipt(name: &str, request: &Value) -> Result<Option<Value>> {
+    input::task_reply_receipt(name, request)
+}
+
+/// Task routing uses saved identity metadata only: no provider inspection,
+/// history, process reconciliation or native API calls for each task row.
+pub(crate) fn task_bindings() -> Result<Vec<Value>> {
+    use std::fs;
+    use std::io::Read;
+    let mut rows = Vec::new();
+    for directory in [root(), root().join("bindings"), root().join("dsh/bindings"), root().join("opencode/bindings")] {
+        let entries = match fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if path.extension().is_none_or(|s| s != "json") || stem.len() != 64 || !stem.bytes().all(|c| c.is_ascii_hexdigit()) { continue; }
+            let row = (|| {
+                let mut bytes = Vec::new();
+                let file = crate::platform::no_follow(std::fs::OpenOptions::new().read(true)).open(&path).ok()?;
+                if !file.metadata().ok()?.is_file() { return None; }
+                file.take(1024 * 1024 + 1).read_to_end(&mut bytes).ok()?;
+                if bytes.len() > 1024 * 1024 { return None; }
+                let row: Value = serde_json::from_slice(&bytes).ok()?;
+                (row["rename_shadow"] != true && !string(&row, "name").is_empty() && !string(&row, "run_id").is_empty()).then_some(row)
+            })();
+            if let Some(row) = row { rows.push(row); }
+        }
+    }
+    Ok(rows)
+}
+
 /// Compatibility entry point used by `hgs __state` and the legacy hook shim.
 pub fn dispatch(args: &[String]) -> Result<i32> {
     // Coordination metadata never starts or controls a native session host.
@@ -664,12 +832,17 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if args.first().map(String::as_str)==Some("repository") { return repositories::dispatch(&args[1..]); }
     #[cfg(unix)]
     if args.first().map(String::as_str)==Some("repository-git-worker") { return repositories::git_worker(&args[1..]); }
+    #[cfg(unix)]
+    if args.first().map(String::as_str)==Some("worktree-request-worker") { return worktree_requests::worker(&args[1..]); }
     session_operations()?;
     let Some((command, args)) = args.split_first() else {
         return Err("missing state operation".into());
     };
+    // WhiteWh fork: `hgs run`, a build Zerus tracks as the session's work (U30).
+    if command == "build" { return builds::dispatch(args); }
     if command == "worktrees" { return worktrees::dispatch(args); }
     if command == "git-status" { return git_status::dispatch(args); }
+    if command == "git-diff" { return git_status::dispatch_diff(args); }
     if command == "dirs" {
         if args.first().map(String::as_str) == Some("--create") {
             let request_id;
@@ -684,6 +857,8 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
             println!("{}", create_directory(path, id)?);
             return Ok(0);
         }
+        let creation=args.first().map(String::as_str)==Some("--creation");
+        let args=if creation { &args[1..] }else{args};
         let hidden = args.first().map(String::as_str) == Some("--hidden");
         let paths = if hidden { &args[1..] } else { args };
         if paths.len() > 1 {
@@ -691,7 +866,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         }
         println!(
             "{}",
-            directories(paths.first().map(String::as_str).unwrap_or("~"), hidden)?
+            directories(paths.first().map(String::as_str).unwrap_or("~"), hidden, creation)?
         );
         return Ok(0);
     }
@@ -705,6 +880,12 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     }
     if command == "hook" {
         return hooks::hook();
+    }
+    if command == "subagents-confirm" {
+        return subagents_confirm::dispatch(args);
+    }
+    if command == "session-upload-block" {
+        return session_upload::dispatch(args);
     }
     if command == "answer-channel" {
         return answer_channel::run();
@@ -748,6 +929,8 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         return Err("Native schedule management is available for DeepSeek sessions; other agents report schedules read-only".into());
     }
     if command == "send-now" { return input_queue::dispatch(args); }
+    if command == "send-cancel" { return input_hold::dispatch_cancel(args); }
+    if command == "deliver-held" { return input_hold::deliver(args); }
     if command == "send" {
         return input::dispatch(args);
     }
@@ -789,14 +972,17 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
             if after < 0 {
                 return Err("cursor must be nonnegative".into());
             }
-            println!(
-                "{}",
-                if let Some(id) = agent_id {
-                    subagents::inspection(name, id, archive_id)?
-                } else {
-                    journal::inspection(name, after, archive_id, include_processes)?
-                }
-            );
+            let mut inspection = if let Some(id) = agent_id {
+                subagents::inspection(name, id, archive_id)?
+            } else {
+                journal::inspection(name, after, archive_id, include_processes)?
+            };
+            // #569: this computer's refused private stores, with their fix;
+            // empty when none is refused.
+            if inspection.is_object() {
+                inspection["private_stores"] = json!(crate::private_stores::refused());
+            }
+            println!("{inspection}");
         }
         "archive" => {
             if args.len() != 1 {

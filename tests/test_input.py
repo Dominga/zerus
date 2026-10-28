@@ -693,6 +693,29 @@ for kind in ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'S
                 self.assertEqual(self.received(), b"\x1b[200~" + text.encode() + final + b"\x1b[201~\r")
                 self.assertEqual(receipt["submitted_text"], text)
 
+    def test_trailing_codex_at_mention_cannot_consume_the_submit_key(self):
+        prompts = dict(codex=("\x1b[2J\x1b[H› ", "2:0"), claude=("\x1b[2J\x1b[H❯ ", "2:0"),
+                       kimi=("\x1b[2J\x1b[H ╭──────────────╮\r\n │ >          │\r\n ╰──────────────╯\x1b[2;6H", "5:1"))
+        for agent, (screen, cursor) in prompts.items():
+            for text, completion in [('Send a test to @reviewer', True), ('Review @', True),
+                                     ('Первая строка\nОтветь @рецензент', True),
+                                     ('Use @reviewer in this sentence.', False),
+                                     ('Email reviewer@example.com', False), ('Read "@reviewer"', False)]:
+                with self.subTest(agent=agent, text=text):
+                    (self.root / 'received').unlink(missing_ok=True)
+                    self.record['agent'] = agent
+                    self.write_record()
+                    self.screen(screen, cursor)
+                    payload = self.payload(text=text)
+                    receipt = self.send(payload)
+                    self.wait_for(lambda: self.received().endswith(b'\r'))
+                    suffix = b'\n' if agent == 'codex' and completion else b''
+                    expected = b'\x1b[200~' + text.encode() + suffix + b'\x1b[201~\r'
+                    self.assertEqual(self.received(), expected)
+                    self.assertEqual(receipt['submitted_text'], text)
+                    self.assertEqual(self.send(payload), receipt)
+                    self.assertEqual(self.received(), expected)
+
     def test_attachments_transferred_privately_and_referenced_on_agent_host(self):
         data = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
         payload = self.payload(attachments=[dict(name="../../screen shot.png", mime="image/png",
@@ -897,6 +920,88 @@ os.execv('/bin/sh',['sh','-c',sys.argv[-1]])
         self.assertEqual(receipt["status"], "submitted")
         self.wait_for(lambda: self.received().endswith(b"\r"))
         self.assertEqual(self.received(), b"\x1b[200~next instruction\x1b[201~\r")
+
+    # U35: a message to an agent that has not taken the previous one.
+    def confirm_previous_input(self):
+        # The agent's next native event confirms the previous input.
+        event = dict(hook_event_name='UserPromptSubmit', session_id=self.conversation_id, prompt='first')
+        hook = subprocess.run([str(HGS), '__state', 'hook'],
+                              env=dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run_id),
+                              input=json.dumps(event), capture_output=True, text=True, timeout=10)
+        self.assertEqual(hook.returncode, 0, hook.stderr)
+
+    def wait_long(self, callback, seconds=15):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if callback(): return
+            time.sleep(.1)
+        self.fail("held message timed out")
+
+    def receipt(self, request_id):
+        return json.loads((self.state / 'input_receipts' / (request_id + '.json')).read_text())
+
+    def test_unconfirmed_message_is_held_and_delivered_once_after_confirmation(self):
+        self.record.update(activity="busy", phase="working")
+        self.write_record()
+        self.assertEqual(self.send(self.payload(text="first"))["status"], "submitted")
+        self.wait_for(lambda: self.received().endswith(b"\r"))
+        # A client that does not ask for the queue is refused as before.
+        self.assertIn("previous input has not been confirmed", self.send(self.payload(text="second"), success=False))
+        held = self.payload(text="second", queue_when_unconfirmed=True)
+        receipt = self.send(held)
+        self.assertEqual((receipt["status"], receipt["request_id"]), ("queued", held["request_id"]))
+        # Its replay is the same receipt; the agent receives nothing more yet.
+        self.assertEqual(self.send(held)["status"], "queued")
+        self.assertEqual([item["request_id"] for item in self.inspect()["held_inputs"]], [held["request_id"]])
+        time.sleep(1.5)
+        self.assertEqual(self.received().count(b"\r"), 1)
+        self.confirm_previous_input()
+        self.wait_long(lambda: self.received().count(b"\r") == 2)
+        self.assertTrue(self.received().endswith(b"\x1b[200~second\x1b[201~\r"), self.received())
+        self.wait_long(lambda: self.receipt(held["request_id"])["status"] == "submitted")
+        self.assertEqual(self.inspect()["held_inputs"], [])
+        # Delivered once: no retry, and the replay answers with its delivery.
+        time.sleep(1.5)
+        self.assertEqual(self.received().count(b"\r"), 2)
+        self.assertEqual(self.send(held)["status"], "submitted")
+
+    def test_cancelled_held_message_is_never_sent(self):
+        self.record.update(activity="busy", phase="working")
+        self.write_record()
+        self.send(self.payload(text="first"))
+        self.wait_for(lambda: self.received().endswith(b"\r"))
+        held = self.payload(text="never", queue_when_unconfirmed=True)
+        self.assertEqual(self.send(held)["status"], "queued")
+        cancel = subprocess.run([str(HGS), "send-cancel", self.name, "--json"], input=json.dumps(dict(request_id=held["request_id"])),
+                                text=True, capture_output=True, env=self.env, timeout=10)
+        self.assertEqual(cancel.returncode, 0, cancel.stderr)
+        self.assertEqual(json.loads(cancel.stdout)["status"], "cancelled")
+        self.confirm_previous_input()
+        time.sleep(2)
+        self.assertNotIn(b"never", self.received())
+        self.assertEqual(self.receipt(held["request_id"])["status"], "cancelled")
+        self.assertEqual(self.inspect()["held_inputs"], [])
+
+    def test_dialog_still_refuses_a_held_capable_message(self):
+        # A real terminal state is refused, never held: the owner opens the terminal.
+        self.screen("\x1b[2J\x1b[HAllow this command?  1. Yes  2. No", "34:0")
+        error = self.send(self.payload(queue_when_unconfirmed=True), success=False)
+        self.assertIn("open Terminal", error)
+        self.assertEqual(self.received(), b"")
+        self.assertFalse((self.state / 'input_hold').exists() and any((self.state / 'input_hold').rglob('*.json')))
+
+    def test_working_claude_confirms_input_shown_in_its_queue_panel(self):
+        # Claude reports UserPromptSubmit for a queued message only when its turn
+        # ends; the message in its own queue panel confirms it sooner.
+        self.record.update(agent="claude", activity="busy", phase="working")
+        self.write_record()
+        self.screen("\x1b[2J\x1b[H❯ ", "2:0")
+        self.send(self.payload(text="first queued note"))
+        self.wait_for(lambda: self.received().endswith(b"\r"))
+        self.assertIn("previous input has not been confirmed", self.send(self.payload(text="second"), success=False))
+        self.screen("\x1b[2J\x1b[H❯ first queued note\r\nctrl+x ctrl+s to send now\r\n\r\n❯ ", "2:3")
+        self.assertEqual(self.send(self.payload(text="second"))["status"], "submitted")
+        self.wait_for(lambda: self.received().endswith(b"\x1b[200~second\x1b[201~\r"))
 
     def provider_failure(self, native=False):
         message = 'Selected model is at capacity. Please try a different model.'

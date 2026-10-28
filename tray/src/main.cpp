@@ -26,6 +26,8 @@
 #include <QPushButton>
 #include "HgsClient.h"
 #include "MainThreadWatchdog.h"
+#include "SettingsJson.h"
+#include "WorkspaceSkin.h"
 #include "TrayAgent.h"
 #include "WorkspaceStyle.h"
 #include "WorkspaceFocus.h"
@@ -36,6 +38,7 @@
 #endif
 #ifdef Q_OS_MACOS
 #include "MacAppVisibility.h"
+#include "MacSystemPower.h"
 #include "MessageBoxIcons.h"
 #include "speech/SpeechRecorder.h"
 #include <pthread/qos.h>
@@ -297,6 +300,7 @@ int main(int argc, char *argv[])
     QCoreApplication::setApplicationVersion(QLatin1String(HGS_TRAY_VERSION));
     QApplication::setQuitOnLastWindowClosed(false);
     ForkLog::install();
+    ForkLog::launch(QCoreApplication::applicationPid());
     // WhiteWh fork: the fork's published builds open in the WhiteWh skin until
     // the person picks another one in Settings → Appearance.
     if (ForkUpdater::installedBuild() > 0 && !QSettings().contains(QStringLiteral("workspace/skin")))
@@ -321,11 +325,15 @@ int main(int argc, char *argv[])
     const bool openSessions = cfg.opensSessions(AppConfig::currentPlatform());
     // Второй запуск не поднимает вторую иконку: стучимся в сокет первого и выходим.
 #ifdef Q_OS_WIN
-    const QString singleInstanceKey = SingleInstance::key(QDir::homePath());
+    const QString singleInstanceKey = SingleInstance::key(ForkLog::home());
     // Pipe names are machine-wide: another user could create this one first. A
     // per-user lock therefore decides which tray runs, and only its owner listens;
     // a second instance uses the pipe only to forward the activation.
-    const QString lockDirectory = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+    // HGS_TRAY_LOCK_DIR exists for tests: a launch would otherwise contend for the
+    // real tray's lock.
+    const QByteArray lockOverride = qgetenv("HGS_TRAY_LOCK_DIR");
+    const QString lockDirectory = lockOverride.isEmpty()
+        ? QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) : QString::fromLocal8Bit(lockOverride);
     QDir().mkpath(lockDirectory);
     const QString lockPath = lockDirectory + QStringLiteral("/hgs-tray.lock");
     QLockFile instanceLock(lockPath);
@@ -333,7 +341,8 @@ int main(int argc, char *argv[])
     if (!locked && instanceLock.error() == QLockFile::LockFailedError) {
         QLocalSocket probe;
         probe.connectToServer(singleInstanceKey);
-        if (probe.waitForConnected(200)) {
+        const bool forwarded = probe.waitForConnected(200);
+        if (forwarded) {
             // Started by the user, this process may bring a window to the front;
             // without passing that on, the running tray's window opens behind
             // the others and only its taskbar button flashes.
@@ -344,12 +353,15 @@ int main(int argc, char *argv[])
             probe.write(openSessions ? "sessions\n" : "show\n");
             probe.waitForBytesWritten(200);
         }
+        ForkLog::alreadyRunning(QCoreApplication::applicationPid(), forwarded);
         errOut << QStringLiteral("hgs-tray: already running\n");
         return 0;
     }
     if (!locked)
         errOut << QStringLiteral("hgs-tray: cannot create %1; a second tray would not be noticed\n")
                       .arg(QDir::toNativeSeparators(lockPath)) << Qt::flush;
+    else
+        ForkLog::ownsInstance(QCoreApplication::applicationPid(), lockPath);
     QLocalServer server;
     // Only this user may connect to the pipe it creates.
     server.setSocketOptions(QLocalServer::UserAccessOption);
@@ -374,12 +386,14 @@ int main(int argc, char *argv[])
         };
         switch (SingleInstance::start(startup, server)) {
         case SingleInstance::Outcome::Forwarded:
+            ForkLog::alreadyRunning(QCoreApplication::applicationPid(), true);
             errOut << QStringLiteral("hgs-tray: already running\n");
             return 0;
         case SingleInstance::Outcome::Failed:
             errOut << QStringLiteral("hgs-tray: cannot claim the socket: %1\n").arg(server.errorString());
             return 3;
         case SingleInstance::Outcome::Claimed:
+            ForkLog::ownsInstance(QCoreApplication::applicationPid(), startup.lockPath);
             break;
         }
     }
@@ -410,9 +424,15 @@ int main(int argc, char *argv[])
     // Once this instance owns the tray: a second one never stages anything.
     cfg.hgsPath = stableHgs(cfg.hgsPath, hgsConfigured ? cfg.hgsPath : QString());
 #endif
+    // Nothing is shown yet: parse the saved JSON values the tray and its windows
+    // read first, so the GUI thread finds them parsed (SettingsJson.h).
+    SettingsJson::preload(TrayAgent::jsonSettings());
+    WorkspaceSkin::preload();
     // KSNI derives its persistent tray ID from the initial display name. Rename
     // the UI only after constructing the icon to preserve Plasma's visibility setting.
     TrayAgent agent(cfg);
+    // The tray exists: this process is the window, not a forwarded launch (U3).
+    ForkLog::started();
 #ifdef Q_OS_WIN
     // WhiteWh fork: the bundled mobile connector (and a chosen local relay),
     // once this is the running tray.
@@ -462,6 +482,12 @@ int main(int argc, char *argv[])
         std::fflush(stderr);
         std::abort();
     });
+#ifdef Q_OS_MACOS
+    // macOS does not schedule the main thread while it goes to sleep or in a dark
+    // wake on battery; the watchdog holds its check around those (MainThreadWatchdog.h).
+    MacSystemPower systemPower([&watchdog]() { watchdog.systemWillSleep(); },
+                               [&watchdog]() { watchdog.systemPoweredOn(); });
+#endif
     const auto takeActivation = [&server, &agent]() {
         QLocalSocket *c = server.nextPendingConnection();
         QObject::connect(c, &QLocalSocket::disconnected, c, &QLocalSocket::deleteLater);

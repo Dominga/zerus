@@ -19,6 +19,13 @@ A failing step publishes nothing. The run number is embedded in `hgs-tray.exe` a
 `ZERUS_FORK_BUILD`, together with the feed address `ZERUS_FORK_FEED_URL`; CMake
 accepts only release assets of `WhiteWh/zerus` for the latter.
 
+An experimental build of any commit: push a tag `whitewh-exp-<name>` for it. The
+same workflow builds, tests and packages that commit and publishes the zip as a
+prerelease named after the tag. It is never the latest release and has no feed,
+and its `hgs-tray.exe` embeds neither a fork build number nor a feed, so the
+updater neither offers it nor replaces it. It is installed by hand, and going
+back to the regular builds is a hand install of a `whitewh-<build>` zip.
+
 ## Feed
 
 `https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json`,
@@ -43,6 +50,19 @@ while a build waits for the restart: a newer build downloads into
 `<stage>-next` and replaces the waiting one only once it is verified, so the
 restart always installs the newest build found.
 **Settings -> Updates -> Check now** reads the feed at once.
+
+**Settings -> About** names `WhiteWh/zerus` as the active repository beside
+upstream `ufna/zerus`, with **Check for updates from WhiteWh/zerus** (then
+**Restart to install fork build N** once a build is verified). In a portable
+folder of a build made locally, without an embedded feed, this button is the
+only check: it reads the feed of the fork's latest release,
+`https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json`,
+with the same rules, and never checks by itself. Outside a portable folder the
+button stays off.
+
+A portable Windows build of the fork never takes an upstream zip: the upstream
+catalog check (`UpdateController`) does not offer the Windows portable build of
+`ufna/zerus` over it, since installing that would replace the fork.
 
 A verified build shows **Restart to finish update** in the tray menu and the
 sidebar, and posts one notification. Restarting quits Zerus as Quit does, so
@@ -116,6 +136,16 @@ connection line to `~/.local/state/hgs/zerus.log`, beside the relay's
 `relay.log`. **Open log** in the tray menu and **Log** in the status bar open it
 in the system's text viewer. Past 4 MiB the file moves to `zerus.log.1`,
 replacing the older copy.
+
+A launch writes `Zerus launched (pid N)` first, so every launch has its own
+line. A launch that finds the tray already running writes `Already running
+(pid N): …` and exits; the process that takes the single-instance lock writes
+`Single instance: pid N holds <lock>`; and only the process that becomes the
+tray writes `Zerus <version> started (pid N)`. Counting `started` lines
+therefore counts windows, not launches, and a crash timeline names the process
+that owned the tray. `HGS_TRAY_HOME` (log and single-instance socket) and
+`HGS_TRAY_LOCK_DIR` (the lock) point a launch at another home and lock folder;
+the launch-log test uses them so it never touches the real tray.
 
 ## Optional extensions
 

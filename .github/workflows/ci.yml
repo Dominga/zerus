@@ -62,7 +62,7 @@ cache-mode: read
 
 concurrency:
   group: ${{ (github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true') && format('ci-dev-run-{0}', github.run_id) || format('ci-{0}-{1}', github.workflow, inputs.ref || github.ref) }}
-  # Dev main uses independent qualification and signing/sealing job locks.
+  # Dev main uses independent build and signing/sealing job locks.
   # Keep PR/manual and pre-rollout whole-run cancellation unchanged.
   cancel-in-progress: ${{ !(github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true') }}
 
@@ -97,15 +97,14 @@ jobs:
       run_ios: ${{ inputs.run_ios || false }}
       filter_pr_platforms: ${{ github.event_name == 'pull_request' }}
   qualification:
-    name: Credential-free Dev qualification
+    name: Credential-free Dev builds
     if: >-
       !cancelled() && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true' &&
       (!inputs.ref || inputs.ref == github.sha)
     cache-mode: write
     concurrency:
-      # Share the old whole-run lock during rollout. Once old runs finish, this
-      # lock covers qualification only; the Dev top-level lock is run-specific.
-      group: ${{ format('ci-{0}-{1}', github.workflow, inputs.ref || github.ref) }}
+      # Build-only work does not wait for an older full regression campaign.
+      group: ci-main-dev-builds
       cancel-in-progress: false
     uses: ./.github/workflows/ci-dev-qualification.yml
   gate:

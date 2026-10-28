@@ -67,17 +67,22 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] inspect <session> [--archive <id>] [--after <cursor>]   activity as JSON
        hgs [@host] reference <session> --json [--archive ID] [--agent ID]   copy a session reference
        hgs self [--json]              the calling agent's own session reference
-       hgs [@host] guide [topic]      how agents message, wait for, launch and stop sessions
+       hgs [@host] guide [topic]      how agents message, wait for, launch and stop sessions and use tasks
        hgs inspect 'zerus://session?...'   resolve and inspect a referenced conversation
+       hgs [@host] watch --json   long-lived NDJSON event stream (stdin control)
+       Event stream ABI: watch-v1
        hgs [@host] processes <session> [--archive <id>]   observed shell commands as JSON
        hgs [@host] processes <session> --output ID | --stop ID --run RUN --conversation ID [--generation ID]
        hgs [@host] send <session> --json   submit message/attachments from JSON stdin
+       hgs [@host] send-cancel <session> --json   cancel a message hgs still holds ({"request_id"})
        hgs [@host] recovery action --scoped-json exact waiting-job control
+       hgs [@host] recovery team-override   a team's reset wait for one session (JSON stdin)
        hgs [@host] history <session> --json bounded exact public history
        hgs [@host] history-projection <session> --json retired and refreshed history rows
        hgs [@host] graph snapshot --json   bounded saved relationship metadata (partial coverage)
        hgs [@host] wait begin|ack|finish|cancel|list --json   explicit independent-agent waits (JSON stdin)
        hgs [@host] team OPERATION --json   agent teams: plan, run, report and decide tasks (JSON stdin)
+       hgs run --json [--wait] | --list --json   a build Zerus tracks as this session's work (JSON stdin)
        hgs [@host] terminal <session> --json scoped terminal screen/input
        hgs [@host] AGENT DIRECTORY --new -n TAG -d --launch-id UUID
        hgs [@host] session-action <session> --json scoped native lifecycle action
@@ -109,6 +114,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] account ls | add ID --provider AGENT --label NAME | rm ID | restore ID | login ID
        hgs [@host] account rename ID --label NAME | inspect ID [--refresh]
        hgs [@host] account default [ID]   show or select the default account for new sessions
+       hgs [@host] account model-settings ID   inspect this account's native model catalog and launch defaults
+       hgs [@host] account model-defaults ID --model MODEL [--effort LEVEL] [--revision REV]   defaults for new sessions
        hgs [@host] account set-key native-dsh --json   save API key from private JSON stdin
        hgs machine file-proof <alias> --json   verify a scoped WSL file before explicit local mapping (wsl-file-proof-v1)
        hgs [@host] account bind-existing native-opencode --json   preview and bind one native conversation (opencode-bind-existing-v1)
@@ -122,10 +129,16 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] socraticode status|start|stop|connect PATH [--qdrant native|docker] | install | install-qdrant   a folder's SocratiCode index (JSON; extension, cargo feature socraticode)
        hgs [@host] worktrees --path PATH [--refresh] [--json]   existing checkouts as JSON
        hgs [@host] git-status --path PATH --json   read-only checkout/publication status
-       hgs [@host] worktrees create --path REPO --branch NAME --destination PATH [--base HEAD] [--json]
+       hgs [@host] git-diff --path PATH --json     read-only diff against HEAD (256 KiB)
+       hgs [@host] worktrees create --path REPO --branch NAME --destination PATH [--base HEAD] [--clone] [--sandbox] [--json]
+       hgs [@host] worktrees create ... --request-id UUID --receipt --json   durable creation, no replay
+       hgs [@host] worktrees status|cancel --request-id UUID --json   original creation receipt
+       Worktree creation ABI: worktree-requests-v1
        hgs [@host] worktrees review --path PATH [--worktree WORKTREE] [--json]   cleanup verdicts and fingerprints
+       hgs [@host] worktrees policy get|set --json   worktree-maintenance-v1 (host-local cleanup rules)
+       hgs [@host] worktrees sweep --json   one bounded automatic cleanup step
        hgs [@host] worktrees inspect --path WORKTREE --common-dir DIR [--file RELATIVE_PATH] [--json]   bounded read-only changes
-       hgs [@host] worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--discard-fingerprint HASH] [--delete-branch] [--json]
+       hgs [@host] worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--discard-fingerprint HASH] [--preserve-archive-restore] [--delete-branch] [--json]
        Mobile worktree ABI: worktrees-v1 (catalog/create/verified project placement)
        hgs [@host] repository check|clone --url URL --parent PATH --name NAME --json
        hgs [@host] repository status --request-id UUID --json
@@ -146,6 +159,9 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] resume <session> --fresh [-d] [--expected-run-id ID]   same settings, new conversation
        hgs notify [--bell] <session> [text]   event for the tray (no tray = no-op)
        hgs project ls [--json] | add <name> <dir> | set <name> <dir> | rm <name>
+       hgs task list|get|add|edit|move|stage|target|start|send|handoff|cancel|report|comment|settings …   project tasks (JSON; agents read one line)
+       hgs task exchange|digests --json                 the phone's task exchange (mobile)
+       hgs task mobile-send|mobile-cancel|mobile-done --json   the phone's task actions (mobile)
        hgs clip                       PNG from this box's clipboard to stdout (rc 1: no image)
        hgs paste <session> <pane> [client]   the tmux C-v binding; not for hand use
   cmd      claude | codex | kimi (know --resume) | opencode (native API) | sh (login shell) | any command
@@ -192,7 +208,7 @@ fn local_sessions() -> Result<()> {
 // Repository preparation owns only its checkout and receipt. Like the existing
 // configuration/control commands, it does not require or enable a session host.
 fn needs_local_sessions(command: &str) -> bool {
-    !matches!(command, "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "team" | "mobile" | "hooks" | "repository")
+    !matches!(command, "ls" | "watch" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "team" | "mobile" | "hooks" | "repository")
 }
 
 /// Fails unless this process may run what the processes of a session run:
@@ -438,13 +454,17 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             return Err(Error::new(1,"Mobile target identity changed; refresh computers"));
         }
         args.drain(..2);
-        if args.first().is_none_or(|a| a.starts_with('@')
-            || (a.starts_with('-') && !(args.len()==1 && matches!(a.as_str(),"--help"|"-h"|"--version")))) {
+        let command_at=if args.first().is_some_and(|a|a=="--client") {
+            if args.get(1).is_none_or(|client|client.is_empty()) { return Err(Error::new(2,"--client needs a peer name")); }
+            2
+        }else{0};
+        if args.get(command_at).is_none_or(|a| a.starts_with('@')
+            || (a.starts_with('-') && !(args.len()==command_at+1 && matches!(a.as_str(),"--help"|"-h"|"--version")))) {
             return Err(Error::new(2,"A guarded mobile call requires a local command"));
         }
-        if args.first().is_some_and(|a| a == "__state") {
+        if args.get(command_at).is_some_and(|a| a == "__state") {
             session_process()?;
-            return state::dispatch(&args[1..]).map_err(|e| Error::new(1,e));
+            return state::dispatch(&args[command_at+1..]).map_err(|e| Error::new(1,e));
         }
     }
     // The existing swarm namespace fails closed on unknown operations in older
@@ -512,6 +532,14 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
         }
     }
     match command.as_str() {
+        "--expect-machine" => {
+            if dry { return Err(Error::new(2,"Guarded calls do not support --dry-run")); }
+            if !target.is_empty()&&!config.is_self(&target) { return remote(&config,&target,command,args,false); }
+            let expected=require(args,0,"Missing expected machine identity")?;
+            let mut local=vec!["--expect-machine".to_owned(),expected.to_owned()];
+            if client!="local" { local.extend(["--client".into(),client]); }
+            local.extend_from_slice(&args[1..]);return dispatch(local);
+        }
         "-h" | "--help" | "help" => {
             // Capability probes for a selected computer must inspect that
             // computer's installed CLI, including retained older versions.
@@ -523,6 +551,7 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             println!("WSL local receiver ABI: wsl-local-v1 (OpenCode existing-only)");
             #[cfg(target_os = "linux")]
             println!("WSL file snapshot ABI: wsl-file-snapshot-v1");
+            println!("Desktop creation ABI: guarded-create-v1");
             #[cfg(windows)]
             print!("{}\nMobile gateway ABI: windows-local-v1\n", crate::host::admin::HELP);
             return Ok(0);
@@ -538,6 +567,16 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
         // Read-only on every machine; never routed as an agent launch.
         "status" => return crate::status::run(&config, &target, args, dry),
         // Text compiled into this hgs; a peer answers with its own.
+        // WhiteWh fork: a build or long test Zerus tracks as this session's work.
+        "run" => {
+            if !target.is_empty() && !config.is_self(&target) {
+                return Err(Error::new(1, "hgs run tracks the calling session's build; run it on that session's computer"));
+            }
+            if dry {
+                return Err(Error::new(1, "hgs run does not support --dry-run"));
+            }
+            return state_command("build", args);
+        }
         "guide" => {
             if !target.is_empty() && !config.is_self(&target) {
                 return remote(&config, &target, command, args, dry);
@@ -650,6 +689,7 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             Ok(0)
         }
         "ls" => list(&config, args, dry),
+        "watch" => crate::watch::run(&config, args, dry),
         "archives" => {
             let mobile = cfg!(windows) && args.last().map(String::as_str)==Some("--windows-mobile");
             let args = if mobile { &args[..args.len()-1] } else { args };
@@ -675,7 +715,7 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             }
             state_command(command, &args)
         }
-        "inspect" | "processes" | "worktrees" | "git-status" | "repository" | "dirs" | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read" | "notifications"
+        "inspect" | "processes" | "worktrees" | "git-status" | "git-diff" | "repository" | "dirs" | "send" | "send-now" | "send-cancel" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read" | "notifications"
         | "attachment" | "file-read" | "recovery" | "voice" | "schedules" | "graph" | "wait" | "team" => {
             if command == "repository" && dry { return Err(Error::new(1,"Repository operations do not support --dry-run")); }
             if command == "wait" && dry { return Err(Error::new(1,"Wait operations do not support --dry-run")); }
@@ -684,10 +724,10 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             if command == "dirs" && has(args, "--create") && dry {
                 return Err(Error::new(1, "folder creation does not support --dry-run"));
             }
-            if command == "worktrees" && args.first().is_some_and(|s| s == "create" || s == "remove") && dry {
-                return Err(Error::new(1, "worktree creation and removal do not support --dry-run"));
+            if command == "worktrees" && args.first().is_some_and(|s| s == "create" || s == "cancel" || s == "remove" || s == "sweep" || s == "policy" && args.get(1).is_some_and(|s|s=="set")) && dry {
+                return Err(Error::new(1, "worktree creation, removal and policy changes do not support --dry-run"));
             }
-            if (matches!(command.as_str(), "processes" | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "recovery" | "read" | "notifications" | "voice" | "schedules") || (command=="attachment" && has(args,"--stage"))) && dry {
+            if (matches!(command.as_str(), "processes" | "send" | "send-now" | "send-cancel" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "recovery" | "read" | "notifications" | "voice" | "schedules") || (command=="attachment" && has(args,"--stage"))) && dry {
                 return Err(Error::new(1, "message input does not support --dry-run"));
             }
             state_command(command, args)
@@ -725,6 +765,7 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             crate::claude_app::Outcome::Launch(argv) => launch(&config, "claude", &argv, &client, dry),
         },
         "project" => project(&config, args, dry),
+        "task" => crate::tasks::dispatch(&config, args, dry),
         _ => launch(&config, command, args, &client, dry),
     }
 }
@@ -1019,6 +1060,23 @@ fn remote(
             all.extend(args.clone());
             all
         }
+        // One long-lived stream: keepalives detect a dropped link, and EOF on
+        // the local stdin reaches the peer's watcher, which then exits.
+        "watch" => {
+            flags = vec![
+                "-o".into(),
+                "BatchMode=yes".into(),
+                "-o".into(),
+                "ConnectTimeout=5".into(),
+                "-o".into(),
+                "ServerAliveInterval=10".into(),
+                "-o".into(),
+                "ServerAliveCountMax=3".into(),
+            ];
+            let mut all = vec![command.into()];
+            all.extend(args.clone());
+            all
+        }
         // Phone management reaches the relay through the gateway peer.
         "mobile" => {
             flags = vec![
@@ -1031,8 +1089,17 @@ fn remote(
             all.extend(args.clone());
             all
         }
-        "archives" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "repository" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "team" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "speech" | "analytics" | "voice" | "hooks" | "--help" => {
+        "--expect-machine" => {
+            let expected=require(&args,0,"Missing expected machine identity")?;
+            let actual=require(&args,1,"Missing guarded command")?;
+            let terminal=!has(&args,"-d")&&!matches!(actual,"dirs"|"worktrees"|"repository"|"--help"|"dsh"|"opencode");
+            flags=vec!["-o".into(),"BatchMode=yes".into(),"-o".into(),crate::windows_peer::connect_timeout(config, target, 3)];
+            if terminal { flags.insert(0,"-t".into()); }
+            let mut all=vec!["--expect-machine".into(),expected.into(),"--client".into(),config.host().into()];
+            all.extend_from_slice(&args[1..]);all
+        }
+        "archives" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "git-diff" | "repository" | "dirs" | "project" | "archive" | "rename"
+        | "send" | "send-now" | "send-cancel" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "team" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "speech" | "analytics" | "voice" | "hooks" | "--help" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),
@@ -1106,6 +1173,8 @@ fn remote(
             }
         }
         crate::windows_peer::command(&windows_args)?
+    } else if command == "--expect-machine" {
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'guarded-create-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to continue verified creation' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "repository" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'repository-clone-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to clone repositories' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "wait" {
@@ -1122,6 +1191,9 @@ fn remote(
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hooks-health-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to inspect hook health' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "analytics" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] analytics --json'; then exec ~/.local/bin/hgs {} --read-only; else echo 'hgs: update the selected computer to read analytics' >&2; exit 1; fi",platform::join(&remote_args)))
+    } else if command == "watch" {
+        // An older peer would read an unknown command as an agent launch.
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF '{}'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to stream events (watch-v1)' >&2; exit 1; fi",zerus_watch_protocol::HELP_MARKER,platform::join(&remote_args)))
     } else if command == "guide" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] guide'; then exec ~/.local/bin/hgs {}; else echo 'hgs: the selected computer has no agent guide; check hgs @host -h' >&2; exit 1; fi",platform::join(&remote_args)))
     } else { format!("~/.local/bin/hgs {}", platform::remote_join(&remote_args)) };
@@ -1200,6 +1272,16 @@ fn run_with_input(ssh: &mut std::process::Command, mut flags: Vec<String>, targe
 }
 
 pub(crate) fn local_json(config: &Config) -> Result<Value> { local_json_archives(config, true) }
+/// #569: the private stores refused now (path, reason, fix), read from the
+/// small current set only; absent when none is refused.
+fn private_stores(raw: &mut Value) {
+    let stores = crate::private_stores::refused();
+    if !stores.is_empty() {
+        raw["private_stores"] = json!(stores);
+    }
+}
+/// `ls --json --local --no-archives`, which `hgs watch` streams.
+pub(crate) fn local_listing(config: &Config) -> Result<Value> { local_json_archives(config, false) }
 fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
     if !platform::local_sessions() {
         // A control console: no tmux, session state or local projects. Absent
@@ -1209,6 +1291,7 @@ fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
             raw["desktop_presence"] = presence;
         }
         raw["preferences"] = crate::swarm::preferences(config);
+        private_stores(&mut raw);
         #[cfg(windows)]
         {
             raw["local_host"] = crate::host::admin::local_host(&config.state);
@@ -1225,19 +1308,14 @@ fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
     let launches = state::launches::Evidence::read();
     // A listing that fails is an error: no sessions would show live ones as stopped.
     let listing = terminal().listing().map_err(|e| Error::new(1, e))?;
-    let sessions: Vec<Value> = listing.sessions.iter().map(|row| {
-        let name = row.name.as_str();
-        let mut parts = name.splitn(3, '/'); let cmd = parts.next().unwrap_or("");
-        let project = parts.next().filter(|s| !s.is_empty()); let tag = parts.next().filter(|s| !s.is_empty());
-        let ttys: Vec<&str> = listing.clients.iter().filter_map(|client| if client.session == name { Some(client.terminal.as_str()) } else { None }).collect();
-        json!({"name":name,"cmd":cmd,"project":project,"tag":tag,"attached":row.attached,"clients":ttys,"created":row.created,"launch_id":row.launch_id})
-    }).collect();
+    let sessions = state::listed_rows(&listing);
     let mut raw = json!({"host":config.host(),"ok":true,"hgs_version":env!("CARGO_PKG_VERSION"),"projects":projects,"sessions":sessions,"peers":config.peers,"metrics":crate::metrics::snapshot(&config.state)});
     // Phone alerts wait while the owner is active here; see src/presence.rs.
     if let Some(presence) = crate::presence::listing(&config.state, crate::presence::now()) {
         raw["desktop_presence"] = presence;
     }
     raw["preferences"] = crate::swarm::preferences(config);
+    private_stores(&mut raw);
     // Windows: the session host as found, never started (spec D2). Unix
     // listings stay as they were.
     #[cfg(windows)]
@@ -1245,11 +1323,7 @@ fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
         raw["local_host"] = crate::host::admin::local_host(&config.state);
     }
     // A session renamed before merge_listing reads the panes keeps its ID.
-    let ids = listing
-        .sessions
-        .iter()
-        .map(|row| (row.name.clone(), row.id.clone()))
-        .collect();
+    let ids = state::listed_ids(&listing);
     let mut merged = state::merge_listing_archives(raw, &ids, archives).map_err(|e| Error::new(1, e))?;
     merged["archive_paging"] = json!(true);
     merged["archive_revision"] = json!(state::archive_catalog::revision().map_err(|e|Error::new(1,e))?);
@@ -2313,6 +2387,13 @@ fn launch(
             crate::accounts::apply_permissions(&command_name, mode, &mut resume);
         }
     }
+    // Capture the account defaults in the new conversation's launch recipe.
+    // Saved resumes/forks and explicit native choices retain their own settings.
+    if !existing && !auto && options.resume_id.is_none()
+        && (options.fresh || !binding_exists(config, &session)?)
+        && ["codex", "claude", "kimi"].contains(&command_name.as_str()) {
+        crate::accounts::apply_model_defaults(config, options.account.as_deref().unwrap_or(""), &command_name, &mut base)?;
+    }
     if options.remote_control {
         if command_name == "claude" {
             base.extend(["--remote-control".into(), session.clone()]);
@@ -2497,7 +2578,7 @@ mod tests {
             "speech", "analytics", "graph", "wait", "team", "mobile", "hooks", "repository"] {
             assert!(!needs_local_sessions(command), "{command}");
         }
-        for command in ["a", "kill", "send", "send-now", "inspect", "history",
+        for command in ["a", "kill", "send", "send-now", "send-cancel", "inspect", "history",
             "history-projection", "processes", "terminal", "session-action", "interrupt",
             "clear-context", "compact-context", "answer", "effort", "settings", "recovery",
             "read", "notifications", "voice", "schedules", "attachment", "file-read",

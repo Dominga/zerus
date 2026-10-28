@@ -46,6 +46,48 @@ pub(super) fn observe_start(record: &mut Value, event: &Value) {
 
 const CLEARED_CONVERSATIONS: usize = 32;
 
+/// The id a SessionStart reports is the conversation Zerus follows (H7): a
+/// resume or compaction may continue in a new transcript, so the record takes
+/// the agent's id instead of refusing it. Only a clear starts a new Activity
+/// timeline; a resume keeps it and notes the change. Returns whether the
+/// conversation changed.
+pub(super) fn follow(record: &mut Value, event: &Value) -> bool {
+    let previous = string(record, "conversation_id").to_owned();
+    let next = string(event, "session_id");
+    if next.is_empty() || next == previous {
+        return false;
+    }
+    observe_start(record, event);
+    let source = string(event, "source");
+    if matches!(source, "resume" | "compact") && !previous.is_empty() {
+        record["session_rebound"] = json!({"at":now(),"run_id":record["run_id"],
+            "previous_conversation_id":previous,"conversation_id":next,"source":source});
+    }
+    record["conversation_id"] = json!(next);
+    true
+}
+
+/// A resume or compaction may legitimately open a new conversation (H7).
+pub(super) fn resumed_session(event: &Value) -> bool {
+    matches!(string(event, "source"), "resume" | "compact")
+}
+
+/// The Activity event that records a session following a new conversation
+/// after a resume or compaction (H7).
+pub(super) fn rebound_event(record: &Value) -> Option<Value> {
+    let rebound = &record["session_rebound"];
+    if rebound["run_id"] != record["run_id"]
+        || rebound["conversation_id"] != record["conversation_id"]
+        || rebound["previous_conversation_id"] == rebound["conversation_id"]
+        || rebound["at"].as_f64().is_none_or(|at| at <= 0.0)
+    {
+        return None;
+    }
+    Some(json!({"type":"SessionRebound","at":rebound["at"],"run_id":record["run_id"],
+        "agent_id":"","detail":"","activity_key":format!("rebound:{}:{}:{}",
+            string(record,"run_id"),string(record,"conversation_id"),rebound["at"])}))
+}
+
 /// `resume --fresh` replaces a stopped binding; its Activity continues like a
 /// clear. The new conversation is unknown until the agent's SessionStart.
 pub(super) fn carry_fresh_start(previous: &Value, record: &mut Value) {
@@ -93,13 +135,13 @@ fn codex_reset_panel_below(screen: &str, cwd: &str, home: &Path) -> bool {
     // one `›` row, the composer at the left edge, with only the header block
     // above it; the composer check then needs the cursor there and no draft.
     let lines: Vec<_> = screen.lines().collect();
-    let mut prompts = lines.iter().enumerate().filter(|(_, line)| line.trim_start().starts_with('›'));
+    let mut prompts = lines.iter().enumerate().filter(|(_, line)| input::codex_prompt(line.trim_start()).is_some());
     let (Some((composer, input)), None) = (prompts.next(), prompts.next()) else { return false; };
     // Its text is the dim placeholder, one of the two that both reviewed
     // releases draw, or nothing: a draft fails here before the composer check.
     let placeholder = |text: &str| text.is_empty() || text.strip_prefix(' ')
         .is_some_and(|text| ["Ask Codex to do anything", "Ask a follow-up question"].contains(&text));
-    if !input.strip_prefix('›').map(str::trim_end).is_some_and(placeholder) { return false; }
+    if !input::codex_prompt(input).map(str::trim_end).is_some_and(placeholder) { return false; }
     let mut rows: Vec<_> = lines[..composer].iter().map(|line| line.trim()).filter(|line| !line.is_empty()).collect();
     // The released idle screen can include its settled decorative logo. Match
     // the complete known pose; arbitrary braille, prose and partial frames do
@@ -134,8 +176,14 @@ pub(super) fn observe_terminal(record: &mut Value) -> Result<bool> {
     // A resume awaiting its deferred SessionStart has no hook-confirmed idle
     // state: its exact process must still own the restored conversation.
     let resumed = resume_input::clearable(record);
+    // The failed-turn path deliberately preserves the missing idle hook. A
+    // matching explicit request may confirm its native reset through the same
+    // full panel/composer checks, without rewriting the session's work state.
+    let requested_failure = record["clear_context_request"].is_object()
+        && record["clear_context_request"]["conversation_id"] == record["conversation_id"]
+        && failed_turn(record);
     if string(record,"agent") != "codex" || awaiting_start(record)
-        || (!resumed && (record["activity"] != "idle" || record["phase"] != "idle"))
+        || (!resumed && !requested_failure && (record["activity"] != "idle" || record["phase"] != "idle"))
         || string(record,"conversation_id").is_empty()
         || (string(record,"prompt").is_empty() && string(record,"last_message").is_empty()
             && !record["clear_context_request"].is_object()) { return Ok(false); }
@@ -143,6 +191,7 @@ pub(super) fn observe_terminal(record: &mut Value) -> Result<bool> {
     // expensive process and composer checks only for a matching reset panel.
     if !codex_reset_panel(&kimi_tui_choice::capture(record)?,string(record,"cwd")) { return Ok(false); }
     if resumed { resume_input::owned(record)?; }
+    if requested_failure && !failed_turn(record) { return Err("Native work changed before clear confirmation".into()); }
     kimi_tui_choice::identity(record)?;
     input::checked_terminal(record,true)?;
     if !codex_reset_panel(&kimi_tui_choice::capture(record)?,string(record,"cwd")) { return Ok(false); }
@@ -303,6 +352,19 @@ pub(super) fn interrupted(record: &Value, live: bool) -> bool {
 pub(super) fn stopped(record: &Value) -> bool {
     record["agent"] == "claude" && record["phase"] == "interrupted" && !telemetry::work_remains(record)
 }
+
+/// A typed Codex task completion may precede its missing idle hook. Only an
+/// explicit clear uses this path; provider attention and other idle actions
+/// retain their existing state. Confirmed tools, children and native jobs win.
+pub(super) fn failed_turn(record: &Value) -> bool {
+    record["agent"] == "codex" && !string(record,"conversation_id").is_empty()
+        && string(record,"expected_id").is_empty() && !telemetry::work_remains(record)
+        && provider_errors::completed_failure(record)
+        && processes::WorkSample::default().summary(record,true)["count"] == 0
+}
+pub(super) fn failed(record: &Value, live: bool) -> bool {
+    live && unblocked(record) && failed_turn(record) && input::checked_terminal(record,true).is_ok()
+}
 /// Codex reports a clear of a resumed conversation only with the SessionStart
 /// it defers to the next turn, under the new conversation's ID. That clear
 /// confirms the resume when it was requested or observed for the expected
@@ -352,7 +414,7 @@ fn command_row(agent: &str, row: &str, x: usize, command: &str) -> bool {
     let before=row.chars().take(x).collect::<String>();
     let after=row.chars().skip(x).collect::<String>();
     match agent {
-        "codex" => before.trim()==format!("› {command}") && after.trim().is_empty(),
+        "codex" => input::codex_prompt(before.trim()).is_some_and(|text|text.trim()==command) && after.trim().is_empty(),
         "claude" => [format!("❯ {command}"),format!("> {command}")].iter().any(|prompt|prompt==before.replace('\u{a0}'," ").trim()) && after.trim().is_empty(),
         // Kimi 2.1 shows an argument hint such as <instruction> after the command.
         "kimi" => before.trim()==format!("│ > {command}") && after.trim().strip_suffix('│').is_some_and(|hint|{
@@ -378,7 +440,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if args.len()!=2 || args[1]!="--json" {return Err("usage: hgs clear-context <session> --json".into());}
     let mut bytes=Vec::new();io::stdin().take(8193).read_to_end(&mut bytes).map_err(|e|e.to_string())?;
     if bytes.len()>8192 {return Err("Clear request is too large".into());}
-    let request:Request=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
+    let request:Request=serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e|e.to_string())?;
     let uuid=uuid::Uuid::parse_str(&request.request_id).map_err(|_|"Invalid request identity")?;
     let name=&args[0];
     if opencode::exists(name) {return Err("OpenCode context reset is not supported by this adapter".into());}
@@ -388,12 +450,15 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     // A resume before its deferred SessionStart is verified as for its first message.
     let resuming=resume_input::clearable(&current);
     let stopped=!resuming && interrupted(&current,true);
-    let dismiss=request.dismiss_prompt && !resuming && !stopped && !available(&current,true);
+    let failed=!resuming && !stopped && self::failed(&current,true);
+    let dismiss=request.dismiss_prompt && !resuming && !stopped && !failed && !available(&current,true);
     let mut record=if dismiss {checked_chooser(name,&request)?} else {
         let record=if resuming {input::checked_resumed(name,&request.expected_run_id,&request.expected_conversation_id)?}
             else if stopped {input::checked_interrupted(name,&request.expected_run_id,&request.expected_conversation_id)?}
+            else if failed {input::checked_failed(name,&request.expected_run_id,&request.expected_conversation_id)?}
             else {input::checked_ready(name,&request.expected_run_id,&request.expected_conversation_id)?};
-        if !(available(&record,true) || resuming && resumed(&record,true) || stopped && interrupted(&record,true)) {
+        if !(available(&record,true) || resuming && resumed(&record,true) || stopped && interrupted(&record,true)
+            || failed && self::failed(&record,true)) {
             return Err("Wait for the agent to become idle before clearing context".into());
         }
         input::checked_terminal(&record,true)?;
@@ -436,6 +501,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         let current=if dismiss {kimi_tui_choice::identity(&record)?}
             else if resuming {resume_input::owned(&record)?;kimi_tui_choice::identity(&record)?}
             else if stopped {input::checked_interrupted(name,&request.expected_run_id,&request.expected_conversation_id)?}
+            else if failed {input::checked_failed(name,&request.expected_run_id,&request.expected_conversation_id)?}
             else {input::checked_ready(name,&request.expected_run_id,&request.expected_conversation_id)?};
         kimi_tui_choice::identity(&record)?;
         input::checked_terminal(&current,false)?;
@@ -470,6 +536,46 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 }
 #[cfg(test)] mod tests {
     use super::*;
+
+    #[test]
+    fn a_resumed_session_follows_its_new_transcript() {
+        // H7: the hook reports the new conversation; the record follows it and
+        // keeps the Activity timeline (no clear boundary).
+        let mut record = json!({"run_id":"r","conversation_id":"old","agent":"claude"});
+        assert!(follow(&mut record, &json!({"session_id":"new","source":"resume"})));
+        assert_eq!(record["conversation_id"], "new");
+        let rebound = &record["session_rebound"];
+        assert_eq!(
+            (rebound["previous_conversation_id"].as_str(), rebound["conversation_id"].as_str()),
+            (Some("old"), Some("new"))
+        );
+        assert_eq!(rebound["source"], "resume");
+        assert!(record["session_clear"].is_null());
+        assert!(resumed_session(&json!({"source":"resume"})));
+        assert!(rebound_event(&record).is_some());
+        // Once bound, the same start changes nothing.
+        assert!(!follow(&mut record, &json!({"session_id":"new","source":"resume"})));
+    }
+
+    #[test]
+    fn a_compaction_follows_the_new_transcript_too() {
+        let mut record = json!({"run_id":"r","conversation_id":"old"});
+        assert!(follow(&mut record, &json!({"session_id":"after","source":"compact"})));
+        assert_eq!(record["conversation_id"], "after");
+        assert_eq!(record["session_rebound"]["source"], "compact");
+        assert!(resumed_session(&json!({"source":"compact"})));
+        assert!(rebound_event(&record).is_some());
+    }
+
+    #[test]
+    fn a_clear_still_starts_a_new_timeline() {
+        let mut record = json!({"run_id":"r","conversation_id":"old"});
+        assert!(follow(&mut record, &json!({"session_id":"new","source":"clear"})));
+        assert_eq!(record["session_clear"]["previous_conversation_id"], "old");
+        assert!(record["session_rebound"].is_null());
+        assert!(!resumed_session(&json!({"source":"clear"})));
+    }
+
     #[test] fn unavailable_context_actions_name_the_blocking_condition_and_work() {
         let idle=json!({"agent":"claude","run_id":"run","conversation_id":"conversation","activity":"idle","phase":"idle",
             "main_done":true,"active_tools":{},"subagents":{}});
@@ -885,10 +991,11 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     #[test] fn exact_command_only() {
         assert!(command_row("codex","› /clear",8,"/clear"));
+        assert!(command_row("codex","» /clear",8,"/clear"));
         assert!(command_row("claude","❯\u{a0}/clear",8,"/clear"));
         assert!(command_row("kimi"," │ > /clear       │",11,"/clear"));
         assert!(command_row("kimi"," │ > /compact  <instruction>          │",13,"/compact"));
         for row in [" │ > /compact extra  │"," │ > /compact  <a> <b> │"," │ > /compact  <instruction"] {assert!(!command_row("kimi",row,13,"/compact"));}
-        for row in ["› /clear extra","› draft /clear","shell$ /clear"] {assert!(!command_row("codex",row,8,"/clear"));}
+        for row in ["› /clear extra","› draft /clear","» /clear extra","» draft /clear","shell$ /clear"] {assert!(!command_row("codex",row,8,"/clear"));}
     }
 }

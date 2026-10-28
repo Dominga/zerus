@@ -10,11 +10,18 @@ const TOPICS: &[(&str, &str)] = &[
     ("wait", include_str!("agent_guide/wait.md")),
     // WhiteWh fork: agent teams.
     ("team", include_str!("agent_guide/team.md")),
+    ("team-lead", include_str!("agent_guide/team-lead.md")),
+    ("team-draft", include_str!("agent_guide/team-draft.md")),
+    ("team-tree", include_str!("agent_guide/team-tree.md")),
+    ("team-run", include_str!("agent_guide/team-run.md")),
+    ("team-safe", include_str!("agent_guide/team-safe.md")),
+    ("run", include_str!("agent_guide/run.md")),
     ("designer", include_str!("agent_guide/designer.md")),
     ("launch", include_str!("agent_guide/launch.md")),
     ("stop", include_str!("agent_guide/stop.md")),
+    ("tasks", include_str!("agent_guide/tasks.md")),
 ];
-const USAGE: &str = "usage: hgs guide [send|wait|team|designer|launch|stop]";
+const USAGE: &str = "usage: hgs guide [send|wait|team|team-lead|team-draft|team-tree|team-run|team-safe|run|designer|launch|stop|tasks]";
 
 pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     let text = match args {
@@ -43,6 +50,11 @@ mod tests {
         for (name, text) in pages() {
             // About four bytes a token: a page costs an agent at most ~600.
             assert!(text.len() <= 2400, "{name} has {} bytes", text.len());
+            // A CRLF checkout adds one byte for each LF that has none: the
+            // page must still fit (N8).
+            let bare = text.matches('\n').count() - text.matches("\r\n").count();
+            let crlf = text.len() + bare;
+            assert!(crlf <= 2400, "{name} has {crlf} bytes in a CRLF checkout");
             assert!(text.is_ascii(), "{name} is not ASCII");
             assert!(text.ends_with('\n') && !text.contains('\t'), "{name}");
             assert!(text.lines().all(|line| line.len() <= 100), "{name} has a long line");

@@ -581,7 +581,10 @@ mod tests {
         let (_dir, mut db, mut record, at) = fixture();
         record["agent"] = json!("claude");
         let key = Identity::new(&["claude", ID]);
-        read(&mut db, &record, &json!({"hook_event_name":"Stop"})).unwrap();
+        // The fixture's own rows, read whole: the product's 50 ms budget would
+        // stop early on a busy computer and leave the counted budget below to
+        // run out before the row under test (#526).
+        read_with_budget(&mut db, &record, &json!({"hook_event_name":"Stop"}), || false).unwrap();
         let before = db.cursor(&key).unwrap().unwrap().1;
         let row = json!({"type":"assistant","timestamp":DateTime::from_timestamp_millis(at).unwrap().to_rfc3339(),
             "sessionId":ID,"uuid":"row-budget","message":{"id":"request-budget",

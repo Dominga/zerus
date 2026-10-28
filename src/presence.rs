@@ -52,7 +52,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> cli::Result<i32>
         .take(MAX_INPUT_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| cli::Error::new(1, format!("read presence: {e}")))?;
-    let input = parse(&bytes).map_err(|e| cli::Error::new(1, format!("{e:#}")))?;
+    let input = parse(crate::state::without_bom(&bytes)).map_err(|e| cli::Error::new(1, format!("{e:#}")))?;
     write(&config.state, &input, now()).map_err(|e| cli::Error::new(1, format!("{e:#}")))?;
     println!("{}", json!({"ok": true}));
     Ok(0)

@@ -28,7 +28,26 @@ const AUTHORIZATION_RETRY: Duration = Duration::from_millis(100);
 
 enum Failure {
     Retry,
+    CachePressure,
     Fatal(JournalError),
+}
+impl Failure {
+    fn request_retry_wait(&self, network_delay: &mut u64) -> Option<Duration> {
+        match self {
+            Self::CachePressure => {
+                // Each bounded journal turn commits its safe frontier. Continue
+                // that local work at the normal poll cadence, without treating
+                // it as a failed network request or spinning without a yield.
+                *network_delay = 1;
+                Some(Duration::from_millis(250))
+            }
+            Self::Retry => {
+                *network_delay = (*network_delay * 2).min(60);
+                Some(Duration::from_secs(*network_delay))
+            }
+            Self::Fatal(_) => None,
+        }
+    }
 }
 impl std::fmt::Debug for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -40,7 +59,12 @@ fn checked<T>(value: crypto::Result<T>) -> Result<T> {
     value.map_err(|_| Failure::Retry)
 }
 fn journal<T>(value: crate::journal::Result<T>) -> Result<T> {
-    value.map_err(Failure::Fatal)
+    value.map_err(|error| match error {
+        JournalError::Refused(ref refusal) if refusal.message() == crate::error::RETAINED_LIMIT => {
+            Failure::CachePressure
+        }
+        other => Failure::Fatal(other),
+    })
 }
 fn encoded(value: &impl serde::Serialize) -> Result<Vec<u8>> {
     serde_json::to_vec(value).map_err(|_| Failure::Retry)
@@ -57,6 +81,60 @@ async fn call(
         .await
         .map_err(|_| Failure::Retry)?
         .ok_or(Failure::Retry)
+}
+
+/// Legacy headers were committed only after authenticated/decrypted admission;
+/// a2 rejects Read/non-READS before native dispatch. The gateway's full signed
+/// Result echoes that accepted class. No fresh request signature is invented:
+/// its full envelope is not stored. Unknown producer/key/history stays durable.
+fn accepted_read_cache(
+    profile: &Profile,
+    id: &str,
+    digest: &str,
+    header: &str,
+    result: &str,
+) -> bool {
+    if !crate::pyvalue::canonical_uuid(id) || crypto::decode_fixed::<32>(digest).is_err() {
+        return false;
+    }
+    let Ok(request) = serde_json::from_str::<Header>(header) else {
+        return false;
+    };
+    let Ok(envelope) = serde_json::from_str::<EncryptedEnvelope>(result) else {
+        return false;
+    };
+    let response = &envelope.header;
+    let me = &profile.identity.device;
+    let Some(phone) = profile.membership.members.get(&request.sender_device_id) else {
+        return false;
+    };
+    request.canonical_bytes().is_ok()
+        && request.kind == PayloadKind::Request
+        && response.kind == PayloadKind::Result
+        && request.operation_class == OperationClass::Read
+        && response.operation_class == OperationClass::Read
+        && phone.role == Role::Phone
+        && me.role == Role::Computer
+        && profile.membership.members.get(&me.device_id) == Some(me)
+        && request.workspace_id == profile.membership.workspace_id
+        && response.workspace_id == request.workspace_id
+        && request.request_id == id
+        && response.request_id == id
+        && request.recipient_device_id == me.device_id
+        && request.recipient_key_generation == me.key_generation
+        && request.gateway_id == me.device_id
+        && response.gateway_id == request.gateway_id
+        && response.sender_device_id == me.device_id
+        && response.sender_key_generation == me.key_generation
+        && response.recipient_device_id == phone.device_id
+        && response.recipient_key_generation == phone.key_generation
+        && request.sender_key_generation == phone.key_generation
+        && response.route_id == request.route_id
+        && profile.historical_heads.get(&request.membership_revision)
+            == Some(&request.membership_head)
+        && profile.historical_heads.get(&response.membership_revision)
+            == Some(&response.membership_head)
+        && envelope.verify_sender(me).is_ok()
 }
 
 struct Engine<'a, N: Native> {
@@ -160,7 +238,9 @@ impl<N: Native + 'static> Engine<'_, N> {
             match refreshed {
                 Ok(profile) => return Ok(profile),
                 Err(Failure::Fatal(error)) => return Err(Failure::Fatal(error)),
-                Err(Failure::Retry) => self.authorization_pause(deadline).await?,
+                Err(Failure::Retry | Failure::CachePressure) => {
+                    self.authorization_pause(deadline).await?
+                }
             }
         }
     }
@@ -538,7 +618,7 @@ impl<N: Native + 'static> Engine<'_, N> {
             match self.heartbeat().await {
                 Ok(()) => {}
                 Err(Failure::Fatal(e)) => return Err(Failure::Fatal(e)),
-                Err(Failure::Retry) => runtime::log(
+                Err(Failure::Retry | Failure::CachePressure) => runtime::log(
                     "WARNING",
                     "Encrypted workspace refresh is unavailable; private transport remains closed",
                 ),
@@ -593,6 +673,11 @@ impl<N: Native + 'static> Engine<'_, N> {
         if text.len() > MAX_SMALL - 4096 {
             return Err(Failure::Retry);
         }
+        journal(self.connector.journal.encrypted_reclaim_read_cache(
+            crate::now(),
+            text.len(),
+            |id, digest, header, result| accepted_read_cache(profile, id, digest, header, result),
+        ))?;
         journal(
             self.connector
                 .journal
@@ -803,7 +888,7 @@ impl<N: Native + 'static> Engine<'_, N> {
                 )
                 .await
                 else {
-                    return Ok(());
+                    return Ok(false);
                 };
                 let mut batch = batch?;
                 let Value::Array(rows) = batch["requests"].take() else {
@@ -812,40 +897,48 @@ impl<N: Native + 'static> Engine<'_, N> {
                 if rows.len() > 1 {
                     return Err(Failure::Retry);
                 }
+                let received = !rows.is_empty();
                 let deadline = tokio::time::Instant::now() + CLAIM_AUTHORIZATION_WAIT;
                 let profile = self.refresh_claimed(deadline).await?;
                 for row in rows {
                     if self.connector.stopping.is_set() {
-                        return Ok(());
+                        return Ok(false);
                     }
                     self.receive_before(&profile, row, deadline).await?;
                 }
                 if self.connector.stopping.is_set() {
-                    return Ok(());
+                    return Ok(false);
                 }
-                self.flush(&profile).await
+                self.flush(&profile).await?;
+                Ok(received)
             };
-            match iteration.await {
-                Ok(()) => delay = 1,
-                Err(Failure::Fatal(e)) => return Err(Failure::Fatal(e)),
-                Err(Failure::Retry) => {
-                    runtime::log("WARNING","Encrypted request delivery is unavailable; stored identities are preserved");
-                    delay = (delay * 2).min(60);
+            let wait = match iteration.await {
+                Ok(received) => {
+                    delay = 1;
+                    // A completed turn has already flushed its durable result.
+                    // Yield to heartbeat/stop, then claim the next queued ID
+                    // without adding a quarter second to every read. Empty
+                    // polls retain their pacing; quota/error waits are separate.
+                    if received {
+                        Duration::ZERO
+                    } else {
+                        Duration::from_millis(250)
+                    }
                 }
-            }
+                Err(error) => {
+                    let Some(wait) = error.request_retry_wait(&mut delay) else {
+                        return Err(error);
+                    };
+                    runtime::log("WARNING","Encrypted request delivery is unavailable; stored identities are preserved");
+                    wait
+                }
+            };
             if self.connector.stopping.is_set() {
                 return Ok(());
             }
-            if runtime::until_stopped(
-                &self.connector.stopping,
-                tokio::time::sleep(Duration::from_millis(if delay == 1 {
-                    250
-                } else {
-                    delay * 1000
-                })),
-            )
-            .await
-            .is_none()
+            if runtime::until_stopped(&self.connector.stopping, tokio::time::sleep(wait))
+                .await
+                .is_none()
             {
                 return Ok(());
             }
@@ -928,6 +1021,9 @@ mod tests {
     use std::collections::BTreeMap;
     const MACHINE: &str = "00000000-0000-4000-8000-000000000020";
     const REQUEST: &str = "00000000-0000-4000-8000-000000000021";
+    // A gateway on Windows always runs as a Windows gateway, which checks the
+    // target session with one more inspect before it dispatches a call.
+    const DISPATCH_CALLS: usize = if cfg!(windows) { 2 } else { 1 };
     #[derive(Default)]
     struct NativeFixture {
         calls: RefCell<Vec<Vec<String>>>,
@@ -980,7 +1076,7 @@ mod tests {
                 };
             }
             Ok(Output::Json(
-                json!({"name":"codex/fixture/main","private":"private native output"}),
+                json!({"name":"codex/fixture/main","agent":"codex","private":"private native output"}),
             ))
         }
     }
@@ -1212,11 +1308,23 @@ mod tests {
         let value = serde_json::to_value(&envelope).unwrap();
         engine.receive(&profile, value.clone()).await.unwrap();
         engine.receive(&profile, value).await.unwrap();
-        assert_eq!(f.connector.native.calls.borrow().len(), 1);
+        assert_eq!(f.connector.native.calls.borrow().len(), DISPATCH_CALLS);
         assert_eq!(
-            f.connector.native.calls.borrow()[0],
-            ["--expect-machine", MACHINE, "inspect", "codex/fixture/main"]
+            f.connector.native.calls.borrow().last().unwrap(),
+            &["--expect-machine", MACHINE, "inspect", "codex/fixture/main"]
         );
+        if cfg!(windows) {
+            assert_eq!(
+                f.connector.native.calls.borrow()[0],
+                [
+                    "--expect-machine",
+                    MACHINE,
+                    "inspect",
+                    "codex/fixture/main",
+                    "--skip-processes"
+                ]
+            );
+        }
         let native = f
             .connector
             .journal
@@ -1240,7 +1348,155 @@ mod tests {
             .receive(&profile, serde_json::to_value(changed).unwrap())
             .await
             .is_err());
-        assert_eq!(f.connector.native.calls.borrow().len(), 1);
+        assert_eq!(f.connector.native.calls.borrow().len(), DISPATCH_CALLS);
+    }
+    #[tokio::test]
+    async fn queued_authenticated_reads_claim_again_after_flush_without_a_success_sleep() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::Instant;
+
+        let mut f = Fixture::new();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut profile = workspace::load_active(&f.private_dir).unwrap();
+        profile.server_url = format!("http://{}", listener.local_addr().unwrap());
+        let store = Store::lock(&f.private_dir, false).unwrap();
+        let old = store.read("active.json").unwrap().unwrap();
+        store
+            .replace(
+                "active.json",
+                &Store::revision(Some(&old)),
+                &serde_json::to_vec(&profile).unwrap(),
+            )
+            .unwrap();
+        drop(store);
+        f.relay = workspace::relay(&profile, true).unwrap();
+        let first = serde_json::to_value(f.request(
+            &profile,
+            REQUEST,
+            &profile.identity.device.device_id,
+            "",
+        ))
+        .unwrap();
+        let second_id = "00000000-0000-4000-8000-000000000022";
+        let second = serde_json::to_value(f.request(
+            &profile,
+            second_id,
+            &profile.identity.device.device_id,
+            "",
+        ))
+        .unwrap();
+        let membership = json!({"changes":[],"membership_revision":profile.membership.revision,"membership_head":profile.membership.head,"next_after":null});
+        let (finished, stop) = tokio::sync::oneshot::channel();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut claims = 0;
+            let mut results = 0;
+            let mut delivered = None;
+            let mut gaps = Vec::new();
+            let mut finished = Some(finished);
+            while Instant::now() < deadline {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(value) => value,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    Err(error) => panic!("fixture accept failed: {error}"),
+                };
+                // Accepted sockets may inherit the listener's nonblocking mode on BSD.
+                // The bounded fixture reader below deliberately uses blocking reads.
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let body_start = loop {
+                    let mut block = [0; 4096];
+                    let n = stream.read(&mut block).unwrap();
+                    assert!(n > 0 && bytes.len() + n < 2 * 1024 * 1024);
+                    bytes.extend_from_slice(&block[..n]);
+                    if let Some(i) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                        break i + 4;
+                    }
+                };
+                let header = String::from_utf8(bytes[..body_start].to_vec()).unwrap();
+                let length = header
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                while bytes.len() < body_start + length {
+                    let mut block = [0; 4096];
+                    let n = stream.read(&mut block).unwrap();
+                    assert!(n > 0 && bytes.len() + n < 2 * 1024 * 1024);
+                    bytes.extend_from_slice(&block[..n]);
+                }
+                let path = header
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap();
+                let response = if path.starts_with("/v2/node/membership?") {
+                    membership.clone()
+                } else if path == "/v2/node/requests?wait=25" {
+                    claims += 1;
+                    if let Some(at) = delivered.take() {
+                        gaps.push(Instant::now().duration_since(at));
+                    }
+                    match claims {
+                        1 => json!({"requests":[first.clone()]}),
+                        2 => json!({"requests":[second.clone()]}),
+                        3 => json!({"requests":[first.clone()]}), // Same ID must never execute twice.
+                        4 => {
+                            finished.take().unwrap().send(()).unwrap();
+                            json!({"requests":[]})
+                        }
+                        _ => panic!("unexpected fixture claim"),
+                    }
+                } else {
+                    assert!(path.starts_with("/v2/node/requests/") && path.ends_with("/result"));
+                    results += 1;
+                    delivered = Some(Instant::now());
+                    json!({})
+                };
+                let response = serde_json::to_vec(&response).unwrap();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n", response.len()).unwrap();
+                stream.write_all(&response).unwrap();
+                if claims == 4 {
+                    return (claims, results, gaps);
+                }
+            }
+            panic!("bounded fixture did not receive all claims");
+        });
+        f.connector.snapshot_ready.set();
+        let engine = f.engine();
+        let stopping = async {
+            stop.await.unwrap();
+            f.connector.stopping.set();
+        };
+        let (result, ()) = future::join(engine.requests(), stopping).await;
+        result.unwrap();
+        let (claims, results, gaps) = server.join().unwrap();
+        // Two requests executed once each; a Windows gateway inspects first.
+        assert_eq!(
+            (claims, results, f.connector.native.calls.borrow().len()),
+            (4, 2, 2 * DISPATCH_CALLS)
+        );
+        assert_eq!(gaps.len(), 2);
+        // A fresh TCP connection per claim takes up to a few hundred ms on a
+        // loaded Windows runner (219 and 363 ms seen with no sleep at all), so
+        // the quarter-second pacing is told apart only off Windows; there, a
+        // gap under a second still rules out the retry waits.
+        let prompt = if cfg!(windows) { Duration::from_secs(1) } else { Duration::from_millis(200) };
+        assert!(gaps.iter().all(|gap| *gap < prompt), "queued reads must claim promptly after a flushed result, without a quarter-second success sleep: {gaps:?}");
+        assert!(f.connector.journal.encrypted_pending().unwrap().is_empty());
     }
     #[tokio::test]
     async fn own_process_authorization_contention_waits_without_losing_claimed_request() {
@@ -1263,7 +1519,7 @@ mod tests {
             .await
             .expect("The same claimed request must resume after the local gate opens")
             .unwrap();
-        assert_eq!(f.connector.native.calls.borrow().len(), 1);
+        assert_eq!(f.connector.native.calls.borrow().len(), DISPATCH_CALLS);
         let receipt: Value = serde_json::from_str(
             &f.connector
                 .journal
@@ -1274,7 +1530,7 @@ mod tests {
         .unwrap();
         assert_eq!(receipt["state"], "completed");
         engine.receive(&profile, value).await.unwrap();
-        assert_eq!(f.connector.native.calls.borrow().len(), 1);
+        assert_eq!(f.connector.native.calls.borrow().len(), DISPATCH_CALLS);
     }
     #[tokio::test]
     async fn external_management_lock_retains_one_receive_and_rechecks_current_authorization() {
@@ -1302,7 +1558,7 @@ mod tests {
             .expect("The retained request must resume after management unlocks")
             .unwrap();
         engine.receive(&profile, value).await.unwrap();
-        assert_eq!(f.connector.native.calls.borrow().len(), 1);
+        assert_eq!(f.connector.native.calls.borrow().len(), DISPATCH_CALLS);
 
         let next_id = "00000000-0000-4000-8000-000000000022";
         let next = f.request(&profile, next_id, &profile.identity.device.device_id, "");
@@ -1348,7 +1604,7 @@ mod tests {
             .await
             .expect("Revoked authorization must fail after management unlocks")
             .is_err());
-        assert_eq!(f.connector.native.calls.borrow().len(), 1);
+        assert_eq!(f.connector.native.calls.borrow().len(), DISPATCH_CALLS);
         assert!(f
             .connector
             .journal
@@ -1558,4 +1814,5 @@ mod tests {
         );
         assert!(f.connector.native.calls.borrow().is_empty());
     }
+    include!("encrypted_read_pressure_tests.rs");
 }

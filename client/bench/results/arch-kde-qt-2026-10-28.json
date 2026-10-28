@@ -1,0 +1,348 @@
+{
+  "client": "qt",
+  "created_at": "2026-10-27T22:20:01Z",
+  "harness": "client/bench/qt/qt_bench.cpp",
+  "platform": {
+    "cpu_threads": 32,
+    "dpr": 1,
+    "label": "arch-kde-wayland",
+    "os": "arch",
+    "os_version": "unknown",
+    "qpa": "wayland",
+    "qt": "6.12.0",
+    "representative": true,
+    "screen": "3440x1440",
+    "screen_hz": 144,
+    "window_exposed": true,
+    "displays": {
+      "source": "kscreen-doctor --json",
+      "outputs": [
+        {
+          "name": "DP-2",
+          "priority": 1,
+          "mode": "2560x1440",
+          "refresh_hz": 144,
+          "scale": 1,
+          "rotation": 1,
+          "vrr_policy": null
+        },
+        {
+          "name": "DP-3",
+          "priority": 2,
+          "mode": "3440x1440",
+          "refresh_hz": 144,
+          "scale": 1,
+          "rotation": 1,
+          "vrr_policy": null
+        }
+      ],
+      "locked": false,
+      "dpms": {
+        "DP-2": "on",
+        "DP-3": "on"
+      }
+    }
+  },
+  "scenarios": [
+    {
+      "id": "list-scroll",
+      "kind": "frame-work",
+      "metric": "wall_ms",
+      "runs": [
+        {
+          "frames": 12896,
+          "gui_cpu_ms": {
+            "count": 12896,
+            "max": 6.507,
+            "mean": 0.737,
+            "median": 0.65,
+            "p95": 1.154,
+            "p99": 1.73
+          },
+          "wall_ms": {
+            "count": 12896,
+            "max": 6.676,
+            "mean": 0.774,
+            "median": 0.677,
+            "p95": 1.237,
+            "p99": 1.972
+          }
+        },
+        {
+          "frames": 12644,
+          "gui_cpu_ms": {
+            "count": 12644,
+            "max": 6.986,
+            "mean": 0.752,
+            "median": 0.657,
+            "p95": 1.164,
+            "p99": 1.798
+          },
+          "wall_ms": {
+            "count": 12644,
+            "max": 9.912,
+            "mean": 0.79,
+            "median": 0.685,
+            "p95": 1.243,
+            "p99": 2.088
+          }
+        },
+        {
+          "frames": 13193,
+          "gui_cpu_ms": {
+            "count": 13193,
+            "max": 7.004,
+            "mean": 0.719,
+            "median": 0.627,
+            "p95": 1.081,
+            "p99": 1.95
+          },
+          "wall_ms": {
+            "count": 13193,
+            "max": 9.757,
+            "mean": 0.757,
+            "median": 0.656,
+            "p95": 1.161,
+            "p99": 2.216
+          }
+        }
+      ],
+      "window_exposed": true,
+      "worst": {
+        "frames": 12644,
+        "gui_cpu_ms": {
+          "count": 12644,
+          "max": 6.986,
+          "mean": 0.752,
+          "median": 0.657,
+          "p95": 1.164,
+          "p99": 1.798
+        },
+        "wall_ms": {
+          "count": 12644,
+          "max": 9.912,
+          "mean": 0.79,
+          "median": 0.685,
+          "p95": 1.243,
+          "p99": 2.088
+        }
+      },
+      "worst_index": 1
+    },
+    {
+      "id": "activity-scroll",
+      "kind": "frame-work",
+      "metric": "wall_ms",
+      "runs": [
+        {
+          "frames": 3184,
+          "gui_cpu_ms": {
+            "count": 3184,
+            "max": 10.865,
+            "mean": 3.059,
+            "median": 2.722,
+            "p95": 5.087,
+            "p99": 6.154
+          },
+          "wall_ms": {
+            "count": 3184,
+            "max": 11.098,
+            "mean": 3.14,
+            "median": 2.78,
+            "p95": 5.273,
+            "p99": 6.471
+          }
+        },
+        {
+          "frames": 3480,
+          "gui_cpu_ms": {
+            "count": 3480,
+            "max": 7.779,
+            "mean": 2.793,
+            "median": 2.523,
+            "p95": 4.642,
+            "p99": 5.701
+          },
+          "wall_ms": {
+            "count": 3480,
+            "max": 8.989,
+            "mean": 2.873,
+            "median": 2.59,
+            "p95": 4.786,
+            "p99": 5.944
+          }
+        },
+        {
+          "frames": 3267,
+          "gui_cpu_ms": {
+            "count": 3267,
+            "max": 9.512,
+            "mean": 2.973,
+            "median": 2.654,
+            "p95": 4.985,
+            "p99": 6.289
+          },
+          "wall_ms": {
+            "count": 3267,
+            "max": 9.616,
+            "mean": 3.06,
+            "median": 2.723,
+            "p95": 5.207,
+            "p99": 6.57
+          }
+        }
+      ],
+      "window_exposed": true,
+      "worst": {
+        "frames": 3184,
+        "gui_cpu_ms": {
+          "count": 3184,
+          "max": 10.865,
+          "mean": 3.059,
+          "median": 2.722,
+          "p95": 5.087,
+          "p99": 6.154
+        },
+        "wall_ms": {
+          "count": 3184,
+          "max": 11.098,
+          "mean": 3.14,
+          "median": 2.78,
+          "p95": 5.273,
+          "p99": 6.471
+        }
+      },
+      "worst_index": 0
+    },
+    {
+      "id": "session-open",
+      "kind": "timing",
+      "metric": "wall_ms",
+      "runs": [
+        {
+          "opens": 12,
+          "wall_ms": {
+            "count": 12,
+            "max": 894.558,
+            "mean": 851.011,
+            "median": 852.023,
+            "p95": 894.558,
+            "p99": 894.558
+          }
+        },
+        {
+          "opens": 12,
+          "wall_ms": {
+            "count": 12,
+            "max": 885.035,
+            "mean": 849.247,
+            "median": 846.161,
+            "p95": 885.035,
+            "p99": 885.035
+          }
+        },
+        {
+          "opens": 12,
+          "wall_ms": {
+            "count": 12,
+            "max": 867.618,
+            "mean": 837.714,
+            "median": 841.559,
+            "p95": 867.618,
+            "p99": 867.618
+          }
+        }
+      ],
+      "window_exposed": true,
+      "worst": {
+        "opens": 12,
+        "wall_ms": {
+          "count": 12,
+          "max": 894.558,
+          "mean": 851.011,
+          "median": 852.023,
+          "p95": 894.558,
+          "p99": 894.558
+        }
+      },
+      "worst_index": 0
+    },
+    {
+      "id": "input-latency",
+      "kind": "latency",
+      "metric": "latency_ms",
+      "runs": [
+        {
+          "inputs": 136,
+          "latency_ms": {
+            "count": 136,
+            "max": 0.866,
+            "mean": 0.381,
+            "median": 0.357,
+            "p95": 0.62,
+            "p99": 0.789
+          }
+        },
+        {
+          "inputs": 133,
+          "latency_ms": {
+            "count": 133,
+            "max": 3.281,
+            "mean": 0.418,
+            "median": 0.345,
+            "p95": 0.778,
+            "p99": 2.342
+          }
+        },
+        {
+          "inputs": 135,
+          "latency_ms": {
+            "count": 135,
+            "max": 3.221,
+            "mean": 0.358,
+            "median": 0.294,
+            "p95": 0.598,
+            "p99": 2.465
+          }
+        }
+      ],
+      "window_exposed": true,
+      "worst": {
+        "inputs": 133,
+        "latency_ms": {
+          "count": 133,
+          "max": 3.281,
+          "mean": 0.418,
+          "median": 0.345,
+          "p95": 0.778,
+          "p99": 2.342
+        }
+      },
+      "worst_index": 1
+    },
+    {
+      "id": "idle",
+      "kind": "resources",
+      "worst": {
+        "cpu_percent": 0.47,
+        "footprint_bytes": -1,
+        "rss_bytes": 260620288,
+        "window_ms": 10000
+      }
+    }
+  ],
+  "schema": "zerus-perf-v1",
+  "settings": {
+    "activity_events": 1000,
+    "list_rows": 2000,
+    "run_ms": 10000,
+    "runs": 3,
+    "step_px": 16,
+    "warmup_ms": 2000,
+    "window": "1440x900"
+  },
+  "startup": {
+    "process_cpu_ms": 1112.812,
+    "wall_ms": 1066.415
+  }
+}

@@ -44,6 +44,7 @@ private slots:
     void archivesStayOutOfQuickAccess();
     void headersAndAmpersandsSurviveExport();
     void submenuIsStableAndDoesNotLeak();
+    void unchangedContentKeepsItsActions();
     void openModesRemainSelectable();
     void emitsIntentOnClick();
     void emptyAndBrokenStates();
@@ -110,6 +111,27 @@ void TestTrayMenu::submenuIsStableAndDoesNotLeak()
         QCOMPARE(tm.menu()->findChildren<QMenu *>().size(), 1);
         QVERIFY(actions.last()->isChecked());
     }
+}
+
+void TestTrayMenu::unchangedContentKeepsItsActions()
+{
+    TrayMenu tm(kModes, "clipboard", false); auto state = twoBoxFleet(); tm.rebuild(state);
+    QPointer<QAction> games = tm.menu()->actions().at(4);
+    QCOMPARE(games->text(), QString("● codex/games"));
+    // A poll that changes nothing the menu shows: poll times and a row's phase.
+    auto local = box("arch", {sess("claude/infra"), sess("codex/games", 1, {"/dev/pts/3"})}); local.sessions[0].phase = "working";
+    state.setLocal(local, 5000); state.setPeer(box("mac", {sess("kimi/docs", 1, {"/dev/pts/8"})}), 5000);
+    tm.rebuild(state); QVERIFY(games);
+    QSignalSpy activated(&tm, &TrayMenu::sessionActivated);
+    games->trigger(); QCOMPARE(activated.at(0), QList<QVariant>({QString(), QString("codex/games"), QString("/dev/pts/3")}));
+    // What it shows or binds rebuilds it: another client terminal, a pause, an unreachable peer.
+    local.sessions[1].clients = {"/dev/pts/4"}; state.setLocal(local, 6000); tm.rebuild(state);
+    QVERIFY(!games);
+    tm.menu()->actions().at(4)->trigger(); QCOMPARE(activated.at(1).at(2).toString(), QString("/dev/pts/4"));
+    local.sessions[0].state = "paused"; state.setLocal(local, 7000); tm.rebuild(state);
+    QVERIFY(labels(tm.menu()).contains("claude/infra  (paused)"));
+    state.setPeer(box("mac", {}, false), 8000); tm.rebuild(state);
+    QVERIFY(labels(tm.menu()).contains("mac: unreachable"));
 }
 
 void TestTrayMenu::openModesRemainSelectable()

@@ -1009,6 +1009,7 @@ pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
     notifications::enrich(&mut value, notifications::load().as_ref(), journal::journal_name(&record));
     inspector.finish();
     waits::decorate(std::slice::from_mut(&mut value));
+    session_state::decorate(std::slice::from_mut(&mut value));
     Ok(value)
 }
 /// The session's own state for delivery, answer, interrupt and lifecycle
@@ -1066,7 +1067,7 @@ fn checked_request(record: &Value) -> Result<Value> {
     if bytes.len() > 30 * 1024 * 1024 {
         return Err("Native request exceeds bounds".into());
     }
-    let request: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let request: Value = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e| e.to_string())?;
     let id =
         uuid::Uuid::parse_str(string(&request, "request_id")).map_err(|_| "Invalid request ID")?;
     if id.is_nil()
@@ -2205,7 +2206,7 @@ mod tests {
         let (old, new) = ("opencode/p/old", "opencode/p/new");
         let marks = dir.path().join("read-marks.json");
         let before = rename_marks(old);
-        atomic(&marks, &before.to_string()).unwrap();
+        atomic_private(&marks, &before.to_string()).unwrap();
         let mut guard = read_marks::RenameGuard::at(&marks).unwrap();
         let old_binding = dir.path().join("old.json");
         let new_binding = dir.path().join("new.json");
@@ -2261,7 +2262,7 @@ mod tests {
             let (old, new) = ("opencode/p/old", "opencode/p/new");
             let marks = dir.path().join("read-marks.json");
             let before = rename_marks(old);
-            atomic(&marks, &before.to_string()).unwrap();
+            atomic_private(&marks, &before.to_string()).unwrap();
             let mut guard = read_marks::RenameGuard::at(&marks).unwrap();
             let (old_binding, new_binding) =
                 (dir.path().join("old.json"), dir.path().join("new.json"));
@@ -2395,7 +2396,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("read-marks.json");
         let bytes = b"{\"version\":1, \"sessions\":{\"other\":{\"conversation\":{\"reply_id\":\"same\"}}}}\n";
-        atomic(&path, std::str::from_utf8(bytes).unwrap()).unwrap();
+        atomic_private(&path, std::str::from_utf8(bytes).unwrap()).unwrap();
         let mut guard = read_marks::RenameGuard::at(&path).unwrap();
         guard.transfer("missing", "new").unwrap();
         guard.transfer("other", "other").unwrap();

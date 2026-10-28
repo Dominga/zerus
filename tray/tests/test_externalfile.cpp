@@ -3,6 +3,7 @@
 #include <QTemporaryDir>
 #include "ExternalFile.h"
 #include "DownloadCache.h"
+#include "OffGuiThread.h"
 
 namespace {
 QString write(const QTemporaryDir &dir, const QString &name, const QByteArray &bytes)
@@ -114,7 +115,7 @@ private slots:
 #if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
         QVERIFY(!marker(result.path).isEmpty());
 #endif
-        const auto usage = DownloadCache::trim(dir.path(), 1, DownloadCache::OpeningGraceMs + 1001);
+        const auto usage = offGuiThread([&] { return DownloadCache::trim(dir.path(), 1, DownloadCache::OpeningGraceMs + 1001); });
         QVERIFY2(usage.error.isEmpty(), qPrintable(usage.error)); QCOMPARE(usage.files, 0); QVERIFY(!QFileInfo::exists(result.path));
     }
 

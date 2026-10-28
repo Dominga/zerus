@@ -26,10 +26,15 @@ pub(crate) fn send_origin() -> Option<Value> {
     target_receipt(&owned_record()?)
 }
 
-/// The live binding whose native agent is an actual ancestor of this CLI.
+/// The live binding whose native agent is an actual ancestor of this CLI, or
+/// whose agent window holds the Claude background job this CLI runs under.
 /// Its name may be a rename shadow's: hooks and agents keep the environment
 /// they started with.
 fn owned_record() -> Option<Value> {
+    token_record().or_else(super::super::continuations::background_session)
+}
+
+fn token_record() -> Option<Value> {
     let name = nonempty_env("HGS_SESSION")?;
     let run = nonempty_env("HGS_RUN_ID")?;
     let record = read_run(&name, &run).ok()??;
@@ -194,7 +199,8 @@ pub(crate) fn forward_send(route: &str, args: &[String], origin: Value) -> crate
     }
     // The ledger digest and the receiving send's request identity both cover
     // the exact text delivered.
-    let input = enveloped(input);
+    // N34: a BOM is dropped before the envelope and the ledger digest.
+    let input = enveloped(crate::state::without_bom(&input).to_vec());
     let reservation = match reserve(&origin, route, &args[0], &input) {
         Ok(value) => Some(value),
         Err(_) => {

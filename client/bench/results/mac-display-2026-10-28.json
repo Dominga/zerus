@@ -1,0 +1,44 @@
+{
+  "client": "probe",
+  "created_at_unix": 1793138529,
+  "display": {
+    "display_link_hz": [
+      119.94293468999108,
+      120.46482932935865,
+      120.45730041660562
+    ],
+    "display_link_window_s": 2,
+    "measured": true,
+    "screen_max_fps": 120
+  },
+  "harness": "client/perf-probe-mac",
+  "platform": {
+    "os": "macos",
+    "os_version": "Version 27.0.1 (Build 26A434)"
+  },
+  "schema": "zerus-perf-v1",
+  "webkit": {
+    "control": {
+      "after": true,
+      "before": true,
+      "error": null
+    },
+    "default": true,
+    "disabled": {
+      "after": false,
+      "applied": true,
+      "before": true,
+      "error": null
+    },
+    "features": 601,
+    "found": true,
+    "key": "PreferPageRenderingUpdatesNear60FPSEnabled",
+    "name": "Prefer Page Rendering Updates near 60fps",
+    "related_keys": [
+      "PreferPageRenderingUpdatesNear60FPSEnabled",
+      "WebAnimationsCustomFrameRateEnabled"
+    ],
+    "untouched": true,
+    "webview_configuration_read_back": false
+  }
+}

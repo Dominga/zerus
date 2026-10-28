@@ -13,7 +13,7 @@ for (const [rule, command] of corpus.blocked) {
 for (const command of corpus.allowed) assert.equal(checkCommand(command, corpus.home), null, command);
 assert.equal(checkCommand('x'.repeat(256 * 1024 + 1), corpus.home).rule, 'protected-path');
 assert.equal(checkCommand('echo ' + 'x'.repeat(17000) + '; rm -rf ~', corpus.home).rule, 'protected-path');
-for (const home of ['/home/alice', '/Users/alice', 'D:\\profiles\\fixture']) {
+for (const home of ['/home/example', '/Users/example', 'D:\\profiles\\example']) {
   assert.equal(checkCommand(`Remove-Item '${home}' -Recurse`, home).rule, 'protected-path');
   assert.equal(checkCommand('rm -rf ~/.cache/pip', home), null);
 }

@@ -1,3 +1,4 @@
+#include "SettingsJson.h"
 #include "SpeechSettings.h"
 #include "SpeechClient.h"
 #include <QAudioDevice>
@@ -214,7 +215,7 @@ SpeechSettings::SpeechSettings(const QString &executable, QWidget *parent, std::
     m_microphone = new QComboBox; m_microphone->setObjectName("speechMicrophone"); layout->addWidget(m_microphone);
     layout->addWidget(label(tr("Provider settings and credentials stay on their processing computer. Recordings are limited to two minutes. Original audio and recognized text remain in conversation history; your typed draft stays separate.")));
     m_statistics = label({}); m_statistics->setObjectName("speechStatistics"); layout->addWidget(m_statistics); layout->addStretch();
-    m_pending = QJsonDocument::fromJson(QSettings().value(pendingKey).toByteArray()).object();
+    m_pending = SettingsJson::object(pendingKey);
     if (!validMachine(m_pending.value("machine_id").toString()) || QUuid(m_pending.value("request_id").toString()).isNull()) m_pending = {};
     setPeers({}); microphones(); controls();
     connect(m_host, &QComboBox::currentIndexChanged, this, [this] { QSettings().setValue("speech/manage_host", m_host->currentData()); refresh(); });
@@ -360,7 +361,7 @@ void SpeechSettings::operation(const QString &host, const QString &machine, QJso
     m_result->clear(); m_result->hide();
     const auto request = uuid(); payload["request_id"] = request; payload["expected_machine_id"] = machine;
     m_pending = {{"host", host}, {"computer", host.isEmpty() ? localComputerName() : host}, {"machine_id", machine}, {"request_id", request}, {"action", payload.value("action")}};
-    QSettings settings; settings.setValue(pendingKey, QJsonDocument(m_pending).toJson(QJsonDocument::Compact)); settings.sync();
+    QSettings settings; SettingsJson::store(settings, QString::fromLatin1(pendingKey), QJsonDocument(m_pending)); settings.sync();
     if (settings.status() != QSettings::NoError) { m_pending = {}; if (done) done({}, tr("Could not save the operation identity. No provider request was sent.")); controls(); return; }
     m_operationDone = std::move(done); m_busy = true; m_waiting = false; m_statusPolls = 0; m_statusClock.start(); controls();
     m_client->request(host, payload, [this](const QJsonObject &reply, const QString &error) { operationResult(reply, error, true); });

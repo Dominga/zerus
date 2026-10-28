@@ -53,6 +53,10 @@ fn parse(agent: &str, screen: &str) -> Option<Queue> {
     Some(Queue { text, keys, hint: if agent == "claude" {"Send the queued messages now"}
         else {"Steer the agent with the queued messages now"}.into() })
 }
+/// The text of the agent's own queue panel on `screen`, if it shows one (U35).
+pub(super) fn panel_text(agent: &str, screen: &str) -> Option<String> {
+    parse(agent, screen).map(|queue| queue.text)
+}
 /// Stop's Escape returns ordinary Codex follow-ups to its input as one unsent draft
 /// (pinned 0.160.1 and 0.162.0). Stop notes the ones this turn's panel shows.
 const STOP_FOLLOW_UPS: &str = "codex_stop_follow_ups";
@@ -129,7 +133,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if args.len()!=2 || args[1]!="--json" {return Err("usage: hgs send-now <session> --json".into());}
     let mut bytes=Vec::new();io::stdin().take(8193).read_to_end(&mut bytes).map_err(|e|e.to_string())?;
     if bytes.len()>8192 {return Err("queue request is too large".into());}
-    let request:Request=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
+    let request:Request=serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e|e.to_string())?;
     let uuid=uuid::Uuid::parse_str(&request.request_id).map_err(|_|"request_id must be a UUID")?;
     let _guard=lock(None)?;
     let record=read(&args[0])?;

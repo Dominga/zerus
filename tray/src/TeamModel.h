@@ -1,4 +1,6 @@
 #pragma once
+#include <QCoreApplication>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QList>
@@ -22,14 +24,120 @@ inline QStringList knownModels(const QString &agent)
     return known.value(agent);
 }
 
+// A member's question to the lead (A3), open until the lead answers it. B1/C4:
+// a permission request carries the exact command, its source ("tool_input",
+// "process" or "unknown"), the agent's reason and the question hash hgs team
+// answer expects.
+struct Question {
+    QString id, text, answer, by;
+    double at = 0, answeredAt = 0;
+    QString tool, command, commandSource, reason, decision;
+    QString hash;
+    // C4: the native answer this card needs: the card's own question id and the
+    // option ids for allow and deny, as status sends them in question.answer.
+    struct NativeAnswer { QString questionId, allow, deny; bool known = false; };
+    NativeAnswer native;
+    // U19 (#520): a subagent card ("Start N subagents"); `record` keeps the
+    // status record, whose `subagents` list (or reason text) gives the rows.
+    bool subagents = false;
+    QJsonObject record;
+    bool answered() const { return answeredAt > 0 || !answer.isEmpty(); }
+    bool permission() const { return !tool.isEmpty() || !command.isEmpty() || !reason.isEmpty(); }
+};
+
+// C4: one answered permission request (members[].permission_answers keeps the
+// last 20): what was decided, who decided it, the tool and command it asked
+// about and the deny text.
+struct PermissionAnswer {
+    QString questionId, decision, by, reason, tool, command;
+    double at = 0;
+    bool denied() const { return decision == "deny"; }
+};
+
 struct Member {
     QString id, role, agent, model, computer, state, error;
     QString account, effort, permissions, folder, directory, prompt;
     // The member's session once it exists: computer alias (empty = the lead's
     // computer) and name.
     QString host, session;
+    // The identity a hand-written plan may carry to adopt an existing session
+    // (F8); empty for a member Zerus launches itself.
+    QString runId, conversationId;
     bool lead = false;
+    // H1: the session stopped at a usage limit; the reset time when the
+    // session reported one, and whether Zerus waits for it (resume after limits).
+    struct Limit { bool known = false; double at = 0, resetsAt = 0; QString detail; };
+    Limit limited;
+    bool limitResume = false;
+    // H3: its DeepSeek host serves other members too.
+    bool hostShared = false;
+    // The member queue (A5): its open task first, then the tasks returned to it
+    // (pending, with attempts). From `team status` when hgs sends it; an older
+    // hgs gets the same list derived from the tasks.
+    QList<int> queue;
+    bool queueKnown = false;   // `queue` was in the JSON, even when empty
+    // G7: the MCP servers and services this member's session runs; they outlive
+    // the session and are not Background work.
+    struct Service { QString name, command; double since = 0; };
+    QList<Service> services;
+    // C12: the declared time budget of the member's background job.
+    struct Budget {
+        QString label, state, command;
+        int minutes = 0, redMinutes = 0, elapsedMinutes = 0;
+        double since = 0;
+        bool known = false;
+    };
+    Budget budget;
+    // C4: the member's pending permission request and the answers so far, as
+    // `team status` sends them in members[].question and permission_answers.
+    Question permission;
+    QList<PermissionAnswer> permissionAnswers;
+    // Spec 5.6 (U25): the member it reports to (empty: the lead) and whether
+    // it is a sub-lead, which hands out, reviews and accepts its reports' tasks.
+    QString parent;
+    bool sub = false;
     QJsonObject json() const;
+};
+
+// An existing session a member may be given instead of starting one (F8): what
+// `plan` and `add-member` accept as `session`. `directory` is the session's own
+// folder, which an adopted member keeps.
+struct SessionChoice {
+    QString host, name, runId, conversationId, agent, directory;
+};
+
+// A report that replaced the reply captured for an attempt (A6).
+struct ReplacedReport {
+    QString text;
+    double at = 0;
+};
+
+// D1: one criterion and one evidence item of a structured report.
+struct ReportCriterion {
+    int n = 0;
+    QString result, note;      // pass, fail, partial, n/a
+    QList<int> evidence;       // indexes into the evidence list
+};
+struct ReportEvidence {
+    QString kind;              // command, image, html, file, log, url, text
+    QString caption, path, url, command, tail, text;
+    int exit = 0;
+    bool hasExit = false;
+};
+struct StructuredReport {
+    bool present = false;
+    QString summary, commit;
+    QList<ReportCriterion> criteria;
+    QList<ReportEvidence> evidence;
+    QStringList limits;
+};
+
+// D2: one finding as `hgs team status` pages it.
+struct TeamFinding {
+    // N17, N18: the owner's replan proposal and a fix_phase finding's phase.
+    QString id, fromTask, severity, title, file, scenario, task, state, by, note, proposal;
+    int line = 0, phase = 0;
+    double at = 0;
 };
 
 struct Attempt {
@@ -37,29 +145,183 @@ struct Attempt {
     QString id, member, state, error, notice, report;
     bool noReport = false;
     double sentAt = 0;
+    // D1: attempts[].report.structured and .unstructured.
+    StructuredReport structured;
+    bool unstructured = false;
+    // Delivery and start (A1); zero or false in an older team file.
+    double deliveredAt = 0, startedAt = 0, replyAt = 0, turnEndedAt = 0;
+    bool startWarned = false;
+    // U31: this attempt worked a task of a draft phase.
+    bool workedAhead = false;
+    // The reply id kept with turn_ended_at, so a newer turn is not captured (A2).
+    QString turnReply;
+    double reportAt = 0;
+    bool captured = false;              // the text was taken from the last reply
+    QList<ReplacedReport> replaced;     // oldest first, at most 3
+    // The phase hgs derives for the attempt (spec 2). `phaseKnown` records that
+    // hgs sent the key at all: it sends null on purpose for a finished task and
+    // for a revoked or refused attempt, and only an older hgs sends no key.
+    QString phase;
+    bool phaseKnown = false;
+    QList<Question> questions;          // oldest first
+    QList<PermissionAnswer> permissions; // B1: answered requests, oldest first
+    // N6: the check this attempt ran (attempts[].check): exit and last lines.
+    struct CheckResult { int exit = 0; QString tail; bool known = false; };
+    CheckResult checkResult;
+    const Question *openQuestion() const
+    {
+        for (const auto &question : questions) if (!question.answered()) return &question;
+        return nullptr;
+    }
 };
 
 struct Dep { int task = 0; bool soft = false; };
 
+// G1: the sub-team a task was delegated to (status children[] and
+// tasks[].subteam), and the parent task a team came from.
+struct Subteam {
+    QString team, name, status;
+    int done = 0, total = 0;
+    bool known = false;
+};
+struct ParentLink {
+    QString team, lead, member;
+    int task = 0;
+    bool known = false;
+};
+
+// A task parked by the lead or the owner (A5): pending, but never ready,
+// rebalanced or handed out until `release`.
+struct Hold {
+    QString by, reason;
+    double at = 0;
+};
+
+// U27: a visual lane of a phase, in order; the label names the row ("Checkpoint
+// 1"). Lanes are drawn by the desktop and never change hand-out.
+struct Lane {
+    int n = 0;
+    QString label;
+    bool known() const { return n > 0; }
+};
+
 struct Task {
     int id = 0;
+    int phase = 1;             // the approved initial plan is phase 1
+    bool pinned = false;       // stays with its assignee
     QString title, description, status, assignee, decidedBy, reason;
+    QString kind;              // C5: "check" for a check task
     QStringList criteria;
     QList<Dep> deps;
     QList<Attempt> attempts;   // oldest first
+    bool held = false;         // A5: the lead holds the task
+    Hold hold;
+    // C3: why the task waits and what unblocks it.
+    struct Wait { QString for_, unblock; QStringList on; bool known = false; };
+    Wait wait;
+    // C5: a check task runs exactly this command and reports its exit.
+    struct Check { QString command; int expectExit = 0, timeoutMinutes = 0; };
+    Check check;
+    struct CheckResult { int exit = 0; QString tail; bool known = false; };
+    CheckResult checkResult;
+    // G1: the sub-team delegated from this task.
+    Subteam subteam;
+    // U27: the visual lane, read from `lane`; n 0 means none.
+    Lane lane;
+    // U29: joined its phase after the phase started, on the owner's word
+    // twice: who added it, when, and the owner's two sentences.
+    struct AddedLate { QString by, request, confirm; double at = 0; bool known = false; };
+    AddedLate addedLate;
+    bool isCheck() const { return kind == "check" || !check.command.isEmpty(); }
     const Attempt *last() const { return attempts.isEmpty() ? nullptr : &attempts.last(); }
+    bool workedAhead() const { const auto *a = last(); return a && a->workedAhead; }
     bool finished() const { return status == "accepted" || status == "rejected" || status == "cancelled"; }
     QJsonObject json() const;
 };
 
+// A phase appended by `extend`; the approved initial plan (phase 1) has no
+// record. A `draft` phase waits for the owner, `auto` becomes approved at once.
+// F10: one line of what the lead changed in a draft, as the store reports it,
+// so the owner can read the diff before approving. `task` is the number the
+// change names; `from`/`to` say what moved or changed.
+struct PhaseChange {
+    QString kind;     // added, removed, changed, moved
+    int task = 0;
+    QString title, from, to;
+    bool added() const { return kind == "added"; }
+    bool removed() const { return kind == "removed"; }
+};
+
+struct Phase {
+    int n = 0;
+    QString title, approval, state, addedBy, decidedBy;
+    bool barrier = false;      // no task starts before every lower phase is finished
+    double addedAt = 0, decidedAt = 0;
+    QList<int> tasks;          // task ids; a discarded phase keeps them
+    QList<PhaseChange> changes; // F10: the lead's changes since the owner last saw it
+    // F12: why a draft waits - "Waiting for the previous phase to be ready"
+    // with that phase and its open tasks. N40: an approved phase still running
+    // no longer blocks the draft: "Can run alongside phase N", `alongside`.
+    struct Waiting { QString text; int phase = 0; QList<int> open; bool alongside = false; };
+    Waiting waiting;
+    // F13: the owner's sentence the lead approved on.
+    QString ownerWord;
+    // U25 (server #378): the note under the phase header, and the owner's
+    // send-back of a draft (state "rejected") until the lead reworks it.
+    QString note;
+    struct Rejection { QString comment, by; double at = 0, reworkedAt = 0; };
+    Rejection rejection;
+    bool draft() const { return state == "draft"; }
+    bool rejected() const { return state == "rejected"; }
+    bool queued() const { return state == "queued"; }
+};
+
+// Set by `hgs team finish`: who finished the team and the bounded summary.
+struct Finish {
+    QString by, summary;
+    double at = 0;
+};
+
+// A member session that still runs after its team is Done or Stopped (F7,
+// spec 9). The desktop shows it apart from the active members and never stops
+// it by itself.
+struct LeftRunning {
+    QString member, role, host, session, runId, conversationId;
+};
+
 struct Team {
     QString id, name, status, project, folder, lead;
+    // D1: settings.evidence_folders, where report evidence may be previewed.
+    QStringList evidenceFolders;
     qint64 revision = 0;
+    // F11: the revision that last renumbered draft phases or tasks.
+    qint64 phaseNumbersRevision = 0;
     double created = 0, updated = 0;
     bool allHard = false;
     int reportTimeout = 120;
+    QString approval;          // settings.approval; empty when the file has none
+    QString phaseApproval;     // settings.phase_approval; empty = same as approval
+    QString idle;              // the "all tasks decided" notice: pending, sending, sent, unconfirmed
     QList<Member> members;     // removed members are left out
     QList<Task> tasks;
+    QList<Phase> phases;       // phase 1 has no record
+    // G1: this team's parent task and its sub-teams, as status sends them.
+    ParentLink parent;
+    QList<Subteam> children;
+    bool hasFinish = false;
+    Finish finish;
+    // `team status` and `team list` derive these; old files are derived here.
+    bool waitingForLead = false;
+    int pendingPhase = 0;      // the first draft phase, 0 when none
+    // Spec 10: any number of draft phases may wait; approved strictly in order.
+    QList<int> pendingPhases;
+    // Done and Stopped teams: the member sessions that still run (F7).
+    QList<LeftRunning> leftRunning;
+    bool leftRunningKnown = false;
+    // B5: a role whose permissions profile the plan widens beyond the template;
+    // a plan with one cannot be approved until the owner confirms it.
+    struct Widening { QString member, role, from, to; };
+    QList<Widening> widenings;
     // Only from `team status`: layers by task, tasks in a cycle, ready tasks,
     // plan errors and warnings.
     bool full = false;
@@ -67,11 +329,183 @@ struct Team {
     QSet<int> cycle;
     QList<int> ready;
     QStringList errors, warnings;
+    // U25: the same errors and warnings with the task each names (0 for none),
+    // for the plan problems list and a phase's error count.
+    struct PlanIssue { int task = 0; QString text; };
+    QList<PlanIssue> errorItems, warningItems;
+    // C7: the plan-health numbers the lead reads before asking for approval and
+    // the owner sees in the GUI, with the starving members while the team runs.
+    struct Health {
+        bool known = false;
+        int tasks = 0, criticalPath = 0, widestReady = 0;
+        double parallelism = 0;
+        QList<QPair<QString, QPair<int, int>>> perMember;   // role, (tasks, on critical path)
+        struct FanIn { int task = 0; QList<int> waitsFor; QString kind; };
+        QList<FanIn> fanIn;
+        QStringList warnings;
+        struct Starved { QString member, role; int minutes = 0; QList<int> blocking; };
+        QList<Starved> starved;
+    };
+    Health health;
+    // G9 (spec 10.2): status.phase_summary - one header record per phase in
+    // display order, phase 1 included. Empty on an older hgs; the desktop then
+    // falls back to its own heading.
+    struct PhaseSummary {
+        int n = 0;
+        QString title, status, healthLine;   // status: done|in_work|approved|draft|paused
+        QString state;   // U25: planned|draft|rejected|queued|running|done (empty: older hgs)
+        int done = 0, total = 0;
+        bool barrier = false;
+    };
+    QList<PhaseSummary> phaseSummary;
+    // G9 (spec 10.1): status.phases_health - the plan health of each phase,
+    // keyed by phase number; empty on an older hgs.
+    QMap<int, Health> phasesHealth;
+    const PhaseSummary *phaseSummaryOf(int n) const;
+    const Health *phaseHealthOf(int n) const;
+    // C4: the undecided reports on the owner's attention list.
+    // U18/N7: `summary` is the server's sentence (member and what waits),
+    // `command` the hgs command that answers it.
+    struct Attention { QString kind, member, summary, command; int task = 0, minutes = 0, phase = 0, count = 0; double since = 0; };
+    QList<Attention> attention;
+    // D2: findings_* from status (open items and the deferred list).
+    QList<TeamFinding> findings;
+    bool findingsKnown = false;
+    QJsonObject findingsSummary;
+    QString findingsNext;
+    // F13: "approved by Lead on the owner's word" and the sentence.
+    QString approvedBy, ownerWord;
+    // F5: a team in status "draft" is edited by the owner and the lead before
+    // it exists: its goal, protocol addendum, folder policy and limit, the
+    // draft revision every update carries and the fields the lead changed that
+    // the owner has not seen yet.
+    QString goal, leadProtocol, folderPolicy;
+    int maxMembers = 0;
+    qint64 draftRevision = 0;
+    QStringList draftUnseen;
+    bool draft() const { return status == QLatin1String("draft"); }
+    // F7: the team a next goal came from, and the one it led to.
+    QString previous, next;
+    // H1: members limited by usage wait for their reset (settings).
+    bool resumeAfterLimits = false;
+    // U25: the owner's auto-accept of error-free phase drafts (settings.auto_accept),
+    // and the open tasks of running phases, the only ones that make a team Stuck.
+    bool autoAccept = false;
+    // U31: idle members may take independent tasks of the next draft phase.
+    bool workAhead = false;
+    QList<int> stuckScope;
+    // The settings as stored, so a change sends them back whole.
+    QJsonObject settingsJson;
+    // F8: the lead's membership proposals, decided by the owner. `member` is
+    // the proposed member (add), its id (remove) or the swap fields (swap).
+    struct Proposal {
+        QString id, kind, by, state, reason, goal, note;
+        double at = 0;
+        QJsonValue member;
+        bool open() const { return state == QLatin1String("open"); }
+        QString memberId() const;
+    };
+    QList<Proposal> proposals;
+    // H6: the sessions a swap left running for the owner to stop (last 20).
+    struct Swapped { QString member, old, by; double at = 0; };
+    QList<Swapped> swapped;
+    // H3: the DeepSeek hosts that serve members.
+    struct Host { QString agent; qint64 pid = 0; double started = 0; QStringList members; };
+    QList<Host> hosts;
+    const Host *hostOf(const QString &member) const;
     const Member *member(const QString &id) const;
     const Member *memberOfSession(const QString &host, const QString &session) const;
+    // Spec 5.6: who reviews a member (its sub-lead parent, else the lead; the
+    // lead has none), its direct reports, and the members as a tree: the lead,
+    // then each member followed by its reports, depth 0 for the lead.
+    QString reviewerOf(const QString &member) const;
+    QList<const Member *> reportsOf(const QString &member) const;
+    struct TreeNode { const Member *member = nullptr; int depth = 0; bool last = false; QList<bool> through; };
+    // `last`: no later sibling under the same parent. `through[k]`: the line of
+    // depth k+1 continues past this row (its ancestor there has a later sibling).
+    // `shown`, when set, keeps only those members: one whose parent is not
+    // shown hangs from its nearest shown ancestor (a folded team's list).
+    QList<TreeNode> memberTree(const std::function<bool(const QString &)> &shown = {}) const;
     const Task *task(int id) const;
+    const Phase *phase(int n) const;
+    const LeftRunning *leftOf(const QString &member) const;
     QString roleOf(const QString &member) const;
+    // Only a team with a phase record groups its plan by phase.
+    bool phased() const { return !phases.isEmpty(); }
+    QString effectivePhaseApproval() const { return phaseApproval.isEmpty() ? approval : phaseApproval; }
+    // The draft records in phase order (spec 10).
+    QList<int> draftPhases() const;
+    // U27: the tasks of one phase, in plan order.
+    QList<int> tasksOfPhase(int phase) const;
 };
+
+// A phase as the plan, board, layers and graph group it. Phase 1 has no
+// record; `done` counts its finished tasks and `total` all its tasks.
+struct PhaseGroup {
+    int n = 0;
+    QString title;
+    bool barrier = false, draft = false;
+    QList<int> tasks;
+    int done = 0;
+    bool finished() const { return !tasks.isEmpty() && done == tasks.size(); }
+};
+// The phases to show, in phase order; empty while the plan is phase 1 only.
+QList<PhaseGroup> phaseGroups(const Team &team);
+// G6: the team's progress in two small numbers instead of one over every task.
+// The first bar follows the phase in work — the lowest phase that is not a
+// draft and still has open tasks — or, when none is in work, the next draft
+// waiting for approval. The second counts finished phases out of the planned
+// ones; a discarded draft is not planned and never counts.
+struct PhaseProgress {
+    int phase = 0;          // the live number of the phase the first bar shows
+    QString title;
+    bool draft = false;     // that phase waits for approval
+    int done = 0, total = 0;
+    int phasesDone = 0, phasesTotal = 0;
+    bool valid() const { return phase > 0 && total > 0; }
+    QString phaseText() const { return QStringLiteral("%1/%2").arg(done).arg(total); }
+    QString phasesText() const { return QStringLiteral("%1/%2").arg(phasesDone).arg(phasesTotal); }
+    QString tooltip() const;
+};
+PhaseProgress phaseProgress(const Team &team);
+// Why phase N may not be approved yet (spec 10), empty when it may: every
+// lower phase must be approved. An approved phase still at work no longer
+// blocks it (F12/N40): the draft then runs alongside it.
+QString approveBlocked(const Team &team, int phase);
+// F12/N40: the earlier approved phase this draft would run alongside (0 when
+// none); the desktop warns the owner before approving it.
+int alongsidePhase(const Team &team, int phase);
+// U25 (spec 5.2): the owner's state of a phase: planned (the team is planning),
+// draft, rejected, queued, running or done. phase_summary[].state when the
+// server sends it, else read from the record and the phase's tasks.
+QString ownerPhaseState(const Team &team, const PhaseGroup &group);
+// U25 (server #378): why the owner may not Accept draft N yet, empty when he
+// may. An earlier phase still at work no longer blocks it (the phase waits as
+// queued); an earlier draft does.
+QString acceptBlocked(const Team &team, int phase);
+// The same reason for the compact draft row ("after phase 3"); the full
+// sentence stays its tooltip.
+QString approveBlockedShort(const Team &team, int phase);
+// True when this member's session still runs after the team ended (F7).
+bool leftMember(const Team &team, const QString &member);
+// C2: one thing on the lead's desk, as `hgs team inbox` lists it.
+struct InboxItem {
+    QString kind;      // report, question, permission, lead_task, stalled, budget
+    QString member, summary, command;
+    int task = 0;
+    double since = 0;
+};
+QList<InboxItem> parseInbox(const QJsonObject &value);
+// "Phase 2 · QA fixes · 3/5" (the title is left out when empty).
+QString phaseHeading(const PhaseGroup &group);
+// Layers by longest path inside one phase; dependencies outside it are ignored
+// (each phase draws its own layers).
+QMap<int, int> phaseLayers(const Team &team, const QList<int> &tasks);
+// U27: one phase's tasks by lane, in lane order, then the tasks without a lane
+// (key 0) which fall back to the dependency layers. Lanes never change hand-out.
+QList<QPair<int, QList<int>>> laneGroups(const Team &team, const QList<int> &ids);
+// The label a lane carries in a phase (the first task that names one).
+QString laneLabel(const Team &team, const QList<int> &ids, int lane);
 
 Team parse(const QJsonObject &value);
 // The plan as `hgs team plan` takes it: members besides the lead, and tasks.
@@ -113,17 +547,34 @@ struct Problem {
 };
 QList<Problem> problems(const Team &team, const LiveLookup &live);
 
-// planning, running, paused, stuck, done, stopped, archived. Stuck: a running
+// draft, planning, running, paused, stuck, done, stopped, archived. Stuck: a running
 // team where no open task can move without you.
 QString displayStatus(const Team &team, const LiveLookup &live);
 QString statusLabel(const QString &status);
 Tone statusTone(const QString &status);
+// F8: what a proposal would do, in one line ("Swap Backend to Codex · gpt-5.5").
+QString proposalText(const Team &team, const Team::Proposal &proposal);
+// H1: "resets 14:30" (today) or "resets 3 Nov 14:30"; empty when unknown.
+QString resetText(double resetsAt);
+// F4: the one Team designer conversation hgs starts (`catalog designer`). It
+// keeps its fixed name and colour, and the desktop files no other work in it:
+// it never leads or joins a team.
+inline bool isDesignerSession(const QString &host, const QString &session)
+{
+    return host.isEmpty() && session.endsWith(QLatin1String("/team-designer"));
+}
+// Its card's fixed title and colour, whatever project the folder falls in.
+inline QString designerTitle() { return QCoreApplication::translate("Teams", "Team designer"); }
+inline QString designerColor() { return QStringLiteral("#a46ee0"); }
 // "Next: #4, #5 wait for #3 Saved cards API" or "Ready: #4 Payment storage".
 QString nextLine(const Team &team);
 // One tone per task, in task order, for the segmented progress bar.
 QList<Tone> progress(const Team &team);
 int accepted(const Team &team);
-// Questions and approvals waiting in member sessions.
+// The team has at least one task and every task is finished (draft is not).
+bool allDecided(const Team &team);
+// Questions and approvals waiting for the lead: a member session's native
+// question or approval, and a team question asked with `hgs team ask` (A3).
 int answers(const Team &team, const LiveLookup &live);
 // Ancestors and descendants of a task, itself included.
 QSet<int> chain(const Team &team, int task);
@@ -131,31 +582,72 @@ QSet<int> chain(const Team &team, int task);
 QMap<int, QList<int>> layered(const Team &team);
 bool ready(const Team &team, const Task &task);
 
+// The shown phase of an attempt (spec 2): sent, delivered, late, working,
+// asking, reported, no_report, stopped, held, rejected, unconfirmed. hgs
+// derives it into the attempt's `phase`; an older hgs gets the same answer
+// from the attempt's fields and its task's hold.
+QString attemptPhase(const Task &task, const Attempt &attempt);
+// The last attempt's phase; empty without attempts.
+QString lastPhase(const Task &task);
+// Unanswered questions of the task's last attempt, oldest first.
+QList<Question> openQuestions(const Task &task);
+const Question *question(const Task &task, const QString &id);
+// The member queue (A5): its open task, then the tasks returned to it
+// (pending, with attempts). Nothing else.
+QList<int> memberQueue(const Team &team, const QString &member);
+
 // The team catalog (`hgs team catalog get`): roles, templates, routing rules
 // and the designer's draft of proposed changes.
+// N1 (#379): every catalog item keeps the object it was read from (`raw`);
+// json() writes the fields the desktop edits over it, so a Save or an Export
+// carries the fields it does not know (a role's about, prompt_order, notes...,
+// a template's work and phases, a skeleton task's phase, a rule's use).
 struct Role {
     QString id, name, color, prompt, agent, account, model, effort, permissions, computer, folder, canMessage;
+    QString permissionsProfile;   // B5: read, write, build, commit or network
     QStringList tags;
     bool dangerous = false;
+    // U25 (spec 11.3, 12): the editable role. `message` is lead, some or team
+    // (can_message keeps lead or team for older readers); `danger` holds the
+    // five allowed actions (push, deploy, del, pkgs, net); the prompt blocks
+    // go in `promptOrder` (rules, role, protocol, task and note keys), the
+    // ones switched off in `promptOff`, a note's text in `notes`.
+    QString about, icon, message, joins, protocolExtra, taskTemplate;
+    QStringList machines, messageTo, promptOrder, promptOff;
+    QJsonObject danger;
+    QMap<QString, QString> notes;
+    QJsonObject raw;
     QJsonObject json() const;
 };
-struct Seat { QString role; int count = 1; bool optional = false; };
-struct SkeletonTask { QString title, role; QList<int> deps; };
+struct Seat { QString role; int count = 1; bool optional = false; QJsonObject raw; };
+struct SkeletonTask { QString title, role; QList<int> deps; QJsonObject raw; int phase = 1; };
 struct Template {
     QString id, name, description, leadProtocol, planning, approval;
+    QString phaseApproval;     // "" = same as the plan's approval
     QList<Seat> roster;
     QList<SkeletonTask> tasks;
     int maxMembers = 6;
+    QString work;      // U25: worktree, clone, same or cloud ("" = worktree)
+    QString phases;    // U25: same, owner or lead (new phases)
+    QJsonObject raw;
     QJsonObject json() const;
 };
-struct Rule { QString id, when, templateId, approval; QJsonObject json() const; };
-struct Proposal { QString id, kind, action, target, title, reason, state; QJsonObject value; double at = 0; };
+// U25: `use` is a template id or "+role" (adds a member and keeps looking);
+// empty uses templateId. An empty approval is the template's own.
+struct Rule { QString id, when, templateId, approval; QJsonObject raw; QString use; QJsonObject json() const; };
+// U28: a proposal on the planning rules ("planning_rules") carries its text
+// in `text`; the others carry an object in `value`.
+struct Proposal { QString id, kind, action, target, title, reason, state; QJsonObject value; double at = 0; QString text; };
 struct Catalog {
     qint64 version = 0;
     bool builtin = false;
     QList<Role> roles;
     QList<Template> templates;
     QList<Rule> routing;
+    // U28: the lead's planning rules, versioned with the catalog. Known only
+    // when hgs sent them: a catalog saved without them gets the built-in ones.
+    QString planningRules;
+    bool planningRulesKnown = false;
     qint64 draftBase = 0;
     QList<Proposal> proposals;
     const Role *role(const QString &id) const;
@@ -168,6 +660,13 @@ Role parseRole(const QJsonObject &value);
 Template parseTemplate(const QJsonObject &value);
 Rule parseRule(const QJsonObject &value);
 Catalog parseCatalog(const QJsonObject &get);
+// U25: the colors the catalog gives its roles (Team designer), under the role's
+// id and name, lowercased with only letters and digits ("Lead (GPT)" is
+// "leadgpt"). TeamController keeps them current; the desktop's role colors read
+// them before the skin's palette.
+QHash<QString, QString> &catalogRoleColors();
+void rememberRoleColors(const Catalog &catalog);
+QString roleColorKey(const QString &role);
 // The catalog with the kept (or also the undecided) changes of its draft applied.
 Catalog withProposals(const Catalog &catalog, bool includeUndecided);
 

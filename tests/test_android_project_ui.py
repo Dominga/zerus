@@ -252,7 +252,7 @@ class HostedJavaAdmissionTests(unittest.TestCase):
     def test_precheckout_retains_actual_release_and_names_refused_guard(self):
         workflow = (ROOT / ".github/workflows/android-project-ui.yml").read_text()
         block = textwrap.dedent(workflow.split("python3 -I -B - <<'PY'\n", 1)[1].split("          PY\n", 1)[0])
-        for refused, image in ((None, "20261012.334.1"), (None, "20261018.339.1"), ("hosted_image", "unknown"), ("java_base_build", "20261012.334.1")):
+        for refused, image in ((None, "20261012.334.1"), (None, "20261018.339.1"), (None, "20261023.334.3"), ("hosted_image", "unknown"), ("java_base_build", "20261012.334.1")):
             with self.subTest(refused=refused, image=image), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 java = root / "jdk"
@@ -354,9 +354,97 @@ class PhoneServiceReadinessTests(unittest.TestCase):
         self.assertNotIn('except', function)
 
 
+class NativeToolEnvironmentTests(unittest.TestCase):
+    def fixture(self, root):
+        native = root / "android-project-ui-native"
+        for directory in (native, native / "cargo", native / "cargo/bin", native / "rustup"):
+            directory.mkdir(mode=0o700)
+        for name in ("rustup", "cargo-ndk"):
+            binary = native / "cargo/bin" / name
+            binary.write_text("synthetic file, never executed")
+            binary.chmod(0o700)
+        for name in ("cargo", "rustc", "rustdoc"):
+            (native / "cargo/bin" / name).symlink_to("rustup")
+        return native
+
+    def test_prepared_tools_remain_reachable_with_a_different_private_home(self):
+        with tempfile.TemporaryDirectory() as directory:
+            actual = Path(directory) / "actual"
+            actual.mkdir(mode=0o700)
+            root = Path(directory) / "alias"
+            root.symlink_to(actual, target_is_directory=True)
+            native = self.fixture(root).resolve()
+            private = {"HOME": str(root / "fixture-home"), "GRADLE_USER_HOME": str(root / "fixture-gradle"),
+                       "ANDROID_USER_HOME": str(root / "fixture-android")}
+            with patch.dict(os.environ, {"CARGO_HOME": "/untrusted/cargo", "RUSTUP_HOME": "/untrusted/rustup",
+                                         "PATH": "/untrusted/bin", "AWS_SESSION_TOKEN": "synthetic"}, clear=True):
+                env = dict(private, **UI.native_environment(root, Path("/reviewed/jdk")))
+            self.assertEqual({key: env[key] for key in private}, private)
+            self.assertEqual(env["CARGO_HOME"], str(native / "cargo"))
+            self.assertEqual(env["RUSTUP_HOME"], str(native / "rustup"))
+            self.assertEqual(env["CARGO_BUILD_JOBS"], "2")
+            self.assertEqual(env["PATH"], f"/reviewed/jdk/bin:{native}/cargo/bin:/usr/bin:/bin")
+            self.assertNotIn("AWS_SESSION_TOKEN", env)
+            self.assertEqual((Path(env["CARGO_HOME"]) / "bin/cargo").resolve(), native / "cargo/bin/rustup")
+
+    def test_missing_or_redirected_toolchain_never_falls_back_to_the_host(self):
+        for change in ("missing", "proxy", "permissions", "binary"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                native = self.fixture(root)
+                if change == "missing":
+                    (native / "rustup").rmdir()
+                elif change == "proxy":
+                    proxy = native / "cargo/bin/cargo"
+                    proxy.unlink()
+                    proxy.symlink_to("/usr/bin/false")
+                elif change == "permissions":
+                    (native / "cargo").chmod(0o755)
+                else:
+                    (native / "cargo/bin/cargo-ndk").unlink()
+                with self.assertRaises((AssertionError, OSError)):
+                    UI.native_environment(root, Path("/reviewed/jdk"))
+
+    def test_both_workflows_prepare_all_abis_before_the_unchanged_fixture(self):
+        blocks = []
+        for name in ("android-project-ui.yml", "android-approval-ui.yml"):
+            workflow = (ROOT / ".github/workflows" / name).read_text()
+            block = workflow.split("      - name: Prepare pinned task-replica libraries", 1)[1].split("      - name: Enable KVM", 1)[0]
+            blocks.append(block)
+            for command in ('test "$RUNNER_ENVIRONMENT" = github-hosted', 'test ! -e "$native"',
+                            'export CARGO_HOME="$native/cargo" RUSTUP_HOME="$native/rustup"',
+                            'cmp "$hosted_rustup" "$CARGO_HOME/bin/rustup"',
+                            'export PATH="$JAVA_HOME/bin:$CARGO_HOME/bin:/usr/bin:/bin"',
+                            'export CARGO_BUILD_JOBS=2', "'ndk;28.2.13676358'",
+                            "rustup toolchain install 1.99.1 --profile minimal --target aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android",
+                            "cargo +1.99.1 install cargo-ndk --version 4.1.2 --locked",
+                            ":app:rustAndroidLibraries :app:uniffiBindings"):
+                self.assertIn(command, block)
+            self.assertLess(workflow.index("Check result and APK admission controls"), workflow.index("Prepare pinned task-replica"))
+            self.assertLess(workflow.index("Prepare pinned task-replica"), workflow.index("Enable KVM"))
+            self.assertIn("timeout-minutes: 30", workflow)
+            for dependency in ("crates/replica/**", "crates/replica-ffi/**"):
+                self.assertIn("      - '" + dependency + "'", workflow)
+            for forbidden in ("secrets.", "actions/cache", "pull_request_target", "self-hosted", "continue-on-error"):
+                self.assertNotIn(forbidden, workflow)
+        self.assertEqual(blocks[0], blocks[1])
+
+    def test_clean_fixture_uses_prepared_tools_before_its_original_build_and_end(self):
+        source = (ROOT / "scripts/ci/android-project-ui.py").read_text()
+        merge = 'env.update(native_environment(os.environ["RUNNER_TEMP"], java))'
+        self.assertLess(source.index('env["GRADLE_OPTS"] += " -Duser.home="'), source.index(merge))
+        self.assertLess(source.index(merge), source.index('end = time.monotonic() + 1200'))
+        self.assertLess(source.index('run("rust-targets"'), source.index('run("apk-build"'))
+        build = source.split('run("apk-build"', 1)[1].split('stores =', 1)[0]
+        self.assertIn('"assembleDebug", "assembleDebugAndroidTest"], 600)', build)
+        self.assertIn('"--no-daemon", "--max-workers=2"', build)
+        self.assertIn('"-PzerusSigningProperties=" + str(missing)', build)
+        self.assertIn('"-PzerusInstrumentationRunner=" + RUNNER', build)
+
+
 class WorkflowBoundaryTests(unittest.TestCase):
-    def test_only_two_reviewed_images_are_allowed_with_the_same_version_guards(self):
-        self.assertEqual(UI.HOSTED_IMAGES, {"20261012.334.1", "20261018.339.1"})
+    def test_only_reviewed_images_are_allowed_with_the_same_version_guards(self):
+        self.assertEqual(UI.HOSTED_IMAGES, {"20261012.334.1", "20261018.339.1", "20261023.334.3"})
         workflow = (ROOT / ".github/workflows/android-project-ui.yml").read_text()
         block = textwrap.dedent(workflow.split("python3 -I -B - <<'PY'\n", 1)[1].split("          PY\n", 1)[0])
         assignment = next(node for node in ast.parse(block).body if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "HOSTED_IMAGES")

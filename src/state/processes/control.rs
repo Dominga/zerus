@@ -115,11 +115,20 @@ impl WorkSample {
         let current = roots(record, &rows);
         let first = current.iter().map(|pid| &rows[pid])
             .min_by(|a,b| a.started.total_cmp(&b.started));
-        json!({"count":current.len(),"started_at":first.map(|p|p.started),
-            "command":first.map(|p|journal::clipped(&json!(p.command),240)).unwrap_or_default(),"sampled_at":now()})
+        // U30: each job, so one nothing waits on can be listed as a service.
+        let mut jobs: Vec<_> = current.iter().map(|pid| &rows[pid]).collect();
+        jobs.sort_by(|a, b| a.started.total_cmp(&b.started));
+        let jobs: Vec<_> = jobs.iter().take(crate::state::session_state::MAX_JOBS)
+            .map(|p| json!({"command":journal::clipped(&json!(p.command),240),"started_at":p.started})).collect();
+        json!({"count":current.len(),"started_at":first.map(|p|p.started),"jobs":jobs,
+            "command":first.map(|p|journal::clipped(&json!(p.command),240)).unwrap_or_default(),"sampled_at":now(),
+            // G7: services are listed here, never counted as Background work.
+            "services":services_of(record, &rows)})
     }
 }
-fn roots(record: &Value, rows: &BTreeMap<u32, Process>) -> Vec<u32> {
+/// Every process the agent started that is work or a candidate service: a
+/// shell, its own process group or a direct child (G7).
+fn candidates(record: &Value, rows: &BTreeMap<u32, Process>) -> Vec<u32> {
     let root = record["pid"].as_u64().unwrap_or(0) as u32;
     let Some(agent) = rows.get(&root) else {
         return vec![];
@@ -160,6 +169,55 @@ fn roots(record: &Value, rows: &BTreeMap<u32, Process>) -> Vec<u32> {
             !candidates
                 .iter()
                 .any(|other| pid != other && descendant(*pid, *other, rows))
+        })
+        .collect()
+}
+
+fn configured_services(record: &Value) -> Vec<crate::state::services::Service> {
+    crate::state::services::configured(string(record, "agent"), string(record, "cwd"), string(record, "agent_home"))
+}
+
+fn agent_pid(record: &Value) -> u32 {
+    record["pid"].as_u64().unwrap_or(0) as u32
+}
+
+fn service_of(services: &[crate::state::services::Service], process: &Process, agent: u32) -> Option<String> {
+    services
+        .iter()
+        .find(|service| {
+            crate::state::services::is_service(
+                std::slice::from_ref(*service),
+                &process.executable,
+                &process.command,
+                agent,
+                process.parent,
+            )
+        })
+        .map(|service| service.name.clone())
+}
+
+/// The work of the session: processes the agent started, without the MCP
+/// servers and services it keeps alive (G7).
+fn roots(record: &Value, rows: &BTreeMap<u32, Process>) -> Vec<u32> {
+    let services = configured_services(record);
+    let agent = agent_pid(record);
+    candidates(record, rows)
+        .into_iter()
+        .filter(|pid| service_of(&services, &rows[pid], agent).is_none())
+        .collect()
+}
+
+/// The MCP servers and services the session runs, with their names and the
+/// time they started (G7).
+fn services_of(record: &Value, rows: &BTreeMap<u32, Process>) -> Vec<Value> {
+    let services = configured_services(record);
+    let agent = agent_pid(record);
+    candidates(record, rows)
+        .into_iter()
+        .filter_map(|pid| {
+            let name = service_of(&services, &rows[&pid], agent)?;
+            Some(json!({"name":name,"command":journal::clipped(&json!(rows[&pid].command),240),
+                "since":rows[&pid].started,"os_pid":pid}))
         })
         .collect()
 }
@@ -277,5 +335,57 @@ mod tests {
         let mut reused = rows[&20].clone();
         reused.birth = "new-birth".into();
         assert_ne!(original, job(&record, &reused, &rows)["id"]);
+    }
+    /// U11: Claude Code on Windows runs an enabled plugin's npx server as
+    /// `cmd.exe /d /s /c npx ^-y^ ...`. The session's listing shows it as the
+    /// plugin's service, not as Background work; an npx job beside it stays
+    /// Background.
+    #[test]
+    fn a_plugin_server_under_the_windows_npx_wrapper_is_a_service_not_work() {
+        let profile = tempfile::tempdir().unwrap();
+        let install = profile.path().join("plugins").join("cache").join("socraticode");
+        std::fs::create_dir_all(install.join(".claude-plugin")).unwrap();
+        std::fs::write(
+            install.join(".claude-plugin").join("plugin.json"),
+            json!({"name":"socraticode","mcpServers":{"socraticode":{"command":"npx","args":["-y","--prefer-online","socraticode@latest"]}}})
+                .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            profile.path().join("plugins").join("installed_plugins.json"),
+            json!({"version":2,"plugins":{"socraticode@socraticode":[{"scope":"user","installPath":install}]}}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(profile.path().join("settings.json"), json!({"enabledPlugins":{"socraticode@socraticode":true}}).to_string())
+            .unwrap();
+        let make = |pid, parent, exe: &str, command: &str| Process {
+            pid,
+            parent,
+            group: Some(pid),
+            birth: "birth".into(),
+            started: f64::from(pid),
+            command: command.into(),
+            executable: exe.into(),
+        };
+        let cmd = r"C:\WINDOWS\system32\cmd.exe";
+        let rows: BTreeMap<_, _> = [
+            make(10, 1, r"C:\Users\u\.local\bin\claude.exe", "claude"),
+            make(20, 10, cmd, r"C:\WINDOWS\system32\cmd.exe /d /s /c npx ^-y^ ^--prefer-online^ ^socraticode@latest^"),
+            make(21, 20, r"C:\Program Files\nodejs\node.exe", r"node C:\npm\npx-cli.js -y --prefer-online socraticode@latest"),
+            make(30, 10, cmd, r"C:\WINDOWS\system32\cmd.exe /d /s /c npx ^-y^ ^prettier^ ^--write^ ^.^"),
+        ]
+        .into_iter()
+        .map(|p| (p.pid, p))
+        .collect();
+        let record = json!({"pid":10,"agent":"claude","cwd":"","agent_home":profile.path()});
+        assert_eq!(roots(&record, &rows), vec![30]);
+        let services = services_of(&record, &rows);
+        assert_eq!(services.len(), 1, "{services:?}");
+        assert_eq!(services[0]["name"], "socraticode");
+        assert_eq!(services[0]["os_pid"], 20);
+        // Another profile has no such plugin: the wrapper is Background there.
+        let other = tempfile::tempdir().unwrap();
+        let record = json!({"pid":10,"agent":"claude","cwd":"","agent_home":other.path()});
+        assert_eq!(roots(&record, &rows), vec![20, 30]);
     }
 }

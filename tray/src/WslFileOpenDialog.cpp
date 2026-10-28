@@ -120,7 +120,7 @@ void WslFileOpenDialog::receive(const QJsonObject &proof)
             // dispatch only. Editing after the handler opens is the owner's act.
             const auto outcome=m_opener(path);
             if(outcome==ExternalFile::Outcome::OpenFailed||outcome==ExternalFile::Outcome::RevealFailed){failure(tr("The mapped file was verified, but the application or file manager could not open it."));return;}
-            if(m_remember->isChecked())QSettings().setValue(m_key,QJsonDocument(m_sent["mapping"].toObject()).toJson(QJsonDocument::Compact));
+            if(m_remember->isChecked())SettingsJson::store(m_key,QJsonDocument(m_sent["mapping"].toObject()));
             m_outcome=outcome==ExternalFile::Outcome::Revealed?ExternalFile::revealedNotice(path):tr("Opened the verified Windows original: %1").arg(path);
             QDialog::accept();
         });

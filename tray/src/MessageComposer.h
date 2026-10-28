@@ -38,9 +38,11 @@ public:
     void setAvailability(bool available, const QString &reason = {});
     void setCooperativeInbox(bool enabled);
     // Session feedback uses the existing action row and never replaces a draft.
-    void setSessionStatus(const QString &text, bool error = false, bool blockInput = false);
+    // html: the same status with emphasis, shown while nothing else takes its place.
+    void setSessionStatus(const QString &text, bool error = false, bool blockInput = false, const QString &html = {});
     // Independent of delivery/loading locks; keeps the existing draft selectable.
     void setRecording(bool recording);
+    bool isRecording() const { return m_recording; }
     void setAttachmentAvailability(bool available, const QString &reason = {});
     // Editable path text on this exact session's computer, without reading or
     // uploading the file. An empty key withdraws the reference target.
@@ -49,7 +51,10 @@ public:
     // Same as Stop; false when no turn can be interrupted now.
     bool requestInterrupt();
     // Fills an empty draft, for example with the prompt of an interrupted turn.
-    bool offerDraft(const QString &key, const QString &text);
+    bool offerDraft(const QString &key, const QString &text, const QList<MessageAttachment> &attachments = {});
+    ComposerDraft draftSnapshot() const { return m_drafts.value(m_key); }
+    void setDraftLabel(const QString &label);
+    void setDraftCacheLimit(int count) { m_draftCacheLimit = count; trimDraftCache(); }
     // The agent's suggested next message: the empty field's placeholder, inserted
     // with Tab. An empty text withdraws it; one already answered is not shown again.
     void setSuggestion(const QString &key, const QString &text, double at);
@@ -63,6 +68,9 @@ public:
     void setCompact(bool compact);
     // WhiteWh fork: how many iron rules go with every message (0 hides the chip).
     void setIronRulesCount(int count);
+    // U25: the compact row's Copy session reference (zerus://session), shown
+    // while the selected session has one to copy.
+    void setSessionReferenceAvailable(bool available);
     // modelDefaultEffort: an empty effort is a choice, the model's own default
     // (OpenCode variants); the popup then offers "Default" first.
     void setModelSettings(const QString &model, const QString &effort, const QJsonArray &options,
@@ -104,6 +112,8 @@ public:
     bool isSending(const QString &key) const;
     // Text or attachments not yet sent; a message on its way does not count.
     bool hasDraft(const QString &key) const;
+    // Every key hasDraft() is true for, from memory: a copy rows are prepared from.
+    QSet<QString> draftKeys() const;
     bool addAttachment(const QString &name, const QString &mime, const QByteArray &data);
     bool canEditAttachments() const { return !m_recording && !m_sessionStatusBlocksInput && !m_key.isEmpty() && !isDraftLoading(m_key) && !isSending(m_key) && !isWaitingToSend(m_key); }
     bool canAttachFiles() const { return m_attachmentsAvailable && canEditAttachments(); }
@@ -119,7 +129,7 @@ public:
     VoiceTarget voiceTarget() const { return {m_key, m_saveRevision.value(m_key), m_navigationRevision}; }
     // Append only to an unchanged, still selected editable draft. A successful
     // callback means the inserted text is durable; it never submits a message.
-    bool insertVoiceText(const VoiceTarget &target, const QString &text, std::function<void(bool)> saved);
+    bool insertVoiceText(const VoiceTarget &target, const QString &text, std::function<void(bool)> saved, const QString &operation = {});
     // Opens a stored copy of an attachment; tests replace the desktop handler.
     std::function<bool(const QUrl &)> openUrl;
     // Whether the session a saved draft belongs to can be shown now. Without it,
@@ -130,10 +140,21 @@ public:
     // Send and push now (message.push) in this field; off by default. Only the
     // main message field pushes: a subagent message bypasses the session's queue.
     void setPushEnabled(bool enabled);
+    // The Tasks tab's input: text and attachments, no model settings or Stop; the
+    // send button carries the stage a new task goes to. Drafts keep their keys.
+    void setTaskMode(bool taskMode);
+    void setSendLabel(const QString &label);
+    void addTaskControls(QWidget *controls);
+    void setSendIconOnly(bool enabled) { setProperty("sendIconOnly", enabled); updateControls(); }
+    // Shown in an empty field when the agent has no suggestion.
+    void setPlaceholder(const QString &placeholder);
 
 signals:
     void sessionRefreshRequested(const QString &sessionKey);
     void interruptRequested(const QString &sessionKey);
+    // U25: Copy session reference, and the iron rules chip.
+    void sessionReferenceRequested(const QString &sessionKey);
+    void ironRulesRequested();
     void settingsTerminalRequested(const QString &sessionKey);
     void settingsRequested(const QString &sessionKey, const QString &model, const QString &effort);
     void openCodeCatalogRequested(const QString &sessionKey);
@@ -159,6 +180,8 @@ protected:
 private:
     using Draft = ComposerDraft;
     bool saveDraft(const QString &key);
+    void trimDraftCache();
+    int m_draftCacheLimit = 0;
     void send();
     void push();
     void applyShortcuts();
@@ -199,7 +222,7 @@ private:
     QSet<QString> m_savingKeys;
     QSet<QString> m_failedSaves;
     QString m_key, m_unavailableReason;
-    QString m_sessionStatus;
+    QString m_sessionStatus, m_sessionStatusHtml;
     bool m_sessionStatusError = false, m_sessionStatusBlocksInput = false;
     bool m_cooperativeInbox = false;
     bool m_available = false, m_loading = false, m_dark = true, m_recording = false, m_attachmentsAvailable = true;
@@ -259,7 +282,8 @@ private:
     QHBoxLayout *m_actions;
     bool m_narrow = false;
     bool m_compact = false;
-    class QLabel *m_rulesChip = nullptr;
+    QPushButton *m_rulesChip = nullptr, *m_sessionReference = nullptr;
+    bool m_sessionReferenceAvailable = false;
     class QFrame *m_card = nullptr;
     QHBoxLayout *m_cardRow = nullptr;
     void fitEditor();
@@ -267,4 +291,6 @@ private:
     // Composer-scope commands (Shortcuts.h) on the field.
     QAction *m_sendAction, *m_pushAction;
     bool m_pushEnabled = false, m_pushing = false;
+    bool m_taskMode = false;
+    QString m_sendLabel, m_placeholder;
 };

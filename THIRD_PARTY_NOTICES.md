@@ -15,7 +15,8 @@ No native Codex executable is bundled.
 
 `tray/vendor/libvterm` contains libvterm 0.3.3 under MIT. Its original copyright
 notice and complete license are retained in `tray/vendor/libvterm/LICENSE`;
-source provenance and archive checksum are in `UPSTREAM.md` beside it.
+source provenance, archive checksum and one local patch are in `UPSTREAM.md`
+beside it.
 
 `tray/vendor/md4c` contains the md4c 0.5.2 Markdown parser and entity table
 under MIT. Its original license is retained in `tray/vendor/md4c/LICENSE.md`;
@@ -50,10 +51,25 @@ retained in `docs/licenses/canonicalpath-LICENSE.txt`. The notice collector chec
 the full source pin and license digest before including that text in packages,
 because this revision's Rust package metadata does not declare its root license.
 
+## Web client design mockup
+
+The design mockup in `design/webui` is not shipped with Zerus packages. It
+embeds the outline paths of two [Tabler Icons](https://github.com/tabler/tabler-icons)
+3.50.0 glyphs (`brand-apple`, `brand-windows`) as operating system marks in
+`design/webui/src/lib/os-icons.ts`, under MIT; the complete license and copyright
+notice are retained in `design/webui/licenses/tabler-icons-LICENSE.txt`. Its
+Linux mark is original Zerus artwork. `design/webui/src/lib/icons.generated.ts`
+contains static markup generated from the installed `lucide-solid` package (ISC).
+
 ## Dependencies obtained during build
 
 Rust dependencies and versions are locked in `Cargo.lock` and, for the mobile
 connector that Linux packages also ship, `services/mobile/connector/Cargo.lock`.
+hgs links Loro (MIT) through `crates/replica`; Loro in turn links `im`,
+`bitmaps` and `sized-chunks` under MPL-2.0, unmodified from crates.io, where
+their source code is available. Packages carry their MPL-2.0 license texts.
+Crates that publish no license file get the upstream notices kept in
+`packaging/rust-licenses`.
 The license expressions and source repositories of the first are recorded in
 `docs/rust-dependencies.json`; packages carry the notices of both.
 This inventory is metadata, not a replacement for dependency license texts.

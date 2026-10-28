@@ -5,6 +5,10 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 
 pub(super) fn root() -> PathBuf {
+    #[cfg(test)]
+    if let Some(root) = TEST_ROOT.with(|root| root.borrow().clone()) {
+        return root;
+    }
     nonempty_env("HGS_STATE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -13,6 +17,21 @@ pub(super) fn root() -> PathBuf {
                 .unwrap_or_else(|| home().join(".local/state"))
                 .join("hgs/sessions")
         })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A private state directory for a test driving the real command entry
+    /// point: the store, the worker lock and the records all live here, and
+    /// nothing outside the test sees it.
+    static TEST_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Sets (or clears) this thread's state directory; `state::with_test_state_root`
+/// restores it even when the test panics.
+#[cfg(test)]
+pub(super) fn set_test_root(root: Option<PathBuf>) {
+    TEST_ROOT.with(|value| *value.borrow_mut() = root);
 }
 
 pub(super) fn private_dir(path: &Path) -> Result<()> {
@@ -25,12 +44,27 @@ pub(super) fn absolute_root() -> Result<PathBuf> {
 }
 
 pub(super) fn atomic(path: &Path, contents: &str) -> Result<()> {
+    write_atomic(path, contents, false)
+}
+
+/// `atomic` for a file whose privacy is checked when it is read (#526): on
+/// Windows the new file gets a protected DACL for this user only before
+/// anything is written, as a Unix temp file is created 0600; an inherited ACL
+/// is not private on every computer.
+pub(super) fn atomic_private(path: &Path, contents: &str) -> Result<()> {
+    write_atomic(path, contents, true)
+}
+
+fn write_atomic(path: &Path, contents: &str, private: bool) -> Result<()> {
     let parent = path.parent().ok_or("cannot write file without parent")?;
     private_dir(parent)?;
     let mut temp = tempfile::Builder::new()
         .prefix(".hgs-")
         .tempfile_in(parent)
         .map_err(|e| e.to_string())?;
+    if private {
+        crate::platform::owner_only_file(temp.path()).map_err(|e| e.to_string())?;
+    }
     temp.write_all(contents.as_bytes())
         .map_err(|e| e.to_string())?;
     temp.as_file().sync_all().map_err(|e| e.to_string())?;

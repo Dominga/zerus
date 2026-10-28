@@ -1,5 +1,6 @@
 #include "CacheKeepalive.h"
 #include "SessionRowPreferences.h"
+#include "SettingsJson.h"
 #include <QJsonDocument>
 #include <QSet>
 #include <QSettings>
@@ -9,7 +10,7 @@ namespace {
 const char *const SettingsKey = "workspace/cacheKeepWarm";
 // Bounded like the other device-local session preferences.
 constexpr int MaxSessions = 10000;
-QJsonObject saved() { return QJsonDocument::fromJson(QSettings().value(SettingsKey).toByteArray()).object(); }
+QJsonObject saved() { return SettingsJson::object(QString::fromLatin1(SettingsKey)); }
 QString id(const QString &host, const SessionInfo &session) { return QString::fromLatin1(SessionRowPreferences::key(host, session).toHex()); }
 }
 
@@ -30,7 +31,7 @@ void CacheKeepalive::setHours(const QString &host, const SessionInfo &session, i
     auto values = saved(); const auto key = id(host, session);
     if (hours <= 0) values.remove(key);
     else if (values.contains(key) || values.size() < MaxSessions) values.insert(key, std::min(hours, int(MaxHours)));
-    QSettings().setValue(SettingsKey, QJsonDocument(values).toJson(QJsonDocument::Compact));
+    SettingsJson::store(QString::fromLatin1(SettingsKey), QJsonDocument(values));
 }
 
 int CacheKeepalive::ttl(const QJsonObject &details)
@@ -68,6 +69,13 @@ bool CacheKeepalive::idle(const SessionInfo &s)
         && s.backgroundProcesses <= 0 && s.subagentActiveCount == 0 && !s.hasCoordinationWait() && !s.needsAction();
 }
 
+// A build Zerus runs: the agent itself is idle; the build is its work.
+bool CacheKeepalive::building(const SessionInfo &s)
+{
+    return s.sessionState == "build" && s.state == "running" && s.processState != "exited" && s.activity == "idle"
+        && s.phase == "idle" && !s.needsAction();
+}
+
 bool CacheKeepalive::pending(const QString &host, const SessionInfo &session) const
 {
     return m_states.value(SessionRowPreferences::key(host, session)).sent > 0;
@@ -82,7 +90,8 @@ QList<CacheKeepalive::Reply> CacheKeepalive::observe(const QString &host, const 
     for (const auto &s : box.sessions) {
         const auto key = SessionRowPreferences::key(host, s);
         const int limit = std::clamp(values.value(QString::fromLatin1(key.toHex())).toInt(), 0, int(MaxHours));
-        if (!limit || s.state != "running" || s.conversationId.isEmpty()) continue;
+        const bool build = building(s);
+        if ((!limit && !build) || s.state != "running" || s.conversationId.isEmpty()) continue;
         listed.insert(key);
         auto &st = m_states[key];
         if (st.run != s.runId || st.conversation != s.conversationId) {
@@ -97,12 +106,25 @@ QList<CacheKeepalive::Reply> CacheKeepalive::observe(const QString &host, const 
         }
         if (st.sent > 0) {
             // hgs does not count a keepalive's reply: idle again later means it ran.
-            if (idle(s) && now - st.sent >= 20) { st.warmed = st.sent; st.sent = 0; st.request = 0; }
+            if ((idle(s) || build) && now - st.sent >= 20) { st.warmed = st.sent; st.sent = 0; st.request = 0; }
             else if (now - st.sent > 600) { st.sent = 0; st.request = 0; st.cold = true; }
             continue;
         }
         // A turn in progress uses the cache.
         if (s.activity == "busy") { st.real = st.warmed = now; st.cold = false; continue; }
+        // A build keeps the context warm every 30 minutes, with the same
+        // message and reply handling; the hours and the cold mark wait for it.
+        if (build) {
+            // Counted from the build's start or the last warming, whichever is later.
+            const double since = std::max(st.warmed, s.build.value("since").toDouble());
+            if (s.runId.isEmpty()) continue;
+            if (since <= 0) { st.warmed = now; continue; }
+            if (now - since < BuildInterval) continue;
+            st.sent = now;
+            st.request = m_client.requestSendMessage(host, s.name, message(), {}, s.runId, s.conversationId);
+            m_requests.insert(st.request, key);
+            continue;
+        }
         if (!idle(s) || st.cold || s.runId.isEmpty() || st.warmed <= 0) continue;
         if (s.cmd == "claude" && !st.inspected) {
             st.inspected = true;

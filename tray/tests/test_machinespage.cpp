@@ -1,3 +1,4 @@
+#include "support/PageShots.h"
 #include <QtTest>
 #include <QCheckBox>
 #include <QColorDialog>
@@ -30,6 +31,8 @@ class TestMachinesPage : public QObject {
     Q_OBJECT
 private slots:
     void init();
+    void unsavedEditsGateActionsAndTheLabelHasSwatches();
+    void unsavedDotSurvivesRowRebuilds();
     void removalRequiresExplicitConfirmationOfSameConnection_data();
     void removalRequiresExplicitConfirmationOfSameConnection();
     void localReadOnlyAndNewProfileCannotOverwrite();
@@ -47,6 +50,7 @@ private slots:
     void dashboardSelectionWaitsForProfiles();
     void controlOnlyComputerIsAConsoleWithoutSessions();
     void countsReadInSingularAndPlural();
+    void hiddenPageRendersFleetChangesWhenShown();
     void windowsConsoleEnablesLocalSessions();
     void enablingIsOfferedOnlyToAWindowsConsole();
     void windowsComputerPageHasNoSshConnection();
@@ -85,6 +89,16 @@ if args[0]=='session-host':
   print('cannot enable local sessions: access denied',file=sys.stderr); sys.exit(1)
  print(json.dumps({'enabled':True,'version':'1.52.0','marker_created':True,
   'cli':{'path':'C:\\Users\\user\\.local\\bin\\hgs.exe','sha256':'a'*64,'version':'1.52.0','changed':True}}))
+ sys.exit(0)
+# The Phones card asks every reachable workspace (U25 shots): one list here.
+if args and args[0].startswith('@') and args[1:2] in (['mobile'],['--help']): args=args[1:]
+if args==['--help']:
+ print('usage: hgs [@host] <cmd>'); print('       hgs [@host] mobile phones|invite|revoke-phone <id> --json   phones'); sys.exit(0)
+if args[0:2]==['mobile','phones']:
+ now=time.time()
+ print(json.dumps({'configured':True,'workspace_id':'w1','workspace_name':'Orbit','server_url':'https://relay.example',
+  'devices':[{'id':'p1','name':'Anna’s iPhone','platform':'ios','paired_at':now-86400*15,'last_seen_at':now-600,'added_by':{'name':'workstation'}},
+             {'id':'p2','name':'Pixel 9','platform':'android','paired_at':now-86400*54,'last_seen_at':now-86400*3,'added_by':{'name':'macbook'}}]}))
  sys.exit(0)
 assert args[0]=='machine'
 command=args[1]
@@ -457,6 +471,112 @@ void TestMachinesPage::dashboardSelectionWaitsForProfiles()
     page.selectMachine("arch"); QCOMPARE(widget<QListWidget>(page, "machineProfiles")->currentRow(), 0);
     page.selectMachine("mac"); page.selectMachine({}); QCOMPARE(widget<QListWidget>(page, "machineProfiles")->currentRow(), 0);
 }
+// U25 part 7 (spec 8): unsaved edits show a dot in the list and a warning, and
+// keep test, SSH, install, reset and remove off until saved or discarded;
+// Discard changes asks first; the label takes a swatch and Soft / Bright; a
+// new draft names a duplicate and cannot be saved.
+void TestMachinesPage::unsavedEditsGateActionsAndTheLabelHasSwatches()
+{
+    MachinesPage page(FakeCli::program(m_script)); start(page); page.resize(1200, 900); page.show();
+    auto *list = widget<QListWidget>(page, "machineProfiles");
+    list->setCurrentRow(1);
+    const QString machine = list->currentItem()->data(Qt::UserRole).toString();
+    QTRY_VERIFY(widget<QLineEdit>(page, "machineHostname")->isEnabled());
+    auto *discard = widget<QPushButton>(page, "discardNewMachine");
+    auto *notice = widget<QLabel>(page, "machineUnsavedNotice");
+    QVERIFY(discard->isVisible()); QCOMPARE(discard->text(), QString("Discard changes")); QVERIFY(!discard->isEnabled());
+    QVERIFY(!notice->isVisible()); QVERIFY(!list->currentItem()->data(Qt::UserRole + 1).toBool());
+    // An edit: the dot, the warning, Save on, the rest off with the reason.
+    widget<QLineEdit>(page, "machineHostname")->setText("10.0.4.21");
+    QVERIFY(list->currentItem()->data(Qt::UserRole + 1).toBool());
+    QVERIFY(notice->isVisible());
+    QCOMPARE(notice->text(), QString("Unsaved changes — test, SSH and install are off until you save or discard."));
+    QVERIFY(widget<QPushButton>(page, "saveMachine")->isEnabled()); QVERIFY(discard->isEnabled());
+    for (const char *name : {"checkMachine", "sshMachine", "installMachine", "resetMachine", "removeMachine"}) {
+        QVERIFY2(!widget<QPushButton>(page, name)->isEnabled(), name);
+        QCOMPARE(widget<QPushButton>(page, name)->toolTip(), QString("Save or discard the connection first"));
+    }
+    PageShots::shot(page, true, "ux-7-machines-dirty-dark");
+    PageShots::shot(page, false, "ux-7-machines-dirty-light");
+    // Discard changes asks, then reloads the saved values.
+    QTimer::singleShot(0, &page, [&] {
+        auto *dialog = page.findChild<QMessageBox *>("unsavedMachineDialog"); QVERIFY(dialog);
+        QCOMPARE(dialog->windowTitle(), QString("Unsaved connection"));
+        QCOMPARE(dialog->text(), QString("Discard the unsaved changes to this connection?"));
+        dialog->button(QMessageBox::Discard)->click();
+    });
+    discard->click();
+    QVERIFY(widget<QLineEdit>(page, "machineHostname")->text() != "10.0.4.21");
+    QVERIFY(!notice->isVisible()); QVERIFY(!list->currentItem()->data(Qt::UserRole + 1).toBool());
+    QVERIFY(widget<QPushButton>(page, "checkMachine")->isEnabled());
+    QVERIFY(widget<QPushButton>(page, "checkMachine")->toolTip().isEmpty());
+    // The label: a swatch and the Bright segment, saved on this device only.
+    QList<QPushButton *> swatches;
+    for (auto *swatch : page.findChildren<QPushButton *>("machineSwatch")) swatches << swatch;
+    QCOMPARE(swatches.size(), 7);
+    swatches.at(2)->click();
+    QCOMPARE(MachineAppearance::color(machine), QColor(swatches.at(2)->property("color").toString()));
+    QVERIFY(swatches.at(2)->isChecked() && !swatches.at(0)->isChecked());
+    widget<QPushButton>(page, "machineLabelBright")->click();
+    QVERIFY(MachineAppearance::vivid(machine)); QCOMPARE(widget<QComboBox>(page, "machineLabelStyle")->currentIndex(), 1);
+    QVERIFY(widget<QPushButton>(page, "machineLabelBright")->isChecked() && !widget<QPushButton>(page, "machineLabelSoft")->isChecked());
+    QVERIFY(!widget<QPushButton>(page, "saveMachine")->isEnabled());
+    // A new draft: its note, Discard draft, and a duplicate name refused.
+    widget<QPushButton>(page, "addMachine")->click();
+    QCOMPARE(discard->text(), QString("Discard draft"));
+    auto *alias = widget<QLineEdit>(page, "machineAlias");
+    alias->setText(machine);
+    QVERIFY(widget<QLabel>(page, "machineAliasError")->isVisible());
+    QCOMPARE(widget<QLabel>(page, "machineAliasError")->text(), QString("This name already exists"));
+    QVERIFY(alias->property("pageError").toBool());
+    QVERIFY(!widget<QPushButton>(page, "saveMachine")->isEnabled());
+    alias->setText("build-03"); widget<QLineEdit>(page, "machineHostname")->setText("10.0.4.23");
+    QVERIFY(!widget<QLabel>(page, "machineAliasError")->isVisible()); QVERIFY(widget<QPushButton>(page, "saveMachine")->isEnabled());
+    QVERIFY(notice->isVisible());
+    PageShots::shot(page, true, "ux-7-machines-new-draft-dark");
+    PageShots::shot(page, false, "ux-7-machines-new-draft-light");
+}
+
+// N20 (#386): every rebuild of the rows keeps the amber dot while the edits
+// stay unsaved - a fleet poll, a swatch, Bright, Soft, Automatic and a
+// cancelled switch to another machine.
+void TestMachinesPage::unsavedDotSurvivesRowRebuilds()
+{
+    MachinesPage page(FakeCli::program(m_script)); start(page); page.resize(1200, 900); page.show();
+    auto *list = widget<QListWidget>(page, "machineProfiles");
+    list->setCurrentRow(1);
+    const QString machine = list->currentItem()->data(Qt::UserRole).toString();
+    QTRY_VERIFY(widget<QLineEdit>(page, "machineHostname")->isEnabled());
+    const auto dot = [&] {
+        for (int i = 0; i < list->count(); ++i)
+            if (list->item(i)->data(Qt::UserRole).toString() == machine) return list->item(i)->data(Qt::UserRole + 1).toBool();
+        return false;
+    };
+    const auto dots = [&] { int n = 0; for (int i = 0; i < list->count(); ++i) n += list->item(i)->data(Qt::UserRole + 1).toBool(); return n; };
+    widget<QLineEdit>(page, "machineHostname")->setText("10.0.4.21");
+    QVERIFY(dot());
+    // A fleet poll rebuilds the rows.
+    BoxState local; local.host = "arch"; local.ok = true; FleetState fleet; fleet.setLocal(local, 1); page.setFleet(fleet);
+    QVERIFY(dot()); QCOMPARE(dots(), 1);
+    // The label's swatch, Bright, Soft and Automatic.
+    page.findChildren<QPushButton *>("machineSwatch").at(3)->click(); QVERIFY(dot());
+    widget<QPushButton>(page, "machineLabelBright")->click(); QVERIFY(dot());
+    widget<QPushButton>(page, "machineLabelSoft")->click(); QVERIFY(dot());
+    widget<QPushButton>(page, "resetMachineColor")->click(); QVERIFY(dot());
+    // Another machine, then Cancel on the prompt: still the same edits.
+    bool asked = false;
+    QTimer::singleShot(0, &page, [&] {
+        auto *dialog = page.findChild<QMessageBox *>("unsavedMachineDialog"); QVERIFY(dialog);
+        asked = true; dialog->button(QMessageBox::Cancel)->click();
+    });
+    list->setCurrentRow(0);
+    QVERIFY(asked);
+    QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(), machine);
+    QVERIFY(dot()); QCOMPARE(dots(), 1);
+    QCOMPARE(widget<QLineEdit>(page, "machineHostname")->text(), QString("10.0.4.21"));
+    QVERIFY(widget<QLabel>(page, "machineUnsavedNotice")->isVisible());
+}
+
 void TestMachinesPage::preview()
 {
     const auto directory = qEnvironmentVariable("HGS_PREVIEW_DIR");
@@ -546,6 +666,23 @@ void TestMachinesPage::countsReadInSingularAndPlural()
     // A control console leaves one machine of the fleet.
     local.localSessions = false; fleet.setLocal(local, 0); page.setFleet(fleet);
     QVERIFY2(summary().contains("1 connected, 1 machine"), qPrintable(summary().join(" | ")));
+}
+void TestMachinesPage::hiddenPageRendersFleetChangesWhenShown()
+{
+    MachinesPage page(FakeCli::program(m_script)); start(page);
+    auto *list = widget<QListWidget>(page, "machineProfiles");
+    QCOMPARE(list->item(1)->text(), QString("mac\nNot connected"));
+    page.hide();
+    BoxState local; local.host = "arch"; local.ok = true;
+    BoxState mac; mac.host = "mac"; mac.ok = true; mac.sessions.resize(1);
+    FleetState fleet; fleet.setLocal(local, 0); fleet.setPeer(mac, QDateTime::currentMSecsSinceEpoch());
+    page.setFleet(fleet); page.setFleet(fleet);
+    QCOMPARE(list->item(1)->text(), QString("mac\nNot connected"));
+    page.show();
+    QCOMPARE(list->item(1)->text(), QString("mac\nConnected, 1 session"));
+    // A shown page renders each change at once.
+    mac.sessions.resize(2); fleet.setPeer(mac, QDateTime::currentMSecsSinceEpoch()); page.setFleet(fleet);
+    QCOMPARE(list->item(1)->text(), QString("mac\nConnected, 2 sessions"));
 }
 void TestMachinesPage::windowsConsoleEnablesLocalSessions()
 {

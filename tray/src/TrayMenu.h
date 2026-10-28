@@ -17,6 +17,7 @@ public:
 
     QMenu *menu() const { return m_menu.data(); }
     bool isOpen() const { return m_open; }
+    // Rebuilds the menu when anything it shows changed; otherwise keeps it.
     void rebuild(const FleetState &state);
 
 signals:
@@ -40,4 +41,5 @@ private:
     // opening, Linux refreshes synchronously on every aboutToShow and peer response.
     // AppKit forwards both, so background rebuilds resume when its menu closes.
     bool m_open = false;
+    QString m_content;
 };

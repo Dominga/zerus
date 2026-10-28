@@ -2,6 +2,7 @@
 
 #include <QList>
 #include <QMap>
+#include <QSet>
 #include <QString>
 
 #include "HgsClient.h"
@@ -29,7 +30,23 @@ public:
     void setLocal(const BoxState &box, qint64 nowMs);
     void registerPeer(const QString &alias);     // объявить пир до первого ответа
     void setPeer(const BoxState &box, qint64 nowMs);
+    // A listing whose digest (BoxState::digest) equals that of the listing
+    // this host's box came from: only its observation fields are taken, the
+    // poll time, machine metrics and process sample times. Read state is
+    // kept. Returns false and changes nothing otherwise; setLocal/setPeer
+    // then apply it in full. host is empty for this computer.
+    bool refreshListing(const QString &host, const BoxState &box, qint64 nowMs);
+    // Takes those observation fields from source, a copy of this fleet whose
+    // listings have only been refreshed since; this state's read marks stay.
+    // Returns false and changes nothing when any listing differs.
+    bool refreshObservations(const FleetState &source);
+    // Which peers count as reachable by poll age at nowMs (kPeerStaleMs):
+    // views that show it compare this value to see when time alone changed them.
+    QByteArray freshness(qint64 nowMs) const;
 
+    // Read replies, attention marks and pending reads at once, in one unread
+    // pass; the same result as setting them one after another.
+    void setReadState(const QJsonObject &read, const QJsonObject &marks, const QJsonObject &pending);
     void setReadReplies(const QJsonObject &read);
     QJsonObject readReplies() const { return m_readReplies; }
     // Replies Mark all as read may mark: unread, except in sessions marked as needing
@@ -42,6 +59,11 @@ public:
     bool markSessionRead(const QString &host, const SessionInfo &expected);
     bool setReviewLater(const QString &host, const SessionInfo &expected, bool marked);
     bool applyNotificationPreferences(const QString &host, const SessionInfo &expected, const QJsonObject &preferences);
+    // U25 (spec 2.3): team members other than the lead (host + '\n' + name)
+    // are muted until their session carries its own choice: a host preference
+    // written at least once (revision > 0) wins over the team default.
+    bool setTeamMembers(const QSet<QString> &members);
+    const QSet<QString> &teamMembers() const { return m_teamMembers; }
     // Shared read state. Hosts with `hgs read` own unread/acknowledged state;
     // marks this GUI queued but no snapshot shows yet keep the UI read.
     void setPendingReads(const QJsonObject &pending);
@@ -74,8 +96,16 @@ private:
     QJsonObject m_readReplies;
     QJsonObject m_attentionMarks;
     SessionInfo *matchingSession(const QString &host, const SessionInfo &expected);
-    struct PeerEntry { BoxState box; qint64 polledAt = 0; bool everPolled = false; };
+    void applyMutes(const QString &host, BoxState &box) const;
+    void applyMute(const QString &host, SessionInfo &s) const;
+    QSet<QString> m_teamMembers;
+    void updateAllUnread();
+    // A box's revision changes whenever its listing content does (setLocal,
+    // setPeer, applyNotificationPreferences), never on refreshListing. Values
+    // are unique across all fleets, so equal revisions mean equal listings.
+    struct PeerEntry { BoxState box; qint64 polledAt = 0; bool everPolled = false; quint64 revision = 0; };
     BoxState m_local;
+    quint64 m_localRevision = 0;
     bool m_haveLocal = false;
     QMap<QString, PeerEntry> m_peers;
 };

@@ -10,6 +10,8 @@ on:
       - 'tests/test_android_project_ui.py'
       - 'tests/fixtures/android-project-ui-java-release.txt'
       - 'mobile/android/**'
+      - 'crates/replica/**'
+      - 'crates/replica-ffi/**'
       - 'src/state/project*'
       - 'src/state/swarm*'
       - 'services/mobile/**'
@@ -56,7 +58,7 @@ jobs:
           python3 -I -B - <<'PY'
           import hashlib, json, os, re
           from pathlib import Path
-          HOSTED_IMAGES = frozenset({"20261012.334.1", "20261018.339.1"})
+          HOSTED_IMAGES = frozenset({"20261012.334.1", "20261018.339.1", "20261023.334.3"})
           os.umask(0o077)
           folder = Path(os.environ['RUNNER_TEMP']) / 'android-project-ui-admission'
           folder.mkdir(mode=0o700)
@@ -135,6 +137,34 @@ jobs:
         run: |
           python3 -I -B tests/test_android_project_ui.py
           python3 -I -B tests/test_approval_ui_harness.py
+      - name: Prepare pinned task-replica libraries on this disposable VM
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          test -z "$(git status --porcelain)"
+          hosted_rustup="$(command -v rustup)"
+          native="$RUNNER_TEMP/android-project-ui-native"
+          test ! -e "$native"
+          mkdir -m 700 "$native"
+          export CARGO_HOME="$native/cargo" RUSTUP_HOME="$native/rustup"
+          export HOME="$native/home" GRADLE_USER_HOME="$native/gradle" ANDROID_USER_HOME="$native/android"
+          mkdir -m 700 "$CARGO_HOME" "$RUSTUP_HOME" "$HOME" "$GRADLE_USER_HOME" "$ANDROID_USER_HOME" "$CARGO_HOME/bin"
+          install -m 700 "$hosted_rustup" "$CARGO_HOME/bin/rustup"
+          cmp "$hosted_rustup" "$CARGO_HOME/bin/rustup"
+          for proxy in cargo rustc rustdoc; do ln -s rustup "$CARGO_HOME/bin/$proxy"; done
+          export JAVA_HOME="$JAVA_HOME_17_X64"
+          export PATH="$JAVA_HOME/bin:$CARGO_HOME/bin:/usr/bin:/bin"
+          export CARGO_BUILD_JOBS=2
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+          rustup toolchain install 1.99.1 --profile minimal --target aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+          cargo +1.99.1 install cargo-ndk --version 4.1.2 --locked
+          sha256sum "$hosted_rustup" "$CARGO_HOME/bin/rustup" "$CARGO_HOME/bin/cargo-ndk" > "$RUNNER_TEMP/android-project-ui-admission/native-tools.sha256"
+          # Prepare JNI and host/bindgen outputs before the unchanged finite UI fixture.
+          mobile/android/gradlew -p mobile/android --no-daemon --max-workers=2 \
+            -PzerusSigningProperties="$native/absent-signing.properties" :app:rustAndroidLibraries :app:uniffiBindings
       - name: Enable KVM only on this disposable hosted VM
         shell: bash
         run: |

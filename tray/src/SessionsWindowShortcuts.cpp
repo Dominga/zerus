@@ -2,6 +2,8 @@
 // rebound from ShortcutRegistry. See Shortcuts.h and
 // docs/superpowers/specs/2026-10-15-keyboard-shortcuts-design.md.
 #include "SessionsWindow.h"
+#include "InspectorCards.h"
+#include "TasksView.h"
 #include "ActivityView.h"
 #include "ContentScale.h"
 #include "MachinesPage.h"
@@ -382,10 +384,7 @@ void SessionsWindow::stepSession(int direction, bool attention)
         const QString key = item->data(SessionRoles::Key).toString();
         if (!needsAttention(key)) continue;
         revealSession(key); // May rebuild the list.
-        for (int row = 0; row < m_sessions->count(); ++row)
-            if (sessionRow(m_sessions->item(row)) && m_sessions->item(row)->data(SessionRoles::Key).toString() == key) {
-                m_sessions->setCurrentRow(row); m_sessions->scrollToItem(m_sessions->item(row)); break;
-            }
+        revealRow(key, true);
         return;
     }
     showNotice(tr("No sessions need attention"));
@@ -408,6 +407,7 @@ QWidget *SessionsWindow::viewFocusTarget() const
 {
     QWidget *view = m_detailTabs->currentWidget();
     if (view == m_activityStack) return (m_activityStack->currentIndex() == 1 ? m_subagentView : m_activityView)->browser();
+    if (view == m_tasks) return m_tasks->composer()->editor();
     return focusTarget(view);
 }
 
@@ -424,7 +424,7 @@ void SessionsWindow::stepFocus(int direction)
     if (selected() && m_detailTabs->isVisible()) areas.append(Area{m_detailTabs->currentWidget(), viewFocusTarget()});
     auto *composer = m_activityStack->currentIndex() == 1 ? m_subagentComposer : m_composer;
     if (composer->isVisible() && composer->isEnabled() && composer->isInputVisible()) areas.append(Area{composer, composer->editor()});
-    if (m_inspectorPanel->isVisible()) areas.append(Area{m_inspectorPanel, focusTarget(m_inspector->currentWidget())});
+    if (m_inspectorPanel->isVisible()) areas.append(Area{m_inspectorPanel, focusTarget(m_inspector->widget())});
     if (areas.isEmpty()) return;
     const QWidget *focus = QApplication::focusWidget();
     int current = -1;

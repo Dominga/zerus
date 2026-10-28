@@ -12,6 +12,9 @@ on:
       - 'mobile/ios/Zerus/App/Theme.swift'
       - 'mobile/ios/Zerus/Common/MarkdownView.swift'
       - 'mobile/ios/ZerusKit/**'
+      - 'mobile/ios/scripts/build-replica.sh'
+      - 'crates/replica/**'
+      - 'crates/replica-ffi/**'
   workflow_dispatch:
     inputs:
       source_sha:
@@ -72,6 +75,16 @@ jobs:
           echo "DEVELOPER_DIR=/Applications/$EXPECTED_XCODE_APPLICATION/Contents/Developer" >> "$GITHUB_ENV"
       - name: Check SDK-free admission, inventory and ownership controls
         run: python3 -I -B tests/test_approval_ui_harness.py
+      - name: Rust for the project task replica
+        timeout-minutes: 3
+        run: rustup toolchain install 1.99.1 --profile minimal --target aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Project task replica library
+        timeout-minutes: 10
+        env:
+          CARGO_BUILD_JOBS: "2"
+          CARGO_PROFILE_RELEASE_LTO: "false"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+        run: RUSTUP_TOOLCHAIN=1.99.1 bash mobile/ios/scripts/build-replica.sh
       - name: One unsigned native simulator UI campaign
         run: python3 -I -B scripts/ci/ios-approval-ui.py
       - name: Retain raw tests, source identity and exact simulator cleanup

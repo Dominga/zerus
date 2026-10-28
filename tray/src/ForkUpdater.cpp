@@ -1,5 +1,7 @@
 #include "ForkUpdater.h"
 #include "ChildProcess.h"
+#include "JsonParse.h"
+#include "ProcessRunner.h"
 #include "PowerShell7.h"
 #ifdef Q_OS_WIN
 #include "RelayConfiguration.h"
@@ -17,6 +19,7 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QTimer>
+#include <QThread>
 
 namespace {
 #ifdef ZERUS_FORK_FEED_URL
@@ -297,16 +300,19 @@ qint64 ForkUpdater::installedBuild()
 
 ForkUpdater::ForkUpdater(QObject *parent) : QObject(parent)
 {
+    connect(this, &ForkUpdater::installStarted, QCoreApplication::instance(), &QCoreApplication::quit);
     m_layout = layoutFor(QCoreApplication::applicationFilePath());
     m_install = m_layout.install;
     m_stage = m_layout.stage;
 #ifdef Q_OS_WIN
     // Only the portable zip carries build-info.json next to hgs-tray.exe.
-    m_enabled = *feedUrl && QString::fromLatin1(feedUrl).startsWith(QLatin1String(releasePrefix))
-        && !m_install.isEmpty() && QFileInfo::exists(m_install + QStringLiteral("/build-info.json"))
-        && !m_layout.superseded;
+    m_portable = !m_install.isEmpty() && QFileInfo::exists(m_install + QStringLiteral("/build-info.json")) && !m_layout.superseded;
+#ifndef ZERUS_FORK_VERSION
+    m_enabled = m_portable && *feedUrl && QString::fromLatin1(feedUrl).startsWith(QLatin1String(releasePrefix));
 #endif
-    m_status = m_enabled ? tr("Fork updates have not been checked.") : QString();
+#endif
+    m_status = m_enabled ? tr("Fork updates have not been checked.")
+             : m_portable ? tr("This fork has no configured update channel.") : QString();
     if (!m_enabled) return;
     m_network = new QNetworkAccessManager(this);
     QTimer::singleShot(firstCheckMs, this, &ForkUpdater::check);
@@ -330,9 +336,24 @@ QString ForkUpdater::unpacked() const
 
 void ForkUpdater::check()
 {
-    if (!m_enabled || m_busy) return;
+    if (!m_enabled) return;
+    fetch();
+}
+
+void ForkUpdater::checkNow()
+{
+    if (!m_enabled) return;
+    fetch();
+}
+
+void ForkUpdater::fetch()
+{
+    if (m_busy) return;
     m_busy = true;
-    QNetworkRequest request{QUrl(QString::fromLatin1(feedUrl))};
+    m_status = tr("Checking the fork's releases…");
+    emit changed();
+    const QString feed = QString::fromLatin1(feedUrl);
+    QNetworkRequest request{QUrl(feed)};
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     request.setTransferTimeout(30000);
     auto *reply = m_network->get(request);
@@ -345,7 +366,12 @@ void ForkUpdater::feedFinished(QNetworkReply *reply)
         return finish(tr("Fork update check failed: %1").arg(reply->errorString()));
     const auto data = reply->read(feedLimit + 1);
     if (data.size() > feedLimit) return finish(tr("The fork update feed is too large."));
-    const auto feed = QJsonDocument::fromJson(data).object();
+    ProcessRunner::post(this, [data] { return JsonParse::object(data); },
+                        [this](const QJsonObject &feed) { applyFeed(feed); });
+}
+
+void ForkUpdater::applyFeed(const QJsonObject &feed)
+{
     m_build = feed.value("build").toInteger();
     m_commit = feed.value("commit").toString();
     m_url = QUrl(feed.value("url").toString());
@@ -429,8 +455,15 @@ void ForkUpdater::extracted()
     QFile manifest(build.filePath(QStringLiteral("build-info.json")));
     const bool complete = unpackedOk && build.exists(QStringLiteral("hgs-tray.exe")) && build.exists(QStringLiteral("hgs.exe"))
         && manifest.open(QIODevice::ReadOnly);
-    // The zip must be the build of the commit the feed names.
-    const auto info = complete ? QJsonDocument::fromJson(manifest.read(feedLimit)).object() : QJsonObject();
+    // The zip must be the build of the commit the feed names. Parse it off the GUI thread.
+    const QByteArray bytes = complete ? manifest.read(feedLimit) : QByteArray();
+    manifest.close();
+    ProcessRunner::post(this, [bytes] { return JsonParse::object(bytes); },
+                        [this, complete, output](const QJsonObject &info) { applyExtracted(complete, output, info); });
+}
+
+void ForkUpdater::applyExtracted(bool complete, const QString &output, const QJsonObject &info)
+{
     if (!complete || info.value("source_commit").toString() != m_commit) {
         QDir(m_download).removeRecursively();
         return finish(output.isEmpty() ? tr("Fork build %1 is incomplete.").arg(m_build)
@@ -438,7 +471,6 @@ void ForkUpdater::extracted()
     }
     // The newer build takes the waiting one's place.
     if (m_download != m_stage) {
-        manifest.close();
         if (!QDir(m_stage).removeRecursively() || !QDir().rename(m_download, m_stage)) {
             QDir(m_download).removeRecursively();
             if (!QFileInfo::exists(unpacked())) m_readyBuild = 0;
@@ -457,7 +489,7 @@ QString ForkUpdater::readyStatus() const
 
 bool ForkUpdater::startInstall()
 {
-    if (!ready() || !QFileInfo::exists(unpacked())) return false;
+    if (m_installing || !ready() || !QFileInfo::exists(unpacked())) return false;
     QString shellError;
     const QString shell = PowerShell7::locate(&shellError);
     if (shell.isEmpty()) {
@@ -494,20 +526,25 @@ bool ForkUpdater::startInstall()
 #endif
     ChildProcess::inheritStdioOnly(process);
     if (!process.startDetached()) return false;
+    m_installing = true;
 #ifdef Q_OS_WIN
-    // The bundled mobile connector runs from the portable folder, which the
-    // plain layout's helper waits to be free of. Ask it to stop through its own
-    // management interface: it finishes its current phone request first, and
-    // the new build starts it again (WindowsMobileServices::ensureInBackground).
-    // The helper's banner already shows while this waits.
+    // The detached helper waits for the portable folder. Stop its connector on
+    // a worker and keep this process alive until that request has completed.
     if (!m_layout.versioned && QFileInfo::exists(RelaySettings::configPath())) {
         const auto config = RelaySettings::configPath();
-        const auto status = WindowsMobileServices::manage(QStringLiteral("status"), config, {{QStringLiteral("revision"), QString()}});
-        if (status.value(QStringLiteral("running")).toBool())
-            WindowsMobileServices::manage(QStringLiteral("stop"), config,
-                {{QStringLiteral("revision"), status.value(QStringLiteral("revision")).toString()},
-                 {QStringLiteral("generation"), status.value(QStringLiteral("generation")).toString()}});
+        auto *worker = QThread::create([config] {
+            const auto status = WindowsMobileServices::manage(QStringLiteral("status"), config, {{QStringLiteral("revision"), QString()}});
+            if (status.value(QStringLiteral("running")).toBool())
+                WindowsMobileServices::manage(QStringLiteral("stop"), config,
+                    {{QStringLiteral("revision"), status.value(QStringLiteral("revision")).toString()},
+                     {QStringLiteral("generation"), status.value(QStringLiteral("generation")).toString()}});
+        });
+        connect(worker, &QThread::finished, this, &ForkUpdater::installStarted);
+        connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+        worker->start();
+        return true;
     }
 #endif
+    QTimer::singleShot(0, this, &ForkUpdater::installStarted);
     return true;
 }

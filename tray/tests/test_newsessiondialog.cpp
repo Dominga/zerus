@@ -1,3 +1,4 @@
+#include "Wait.h"
 #include <QtTest>
 #include <memory>
 #include <QComboBox>
@@ -14,12 +15,18 @@
 #include <QScrollBar>
 #include <QTreeWidget>
 #include <QUuid>
+#include "JsonSettings.h"
 #include "NewSessionDialog.h"
 #include "CloneRepositoryDialog.h"
 #include "OpenCodeModelPicker.h"
 #include "AccountUsageStore.h"
 #include "AccountUsage.h"
 #include "SessionsWindow.h"
+#include "SessionCreationController.h"
+#include "SessionList.h"
+#include "SessionSearch.h"
+#include <QPointer>
+#include <QPlainTextEdit>
 #include "FakeCli.h"
 #include "IdentityBadge.h"
 #include "AccountCatalog.h"
@@ -32,6 +39,9 @@
 #include <QShortcut>
 #include <QToolButton>
 #include <QMenu>
+#include <QPainter>
+#include <QPointer>
+#include <QWidgetAction>
 
 class TestNewSessionDialog : public QObject {
     Q_OBJECT
@@ -72,6 +82,16 @@ class TestNewSessionDialog : public QObject {
                 if(tree->topLevelItem(g)->child(m)->data(0,Qt::UserRole).toString()==value)return tree->topLevelItem(g)->child(m);
         return nullptr;
     }
+    // U25 part 8: New session is the dense dialog by default; these tests check
+    // the classic form a skin may still choose (views.newSession = classic).
+    static void classicView() {
+        QVERIFY(QDir().mkpath(WorkspaceSkin::directory()));
+        QFile skin(QDir(WorkspaceSkin::directory()).filePath("classic-form.json"));
+        QVERIFY(skin.open(QIODevice::WriteOnly|QIODevice::Truncate));
+        skin.write(R"({"schema":1,"name":"Classic form","views":{"newSession":"classic"}})");skin.close();
+        QSettings().setValue("workspace/skin","classic-form");
+        WorkspaceSkin::preload();
+    }
     // Each call the fixture recorded in a file, one JSON line per call.
     QStringList lines(const QString &name) const {
         QFile f(m_fixture.filePath(name));if(!f.open(QIODevice::ReadOnly))return {};
@@ -79,19 +99,51 @@ class TestNewSessionDialog : public QObject {
     }
 private slots:
     void initTestCase() {
+        // Workspace checks read Sessions rows right after an action: rows are prepared
+        // on the preparation thread while the GUI thread waits (SessionsWindow.h).
+        SessionsWindow::setRowPreparationForTests(SessionsWindow::RowPreparation::Blocking);
         QVERIFY(m_settings.isValid());QCoreApplication::setOrganizationName("hgs-tests");QCoreApplication::setApplicationName("new-session-dialog");
         QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,m_settings.path());
+        WorkspaceSkin::preload();
     }
     void init() {
         QSettings().clear();
         for(const auto &name:{"fail","removed","slow-mac","released","missing","ended","quota-probes","mac-started","duplicates","other-scope","machine-accounts","slow-catalog-mac","catalog-started","empty-catalog","opencode","uncached","hold-probes","opencode-models","opencode-stopped","service-started","opencode-ids",
             "model-calls","favorite-calls","favorite-fails","models-stopped","old-hgs","favorites","slow-models","slow-favorite","favorite-started",
-            "hold-next-models","models-held","project-inference","canonical-directory","clone-calls","clone-worktree","clone-uncertain","clone-receipt","prefill-linked"})flag(name,false);
+            "hold-next-models","models-held","project-inference","canonical-directory","clone-calls","clone-worktree","clone-uncertain","clone-receipt","prefill-linked","hold-creation-folder","creation-folder-started","release-creation-folder",
+            "ux","ux-calls"})flag(name,false);
+        QFile::remove(QSettings().fileName()+".creations.json");
         QVERIFY(FakeCli::install(m_fixture.filePath("hgs"),R"PY(#!/usr/bin/env python3
 import json,pathlib,sys,time
 root=pathlib.Path(__file__).parent
 a=sys.argv[1:];host=''
 if a and a[0].startswith('@'):host=a.pop(0)[1:]
+# ux: the design prototype's computers and accounts (U25 part 8); every call is logged.
+UX={'':[('work','codex','work@orbit.example',69,23,55),('claude-work','claude','work@orbit.example',34,18,100),
+        ('claude-anna','claude','anna@example.test',4,9,135),('native-dsh','dsh','',-1,-1,0)],
+    'build-01':[('work','codex','build@orbit.example',69,23,55),('kimi','kimi','',-1,-1,0),('ollama','claude','',-1,-1,0)]}
+if (root/'ux').exists():
+ with open(root/'ux-calls','a') as calls:calls.write(json.dumps([host]+a)+'\n')
+ def ux_status(i,p,email,five,week,reset):
+  if p=='kimi':return {'status':'signed_out','identity':{},'windows':[],'checked_at':time.time()-120}
+  if p=='dsh':return {'status':'ok','identity':{},'windows':[],'balances':[{'balance':'149.40','currency':'USD'}],'checked_at':time.time()-120}
+  if i=='ollama':return {'status':'ok','identity':{'auth_method':'Ollama','plan':'qwen3-coder'},'windows':[],'checked_at':time.time()-120}
+  now=int(time.time())
+  return {'status':'ok','identity':{'email':email},'checked_at':now-120,'windows':[
+   {'window_minutes':300,'used_percent':five,'resets_at':now+reset*60},{'window_minutes':10080,'used_percent':week,'resets_at':now+4*86400}]}
+ rows=UX.get(host,[])
+ if a[:2]==['account','ls']:
+  print(json.dumps({'profiles':[{'id':i,'provider':p,'label':i,'home':'/profiles/'+i,'installed':True,'is_default':i in ('work','claude-work','native-dsh','kimi'),
+                                 'account_status':ux_status(i,p,e,f,w,r)} for i,p,e,f,w,r in rows]}))
+ elif a[:2]==['account','inspect']:
+  for i,p,e,f,w,r in rows:
+   if i==a[2]:print(json.dumps({'id':i,'provider':p,'home':'/profiles/'+i,**ux_status(i,p,e,f,w,r)}))
+ elif a[:2]==['account','ollama-models']:
+  print(json.dumps({'details':[{'name':'qwen3-coder','parameter_size':'30B','quantization':'Q4_K_M','size':18e9},
+                               {'name':'llama3.1:8b','parameter_size':'8B','quantization':'Q4_K_M','size':4.9e9}]}))
+ elif a and a[0]=='worktrees':print(json.dumps({'state':'ok','path':a[-1],'selected_root':a[-1],'common_dir':a[-1]+'/.git','worktrees':[{'path':a[-1],'kind':'main','available':True}]}))
+ elif a and a[0]=='dirs':print(json.dumps({'path':a[-1],'directories':[]}))
+ sys.exit(0)
 # The catalog's cached status and a probe report the same account state.
 def status(i,provider):
  window={'window_minutes':300,'used_percent':91 if host=='mac' else 17,'resets_at':int(time.time())+3600}
@@ -221,6 +273,9 @@ elif a[:2]==['account','favorite']:
  (root/'favorites').write_text(json.dumps(starred))
  print(json.dumps({'status':'applied','request_id':a[a.index('--request-id')+1],'model':model,'favorite':on,'favorites':starred}))
 elif a and a[0]=='dirs':
+ if (root/'hold-creation-folder').exists():
+  (root/'creation-folder-started').touch()
+  while not (root/'release-creation-folder').exists():time.sleep(.01)
  answer={'path':(root/'canonical-directory').read_text() if (root/'canonical-directory').exists() else a[-1],'directories':[]}
  if (root/'project-inference').exists():answer['project_inference']={'schema':1,'swarm_id':'swarm-fixture','project_id':(root/'project-inference').read_text()}
  print(json.dumps(answer))
@@ -241,6 +296,60 @@ elif a and a[0]=='worktrees':
         QTest::addColumn<QString>("host");QTest::addColumn<bool>("worktree");
         QTest::newRow("local-folder")<<QString()<<false;QTest::newRow("remote-folder")<<QString("mac")<<false;
         QTest::newRow("local-worktree")<<QString()<<true;QTest::newRow("remote-worktree")<<QString("mac")<<true;
+    }
+    void workspaceCreatesSelectableCardBeforeFolderCheckCompletes_data(){
+        QTest::addColumn<QString>("theme");QTest::addColumn<double>("scale");
+        QTest::newRow("dark")<<QString("dark")<<1.0;QTest::newRow("light-large")<<QString("light")<<1.5;
+    }
+    void editAcquiredCloneKeepsItsConfirmedFolder(){
+        NewSessionDialog dialog(program(),fleet());
+        const QJsonObject plan{{"id",QUuid::createUuid().toString(QUuid::WithoutBraces)},{"tag","retained-clone"},
+            {"account","work"},{"repository",true},{"clone_done",true},{"auto",false},
+            {"target","/workspace/fresh"},{"source","/workspace/previous-choice"}};
+        dialog.restoreCreationChoices(plan);
+        QCOMPARE(dialog.findChild<QLabel *>("launchFolderPath")->text(),QString("/workspace/fresh"));
+    }
+    void workspaceCreatesSelectableCardBeforeFolderCheckCompletes(){
+        QFETCH(QString,theme);QFETCH(double,scale);QSettings().setValue("workspace/theme",theme);QSettings().setValue("workspace/contentScale",scale);
+        SessionOrganization projects;const auto project=projects.createGroup("Creation fixture");projects.addFolder(project,"pc","/workspace/example");
+        setJsonSetting("workspace/organization",QJsonDocument(projects.toJson()).toJson(QJsonDocument::Compact));
+        SessionsWindow window(program());window.resize(900,650);window.setFleet(fleet());window.show();
+        const auto originalSearch=theme=="light"?QString("an existing search scope"):QString();
+        window.findChild<QLineEdit *>("search")->setText(originalSearch);
+        QPointer<NewSessionDialog> submitted;QString request;
+        QTimer::singleShot(0,&window,[&]{
+            submitted=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget());QVERIFY(submitted);
+            QTimer::singleShot(20000,submitted,&QDialog::reject);
+            submitted->selectPath("/workspace/example",false);
+            QTRY_VERIFY(row(*submitted,"work")>=0);choices(*submitted)->setCurrentRow(row(*submitted,"work"));
+            auto *start=submitted->findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());
+            flag("hold-creation-folder");
+            connect(submitted,&NewSessionDialog::creationRequested,&window,[&](const QJsonObject &){
+                const auto ops=window.findChild<SessionCreationController *>()->operations();QVERIFY(!ops.isEmpty());request=ops.begin().key();
+            });
+            start->click();
+        });
+        window.findChild<QPushButton *>("sessionPanelNewSession")->click();
+        QVERIFY(!submitted);QVERIFY(!request.isEmpty());
+        auto *list=window.findChild<SessionList *>("sessionList");QVERIFY(list);
+        QListWidgetItem *pending=nullptr;for(int i=0;i<list->count();++i)if(list->item(i)->data(SessionRoles::LaunchId)==request)pending=list->item(i);
+        QVERIFY(pending);QVERIFY(pending->flags().testFlag(Qt::ItemIsSelectable));QCOMPARE(list->currentItem(),pending);
+        QTRY_VERIFY(QFile::exists(m_fixture.filePath("creation-folder-started")));
+        QVERIFY(list->isVisible());QCOMPARE(window.findChild<QLineEdit *>("search")->text(),originalSearch);
+        QVERIFY(window.findChild<QWidget *>("creationDetailPanel")->isVisible());
+        auto *progress=window.findChild<QPlainTextEdit *>("creationDetails");QVERIFY(progress);
+        QTRY_COMPARE(progress->font().pixelSize(),qRound(13*scale));
+        auto *panel=window.findChild<QWidget *>("creationDetailPanel");QVERIFY(panel->rect().contains(progress->geometry()));
+        const auto preview=qEnvironmentVariable("ZERUS_PREVIEW_DIR");if(!preview.isEmpty())QVERIFY(window.grab().save(preview+"/session-creation-"+theme+".png"));
+        auto *stop=window.findChild<QPushButton *>("creationStop");QVERIFY(stop->isVisible());stop->click();
+        flag("release-creation-folder");
+        auto *controller=window.findChild<SessionCreationController *>();QTRY_COMPARE(controller->operation(request)["state"].toString(),QString("stopped"));
+        QVERIFY(window.findChild<QPlainTextEdit *>("creationDetails")->toPlainText().contains("Setup stopped"));
+        window.findChild<QLineEdit *>("search")->setText(controller->operation(request)["tag"].toString());
+        auto *search=window.findChild<QListWidget *>("searchResults");QVERIFY(search);
+        const auto hasCreation=[&]{for(int i=0;i<search->count();++i)if(SessionSearch::creationId(search->item(i))==request)return true;return false;};
+        QTRY_VERIFY(hasCreation());QVERIFY(window.findChild<QWidget *>("creationDetailPanel")->isVisible());
+        QTRY_VERIFY(window.findChild<QPushButton *>("creationEdit")->isVisible());
     }
     void cloneCreatesProjectAndStartsOnSelectedComputer(){
         QFETCH(QString,host);QFETCH(bool,worktree);if(worktree)flag("clone-worktree");SessionOrganization projects;const auto initial=projects.createGroup("Existing");
@@ -285,7 +394,7 @@ elif a and a[0]=='worktrees':
         dialog.findChild<QLineEdit *>("launchRepositoryUrl")->setText("git@example.invalid:team/fresh.git");
         dialog.findChild<QLineEdit *>("launchRepositoryDestination")->setText("/workspace/fresh");
         QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
-        auto *start=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());QVERIFY(lines("clone-calls").isEmpty());start->click();QTRY_COMPARE(launched.size(),1);
+        auto *start=dialog.findChild<QPushButton *>("primary");WAIT_VERIFY(start->isEnabled());QVERIFY(lines("clone-calls").isEmpty());start->click();WAIT_COMPARE(launched.size(), 1);
         QCOMPARE(launched[0][0].toString(),host);QCOMPARE(launched[0][5].toString(),expected);QVERIFY(!dialog.implicitInbox());
         if(worktree)QVERIFY(launched[0][2].toString().startsWith("/workspace/fresh-work-"));else QCOMPARE(launched[0][2].toString(),QString("/workspace/fresh"));
         const auto *chosen=projects.group(expected);QVERIFY(chosen);QCOMPARE(chosen->folders.size(),1);
@@ -358,12 +467,13 @@ elif a and a[0]=='worktrees':
                 QTest::newRow(qPrintable(theme+'-'+state))<<theme<<state;
     }
     void sourceSwitchKeepsControls(){
+        classicView();
         QFETCH(QString,theme);QFETCH(QString,state);QSettings().setValue("workspace/theme",theme);
         if(state=="recovery"){
             const QJsonArray source{program(),QString()};
             const auto key="workspace/repositoryClone/"+QString::fromLatin1(QJsonDocument(source).toJson(QJsonDocument::Compact).toHex());
             const QJsonObject pending{{"request_id",QUuid::createUuid().toString(QUuid::WithoutBraces)},{"url","git@example.invalid:team/fresh.git"},{"parent","/workspace"},{"name","fresh"},{"path","/workspace/fresh"}};
-            QSettings().setValue(key+"/pending",QJsonDocument(pending).toJson(QJsonDocument::Compact));
+            setJsonSetting(key+"/pending",QJsonDocument(pending).toJson(QJsonDocument::Compact));
         }
         SessionOrganization projects;const auto project=projects.createGroup("Example");projects.addFolder(project,"pc","/workspace/example");
         SessionsWindow workspace(program());workspace.setFleet(fleet());
@@ -395,6 +505,7 @@ elif a and a[0]=='worktrees':
         QVERIFY(lines("clone-calls").isEmpty());
     }
     void repositoryFormFitsWorkspace(){
+        classicView();
         QFETCH(QString,theme);QSettings().setValue("workspace/theme",theme);
         SessionOrganization projects;const auto project=projects.createGroup("Example repository with a long descriptive project name");projects.addFolder(project,"pc","/workspace/example");
         SessionsWindow workspace(program());workspace.setFleet(fleet());
@@ -554,17 +665,21 @@ elif a and a[0]=='worktrees':
     void skinsKeepSafeValuesAndDuplicate() {
         const auto skins=WorkspaceSkin::available();QVERIFY(skins.size()>=2);
         QCOMPARE(skins[0].id,QString("zerus"));QCOMPARE(skins[1].id,QString("whitewh"));
-        QCOMPARE(skins[0].view("newSession"),QString("classic"));QVERIFY(!skins[0].framelessDialogs());
+        // U25 part 8: New session is dense unless a skin names classic; other screens stay classic.
+        QCOMPARE(skins[0].view("newSession"),QString("dense"));QCOMPARE(skins[0].view("sessions"),QString("classic"));QVERIFY(!skins[0].framelessDialogs());
         QCOMPARE(skins[1].view("newSession"),QString("dense"));QVERIFY(skins[1].framelessDialogs());
         // WhiteWh has its own dark palette and the Zerus light one.
         QCOMPARE(skins[1].dark.accent,QString("#7dd3b0"));QCOMPARE(skins[1].view("sessions"),QString("cards"));
-        QCOMPARE(skins[1].named(true,"card"),QString("#181c22"));QVERIFY(skins[1].stylesheet.contains("QScrollBar"));
+        QCOMPARE(skins[1].named(true,"card"),QString("#181c22"));QVERIFY(skins[1].stylesheet.contains("composerCard"));
+        // U25: the thin scroll bars come from workspaceScrollbars for every skin, not from this one.
+        QVERIFY(!skins[1].stylesheet.contains("QScrollBar"));
         QCOMPARE(WorkspaceSkin::toJson(skins[1].light),WorkspaceSkin::toJson(WorkspaceSkin::zerus(false)));
         const QJsonObject unsafe{{"schema",1},{"name","T"},{"dark",QJsonObject{{"accent","#ff00aa"},{"border","red; background:url(x)"}}},
                                  {"views",QJsonObject{{"newSession","Dense!"}}}};
         const auto parsed=WorkspaceSkin::parse(unsafe,"t",{},false);
         QCOMPARE(parsed.dark.accent,QString("#ff00aa"));QCOMPARE(parsed.dark.border,WorkspaceSkin::zerus(true).border);
-        QCOMPARE(parsed.view("newSession"),QString("classic"));
+        QCOMPARE(parsed.view("newSession"),QString("dense"));
+        QCOMPARE(WorkspaceSkin::parse(QJsonObject{{"schema",1},{"views",QJsonObject{{"newSession","classic"}}}},"c",{},false).view("newSession"),QString("classic"));
         const auto dir=WorkspaceSkin::directory();QDir(dir).removeRecursively();
         const auto cleanup=qScopeGuard([dir]{QDir(dir).removeRecursively();});
         QString error;QCOMPARE(WorkspaceSkin::duplicate(skins[1],"My Skin",&error),QString("my-skin"));QVERIFY(error.isEmpty());
@@ -572,6 +687,20 @@ elif a and a[0]=='worktrees':
         const auto again=WorkspaceSkin::available();QCOMPARE(again.size(),4);
         const QStringList copies{again[2].id,again[3].id};QVERIFY(copies.contains("my-skin"));QVERIFY(copies.contains("my-skin-2"));
         QVERIFY(!again[2].builtin);QCOMPARE(again[2].view("newSession"),QString("dense"));QVERIFY(again[2].framelessDialogs());
+    }
+    void customSkinReloadsOffTheGuiThread() {
+        QVERIFY(QDir().mkpath(WorkspaceSkin::directory()));
+        const auto path = QDir(WorkspaceSkin::directory()).filePath("refresh-test.json");
+        const auto cleanup = qScopeGuard([path] { QFile::remove(path); QSettings().remove("workspace/skin"); });
+        const auto write = [path](const QByteArray &data) {
+            QFile file(path); if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+            return file.write(data) == data.size();
+        };
+        QVERIFY(write(R"({"schema":1,"name":"First"})"));
+        QSettings().setValue("workspace/skin", "refresh-test");
+        QTRY_COMPARE_WITH_TIMEOUT(WorkspaceSkin::current().name, QString("First"), 8000);
+        QVERIFY(write(R"({"schema":1,"name":"Second version"})"));
+        QTRY_COMPARE_WITH_TIMEOUT(WorkspaceSkin::active().name, QString("Second version"), 8000);
     }
     // The WhiteWh skin arranges the same form densely; its logic is unchanged.
     void denseViewStartsLikeTheClassicOne() {
@@ -583,8 +712,8 @@ elif a and a[0]=='worktrees':
         QTRY_VERIFY(row(dialog,"work")>=0);QVERIFY(!choices(dialog)->isVisible());
         const auto agents=[&]{QStringList ids;for(auto *button:dialog.findChildren<QAbstractButton *>("denseAgent"))ids<<button->property("agent").toString();return ids;};
         const auto pick=[&](const QString &key){for(auto *button:dialog.findChildren<QAbstractButton *>("denseAgent"))if(button->property("agent").toString()==key)button->click();};
-        // Ollama follows Claude Code: a local model account is a Claude Code profile.
-        QTRY_COMPARE(agents(),QStringList({"codex","claude","dsh","ollama","sh"}));
+        // Every agent has its tile (Kimi without an account); OpenCode only with one.
+        QTRY_COMPARE(agents(),QStringList({"codex","claude","kimi","dsh","ollama","sh"}));
         const auto preview=qEnvironmentVariable("ZERUS_DENSE_PREVIEW");
         // Two Codex accounts: the line under the rail is a chip, and its list
         // chooses the account the session uses.
@@ -609,7 +738,7 @@ elif a and a[0]=='worktrees':
         // A signed-out agent offers its own action and does not start.
         auto *start=dialog.findChild<QPushButton *>("primary");
         pick("dsh");QTRY_VERIFY(!start->isEnabled());
-        QCOMPARE(start->toolTip(),QString("Connect the account first"));
+        QCOMPARE(start->toolTip(),QString("Sign in to the account first"));
         auto *action=dialog.findChild<QPushButton *>("denseSignIn");QVERIFY(action->isVisible());QCOMPARE(action->text(),QString("Add key"));
         if(!preview.isEmpty())QVERIFY(dialog.grab().save(preview+"/dense-dsh.png"));
         QVERIFY(!dialog.findChild<QWidget *>("denseModelField")->isVisible());
@@ -618,7 +747,126 @@ elif a and a[0]=='worktrees':
         QCOMPARE(launched[0][1].toString(),QString("claude"));QCOMPARE(launched[0][4].toString(),QString("claude"));
         QVERIFY(launched[0][8].toString().isEmpty());
     }
+    // U25 part 8 (spec 10): the Zerus skin's New session is the dense dialog
+    // of the design, light and dark: the agents' account states, the account
+    // list, Ollama's model, an offline computer and the computer menu, Start
+    // with its reasons, Ctrl+Enter and Esc. Opening it creates nothing.
+    // ZERUS_TEAM_SHOTS=<dir> keeps ux-8-* shots of every state.
+    void denseDialogFollowsTheDesign_data() {
+        QTest::addColumn<QString>("theme");
+        QTest::newRow("dark")<<QString("dark");QTest::newRow("light")<<QString("light");
+    }
+    void denseDialogFollowsTheDesign() {
+        QFETCH(QString,theme);flag("ux");QSettings().setValue("workspace/theme",theme);
+        FleetState fleet;const auto now=QDateTime::currentMSecsSinceEpoch();
+        BoxState local;local.host="workstation";local.ok=true;local.metrics=QJsonObject{{"platform","windows"}};fleet.setLocal(local,now);
+        BoxState build;build.host="build-01";build.ok=true;build.metrics=QJsonObject{{"platform","linux"}};fleet.setPeer(build,now);
+        BoxState studio;studio.host="studio";studio.ok=false;fleet.setPeer(studio,now);
+        SessionOrganization projects;const auto orbit=projects.createGroup("Orbit platform");
+        projects.addFolder(orbit,"workstation","D:/work/orbit",{},MachinePlatform::Style::Windows);projects.addFolder(orbit,"build-01","/srv/orbit");
+        NewSessionDialog dialog(program(),fleet,{},"claude",orbit,nullptr,nullptr,&projects);dialog.setGroups(projects,orbit);
+        dialog.findChild<QLineEdit *>("launchName")->setText("orbit-40d");dialog.show();
+        QVERIFY(dialog.findChild<QFrame *>("newSessionDense"));QVERIFY(dialog.windowFlags()&Qt::FramelessWindowHint);
+        QCOMPARE(dialog.findChild<QFrame *>("newSessionDense")->width(),520);
+        const auto buttons=[&]{QList<NewSessionDense::AgentButton *> all;for(auto *b:dialog.findChildren<QAbstractButton *>("denseAgent"))all<<static_cast<NewSessionDense::AgentButton *>(b);return all;};
+        const auto tile=[&](const QString &key)->NewSessionDense::AgentButton *{for(auto *b:buttons())if(b->agent().key==key)return b;return nullptr;};
+        const auto keys=[&]{QStringList ids;for(auto *b:buttons())ids<<b->agent().key;return ids;};
+        auto *info=static_cast<NewSessionDense::InfoLine *>(dialog.findChild<QWidget *>("denseInfo"));auto *chip=static_cast<NewSessionDense::AccountChip *>(dialog.findChild<QAbstractButton *>("denseAccountChip"));
+        auto *start=dialog.findChild<QPushButton *>("primary");auto *action=dialog.findChild<QPushButton *>("denseSignIn");
+        auto *machine=dialog.findChild<QComboBox *>("launchComputer");auto *folder=dialog.findChild<QComboBox *>("launchProjectFolder");
+        const auto shots=qEnvironmentVariable("ZERUS_TEAM_SHOTS");
+        // The dialog on the page colour, with an open popup where it lies.
+        const auto shoot=[&](const QString &name,QWidget *popup=nullptr){
+            if(shots.isEmpty())return;
+            QTest::qWait(120);
+            const auto page=WorkspaceSkin::color(WorkspaceSkin::active(),theme=="dark","page");
+            const auto self=dialog.grab();QRect area(QPoint(0,0),self.size()/self.devicePixelRatio());
+            QPoint at;const bool open=popup&&popup->isVisible();
+            if(open){at=popup->mapToGlobal(QPoint(0,0))-dialog.mapToGlobal(QPoint(0,0));area|=QRect(at,popup->size());}
+            QImage image(area.adjusted(-24,-24,24,24).size(),QImage::Format_ARGB32);image.fill(page);
+            QPainter painter(&image);const QPoint origin(24-area.left(),24-area.top());painter.drawPixmap(origin,self);
+            if(open)painter.drawPixmap(origin+at,popup->grab());
+            painter.end();QVERIFY(image.save(QDir(shots).filePath(QString("ux-8-%1-%2.png").arg(name,theme))));
+        };
+        // Spec 40: Codex's limits, Claude's two accounts, Kimi without one, DeepSeek's balance.
+        QTRY_COMPARE(keys(),QStringList({"codex","claude","kimi","dsh","ollama","sh"}));
+        QTRY_VERIFY(tile("codex")->agent().fiveHour==69);QCOMPARE(tile("codex")->agent().week,23.0);
+        QVERIFY(tile("claude")->agent().multi());QCOMPARE(tile("claude")->agent().accounts.size(),2);
+        QVERIFY(tile("kimi")->agent().absent);QVERIFY(tile("dsh")->agent().connected);QCOMPARE(tile("dsh")->agent().balance,QString("$149.40"));
+        QVERIFY(!tile("ollama")->agent().connected);QCOMPARE(tile("sh")->agent().name,QString("PowerShell"));
+        QCOMPARE(tile("ollama")->width(),38);QCOMPARE(tile("sh")->width(),38);QCOMPARE(tile("codex")->height(),34);
+        QTRY_VERIFY(tile("claude")->isChecked());QTRY_VERIFY(chip->isVisible());QVERIFY(!info->isVisible());
+        QCOMPARE(chip->accounts().size(),2);QVERIFY(chip->accessibleName().startsWith("Account: "));
+        QCOMPARE(machine->currentText(),QString("workstation"));QCOMPARE(folder->currentData(Qt::UserRole+2).toString(),QString("D:/work/orbit"));
+        QTRY_VERIFY(start->isEnabled());QCOMPARE(start->toolTip(),QString("Start session (Ctrl+Enter)"));
+        QCOMPARE(dialog.findChild<QPushButton *>("browseLaunchFolder")->toolTip(),QString("Browse for folder"));
+        QCOMPARE(dialog.findChild<QToolButton *>("manageLaunchProject")->toolTip(),QString("Project settings"));
+        auto *more=dialog.findChild<QPushButton *>("launchWorktreeOptions");QStringList worktree;
+        for(auto *entry:more->menu()->actions())if(!entry->isSeparator())worktree<<entry->text();
+        QCOMPARE(worktree.mid(0,3),QStringList({"","New worktree…","Use an existing worktree…"}));
+        shoot("new-session");
+        // Spec 41: the account list, with Add account.
+        chip->click();auto *list=dialog.findChild<QWidget *>("denseAccountList");QTRY_VERIFY(list->isVisible());
+        shoot("accounts",list);QTest::keyClick(list,Qt::Key_Escape);QTRY_VERIFY(!list->isVisible());
+        // Kimi has no account here: its line says so, Start says why it is off.
+        tile("kimi")->click();QTRY_VERIFY(tile("kimi")->isChecked());
+        QCOMPARE(info->text(),QString("Kimi · no account on workstation · add one in Agent accounts"));
+        QVERIFY(action->isVisible());QCOMPARE(action->text(),QString("Add account"));
+        QVERIFY(!start->isEnabled());QCOMPARE(start->toolTip(),QString("Sign in to the account first"));
+        // The computer menu: a header, this computer checked, studio offline with its reason.
+        tile("claude")->click();QTRY_VERIFY(chip->isVisible());
+        static_cast<NewSessionDense::MenuCombo *>(machine)->showPopup();
+        QPointer<QMenu> menu;
+        QTRY_VERIFY([&]{for(auto *open:dialog.findChildren<QMenu *>("denseMenu"))if(open->isVisible())menu=open;return !menu.isNull();}());
+        QStringList entries;QString why;
+        for(auto *entry:menu->actions()){
+            if(entry->isSeparator())continue;
+            if(entry->objectName()=="denseMenuHeader")entries<<"["+static_cast<QLabel *>(static_cast<QWidgetAction *>(entry)->defaultWidget())->text()+"]";
+            else {entries<<entry->text()+(entry->isEnabled()?QString():QString(" (off)"));if(!entry->isEnabled())why=entry->toolTip();}
+        }
+        QCOMPARE(entries,QStringList({"[Computer]","✓ workstation (this computer)","build-01","studio (off)"}));QCOMPARE(why,QString("studio is offline"));
+        shoot("computer-menu",menu);menu->close();QTRY_VERIFY(!menu||!menu->isVisible());
+        // Spec 42: build-01's Kimi is signed out: the tile is grey, Sign in, no Start.
+        machine->setCurrentIndex(machine->findData("build-01"));
+        QTRY_COMPARE(folder->currentData(Qt::UserRole+2).toString(),QString("/srv/orbit"));
+        QTRY_VERIFY(tile("claude")&&tile("claude")->agent().absent);QTRY_VERIFY(!tile("kimi")->agent().absent);QVERIFY(!tile("kimi")->agent().connected);
+        QCOMPARE(tile("sh")->agent().name,QString("Shell"));
+        tile("kimi")->click();QTRY_COMPARE(info->text(),QString("Kimi · not connected · sign in to use this account"));
+        QCOMPARE(action->text(),QString("Sign in"));QVERIFY(!start->isEnabled());QCOMPARE(start->toolTip(),QString("Sign in to the account first"));
+        QVERIFY(!dialog.findChild<QPushButton *>("refreshLaunchAccounts")->isVisible());
+        shoot("signed-out");
+        // Spec 43: Ollama on build-01, its model and what the model is.
+        tile("ollama")->click();QTRY_VERIFY(dialog.findChild<QComboBox *>("denseLocalModel")->isVisible());
+        QTRY_COMPARE(dialog.findChild<QComboBox *>("denseLocalModel")->currentText(),QString("qwen3-coder"));
+        QTRY_COMPARE(dialog.findChild<QLabel *>("denseModelMeta")->text(),QString("30B · Q4_K_M · 18.0 GB"));
+        QCOMPARE(info->text(),QString("Ollama · local on build-01 · 2 models"));QVERIFY(dialog.findChild<QPushButton *>("refreshLaunchAccounts")->isVisible());
+        QCOMPARE(dialog.findChild<QToolButton *>("denseRescan")->toolTip(),QString("Rescan local models"));
+        QTRY_VERIFY(start->isEnabled());
+        shoot("ollama");
+        // Spec 44: studio is offline: no folder, a warn frame, Start off with the reason.
+        machine->setCurrentIndex(machine->findData("studio"));
+        QTRY_COMPARE(info->text(),QString("studio is offline · pick another computer"));
+        QVERIFY(!start->isEnabled());QCOMPARE(start->toolTip(),QString("studio is offline"));
+        QVERIFY(machine->property("denseBad").toBool());QVERIFY(folder->property("denseBad").toBool());
+        QCOMPARE(folder->count(),0);QCOMPARE(folder->placeholderText(),QString("No folder on studio"));
+        QVERIFY(!dialog.findChild<QWidget *>("denseModelField")->isVisible());QVERIFY(dialog.findChild<QLabel *>("launchError")->text().isEmpty());
+        shoot("offline");
+        // Nothing was created by looking: no worktree, no clone, no launch.
+        for(const auto &line:lines("ux-calls"))QVERIFY2(!line.contains("create")&&!line.contains("\"clone\""),qPrintable(line));
+        // Ctrl+Enter starts on build-01 without a worktree; Esc closes.
+        machine->setCurrentIndex(machine->findData("build-01"));QTRY_VERIFY(tile("codex"));tile("codex")->click();
+        dialog.findChild<QPushButton *>("launchWithoutWorktree")->click();
+        QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
+        dialog.activateWindow();QVERIFY(QTest::qWaitForWindowActive(&dialog));
+        QTRY_VERIFY(start->isEnabled());QTest::keyClick(&dialog,Qt::Key_Return,Qt::ControlModifier);QTRY_COMPARE(launched.size(),1);
+        QCOMPARE(launched[0][0].toString(),QString("build-01"));QCOMPARE(launched[0][1].toString(),QString("codex"));
+        QCOMPARE(launched[0][2].toString(),QString("/srv/orbit"));QCOMPARE(launched[0][3].toString(),QString("orbit-40d"));
+        NewSessionDialog again(program(),fleet,{},"claude",orbit,nullptr,nullptr,&projects);again.setGroups(projects,orbit);again.show();
+        again.activateWindow();QVERIFY(QTest::qWaitForWindowActive(&again));QSignalSpy closed(&again,&QDialog::rejected);
+        QTest::keyClick(&again,Qt::Key_Escape);QTRY_COMPARE(closed.size(),1);QVERIFY(!again.isVisible());
+    }
     void permissionsOfferOnlyTheComputersListedModes() {
+        classicView();
         {   // An older computer lists no modes: only the account default exists.
             NewSessionDialog dialog(program(),fleet(),{},"claude");dialog.selectPath("/workspace/example",false);dialog.show();
             QTRY_VERIFY(row(dialog,"claude")>=0);choices(dialog)->setCurrentRow(row(dialog,"claude"));
@@ -660,7 +908,7 @@ elif a and a[0]=='worktrees':
         NewSessionDialog dialog(program(),fleet(),{},"codex");dialog.setGroups(projects,"ungrouped");
         dialog.setProjectCatalogSwarm("swarm-fixture");
         dialog.selectPath("/workspace/example",false);QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
-        auto *start=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+        auto *start=dialog.findChild<QPushButton *>("primary");WAIT_VERIFY(start->isEnabled());start->click();WAIT_COMPARE(launched.size(), 1);
         QCOMPARE(launched[0][5].toString(),QString("ungrouped"));
     }
     void anotherOrUnknownSwarmWithTheSameProjectIdDoesNotInferMembership() {
@@ -722,13 +970,13 @@ elif a and a[0]=='worktrees':
         auto *choice=dialog.findChild<QComboBox *>("launchProject");QVERIFY(choice);
         if(explicitChoice==1)QVERIFY(QMetaObject::invokeMethod(choice,"activated",Q_ARG(int,choice->currentIndex())));
         QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);auto *start=dialog.findChild<QPushButton *>("primary");
-        QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+        WAIT_VERIFY(start->isEnabled());start->click();WAIT_COMPARE(launched.size(), 1);
         QCOMPARE(launched[0][5].toString(),inferred?project:explicitChoice==2?other:QString("ungrouped"));
         QCOMPARE(launched[0][2].toString(),canonicalPath);
         if(inferred)QVERIFY(launched[0][7].toString().isEmpty());
     }
     void rememberedAndExplicitMissingAccounts() {
-        QSettings().setValue("workspace/launchAccounts",QByteArray(R"({"":{"codex":"gone"}})"));
+        setJsonSetting("workspace/launchAccounts",QByteArray(R"({"":{"codex":"gone"}})"));
         NewSessionDialog dialog(program(),fleet(),{},"codex");dialog.selectPath("/workspace/example",false);dialog.show();
         QTRY_VERIFY(row(dialog,"work")>=0);QTRY_COMPARE(choices(dialog)->count(),5);QCOMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),QString("other"));
         dialog.selectAccount("gone");QVERIFY(!choices(dialog)->currentItem());QVERIFY(!dialog.findChild<QPushButton *>("primary")->isEnabled());
@@ -775,7 +1023,7 @@ elif a and a[0]=='worktrees':
         QTRY_COMPARE(choices(dialog)->count(),5);QTRY_VERIFY(row(dialog,"claude-copy")>=0);
         QCOMPARE(row(dialog,"claude"),-1);QCOMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),QString("claude-copy"));
         // Another form changing remembered defaults cannot retarget this form.
-        QSettings().setValue("workspace/launchAccounts",QByteArray(R"({"":{"claude":"claude"}})"));
+        setJsonSetting("workspace/launchAccounts",QByteArray(R"({"":{"claude":"claude"}})"));
         for(auto *timer:dialog.findChildren<QTimer *>())if(timer->interval()==60000)QMetaObject::invokeMethod(timer,"timeout");
         QCOMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),QString("claude-copy"));
         dialog.selectAccount("claude");QVERIFY(row(dialog,"claude")>=0);QCOMPARE(row(dialog,"claude-copy"),-1);
@@ -1194,6 +1442,7 @@ elif a and a[0]=='worktrees':
         QCOMPARE(launched[0][0].toString(),QString("mac"));QCOMPARE(launched[0][1].toString(),QString("sh"));flag("released");
     }
     void cachedLimitBarsReuseFooterWidgetAndIndicatorPreference() {
+        classicView();
         NewSessionDialog dialog(program(),fleet());dialog.show();QTRY_VERIFY(row(dialog,"work")>=0);
         auto *renderer=dynamic_cast<AccountUsage::Button *>(dialog.findChild<QPushButton *>("launchAccountLimitsRenderer"));
         QVERIFY(renderer);QVERIFY(!renderer->isVisible());QCOMPARE(renderer->focusPolicy(),Qt::NoFocus);

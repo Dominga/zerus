@@ -8,14 +8,19 @@ class ArchiveBrowser;
 class ToolbarChip;
 class SettingsPage;
 class SwarmController;
+class WorktreeCleanupStatus;
+class SessionCreationController;
+class QPlainTextEdit;
 
 #include <QPointer>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QTimer>
+#include "SessionStates.h"
 #include <QDeadlineTimer>
 #include <QElapsedTimer>
 #include <QWidget>
+#include <memory>
 #include <optional>
 #include "FleetState.h"
 #include "HgsClient.h"
@@ -23,6 +28,9 @@ class SwarmController;
 #include "SessionRowPreferences.h"
 #include "TeamModel.h"   // WhiteWh fork: agent teams
 #include "TeamCatalogEditor.h"
+#include "SessionAccounts.h"
+#include "SessionRows.h"
+#include <QFont>
 
 class QAction;
 class QFileSystemWatcher;
@@ -50,6 +58,7 @@ class QHBoxLayout;
 class MachinesPage;
 class MachineFilter;
 class ProjectFilter;
+class AccountFilter;
 class DashboardPage;
 class AccountsPage;
 class GoToDialog;
@@ -69,19 +78,26 @@ class SessionsWindow : public QWidget {
 public:
     explicit SessionsWindow(const QString &hgsPath, QWidget *parent = nullptr);
     void setFleet(const FleetState &fleet);
+    // The same listings as the last setFleet, refreshed by FleetState::refreshListing:
+    // pages take the new poll times and metrics, while rows, read state and the
+    // organization stay unless time alone changed what they show.
+    void refreshFleet(const FleetState &fleet);
     void showSessionList();
     void showUpdates();
     void showSession(const QString &host, const QString &name);
     void showAttentionSession(const QString &host, const QString &name);
     void showNotificationNotice(const QString &message) { showNotice(message, false); }
+    // N7: a click on a team attention notification opens that team.
+    void showTeamAttention(const QString &token);
     void showProjects(const QString &host = {});
-    void showNewSession(const QString &agent = {}, const QString &project = {}, const QString &host = {}, const QString &folder = {}, const QString &path = {}, const QString &account = {});
+    // WhiteWh fork: name, a suggested session name, comes last.
+    void showNewSession(const QString &agent = {}, const QString &project = {}, const QString &host = {}, const QString &folder = {}, const QString &path = {}, const QString &account = {}, const QJsonObject &recipe = {}, const QString &taskUuid = {}, const QString &taskParentId = {}, const QString &name = {});
     void newSessionLaunchFailed(const QString &launchId, const QString &error = {});
     void setClipboardMode(bool clipboard);
     void setConnectionError(const QString &error);
     void setPollingHosts(const QSet<QString> &hosts);
     static QString status(const SessionInfo &session, bool reachable = true);
-    // Tests only, so suites need not wait out fixed delays: information notices
+    // Tests only, so suites need not wait out fixed delays: timed notices
     // (5 s), compaction polls (2.5 s), the details poll tick (500 ms) with its
     // Activity interval (2.5 s), and the wait of Send and push now (20 s, which
     // also restarts an armed push's wait). The application keeps the defaults.
@@ -90,7 +106,85 @@ public:
     void setDetailsPollForTests(int tickMs, int activityMs) { m_timer.setInterval(tickMs); m_activityPollMs = activityMs; }
     void setPushTimeoutForTests(int ms) { m_pushTimeout = ms; if (m_push) m_push->deadline.setRemainingTime(ms); }
 
+    // Sessions rows are prepared off the GUI thread (spec "Model preparation off
+    // the GUI thread"). rebuild() reconciles the window's own state on the GUI
+    // thread, copies what the rows read into RowInputs, and prepareRows() turns
+    // that copy into PreparedRows on the shared preparation thread
+    // (ProcessRunner::post). Only the newest preparation is applied, and only
+    // rows whose digest changed are written to the list.
+    using Entry = SessionRows::Entry;
+    struct RowInputs {
+        quint64 generation = 0;
+        QList<Entry> entries;   // listed sessions, sorted, with organization identities
+        FleetState fleet;
+        SessionOrganization organization;
+        SessionRowPreferences rowPreferences;
+        SessionRows::Selection selection;
+        QString readSelectionKey, creationSessionToSelect, revealCreation;
+        // Keys with an unsent draft in the message and subagent composers.
+        QSet<QString> drafts, childDrafts, expanded;
+        QString filter;
+        QSet<QString> hostFilters, projectFilters, accountFilters;
+        QString folderHost, folderPath;
+        bool folderCheckout = false;
+        double archiveFrom = 0, archiveUntil = 0;   // the archive window shown
+        QJsonObject pendingLaunches;
+        QSet<QString> ownedCreations;
+        bool includeCompleted = false, hideEmptyProjects = true;
+        QHash<QString, Entry> terminating;
+        QHash<QString, QJsonObject> gitStatus;      // host + '\n' + path
+        QHash<QString, QColor> machineColors;
+        QJsonArray accountProfiles, accountDetailsProfiles;
+        QFont tooltipFont;
+        int accessibleWidth = 420;
+        qint64 nowSecs = 0;
+        // WhiteWh fork: agent teams and session leads, copied on the GUI thread.
+        QList<Teams::Team> teams;
+        QSet<QString> teamProblems;                 // team id, newline, member id
+        QHash<QString, QVariantMap> teamStrips;     // a lead card's strip, by team id
+        QSet<QString> collapsedTeams;
+        QJsonObject sessionLeads;                   // SessionLeads::all()
+        QHash<QString, int> keepWarmHours;          // Keep cache warm, by entry key
+    };
+    struct PreparedRow {
+        enum Kind { Header, Session, Child, Launch };
+        Kind kind = Session;
+        QString key, parentKey, child, launch;
+        Qt::ItemFlags flags;
+        bool hidden = false;
+        // Every role the row's item holds; any other row role is cleared.
+        QMap<int, QVariant> roles;
+        QByteArray digest;   // of key, flags, hidden and roles
+    };
+    struct PreparedRows {
+        quint64 generation = 0;
+        QList<PreparedRow> rows;
+        bool uniqueKeys = true;
+        int firstSession = -1, firstVisible = -1;
+        QMap<QString, int> counts;   // by state filter
+        QMap<QString, int> machineCounts, projectCounts, accountCounts;
+        QSet<QString> projectKeys, drafts;
+        QJsonObject creationScope;
+        QList<SessionAccounts::Account> accounts;
+        QList<std::pair<QString, QString>> gitReads;
+        int unreadReplies = 0;
+        QString countText, countShort;
+    };
+    // Reads only its argument: callable on any thread.
+    static PreparedRows prepareRows(const RowInputs &inputs);
+    // Tests: Blocking prepares on the preparation thread while the GUI thread
+    // waits, so rows are current when rebuild() returns, as suites expect.
+    enum class RowPreparation { Async, Blocking };
+    static void setRowPreparationForTests(RowPreparation mode);
+    RowInputs rowInputsForTests() const { return rowInputs(); }
+    quint64 rowGenerationForTests() const { return m_rowGeneration; }
+    bool rowsPendingForTests() const { return m_rowsPending || m_rowRequestQueued; }
+    int droppedRowPreparationsForTests() const { return m_droppedRowPreparations; }
+
 signals:
+    // Prepared rows of this generation were written to the list.
+    void rowsApplied(quint64 generation);
+
     void replyViewed(const QString &host, const QString &name, const QString &conversation, const QString &reply);
     void repliesMarkedRead(const QJsonObject &replies);
     void attentionMarksChanged(const QJsonObject &marks, const QJsonObject &readReplies);
@@ -102,11 +196,17 @@ signals:
     void folderShellRequested(const QString &host, const QString &directory);
     void copySessionCommandRequested(const QString &host, const QString &name, const QString &archiveId);
     void copyTextRequested(const QString &text);
-    void newSessionRequested(const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &permissions = {}, const QString &localModel = {});
+    void newSessionRequested(const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &permissions = {}, const QString &localModel = {}, const QString &expectedMachine = {});
     void projectsChanged(const QString &host);
     void accountLoginRequested(const QString &host, const QString &id);
     void accountInstallRequested(const QString &host, const QString &provider);
     void machineSshRequested(const QString &alias);
+    // N7 (U18): a team's attention item, raised once and withdrawn when gone.
+    void teamAttentionRaised(const QString &token, const QString &title, const QString &body);
+    void teamAttentionCleared(const QString &token);
+    // U25 (spec 2.3): the sessions of team members other than the lead
+    // (host + '\n' + name), muted until they carry their own choice.
+    void teamMembersChanged(const QSet<QString> &members);
 
 public:
     // WhiteWh fork: apply the selected skin again, as after a change in Settings.
@@ -122,16 +222,24 @@ protected:
 private:
     ArchiveBrowser *m_archiveBrowser = nullptr;
     QMap<QString,QList<SessionInfo>> m_archiveSearchRows;
-    struct Entry { QString host, machine, key, identity; SessionInfo session; bool online; };
     void applyTheme();
     void updateWindowPinAppearance();
     void applyContentScale();
     void applyActivityWidth();
     void saveOrganization();
+    void applyFleet(const FleetState &fleet, bool refresh);
+    bool refreshEntries();
     void setSessionRowCollapsed(const Entry &entry, bool collapsed);
     void saveSessionRowPreferences();
     void updateSessionRowPresentation();
     void savePendingLaunches();
+    void dispatchTaskLaunches();
+    bool saveTaskLaunches();
+    QJsonObject m_taskLaunches;
+    bool m_taskLaunchRecoveryBlocked = false;
+    QHash<quint64, QString> m_taskLaunchRequests;
+    void renderCreation();
+    void selectCreation(const QString &id);
     void placeLaunchedSessions();
     bool takeEndedLaunch(const QString &launchId, QJsonObject *launch = nullptr);
     void createGroup(const QString &session = {});
@@ -145,8 +253,32 @@ private:
     void updateSessionLoading();
     void updateSessionFeedback();
     void rebuild();
-    QMap<int, QVariant> sessionCardRoles(const Entry &entry) const;
-    QMap<int,QVariant> childCardRoles(const Entry &entry,const QString &id,const QJsonObject &child) const;
+    // The row preparation (SessionsWindowRows.cpp): the copy rebuild() takes, its
+    // request to the preparation thread, and writing the newest result.
+    RowInputs rowInputs() const;
+    void requestRows();
+    void postRows();
+    void applyRows(const PreparedRows &prepared);
+    void applyListRows(const PreparedRows &prepared);
+    static QMap<int, QVariant> sessionCardRoles(const Entry &entry, const RowInputs &inputs);
+    static QMap<int, QVariant> childCardRoles(const Entry &entry, const QString &id, const QJsonObject &child, const RowInputs &inputs);
+    // Selects (or only scrolls to) the row with this key now, and again when
+    // rows still being prepared are applied.
+    void revealRow(const QString &key, bool select);
+    void revealPendingRow();
+    SessionRows::Selection rowSelection() const { return {m_selectedKey, m_details, m_subagentId, m_subagentConversation}; }
+    static inline RowPreparation s_rowPreparation = RowPreparation::Async;
+    quint64 m_rowGeneration = 0;
+    bool m_rowsPending = false, m_rowRequestQueued = false;
+    int m_droppedRowPreparations = 0;
+    // One-time choices rebuild() made for the next applied rows: the row to
+    // select instead of the selected session, a placed creation, a fork whose
+    // terminal opens once it is selected, and a row to reveal.
+    std::optional<QString> m_rowSelection;
+    bool m_rowCreationPlaced = false;
+    QString m_forkTerminalKey;
+    struct PendingReveal { QString key; bool select = false; };
+    std::optional<PendingReveal> m_reveal;
     void selectSession();
     void inspect();
     // The DeepSeek native UI: its tab when the embedded plugin is available,
@@ -165,6 +297,8 @@ private:
     void loadMedia(class ActivityView *view, const QString &key, const QString &href, bool open);
     struct MediaDownload { QPointer<class ActivityView> view; QString key; bool open = false; };
     QHash<quint64, MediaDownload> m_mediaDownloads;   // WhiteWh fork
+    // The Tasks tab follows the open session's project and its sessions.
+    void updateTasks(const Entry *entry);
     void updateWorktrees();
     void filterFolder(const QString &host, const QString &path, bool checkout);
     void openRelatedSession(const QString &host, const QString &name, const QString &archive);
@@ -187,6 +321,10 @@ private:
     QHBoxLayout *m_sessionHeader = nullptr, *m_filterRow = nullptr;
     QString m_countFull, m_countShort;
     bool m_focusSearch = false;
+    // WhiteWh fork: the owner opened the finished subagents in the Tasks card.
+    bool m_showFinishedChildren = false;
+    // WhiteWh fork: the selected session's background jobs, at most 64.
+    QJsonArray m_backgroundJobs;
     int m_stripLayout = 0, m_stripReserve = 0;
     QWidget *m_stripSpacer = nullptr;
     QPushButton *m_savedDrafts = nullptr;
@@ -197,7 +335,7 @@ private:
     QElapsedTimer m_readDwell;
     QString m_readCandidate, m_readSelectionKey;
     void acceptInspection(const QString &host, const QString &name, const QJsonObject &data, const QString &archiveId);
-    void showNotice(const QString &message, bool error = false);
+    void showNotice(const QString &message, bool error = false, bool transient = false);
     void clearNotice();
     // Opens a session file like a browser download; see ExternalFile.h.
     void openExternalFile(const QString &path, bool otherMachine);
@@ -210,17 +348,25 @@ private:
     // when the selection changed while the warning was open.
     bool confirmLocalStart(const Entry &original);
     void terminateSession();
+    // F7: a member session a Done/Stopped team left running. The Team tab has
+    // already confirmed; this selects it and runs the terminate flow without
+    // asking a second time.
+    void stopTeamSession(const QString &host, const QString &name);
     void archiveSession();
     // Native lifecycle cleanup reports its result after Archive or Terminate.
     // Keep a review action for remaining work. Host, session, root, common dir.
     QStringList m_archivedWorktree;
-    QString m_archivedWorktreeRun, m_worktreeCleanupReason;
+    QString m_archivedWorktreeRun, m_archivedWorktreeOwnerId, m_worktreeCleanupReason;
     bool m_worktreeCleanupOffered = false, m_worktreeCleanupUnconfirmed = false;
     QPushButton *m_worktreeCleanup = nullptr;
+    WorktreeCleanupStatus *m_terminationCleanup = nullptr;
+    QHash<QString,QJsonObject> m_terminationCleanupResults;
     int m_worktreeCleanupRevision = 0;
     void offerWorktreeCleanup();
     void updateWorktreeCleanupOffer();
     void cleanUpArchivedWorktree();
+    void reviewTerminatedWorktrees(const QList<QStringList> &offers);
+    bool m_removeTerminatedWorktree = false;
     void renameSession();
     void forkSession();
     void populateBatchActions(QMenu *menu);
@@ -252,6 +398,10 @@ private:
     QStringList m_selectionErrors;
     int m_selectionTotal = 0, m_selectionDone = 0, m_selectionFailed = 0;
     bool m_selectionRunning = false;
+    bool m_selectionRemoveWorktrees = false;
+    QStringList m_selectionCleanupTarget;
+    QList<QStringList> m_selectionCleanupOffers;
+    int m_selectionCleanupOverflow = 0;
     enum class SessionMenuAction { OpenTerminal, OpenProcesses, OpenFolder, FolderShell, CopyCommand, ChangeState, Rename, Fork, Archive, CopyName, CopyReference, CopyFolder, Terminate, MarkRead, ReviewLater, StartFresh, Clear, ToggleMute, ToggleKeepWarm, CollapseRow, ExpandRow };
     void copySessionReference(const Entry &entry, const QString &agent = {});
     void showSessionMenu(const QString &key, const QPoint &position);
@@ -266,6 +416,8 @@ private:
         bool fresh = false, compact = false;
         qint64 started = 0;
     } m_startSend;
+    // U3: the resume guard refused a stale transcript; ask how to continue.
+    void resumeBehind(const QString &name, const QString &detail);
     void cancelStartContinuation(const QString &reason);
     void continueAfterStart(const QString &host, const QString &name, const QJsonObject &data);
     struct CompactContinuation {
@@ -327,6 +479,7 @@ private:
     void renderQuestion(const Entry &entry, int navigation = 0);
     void setInspectorVisible(bool visible);
     void updateInspectorMinimum();
+    void applyInspectorWidth();
     // Keyboard commands of the Window scope (Shortcuts.h), implemented in
     // SessionsWindowShortcuts.cpp. Every command's action stays enabled; a
     // command with nothing to do does nothing or shows a notice.
@@ -374,6 +527,14 @@ private:
     FleetState m_fleet;
     QList<Entry> m_entries;
     QJsonObject m_pendingLaunches;
+    SessionCreationController *m_creations=nullptr;
+    QString m_selectedCreation,m_revealCreation,m_creationSessionToSelect;
+    QWidget *m_creationPanel=nullptr;
+    QLabel *m_creationTitle=nullptr;
+    QPlainTextEdit *m_creationText=nullptr;
+    QPushButton *m_creationContinue=nullptr,*m_creationCheck=nullptr,*m_creationStop=nullptr,*m_creationEdit=nullptr;
+    bool m_admittingCreation=false;
+    QHash<QString,QString> m_creationNotices;
     // Launches a listing reported ended, oldest first, with their launch intent.
     QList<QPair<QString, QJsonObject>> m_endedLaunches;
     QHash<QString, Entry> m_terminating;
@@ -396,6 +557,8 @@ private:
     class SocratiCodePanel *m_socratiCode=nullptr;
     // WhiteWh fork: agent teams on this computer and the inspector's Team tab.
     class TeamController *m_teams=nullptr;
+    std::shared_ptr<class TeamAttentionNotices> m_teamNotices;
+    QString m_pendingTeamAttention;   // a clicked notice whose team is not read yet
     class TeamPanel *m_teamPanel=nullptr;
     // The team header the user selected in the list; a selected session shows its own team.
     QString m_selectedTeam;
@@ -403,13 +566,21 @@ private:
     class QFrame *m_teamStrip=nullptr;
     class QLabel *m_teamStripText=nullptr;
     void openTeamTask(int task);
-    void showNewTeam();
+    // F7: a session named here is taken into the new team as its existing lead.
+    void showNewTeam(const QString &host = {}, const QString &name = {});
     void showTeamDesigner();
     void startTeamDesigner(const QString &folder,const QString &goal,const QJsonObject &agent);
     QString m_teamDesignerFolder,m_teamDesignerProject;
     QString teamDesignerSession() const;
     class TeamCatalogEditor *m_teamCatalog=nullptr;
     class TeamWorkspace *m_teamWorkspace=nullptr;
+    // U25 (spec 3): the header rows that carry a lead session's team.
+    QHBoxLayout *m_titleRow=nullptr, *m_chipsRow=nullptr; bool m_teamHeader=false;
+    // U30 (#508): the header pill's state, its glyph and the clock that keeps
+    // Cooling counting down between polls.
+    SessionStates::Shown m_badgeState;
+    QLabel *m_badgeGlyph=nullptr;
+    QTimer m_stateClock;
     // The Team designer mode on the rail, and New team next to Activity: the
     // selected session leads the team built there; once created, Team follows.
     class TeamDesignerPage *m_teamDesignerPage=nullptr;
@@ -428,6 +599,8 @@ private:
     void updateTeamPanel();
     void showTeam(const QString &team);
     Teams::Live teamLive(const Teams::Member &member) const;
+    // The strip a team lead's card carries (SessionRoles::TeamLead).
+    QVariantMap teamStrip(const Teams::Team &team) const;
     QSet<QString> m_collapsedTeams;
     class IronRulesPanel *m_ironRules=nullptr;
     class SessionLeadPanel *m_leadPanel=nullptr;
@@ -443,9 +616,16 @@ private:
     void sendReportToLead();
     // WhiteWh fork: the project (organization group) a session belongs to.
     QString projectOfKey(const QString &key) const;
-    QSet<QString> m_hostFilters, m_projectFilters;
+    QString teamProjectRules() const;
+    QSet<QString> m_hostFilters, m_projectFilters, m_accountFilters;
+    QJsonArray m_sessionAccountProfiles;
+    QJsonArray m_sessionAccountDetailsProfiles;
     QString selectedHostTarget() const;
     void updateDashboard();
+    // Gives each computer's live event stream the checkout folders of its
+    // sessions (selected, then shown rows, then the rest); those need no
+    // git-status poll while it follows them.
+    void updateGitWatch();
     QJsonObject m_details;
     QHash<QString, QString> m_questionSelections;
     QJsonArray m_events;
@@ -480,8 +660,15 @@ private:
     QSet<QString> m_inspectionBehindSettings;
     QByteArray m_settingsIdentity; // The automatic apply in flight.
     bool m_pending = false, m_clipboard = false, m_rebuilding = false;
+    // N7: the Team tab's leftover Stop names a session; its entry key waits
+    // here until the inspection that decides the real action has loaded.
+    QString m_terminateAfterInspect;
     // Polls keep hidden pages' data current; these pages render when shown.
     bool m_sessionsStale = false, m_dashboardStale = false;
+    // What the session rows were rendered with: peer reachability by poll age
+    // (FleetState::freshness), and when a row's text next changes with the clock.
+    QByteArray m_renderedFreshness;
+    qint64 m_rowsChangeAt = 0;
     QSet<QString> m_retryReads;
     QHash<QString, quint64> m_waitingPreparations;
     quint64 m_waitingPreparationSerial = 0;
@@ -496,18 +683,24 @@ private:
     QHash<QString, QElapsedTimer> m_remotePollAges;
     BusyIndicator *m_sessionLoading = nullptr;
     QElapsedTimer m_processPollAge,m_inspectionAge;
+    // Runs whose event-stream subscription ended; they are polled (EventStream.h).
+    QSet<QString> m_streamEnded;
     SessionList *m_sessions;
     SessionSearch *m_searchResults;
     QStackedWidget *m_listStack = nullptr;
     MachinesPage *m_machinesPage;
     MachineFilter *m_machineFilter;
     ProjectFilter *m_projectFilter;
+    AccountFilter *m_accountFilter;
     DashboardPage *m_dashboard;
     AccountsPage *m_accountsPage;
     SessionOrganization m_organization;
     SessionRowPreferences m_sessionRowPreferences;
     SwarmController *m_swarm = nullptr;
     QByteArray m_savedOrganization;
+    // SessionOrganization::revision() of the organization last saved and sent
+    // to the swarm; 0 when the next save must serialize it.
+    quint64 m_savedOrganizationRevision = 0;
     QPushButton *m_sessionsNav, *m_machinesNav, *m_accountsNav;
     SwarmButton *m_brand = nullptr;
     QString m_fullTitle, m_fullMeta;
@@ -555,6 +748,9 @@ private:
     QTextBrowser *m_children = nullptr, *m_info = nullptr;
     ActivityView *m_activityView = nullptr;
     class ProcessView *m_processes = nullptr;
+    class TasksView *m_tasks = nullptr;
+    QWidget *m_taskView = nullptr;
+    class TaskInspector *m_taskInspector = nullptr;
     QWidget *m_nativeSignIn = nullptr;
     // A stopped OpenCode service: started only by this explicit action.
     QWidget *m_openCodeService = nullptr;
@@ -571,6 +767,13 @@ private:
     QJsonObject m_subagentDetails;
     MessageComposer *m_composer = nullptr, *m_subagentComposer = nullptr;
     class WorkingLine *m_workingLine = nullptr;   // WhiteWh fork
+    // U35: the messages hgs holds for the selected session, with Cancel; the
+    // ones just queued per session until a read lists them; cancels in flight.
+    class HeldInputBar *m_heldBar = nullptr;
+    QHash<QString, QJsonArray> m_justHeld;
+    QHash<quint64, QPair<QString, QString>> m_heldCancels;
+    void renderHeld();
+    void openSessionTerminal(const QString &host, const QString &name);
     QHash<quint64, QString> m_childMessages;
     QuestionCard *m_question = nullptr;
     QList<ActivityWidth::ColumnLayout *> m_activityColumns;   // content sharing Activity's reading column
@@ -581,7 +784,20 @@ private:
     TerminalView *m_terminal = nullptr;
     NativeUiView *m_nativeUi = nullptr;
     QTabWidget *m_detailTabs = nullptr;
-    QTabWidget *m_inspector = nullptr;
+    // U25 part 6 (spec 6): the inspector's column of cards.
+    class InspectorCards *m_inspector = nullptr;
+    QMap<QString, class InspectorValue *> m_environment;
+    QLabel *m_contextUsed = nullptr, *m_contextTokens = nullptr, *m_contextLeft = nullptr;
+    class ContextBar *m_contextBar = nullptr;
+    QWidget *m_contextRows = nullptr, *m_changesList = nullptr;
+    QLabel *m_changesEmpty = nullptr;
+    QPushButton *m_commitChanges = nullptr, *m_openDiff = nullptr;
+    quint64 m_diffRequest = 0;
+    void openInspectorCard(int card);
+    void updateEnvironmentCard();
+    void updateContextCard();
+    void updateChangesCard();
+    void showDiff(const QJsonObject &data, const QString &error);
     QLabel *m_detailsContext = nullptr;
     QLabel *m_detailsIdTitle = nullptr, *m_detailsIdValue = nullptr;
     QPushButton *m_copySessionId = nullptr;
@@ -595,7 +811,10 @@ private:
     QFrame *m_inspectorPanel = nullptr;
     QSplitter *m_workSplitter = nullptr;
     QPushButton *m_inspectorToggle = nullptr;
-    int m_inspectorWidth = 290;
+    QWidget *m_inspectorCorner = nullptr;
+    static constexpr int DefaultInspectorWidth = 400;
+    int m_inspectorWidth = DefaultInspectorWidth;
+    bool m_inspectorWidthPending = false;
     struct PendingMessage { QString key, runId, conversationId; };
     QHash<quint64, PendingMessage> m_pendingMessages;
     QHash<QString, QJsonArray> m_localMessages;
@@ -605,7 +824,10 @@ private:
     void finishSendEvidence(const QString &key);
     struct PendingAnswer { QString key, questionId, questionHash; };
     QHash<quint64, PendingAnswer> m_pendingAnswers;
-    struct PendingNotifications { Entry entry; };
+    // U25: unmuting a member muted by its team writes mute, then unmute: the
+    // host records only a change, and revision 0 means the session never chose.
+    struct PendingNotifications { Entry entry; bool thenUnmute = false; };
+    QSet<QString> m_teamMembers;
     QHash<quint64, PendingNotifications> m_pendingNotifications;
     bool m_confirmingQuestionCache = false;
     QStackedWidget *m_detailStack = nullptr;

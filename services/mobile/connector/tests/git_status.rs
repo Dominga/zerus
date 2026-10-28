@@ -109,7 +109,7 @@ async fn native_projection_uses_exact_original_path_no_stdin_and_deduplicates() 
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].argv, ["git-status", "--path", PATH, "--json"]);
     assert_eq!(calls[0].payload, None);
-    assert_eq!(calls[0].timeout, Some(5.0));
+    assert_eq!(calls[0].timeout, Some(25.0));
     assert_eq!(calls[0].max_output_bytes, Some(32 * 1024));
 }
 
@@ -381,7 +381,7 @@ async fn existing_machine_guard_wraps_only_the_exact_git_argv_and_empty_payload(
             json!({"schema":1,"target_machine_id":machine,"argv":["git-status","--path",PATH,"--json"],"payload":null})
         )
     );
-    assert_eq!(calls[0].timeout, Some(5.0));
+    assert_eq!(calls[0].timeout, Some(25.0));
     assert_eq!(calls[0].max_output_bytes, Some(32 * 1024));
 }
 

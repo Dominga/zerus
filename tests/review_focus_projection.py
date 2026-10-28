@@ -12,10 +12,38 @@ DISCLOSURE_PATCH = ROOT / "tests/fixtures/android-disclosure-reveal-binding.patc
 DISCLOSURE_PATCH_SHA = "836ba867003270d90d3d1a7b21cc6ae4e08d41187ad1cbcda4e8b5ed6a732655"
 CONFIRMATION_ORDER_PATCH = ROOT / "tests/fixtures/android-confirmation-observation-order.patch"
 CONFIRMATION_ORDER_PATCH_SHA = "f0176b24763d88bce6cd6c0b8f334278e29974705c9a059a985c12228f2feaef"
+SCROLL_IDLE_PATCH = ROOT / "tests/fixtures/android-disclosure-scroll-idle.patch"
+SCROLL_IDLE_PATCH_SHA = "5cbcf83a20a2d5388436402b4ecf47841fa21b34381ff0d7ef132e8212e03992"
 BASELINES = {
     FIXTURE: "73cee450f08e33c007ad6f3188a6a69135674e2503f80ea48582ba8aa394a9f7",
     PROBE: "beb6a3caf6ae07ca3a062f4f30286aad3b19b71427eed7c9e8d662f7d5ae85be",
 }
+
+
+def reverse_scroll_idle(source):
+    """Reverse only the bounded pre-tap idle observation; retain every physical tap and oracle."""
+    raw = SCROLL_IDLE_PATCH.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != SCROLL_IDLE_PATCH_SHA:
+        raise AssertionError("reviewed scroll-idle patch changed")
+    sections = raw.decode().split("diff --git ")
+    if sections[0] or len(sections) != 2:
+        raise AssertionError("unexpected scroll-idle patch sections")
+    header, body = sections[1].split("\n", 1)
+    if header != "a/" + FIXTURE + " b/" + FIXTURE:
+        raise AssertionError("unexpected scroll-idle patch path")
+    hunks = re.split(r"(?m)^@@[^\n]*\n", body)[1:]
+    if not hunks:
+        raise AssertionError("missing scroll-idle patch hunks")
+    for hunk in hunks:
+        lines = hunk.splitlines(keepends=True)
+        if not lines or any(line[:1] not in (" ", "+", "-") for line in lines):
+            raise AssertionError("unsupported scroll-idle patch hunk")
+        old = "".join(line[1:] for line in lines if line[0] in " -")
+        new = "".join(line[1:] for line in lines if line[0] in " +")
+        if not old or not new or old == new or source.count(new) != 1:
+            raise AssertionError("scroll-idle postimage missing, changed or duplicated")
+        source = source.replace(new, old, 1)
+    return source
 
 
 def reverse_confirmation_order(source):
@@ -76,7 +104,7 @@ def reverse_focus_wait(path, source):
     if path not in BASELINES:
         raise AssertionError("unexpected focus-wait projection path")
     if path == FIXTURE:
-        source = reverse_disclosure_reveal(source)
+        source = reverse_disclosure_reveal(reverse_scroll_idle(source))
     raw = PATCH.read_bytes()
     if hashlib.sha256(raw).hexdigest() != PATCH_SHA:
         raise AssertionError("reviewed focus-wait patch changed")

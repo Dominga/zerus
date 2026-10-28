@@ -1,5 +1,6 @@
 #pragma once
 #include "ChildProcess.h"
+#include "JsonParse.h"
 #include <QCheckBox>
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -112,7 +113,7 @@ inline QJsonObject manage(const QString &action, const QString &config, const QJ
     process.closeWriteChannel();
     if (!process.waitForFinished(12000)) { process.kill(); process.waitForFinished(1000); return {}; }
     if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) return {};
-    return QJsonDocument::fromJson(process.readAllStandardOutput()).object();
+    return JsonParse::object(process.readAllStandardOutput());
 }
 
 // At Zerus start, off the GUI thread: the chosen relay, then a configured

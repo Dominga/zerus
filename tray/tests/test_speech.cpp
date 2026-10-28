@@ -1,3 +1,4 @@
+#include "JsonSettings.h"
 #include "speech/SpeechClient.h"
 #include "speech/SpeechRecorder.h"
 #include "speech/RoundVideo.h"
@@ -127,6 +128,18 @@ else:
         if (root/'lost-management').exists():
             print(payload.get('credential',{}).get('value','private fixture value'),file=sys.stderr);sys.exit(1)
         print(json.dumps(result))
+    elif payload['action'].startswith('draft_'):
+        action=payload['action']
+        with (root/'draft-actions').open('a') as log: log.write(json.dumps(payload)+'\n')
+        assert 'voice' not in sys.argv
+        assert 'expected_run_id' not in payload
+        if action=='draft_profiles':
+            print(json.dumps(dict(schema=1,computers=[{'machine_id':'bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb','name':'Fixture','profiles':[{'id':'russian','name':'Russian','available':True}]}])))
+        else:
+            key=payload.get('request_id',payload.get('job_id'));uuid.UUID(key)
+            while (root/'draft-gate').exists():time.sleep(.01)
+            if (root/'draft-lost').exists():sys.exit(1)
+            print(json.dumps(dict(schema=1,job_id=key,state='completed',text='Recognized task content')))
     elif 'voice' in sys.argv:
         uuid.UUID(payload['request_id'])
         assert payload['expected_run_id']
@@ -241,6 +254,60 @@ private slots:
         QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_home.path());
     }
     void init() { ComposerDraftStore::flushWrites(); QDir(ComposerDraftStore::directory()).removeRecursively(); QSettings().clear(); }
+    void taskVoiceTranscribesIntoItsDraftWithoutNativeInput() {
+        QTemporaryDir dir; MessageComposer composer; composer.setTaskMode(true); composer.setSessionKey("task-description\nproject\ntask-one");
+        composer.setAvailability(true); QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey())); composer.show();
+        auto *recorder = new FixtureRecorder;
+        SpeechComposer speech(fixture(dir.path()), &composer, [&] {
+            SpeechComposer::Target t; t.key = composer.sessionKey(); t.session = "fixture/task"; t.available = true; t.draftOnly = true; return t;
+        }, recorder);
+        QSignalSpy sent(&composer, &MessageComposer::sendRequested);
+        auto *voice = composer.findChild<ToolbarChip *>("voiceRecord"); QTRY_VERIFY(voice->isEnabled()); voice->click(); voice->click();
+        auto *transcribe = composer.findChild<QPushButton *>("voiceSend"); QTRY_VERIFY(transcribe->isEnabled()); QCOMPARE(transcribe->text(), QString("Transcribe")); transcribe->click();
+        QTRY_COMPARE(composer.editor()->toPlainText(), QString("Recognized task content"));
+        ComposerDraftStore::flushWrites(); QCOMPARE(sent.size(), 0); QCOMPARE(recorder->starts, 1);
+        const auto draft = ComposerDraftStore().load(composer.sessionKey()); QCOMPARE(draft.text, QString("Recognized task content"));
+        QVERIFY(!draft.formState.value("voice_insertions").toArray().isEmpty()); QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
+        QTRY_VERIFY(ComposerDraftStore().load("voice-message-draft\n"+composer.sessionKey()).attachments.isEmpty());
+    }
+    void taskVoiceNavigationRetainsTheOriginalJobWithoutReplay() {
+        QTemporaryDir dir; QFile gate(dir.path()+"/draft-gate"); QVERIFY(gate.open(QIODevice::WriteOnly)); gate.close();
+        MessageComposer composer; composer.setTaskMode(true); composer.setSessionKey("task-comment\nproject\ntask-one"); composer.setAvailability(true);
+        QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey())); composer.show(); auto *recorder = new FixtureRecorder;
+        SpeechComposer speech(fixture(dir.path()), &composer, [&] {
+            SpeechComposer::Target t; t.key = composer.sessionKey(); t.session = t.key; t.available = true; t.draftOnly = true; return t;
+        }, recorder);
+        auto *voice = composer.findChild<ToolbarChip *>("voiceRecord"); QTRY_VERIFY(voice->isEnabled()); voice->click(); voice->click();
+        auto *transcribe = composer.findChild<QPushButton *>("voiceSend"); QTRY_VERIFY(transcribe->isEnabled()); transcribe->click();
+        QTRY_VERIFY([&] { QFile f(dir.path()+"/draft-actions"); return f.open(QIODevice::ReadOnly) && f.readAll().contains("draft_submit"); }());
+        composer.setSessionKey("task-comment\nproject\ntask-two"); QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
+        composer.editor()->setPlainText("Other task input"); QVERIFY(gate.remove()); QTest::qWait(100);
+        QCOMPARE(composer.editor()->toPlainText(), QString("Other task input"));
+        composer.setSessionKey("task-comment\nproject\ntask-one"); QTRY_COMPARE(transcribe->text(), QString("Check transcription"));
+        QTRY_VERIFY(transcribe->isEnabled()); transcribe->click(); QTRY_COMPARE(composer.editor()->toPlainText(), QString("Recognized task content"));
+        QFile actions(dir.path()+"/draft-actions"); QVERIFY(actions.open(QIODevice::ReadOnly)); const auto requests = actions.readAll();
+        QCOMPARE(requests.count("draft_submit"), 1); QCOMPARE(requests.count("draft_status"), 1); QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
+    }
+    void lateTaskTranscriptionKeepsEditedTextUntilExplicitInsertion() {
+        QTemporaryDir dir; QFile gate(dir.path()+"/draft-gate"); QVERIFY(gate.open(QIODevice::WriteOnly)); gate.close();
+        MessageComposer composer; composer.setTaskMode(true); composer.setSessionKey("task-comment\nproject\ntask-one"); composer.setAvailability(true);
+        QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey())); composer.show(); auto *recorder = new FixtureRecorder;
+        SpeechComposer speech(fixture(dir.path()), &composer, [&] {
+            SpeechComposer::Target t; t.key = composer.sessionKey(); t.session = "fixture/task"; t.available = true; t.draftOnly = true; return t;
+        }, recorder);
+        auto *voice = composer.findChild<ToolbarChip *>("voiceRecord"); QTRY_VERIFY(voice->isEnabled()); voice->click(); voice->click();
+        auto *transcribe = composer.findChild<QPushButton *>("voiceSend"); QTRY_VERIFY(transcribe->isEnabled()); transcribe->click();
+        composer.editor()->setPlainText("Typed while transcribing"); QVERIFY(gate.remove());
+        QTRY_COMPARE(transcribe->text(), QString("Add to draft"));
+        // The caption arrives before the transcript's durable save completes.
+        QTRY_VERIFY(transcribe->isEnabled()); QCOMPARE(composer.editor()->toPlainText(), QString("Typed while transcribing"));
+        transcribe->click();
+        QTRY_VERIFY(composer.editor()->toPlainText().contains("Recognized task content"));
+        QVERIFY(composer.editor()->toPlainText().contains("Typed while transcribing"));
+        const auto text = composer.editor()->toPlainText(); const auto id = composer.draftSnapshot().formState.value("voice_insertions").toArray().first().toString();
+        bool saved = false; QVERIFY(composer.insertVoiceText(composer.voiceTarget(), "Recognized task content", [&](bool ok) { saved = ok; }, id));
+        QTRY_VERIFY(saved); QCOMPARE(composer.editor()->toPlainText(), text); QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
+    }
     void streamingConversionIsIndependentOfChunks() {
         const auto input = tone(48000, 2, 48000, 997);
         SpeechPcmConverter full(format(48000, 2)), chunked(format(48000, 2));
@@ -448,7 +515,7 @@ private slots:
     }
     void settingsUnknownReceiptRemainsPendingWithoutReplay() {
         QTemporaryDir dir;const QJsonObject pending{{"host",""},{"computer","This computer"},{"machine_id","bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"},{"request_id","aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"},{"action","profile_upsert"}};
-        QSettings().setValue("speech/providerOperation",QJsonDocument(pending).toJson(QJsonDocument::Compact));
+        setJsonSetting("speech/providerOperation",QJsonDocument(pending).toJson(QJsonDocument::Compact));
         SpeechSettings settings(fixture(dir.path()));settings.refresh();auto *check=settings.findChild<QPushButton *>("speechCheckOperation");check->click();QTRY_VERIFY(check->isEnabled());
         QCOMPARE(QJsonDocument::fromJson(QSettings().value("speech/providerOperation").toByteArray()).object(),pending);
         QVERIFY(!settings.findChild<QPushButton *>("speechAdd")->isEnabled());QVERIFY(!QFile::exists(dir.path()+"/management-actions"));

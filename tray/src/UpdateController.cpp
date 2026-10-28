@@ -1,4 +1,6 @@
 #include "UpdateController.h"
+#include "JsonParse.h"
+#include "ProcessRunner.h"
 #include "ChildProcess.h"
 #include "ForkUpdater.h"
 #include <QCoreApplication>
@@ -86,8 +88,8 @@ QHash<QString,QString> bundleValues(const QString &path){
 DesktopUpdateFeed parseDev(const QByteArray &data){
     DesktopUpdateFeed result;
     if(data.size()>256*1024)return result;
-    QJsonParseError error;auto doc=QJsonDocument::fromJson(data,&error);
-    if(error.error!=QJsonParseError::NoError||!doc.isObject())return result;
+    QString error;auto doc=JsonParse::parse(data,&error);
+    if(!error.isEmpty()||!doc.isObject())return result;
     auto raw=doc.object();
     if(!integer(raw["schemaVersion"],2,2)||raw["product"]!="zerus"||raw["platform"]!="desktop"||raw["channel"]!="dev"||raw["channelTag"]!="dev"||raw.contains("sourceDirty")||!integer(raw["buildId"],1,9007199254740991LL)||!integer(raw["buildNumber"],1,9007199254740991LL))return result;
     auto id=raw["buildId"].toInteger();auto commit=raw["sourceCommit"].toString();auto version=raw["versionName"].toString();
@@ -132,6 +134,11 @@ QJsonObject UpdateController::buildInfo(){
     info["devBuildNumber"]=qint64(ZERUS_DEV_BUILD_NUMBER);
     info["versionName"]=QStringLiteral(ZERUS_DEV_BASE_VERSION)+QString("-dev.%1").arg(qint64(ZERUS_DEV_BUILD_NUMBER));
 #endif
+#ifdef ZERUS_LOCAL_PREVIEW_LABEL
+    info["previewLabel"]=QStringLiteral(ZERUS_LOCAL_PREVIEW_LABEL);
+    info["versionName"]=QStringLiteral(ZERUS_DEV_BASE_VERSION)+"-preview."+QStringLiteral(ZERUS_LOCAL_PREVIEW_LABEL)
+        +'.'+info["sourceCommit"].toString().left(7);
+#endif
     return info;
 }
 QString UpdateController::installedVersion(){
@@ -139,7 +146,7 @@ QString UpdateController::installedVersion(){
 #ifdef ZERUS_FORK_VERSION
     version=tr("Fork %1 candidate — Zerus %2").arg(info["forkVersion"].toString(),version);
 #endif
-    if(info["devBuildNumber"].toInteger()>0||info["sourceCommit"].toString().isEmpty())return version;
+    if(info["devBuildNumber"].toInteger()>0||info.contains("previewLabel")||info["sourceCommit"].toString().isEmpty())return version;
     const auto source=info["sourceCommit"].toString().left(7);
     return info["sourceDirty"].toBool()?tr("%1 (local changes %2)").arg(version,source):QString("%1 (%2)").arg(version,source);
 }
@@ -177,7 +184,7 @@ DesktopUpdateFeed UpdateController::parseFeed(const QByteArray &data,const QStri
     if(channel=="dev")return parseDev(data);
     DesktopUpdateFeed result;
     if(data.size()>256*1024||!(channel=="stable"||channel=="nightly"))return result;
-    QJsonParseError error;auto doc=QJsonDocument::fromJson(data,&error);if(error.error!=QJsonParseError::NoError||!doc.isObject())return result;
+    QString error;auto doc=JsonParse::parse(data,&error);if(!error.isEmpty()||!doc.isObject())return result;
     auto raw=doc.object();
     if(!integer(raw["schemaVersion"],1,1)||raw["product"]!="zerus"||raw["platform"]!="desktop"||raw["channel"]!=channel||raw.contains("sourceDirty")||!integer(raw["releaseId"],1,9007199254740991LL))return result;
     QString version=raw["versionName"].toString(),release=raw["releaseUrl"].toString();
@@ -313,8 +320,8 @@ QString UpdateController::wingetPackage(const QString &executable){
 }
 bool UpdateController::installerRecord(const QByteArray &data){
     if(data.isEmpty()||data.size()>installerRecordLimit)return false;
-    QJsonParseError error;const auto document=QJsonDocument::fromJson(data,&error);
-    if(error.error!=QJsonParseError::NoError||!document.isObject())return false;
+    QString error;const auto document=JsonParse::parse(data,&error);
+    if(!error.isEmpty()||!document.isObject())return false;
     const auto record=document.object();
     return integer(record["schema"],1,1)&&record["kind"]=="installer"&&record["product"]=="Zerus";
 }
@@ -456,7 +463,7 @@ bool UpdateController::startRestartHelper(const QString &bundle,qint64 pid,const
 }
 bool UpdateController::restartRequired() const{return m_restartRequired||ForkUpdater::instance()->ready();}
 void UpdateController::restartIntoInstalledBundle(){
-    if(auto *fork=ForkUpdater::instance();fork->ready()){if(fork->startInstall())QCoreApplication::quit();return;}
+    if(auto *fork=ForkUpdater::instance();fork->ready()){fork->startInstall();return;}
 #ifdef Q_OS_MACOS
     QDir bundle=QFileInfo(m_executable).absoluteDir();if(!bundle.cdUp()||!bundle.cdUp()||!bundle.dirName().endsWith(".app"))return;
     if(startRestartHelper(bundle.absolutePath(),QCoreApplication::applicationPid()))QCoreApplication::quit();
@@ -543,7 +550,7 @@ void UpdateController::updateLoginItem(std::function<void(const QString &)> done
     },60000,true);
 }
 void UpdateController::sourceInstallation(const QString &executable){
-    m_installation.kind="unknown";QDir directory=QFileInfo(executable).absoluteDir();
+    QString kind="unknown";QDir directory=QFileInfo(executable).absoluteDir();
 #ifdef Q_OS_WIN
     // The portable zip has build-info.json next to hgs-tray.exe: never a source
     // build, even unpacked inside a folder kept in Git (a profile, for instance).
@@ -551,7 +558,7 @@ void UpdateController::sourceInstallation(const QString &executable){
 #else
     const bool bundle=false;
 #endif
-    for(int depth=0;!bundle&&depth<20;++depth){if(QFileInfo::exists(directory.filePath(".git"))){m_installation.kind="source";break;}if(!directory.cdUp())break;}
+    for(int depth=0;!bundle&&depth<20;++depth){if(QFileInfo::exists(directory.filePath(".git"))){kind="source";break;}if(!directory.cdUp())break;}
 #ifdef Q_OS_WIN
     // Windows builds ship as a portable zip; there is no package manager to ask.
     // Stable stays the default: stable releases after 0.42.2 carry the same tested
@@ -559,14 +566,19 @@ void UpdateController::sourceInstallation(const QString &executable){
     // nightly, is kept.
     // The per-user installer leaves installation.json next to hgs-tray.exe
     // (scripts/windows_installer.py); a zip has none. Neither updates itself.
-    if(m_installation.kind=="unknown"){
-        QFile record(QFileInfo(executable).absoluteDir().filePath("installation.json"));QByteArray data;
-        if(record.open(QIODevice::ReadOnly))data=record.read(installerRecordLimit+1);
-        if(installerRecord(data))m_installation.kind="installer";
-        else{m_installation.kind="portable";m_installation.package=wingetPackage(executable);}
+    // The record is read and parsed off the GUI thread (ProcessRunner.h).
+    if(kind=="unknown"){
+        const QString path=QFileInfo(executable).absoluteDir().filePath("installation.json");
+        ProcessRunner::post(this,[path]{QFile record(path);QByteArray data;if(record.open(QIODevice::ReadOnly))data=record.read(installerRecordLimit+1);return installerRecord(data);},
+            [this,executable](bool installer){
+                if(installer)m_installation.kind="installer";
+                else{m_installation.kind="portable";m_installation.package=wingetPackage(executable);}
+                emit changed();compare();
+            });
+        return;
     }
 #endif
-    emit changed();compare();
+    m_installation.kind=kind;emit changed();compare();
 }
 void UpdateController::detectInstallation(const QString &executable){
     QString canonical=QFileInfo(executable).canonicalFilePath();if(canonical.isEmpty()){m_installation.kind="unknown";emit changed();compare();return;}
@@ -604,12 +616,17 @@ void UpdateController::startCheck(bool automatic){
     auto *manager=m_fetch?nullptr:new QNetworkAccessManager(this);QNetworkRequest request(QUrl("https://zerus.dev/updates/"+QString(selected=="dev"?"v2":"v1")+"/desktop/"+selected+".json"));request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,QNetworkRequest::ManualRedirectPolicy);request.setTransferTimeout(10000);
     auto *reply=m_fetch?m_fetch(request):manager->get(request);m_activeReply=reply;auto data=std::make_shared<QByteArray>();auto oversized=std::make_shared<bool>(false);auto *timer=new QTimer(reply);timer->setSingleShot(true);connect(timer,&QTimer::timeout,reply,&QNetworkReply::abort);timer->start(10000);
     connect(reply,&QNetworkReply::readyRead,this,[reply,data,oversized]{auto bytes=reply->readAll();if(data->size()+bytes.size()>256*1024){*oversized=true;reply->abort();}else *data+=bytes;});
-    connect(reply,&QNetworkReply::finished,this,[this,reply,manager,timer,data,oversized,generation,selected]{timer->stop();if(generation==m_checkGeneration){
-        m_busy=false;m_activeReply=nullptr;bool mayNotify=!m_automaticInFlight||automaticChecks();m_automaticInFlight=false;DesktopUpdateFeed verified;if(!*oversized&&reply->error()==QNetworkReply::NoError&&reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()==200)verified=parseFeed(*data,selected);
+    connect(reply,&QNetworkReply::finished,this,[this,reply,manager,timer,data,oversized,generation,selected]{timer->stop();
+        // The downloaded catalog is parsed off the GUI thread (ProcessRunner.h).
+        const bool fetched=generation==m_checkGeneration&&!*oversized&&reply->error()==QNetworkReply::NoError&&reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()==200;
+        if(generation==m_checkGeneration)m_activeReply=nullptr;
+        reply->deleteLater();if(manager)manager->deleteLater();
+        ProcessRunner::post(this,[fetched,bytes=*data,selected]{return fetched?parseFeed(bytes,selected):DesktopUpdateFeed{};},[this,data,generation,selected](const DesktopUpdateFeed &verified){if(generation==m_checkGeneration){
+        m_busy=false;m_activeReply=nullptr;bool mayNotify=!m_automaticInFlight||automaticChecks();m_automaticInFlight=false;
         if(verified.valid){m_freshForNotification=mayNotify;m_cached=false;m_available=false;m_feed=verified;m_lastSuccess=QDateTime::currentSecsSinceEpoch();QSettings settings;settings.setValue("updates/catalog/"+selected,*data);settings.setValue("updates/lastSuccess/"+selected,m_lastSuccess);m_notice="Last successful check: "+QDateTime::fromSecsSinceEpoch(m_lastSuccess).toString(Qt::ISODate)+".";}
         else {m_error=tr("Check failed. Try again later.");m_cached=m_feed.valid;m_notice=m_feed.valid?"Update check failed. Showing the last verified catalog ("+QDateTime::fromSecsSinceEpoch(m_lastSuccess).toString(Qt::ISODate)+").":"Update check failed or the catalog was invalid. Try again later.";}
         present(m_feed.valid?comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false):QString());emit changed();compare();
-    }reply->deleteLater();if(manager)manager->deleteLater();});
+    }});});
 }
 void UpdateController::completeComparison(bool newer,const QString &message){
     m_available=newer;present(message);emit changed();
@@ -629,7 +646,10 @@ void UpdateController::compare(){
     }
     if(m_installation.kind!="package"){
         const auto version=QCoreApplication::applicationVersion();
-        bool newer=windowsBuild(m_installation)?portableUpdateAvailable(version,m_feed):channel()=="stable"&&plainStableIsNewer(version,m_feed.version);
+        // WhiteWh fork: a portable Windows build of the fork updates only from
+        // the fork's releases (ForkUpdater); an upstream zip would replace it.
+        const bool fork=windowsBuild(m_installation)&&ForkUpdater::instance()->manualAvailable();
+        bool newer=windowsBuild(m_installation)?!fork&&portableUpdateAvailable(version,m_feed):channel()=="stable"&&plainStableIsNewer(version,m_feed.version);
         completeComparison(newer,comparisonMessage(m_installation,m_feed,version,0,false));return;
     }
     if(m_installation.package=="zerus-git"||m_installation.version.isEmpty()||!m_feed.packages.contains(m_installation.package)){completeComparison(false,comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false));return;}
@@ -639,13 +659,23 @@ void UpdateController::compare(){
 
 void UpdateController::present(const QString &message){m_comparison=message;m_message=m_notice+(m_notice.isEmpty()||message.isEmpty()?QString():QStringLiteral(" "))+message;}
 void UpdateController::restoreCatalog(){
+
 #ifdef ZERUS_FORK_VERSION
     // Explicit injected transports serve the inherited contract tests. A real
     // fork candidate never adopts an upstream cached catalog as its own channel.
     if(!m_fetch){m_feed={};m_available=false;m_message=tr("This fork candidate has no configured update channel.");return;}
 #endif
-    QSettings settings;auto selected=channel();auto raw=settings.value("updates/catalog/"+selected).toByteArray();auto parsed=parseFeed(raw,selected);auto checked=settings.value("updates/lastSuccess/"+selected,0).toLongLong();
-    if(!parsed.valid||checked<=0||checked>QDateTime::currentSecsSinceEpoch())return;
-    m_feed=parsed;m_lastSuccess=checked;m_cached=true;m_notice="Last successful check: "+QDateTime::fromSecsSinceEpoch(checked).toString(Qt::ISODate)+" (cached).";
-    present(comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false));
+
+    // The saved catalog is parsed off the GUI thread (ProcessRunner.h). Posted
+    // first, it is applied before the result of a check started after it; a later
+    // restore, or a catalog already verified meanwhile, supersedes it.
+    QSettings settings;const auto selected=channel();const auto raw=settings.value("updates/catalog/"+selected).toByteArray();
+    const auto checked=settings.value("updates/lastSuccess/"+selected,0).toLongLong();const auto generation=++m_restoreGeneration;
+    ProcessRunner::post(this,[raw,selected]{return parseFeed(raw,selected);},[this,generation,selected,checked](const DesktopUpdateFeed &parsed){
+        if(generation!=m_restoreGeneration||selected!=channel()||m_feed.valid)return;
+        if(!parsed.valid||checked<=0||checked>QDateTime::currentSecsSinceEpoch())return;
+        m_feed=parsed;m_lastSuccess=checked;m_cached=true;m_notice="Last successful check: "+QDateTime::fromSecsSinceEpoch(checked).toString(Qt::ISODate)+" (cached).";
+        present(comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false));emit changed();compare();
+    });
+
 }

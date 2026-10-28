@@ -1,0 +1,14 @@
+{
+  "answer": {
+    "allow": "1",
+    "deny": "2",
+    "question_id": "approval"
+  },
+  "asked_at": 1792990000.0,
+  "command": "cargo test --locked",
+  "command_source": "tool_input",
+  "question_hash": "6f2b0e3a",
+  "question_id": "claude-approval:6f2b0e3a",
+  "reason": "cargo test --locked",
+  "tool": "Bash"
+}

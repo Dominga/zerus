@@ -6,21 +6,21 @@
 #include "TeamModel.h"
 
 class QLabel;
-class QPlainTextEdit;
 class QPushButton;
 class QScrollArea;
 class QSplitter;
-class QStackedWidget;
 class QVBoxLayout;
 class TeamCatalogEditor;
 class TeamController;
 class TeamConversation;
 
-// WhiteWh fork: agent teams. The Team designer mode (design D1, HANDOFF §12):
-// the universal catalog that New team builds teams from. Left: the designer
-// agent of the selected session's project — its conversation, its proposals to
-// keep or reject, or Start designer when it does not run. Right: the catalog,
-// edited by hand or shown as the designer's draft with a diff.
+// WhiteWh fork: agent teams. The Team designer mode (design D1, HANDOFF §12;
+// U25 spec 11.1): the universal catalog that New team builds teams from. Left:
+// the designer agent's chat - before the first message its intro and the
+// composer in the middle (the first message starts the designer with it as the
+// goal), then its conversation, its proposals to keep or reject and the DRAFT
+// bar right above the composer. Right: the catalog, edited by hand or shown as
+// the designer's draft.
 class TeamDesignerPage : public QWidget {
 public:
     explicit TeamDesignerPage(TeamController *teams, QWidget *parent = nullptr);
@@ -32,7 +32,11 @@ public:
     std::function<Teams::Live()> designerLive;
     // agent: {"agent", "model", "effort"} of the designer's session.
     std::function<void(const QString &folder, const QString &goal, const QJsonObject &agent)> startDesigner;
+    // The start failed: the first message stays in the composer with the reason.
+    void startFailed(const QString &error);
     std::function<void(const QString &session)> openDesigner;
+    // U35: the designer's terminal, when a send meets a dialog or draft.
+    std::function<void(const QString &host, const QString &session)> openTerminal;
     std::function<bool(const QString &name, const QString &title, const QString &text, const QString &action)> confirm;
     // After the session list or the catalog changes.
     void refresh();
@@ -42,19 +46,24 @@ protected:
     void hideEvent(QHideEvent *event) override;
 private:
     void renderProposals();
-    QWidget *emptyState();
+    void renderDraftBar();
+    void showModelMenu();
+    void updateModelButton();
+    QWidget *intro();
     TeamController *m_teams;
     QString m_folder, m_project;
     TeamCatalogEditor *m_editor;
     TeamConversation *m_chat;
-    QSplitter *m_split, *m_chatSplit;
-    QStackedWidget *m_chatStack;
+    QSplitter *m_split;
     QScrollArea *m_proposals;
+    QWidget *m_draftBar;
+    QLabel *m_draftError = nullptr, *m_draftText;
+    QPushButton *m_draftApply, *m_draftDiscard;
     // Decided proposals closed in the list; Apply still writes the kept ones.
     QSet<QString> m_closed;
     QLabel *m_title, *m_status, *m_reads, *m_proposes, *m_version;
-    QPlainTextEdit *m_goal = nullptr;
-    class QComboBox *m_agent = nullptr, *m_model = nullptr, *m_effort = nullptr;
-    QPushButton *m_start = nullptr, *m_open;
+    QPushButton *m_open;
+    // The designer's agent, model and effort before it starts.
+    QString m_agent = QStringLiteral("claude"), m_model = QStringLiteral("opus"), m_effort = QStringLiteral("high");
     bool m_dark = true;
 };

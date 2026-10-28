@@ -1,7 +1,8 @@
 //! Review and guarded removal of linked worktrees. Removal repeats every check
 //! under the repository lock used by creation, compares the fingerprint the
 //! person reviewed. Force is limited to explicitly confirmed, content-fingerprinted
-//! uncommitted files; active/locked/nested/unknown worktrees remain protected.
+//! uncommitted files. A short-lived manual process confirmation accepts incomplete
+//! access to process paths; active/locked/nested and other unknowns stay protected.
 use super::worktrees::{cache_file, canonical, error, git, list, GitError};
 use super::*;
 use fs2::FileExt;
@@ -16,6 +17,29 @@ const WALK_ENTRIES: usize = 200_000;
 const WALK_TIME: Duration = Duration::from_secs(2);
 const MAX_IGNORED: usize = 20;
 const MAX_SAMPLES: usize = 5;
+const PROCESS_CONSENT_SECONDS: u64 = 300;
+
+fn process_consent(row: &Value, common: &Path, issued: u64) -> String {
+    let proof = fingerprint(json!({"scope":"manual-process-uncertainty-v2",
+        "worktree":row["fingerprint"],"common_dir":common,"issued":issued}));
+    format!("v2:{issued}:{proof}")
+}
+
+fn valid_process_consent(proof: &str, row: &Value, common: &Path, at: u64) -> bool {
+    let Some(issued) = proof.strip_prefix("v2:").and_then(|s| s.split_once(':'))
+        .and_then(|(issued, _)| issued.parse::<u64>().ok()) else { return false; };
+    if issued > at || at - issued >= PROCESS_CONSENT_SECONDS
+        || row["fingerprint"].as_str().is_none_or(str::is_empty) {
+        return false;
+    }
+    // The person accepts unknown process paths for this checkout for five minutes,
+    // including ordinary unrelated process churn. A fresh complete inventory is
+    // still required. Any known use or other protection removes this authority.
+    let reviewable = row["process_fingerprint"].as_str().is_some_and(|s| !s.is_empty());
+    let clear = matches!(row["verdict"].as_str(), Some("ready" | "review"))
+        && row["reasons"].as_array().is_some_and(Vec::is_empty);
+    (reviewable || clear) && proof == process_consent(row, common, issued)
+}
 
 /// Folders a Zerus session record refers to.
 struct Reference {
@@ -24,13 +48,15 @@ struct Reference {
 }
 
 struct Context {
+    common: PathBuf,
     /// (display name, full ref) of the main checkout's branch and origin/HEAD.
     bases: Vec<(String, String)>,
     /// Other processes' current directories, or why they cannot be read.
-    processes: std::result::Result<Vec<(u32, PathBuf, String)>, String>,
+    processes: std::result::Result<crate::platform::WorktreeProcesses, String>,
     bindings: Vec<Reference>,
     bindings_complete: bool,
     archives: Vec<Reference>,
+    archives_complete: bool,
 }
 
 fn reason(code: &str, message: impl Into<String>) -> Value {
@@ -160,16 +186,16 @@ fn context(common: &Path, trees: &[Value], deadline: Instant) -> Context {
     let records = bindings();
     let bindings_complete = records.is_ok();
     let bindings = records.unwrap_or_default();
+    let mut archives=Vec::new();
+    let archives_complete=archive::visit_bounded(deadline,|record|{archives.push(reference(&record));Ok(())}).is_ok();
     Context {
+        common: common.to_path_buf(),
         bases,
-        processes: crate::platform::current_directories(),
+        processes: crate::platform::worktree_processes(deadline),
         bindings,
         bindings_complete,
-        archives: archive::records()
-            .unwrap_or_default()
-            .iter()
-            .map(reference)
-            .collect(),
+        archives,
+        archives_complete,
     }
 }
 
@@ -480,6 +506,10 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
     let head = string(tree, "head").to_owned();
     let branch = string(tree, "branch").to_owned();
     let mut row = tree.clone();
+    let owner=super::worktree_lifecycle::owned(&context.common, &path);
+    row["zerus_owned"] = json!(owner.is_some());
+    row["ownership_id"] = owner.as_ref().map(|owner|owner["id"].clone()).unwrap_or(Value::Null);
+    row["archive_restore_ready"] = json!(context.archives_complete && owner.as_ref().is_some_and(|owner|owner["branch"]==tree["branch"]));
     for key in ["locked", "prunable", "detached"] {
         row[key] = json!(tree[key] == true);
     }
@@ -523,11 +553,6 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
             },
         ));
     }
-    if tree["available"] != true {
-        row["fingerprint"] = json!(fingerprint(json!({"path":path,"head":head,"branch":branch,
-            "locked":row["locked"],"prunable":row["prunable"],"available":false})));
-        return finish(row, reasons, notes);
-    }
     if Instant::now() >= total {
         reasons.push(reason(
             "status_unavailable",
@@ -537,11 +562,19 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
     }
 
     // Without the running processes' folders, nothing may count as unused.
-    let samples: Vec<_> = match &context.processes {
-        Ok(processes) => processes
-            .iter()
-            .filter(|(_, cwd, _)| inside(cwd, &path))
-            .collect(),
+    let mut samples: Vec<_> = match &context.processes {
+        Ok(processes) => {
+            if !processes.unreadable.is_empty() {
+                reasons.push(reason("processes_unavailable", format!(
+                    "Zerus cannot check whether some running programs use this folder ({} with hidden paths).",
+                    plural(processes.unreadable.len(), "process")
+                )));
+                row["unreadable_processes"] = json!(processes.unreadable);
+            }
+            processes.paths.iter()
+                .filter(|(_, cwd, _)| inside(cwd, &path))
+                .collect()
+        }
         Err(error) => {
             reasons.push(reason(
                 "processes_unavailable",
@@ -550,6 +583,8 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
             Vec::new()
         }
     };
+    samples.sort_by_key(|(pid, _, _)| *pid);
+    samples.dedup_by_key(|(pid, _, _)| *pid);
     row["processes"] = json!(samples
         .iter()
         .take(MAX_SAMPLES)
@@ -593,6 +628,15 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
     row["sessions"] = json!(sessions);
     let archived = uses(&context.archives).len();
     row["archived_sessions"] = json!(archived);
+    if !context.archives_complete {
+        notes.push(reason("archives_unavailable","Archive references could not be fully checked. Automatic cleanup keeps this worktree."));
+    }
+
+    if tree["available"] != true {
+        row["fingerprint"] = json!(fingerprint(json!({"path":path,"head":head,"branch":branch,"owner":row["ownership_id"],
+            "locked":row["locked"],"prunable":row["prunable"],"available":false,"sessions":row["sessions"]})));
+        return finish(row, reasons, notes);
+    }
 
     let mut nested: Vec<String> = trees
         .iter()
@@ -797,6 +841,7 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
     row["ignored_bytes"] = json!(ignored.iter().map(|(_, bytes, _, _)| bytes).sum::<u64>());
     row["ignored_complete"] = json!(ignored.iter().all(|(_, _, complete, _)| *complete));
     row["ignored_count"] = json!(ignored.len());
+    row["generated_files_only"] = json!(super::worktree_caches::generated_only(&path, &status.ignored, total));
     row["ignored_fingerprint"] = json!(fingerprint(json!(ignored)));
     ignored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     row["ignored"] = json!(ignored
@@ -885,10 +930,17 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
                     .all(|r| matches!(string(r, "code"), "changes" | "untracked"))
         );
     }
-    row["fingerprint"] = json!(fingerprint(json!({"path":path,"head":head,"branch":branch,
+    row["fingerprint"] = json!(fingerprint(json!({"path":path,"head":head,"branch":branch,"owner":row["ownership_id"],
         "locked":row["locked"],"prunable":row["prunable"],"available":true,
         "status":status.entries,"nested":row["nested"],"sessions":row["sessions"],
         "ignored":row["ignored_fingerprint"],"discard":row["discard_fingerprint"]})));
+    // A complete roster with only stable access-denied paths permits a narrow
+    // manual exception. All other blockers (including any readable use) win.
+    if context.processes.as_ref().is_ok_and(|p| !p.unreadable.is_empty())
+        && reasons.len() == 1 && reasons[0]["code"] == "processes_unavailable"
+    {
+        row["process_fingerprint"] = json!(process_consent(&row, &context.common, now() as u64));
+    }
     finish(row, reasons, notes)
 }
 
@@ -993,22 +1045,40 @@ pub(super) fn review_command(args: &[String]) -> Result<Value> {
 }
 
 pub(super) fn remove_command(args: &[String]) -> Result<Value> {
-    const USAGE: &str = "usage: hgs worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--delete-branch] [--request-id ID] [--json]";
+    remove_with_outcome(args).0
+}
+
+/// Only the CLI exposes the structured outcome. Internal lifecycle callers keep
+/// the existing Result contract. Once Git may have started, errors are uncertain.
+pub(super) fn remove_with_outcome(args: &[String]) -> (Result<Value>, bool) {
+    let mut attempted = false;
+    let result = remove(args, &mut attempted);
+    (result, attempted)
+}
+
+fn remove(args: &[String], attempted: &mut bool) -> Result<Value> {
+    const USAGE: &str = "usage: hgs worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--process-fingerprint HASH] [--delete-branch] [--request-id ID] [--json]";
     let mut options = BTreeMap::new();
     let mut delete_branch = false;
     let mut automatic = false;
+    let mut preserve_restore = false;
+    let mut periodic = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--json" => {}
             "--delete-branch" => delete_branch = true,
             "--automatic" => automatic = true,
+            "--preserve-archive-restore" => preserve_restore = true,
+            "--periodic" => periodic = true,
             "--dry-run" => return Err("worktree removal does not support --dry-run".into()),
             key @ ("--path"
             | "--common-dir"
             | "--fingerprint"
             | "--ignored-fingerprint"
             | "--discard-fingerprint"
+            | "--process-fingerprint"
+            | "--owner-id"
             | "--request-id") => {
                 i += 1;
                 let value = args.get(i).ok_or_else(|| format!("{key} needs a value"))?;
@@ -1032,6 +1102,8 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
             .ok_or_else(|| format!("{key} is required"))
     };
     let target = Path::new(required("--path")?);
+    if preserve_restore && delete_branch { return Err("Exit cleanup preserves the retained worktree branch".into()); }
+    if periodic && !automatic { return Err("Periodic cleanup requires automatic safety checks".into()); }
     let common = Path::new(required("--common-dir")?);
     let expected = required("--fingerprint")?;
     if !target.is_absolute() || !common.is_absolute() {
@@ -1107,6 +1179,9 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
         .cloned()
         .ok_or(changed)?;
     let path = PathBuf::from(string(&row, "path"));
+    if options.get("--owner-id").is_some_and(|expected|row["ownership_id"].as_str()!=Some(*expected)) {
+        return Err("Worktree ownership changed; the replacement checkout was kept for review".into());
+    }
     if row["kind"] != "linked" {
         return Err("Only linked worktrees can be removed; the main checkout stays.".into());
     }
@@ -1119,7 +1194,13 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
                 .into(),
         );
     }
-    if row["verdict"] == "blocked" && discard.is_none() {
+    let process_consent = options.get("--process-fingerprint").copied();
+    if process_consent.is_some()
+        && (automatic || !valid_process_consent(process_consent.unwrap(), &row, &common, now() as u64))
+    {
+        return Err("Process confirmation is stale or this worktree is still protected. Review it again.".into());
+    }
+    if row["verdict"] == "blocked" && discard.is_none() && process_consent.is_none() {
         let reasons: Vec<_> = row["reasons"]
             .as_array()
             .into_iter()
@@ -1133,6 +1214,10 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
         ));
     }
     if automatic {
+        let policy = super::worktree_maintenance::policy()?;
+        if !policy.enabled || (!periodic && !policy.after_session) {
+            return Err("Automatic worktree cleanup is disabled".into());
+        }
         if delete_branch
             || options.contains_key("--discard-fingerprint")
             || options.contains_key("--ignored-fingerprint")
@@ -1141,6 +1226,22 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
         }
         if super::worktree_lifecycle::owned(&common, &path).is_none() {
             return Err("Not a verified Zerus-created worktree; review it manually".into());
+        }
+        let missing = row["available"] == false;
+        if missing {
+            if !periodic || !policy.missing || fs::symlink_metadata(&path).is_ok()
+                || fs::symlink_metadata(&path).is_err_and(|e| e.kind()!=std::io::ErrorKind::NotFound) {
+                return Err("Missing worktree cleanup is disabled or the path cannot be verified absent".into());
+            }
+            let reference=format!("refs/heads/{}",string(&row,"branch"));
+            let retained=git(&common,&["rev-parse","--verify","--end-of-options",&reference],Instant::now()+Duration::from_secs(2)).ok().map(text);
+            if retained.as_deref()!=Some(string(&row,"head")) {
+                return Err("The missing checkout head is not retained by its branch; review manually".into());
+            }
+        } else {
+        if periodic && !policy.unused_integrated { return Err("Unused worktree cleanup is disabled".into()); }
+        if periodic && (row["last_activity"].as_f64().is_none_or(|at| now()-at < f64::from(policy.grace_hours)*3600.)) {
+            return Err("Worktree is within the configured inactivity grace period".into());
         }
         if row["changes"].as_u64().unwrap_or(1) != 0
             || row["untracked"].as_u64().unwrap_or(1) != 0
@@ -1154,6 +1255,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
         ) {
             return Err("Work is not proven integrated; its folder and branch were kept".into());
         }
+        }
     }
     if !automatic && string(&row, "fingerprint") != expected {
         return Err("Worktree changed since the review. Review it again.".into());
@@ -1164,8 +1266,9 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
         return Err("Review the local files outside Git and explicitly confirm their deletion before removing this worktree.".into());
     }
     let missing = row["verdict"] == "missing";
-    if automatic {
+    if automatic || preserve_restore {
         super::worktree_lifecycle::prepare_removal(&common, &row)?;
+        super::worktree_maintenance::reserve(&common, &path)?;
     }
     let spelling = path.to_string_lossy();
     let mut command = vec!["worktree", "remove"];
@@ -1173,6 +1276,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
         command.push("--force");
     }
     command.extend(["--", &spelling]);
+    *attempted = true;
     git(
         &common,
         &command,
@@ -1211,10 +1315,48 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
             }
         }
     }
-    drop(lock);
-    Ok(
-        json!({"status":if missing {"forgotten"} else {"removed"},"path":path,"branch":branch,
+    let result = json!({"status":if missing {"forgotten"} else {"removed"},"path":path,"branch":branch,
         "branch_deleted":deleted,"branch_error":branch_error,"common_dir":common,
-        "request_id":options.get("--request-id"),"machine":data["machine"]}),
-    )
+        "request_id":options.get("--request-id"),"machine":data["machine"]});
+    if automatic || preserve_restore {
+        super::worktree_maintenance::removed(&path,&result)
+            .map_err(|e|format!("Removal could not be confirmed: result could not be saved: {e}"))?;
+    }
+    drop(lock);
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manual_process_consent_expires_and_binds_the_checkout() {
+        let common = Path::new("/fixture/repository/.git");
+        let mut row = json!({"fingerprint":"original-checkout", "process_fingerprint":"available",
+            "verdict":"blocked", "reasons":[{"code":"processes_unavailable"}]});
+        let proof = process_consent(&row, common, 1000);
+        assert!(valid_process_consent(&proof, &row, common, 1000));
+        assert!(valid_process_consent(&proof, &row, common, 1299));
+        assert!(!valid_process_consent(&proof, &row, common, 1300));
+        assert!(!valid_process_consent(&proof, &row, common, 999));
+        assert!(!valid_process_consent(&proof, &row, Path::new("/fixture/other/.git"), 1000));
+        assert!(!valid_process_consent(&proof.replace("1000", "1001"), &row, common, 1001));
+        row["fingerprint"] = json!("replacement-checkout");
+        assert!(!valid_process_consent(&proof, &row, common, 1000));
+    }
+
+    #[test]
+    fn manual_process_consent_does_not_admit_another_blocker() {
+        let common = Path::new("/fixture/repository/.git");
+        let mut row = json!({"fingerprint":"checkout", "process_fingerprint":"available", "verdict":"blocked"});
+        let proof = process_consent(&row, common, 1000);
+        row.as_object_mut().unwrap().remove("process_fingerprint");
+        for code in ["processes", "sessions", "processes_unavailable", "status_unavailable", "locked"] {
+            row["reasons"] = json!([{"code":code}]);
+            assert!(!valid_process_consent(&proof, &row, common, 1000));
+        }
+        row["verdict"] = json!("ready");row["reasons"] = json!([]);
+        assert!(valid_process_consent(&proof, &row, common, 1000), "Complete readable coverage also satisfies the accepted risk");
+    }
 }

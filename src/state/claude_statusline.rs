@@ -318,7 +318,7 @@ pub(super) fn run() -> Result<i32> {
         .read_to_end(&mut input)
         .is_ok_and(|read| read as u64 <= MAX_INPUT);
     let parsed = complete
-        .then(|| serde_json::from_slice::<Value>(&input).ok())
+        .then(|| serde_json::from_slice::<Value>(crate::state::without_bom(&input)).ok())
         .flatten();
     if let Some(parsed) = &parsed {
         let _ = record(parsed, observed_at);
@@ -421,7 +421,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let config = temp.path().join("config");
         let project = temp.path().join("project");
-        fs::create_dir_all(&project).unwrap();
+        // The project is its own repository's root, so its local settings are
+        // read wherever the temp folder lies: inside another checkout (TEMP in
+        // a worktree) it would otherwise be a nested folder whose local
+        // settings Claude does not resolve.
+        fs::create_dir_all(project.join(".git")).unwrap();
         assert_eq!(user_status_line(&config, &project, false), Ok(None));
         let user = json!({"type": "command", "command": "user-line", "padding": 2});
         write(&config.join("settings.json"), &json!({"model": "opus", "statusLine": user}));

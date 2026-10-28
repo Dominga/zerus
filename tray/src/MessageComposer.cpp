@@ -264,7 +264,7 @@ private:
 
 MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
 {
-    setObjectName("messageComposer");
+    setObjectName("messageComposer"); setProperty("messageComposer", true);
     auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0, 4, 0, 0); layout->setSpacing(0);
     m_editorHeight = qBound(DefaultEditorHeight, QSettings().value(EditorHeightSetting, DefaultEditorHeight).toInt(), MaximumEditorHeight);
     auto *handle = new ComposerResizeHandle(this); m_resizeHandle = handle; layout->addWidget(handle);
@@ -281,7 +281,7 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
     m_input = new QWidget(this); m_input->setObjectName("messageInputArea");
     auto *inputLayout = new QVBoxLayout(m_input); inputLayout->setContentsMargins(0, 0, 0, 0); inputLayout->setSpacing(7);
     layout->addWidget(m_input);
-    auto *edit = new ComposeEdit(this); m_editor = edit; m_toolbar->setFocusFallback(edit); edit->setObjectName("messageInput");
+    auto *edit = new ComposeEdit(this); m_editor = edit; m_toolbar->setFocusFallback(edit); edit->setObjectName("messageInput"); edit->setProperty("composerEditor", true);
     edit->setAccessibleName(tr("Message to selected agent")); edit->setPlaceholderText(tr("Message this agent…"));
     edit->setMinimumHeight(DefaultEditorHeight); edit->setMaximumHeight(DefaultEditorHeight); edit->setTabChangesFocus(true);
     handle->pressed = [this] { m_dragEditorHeight = m_editor->height(); };
@@ -365,8 +365,16 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
         const QString model = m_models->currentData().toString(), effort = m_efforts->currentData().toString();
         m_settingsPopup->hide(); emit settingsRequested(m_key, model, effort);
     });
-    m_rulesChip = new QLabel; m_rulesChip->setObjectName("ironRulesChip"); m_rulesChip->hide();
+    m_rulesChip = new QPushButton; m_rulesChip->setObjectName("ironRulesChip"); m_rulesChip->hide();
     m_rulesChip->setToolTip(tr("This project's iron rules are sent at the start of every message"));
+    m_rulesChip->setAutoDefault(false); m_rulesChip->setCursor(Qt::PointingHandCursor); m_rulesChip->setIconSize(QSize(12, 12));
+    connect(m_rulesChip, &QPushButton::clicked, this, &MessageComposer::ironRulesRequested);
+    // U25: the compact row's centre ends with the session's reference.
+    m_sessionReference = new QPushButton; m_sessionReference->setObjectName("copySessionReference"); m_sessionReference->hide();
+    m_sessionReference->setFixedSize(28, 28); m_sessionReference->setIconSize(QSize(12, 12)); m_sessionReference->setAutoDefault(false);
+    m_sessionReference->setToolTip(tr("Copy session reference")); m_sessionReference->setAccessibleName(tr("Copy session reference"));
+    m_sessionReference->setCursor(Qt::PointingHandCursor);
+    connect(m_sessionReference, &QPushButton::clicked, this, [this] { if (!m_key.isEmpty()) emit sessionReferenceRequested(m_key); });
     actions->addWidget(m_attach); actions->addWidget(m_reference); actions->addWidget(m_rulesChip); actions->addStretch(0); actions->addWidget(m_status, 1); actions->addWidget(m_refreshStatus); actions->addWidget(m_retry); actions->addWidget(m_settings); actions->addWidget(m_stop); actions->addWidget(m_send);
     inputLayout->addLayout(actions);
     connect(edit, &QPlainTextEdit::textChanged, this, [this]() {
@@ -490,7 +498,7 @@ void MessageComposer::setSessionKey(const QString &key)
     if (key == m_key) return;
     ++m_navigationRevision;
     setFileReferenceTarget({}, {}, {});
-    m_sessionStatus.clear(); m_sessionStatusError = false; m_sessionStatusBlocksInput = false;
+    m_sessionStatus.clear(); m_sessionStatusHtml.clear(); m_sessionStatusError = false; m_sessionStatusBlocksInput = false;
     m_settingsPopup->hide();
     // Another session or none: the OpenCode picker's context ends here, also when the same one returns.
     m_openCodeContext.clear(); resetOpenCodeModels();
@@ -513,16 +521,25 @@ void MessageComposer::ensureDraftLoaded(const QString &key)
                 m_loading = true; restoreDraft(); m_loading = false;
                 rebuildAttachments(); updateControls(); updatePlaceholder();
             }
-            emit draftLoaded(key);
+            emit draftLoaded(key); trimDraftCache();
         });
     }
 }
 
-bool MessageComposer::insertVoiceText(const VoiceTarget &target, const QString &text, std::function<void(bool)> saved)
+bool MessageComposer::insertVoiceText(const VoiceTarget &target, const QString &text, std::function<void(bool)> saved, const QString &operation)
 {
     if (target.key.isEmpty() || target.key != m_key || target.revision != m_saveRevision.value(m_key)
         || target.navigation != m_navigationRevision || !canEditAttachments() || isPreparingSending(m_key)
         || !isInputVisible() || m_editor->isReadOnly() || text.isEmpty()) return false;
+    auto insertions = m_drafts[m_key].formState.value("voice_insertions").toArray();
+    if (!operation.isEmpty()) {
+        if (insertions.contains(operation)) {
+            m_draftStore.saveDurableAsync(m_key, m_drafts.value(m_key), this, [saved](bool ok, const ComposerDraft &) { saved(ok); });
+            return true;
+        }
+        if (insertions.size() >= 32) insertions.removeFirst();
+        insertions.append(operation); m_drafts[m_key].formState["voice_insertions"] = insertions;
+    }
     // Dictation appends at the captured caret without replacing a selection.
     auto cursor = m_editor->textCursor(); cursor.clearSelection();
     QString insertion = text;
@@ -565,8 +582,24 @@ QString MessageComposer::suggestion() const { return isWaitingToSend(m_key) ? QS
 void MessageComposer::updatePlaceholder()
 {
     const QString text = suggestion();
-    m_editor->setPlaceholderText(text.isEmpty() ? tr("Message this agent…") : text);
+    m_editor->setPlaceholderText(m_cooperativeInbox ? tr("Queue an instruction; the external agent must read it…")
+        : !text.isEmpty() ? text : !m_placeholder.isEmpty() ? m_placeholder : tr("Message this agent…"));
 }
+
+void MessageComposer::setTaskMode(bool taskMode)
+{
+    m_taskMode = taskMode;
+    m_toolbar->setVisible(true);
+    m_editor->setAccessibleName(taskMode ? tr("Task prompt") : tr("Message to selected agent"));
+    setAttachmentAvailability(true);
+    updateControls();
+}
+
+void MessageComposer::addTaskControls(QWidget *controls) { m_actions->insertWidget(m_actions->indexOf(m_send), controls); }
+
+void MessageComposer::setSendLabel(const QString &label) { m_sendLabel = label; updateControls(); }
+
+void MessageComposer::setPlaceholder(const QString &placeholder) { m_placeholder = placeholder; updatePlaceholder(); }
 
 bool MessageComposer::requestInterrupt()
 {
@@ -574,15 +607,32 @@ bool MessageComposer::requestInterrupt()
     emit interruptRequested(m_key); return true;
 }
 
-bool MessageComposer::offerDraft(const QString &key, const QString &text)
+bool MessageComposer::offerDraft(const QString &key, const QString &text, const QList<MessageAttachment> &attachments)
 {
-    if (((m_recording || m_sessionStatusBlocksInput) && key==m_key) || key.isEmpty() || isDraftLoading(key) || text.trimmed().isEmpty() || isWaitingToSend(key)) return false;
+    if (((m_recording || m_sessionStatusBlocksInput) && key==m_key) || key.isEmpty() || isDraftLoading(key) || (text.trimmed().isEmpty() && attachments.isEmpty()) || isWaitingToSend(key)) return false;
     auto &draft = m_drafts[key];
     // A draft the user started, or a message on its way, always wins.
     if (!draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty() || draft.sending) return false;
-    draft.text = text; draft.position = draft.anchor = int(text.size()); draft.notice.clear();
+    draft.text = text; draft.attachments = attachments; draft.position = draft.anchor = int(text.size()); draft.notice.clear();
     if (key == m_key) { m_loading = true; restoreDraft(); m_loading = false; }
+    if (key == m_key) rebuildAttachments();
     saveDraft(key); notifyDraft(key); updateControls(); return true;
+}
+
+void MessageComposer::setDraftLabel(const QString &label) {
+    if (m_key.isEmpty() || isDraftLoading(m_key) || m_drafts[m_key].label == label) return;
+    m_drafts[m_key].label = label; saveDraft(m_key);
+}
+
+void MessageComposer::trimDraftCache() {
+    if (m_draftCacheLimit <= 0) return;
+    for (const auto &key : m_drafts.keys()) {
+        if (m_drafts.size() <= m_draftCacheLimit) break;
+        if (key == m_key || isDraftLoading(key) || isSending(key) || isWaitingToSend(key)
+            || m_savingKeys.contains(key) || m_failedSaves.contains(key) || m_renamingKeys.contains(key)) continue;
+        if (hasDraft(key)) m_storedDrafts.insert(key); else m_storedDrafts.remove(key);
+        m_drafts.remove(key); m_saveRevision.remove(key);
+    }
 }
 
 void MessageComposer::setAttachmentAvailability(bool available, const QString &reason)
@@ -595,7 +645,7 @@ void MessageComposer::setCooperativeInbox(bool enabled)
     if(m_cooperativeInbox==enabled)return;
     m_cooperativeInbox=enabled;
     m_editor->setAccessibleName(enabled?tr("Instruction for external agent inbox"):tr("Message to selected agent"));
-    m_editor->setPlaceholderText(enabled?tr("Queue an instruction; the external agent must read it…"):tr("Message this agent…"));
+    updatePlaceholder();
     updateControls();
 }
 
@@ -605,11 +655,11 @@ void MessageComposer::setAvailability(bool available, const QString &reason)
     m_available = available; m_unavailableReason = reason; updateControls();
 }
 
-void MessageComposer::setSessionStatus(const QString &text, bool error, bool blockInput)
+void MessageComposer::setSessionStatus(const QString &text, bool error, bool blockInput, const QString &html)
 {
     blockInput = blockInput && !text.isEmpty();
-    if (m_sessionStatus == text && m_sessionStatusError == error && m_sessionStatusBlocksInput == blockInput) return;
-    m_sessionStatus = text; m_sessionStatusError = error; m_sessionStatusBlocksInput = blockInput;
+    if (m_sessionStatus == text && m_sessionStatusError == error && m_sessionStatusBlocksInput == blockInput && m_sessionStatusHtml == html) return;
+    m_sessionStatus = text; m_sessionStatusError = error; m_sessionStatusBlocksInput = blockInput; m_sessionStatusHtml = html;
     updateControls();
 }
 
@@ -624,6 +674,14 @@ bool MessageComposer::hasDraft(const QString &key) const
         && (!m_drafts.value(key).text.trimmed().isEmpty() || !m_drafts.value(key).attachments.isEmpty()));
     const auto draft = m_drafts.value(key);
     return !draft.sending && (!draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty());
+}
+
+QSet<QString> MessageComposer::draftKeys() const
+{
+    QSet<QString> keys;
+    for (auto it = m_drafts.cbegin(); it != m_drafts.cend(); ++it) if (hasDraft(it.key())) keys.insert(it.key());
+    for (const auto &key : m_storedDrafts) if (!m_drafts.contains(key) && hasDraft(key)) keys.insert(key);
+    return keys;
 }
 
 void MessageComposer::notifyDraft(const QString &key)
@@ -657,6 +715,7 @@ bool MessageComposer::saveDraft(const QString &key)
         m_savingKeys.remove(key);
         if (saved) m_failedSaves.remove(key); else m_failedSaves.insert(key);
         if (key == m_key) updateControls();
+        trimDraftCache();
     });
     return true;
 }
@@ -698,7 +757,7 @@ void MessageComposer::prepareSendingAsync(const QString &key, bool preserveDraft
     if ((m_recording && key==m_key) || key.isEmpty() || isSending(key) || m_preparingWaiting.contains(key) || isDraftLoading(key) || (m_drafts.value(key).uncertain && !preserveDraft)) { done(false); return; }
     m_waitingSends.remove(key); m_preparingKeys.insert(key);
     if (preserveDraft) m_preservedDrafts.insert(key, m_drafts.value(key));
-    auto &draft = m_drafts[key]; draft.sending = true; draft.error = false; draft.notice = tr("Saving before sending…");
+    auto &draft = m_drafts[key]; draft.sending = true; draft.error = false; draft.notice = m_taskMode ? tr("Saving…") : tr("Saving before sending…");
     // Preserve a newer draft on Activity retry, but also durably record that a
     // delivery may have begun. Recovery never repeats the older message.
     auto snapshot = m_preservedDrafts.value(key, draft); snapshot.sending = true;
@@ -712,10 +771,10 @@ void MessageComposer::prepareSendingAsync(const QString &key, bool preserveDraft
             draft.sending = false; draft.notice.clear(); m_preservedDrafts.remove(key); m_failedSaves.insert(key);
             if (key == m_key) updateControls(); done(false); return;
         }
-        m_failedSaves.remove(key); draft.notice = tr("Sending…");
+        m_failedSaves.remove(key); draft.notice = m_taskMode ? tr("Saving…") : tr("Sending…");
         if (key == m_key) {
             if (m_send->hasFocus()) m_editor->setFocus(Qt::OtherFocusReason);
-            m_loading = true; m_editor->clear(); m_loading = false;
+            if (!m_taskMode) { m_loading = true; m_editor->clear(); m_loading = false; }
             rebuildAttachments(); updateControls();
         }
         notifyDraft(key); done(true);
@@ -733,7 +792,7 @@ void MessageComposer::deliveryFinished(const QString &key, bool ok, const QStrin
     }
     auto &draft = m_drafts[key]; const bool wasSending = draft.sending;
     draft.sending = false; draft.error = !ok; draft.uncertain = uncertain;
-    draft.notice = ok ? tr("Submitted to terminal") : detail;
+    draft.notice = ok ? (m_taskMode ? tr("Saved") : tr("Submitted to terminal")) : detail;
     if (ok) { draft.text.clear(); draft.attachments.clear(); draft.attachmentHashes.clear(); draft.nextAttachmentNumber = 1; }
     saveDraft(key);
     notifyDraft(key);
@@ -1150,11 +1209,17 @@ void MessageComposer::updateControls()
         : m_attachmentsAvailable ? tr("Attach files, paste an image, or drop files onto this session") : m_attachmentsReason);
     for (auto *button : m_attachmentList->findChildren<QPushButton *>("removeAttachment")) button->setEnabled(!locked);
     m_send->setEnabled(!m_key.isEmpty() && m_available && hasContent && (draft.attachments.isEmpty()||m_attachmentsAvailable) && !tooLong && !locked && !draft.uncertain);
-    const QString sendText = draft.sending ? (m_cooperativeInbox?tr("Queueing…"):tr("Sending…")) : waiting ? tr("Waiting to send…") : m_cooperativeInbox?tr("Queue"):tr("Send");
+    m_attach->setVisible(true);
+    const bool iconOnly = property("sendIconOnly").toBool();
+    const QString idleText = m_taskMode ? m_sendLabel : m_cooperativeInbox ? tr("Queue") : tr("Send");
+    const QString sendText = draft.sending ? (m_taskMode ? tr("Saving…") : m_cooperativeInbox ? tr("Queueing…") : tr("Sending…")) : waiting ? tr("Waiting to send…") : idleText;
+    m_send->setIconSize(iconOnly ? QSize(20, 20) : QSize(14, 14));
     // WhiteWh fork: the compact card's Send is a pill that says Send; other states keep only the icon.
-    m_send->setText(m_compact && sendText != tr("Send") && sendText != tr("Queue") ? QString() : sendText); m_send->setAccessibleName(sendText);
-    m_send->setToolTip(waiting ? m_waitingSends.value(m_key) : m_compact ? sendText + " · " + tr("Enter; new line: Shift+Enter") : tr("Send: Enter; new line: Shift+Enter"));
-    if(m_cooperativeInbox)m_send->setToolTip(ConversationSource::queueWarning());
+    m_send->setText((iconOnly && sendText == idleText) || (m_compact && sendText != idleText) ? QString() : sendText);
+    m_send->setAccessibleName(m_taskMode ? m_sendLabel : sendText);
+    m_send->setToolTip(waiting ? m_waitingSends.value(m_key) : m_taskMode ? tr("%1: Enter; new line: Shift+Enter").arg(m_sendLabel)
+        : m_compact ? sendText + " · " + tr("Enter; new line: Shift+Enter") : tr("Send: Enter; new line: Shift+Enter"));
+    if (m_cooperativeInbox && !m_taskMode) m_send->setToolTip(ConversationSource::queueWarning());
     m_retry->setVisible(draft.uncertain && !operationLocked);
     m_refreshStatus->setVisible(!m_sessionStatus.isEmpty() && m_sessionStatusError);
     m_refreshStatus->setEnabled(!operationLocked);
@@ -1169,7 +1234,9 @@ void MessageComposer::updateControls()
     if (status.isEmpty()) status = tooLong ? tr("Message exceeds 64 KiB.") : !m_sessionStatus.isEmpty() ? m_sessionStatus : m_unavailableReason;
     if(status.isEmpty()&&m_cooperativeInbox)status=ConversationSource::queueWarning();
     const auto detail = !m_sessionStatus.isEmpty() && m_sessionStatus != status ? status + '\n' + m_sessionStatus : status;
-    m_status->setText(status); m_status->setToolTip(Qt::convertFromPlainText(detail)); m_status->setAccessibleName(status);
+    const bool rich = status == m_sessionStatus && !m_sessionStatusHtml.isEmpty();
+    m_status->setTextFormat(rich ? Qt::RichText : Qt::PlainText); m_status->setText(rich ? m_sessionStatusHtml : status);
+    m_status->setToolTip(Qt::convertFromPlainText(detail)); m_status->setAccessibleName(status);
     m_status->setAccessibleDescription(detail);
     m_refreshStatus->setToolTip(Qt::convertFromPlainText(tr("Refresh this session") + '\n' + m_sessionStatus));
     m_refreshStatus->setAccessibleDescription(m_sessionStatus);
@@ -1181,11 +1248,12 @@ void MessageComposer::updateControls()
     const bool showSettings = !m_narrow || status.isEmpty();
     const auto focus = QApplication::focusWidget();
     const bool returnFocus = !showSettings && (m_settings->hasFocus() || (focus && m_settingsPopup->isAncestorOf(focus)));
-    m_settings->setVisible(showSettings);
+    m_settings->setVisible(showSettings && !m_taskMode);
     if (!showSettings) m_settingsPopup->hide();
     // Do not transfer an unfinished settings interaction to the Stop action.
     if (returnFocus) m_editor->setFocus(Qt::OtherFocusReason);
     m_actions->setStretch(2, status.isEmpty() ? 1 : 0);
+    m_sessionReference->setVisible(m_compact && m_sessionReferenceAvailable && !m_key.isEmpty());
     setWorkspaceStyle(m_status, QString("font-size:11px;color:%1;").arg(ownError || (status == m_sessionStatus && m_sessionStatusError)
         ? (m_dark ? "#f4ab9b" : "#a13224") : waiting ? (m_dark ? "#efc978" : "#92641b") : (m_dark ? "#a2adbc" : "#627082")));
     emit controlsChanged();
@@ -1223,13 +1291,16 @@ void MessageComposer::showSavedDrafts()
             const auto summary = summaries.value(key);
             const auto owner = ComposerDraftStore::owner(key);
             QStringList title, detail;
-            if (owner.kind == ComposerDraftOwner::Kind::Unknown) {
+            if (owner.kind == ComposerDraftOwner::Kind::TaskDescription || owner.kind == ComposerDraftOwner::Kind::TaskComment) {
+                title << (summary.label.isEmpty() ? owner.task : summary.label) << owner.project;
+            } else if (owner.kind == ComposerDraftOwner::Kind::Unknown) {
                 title << (summary.label.isEmpty() ? QString(key).replace('\n', " / ") : summary.label);
             } else {
                 title << owner.session << (owner.machine.isEmpty() ? tr("this computer") : owner.machine);
                 if (owner.kind == ComposerDraftOwner::Kind::Subagent) title << tr("subagent");
                 else if (owner.kind == ComposerDraftOwner::Kind::Question) title << tr("question answer");
                 else if (owner.kind == ComposerDraftOwner::Kind::Voice) title << tr("voice message");
+                else if (owner.kind == ComposerDraftOwner::Kind::Task) title << tr("task prompt");
                 if (!owner.archive.isEmpty()) title << tr("archived");
             }
             if (summary.modified.isValid()) detail << QLocale().toString(summary.modified, QLocale::ShortFormat);
@@ -1251,6 +1322,7 @@ void MessageComposer::showSavedDrafts()
             if(owner.kind==ComposerDraftOwner::Kind::Subagent){context<<tr("Subagent");item->setData(SessionRoles::Title,item->data(SessionRoles::Title).toString()+" / "+owner.subagent);}
             else if(owner.kind==ComposerDraftOwner::Kind::Question)context<<tr("Question answer");
             else if(owner.kind==ComposerDraftOwner::Kind::Voice)context<<tr("Voice message");
+            else if(owner.kind==ComposerDraftOwner::Kind::Task)context<<tr("Task prompt");
             if(!owner.archive.isEmpty())context<<tr("Archived");
             if(summary.attachments&&!summary.preview.isEmpty())context<<tr("%n attachment(s)",nullptr,summary.attachments);
             if(!context.isEmpty()){const auto meta=item->data(SessionRoles::Meta).toString();if(!meta.isEmpty())context.prepend(meta);item->setData(SessionRoles::Meta,context.join(" / "));}
@@ -1629,6 +1701,7 @@ QJsonObject MessageComposer::withConfirmedFavorites(QJsonObject catalog) const
 void MessageComposer::setTheme(bool dark)
 {
     m_dark = dark;
+    const auto token = [dark](const char *name) { return WorkspaceSkin::color(WorkspaceSkin::active(), dark, QString::fromLatin1(name)).name(); };
     updateSettingsButton();
     m_toolbar->setTheme(dark);
     m_attach->setIcon(workspaceIcon("attachment", dark ? QColor("#c5cfdb") : QColor("#536477")));
@@ -1636,6 +1709,8 @@ void MessageComposer::setTheme(bool dark)
     m_refreshStatus->setIcon(composerIcon("refresh", QColor(dark ? "#efc978" : "#92641b"), QColor(dark ? "#85909e" : "#6d7784")));
     m_retry->setIcon(composerIcon("refresh", QColor(dark ? "#efc978" : "#92641b"), QColor(dark ? "#85909e" : "#6d7784")));
     m_stop->setIcon(workspaceIcon("stop",dark ? QColor("#ff9ca8") : QColor("#b52d48")));
+    m_rulesChip->setIcon(workspaceIcon("shield", QColor(token("muted"))));
+    m_sessionReference->setIcon(workspaceIcon("link", QColor(token("text2"))));
     // Match the stylesheet's enabled and disabled Send text colors below.
     m_send->setIcon(composerIcon("send", QColor(dark ? "#10231b" : "#ffffff"), QColor(dark ? "#85909e" : "#6d7784")));
     const QColor chevron(dark ? "#a2adbc" : "#627082");
@@ -1644,10 +1719,10 @@ void MessageComposer::setTheme(bool dark)
     handle->accent = QColor(dark ? "#8bdfc0" : "#167357"); handle->update();
     m_settings->setProperty("chevron", QVariant::fromValue(composerIcon("chevron-down", chevron, chevron))); m_settings->update();
     setStyleSheet(QString(R"(
-        QPlainTextEdit#messageInput { background:%1; color:%2; border:1px solid %3; border-radius:9px; padding:%8px; font-size:%9px; selection-background-color:%4; }
-        QPlainTextEdit#messageInput:focus { border-color:%5; }
-        QPlainTextEdit#messageInput[sessionBlocked="true"] { color:%7; border-color:%3; }
-        QWidget#messageComposer { background:transparent; border:0; }
+        QPlainTextEdit[composerEditor="true"] { background:%1; color:%2; border:1px solid %3; border-radius:9px; padding:%8px; font-size:%9px; selection-background-color:%4; }
+        QPlainTextEdit[composerEditor="true"]:focus { border-color:%5; }
+        QPlainTextEdit[composerEditor="true"][sessionBlocked="true"] { color:%7; border-color:%3; }
+        QWidget[messageComposer="true"] { background:transparent; border:0; }
         QWidget#attachmentRow { border-radius:6px; }
         QWidget#attachmentRow:hover, QWidget#attachmentRow:focus { background:%4; }
         QWidget#attachmentsPopover QLabel { font-size:11px; border:0; background:transparent; }
@@ -1676,19 +1751,28 @@ void MessageComposer::setTheme(bool dark)
         QPushButton#attachMessageFile:focus[keyboardFocus="true"] { border-color:%5; }
         QPushButton#refreshSessionStatus { padding:0; border:0; background:transparent; }
         QPushButton#allowMessageRetry { padding:7px 10px; font-size:11px; }
-        QLabel#ironRulesChip { padding:2px 8px; border:1px solid %3; border-radius:6px; font-size:11px; color:%7; }
+        QPushButton#ironRulesChip { padding:2px 8px; border:1px solid %3; border-radius:6px; font-size:11px; color:%7; background:transparent; }
     )").arg(dark ? "#171d24" : "#f8fafb", dark ? "#e8edf4" : "#1a2733", dark ? "#3d4855" : "#dce2e8",
              dark ? "#365b4d" : "#c7eadd", dark ? "#8bdfc0" : "#167357", dark ? "#10231b" : "#ffffff", dark ? "#85909e" : "#6d7784")
         .arg(ContentScale::px(9, m_scale)).arg(ContentScale::px(13, m_scale)) + workspaceScrollbars(dark)
         // WhiteWh fork: the compact composer's card frames the field and its buttons.
+        // U25: the prototype's .ccard, .cbtn and .btn.icon, from the skin's tokens.
         + (m_compact ? QString(R"(
-        QFrame#composerCard { background:%1; border:1px solid %2; border-radius:12px; }
+        QFrame#composerCard { background:%1; border:1px solid %2; border-radius:14px; }
         QFrame#composerCard:focus-within { border-color:%3; }
         QFrame#composerCard QPlainTextEdit#messageInput, QFrame#composerCard QPlainTextEdit#messageInput:focus { background:transparent; border:0; padding:6px 4px; }
         QFrame#composerCard QPushButton#sendMessage { padding:0 12px; border-radius:9px; min-width:34px; min-height:30px; max-height:30px; }
-        QPushButton#attachMessageFile { border:0; border-radius:8px; background:transparent; }
+        QFrame#composerCard QPushButton#interruptAgent { padding:0 11px; border:1px solid %4; border-radius:9px; background:%5; color:%6; min-height:30px; max-height:30px; }
+        QFrame#composerCard QPushButton#interruptAgent:hover { background:%7; color:%8; }
+        QPushButton#attachMessageFile, QPushButton#referenceMessageFile { border:0; border-radius:7px; background:transparent; }
+        QPushButton#attachMessageFile:hover, QPushButton#referenceMessageFile:hover { background:%7; }
+        QPushButton#ironRulesChip { border:1px solid transparent; border-radius:7px; background:transparent; color:%9; font-size:11.5px; padding:0 9px; min-height:26px; max-height:26px; }
+        QPushButton#ironRulesChip:hover { background:%7; color:%8; }
+        QPushButton#copySessionReference { padding:0; border:1px solid %4; border-radius:7px; background:%5; }
+        QPushButton#copySessionReference:hover { background:%7; }
         QPushButton#sessionModelSettings { border:1px solid transparent; }
-    )").arg(dark ? "#1b1f26" : "#ffffff", dark ? "#2c323b" : "#dce2e8", dark ? "#7dd3b0" : "#167357") : QString()));
+    )").arg(token("field"), token("border"), token("cardSelBorder"), token("border"), token("surface"), token("text2"), token("hover"), token("fg"))
+          .arg(token("muted")) : QString()));
     updateControls();
 }
 
@@ -1714,7 +1798,7 @@ void MessageComposer::fitEditor()
 
 void MessageComposer::setIronRulesCount(int count)
 {
-    m_rulesChip->setText(tr("%n iron rule(s)", nullptr, count));
+    m_rulesChip->setText(count == 1 ? tr("1 iron rule") : tr("%1 iron rules").arg(count));
     m_rulesChip->setAccessibleName(m_rulesChip->text());
     m_rulesChip->setVisible(count > 0);
 }
@@ -1725,29 +1809,54 @@ void MessageComposer::setCompact(bool compact)
     m_compact = compact;
     m_resizeHandle->setVisible(!compact && !m_input->isHidden());
     auto *inputLayout = static_cast<QVBoxLayout *>(m_input->layout());
+    // U25 (spec 4): the composer's own controls in the row under the card, by zone.
+    const QList<QPair<ComposerToolbar::Slot, QWidget *>> rowItems{
+        {ComposerToolbar::Slot::Attach, m_attach}, {ComposerToolbar::Slot::FileReference, m_reference},
+        {ComposerToolbar::Slot::IronRules, m_rulesChip}, {ComposerToolbar::Slot::SessionReference, m_sessionReference},
+        {ComposerToolbar::Slot::Status, m_status}, {ComposerToolbar::Slot::StatusRefresh, m_refreshStatus},
+        {ComposerToolbar::Slot::Retry, m_retry}, {ComposerToolbar::Slot::Model, m_settings}};
     if (compact) {
         if (!m_card) {
             m_card = new QFrame; m_card->setObjectName("composerCard");
-            m_cardRow = new QHBoxLayout(m_card); m_cardRow->setContentsMargins(10, 5, 5, 5); m_cardRow->setSpacing(4);
+            m_cardRow = new QHBoxLayout(m_card); m_cardRow->setContentsMargins(10, 5, 5, 5); m_cardRow->setSpacing(6);
             connect(m_editor->document(), &QTextDocument::contentsChanged, this, [this] { if (m_compact) fitEditor(); });
         }
-        inputLayout->removeWidget(m_editor); m_actions->removeWidget(m_send);
-        m_cardRow->addWidget(m_editor, 1); m_cardRow->addWidget(m_send, 0, Qt::AlignBottom);
+        inputLayout->removeWidget(m_editor); m_actions->removeWidget(m_send); m_actions->removeWidget(m_stop);
+        // The prototype's card: the field, then Stop and Send at its bottom right.
+        m_cardRow->addWidget(m_editor, 1); m_cardRow->addWidget(m_stop, 0, Qt::AlignBottom); m_cardRow->addWidget(m_send, 0, Qt::AlignBottom);
         inputLayout->insertWidget(0, m_card);
-        // Attach stays first in the row under the card; the toolbar (voice,
-        // video, attachments) follows it, left of the model.
-        static_cast<QBoxLayout *>(layout())->removeWidget(m_toolbar); m_actions->insertWidget(1, m_toolbar);
+        static_cast<QBoxLayout *>(layout())->removeWidget(m_toolbar);
+        for (const auto &[slot, widget] : rowItems) m_actions->removeWidget(widget);
+        m_toolbar->setThreeZones(true);
+        for (const auto &[slot, widget] : rowItems) m_toolbar->add(slot, widget);
+        inputLayout->insertWidget(1, m_toolbar);
         m_send->setMinimumSize(34, 30); m_send->setMaximumSize(QWIDGETSIZE_MAX, 30); m_send->setLayoutDirection(Qt::LeftToRight);
+        m_stop->setMaximumHeight(30);
         m_card->show();
     } else {
-        m_cardRow->removeWidget(m_editor); m_cardRow->removeWidget(m_send);
+        m_cardRow->removeWidget(m_editor); m_cardRow->removeWidget(m_stop); m_cardRow->removeWidget(m_send);
         inputLayout->removeWidget(m_card); m_card->hide();
-        m_actions->removeWidget(m_toolbar); static_cast<QBoxLayout *>(layout())->insertWidget(0, m_toolbar);
+        for (const auto &[slot, widget] : rowItems) m_toolbar->remove(widget);
+        m_toolbar->setThreeZones(false);
+        inputLayout->removeWidget(m_toolbar); static_cast<QBoxLayout *>(layout())->insertWidget(0, m_toolbar);
         inputLayout->insertWidget(0, m_editor);
-        m_actions->addWidget(m_send);
+        // The classic action row, as the constructor built it.
+        m_actions->insertWidget(0, m_attach); m_actions->insertWidget(1, m_reference); m_actions->insertWidget(2, m_rulesChip);
+        m_actions->addWidget(m_status, 1);
+        for (auto *widget : {static_cast<QWidget *>(m_refreshStatus), static_cast<QWidget *>(m_retry), static_cast<QWidget *>(m_settings),
+                             static_cast<QWidget *>(m_stop), static_cast<QWidget *>(m_send)}) m_actions->addWidget(widget);
+        m_sessionReference->hide();
         m_send->setMinimumSize(0, 0); m_send->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX); m_send->setLayoutDirection(Qt::RightToLeft);
+        m_stop->setMaximumHeight(QWIDGETSIZE_MAX);
     }
     fitEditor(); updateControls(); setTheme(m_dark);
+}
+
+void MessageComposer::setSessionReferenceAvailable(bool available)
+{
+    if (available == m_sessionReferenceAvailable) return;
+    m_sessionReferenceAvailable = available;
+    updateControls();
 }
 
 // The compact menu: the models, then the effort of the chosen one. A choice

@@ -16,14 +16,17 @@ class QScrollArea;
 class QStackedWidget;
 class QVBoxLayout;
 
-// WhiteWh fork: agent teams. The team catalog (design D1, HANDOFF §12): roles
-// (name, color, specialization, default agent, permissions, folder policy, who
-// it may message, prompt with its place in what a member reads), templates
-// (roster per role, task skeleton, planning, approval) and routing rules with
+// WhiteWh fork: agent teams. The team catalog (design D1, HANDOFF §12; U25
+// spec 11.2-11.5): roles (name, about, icon and color, specialization,
+// default agent, computers, permissions, folder policy, who it may message,
+// when it joins, dangerous actions and the prompt order), templates (roster
+// counts with "only if needed", work mode, task skeleton with phases,
+// planning, approval, new phases, max members, checks) and routing rules with
 // Try it. One widget, two hosts: the Team designer page and Settings > Teams.
 // Manual edits stay local until Save writes the next version. With the draft
-// shown (the designer page), the designer's proposals read as a diff to keep
-// or reject and Apply together; a draft made on an older version can't apply.
+// shown (the designer page), the designer's proposals show in the same
+// editors, read only, with a plate to keep or reject each; a draft made on an
+// older version can't apply.
 class TeamCatalogEditor : public QWidget {
 public:
     explicit TeamCatalogEditor(TeamController *teams, QWidget *parent = nullptr);
@@ -31,50 +34,70 @@ public:
     // Asks the designer to redo its draft on the current version.
     std::function<void(qint64 version)> askRedo;
     std::function<bool(const QString &name, const QString &title, const QString &text, const QString &action)> confirm;
+    // The selected session's project rules, the first block of Prompt order.
+    std::function<QString()> projectRules;
     void setDark(bool dark);
     // The designer page shows the draft; Settings edits by hand only.
     void setShowDraft(bool show) { m_showDraft = show; load(); }
     // Settings offers Open Team designer.
     void setDesignerButton(bool shown);
     // While the designer works, saving by hand makes its draft out of date.
-    void setDesignerWorking(bool working) { m_designerWorking = working; updateHeader(); }
+    void setDesignerWorking(bool working) { if (working == m_designerWorking) return; m_designerWorking = working; updateHeader(); }
     // Selects a proposal's item: Show in catalog.
     void showProposal(const QString &proposal);
     // Apply as from the header, with its confirmation; off while it is.
     void applyKept();
+    // N38 (#548): whether a designer runs to redo an out-of-date draft; the
+    // banner offers "Ask designer to redo" only then.
+    std::function<bool()> canRedo;
+    // The banner again, after canRedo's answer may have changed.
+    void refreshBanner() { updateHeader(); }
+    // Discard as from the header, with its confirmation.
+    void discardDraft();
     // The role's Computer and Account dropdowns: computers by alias (empty is
     // this computer) and the accounts each one reports.
     struct Computer { QString alias, label; bool online = true; };
     void setSources(HgsClient *client, const QList<Computer> &computers);
+    // The template a goal would use, as Try it shows it (the server's route).
+    struct Route { int rule = -1; QString templateId; QStringList added; QString approval; };
+    static Route route(const Teams::Catalog &catalog, const QString &goal);
 private:
     struct Account { QString id, provider, label; bool signedIn = true; };
     void fillAccounts(QComboBox *box, const Teams::Role &role) const;
-    enum class Tab { Roles, Templates, Routing };
+    enum class Tab { Roles, Templates, Routing, Rules };
     bool draftMode() const;
     void load();
     void rebuildLists();
     void rebuildEditor();
     void updateHeader();
     void setTab(Tab tab);
+    // U28: the lead's planning rules: the text, or a proposal's line diff.
+    QWidget *planningRulesEditor();
+    void resetPlanningRules();
+    void selectTemplate(const QString &id);
     QWidget *roleEditor(int index);
     QWidget *templateEditor(int index);
     QWidget *routingEditor();
-    QWidget *draftEditor(const QString &kind, const QString &id);
-    QWidget *listRow(const QString &kind, const QString &id, const QString &name, const QColor &color, const QString &agent,
-                     const Teams::Proposal *proposal, bool dirty);
+    QWidget *proposalPlate(const Teams::Proposal &proposal);
+    QWidget *promptOrder(int index);
+    QWidget *listRow(const QString &kind, int index, const Teams::Proposal *proposal, bool dirty);
+    const Teams::Proposal *proposalOf(const QString &kind, const QString &id) const;
     int unsavedChanges() const;
     void changed();
+    void decide(const QString &proposal, const QString &decision);
     TeamController *m_teams;
     HgsClient *m_client = nullptr;
     QList<Computer> m_computers;
     QHash<QString, QList<Account>> m_accounts;
     QPointer<QComboBox> m_accountChoice;
     int m_accountRole = -1;
+    // The catalog the editors show: the saved one with manual edits, or the
+    // draft view (the saved one with every proposal over it), read only.
     Teams::Catalog m_catalog;
-    bool m_dirty = false, m_dark = true, m_showDraft = false, m_designerWorking = false;
+    bool m_dirty = false, m_dark = true, m_showDraft = false, m_designerWorking = false, m_readOnly = false;
     Tab m_tab = Tab::Roles;
     QString m_applied;
-    QLabel *m_title, *m_meta, *m_bannerText, *m_legend;
+    QLabel *m_title, *m_meta, *m_bannerTitle, *m_bannerText, *m_bannerIcon, *m_legend;
     QFrame *m_banner;
     QPushButton *m_bannerAction, *m_bannerDiscard;
     QWidget *m_tabs;

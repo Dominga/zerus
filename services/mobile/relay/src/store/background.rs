@@ -76,7 +76,10 @@ impl Store {
         if !self.db.cfg.public_enrollment {
             return self.release_poll(lease).await;
         }
-        let mut t = self.db.control(class).await?;
+        crate::db::retry_cleanup(|| self.release_poll_reserved_once(lease, class)).await
+    }
+    async fn release_poll_reserved_once(&self, lease: &str, class: ServiceClass) -> Result<()> {
+        let mut t = self.db.cleanup_control(class).await?;
         if let Some(row) = t
             .one("SELECT * FROM poll_leases WHERE id=?", args![lease])
             .await?
@@ -307,6 +310,9 @@ impl Store {
             for (predicate, threshold) in [
                 ("operation='analytics_read'".into(), at - 120.0),
                 ("operation='terminal_snapshot'".into(), at - 120.0),
+                // The `task_exchange_history` and `task_done_history` indexes hold only these rows.
+                ("operation='task_exchange'".into(), at - 120.0),
+                ("operation='task_done'".into(), at - 120.0),
                 (
                     format!("operation IN {}", crate::speech_config::READ_SQL),
                     at - 120.0,
@@ -388,7 +394,9 @@ impl Store {
                             | "speech_stats"
                             | "speech_status"
                             | "voice_profiles"
-                            | "voice_status" => 120.0,
+                            | "voice_status"
+                            | "task_exchange"
+                            | "task_done" => 120.0,
                             "attachment_read" | "file_read" => ATTACHMENT_RESULT_TTL,
                             _ => self.db.cfg.retention.min(3600) as f64,
                         }

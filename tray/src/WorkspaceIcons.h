@@ -30,6 +30,51 @@ inline QIcon agentLogoIcon(const QString &agent, const QColor &color)
     return icon;
 }
 
+// U25: icons drawn from the owner's prototype (Zerus-prototype.html, its `I`
+// table): the toothed settings gear, also on the services chip, and the bell
+// and crossed-out bell of notifications and mute. Its strokes: 1.6, round.
+inline const char *prototypeIconPath(const QString &name)
+{
+    static const QHash<QString, const char *> paths{
+        {"settings", "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2zM9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"},
+        {"bell", "M6 16V11a6 6 0 0 1 12 0v5l2 2H4zM10 20a2 2 0 0 0 4 0"},
+        {"bell-off", "M8.7 4.3A6 6 0 0 1 18 11v4M6 11v5l-2 2h12M10 20a2 2 0 0 0 4 0M3 3l18 18"},
+        {"mute", "M8.7 4.3A6 6 0 0 1 18 11v4M6 11v5l-2 2h12M10 20a2 2 0 0 0 4 0M3 3l18 18"},
+        // The lead's session header and the composer row (spec 3, 4).
+        {"clock", "M4 13a8 8 0 1 0 16 0a8 8 0 1 0 -16 0ZM12 9v4l2.5 2M10 2h4"},
+        // U25 part 6: the inspector's Environment rows (the prototype's key,
+        // pc, sparkle and bolt).
+        {"key", "M4 15a4 4 0 1 0 8 0a4 4 0 1 0 -8 0ZM10.8 12.2L20 3M17 6l2.5 2.5M14.5 8.5L17 11"},
+        {"monitor", "M4.5 4h15a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1 -1.5 1.5h-15a1.5 1.5 0 0 1 -1.5 -1.5v-9a1.5 1.5 0 0 1 1.5 -1.5ZM8 20h8M12 16v4"},
+        {"asterisk", "M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6L5.6 18.4"},
+        {"bolt", "M13 3L5 14h6l-1 7 8-11h-6z"},
+        {"arrow-left", "M10 6l-6 6 6 6M4 12h16"},
+        {"check-circle", "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0ZM8 12.5l2.8 2.8L16.5 9"},
+        {"archive", "M4 4h16a1 1 0 0 1 1 1v3a1 1 0 0 1 -1 1h-16a1 1 0 0 1 -1 -1v-3a1 1 0 0 1 1 -1ZM5 9v10h14V9M10 13h4"},
+        {"link", "M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"},
+        {"shield", "M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6z"},
+        // The Team tab (spec 5): a phase's note, Show on graph, a draft's pencil.
+        {"message", "M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9l-4 3.5V6a1 1 0 0 1 1-1z"},
+        {"eye", "M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12zM9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"},
+        {"pencil", "M4 20l1-4L16 5l3 3L8 19zM14 7l3 3"},
+        {"warning", "M12 4l9 16H3zM12 10v4M12 17v.5"}};
+    return paths.value(name);
+}
+
+// Draws a prototype path into a square pixmap of `size`; false when the SVG
+// image plugin is missing, and the caller paints its older line icon.
+inline bool paintPrototypeIcon(QPainter &painter, int size, const char *path, const QColor &color)
+{
+    const QByteArray svg = QStringLiteral("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%1\" height=\"%1\" viewBox=\"0 0 24 24\">"
+                                          "<path d=\"%2\" fill=\"none\" stroke=\"%3\" stroke-opacity=\"%4\" stroke-width=\"1.6\" "
+                                          "stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>")
+                               .arg(size).arg(QLatin1String(path), color.name()).arg(color.alphaF()).toUtf8();
+    QPixmap drawn;
+    if (!drawn.loadFromData(svg, "SVG")) return false;
+    painter.save(); painter.resetTransform(); painter.drawPixmap(0, 0, drawn); painter.restore();
+    return true;
+}
+
 // One small stroke family, drawn at native DPR instead of platform-dependent glyphs.
 inline QIcon workspaceIcon(const QString &name, const QColor &color)
 {
@@ -46,7 +91,8 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
         QPixmap pm(size, size); pm.fill(Qt::transparent);
         QPainter p(&pm); p.setRenderHint(QPainter::Antialiasing); p.scale(size / 24., size / 24.);
         p.setPen(QPen(color, 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin)); p.setBrush(Qt::NoBrush);
-        if (name == "github" || name == "zerus") {
+        if (const char *path = prototypeIconPath(name); path && paintPrototypeIcon(p, size, path, color)) {
+        } else if (name == "github" || name == "zerus") {
             p.resetTransform(); p.drawPixmap(0, 0, symbol.pixmap(size, size));
             p.setCompositionMode(QPainter::CompositionMode_SourceIn); p.fillRect(pm.rect(), color);
         } else if (name == "codex") {
@@ -169,6 +215,12 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
             QPainterPath check; check.moveTo(3, 12); check.lineTo(7, 16); check.lineTo(16, 7); p.drawPath(check);
             QPainterPath second; second.moveTo(11, 15); second.lineTo(13, 17); second.lineTo(22, 8); p.drawPath(second);
         } else if (name == "add") { p.drawLine(12, 5, 12, 19); p.drawLine(5, 12, 19, 12); }
+        // U29: out of the phase's original scope - a plus outside a dashed frame.
+        else if (name == "out-of-scope") {
+            QPen dashed = p.pen(); dashed.setDashPattern({2.0, 1.6}); p.save(); p.setPen(dashed);
+            p.drawRoundedRect(QRectF(3, 3, 14, 14), 3, 3); p.restore();
+            p.drawLine(QPointF(18, 13), QPointF(18, 22)); p.drawLine(QPointF(13.5, 17.5), QPointF(22.5, 17.5));
+        }
         else if (name == "refresh") {
             p.drawArc(QRectF(5, 5, 14, 14), 40*16, 290*16); p.drawLine(19, 4, 19, 9); p.drawLine(14, 9, 19, 9);
         } else if (name == "reset") {
@@ -220,8 +272,10 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
         } else if (name == "search") {
             p.drawEllipse(QPointF(10.5, 10.5), 6, 6); p.drawLine(QPointF(15, 15), QPointF(20, 20));
         } else if (name == "collapse-panel") {
-            p.drawLine(20, 4, 20, 20); p.drawLine(5, 12, 15, 12);
-            p.drawLine(10, 7, 15, 12); p.drawLine(10, 17, 15, 12);
+            // Match the centred 18px workspace glyphs: balanced side margins
+            // and a shorter arrow that does not crowd the panel edge.
+            p.drawLine(19, 5, 19, 19); p.drawLine(5, 12, 14, 12);
+            p.drawLine(10, 8, 14, 12); p.drawLine(10, 16, 14, 12);
         } else if (name == "stop") {
             p.setBrush(color);p.drawRoundedRect(QRectF(6,6,12,12),1,1);
         } else if (name == "close") {
@@ -249,6 +303,30 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
             }
             else { p.drawLine(6, 9, 12, 15); p.drawLine(12, 15, 18, 9); }
         } else if (name == "more") { p.drawPoint(5, 12); p.drawPoint(12, 12); p.drawPoint(19, 12); }
+        // Project tasks (TasksView): a stage's icon is the icon of the action that moves a task there.
+        else if (name == "task-inbox") {
+            QPainterPath tray; tray.moveTo(4, 13.5); tray.lineTo(6.5, 6); tray.lineTo(17.5, 6); tray.lineTo(20, 13.5);
+            tray.lineTo(20, 19); tray.lineTo(4, 19); tray.closeSubpath(); p.drawPath(tray);
+            QPainterPath slot; slot.moveTo(4, 13.5); slot.lineTo(8.5, 13.5); slot.lineTo(10, 16); slot.lineTo(14, 16);
+            slot.lineTo(15.5, 13.5); slot.lineTo(20, 13.5); p.drawPath(slot);
+        } else if (name == "task-list") {
+            p.drawLine(4, 6, 20, 6); p.drawLine(4, 11, 20, 11); p.drawLine(4, 16, 14, 16);
+        } else if (name == "task-list-add") {
+            p.drawLine(4, 6, 16, 6); p.drawLine(4, 11, 16, 11); p.drawLine(4, 16, 11, 16);
+            p.drawLine(QPointF(17.5, 14), QPointF(17.5, 21)); p.drawLine(QPointF(14, 17.5), QPointF(21, 17.5));
+        } else if (name == "task-clock") {
+            p.drawEllipse(QPointF(12, 12), 8.5, 8.5); p.drawLine(QPointF(12, 7.5), QPointF(12, 12)); p.drawLine(12, 12, 15, 14);
+        } else if (name == "task-check") {
+            p.setPen(QPen(color, 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin)); p.drawLine(5, 12, 10, 17); p.drawLine(10, 17, 19, 7);
+        } else if (name == "task-funnel") {
+            QPainterPath funnel; funnel.moveTo(4, 5); funnel.lineTo(20, 5); funnel.lineTo(14, 12.5); funnel.lineTo(14, 19);
+            funnel.lineTo(10, 17); funnel.lineTo(10, 12.5); funnel.closeSubpath(); p.drawPath(funnel);
+        } else if (name == "task-edit") {
+            QPainterPath pencil; pencil.moveTo(4, 20); pencil.lineTo(8, 20); pencil.lineTo(19, 9); pencil.lineTo(15, 5);
+            pencil.lineTo(4, 16); pencil.closeSubpath(); p.drawPath(pencil); p.drawLine(13, 7, 17, 11);
+        } else if (name == "task-top") {
+            p.drawLine(7, 12, 12, 7); p.drawLine(12, 7, 17, 12); p.drawLine(7, 18, 12, 13); p.drawLine(12, 13, 17, 18);
+        }
         p.end(); icon.addPixmap(pm);
     }
     cache->insert(key, icon);

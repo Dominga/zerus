@@ -31,6 +31,13 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod result_stream;
+
+/// Upgraded sockets retain the SAME accepted-connection slot after Hyper's
+/// HTTP future completes. A successful upgrade must not evade max_connections.
+#[derive(Clone)]
+struct ConnectionSlot(Arc<OwnedSemaphorePermit>);
+
 #[derive(Clone)]
 pub struct App {
     pub store: Store,
@@ -155,6 +162,55 @@ impl Drop for Poll {
         });
     }
 }
+fn encode_response(value: Value, maximum: usize) -> Result<(std::fs::File, usize)> {
+    use std::io::{Seek, Write};
+    let file = tempfile::tempfile()?;
+    let mut w = json::LimitWriter {
+        inner: std::io::BufWriter::new(file),
+        remaining: maximum,
+    };
+    json::encode(&value, &mut w).map_err(|_| Error::LARGE)?;
+    w.flush()?;
+    let size = maximum - w.remaining;
+    let mut file = w.inner.into_inner().map_err(|_| Error::UNAVAILABLE)?;
+    file.rewind()?;
+    Ok((file, size))
+}
+fn spooled_response(
+    file: std::fs::File,
+    size: usize,
+    status: StatusCode,
+    budget: Arc<Budget>,
+) -> Response {
+    let file = tokio::fs::File::from_std(file);
+    let stream = stream::unfold(
+        (file, budget, Instant::now() + Duration::from_secs(30)),
+        |(mut file, guard, deadline)| async move {
+            let mut b = vec![0u8; 65536];
+            let read = tokio::time::timeout_at(deadline.into(), file.read(&mut b)).await;
+            match read {
+                Ok(Ok(0)) => None,
+                Ok(Ok(n)) => {
+                    b.truncate(n);
+                    Some((
+                        Ok::<_, std::io::Error>(bytes::Bytes::from(b)),
+                        (file, guard, deadline),
+                    ))
+                }
+                _ => Some((
+                    Err(std::io::Error::other("response interrupted")),
+                    (file, guard, Instant::now()),
+                )),
+            }
+        },
+    );
+    let mut r = Response::new(Body::from_stream(stream));
+    *r.status_mut() = status;
+    r.headers_mut()
+        .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+    r.headers_mut().insert(header::CONTENT_LENGTH, size.into());
+    r
+}
 impl App {
     pub async fn new(store: Store) -> Result<Self> {
         let cfg = store.db.cfg.clone();
@@ -202,13 +258,65 @@ impl App {
         units: usize,
         class: ServiceClass,
     ) -> Result<ResourcePermit> {
+        if lane.name != "database" {
+            return self.admit_once(lane, units, class).await;
+        }
+        // A single phone's fresh membership, receipt and event checks can
+        // overlap the gateway heartbeat on different workers. Queue briefly
+        // before DB work instead of converting a short burst into a busy UI.
+        // Every attempt still acquires BOTH existing local and shared budgets.
+        // No permit or SQL transaction is retained across the backoff.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+        let mut pause = Duration::from_millis(10);
+        loop {
+            match self.admit_once(lane, units, class).await {
+                Ok(permit) => return Ok(permit),
+                Err(error) if error.0 == Error::BUSY.0 && error.1 == Error::BUSY.1 => {
+                    let now = tokio::time::Instant::now();
+                    if now >= deadline {
+                        return Err(error);
+                    }
+                    tokio::select! {
+                        _ = self.stop.cancelled() => return Err(Error::UNAVAILABLE),
+                        _ = tokio::time::sleep_until(deadline.min(now + pause)) => {}
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(error);
+                    }
+                    pause = (pause * 2).min(Duration::from_millis(100));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    async fn admit_once(
+        &self,
+        lane: &Lane,
+        units: usize,
+        class: ServiceClass,
+    ) -> Result<ResourcePermit> {
         let local = lane.take(units, class)?;
-        let shared = self.store.acquire_service(lane.name, class, units).await?;
-        Ok(ResourcePermit {
-            _local: local,
-            _shared: shared,
-            class,
-        })
+        if !self.cfg.public_enrollment {
+            return Ok(ResourcePermit {
+                _local: local,
+                _shared: None,
+                class,
+            });
+        }
+        let store = self.store.clone();
+        let name = lane.name;
+        let tracker = store.db.tasks.clone();
+        // Ownership transfers before COMMIT. If HTTP disappears, the task
+        // retains local capacity and its eventual shared lease still drops.
+        let task = tracker.spawn(async move {
+            let shared = store.acquire_service(name, class, units).await?;
+            Ok::<_, Error>(ResourcePermit {
+                _local: local,
+                _shared: shared,
+                class,
+            })
+        });
+        task.await.map_err(|_| Error::UNAVAILABLE)?
     }
     async fn work<T: Send + 'static>(
         &self,
@@ -310,49 +418,9 @@ impl App {
         let reserve = self.admit(&self.spools, maximum, budget.class()).await?;
         budget.keep(reserve);
         let (file, size) = self
-            .work(budget.clone(), move || {
-                use std::io::{Seek, Write};
-                let file = tempfile::tempfile()?;
-                let mut w = json::LimitWriter {
-                    inner: std::io::BufWriter::new(file),
-                    remaining: maximum,
-                };
-                json::encode(&value, &mut w).map_err(|_| Error::LARGE)?;
-                w.flush()?;
-                let size = maximum - w.remaining;
-                let mut file = w.inner.into_inner().map_err(|_| Error::UNAVAILABLE)?;
-                file.rewind()?;
-                Ok((file, size))
-            })
+            .work(budget.clone(), move || encode_response(value, maximum))
             .await?;
-        let file = tokio::fs::File::from_std(file);
-        let stream = stream::unfold(
-            (file, budget, Instant::now() + Duration::from_secs(30)),
-            |(mut file, guard, deadline)| async move {
-                let mut b = vec![0u8; 65536];
-                let read = tokio::time::timeout_at(deadline.into(), file.read(&mut b)).await;
-                match read {
-                    Ok(Ok(0)) => None,
-                    Ok(Ok(n)) => {
-                        b.truncate(n);
-                        Some((
-                            Ok::<_, std::io::Error>(bytes::Bytes::from(b)),
-                            (file, guard, deadline),
-                        ))
-                    }
-                    _ => Some((
-                        Err(std::io::Error::other("response interrupted")),
-                        (file, guard, Instant::now()),
-                    )),
-                }
-            },
-        );
-        let mut r = Response::new(Body::from_stream(stream));
-        *r.status_mut() = status;
-        r.headers_mut()
-            .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
-        r.headers_mut().insert(header::CONTENT_LENGTH, size.into());
-        Ok(r)
+        Ok(spooled_response(file, size, status, budget))
     }
     async fn authenticate(
         &self,
@@ -527,15 +595,16 @@ impl App {
         if path == "/v2/capabilities" && method == Method::GET {
             let _lane = take(&self.anonymous)?;
             let mut value = protocol::capabilities(self.push.providers());
-            value["encrypted_transport"] = json!({"version":1,"membership":"signed-linear-v1","public_enrollment":true,"request_max_bytes":ENCRYPTED_REQUEST_MAX,"result_max_bytes":ENCRYPTED_SMALL_MAX});
+            value["encrypted_transport"] = json!({"version":1,"membership":"signed-linear-v1","public_enrollment":true,"request_max_bytes":ENCRYPTED_REQUEST_MAX,"result_max_bytes":ENCRYPTED_SMALL_MAX,"result_stream":{"version":1,"path":"/v2/stream","max_requests":16,"lifetime_seconds":60}});
             return Ok(axum::Json(value).into_response());
         }
         if (path == "/v2/workspaces" || path == "/v2/enrollments") && method == Method::POST {
             let _lane = take(&self.anonymous)?;
-            budget.keep(
-                self.admit(&self.database, 1, ServiceClass::Standard)
-                    .await?,
-            );
+            // Database admission ends with handler work, before the materialized
+            // response is handed to the network. Other budgets still own I/O.
+            let _database = self
+                .admit(&self.database, 1, ServiceClass::Standard)
+                .await?;
             self.store
                 .rate(&json!(["public-enrollment", identity]), 10, true)
                 .await?;
@@ -563,10 +632,11 @@ impl App {
                 .and_then(|v| v.strip_prefix("Bearer "))
                 .ok_or(Error::UNAUTHORIZED)?
                 .to_owned();
-            budget.keep(
-                self.admit(&self.database, 1, ServiceClass::Standard)
-                    .await?,
-            );
+            // Database admission ends with handler work, before the materialized
+            // response is handed to the network. Other budgets still own I/O.
+            let _database = self
+                .admit(&self.database, 1, ServiceClass::Standard)
+                .await?;
             self.store
                 .rate(&json!(["enrollment-status", identity]), 120, true)
                 .await?;
@@ -579,10 +649,11 @@ impl App {
         }
         if path == "/v1/pair" && method == Method::POST {
             let _lane = take(&self.anonymous)?;
-            budget.keep(
-                self.admit(&self.database, 1, ServiceClass::Standard)
-                    .await?,
-            );
+            // Database admission ends with handler work, before the materialized
+            // response is handed to the network. Other budgets still own I/O.
+            let _database = self
+                .admit(&self.database, 1, ServiceClass::Standard)
+                .await?;
             self.store
                 .rate(&json!(["pair", identity]), 10, true)
                 .await?;
@@ -641,6 +712,13 @@ impl App {
             }
         }
         let parts: Vec<_> = path.trim_matches('/').split('/').collect();
+        if path == "/v2/stream" && method == Method::GET {
+            if !params.is_empty() {
+                return Err(Error::BAD);
+            }
+            drop(pre_database);
+            return self.result_stream(unread, c, admission).await;
+        }
         if (path == "/v2/events" || path == "/v2/node/requests") && method == Method::GET {
             let wait = params
                 .get("wait")
@@ -666,20 +744,29 @@ impl App {
                 if role == Role::Node {
                     if self.store.encrypted_pending(&c).await? {
                         budget.keep(self.admit(&self.large, 1, budget.class()).await?);
+                        // Every capacity refusal precedes the durable claim. Reuse
+                        // these exact spool/CPU reservations for parse and encode;
+                        // no post-claim reacquisition can strand a queued request.
+                        budget.keep(
+                            self.admit(&self.spools, ENCRYPTED_REQUEST_MAX, budget.class())
+                                .await?,
+                        );
+                        let cpu = self.admit(&self.cpu, 1, budget.class()).await?;
                         let raw = self.store.encrypted_claim_body(&c).await?;
-                        let value = self
-                            .work(budget.clone(), move || {
-                                Ok(match raw {
-                                    Some(body) => {
-                                        json!({"requests":[json::parse(body.as_bytes(),32,50000)?]})
-                                    }
-                                    None => json!({"requests":[]}),
-                                })
-                            })
-                            .await?;
-                        return self
-                            .response(value, StatusCode::OK, budget, ENCRYPTED_REQUEST_MAX)
-                            .await;
+                        let guard = budget.clone();
+                        let (file, size) = tokio::task::spawn_blocking(move || {
+                            let _keep = (cpu, guard);
+                            let value = match raw {
+                                Some(body) => {
+                                    json!({"requests":[json::parse(body.as_bytes(),32,50000)?]})
+                                }
+                                None => json!({"requests":[]}),
+                            };
+                            encode_response(value, ENCRYPTED_REQUEST_MAX)
+                        })
+                        .await
+                        .map_err(|_| Error::UNAVAILABLE)??;
+                        return Ok(spooled_response(file, size, StatusCode::OK, budget));
                     }
                     if Instant::now() >= deadline {
                         return self
@@ -762,7 +849,9 @@ impl App {
             }
         }
         budget.keep(admission);
-        budget.keep(pre_database);
+        // Keep database admission through every awaited database operation and
+        // response materialization, but not the finished response's network I/O.
+        let _database = pre_database;
         budget.keep(self.admit(&self.responses, 1, budget.class()).await?);
         if path.starts_with("/v2/") && path != "/v2/push" {
             let page_limit = params
@@ -1130,9 +1219,10 @@ pub async fn serve(
     loop {
         tokio::select! {biased;_=shutdown.cancelled()=>break,accept=listener.accept()=>{
             let (stream,addr)=accept?;let Ok(permit)=connections.clone().try_acquire_owned()else{drop(stream);continue;};stream.set_nodelay(true)?;
-            let service=router.clone().layer(axum::Extension(ConnectInfo(addr)));let stop=shutdown.clone();
-            tasks.spawn(async move{let _permit=permit;let mut builder=hyper::server::conn::http1::Builder::new();builder.timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(10)).max_headers(100).max_buf_size(32768);
-                let connection=builder.serve_connection(TokioIo::new(stream),TowerToHyperService::new(service));tokio::pin!(connection);
+            let slot=ConnectionSlot(Arc::new(permit));
+            let service=router.clone().layer(axum::Extension(ConnectInfo(addr))).layer(axum::Extension(slot.clone()));let stop=shutdown.clone();
+            tasks.spawn(async move{let _slot=slot;let mut builder=hyper::server::conn::http1::Builder::new();builder.timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(10)).max_headers(100).max_buf_size(32768);
+                let connection=builder.serve_connection(TokioIo::new(stream),TowerToHyperService::new(service)).with_upgrades();tokio::pin!(connection);
                 tokio::select!{_= &mut connection=>{},_=tokio::time::sleep(Duration::from_secs(120))=>{},_=stop.cancelled()=>{connection.as_mut().graceful_shutdown();let _=tokio::time::timeout(Duration::from_secs(30),&mut connection).await;}}
             });
         }}
@@ -1141,4 +1231,510 @@ pub async fn serve(
     tasks.close();
     let _ = tokio::time::timeout(Duration::from_secs(app.cfg.shutdown_timeout), tasks.wait()).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod admission_cleanup_tests {
+    use super::*;
+    use crate::db::Db;
+    use std::{
+        future::Future,
+        task::{Context, Waker},
+    };
+
+    #[tokio::test]
+    async fn cancelled_public_admission_retains_local_capacity_until_shared_acquisition_settles() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config {
+            public_enrollment: true,
+            large_payload_slots: 2,
+            max_spool_bytes: 164 * 1024 * 1024,
+            background: false,
+            ..Config::default()
+        };
+        let db = Db::open(
+            &directory.path().join("state/relay.sqlite3"),
+            Arc::new(config),
+        )
+        .await
+        .unwrap();
+        let app = App::new(Store::new(db)).await.unwrap();
+        // Private SQL evidence that acquisition really committed once. This
+        // adds no production hook and uses no additional connection or pool.
+        app.store
+            .db
+            .exec(
+                "CREATE TABLE admitted_cleanup_test(id TEXT PRIMARY KEY)",
+                &[],
+            )
+            .await
+            .unwrap();
+        app.store.db.exec("CREATE TRIGGER admitted_cleanup_test_insert AFTER INSERT ON service_leases WHEN NEW.lane='request' BEGIN INSERT INTO admitted_cleanup_test(id) VALUES(NEW.id); END",&[]).await.unwrap();
+        let total = app.authenticated.total.available_permits();
+        let standard = app.authenticated.standard.available_permits();
+        let held = app.store.db.pool.acquire().await.unwrap();
+        let mut admission = Box::pin(app.admit(&app.authenticated, 1, ServiceClass::Standard));
+        assert!(admission
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending());
+        // Drop the owning future, not merely a Pin<&mut Future> wrapper.
+        drop(admission);
+        assert_eq!(
+            app.authenticated.total.available_permits(),
+            total - 1,
+            "cancelled admission must retain local capacity until its tracked acquisition settles"
+        );
+        assert_eq!(app.authenticated.standard.available_permits(), standard - 1);
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let row = app.store.db.one("SELECT used_total,used_standard,(SELECT count(*) FROM service_leases WHERE lane='request') AS leases,(SELECT count(*) FROM admitted_cleanup_test) AS acquired FROM service_resources WHERE lane='request'",&[]).await.unwrap().unwrap();
+                if row["acquired"] == 1
+                    && row["leases"] == 0
+                    && row["used_total"] == 0
+                    && row["used_standard"] == 0
+                    && app.authenticated.total.available_permits() == total
+                    && app.authenticated.standard.available_permits() == standard
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the detached acquisition must commit once and release both budgets");
+        app.store.db.close().await;
+    }
+}
+
+#[cfg(test)]
+mod database_response_lifetime_tests {
+    use super::*;
+    use crate::{args, db::i, store::token, test_backend::Backend};
+    use http_body_util::BodyExt;
+    use std::task::Poll;
+    use zerus_mobile_crypto::{
+        Identity, MembershipAction, MembershipStatement, Role as DeviceRole, SignedMembership,
+    };
+
+    struct Fixture {
+        first: App,
+        second: App,
+        secret: String,
+        _backend: Backend,
+    }
+
+    impl Fixture {
+        async fn close(&self) {
+            self.first.store.db.close().await;
+            self.second.store.db.close().await;
+        }
+    }
+
+    fn workspace_body() -> (String, Value) {
+        let identity =
+            Identity::generate(uuid::Uuid::new_v4().to_string(), DeviceRole::Computer).unwrap();
+        let membership = SignedMembership::sign(
+            MembershipStatement {
+                workspace_id: uuid::Uuid::new_v4().to_string(),
+                revision: 0,
+                previous_head: zerus_mobile_crypto::encode(&[0; 32]),
+                issuer_device_id: identity.public().device_id.clone(),
+                issuer_key_generation: 1,
+                action: MembershipAction::Add,
+                device: Some(identity.public().clone()),
+                revoked_device_id: None,
+            },
+            &identity,
+        )
+        .unwrap();
+        let secret = token();
+        let body = json!({ "membership": membership, "service_token": secret });
+        (secret, body)
+    }
+
+    async fn fixture() -> Fixture {
+        let config = Config {
+            public_enrollment: true,
+            large_payload_slots: 2,
+            max_spool_bytes: 164 * MIB,
+            background: false,
+            ..Config::default()
+        };
+        let backend = Backend::new(config).await;
+        let store = backend.store().await;
+        let (secret, body) = workspace_body();
+        store.create_workspace(&body).await.unwrap();
+        // SQLite owns one file lock/pool; PostgreSQL exercises independent workers.
+        let peer = if backend.is_postgres() {
+            backend.store().await
+        } else {
+            store.clone()
+        };
+        let first = App::new(store.clone()).await.unwrap();
+        let second = App::new(peer).await.unwrap();
+        Fixture {
+            first,
+            second,
+            secret,
+            _backend: backend,
+        }
+    }
+
+    async fn usage(app: &App, lane: &str) -> Value {
+        app.store.db.one(
+            "SELECT used_total,used_standard,(SELECT count(*) FROM service_leases WHERE lane=?) AS leases FROM service_resources WHERE lane=?",
+            args![lane, lane],
+        ).await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn short_cross_worker_database_burst_waits_without_borrowing_team_capacity() {
+        let fixture = fixture().await;
+        let standard = fixture
+            .first
+            .cfg
+            .standard_capacity(fixture.first.cfg.payload_pool_max() as usize);
+        let mut held = Vec::new();
+        for _ in 0..standard {
+            held.push(
+                fixture
+                    .first
+                    .admit(&fixture.first.database, 1, ServiceClass::Standard)
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert_eq!(fixture.first.database.standard.available_permits(), 0);
+        assert_eq!(
+            fixture.second.database.standard.available_permits(),
+            standard
+        );
+        let team = fixture
+            .second
+            .admit(&fixture.second.database, 1, ServiceClass::Team)
+            .await
+            .unwrap();
+        let release = async {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            let row = usage(&fixture.first, "database").await;
+            assert_eq!(i(&row, "used_standard"), standard as i64);
+            assert_eq!(i(&row, "used_total"), standard as i64 + 1);
+            drop(held);
+        };
+        let (result, ()) = futures_util::future::join(
+            fixture
+                .second
+                .admit(&fixture.second.database, 1, ServiceClass::Standard),
+            release,
+        )
+        .await;
+        let accepted = result.is_ok();
+        drop(result);
+        drop(team);
+        all_released(&fixture.first).await;
+        fixture.close().await;
+        assert!(
+            accepted,
+            "short database burst must queue within the existing capacity"
+        );
+    }
+
+    #[tokio::test]
+    async fn sustained_database_pressure_stays_bounded_and_does_not_borrow_reserved_slots() {
+        let fixture = fixture().await;
+        let standard = fixture
+            .first
+            .cfg
+            .standard_capacity(fixture.first.cfg.payload_pool_max() as usize);
+        let mut held = Vec::new();
+        for _ in 0..standard {
+            held.push(
+                fixture
+                    .first
+                    .admit(&fixture.first.database, 1, ServiceClass::Standard)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let start = Instant::now();
+        let result = fixture
+            .second
+            .admit(&fixture.second.database, 1, ServiceClass::Standard)
+            .await;
+        let elapsed = start.elapsed();
+        let busy = matches!(result,Err(error) if error.0==Error::BUSY.0 && error.1==Error::BUSY.1);
+        let row = usage(&fixture.first, "database").await;
+        assert_eq!(i(&row, "used_standard"), standard as i64);
+        assert_eq!(i(&row, "used_total"), standard as i64);
+        assert_eq!(i(&row, "leases"), standard as i64);
+        drop(held);
+        all_released(&fixture.first).await;
+        fixture.close().await;
+        assert!(busy, "sustained pressure must remain a capacity refusal");
+        assert!(
+            elapsed >= Duration::from_millis(200) && elapsed < Duration::from_secs(2),
+            "database capacity waiting must have a finite deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_database_admission_wait_leaves_no_shared_or_local_reservation() {
+        let fixture = fixture().await;
+        let standard = fixture
+            .first
+            .cfg
+            .standard_capacity(fixture.first.cfg.payload_pool_max() as usize);
+        let mut held = Vec::new();
+        for _ in 0..standard {
+            held.push(
+                fixture
+                    .first
+                    .admit(&fixture.first.database, 1, ServiceClass::Standard)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let second = fixture.second.clone();
+        let pending = tokio::spawn(async move {
+            second
+                .admit(&second.database, 1, ServiceClass::Standard)
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        pending.abort();
+        let cancelled = matches!(pending.await,Err(error) if error.is_cancelled());
+        drop(held);
+        all_released(&fixture.first).await;
+        assert_eq!(
+            fixture.first.database.standard.available_permits(),
+            standard
+        );
+        assert_eq!(
+            fixture.second.database.standard.available_permits(),
+            standard
+        );
+        fixture.close().await;
+        assert!(
+            cancelled,
+            "waiting must remain owned by the requesting future"
+        );
+    }
+
+    async fn database_free(app: &App) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let row = usage(app, "database").await;
+                if i(&row, "used_total") == 0
+                    && i(&row, "used_standard") == 0
+                    && i(&row, "leases") == 0
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("finished database work must release database permits before unread response I/O");
+    }
+
+    async fn all_released(app: &App) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let row = app.store.db.one(
+                    "SELECT (SELECT CAST(coalesce(sum(used_total),0) AS BIGINT) FROM service_resources) AS used,(SELECT count(*) FROM service_leases) AS leases",
+                    &[],
+                ).await.unwrap().unwrap();
+                if i(&row, "used") == 0 && i(&row, "leases") == 0 { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("response cancellation must release every remaining resource");
+    }
+
+    async fn routes(app: &App, secret: &str) -> Response {
+        let mut unread = Some(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/node/routes")
+                .header(header::AUTHORIZATION, format!("Bearer {secret}"))
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let response = app
+            .handle(&mut unread)
+            .await
+            .expect("the private encrypted fixture must return a normal response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "13");
+        response
+    }
+
+    #[tokio::test]
+    async fn unread_materialized_responses_release_database_on_both_workers() {
+        let fixture = fixture().await;
+        let standard = fixture
+            .first
+            .cfg
+            .standard_capacity(fixture.first.cfg.payload_pool_max() as usize);
+        assert_eq!(standard, 4);
+        let mut unread_responses = Vec::new();
+        for index in 0..standard {
+            let app = if index % 2 == 0 {
+                &fixture.first
+            } else {
+                &fixture.second
+            };
+            unread_responses.push(routes(app, &fixture.secret).await);
+            // Keep every real handler-produced body UNREAD, including its spool.
+            // The old source fails here with a live database lease despite no
+            // remaining database work. Never make its body drop to pass.
+            database_free(&fixture.first).await;
+            assert_eq!(
+                fixture.first.database.standard.available_permits(),
+                standard
+            );
+            assert_eq!(
+                fixture.second.database.standard.available_permits(),
+                standard
+            );
+            for lane in ["request", "response"] {
+                let row = usage(&fixture.first, lane).await;
+                assert_eq!(i(&row, "used_standard"), unread_responses.len() as i64);
+            }
+            let spool = usage(&fixture.first, "spool").await;
+            assert_eq!(
+                i(&spool, "used_standard"),
+                (unread_responses.len() * MIB) as i64
+            );
+        }
+        let healthy = routes(&fixture.second, &fixture.secret).await;
+        let bytes = healthy.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.as_ref(), br#"{"routes":[]}"#);
+        drop(unread_responses);
+        all_released(&fixture.first).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn slow_materialized_response_keeps_io_budgets_until_cancelled() {
+        let fixture = fixture().await;
+        let response = routes(&fixture.first, &fixture.secret).await;
+        let mut body = response.into_body();
+        let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        assert_eq!(frame.as_ref(), br#"{"routes":[]}"#);
+        // Do not poll EOF. The stream still owns its file and I/O budgets.
+        database_free(&fixture.first).await;
+        for lane in ["request", "response"] {
+            assert_eq!(i(&usage(&fixture.first, lane).await, "used_standard"), 1);
+        }
+        assert_eq!(
+            i(&usage(&fixture.first, "spool").await, "used_standard"),
+            MIB as i64
+        );
+        drop(body);
+        all_released(&fixture.first).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn inflight_request_keeps_database_admission_and_cancel_releases_it() {
+        let fixture = fixture().await;
+        let started = Arc::new(tokio::sync::Notify::new());
+        let notify = started.clone();
+        let body = Body::from_stream(stream::poll_fn(
+            move |_| -> Poll<Option<std::result::Result<bytes::Bytes, std::io::Error>>> {
+                notify.notify_one();
+                Poll::Pending
+            },
+        ));
+        let app = fixture.first.clone();
+        let secret = fixture.secret.clone();
+        let task = tokio::spawn(async move {
+            let mut unread = Some(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v2/node/routes")
+                    .header(header::AUTHORIZATION, format!("Bearer {secret}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::CONTENT_LENGTH, "2")
+                    .body(body)
+                    .unwrap(),
+            );
+            app.handle(&mut unread).await
+        });
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("the real handler must reach body ingestion");
+        let standard = fixture
+            .first
+            .cfg
+            .standard_capacity(fixture.first.cfg.payload_pool_max() as usize);
+        assert_eq!(
+            fixture.first.database.standard.available_permits(),
+            standard - 1
+        );
+        let row = usage(&fixture.first, "database").await;
+        assert!(i(&row, "used_standard") >= 1);
+        // The other worker has free local capacity, but the shared standard
+        // reservation still protects this actual in-flight request.
+        let refused = fixture
+            .second
+            .admit(&fixture.second.database, standard, ServiceClass::Standard)
+            .await
+            .err()
+            .expect("in-flight database work must remain charged");
+        assert_eq!((refused.0, refused.1), (Error::BUSY.0, Error::BUSY.1));
+        let team_reserved = fixture.first.cfg.payload_pool_max() as usize - standard;
+        let team = fixture
+            .second
+            .admit(&fixture.second.database, team_reserved, ServiceClass::Team)
+            .await
+            .expect("the original reserved team capacity remains available");
+        drop(team);
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        all_released(&fixture.first).await;
+        assert_eq!(
+            fixture.first.database.standard.available_permits(),
+            standard
+        );
+        assert_eq!(
+            fixture.second.database.standard.available_permits(),
+            standard
+        );
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn public_materialized_response_releases_database_before_body_delivery() {
+        let fixture = fixture().await;
+        let (_, value) = workspace_body();
+        let raw = serde_json::to_vec(&value).unwrap();
+        let mut unread = Some(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2/workspaces")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::CONTENT_LENGTH, raw.len().to_string())
+                .body(Body::from(raw))
+                .unwrap(),
+        );
+        let response = fixture.first.handle(&mut unread).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        database_free(&fixture.first).await;
+        assert_eq!(
+            i(&usage(&fixture.first, "response").await, "used_standard"),
+            1
+        );
+        assert_eq!(
+            i(&usage(&fixture.first, "spool").await, "used_standard"),
+            MIB as i64
+        );
+        assert!(i(&usage(&fixture.first, "body").await, "used_standard") > 0);
+        drop(response);
+        all_released(&fixture.first).await;
+        fixture.close().await;
+    }
 }

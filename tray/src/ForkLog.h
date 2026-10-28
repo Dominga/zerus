@@ -15,10 +15,18 @@ namespace ForkLog {
 
 // The usual folder, or the temporary folder when that one cannot be written
 // (a profile Zerus may not change, a sandbox): the log still exists to open.
+// HGS_TRAY_HOME points a launch at another home, as a test does: the log, the
+// single-instance socket and the tray's own state then stay out of the real
+// profile.
+inline QString home()
+{
+    return qEnvironmentVariable("HGS_TRAY_HOME", QDir::homePath());
+}
+
 inline QString path()
 {
     static const QString file = [] {
-        const auto directory = QDir::homePath() + QStringLiteral("/.local/state/hgs");
+        const auto directory = home() + QStringLiteral("/.local/state/hgs");
         const auto usual = directory + QStringLiteral("/zerus.log");
         QDir().mkpath(directory);
         QFile probe(usual);
@@ -84,7 +92,33 @@ inline void handler(QtMsgType type, const QMessageLogContext &context, const QSt
 inline void install()
 {
     previous() = qInstallMessageHandler(handler);
-    write("info", QStringLiteral("Zerus %1 started").arg(QCoreApplication::applicationVersion()));
+}
+
+// U3: every launch writes its own line, but "started" belongs only to the
+// process that takes the single-instance lock and becomes the tray. A second
+// launch says "already running" and exits, so counting "started" lines no
+// longer counts launches, and a crash timeline can name the owning process.
+inline void launch(qint64 pid)
+{
+    write("info", QStringLiteral("Zerus launched (pid %1)").arg(pid));
+}
+
+inline void alreadyRunning(qint64 pid, bool forwarded)
+{
+    write("info", forwarded
+        ? QStringLiteral("Already running (pid %1): forwarded the activation to the tray that owns this computer").arg(pid)
+        : QStringLiteral("Already running (pid %1): no tray answered, so this launch exits").arg(pid));
+}
+
+inline void ownsInstance(qint64 pid, const QString &lockPath)
+{
+    write("info", QStringLiteral("Single instance: pid %1 holds %2").arg(pid).arg(QDir::toNativeSeparators(lockPath)));
+}
+
+inline void started()
+{
+    write("info", QStringLiteral("Zerus %1 started (pid %2)")
+        .arg(QCoreApplication::applicationVersion()).arg(QCoreApplication::applicationPid()));
 }
 
 // False when no program could show it; the caller says where the file is.

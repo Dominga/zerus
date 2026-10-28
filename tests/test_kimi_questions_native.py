@@ -355,6 +355,9 @@ display_name = "Fixture"
   return cards[0]
 
 class NativeKimiQuestions(NativeKimi):
+ LONG_OTHER=('Добавить отдельный тестовый маршрут на выбранном компьютере. '
+             'Сохранить существующие настройки и проверить полный текст ответа, '
+             'который прокручивается по горизонтали в узком редакторе Other.')
  def startup_snapshot(self,stage):
   if not EVIDENCE:return
   snapshot=dict(stage=stage,monotonic=time.monotonic(),screen=self.screen(),
@@ -445,6 +448,44 @@ class NativeKimiQuestions(NativeKimi):
   receipt=self.answer(self.payload(card,'opt_0_0'),timeout=60)
   self.assertEqual(receipt['status'],'answered')
   self.assertEqual(self.resolved()['answers'],{'Which release should we prepare?':'Stable'})
+
+ def other_payload(self,card,text):
+  payload=self.payload(card,'opt_0_0')
+  payload['answers']=[dict(question_id='q_0',selected_option_ids=[],text=text)]
+  return payload
+
+ def prime_other(self,text):
+  self.tmux('send-keys','-t',self.pane,'3')
+  self.wait_for(lambda:'Type your answer, then press Enter to save.' in self.screen())
+  loaded=subprocess.run([str(self.bin/'tmux'),'load-buffer','-b','native-other','-'],env=self.env,
+                        input=text,text=True,capture_output=True,timeout=5)
+  self.assertEqual(loaded.returncode,0,loaded.stderr)
+  self.tmux('paste-buffer','-p','-r','-d','-b','native-other','-t',self.pane)
+  self.wait_for(lambda:text[-25:] in self.screen())
+
+ def test_short_question_long_other_is_confirmed_from_the_complete_review(self):
+  card=self.card()
+  receipt=self.answer(self.other_payload(card,self.LONG_OTHER),timeout=60)
+  self.assertEqual(receipt['status'],'answered')
+  self.assertEqual(self.resolved()['answers'],{'Which release should we prepare?':self.LONG_OTHER})
+
+ def test_short_question_explicit_retry_resumes_the_existing_other_editor(self):
+  self.prime_other(self.LONG_OTHER)
+  card=self.card()
+  self.assertTrue(card['can_answer'],card['answer_unavailable_reason'])
+  receipt=self.answer(self.other_payload(card,self.LONG_OTHER),timeout=60)
+  self.assertEqual(receipt['status'],'answered')
+  self.assertEqual(self.resolved()['answers'],{'Which release should we prepare?':self.LONG_OTHER})
+
+ def test_short_question_foreign_other_is_preserved_without_submission(self):
+  self.prime_other(self.LONG_OTHER)
+  card=self.card();payload=self.other_payload(card,'A different requested answer')
+  error=self.answer(payload,success=False,timeout=60)
+  self.assertIn('review differs',error)
+  self.assertIsNone(self.resolved())
+  self.assertIn('Review your answer before submit',self.screen())
+  self.assertNotIn('A different requested answer',self.screen())
+  self.assertIn('do not resend automatically',self.answer(payload,success=False,timeout=60))
 
 class NativeKimiTrust(NativeKimi):
  """The startup folder trust prompt: shown whole, answered only as chosen."""

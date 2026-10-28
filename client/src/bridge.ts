@@ -1,0 +1,192 @@
+import { invoke } from "@tauri-apps/api/core";
+import { emptyBatch, isEmptyBatch, type Action, type Batch, type ComputerId, type Details, type Outcome, type ReadMark, type Target } from "./types";
+import type { ActivityPort, FollowRequest } from "./store/activity";
+import { documentVisibility, type PageVisibility } from "./store/visibility";
+
+// The one path from the Rust side to the stores. The frontend asks for the next
+// batch from requestAnimationFrame with one call in flight; `next_batch`
+// parks up to 250 ms while nothing is pending, so an idle client does not
+// poll. A batch is applied in the frame after it arrives, at most one per
+// frame. Outside Tauri (`npm run dev` in a browser) a built-in replay of the
+// synthetic fixture stands in, so the UI works without the app.
+
+export type BridgeMode = "tauri" | "replay";
+
+export interface Source extends ActivityPort {
+  next(): Promise<Batch>;
+}
+
+let source: Source | undefined;
+
+export const inTauri = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+/** `next_batch` answers with raw JSON bytes (`ipc::Response`), so large batches skip script evaluation. */
+function decodeBatch(reply: unknown): Batch {
+  if (reply instanceof ArrayBuffer) return JSON.parse(new TextDecoder().decode(reply)) as Batch;
+  if (ArrayBuffer.isView(reply)) return JSON.parse(new TextDecoder().decode(reply)) as Batch;
+  if (Array.isArray(reply)) return JSON.parse(new TextDecoder().decode(Uint8Array.from(reply as number[]))) as Batch;
+  return reply as Batch;
+}
+
+const tauriSource: Source = {
+  next: () => invoke<unknown>("next_batch").then(decodeBatch),
+  follow: (request: FollowRequest) => invoke<void>("follow", { ...request }),
+  unfollow: (computer: ComputerId, key: string) => invoke<void>("unfollow", { computer, key }),
+};
+
+/** Starts the data source and the per-frame pump; resolves with the mode in use. */
+export async function startBridge(onBatch: (b: Batch) => void): Promise<BridgeMode> {
+  let mode: BridgeMode = "replay";
+  if (inTauri()) {
+    try {
+      await invoke("start");
+      source = tauriSource;
+      mode = "tauri";
+    } catch (error) {
+      // A build without the live feature has no data source of its own.
+      console.warn("Zerus Next: no live data in this build, using the built-in replay.", error);
+    }
+  }
+  if (!source) {
+    const { createReplay } = await import("./dev/replay");
+    source = createReplay();
+  }
+  pump(source, onBatch);
+  return mode;
+}
+
+/** What the pump needs from the page; tests pass their own. */
+export interface PumpHost {
+  /** The next display frame (requestAnimationFrame). */
+  frame(callback: () => void): void;
+  /** A timer (setTimeout); returns its cancel. */
+  later(callback: () => void, ms: number): () => void;
+  visibility: PageVisibility;
+}
+
+const pageHost: PumpHost = {
+  frame: (callback) => { requestAnimationFrame(() => callback()); },
+  later: (callback, ms) => { const timer = setTimeout(callback, ms); return () => clearTimeout(timer); },
+  visibility: documentVisibility,
+};
+
+/** Calls, frames and batches of the pump since it started (Diagnostics and the hidden-window check read them). */
+export const pumpStats = { pulls: 0, frames: 0, applied: 0, held: 0 };
+
+/**
+ * One `next_batch` in flight. A batch is applied in the next animation frame,
+ * which then asks for the following one; an empty answer (the 250 ms park ran
+ * out) asks again at once without a frame, so an idle window schedules no
+ * frames. While the window is hidden or minimised the pump stops: it asks for
+ * nothing and schedules no frame, a batch that arrives meanwhile waits
+ * unapplied, and the Rust side keeps folding changes into the next batch
+ * (bounded per key). Showing the window applies the waiting batch in its first
+ * frame and resumes.
+ */
+export function pump(from: Source, onBatch: (b: Batch) => void, host: PumpHost = pageHost) {
+  /** A batch that arrived while hidden. */
+  let held: Batch | undefined;
+  /** Stopped while hidden; nothing is in flight or scheduled. */
+  let stopped = false;
+  const hidden = () => host.visibility.hidden();
+  const pull = () => {
+    if (hidden()) { stopped = true; return; }
+    pumpStats.pulls++;
+    from.next().then(
+      (reply) => {
+        const b = normalize(reply ?? {});
+        if (isEmptyBatch(b)) { pull(); return; }
+        deliver(b);
+      },
+      (error) => {
+        console.error("Zerus Next: next_batch failed", error);
+        host.later(pull, 1000);
+      },
+    );
+  };
+  const deliver = (b: Batch) => {
+    if (hidden()) { held = b; stopped = true; pumpStats.held++; return; }
+    // In the next frame; a window whose frames are throttled (occluded)
+    // still applies it within 250 ms, so the stores never fall far behind.
+    let done = false;
+    const apply = () => {
+      if (done) return;
+      done = true;
+      cancel();
+      if (hidden()) { held = b; stopped = true; pumpStats.held++; return; }
+      pumpStats.applied++;
+      try { onBatch(b); } catch (error) { console.error("Zerus Next: applying a batch failed", error); }
+      pull();
+    };
+    const cancel = host.later(apply, 250);
+    pumpStats.frames++;
+    host.frame(apply);
+  };
+  const resume = () => {
+    if (hidden() || !stopped) return;
+    stopped = false;
+    const b = held;
+    held = undefined;
+    if (b) deliver(b); else pull();
+  };
+  const unsubscribe = host.visibility.onChange(resume);
+  pull();
+  return unsubscribe;
+}
+
+/** Missing arrays default to empty, so a core that omits empty fields still applies. */
+function normalize(b: Partial<Batch>): Batch {
+  const e = emptyBatch();
+  return { upserts: b.upserts ?? e.upserts, removes: b.removes ?? e.removes, replaces: b.replaces ?? e.replaces, computers: b.computers ?? e.computers, activity: b.activity ?? e.activity };
+}
+
+/** The Activity port of the current source (follow and unfollow). */
+export const activityPort: ActivityPort = {
+  follow: (request) => source?.follow(request) ?? Promise.resolve(),
+  unfollow: (computer, key) => source?.unfollow(computer, key) ?? Promise.resolve(),
+};
+
+/** Process RSS and CPU of the app, when running in Tauri. */
+export async function metrics(windowMs?: number): Promise<Record<string, unknown> | undefined> {
+  if (!inTauri()) return undefined;
+  try { return await invoke<Record<string, unknown>>("metrics", windowMs ? { window_ms: windowMs } : {}); } catch { return undefined; }
+}
+
+/** One guarded session action; an Err (a rejected promise) is an unknown outcome. */
+export async function runAction(target: Target, action: Action): Promise<Outcome> {
+  if (!inTauri()) return { outcome: "failed", detail: "Actions need the desktop app." };
+  return invoke<Outcome>("run_action", { target, action });
+}
+
+/** The inspect fields of a session; null when they are unavailable. */
+export async function inspectSession(target: Target, archiveId: string | null): Promise<Details | null> {
+  if (!inTauri()) return null;
+  return (await invoke<Details | null>("inspect_session", { target, archiveId })) ?? null;
+}
+
+/** Read marks whose delivery has not been confirmed yet. */
+export async function pendingReadMarks(): Promise<ReadMark[]> {
+  if (!inTauri()) return [];
+  return invoke<ReadMark[]>("pending_read_marks");
+}
+
+/** `hgs reference` for a session: its `zerus://session?...` URI. */
+export async function sessionReference(target: Target, archiveId: string | null): Promise<string> {
+  if (!inTauri()) throw "Actions need the desktop app.";
+  return invoke<string>("session_reference", { target, archiveId });
+}
+
+/** The command that opens the session in a terminal, written for this computer's shell. */
+export async function copyCommand(computer: string, name: string, archiveId: string | null): Promise<string> {
+  if (!inTauri()) throw "Actions need the desktop app.";
+  return invoke<string>("copy_command", { computer, name, archiveId });
+}
+
+/** Puts text on the clipboard: from Rust in the app, the page's clipboard in a browser. */
+export async function copyText(text: string): Promise<void> {
+  if (inTauri()) return invoke<void>("copy_text", { text });
+  if (!text.trim()) throw "nothing to copy: the command is empty";
+  if (/[\r\n]/.test(text)) throw "the command has a newline in it -- copying that is dangerous: the shell would run it the moment you paste";
+  if (!navigator.clipboard) throw "The clipboard is unavailable.";
+  await navigator.clipboard.writeText(text);
+}

@@ -10,8 +10,9 @@ class ConversationLoadPresentationTest {
         for (status in listOf(inspection, history)) {
             assertFalse(status.initial)
             assertTrue(status.spinner)
-            assertEquals("Updating messages…", status.text)
         }
+        assertEquals("Checking latest activity…", inspection.text)
+        assertEquals("Loading message history…", history.text)
         assertNull(ConversationLoadPresentation.status(true, false, true, false, true, false, opening = true))
         // Once this opening has settled, fast background polls stay quiet.
         assertNull(ConversationLoadPresentation.status(true, true, false, false, false, false, opening = false))
@@ -26,7 +27,7 @@ class ConversationLoadPresentationTest {
         val explicit = ConversationLoadPresentation.status(false, true, true, false, false, false, resolved = true)!!
         assertFalse(explicit.initial)
         assertTrue(explicit.spinner)
-        assertEquals("Refreshing conversation…", explicit.text)
+        assertEquals("Checking latest activity…", explicit.text)
         val slowHistory = ConversationLoadPresentation.status(false, false, false, true, true, false, resolved = true)!!
         assertFalse(slowHistory.initial)
         assertEquals("Loading message history…", slowHistory.text)
@@ -81,6 +82,27 @@ class ConversationLoadPresentationTest {
         assertNull(ConversationLoadPresentation.status(false, false, true, false, true, false))
         assertNull(ConversationLoadPresentation.status(true, false, true, false, true, false))
         assertNull(ConversationLoadPresentation.status(false, true, true, true, true, true))
+    }
+
+    @Test fun pinnedBannerDistinguishesSavedMessagesFromVerifiedActivityAndHistory() {
+        val waiting = ConversationLoadPresentation.status(true, true, false, true, false, false, opening = true)
+        val cached = ConversationLoadPresentation.banner(waiting, true, false, false, false)!!
+        assertEquals("Checking activity and messages…", cached.text)
+        assertEquals("Showing saved messages.", cached.detail)
+        assertTrue(cached.spinner)
+
+        val inspected = ConversationLoadPresentation.banner(null, true, true, false, false)!!
+        assertEquals("Latest activity checked", inspected.text)
+        assertEquals("Showing available messages.", inspected.detail)
+        val complete = ConversationLoadPresentation.banner(null, true, true, true, false)!!
+        assertEquals("Message history loaded.", complete.detail)
+        assertFalse(complete.spinner)
+
+        val failed = ConversationLoadPresentation.banner(null, true, false, true, false)!!
+        assertEquals("Showing saved messages", failed.text)
+        assertEquals("Refresh to check for updates.", failed.detail)
+        assertFalse(failed.spinner)
+        assertNull(ConversationLoadPresentation.banner(waiting, true, true, true, true))
     }
 
     @Test fun historyNavigationDoesNotInheritOldSpinnerDeadline() {

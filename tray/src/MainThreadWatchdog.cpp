@@ -9,6 +9,9 @@
 #else
 #include <pthread.h>
 #endif
+#ifdef Q_OS_MACOS
+#include <time.h>
+#endif
 
 std::int64_t MainThreadWatchdog::nowMs()
 {
@@ -19,6 +22,11 @@ std::int64_t MainThreadWatchdog::nowMs()
     ULONGLONG ticks = 0;
     QueryUnbiasedInterruptTime(&ticks);
     return static_cast<std::int64_t>(ticks / 10000);
+#elif defined(Q_OS_MACOS)
+    // libc++'s steady_clock is CLOCK_MONOTONIC_RAW on Apple platforms, which
+    // keeps counting while the Mac sleeps, so a wake looked like a hang and
+    // aborted the tray. Uptime (mach_absolute_time) stops during sleep.
+    return static_cast<std::int64_t>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000000);
 #else
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                Clock::now().time_since_epoch())
@@ -26,14 +34,18 @@ std::int64_t MainThreadWatchdog::nowMs()
 #endif
 }
 
-MainThreadWatchdog::MainThreadWatchdog(int thresholdMs, std::function<void()> onHang)
+MainThreadWatchdog::MainThreadWatchdog(int thresholdMs, std::function<void()> onHang,
+                                       int wakeGraceMs)
     : m_thresholdMs(thresholdMs)
+    , m_wakeGraceMs(wakeGraceMs)
     , m_onHang(std::move(onHang))
     , m_lastBeatMs(nowMs())
 {
     m_heartbeat.setInterval(std::max(1, thresholdMs / 4));
-    QObject::connect(&m_heartbeat, &QTimer::timeout, &m_heartbeat,
-                     [this]() { m_lastBeatMs.store(nowMs()); });
+    QObject::connect(&m_heartbeat, &QTimer::timeout, &m_heartbeat, [this]() {
+        m_lastBeatMs.store(nowMs());
+        m_awaitingBeat.store(false);
+    });
     m_heartbeat.start();
 
     m_thread = std::thread([this]() {
@@ -48,13 +60,32 @@ MainThreadWatchdog::MainThreadWatchdog(int thresholdMs, std::function<void()> on
         std::unique_lock<std::mutex> lock(m_mutex);
         // wait_for возвращает true только по m_stop; таймаут -- очередная проверка.
         while (!m_wake.wait_for(lock, period, [this]() { return m_stop; })) {
-            if (nowMs() - m_lastBeatMs.load() <= m_thresholdMs)
+            const auto now = nowMs();
+            if (now - m_lastBeatMs.load() <= m_thresholdMs)
+                continue;
+            // Asleep or not yet scheduled again after a wake (see the header).
+            if ((m_sleeping.load() || m_awaitingBeat.load())
+                && now - m_powerEventMs.load() <= m_wakeGraceMs)
                 continue;
             lock.unlock();
             m_onHang();
             return;   // не больше одного раза
         }
     });
+}
+
+void MainThreadWatchdog::systemWillSleep()
+{
+    m_powerEventMs.store(nowMs());
+    m_sleeping.store(true);
+}
+
+void MainThreadWatchdog::systemPoweredOn()
+{
+    m_powerEventMs.store(nowMs());
+    // Before m_sleeping clears, so that the check never sees neither hold.
+    m_awaitingBeat.store(true);
+    m_sleeping.store(false);
 }
 
 MainThreadWatchdog::~MainThreadWatchdog()

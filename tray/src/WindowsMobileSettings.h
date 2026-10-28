@@ -1,4 +1,6 @@
 #pragma once
+#include "ProcessRunner.h"
+#include "JsonParse.h"
 #include "ChildProcess.h"
 #include "RelayConfiguration.h"
 #include <QCoreApplication>
@@ -105,11 +107,14 @@ private:
         auto *deadline=new QTimer(p);deadline->setSingleShot(true);
         auto output=std::make_shared<QByteArray>();
         const auto previous=snapshot;
-        auto finish=[this,p,deadline,output,action,payload,previous](bool success){
-            if(process!=p)return;
-            deadline->stop();process=nullptr;
+        auto finishing=std::make_shared<bool>(false);
+        auto finish=[this,p,deadline,output,action,payload,previous,finishing](bool success){
+            if(process!=p||*finishing)return;*finishing=true;
+            deadline->stop();
             const auto bytes=*output+p->readAllStandardOutput();
-            const auto doc=QJsonDocument::fromJson(bytes);const auto result=doc.object();
+            // The reply is parsed off the GUI thread; this request stays current until then.
+            ProcessRunner::post(this,[bytes]{return JsonParse::parse(bytes);},[this,p,action,payload,previous,success,bytes](const QJsonDocument &doc){
+            process=nullptr;const auto result=doc.object();
             if(!success||!doc.isObject()||bytes.size()>65536||!confirmed(action,result,payload,previous)){
                 notice->setText(tr("Connector operation was not confirmed. Reload status before retrying. Check that the portable ZIP includes zerus-mobile-connector.exe and private configuration is available."));
                 state->setText(tr("Connector: status unknown"));
@@ -127,7 +132,7 @@ private:
                 state->setText(result.value("running").toBool()?tr("Connector: running. Relay connectivity is not verified here."):tr("Connector: stopped"));
                 notice->setText(action=="save"?tr("Configuration saved privately. Start the connector, then refresh Phones below."):QString());controls(false);
             }
-            p->deleteLater();
+            p->deleteLater();});
         };
         connect(deadline,&QTimer::timeout,p,[p]{p->kill();});
         connect(p,&QProcess::readyReadStandardOutput,p,[p,output]{*output+=p->readAllStandardOutput();if(output->size()>65536)p->kill();});

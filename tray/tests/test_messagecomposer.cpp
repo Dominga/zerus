@@ -191,6 +191,8 @@ private slots:
     void cooperativeInboxIsExplicitAndDoesNotAutoSubmit();
     void unsupportedAttachmentsPreserveTextAndAllowExplicitRemoval();
     void compactComposerAppliesMenuChoicesAtOnce();
+    void compactComposerRowHasThreeZones();
+    void taskModeAddsAttachmentsWithTheStageButton();
     void initTestCase();
     void voiceInsertionRequiresUnchangedDraftAndNavigation();
     void init() { ComposerDraftStore::flushWrites(); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); QSettings().remove("workspace/messageEditorHeight"); }
@@ -593,6 +595,27 @@ void TestMessageComposer::unsupportedAttachmentsPreserveTextAndAllowExplicitRemo
     composer.setRecording(true);QVERIFY(!send->isEnabled());composer.setRecording(false);QVERIFY(send->isEnabled());
 }
 
+void TestMessageComposer::taskModeAddsAttachmentsWithTheStageButton()
+{
+    // Saved drafts names a task prompt by the session it is for.
+    const auto owner=ComposerDraftStore::owner("task-draft\nmac\ncodex/api");
+    QCOMPARE(int(owner.kind),int(ComposerDraftOwner::Kind::Task));QCOMPARE(owner.machine,QString("mac"));QCOMPARE(owner.session,QString("codex/api"));
+    MessageComposer composer;composer.setTaskMode(true);composer.setSendLabel("Backlog");composer.setPlaceholder("Task prompt for orchard / codex/api…");
+    composer.resize(600,160);composer.show();
+    composer.setSessionKey("task-draft\n\ncodex/api");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));composer.setAvailability(true);
+    QVERIFY(!composer.toolbar()->isHidden());
+    for(const char *name:{"sessionModelSettings","interruptAgent"})QVERIFY2(composer.findChild<QPushButton *>(name)->isHidden(),name);
+    auto *send=composer.findChild<QPushButton *>("sendMessage");QCOMPARE(send->text(),QString("Backlog"));QVERIFY(!send->isEnabled());
+    QCOMPARE(composer.editor()->placeholderText(),QString("Task prompt for orchard / codex/api…"));
+    QVERIFY(composer.canAttachFiles());QVERIFY(composer.addAttachment("image.png","image/png","image data"));
+    QVERIFY(composer.findChild<QPushButton *>("attachMessageFile")->isVisible());
+    QSignalSpy requested(&composer,&MessageComposer::sendRequested);
+    composer.editor()->setFocus();QTest::keyClicks(composer.editor(),"Add rate limiting");QVERIFY(send->isEnabled());
+    QTest::keyClick(composer.editor(),Qt::Key_Return);
+    QTRY_COMPARE(requested.size(),1);QVERIFY(requested[0][1].toString().contains("Add rate limiting"));
+    QCOMPARE(requested[0][2].value<QList<MessageAttachment>>().size(),1);
+}
+
 void TestMessageComposer::initTestCase()
 {
     QVERIFY(m_settings.isValid());
@@ -837,6 +860,14 @@ void TestMessageComposer::savedDraftsNameAndOpenTheirSession()
     save(remote, "  \n  Review   the deployment  ");
     save(child, "Ask the worker"); save(question, "Answer the question");
     save("voice-message-draft\n" + remote, {}, true); save("legacy", "Kept under an old key");
+    // A question-answer key keeps its JSON identity on disk. The draft index
+    // decodes it off the GUI thread; owner() then names its session at once.
+    QVERIFY(ComposerDraftStore().keys().contains(question));
+    const auto owner = ComposerDraftStore::owner(question);
+    QCOMPARE(int(owner.kind), int(ComposerDraftOwner::Kind::Question));
+    QCOMPARE(owner.machine, QString("mac")); QCOMPARE(owner.session, QString("claude/infra/review"));
+    const auto unlisted = "question\n" + QString::fromUtf8(QJsonDocument(QJsonArray{local, "question-two", "hash"}).toJson(QJsonDocument::Compact)) + "\nrun\nconversation";
+    QVERIFY(ComposerDraftStore::owner(unlisted).kind != ComposerDraftOwner::Kind::Question);
     // Newest first: the remote draft becomes the oldest.
     QFile manifest(ComposerDraftStore::directory() + '/' + QCryptographicHash::hash(remote.toUtf8(), QCryptographicHash::Sha256).toHex() + "/draft.json");
     QVERIFY(manifest.open(QIODevice::ReadWrite));
@@ -1467,6 +1498,51 @@ void TestMessageComposer::compactComposerAppliesMenuChoicesAtOnce()
     menu->close();
     composer.setCompact(false); QVERIFY(!card->isVisible()); QCOMPARE(send->text(), QString("Send"));
     QVERIFY(!card->isAncestorOf(send)); QCOMPARE(composer.editor()->height(), 76);
+}
+
+// U25 (spec 4): the compact row under the field has three zones: Attach,
+// Voice and the iron rules left; Video, Cache, the context and Copy session
+// reference centred under the field; the model right. Stop sits in the card.
+void TestMessageComposer::compactComposerRowHasThreeZones()
+{
+    MessageComposer composer; composer.resize(900, 220); setSessionReady(composer, "arch/session");
+    composer.setModelSettings("model-one", "high", QJsonArray{QJsonObject{{"id", "model-one"}, {"effort_options", QJsonArray{"high"}}}}, true, {});
+    auto *video = new ToolbarChip; video->setObjectName("voiceMode"); video->setIconName("video"); video->setActive(true);
+    auto *voice = new ToolbarChip; voice->setObjectName("voiceRecord"); voice->setLabels("Voice"); voice->setActive(true);
+    auto *cache = new ToolbarChip; cache->setObjectName("cacheChip"); cache->setLabels("Cache ~60m"); cache->setActive(true);
+    composer.toolbar()->add(ComposerToolbar::Slot::Voice, voice);
+    composer.toolbar()->add(ComposerToolbar::Slot::VoiceMode, video);
+    composer.toolbar()->add(ComposerToolbar::Slot::Cache, cache);
+    composer.setIronRulesCount(2);
+    QSignalSpy references(&composer, &MessageComposer::sessionReferenceRequested);
+    composer.setSessionReferenceAvailable(true);
+    composer.setCompact(true); composer.show(); QTest::qWait(40);
+    auto *toolbar = composer.toolbar(); QVERIFY(toolbar->threeZones());
+    auto *card = composer.findChild<QFrame *>("composerCard");
+    auto *attach = composer.findChild<QPushButton *>("attachMessageFile");
+    auto *rules = composer.findChild<QPushButton *>("ironRulesChip");
+    auto *reference = composer.findChild<QPushButton *>("copySessionReference");
+    auto *model = composer.findChild<QPushButton *>("sessionModelSettings");
+    QVERIFY(reference->isVisible() && rules->isVisible());
+    QCOMPARE(rules->text(), QStringLiteral("2 iron rules"));
+    QVERIFY(card->isAncestorOf(composer.findChild<QPushButton *>("interruptAgent")));
+    QVERIFY(toolbar->mapTo(&composer, QPoint()).y() >= card->mapTo(&composer, QPoint()).y() + card->height());
+    const auto x = [&composer](QWidget *w) { return w->mapTo(&composer, QPoint()).x(); };
+    QVERIFY(x(attach) < x(voice) && x(voice) < x(rules));
+    QVERIFY(x(rules) + rules->width() < x(video) && x(video) < x(cache) && x(cache) < x(reference));
+    QVERIFY(x(reference) + reference->width() < x(model));
+    // The centre group is centred under the card.
+    const int centreMiddle = (x(video) + x(reference) + reference->width()) / 2, cardMiddle = x(card) + card->width() / 2;
+    QVERIFY2(qAbs(centreMiddle - cardMiddle) <= 8, qPrintable(QStringLiteral("%1 vs %2").arg(centreMiddle).arg(cardMiddle)));
+    QVERIFY(x(model) + model->width() > composer.width() - 12);
+    reference->click(); QCOMPARE(references.size(), 1); QCOMPARE(references[0][0].toString(), QStringLiteral("arch/session"));
+    composer.setSessionReferenceAvailable(false); QVERIFY(!reference->isVisible());
+    // The classic layout gets its row back: Attach and the model beside the field again.
+    composer.setCompact(false); QTest::qWait(20);
+    QVERIFY(!toolbar->threeZones()); QVERIFY(!toolbar->isAncestorOf(attach)); QVERIFY(!toolbar->isAncestorOf(model));
+    QVERIFY(attach->isVisible() && model->isVisible()); QVERIFY(!reference->isVisible());
+    QVERIFY(toolbar->mapTo(&composer, QPoint()).y() < composer.editor()->mapTo(&composer, QPoint()).y());
+    QVERIFY(x(video) < x(cache));
 }
 
 // OpenCode effort is a variant of the model, and no variant is the model's own

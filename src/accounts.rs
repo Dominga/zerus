@@ -1,5 +1,6 @@
 //! Named, per-machine native agent profiles. The catalog contains labels, never credentials.
 mod inspection;
+mod model_defaults;
 mod claude;
 mod claude_settings;
 mod mcp_servers;
@@ -43,6 +44,8 @@ struct Catalog {
     permission_modes: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     defaults: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    model_defaults: BTreeMap<String, model_defaults::Defaults>,
 }
 fn read(config: &Config) -> Result<Vec<u8>> {
     match fs::read(config.dir.join("accounts.json")) {
@@ -88,6 +91,7 @@ fn decode(bytes: &[u8]) -> Result<Catalog> {
             return Err(Error::new(1, "Invalid default account profile."));
         }
     }
+    model_defaults::validate_catalog(&catalog)?;
     Ok(catalog)
 }
 pub fn default_account(config: &Config, provider: &str) -> Result<Option<String>> {
@@ -192,6 +196,23 @@ fn lookup(config: &Config, id: &str) -> Result<(Profile, PathBuf, bool)> {
 pub(crate) fn hook_profile(config: &Config, id: &str) -> Result<(String, PathBuf)> {
     let (profile, path, _) = lookup(config, id)?;
     Ok((profile.provider, path))
+}
+
+/// The Claude account config a new launch without `--account` reads (U16,
+/// N18): the default managed profile's `.claude.json` (the launch sets
+/// `CLAUDE_CONFIG_DIR` to that profile), else the native one.
+pub(crate) fn claude_launch_config(config: &Config) -> Result<PathBuf> {
+    match default_account(config, "claude")? {
+        Some(id) if !native_id(&id) => Ok(lookup(config, &id)?.1.join(".claude.json")),
+        _ => claude::account_config(),
+    }
+}
+
+/// U16: mark Zerus's own Team designer folder trusted in the account config the
+/// designer's Claude session reads. Only that folder; start-up trust stays
+/// manual for every other folder.
+pub(crate) fn trust_claude_folder(config: &Path, folder: &str) -> Result<bool> {
+    claude::trust_folder(config, folder)
 }
 
 fn default_label(provider: &str) -> &'static str {
@@ -331,6 +352,7 @@ fn list(config: &Config) -> Result<Value> {
         let mode = catalog.permission_modes.get(row["id"].as_str().unwrap_or("")).map(String::as_str).unwrap_or("provider");
         permission_status::describe(config, row, mode);
         row["permission_modes"] = json!(permission_modes(&provider));
+        model_defaults::describe(row, &catalog);
     }
     // The connector forwards at most 128 KiB of accounts; this row keeps within 32 KiB.
     #[cfg(unix)]
@@ -548,6 +570,8 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     match operation {
         "ls"=>{println!("{}",list(config)?);},
         "inspect"=>{println!("{}",inspection::inspect(config,args)?);},
+        "model-settings"=>{println!("{}",model_defaults::inspect(config,id)?);},
+        "model-defaults"=>{println!("{}",model_defaults::set(config,args,dry)?);},
         "set-key"=>{println!("{}",deepseek::set_key(config,args,dry)?);},
         "install"=>return install::run(id,dry),
         "bind-existing"=>{
@@ -665,7 +689,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             use std::io::{IsTerminal,Read};
             if std::io::stdin().is_terminal() || dry {return Err(Error::new(1,"Credential transport requires a private input pipe. Use account copy."));}
             let mut payload=Vec::new();std::io::stdin().take((MAX_TRANSFER+1)as u64).read_to_end(&mut payload)?;
-            println!("{}",import(config,id,arg(args,"--label").unwrap_or(id),&payload)?);
+            println!("{}",import(config,id,arg(args,"--label").unwrap_or(id),crate::state::without_bom(&payload))?);
         },
         "login"=>{
             if id=="native-dsh" {return crate::native_ui::open(config,"","@account",dry);}
@@ -1103,6 +1127,11 @@ pub fn run_environment(account: &str, provider: &str, home: &str) -> Vec<String>
     environment
 }
 
+/// Apply saved model defaults only when creating a new conversation.
+pub fn apply_model_defaults(config: &Config, account: &str, provider: &str, argv: &mut Vec<String>) -> Result<()> {
+    model_defaults::apply(config, account, provider, argv)
+}
+
 #[cfg(test)]
 mod permission_tests {
     use super::*;
@@ -1153,6 +1182,36 @@ mod permission_tests {
             assert!(prompt.iter().position(|s|s=="--").unwrap()>1);assert_eq!(prompt.last().unwrap(),flag);
             let saved=prompt.clone();apply_permissions(provider,"bypass",&mut prompt);assert_eq!(prompt,saved);
         }
+    }
+    #[test]
+    fn the_designer_is_trusted_in_the_profile_its_launch_uses() {
+        // N18: a launch without --account uses the default account; with a
+        // managed default that is <config>/accounts/<id>/.claude.json.
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            home: dir.path().to_str().unwrap().into(), dir: dir.path().join("config"), state: dir.path().join("state"),
+            selves: vec![], peers: vec![], base_peers: vec![], peers_from_environment: false,
+            machines: BTreeMap::new(), tab: false, tab_colors: String::new(),
+        };
+        assert_eq!(claude_launch_config(&config).unwrap(), claude::account_config().unwrap(), "no catalog: the native config");
+        fs::create_dir_all(&config.dir).unwrap();
+        fs::write(config.dir.join("accounts.json"), json!({
+            "profiles": {"work": {"provider": "claude", "label": "Work"}},
+            "defaults": {"claude": "work"}
+        }).to_string()).unwrap();
+        assert_eq!(claude_launch_config(&config).unwrap(), config.dir.join("accounts").join("work").join(".claude.json"));
+        fs::write(config.dir.join("accounts.json"), json!({
+            "profiles": {"work": {"provider": "claude", "label": "Work"}},
+            "defaults": {"claude": "native-claude"}
+        }).to_string()).unwrap();
+        assert_eq!(claude_launch_config(&config).unwrap(), claude::account_config().unwrap(), "a native default: the native config");
+    }
+    #[test]
+    fn claude_project_keys_use_forward_slashes_on_windows() {
+        // N19: as Claude writes them; the mixed form was another project.
+        let mixed = "C:\\Users\\example\\.local/state\\hgs/sessions\\team-designer";
+        assert_eq!(claude::project_key(mixed, true), "C:/Users/example/.local/state/hgs/sessions/team-designer");
+        assert_eq!(claude::project_key("/home/example/a\\b", false), "/home/example/a\\b");
     }
     #[test]
     fn auto_mode_is_claude_only() {

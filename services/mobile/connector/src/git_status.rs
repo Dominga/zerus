@@ -68,7 +68,8 @@ pub fn call(payload: &Value) -> Call {
         payload["path"].as_str().expect("validated"),
         "--json",
     ])
-    .timeout(5.0);
+    // hgs bounds each git read of a status (2 s, #526): 19 s at most in all.
+    .timeout(25.0);
     call.max_output_bytes = Some(MAX_BYTES);
     call
 }

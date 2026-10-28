@@ -7,12 +7,23 @@ invitation from an already enrolled computer; phone invitations have a different
 purpose. An active trusted computer must remain online to verify the joining
 device's proof and approve its immutable public keys.
 
+Create and Join ask for the relay and, for Join, a computer invitation code.
+The computer's system hostname supplies its private display name automatically;
+neither a workspace-name field nor a computer-name field is required. Existing
+saved labels are preserved. A phone's Rename machine action remains a separate
+display preference on that phone.
+
 Every computer and phone has its own bearer credential, signing key and
 encryption key. A workspace is the shared authorization namespace, rather than
 one physical computer. A phone can reach each enrolled gateway and that
 gateway's directly configured SSH peers. A direct peer remains a native route;
 it does not become an enrolled gateway automatically. Windows gateways execute
 local Windows operations only.
+
+A computer has one active workspace. A phone can retain several separate
+workspace connections. A computer already reachable through a gateway's SSH
+configuration does not need to join separately; enrolling it as another gateway
+is useful when it must remain reachable independently of the first gateway.
 
 Private workspace/computer labels live at endpoints. The public enrollment
 service stores generic labels and opaque identities. Changing a local label
@@ -83,6 +94,26 @@ switch retires the old gateway using a signed membership change, preserves its
 journal, and activates a fresh identity and receipt directory for the destination
 workspace. Native sessions and desktop projects remain local. Existing phones
 of the destination workspace do not need another pairing ceremony.
+
+An enrollment may already be saved when its activation response is lost. The
+desktop then refreshes local status without repeating Create or Join. A saved
+pending connection is resumed with Check connection or Continue connecting;
+its exact device identity, destination and request identities are retained.
+Confirmed pending enrollment also clears the consumed invitation from the form.
+
+An explicitly confirmed legacy switch on Linux can hand over a verified Rust
+connector service automatically. It verifies the service, running process,
+configuration and journal binding, then reserves one graceful stop request for
+that connector alone. It waits for its current phone request and journal lock
+to finish before activating the destination. A private, marked service drop-in
+updates the executable used for subsequent starts without replacing the base
+unit or unrelated settings. Native agents and tmux are never stop targets.
+An already stopped connector can still use the established manual activation
+path on other platforms or when no service can be admitted; this grants no
+service control or autostart guarantee. A running unsupported or unsafe service
+retains an actionable pending connection. Opening settings and reading status
+never authorize a handover; uncertain delivery never authorizes a second stop
+signal.
 
 There is no account/password recovery service. A machine with lost local state
 uses a fresh invitation from another trusted computer, or creates a new

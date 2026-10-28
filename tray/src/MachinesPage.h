@@ -22,6 +22,8 @@ protected:
     void showEvent(QShowEvent *) override;
 private:
     void renderRows();
+    // The amber dot beside the machine with unsaved edits (every row rebuild too).
+    void markUnsaved();
     void loadSelection();
     void updateControls();
     void changed();
@@ -43,6 +45,12 @@ private:
     QJsonObject m_data;
     QListWidget *m_list;
     QLabel *m_summary, *m_title, *m_status, *m_origin, *m_effective, *m_colorHint, *m_localHost;
+    // U25 part 7 (spec 8): the title's note, the duplicate-name error and the
+    // unsaved-changes warning; the label swatches and the Soft/Bright segment.
+    QLabel *m_titleNote, *m_aliasError, *m_unsaved;
+    QList<QPushButton *> m_swatches;
+    QPushButton *m_styleSoft, *m_styleBright;
+    bool m_dark = false;
     QLineEdit *m_alias, *m_hostname, *m_user, *m_key;
     QLineEdit *m_wslDistribution, *m_wslUser, *m_wslHgs;
     QComboBox *m_transport;
@@ -65,4 +73,5 @@ private:
     QJsonObject m_effectiveData;
     bool m_loading = false, m_dirty = false, m_new = false, m_installing = false;
     bool m_discardPrompt = false;
+    bool m_rowsStale = false;
 };

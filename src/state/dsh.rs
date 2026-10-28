@@ -64,6 +64,53 @@ pub(crate) fn account_ui_url(home: &Path) -> Result<String> {
         .map(|m| m.as_str().to_owned())
         .ok_or_else(|| "Native DeepSeek UI is unavailable.".into())
 }
+/// H3: the host serving a member's dsh session: its pid and when it started
+/// (the pid file's time), for team status. Read only.
+pub(crate) fn host_of(name: &str) -> Option<Value> {
+    let record = binding(name).ok()?;
+    let path = host_dir(&record).join("host.pid");
+    let pid: u32 = fs::read_to_string(&path).ok()?.trim().parse().ok()?;
+    let started = fs::metadata(&path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs_f64();
+    Some(json!({"pid":pid,"started":started}))
+}
+
+/// H4: the arguments Zerus gives the native DeepSeek host. They never enable
+/// session-log upload (`session-log-deepseek`); only the private overlay,
+/// profile and local socket are set.
+fn host_arguments(overlay: &Path, default_profile: bool) -> Vec<String> {
+    let mut args = vec!["--profile".to_owned(), "hgs".to_owned()];
+    if default_profile {
+        args.extend(["--from-default-profile".to_owned(), "web".to_owned()]);
+    }
+    args.extend([
+        "--patch".to_owned(),
+        overlay.to_string_lossy().into_owned(),
+        "--no-open".to_owned(),
+        "--host".to_owned(),
+        "127.0.0.1".to_owned(),
+        "--port".to_owned(),
+        "0".to_owned(),
+    ]);
+    args
+}
+
+/// H4: the one overlay Zerus writes for the host: its private bridge only.
+fn host_overlay(script: &Path, socket: &Path, block_upload: bool) -> Value {
+    let mut insert = vec![json!({"id":"hgs-native-dsh","name":script,"config":{"socket":socket,"recoveryPolicy":recovery::policy_path()}})];
+    if block_upload {
+        // U22: the row replaces the shipped plugin's config; the user's global
+        // dsh configuration is never edited.
+        insert.push(session_upload::overlay_row()["insert"][0].clone());
+    }
+    json!([{"insert":insert}])
+}
+
 fn host_dir(record: &Value) -> PathBuf {
     root().join("dsh/hosts").join(
         &format!(
@@ -179,13 +226,15 @@ fn exchange(path: &Path, request: &str, read_timeout: Duration) -> Result<String
         Err(_) => Err("Native request delivery uncertain: the DeepSeek host did not answer in time".into()),
     }
 }
-fn ensure_host(record: &Value) -> Result<()> {
+fn ensure_host(record: &Value) -> Result<bool> {
     let dir = host_dir(record);
     private_dir(&dir)?;
     let _guard = lock(Some(&dir.join("start.lock")))?;
     if let Ok(ping) = rpc(record, "ping", json!({})) {
         if ping["version"] == VERSION && ping["protocol"] == 1 {
-            return Ok(());
+            // N17: a host that was already running keeps the block state it was
+            // started with; sessions launched into it may still upload.
+            return Ok(running_host_block_stale(&dir));
         }
         return Err("The running DeepSeek host uses an incompatible adapter; close its sessions before upgrading".into());
     }
@@ -218,8 +267,14 @@ fn ensure_host(record: &Value) -> Result<()> {
     let overlay = dir.join("hgs.patch.json");
     atomic(
         &overlay,
-        &json!([{"insert":[{"id":"hgs-native-dsh","name":script,"config":{"socket":socket,"recoveryPolicy":recovery::policy_path()}}]}])
-            .to_string(),
+        &host_overlay(&script, &socket, session_upload::block()).to_string(),
+    )?;
+    // N17: the block state this host starts with is recorded beside it, so a
+    // later launch into a host started before the block can say so instead of
+    // promising a block the running host never got.
+    atomic(
+        &dir.join("upload-block.json"),
+        &json!({"block":session_upload::block(),"at":now()}).to_string(),
     )?;
     let log = crate::platform::private_open(OpenOptions::new().create(true).truncate(true).write(true))
         .open(dir.join("host.log"))
@@ -250,19 +305,7 @@ fn ensure_host(record: &Value) -> Result<()> {
                 .env("XDG_RUNTIME_DIR", runtime);
         }
     }
-    command.args(["--profile", "hgs"]);
-    // This flag creates a profile and intentionally rejects existing ones.
-    // Reopening the host must retain the native profile and its settings.
-    if !Path::new(string(record, "agent_home"))
-        .join("profiles/hgs/package.json")
-        .exists()
-    {
-        command.args(["--from-default-profile", "web"]);
-    }
-    command
-        .arg("--patch")
-        .arg(overlay)
-        .args(["--no-open", "--host", "127.0.0.1", "--port", "0"])
+    command.args(host_arguments(&overlay, !Path::new(string(record, "agent_home")).join("profiles/hgs/package.json").exists()))
         .env("DSH_HOME", string(record, "agent_home"))
         .current_dir(home())
         .stdin(Stdio::null())
@@ -276,7 +319,7 @@ fn ensure_host(record: &Value) -> Result<()> {
     while Instant::now() < deadline {
         if let Ok(value) = rpc(record, "ping", json!({})) {
             if value["protocol"] == 1 {
-                return Ok(());
+                return Ok(false);
             }
         }
         if child.try_wait().map_err(|e| e.to_string())?.is_some() {
@@ -290,13 +333,62 @@ fn ensure_host(record: &Value) -> Result<()> {
     Err("DeepSeek host is still starting; retry opening the session".into())
 }
 
-pub(crate) fn native_ui_url(name: &str) -> Result<String> {
-    let record = if name == "@account" {
+/// N17: whether a host that was already running was started without the block
+/// asked for now. The state is written when a host starts; a host from before
+/// the setting, or one started while it was off, is not protecting anything.
+fn running_host_block_stale(dir: &Path) -> bool {
+    if !session_upload::block() {
+        return false;
+    }
+    let started = fs::read(dir.join("upload-block.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|value| value["block"].as_bool());
+    started != Some(true)
+}
+
+/// N17/U22: what a binding says about DeepSeek's session-log upload: the
+/// verification mark when its own records still accepted one after the launch
+/// (U22), and the "may be active" mark when the running host was started
+/// without the block. `upload_note` is the sentence the session card, `hgs ls`
+/// and the team status show.
+pub(crate) fn upload_state(record: &Value) -> Value {
+    let mut value = json!({});
+    if let Some(seen) = record.get("upload_seen").filter(|seen| seen.is_object()) {
+        value["upload_seen"] = seen.clone();
+        value["upload_note"] = json!("DeepSeek session-log upload still active");
+    } else if session_upload::block() {
+        if let Some(maybe) = record.get("upload_may_be_active").filter(|maybe| maybe.is_object()) {
+            value["upload_may_be_active"] = maybe.clone();
+            value["upload_note"] =
+                json!("DeepSeek session-log upload may still be active: the running DeepSeek host was started before the block");
+        }
+    }
+    value
+}
+
+/// N17/U22: the upload marks for one bound session, verifying its own records
+/// first when it is not marked yet (bounded and throttled).
+pub(crate) fn upload_state_for(name: &str) -> Value {
+    if !session_upload::block() {
+        return json!({});
+    }
+    let Ok(mut record) = binding(name) else { return json!({}) };
+    if record.get("upload_seen").is_none() {
+        if let Some(seen) = check_upload(name) {
+            record["upload_seen"] = seen;
+        }
+    }
+    upload_state(&record)
+}
+
+pub(crate) fn native_ui_url(name: &str) -> Result<String> {    let record = if name == "@account" {
         json!({"agent_home":native_home()})
     } else {
         binding(name)?
     };
-    ensure_host(&record)?;
+    // N17: opening the native UI never marks a session; only a launch does.
+    let _block_stale = ensure_host(&record)?;
     let pattern =
         regex::Regex::new(r"http://127\.0\.0\.1:[0-9]+/\?token=[A-Za-z0-9_%.-]+").unwrap();
     // A new host's adapter can answer before its web server logs the address.
@@ -433,6 +525,24 @@ fn create_session(record: &mut Value) -> Result<()> {
     save(record)
 }
 
+/// U34: a DeepSeek session's sandbox needs full control (WRITE_DAC and
+/// WRITE_OWNER) of the folder it confines. On Windows a folder Zerus did not
+/// create may lack it — a worktree on a second drive inherits only
+/// Authenticated Users Modify — and every command then fails before it runs, so
+/// the session does not start and the owner gets the exact one-line fix. Other
+/// systems compile the check out.
+#[cfg(windows)]
+fn ensure_sandbox_folder(folder: &Path) -> Result<()> {
+    if let Some(problem) = crate::platform::sandbox_folder_problem(folder).map_err(|e| e.to_string())? {
+        return Err(problem);
+    }
+    Ok(())
+}
+#[cfg(not(windows))]
+fn ensure_sandbox_folder(_: &Path) -> Result<()> {
+    Ok(())
+}
+
 pub(crate) fn launch(
     name: &str,
     cwd: &str,
@@ -450,23 +560,81 @@ pub(crate) fn launch(
             return Err("This DeepSeek session name already exists".into());
         }
         let mut record = binding(name)?;
-        ensure_host(&record)?;
+        let block_stale = ensure_host(&record)?;
+        mark_upload_may_be_active(&mut record, block_stale);
         create_session(&mut record)?;
         record["paused"] = json!(false);
         record["run_id"] = json!(uuid::Uuid::new_v4().to_string());
+        // U22: the verification reads records written after this launch.
+        record["upload_since"] = json!(now());
+        record["upload_checked_at"] = json!(0);
         save(&record)?;
         return Ok(());
     }
     let cwd = crate::platform::canonical(cwd).map_err(|e| e.to_string())?;
+    ensure_sandbox_folder(&cwd)?;
     let mut record = json!({"backend":"dsh","name":name,"agent":"dsh","agent_home":native_home(),"cwd":cwd,
         "conversation_id":format!("session-{}",uuid::Uuid::new_v4()),"run_id":uuid::Uuid::new_v4().to_string(),
-        "created":now(),"launch_id":launch_id,"paused":false});
-    ensure_host(&record)?;
+        "created":now(),"upload_since":now(),"launch_id":launch_id,"paused":false});
+    let block_stale = ensure_host(&record)?;
+    mark_upload_may_be_active(&mut record, block_stale);
     create_session(&mut record)?;
     if let Ok(config) = crate::config::Config::load() {
         crate::swarm::infer_new_session(&config, name, &cwd);
     }
     Ok(())
+}
+
+/// U22: how often an unmarked session's own records are read again.
+const UPLOAD_CHECK_SECONDS: f64 = 60.0;
+
+/// N17: a session launched or resumed into a host that was started without the
+/// block is marked, so the desktop and status say the block may not hold for it
+/// until the host restarts. A host started with the block clears the mark.
+fn mark_upload_may_be_active(record: &mut Value, stale: bool) {
+    let Some(object) = record.as_object_mut() else { return };
+    if stale {
+        object.insert(
+            "upload_may_be_active".into(),
+            json!({"at":now(),"reason":"the running DeepSeek host was started before the block"}),
+        );
+    } else {
+        object.remove("upload_may_be_active");
+    }
+}
+
+/// U22: verifies the block from the session's own records. A session started or
+/// resumed with the block on that still writes a session-log-deepseek
+/// acceptance record after that launch is marked on its binding. One bounded
+/// pass per minute from the stored frame boundary (512 KiB, 200 frames), so an
+/// acceptance written later is found however large the store grows; this runs
+/// off the hook path, when the session list or a team status asks.
+pub(crate) fn check_upload(name: &str) -> Option<Value> {
+    if !super::session_upload::block() {
+        return None;
+    }
+    let mut record = binding(name).ok()?;
+    if let Some(seen) = record.get("upload_seen").filter(|seen| seen.is_object()) {
+        return Some(seen.clone());
+    }
+    let at = now();
+    if at - record["upload_checked_at"].as_f64().unwrap_or(0.0) < UPLOAD_CHECK_SECONDS {
+        return None;
+    }
+    let path = super::session_upload::file(string(&record, "agent_home"), string(&record, "conversation_id"))?;
+    let offset = record["upload_offset"].as_u64().unwrap_or(0);
+    let since = record["upload_since"].as_f64().or_else(|| record["created"].as_f64()).unwrap_or(0.0);
+    let Ok(tail) = super::session_upload::read_tail(&path, offset) else { return None };
+    record["upload_checked_at"] = json!(at);
+    record["upload_offset"] = json!(tail.offset);
+    if super::session_upload::uploaded_after(&tail.records, since) {
+        let seen = json!({"at":at,"plugin":"session-log-deepseek","offset":tail.offset});
+        record["upload_seen"] = seen.clone();
+        let _ = save(&record);
+        return Some(seen);
+    }
+    let _ = save(&record);
+    None
 }
 
 pub(crate) fn snapshots() -> Result<Vec<Value>> {
@@ -491,6 +659,18 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
         }
         records.push(record);
     }
+    // U22: a session whose own records still accept the upload is marked, so
+    // the session card and Accounts can say so. Bounded and throttled per
+    // session; only when the block is on and the session is not marked yet.
+    if super::session_upload::block() {
+        for record in &mut records {
+            if record.get("upload_seen").is_none() {
+                if let Some(seen) = check_upload(string(record, "name")) {
+                    record["upload_seen"] = seen;
+                }
+            }
+        }
+    }
     // One request per host home, for exactly the conversations bound here.
     let mut homes: BTreeMap<String, Vec<&str>> = BTreeMap::new();
     for record in &records {
@@ -513,7 +693,12 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
 /// The host's rows (or, on an older bridge, list) RPC and its generation
 /// semantics are unchanged.
 pub(super) fn snapshot(name: &str) -> Result<Value> {
-    let record = binding(name)?;
+    let mut record = binding(name)?;
+    if record.get("upload_seen").is_none() {
+        if let Some(seen) = check_upload(name) {
+            record["upload_seen"] = seen;
+        }
+    }
     let list = session_rows(&record, &[string(&record, "conversation_id")]).unwrap_or(Value::Null);
     Ok(snapshot_from(&record, &list))
 }
@@ -530,6 +715,13 @@ fn snapshot_from(record: &Value, list: &Value) -> Value {
     child_summaries(record, &mut value, list, &list["generation"]);
     if !list.is_null() {
         value["host_generation"] = list["generation"].clone();
+    }
+    // U22/N17: the session still uploads session logs, or the running host was
+    // started before the block; the row says which with its time.
+    if let Some(upload) = upload_state(record).as_object() {
+        for (key, mark) in upload {
+            value[key] = mark.clone();
+        }
     }
     value
 }
@@ -1072,6 +1264,10 @@ pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
     // Internal recovery/input checks never need a process inventory.
     inspect_with_processes(name, agent_id, false)
 }
+/// `hgs inspect NAME` with its process inventory, for `hgs watch`.
+pub(crate) fn inspect_processes(name: &str) -> Result<Value> {
+    inspect_with_processes(name, None, true)
+}
 fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes: bool) -> Result<Value> {
     let record = binding(name)?;
     let inspected = rpc(
@@ -1093,7 +1289,10 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
         if let [row] = rows.as_slice() { Some(*row) } else { None }
     })).filter(|_| listed["generation"] == inspected["generation"]);
     let mut result = normalize(&record, child_row.unwrap_or(row), &inspected);
-    if agent_id.is_none() { waits::decorate(std::slice::from_mut(&mut result)); }
+    if agent_id.is_none() {
+        waits::decorate(std::slice::from_mut(&mut result));
+        session_state::decorate(std::slice::from_mut(&mut result));
+    }
     child_summaries(&record, &mut result, &listed, &inspected["generation"]);
     let mut events = native_events(&inspected["page"]["records"]);
     let process_snapshot=if include_processes { processes::dsh_snapshot(&record,&inspected) } else { Value::Null };
@@ -1248,8 +1447,15 @@ fn question_cards(record: &Value, inspected: &Value) -> Vec<Value> {
             "allow_other":q["approval"]!=true,"required":true,"options":item["options"].as_array().into_iter().flatten().enumerate().map(|(i,o)|json!({"id":if q["approval"]==true {if i==0 {"allow".to_owned()}else{"deny".to_owned()}}else{i.to_string()},"label":o["label"],"description":o["description"]})).collect::<Vec<_>>()
         })).collect::<Vec<_>>();
         let hash=format!("{:x}",Sha256::digest(json!([inspected["generation"],q]).to_string().as_bytes()));
-        json!({"question_id":q["id"],"question_hash":hash,"tool_call_id":q["id"],"run_id":record["run_id"],"conversation_id":record["conversation_id"],
-            "agent_id":"main","source":"dsh_native","approval":q["approval"]==true,"can_answer":true,"answer_transport":"native_dsh","questions":items})
+        let mut card=json!({"question_id":q["id"],"question_hash":hash,"tool_call_id":q["id"],"run_id":record["run_id"],"conversation_id":record["conversation_id"],
+            "agent_id":"main","source":"dsh_native","approval":q["approval"]==true,"can_answer":true,"answer_transport":"native_dsh","questions":items});
+        // The exact shell command the bridge tied to the approval's call, for a
+        // team's safe actions; a host without it shows no command.
+        if q["approval"]==true {
+            if let Some(command)=q["command"].as_str() {card["tool_input"]=json!({"command":command});}
+            if let Some(tool)=q["tool"].as_str() {card["tool"]=json!(tool);}
+        }
+        card
     }).collect()
 }
 
@@ -1301,7 +1507,7 @@ fn checked_request(record: &Value) -> Result<Value> {
     if bytes.len() > 30 * 1024 * 1024 {
         return Err("Native request is too large".into());
     }
-    let request: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let request: Value = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e| e.to_string())?;
     uuid::Uuid::parse_str(string(&request, "request_id")).map_err(|_| "Invalid request ID")?;
     if request["expected_run_id"] != record["run_id"]
         || request["expected_conversation_id"] != record["conversation_id"]
@@ -1584,7 +1790,12 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 return Ok(0);
             }
             if command == "resume" {
-                ensure_host(&record)?;
+                let block_stale = ensure_host(&record)?;
+                mark_upload_may_be_active(&mut record, block_stale);
+                // N17: a resume into a host that was already running is verified
+                // from the records written after it, like a launch.
+                record["upload_since"] = json!(now());
+                record["upload_checked_at"] = json!(0);
             }
             if command == "resume" {
                 create_session(&mut record)?;
@@ -1841,5 +2052,67 @@ mod notification_tests {
         assert!(notification_snapshot_with(&record, |method, _| Ok(if method == "inspect" { json!({"generation":"host","pendingQuestions":[{}]}) } else { json!({"generation":"host"}) })).is_err());
         assert!(notification_snapshot_with(&record, |method, _| Ok(if method == "inspect" { json!({"generation":"old","pendingQuestions":[]}) } else { json!({"generation":"new"}) })).is_err());
         assert!(notification_snapshot_with(&record, |_, _| Ok(json!({"generation":"host"}))).is_err());
+    }
+
+    #[test]
+    fn the_deepseek_host_never_enables_session_log_upload() {
+        // H4: member, lead and designer launches all use these arguments and
+        // this overlay; neither may enable session-log-deepseek.
+        let overlay = Path::new("state/dsh/hosts/x/hgs.patch.json");
+        for (default_profile, kind) in [(false, "member"), (false, "lead"), (true, "designer")] {
+            let args = host_arguments(overlay, default_profile).join(" ");
+            let lowered = args.to_lowercase();
+            for forbidden in ["session-log", "sessionlog", "logupload", "upload"] {
+                assert!(!lowered.contains(forbidden), "{kind}: {args}");
+            }
+            assert!(args.contains("--patch") && args.contains("--profile hgs"), "{kind}: {args}");
+        }
+        let overlay = host_overlay(Path::new("state/bridge.mjs"), Path::new("state/socket"), false).to_string().to_lowercase();
+        assert!(overlay.contains("hgs-native-dsh"), "{overlay}");
+        for forbidden in ["session-log", "sessionlog", "logupload", "upload"] {
+            assert!(!overlay.contains(forbidden), "{overlay}");
+        }
+        // U22: the block overlay disables the shipped plugin; off leaves dsh alone.
+        let blocked = host_overlay(Path::new("state/bridge.mjs"), Path::new("state/socket"), true).to_string();
+        assert!(blocked.contains("session-log-deepseek") && blocked.contains("\"enabled\":false"), "{blocked}");
+    }
+
+    /// N17: a host that was already running keeps the block state it started
+    /// with; a session launched into a host started before the block is marked
+    /// "may be active" instead of promising a block that host never got.
+    #[test]
+    fn a_host_started_without_the_block_marks_its_sessions() {
+        let _guard = crate::state::ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let old = std::env::var("HGS_STATE_DIR").ok();
+        std::env::set_var("HGS_STATE_DIR", dir.path());
+        let host = dir.path().join("host");
+        std::fs::create_dir_all(&host).unwrap();
+        // A host from before the setting: stale.
+        assert!(running_host_block_stale(&host));
+        std::fs::write(host.join("upload-block.json"), json!({"block":true,"at":1.0}).to_string()).unwrap();
+        assert!(!running_host_block_stale(&host), "a host started with the block protects its sessions");
+        std::fs::write(host.join("upload-block.json"), json!({"block":false,"at":1.0}).to_string()).unwrap();
+        assert!(running_host_block_stale(&host), "a host started with the block off does not");
+        // The mark says which state the session's host is in.
+        let mut record = json!({});
+        mark_upload_may_be_active(&mut record, true);
+        let state = upload_state(&record);
+        assert_eq!(
+            state["upload_note"],
+            "DeepSeek session-log upload may still be active: the running DeepSeek host was started before the block"
+        );
+        assert!(state["upload_may_be_active"].is_object());
+        // A verified record mark (U22) is the stronger one.
+        let verified = json!({"upload_seen":{"at":2.0},"upload_may_be_active":{"at":1.0}});
+        assert_eq!(upload_state(&verified)["upload_note"], "DeepSeek session-log upload still active");
+        // A host started with the block clears the mark.
+        mark_upload_may_be_active(&mut record, false);
+        assert!(record.get("upload_may_be_active").is_none());
+        assert!(upload_state(&record).as_object().is_some_and(|state| state.is_empty()));
+        match old {
+            Some(value) => std::env::set_var("HGS_STATE_DIR", value),
+            None => std::env::remove_var("HGS_STATE_DIR"),
+        }
     }
 }

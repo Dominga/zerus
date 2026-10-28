@@ -221,6 +221,14 @@ fn observe(state: &mut Value, event: &Value, provider: &str, conversation: &str)
                 state.as_object_mut().unwrap().remove(key);
             }
         }
+        "claude" if event["sessionId"] == conversation && event["type"] == "user" => {
+            // H7: a prompt after the last cache observation makes that
+            // observation older than the session's last turn.
+            let at = search::timestamp(&event["timestamp"]);
+            if at > 0.0 {
+                state["last_prompt_at"] = json!(at.max(state["last_prompt_at"].as_f64().unwrap_or(0.0)));
+            }
+        }
         "kimi" if ["", "main"].contains(&string(event, "agentId")) => {
             if ["profile.bind", "llm.request"].contains(&string(event, "type")) {
                 state["model"] = event["modelAlias"].clone();
@@ -247,8 +255,26 @@ fn output(state: &Value, provider: &str, partial: bool) -> Value {
     json!({"status":if available {"ok"} else {"unavailable"},"source":provider,
         "scope":"conversation","includes_subagents":false,"partial":partial,
         "totals":state["totals"],"last_request":state["last"],"requests":state["requests"],
-        "prompt_cache":state["prompt_cache"],"context":state["context"],"model":state["model"],"cost_usd":state["cost_usd"],"cost_stale":state["cost_stale"],
+        "prompt_cache":settled_cache(state),"context":state["context"],"model":state["model"],"cost_usd":state["cost_usd"],"cost_stale":state["cost_stale"],
         "cost_incomplete":state["cost_incomplete"],"extras":state["extras"]})
+}
+
+/// The cache claim an observation still supports (H7): a warm cache whose
+/// deadline passed, or one observed before the session's last prompt, is
+/// unknown - never a warm deadline in the past, which the desktop reads as a
+/// cold cache.
+fn settled_cache(state: &Value) -> Value {
+    let cache = &state["prompt_cache"];
+    if cache["status"] != "warm" {
+        return cache.clone();
+    }
+    let observed = cache["observed_at"].as_f64().unwrap_or(0.0);
+    let expires = cache["expires_at"].as_f64().unwrap_or(0.0);
+    let prompt = state["last_prompt_at"].as_f64().unwrap_or(0.0);
+    if observed <= 0.0 || expires <= now() || prompt > observed {
+        return json!({"status":"unknown","source":"native_usage","observed_at":observed});
+    }
+    cache.clone()
 }
 
 fn scan(path: &Path, cache_path: &Path, provider: &str, conversation: &str) -> Result<Value> {
@@ -412,6 +438,31 @@ pub(super) fn dsh(projections: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_stale_cache_observation_is_unknown_never_warm_or_cold() {
+        let reply = json!({"type":"assistant","sessionId":"one","timestamp":"2026-10-11T05:00:00Z",
+            "message":{"id":"one","model":"fixture","usage":{"input_tokens":10,"cache_read_input_tokens":500,
+                "cache_creation_input_tokens":100,"cache_creation":{"ephemeral_1h_input_tokens":100}}}});
+        // An observation whose deadline passed is unknown: not warm, and not the
+        // cold cache the desktop reads from a past deadline (H7).
+        let mut expired = json!({"totals":{},"context":{}});
+        observe(&mut expired, &reply, "claude", "one");
+        assert_eq!(expired["prompt_cache"]["status"], "warm");
+        assert_eq!(settled_cache(&expired)["status"], "unknown");
+        // A prompt after the observation makes its deadline untrustworthy.
+        let mut later = json!({"totals":{},"context":{}});
+        observe(&mut later, &reply, "claude", "one");
+        observe(&mut later, &json!({"type":"user","sessionId":"one","timestamp":"2026-10-11T05:30:00Z"}), "claude", "one");
+        assert_eq!(settled_cache(&later)["status"], "unknown");
+        // The observation the session's last turn left, with its deadline
+        // ahead, stays warm.
+        let mut fresh = json!({"totals":{},"context":{}});
+        let mut future = reply.clone();
+        future["timestamp"] = json!("2099-01-01T00:00:00Z");
+        observe(&mut fresh, &future, "claude", "one");
+        assert_eq!(settled_cache(&fresh)["status"], "warm");
+    }
+
     #[test]
     fn claude_compaction_replaces_context_and_invalidates_old_cache_evidence() {
         let mut state = json!({"totals":{},"seen":{},"context":{"limit":1000000}});

@@ -1,3 +1,4 @@
+#include "support/PageShots.h"
 #include <QtTest>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -60,6 +61,7 @@ private slots:
     void accountRowsDrawNoNativeFocusFrame();
     void init();
     void nativeDefaultsAndMachineScopedActions();
+    void modelDefaultsUseTheSelectedMachineAndNativeCatalog();
     void openCodeNativeConfigurationDoesNotOfferUnsupportedAccountMutations();
     void openCodeReasonsAndExplicitStart();
     void openCodeProvidersShowConnectionAndCounts();
@@ -76,6 +78,7 @@ private slots:
     void hiddenDefaultIsNotOfferedForNewSessions();
     void sameAccountHasMachineTagsAndScopedActions();
     void identityGroupingSeparatesProvidersOrganizationsAndUnknownProfiles();
+    void signFiltersPillsEmptyResultAndUsedByTeams();
     void addToMachineOffersCopyOrNativeSignIn();
     void missingAgentInstallsOnSelectedMachine();
     void deepSeekKeyStaysOnSelectedMachine();
@@ -83,6 +86,8 @@ private slots:
     void refreshPreservesRowsAndShowsPendingUsage();
     void summaryCountsReadInSingularAndPlural();
     void initialLoadingPublishesOnlyGroupedAccounts();
+    void hiddenStartupWarmsAndPublishesVerifiedIdentities();
+    void hiddenPageKeepsItsCatalogAndRendersWhenShown();
     void loadingFinishesWithPartialOrUnavailableResults_data();
     void loadingFinishesWithPartialOrUnavailableResults();
     void permissionsStayBoundToSelectedMachine();
@@ -93,6 +98,8 @@ private slots:
     void defaultAccountIsMachineScopedAndUsedForNewSessions();
     void detailsPaneShowsPageBackground();
     void controlOnlyComputerManagesAccountsOnRemoteMachinesOnly();
+    // U22/N17: the DeepSeek account names a session whose upload block may not hold.
+    void deepSeekUploadWarningShowsOnTheAccount();
     void preview();
 private:
     FleetState fleet(bool remote = true) const;
@@ -125,12 +132,15 @@ if args[0]=='account':
   while (root/'hold-remote-catalog').exists():time.sleep(.02)
  if args[1]=='ls' and host and (root/'fail-catalog').exists():sys.exit(1)
  if args[1]=='ls' and (root/'empty-catalog').exists():print(json.dumps({'profiles':[]}));sys.exit(0)
+ if args[1]=='model-settings':
+  print(json.dumps({'account_id':args[2],'revision':'model-rev','defaults':{'model':'','effort':''},'provider_defaults':{'model':'fixture-smart','effort':'low'},'effort_supported':True,'models':[{'id':'fixture-smart','label':'Fixture smart','effort_options':['low','xhigh']}]}));sys.exit(0)
+ if args[1]=='model-defaults':publish('model-defaults-action',json.dumps({'host':host,'args':args}))
  if args[1]=='inspect':
   while (root/'hold-inspect').exists() or (host and (root/'hold-remote-inspect').exists()):time.sleep(.02)
   if (root/'fail-inspect').exists():sys.exit(1)
   if (root/'slow-inspect').exists():time.sleep(.15)
   provider=args[2].removeprefix('native-') if args[2].startswith('native-') else 'codex'
-  if provider=='claude' and (root/'claude-status.json').exists():
+  if provider=='claude' and (root/'claude-status.json').exists() and json.loads((root/'claude-status.json').read_text()).get('host',host)==host:
    data=json.loads((root/'claude-status.json').read_text());data.update(id=args[2],provider=provider,home='~/.claude',checked_at=time.time(),identity={'email':host+'-claude@example.test','auth_method':'none'},windows=[])
    print(json.dumps(data));sys.exit(0)
   email=args[2]+'@example.test'
@@ -162,6 +172,7 @@ if args[0]=='account':
  profiles.append({'id':'work-'+(host or 'local'),'provider':'codex','label':'Work','home':'~/.config/hgs/accounts/work','native':False,'installed':True,'portable':True,'credential_file':True})
  if (root/'one-account').exists():profiles=profiles[:1]
  for p in profiles:
+  p['model_defaults_supported']=True;p['model_defaults']={'model':'','effort':''}
   chosen=(root/('default-'+(host or 'local')))
   p['is_default']=p['id']==(chosen.read_text() if chosen.exists() and p['provider']=='codex' else 'native-'+p['provider'])
  if (root/'deepseek').exists():
@@ -196,6 +207,39 @@ elif args[0]=='project': print(json.dumps([{'name':'sample','dir':'/tmp/sample',
 else: print('{}')
 )"); script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
 }
+void TestAccountsPage::modelDefaultsUseTheSelectedMachineAndNativeCatalog()
+{
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet());page.show();
+    page.showAccount("mac","native-codex");
+    auto *list=page.findChild<QListWidget *>("accountProfiles");
+    const auto selectedRemote=[&] {
+        if(!list->currentItem())return false;
+        const auto members=list->currentItem()->data(Qt::UserRole).toJsonObject()["members"].toArray();
+        return std::any_of(members.cbegin(),members.cend(),[](const QJsonValue &value){
+            const auto p=value.toObject();return p["host"]=="mac" && p["id"]=="native-codex";
+        });
+    };
+    QTRY_VERIFY(selectedRemote());
+    auto *button=page.findChild<QPushButton *>("accountModelDefaults");
+    QTRY_VERIFY(button->isVisible() && button->isEnabled());
+    QTimer poll;
+    connect(&poll,&QTimer::timeout,&page,[&]{
+        auto *dialog=page.findChild<QDialog *>("accountModelDefaultsDialog");if(!dialog)return;
+        poll.stop();const auto close=qScopeGuard([&]{if(dialog->isVisible())dialog->reject();});
+        auto *model=dialog->findChild<QComboBox *>("defaultModel"),*effort=dialog->findChild<QComboBox *>("defaultEffort");
+        QVERIFY(model && effort);QCOMPARE(model->count(),2);QVERIFY(!effort->isEnabled());
+        QVERIFY(dialog->findChild<QLabel *>("nativeModelDefaults")->text().contains("low"));
+        model->setCurrentIndex(model->findData("fixture-smart"));QVERIFY(effort->isEnabled());
+        QCOMPARE(effort->count(),3);effort->setCurrentIndex(effort->findData("xhigh"));
+        dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Save)->click();
+    });
+    poll.start(10);button->click();
+    QTRY_VERIFY(QFile::exists(m_dir.filePath("model-defaults-action")));
+    QFile action(m_dir.filePath("model-defaults-action"));QVERIFY(action.open(QIODevice::ReadOnly));
+    const auto call=QJsonDocument::fromJson(action.readAll()).object();QCOMPARE(call["host"].toString(),QString("mac"));
+    QCOMPARE(call["args"].toArray(),QJsonArray({"account","model-defaults","native-codex","--model","fixture-smart","--effort","xhigh","--revision","model-rev"}));
+}
+
 void TestAccountsPage::openCodeNativeConfigurationDoesNotOfferUnsupportedAccountMutations()
 {
     QFile original(m_script);QVERIFY(original.open(QIODevice::ReadOnly));
@@ -803,6 +847,81 @@ void TestAccountsPage::savedSignInKeepsDifferentAccountsSeparate()
     QVERIFY(QFile::exists(m_dir.filePath("removed-mac")));QVERIFY(!QFile::exists(m_dir.filePath("action")));
 }
 
+// U25 part 7 (spec 9): All / Signed in N / Signed out N on the machine
+// filter, the row pill and struck machine tags, the summary of what is
+// shown, the empty result with Clear filters, a signed-out account's warn
+// status and primary sign-in, and Used by teams with Open team.
+void TestAccountsPage::signFiltersPillsEmptyResultAndUsedByTeams()
+{
+    // Claude is signed out on mac only.
+    QFile data(m_dir.filePath("claude-status.json")); QVERIFY(data.open(QIODevice::WriteOnly));
+    data.write(QJsonDocument(QJsonObject{{"status", "signed_out"}, {"auth_status", "signed_out"}, {"host", "mac"}}).toJson()); data.close();
+    AccountsPage page(FakeCli::program(m_script)); page.setFleet(fleet()); page.resize(1100, 720); page.show();
+    page.setTeamUses([](const QJsonObject &profile) {
+        QList<AccountsPage::TeamUse> uses;
+        if (profile["provider"] == "codex") uses << AccountsPage::TeamUse{"team-1", "Checkout v2", "Frontend, Lead (GPT)"};
+        return uses;
+    });
+    QSignalSpy opened(&page, &AccountsPage::openTeamRequested);
+    auto *list = page.findChild<QListWidget *>("accountProfiles"); QTRY_COMPARE(list->count(), 8);
+    const auto states = [&] { QStringList out; for (int i = 0; i < list->count(); ++i) out << list->item(i)->data(Qt::UserRole + 1).toString(); return out; };
+    QTRY_VERIFY(states().contains("out"));
+    const int outs = int(states().count("out") + states().count("expired"));
+    auto *all = page.findChild<QPushButton *>("accountSignAll"), *in = page.findChild<QPushButton *>("accountSignIn"), *out = page.findChild<QPushButton *>("accountSignOut");
+    QVERIFY(all->isChecked());
+    QCOMPARE(in->text(), QString("Signed in %1").arg(8 - outs)); QCOMPARE(out->text(), QString("Signed out %1").arg(outs));
+    // Signed out: only those, each with the machines it is not signed in on.
+    out->click();
+    QTRY_COMPARE(list->count(), outs);
+    for (int i = 0; i < list->count(); ++i) {
+        QVERIFY(list->item(i)->data(Qt::UserRole + 1).toString() != "in");
+        QVERIFY(!list->item(i)->data(Qt::UserRole + 2).toStringList().isEmpty());
+    }
+    QLabel *summary = nullptr;
+    for (auto *label : page.findChildren<QLabel *>("muted")) if (label->text().contains("machines loaded") || label->text().contains("machine loaded")) summary = label;
+    QVERIFY(summary); QVERIFY2(summary->text().endsWith(QString(" · %1 shown").arg(outs)), qPrintable(summary->text()));
+    // The signed-out account: its status in warn, its sign-in primary.
+    list->setCurrentRow(0);
+    QTRY_VERIFY(page.findChild<QLabel *>("accountMachineStatus")->property("pageWarn").toBool());
+    QVERIFY(page.findChild<QPushButton *>("loginAccount")->property("pagePrimary").toBool());
+    PageShots::shot(page, true, "ux-7-accounts-signed-out-dark");
+    PageShots::shot(page, false, "ux-7-accounts-signed-out-light");
+    // A machine filter can leave nothing: "No accounts match", then Clear filters.
+    auto *machine = page.findChild<QComboBox *>("accountMachineFilter");
+    int emptyAt = -1;
+    for (int i = 1; i < machine->count() && emptyAt < 0; ++i) {
+        machine->setCurrentIndex(i);
+        if (list->count() == 0) emptyAt = i;
+    }
+    if (emptyAt < 0) {
+        // Every machine has a signed-out account: Signed in on the machine of
+        // the last one still leaves the others.
+        in->click();
+        for (int i = 1; i < machine->count() && emptyAt < 0; ++i) { machine->setCurrentIndex(i); if (list->count() == 0) emptyAt = i; }
+    }
+    QVERIFY2(emptyAt >= 0, "a filter that matches nothing");
+    QTRY_VERIFY(page.findChild<QWidget *>("accountsEmpty")->isVisible());
+    QVERIFY(!list->isVisible());
+    page.findChild<QPushButton *>("clearAccountFilters")->click();
+    QTRY_COMPARE(list->count(), 8);
+    QVERIFY(all->isChecked()); QCOMPARE(machine->currentIndex(), 0);
+    QVERIFY(!page.findChild<QWidget *>("accountsEmpty")->isVisible());
+    // Used by teams: a codex account names its team; Open team asks for it.
+    int codex = -1;
+    for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(Qt::UserRole).toJsonObject()["provider"] == "codex") { codex = i; break; }
+    QVERIFY(codex >= 0);
+    list->setCurrentRow(codex);
+    QTRY_VERIFY(page.findChild<QFrame *>("accountTeamsCard")->isVisible());
+    auto *row = page.findChild<QWidget *>("accountTeamRow"); QVERIFY(row);
+    QVERIFY(row->findChild<QLabel *>()->text() == "Checkout v2 · Frontend, Lead (GPT)");
+    row->findChild<QPushButton *>("accountOpenTeam")->click();
+    QCOMPARE(opened.size(), 1); QCOMPARE(opened.first().first().toString(), QString("team-1"));
+    // A machine filter shows that machine's accounts only.
+    machine->setCurrentIndex(machine->count() - 1);
+    PageShots::shot(page, true, "ux-7-accounts-by-machine-dark");
+    PageShots::shot(page, false, "ux-7-accounts-by-machine-light");
+}
+
 void TestAccountsPage::identityGroupingSeparatesProvidersOrganizationsAndUnknownProfiles()
 {
     const auto profile = [](QString host, QString provider, QString email, QString org = {}, QString id = {}) {
@@ -987,6 +1106,42 @@ void TestAccountsPage::aSlowPeerListingDoesNotHoldAddAccount()
     QVERIFY(QFile::remove(hold.fileName())); QTRY_COMPARE(page.profiles().size(),8); QVERIFY(add->isEnabled());
 }
 
+void TestAccountsPage::hiddenStartupWarmsAndPublishesVerifiedIdentities()
+{
+    QFile shared(m_dir.filePath("shared-identity"));QVERIFY(shared.open(QIODevice::WriteOnly));shared.close();
+    AccountsPage page(FakeCli::program(m_script));QSignalSpy changed(&page,&AccountsPage::catalogChanged);
+    page.setFleet(fleet());QVERIFY(!page.isVisible());
+    QTRY_COMPARE(page.profiles().size(),8);
+    const auto identified=[&] {
+        const auto profiles=page.profiles();
+        return std::all_of(profiles.cbegin(),profiles.cend(),[](const QJsonValue &value){return !value.toObject()["usage"].toObject()["identity"].toObject()["email"].toString().isEmpty();});
+    };
+    QTRY_VERIFY(identified());QVERIFY(changed.size()>2);
+    const auto grouped=AccountCatalog::group(page.profiles());QCOMPARE(grouped.size(),7);
+    const auto sharedAccount=std::find_if(grouped.cbegin(),grouped.cend(),[](const QJsonValue &value){return value.toObject()["members"].toArray().size()==2;});
+    QVERIFY(sharedAccount!=grouped.cend());QCOMPARE((*sharedAccount).toObject()["provider"].toString(),QString("codex"));
+    QVERIFY(!page.isVisible());
+    const auto calls=[&]{QFile file(m_dir.filePath("calls"));if(!file.open(QIODevice::ReadOnly))return QByteArray();return file.readAll();};
+    const auto before=calls();page.setFleet(fleet());QTest::qWait(60);QCOMPARE(calls(),before); // Ordinary fleet polls do not restart the warm-up.
+}
+
+void TestAccountsPage::hiddenPageKeepsItsCatalogAndRendersWhenShown()
+{
+    QFile shared(m_dir.filePath("shared-identity"));QVERIFY(shared.open(QIODevice::WriteOnly));shared.close();
+    AccountsPage page(FakeCli::program(m_script));page.resize(1000,700);
+    auto *list=page.findChild<QListWidget *>("accountProfiles");
+    page.setFleet(fleet());QVERIFY(!page.isVisible());
+    // Sessions read the catalog of the hidden page; its rows wait until it is shown.
+    QTRY_COMPARE(page.catalogProfiles().size(),8);
+    for(int i=0;i<3;++i)page.setFleet(fleet());
+    QCOMPARE(list->count(),0);
+    page.show();QCOMPARE(list->count(),7);QVERIFY(list->currentItem());
+    // A fleet change while hidden is rendered on the next show.
+    page.hide();page.setFleet(fleet(false));
+    QCOMPARE(page.catalogProfiles().size(),4);QCOMPARE(list->count(),7);
+    page.show();QCOMPARE(list->count(),4);
+}
+
 void TestAccountsPage::initialLoadingPublishesOnlyGroupedAccounts()
 {
     QFile shared(m_dir.filePath("shared-identity")); QVERIFY(shared.open(QIODevice::WriteOnly)); shared.close();
@@ -1002,15 +1157,18 @@ void TestAccountsPage::initialLoadingPublishesOnlyGroupedAccounts()
     QVERIFY(QFile::remove(catalogHold.fileName()));
     QTRY_COMPARE(page.profiles().size(),8);QTest::qWait(100);
     QCOMPARE(list->count(),0);QVERIFY(loading->isVisible());QVERIFY(refresh->property("refreshing").toBool());
+    QVERIFY(page.catalogProfiles().isEmpty());
     int maximumRows=0;connect(list->model(),&QAbstractItemModel::rowsInserted,&page,[&]{maximumRows=qMax(maximumRows,list->count());});
     const auto preview=qEnvironmentVariable("HGS_ACCOUNTS_PREVIEW");
     if(!preview.isEmpty()){QDir().mkpath(preview);page.setTheme(true);QVERIFY(page.grab().save(preview+"/loading-dark.png"));page.setTheme(false);QVERIFY(page.grab().save(preview+"/loading-light.png"));}
     QFile remoteHold(m_dir.filePath("hold-remote-inspect"));QVERIFY(remoteHold.open(QIODevice::WriteOnly));remoteHold.close();
     QVERIFY(QFile::remove(hold.fileName()));QTRY_COMPARE(list->count(),4);
+    QCOMPARE(page.catalogProfiles().size(),4);
     QVERIFY(content->isVisible());QVERIFY(!loading->isVisible());QVERIFY(refresh->property("refreshing").toBool());
     for(int i=0;i<list->count();++i)for(const auto &member:list->item(i)->data(Qt::UserRole).toJsonObject()["members"].toArray())QCOMPARE(member.toObject()["host"].toString(),QString());
     const QPersistentModelIndex localRow(list->model()->index(0,0));
     QVERIFY(QFile::remove(remoteHold.fileName()));QTRY_COMPARE(list->count(),7);QTRY_VERIFY(refresh->isEnabled());
+    QCOMPARE(page.catalogProfiles().size(),8);QCOMPARE(AccountCatalog::group(page.catalogProfiles()).size(),list->count());
     QVERIFY(localRow.isValid());
     QVERIFY(!loading->isVisible());QVERIFY(content->isVisible());QCOMPARE(maximumRows,7);
     QCOMPARE(list->currentItem()->data(Qt::UserRole).toJsonObject()["members"].toArray().size(),2);
@@ -1080,6 +1238,33 @@ void TestAccountsPage::summaryCountsReadInSingularAndPlural()
     QTRY_COMPARE(page.findChild<QListWidget *>("accountProfiles")->count(), 1);
     QTRY_VERIFY(page.findChild<QPushButton *>("refreshAccounts")->isEnabled());
     QCOMPARE(summary(page), QString("1 account, 1 machine loaded"));
+}
+
+void TestAccountsPage::deepSeekUploadWarningShowsOnTheAccount()
+{
+    // U22/N17: a DeepSeek session whose records still accept the upload (or
+    // whose host was started before the block) names it on its account, in the
+    // same words as its session card. Another provider's account carries none.
+    auto state = fleet();
+    BoxState mac; mac.host = "mac"; mac.ok = true;
+    SessionInfo upload; upload.cmd = "dsh"; upload.name = "dsh/orbit/backend";
+    upload.tracked = true; upload.resumable = true;
+    upload.uploadNote = "DeepSeek session-log upload still active";
+    mac.sessions = {upload};
+    state.setPeer(mac, QDateTime::currentMSecsSinceEpoch());
+    // A DeepSeek account exists on that machine.
+    QFile deepseek(m_dir.filePath("deepseek")); QVERIFY(deepseek.open(QIODevice::WriteOnly)); deepseek.close();
+    AccountsPage page(FakeCli::program(m_script)); page.setFleet(state); page.show();
+    page.showAccount("mac", "native-dsh");
+    auto *detail = page.findChild<QLabel *>("accountMachineStatus");
+    QVERIFY(detail);
+    QTRY_VERIFY2(detail->text().contains(upload.uploadNote), qPrintable(detail->text()));
+    // The page as the window shows it, once its panes have laid out.
+    page.resize(1080, 700); QTest::qWait(250);
+    PageShots::shot(page, true, "ux-8-accounts-upload-dark");
+    PageShots::shot(page, false, "ux-8-accounts-upload-light");
+    page.showAccount("mac", "native-codex");
+    QTRY_VERIFY2(!detail->text().contains(upload.uploadNote), qPrintable(detail->text()));
 }
 
 void TestAccountsPage::preview()

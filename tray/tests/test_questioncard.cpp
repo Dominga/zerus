@@ -5,6 +5,8 @@
 #include "MonospaceFont.h"
 
 #include <QAbstractButton>
+#include <QApplication>
+#include <QFrame>
 #include <QDir>
 #include <QDateTime>
 #include <QDesktopServices>
@@ -149,6 +151,7 @@ QJsonObject openCodeCard(const QJsonObject &contractCase)
 class TestQuestionCard : public QObject {
     Q_OBJECT
 private slots:
+    void subagentCardListsEachSubagentAndAnswersTheCard();
     void initTestCase() {
         QVERIFY(m_settings.isValid());
         QCoreApplication::setOrganizationName("hgs-tests"); QCoreApplication::setApplicationName("question-card");
@@ -456,6 +459,92 @@ void TestQuestionCard::reviewCountdownAndNextNavigation()
     card.setReviewDelayForTests(200);QTRY_VERIFY(allow->isEnabled());allow->click();QCOMPARE(sent.size(),1);
     QCOMPARE(sent.first()[2].toJsonArray().first().toObject().value("selected_option_ids").toArray(),QJsonArray{"allow"});
     const auto preview=qEnvironmentVariable("HGS_APPROVAL_PREVIEW");if(!preview.isEmpty()){QDir().mkpath(preview);QVERIFY(card.grab().save(preview+"/approval.png"));}
+}
+
+// U19 (#520): hgs's subagent card (claude_approval, #519) as the session shows
+// it: "Start N subagents", one row per subagent (type, model, effort when
+// known, task), Allow all after the review delay and Deny, answering that
+// exact card with its own one-time Yes or No. Three from the card's list, one
+// from the question text an older hgs sends.
+QJsonObject subagentCard(const QString &hash, const QJsonArray &calls, const QString &text, const QJsonArray &list = {})
+{
+    QJsonObject card{{"question_id", "claude-approval:subagents"}, {"question_hash", hash}, {"tool_call_id", "toolu_one"},
+        {"run_id", "run"}, {"conversation_id", "conversation"}, {"source", "claude_tool_approval"}, {"can_answer", true},
+        {"approval", true}, {"approval_choices", true}, {"answer_transport", "claude_hook"}, {"panel_verified", false},
+        {"subagent_confirmation", true}, {"subagent_calls", calls},
+        {"questions", QJsonArray{QJsonObject{{"id", "approval"}, {"header", "Subagents"}, {"question", text},
+            {"body", text + "\n\nAgent\n\n{\"subagent_type\":\"Explore\"}"}, {"allow_other", true},
+            {"other_label", "Tell Claude what to do instead"},
+            {"options", QJsonArray{QJsonObject{{"id", "1"}, {"label", "Yes"}, {"scope", "once"}},
+                                   QJsonObject{{"id", "2"}, {"label", "No"}, {"scope", "once"}}}}}}}};
+    if (!list.isEmpty()) card["subagents"] = list;
+    return card;
+}
+
+void TestQuestionCard::subagentCardListsEachSubagentAndAnswersTheCard()
+{
+    const QString shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS");
+    QuestionCard card; card.resize(560, 480); card.show(); card.activateWindow(); QApplication::setActiveWindow(&card);
+    card.setReviewDelayForTests(200);
+    QSignalSpy sent(&card, &QuestionCard::answerRequested);
+    const QString three = "Start 3 subagents: Explore (model haiku, effort low): Find the callers; "
+                          "reviewer (model sonnet, effort high): Review the diff; general (model inherits claude-opus-4-6): Write the fix";
+    const QJsonArray list{QJsonObject{{"id", "toolu_one"}, {"type", "Explore"}, {"model", "haiku"}, {"effort", "low"}, {"description", "Find the callers"}},
+                          QJsonObject{{"id", "toolu_two"}, {"type", "reviewer"}, {"model", "sonnet"}, {"effort", "high"}, {"description", "Review the diff"}},
+                          QJsonObject{{"id", "toolu_three"}, {"type", "general"}, {"model", "inherits claude-opus-4-6"}, {"description", "Write the fix"}}};
+    setQuestionReady(card, "session", subagentCard("three", QJsonArray{"toolu_one", "toolu_two", "toolu_three"}, three, list));
+    QCOMPARE(card.findChild<QLabel *>("questionHeading") ? card.findChild<QLabel *>("questionHeading")->text() : QString(), QStringLiteral("Start 3 subagents"));
+    const auto rows = card.findChildren<QFrame *>("questionSubagent");
+    QCOMPARE(rows.size(), 3);
+    QStringList types, models, tasks;
+    for (auto *row : rows) {
+        types << row->findChild<QLabel *>("questionSubagentType")->text();
+        models << row->findChild<QLabel *>("questionSubagentModel")->text();
+        tasks << row->findChild<QLabel *>("questionSubagentTask")->text();
+    }
+    QCOMPARE(types, (QStringList{"Explore", "reviewer", "general"}));
+    QCOMPARE(models, (QStringList{"model haiku · effort low", "model sonnet · effort high", "model inherits claude-opus-4-6"}));
+    QCOMPARE(tasks, (QStringList{"Find the callers", "Review the diff", "Write the fix"}));
+    // Allow all and Deny only: no option list, no Submit, no feedback field.
+    for (auto *option : card.findChildren<QAbstractButton *>("questionOption")) QVERIFY(!option->isVisible());
+    QVERIFY(!card.findChild<QLineEdit *>("questionFreeText"));
+    QVERIFY(submit(card)->isHidden());
+    auto *allow = card.findChild<QPushButton *>("approveToolRequest"), *deny = card.findChild<QPushButton *>("denyToolRequest");
+    QVERIFY(allow->isVisible() && deny->isVisible());
+    QCOMPARE(deny->text(), QStringLiteral("Deny"));
+    QTRY_VERIFY(allow->isEnabled());
+    QCOMPARE(allow->text(), QStringLiteral("Allow all"));
+    if (!shots.isEmpty()) {
+        card.setTheme(true); QTest::qWait(50); QVERIFY(card.grab().save(shots + "/u19-subagents-three-dark.png"));
+        card.setTheme(false); QTest::qWait(50); QVERIFY(card.grab().save(shots + "/u19-subagents-three-light.png"));
+        card.setTheme(true);
+    }
+    allow->click();
+    QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent.first()[0].toString(), QStringLiteral("session"));
+    QCOMPARE(sent.first()[1].toString(), QStringLiteral("claude-approval:subagents"));
+    QCOMPARE(sent.first()[2].toJsonArray(), (QJsonArray{QJsonObject{{"question_id", "approval"}, {"selected_option_ids", QJsonArray{"1"}}, {"text", ""}}}));
+    // One subagent, from an older hgs's question text alone: Deny answers No.
+    sent.clear();
+    setQuestionReady(card, "session", subagentCard("one", QJsonArray{"toolu_four"}, "Start 1 subagent: Explore (model haiku): Find the callers"));
+    QCOMPARE(card.findChild<QLabel *>("questionHeading")->text(), QStringLiteral("Start 1 subagent"));
+    QCOMPARE(card.findChildren<QFrame *>("questionSubagent").size(), 1);
+    QCOMPARE(card.findChild<QLabel *>("questionSubagentModel")->text(), QStringLiteral("model haiku"));
+    QCOMPARE(card.findChild<QLabel *>("questionSubagentTask")->text(), QStringLiteral("Find the callers"));
+    if (!shots.isEmpty()) {
+        QTest::qWait(50); QVERIFY(card.grab().save(shots + "/u19-subagents-one-dark.png"));
+        card.setTheme(false); QTest::qWait(50); QVERIFY(card.grab().save(shots + "/u19-subagents-one-light.png"));
+        card.setTheme(true);
+    }
+    QVERIFY(deny->isEnabled());
+    deny->click();
+    QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent.first()[2].toJsonArray(), (QJsonArray{QJsonObject{{"question_id", "approval"}, {"selected_option_ids", QJsonArray{"2"}}, {"text", ""}}}));
+    // Another approval card keeps its own controls.
+    auto plain = subagentCard("plain", {}, "Claude asks to use Bash"); plain.remove("subagent_confirmation");
+    setQuestionReady(card, "session", plain);
+    QVERIFY(card.findChildren<QFrame *>("questionSubagent").isEmpty());
+    QVERIFY(!submit(card)->isHidden());
 }
 
 void TestQuestionCard::claudeApprovalListsNativeOptionsAndConfirmsBroaderOnes()

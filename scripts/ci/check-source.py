@@ -21,6 +21,14 @@ CHILD_PROCESS_EXEMPT = {
     "tray/src/WindowsTerminalBackend.cpp": "the app links it only on Windows, where inheritStdioOnly() does nothing",
 }
 CHILD_PROCESS_SOURCES = re.compile(r"tray/src/.+\.(?:cpp|h|mm)")
+# The desktop parses JSON only through tray/src/JsonParse.h, which reports a
+# parse on the GUI thread. There is no GUI-thread exception: owner decision,
+# 2026-10-27, the list of files allowed to call JsonParse::local() only shrank
+# and is empty at the end of M2 (zerus-604d.11), so local() is gone and any call
+# to it is rejected.
+JSON_PARSER = "tray/src/JsonParse.cpp"
+JSON_DECODER = re.compile(r"\b(?:QJsonDocument\s*::\s*fromJson|QCborValue\s*::\s*fromCbor)\b")
+LOCAL_JSON = re.compile(r"\bJsonParse\s*::\s*local\w*\s*\(")
 SEE_CHILD_PROCESS = "(tray/src/ChildProcess.h)"
 LEXEME = re.compile(r"//|/\*|[\"']")
 LITERAL = {'"': re.compile(r'"(?:\\.|[^"\\\n])*"?'), "'": re.compile(r"'(?:\\.|[^'\\\n])*'?")}
@@ -249,6 +257,20 @@ def child_process_findings(files):
     return [f"{name}:{line}: {reason} {SEE_CHILD_PROCESS}." for name, line, reason in sorted(problems)]
 
 
+def json_parse_findings(files):
+    """"file:line: reason" for JSON parsed outside JsonParse.h or on the GUI thread through JsonParse::local()."""
+    problems = []
+    for name, text in sorted(files.items()):
+        code = code_only(text)
+        found = [] if name == JSON_PARSER else [
+            (match.start(), "parse JSON with JsonParse (tray/src/JsonParse.h), off the GUI thread")
+            for match in JSON_DECODER.finditer(code)]
+        found += [(match.start(), "JsonParse::local() is gone; parse off the GUI thread (tray/src/JsonParse.h)")
+                  for match in LOCAL_JSON.finditer(code)]
+        problems += [f"{name}:{code.count(chr(10), 0, offset) + 1}: {reason}" for offset, reason in sorted(found)]
+    return problems
+
+
 def main():
     paths = subprocess.check_output(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=ROOT).decode().split("\0")
     # First, so that a desktop child the unit tests would also find shows only its findings.
@@ -257,6 +279,8 @@ def main():
     if stale := sorted(set(CHILD_PROCESS_EXEMPT) - set(sources)):
         raise SystemExit(f"Remove the child process exemption of missing {', '.join(stale)}.")
     if problems := child_process_findings(sources):
+        raise SystemExit("\n".join(problems))
+    if problems := json_parse_findings(sources):
         raise SystemExit("\n".join(problems))
     subprocess.run([sys.executable, "-m", "unittest", "discover", "-q", "-s", "tests", "-p", "test_source_*.py"], cwd=ROOT, check=True)
     subprocess.run([sys.executable, str(ROOT / "scripts/check-source-privacy.py")], check=True)
@@ -316,7 +340,7 @@ def main():
             ast.parse(path.read_text(), filename=name)
         elif path.read_bytes().split(b"\n", 1)[0].startswith((b"#!/bin/sh", b"#!/usr/bin/env bash")) or path.name in {"PKGBUILD", "PKGBUILD.in"}:
             subprocess.run(["bash", "-n", str(path)], check=True)
-    print("Source syntax, privacy, child process and release version checks passed.")
+    print("Source syntax, privacy, child process, JSON parsing and release version checks passed.")
 
 
 if __name__ == "__main__":

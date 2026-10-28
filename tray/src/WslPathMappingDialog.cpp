@@ -53,7 +53,7 @@ WslPathMappingDialog::WslPathMappingDialog(const QString &hgsPath, const QString
         QJsonObject current;
         for(const auto &value:data["machines"].toArray()){const auto row=value.toObject();if(row["alias"]==m_host)current=row["connection"].toObject();}
         if(data["local"]!=m_machine||current["transport"]!="wsl-local"||current["wsl"].toObject()!=m_profile){fail(tr("The WSL connection changed. Close this preview and select the machine again."));return;}
-        if(m_remember->isChecked())QSettings().setValue(m_key,QJsonDocument(m_mapping).toJson(QJsonDocument::Compact));
+        if(m_remember->isChecked())SettingsJson::store(m_key,QJsonDocument(m_mapping));
         QDialog::accept();
     });
     connect(&m_client,&HgsClient::machinesFailed,this,[this](quint64 request,const QString &error){if(request==m_profileRequest){m_profileRequest=0;fail(error);}});

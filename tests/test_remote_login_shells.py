@@ -123,6 +123,22 @@ class RemoteLoginShells(unittest.TestCase):
                 version = self.hgs(shell, '@peer', 'version')
                 self.assertEqual((version.returncode, version.stdout), (0, 'hgs 9.9.9\n'), version.stderr)
 
+    def test_guarded_creation_requires_exact_peer_capability_and_keeps_identity(self):
+        identity='11111111-1111-4111-8111-111111111111'
+        for name,shell in login_shells().items():
+            with self.subTest(shell=name):
+                executable=self.peer/'.local/bin/hgs'
+                executable.write_text(PEER_HGS)
+                old=self.hgs(shell,'@peer','--expect-machine',identity,'dirs',TRICKY)
+                self.assertNotEqual(old.returncode,0);self.assertIn('update the selected computer',old.stderr)
+                self.assertFalse((self.peer/'argv.json').exists())
+                executable.write_text(PEER_HGS.replace("'hooks-health-v1'","'hooks-health-v1' 'guarded-create-v1'"))
+                result=self.hgs(shell,'@peer','--expect-machine',identity,'dirs',TRICKY)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertEqual(self.received(),(['--expect-machine',identity,'--client','test-local','dirs',TRICKY],''))
+                options=json.loads((self.root/'ssh-args.json').read_text())
+                self.assertIn('BatchMode=yes',options);self.assertNotIn('-t',options)
+
     def test_peer_status_reads_the_status_command(self):
         for name, shell in login_shells().items():
             with self.subTest(shell=name):

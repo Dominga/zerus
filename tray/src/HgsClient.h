@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ProcessRunner.h"
+
 #include <QHash>
 #include <QByteArray>
 #include <QList>
@@ -31,7 +33,7 @@ struct SessionInfo {
     qint64 created = 0;
     QString state = QStringLiteral("running"); // running | paused | stopped | archived
     QString archiveId;
-    QString runId, attentionId, launchId, conversationId, replyId;
+    QString runId, attentionId, launchId, conversationId, replyId, worktreeOwnerId;
     QString accountId, accountHome;
     double replyAt = 0;
     bool unreadReply = false;
@@ -43,9 +45,17 @@ struct SessionInfo {
     int backgroundProcesses = -1;
     double backgroundStarted = 0, backgroundObservedAt = 0;
     QString backgroundCommand;
+    // G7: the MCP servers and other services this session runs. They live with
+    // the session, so they are never Background work; the name, the command and
+    // when each started.
+    struct Service { QString name, command; double since = 0; };
+    QList<Service> services;
     bool reviewLater = false, attentionAcknowledged = false;
     // Confirmed notification preference from the session's host, shared by devices.
     bool muted = false;
+    // U25 (spec 2.3): muted only because it is a team member other than the
+    // lead and its session carries no choice of its own (FleetState).
+    bool teamMuted = false;
     bool sharedNotifications = false;
     QJsonObject notificationPreferences;
     QString notificationPreferencesError;
@@ -67,12 +77,31 @@ struct SessionInfo {
     QString cwd, canonicalCwd, gitCommonDir, cwdSource, gitRoot, gitBranch, gitWorktreeName, gitMetadataState;
     bool gitWorktree = false, gitDetached = false;
     QString activitySummary, activityDetail, subagentSource;
+    // U19: why subagents cannot be confirmed in this session, from its record.
+    QString subagentConfirm;
+    // "Your answer: …" for the user's own answers in prompt and activityDetail,
+    // prepared off the GUI thread (QuestionReply.h); empty for other text.
+    QString promptAnswers, activityAnswers;
     bool subagentCountsComplete = false;
     int subagentActiveCount = 0, subagentCompletedCount = 0, subagentTotalCount = -1;
     QJsonArray subagentPreviews;
     QJsonObject subagents;
     QString processState, conversationState, runtimeState;
     double lastEventAt = 0, turnStarted = 0, compactionStarted = 0, providerStatusAt = 0, attentionStarted = 0;
+    // U30 (#506): the host's session state (working, user, deps, build,
+    // cooling, cold, stopped; empty from an older host), its reason
+    // ({kind, text, ...}), the last native event, the prompt cache's TTL
+    // ({seconds, source, kept_warm}) and a Zerus-run build ({source, label,
+    // command, since}) while one runs.
+    QString sessionState;
+    QJsonObject stateReason, cacheTtl, build;
+    double lastActive = 0;
+    // U22/N17: DeepSeek's session-log upload. uploadSeen is the verified mark -
+    // the session's own records still accepted an upload after its launch;
+    // uploadMayBeActive marks a session whose running host was started before
+    // the block. uploadNote is the sentence the session card and Accounts show.
+    QJsonObject uploadSeen, uploadMayBeActive;
+    QString uploadNote;
     int subagentCount = 0;
     // Pending optional Codex questions ("optional_questions"): the exact count,
     // the IDs the host lists (the newest ones) and the newest question's time.
@@ -87,6 +116,8 @@ struct SessionInfo {
         return state == QLatin1String("running") && processState != QLatin1String("exited")
             && activity != QLatin1String("unknown") && !(conversationState == QLatin1String("ended") && activity != QLatin1String("idle"))
             && (activity == QLatin1String("busy") || backgroundProcesses > 0 || subagentActiveCount > 0
+                // U30: a build Zerus runs keeps the reply waiting too.
+                || sessionState == QLatin1String("build")
                 || (activity == QLatin1String("idle") && phase == QLatin1String("idle") && hasCoordinationWait()));
     }
     bool hasCoordinationWait() const {
@@ -137,10 +168,16 @@ struct BoxState {
     // pid, protocol, conpty, integrity, windows_session, and error when it is
     // unavailable). Empty on Unix and from an older CLI.
     QJsonObject localHost;
+    // WhiteWh fork, #569: "private_stores", the stores this computer's hgs
+    // refuses now (path, kind, reason, fix, source, at). Empty when none.
+    QJsonArray privateStores;
     // "ended_launches" by launch ID: launches whose session ended before this
     // listing without a listed session or record ("name", "code" or null,
     // "output", its last lines). Empty from an older CLI.
     QHash<QString, QJsonObject> endedLaunches;
+    // The listing this box was prepared from, without its observation fields
+    // (HgsClient::listingDigest). Empty when it came from anywhere else.
+    QByteArray digest;
 };
 
 struct ProjectInfo {
@@ -184,7 +221,7 @@ public:
     // Асинхронно: `hgs ls --json --local`. Один exec, единицы миллисекунд.
     void requestLocal();
     // OpenCode effort is a variant of the chosen model: it is passed only with a model.
-    void launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &model = {}, const QString &effort = {}, const QString &permissions = {});
+    void launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &model = {}, const QString &effort = {}, const QString &permissions = {}, const QString &expectedMachine = {});
     void launchNativeSession(const QString &host, const QString &target, const QString &name, const QString &account, const QString &launchId);
     // Асинхронно: `hgs @<peer> ls --json`. Пир, который спит, — это ok:false, а не ошибка.
     // peerReady() carries a box whose host is this alias (see BoxState::host).
@@ -217,6 +254,12 @@ public:
     // WhiteWh fork: `hgs [@host] team <operation> --json` with `input` on stdin
     // (agent teams). A change carries its own request_id; none is retried.
     quint64 requestTeam(const QString &host, const QString &operation, const QJsonObject &input);
+    // `hgs task <arguments>` on this computer, whose replica holds the project's
+    // tasks. A prompt, report or comment travels on stdin; the reply is the JSON object.
+    quint64 requestTask(const QStringList &arguments, const QString &input = {});
+    // How long a task command may take: a send or cancel may run on another
+    // computer of the swarm after exchanging its tasks.
+    static int taskTimeoutMs(const QStringList &arguments);
     // `hgs session-host <action> --json` on this computer (Windows, spec D2):
     // install enables local sessions and stages the stable CLI and a host image.
     quint64 requestSessionHost(const QString &action);
@@ -225,11 +268,24 @@ public:
     void setPresence(double idleSeconds, bool locked);
     void setupMachine(const QString &alias, const QString &source = {});
     QJsonObject worktreeSnapshot(const QString &host, const QString &path) const;
+    // Every snapshot by host + '\n' + path: an implicitly shared copy.
+    QHash<QString, QJsonObject> gitStatusSnapshots() const { return m_gitStatusCache; }
     QJsonObject gitStatusSnapshot(const QString &host, const QString &path) const;
+    // `git-status` for a folder, at most every 15 s; none while a live event
+    // stream follows it (EventStreams::coversGit).
     void requestGitStatus(const QString &host, const QString &path);
-    quint64 requestWorktrees(const QString &host, const QString &path, bool refresh = false);
+    // A folder's git status from a live event stream, kept as a poll's result.
+    void acceptGitStatus(const QString &host, const QString &path, const QJsonObject &status);
+    // Tests: the 15 s git-status interval.
+    static void setGitStatusIntervalForTests(int ms);
+    quint64 requestWorktrees(const QString &host, const QString &path, bool refresh = false, const QString &expectedMachine = {});
+    // U25 part 6: the read-only diff against HEAD for the inspector's Changes card.
+    quint64 requestGitDiff(const QString &host, const QString &path);
     quint64 createWorktree(const QString &host, const QString &path, const QString &commonDir,
-                           const QString &branch, const QString &base, const QString &destination);
+                           const QString &branch, const QString &base, const QString &destination,
+                           const QString &requestId = {}, bool receipt = false, const QString &expectedMachine = {},
+                           bool sandbox = false);
+    quint64 worktreeReceipt(const QString &host, const QString &action, const QString &requestId, const QString &expectedMachine = {});
     // Cleanup verdicts are computed on the owning machine. Whole-repository reviews
     // stay cached for five minutes for the Clean up reminder; removal repeats every
     // check there. Discard needs its own content proof; failures are never replayed.
@@ -240,12 +296,13 @@ public:
     void invalidateWorktreeCache(const QString &host, const QString &commonDir);
     QJsonObject worktreeReview(const QString &host, const QString &commonDir, int maxAgeSeconds = 300) const;
     quint64 removeWorktree(const QString &host, const QString &path, const QString &commonDir,
-                           const QString &fingerprint, bool deleteBranch, const QString &ignoredFingerprint = {}, const QString &discardFingerprint = {});
+                           const QString &fingerprint, bool deleteBranch, const QString &ignoredFingerprint = {}, const QString &discardFingerprint = {}, const QString &processFingerprint = {}, bool preserveArchiveRestore = false);
     quint64 requestDirectories(const QString &host, const QString &path, bool hidden = false);
+    quint64 requestCreationDirectory(const QString &host, const QString &path, const QString &expectedMachine = {});
     quint64 createDirectory(const QString &host, const QString &path);
     // Selected-computer capability probe precedes every acquisition operation.
     quint64 repositoryOperation(const QString &host, const QString &action, const QString &url,
-                                const QString &parent, const QString &name, const QString &token = {});
+                                const QString &parent, const QString &name, const QString &token = {}, const QString &expectedMachine = {});
     // Whether an inspection of this session is running; one at a time per session.
     bool inspectionInFlight(const QString &host, const QString &name, const QString &archiveId = QString()) const
     { return m_inspectionsInFlight.contains(host + QLatin1Char('\n') + name + QLatin1Char('\n') + archiveId); }
@@ -271,7 +328,11 @@ public:
     static constexpr qsizetype MaximumAttachments = 8;
     quint64 requestSendMessage(const QString &host, const QString &name, const QString &text,
                                const QList<MessageAttachment> &attachments,
-                               const QString &expectedRunId, const QString &expectedConversationId = {}, const QString &agentId = {}, const QString &compactionId = {});
+                               const QString &expectedRunId, const QString &expectedConversationId = {}, const QString &agentId = {}, const QString &compactionId = {},
+                               bool holdWhenUnconfirmed = false);
+    // U35: `hgs [@host] send-cancel <session> --json` for a message hgs still
+    // holds; heldCancelFinished answers with its receipt ("cancelled") or why not.
+    quint64 requestCancelHeld(const QString &host, const QString &name, const QString &requestId);
     quint64 requestQueueSendNow(const QString &host, const QString &name, const QString &run, const QString &conversation, const QString &queue);
     // An untracked session (a shell from `hgs sh -d`) has no run identity: pass
     // empty run and conversation and its listed creation time, which binds the
@@ -302,6 +363,20 @@ public:
     quint64 requestArchivePage(const QString &host, const QJsonObject &query);
     static QList<SessionInfo> parseSessions(const QJsonArray &rows);
     static BoxState parseBox(const QByteArray &json, QString *error);
+    // A listing that is already an object, as tests and prepared values hold it.
+    static BoxState box(const QJsonObject &object);
+    // A computer's listing (`ls --json`, or the event stream's catalog) with
+    // its digest: SHA-256 of the listing without the fields that change on
+    // every read without news (rows' goal_observed_at and
+    // process_work.sampled_at; metrics and desktop_presence). Equal digests
+    // let the desktop skip all but the observation fields (FleetState::refreshListing).
+    // Runs on a preparation thread.
+    static BoxState parseListing(const QByteArray &json, QString *error);
+    static BoxState listing(const QJsonObject &object);
+    static QByteArray listingDigest(const QJsonObject &listing);
+    // How the client starts hgs with these arguments: its environment without
+    // an agent's attribution, and macOS argument handling.
+    static ProcessRunner::Request commandRequest(const QString &hgs, const QStringList &arguments);
     static QList<BoxState> parseFleet(const QByteArray &json, QString *error);
     static QList<ProjectInfo> parseProjects(const QByteArray &json, QString *error);
 
@@ -313,7 +388,9 @@ public:
     void pauseSession(const QString &host, const QString &name);
     void openNativeUi(const QString &host, const QString &name);
     quint64 requestNativeUi(const QString &host, const QString &name);
-    void resumeSession(const QString &host, const QString &name);
+    // U3: a resume the guard refused as stale is retried with the lost dialogue
+    // written out, or accepted as it is.
+    void resumeSession(const QString &host, const QString &name, bool lostDialogue = false, bool acceptStale = false);
     // A new conversation from the stopped run's own launch settings.
     void startFreshSession(const QString &host, const QString &name, const QString &run);
     void archiveSession(const QString &host, const QString &name);
@@ -369,6 +446,8 @@ signals:
     void swarmFailed(quint64 request, const QString &error);
     void teamReady(quint64 request, const QString &host, const QString &operation, const QJsonObject &result);
     void teamFailed(quint64 request, const QString &host, const QString &operation, const QString &error);
+    void taskReady(quint64 request, const QJsonObject &result);
+    void taskFailed(quint64 request, const QString &error);
     void sessionHostReady(quint64 request, const QJsonObject &result);
     void sessionHostFailed(quint64 request, const QString &error);
     void presenceFinished(const QString &error); // Empty on success.
@@ -381,6 +460,7 @@ signals:
     void readFinished(quint64 request, bool delivered, const QJsonObject &result, const QString &error);
     void notificationsFinished(quint64 request, bool ok, const QJsonObject &result, const QString &error);
     void queueSendFinished(quint64 request, bool ok, const QJsonObject &receipt, const QString &error);
+    void heldCancelFinished(quint64 request, const QString &host, const QString &name, bool ok, const QJsonObject &receipt, const QString &error);
     void messageSent(quint64 request, const QString &host, const QString &name, const QJsonObject &receipt);
     void messageFailed(quint64 request, const QString &host, const QString &name, const QString &detail, bool deliveryUncertain);
     void sessionWriteDone(const QString &host);
@@ -401,7 +481,9 @@ signals:
     void worktreesReady(quint64 request, const QString &host, const QString &path, const QJsonObject &data);
     void worktreesFailed(quint64 request, const QString &host, const QString &path, const QString &detail);
     void gitStatusChanged(const QString &host, const QString &path);
+    void gitDiffReady(quint64 request, const QJsonObject &data, const QString &error);
     void worktreeCreated(quint64 request, bool ok, const QJsonObject &result, const QString &error);
+    void worktreeReceiptReady(quint64 request, bool ok, const QJsonObject &result, const QString &error);
     void worktreeReviewReady(quint64 request, const QString &host, const QString &path, const QJsonObject &data);
     void worktreeReviewFailed(quint64 request, const QString &host, const QString &path, const QString &detail);
     void worktreeInspectionFinished(quint64 request, const QString &host, const QString &path, const QString &file, const QJsonObject &data, const QString &error);
@@ -433,7 +515,10 @@ private:
     QTimer *m_downloadCacheTimer = nullptr;
     bool m_downloadCacheTrimBusy = false;
     void pumpGitStatus();
+    void storeGitStatus(const QString &host, const QString &path, QJsonObject data);
     QHash<QString, QJsonObject> m_gitStatusCache;
+    // Cached values a stream delivered rather than a poll.
+    QSet<QString> m_gitStatusStreamed;
     QHash<QString, qint64> m_gitStatusRequestedAt;
     QList<QPair<QString, QString>> m_gitStatusQueue;
     QSet<QString> m_gitStatusInFlight;
@@ -456,11 +541,15 @@ private:
     bool m_localInFlight = false;
     bool m_versionInFlight = false;
     QSet<QString> m_inspectionsInFlight;
-    quint64 m_directoryRequest = 0, m_worktreeRequest = 0;
+    quint64 m_directoryRequest = 0, m_worktreeRequest = 0, m_gitDiffRequest = 0;
     QHash<QString, QList<QPair<quint64, QString>>> m_worktreesInFlight;
     QHash<QString, QList<quint64>> m_reviewsInFlight;
     QHash<QString, QJsonObject> m_worktreeReviews;
     QHash<QString, QJsonObject> m_worktreeInspections;
+    // Reply sizes of cached reviews and inspections, and each inspection's
+    // {host, path, common dir} scope, so trimming and invalidation never parse.
+    QHash<QString, qsizetype> m_worktreeReviewBytes, m_worktreeInspectionBytes;
+    QHash<QString, QStringList> m_worktreeInspectionScopes;
     QHash<QString, QList<quint64>> m_worktreeInspectionsInFlight;
     QHash<QString, quint64> m_worktreeCacheGenerations;
     quint64 m_nativeUiRequest = 0;
@@ -476,6 +565,7 @@ private:
     quint64 m_mobileRequest = 0;
     quint64 m_swarmRequest = 0;
     quint64 m_teamRequest = 0;
+    quint64 m_taskRequest = 0;
     quint64 m_sessionHostRequest = 0;
     quint64 m_wslFileProofRequest = 0;
     quint64 m_pathRefRequest = 0;

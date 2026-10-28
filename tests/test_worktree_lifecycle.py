@@ -93,6 +93,66 @@ class WorktreeLifecycle(test_pause.Harness):
         self.hgs('resume',name,'--archive',archive['archive_id'],'-d',rc=1)
         self.assertFalse(self.project.exists());self.assertEqual(len(self.archives()),1);self.assertFalse(self.binding(name))
 
+    def test_confirmed_exit_cleanup_removes_generated_cache_and_restores_the_archive(self):
+        (self.project/'Cargo.toml').write_text('[package]\nname="fixture"\nversion="0.1.0"\n')
+        self.git('-C',str(self.project),'add','Cargo.toml');self.commit(self.project,'fixture manifest')
+        self.git('-C',str(self.repo),'merge','--ff-only','session-work')
+        (self.repo/'.git/info/exclude').write_text('target/\n')
+        cache=self.project/'target';cache.mkdir()
+        (cache/'CACHEDIR.TAG').write_text('Signature: 8a477f597d28d172789f06886806bc55\n')
+        (cache/'generated-output').write_text('rebuildable')
+        name=self.start('claude');identity=self.binding(name)['conversation_id']
+        owner=self.binding(name)['worktree_owner']['id']
+        listed=json.loads(self.hgs('ls','--json','--local','--no-archives'))['sessions']
+        self.assertEqual(next(r for r in listed if r['name']==name)['worktree_owner_id'],owner)
+        result=self.command('terminate',name);self.assertEqual(result['status'],'kept',result)
+        row=json.loads(self.hgs('worktrees','review','--path',str(self.repo),'--worktree',str(self.project),'--json'))['worktrees'][0]
+        self.assertTrue(row['zerus_owned']);self.assertTrue(row['archive_restore_ready']);self.assertTrue(row['generated_files_only'])
+        head=self.git('-C',str(self.project),'rev-parse','HEAD')
+        self.hgs('worktrees','remove','--path',str(self.project),'--common-dir',str(self.repo/'.git'),
+                 '--fingerprint',row['fingerprint'],'--ignored-fingerprint',row['ignored_fingerprint'],'--preserve-archive-restore','--json')
+        self.assertFalse(self.project.exists());self.assertEqual(self.git('-C',str(self.repo),'rev-parse','session-work'),head)
+        archive=self.archives()[0];self.assertEqual(archive['worktree_cleanup']['head'],head)
+        self.hgs('resume',name,'--archive',archive['archive_id'],'-d')
+        self.wait(lambda:self.binding(name).get('conversation_id')==identity and not self.binding(name).get('expected_id'))
+        self.assertTrue(self.project.is_dir());self.assertFalse((self.project/'target').exists())
+
+    def test_new_managed_checkout_at_the_same_path_invalidates_the_old_review(self):
+        def review():return json.loads(self.hgs('worktrees','review','--path',str(self.repo),'--worktree',str(self.project),'--json'))['worktrees'][0]
+        original=review();head=self.git('-C',str(self.project),'rev-parse','HEAD')
+        self.git('-C',str(self.repo),'worktree','remove',str(self.project))
+        self.git('-C',str(self.repo),'branch','-D','session-work')
+        self.hgs('worktrees','create','--path',str(self.repo),'--destination',str(self.project),'--branch','session-work','--json')
+        replacement=review()
+        self.assertEqual(replacement['head'],head);self.assertEqual(replacement['branch'],original['branch'])
+        self.assertNotEqual(replacement['ownership_id'],original['ownership_id'])
+        self.assertNotEqual(replacement['fingerprint'],original['fingerprint'])
+        self.hgs('worktrees','remove','--path',str(self.project),'--common-dir',str(self.repo/'.git'),
+                 '--fingerprint',original['fingerprint'],'--json',rc=1)
+        self.assertTrue(self.project.is_dir())
+
+    def test_termination_keeps_a_new_managed_checkout_at_the_original_path(self):
+        name=self.start('claude');owner=self.binding(name)['worktree_owner']['id']
+        self.git('-C',str(self.repo),'worktree','remove','--force',str(self.project))
+        self.hgs('worktrees','create','--path',str(self.repo),'--destination',str(self.project),'--branch','replacement-work','--json')
+        row=json.loads(self.hgs('worktrees','review','--path',str(self.repo),'--worktree',str(self.project),'--json'))['worktrees'][0]
+        self.assertNotEqual(row['ownership_id'],owner)
+        result=self.command('terminate',name)
+        self.assertEqual(result['status'],'kept',result);self.assertIn('ownership changed',result['reason'])
+        self.assertTrue(self.project.is_dir());self.assertNotIn('worktree_cleanup',self.archives()[0])
+
+    def test_unknown_local_data_and_stale_cache_review_do_not_allow_exit_cleanup(self):
+        (self.repo/'.git/info/exclude').write_text('local-notes\n')
+        note=self.project/'local-notes';note.write_text('retain unique data')
+        name=self.start('claude');self.command('terminate',name)
+        row=json.loads(self.hgs('worktrees','review','--path',str(self.repo),'--worktree',str(self.project),'--json'))['worktrees'][0]
+        self.assertTrue(row['zerus_owned']);self.assertFalse(row['generated_files_only'])
+        note.write_text('changed after the review')
+        self.hgs('worktrees','remove','--path',str(self.project),'--common-dir',str(self.repo/'.git'),
+                 '--fingerprint',row['fingerprint'],'--ignored-fingerprint',row['ignored_fingerprint'],'--preserve-archive-restore','--json',rc=1)
+        self.assertEqual(note.read_text(),'changed after the review')
+        self.assertNotIn('worktree_cleanup',self.archives()[0])
+
     def test_restore_never_follows_a_replaced_destination_parent(self):
         parent=self.root/'parent';parent.mkdir();self.project=parent/'linked'
         self.hgs('worktrees','create','--path',str(self.repo),'--destination',str(self.project),'--branch','nested-session','--json')

@@ -199,9 +199,11 @@ private slots:
     void archiveRestoreKeepsVisibleHistoryAndSelection();
     void hiddenSnapshotsDoNotBuildDocuments();
     void teamMessagesReadAsPlaques();
+    void allDecidedMessagesReadAsPlaques();
     void cacheKeepalivesReadAsOneQuietLine();
     void whiteWhTranscriptReadsFlat();
     void preparedWorkerLifetimeFollowsDocuments();
+    void renderWorkersRunAtTheGuiPriority();
     void longUpdatesKeepQueuedEditorInputResponsive();
     void richReplyScrollingKeepsQueuedInputResponsive();
     void tableReplyScrollingKeepsQueuedInputResponsive_data();
@@ -292,6 +294,7 @@ private slots:
     void contentScaleScalesMarkupOnly();
     void contentScaleEnlargesTranscriptAndQueue();
     void agentMarkdownLooksLikeGitHub();
+    void taskJournalUsesMarkdownAndActualAuthors();
     void searchResultKeepsInlineCodeSearchable();
     void copyGivesVisibleText();
     void agentRepliesCopyAsMarkdown();
@@ -321,6 +324,29 @@ QJsonArray longHistory()
     }
     return events;
 }
+}
+
+void TestActivityView::taskJournalUsesMarkdownAndActualAuthors()
+{
+    SettledActivityView view; view.resize(360, 300);
+    const QJsonArray entries{
+        QJsonObject{{"id", "1"}, {"at", 1791018000000.0}, {"author", "reviewer"}, {"label", "Report"}, {"role", "agent"},
+            {"text", "**Implemented** `ownership_id`\n\n- First change\n- Second change"}},
+        QJsonObject{{"id", "2"}, {"at", 1791018001000.0}, {"author", "You"}, {"label", "Comment"}, {"role", "person"},
+            {"text", "Please check `stable_id` and **history**."}},
+        QJsonObject{{"id", "3"}, {"at", 1791018002000.0}, {"author", "reviewer"}, {"role", "event"}, {"text", "moved it to In review"}}};
+    view.setTaskJournal("task-a/history", entries); settle(view);
+    const auto plain = view.plainText();
+    QVERIFY(plain.contains("reviewer · Report")); QVERIFY(plain.contains("You · Comment"));
+    QVERIFY(plain.contains("ownership_id")); QVERIFY(plain.contains("stable_id")); QVERIFY(!plain.contains("**Implemented**"));
+    QVERIFY(plain.contains("moved it to In review")); QVERIFY(!plain.contains("RECORDED ACTIVITY"));
+    QVERIFY(!plain.contains("Sent")); QVERIFY(!plain.contains("tool calls"));
+    const int passes = view.renderPasses(); view.setTaskJournal("task-a/history", entries); settle(view); QCOMPARE(view.renderPasses(), passes);
+    view.setTaskJournal("task-b/result", {QJsonObject{{"id", "result"}, {"author", "worker"}, {"label", "Report"}, {"role", "agent"},
+        {"text", QString("A long report with `readable_code`.\n\n").repeated(80)}}}, false);
+    QCOMPARE(view.plainText(), plain); // The prepared replacement never publishes an empty frame.
+    settle(view);
+    QCOMPARE(view.browser()->verticalScrollBar()->value(), 0); QVERIFY(!view.plainText().contains("ownership_id"));
 }
 
 void TestActivityView::archiveRestoreKeepsVisibleHistoryAndSelection()
@@ -371,6 +397,23 @@ void TestActivityView::teamMessagesReadAsPlaques()
     QMetaObject::invokeMethod(view.browser(), "anchorClicked", Q_ARG(QUrl, QUrl("hgs-team-task:3")));
     QCOMPARE(task.count(), 1);
     QCOMPARE(task.first().first().toInt(), 3);
+}
+
+// WhiteWh fork: the dispatcher's one "all tasks decided" message is a plaque
+// of its own kind, not a task hand-off.
+void TestActivityView::allDecidedMessagesReadAsPlaques()
+{
+    const QString decided = QString::fromUtf8("[Zerus team \u00b7 from: Zerus \u00b7 all tasks decided]\n"
+        "Team: Checkout v1.2 release. All 5 tasks are decided (3 accepted, 1 rejected, 1 cancelled).\n"
+        "Add the next phase with hgs team extend --json, or finish the team with a summary (hgs guide team-lead):\n"
+        "  {\"request_id\":\"a\",\"team\":\"t\",\"summary\":\"...\"} | hgs team finish --json");
+    SettledActivityView view; view.resize(700, 500);
+    view.setActivity({}, {journalEvent(1, "UserPromptSubmit", decided)});
+    const auto text = view.browser()->toPlainText();
+    QVERIFY(text.contains("All tasks decided"));
+    QVERIFY(text.contains("All 5 tasks are decided"));
+    QVERIFY(text.contains(QString::fromUtf8("Zerus \u2192 Lead")));
+    QVERIFY(!text.contains("Task from team"));
 }
 
 // WhiteWh fork: with the skin's bubbles, agent replies read as text in the
@@ -431,6 +474,23 @@ void TestActivityView::preparedWorkerLifetimeFollowsDocuments()
     }
     delete view;
     QTRY_COMPARE_WITH_TIMEOUT(workers().size(), 0, 15000);
+}
+
+// #523: the render worker runs at the GUI's priority. A below-normal worker
+// got almost no CPU while normal-priority work (the agents' builds and tests)
+// filled the cores, so Activity never finished rendering under load.
+void TestActivityView::renderWorkersRunAtTheGuiPriority()
+{
+    const auto workers = [] { return qApp->findChildren<QThread *>("activityRenderWorker"); };
+    ActivityView view; view.resize(900, 500); view.show(); view.setSessionKey("priority");
+    settle(view);
+    const int passes = view.renderPasses();
+    view.setActivity({}, history(20));
+    QTRY_VERIFY(view.renderPasses() > passes);
+    settle(view);
+    // The committed document keeps its worker alive, so it can be read here.
+    QTRY_VERIFY(!workers().isEmpty());
+    for (auto *worker : workers()) QVERIFY2(worker->priority() >= QThread::NormalPriority, qPrintable(QString::number(worker->priority())));
 }
 
 void TestActivityView::longUpdatesKeepQueuedEditorInputResponsive()

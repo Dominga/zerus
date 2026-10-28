@@ -19,6 +19,9 @@ public:
   QString selectedText() const;
   int scrollbackLines() const { return static_cast<int>(m_history.size()); }
   VTermScreenCell screenCell(int row, int column) const;
+  // The colour around the rounded box; invalid keeps square corners.
+  void setCornerColor(const QColor &color);
+  static constexpr int CornerRadius = 10;
 
 signals:
   void output(const QByteArray &bytes);
@@ -30,6 +33,7 @@ protected:
   bool event(QEvent *event) override;
   void paintEvent(QPaintEvent *) override;
   void resizeEvent(QResizeEvent *) override;
+  void showEvent(QShowEvent *) override;
   void keyPressEvent(QKeyEvent *) override;
   void mousePressEvent(QMouseEvent *) override;
   void mouseMoveEvent(QMouseEvent *) override;
@@ -86,6 +90,7 @@ private:
   qsizetype m_historyBytes = 0;
   QPoint m_selectionStart{-1, -1}, m_selectionEnd{-1, -1};
   bool m_selecting = false;
+  QColor m_cornerColor;
   QString m_title, m_preedit;
   QTimer m_blink;
 };

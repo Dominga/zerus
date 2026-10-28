@@ -1,0 +1,10 @@
+{"schema":1,"node_id":"node-1","swarm_id":"swarm-1","digest":"d1","initialized":true,"conflicts":[{"key":"k1","field":"name","selected":null,"variants":[]}],
+ "machines":[{"connection":null,"id":"m-1","local":true,"name":"workstation"}],
+ "peers":{"studio":{"last_sync":1793000000,"node":"node-2"},"mac":{"error":"ssh: connect to host mac.example.net port 22: Connection timed out","last_sync":1792990000,"node":"node-3"}},
+ "organization":{"version":2,"default_project":"ungrouped","project_order":["sample","ungrouped"],"projects":[
+  {"id":"ungrouped","name":"Inbox","color":"","accessible":true,"sessions":[],"folders":[]},
+  {"id":"remote-only","name":"Studio renders","color":"#7a5cff","accessible":false,"sessions":[],"folders":[]},
+  {"id":"sample","name":"Sample project","color":"#3fb950","accessible":true,"sessions":["claude/sample-project/review"],"folders":[
+   {"id":"f1","name":"","path":"/home/example/src/sample-project","machine":"workstation","machine_id":"m-1","machine_name":""},
+   {"id":"f2","name":"Docs","path":"C:\\Users\\example\\docs","machine":"win-lab","machine_id":"m-4","machine_name":"Windows lab"}]}]},
+ "preferences":{"mobile_delivery":"auto"},"versions":{},"worker":{"running":false,"current":null},"written":{}}

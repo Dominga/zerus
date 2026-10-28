@@ -3,16 +3,14 @@
 #include "TeamController.h"
 #include "TeamConversation.h"
 #include "TeamWidgets.h"
-#include <QComboBox>
 #include <QDir>
-#include <QJsonObject>
-#include <QLineEdit>
 #include <QHBoxLayout>
-#include <QPlainTextEdit>
+#include <QJsonObject>
+#include <QMenu>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSplitter>
-#include <QStackedWidget>
+#include <QTransform>
 #include <QVBoxLayout>
 
 using namespace TeamUi;
@@ -21,11 +19,17 @@ namespace {
 const QStringList agents{"claude", "codex", "kimi", "dsh", "opencode"};
 const QMap<QString, QString> agentNames{{"claude", "Claude Code"}, {"codex", "Codex"}, {"kimi", "Kimi"}, {"dsh", "DeepSeek"}, {"opencode", "OpenCode"}};
 
-QLabel *chip(const QString &text, const char *name)
+// A header chip: an icon and its text.
+QWidget *chip(const QString &icon, const char *name, QLabel **text)
 {
-    auto *l = new QLabel(text); l->setObjectName(name);
-    l->setProperty("designerChip", true);
-    return l;
+    auto *w = new QWidget; w->setObjectName(name); w->setProperty("designerChip", true); w->setAttribute(Qt::WA_StyledBackground);
+    auto *h = new QHBoxLayout(w); h->setContentsMargins(8, 2, 9, 2); h->setSpacing(6);
+    auto *glyph = new QLabel; glyph->setObjectName("designerChipIcon"); glyph->setProperty("icon", icon); glyph->setFixedSize(12, 12);
+    *text = new QLabel; (*text)->setObjectName(name);
+    if (icon.isEmpty()) glyph->hide();
+    h->addWidget(glyph); h->addWidget(*text, 1);
+    w->setObjectName(QByteArray(name) + "Chip");
+    return w;
 }
 }
 
@@ -46,111 +50,98 @@ TeamDesignerPage::TeamDesignerPage(TeamController *teams, QWidget *parent) : QWi
     top->addWidget(m_title, 1);
     m_status = new QLabel; m_status->setObjectName("teamDesignerAgentStatus");
     top->addWidget(m_status);
-    m_open = button(tr("Open in Activity"), "teamDesignerOpen"); m_open->setProperty("ghost", true);
+    m_open = new QPushButton; m_open->setObjectName("teamDesignerOpen"); m_open->setProperty("ghost", true); m_open->setFixedSize(30, 28);
+    m_open->setToolTip(tr("Open in Activity")); m_open->setAccessibleName(tr("Open in Activity")); m_open->setCursor(Qt::PointingHandCursor);
     top->addWidget(m_open);
     hv->addLayout(top);
     auto *chips = row(6);
-    m_reads = chip(QString(), "teamDesignerReads"); m_proposes = chip(tr("Proposes only"), "teamDesignerProposes"); m_version = chip(QString(), "teamDesignerVersion");
-    m_reads->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    chips->addWidget(m_reads, 1); chips->addWidget(m_proposes); chips->addWidget(m_version);
+    auto *reads = chip(QStringLiteral("folder"), "teamDesignerReads", &m_reads);
+    auto *proposes = chip(QStringLiteral("shield"), "teamDesignerProposes", &m_proposes); m_proposes->setText(tr("Proposes only"));
+    auto *version = chip(QString(), "teamDesignerVersion", &m_version);
+    reads->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); m_reads->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    chips->addWidget(reads, 1); chips->addWidget(proposes); chips->addWidget(version); chips->addStretch();
     hv->addLayout(chips);
     cv->addWidget(header);
-    m_chatStack = new QStackedWidget;
-    m_chatStack->addWidget(emptyState());
-    m_chatSplit = new QSplitter(Qt::Vertical); m_chatSplit->setChildrenCollapsible(false);
+    // Above the composer: the proposals, then the DRAFT bar.
+    auto *above = new QWidget; above->setObjectName("teamDesignerAbove");
+    auto *av = new QVBoxLayout(above); av->setContentsMargins(16, 0, 16, 0); av->setSpacing(8);
     m_proposals = new QScrollArea; m_proposals->setObjectName("teamDesignerProposals"); m_proposals->setWidgetResizable(true);
     m_proposals->setFrameShape(QFrame::NoFrame); m_proposals->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_proposals->viewport()->setAutoFillBackground(false);
+    av->addWidget(m_proposals);
+    m_draftBar = new QFrame; m_draftBar->setObjectName("teamDesignerDraftBar");
+    auto *dh = new QHBoxLayout(m_draftBar); dh->setContentsMargins(10, 6, 8, 6); dh->setSpacing(8);
+    auto *draftMark = new QLabel(QStringLiteral("DRAFT")); draftMark->setObjectName("teamDesignerDraftMark");
+    m_draftText = new QLabel; m_draftText->setObjectName("teamDesignerDraftText"); m_draftText->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_draftDiscard = button(tr("Discard draft"), "teamDesignerDraftDiscard"); m_draftDiscard->setProperty("danger", true);
+    m_draftApply = button(QString(), "teamDesignerApplyKept", true);
+    dh->addWidget(draftMark); dh->addWidget(m_draftText, 1); dh->addWidget(m_draftDiscard); dh->addWidget(m_draftApply);
+    av->addWidget(m_draftBar);
+    // U15: a refused Apply or Discard, under the bar until it succeeds.
+    m_draftError = new QLabel; m_draftError->setObjectName("teamDesignerDraftError"); m_draftError->setWordWrap(true);
+    m_draftError->setTextFormat(Qt::PlainText); m_draftError->hide();
+    av->addWidget(m_draftError);
     m_chat = new TeamConversation(teams->client());
-    m_chat->setPlaceholder(tr("Ask for changes…"));
-    m_chat->setQuickAsks({tr("Explain current roles"), tr("Make a cheaper team for docs")});
-    m_chatSplit->addWidget(m_chat); m_chatSplit->addWidget(m_proposals);
-    m_chatSplit->setStretchFactor(0, 3); m_chatSplit->setStretchFactor(1, 2);
-    m_chatStack->addWidget(m_chatSplit);
-    cv->addWidget(m_chatStack, 1);
+    // U16: the designer's questions and permission requests are answered here.
+    m_chat->setQuestionsShown(true);
+    m_chat->setAgentName(tr("the designer"));
+    m_chat->openTerminal = [this](const QString &host, const QString &session) { if (openTerminal) openTerminal(host, session); };
+    m_chat->useDesignerLayout(intro(), above);
+    m_chat->openSession = [this] {
+        const QString session = designerSession ? designerSession() : QString();
+        if (!session.isEmpty() && openDesigner) openDesigner(session);
+    };
+    m_chat->startRequested = [this](const QString &text) {
+        const QJsonObject launch{{"agent", m_agent}, {"model", m_agent == "dsh" ? QString() : m_model},
+                                 {"effort", m_agent == "dsh" || m_agent == "kimi" ? QString() : m_effort}};
+        if (startDesigner) startDesigner(m_folder, text, launch);
+    };
+    cv->addWidget(m_chat, 1);
     m_split->addWidget(chat);
     // The catalog.
     auto *catalog = new QWidget; catalog->setObjectName("teamDesignerCatalog");
-    auto *kv = new QVBoxLayout(catalog); kv->setContentsMargins(14, 10, 14, 10);
+    auto *kv = new QVBoxLayout(catalog); kv->setContentsMargins(16, 12, 16, 10);
     m_editor = new TeamCatalogEditor(teams);
     m_editor->setShowDraft(true);
     m_editor->confirm = [this](const QString &name, const QString &title, const QString &text, const QString &action) { return confirm ? confirm(name, title, text, action) : true; };
     m_editor->askRedo = [this](qint64 version) {
-        // The designer redoes its draft in its own conversation.
-        m_chat->send(tr("The catalog changed to v%1 after your draft. Discard your proposals and propose again on v%1.").arg(version));
+        // The designer redoes its draft in its own conversation; its next
+        // proposals replace the out-of-date draft (N38, #548).
+        if (!designerSession || designerSession().isEmpty()) return;
+        m_chat->send(tr("The catalog changed to v%1 after your draft. Propose your changes again on v%1; your new proposals replace the old draft.").arg(version));
     };
+    // N38 (#548): only a running designer is asked; with none, the click would
+    // start a new designer session, and the owner discards the draft instead.
+    m_editor->canRedo = [this] { return designerSession && !designerSession().isEmpty(); };
     kv->addWidget(m_editor);
     m_split->addWidget(catalog);
     m_split->setStretchFactor(0, 0); m_split->setStretchFactor(1, 1);
-    m_split->setSizes({540, 1000});
+    m_split->setSizes({520, 1000});
     outer->addWidget(m_split, 1);
     QObject::connect(m_open, &QPushButton::clicked, this, [this] {
         const QString session = designerSession ? designerSession() : QString();
         if (!session.isEmpty() && openDesigner) openDesigner(session);
     });
+    QObject::connect(m_chat->modelButton(), &QPushButton::clicked, this, [this] { showModelMenu(); });
+    QObject::connect(m_draftApply, &QPushButton::clicked, this, [this] { m_editor->applyKept(); });
+    QObject::connect(m_draftDiscard, &QPushButton::clicked, this, [this] { m_editor->discardDraft(); });
     QObject::connect(m_teams, &TeamController::catalogChanged, this, [this] { refresh(); });
     setDark(true);
 }
 
-QWidget *TeamDesignerPage::emptyState()
+QWidget *TeamDesignerPage::intro()
 {
     auto *w = new QWidget; w->setObjectName("teamDesignerEmpty");
-    auto *v = new QVBoxLayout(w); v->setContentsMargins(24, 24, 24, 24); v->setSpacing(10);
-    v->addStretch();
-    auto *icon = new QLabel; icon->setObjectName("teamDesignerEmptyIcon"); icon->setFixedSize(36, 36);
-    v->addWidget(icon);
-    auto *title = new QLabel(tr("Design roles and teams with an agent")); title->setObjectName("teamDesignerEmptyTitle"); title->setWordWrap(true);
+    auto *v = new QVBoxLayout(w); v->setContentsMargins(40, 12, 40, 8); v->setSpacing(8);
+    auto *icon = new QLabel; icon->setObjectName("teamDesignerEmptyIcon"); icon->setFixedSize(40, 40); icon->setAlignment(Qt::AlignCenter);
+    v->addWidget(icon, 0, Qt::AlignHCenter);
+    auto *title = new QLabel(tr("Design roles and teams with an agent")); title->setObjectName("teamDesignerEmptyTitle");
+    title->setWordWrap(true); title->setAlignment(Qt::AlignHCenter);
     v->addWidget(title);
-    auto *text = new QLabel(tr("The designer reads the selected session's folder and the team history, and proposes changes to roles, "
-                               "templates and routing. <b>It never saves anything</b> — you keep or reject each proposal and apply them."));
-    text->setObjectName("teamDesignerEmptyText"); text->setWordWrap(true); text->setTextFormat(Qt::RichText);
+    auto *text = new QLabel(tr("The designer reads the selected session’s folder and the team history, and proposes changes to roles, "
+                               "templates and routing. It never saves anything — you keep or reject each proposal and apply them."));
+    text->setObjectName("teamDesignerEmptyText"); text->setWordWrap(true); text->setAlignment(Qt::AlignHCenter);
     v->addWidget(text);
-    m_goal = new QPlainTextEdit; m_goal->setObjectName("teamDesignerGoal"); m_goal->setFixedHeight(84);
-    m_goal->setPlaceholderText(tr("What do you need? e.g. a security reviewer for payment code and a small team for bugfixes"));
-    v->addWidget(m_goal);
-    auto *examplesBox = new QWidget; auto *examples = new FlowLayout(6); examplesBox->setLayout(examples);
-    for (const auto &example : {tr("Security reviewer for payments"), tr("Team for small bugfixes"), tr("Cheaper team for docs"), tr("Explain current roles")}) {
-        auto *b = button(example, "teamDesignerExample"); b->setProperty("chip", true);
-        QObject::connect(b, &QPushButton::clicked, this, [this, example] { m_goal->setPlainText(example); });
-        examples->addWidget(b);
-    }
-    v->addWidget(examplesBox);
-    // Which agent designs, on which model; it runs on this computer.
-    auto *agentRow = row(6);
-    m_agent = new QComboBox; m_agent->setObjectName("teamDesignerAgent");
-    for (const auto &a : agents) m_agent->addItem(workspaceIcon(a, colorsFor(true).fg), agentNames.value(a), a);
-    m_model = new QComboBox; m_model->setObjectName("teamDesignerModel"); m_model->setEditable(true);
-    m_model->lineEdit()->setPlaceholderText(tr("default model"));
-    m_effort = new QComboBox; m_effort->setObjectName("teamDesignerEffort");
-    m_effort->addItem(QStringLiteral("—"), QString());
-    for (const auto *e : {"low", "medium", "high", "xhigh"}) m_effort->addItem(QString::fromLatin1(e), QString::fromLatin1(e));
-    const auto models = [this] {
-        // Suggestions only: the field takes any model the agent's command line knows.
-        const QString agent = m_agent->currentData().toString();
-        const QString keep = m_model->currentText();
-        m_model->clear(); m_model->addItems(Teams::knownModels(agent));
-        m_model->setCurrentText(Teams::knownModels(agent).contains(keep) ? keep : QString());
-        // DeepSeek runs its own model; Kimi has no effort.
-        m_model->setEnabled(agent != "dsh"); m_effort->setEnabled(agent != "dsh" && agent != "kimi");
-    };
-    QObject::connect(m_agent, &QComboBox::currentIndexChanged, this, models);
-    models();
-    m_model->setCurrentText(QStringLiteral("opus")); m_effort->setCurrentIndex(m_effort->findData(QStringLiteral("high")));
-    agentRow->addWidget(m_agent, 4); agentRow->addWidget(m_model, 5); agentRow->addWidget(m_effort, 2);
-    v->addLayout(agentRow);
-    auto *bottom = row(8);
-    auto *where = label(tr("Runs on this computer"), colorsFor(true).dim, 11); where->setObjectName("teamDesignerWhere");
-    bottom->addWidget(where);
-    bottom->addStretch();
-    m_start = button(tr("Start designer"), "teamDesignerStart", true);
-    QObject::connect(m_start, &QPushButton::clicked, this, [this] {
-        const QJsonObject launch{{"agent", m_agent->currentData().toString()}, {"model", m_model->isEnabled() ? m_model->currentText().trimmed() : QString()},
-                                 {"effort", m_effort->isEnabled() ? m_effort->currentData().toString() : QString()}};
-        if (startDesigner) startDesigner(m_folder, m_goal->toPlainText().trimmed(), launch);
-        m_start->setEnabled(false); m_start->setText(tr("Starting…"));
-    });
-    bottom->addWidget(m_start);
-    v->addLayout(bottom);
-    v->addStretch();
     return w;
 }
 
@@ -160,22 +151,38 @@ void TeamDesignerPage::setContext(const QString &folder, const QString &project)
     refresh();
 }
 
+void TeamDesignerPage::startFailed(const QString &error)
+{
+    m_chat->startFinished(error.isEmpty() ? tr("The Team designer did not start.") : tr("The Team designer did not start: %1").arg(error));
+}
+
 void TeamDesignerPage::setDark(bool dark)
 {
     m_dark = dark;
     const Colors c = colorsFor(dark);
+    const auto a = [](const QColor &color, double value) { return alpha(color, value).name(QColor::HexArgb); };
     setStyleSheet(teamSheet(c) + QStringLiteral(
         "QWidget#teamDesignerChat{border-right:1px solid %1;}"
         "QWidget#teamDesignerChatHeader{border-bottom:1px solid %1;}"
-        "QLabel#teamDesignerPageTitle{color:%2;font-size:16px;font-weight:600;}"
-        "QLabel[designerChip=\"true\"]{color:%3;border:1px solid %1;border-radius:9px;padding:1px 8px;font-size:11px;}"
+        "QLabel#teamDesignerPageTitle{color:%2;font-size:17px;font-weight:600;}"
+        "QWidget[designerChip=\"true\"]{background:%7;border:1px solid %1;border-radius:7px;}"
+        "QWidget[designerChip=\"true\"] QLabel{color:%3;font-size:12px;background:transparent;border:none;}"
         "QLabel#teamDesignerTile{background:%4;border-radius:7px;}"
-        "QLabel#teamDesignerEmptyTitle{color:%2;font-size:15px;font-weight:600;}"
-        "QLabel#teamDesignerEmptyText{color:%5;font-size:12px;}"
-        "QFrame#teamDesignerProposal{background:%6;border:1px solid %1;border-radius:10px;}")
-        .arg(c.border.name(), c.fg.name(), c.text2.name(), alpha(c.accent, .18).name(QColor::HexArgb), c.muted.name(), c.surface.name()));
+        "QLabel#teamDesignerEmptyTitle{color:%2;font-size:17px;font-weight:600;}"
+        "QLabel#teamDesignerEmptyText{color:%5;font-size:13px;}"
+        "QFrame#teamDesignerProposal{background:%6;border:1px solid %1;border-radius:10px;}"
+        "QScrollArea#teamDesignerProposals,QWidget#teamDesignerProposalList{background:transparent;}"
+        "QFrame#teamDesignerDraftBar{background:transparent;border:1px dashed %8;border-radius:9px;}"
+        "QLabel#teamDesignerDraftMark{color:%9;background:%10;border:1px solid %8;border-radius:4px;padding:0 5px;font-size:10px;font-weight:700;}"
+        "QLabel#teamDesignerDraftText{color:%3;font-size:12px;}")
+        .arg(c.border.name(), c.fg.name(), c.text2.name(), a(c.accent, .18), c.muted.name(), c.cardFill.name(), c.tile.name(),
+             a(c.folder, .55), c.folder.name(), a(c.folder, .10)));
     findChild<QLabel *>("teamDesignerTile")->setPixmap(workspaceIcon("team", c.accent).pixmap(16, 16));
-    findChild<QLabel *>("teamDesignerEmptyIcon")->setPixmap(workspaceIcon("team", c.accent).pixmap(32, 32));
+    findChild<QLabel *>("teamDesignerEmptyIcon")->setPixmap(workspaceIcon("team", c.accent).pixmap(36, 36));
+    for (auto *glyph : findChildren<QLabel *>("designerChipIcon"))
+        if (!glyph->property("icon").toString().isEmpty()) glyph->setPixmap(workspaceIcon(glyph->property("icon").toString(), c.text2).pixmap(12, 12));
+    // Open in Activity: an arrow up out of the column.
+    m_open->setIcon(workspaceIcon("external", c.text2));
     m_editor->setDark(dark);
     m_chat->setTheme(dark);
     refresh();
@@ -186,7 +193,9 @@ void TeamDesignerPage::refresh()
     const Colors c = colorsFor(m_dark);
     const auto &catalog = m_teams->catalog();
     const QString session = designerSession ? designerSession() : QString();
-    const Live live = session.isEmpty() || !designerLive ? Live{} : designerLive();
+    const Teams::Live live = session.isEmpty() || !designerLive ? Teams::Live{} : designerLive();
+    // N38 (#548): the redo offer follows whether a designer runs now.
+    m_editor->refreshBanner();
     int undecided = 0; for (const auto &p : catalog.proposals) undecided += p.state == "proposed";
     const bool stale = !catalog.proposals.isEmpty() && catalog.draftBase != catalog.version;
     QString status; QColor tone = c.muted;
@@ -197,17 +206,89 @@ void TeamDesignerPage::refresh()
     else if (undecided) { status = tr("Waiting for your decision"); tone = c.folder; }
     else status = tr("Idle");
     m_status->setText(status);
-    m_status->setStyleSheet(QStringLiteral("color:%1;border:1px solid %2;border-radius:9px;padding:1px 8px;font-size:11px;")
-                                .arg(tone.name(), alpha(tone, .5).name(QColor::HexArgb)));
+    m_status->setStyleSheet(QStringLiteral("color:%1;border:1px solid %2;border-radius:11px;padding:2px 12px;font-size:12px;")
+                                .arg(tone.name(), alpha(tone, .6).name(QColor::HexArgb)));
     m_reads->setText(tr("Reads %1 (selected session)").arg(m_folder.isEmpty() ? tr("no folder") : QDir::toNativeSeparators(m_folder)));
     m_reads->setToolTip(m_folder);
     m_version->setText(catalog.builtin ? tr("Built-in catalog") : tr("Catalog v%1").arg(catalog.version));
     m_open->setVisible(!session.isEmpty());
-    m_chatStack->setCurrentIndex(session.isEmpty() ? 0 : 1);
-    if (!session.isEmpty()) m_chat->setSession({}, session);
-    else if (m_start) { m_start->setEnabled(true); m_start->setText(tr("Start designer")); }
+    m_chat->setSession({}, session);
     m_editor->setDesignerWorking(live.working);
+    updateModelButton();
     renderProposals();
+    renderDraftBar();
+}
+
+void TeamDesignerPage::updateModelButton()
+{
+    auto *b = m_chat->modelButton();
+    const QString session = designerSession ? designerSession() : QString();
+    if (session.isEmpty()) {
+        QStringList parts{m_agent == "dsh" ? agentNames.value(m_agent) : m_model.isEmpty() ? agentNames.value(m_agent) : m_model};
+        if (!m_effort.isEmpty() && m_agent != "dsh" && m_agent != "kimi") parts << m_effort;
+        b->setText(parts.join(' '));
+        b->setIcon(workspaceIcon("chevron-down", colorsFor(m_dark).text2)); b->setLayoutDirection(Qt::RightToLeft);
+        b->setToolTip(tr("The designer's agent, model and effort"));
+        b->setEnabled(true);
+    } else {
+        // A running designer keeps its model; its session changes it.
+        const auto details = m_chat->details();
+        QStringList parts{details.value("model").toString(details.value("agent").toString(tr("Designer")))};
+        if (!details.value("effort").toString().isEmpty()) parts << details.value("effort").toString();
+        b->setText(parts.join(' ')); b->setIcon(QIcon());
+        b->setToolTip(tr("Change the designer's model in its own session"));
+        b->setEnabled(false);
+    }
+}
+
+// Models by agent, then the effort; a choice applies at once.
+void TeamDesignerPage::showModelMenu()
+{
+    auto *menu = new QMenu(this); menu->setObjectName("teamDesignerModelMenu"); menu->setAttribute(Qt::WA_DeleteOnClose);
+    for (const auto &agent : agents) {
+        menu->addSection(agentNames.value(agent));
+        QStringList models = Teams::knownModels(agent);
+        // DeepSeek runs its own model.
+        if (models.isEmpty() || agent == "dsh") models = QStringList{QString()};
+        for (const auto &model : models) {
+            auto *action = menu->addAction(model.isEmpty() ? tr("Default model") : model);
+            action->setCheckable(true); action->setChecked(agent == m_agent && model == m_model);
+            QObject::connect(action, &QAction::triggered, this, [this, agent, model] { m_agent = agent; m_model = model; updateModelButton(); });
+        }
+    }
+    menu->addSeparator();
+    auto *efforts = menu->addMenu(tr("Effort") + QStringLiteral("  ·  ") + (m_effort.isEmpty() ? QStringLiteral("—") : m_effort));
+    efforts->setEnabled(m_agent != "dsh" && m_agent != "kimi");
+    for (const auto *effort : {"low", "medium", "high", "xhigh"}) {
+        auto *action = efforts->addAction(QString::fromLatin1(effort));
+        action->setCheckable(true); action->setChecked(m_effort == QLatin1String(effort));
+        QObject::connect(action, &QAction::triggered, this, [this, effort] { m_effort = QString::fromLatin1(effort); updateModelButton(); });
+    }
+    menu->addSeparator();
+    auto *note = menu->addAction(tr("Runs on this computer")); note->setEnabled(false);
+    auto *b = m_chat->modelButton();
+    const QSize size = menu->sizeHint();
+    menu->popup(b->mapToGlobal(QPoint(b->width() - size.width(), -size.height() - 6)));
+}
+
+// The DRAFT bar above the composer repeats the catalog's draft header.
+void TeamDesignerPage::renderDraftBar()
+{
+    const auto &catalog = m_teams->catalog();
+    int kept = 0, undecided = 0;
+    for (const auto &p : catalog.proposals) { kept += p.state == "kept"; undecided += p.state == "proposed"; }
+    const bool stale = catalog.draftBase != catalog.version;
+    m_draftBar->setVisible(!catalog.proposals.isEmpty());
+    const QString error = m_teams->draftError();
+    m_draftError->setText(error.isEmpty() ? QString() : QStringLiteral("⚠ ") + error);
+    m_draftError->setStyleSheet(QStringLiteral("QLabel{color:%1;font-size:11px;}").arg(colorsFor(m_dark).danger.name()));
+    m_draftError->setVisible(!error.isEmpty());
+    m_draftText->setText(tr("based on v%1 · %2 of %3 kept · %4 undecided").arg(catalog.draftBase).arg(kept).arg(catalog.proposals.size()).arg(undecided));
+    m_draftText->setToolTip(m_draftText->text());
+    m_draftApply->setText(QStringLiteral("✓ ") + (kept == 1 ? tr("Apply 1 change") : tr("Apply %1 changes").arg(kept)));
+    m_draftApply->setEnabled(kept > 0 && !stale);
+    m_draftApply->setToolTip(stale ? tr("The catalog changed after this draft; applying would overwrite those edits.")
+                                   : tr("Write the kept changes as the next catalog version"));
 }
 
 void TeamDesignerPage::renderProposals()
@@ -216,43 +297,31 @@ void TeamDesignerPage::renderProposals()
     const auto &catalog = m_teams->catalog();
     const int scroll = m_proposals->verticalScrollBar()->value();
     auto *content = new QWidget; content->setObjectName("teamDesignerProposalList");
-    auto *v = new QVBoxLayout(content); v->setContentsMargins(10, 8, 10, 8); v->setSpacing(6);
-    const auto decide = [this](const QString &id, const QString &decision) {
-        m_teams->call(QStringLiteral("catalog decide"), {{"proposal", id}, {"decision", decision}}, [](bool, const QJsonObject &, const QString &) {});
-    };
-    // Apply stands with the proposals it writes.
-    int kept = 0, undecided = 0;
-    for (const auto &p : catalog.proposals) { kept += p.state == "kept"; undecided += p.state == "proposed"; }
-    const bool stale = catalog.draftBase != catalog.version;
-    auto *bar = row(6);
-    QStringList counts;
-    if (kept) counts << tr("%n kept", nullptr, kept);
-    if (undecided) counts << tr("%n undecided", nullptr, undecided);
-    bar->addWidget(label(counts.isEmpty() ? tr("No change kept") : counts.join(QStringLiteral(" · ")), c.muted, 11), 1);
+    auto *v = new QVBoxLayout(content); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(8);
+    // U15: decisions go through the controller, with or without a designer session.
+    const auto decide = [this](const QString &id, const QString &decision) { m_teams->decideProposal(id, decision); };
     if (!m_closed.isEmpty()) {
+        auto *bar = row(6); bar->addStretch();
         auto *reopen = button(tr("Show closed"), "teamDesignerShowClosed"); reopen->setProperty("ghost", true);
         QObject::connect(reopen, &QPushButton::clicked, this, [this] { m_closed.clear(); renderProposals(); });
         bar->addWidget(reopen);
+        v->addLayout(bar);
     }
-    auto *apply = button(kept == 1 ? tr("Apply 1 change") : tr("Apply %1 changes").arg(kept), "teamDesignerApplyKept", true);
-    apply->setEnabled(kept > 0 && !stale);
-    apply->setToolTip(stale ? tr("The catalog changed after this draft; applying would overwrite those edits.")
-                            : tr("Write the kept changes as the next catalog version"));
-    QObject::connect(apply, &QPushButton::clicked, this, [this] { m_editor->applyKept(); });
-    bar->addWidget(apply);
-    v->addLayout(bar);
+    int shown = 0;
     for (const auto &p : catalog.proposals) {
         if (p.state != "proposed" && m_closed.contains(p.id)) continue;
+        ++shown;
         const bool rejected = p.state == "rejected";
         auto *card = new QFrame; card->setObjectName("teamDesignerProposal");
-        auto *cv = new QVBoxLayout(card); cv->setContentsMargins(8, 6, 8, 6); cv->setSpacing(3);
-        auto *head = row(6);
+        auto *cv = new QVBoxLayout(card); cv->setContentsMargins(14, 10, 12, 10); cv->setSpacing(5);
+        auto *head = row(8);
         const QString markText = p.action == "add" ? QStringLiteral("NEW") : p.action == "remove" ? QStringLiteral("REMOVED") : QStringLiteral("CHANGED");
         const QColor markColor = p.action == "add" ? c.accent : p.action == "remove" ? c.danger : c.folder;
-        auto *m = label(markText, markColor, 9, true);
-        m->setStyleSheet(QStringLiteral("color:%1;border:1px solid %2;border-radius:3px;padding:0 4px;").arg(markColor.name(), alpha(markColor, .6).name(QColor::HexArgb)));
+        auto *m = label(markText, markColor, 10, true);
+        m->setStyleSheet(QStringLiteral("color:%1;background:%2;border:1px solid %3;border-radius:4px;padding:0 5px;")
+                             .arg(markColor.name(), alpha(markColor, .10).name(QColor::HexArgb), alpha(markColor, .55).name(QColor::HexArgb)));
         head->addWidget(m);
-        auto *title = elided(p.title, rejected ? c.dim : c.fg, 12); QFont tf = title->font(); tf.setWeight(QFont::DemiBold); tf.setStrikeOut(rejected); title->setFont(tf);
+        auto *title = elided(p.title, rejected ? c.dim : c.fg, 13); QFont tf = title->font(); tf.setWeight(QFont::DemiBold); tf.setStrikeOut(rejected); title->setFont(tf);
         head->addWidget(title, 1);
         if (p.state == "proposed") {
             auto *reject = button(tr("× Reject"), "teamProposalReject"); reject->setProperty("ghost", true);
@@ -261,7 +330,7 @@ void TeamDesignerPage::renderProposals()
             QObject::connect(keep, &QPushButton::clicked, this, [decide, id = p.id] { decide(id, "keep"); });
             head->addWidget(reject); head->addWidget(keep);
         } else {
-            head->addWidget(label(p.state == "kept" ? tr("✓ Kept") : tr("Rejected"), p.state == "kept" ? c.accent : c.danger, 11));
+            head->addWidget(label(p.state == "kept" ? tr("✓ Kept") : tr("Rejected"), p.state == "kept" ? c.accent : c.danger, 12));
             auto *undo = button(tr("Undo"), "teamProposalUndo"); undo->setProperty("ghost", true);
             QObject::connect(undo, &QPushButton::clicked, this, [decide, id = p.id] { decide(id, "undo"); });
             head->addWidget(undo);
@@ -272,21 +341,23 @@ void TeamDesignerPage::renderProposals()
             head->addWidget(close);
         }
         cv->addLayout(head);
-        auto *foot = row(6);
-        auto *reason = label(p.reason, c.muted, 11); reason->setWordWrap(true);
-        foot->addWidget(reason, 1);
+        if (!p.reason.isEmpty()) { auto *reason = label(p.reason, c.text2, 12); reason->setWordWrap(true); cv->addWidget(reason); }
         auto *show = button(tr("Show in catalog"), "teamProposalShow"); show->setProperty("ghost", true);
+        show->setStyleSheet(QStringLiteral("QPushButton{padding:2px 0;color:%1;}").arg(c.fg.name()));
         QObject::connect(show, &QPushButton::clicked, this, [this, id = p.id] { m_editor->showProposal(id); });
-        foot->addWidget(show, 0, Qt::AlignTop);
-        cv->addLayout(foot);
-        if (rejected) { auto *effect = card; effect->setStyleSheet(QStringLiteral("QFrame#teamDesignerProposal{background:transparent;}")); }
+        cv->addWidget(show, 0, Qt::AlignLeft);
+        // A refused decision stays with its proposal until a decision lands.
+        if (const auto error = m_teams->proposalError(p.id); !error.isEmpty()) cv->addWidget(refusal(error, c, "teamProposalError"));
+        if (rejected) card->setStyleSheet(QStringLiteral("QFrame#teamDesignerProposal{background:transparent;}"));
         v->addWidget(card);
     }
-    v->addStretch();
     retire(m_proposals->takeWidget());
     m_proposals->setWidget(content);
     m_proposals->verticalScrollBar()->setValue(scroll);
-    m_proposals->setVisible(!catalog.proposals.isEmpty());
+    m_proposals->setVisible(shown > 0 || !m_closed.isEmpty());
+    // The cards take their height up to about half the column; then they scroll.
+    content->adjustSize();
+    m_proposals->setFixedHeight(qMin(content->sizeHint().height() + 2, qMax(160, height() / 2 - 80)));
 }
 
 void TeamDesignerPage::showEvent(QShowEvent *event)

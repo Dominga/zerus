@@ -637,7 +637,13 @@ class NativeKimi(lifecycle.Harness):
         conversation only with that message."""
         name = 'kimi/p/native'
         self.hgs('kimi', 'p', '-n', 'native', '-d')
-        self.until(lambda: self.binding(name).get('pid'), name)
+        def agent_started():
+            record = self.binding(name)
+            supervisor = (record.get('supervisor') or {}).get('pid')
+            # Lifecycle first publishes the supervisor itself as a placeholder.
+            # Pin the native identity only after spawn publishes its actual child.
+            return record.get('pid') and supervisor and record['pid'] != supervisor
+        self.until(agent_started, name)
         self.assert_process(name, 'initial')
         answered = []
 
@@ -813,6 +819,56 @@ class NativeKimi(lifecycle.Harness):
                 found.append(content)
         return found.count(text)
 
+    def test_launch_prompt_waits_for_trust_and_is_not_replayed_on_resume(self):
+        name, text = 'kimi/p/initial', 'Initial launch message\\'
+        launch = str(uuid.uuid4())
+        self.hgs('kimi', 'p', '--new', '-n', 'initial', '-d', '--launch-id', launch, '--', text)
+        state = self.until(lambda: (s if any(q.get('can_answer') for q in s.get('pending_questions', [])) else None)
+                           if (s := self.inspect(name)) else None, name)
+        self.assertEqual(self.binding(name)['launch_id'], launch)
+        self.assertIn('Trust this folder?', self.screen(name))
+        self.assertFalse(self.requests, 'the launch message bypassed folder trust')
+        self.assertNotIn(text, self.binding(name)['base'], 'resume recipe contains the launch prompt')
+        card = next(q for q in state['pending_questions'] if q.get('can_answer'))
+        self.assertEqual(self.answer(name, card, 0)['status'], 'answered')
+        self.until(lambda: self.held(text) == 1, name)
+        record = self.until(lambda: (r if r.get('launch_prompt', {}).get('status') == 'submitted' else None)
+                            if (r := self.binding(name)) else None, name)
+        request = record['launch_prompt']['request_id']
+        receipt = json.loads((self.root / 'state/input_receipts' / (request + '.json')).read_text())
+        self.assertEqual((receipt['status'], receipt['first_message'], receipt['text']), ('submitted', True, text))
+        state = self.until(lambda: self.settled(name, receipt), name)
+        conversation = state['conversation_id']
+        self.assert_process(name, 'initial')
+        calls = len(self.requests)
+        self.hgs('pause', name)
+        self.hgs('resume', name, '-d')
+        self.until(lambda: self.inspect(name).get('activity') == 'idle', name)
+        self.assertEqual(self.binding(name)['conversation_id'], conversation)
+        self.assertEqual(len(self.requests), calls, 'resume replayed the initial message')
+        followup = self.send(name, self.payload(name, 'Follow-up after initial launch'))
+        self.until(lambda: self.settled(name, followup), name)
+        self.assertEqual(self.held(text), 1)
+        self.assert_process(name, 'resumed')
+
+    def test_declined_initial_prompt_is_cancelled_and_inspection_is_bounded(self):
+        name, text = 'kimi/p/declined', 'Private initial message ' * 100
+        self.hgs('kimi', 'p', '--new', '-n', 'declined', '-d', '--', text)
+        state = self.until(lambda: (s if any(q.get('can_answer') for q in s.get('pending_questions', [])) else None)
+                           if (s := self.inspect(name)) else None, name)
+        pending = state['launch_prompt']
+        self.assertEqual(pending['status'], 'pending')
+        self.assertNotIn('text', pending)
+        self.assertEqual(pending['preview'], text[:200] + '…')
+        self.assertLess(len(json.dumps(pending)), 1024)
+        self.assertFalse(self.requests)
+        self.assert_process(name, 'initial')
+        card = next(q for q in state['pending_questions'] if q.get('can_answer'))
+        self.assertEqual(self.answer(name, card, 1)['status'], 'answered')
+        self.until(lambda: self.binding(name).get('launch_prompt', {}).get('status') == 'cancelled', name)
+        self.assertFalse(self.requests, 'declining trust delivered the initial message')
+        self.assertFalse((self.root / 'state/input_receipts' / (pending['request_id'] + '.json')).exists())
+
     def test_exact_input_reaches_the_model_once(self):
         # Existing account-wide tracking entries predate the managed TOML
         # block. A supervised launch must retain them without adding another
@@ -881,6 +937,10 @@ class NativeKimi(lifecycle.Harness):
                    self.inspect(name).get('activity') == 'idle', name)
         self.assert_process(name, 'resumed')
         self.assertEqual(self.binding(name)['conversation_id'], before['conversation_id'])
+        resumed = self.binding(name)
+        self.hgs('terminate', name, '--expected-run-id', resumed['run_id'])
+        archives = [json.loads(path.read_text()) for path in (self.root / 'state/archives').glob('*.json')]
+        self.assertTrue(any(row['conversation_id'] == before['conversation_id'] and row['run_id'] == resumed['run_id'] for row in archives))
 
     def test_rolling_window_429_recovers_in_the_same_conversation(self):
         name = self.launch()
@@ -1444,6 +1504,7 @@ class FixtureControls(unittest.TestCase):
         class Scripted(NativeKimi):
             """Kimi's composer takes input before its banner request and warning."""
             ticks = 0
+            binding_reads = 0
             requests = []
 
             def tick(self):
@@ -1474,7 +1535,8 @@ class FixtureControls(unittest.TestCase):
                 return ''
 
             def binding(self, name):
-                return dict(pid=1, run_id='run')
+                self.binding_reads += 1
+                return dict(pid=1 if self.binding_reads == 1 else 2, run_id='run', supervisor=dict(pid=1))
 
             def assert_process(self, name, stage):
                 pass
@@ -1487,6 +1549,7 @@ class FixtureControls(unittest.TestCase):
                 return 'off\n'
         kimi = Scripted()
         kimi.launch()
+        self.assertGreaterEqual(kimi.binding_reads, 2, 'the initial supervisor PID is not a native agent identity')
         self.assertIn(TMUX_KEYS, kimi.shown(), 'the start was ready before Kimi drew its tmux warning')
         self.assertGreaterEqual(kimi.ticks, 6)
 

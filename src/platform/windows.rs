@@ -2,7 +2,7 @@
 //! machines through the system OpenSSH client and, once local sessions are
 //! enabled, runs agent sessions in its session host (spec D2, D8).
 use super::{
-    capture, ExitInfo, FileIdentity, Presence, Private, ProcessIdentity, ProcessImage, ProcessRow,
+    capture, ExitInfo, FileIdentity, Presence, Private, PrivateRepair, ProcessIdentity, ProcessImage, ProcessRow,
     RunError,
 };
 use crate::{
@@ -40,19 +40,25 @@ use windows_sys::{
             WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Security::{
-            Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
+            Authorization::{
+                GetNamedSecurityInfoW, GetSecurityInfo, SetEntriesInAclW, SetNamedSecurityInfoW,
+                EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN,
+                TRUSTEE_W,
+            },
             GetAce, GetLengthSid, GetTokenInformation, IsWellKnownSid, TokenUser,
-            WinBuiltinAdministratorsSid, WinCreatorOwnerRightsSid, WinLocalSystemSid,
-            ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, INHERIT_ONLY_ACE,
-            OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER,
+            SUB_CONTAINERS_AND_OBJECTS_INHERIT, WinBuiltinAdministratorsSid, WinCreatorOwnerRightsSid,
+            WinLocalSystemSid, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION,
+            INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY,
+            TOKEN_USER,
         },
         Storage::FileSystem::{
             CreateFileW, GetFileInformationByHandle, GetFileType, BY_HANDLE_FILE_INFORMATION,
             FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
             FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_OVERLAPPED,
+            FILE_ALL_ACCESS,
             FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE,
             FILE_TYPE_CHAR, FILE_TYPE_DISK, FILE_TYPE_PIPE, FILE_WRITE_ATTRIBUTES, OPEN_EXISTING,
-            PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND, READ_CONTROL,
+            PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
         },
         System::{
             Console::{
@@ -84,6 +90,13 @@ use windows_sys::{
         },
         UI::Shell::CommandLineToArgvW,
     },
+};
+
+/// The ACL bits the test that makes a Modify-only folder needs; the program
+/// itself only ever grants FullControl.
+#[cfg(test)]
+use windows_sys::Win32::Storage::FileSystem::{
+    DELETE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
 };
 
 /// The locale and the console code page stay as they are: Rust writes Unicode to
@@ -920,6 +933,308 @@ pub fn make_private(_: &fs::File) -> io::Result<()> {
 pub fn restrict_dir(_: &Path) -> io::Result<()> {
     Ok(())
 }
+/// U34: the rights the DeepSeek sandbox needs on its folder. Its write grant
+/// calls SetNamedSecurityInfoW, which needs both, and a folder on a second drive
+/// inherits only Authenticated Users Modify: the owner keeps an implicit
+/// WRITE_DAC and loses WRITE_OWNER, so the sandbox fails with Win32 5 before any
+/// command runs.
+fn wide_path(path: &Path) -> Vec<u16> {
+    path.as_os_str().encode_wide().chain(Some(0)).collect()
+}
+
+/// U34: the rights the DeepSeek sandbox needs on its folder — its write grant
+/// calls SetNamedSecurityInfoW, which needs both. A folder on a second drive
+/// inherits only Authenticated Users Modify: the owner keeps an implicit
+/// WRITE_DAC and loses WRITE_OWNER, so the sandbox fails with Win32 5 before any
+/// command runs. Checked by opening the folder with each right, as the grant
+/// would.
+pub fn missing_sandbox_rights(path: &Path) -> io::Result<Vec<&'static str>> {
+    let mut missing = Vec::new();
+    if !can_open_with(path, WRITE_DAC)? {
+        missing.push("WRITE_DAC");
+    }
+    if !can_open_with(path, WRITE_OWNER)? {
+        missing.push("WRITE_OWNER");
+    }
+    Ok(missing)
+}
+
+fn can_open_with(path: &Path, access: u32) -> io::Result<bool> {
+    let wide = wide_path(path);
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        let error = io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(code) if code == ERROR_ACCESS_DENIED as i32 => Ok(false),
+            _ => Err(error),
+        };
+    }
+    unsafe {
+        CloseHandle(handle);
+    }
+    Ok(true)
+}
+
+/// U34: adds this user's explicit, inheritable FullControl entry to a folder
+/// Zerus just created — only that folder. Existing, inherited and deny entries
+/// are kept; inheritance carries the entry to new files.
+pub fn grant_full_control(path: &Path) -> io::Result<()> {
+    let sid = process::current_user().ok_or_else(|| io::Error::other("this user's identity is unavailable"))?;
+    let access = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: FILE_ALL_ACCESS,
+        grfAccessMode: GRANT_ACCESS,
+        grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+        Trustee: TRUSTEE_W {
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_UNKNOWN,
+            ptstrName: sid.as_ptr() as *mut u16,
+            ..Default::default()
+        },
+    };
+    let wide = wide_path(path);
+    let mut old: *mut ACL = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let code = unsafe {
+        GetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut old,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if code != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    let _descriptor = Descriptor(descriptor);
+    let mut acl: *mut ACL = std::ptr::null_mut();
+    let code = unsafe { SetEntriesInAclW(1, &access, old, &mut acl) };
+    if code != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    let _acl = Acl(acl);
+    let code = unsafe {
+        SetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            acl,
+            std::ptr::null_mut(),
+        )
+    };
+    if code != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    Ok(())
+}
+
+/// An ACL with one entry: this user's FullControl, which a folder's new files
+/// and folders inherit when `container`.
+fn owner_only_acl(container: bool) -> io::Result<Acl> {
+    use windows_sys::Win32::Security::NO_INHERITANCE;
+    let sid = process::current_user().ok_or_else(|| io::Error::other("this user's identity is unavailable"))?;
+    let access = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: FILE_ALL_ACCESS,
+        grfAccessMode: GRANT_ACCESS,
+        grfInheritance: if container { SUB_CONTAINERS_AND_OBJECTS_INHERIT } else { NO_INHERITANCE },
+        Trustee: TRUSTEE_W {
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_UNKNOWN,
+            ptstrName: sid.as_ptr() as *mut u16,
+            ..Default::default()
+        },
+    };
+    let mut acl: *mut ACL = std::ptr::null_mut();
+    let code = unsafe { SetEntriesInAclW(1, &access, std::ptr::null(), &mut acl) };
+    if code != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    Ok(Acl(acl))
+}
+
+/// #526: creates `path` and its missing parents, each new folder with a
+/// protected DACL that grants only this user, as Unix creates them 0700. An
+/// inherited ACL is not private on every computer: a folder on a second drive
+/// inherits Authenticated Users Modify, and a Codex sandbox adds its users to
+/// the profile. A folder that already exists keeps its ACL, so a privacy check
+/// still refuses one that Zerus did not make private.
+pub fn owner_only_dir(path: &Path) -> io::Result<()> {
+    use windows_sys::Win32::{
+        Foundation::ERROR_ALREADY_EXISTS,
+        Security::{
+            InitializeSecurityDescriptor, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
+            SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SE_DACL_PROTECTED,
+        },
+        Storage::FileSystem::CreateDirectoryW,
+    };
+    let mut missing = Vec::new();
+    let mut next = Some(path);
+    while let Some(folder) = next.filter(|folder| !folder.as_os_str().is_empty() && !folder.exists()) {
+        missing.push(folder);
+        next = folder.parent();
+    }
+    if missing.is_empty() {
+        return if path.is_dir() { Ok(()) } else { Err(io::Error::from(io::ErrorKind::AlreadyExists)) };
+    }
+    let acl = owner_only_acl(true)?;
+    let mut descriptor: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+    let pointer = &mut descriptor as *mut SECURITY_DESCRIPTOR as PSECURITY_DESCRIPTOR;
+    // SECURITY_DESCRIPTOR_REVISION.
+    if unsafe { InitializeSecurityDescriptor(pointer, 1) } == 0
+        || unsafe { SetSecurityDescriptorDacl(pointer, 1, acl.0, 0) } == 0
+        || unsafe { SetSecurityDescriptorControl(pointer, SE_DACL_PROTECTED, SE_DACL_PROTECTED) } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: pointer,
+        bInheritHandle: 0,
+    };
+    for folder in missing.into_iter().rev() {
+        let wide = wide_path(folder);
+        if unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) } == 0 {
+            let error = io::Error::last_os_error();
+            // Another process made it meanwhile: it keeps its own ACL.
+            if error.raw_os_error() != Some(ERROR_ALREADY_EXISTS as i32) || !folder.is_dir() {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// #526: gives a file this process has just created, before anything is
+/// written to it, a protected DACL that grants only this user, as Unix
+/// creates private files 0600.
+pub fn owner_only_file(path: &Path) -> io::Result<()> {
+    use windows_sys::Win32::Security::PROTECTED_DACL_SECURITY_INFORMATION;
+    let acl = owner_only_acl(false)?;
+    let wide = wide_path(path);
+    let code = unsafe {
+        SetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            acl.0,
+            std::ptr::null_mut(),
+        )
+    };
+    if code != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    Ok(())
+}
+
+/// U34: the one-line fix the owner gets when the sandbox cannot use a folder;
+/// None when this process already has both rights.
+pub fn sandbox_folder_problem(path: &Path) -> io::Result<Option<String>> {
+    let missing = missing_sandbox_rights(path)?;
+    if missing.is_empty() {
+        return Ok(None);
+    }
+    let sid = user_sid_string().ok_or_else(|| io::Error::other("this user's identity is unavailable"))?;
+    Ok(Some(format!(
+        "the DeepSeek sandbox needs full control of {} (missing {}); fix it for this folder with:\n  \
+         icacls \"{}\" /grant *{}:(OI)(CI)F",
+        path.display(),
+        missing.join(" and "),
+        path.display(),
+        sid
+    )))
+}
+
+/// This user's SID in the `S-1-5-...` form icacls takes.
+pub fn user_sid_string() -> Option<String> {
+    process::current_user().map(sid_string)
+}
+
+fn sid_string(sid: &[u8]) -> String {
+    let revision = sid.first().copied().unwrap_or(1);
+    let count = sid.get(1).copied().unwrap_or(0) as usize;
+    let authority = (2..8).fold(0u64, |value, index| (value << 8) | u64::from(sid.get(index).copied().unwrap_or(0)));
+    let subs: Vec<String> = (0..count)
+        .map(|index| {
+            let at = 8 + index * 4;
+            let bytes = [0, 1, 2, 3].map(|offset| sid.get(at + offset).copied().unwrap_or(0));
+            u32::from_le_bytes(bytes).to_string()
+        })
+        .collect();
+    format!("S-{revision}-{authority}-{}", subs.join("-"))
+}
+
+struct Descriptor(PSECURITY_DESCRIPTOR);
+impl Drop for Descriptor {
+    fn drop(&mut self) {
+        unsafe {
+            LocalFree(self.0);
+        }
+    }
+}
+struct Acl(*mut ACL);
+impl Drop for Acl {
+    fn drop(&mut self) {
+        unsafe {
+            LocalFree(self.0 as *mut _);
+        }
+    }
+}
+/// A test folder whose DACL is only this user's Modify, as Authenticated Users
+/// Modify is inherited from the drive's root on a second drive.
+#[cfg(test)]
+fn set_modify_only(path: &Path) -> io::Result<()> {
+    let sid = process::current_user().ok_or_else(|| io::Error::other("this user's identity is unavailable"))?;
+    let access = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE,
+        grfAccessMode: GRANT_ACCESS,
+        grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+        Trustee: TRUSTEE_W {
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_UNKNOWN,
+            ptstrName: sid.as_ptr() as *mut u16,
+            ..Default::default()
+        },
+    };
+    let mut acl: *mut ACL = std::ptr::null_mut();
+    let code = unsafe { SetEntriesInAclW(1, &access, std::ptr::null(), &mut acl) };
+    if code != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    let _acl = Acl(acl);
+    let wide = wide_path(path);
+    let code = unsafe {
+        SetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            acl,
+            std::ptr::null_mut(),
+        )
+    };
+    if code != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    Ok(())
+}
 pub fn private_open(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
     options
 }
@@ -1332,6 +1647,173 @@ mod process {
         }
         Ok(true)
     }
+    /// #569: makes the entry at `path` private when it is this user's and only
+    /// too open. A protected DACL that grants this user FullControl (inherited
+    /// by a folder's new entries) replaces the open one, through a handle that
+    /// never follows a link; the content and the owner stay. Another owner, a
+    /// reparse point, another kind of entry or a second link is refused and the
+    /// entry is left as it is.
+    pub fn repair_private(path: &Path, kind: Private) -> io::Result<PrivateRepair> {
+        use windows_sys::Win32::Security::{Authorization::SetSecurityInfo, PROTECTED_DACL_SECURITY_INFORMATION};
+        let open = |access: u32| {
+            fs::OpenOptions::new()
+                .access_mode(access)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path)
+        };
+        // Looked at first through a handle that changes nothing.
+        let entry = open(READ_CONTROL | FILE_READ_ATTRIBUTES)?;
+        let info = file_information(&entry)?;
+        let attributes = info.dwFileAttributes;
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Ok(PrivateRepair::Refused("it is a link or reparse point".into()));
+        }
+        let directory = attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+        match kind {
+            Private::Directory if !directory => return Ok(PrivateRepair::Refused("it is not a folder".into())),
+            Private::File if directory => return Ok(PrivateRepair::Refused("it is a folder, not a file".into())),
+            Private::File if info.nNumberOfLinks != 1 => {
+                return Ok(PrivateRepair::Refused(format!("the file has {} links", info.nNumberOfLinks)));
+            }
+            _ => {}
+        }
+        let user = current_user().ok_or_else(|| io::Error::other("this user's identity is unavailable"))?;
+        let (owner, open_aces) = security(entry.as_raw_handle() as HANDLE, user)?;
+        match owner {
+            Some(owner) if owner == user => {}
+            Some(owner) => return Ok(PrivateRepair::Refused(format!("it is owned by {}", account_label(&owner)))),
+            None => return Ok(PrivateRepair::Refused("it has no owner".into())),
+        }
+        if open_aces.is_empty() {
+            return Ok(PrivateRepair::Private);
+        }
+        // Changed through a second handle that names the same file: never one
+        // renamed into its place meanwhile.
+        let writer = match open(READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES) {
+            Ok(writer) => writer,
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                return Ok(PrivateRepair::Refused(format!("this user cannot change its permissions ({error})")));
+            }
+            Err(error) => return Err(error),
+        };
+        let same = file_information(&writer)?;
+        if (same.dwVolumeSerialNumber, same.nFileIndexHigh, same.nFileIndexLow)
+            != (info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow)
+            || same.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Ok(PrivateRepair::Refused("it changed while it was checked".into()));
+        }
+        let handle = writer.as_raw_handle() as HANDLE;
+        let acl = owner_only_acl(kind == Private::Directory)?;
+        let code = unsafe {
+            SetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                acl.0,
+                std::ptr::null(),
+            )
+        };
+        if code != ERROR_SUCCESS {
+            let error = io::Error::from_raw_os_error(code as i32);
+            return Ok(PrivateRepair::Refused(format!("its permissions could not be changed ({error})")));
+        }
+        if !private_security(handle)? {
+            return Ok(PrivateRepair::Refused("it is still open after the repair".into()));
+        }
+        Ok(PrivateRepair::Repaired(open_aces))
+    }
+    /// The owner of the entry behind `handle` and the accesses its DACL grants
+    /// anyone but this user, SYSTEM, Administrators and OWNER RIGHTS.
+    fn security(handle: HANDLE, user: &[u8]) -> io::Result<(Option<Vec<u8>>, Vec<String>)> {
+        let mut owner: PSID = std::ptr::null_mut();
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let code = unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        if code != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(code as i32));
+        }
+        let _descriptor = Descriptor(descriptor);
+        let owner = if owner.is_null() { None } else { Some(unsafe { sid_bytes(owner) }.to_vec()) };
+        Ok((owner, unsafe { open_aces(dacl, user) }?))
+    }
+    /// The accesses a DACL grants anyone but this user, SYSTEM, Administrators
+    /// and OWNER RIGHTS, by account; a missing DACL grants everyone everything.
+    ///
+    /// # Safety
+    /// `dacl` is null or points to a valid ACL.
+    unsafe fn open_aces(dacl: *mut ACL, user: &[u8]) -> io::Result<Vec<String>> {
+        if dacl.is_null() {
+            return Ok(vec!["Everyone (no DACL)".into()]);
+        }
+        let mut open = Vec::new();
+        for index in 0..u32::from((*dacl).AceCount) {
+            let mut ace = std::ptr::null_mut();
+            if GetAce(dacl, index, &mut ace) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let header = &*(ace as *const ACE_HEADER);
+            if u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0 || header.AceType == ACCESS_DENIED_ACE_TYPE {
+                continue;
+            }
+            if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
+                open.push(format!("an access entry of type {}", header.AceType));
+                continue;
+            }
+            let sid = std::ptr::addr_of!((*(ace as *const ACCESS_ALLOWED_ACE)).SidStart) as PSID;
+            let trusted = sid_bytes(sid) == user
+                || IsWellKnownSid(sid, WinLocalSystemSid) != 0
+                || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
+                || IsWellKnownSid(sid, WinCreatorOwnerRightsSid) != 0;
+            if !trusted {
+                let label = account_label(sid_bytes(sid));
+                if !open.contains(&label) {
+                    open.push(label);
+                }
+            }
+        }
+        Ok(open)
+    }
+    /// `DOMAIN\name (S-1-...)`, or the SID alone when no account is found.
+    fn account_label(sid: &[u8]) -> String {
+        use windows_sys::Win32::Security::{LookupAccountSidW, SID_NAME_USE};
+        let text = sid_string(sid);
+        let mut name = [0u16; 256];
+        let mut domain = [0u16; 256];
+        let (mut name_len, mut domain_len) = (name.len() as u32, domain.len() as u32);
+        let mut kind: SID_NAME_USE = 0;
+        let found = unsafe {
+            LookupAccountSidW(
+                std::ptr::null(),
+                sid.as_ptr() as PSID,
+                name.as_mut_ptr(),
+                &mut name_len,
+                domain.as_mut_ptr(),
+                &mut domain_len,
+                &mut kind,
+            )
+        } != 0;
+        if !found {
+            return text;
+        }
+        let name = String::from_utf16_lossy(&name[..name_len as usize]);
+        let domain = String::from_utf16_lossy(&domain[..domain_len as usize]);
+        if domain.is_empty() { format!("{name} ({text})") } else { format!("{domain}\\{name} ({text})") }
+    }
     /// # Safety
     /// `sid` points to a valid SID.
     unsafe fn sid_bytes<'a>(sid: PSID) -> &'a [u8] {
@@ -1368,7 +1850,7 @@ mod process {
         let user = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) };
         Some(unsafe { sid_bytes(user.User.Sid) }.to_vec())
     }
-    fn current_user() -> Option<&'static [u8]> {
+    pub(super) fn current_user() -> Option<&'static [u8]> {
         static USER: OnceLock<Option<Vec<u8>>> = OnceLock::new();
         USER.get_or_init(|| token_user(unsafe { GetCurrentProcess() }))
             .as_deref()
@@ -1638,6 +2120,9 @@ mod process {
     /// the system reports; until hgs reads it there, nothing may count as unused.
     pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
         Err("Running processes cannot be inspected on this computer".into())
+    }
+    pub fn worktree_processes(_deadline: std::time::Instant) -> std::result::Result<crate::platform::WorktreeProcesses, String> {
+        current_directories().map(Into::into)
     }
     /// Windows cannot list another process's open files without a driver; it can
     /// only say who holds a given file (`holds_open`).
@@ -2048,9 +2533,140 @@ mod process {
     }
 }
 
+struct SendHandle(windows_sys::Win32::Foundation::HANDLE);
+// The writer thread owns the pipe's write end for its whole life.
+unsafe impl Send for SendHandle {}
+impl SendHandle {
+    fn take(self) -> windows_sys::Win32::Foundation::HANDLE {
+        self.0
+    }
+}
+
+/// H2: the current process reads `bytes` as stdin through an anonymous pipe,
+/// in memory only: a JSON request may hold a private key and must not land on
+/// disk.
+pub fn stdin_from_bytes(bytes: Vec<u8>) -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::WriteFile;
+    use windows_sys::Win32::System::Console::{SetStdHandle, STD_INPUT_HANDLE};
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+    let mut read: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
+    let mut write: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: 0,
+    };
+    if unsafe { CreatePipe(&mut read, &mut write, &attributes, 0) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { SetStdHandle(STD_INPUT_HANDLE, read) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let write = SendHandle(write);
+    std::thread::spawn(move || {
+        let write = write.take();
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let mut written = 0u32;
+            let chunk = &bytes[offset..];
+            let ok = unsafe {
+                WriteFile(write, chunk.as_ptr() as *const _, chunk.len() as u32, &mut written, std::ptr::null_mut())
+            };
+            if ok == 0 || written == 0 {
+                break;
+            }
+            offset += written as usize;
+        }
+        unsafe { CloseHandle(write) };
+    });
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #526: under a folder whose ACL passes Authenticated Users Modify on (as
+    /// a second drive does), a folder made by create_dir_all is not private and
+    /// the check refuses it; owner_only_dir makes each new folder private, and
+    /// so are the files created inside it and a file owner_only_file protects.
+    /// A folder that already existed keeps its ACL and stays refused.
+    #[test]
+    fn owner_only_folders_and_files_stay_private_under_an_open_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let open = temp.path().join("open");
+        fs::create_dir(&open).unwrap();
+        // S-1-5-11: Authenticated Users.
+        let granted = Command::new("icacls")
+            .arg(&open)
+            .args(["/grant", "*S-1-5-11:(OI)(CI)M", "/Q"])
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(granted.success());
+        let inherited = open.join("inherited");
+        fs::create_dir_all(&inherited).unwrap();
+        assert!(!verify_private(&inherited, Private::Directory).unwrap(), "the check refuses an inherited open ACL");
+
+        let private = open.join("a").join("b");
+        owner_only_dir(&private).unwrap();
+        for folder in [open.join("a"), private.clone()] {
+            assert!(verify_private(&folder, Private::Directory).unwrap(), "{}", folder.display());
+        }
+        fs::write(private.join("store.sqlite3"), b"x").unwrap();
+        assert!(verify_private(&private.join("store.sqlite3"), Private::File).unwrap(), "a new file inherits only this user");
+        // Again: nothing to create, nothing changes.
+        owner_only_dir(&private).unwrap();
+        assert!(verify_private(&private, Private::Directory).unwrap());
+        // A folder Zerus did not make private stays refused.
+        owner_only_dir(&inherited).unwrap();
+        assert!(!verify_private(&inherited, Private::Directory).unwrap());
+        // A file is not a folder.
+        assert!(owner_only_dir(&private.join("store.sqlite3")).is_err());
+
+        let file = open.join("marks.json");
+        fs::write(&file, b"{}").unwrap();
+        assert!(!verify_private(&file, Private::File).unwrap());
+        owner_only_file(&file).unwrap();
+        assert!(verify_private(&file, Private::File).unwrap());
+        assert_eq!(fs::read(&file).unwrap(), b"{}");
+    }
+
+    /// U34: a folder that inherits Modify only has WRITE_DAC (the owner's
+    /// implicit right) but no WRITE_OWNER, so the DeepSeek sandbox would fail;
+    /// the grant adds this user's inheritable FullControl and the precheck then
+    /// passes, also for a file created inside.
+    #[test]
+    fn a_sandbox_folder_is_granted_full_control_and_a_modify_only_one_is_refused() {
+        // The user's Temp folder is another drive-like inherited ACL; the test
+        // keeps its folders inside the checkout, where the sandbox may change
+        // permissions.
+        let dir = tempfile::Builder::new().prefix("hgs-acl-").tempdir_in(".").unwrap();
+        let repo = dir.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        set_modify_only(&repo).unwrap();
+        let member = repo.join("member");
+        fs::create_dir(&member).unwrap();
+        let missing = missing_sandbox_rights(&member).unwrap();
+        if missing.is_empty() {
+            // An elevated account (a CI runner's administrator) keeps
+            // WRITE_OWNER through its privileges: nothing to grant here.
+            eprintln!("this account keeps full rights on a Modify-only folder; skipped");
+            return;
+        }
+        assert!(missing.contains(&"WRITE_OWNER"), "{missing:?}");
+        let problem = sandbox_folder_problem(&member).unwrap().expect("the sandbox cannot use this folder yet");
+        assert!(problem.starts_with("the DeepSeek sandbox needs full control of "), "{problem}");
+        assert!(problem.contains("/grant *S-1-5-21-"), "{problem}");
+        grant_full_control(&member).unwrap();
+        assert!(missing_sandbox_rights(&member).unwrap().is_empty(), "{:?}", missing_sandbox_rights(&member));
+        assert!(sandbox_folder_problem(&member).unwrap().is_none());
+        let file = member.join("inside.txt");
+        fs::write(&file, "x").unwrap();
+        assert!(missing_sandbox_rights(&file).unwrap().is_empty());
+    }
 
     #[test]
     fn path_gains_the_stable_cli_and_agent_installer_folders_once() {

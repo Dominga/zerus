@@ -13,6 +13,8 @@ public:
     void configure(const QMap<QString,QString> &hosts, bool active);
     QList<SessionInfo> sessions(const QString &host) const;
     bool includes(double archivedAt) const;
+    // The archive window includes() accepts: from <= archivedAt < until.
+    std::pair<double, double> includedRange() const;
     void refresh();
     void setQuery(const QString &query);
     void setTheme(bool dark);

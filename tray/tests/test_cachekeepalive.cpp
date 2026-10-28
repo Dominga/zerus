@@ -20,6 +20,7 @@ private slots:
     }
     void hoursAreBoundedPerConversation();
     void warmsBeforeExpiryAndKeepsItsRepliesQuiet();
+    void aBuildKeepsTheContextWarmEveryThirtyMinutes();
 };
 
 namespace {
@@ -117,4 +118,43 @@ if 'send' in a:
 }
 
 QTEST_GUILESS_MAIN(TestCacheKeepalive)
+// U30 (#508): while a session builds (session_state "build"), its context is
+// kept warm every 30 minutes for as long as the build runs, without the
+// per-session hours (off here); when the build ends nothing more is sent.
+void TestCacheKeepalive::aBuildKeepsTheContextWarmEveryThirtyMinutes()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const auto fixture = dir.filePath("hgs");
+    QVERIFY(FakeCli::install(fixture, R"PY(#!/usr/bin/env python3
+import sys,json
+a=sys.argv[1:]
+if 'send' in a:
+    request=json.load(sys.stdin)
+    open(__file__+'.calls','a').write(json.dumps(request)+'\n')
+    print(json.dumps(dict(status='submitted',request_id=request['request_id'],agent_id='',name=a[a.index('send')+1],
+        run_id=request['expected_run_id'],conversation_id=request['expected_conversation_id'])))
+)PY"));
+    const auto calls = fixture + ".calls";
+    CacheKeepalive keepalive(FakeCli::program(fixture));
+    auto s = session("1:100", 100);
+    s.name = "codex/project/build"; s.conversationId = "build-conversation";
+    QCOMPARE(CacheKeepalive::hours({}, s), 0);
+    auto building = s; building.sessionState = "build";
+    building.build = QJsonObject{{"source", "hgs_run"}, {"label", "cargo test"}, {"command", "cargo test"}, {"since", 1000.0}};
+    // The fake clock: a poll every minute for two hours of build.
+    int expected = 0;
+    for (double now = 1000; now <= 1000 + 2 * 3600; now += 60) {
+        keepalive.observe({}, box(building), now);
+        if (int(now - 1000) % 1800 == 0 && now > 1000) ++expected;
+        QTRY_COMPARE_WITH_TIMEOUT(keepalive.inFlight(), 0, Slow);
+        QCOMPARE(sent(calls).size(), expected);
+    }
+    QCOMPARE(expected, 4);   // at 30, 60, 90 and 120 minutes
+    QVERIFY(sent(calls).first().startsWith("<zerus-cache-keepalive>"));
+    // The build ends: the session follows its own setting (off), so no more.
+    for (double now = 1000 + 2 * 3600 + 60; now <= 1000 + 4 * 3600; now += 60) keepalive.observe({}, box(s), now);
+    QTest::qWait(200);
+    QCOMPARE(sent(calls).size(), 4);
+}
+
 #include "test_cachekeepalive.moc"

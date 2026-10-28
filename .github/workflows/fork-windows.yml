@@ -3,10 +3,13 @@ name: Fork Windows build
 # WhiteWh/zerus only; not part of upstream Zerus. Builds and tests the Windows
 # portable zip of whitewh/main, then publishes it with its update feed as a
 # release of this fork. The fork's desktop updater installs those releases
-# (docs/fork-updates.md).
+# (docs/fork-updates.md). A pushed tag whitewh-exp-* builds that commit the same
+# way and publishes an experimental prerelease: never the latest release, no
+# feed, and no updater in its desktop app.
 on:
   push:
     branches: [whitewh/main]
+    tags: ['whitewh-exp-*']
   workflow_dispatch:
 
 permissions:
@@ -33,9 +36,11 @@ jobs:
       ZERUS_BUILD_JOBS: 4
       CCACHE_DEPEND: 1
       CCACHE_MAXSIZE: 500M
+      EXPERIMENTAL: ${{ startsWith(github.ref, 'refs/tags/whitewh-exp-') }}
       # Embedded in hgs-tray: the build the updater compares and the feed it reads.
-      ZERUS_FORK_BUILD: ${{ github.run_number }}
-      ZERUS_FORK_FEED_URL: https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json
+      # Empty for an experimental build, so it neither updates nor gets updated.
+      ZERUS_FORK_BUILD: ${{ !startsWith(github.ref, 'refs/tags/whitewh-exp-') && github.run_number || '' }}
+      ZERUS_FORK_FEED_URL: ${{ !startsWith(github.ref, 'refs/tags/whitewh-exp-') && 'https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json' || '' }}
     steps:
       - name: Check out text files unchanged
         run: git config --global core.autocrlf false
@@ -141,6 +146,7 @@ jobs:
       # Schema 1 of docs/fork-updates.md: the updater installs `url` only when its
       # size and SHA-256 match and the zip's build-info.json names `commit`.
       - name: Update feed
+        if: env.EXPERIMENTAL != 'true'
         env:
           BUILD: ${{ github.run_number }}
           COMMIT: ${{ github.sha }}
@@ -156,6 +162,7 @@ jobs:
           print(json.dumps(feed, indent=2))
           EOF
       - name: Publish the fork release
+        if: env.EXPERIMENTAL != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           BUILD: ${{ github.run_number }}
@@ -164,6 +171,13 @@ jobs:
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
             --title "Zerus fork build $BUILD" \
             --notes "Windows portable build $BUILD of whitewh/main at $GITHUB_SHA. Installed automatically by fork builds of Zerus (docs/fork-updates.md)."
+      - name: Publish the experimental prerelease
+        if: env.EXPERIMENTAL == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" artifacts/zerus-windows-x86_64.zip             --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --latest=false             --title "Zerus fork experimental $TAG"             --notes "Experimental Windows portable build of $GITHUB_SHA (tag $TAG). Not the latest release and not offered by the fork updater; this build does not update itself. Install it by hand (docs/fork-updates.md)."
       - name: Retain test logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -246,7 +246,7 @@ struct SessionDetailsSheet: View {
             List {
                 Picker("Section", selection: $tab) {
                     Text("Overview").tag(0)
-                    Text("Tasks").tag(1)
+                    Text("Plan").tag(1)
                     Text("Agents").tag(2)
                     Text("Processes").tag(3)
                 }
@@ -342,7 +342,7 @@ struct SessionDetailsSheet: View {
     @ViewBuilder
     private func tasks(_ details: SessionDetailsView) -> some View {
         if details.tasks.isEmpty {
-            Text("No task list reported yet. Tasks appear when the agent updates its plan.").foregroundStyle(Theme.muted)
+            Text("No plan reported yet. It appears when the agent updates its plan.").foregroundStyle(Theme.muted)
         }
         ForEach(details.tasks, id: \.owner) { list in
             Section {

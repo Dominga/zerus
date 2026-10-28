@@ -1,4 +1,5 @@
 #pragma once
+#include "JsonParse.h"
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -112,6 +113,7 @@ inline std::optional<Prepared> prepare(const Snapshot &old,const Edit &edit,QStr
 
 // Credentials never enter QSettings, diagnostics or process arguments. A held
 // directory descriptor and no-follow opens reject symlinks at every path level.
+// load() and save() parse the file: call them off the GUI thread (JsonParse.h).
 class ConfigStore {
 public:
     explicit ConfigStore(QString path=configPath()):path_(std::move(path)){}
@@ -210,8 +212,8 @@ private:
         struct stat after{};const bool stable=::fstat(fd,&after)==0&&after.st_size==st.st_size&&after.st_mtime==st.st_mtime;
         ::close(fd);
         if(n<0||!stable||bytes.size()>65536)return fail(QStringLiteral("Configuration changed while reading. Reload before saving."));
-        QJsonParseError parse{};const auto doc=QJsonDocument::fromJson(bytes,&parse);
-        if(parse.error!=QJsonParseError::NoError||!doc.isObject())return fail(QStringLiteral("Connector configuration is not a JSON object."));
+        QString parse;const auto doc=JsonParse::parse(bytes,&parse);
+        if(!parse.isEmpty()||!doc.isObject())return fail(QStringLiteral("Connector configuration is not a JSON object."));
         *out={true,doc.object(),bytes,quint64(st.st_dev),quint64(st.st_ino)};return true;
     }
 #endif

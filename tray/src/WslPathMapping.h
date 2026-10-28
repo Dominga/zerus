@@ -1,4 +1,5 @@
 #pragma once
+#include "SettingsJson.h"
 #include <QCryptographicHash>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -11,7 +12,6 @@ inline QString key(const QString &host,const QString &machine,const QJsonObject 
     return "pathMappings/"+QString::fromLatin1(QCryptographicHash::hash(identity,QCryptographicHash::Sha256).toHex());
 }
 inline QJsonObject load(const QString &key) {
-    const auto data=QSettings().value(key).toByteArray();
-    return data.size()<=16384?QJsonDocument::fromJson(data).object():QJsonObject();
+    return SettingsJson::object(key, 16384);
 }
 }

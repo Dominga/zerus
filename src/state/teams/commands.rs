@@ -3778,10 +3778,10 @@ mod tests {
         // N19
         let (team, _, _) = review_team();
         with_review_team(&team, || {
-            call("settings", json!({"settings":{"evidence_folders":["shots","D:/Tools/zerus-team-phases/shots-v2"]},"by":"human"})).unwrap();
-            assert_eq!(stored().settings.evidence_folders, vec!["shots".to_owned(), "D:/Tools/zerus-team-phases/shots-v2".to_owned()]);
+            call("settings", json!({"settings":{"evidence_folders":["shots","D:/work/team-phases/shots-v2"]},"by":"human"})).unwrap();
+            assert_eq!(stored().settings.evidence_folders, vec!["shots".to_owned(), "D:/work/team-phases/shots-v2".to_owned()]);
             let status = run("status", &json!({"team":"rv"}), false).unwrap();
-            assert_eq!(status["settings"]["evidence_folders"][1], "D:/Tools/zerus-team-phases/shots-v2");
+            assert_eq!(status["settings"]["evidence_folders"][1], "D:/work/team-phases/shots-v2");
             let error = call("settings", json!({"settings":{"evidence_folders":["  "]},"by":"human"})).unwrap_err().to_string();
             assert!(error.contains("An evidence folder"), "{error}");
         });

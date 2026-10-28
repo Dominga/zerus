@@ -730,7 +730,7 @@ answered; a denial cannot carry an explanation.
 
 - **U25. New UI from the owner's design (owner, 2026-10-27).** The designer's
   clickable prototype and its spec are the source of truth for look and
-  behaviour: `D:\Tools\Zerus-UI-handoff\Zerus-prototype.html`
+  behaviour: the UI handoff's `Zerus-prototype.html`
   (opens offline; the Prototype button switches Running / Stuck / Done /
   Planning and the theme) and `SPEC.md` with 52 screenshots in `shots` (sections 0-14, with an
   acceptance checklist in 13; screenshots follow). UI strings are English,
@@ -862,7 +862,7 @@ answered; a denial cannot carry an explanation.
 
 - **U30. Six session states (owner, 2026-10-27; the owner's explicit
   direction for the status contract).** The design is
-  `D:\Tools\Zerus-UI-handoff\Status\SESSION-STATES.md` with 13 shots. A
+  the UI handoff's `Status/SESSION-STATES.md` with 13 shots. A
   session is Working (the turn runs, with its timer), Waiting for you (an
   approval, an input, a reply to read, or the lead's "Needs you"), Waiting
   for dependencies (always with the reason: subagents by name, a long
@@ -934,7 +934,7 @@ answered; a denial cannot carry an explanation.
   2026-10-27).** backend, backend2, qa and backend4 each started with every
   command failing: `SetNamedSecurityInfoW failed (Win32 5): grantWrite(<worktree>)`.
   The DeepSeek sandbox needs WRITE_DAC and WRITE_OWNER on the folder it
-  confines. A folder on a second drive (D:\Tools) inherits the drive's
+  confines. A folder on a second drive (such as D:\work) inherits the drive's
   default ACL: Authenticated Users Modify, no explicit right for the user, so
   the owner has WRITE_DAC but not WRITE_OWNER and the provisioning fails;
   under C:\Users\<user> the profile's explicit FullControl hides it. Each

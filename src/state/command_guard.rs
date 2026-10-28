@@ -565,7 +565,7 @@ mod tests {
 
     #[test]
     fn supplied_home_is_used_on_every_platform() {
-        for home in ["/home/fixture", "/Users/fixture", r"D:\profiles\fixture"] {
+        for home in ["/home/example", "/Users/example", r"D:\profiles\example"] {
             assert_eq!(
                 check(&format!("Remove-Item '{home}' -Recurse"), home)
                     .unwrap()

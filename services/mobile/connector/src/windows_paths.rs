@@ -164,7 +164,7 @@ mod tests {
         assert_eq!(to_native("/D:/Work/GIT/roguedod_s1").as_deref(), Some(r"D:\Work\GIT\roguedod_s1"));
         assert_eq!(to_native("/d:").as_deref(), Some(r"D:\"));
         assert_eq!(to_native("/D:/").as_deref(), Some(r"D:\"));
-        for path in [r"D:\Work\x y", r"C:\Users\whitl\.codex"] {
+        for path in [r"D:\Work\x y", r"C:\Users\example\.codex"] {
             assert_eq!(to_native(&to_phone(path).unwrap()).as_deref(), Some(path));
         }
     }

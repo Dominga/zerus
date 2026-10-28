@@ -92,9 +92,9 @@ pub(crate) const BUILTIN: &[Template] = &[
     },
     Template {
         id: "qt-configure",
-        summary: "cmake configure into .ci-build/gui",
+        summary: "cmake configure of tray/ into .ci-build/gui (Ninja, Release)",
         program: "cmake",
-        args: &["-S", ".", "-B", ".ci-build/gui", "-G", "Ninja"],
+        args: &["-S", "tray", "-B", ".ci-build/gui", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release"],
         params: &[],
         timeout_secs: 600,
     },
@@ -490,9 +490,13 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
         }
         // U21: the test binary is one of the folder's build outputs, run by
         // Zerus; a suite that is not a file in the folder is refused.
-        let path = folder.join(&program);
-        let path = if path.exists() { path } else { folder.join(format!("{program}.exe")) };
-        ensure!(path.is_file(), "The Qt test binary {program} is not in your folder's build");
+        // Expert, #528: the Windows build puts the suites in gui/tests.
+        let suite = program.trim_start_matches(".ci-build/gui/").to_owned();
+        let path = [program.clone(), format!(".ci-build/gui/tests/{suite}")]
+            .iter()
+            .flat_map(|name| [folder.join(name), folder.join(format!("{name}.exe"))])
+            .find(|path| path.is_file());
+        let Some(path) = path else { bail!("The Qt test binary {program} is not in your folder's build") };
         program = path.display().to_string();
         let shots = args["shots"].as_str().unwrap_or_default();
         if !shots.is_empty() {
@@ -941,6 +945,12 @@ mod tests {
         assert_eq!(built.argv, ["a", "b"]);
         assert!(built.program.ends_with("test_teamsui.exe"), "{}", built.program);
         assert!(plan("qt-test", &json!({"suite":"test_teamsui"}), dir.path()).unwrap().argv.is_empty());
+        // The Windows build's suites are in gui/tests.
+        std::fs::create_dir_all(suite.join("tests")).unwrap();
+        std::fs::write(suite.join("tests").join("test_teams.exe"), b"x").unwrap();
+        let windows = plan("qt-test", &json!({"suite":"test_teams"}), dir.path()).unwrap();
+        assert!(windows.program.replace('\\', "/").ends_with("gui/tests/test_teams.exe"), "{}", windows.program);
+        assert!(plan("qt-test", &json!({"suite":"test_missing"}), dir.path()).is_err());
     }
 
     #[test]

@@ -4,7 +4,7 @@ import org.json.JSONObject
 import kotlin.math.max
 
 /**
- * U30: the session states of D:/Tools/Zerus-UI-handoff/Status/SESSION-STATES.md over the fields the
+ * U30: the session states of the UI handoff's Status/SESSION-STATES.md over the fields the
  * host reports: `session_state` (working, build, user, deps, cooling, cold, stopped), `state_reason`
  * (the explicit reason behind it), `build`, `last_active` and `cache_ttl`. `offline` is this phone's
  * state for a machine that does not answer; the host never lists it.

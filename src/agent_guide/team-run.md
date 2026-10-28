@@ -6,7 +6,7 @@ sandbox, in the member's own folder, with a bounded time and output:
   cargo-test {filter?, bin?, package?, toolchain?}
                              cargo test --locked [--package=P] [--bin=B] [F]
   cargo-clippy {package?, toolchain?}  clippy --all-targets -- -D warnings
-  qt-configure               cmake configure into .ci-build/gui
+  qt-configure               cmake configure of tray/ into .ci-build/gui
   qt-build {targets?}        cmake --build .ci-build/gui
   qt-test {suite, functions?, shots?}  a test binary from .ci-build/gui,
                              offscreen; shots go to .ci-build/shots

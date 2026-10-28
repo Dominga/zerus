@@ -211,7 +211,7 @@ report, in `deps` order:
 
 ```
 From dependencies:
-#5 Model: phase, pinned (accepted) by backend (Backend), folder: D:\Tools\Zerus-team-f3d22e71-backend
+#5 Model: phase, pinned (accepted) by backend (Backend), folder: D:\work\Zerus-team-f3d22e71-backend
 <report text>
 ```
 

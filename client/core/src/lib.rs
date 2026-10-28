@@ -34,6 +34,7 @@ pub mod state;
 pub mod stream;
 pub mod tasks;
 pub mod terminal;
+pub mod trayicon;
 pub mod view;
 pub mod views;
 pub mod voice;

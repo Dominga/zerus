@@ -176,6 +176,49 @@ pub fn open_command(
     command(hgs, &open_arguments(computer, name, archive_id), shell)
 }
 
+/// An AppleScript string literal's contents: backslash first, then quote and
+/// newline (`MacBackend.cpp:7-23`).
+pub fn apple_script_escape(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
+/// Opens `command` in a new Terminal.app window and brings it to the front
+/// (`MacBackend::terminalAppScript`).
+pub fn terminal_app_script(command: &str) -> String {
+    format!(
+        "tell application \"Terminal\"\n    do script \"{}\"\n    activate\nend tell",
+        apple_script_escape(command)
+    )
+}
+
+/// Qt's tray message on macOS (`MacBackend::notificationScript`).
+pub fn notification_script(title: &str, body: &str) -> String {
+    format!(
+        "display notification \"{}\" with title \"{}\"",
+        apple_script_escape(body),
+        apple_script_escape(title)
+    )
+}
+
+/// A copied command as its notice shows it: at most 120 characters, cut in
+/// the middle (`ClipboardBackend::notificationText`).
+pub fn notification_text(command: &str) -> String {
+    const MAX: usize = 120;
+    const ELLIPSIS: &str = " \u{2026} ";
+    let chars: Vec<char> = command.chars().collect();
+    if chars.len() <= MAX {
+        return command.to_owned();
+    }
+    let keep = MAX - ELLIPSIS.chars().count();
+    let (head, tail) = (keep / 2, keep - keep / 2);
+    let mut shown: String = chars[..head].iter().collect();
+    shown.push_str(ELLIPSIS);
+    shown.extend(&chars[chars.len() - tail..]);
+    shown
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,5 +458,29 @@ mod tests {
         assert_eq!(copyable("a\nb"), Err(newline.to_owned()));
         assert_eq!(copyable("a\rb"), Err(newline.to_owned()));
         assert_eq!(copyable("a\n"), Err(newline.to_owned()));
+    }
+
+    #[test]
+    fn apple_script_strings_escape_backslash_first() {
+        assert_eq!(apple_script_escape(r#"a\b"c"#), r#"a\\b\"c"#);
+        assert_eq!(apple_script_escape("one\ntwo"), "one\\ntwo");
+        assert_eq!(
+            terminal_app_script("hgs @mac a 'claude/R\"D'"),
+            "tell application \"Terminal\"\n    do script \"hgs @mac a 'claude/R\\\"D'\"\n    activate\nend tell"
+        );
+        assert_eq!(
+            notification_script("Zerus: copied", "hgs a x\nnext"),
+            "display notification \"hgs a x\\nnext\" with title \"Zerus: copied\""
+        );
+    }
+
+    #[test]
+    fn long_copied_commands_are_cut_in_the_middle() {
+        assert_eq!(notification_text("hgs a x"), "hgs a x");
+        let long = format!("hgs @mac a {}", "x".repeat(200));
+        let shown = notification_text(&long);
+        assert_eq!(shown.chars().count(), 120);
+        assert!(shown.starts_with("hgs @mac a xx"));
+        assert!(shown.contains(" \u{2026} "));
     }
 }

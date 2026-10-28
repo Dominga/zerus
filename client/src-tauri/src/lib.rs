@@ -17,6 +17,9 @@ mod pump;
 mod replay;
 #[cfg(feature = "live")]
 mod screens;
+#[cfg(feature = "live")]
+mod terminal;
+mod window_visibility;
 
 use tauri::{AppHandle, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
@@ -34,6 +37,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(commands::AppState::default())
+        .manage(window_visibility::Visibility::default())
         .invoke_handler(handler())
         .setup(|app| {
             #[cfg(feature = "live")]
@@ -46,6 +50,13 @@ pub fn run() {
                 app.manage(actions::Actions::new(dir.join(actions::marks_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
                 app.manage(screens::Screens::tauri(app.handle().clone(), pump));
+                app.manage(terminal::Terminals::new(
+                    zerus_client_core::default_hgs(),
+                    actions::actions_allowed(
+                        std::env::var("ZERUS_CLIENT_REPLAY").ok().as_deref(),
+                        std::env::var("ZERUS_CLIENT_HGS").ok().as_deref(),
+                    ),
+                ));
             }
             let display = display::display_name();
             if !display::headless_allowed(std::env::var("ZERUS_CLIENT_HEADLESS").is_ok_and(|v| v == "1"), display.as_deref()) {
@@ -61,6 +72,20 @@ pub fn run() {
                 }
             }
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() == MAIN_WINDOW
+                && matches!(event, tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Focused(_) | tauri::WindowEvent::Moved(_))
+            {
+                window_visibility::sync(window);
+            }
+            #[cfg(feature = "live")]
+            if window.label() == MAIN_WINDOW && matches!(event, tauri::WindowEvent::Destroyed) {
+                use tauri::Manager;
+                window.state::<terminal::Terminals>().stop_all();
+            }
+            #[cfg(not(feature = "live"))]
+            let _ = (window, event);
         })
         .run(tauri::generate_context!())
         .expect("Zerus Next failed to start");
@@ -94,6 +119,13 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         screens::machine_resolve,
         screens::machine_check,
         screens::projects_view,
+        terminal::terminal_connect,
+        terminal::terminal_write,
+        terminal::terminal_resize,
+        terminal::terminal_ack,
+        terminal::terminal_disconnect,
+        terminal::terminal_retarget,
+        terminal::terminal_status,
     ]
 }
 

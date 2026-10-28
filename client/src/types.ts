@@ -247,3 +247,19 @@ export const emptyMachines = (error: string | null = null): MachinesView => ({
 export const emptyProjects = (status = ""): ProjectsView => ({
   loaded: false, refreshing: false, status, status_error: status !== "", conflicts: 0, unconnected: [], notice: null, projects: [],
 });
+
+// The Terminal tab (src-tauri/src/terminal.rs).
+export interface TerminalTarget { computer: ComputerId; name: string; run_id: string; machine: string }
+export interface TerminalConnected { generation: number; status: string; reused: boolean }
+export interface TerminalStatus { supported: boolean; available: boolean; reason: string; idle: string; connecting: string; disconnected: string }
+export interface TerminalFinished { kind: "finished"; code: number; status: string }
+/** The core's `TerminalFacts`: a row's terminal fields. */
+export interface TerminalFacts {
+  cmd: string;
+  terminal_supported: boolean;
+  terminal_reported: boolean;
+  terminal_attach_supported: boolean;
+  terminal_attach_reported: boolean;
+  terminal_reason: string;
+  terminal_attach_reason: string;
+}

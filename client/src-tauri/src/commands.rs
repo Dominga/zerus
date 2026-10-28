@@ -357,6 +357,7 @@ pub fn perf_away(
         _ => return Err(format!("unknown way to take the window away: {how}")),
     }
     .map_err(|error| error.to_string())?;
+    crate::window_visibility::sync_webview(&window);
     // The page sees the change and its last frame ends before the sample starts.
     std::thread::sleep(std::time::Duration::from_millis(1500));
     let minimized = window.is_minimized().unwrap_or(false);
@@ -369,6 +370,7 @@ pub fn perf_away(
         "hide" => window.show(),
         _ => window.unminimize(),
     };
+    crate::window_visibility::sync_webview(&window);
     if let Err(error) = back.and_then(|()| window.set_focus()) {
         eprintln!("zerus-client perf: could not bring the window back: {error}");
     }

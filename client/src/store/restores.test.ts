@@ -58,7 +58,7 @@ function deferredCalls() {
   return { answer: async (o: Outcome) => { pending.shift()!(o); await flush(); }, waiting: () => pending.length };
 }
 
-function setup(options: { online?: boolean } = {}) {
+function setup(options: { online?: boolean; perform?: (...args: Parameters<ReturnType<typeof createActions>["perform"]>) => Promise<Outcome> } = {}) {
   const catalog = createCatalog();
   const archived = new Map<string, Session>();
   const page = (...rows: ViewRow[]) => { for (const r of rows) { const s = archivedSession("", "box", r); archived.set(s.key, s); } };
@@ -75,7 +75,7 @@ function setup(options: { online?: boolean } = {}) {
     online,
     updating: actions.updating,
     batchRunning,
-    perform: actions.perform,
+    perform: options.perform ?? actions.perform,
     notify: actions.notify,
     stillListed: actions.stillListed,
     refreshArchive,
@@ -199,6 +199,32 @@ describe("Restore session (Qt changeSession 5542-5560)", () => {
       await a.restore(a.row(RESTORE_LIMIT + 1));
       expect(mocked.runAction).toHaveBeenCalledTimes(RESTORE_LIMIT);
       expect(a.texts().at(-1)).toBe(`error:${RESTORES_PENDING}`);
+      dispose();
+    });
+  });
+
+  it("shows a thrown restore as the sticky failure a failed outcome shows", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup({ perform: () => Promise.reject(new Error("bridge gone")) });
+      a.page(archivedView(1));
+      a.setSelectedKey(a.row(1).key);
+      await a.restore(a.row(1));
+      expect(a.texts()).toEqual(["error:bridge gone"]);
+      expect(a.actions.notices()[0].sticky).toBe(true);
+      expect(a.pendingCount()).toBe(0);
+      expect(a.refreshArchive).not.toHaveBeenCalled();
+      expect(a.stateFilter()).toBe("archived");
+      dispose();
+    });
+  });
+
+  it("restores a row whose reported operations leave out restore, as Qt's header and selected-row menu do", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      a.page(archivedView(1, { allowed_actions: ["rename", "forget"] }));
+      mocked.runAction.mockResolvedValueOnce(done());
+      await a.restore(a.row(1));
+      expect(mocked.runAction).toHaveBeenCalledWith(expect.objectContaining({ name: "codex/example/a1" }), { kind: "restore", archive_id: uuid(1) });
       dispose();
     });
   });
@@ -376,6 +402,26 @@ describe("the batch's archive calls (Qt runNextSelectionAction 333-343, finishSe
       await flush();
       expect(a.selectedKey()).toBeUndefined();
       expect(a.pendingCount()).toBe(RESTORE_LIMIT - 1);
+      dispose();
+    });
+  });
+
+  it("see a name as taken only while the catalog lists the live row a restore saw appear", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      a.page(archivedView(1), archivedView(1, { archive_id: uuid(2) }));
+      const second = snapshotOf(a.archived.get(`\narchive:${uuid(2)}`)!);
+      mocked.runAction.mockResolvedValueOnce(done());
+      await a.calls.restore(a.row(1));
+      // Pending, its live row not listed yet: the restore limit answers, the name is not taken.
+      expect(a.calls.taken(second)).toBe(false);
+      expect(a.calls.restore(second)).toBe("limit");
+      a.live("codex/example/a1");
+      await flush();
+      expect(a.pendingCount()).toBe(0);
+      expect(a.calls.taken(second)).toBe(true);
+      a.catalog.applyBatch({ ...emptyBatch(), removes: [{ computer: "", key: "run:codex/example/a1" }] });
+      expect(a.calls.taken(second)).toBe(false);
       dispose();
     });
   });

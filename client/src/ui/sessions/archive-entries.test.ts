@@ -1,4 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
+
+vi.hoisted(() => {
+  // The scope rule lives in store/archive.ts, which loads store/ui.ts (the page address and storage).
+  const store = new Map<string, string>();
+  vi.stubGlobal("location", { search: "", hash: "", href: "http://localhost/" });
+  vi.stubGlobal("localStorage", { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v); }, removeItem: (k: string) => { store.delete(k); } });
+});
+vi.mock("../../bridge", () => ({
+  archivePage: vi.fn(() => new Promise(() => {})),
+  cancelArchivePages: vi.fn(async () => {}),
+  pendingReadMarks: vi.fn(async () => []),
+  attentionMarks: vi.fn(async () => ({ marks: {}, replies: {} })),
+  updateAttentionMarks: vi.fn(async () => {}),
+  queueReadMarks: vi.fn(async () => []),
+}));
+
 import { CLEAR_ARCHIVE_LABEL, clearArchiveEntry, clearArchiveRows } from "./archive-entries";
 
 // Qt's Clear archive (SessionSelection.cpp 171-181 and 226-235).

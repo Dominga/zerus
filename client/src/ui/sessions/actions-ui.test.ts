@@ -48,12 +48,13 @@ describe("menuState change", () => {
     // A live row's change entry never reads it.
     expect(menuState(row({ state: "paused" }), true, false, undefined, { occupied: true }).change.enabled).toBe(true);
   });
-  it("needs allowed(restore) in the context menu only, as Qt's header does not read it (5360-5361)", () => {
+  it("does not read allowed(restore): the client's context menu is Qt's selected-row case, which reuses the header (5360, 3897-3898)", () => {
     const refused = row({ state: "archived", archive_id: "a1", allowed_actions: ["rename", "forget"] });
-    expect(menuState(refused, true, false, undefined, { context: true }).change.enabled).toBe(false);
+    expect(menuState(refused, true, false, undefined, { context: true }).change.enabled).toBe(true);
     expect(menuState(refused, true, false).change.enabled).toBe(true);
-    const allowed = row({ state: "archived", archive_id: "a1", allowed_actions: ["restore"] });
-    expect(menuState(allowed, true, false, undefined, { context: true }).change.enabled).toBe(true);
+    // The other conditions still hold.
+    expect(menuState(row({ state: "archived", allowed_actions: ["rename"] }), true, false, undefined, { context: true }).change.enabled).toBe(false);
+    expect(menuState(refused, true, false, undefined, { context: true, occupied: true }).change.enabled).toBe(false);
   });
   it("lets auth_required stand in for idle with details", () => {
     expect(menuState(row({ activity: "busy" }), true, false, details({ auth_required: true })).change.enabled).toBe(true);

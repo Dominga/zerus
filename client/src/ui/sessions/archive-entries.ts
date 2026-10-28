@@ -1,3 +1,4 @@
+import { inScope } from "../../store/archive";
 import type { MenuEntry } from "../../store/ui";
 import type { Session } from "./types";
 
@@ -5,7 +6,8 @@ import type { Session } from "./types";
 // (SessionSelection.cpp 171-181) and clearArchive (226-235). The client's
 // archive is always paged, so the entry names the loaded archived sessions;
 // it runs the selection's Forget (store/batch.ts) with Qt's Clear archive
-// confirmation. Pure: selection-live.ts binds it to the stores.
+// confirmation. It only reads what it is given; selection-live.ts binds it
+// to the stores.
 
 /** Qt's paged label (`m_archiveBrowser->paged()`). */
 export const CLEAR_ARCHIVE_LABEL = "Remove loaded archived sessions…";
@@ -18,8 +20,7 @@ export interface ClearScope {
   projects: readonly string[];
 }
 
-const inFilters = (s: Archived, scope: ClearScope) =>
-  s.state === "archived" && (!scope.machines.length || scope.machines.includes(s.machine)) && (!scope.projects.length || scope.projects.includes(s.project));
+const inFilters = (s: Archived, scope: ClearScope) => s.state === "archived" && inScope(s, scope);
 
 /**
  * Qt's clearArchive entries: the loaded archived rows in the machine and

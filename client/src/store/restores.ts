@@ -29,6 +29,7 @@ import type { Action, Outcome } from "../types";
 // conversation (store/actions.ts detailsFor).
 
 export const RESTORE_LIMIT = 64;
+const errorText = (error: unknown) => (typeof error === "string" ? error : error instanceof Error ? error.message : String(error));
 export const RESTORES_PENDING = "Finish or refresh the earlier restores before restoring another session.";
 export const RESTORE_UNVERIFIED = "The restored conversation could not be verified.";
 /** Qt's selectSessionEntry refusal after a confirmation. */
@@ -75,6 +76,8 @@ export function createRestores(deps: RestoreDeps) {
   let followed: string | undefined;
   /** The filter this store set, so its own change does not cancel the follow. */
   let ownFilter: StateFilter | undefined;
+  /** The live row key each restored name appeared with, the latest RESTORE_LIMIT (for `taken`). */
+  const appeared = new Map<string, string>();
 
   const find = (id: string) => untrack(pending).find((p) => p.id === id);
   const add = (p: PendingRestore) => setPending((all) => [...all, p]);
@@ -112,6 +115,9 @@ export function createRestores(deps: RestoreDeps) {
       }
     }
     if (followed === p.id) followed = undefined;
+    appeared.delete(p.id);
+    appeared.set(p.id, live.key);
+    if (appeared.size > RESTORE_LIMIT) appeared.delete(appeared.keys().next().value!);
     drop(p.id);
   }
 
@@ -139,26 +145,25 @@ export function createRestores(deps: RestoreDeps) {
   });
 
   /** The Restore entry's rule (menuState), read again on the live row at the click. */
-  function restorable(live: ActionRow, context: boolean): boolean {
+  function restorable(live: ActionRow): boolean {
     return menuState(live, deps.online(live.computer), deps.updating(live.computer, live.name), undefined, {
-      context, batchRunning: deps.batchRunning(), occupied: archiveNameOccupied(live, deps.catalog.rows),
+      batchRunning: deps.batchRunning(), occupied: archiveNameOccupied(live, deps.catalog.rows),
     }).change.enabled;
   }
 
   /**
    * Restore session from a menu or the header (Qt's runSessionMenuAction
-   * recheck, then changeSession). `context`: the row's context menu, whose
-   * entry also needs allowed(restore). A row that is gone or changed gets the
+   * recheck, then changeSession). A row that is gone or changed gets the
    * recheck's notice; an entry no longer enabled returns silently; past the
    * restore limit nothing runs and the sticky notice says so.
    */
-  async function restore(row: ActionRow, options: { context?: boolean } = {}): Promise<void> {
+  async function restore(row: ActionRow): Promise<void> {
     // A pending restore's row, kept selected after the archive reloaded, is Qt's selected() entry.
     const kept = untrack(pending).find((p) => p.sourceKey === row.key)?.source;
     const live = kept && !deps.archived(row.key) ? snapshotOf(kept) : deps.stillListed(row);
     if (!live) return;
     if ((live.state === "running") !== (row.state === "running")) { deps.notify("error", STATE_CHANGED, true); return; }
-    if (live.state !== "archived" || !restorable(live, !!options.context)) return;
+    if (live.state !== "archived" || !restorable(live)) return;
     const id = nameKey(live);
     if (writing !== undefined || full(id)) { deps.notify("error", RESTORES_PENDING, true); return; }
     const source = snapshotOf(live);
@@ -169,7 +174,9 @@ export function createRestores(deps: RestoreDeps) {
     try {
       out = await deps.perform(source, { kind: "restore", archive_id: source.archiveId ?? "" });
     } catch (error) {
-      out = { outcome: "failed", detail: String(error) };
+      // As a failed outcome: the sticky error, never replayed.
+      out = { outcome: "failed", detail: errorText(error) };
+      deps.notify("error", out.detail, true);
     } finally {
       writing = undefined;
     }
@@ -196,7 +203,7 @@ export function createRestores(deps: RestoreDeps) {
    * silently, as in Qt. Success refreshes the archive.
    */
   async function forgetArchived(row: ActionRow): Promise<void> {
-    const live = deps.archived(row.key) ?? deps.catalog.rows[row.key];
+    const live = deps.archived(row.key);
     if (!live || ((row.created ?? 0) > 0 && (live.created ?? 0) > 0 && live.created !== row.created) || (live.archiveId ?? "") !== (row.archiveId ?? "")) {
       deps.notify("error", NO_LONGER_AVAILABLE, true);
       return;
@@ -222,6 +229,11 @@ export function createRestores(deps: RestoreDeps) {
     },
     forget: (row) => deps.perform(row, { kind: "forget_archive", archive_id: row.archiveId ?? "" }, { quiet: true }),
     refresh: () => deps.refreshArchive(),
+    taken: (row) => {
+      const key = appeared.get(nameKey(row));
+      const live = key ? deps.catalog.rows[key] : undefined;
+      return !!live && live.state !== "archived" && live.computer === row.computer && live.name === row.name;
+    },
   };
 
   return {

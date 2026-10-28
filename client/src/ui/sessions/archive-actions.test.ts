@@ -29,7 +29,8 @@ import { archive } from "../../store/archive";
 import { notices } from "../../store/actions";
 import { bindBatchConfirm } from "../../store/batch";
 import { selected, selectedKey, setSelectedKey, setStateFilter, stateFilter } from "../../store/ui";
-import { actionEntries } from "./ActionDialogs";
+import { actionEntries, renameSession } from "./ActionDialogs";
+import { snapshotOf } from "./actions-ui";
 import { clearArchiveMenuEntry, selectionCount } from "./selection-live";
 import type { BatchConfirmation } from "./selection";
 import { emptyBatch, type ArchivePage, type Outcome, type ViewRow } from "../../types";
@@ -107,6 +108,54 @@ describe("the archived row's menu entries", () => {
     await flush();
     expect(selectedKey()).toBe("\nrun:r3");
     expect(selected()?.state).toBe("running");
+  });
+});
+
+describe("the header and the context menu Restore", () => {
+  it("restore a row whose operations leave out restore, as Qt's header and selected-row menu do", async () => {
+    await loadArchive({ ...archived(12), allowed_actions: ["rename", "forget"] });
+    const row = archive.row(key(12))!;
+    expect(actionEntries(row, undefined, { context: true }).change.disabled).toBe(false);
+    const header = actionEntries(row);
+    expect([header.change.label, header.change.disabled]).toEqual(["Restore session", false]);
+    mocked.runAction.mockResolvedValueOnce(done());
+    header.change.action!();
+    await flush();
+    expect(mocked.runAction).toHaveBeenCalledTimes(1);
+    expect(mocked.runAction).toHaveBeenCalledWith(expect.objectContaining({ name: "codex/example/r12" }), { kind: "restore", archive_id: uuid(12) });
+  });
+});
+
+describe("Rename of a loaded archived row", () => {
+  it("reloads the archive after a success and cancels a pending restore's follow", async () => {
+    await loadArchive(archived(10), archived(11));
+    setSelectedKey(key(10));
+    let finishRestore: (o: Outcome) => void = () => {};
+    mocked.runAction.mockImplementation((_target, action) => (action.kind === "restore" ? new Promise((r) => { finishRestore = r; }) : Promise.resolve(done())));
+    actionEntries(archive.row(key(10))!, undefined, { context: true }).change.action!();
+    await flush();
+    const before = mocked.archivePage.mock.calls.length;
+    const out = await renameSession(snapshotOf(archive.row(key(11))!), "codex/example/renamed");
+    await flush();
+    expect(out.outcome).toBe("done");
+    expect(mocked.runAction).toHaveBeenLastCalledWith(expect.objectContaining({ name: "codex/example/r11" }), { kind: "rename", new_name: "codex/example/renamed", archive_id: uuid(11) });
+    expect(mocked.archivePage.mock.calls.length).toBe(before + 1);
+    // The restore is no longer followed: the filter stays, and the verified live row only clears the old selection.
+    finishRestore(done());
+    await flush();
+    expect(stateFilter()).toBe("archived");
+    applyBatch({ ...emptyBatch(), upserts: [{ computer: "", key: "run:r10", row: { name: "codex/example/r10", agent: "codex", state: "running", resumable: true, run_id: "run-new", conversation_id: "conv-r10" } }] });
+    await flush();
+    expect(selectedKey()).toBeUndefined();
+  });
+
+  it("does not reload the archive after a failure", async () => {
+    await loadArchive(archived(13));
+    mocked.runAction.mockResolvedValueOnce({ outcome: "failed", detail: "name in use" });
+    const before = mocked.archivePage.mock.calls.length;
+    await renameSession(snapshotOf(archive.row(key(13))!), "codex/example/other");
+    await flush();
+    expect(mocked.archivePage.mock.calls.length).toBe(before);
   });
 });
 

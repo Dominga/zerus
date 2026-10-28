@@ -343,6 +343,7 @@ describe("archived rows", () => {
         restore: vi.fn(async () => done()),
         forget: vi.fn(async () => failed("not found")),
         refresh: vi.fn(),
+        taken: () => false,
       };
       const a = setup([], { archive });
       await a.run("resume", [row]);
@@ -359,7 +360,7 @@ describe("archived rows", () => {
   it("count a restore past the restore limit as failed", async () => {
     await createRoot(async (dispose) => {
       const row = archivedRow();
-      const archive: ArchiveCalls = { current: () => row, restore: vi.fn(() => "limit" as const), forget: vi.fn(), refresh: vi.fn() };
+      const archive: ArchiveCalls = { current: () => row, restore: vi.fn(() => "limit" as const), forget: vi.fn(), refresh: vi.fn(), taken: () => false };
       const a = setup([], { archive });
       await a.run("resume", [row]);
       expect(a.texts()).toEqual(["Resume / restore: 0 of 1 completed. 1 failed or changed; refresh before retrying.\nclaude/p/a: earlier restores still need a refresh"]);
@@ -371,7 +372,7 @@ describe("archived rows", () => {
     await createRoot(async (dispose) => {
       const row = archivedRow();
       const listed = new Map([[row.key, row]]);
-      const archive: ArchiveCalls = { current: vi.fn((r) => listed.get(r.key)), restore: vi.fn(), forget: vi.fn(), refresh: vi.fn() };
+      const archive: ArchiveCalls = { current: vi.fn((r) => listed.get(r.key)), restore: vi.fn(), forget: vi.fn(), refresh: vi.fn(), taken: () => false };
       const a = setup([], { archive });
       await a.run("compact", [row]);
       expect(a.compact).toEqual({ [row.key]: true });
@@ -392,7 +393,7 @@ describe("archived rows", () => {
       const scans = { n: 0 };
       const rows = Array.from({ length: 5 }, (_, i) => toSession("", `archive:a${i}`, view(`a${i}`, { state: "archived", archive_id: `a${i}` })));
       const listed = new Map(rows.map((r) => [r.key, r]));
-      const archive: ArchiveCalls = { current: (r) => listed.get(r.key), restore: vi.fn(async () => done()), forget: vi.fn(), refresh: vi.fn() };
+      const archive: ArchiveCalls = { current: (r) => listed.get(r.key), restore: vi.fn(async () => done()), forget: vi.fn(), refresh: vi.fn(), taken: () => false };
       const a = setup([rowOut("live", { name: "claude/p/a3", state: "paused" }), rowOut("other")], { archive, scans });
       await a.run("resume", rows);
       expect(scans.n).toBe(1);
@@ -401,15 +402,47 @@ describe("archived rows", () => {
     });
   });
 
-  it("see a name restored earlier in the same run as taken", async () => {
+  /** Restore calls that keep their pending names as the restore store does (Qt's m_restores). */
+  function trackingCalls(listed: Map<string, SelectionRow>, taken: (row: SelectionRow) => boolean = () => false) {
+    const pending = new Set<string>();
+    const restore = vi.fn((r: SelectionRow): Promise<Outcome> | "limit" => {
+      if (pending.has(r.name)) return "limit";
+      pending.add(r.name);
+      return Promise.resolve(done());
+    });
+    const calls: ArchiveCalls = { current: (r) => listed.get(r.key), restore, forget: vi.fn(), refresh: vi.fn(), taken: (r) => taken(r as SelectionRow) };
+    return { calls, restore, pending };
+  }
+
+  it("count a second instance of a name restored earlier in the run as past the restore limit (Qt SessionSelection.cpp 336-338)", async () => {
     await createRoot(async (dispose) => {
       const one = archivedRow();
       const two = toSession("", "archive:a2", view("a", { state: "archived", archive_id: "a2" }));
-      const listed = new Map([[one.key, one], [two.key, two]]);
-      const archive: ArchiveCalls = { current: (r) => listed.get(r.key), restore: vi.fn(async () => done()), forget: vi.fn(), refresh: vi.fn() };
-      const a = setup([], { archive });
+      const { calls, restore } = trackingCalls(new Map([[one.key, one], [two.key, two]]));
+      const a = setup([], { archive: calls });
       await a.run("resume", [one, two]);
-      expect(archive.restore).toHaveBeenCalledTimes(1);
+      expect(restore.mock.calls.map((c) => c[0].archiveId)).toEqual(["a1", "a2"]);
+      expect(mocked.runAction).not.toHaveBeenCalled();
+      expect(a.texts()).toEqual(["Resume / restore: 1 of 2 completed. 1 failed or changed; refresh before retrying.\nclaude/p/a: earlier restores still need a refresh"]);
+      dispose();
+    });
+  });
+
+  it("see a name taken when the catalog lists its live row by the next item: no call, session changed", async () => {
+    await createRoot(async (dispose) => {
+      const one = archivedRow();
+      const two = toSession("", "archive:a2", view("a", { state: "archived", archive_id: "a2" }));
+      let a: ReturnType<typeof setup> | undefined;
+      // Only a live row the catalog holds takes the name; nothing is inferred from the earlier item.
+      const listedLive = (r: SelectionRow) => Object.values(a!.catalog.rows).some((x) => x.name === r.name && x.state !== "archived");
+      const tracking = trackingCalls(new Map([[one.key, one], [two.key, two]]), listedLive);
+      tracking.restore.mockImplementationOnce((r) => {
+        a!.applyBatch(batchOf({ upserts: [rowOut("restored", { name: r.name })] }));
+        return Promise.resolve(done());
+      });
+      a = setup([], { archive: tracking.calls });
+      await a.run("resume", [one, two]);
+      expect(tracking.restore).toHaveBeenCalledTimes(1);
       expect(a.texts()).toEqual(["Resume / restore: 1 of 2 completed. 1 failed or changed; refresh before retrying.\nbox / claude/p/a: session changed or is unavailable"]);
       dispose();
     });
@@ -418,7 +451,7 @@ describe("archived rows", () => {
   it("refresh the archive once when a write batch ends (Qt SessionsWindow.cpp 1916)", async () => {
     await createRoot(async (dispose) => {
       const row = archivedRow();
-      const archive: ArchiveCalls = { current: () => row, restore: vi.fn(), forget: vi.fn(async () => done()), refresh: vi.fn() };
+      const archive: ArchiveCalls = { current: () => row, restore: vi.fn(), forget: vi.fn(async () => done()), refresh: vi.fn(), taken: () => false };
       const a = setup([rowOut("b", { state: "paused" })], { archive });
       const calls = deferredCalls();
       const forget = a.run("forget", [row, ...a.listed("b")]);
@@ -453,7 +486,7 @@ describe("archived rows", () => {
         if (r.key === one.key) throw new Error("hook broke");
         return Promise.resolve(done());
       });
-      const archive: ArchiveCalls = { current, restore, forget: vi.fn(), refresh: vi.fn() };
+      const archive: ArchiveCalls = { current, restore, forget: vi.fn(), refresh: vi.fn(), taken: () => false };
       const a = setup([], { archive });
       await a.run("resume", [one, two, three]);
       expect(restore.mock.calls.map((c) => c[0].key)).toEqual([one.key, three.key]);

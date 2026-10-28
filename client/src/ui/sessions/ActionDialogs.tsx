@@ -5,7 +5,7 @@ import { change, copyCommand, copyFolder, copyName, copyReference, dismiss, end,
 import { bindBatchConfirm, running } from "../../store/batch";
 import { cancelRestoreFollow, forgetArchived, refreshArchiveWhenDone, restoreSession } from "../../store/restores";
 import type { MenuEntry } from "../../store/ui";
-import type { Details } from "../../types";
+import type { Details, Outcome } from "../../types";
 import type { Session } from "./types";
 import { FRESH_CHANGED, STATE_CHANGED, archiveNameOccupied, canStartStopped, FRESH_TIP, copyState, dialogReducer, freshCopy, freshEntry, freshStillValid, menuState, notificationsState, renameParts, renameProblem, forgetArchivedCopy, forgetCopy, forgetOpening, snapshotOf, terminateCopy, terminates, type ForgetScope, type ActionRow, type DialogEvent } from "./actions-ui";
 import type { BatchConfirmation } from "./selection";
@@ -49,7 +49,7 @@ export function actionEntries(s: Session, details?: Details, options: { context?
   return {
     change: {
       label: m.change.label, icon: archived || row.state !== "running" ? "play" : "pause", disabled: !m.change.enabled, hint: hint(m.change.enabled, m.change.reason),
-      action: () => { void (archived ? restoreSession(row, { context: options.context }) : change(row)); },
+      action: () => { void (archived ? restoreSession(row) : change(row)); },
     },
     stop: {
       label: "Stop", icon: "circle-stop", shown: m.stop.visible, disabled: !m.stop.enabled, hint: hint(m.stop.enabled, m.stop.reason),
@@ -129,6 +129,16 @@ function* listedRows(): Iterable<Session> {
   }
 }
 
+/**
+ * The Rename dialog's call (Qt's renameSession, then writeDone): a rename
+ * cancels a pending restore's follow (Qt clears m_restoreKey) and a success
+ * reloads the archive pages (1917).
+ */
+export function renameSession(row: ActionRow, newName: string): Promise<Outcome> {
+  cancelRestoreFollow();
+  return perform(row, { kind: "rename", new_name: newName, archive_id: row.archiveId ?? null }).then(refreshArchiveWhenDone);
+}
+
 /** Qt's rename dialog: the agent and project stay; only the tag after them is edited. */
 function RenameDialog(props: { row: ActionRow; close: () => void }) {
   const { prefix, tag: oldTag } = renameParts(props.row.name);
@@ -143,8 +153,7 @@ function RenameDialog(props: { row: ActionRow; close: () => void }) {
     const tag = value();
     if (tag === oldTag || renameProblem(tag, props.row, listedRows())) return;
     props.close();
-    cancelRestoreFollow();
-    void perform(props.row, { kind: "rename", new_name: prefix + tag, archive_id: props.row.archiveId ?? null }).then(refreshArchiveWhenDone);
+    void renameSession(props.row, prefix + tag);
   };
   return (
     <form onSubmit={submit}>

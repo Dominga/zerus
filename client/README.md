@@ -227,9 +227,10 @@ Outcome rules:
 
 Restore session is an archived row's change entry. It is enabled when the
 computer is online, no write is pending, the row is resumable and has its archive
-id, and no live row of that computer has its name; the context menu also needs
-an allowed restore (Qt's header does not). The call is `resume NAME --archive ID
--d`. While the same session's restore is pending, another single restore runs or
+id, and no live row of that computer has its name. As in Qt's header and the
+menu of the selected row (a right-click selects the row), it does not read the
+row's allowed operations; a batch's Resume / restore does. The call is
+`resume NAME --archive ID -d`. While the same session's restore is pending, another single restore runs or
 64 restores are pending, nothing runs and the sticky notice says "Finish or
 refresh the earlier restores before restoring another session." A restore stays
 pending until its live (running) row appears, or until its call fails.
@@ -297,9 +298,9 @@ selected row, under the heading "N selected sessions", followed by "Deselect all
   that stays. A call is made once and never retried, and a failure does not stop
   the next item, also when it throws. The calls are the single-session ones of
   the table above, with their own success and failure notices replaced by the
-  batch's. An archived row restores (past the restore limit it fails with
-  "NAME: earlier restores still need a refresh") or forgets its archived
-  instance. When a write batch ends, the archive pages reload.
+  batch's. An archived row restores (past the restore limit, also for a second
+  instance of a name restored earlier in the batch, it fails with "NAME: earlier
+  restores still need a refresh") or forgets its archived instance. When a write batch ends, the archive pages reload.
 - While a batch (or a Pause all or Resume all) runs, every write entry is
   disabled, the header shows "Updating…" and a second batch does not start. Stop
   and the copy entries are not writes.

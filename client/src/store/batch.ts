@@ -41,6 +41,12 @@ export interface ArchiveCalls {
   forget(row: ActionRow): Promise<Outcome>;
   /** Reloads the archive pages, once a write batch has ended (Qt SessionsWindow.cpp 1916). */
   refresh(): void;
+  /**
+   * The catalog lists a live row of the archived row's name now, one that the
+   * restores saw appear since the run's name index was built (Qt reads its
+   * entries at each item). Never inferred from an earlier item's outcome.
+   */
+  taken(row: ActionRow): boolean;
 }
 
 export interface BatchDeps {
@@ -74,13 +80,15 @@ export function createBatch(deps: BatchDeps) {
 
   /**
    * Qt's selectionActionApplies for a row now. `names` is a live name index
-   * (`liveNameIndex`) for checking many rows; without it an archived row's
-   * Resume scans the catalog once (Qt's archiveNameOccupied).
+   * (`liveNameIndex`) for checking many rows, plus the live rows of restores
+   * that appeared since (`taken`); without it an archived row's Resume scans
+   * the catalog once (Qt's archiveNameOccupied).
    */
   function applies(s: SelectionRow, a: SelectionAction, online: boolean, updating: boolean, names?: () => ReadonlySet<string>): boolean {
+    const occupied = () => (names ? names().has(nameKey(s)) || !!deps.archive()?.taken(s) : archiveNameOccupied(s, deps.catalog.rows));
     return selectionApplies(s, a, {
       online, updating, compact: deps.compact.get(s.key), attention: deps.attention(s),
-      occupied: a === "resume" && s.state === "archived" && (names ? names().has(nameKey(s)) : archiveNameOccupied(s, deps.catalog.rows)),
+      occupied: a === "resume" && s.state === "archived" && occupied(),
     });
   }
 
@@ -104,7 +112,9 @@ export function createBatch(deps: BatchDeps) {
    */
   async function run(a: SelectionAction, rows: readonly SelectionRow[], options: RunOptions = {}): Promise<void> {
     // One live name index per run (Qt's archiveNameOccupied for every archived
-    // Resume), built on first use; a name restored during the run joins it.
+    // Resume), built on first use. A second instance of a name restored in this
+    // run meets the restore limit (Qt's m_restores), or `taken` once its live
+    // row is listed.
     let names: Set<string> | undefined;
     const index = () => (names ??= liveNameIndex(deps.catalog.rows));
     const appliesNow = (s: SelectionRow) => applies(s, a, deps.online(s.computer), deps.updating(s.computer, s.name), index);
@@ -152,10 +162,8 @@ export function createBatch(deps: BatchDeps) {
           const row = snapshotOf(live);
           const out = await call(row, a);
           if (out === "limit") fail(restoreLimitText(row));
-          else if (out.outcome === "done") {
-            done++;
-            if (a === "resume" && row.state === "archived") names?.add(nameKey(row));
-          } else fail(`${selectionCall(row, a).operation}: ${out.detail}`);
+          else if (out.outcome === "done") done++;
+          else fail(`${selectionCall(row, a).operation}: ${out.detail}`);
         } catch (error) {
           fail(`${selectionCall(original, a).operation}: ${errorText(error)}`);
         }

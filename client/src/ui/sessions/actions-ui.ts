@@ -135,10 +135,11 @@ export function menuState(s: ActionRow, online: boolean, updating: boolean, deta
   const idle = s.activity === "idle" || !!details?.auth_required;
   const canPause = running && s.resumable && idle && s.processState !== "exited"
     && (!details || details.expected_id === "" || details.resume_message_can_send);
-  // Restore (Qt canChange 5302-5304): the context menu also needs allowed(restore)
-  // (5360-5361); the header's m_changeAction does not read it (3897-3898).
+  // Restore (Qt canChange 5302-5304). The client's right-click selects the row
+  // first, so its context menu is Qt's selected-row case, which reuses the
+  // header's m_changeAction (5360): neither reads allowed(restore) (3897-3898).
   const change = archived
-    ? available && s.resumable && !!s.archiveId && !options.occupied && (!options.context || allowedOp(s, "restore"))
+    ? available && s.resumable && !!s.archiveId && !options.occupied
     : available && ((canPause && allowedOp(s, "pause", details)) || (!running && s.resumable && allowedOp(s, "resume", details)));
   const [agent, project] = s.name.split("/", 2);
 

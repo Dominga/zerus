@@ -114,6 +114,15 @@ pub(crate) const BUILTIN: &[Template] = &[
         params: &[param("suite", Kind::Identifier), optional("functions", Kind::Identifiers), optional("shots", Kind::Identifier)],
         timeout_secs: 1800,
     },
+    // Owner, 2026-10-28: QA ran the Android tests by hand, a permission each.
+    Template {
+        id: "android-test",
+        summary: "the Android unit tests (gradlew :app:testDebugUnitTest) with Gradle's home and cache in your folder",
+        program: "mobile/android/gradlew",
+        args: &["-p", "mobile/android", ":app:testDebugUnitTest", "--no-daemon"],
+        params: &[],
+        timeout_secs: 3600,
+    },
     Template {
         id: "git-merge-lead",
         summary: "git merge --no-edit the lead's branch into your own folder",
@@ -480,7 +489,108 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
             ensure!(shots == "true" || shots == "false", "The template's \"shots\" is true or false");
         }
     }
+    if template.id == "android-test" {
+        let path = folder.join(&program);
+        let path = if cfg!(windows) { folder.join(format!("{program}.bat")) } else { path };
+        ensure!(path.is_file(), "The Android Gradle wrapper {} is not in your folder", path.display());
+        program = path.display().to_string();
+        let home = folder.join(".zerus-team").join("gradle");
+        argv.extend(["-g".to_owned(), home.join("home").display().to_string(), "--project-cache-dir".to_owned(), home.join("cache").display().to_string()]);
+    }
     Ok(Plan { template: template.id.to_owned(), program, argv, commit: None })
+}
+
+/// Owner, 2026-10-28 (QA #512): on Windows a Qt build needs the Visual Studio
+/// environment; without it cl.exe finds no standard header (C1083) and the
+/// members built through their own vcvars batch files, a permission each.
+/// vswhere names the newest Visual Studio with the C++ tools; its
+/// vcvars64.bat runs once per worker and the environment it sets is kept.
+#[cfg(windows)]
+fn msvc_environment() -> Option<Vec<(String, String)>> {
+    static ENV: std::sync::OnceLock<Option<Vec<(String, String)>>> = std::sync::OnceLock::new();
+    ENV.get_or_init(|| {
+        let program_files = std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into());
+        let vswhere = Path::new(&program_files).join(r"Microsoft Visual Studio\Installer\vswhere.exe");
+        // The Visual Studio of the Qt kit (msvc2022) first, then the newest
+        // with the C++ tools.
+        let find = |version: Option<&str>| -> Option<String> {
+            let mut query = Command::new(&vswhere);
+            if let Some(version) = version {
+                query.args(["-version", version]);
+            } else {
+                query.arg("-latest");
+            }
+            let found = query
+                .args(["-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"])
+                .output()
+                .ok()?;
+            let install = String::from_utf8_lossy(&found.stdout).lines().next()?.trim().to_owned();
+            (!install.is_empty()).then_some(install)
+        };
+        let install = find(Some("[17.0,18.0)")).or_else(|| find(None))?;
+        let vcvars = Path::new(&install).join("VC").join("Auxiliary").join("Build").join("vcvars64.bat");
+        if !vcvars.is_file() {
+            return None;
+        }
+        // cmd parses its own quotes: the line goes as it is, not re-quoted.
+        use std::os::windows::process::CommandExt;
+        let output = Command::new("cmd").raw_arg(format!("/d /s /c \"\"{}\" >nul 2>&1 && set\"", vcvars.display())).output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let env = parse_set_output(&String::from_utf8_lossy(&output.stdout));
+        env.iter().any(|(key, _)| key.eq_ignore_ascii_case("INCLUDE")).then_some(env)
+    })
+    .clone()
+}
+
+/// `set` prints NAME=value lines; a name never starts with '='.
+fn parse_set_output(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|line| line.split_once('='))
+        .filter(|(key, _)| !key.is_empty() && !key.contains(char::is_whitespace))
+        .map(|(key, value)| (key.to_owned(), value.trim_end_matches('\r').to_owned()))
+        .collect()
+}
+
+/// The Qt the folder's build was configured with: the bin folder next to the
+/// `Qt6_DIR` (…/lib/cmake/Qt6) of .ci-build/gui/CMakeCache.txt, for the test
+/// binaries' DLLs.
+fn qt_bin(folder: &Path) -> Option<PathBuf> {
+    let cache = std::fs::read_to_string(folder.join(".ci-build").join("gui").join("CMakeCache.txt")).ok()?;
+    let dir = cache.lines().find_map(|line| line.strip_prefix("Qt6_DIR:PATH=").or_else(|| line.strip_prefix("Qt6_DIR:UNINITIALIZED=")))?;
+    let bin = Path::new(dir.trim()).parent()?.parent()?.parent()?.join("bin");
+    bin.is_dir().then_some(bin)
+}
+
+/// The environment a template needs beyond the worker's own (owner,
+/// 2026-10-28): the Visual Studio tools for the Qt configure and build on
+/// Windows, Qt's DLLs and the fonts for a Qt test, Gradle's home in the folder.
+fn template_environment(plan: &Plan, folder: &Path) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    #[cfg(windows)]
+    if matches!(plan.template.as_str(), "qt-configure" | "qt-build" | "qt-test") {
+        if let Some(msvc) = msvc_environment() {
+            env.extend(msvc);
+        }
+    }
+    if plan.template == "qt-test" {
+        if let Some(bin) = qt_bin(folder) {
+            let path = env.iter().find(|(key, _)| key.eq_ignore_ascii_case("PATH")).map(|(_, value)| value.clone())
+                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
+            let separator = if cfg!(windows) { ';' } else { ':' };
+            env.retain(|(key, _)| !key.eq_ignore_ascii_case("PATH"));
+            env.push(("PATH".into(), format!("{}{separator}{path}", bin.display())));
+        }
+        #[cfg(windows)]
+        if std::env::var_os("QT_QPA_FONTDIR").is_none() {
+            env.push(("QT_QPA_FONTDIR".into(), "C:/Windows/Fonts".into()));
+        }
+    }
+    if plan.template == "android-test" {
+        env.push(("GRADLE_USER_HOME".into(), folder.join(".zerus-team").join("gradle").join("home").display().to_string()));
+    }
+    env
 }
 
 fn whole_placeholder(raw: &str) -> Option<&str> {
@@ -525,6 +635,9 @@ pub(crate) fn execute(plan: &Plan, folder: &Path, timeout: Duration, env: &[(&st
         .env("QT_QPA_PLATFORM", "offscreen")
         // The worker's own build dir is Zerus', never the member's.
         .env_remove("CARGO_TARGET_DIR");
+    for (key, value) in template_environment(plan, folder) {
+        command.env(key, value);
+    }
     for (key, value) in env {
         command.env(key, value);
     }
@@ -682,7 +795,46 @@ mod tests {
         }
         // The set the owner asked for, by id.
         let ids: Vec<&str> = BUILTIN.iter().map(|template| template.id).collect();
-        assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "git-merge-lead", "git-commit"]);
+        assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "android-test", "git-merge-lead", "git-commit"]);
+    }
+
+    // Run by hand on a Windows machine with Visual Studio (cargo test -- --ignored).
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn the_visual_studio_environment_is_found_here() {
+        let env = msvc_environment().expect("vswhere and vcvars64.bat");
+        assert!(env.iter().any(|(key, value)| key.eq_ignore_ascii_case("INCLUDE") && !value.is_empty()));
+    }
+
+    #[test]
+    fn templates_bring_the_environment_their_tools_need() {
+        // Owner, 2026-10-28 (QA #512): the Qt templates on Windows had no
+        // Visual Studio environment and Qt's DLLs, and the Android tests had
+        // no template, so QA asked a permission for each run.
+        assert_eq!(parse_set_output("INCLUDE=C:/VC/include\r\nPath=C:/bin\r\n=C:=C:/\r\nbad line\r\n"),
+                   vec![("INCLUDE".into(), "C:/VC/include".into()), ("Path".into(), "C:/bin".into())]);
+        let dir = temp();
+        let qt = dir.path().join("Qt").join("6.10.3").join("msvc2022_64");
+        std::fs::create_dir_all(qt.join("bin")).unwrap();
+        std::fs::create_dir_all(qt.join("lib").join("cmake").join("Qt6")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".ci-build").join("gui")).unwrap();
+        std::fs::write(dir.path().join(".ci-build").join("gui").join("CMakeCache.txt"),
+                       format!("Qt6_DIR:PATH={}\n", qt.join("lib").join("cmake").join("Qt6").display())).unwrap();
+        assert_eq!(qt_bin(dir.path()), Some(qt.join("bin")));
+        let test = Plan { template: "qt-test".into(), program: "t".into(), argv: vec![], commit: None };
+        let env = template_environment(&test, dir.path());
+        let path = env.iter().find(|(key, _)| key == "PATH").map(|(_, value)| value.clone()).unwrap();
+        assert!(path.starts_with(&qt.join("bin").display().to_string()), "{path}");
+        // The Gradle wrapper is the folder's own; its home and cache stay in the folder.
+        let android = dir.path().join("mobile").join("android");
+        std::fs::create_dir_all(&android).unwrap();
+        std::fs::write(android.join(if cfg!(windows) { "gradlew.bat" } else { "gradlew" }), "").unwrap();
+        let planned = plan("android-test", &json!({}), dir.path()).unwrap();
+        assert!(planned.argv.contains(&":app:testDebugUnitTest".to_owned()));
+        assert!(planned.argv.iter().any(|arg| arg.starts_with(&dir.path().join(".zerus-team").display().to_string())));
+        let env = template_environment(&planned, dir.path());
+        assert!(env.iter().any(|(key, value)| key == "GRADLE_USER_HOME" && value.contains(".zerus-team")));
     }
 
     #[test]

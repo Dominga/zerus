@@ -1,7 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity } from "./types";
-import type { CreationAdmission, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
+import type { CreatedWorktree, CreationAdmission, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 
@@ -420,9 +420,12 @@ export const repositoryFields = (url: string, destination: string, style: PathSt
 export const worktreeSnapshot = (computer: ComputerId, path: string) => desktop<Record<string, unknown>>("worktree_snapshot", { computer, path });
 /** The folder's catalog: a fresh snapshot, or `hgs worktrees --path`; a rejection is its error. */
 export const worktreeCatalog = (computer: ComputerId, path: string, refresh: boolean) => desktop<Record<string, unknown>>("worktree_catalog", { computer, path, refresh });
-/** Create worktree: the new checkout's path; a rejection is Qt's text. Never retried. */
-export const createWorktree = (computer: ComputerId, path: string, commonDir: string, branch: string, base: string, destination: string) =>
-  desktop<string>("create_worktree", { computer, path, commonDir, branch, base, destination });
+/**
+ * Create worktree: the new checkout and `catalog` (the folder's catalog the dialog opened with, naming the repository)
+ * listing it as verified; a rejection is Qt's text. Never retried.
+ */
+export const createWorktree = (computer: ComputerId, path: string, catalog: Record<string, unknown>, branch: string, base: string, destination: string) =>
+  desktop<CreatedWorktree>("create_worktree", { computer, path, catalog, branch, base, destination });
 export const listDirectories = (computer: ComputerId, path: string, hidden: boolean) => desktop<Record<string, unknown>>("list_directories", { computer, path, hidden });
 /** New folder in the folder browser: its receipt. A lost one is read again, never sent again. */
 export const createDirectory = (computer: ComputerId, path: string) => desktop<Record<string, unknown>>("create_directory", { computer, path });

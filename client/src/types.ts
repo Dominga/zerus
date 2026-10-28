@@ -432,6 +432,12 @@ export interface FolderOut {
   machine_id: string;
   machine_name: string;
 }
+/** What Create manually… created (`newsession.rs` `CreatedWorktree`). */
+export interface CreatedWorktree {
+  path: string;
+  /** The catalog the dialog opened with, listing the new checkout as verified (`launch::created_catalog`). */
+  catalog: Record<string, unknown>;
+}
 export interface RepositoryFields {
   url: string; parent: string; name: string;
   /** The Clone to field's text. */

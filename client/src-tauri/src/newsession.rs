@@ -315,19 +315,22 @@ impl NewSession {
 
     /// Create worktree in the manual dialog (`NewWorktreeDialog`, with
     /// `createWorktree` 1565-1590): one fresh request identity, no expected
-    /// machine and no receipt, as Qt sends it. The repository's catalogs are
-    /// invalidated on every outcome. The new checkout's path, or Qt's text.
-    #[allow(clippy::too_many_arguments)]
+    /// machine and no receipt, as Qt sends it. `catalog` is the folder's
+    /// catalog the dialog opened with: its `common_dir` names the repository
+    /// (`NewWorktreeDialog.h:22`). The repository's catalogs are invalidated on
+    /// every outcome. The new checkout, with `catalog` listing it as verified
+    /// (`launch::created_catalog`, NewSessionDialog.cpp 1137-1141), or Qt's text.
     pub fn create_worktree(
         &self,
         computer: &ComputerId,
         path: &str,
-        common_dir: &str,
+        catalog: &Value,
         branch: &str,
         base: &str,
         destination: &str,
-    ) -> Result<String, String> {
+    ) -> Result<CreatedWorktree, String> {
         self.allowed()?;
+        let common_dir = catalog["common_dir"].as_str().unwrap_or_default();
         let request_id = uuid::Uuid::new_v4().to_string();
         let invocation = worktrees::create_invocation(
             computer,
@@ -344,7 +347,11 @@ impl NewSession {
         lock(&self.0.catalogs).invalidate(&computer.0, common_dir);
         self.save();
         let data = worktrees::created(exit, &request_id, branch, common_dir, false, destination)?;
-        Ok(data["path"].as_str().unwrap_or_default().to_owned())
+        let path = data["path"].as_str().unwrap_or_default().to_owned();
+        Ok(CreatedWorktree {
+            catalog: launch::created_catalog(catalog, &path),
+            path,
+        })
     }
 
     /// A folder listing (`requestDirectories`): 5 s here, 15 s on a peer.
@@ -420,6 +427,15 @@ impl NewSession {
         let invocation = launch::opencode_start_invocation(computer);
         launch::opencode_started(run_bounded(&self.0.hgs, &invocation, REPLY_LIMIT))
     }
+}
+
+/// A worktree Create manually… created: its path, and the catalog the dialog
+/// opened with listing it as an available linked worktree, which New session
+/// keeps as that folder's verified catalog.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CreatedWorktree {
+    pub path: String,
+    pub catalog: Value,
 }
 
 /// The choices the next dialog starts with (`workspace/launchAgent`,
@@ -724,22 +740,21 @@ pub async fn worktree_catalog(
 }
 
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
 pub async fn create_worktree(
     state: State<'_, NewSession>,
     computer: String,
     path: String,
-    common_dir: String,
+    catalog: Value,
     branch: String,
     base: String,
     destination: String,
-) -> Result<String, String> {
+) -> Result<CreatedWorktree, String> {
     let state = state.inner().clone();
     blocking(move || {
         state.create_worktree(
             &ComputerId(computer),
             &path,
-            &common_dir,
+            &catalog,
             &branch,
             &base,
             &destination,
@@ -1430,14 +1445,16 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
             assert_eq!(
-                session.create_worktree(
-                    &local,
-                    "/srv/repo",
-                    "/srv/repo/.git",
-                    "feature",
-                    "HEAD",
-                    "/srv/repo-feature"
-                ),
+                session
+                    .create_worktree(
+                        &local,
+                        "/srv/repo",
+                        &catalog(),
+                        "feature",
+                        "HEAD",
+                        "/srv/repo-feature"
+                    )
+                    .map(|created| created.path),
                 Ok("/srv/repo-feature".into())
             );
             assert_eq!(
@@ -1461,18 +1478,40 @@ mod tests {
                 "worktrees create": {"stdout": reply, "echo": {"request_id": "--request-id"}}}}));
             let session = fake.session(Arc::new(Mutex::new(1000.0)), None);
             let mac = ComputerId::from("mac");
-            session.catalog(&mac, "/srv/repo", false).unwrap();
+            let opened = session.catalog(&mac, "/srv/repo", false).unwrap();
             let create = || {
-                session.create_worktree(
+                session
+                    .create_worktree(
+                        &mac,
+                        "/srv/repo",
+                        &opened,
+                        "feature",
+                        "HEAD",
+                        "/srv/repo-feature",
+                    )
+                    .map(|created| created.path)
+            };
+            // The created checkout joins the catalog the dialog opened with, as verified.
+            let created = session
+                .create_worktree(
                     &mac,
                     "/srv/repo",
-                    "/srv/repo/.git",
+                    &opened,
                     "feature",
                     "HEAD",
                     "/srv/repo-feature",
                 )
-            };
-            assert_eq!(create(), Ok("/srv/repo-feature".into()));
+                .unwrap();
+            assert_eq!(created.path, "/srv/repo-feature");
+            assert_eq!(
+                created.catalog,
+                launch::created_catalog(&opened, "/srv/repo-feature")
+            );
+            assert_eq!(
+                created.catalog["worktrees"].as_array().unwrap().last(),
+                Some(&json!({"path": "/srv/repo-feature", "kind": "linked", "available": true}))
+            );
+            assert_eq!(created.catalog["common_dir"], "/srv/repo/.git");
             let call = fake.log()[1].clone();
             assert_eq!(
                 call[..15],
@@ -1819,7 +1858,7 @@ mod tests {
             assert_eq!(session.opencode_favorite(&mac, "m", true, "mac"), refused);
             assert_eq!(session.opencode_start(&mac), refused);
             assert_eq!(
-                session.create_worktree(&mac, "/srv", "/srv/.git", "b", "HEAD", "/srv-b"),
+                session.create_worktree(&mac, "/srv", &catalog(), "b", "HEAD", "/srv-b"),
                 Err(REPLAY_NEEDS_HGS.into())
             );
             assert!(fake.log().is_empty());

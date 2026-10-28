@@ -12,6 +12,7 @@ pub mod batch;
 pub mod details;
 pub mod fleet;
 pub mod processes;
+pub mod readmarks;
 pub mod run;
 pub mod state;
 pub mod stream;

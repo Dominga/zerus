@@ -152,6 +152,35 @@ impl Fleet {
             .is_some_and(|handle| handle.unfollow(key))
     }
 
+    /// Follows a session's processes on one computer (see
+    /// [`crate::processes`]), independent of its Activity follow; returns the
+    /// session's catalog key. A followed session stays followed across
+    /// reconnects until [`Self::unfollow_processes`] or its end.
+    pub fn follow_processes(
+        &self,
+        computer: &ComputerId,
+        session: SessionRef,
+    ) -> Result<String, FollowError> {
+        let streams = guard(&self.shared.streams);
+        let handle = streams.get(computer).ok_or(FollowError::UnknownComputer)?;
+        handle.follow_processes(session)
+    }
+
+    /// Stops following a session's processes; false when it was not followed.
+    pub fn unfollow_processes(&self, computer: &ComputerId, key: &str) -> bool {
+        guard(&self.shared.streams)
+            .get(computer)
+            .is_some_and(|handle| handle.unfollow_processes(key))
+    }
+
+    /// The sessions whose processes a computer follows, by key.
+    pub fn followed_processes(&self, computer: &ComputerId) -> Vec<String> {
+        guard(&self.shared.streams)
+            .get(computer)
+            .map(StreamHandle::followed_processes)
+            .unwrap_or_default()
+    }
+
     /// Writes a control line (a `ping`, say) to one computer's stream.
     pub fn send(&self, computer: &ComputerId, control: Control) -> bool {
         guard(&self.shared.streams)

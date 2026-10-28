@@ -10,21 +10,23 @@
 //! [`ComputerStatus::Reconnecting`] with its rows kept, and the next start
 //! follows after 5 s, 15 s, 60 s, then every 5 minutes (failures more than ten
 //! minutes apart start over). Followed sessions are subscribed again on every
-//! new stream, after their last cursor.
+//! new stream, after their last cursor, and so are followed processes when the
+//! stream offers that topic.
 use crate::{state::CatalogState, Change, ComputerId, ComputerStatus};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use zerus_watch_protocol::{
     decode, topic, Body, Control, Frame, FrameError, SessionRef, Subscription,
-    ACTIVITY_SUBSCRIPTIONS, ACTIVITY_TAIL, HELP_MARKER, MAX_FRAME_BYTES, VERSION,
+    ACTIVITY_SUBSCRIPTIONS, ACTIVITY_TAIL, HELP_MARKER, MAX_FRAME_BYTES, PROCESSES_SUBSCRIPTIONS,
+    VERSION,
 };
 
 /// Lines and commands a supervisor may have queued; a full queue makes the
@@ -110,7 +112,8 @@ pub enum FollowError {
     UnknownComputer,
     /// The key is not the session's catalog key.
     KeyMismatch,
-    /// The computer already follows [`ACTIVITY_SUBSCRIPTIONS`] sessions.
+    /// The computer already follows [`ACTIVITY_SUBSCRIPTIONS`] sessions (for
+    /// processes, [`PROCESSES_SUBSCRIPTIONS`] or the stream's lower limit).
     TooMany,
     /// The stream was stopped.
     Stopped,
@@ -298,6 +301,8 @@ enum Input {
     Closed { generation: u64 },
     Subscribe { key: String },
     Unsubscribe { key: String, session: SessionRef },
+    SubscribeProcesses { key: String },
+    UnsubscribeProcesses { key: String, session: SessionRef },
     Control(Control),
     Stop,
 }
@@ -310,8 +315,10 @@ struct Follow {
 }
 
 type Follows = Arc<Mutex<BTreeMap<String, Follow>>>;
+/// Sessions whose processes are followed, by key.
+type ProcessFollows = Arc<Mutex<BTreeMap<String, SessionRef>>>;
 
-fn lock(follows: &Follows) -> MutexGuard<'_, BTreeMap<String, Follow>> {
+fn lock<T>(follows: &Mutex<T>) -> MutexGuard<'_, T> {
     follows
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -322,6 +329,9 @@ pub struct StreamHandle {
     computer: ComputerId,
     tx: SyncSender<Input>,
     follows: Follows,
+    processes: ProcessFollows,
+    /// The processes follows the latest stream accepts.
+    processes_limit: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -391,6 +401,50 @@ impl StreamHandle {
         lock(&self.follows).keys().cloned().collect()
     }
 
+    /// Follows a session's processes on this computer, now and on every later
+    /// stream that offers the topic; returns its key. Independent of
+    /// [`Self::follow`]. At most [`PROCESSES_SUBSCRIPTIONS`] per computer, or
+    /// the lower limit of the latest stream.
+    pub fn follow_processes(&self, session: SessionRef) -> Result<String, FollowError> {
+        if self.stopped() {
+            return Err(FollowError::Stopped);
+        }
+        let key = session.key();
+        {
+            let mut follows = lock(&self.processes);
+            if let Some(old) = follows.get(&key) {
+                if *old == session {
+                    return Ok(key);
+                }
+            } else if follows.len() >= self.processes_limit.load(Ordering::Relaxed) {
+                return Err(FollowError::TooMany);
+            }
+            follows.insert(key.clone(), session);
+        }
+        self.tx
+            .send(Input::SubscribeProcesses { key: key.clone() })
+            .map_err(|_| FollowError::Stopped)?;
+        Ok(key)
+    }
+
+    /// Stops following a session's processes and drops their state without an
+    /// update; false when the key was not followed.
+    pub fn unfollow_processes(&self, key: &str) -> bool {
+        let Some(session) = lock(&self.processes).remove(key) else {
+            return false;
+        };
+        let _ = self.tx.send(Input::UnsubscribeProcesses {
+            key: key.to_owned(),
+            session,
+        });
+        true
+    }
+
+    /// The keys whose processes are followed.
+    pub fn followed_processes(&self) -> Vec<String> {
+        lock(&self.processes).keys().cloned().collect()
+    }
+
     /// Ends the stream (EOF on its stdin), reports the computer
     /// [`ComputerStatus::Ended`] with no rows, and waits for the supervisor.
     pub fn stop(mut self) {
@@ -425,6 +479,8 @@ pub fn spawn(
 ) -> StreamHandle {
     let (tx, rx) = mpsc::sync_channel(QUEUE_LINES);
     let follows = Follows::default();
+    let processes = ProcessFollows::default();
+    let processes_limit = Arc::new(AtomicUsize::new(PROCESSES_SUBSCRIPTIONS));
     let stop = Arc::new(AtomicBool::new(false));
     let supervisor = Supervisor {
         hgs: hgs.to_owned(),
@@ -434,6 +490,8 @@ pub fn spawn(
         rx,
         tx: tx.clone(),
         follows: follows.clone(),
+        processes: processes.clone(),
+        processes_limit: processes_limit.clone(),
         stop: stop.clone(),
         state: CatalogState::new(),
         generation: 0,
@@ -454,6 +512,8 @@ pub fn spawn(
         computer: computer.clone(),
         tx,
         follows,
+        processes,
+        processes_limit,
         stop,
         thread: Some(thread),
     }
@@ -473,6 +533,8 @@ struct Supervisor {
     rx: Receiver<Input>,
     tx: SyncSender<Input>,
     follows: Follows,
+    processes: ProcessFollows,
+    processes_limit: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     state: CatalogState,
     generation: u64,
@@ -560,6 +622,10 @@ impl Supervisor {
                 Ok(Input::Stop) | Err(RecvTimeoutError::Disconnected) => return false,
                 Ok(Input::Subscribe { key }) => self.state.follow(&key),
                 Ok(Input::Unsubscribe { key, .. }) => self.state.unfollow(&key),
+                Ok(Input::SubscribeProcesses { key }) => self.state.processes_mut().follow(&key),
+                Ok(Input::UnsubscribeProcesses { key, .. }) => {
+                    self.state.processes_mut().unfollow(&key)
+                }
                 Ok(_) => {}
                 Err(RecvTimeoutError::Timeout) => return true,
             }
@@ -630,6 +696,11 @@ impl Supervisor {
                         }));
                     }
                 }
+                Ok(Input::SubscribeProcesses { key }) => self.subscribe_processes(&key),
+                Ok(Input::UnsubscribeProcesses { key, session }) => {
+                    self.state.processes_mut().unfollow(&key);
+                    self.unsubscribe_processes(session);
+                }
                 Ok(Input::Control(control)) => self.write(&control),
                 Ok(Input::Stop) | Err(RecvTimeoutError::Disconnected) => return Outcome::Stopped,
                 Err(RecvTimeoutError::Timeout) => {}
@@ -640,22 +711,46 @@ impl Supervisor {
     fn handle(&mut self, frame: &Frame) {
         let changes = self.state.apply(&self.computer, frame);
         for change in changes {
-            if let Change::Activity {
-                key,
-                update: crate::ActivityUpdate::Ended,
-                ..
-            } = &change
-            {
-                lock(&self.follows).remove(key);
+            match &change {
+                Change::Activity {
+                    key,
+                    update: crate::ActivityUpdate::Ended,
+                    ..
+                } => {
+                    lock(&self.follows).remove(key);
+                }
+                Change::Processes {
+                    key,
+                    update: crate::ProcessesUpdate::Ended,
+                    ..
+                } => {
+                    // The server may still follow a key the catalog dropped.
+                    let removed = lock(&self.processes).remove(key);
+                    if let Some(session) = removed {
+                        self.unsubscribe_processes(session);
+                    }
+                }
+                _ => {}
             }
             self.emit(change);
         }
         match &frame.body {
             Body::Hello(_) => {
                 self.greeted = true;
+                let limit = self
+                    .state
+                    .processes_limit()
+                    .map_or(PROCESSES_SUBSCRIPTIONS, |limit| {
+                        limit.min(PROCESSES_SUBSCRIPTIONS)
+                    });
+                self.processes_limit.store(limit, Ordering::Relaxed);
                 let keys: Vec<String> = lock(&self.follows).keys().cloned().collect();
                 for key in keys {
                     self.subscribe(&key);
+                }
+                let keys: Vec<String> = lock(&self.processes).keys().cloned().collect();
+                for key in keys {
+                    self.subscribe_processes(&key);
                 }
             }
             Body::Snapshot(snapshot)
@@ -696,6 +791,45 @@ impl Supervisor {
             tail: after.is_none().then_some(follow.tail),
             ..Subscription::default()
         }));
+    }
+
+    /// Accepts the key's processes frames and, on a greeted stream that offers
+    /// the topic, subscribes it. A key the live catalog lacks ends at once, and
+    /// so does one beyond the stream's limit.
+    fn subscribe_processes(&mut self, key: &str) {
+        let Some(session) = lock(&self.processes).get(key).cloned() else {
+            return;
+        };
+        self.state.processes_mut().follow(key);
+        if !self.greeted {
+            return;
+        }
+        let Some(limit) = self.state.processes_limit() else {
+            return;
+        };
+        let beyond = self.state.processes().keys().position(|known| known == key) >= Some(limit);
+        if (self.state.live() && !self.state.rows().contains_key(key)) || beyond {
+            if let Some(change) = self.state.processes_mut().end(&self.computer, key) {
+                lock(&self.processes).remove(key);
+                self.emit(change);
+            }
+            return;
+        }
+        self.write(&Control::Subscribe(Subscription {
+            topic: topic::PROCESSES.into(),
+            session: Some(session),
+            ..Subscription::default()
+        }));
+    }
+
+    fn unsubscribe_processes(&mut self, session: SessionRef) {
+        if self.greeted && self.state.processes_limit().is_some() {
+            self.write(&Control::Unsubscribe(Subscription {
+                topic: topic::PROCESSES.into(),
+                session: Some(session),
+                ..Subscription::default()
+            }));
+        }
     }
 
     fn write(&mut self, control: &Control) {

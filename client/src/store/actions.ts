@@ -5,6 +5,7 @@ import { catalog as appCatalog, computerOffline, type CatalogState } from "./cat
 import { marks as appMarks, type Marks } from "./marks";
 import { copyState, detailsFromInspection, MUTE_PENDING, STATE_CHANGED, forgetsBindingOnly, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type ForgetScope, type PendingNotifications } from "../ui/sessions/actions-ui";
 import type { Action, Details, Outcome, Target } from "../types";
+import type { Session } from "../ui/sessions/types";
 
 // Guarded session actions. Every action is one call to the Rust side; a call
 // is never repeated. A rejected call is an unknown outcome and is shown as a
@@ -415,5 +416,17 @@ let selection: () => Selection = () => ({});
 /** Hands the store the selected row and open subagent (session.ts), which this module cannot import: ui.ts reads the page. */
 export function bindSelection(source: () => Selection) { selection = source; }
 
-const app = createActions(appCatalog, (computer) => !computerOffline(computer), () => selection());
+/**
+ * The rows the actions look up by key: the catalog's, then the loaded archived
+ * rows (Qt's entries hold both). Only lookups by key are answered.
+ */
+export function withArchived(catalog: Pick<CatalogState, "rows">, archived: (key: string) => Session | undefined): Pick<CatalogState, "rows"> {
+  return { rows: new Proxy({} as CatalogState["rows"], { get: (_, key) => (typeof key === "string" ? catalog.rows[key] ?? archived(key) : undefined) }) };
+}
+
+let archivedRow: (key: string) => Session | undefined = () => undefined;
+/** Hands the store the loaded archived rows (store/archive.ts), which this module cannot import: archive.ts reads ui.ts. */
+export function bindArchivedRows(lookup: (key: string) => Session | undefined) { archivedRow = lookup; }
+
+const app = createActions(withArchived(appCatalog, (key) => archivedRow(key)), (computer) => !computerOffline(computer), () => selection());
 export const { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify } = app;

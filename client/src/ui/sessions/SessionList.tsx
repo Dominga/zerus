@@ -7,6 +7,8 @@ import {
   emphasis, childStatus, gitTooltip, paletteIndex, folderOf,
 } from "./SessionCard";
 import { catalog, computerOffline } from "../../store/catalog";
+import { archiveCount } from "../../store/archive";
+import { ArchiveBar } from "./ArchiveBar";
 import { detailsFor, followedFor, updating } from "../../store/actions";
 import { running } from "../../store/batch";
 import { TOOL_WIDTH, machineMenu, runSelection, selectedRows, selectionContextMenu, selectionCount } from "./selection-live";
@@ -36,7 +38,7 @@ const FILTERS: { id: StateFilter; icon: string; tip: string; count: () => string
   { id: "attention", icon: "attention", tip: "Needs attention", count: () => String(counts().attention) },
   { id: "active", icon: "active", tip: "Active: working, scheduled, waiting, needs attention or a draft", count: () => String(counts().active) },
   { id: "paused", icon: "paused", tip: "Saved sessions (paused or stopped)", count: () => String(counts().paused) },
-  { id: "archived", icon: "archived", tip: "Archive", count: () => "" },
+  { id: "archived", icon: "archived", tip: "Archive", count: archiveCount },
 ];
 
 const filterTone = (id: StateFilter) => ({
@@ -117,7 +119,7 @@ function sessionMenu(s: Session): MenuEntry[] {
     ...(mark ? [mark] : []),
     { separator: true },
     act.change,
-    fresh ?? { label: "Clear session…", icon: "clear", disabled: LATER },
+    ...(fresh ? [fresh] : s.state === "archived" ? [] : [{ label: "Clear session…", icon: "clear", disabled: LATER }]),
     act.rename,
     { label: "Fork session…", icon: "git-fork", disabled: LATER },
     ...(act.archive ? [act.archive] : []),
@@ -437,8 +439,8 @@ export function SessionList() {
         </div>
         <FilterChips />
 
-        <Show when={stateFilter() !== "archived"} fallback={<ArchiveList />}>
-          <Show when={catalog.order.length > 0} fallback={<ListPlaceholder />}>
+        <Show when={stateFilter() === "archived"}><ArchiveBar /></Show>
+          <Show when={catalog.order.length > 0 || stateFilter() === "archived"} fallback={<ListPlaceholder />}>
             <div class="sp-scroll" classList={{ morphing: morphing(), organizing: !!dragItem() }} ref={list.ref} tabindex="0" onKeyDown={onKey} role="tree"
               onDragOver={(e) => organizeOver(e, list)} onDrop={(e) => organizeDrop(e)} onDragLeave={(e) => { if (!(e.currentTarget as Element).contains(e.relatedTarget as Node)) setDrop(undefined); }}
               aria-label="Agent sessions; Ctrl-click to select several; drag to organize, left/right to collapse or expand a group">
@@ -450,7 +452,6 @@ export function SessionList() {
               </Show>
             </div>
           </Show>
-        </Show>
         <SelectionBar />
         <footer class="sp-foot">
           <span class="tabular ell">{shownSummary().shown ? `${shownSummary().shown} shown, ${shownSummary().working} working, ${shownSummary().attention} attention` : catalog.order.length ? "No matching sessions" : ""}</span>
@@ -610,18 +611,6 @@ function ListPlaceholder() {
         </Show>
       </div>
     </Show>
-  );
-}
-
-function ArchiveList() {
-  return (
-    <div class="sp-scroll archive">
-      <div class="empty">
-        <Icon name="archive" size={26} />
-        <h3>Archive</h3>
-        <p>Archived sessions are read in pages from each machine; browsing them moves to this client in a later phase.</p>
-      </div>
-    </div>
   );
 }
 

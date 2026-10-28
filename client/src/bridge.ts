@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { emptyBatch, isEmptyBatch, type Action, type Batch, type ComputerId, type Details, type Outcome, type ReadMark, type Target } from "./types";
+import { emptyBatch, isEmptyBatch, type Action, type ArchivePage, type Batch, type ComputerId, type Details, type Outcome, type ReadMark, type Target } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 
@@ -225,6 +225,16 @@ export async function sessionReference(target: Target, archiveId: string | null)
 export async function copyCommand(computer: string, name: string, archiveId: string | null): Promise<string> {
   if (!inTauri()) throw "Actions need the desktop app.";
   return invoke<string>("copy_command", { computer, name, archiveId });
+}
+
+/**
+ * One checked page of a computer's archive (`archive_page`, `hgs [@alias] archives --json`).
+ * Rejects with Qt's text for an invalid page, "superseded" when a newer
+ * request of that computer replaced it, or the hgs failure.
+ */
+export async function archivePage(computer: string, from: number, until: number, cursor: string, query: string): Promise<ArchivePage> {
+  if (!inTauri()) throw "Archive pages need the desktop app.";
+  return invoke<ArchivePage>("archive_page", { computer, from, until, cursor, query });
 }
 
 /** Puts text on the clipboard: from Rust in the app, the page's clipboard in a browser. */

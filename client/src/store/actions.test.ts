@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRoot } from "solid-js";
 import { createCatalog, toSession } from "./catalog";
-import { createActions, type Followed } from "./actions";
+import { createActions, withArchived, type Followed } from "./actions";
 import { createMarks, type MarksPort } from "./marks";
 import { notificationsState, snapshotOf } from "../ui/sessions/actions-ui";
 import * as bridge from "../bridge";
@@ -941,6 +941,52 @@ describe("forget", () => {
       await gone.forget(session({ state: "paused" }), opened());
       expect(mocked.runAction).not.toHaveBeenCalled();
       expect(gone.notices()).toMatchObject([{ tone: "error", text: "The session state changed. Open its actions again.", sticky: true }]);
+      dispose();
+    });
+  });
+});
+
+describe("archived rows (the Archive view)", () => {
+  const ARCHIVE_ID = "10000000-0000-4000-8000-000000000001";
+  const archived = () => toSession("", `archive:${ARCHIVE_ID}`, view({ state: "archived", status: "ended", archive_id: ARCHIVE_ID, archived_at: 1_789_000_000 }));
+
+  it("an archived selection inspects with its archive id (inspect --archive ID)", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      const row = archived();
+      expect(a.detailsFor(row, true, { value: undefined, settled: true })).toBeUndefined();
+      await flush();
+      expect(mocked.inspectSession).toHaveBeenCalledTimes(1);
+      expect(mocked.inspectSession).toHaveBeenCalledWith({ computer: "", name: "claude/sample-project/a", run_id: "run-1", conversation_id: "conv-1" }, ARCHIVE_ID);
+      expect(a.detailsFor(row, true, { value: undefined, settled: true })?.run_id).toBe("run-1");
+      dispose();
+    });
+  });
+
+  it("the click-time recheck finds a loaded archived row, so Copy restore command passes its archive id", async () => {
+    await createRoot(async (dispose) => {
+      const catalog = createCatalog();
+      const row = archived();
+      mocked.copyCommand.mockResolvedValue("hgs resume claude/sample-project/a --archive id");
+      const plain = createActions(catalog.catalog);
+      expect(await plain.copyCommand(snapshotOf(row))).toEqual({ outcome: "failed", detail: "This session is no longer available. Open its actions again." });
+      const a = createActions(withArchived(catalog.catalog, (key) => (key === row.key ? row : undefined)));
+      expect(await a.copyCommand(snapshotOf(row))).toMatchObject({ outcome: "done" });
+      expect(mocked.copyCommand).toHaveBeenCalledWith("", "claude/sample-project/a", ARCHIVE_ID);
+      expect(a.stillListed(snapshotOf(row))?.archiveId).toBe(ARCHIVE_ID);
+      dispose();
+    });
+  });
+
+  it("an archived rename runs with its archive id while the archived row is loaded", async () => {
+    await createRoot(async (dispose) => {
+      const catalog = createCatalog();
+      const row = archived();
+      mocked.runAction.mockResolvedValue(done());
+      const a = createActions(withArchived(catalog.catalog, (key) => (key === row.key ? row : undefined)));
+      const rename = { kind: "rename", new_name: "claude/sample-project/b", archive_id: ARCHIVE_ID } as const;
+      expect(await a.perform(snapshotOf(row), rename)).toMatchObject({ outcome: "done" });
+      expect(mocked.runAction).toHaveBeenCalledWith({ computer: "", name: "claude/sample-project/a", run_id: "run-1", conversation_id: "conv-1" }, rename);
       dispose();
     });
   });

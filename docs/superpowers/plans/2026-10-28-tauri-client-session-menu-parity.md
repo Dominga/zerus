@@ -598,7 +598,7 @@ Rules (`ArchiveBrowser.cpp`, `ArchiveDatePicker.cpp`):
   - A page that comes back empty while rows were shown is the error "Archive changed. Refresh to start a new view.".
   - Pages load only while the Archive filter shows the list.
   - A query change cancels pages and reloads after 300 ms.
-- **Date range:** the picker's periods and custom range, default the last 30 days (`m_first = today - 29`). `from >= until` loads nothing.
+- **Date range:** the picker's periods and custom range. The default is All dates (`m_period = 0`); the custom range starts at the last 30 days (`m_first = today - 29`). `from >= until` loads nothing.
 - **Status:**
   - "Loading archive…" while loading;
   - one computer with a window: "{a}–{b} of {total}", or "{shown} shown of {total}";

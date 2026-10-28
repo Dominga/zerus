@@ -22,6 +22,7 @@ pub mod shell;
 pub mod state;
 pub mod stream;
 pub mod tasks;
+pub mod termination_cleanup;
 pub mod view;
 pub mod views;
 pub mod worktree_review;

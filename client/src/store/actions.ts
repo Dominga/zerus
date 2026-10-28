@@ -33,6 +33,8 @@ const ALREADY_STOPPED = ["hgs: This turn is no longer working", "This turn is no
 
 const sessionId = (computer: string, name: string) => `${computer}\n${name}`;
 const failed = (detail: string): Outcome => ({ outcome: "failed", detail });
+/** The text of a rejected call: the string itself, an Error's message, else its String(). */
+export const errorText = (error: unknown) => (typeof error === "string" ? error : error instanceof Error ? error.message : String(error));
 
 /**
  * The target of an action. Interrupt, mark read and terminate act on one
@@ -322,8 +324,6 @@ export function createActions(
     const value = fetched[id]?.value;
     return matches(value) ? value : undefined;
   }
-
-  const errorText = (error: unknown) => (typeof error === "string" ? error : error instanceof Error ? error.message : String(error));
 
   /** The text the last successful copy put on the clipboard (the actions smoke logs it). */
   let copied = "";

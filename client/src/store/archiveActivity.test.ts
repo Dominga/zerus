@@ -40,13 +40,15 @@ const seqs = (list: readonly ActivityEvent[]) => list.map((e) => e.seq);
 
 interface Call { computer: string; name: string; archiveId: string; after: number; resolve(r: ArchivedActivity): void; reject(e: unknown): void }
 
-function setup(options: { showing?: boolean } = {}) {
+function setup(options: { showing?: boolean; defaultClock?: boolean } = {}) {
   const calls: Call[] = [];
   const read = vi.fn((computer: string, name: string, archiveId: string, after: number) =>
     new Promise<ArchivedActivity>((resolve, reject) => { calls.push({ computer, name, archiveId, after, resolve, reject }); }));
   const [showing, setShowing] = createSignal(options.showing ?? true);
   let store!: ReturnType<typeof createArchiveActivity>;
-  const dispose = createRoot((d) => { store = createArchiveActivity({ read, showing }); return d; });
+  // The fake timers move Date; the app's default clock is the monotonic one.
+  const now = options.defaultClock ? undefined : () => Date.now();
+  const dispose = createRoot((d) => { store = createArchiveActivity({ read, showing, now }); return d; });
   /** Answers the call at `i` (default: the latest) and lets its handlers run. */
   const answer = async (r: ArchivedActivity, i = calls.length - 1) => { calls[i].resolve(r); await flush(); };
   const fail = async (error: unknown, i = calls.length - 1) => { calls[i].reject(error); await flush(); };
@@ -107,6 +109,16 @@ describe("archived Activity (Qt inspect 3467-3492, acceptInspection 3587-3660)",
     expect(t.calls.length).toBe(3);
     vi.advanceTimersByTime(1);
     expect(t.calls.length).toBe(4);
+    t.dispose();
+  });
+
+  it("measures the cadence on a monotonic clock, as Qt's QElapsedTimer: a wall clock set back does not stall it", async () => {
+    const t = setup({ defaultClock: true });
+    t.store.follow(target(1));
+    vi.setSystemTime(new Date(2026, 9, 28, 11, 0, 0));
+    await t.answer(reply([ev(1)]));
+    vi.advanceTimersByTime(ARCHIVED_POLL_MS);
+    expect(t.calls.map((c) => c.after)).toEqual([0, 1]);
     t.dispose();
   });
 
@@ -223,6 +235,7 @@ describe("archived Activity (Qt inspect 3467-3492, acceptInspection 3587-3660)",
   });
 
   it(`keeps at most ${ARCHIVED_EVENTS_MAX} events, the oldest dropped first (acceptInspection 3651)`, async () => {
+    expect(ARCHIVED_EVENTS_MAX).toBe(500);
     const t = setup();
     t.store.follow(target(1));
     const many = Array.from({ length: ARCHIVED_EVENTS_MAX + 100 }, (_, i) => ev(i + 1));

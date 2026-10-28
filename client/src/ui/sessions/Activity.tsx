@@ -369,8 +369,8 @@ export function paneStates(source: ActivitySource, s: Session | undefined) {
     offline: live === "offline",
     /** "This session left the list; its Activity stopped here." */
     ended: source.ended(),
-    /** Why the last read failed, as a notice. */
-    failure: source.error() ?? "",
+    /** Why the last read failed, as a notice: read-only sources only (the live pane never showed its follow error). */
+    failure: source.readOnly ? source.error() ?? "" : "",
   };
 }
 

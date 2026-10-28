@@ -1,9 +1,9 @@
 import { batch, createEffect, createRoot, createSignal, on, onCleanup, untrack } from "solid-js";
 import * as bridge from "../bridge";
 import { seqOf } from "./activity";
+import { errorText } from "./actions";
 import { activityReadOnly, type ActivitySource } from "./activitySource";
-import { archive } from "./archive";
-import { page, selectedKey } from "./ui";
+import { page, selected, selectedKey } from "./ui";
 import { pageHidden } from "./visibility";
 import type { ActivityEvent, ArchivedActivity, ComputerId } from "../types";
 
@@ -38,11 +38,10 @@ export interface ArchiveActivityDeps {
   showing(): boolean;
   /** A timer; returns its cancel. */
   later?(callback: () => void, ms: number): () => void;
-  /** The clock, in milliseconds. */
+  /** A monotonic clock in milliseconds (performance.now), as Qt's QElapsedTimer. */
   now?(): number;
 }
 
-const errorText = (error: unknown) => (typeof error === "string" ? error : error instanceof Error ? error.message : String(error));
 const capped = (list: ActivityEvent[]) => (list.length > ARCHIVED_EVENTS_MAX ? list.slice(list.length - ARCHIVED_EVENTS_MAX) : list);
 const sameTarget = (a: ArchiveTarget | undefined, b: ArchiveTarget | undefined) =>
   a === b || (!!a && !!b && a.id === b.id && a.computer === b.computer && a.name === b.name && a.archiveId === b.archiveId);
@@ -52,7 +51,7 @@ const seqNumber = (e: ActivityEvent) => seqOf(e) ?? 0;
 /** The archived Activity store; call it inside a reactive root. */
 export function createArchiveActivity(deps: ArchiveActivityDeps) {
   const later = deps.later ?? ((callback: () => void, ms: number) => { const timer = setTimeout(callback, ms); return () => clearTimeout(timer); });
-  const now = deps.now ?? (() => Date.now());
+  const now = deps.now ?? (() => performance.now());
   const [target, setTarget] = createSignal<ArchiveTarget | undefined>();
   const [events, setEvents] = createSignal<readonly ActivityEvent[]>([]);
   const [summary, setSummary] = createSignal<Record<string, unknown> | undefined>();
@@ -174,12 +173,16 @@ export function createArchiveActivity(deps: ArchiveActivityDeps) {
 
 export type ArchiveActivityStore = ReturnType<typeof createArchiveActivity>;
 
-/** The selected row while it is a loaded archived row with an archive id. */
+/**
+ * The selected archived row with an archive id: a loaded one, or the source of
+ * a pending restore while the archive reloads (the same lookup as `selected`,
+ * Qt's selected() 3136-3139).
+ */
 function selectedArchived(): ArchiveTarget | undefined {
   const key = selectedKey();
   if (!key || !activityReadOnly(key)) return undefined;
-  const row = archive.row(key);
-  return row?.archiveId ? { id: row.key, computer: row.computer, name: row.name, archiveId: row.archiveId } : undefined;
+  const row = selected();
+  return row?.key === key && row.archiveId ? { id: row.key, computer: row.computer, name: row.name, archiveId: row.archiveId } : undefined;
 }
 
 /** The app's archived Activity: the selected archived row, while the Sessions page shows in a shown window. */

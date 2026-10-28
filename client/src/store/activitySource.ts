@@ -22,7 +22,7 @@ export interface ActivitySource {
   ended(): boolean;
   /** Reads the page before the oldest event. */
   loadOlder(): void;
-  /** Shown as a notice while set. */
+  /** Why the last read failed; a read-only source shows it as a notice while set. */
   error(): string | undefined;
   /**
    * Recorded Activity that is only read: no live states, no composer, no send

@@ -38,9 +38,11 @@ import { activity } from "../../store/session";
 import { archiveActivity } from "../../store/archiveActivity";
 import type { ActivitySource } from "../../store/activitySource";
 import { followedFor } from "../../store/actions";
-import { archivedSession } from "../../store/archive";
+import { archive, archivedSession } from "../../store/archive";
 import { applyBatch, toSession } from "../../store/catalog";
-import { setPage, setSelectedKey, setStateFilter } from "../../store/ui";
+import { restoreSession } from "../../store/restores";
+import { selected, setPage, setSelectedKey, setStateFilter } from "../../store/ui";
+import { snapshotOf } from "./actions-ui";
 import { emptyBatch, type ActivityEvent, type ArchivePage, type ArchivedActivity, type ViewRow } from "../../types";
 
 const mocked = vi.mocked(bridge);
@@ -86,8 +88,10 @@ describe("the Activity view with a read-only source", () => {
   });
 
   it("keeps the live states for a live source", () => {
-    const live = readOnlySource({ readOnly: undefined, olderDone: () => false, ended: () => true });
+    const live = readOnlySource({ readOnly: undefined, olderDone: () => false, ended: () => true, error: () => "x" });
     expect(paneStates(live, rows[0])).toMatchObject({ working: true, ended: true });
+    // The live pane never showed its follow error; the notice is for read-only sources.
+    expect(paneStates(live, rows[0]).failure).toBe("");
     expect(paneStates(live, rows[1]).attention).toBe(true);
     expect(paneStates(live, rows[2]).error).toBe(true);
     expect(paneStates(live, rows[4]).archived).toBe(true);
@@ -102,6 +106,10 @@ describe("the session detail", () => {
     expect(activitySourceFor("\nrun:run-live")).toBe(activity);
     expect(detailTabs(`\narchive:${uuid(1)}`).map((t) => t.label)).toEqual(["Activity"]);
     expect(detailTabs("\nrun:run-live").map((t) => t.label)).toContain("Activity");
+    // Qt hides only the Terminal for an archived row; Processes stays while enabled.
+    const all = [{ id: "activity", label: "Activity" }, { id: "terminal", label: "Terminal" }, { id: "processes", label: "Processes" }];
+    expect(detailTabs(`box\narchive:${uuid(1)}`, all).map((t) => t.label)).toEqual(["Activity", "Processes"]);
+    expect(detailTabs("\nrun:run-live", all).map((t) => t.label)).toEqual(["Activity", "Terminal", "Processes"]);
   });
 });
 
@@ -143,5 +151,34 @@ describe("the app's archived Activity", () => {
     expect(mocked.activityPort.follow).toHaveBeenCalledWith(expect.objectContaining({ key: "run:run-live" }));
     vi.advanceTimersByTime(10_000);
     expect(reads.length).toBe(2);
+  });
+
+  it("keeps reading a restore's archived row while the archive reloads, as Qt's selected() keeps its source (3136-3139)", async () => {
+    const pages: ((p: ArchivePage) => void)[] = [];
+    mocked.archivePage.mockImplementation(() => new Promise((resolve) => { pages.push(resolve); }));
+    const reads: { args: unknown[]; resolve(r: ArchivedActivity): void }[] = [];
+    mocked.archivedActivity.mockImplementation((...args: unknown[]) => new Promise((resolve) => { reads.push({ args, resolve }); }));
+    setStateFilter("archived");
+    archive.refresh();
+    await flush();
+    pages.splice(0).forEach((answer) => answer({ rows: [{ ...archivedRow(3), resumable: true }], next_cursor: "", previous_cursor: null, total: 1, position: 0 }));
+    await flush();
+    const key = `\narchive:${uuid(3)}`;
+    setSelectedKey(key);
+    expect(reads.at(-1)?.args).toEqual(["", "codex/example/a3", uuid(3), 0]);
+    reads.at(-1)!.resolve({ events: [ev(1, "Stop", "Done.")], replace_events: false, conversation_id: "conv-a3", run_id: "run-a3", cleared_conversations: [], cursor: 1, summary: {} });
+    await flush();
+
+    mocked.runAction.mockResolvedValueOnce({ outcome: "done", receipt: {}, cleanup: null });
+    await restoreSession(snapshotOf(selected()!));
+    await flush();
+    // The page is reloading: the row is the pending restore's source, still selected and still read.
+    expect(selected()?.archiveId).toBe(uuid(3));
+    expect(archiveActivity.target()?.id).toBe(key);
+    expect(archiveActivity.events().map((e) => e.seq)).toEqual([1]);
+    const before = reads.length;
+    vi.advanceTimersByTime(3000);
+    expect(reads.length).toBe(before + 1);
+    expect(reads.at(-1)?.args).toEqual(["", "codex/example/a3", uuid(3), 1]);
   });
 });

@@ -96,13 +96,15 @@ function Header() {
   );
 }
 
-const TABS = [{ id: "activity", label: "Activity" }] as const;
+type Tab = { id: string; label: string };
+const TABS: readonly Tab[] = [{ id: "activity", label: "Activity" }];
 
 /** The Activity of a row: an archived row's recorded one, read-only and never streamed, else the live follow. */
 export const activitySourceFor = (key: string): ActivitySource => (activityReadOnly(key) ? archiveActivity : activity);
 
-/** The tabs of a row; an archived row has Activity only (Qt has no Terminal for it, and terminal_status answers unsupported). */
-export const detailTabs = (key: string) => (activityReadOnly(key) ? TABS.filter((t) => t.id === "activity") : TABS);
+/** The tabs of a row: an archived row has no Terminal (Qt hides only that one; terminal_status answers unsupported). */
+export const detailTabs = (key: string, tabs: readonly Tab[] = TABS): readonly Tab[] =>
+  (activityReadOnly(key) ? tabs.filter((t) => t.id !== "terminal") : tabs);
 
 export function SessionDetail() {
   return (

@@ -446,8 +446,11 @@ the cursor becomes the reply's. A reply for another conversation than the shown
 one (unless its `cleared_conversations` lists the shown one) replaces the
 events and is read again from cursor 0 at once. At most 500 events are kept,
 the oldest dropped first, as Qt keeps them. A failed read shows "Could not
-refresh activity: {error}" until the next answer. Leaving the row, another page
-or a hidden window stops the reads and drops the events. The pane renders
+refresh activity: {error}" as a notice until the next answer; that notice is
+for read-only sources only, and the live pane shows no follow error. The row of
+a pending restore stays selected and read while the archive reloads, as Qt's
+`selected()` keeps it. Leaving the row, another page or a hidden window stops
+the reads and drops the events. The pane renders
 through the same Activity view, read-only: the transcript without the live
 tool line, the attention, error and offline banners or a composer, and no
 Terminal tab, as Qt shows none for an archived row.
@@ -506,10 +509,9 @@ query on standard input) and an `inspect NAME ... --archive ID` call. It then
 waits up to 15 s for the row's Activity to show the fake's events and logs
 `actions-smoke archive-activity: done (N events)`, or `failed (...)` when no
 event shows, the row is followed live or the pane shows a notice or a live line
-(`log.ndjson` holds `inspect NAME --after 0 --skip-processes --archive ID`, and
-after the hook waits one poll the same call with `--after 2`; each later reload
-of the archive reads the row from `--after 0` again). On the same archived row
-it then runs the Restore session entry's path and logs
+(`log.ndjson` holds `inspect NAME --after 0 --skip-processes --archive ID` for
+the details and the first Activity read, and after the hook waits one poll the
+same call with `--after 2`). On the same archived row it then runs the Restore session entry's path and logs
 `actions-smoke restore: done (state filter now all)` (the Archive filter becomes
 All, as the row is selected and followed; `log.ndjson` holds `resume NAME
 --archive ID -d`), Forget archived session through the dialog's confirmation

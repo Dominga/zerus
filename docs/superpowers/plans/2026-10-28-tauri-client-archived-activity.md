@@ -75,7 +75,7 @@ Commit `feat(client): the archived Activity read`.
 ## Task G2: the store and the pane
 
 - **The store** (`client/src/store/archiveActivity.ts`), a port of Qt's merge in `acceptInspection` (3639-3660):
-  - `createArchiveActivity(deps)`, where `deps` is the bridge call, a clock or timer seam, and whether the Sessions page shows. The app instance follows the selected row: active only for an `archive:` key whose loaded archived row has an archive id.
+  - `createArchiveActivity(deps)`, where `deps` is the bridge call, a clock or timer seam, and whether the Sessions page shows. The app instance follows the selected row: active only for an `archive:` key whose selected archived row (a loaded one, or a pending restore's source while the archive reloads, Qt's `selected()` 3136-3139) has an archive id. The poll clock is monotonic (`performance.now`, as Qt's `QElapsedTimer`).
   - It implements `ActivitySource`, an exported interface in `client/src/store/activitySource.ts` that both this store and the live `activity` store implement: `target`, `events`, `summary`, `loaded`, `loadingOlder` (always false here), `olderDone` (always true here), `ended` (false here), `loadOlder` (a no-op here), `error` and `readOnly` (true here). Phase 4 extends only the live store's side. A source that lacks something renders nothing for it.
   - On a new selection it resets the events, summary and cursor and the error, and reads with `after = 0`.
   - It polls every 2500 ms only while the row stays selected and the page shows, with no overlapping read: a read starts 2500 ms after the previous one started, once that one ended (Qt's `m_inspectionAge`). A "busy" answer (`ARCHIVED_ACTIVITY_BUSY`) is ignored, as Qt's `return false`: nothing started, so it is tried again at the next tick of Qt's 500 ms timer.
@@ -90,9 +90,9 @@ Commit `feat(client): the archived Activity read`.
 - **`ActivityView`** (`Activity.tsx`), with the read-only branching kept as small as possible:
   - It takes an optional `source` with that surface, defaulting to the live `activity` store.
   - With `source.readOnly`, it shows the transcript instead of the "This conversation is archived." notice, and it shows no live tool line, no attention or error banners for live states, no offline notice and no "left the list" notice.
-  - It shows `source.error` as a notice when set.
+  - It shows `source.error` as a notice when set, for a read-only source only (the live pane never showed its follow error).
   - The older-page scroll trigger never fires for it (`olderDone` is true).
-- **`SessionDetail.tsx`:** for a selected archived row, pass the archived store as the source. Export `activityReadOnly(key)` (true for `archive:` keys) for the owner session's composer, either from here or from the store. Archived rows show no Terminal tab: Qt has none for them, and `terminal_status` already answers unsupported.
+- **`SessionDetail.tsx`:** for a selected archived row, pass the archived store as the source. Export `activityReadOnly(key)` (true for `archive:` keys) for the owner session's composer, either from here or from the store. Archived rows show no Terminal tab: Qt hides only that one for them (Processes stays while enabled), and `terminal_status` already answers unsupported.
 - **No live follow for archived rows:** `store/session.ts` follows only rows that are not `archive:` keys (before this, selecting an archived row subscribed it on the stream), and `followedFor` in `store/actions.ts` answers an archived key as settled with no value, so its details are inspected at once as before.
 - **Tests:**
   - the store: reset on selection, the poll cadence and no overlap, the merge rules, a conversation change, a dropped late reply, the error text and its clearing, and nothing kept after leaving;

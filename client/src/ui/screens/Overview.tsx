@@ -128,6 +128,8 @@ function LiveSessions(props: { rows: Session[]; scroller: () => HTMLElement | un
     const measure = () => { setWidth(grid.clientWidth); setTop(grid.offsetTop); };
     const ro = new ResizeObserver(measure);
     ro.observe(grid);
+    // Content above the grid (accounts loading, machine cards, the offline notice) moves it without resizing it.
+    if (grid.parentElement) ro.observe(grid.parentElement);
     measure();
     onCleanup(() => ro.disconnect());
   });
@@ -219,7 +221,7 @@ export function OverviewScreen() {
             <b class="tabular">{ov.stats().attention}</b><span>Needs attention</span>
           </button>
           <button class="ov-tile" onClick={() => go("active")}><b class="tabular">{ov.stats().active}</b><span>Active</span></button>
-          <button class="ov-tile" onClick={() => setPage("machines")}><b class="tabular">{`${online()} / ${ov.cards().length}`}</b><span>Machines online</span></button>
+          <button class="ov-tile" onClick={() => { setMachineFilter([]); setProjectFilter([]); setPage("machines"); }}><b class="tabular">{`${online()} / ${ov.cards().length}`}</b><span>Machines online</span></button>
           <button class="ov-tile" onClick={() => go("all")}><b class="tabular">{ov.stats().all}</b><span>Sessions</span></button>
         </div>
 

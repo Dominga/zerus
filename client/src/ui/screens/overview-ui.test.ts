@@ -11,7 +11,6 @@ const account = (extra: Partial<Account> = {}): Account => ({
 });
 
 describe("overview cards", () => {
-  // Review Focus 1.
   it("a reconnecting peer keeps its last values in the unknown colour, leaves Machines online and counts as offline", () => {
     const computers = { "": { id: "", status: "live", attempt: 0 }, studio: { id: "studio", status: "reconnecting", attempt: 1 } };
     const cards = fleetCards(computers, { "": machineMeta("workstation"), studio: machineMeta("studio", { cpu_percent: 42, sampled_at: NOW - 30 }) });

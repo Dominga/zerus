@@ -15,9 +15,9 @@ mod organization;
 mod platform;
 #[cfg(feature = "live")]
 mod pump;
-pub mod renderer;
 #[cfg(feature = "live")]
 mod readsync;
+pub mod renderer;
 #[cfg(feature = "live")]
 mod replay;
 #[cfg(feature = "live")]

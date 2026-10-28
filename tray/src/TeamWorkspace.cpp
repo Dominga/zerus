@@ -977,22 +977,32 @@ private:
 class ToolbarRow : public QWidget {
 public:
     using QWidget::QWidget;
-    bool compact() const { return m_compact; }
+    bool compact() const { return m_level == 2; }
 protected:
     void resizeEvent(QResizeEvent *event) override { QWidget::resizeEvent(event); refit(); }
     void showEvent(QShowEvent *event) override { QWidget::showEvent(event); refit(); }
 private:
+    // Two steps: first the switch labels go (their switches keep them as
+    // tooltips), then the buttons' words.
     void refit()
     {
-        if (!m_compact) m_full = sizeHint().width();
-        const bool compact = width() < m_full;
-        if (compact == m_compact) return;
-        m_compact = compact;
+        if (m_level == 0) {
+            m_full = sizeHint().width();
+            m_labels = 0;
+            const int spacing = layout() ? layout()->spacing() : 0;
+            for (auto *l : findChildren<QLabel *>())
+                if (l->property("compactHide").toBool() && !l->isHidden()) m_labels += l->sizeHint().width() + spacing;
+        }
+        const int level = width() >= m_full ? 0 : width() >= m_full - m_labels ? 1 : 2;
+        if (level == m_level) return;
+        m_level = level;
+        const bool compact = level == 2;
+        for (auto *l : findChildren<QLabel *>()) if (l->property("compactHide").toBool()) l->setVisible(level == 0);
         // Icon-only buttons take their icon's width, not the style's text
         // minimum, and the row draws its groups closer together.
         if (auto *row = qobject_cast<QHBoxLayout *>(layout())) {
-            row->setSpacing(compact ? 4 : 8);
-            row->setContentsMargins(compact ? 6 : 12, 8, compact ? 6 : 12, 6);
+            row->setSpacing(compact ? 2 : 8);
+            row->setContentsMargins(compact ? 4 : 12, 8, compact ? 4 : 12, 6);
         }
         for (auto *b : findChildren<QPushButton *>()) {
             const QString text = b->property("compactText").toString();
@@ -1006,10 +1016,8 @@ private:
             const QIcon icon = b->property("compactIcon").value<QIcon>();
             if (!icon.isNull()) b->setIcon(compact ? icon : QIcon());
         }
-        for (auto *l : findChildren<QLabel *>()) if (l->property("compactHide").toBool()) l->setVisible(!compact);
     }
-    bool m_compact = false;
-    int m_full = 0;
+    int m_level = 0, m_full = 0, m_labels = 0;
 };
 
 QWidget *TeamWorkspace::toolbar(const Team &team)

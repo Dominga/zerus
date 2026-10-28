@@ -388,17 +388,26 @@ actions they return on `Lane::Write`.
     comment.
 - [ ] `rename(old, new)` refuses an existing nonempty target with "Another draft
   already exists here. Recover the previous one from Saved drafts.".
-- [ ] **Location: needs a decision (design).** The Tauri client and the Qt GUI
-  can run at the same time during the migration. Two writers on one key would
-  race, so the recommendation is:
-  - the client's own root (`<app data>/drafts`), in the same format;
+- [ ] **Location (agreed with design).** The Tauri client and the Qt GUI can
+  run at the same time during the migration, so each store has exactly one
+  writer:
+  - the client writes only its own root, `<app data>/drafts`, in the same
+    format;
   - Saved drafts also lists Qt's store (`hgdev/hgs-tray.conf.drafts`, or the
-    plist sibling on macOS) read-only;
-  - recovering a Qt draft copies it into the client's store.
+    plist sibling on macOS);
+  - "Recover" copies a Qt draft into the client's root, and the Qt copy stays.
 
-  `tray/update-installed.py` snapshots and verifies only Qt's folder, so the
-  client's installer and updater need the same graceful quit, snapshot and
-  check for its own root. That belongs to the packaging work.
+  Qt's store is strictly read-only for the client: no locks, writes or renames.
+  Qt replaces its files atomically while the client reads them. A manifest
+  that fails to parse, or a blob that does not match its hash, is read once
+  more before it counts as invalid.
+- [ ] Follow-ups outside phase 4, filed under their phases:
+  - `zerus-5wmh.13` (side-by-side period): when the owner switches the
+    default, a one-time import of all Qt drafts into the client's root,
+    de-duplicated by key and content hash.
+  - `zerus-5wmh.12` (packaging and updates): the client's updater quits the
+    client gracefully, flushes, snapshots and verifies its drafts root, as
+    `tray/update-installed.py` does for Qt's.
 - [ ] Tests:
   - ordering under coalescing;
   - a crash between the blob and manifest writes;
@@ -407,7 +416,7 @@ actions they return on `Lane::Write`.
   - rename collisions;
   - private permissions on Unix.
 
-## Media: voice and round video (proposal, before building)
+## Media: voice and round video (layout agreed; M1 next)
 
 Voice and round video capture, encoding and transcription are the events
 session's; the recorder controls, the mode switch, the player and the progress
@@ -465,6 +474,17 @@ ring are the web client's (spec lines 212-214).
   - The result is the voice composer's state, not a file path.
 - Permission texts as Qt's: "Allow camera and microphone access, then hold
   Video again." and "A camera and microphone are required to record video.".
+- macOS permissions belong to these tasks:
+  - the camera and microphone prompts (`AVCaptureDevice` authorization, never
+    requested before the user holds Voice or Video);
+  - `NSCameraUsageDescription` and `NSMicrophoneUsageDescription` in the
+    bundle's Info.plist;
+  - the hardened runtime entitlements `com.apple.security.device.camera` and
+    `com.apple.security.device.audio-input`.
+- The pipeline mirrors Qt's exactly, as `SpeechRecorder`, `SpeechComposer` and
+  `RoundVideo` define it: states, limits, texts, profiles, the draft, preview
+  before send, and the uncertain and cancel paths. Each M task ports the Qt
+  tests that cover its part.
 
 **Proposed order:**
 - M1: voice audio (core, plus `cpal` in `client/media`), on every platform.

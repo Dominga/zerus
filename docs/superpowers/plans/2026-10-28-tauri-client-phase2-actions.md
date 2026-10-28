@@ -1,56 +1,86 @@
-# Tauri Client Phase 2: Guarded Actions Implementation Plan
+# Tauri Client Phase 2: Guarded Session Actions Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** The new desktop client sends messages, interrupts a turn, marks a session read, pauses, resumes, renames, archives and terminates sessions through the same guarded `hgs` calls, identities, confirmations and outcome rules as the Qt GUI (Beads `zerus-5wmh.7`).
+**Goal:** The new desktop client interrupts a turn, marks a session read, pauses, resumes, renames, archives and terminates sessions. It uses the same guarded `hgs` calls, identities, enablement rules, confirmations, notices and outcome rules as the Qt GUI (Beads `zerus-5wmh.7`).
 
-**Architecture:** `client/core` gains a pure action layer: one module builds the exact `hgs` argument list, standard input and timeout for each action (`actions.rs`). A second module runs one invocation with a deadline (`run.rs`) and classifies the exit into done, failed or uncertain with Qt's receipt checks. A third keeps read marks durable until the host's snapshot shows them (`readmarks.rs`). `client/src-tauri` exposes one `run_action` command that runs these on a worker thread and refuses a second action of the same kind on the same session while one is in flight. The SolidJS frontend enables the menu entries phase 1 left disabled and adds the confirmations, the rename dialog, the outcome notices and a text-only composer. Unknown outcomes are shown, never replayed.
+**Architecture:**
+- **Pure action layer in `client/core`:**
+  - `actions.rs` builds the exact `hgs` argument list, standard input and timeout for each action. It classifies the exit with Qt's receipt rules into done or failed, including the automatic worktree cleanup line of archive and terminate.
+  - `run.rs` runs one invocation with a deadline.
+  - `details.rs` reads the selected session's `hgs inspect` fields that the enablement rules need.
+  - `readmarks.rs` keeps shared read marks durable until the host's snapshot shows them.
+- **`client/src-tauri`:** exposes `run_action` and `inspect_session`, and refuses a second action on a session while one is in flight.
+- **SolidJS frontend:** enables the session menu entries phase 1 left disabled, following Qt's exact enablement, labels and confirmations.
+
+Unknown outcomes are shown and never replayed.
 
 **Tech Stack:** Rust 1.99.1 (`client/core`, `client/src-tauri`, Tauri 2), SolidJS 1.9 + TypeScript + Vite, vitest, Python 3 stdlib for the fake `hgs`.
 
-**Spec:** `docs/superpowers/specs/2026-10-27-tauri-web-ui-design.md` (section "Actions"; the phase table in `docs/superpowers/plans/2026-10-28-tauri-client-phase1.md`). The behavioural reference is the Qt GUI: `tray/src/HgsClient.cpp` (`requestSendMessage`, `runSessionAction`, `requestRead`, `runWrite`, `terminateSession`, `pauseSession`, `resumeSession`, `archiveSession`, `renameSession`), `tray/src/NativeSessionCapabilities.h`, `tray/src/ReadMarks.h`, and the terminate confirmation in `tray/src/SessionsWindow.cpp` (object name `terminateSessionConfirm`).
+**Spec:** `docs/superpowers/specs/2026-10-27-tauri-web-ui-design.md` (section "Actions"); phase table in `docs/superpowers/plans/2026-10-28-tauri-client-phase1.md`. The behavioural reference is the Qt GUI:
+- `tray/src/HgsClient.cpp`: `runSessionAction`, `requestRead`, `runWrite`, `requestInspection`, `terminateSession`, `pauseSession`, `resumeSession`, `archiveSession`, `renameSession`.
+- `tray/src/NativeSessionCapabilities.h`.
+- `tray/src/ReadMarks.h`.
+- `tray/src/SessionsWindow.cpp`:
+  - the header actions, around lines 3890-3912;
+  - the session context menu, around 5270-5380;
+  - the write notices, around 1915-1994;
+  - the terminate confirmation, around 5760-5800 (object name `terminateSessionConfirm`).
+
+Read those lines before each task; this plan quotes the rules it depends on.
 
 ## Global Constraints
 
 - "Actions keep today's guarded CLI calls and their rules: request identities, expected run and conversation, destructive confirmations with the safe choice focused, and **unknown outcomes are never replayed automatically**. The client adds no new action semantics." (spec, Actions)
 - Rust toolchain 1.99.1 (`cargo +1.99.1`, `rust-version = "1.99"`); `client/core` stays pure Rust without Tauri.
 - The new UI never separates values with dots (U+00B7, U+2022, U+2219, U+22C5, U+2027, U+2981, U+30FB); `scripts/check-ui-separators.py` enforces it.
-- No obvious keyboard hints in the UI (owner rule, round 6): no "Enter to send" text.
+- No obvious keyboard hints in the UI (owner rule, round 6).
+- **Notices are Qt's texts:**
+  - After a successful write: "Session renamed. Refreshing…" for rename, and "Session updated. Refreshing…" for pause, resume, archive and terminate (`SessionsWindow.cpp:1971`).
+  - On failure: the detail `hgs` printed.
+  - Worktree cleanup: "Worktree removed automatically. The branch and archived conversation are kept." and "Worktree kept for review: {reason}" (`SessionsWindow.cpp:1987-1992`).
+  - Interrupt and mark read show no success notice.
 - Never run the real `hgs` against live sessions in tests; tests use the fake `hgs` in `client/core/tests/support`.
 - Headless GUI runs only with `env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 ZERUS_CLIENT_HEADLESS=1 xvfb-run -a -s "-screen 0 1440x900x24" ...` (`client/README.md`, "Headless runs").
-- Repository text in English; no session names, real paths or e-mail addresses in fixtures (reserved example domains, `/home/example/...`).
-- Remove-worktree cleanup after Terminate, forgetting saved or archived sessions, fork, clear and compact context are out of scope (they move with `zerus-5wmh.10`); their menu entries stay disabled.
+- Repository text in English; fixtures synthetic (reserved example domains, `/home/example/...`, `claude/sample-project/review`).
+- Send is not in this phase: it moves to phase 4 with the full composer (`zerus-5wmh.9`). That phase needs Qt's block reasons, the cold cache confirmation, resume-then-send, local failed messages and durable drafts.
 
 ## Review Focus
 
-1. A session restarted between the click and the call (new run id): `hgs` refuses the stale expected run; the client shows the failure with Qt's text, keeps the composer text, and the next attempt uses the new run from the catalog.
-2. Enter pressed twice or a button double-clicked: exactly one `hgs` process per session and action kind; the second press is refused with "A message to this session is already being sent." (send) or ignored while pending (other actions).
-3. A slow or dropped SSH peer: the action times out, the outcome is uncertain or failed with "Check Terminal before retrying", nothing is retried, and the session's action is enabled again.
-4. `hgs` missing or not executable: a definite failure before any bytes are sent (never "uncertain").
-5. The selected session changes, disappears or is renamed while a confirmation or rename dialog is open: the action runs only against the session the dialog was opened for, and only if it is still listed with the same run.
+1. A session restarted between the menu opening and the click (new run id): the action runs only if the row still has the run the menu or dialog was built for; otherwise the notice says "This session changed. Open its actions again." and nothing runs. Terminate also passes `--expected-run-id`, so `hgs` refuses a stale run.
+2. A double click or a repeated shortcut: exactly one `hgs` process per session while an action is pending; every action entry of that session shows disabled ("Updating…" in Qt) until the outcome arrives.
+3. A slow or dropped SSH peer: the action times out with Qt's text, nothing is retried, and the session's actions are enabled again.
+4. `hgs` missing or not executable: a definite failure with the spawn error, before any input is written.
+5. Archive or terminate prints a `ZERUS_WORKTREE_CLEANUP` line with status `kept` or `unconfirmed`: the notice stays until dismissed and nothing removes the folder or retries.
 
 ---
 
 ## File Structure
 
 ```
-client/core/src/actions.rs          Action, Target, Invocation, Exit, Outcome; invocation(), classify(), allowed()
-client/core/src/run.rs              run(hgs, &Invocation) -> Exit: spawn, stdin, deadline, environment
-client/core/src/readmarks.rs        ReadMark, ReadMarks: durable pending marks, merge, settle against rows
-client/core/src/view.rs             ViewRow gains state, tracked, reply_id, attention_signature, shared_read,
-                                    read_reply_id, read_attention_signature, allowed_actions, action_reasons
-client/core/src/lib.rs              pub mod actions, run, readmarks; re-exports
-client/core/tests/actions.rs        run() + classify() against the fake hgs
+client/core/src/actions.rs        Action, Target, Invocation, Exit, Outcome, WorktreeCleanup; invocation(), classify(), allowed()
+client/core/src/run.rs            run(), run_with_env(): spawn, stdin, deadline, environment
+client/core/src/details.rs        Details (inspect fields used by enablement); details_invocation(), parse_details()
+client/core/src/readmarks.rs      ReadMark, ReadMarks: durable pending shared read marks
+client/core/src/view.rs           ViewRow gains state, tracked, resumable, activity, process_state, archive_id,
+                                  reply_id, attention_signature, shared_read, read_reply_id,
+                                  read_attention_signature, allowed_actions, action_reasons
+client/core/src/lib.rs            new modules and re-exports
+client/core/tests/actions.rs      run() + classify() against the fake hgs
 client/core/tests/support/fake_hgs_actions.py   fake hgs for action tests
-client/src-tauri/src/actions.rs     run_action and pending_read_marks commands, in-flight guard
-client/src-tauri/src/lib.rs         registers the commands and the read-mark store path
-client/src/store/actions.ts         action state per session, outcome notices, mark-read queue on the JS side
-client/src/store/actions.test.ts    vitest for the store
-client/src/ui/sessions/ActionDialogs.tsx   TerminateConfirm, RenameDialog
-client/src/ui/sessions/Composer.tsx        text-only composer (port of design/webui Composer, no attachments)
-client/src/ui/sessions/SessionList.tsx     enables the menu entries
-client/src/ui/sessions/SessionDetail.tsx   Stop button, Mark as read chip, composer
-client/README.md                    "Actions" section
+client/src-tauri/src/actions.rs   run_action, inspect_session, pending_read_marks; in-flight guard
+client/src-tauri/src/lib.rs       registers commands and the read-mark store path
+client/src-tauri/src/commands.rs  settles read marks against applied rows
+client/src/types.ts               the new ViewRow fields, Details, Action, Outcome, Target
+client/src/bridge.ts              runAction, inspectSession, pendingReadMarks wrappers
+client/src/store/actions.ts       pending state per session, notices, details cache, read-mark retry
+client/src/store/actions.test.ts
+client/src/ui/sessions/actions-ui.ts      menuState(), terminateCopy(), renameError() (pure, tested)
+client/src/ui/sessions/actions-ui.test.ts
+client/src/ui/sessions/ActionDialogs.tsx  TerminateConfirm, RenameDialog
+client/src/ui/sessions/SessionList.tsx    context menu entries
+client/src/ui/sessions/SessionDetail.tsx  header actions, Stop, Mark as read chip
+client/README.md                  "Actions" section
 ```
 
 ---
@@ -59,244 +89,203 @@ client/README.md                    "Actions" section
 
 **Files:**
 - Create: `client/core/src/actions.rs`
-- Modify: `client/core/src/lib.rs` (add `pub mod actions;` and `pub use actions::{Action, Target, Invocation, Exit, Outcome};`)
-- Modify: `client/core/src/view.rs` (new `ViewRow` fields, see Interfaces)
-- Test: unit tests inside `actions.rs`, plus new cases in `view.rs` tests
+- Modify: `client/core/src/lib.rs` (`pub mod actions;` and `pub use actions::{Action, Target, Invocation, Exit, Outcome, WorktreeCleanup};`)
+- Modify: `client/core/src/view.rs` (new `ViewRow` fields)
+- Test: unit tests in `actions.rs` and `view.rs`
 
 **Interfaces:**
-- Consumes: `ViewRow` (phase 1), `ComputerId` (`""` is this computer).
+- Consumes: `ViewRow` (phase 1); computer `""` is this computer, otherwise the SSH alias.
 - Produces:
 
 ```rust
-pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Target {
-    /// "" for this computer, otherwise the SSH alias (`hgs @alias`).
-    pub computer: String,
-    pub name: String,
-    pub run_id: String,
-    pub conversation_id: String,
-}
+pub struct Target { pub computer: String, pub name: String, pub run_id: String, pub conversation_id: String }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
-    Send { text: String },
     Interrupt { turn_started: f64 },
     MarkRead { reply_id: Option<String>, attention_signature: Option<String> },
     Pause,
     Resume,
-    Rename { new_name: String },
+    Rename { new_name: String, archive_id: Option<String> },
     Archive,
     Terminate,
 }
 
-pub struct Invocation {
-    pub args: Vec<String>,          // without the program; "@alias" first for a peer
-    pub stdin: Option<Vec<u8>>,     // JSON for send, interrupt and read
-    pub timeout: std::time::Duration,
-    pub request_id: Option<String>, // send and interrupt
-}
+pub struct Invocation { pub args: Vec<String>, pub stdin: Option<Vec<u8>>, pub timeout: std::time::Duration, pub request_id: Option<String> }
 
 pub enum Exit {
     Code { code: i32, stdout: Vec<u8>, stderr: String },
-    Abnormal { stderr: String },    // killed by a signal
+    Abnormal { stderr: String },
     TimedOut,
-    StartFailed(String),            // spawn error text
-    WriteFailed,                    // stdin could not be written in full
+    StartFailed(String),
+    WriteFailed,
 }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorktreeCleanup { pub status: String, pub path: String, pub common_dir: String, pub reason: Option<String> }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum Outcome {
-    Done { receipt: serde_json::Value },
+    Done { receipt: serde_json::Value, cleanup: Option<WorktreeCleanup> },
     Failed { detail: String },
-    Uncertain { detail: String },   // send only, exactly where Qt reports uncertain
 }
 
-/// The exact `hgs` call, or the refusal Qt shows before starting a process.
 pub fn invocation(target: &Target, action: &Action, request_id: &str) -> Result<Invocation, String>;
-/// Qt's receipt and exit rules for that action.
 pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit: Exit) -> Outcome;
-/// Qt's NativeSessionCapabilities::action: reported allowed_actions win; without them
+/// NativeSessionCapabilities::action without details: reported allowed_actions win; without them
 /// every operation is allowed except that an "opencode" session only renames and forgets.
 pub fn allowed(row: &ViewRow, operation: &str) -> bool;
 ```
 
-`ViewRow` additions (all from the catalog row, `#[serde(default)]`, snake_case JSON to the frontend):
-`state: String` (`row.state`), `tracked: bool`, `reply_id: Option<String>`, `attention_signature: Option<String>`, `shared_read: bool` (the row has the key `attention_signature`), `read_reply_id: Option<String>` and `read_attention_signature: Option<String>` (from `row.read` only when `row.read.conversation_id == row.conversation_id`, as `HgsClient.cpp:188-192`), `allowed_actions: Option<Vec<String>>`, `action_reasons: BTreeMap<String, String>`.
+`ViewRow` additions, all `#[serde(default)]`, from the catalog row:
+- **State:** `state: String`, `tracked: bool`, `resumable: bool`, `activity: String`, `process_state: String`, `archive_id: Option<String>`.
+- **Reply identity:** `reply_id: Option<String>`, `attention_signature: Option<String>`, and `shared_read: bool` (the row has the key `attention_signature`).
+- **Read state:** `read_reply_id: Option<String>` and `read_attention_signature: Option<String>`, taken from `row.read` only when `row.read.conversation_id == row.conversation_id` (`HgsClient.cpp:186-192`).
+- **Capabilities:** `allowed_actions: Option<Vec<String>>`, `action_reasons: BTreeMap<String, String>`.
 
-The argument lists, inputs and timeouts (copied from `tray/src/HgsClient.cpp`; `@alias` is prepended for a peer):
+Calls, inputs and timeouts (from `tray/src/HgsClient.cpp`; `@alias` first for a peer):
 
 | Action | Arguments | Standard input | Timeout this computer / peer |
 |---|---|---|---|
-| Send | `send NAME --json` | `{"request_id","text","attachments":[],"expected_run_id","expected_conversation_id"}` | 15 s / 45 s |
 | Interrupt | `interrupt NAME --json` | `{"request_id","expected_run_id","expected_conversation_id","expected_turn_started"}` | 15 s / 45 s |
 | MarkRead | `read NAME --json` | `{"run_id","conversation_id","reply_id"|null,"attention_signature"|null}` | 15 s / 35 s |
 | Pause | `pause NAME` | none | 45 s / 45 s |
 | Resume | `resume NAME -d` | none | 30 s / 30 s |
-| Rename | `rename NAME NEW` | none | 5 s / 15 s |
+| Rename | `rename NAME NEW` plus `--archive ID` when archived | none | 5 s / 15 s |
 | Archive | `archive NAME` | none | 30 s / 45 s |
 | Terminate | `terminate NAME --expected-run-id RUN` (flag only when RUN is not empty) | none | 45 s / 60 s |
 
-The timeouts and texts are Qt's (`tray/src/HgsClient.cpp`: send 15 s / 45 s at line 2100, session actions 15 s / 45 s, read 15 s / 35 s, writes as passed to `runWrite`). Refusal texts, verbatim: "Refresh the session before sending a message.", "Use at most 64 KiB of text and 8 attachments.", "Write a message or attach a file first.".
-
-- [ ] **Step 1: Write the failing tests** (in `actions.rs`, `#[cfg(test)] mod tests`):
+- [ ] **Step 1: Write the failing tests** (in `actions.rs`):
 
 ```rust
 fn target(computer: &str) -> Target {
     Target { computer: computer.into(), name: "claude/sample-project/review".into(),
              run_id: "run-1".into(), conversation_id: "conv-1".into() }
 }
+fn exit0(stdout: &[u8], stderr: &str) -> Exit { Exit::Code { code: 0, stdout: stdout.to_vec(), stderr: stderr.into() } }
 
 #[test]
-fn send_builds_the_guarded_call() {
-    let inv = invocation(&target(""), &Action::Send { text: "hello".into() }, "req-1").unwrap();
-    assert_eq!(inv.args, ["send", "claude/sample-project/review", "--json"]);
-    let input: serde_json::Value = serde_json::from_slice(inv.stdin.as_ref().unwrap()).unwrap();
-    assert_eq!(input, serde_json::json!({"request_id":"req-1","text":"hello","attachments":[],
-        "expected_run_id":"run-1","expected_conversation_id":"conv-1"}));
-    let peer = invocation(&target("mac"), &Action::Send { text: "hello".into() }, "req-1").unwrap();
-    assert_eq!(peer.args[0], "@mac");
-}
-
-#[test]
-fn send_refuses_like_qt_before_starting() {
-    let mut t = target(""); t.run_id.clear();
-    assert_eq!(invocation(&t, &Action::Send { text: "x".into() }, "r").err().unwrap(),
-               "Refresh the session before sending a message.");
-    assert_eq!(invocation(&target(""), &Action::Send { text: "  \n".into() }, "r").err().unwrap(),
-               "Write a message or attach a file first.");
-    let big = "a".repeat(MAX_MESSAGE_BYTES + 1);
-    assert_eq!(invocation(&target(""), &Action::Send { text: big }, "r").err().unwrap(),
-               "Use at most 64 KiB of text and 8 attachments.");
-}
-
-#[test]
-fn a_valid_send_receipt_is_done_and_anything_else_is_uncertain() {
+fn calls_match_the_qt_client() {
     let t = target("");
-    let a = Action::Send { text: "hello".into() };
-    let inv = invocation(&t, &a, "req-1").unwrap();
-    let ok = br#"{"status":"submitted","request_id":"req-1","agent_id":"","name":"claude/sample-project/review","run_id":"run-1","conversation_id":"conv-1"}"#;
-    assert!(matches!(classify(&t, &a, &inv, Exit::Code { code: 0, stdout: ok.to_vec(), stderr: String::new() }), Outcome::Done { .. }));
-    let wrong_run = br#"{"status":"submitted","request_id":"req-1","agent_id":"","name":"claude/sample-project/review","run_id":"run-2","conversation_id":"conv-1"}"#;
-    assert_eq!(classify(&t, &a, &inv, Exit::Code { code: 0, stdout: wrong_run.to_vec(), stderr: String::new() }),
-               Outcome::Uncertain { detail: "Delivery acknowledgement is invalid. Inspect Terminal before retrying.".into() });
-    assert_eq!(classify(&t, &a, &inv, Exit::TimedOut),
-               Outcome::Uncertain { detail: "Delivery timed out. The message may have reached the agent; inspect Terminal before retrying.".into() });
-    assert_eq!(classify(&t, &a, &inv, Exit::WriteFailed),
-               Outcome::Uncertain { detail: "Message transfer failed. Inspect Terminal before retrying.".into() });
+    assert_eq!(invocation(&t, &Action::Pause, "u").unwrap().args, ["pause", "claude/sample-project/review"]);
+    assert_eq!(invocation(&t, &Action::Resume, "u").unwrap().args, ["resume", "claude/sample-project/review", "-d"]);
+    assert_eq!(invocation(&t, &Action::Archive, "u").unwrap().args, ["archive", "claude/sample-project/review"]);
+    let rename = invocation(&t, &Action::Rename { new_name: "claude/sample-project/review-2".into(), archive_id: Some("a1".into()) }, "u").unwrap();
+    assert_eq!(rename.args, ["rename", "claude/sample-project/review", "claude/sample-project/review-2", "--archive", "a1"]);
+    let term = invocation(&target("mac"), &Action::Terminate, "u").unwrap();
+    assert_eq!(term.args, ["@mac", "terminate", "claude/sample-project/review", "--expected-run-id", "run-1"]);
+    assert_eq!(term.timeout, std::time::Duration::from_secs(60));
+    let mut no_run = target(""); no_run.run_id.clear();
+    assert_eq!(invocation(&no_run, &Action::Terminate, "u").unwrap().args, ["terminate", "claude/sample-project/review"]);
 }
 
 #[test]
-fn send_exit_one_is_a_definite_failure_unless_delivery_is_uncertain() {
-    let t = target(""); let a = Action::Send { text: "hello".into() };
-    let inv = invocation(&t, &a, "req-1").unwrap();
-    assert_eq!(classify(&t, &a, &inv, Exit::Code { code: 1, stdout: vec![], stderr: "hgs: stale run".into() }),
-               Outcome::Failed { detail: "hgs: stale run".into() });
-    assert!(matches!(classify(&t, &a, &inv, Exit::Code { code: 1, stdout: vec![], stderr: "hgs: delivery uncertain".into() }), Outcome::Uncertain { .. }));
-    assert!(matches!(classify(&t, &a, &inv, Exit::Code { code: 2, stdout: vec![], stderr: String::new() }), Outcome::Uncertain { .. }));
-    assert_eq!(classify(&t, &a, &inv, Exit::StartFailed("No such file".into())),
-               Outcome::Failed { detail: "Cannot start hgs: No such file".into() });
-}
-
-#[test]
-fn a_first_message_needs_first_message_true() {
-    let mut t = target(""); t.conversation_id.clear();
-    let a = Action::Send { text: "hello".into() };
-    let inv = invocation(&t, &a, "req-1").unwrap();
-    let without = br#"{"status":"submitted","request_id":"req-1","agent_id":"","name":"claude/sample-project/review","run_id":"run-1","conversation_id":""}"#;
-    assert!(matches!(classify(&t, &a, &inv, Exit::Code { code: 0, stdout: without.to_vec(), stderr: String::new() }), Outcome::Uncertain { .. }));
-    let with = br#"{"status":"submitted","request_id":"req-1","agent_id":"","name":"claude/sample-project/review","run_id":"run-1","conversation_id":"","first_message":true}"#;
-    assert!(matches!(classify(&t, &a, &inv, Exit::Code { code: 0, stdout: with.to_vec(), stderr: String::new() }), Outcome::Done { .. }));
-}
-
-#[test]
-fn interrupt_checks_identity_and_submitted() {
+fn interrupt_sends_its_identity_and_checks_the_receipt() {
     let t = target(""); let a = Action::Interrupt { turn_started: 1793000000.5 };
     let inv = invocation(&t, &a, "req-2").unwrap();
     assert_eq!(inv.args, ["interrupt", "claude/sample-project/review", "--json"]);
+    let input: serde_json::Value = serde_json::from_slice(inv.stdin.as_ref().unwrap()).unwrap();
+    assert_eq!(input, serde_json::json!({"request_id":"req-2","expected_run_id":"run-1",
+        "expected_conversation_id":"conv-1","expected_turn_started":1793000000.5}));
     let ok = br#"{"status":"submitted","request_id":"req-2","name":"claude/sample-project/review","run_id":"run-1","conversation_id":"conv-1"}"#;
-    assert!(matches!(classify(&t, &a, &inv, Exit::Code { code: 0, stdout: ok.to_vec(), stderr: String::new() }), Outcome::Done { .. }));
-    assert_eq!(classify(&t, &a, &inv, Exit::TimedOut), Outcome::Failed { detail: "Request timed out. Check Terminal before retrying.".into() });
-    assert_eq!(classify(&t, &a, &inv, Exit::Code { code: 0, stdout: b"{}".to_vec(), stderr: String::new() }),
+    assert!(matches!(classify(&t, &a, &inv, exit0(ok, "")), Outcome::Done { .. }));
+    assert_eq!(classify(&t, &a, &inv, exit0(b"{}", "")),
                Outcome::Failed { detail: "Invalid acknowledgement. Check Terminal before retrying.".into() });
+    assert_eq!(classify(&t, &a, &inv, Exit::TimedOut),
+               Outcome::Failed { detail: "Request timed out. Check Terminal before retrying.".into() });
+    assert_eq!(classify(&t, &a, &inv, Exit::WriteFailed),
+               Outcome::Failed { detail: "Transfer failed. Check Terminal before retrying.".into() });
+    assert_eq!(classify(&t, &a, &inv, Exit::Code { code: 1, stdout: vec![], stderr: String::new() }),
+               Outcome::Failed { detail: "Could not complete the request. Check Terminal.".into() });
 }
 
 #[test]
 fn mark_read_accepts_applied_or_not_found() {
     let t = target(""); let a = Action::MarkRead { reply_id: Some("rep-1".into()), attention_signature: None };
-    let inv = invocation(&t, &a, "unused").unwrap();
+    let inv = invocation(&t, &a, "u").unwrap();
     assert_eq!(inv.args, ["read", "claude/sample-project/review", "--json"]);
     let input: serde_json::Value = serde_json::from_slice(inv.stdin.as_ref().unwrap()).unwrap();
     assert_eq!(input, serde_json::json!({"run_id":"run-1","conversation_id":"conv-1","reply_id":"rep-1","attention_signature":null}));
     let applied = br#"{"ok":true,"applied":{"reply_id":true,"attention_signature":false},"read":{"conversation_id":"conv-1"}}"#;
-    assert!(matches!(classify(&t, &a, &inv, Exit::Code { code: 0, stdout: applied.to_vec(), stderr: String::new() }), Outcome::Done { .. }));
+    assert!(matches!(classify(&t, &a, &inv, exit0(applied, "")), Outcome::Done { .. }));
     let gone = br#"{"ok":false,"error":"not_found"}"#;
     assert!(matches!(classify(&t, &a, &inv, Exit::Code { code: 1, stdout: gone.to_vec(), stderr: String::new() }), Outcome::Done { .. }));
     assert_eq!(classify(&t, &a, &inv, Exit::TimedOut), Outcome::Failed { detail: "Saving read state timed out.".into() });
+    assert_eq!(classify(&t, &a, &inv, exit0(b"{\"ok\":true}", "")),
+               Outcome::Failed { detail: "Could not save read state on that machine.".into() });
 }
 
 #[test]
 fn writes_succeed_on_exit_zero_and_report_stderr_otherwise() {
-    let t = target("mac");
-    let inv = invocation(&t, &Action::Terminate, "unused").unwrap();
-    assert_eq!(inv.args, ["@mac", "terminate", "claude/sample-project/review", "--expected-run-id", "run-1"]);
-    assert_eq!(inv.timeout, std::time::Duration::from_secs(60));
-    assert!(matches!(classify(&t, &Action::Terminate, &inv, Exit::Code { code: 0, stdout: vec![], stderr: String::new() }), Outcome::Done { .. }));
-    assert_eq!(classify(&t, &Action::Terminate, &inv, Exit::Code { code: 1, stdout: vec![], stderr: " hgs: no such session \n".into() }),
+    let t = target(""); let inv = invocation(&t, &Action::Pause, "u").unwrap();
+    assert!(matches!(classify(&t, &Action::Pause, &inv, exit0(b"", "")), Outcome::Done { cleanup: None, .. }));
+    assert_eq!(classify(&t, &Action::Pause, &inv, Exit::Code { code: 1, stdout: vec![], stderr: " hgs: no such session \n".into() }),
                Outcome::Failed { detail: "hgs: no such session".into() });
-    assert_eq!(classify(&t, &Action::Terminate, &inv, Exit::TimedOut), Outcome::Failed { detail: "timed out".into() });
-    let rename = invocation(&target(""), &Action::Rename { new_name: "review-2".into() }, "unused").unwrap();
-    assert_eq!(rename.args, ["rename", "claude/sample-project/review", "review-2"]);
-    assert_eq!(invocation(&target(""), &Action::Resume, "u").unwrap().args, ["resume", "claude/sample-project/review", "-d"]);
+    assert_eq!(classify(&t, &Action::Pause, &inv, Exit::TimedOut), Outcome::Failed { detail: "timed out".into() });
+    assert_eq!(classify(&t, &Action::Pause, &inv, Exit::StartFailed("No such file or directory".into())),
+               Outcome::Failed { detail: "No such file or directory".into() });
+}
+
+#[test]
+fn archive_and_terminate_carry_exactly_one_cleanup_line() {
+    let t = target(""); let inv = invocation(&t, &Action::Archive, "u").unwrap();
+    let line = "ZERUS_WORKTREE_CLEANUP {\"status\":\"kept\",\"path\":\"/home/example/sample-project-wt\",\"common_dir\":\"/home/example/sample-project/.git\",\"reason\":\"unsaved work\"}\n";
+    match classify(&t, &Action::Archive, &inv, exit0(b"", line)) {
+        Outcome::Done { cleanup: Some(c), .. } => { assert_eq!(c.status, "kept"); assert_eq!(c.reason.as_deref(), Some("unsaved work")); }
+        other => panic!("{other:?}"),
+    }
+    let two = format!("{line}{line}");
+    assert!(matches!(classify(&t, &Action::Archive, &inv, exit0(b"", &two)), Outcome::Done { cleanup: None, .. }));
+    let no_dir = "ZERUS_WORKTREE_CLEANUP {\"status\":\"removed\",\"path\":\"/home/example/wt\",\"common_dir\":\"\"}\n";
+    assert!(matches!(classify(&t, &Action::Archive, &inv, exit0(b"", no_dir)), Outcome::Done { cleanup: None, .. }));
+    assert!(matches!(classify(&t, &Action::Pause, &invocation(&t, &Action::Pause, "u").unwrap(), exit0(b"", line)), Outcome::Done { cleanup: None, .. }));
 }
 
 #[test]
 fn rename_uses_the_cli_name_rule() {
-    for bad in ["", "a b", "a/b", "a=b", "#a"] {
-        assert!(invocation(&target(""), &Action::Rename { new_name: bad.into() }, "u").is_err(), "{bad:?}");
+    for bad in ["", "claude/a b", "claude/a=b", "#claude/a", "claude/", "/review"] {
+        assert!(invocation(&target(""), &Action::Rename { new_name: bad.into(), archive_id: None }, "u").is_err(), "{bad:?}");
     }
 }
 ```
 
-and in `view.rs` tests: a row with `"allowed_actions":["rename"]`, `"attention_signature":"sig"`, `"read":{"conversation_id":"conv-1","reply_id":"rep-0"}` projects `allowed_actions == Some(vec!["rename"])`, `shared_read == true`, `read_reply_id == Some("rep-0")`; a row whose `read.conversation_id` differs leaves `read_reply_id == None`; `allowed(&row, "pause")` is false for that row and true for a row without `allowed_actions` whose agent is `claude`; an `opencode` row without `allowed_actions` allows only `rename` and `forget`.
+In `view.rs` tests:
+- A row with `"allowed_actions":["rename"]`, `"attention_signature":"sig"` and `"read":{"conversation_id":"conv-1","reply_id":"rep-0"}` projects `allowed_actions == Some(vec!["rename"])`, `shared_read == true` and `read_reply_id == Some("rep-0")`.
+- A row whose `read.conversation_id` differs leaves `read_reply_id == None`.
+- `allowed(&row, "pause")` is false for that row, and true for a `claude` row without `allowed_actions`.
+- An `opencode` row without `allowed_actions` allows only `rename` and `forget`.
 
-- [ ] **Step 2: Run the tests to see them fail**
+- [ ] **Step 2: Run** `cargo +1.99.1 test --manifest-path client/core/Cargo.toml --target-dir target/client-core actions::`. Expected: compile errors (`invocation`, `classify` not found).
 
-Run: `cargo +1.99.1 test --manifest-path client/core/Cargo.toml --target-dir target/client-core actions::`
-Expected: compile errors (`invocation`, `classify` not found).
-
-- [ ] **Step 3: Implement `actions.rs`** with these rules (one `match` per function; no other behaviour):
-  - `invocation`: prepend `@{computer}` when `computer` is not empty; build the table's arguments. The rename name rule is `src/config.rs::check_name`: non-empty, no `/`, no `=`, no leading `#`, no whitespace, with the refusal text "Use a name without spaces, slashes or '='." Send refusals in Qt's order: empty name or run id, then the size limit, then empty text. JSON input is compact (`serde_json::to_vec`), and `request_id` is the passed id for send and interrupt.
-  - `classify` for Send: `StartFailed(e)` gives `Failed("Cannot start hgs: {e}")`. `WriteFailed` and `TimedOut` give Uncertain with the texts in the tests, and so does `Abnormal`. `Code{code != 0}` is `Uncertain` when `code != 1` or stderr contains "delivery uncertain" (case-insensitive); otherwise it is `Failed(stderr.trim())`, or `Failed("Message transfer failed (exit {code}).")` with no stderr. `Code{0}` is `Done` only when stdout parses as an object with `status == "submitted"`, `request_id == request_id`, `agent_id` absent or `""`, `name == target.name`, `run_id == target.run_id`, `conversation_id` a string equal to `target.conversation_id`, and `first_message == true` when `target.conversation_id` is empty. Anything else is Uncertain("Delivery acknowledgement is invalid. Inspect Terminal before retrying.").
-  - `classify` for Interrupt, as `runSessionAction` (non-scoped):
-    - `TimedOut` gives Failed("Request timed out. Check Terminal before retrying.").
-    - `WriteFailed` gives Failed("Transfer failed. Check Terminal before retrying.").
-    - A non-zero exit gives Failed(stderr trimmed, at most 2000 chars), or "Could not complete the request. Check Terminal." with no stderr.
-    - Exit 0 is Done when `request_id`, `name`, `run_id == expected_run_id`, `conversation_id == expected_conversation_id` and `status == "submitted"` all match. Otherwise it gives Failed("Invalid acknowledgement. Check Terminal before retrying.").
-  - `classify` for MarkRead, as `requestRead`:
-    - Done when exit 0 with `ok == true`, `applied.reply_id` and `applied.attention_signature` booleans, and `read` null or with `read.conversation_id == conversation_id`.
+- [ ] **Step 3: Implement `actions.rs`:**
+  - `invocation` prepends `@{computer}` for a peer and follows the table.
+  - The rename rule follows Qt and `src/config.rs::check_name`: both name sections (before and after the first `/`) are non-empty, with no whitespace, no `=` and no leading `#`. The refusal text is "Use a name without spaces or '=', with a project and a session part."
+  - JSON input is compact (`serde_json::to_vec`); `request_id` is the passed id for interrupt.
+  - `classify` for Interrupt follows `runSessionAction` (non-scoped):
+    - `TimedOut`, `WriteFailed` and non-zero exits map to the failure texts in the tests.
+    - A non-zero exit with stderr reports that stderr, trimmed and at most 2000 chars.
+    - `StartFailed(e)` reports `e`.
+    - Exit 0 is Done only when `request_id`, `name`, `run_id == expected_run_id`, `conversation_id == expected_conversation_id` and `status == "submitted"` all match.
+  - `classify` for MarkRead follows `requestRead`:
+    - Done when exit 0 with `ok == true`, boolean `applied.reply_id` and `applied.attention_signature`, and `read` either null or with `read.conversation_id == conversation_id`.
     - Done when exit 1 with exactly `{"ok":false,"error":"not_found"}`.
-    - `TimedOut` gives Failed("Saving read state timed out.").
-    - Otherwise Failed(stderr, or "Could not save read state on that machine.").
-  - `classify` for Pause, Resume, Rename, Archive and Terminate (`runWrite`): Done on exit 0. Otherwise:
-    - `TimedOut` gives Failed("timed out").
-    - `StartFailed(e)` or `Abnormal` gives Failed(the error text).
-    - A non-zero exit gives Failed(stderr trimmed).
-  - `allowed`: `allowed_actions` when present, else `agent != "opencode" || operation in ["rename","forget"]`.
+    - `TimedOut` gives "Saving read state timed out."; anything else gives stderr or "Could not save read state on that machine.".
+  - `classify` for writes follows `runWrite`:
+    - Done on exit 0.
+    - `TimedOut` gives "timed out"; `StartFailed(e)` or `Abnormal` gives the error text; otherwise stderr trimmed.
+    - For Archive and Terminate only, count the stderr lines starting with `ZERUS_WORKTREE_CLEANUP `. Exactly one line, parsing as an object with non-empty `path` and `common_dir`, becomes `cleanup`.
+  - `allowed` follows the doc comment.
 
-- [ ] **Step 4: Run the tests**
-
-Run: `cargo +1.99.1 test --manifest-path client/core/Cargo.toml --target-dir target/client-core && cargo +1.99.1 clippy --locked --manifest-path client/core/Cargo.toml --target-dir target/client-core --all-targets -- -D warnings`
-Expected: all pass, no warnings.
+- [ ] **Step 4: Run** the tests and `cargo +1.99.1 clippy --locked --manifest-path client/core/Cargo.toml --target-dir target/client-core --all-targets -- -D warnings`. Expected: PASS, no warnings.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add client/core/src/actions.rs client/core/src/lib.rs client/core/src/view.rs
-git commit -m "feat(client): guarded action requests and outcome rules"
+git commit -m "feat(client): guarded session action requests and Qt's outcome rules"
 ```
 
 ---
@@ -307,54 +296,63 @@ git commit -m "feat(client): guarded action requests and outcome rules"
 - Create: `client/core/src/run.rs`
 - Create: `client/core/tests/support/fake_hgs_actions.py`
 - Create: `client/core/tests/actions.rs`
-- Modify: `client/core/src/lib.rs` (`pub mod run; pub use run::run;`)
+- Modify: `client/core/src/lib.rs` (`pub mod run; pub use run::{run, run_with_env};`)
 
 **Interfaces:**
-- Consumes: `Invocation`, `Exit` (Task 1), `default_hgs()` (phase 1 `lib.rs`).
-- Produces: `pub fn run(hgs: &std::path::Path, invocation: &Invocation) -> Exit` (blocking; returns within `invocation.timeout` plus 2 s).
+- Consumes: `Invocation`, `Exit`, `invocation`, `classify` (Task 1).
+- Produces: `pub fn run(hgs: &Path, inv: &Invocation) -> Exit` and `pub fn run_with_env(hgs: &Path, inv: &Invocation, parent_env: &[(&str, &str)]) -> Exit` (blocking; returns within `inv.timeout` plus 2 s; `run` is `run_with_env` with an empty slice).
 
-- [ ] **Step 1: Write the fake `hgs`** (`client/core/tests/support/fake_hgs_actions.py`, stdlib only, never the real CLI):
+- [ ] **Step 1: Write the fake `hgs`** (stdlib only, never the real CLI):
 
 ```python
 #!/usr/bin/env python3
 """A fake `hgs` for the client action tests. Reads `config.json` beside itself:
-{"reply": {"exit": 0, "stdout": <object or "echo_receipt">, "stderr": "", "sleep": 0}}
-Appends {"argv": [...], "stdin": "..."} to `log.ndjson` beside itself."""
+{"reply": {"exit": 0, "stdout": <object or "echo_interrupt">, "stderr": "", "sleep": 0, "log_env": []}}
+Appends {"argv": [...], "stdin": "...", "env": {...}} to `log.ndjson` beside itself."""
 import json, os, sys, time
 
 here = os.path.dirname(os.path.abspath(__file__))
 config = json.load(open(os.path.join(here, "config.json")))["reply"]
-data = sys.stdin.read() if not sys.stdin.isatty() else ""
+data = sys.stdin.read()
+entry = {"argv": sys.argv[1:], "stdin": data}
+if config.get("log_env"):
+    entry["env"] = {k: os.environ.get(k) for k in config["log_env"]}
 with open(os.path.join(here, "log.ndjson"), "a") as log:
-    log.write(json.dumps({"argv": sys.argv[1:], "stdin": data}) + "\n")
+    log.write(json.dumps(entry) + "\n")
 time.sleep(config.get("sleep", 0))
 out = config.get("stdout")
-if out == "echo_receipt":
+if out == "echo_interrupt":
     request = json.loads(data)
     args = [a for a in sys.argv[1:] if not a.startswith("@")]
-    out = {"status": "submitted", "request_id": request["request_id"], "agent_id": "",
-           "name": args[1], "run_id": request["expected_run_id"],
-           "conversation_id": request["expected_conversation_id"]}
+    out = {"status": "submitted", "request_id": request["request_id"], "name": args[1],
+           "run_id": request["expected_run_id"], "conversation_id": request["expected_conversation_id"]}
 if out is not None:
     sys.stdout.write(json.dumps(out))
 sys.stderr.write(config.get("stderr", ""))
 sys.exit(config.get("exit", 0))
 ```
 
-- [ ] **Step 2: Write the failing integration tests** (`client/core/tests/actions.rs`). Copy the script into a fresh temp folder as `hgs` (mode 0755) with a `config.json`, following the pattern in `client/core/tests/common` used by the phase 1 stream tests:
+- [ ] **Step 2: Write the failing integration tests** (`client/core/tests/actions.rs`). `Fake::new(config)` makes a fresh folder under `std::env::temp_dir()` named with the process id and a counter, copies `tests/support/fake_hgs_actions.py` there as `hgs` with mode 0755 and writes `config.json`; `log()` parses `log.ndjson`; `Drop` removes the folder. `target()` is the Task 1 target on this computer.
 
 ```rust
 #[test]
-fn a_send_through_the_fake_is_done_and_logged_once() {
-    let fake = Fake::new(r#"{"reply":{"exit":0,"stdout":"echo_receipt"}}"#);
-    let t = Target { computer: String::new(), name: "claude/sample-project/review".into(), run_id: "run-1".into(), conversation_id: "conv-1".into() };
-    let a = Action::Send { text: "hello".into() };
+fn an_interrupt_through_the_fake_is_done_and_logged_once() {
+    let fake = Fake::new(r#"{"reply":{"exit":0,"stdout":"echo_interrupt"}}"#);
+    let t = target(); let a = Action::Interrupt { turn_started: 1.5 };
     let inv = invocation(&t, &a, "req-1").unwrap();
-    let outcome = classify(&t, &a, &inv, run(&fake.hgs, &inv));
-    assert!(matches!(outcome, Outcome::Done { .. }), "{outcome:?}");
-    let log = fake.log();
-    assert_eq!(log.len(), 1);
-    assert_eq!(log[0]["argv"], serde_json::json!(["send", "claude/sample-project/review", "--json"]));
+    assert!(matches!(classify(&t, &a, &inv, run(&fake.hgs, &inv)), Outcome::Done { .. }));
+    assert_eq!(fake.log().len(), 1);
+    assert_eq!(fake.log()[0]["argv"], serde_json::json!(["interrupt", "claude/sample-project/review", "--json"]));
+}
+
+#[test]
+fn a_terminate_with_a_cleanup_line_reports_it() {
+    let fake = Fake::new(r#"{"reply":{"exit":0,"stderr":"ZERUS_WORKTREE_CLEANUP {\"status\":\"unconfirmed\",\"path\":\"/home/example/wt\",\"common_dir\":\"/home/example/repo/.git\",\"reason\":\"in use\"}\n"}}"#);
+    let t = target(); let inv = invocation(&t, &Action::Terminate, "u").unwrap();
+    match classify(&t, &Action::Terminate, &inv, run(&fake.hgs, &inv)) {
+        Outcome::Done { cleanup: Some(c), .. } => assert_eq!(c.status, "unconfirmed"),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]
@@ -377,25 +375,22 @@ fn a_missing_hgs_fails_to_start() {
 fn the_agent_attribution_is_not_inherited() {
     let fake = Fake::new(r#"{"reply":{"exit":0,"log_env":["HGS_SESSION","HGS_RUN_ID"]}}"#);
     let inv = invocation(&target(), &Action::Pause, "u").unwrap();
-    let exit = run_with_env(&fake.hgs, &inv, &[("HGS_SESSION", "x"), ("HGS_RUN_ID", "y")]);
-    assert!(matches!(exit, Exit::Code { code: 0, .. }));
+    assert!(matches!(run_with_env(&fake.hgs, &inv, &[("HGS_SESSION", "x"), ("HGS_RUN_ID", "y")]), Exit::Code { code: 0, .. }));
     assert_eq!(fake.log()[0]["env"], serde_json::json!({"HGS_SESSION": null, "HGS_RUN_ID": null}));
 }
 ```
 
-`run_with_env(hgs, inv, parent_env)` is `run` with extra variables set on the child before the two `env_remove` calls (it proves the removal wins); `run` calls it with an empty slice. Extend the fake: when `log_env` is set, the log line also holds `"env": {k: os.environ.get(k) for k in config["log_env"]}`. `Fake` and `target()` live in the test file: `Fake::new(config)` makes a fresh folder under `std::env::temp_dir()` named with the process id and a counter, copies `tests/support/fake_hgs_actions.py` there as `hgs` with mode 0755, writes `config.json`, and `log()` parses `log.ndjson` line by line.
+- [ ] **Step 3: Run** `cargo +1.99.1 test --manifest-path client/core/Cargo.toml --target-dir target/client-core --test actions`. Expected: compile error (`run` missing).
 
-- [ ] **Step 3: Run the tests to see them fail**
+- [ ] **Step 4: Implement `run.rs`:**
+  - Build `Command::new(hgs).args(&inv.args)`, apply `parent_env`, then `.env_remove("HGS_SESSION").env_remove("HGS_RUN_ID")` (as `stream.rs:152`), with stdin, stdout and stderr piped.
+  - A spawn error maps to `StartFailed(e.to_string())`.
+  - Write all of stdin when there is any, then close it. A short or failed write gives `WriteFailed` and kills the child.
+  - Read stdout and stderr on two threads.
+  - Poll `try_wait` every 20 ms until the deadline, then `kill()`, `wait()` and return `TimedOut`.
+  - A signal exit maps to `Abnormal { stderr }`. Cap stderr at 64 KiB while reading, so a noisy child cannot grow memory.
 
-Run: `cargo +1.99.1 test --manifest-path client/core/Cargo.toml --target-dir target/client-core --test actions`
-Expected: compile error (`run` not found).
-
-- [ ] **Step 4: Implement `run.rs`**: `std::process::Command::new(hgs).args(&inv.args)` with `.env_remove("HGS_SESSION").env_remove("HGS_RUN_ID")` (as `stream.rs:152`), piped stdin, stdout and stderr. Spawn errors map to `StartFailed(e.to_string())`. Write `stdin` in full and close it; a write error maps to `WriteFailed` and kills the child. Read stdout and stderr on two threads so a full pipe cannot block. Poll `try_wait` every 20 ms until `inv.timeout`, then `kill()`, `wait()` and return `TimedOut`. A signal exit maps to `Abnormal { stderr }`; otherwise return `Code { code, stdout, stderr }` with stderr capped at 2000 chars.
-
-- [ ] **Step 5: Run the tests**
-
-Run: `cargo +1.99.1 test --manifest-path client/core/Cargo.toml --target-dir target/client-core`
-Expected: all pass.
+- [ ] **Step 5: Run** all core tests and clippy. Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
@@ -406,11 +401,72 @@ git commit -m "feat(client): run one guarded hgs action with a deadline"
 
 ---
 
-### Task 3: Durable read marks (`client/core/src/readmarks.rs`)
+### Task 3: Selected-session details (`client/core/src/details.rs`)
+
+The header enablement in Qt reads inspect fields of the selected session (`m_details`), for example `auth_required`, `expected_id`, `resume_message_can_send`, `allowed_actions` and `action_reasons`. Details are adopted only when they name the row's run and conversation (`SessionsWindow.cpp:5343-5346`).
+
+**Files:**
+- Create: `client/core/src/details.rs`
+- Modify: `client/core/src/lib.rs`
+
+**Interfaces:**
+- Consumes: `Target`, `Invocation`, `Exit` (Task 1).
+- Produces:
+
+```rust
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Details {
+    pub run_id: String, pub conversation_id: String,
+    pub auth_required: bool, pub expected_id: String, pub resume_message_can_send: bool,
+    pub allowed_actions: Option<Vec<String>>, pub action_reasons: BTreeMap<String, String>,
+}
+/// `hgs [@host] inspect NAME --after 0 --skip-processes [--archive ID]`, 5 s here / 15 s on a peer (HgsClient.cpp:925-931).
+pub fn details_invocation(target: &Target, archive_id: Option<&str>) -> Invocation;
+/// The details when exit 0 and the JSON names target.run_id and target.conversation_id; otherwise None.
+pub fn parse_details(target: &Target, exit: Exit) -> Option<Details>;
+```
+
+- [ ] **Step 1: Write the failing tests** (in `details.rs`):
+
+```rust
+#[test]
+fn inspect_call_matches_the_qt_client() {
+    let t = Target { computer: "mac".into(), name: "claude/sample-project/review".into(), run_id: "run-1".into(), conversation_id: "conv-1".into() };
+    let inv = details_invocation(&t, Some("a1"));
+    assert_eq!(inv.args, ["@mac", "inspect", "claude/sample-project/review", "--after", "0", "--skip-processes", "--archive", "a1"]);
+    assert_eq!(inv.timeout, std::time::Duration::from_secs(15));
+}
+
+#[test]
+fn details_are_adopted_only_for_the_listed_run() {
+    let t = Target { computer: String::new(), name: "claude/sample-project/review".into(), run_id: "run-1".into(), conversation_id: "conv-1".into() };
+    let body = br#"{"run_id":"run-1","conversation_id":"conv-1","expected_id":"e1","resume_message_can_send":false}"#;
+    let d = parse_details(&t, Exit::Code { code: 0, stdout: body.to_vec(), stderr: String::new() }).unwrap();
+    assert_eq!(d.expected_id, "e1"); assert!(!d.resume_message_can_send); assert_eq!(d.allowed_actions, None);
+    let other = br#"{"run_id":"run-2","conversation_id":"conv-1"}"#;
+    assert_eq!(parse_details(&t, Exit::Code { code: 0, stdout: other.to_vec(), stderr: String::new() }), None);
+    assert_eq!(parse_details(&t, Exit::Code { code: 1, stdout: body.to_vec(), stderr: String::new() }), None);
+    assert_eq!(parse_details(&t, Exit::Code { code: 0, stdout: b"not json".to_vec(), stderr: String::new() }), None);
+}
+```
+
+- [ ] **Step 2: Run** `cargo +1.99.1 test --manifest-path client/core/Cargo.toml --target-dir target/client-core details::` and expect FAIL.
+- [ ] **Step 3: Implement** with `serde_json::Value` reads (unknown fields ignored; missing booleans false; missing `allowed_actions` stays `None`).
+- [ ] **Step 4: Run** tests and clippy. Expected: PASS.
+- [ ] **Step 5: Commit**
+
+```bash
+git add client/core/src/details.rs client/core/src/lib.rs
+git commit -m "feat(client): selected-session details for action enablement"
+```
+
+---
+
+### Task 4: Durable shared read marks (`client/core/src/readmarks.rs`)
 
 **Files:**
 - Create: `client/core/src/readmarks.rs`
-- Modify: `client/core/src/lib.rs` (`pub mod readmarks; pub use readmarks::{ReadMark, ReadMarks};`)
+- Modify: `client/core/src/lib.rs`
 
 **Interfaces:**
 - Consumes: `ViewRow` fields from Task 1.
@@ -420,240 +476,238 @@ git commit -m "feat(client): run one guarded hgs action with a deadline"
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReadMark { pub computer: String, pub name: String, pub run_id: String, pub conversation_id: String,
                       pub reply_id: Option<String>, pub attention_signature: Option<String> }
-pub struct ReadMarks { /* path + marks keyed by (computer, name) */ }
+pub struct ReadMarks { /* path and marks keyed by (computer, name) */ }
 impl ReadMarks {
-    pub fn load(path: std::path::PathBuf) -> Self;            // missing or unreadable file: empty
-    pub fn add(&mut self, mark: ReadMark);                     // ReadMark::merged rule, then save
+    pub fn load(path: PathBuf) -> Self;                 // missing or unreadable file: empty, no panic
+    pub fn add(&mut self, mark: ReadMark);              // ReadMark::merged (tray/src/ReadMarks.h:41-48), then save
     pub fn pending(&self) -> Vec<ReadMark>;
-    /// Drops marks the host's row already shows (read_reply_id / read_attention_signature equal,
-    /// or a different run or conversation); returns true when anything changed (then saves).
+    /// Drops the mark the row already shows (equal read_reply_id or read_attention_signature,
+    /// or another run or conversation); returns true when it changed anything (then saves).
     pub fn settle(&mut self, computer: &str, row: &ViewRow) -> bool;
 }
 ```
 
-- [ ] **Step 1: Write the failing tests** (unit tests in `readmarks.rs`, temp file under `std::env::temp_dir()` with the process id in the name):
-  - `a_newer_mark_keeps_the_field_it_does_not_set`: add a mark with `reply_id: Some("r1")`, then the same run with `reply_id: None, attention_signature: Some("s1")`; `pending()` holds one mark with both `r1` and `s1` (the `ReadMark::merged` rule in `tray/src/ReadMarks.h:41-48`).
+- [ ] **Step 1: Write the failing tests** (temp file under `std::env::temp_dir()` named with the process id and test name):
+  - `a_newer_mark_keeps_the_field_it_does_not_set`: add `reply_id: Some("r1")`, then the same run with `reply_id: None, attention_signature: Some("s1")`; `pending()` holds one mark with `r1` and `s1`.
   - `a_mark_for_another_run_replaces_the_old_one`.
   - `marks_survive_a_restart`: `add`, then `ReadMarks::load(same path).pending()` returns it.
-  - `the_host_snapshot_settles_a_mark`: a row with the same run and `read_reply_id == Some("r1")` settles the `r1` mark; a row with a new `run_id` drops it too; a row still showing another reply keeps it.
-  - `an_unreadable_file_starts_empty`: write `not json` to the path, `load` gives no marks and does not panic.
-
-- [ ] **Step 2: Run** `cargo +1.99.1 test --manifest-path client/core/Cargo.toml --target-dir target/client-core readmarks::`. Expected: FAIL (module missing).
-
-- [ ] **Step 3: Implement**: a `BTreeMap<(String, String), ReadMark>` saved as JSON to `path` through a temporary file in the same folder plus `std::fs::rename`, so a crash never leaves half a file. No size bound is needed beyond one mark per session, because the catalog bounds the sessions.
-
-- [ ] **Step 4: Run the tests.** Expected: PASS, clippy clean.
-
+  - `the_host_snapshot_settles_a_mark`: the same run with `read_reply_id == Some("r1")` drops it; a row with a new `run_id` drops it; a row showing another reply keeps it.
+  - `an_unreadable_file_starts_empty`: the path holds `not json`; `load` gives no marks.
+- [ ] **Step 2: Run** `cargo +1.99.1 test --manifest-path client/core/Cargo.toml --target-dir target/client-core readmarks::` and expect FAIL.
+- [ ] **Step 3: Implement** a `BTreeMap<(String, String), ReadMark>` saved as JSON through a temporary file in the same folder plus `std::fs::rename`.
+- [ ] **Step 4: Run** tests and clippy. Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
 git add client/core/src/readmarks.rs client/core/src/lib.rs
-git commit -m "feat(client): durable read marks until the host shows them"
+git commit -m "feat(client): durable shared read marks until the host shows them"
 ```
 
 ---
 
-### Task 4: Tauri commands with the in-flight guard (`client/src-tauri/src/actions.rs`)
+### Task 5: Tauri commands and the in-flight guard (`client/src-tauri/src/actions.rs`)
 
 **Files:**
 - Create: `client/src-tauri/src/actions.rs`
-- Modify: `client/src-tauri/src/lib.rs` (module, `.manage(Actions::new(app_data_dir.join("read-marks.json")))`, add `run_action`, `pending_read_marks` to `invoke_handler`)
-- Modify: `client/src-tauri/src/commands.rs` (after each applied batch row upsert, call `actions.settle(computer, &row)`; the settle needs the computer id and the row the pump already has)
+- Modify: `client/src-tauri/src/lib.rs`: the module; `.manage(Actions::new(app.path().app_data_dir()?.join("read-marks.json")))`; `run_action`, `inspect_session` and `pending_read_marks` in `invoke_handler`.
+- Modify: `client/src-tauri/src/commands.rs` (call `actions.settle(&computer, &row)` for each upserted row of an applied batch)
 
 **Interfaces:**
-- Consumes: `invocation`, `classify`, `run`, `ReadMarks`, `default_hgs()`.
-- Produces (frontend contract, JSON snake_case):
+- Consumes: `invocation`, `classify`, `run`, `details_invocation`, `parse_details`, `ReadMarks`, `default_hgs()`.
+- Produces (frontend contract, snake_case JSON):
 
 ```rust
 #[tauri::command]
-pub async fn run_action(state: tauri::State<'_, Actions>, target: Target, action: Action) -> Result<Outcome, String>;
-// Err only for "already in progress" (string "busy"); every hgs result is an Outcome.
+pub async fn run_action(state: State<'_, Actions>, target: Target, action: Action) -> Result<Outcome, String>; // Err("busy") while one runs
 #[tauri::command]
-pub fn pending_read_marks(state: tauri::State<'_, Actions>) -> Vec<ReadMark>;
+pub async fn inspect_session(target: Target, archive_id: Option<String>) -> Option<Details>;
+#[tauri::command]
+pub fn pending_read_marks(state: State<'_, Actions>) -> Vec<ReadMark>;
 ```
 
-- [ ] **Step 1: Write the failing tests** (`#[cfg(test)]` in `actions.rs`, no Tauri runtime: test the guard type `InFlight` directly):
+- [ ] **Step 1: Write the failing test** for the guard type:
 
 ```rust
 #[test]
-fn one_action_per_session_and_kind() {
+fn one_action_per_session_at_a_time() {
     let flight = InFlight::default();
-    let key = ("".to_string(), "claude/sample-project/review".to_string(), "send");
-    let first = flight.claim(key.clone()).unwrap();
-    assert!(flight.claim(key.clone()).is_none());
-    assert!(flight.claim(("".into(), "claude/sample-project/review".into(), "pause")).is_some());
+    let first = flight.claim(("".into(), "claude/sample-project/review".into())).unwrap();
+    assert!(flight.claim(("".into(), "claude/sample-project/review".into())).is_none());
+    assert!(flight.claim(("mac".into(), "claude/sample-project/review".into())).is_some());
     drop(first);
-    assert!(flight.claim(key).is_some());
+    assert!(flight.claim(("".into(), "claude/sample-project/review".into())).is_some());
 }
 ```
 
-- [ ] **Step 2: Run** `cargo +1.99.1 test --locked` in `client/src-tauri`. Expected: FAIL (`InFlight` missing).
+(One guard per session for every kind: Qt's `updating` disables all of a session's actions while one runs.)
 
-- [ ] **Step 3: Implement**:
-  - `InFlight` is a `Mutex<HashSet<(String, String, &'static str)>>` whose `claim` returns a guard that removes the key on drop.
-  - `run_action` claims `(target.computer, target.name, kind)`, generates `request_id` with `uuid::Uuid::new_v4()`, and builds the invocation. A refusal is returned as `Outcome::Failed { detail }`. Then it runs `run` on `tauri::async_runtime::spawn_blocking` and classifies.
-  - For `MarkRead` it first `add`s the mark to `ReadMarks`, then sends. A `Done` outcome is left in place until `settle` drops it, and a failed one stays pending for the next retry. The retry is driven by Task 8's queue, at most once per catalog change per session, and never faster than once per 5 s.
-  - Send's in-flight refusal text is "A message to this session is already being sent." (Qt). Other kinds return `Err("busy")`, which the frontend ignores.
-  - Add `uuid = { version = "1", features = ["v4"] }` to `client/src-tauri/Cargo.toml` if it is not already a dependency (check `cargo tree -i uuid` first and reuse the existing version).
-
-- [ ] **Step 4: Run** `cargo +1.99.1 test --locked` and `cargo +1.99.1 clippy --locked --all-targets -- -D warnings` in `client/src-tauri`. Expected: PASS.
-
+- [ ] **Step 2: Run** `cargo +1.99.1 test --locked` in `client/src-tauri`. Expected: FAIL.
+- [ ] **Step 3: Implement:**
+  - `InFlight` is a `Mutex<HashSet<(String, String)>>` whose claim guard removes the key on drop.
+  - `run_action` claims the session, makes the request id with `uuid::Uuid::new_v4()` (reuse the dependency if `cargo tree -i uuid` shows one) and builds the invocation; a refusal returns `Outcome::Failed`. It runs `run` on `tauri::async_runtime::spawn_blocking`, then classifies.
+  - For `MarkRead` it first `add`s the mark to `ReadMarks`, so the mark survives a crash during the call.
+  - `inspect_session` runs `details_invocation` the same way, without the guard. The store keeps at most one inspect in flight per session (Task 6).
+- [ ] **Step 4: Run** tests and `cargo +1.99.1 clippy --locked --all-targets -- -D warnings`. Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
 git add client/src-tauri/src/actions.rs client/src-tauri/src/lib.rs client/src-tauri/src/commands.rs client/src-tauri/Cargo.toml client/src-tauri/Cargo.lock
-git commit -m "feat(client): run_action with one action per session and kind"
+git commit -m "feat(client): run_action and inspect_session with one action per session"
 ```
 
 ---
 
-### Task 5: Frontend action store and notices (`client/src/store/actions.ts`)
+### Task 6: Frontend store, notices, details and read-mark retry (`client/src/store/actions.ts`)
 
 **Files:**
-- Create: `client/src/store/actions.ts`
-- Create: `client/src/store/actions.test.ts`
-- Modify: `client/src/types.ts` (the new `ViewRow` fields)
-- Modify: `client/src/bridge.ts` (typed `runAction(target, action)` and `pendingReadMarks()` wrappers; a browser stub that resolves `{outcome:"failed", detail:"Actions need the desktop app."}`)
+- Create: `client/src/store/actions.ts`, `client/src/store/actions.test.ts`
+- Modify: `client/src/types.ts` (the new `ViewRow` fields; `Details`, `Action`, `Outcome`, `Target`)
+- Modify: `client/src/bridge.ts` (`runAction`, `inspectSession`, `pendingReadMarks`; in the browser build they resolve `{outcome:"failed", detail:"Actions need the desktop app."}`, `null` and `[]`)
 
 **Interfaces:**
-- Consumes: `run_action`, `pending_read_marks` (Task 4); `RowOut` and `ViewRow` from `client/src/types.ts`, which this task extends with Task 1's new fields (`state`, `tracked`, `reply_id`, `attention_signature`, `shared_read`, `read_reply_id`, `read_attention_signature`, `allowed_actions`, `action_reasons`).
+- Consumes: the Task 5 commands; `RowOut` from `client/src/types.ts`; the catalog store (phase 1, `client/src/store/catalog.ts`).
 - Produces:
 
 ```ts
-export type Action =
-  | { kind: "send"; text: string } | { kind: "interrupt"; turn_started: number }
-  | { kind: "mark_read"; reply_id: string | null; attention_signature: string | null }
-  | { kind: "pause" } | { kind: "resume" } | { kind: "rename"; new_name: string }
-  | { kind: "archive" } | { kind: "terminate" };
-export type Outcome = { outcome: "done"; receipt: unknown } | { outcome: "failed"; detail: string } | { outcome: "uncertain"; detail: string };
-export interface Target { computer: string; name: string; run_id: string; conversation_id: string }
 export function targetOf(entry: RowOut): Target | undefined;   // undefined without a run id
-export function pending(computer: string, name: string, kind: Action["kind"]): boolean;  // reactive
-export async function perform(target: Target, action: Action): Promise<Outcome>;  // sets pending, shows notice
-export function allowed(row: ViewRow, operation: string): boolean;   // same rule as core::actions::allowed
-export const notices: () => Notice[];  // { id, tone: "error" | "warn" | "info", text }
+export function updating(computer: string, name: string): boolean;   // reactive: an action of that session is pending
+export async function perform(entry: RowOut, action: Action): Promise<Outcome>;
+export function detailsFor(entry: RowOut): Details | undefined;  // reactive; fetched once per selection and run
+export const notices: () => Notice[];   // { id, tone: "error" | "warn" | "info", text, sticky }
+export function dismiss(id: number): void;
 ```
 
-- [ ] **Step 1: Write the failing vitest tests** (`actions.test.ts`, with `bridge` mocked through `vi.mock("../bridge")`):
-  - `perform` marks the action pending until the promise settles and clears it after.
-  - A `failed` outcome adds an `error` notice with the detail text unchanged. An `uncertain` outcome adds a `warn` notice with the detail and never calls `runAction` a second time; assert the mock was called exactly once after 6 s of fake timers.
-  - `targetOf` returns `undefined` for a row without `run_id`, and the computer `""` for this computer.
-  - `allowed` matches the core rule: reported `allowed_actions` win, and `opencode` without them allows only `rename` and `forget`.
+Rules:
+- `perform` re-reads the row by `(computer, key)` from the catalog. If the row is gone or its `run_id` differs from `entry.row.run_id`, it shows the info notice "This session changed. Open its actions again." and returns without a call.
+- **Success notices:** rename shows "Session renamed. Refreshing…"; pause, resume, archive and terminate show "Session updated. Refreshing…" (info, 6 s). Interrupt and mark read show none.
+- **Failures:** an error notice with the detail, which stays until dismissed.
+- **Cleanup notices:**
+  - `removed`: info "Worktree removed automatically. The branch and archived conversation are kept."
+  - `kept` and `unconfirmed`: a sticky warning "Worktree kept for review: {reason}".
+  - Nothing ever retries.
+- `detailsFor` calls `inspectSession` when a session is selected and again when its `run_id`, `conversation_id` or `state` changes. Only one inspect runs per session at a time, and only details whose identities match the row are kept.
+- **Read-mark retry:** load `pendingReadMarks()` at start. When a batch upserts a row with a pending mark that still shows unread, call `perform(entry, mark_read)` again, at most once per 5 s per session.
 
-- [ ] **Step 2: Run** `npx vitest run src/store/actions.test.ts` in `client`. Expected: FAIL.
-
-- [ ] **Step 3: Implement** with Solid signals: `createStore<Record<string, true>>` keyed `${computer}\n${name}\n${kind}`, and a notices list capped at 5 entries. `info` notices disappear after 6 s; `error` and `warn` notices stay until dismissed. Notice texts come from Rust unchanged. Success notices: "Paused", "Resumed", "Renamed", "Moved to archive", "Terminated"; send and mark read show no success notice. The notice copy has no dot separators.
-
+- [ ] **Step 1: Write the failing vitest tests** (`vi.mock("../bridge")`, fake timers):
+  - pending state is set and cleared;
+  - a changed run refuses with the notice text and no call;
+  - the success text per action, and none for interrupt and mark read;
+  - a failed outcome makes a sticky error;
+  - a `kept` cleanup makes a sticky warning with the reason;
+  - `runAction` is called exactly once per `perform`, even 10 s later;
+  - details are fetched once per selection, refetched on a run change, and dropped on mismatch;
+  - a pending read mark is retried on a batch, and not again within 5 s.
+- [ ] **Step 2: Run** `npx vitest run src/store/actions.test.ts` in `client` and expect FAIL.
+- [ ] **Step 3: Implement** with Solid stores. Notices are capped at 5; the copy has no dot separators.
 - [ ] **Step 4: Run** `npx vitest run` and `npm run check`. Expected: PASS.
-
 - [ ] **Step 5: Commit**
 
 ```bash
-git add client/src/store/actions.ts client/src/store/actions.test.ts client/src/bridge.ts
-git commit -m "feat(client): action store with outcome notices and no automatic retry"
+git add client/src/store/actions.ts client/src/store/actions.test.ts client/src/types.ts client/src/bridge.ts
+git commit -m "feat(client): action store with Qt's notices and no automatic retry"
 ```
 
 ---
 
-### Task 6: Menu entries, Stop, Mark as read and the dialogs
+### Task 7: Menu entries, header actions, Stop, Mark as read and the dialogs
 
 **Files:**
-- Create: `client/src/ui/sessions/ActionDialogs.tsx`
-- Modify: `client/src/ui/sessions/SessionList.tsx` (menu entries at the lines with `disabled: true` for Rename, Pause session, Move to archive, Terminate session)
-- Modify: `client/src/ui/sessions/SessionDetail.tsx` (Stop button while a turn runs; Mark as read chip as in the mockup's Activity toolbar)
-- Modify: `client/src/ui/components/Overlays.tsx` if the dialog host needs a slot (follow the existing menu overlay pattern)
+- Create: `client/src/ui/sessions/actions-ui.ts`, `client/src/ui/sessions/actions-ui.test.ts`, `client/src/ui/sessions/ActionDialogs.tsx`
+- Modify: `client/src/ui/sessions/SessionList.tsx`, `client/src/ui/sessions/SessionDetail.tsx`
 
 **Interfaces:**
-- Consumes: `perform`, `pending`, `allowed`, `targetOf` (Task 5); catalog rows.
-- Produces: `TerminateConfirm(props: { entry: RowOut; onClose(): void })` and `RenameDialog(props: { entry: RowOut; onClose(): void })`.
+- Consumes: `perform`, `updating`, `detailsFor`, `targetOf` (Task 6).
+- Produces:
 
-Behaviour (from `SessionsWindow.cpp` around the `terminateSessionConfirm` dialog and the session menu):
+```ts
+export interface MenuState {
+  change: { label: "Pause session" | "Resume session" | "Restore session" | "Updating…"; enabled: boolean };
+  rename: boolean;
+  archive: { visible: boolean; enabled: boolean; reason?: string };
+  end: { label: "Terminate session…" | "Forget saved session…" | "Forget archived session…"; enabled: boolean; reason?: string };
+  stop: boolean;
+  markRead: { label: "Mark as read" | "Mark needs attention"; enabled: boolean; reason?: string };
+}
+export function menuState(entry: RowOut, online: boolean, updating: boolean, details?: Details): MenuState;
+export function terminateCopy(entry: RowOut): { title: string; text: string; detail: string; confirm: string };
+export function renameError(name: string): string | undefined;
+```
 
-| Entry | Enabled when | Runs |
-|---|---|---|
-| Pause session / Resume session | computer online, `allowed(row,"pause")` / `"resume"`, state `running` / not running and not archived | `pause` / `resume` |
-| Rename… (F2) | `allowed(row,"rename")`, not pending | dialog, then `rename` |
-| Move to archive | `allowed(row,"archive")`, state not `archived` | `archive` |
-| Terminate session… | state `running`, `allowed(row,"terminate")` | confirmation, then `terminate` |
-| Stop (detail header) | `turn_started` set, `allowed(row,"interrupt")` | `interrupt` with `turn_started` |
-| Mark as read (menu and chip) | the row is unread or has attention | `mark_read` with `reply_id` and `attention_signature` from the row |
+Rules (Qt `SessionsWindow.cpp` 3890-3912 for the selected session with details, and 5270-5380 for the context menu):
+- `available = online && !updating`.
+- **Change entry** (header and menu, without details):
+  - `canPause = state == "running" && resumable && activity == "idle" && process_state != "exited"`.
+  - For the selected session with details, `activity == "idle"` may instead be `details.auth_required`. Additionally `details.expected_id == "" || details.resume_message_can_send`.
+  - Enabled when `available` and either:
+    - not archived, and (`canPause && allowed("pause")`) or (`state != "running" && resumable && allowed("resume")`);
+    - or archived, which shows "Restore session" disabled in this phase (Restore moves to `zerus-5wmh.17`).
+  - The label is "Updating…" while updating, otherwise as in the type.
+- **Rename:** `allowed("rename") && available`, both name sections non-empty, and `archive_id` present when archived.
+- **Move to archive:** visible only when `agent != "dsh"` and `state` is `paused` or `stopped`; enabled when `!updating && allowed("archive")`; the reason is `action_reasons.archive`.
+- **End entry:** operation `terminate` when `state == "running"` and not forgets-binding-only (`agent == "opencode" && allowed("forget") && !allowed("terminate")`); otherwise `forget`.
+  - The label is "Terminate session…", "Forget saved session…", or "Forget archived session…" when archived.
+  - Terminate is enabled when `available && allowed("terminate")`. The Forget variants stay disabled in this phase with the reason "Forgetting sessions arrives in a later version." (`zerus-5wmh.17`).
+- **Stop:** `turn_started` set, `allowed("interrupt")` and `available`.
+- **Mark as read:** shown when the row needs attention (`attention` set, or `unread`, matching Qt `SessionRows::needsAttention` for the fields the client has). It runs `mark_read` with the row's `reply_id` and `attention_signature`.
+  - When the host has no shared read state (`!shared_read`), it is disabled with the reason "Update hgs on this session's host to share read state." (the local fallback is `zerus-5wmh.16`).
+  - Otherwise the entry is "Mark needs attention", disabled with the reason "Arrives with attention marks." (`zerus-5wmh.16`).
+- **Terminate confirmation** (`SessionsWindow.cpp:5771-5797`):
+  - Title "Terminate session?".
+  - When `tracked` and the agent is `codex`, `claude` or `kimi`, the text is "Stop {name} and move its recorded conversation to Archive? Running processes will stop; the conversation history is kept." and the confirm button is "Stop and archive".
+  - Otherwise the text is "Terminate {name}? Its running processes will stop. No HGS archive is available for this session; any native conversation history is kept." and the button is "Terminate session".
+  - The detail is "Computer: {machine}".
+  - Cancel is focused and is the default button, and Escape cancels. There is no Remove-worktree checkbox in this phase (`zerus-5wmh.10`).
+  - On confirm, the row is checked again as in `perform`.
+- **Rename dialog:**
+  - The field starts with the full current name, with the session part selected.
+  - `renameError` returns "Use a name without spaces or '=', with a project and a session part." for names Task 1's rule refuses. Rename is disabled while there is an error or the name is unchanged.
+  - Escape cancels.
 
-Terminate confirmation, as in Qt:
-- **Title:** "Terminate session?".
-- **Text** when the session is tracked and its agent is `codex`, `claude` or `kimi` (keep archive): "Stop {name} and move its recorded conversation to Archive? Running processes will stop; the conversation history is kept." Otherwise: "Terminate {name}? Its running processes will stop. No HGS archive is available for this session; any native conversation history is kept." (`SessionsWindow.cpp:5772`).
-- **Detail:** "Computer: {machine}".
-- **Buttons:** "Stop and archive" or "Terminate session", and Cancel. Cancel has focus and is the default, and Escape cancels.
-- There is no Remove-worktree checkbox in this phase.
-
-Rename dialog: a text field with the current short name selected, and Rename and Cancel buttons. Rename is disabled while the name breaks the CLI rule (non-empty, no space, `/` or `=`, no leading `#`); under the field it says "Use a name without spaces, slashes or '='."
-
-- [ ] **Step 1: Write the failing vitest tests** for pure helpers in a new `client/src/ui/sessions/actions-ui.ts`: `menuState(row, online) -> { pause, resume, rename, archive, terminate, stop, markRead }` booleans per the table, and `terminateCopy(row) -> { title, text, confirm }` returning the two Qt variants. Fixture rows are synthetic (`claude/sample-project/review`, `/home/example/sample-project`).
-
+- [ ] **Step 1: Write the failing vitest tests** for `menuState`: one case per rule above with synthetic rows, including an `opencode` row, a `dsh` row, an archived row with and without `archive_id`, a running `claude` row in idle and in working, `process_state == "exited"`, and details with `expected_id` set and `resume_message_can_send` false. Also test `terminateCopy` for both variants and `renameError`.
 - [ ] **Step 2: Run** `npx vitest run src/ui/sessions` and expect FAIL.
-
-- [ ] **Step 3: Implement** the helpers and the components; wire the entries. Before running a confirmed or renamed action, re-read the row by `(computer, key)` from the catalog. If it is gone or its `run_id` differs from the one the dialog opened with, show the info notice "This session changed. Open its actions again." and do nothing (Qt `selectSessionEntry(original)`).
-
+- [ ] **Step 3: Implement** the helpers, `ActionDialogs.tsx` (the mockup's dialog classes and skin variables) and the wiring. In the context menu and the header, replace the phase 1 `disabled: true` entries with `menuState`, and show disabled entries' reasons as their tooltip, as Qt does with `hint`.
 - [ ] **Step 4: Run** `npx vitest run`, `npm run check`, `python3 ../scripts/check-ui-separators.py`. Expected: PASS.
-
 - [ ] **Step 5: Commit**
 
 ```bash
 git add client/src/ui/sessions
-git commit -m "feat(client): session actions with Qt's confirmations"
+git commit -m "feat(client): session actions with Qt's enablement and confirmations"
 ```
 
 ---
 
-### Task 7: Text composer and send
+### Task 8: Documentation and the end-to-end check
 
 **Files:**
-- Create: `client/src/ui/sessions/Composer.tsx` (port of `design/webui/src/screens/sessions/Composer.tsx` without attachments, voice, video and the resize grip's persistence beyond what the mockup has)
-- Modify: `client/src/ui/sessions/SessionDetail.tsx` (mount the composer under Activity)
-- Test: `client/src/ui/sessions/composer.test.ts`
+- Modify: `client/README.md` ("Actions" section: the call table, the outcome rules, "unknown outcomes are never replayed", where read marks are stored)
+- Modify: `client/src/ui/PerfHost.tsx` (an `actions-smoke=1` query hook beside the perf hooks, documented in the README)
+- Modify: `docs/superpowers/plans/2026-10-28-tauri-client-phase1.md` (the phase table: phase 2 without send; send in phase 4)
 
-**Interfaces:**
-- Consumes: `perform`, `pending`, `targetOf` (Task 5).
-- Produces: `Composer(props: { entry: RowOut })`.
-
-Rules:
-- Enter sends; Shift+Enter inserts a newline. There is no visible hint text.
-- The send button is disabled while `pending(…,"send")`, while the trimmed text is empty, or while the row has no run id. The draft is kept per `(computer, name)` in memory.
-- `done` clears the draft. `failed` and `uncertain` keep the draft and show the notice; the user decides whether to send again, and a new attempt gets a new request id, as in Qt.
-- Text over 64 KiB disables Send and shows "Use at most 64 KiB of text and 8 attachments." under the field.
-
-- [ ] **Step 1: Write the failing vitest tests** for a pure `composerState(text, row, sending) -> { canSend, hint }` and for `onKey(event)` returning `"send" | "newline" | null` (Enter without Shift, Shift+Enter, IME composition (`isComposing`) returns null).
-- [ ] **Step 2: Run** `npx vitest run src/ui/sessions/composer.test.ts` and expect FAIL.
-- [ ] **Step 3: Implement** the helpers and the component with the mockup's classes and skin variables (`design/webui` `cmp-*` classes) so the approved look holds.
-- [ ] **Step 4: Run** `npx vitest run`, `npm run check`, the separator check. Expected: PASS.
-- [ ] **Step 5: Commit**
-
-```bash
-git add client/src/ui/sessions/Composer.tsx client/src/ui/sessions/composer.test.ts client/src/ui/sessions/SessionDetail.tsx
-git commit -m "feat(client): text composer that sends through the guarded path"
-```
-
----
-
-### Task 8: Documentation, read-mark retry and the end-to-end check
-
-**Files:**
-- Modify: `client/README.md` ("Actions" section: the table from Task 1, the outcome rules, "unknown outcomes are never replayed", where read marks are stored)
-- Modify: `client/src/store/actions.ts` (read-mark retry on catalog changes)
-- Modify: `docs/superpowers/plans/2026-10-28-tauri-client-phase1.md` (phase table: phase 2 links this plan)
-
-- [ ] **Step 1: Write the failing vitest test**. On a catalog batch whose row still shows a pending mark unread, the store calls `perform(target, mark_read)` once for that session. A second batch within 5 s does not call it again, and a batch where the row shows it read calls nothing.
-- [ ] **Step 2: Implement** the retry. It reads `pendingReadMarks()` at start and after each mark, keeps a per-session last-attempt time, retries at most once per 5 s per session, and only on a catalog change.
-- [ ] **Step 3: End-to-end with the fake hgs**. Set `ZERUS_CLIENT_HGS` to a copy of `fake_hgs_actions.py` with `echo_receipt` and run the app headless on the replay fixtures with the auto-perf hooks off. A `ZERUS_CLIENT_QUERY=actions-smoke=1` hook in `PerfHost.tsx` (kept, documented in `client/README.md` beside the perf hooks) makes the app send one message, pause, rename and terminate the selected replay session, capture a headless screenshot of the Terminate confirmation to the scratch folder (never committed), then exit. Afterwards the fake's `log.ndjson` holds exactly one call per action, with the expected argument lists and inputs. Record the command and the log lines in the PR description.
-- [ ] **Step 4: Run all checks**: `cargo +1.99.1 test` (core and src-tauri), clippy with `-D warnings`, `npx vitest run`, `npm run check`, `python3 scripts/check-ui-separators.py`, `python3 scripts/check-source-privacy.py`.
-- [ ] **Step 5: Commit**
+- [ ] **Step 1: End-to-end with the fake `hgs`.** Copy `fake_hgs_actions.py` as `hgs` with `{"reply":{"exit":0,"stdout":"echo_interrupt"}}` into a scratch folder and point `ZERUS_CLIENT_HGS` at it.
+  - Run the release app headless on the replay fixtures with `ZERUS_CLIENT_QUERY=actions-smoke=1` and the Headless constraint's environment.
+  - The hook selects the replay session `claude/sample-project/review`, runs pause, resume, rename (to `claude/sample-project/review-renamed`), archive and terminate through `perform` (confirming dialogs programmatically), then exits.
+  - Afterwards `log.ndjson` holds exactly one call per action, with the table's argument lists.
+  - Record the command and the log lines in the PR description. Screenshots stay in the scratch folder.
+- [ ] **Step 2: Run all checks:** `cargo +1.99.1 test`, plus clippy with `-D warnings`, in `client/core` and `client/src-tauri`; then `npx vitest run`, `npm run check`, `python3 scripts/check-ui-separators.py` and `python3 scripts/check-source-privacy.py`.
+- [ ] **Step 3: Commit**
 
 ```bash
 git add client docs/superpowers/plans
-git commit -m "docs(client): guarded actions, read marks and their outcome rules"
+git commit -m "docs(client): guarded session actions and their outcome rules"
 ```
 
 ---
 
-## Out of scope (later phases)
+## Phases of the remaining Qt session-menu entries
 
-Remove-worktree cleanup after Terminate, Forget saved/archived sessions, Fork, Clear and Compact context, queued-message removal, answering questions, attachments, voice and video, and batch actions over a multi-selection; they keep their Qt behaviour and arrive with `zerus-5wmh.9` and `zerus-5wmh.10`.
+| Entry | Phase and Beads task |
+|---|---|
+| Send, the composer guards, cold cache confirmation, resume-then-send, local failed messages, durable drafts | Phase 4, `zerus-5wmh.9` |
+| Open terminal, Open native DeepSeek UI, Open folder, Open shell in session folder, Show running commands | Phase 4, `zerus-5wmh.9` |
+| Copy session reference, Copy folder path, Copy connect command, Copy restore command | Phase 4, `zerus-5wmh.19` |
+| Mark needs attention, Mute and Unmute, Mark all as read, local read marks for older hosts | Phase 3, `zerus-5wmh.16` |
+| Move to project (and New project), Rename project, Project settings, Sort sessions by name, Delete project | Phase 3, `zerus-5wmh.18` |
+| Start fresh, Restore session, Forget saved session, Forget archived session, Clear archive | Phase 5, `zerus-5wmh.17` |
+| Remove worktree after Terminate and the worktree review offer, Fork session, Clear session, Compact context | Phase 5, `zerus-5wmh.10` |
+| Multi-selection batch actions | After phase 2, `zerus-5wmh.20` |
+| Expand or compact session row, Expand all collapsed, Copy session name | Done in phase 1 |

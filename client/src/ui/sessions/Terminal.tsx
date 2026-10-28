@@ -101,7 +101,7 @@ export function TerminalTab() {
           <Icon name={connected() ? "unplug" : "plug"} size={15} />
         </button>
       </div>
-      <div class="term-host" ref={host} />
+      <div class="term-host" data-shortcut-context="terminal" ref={host} />
     </div>
   );
 }

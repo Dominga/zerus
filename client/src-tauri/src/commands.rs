@@ -31,6 +31,12 @@ impl AppState {
     pub fn start_source(&self) -> Result<String, String> {
         self.live.start()
     }
+
+    /// The peers this computer's listing names; None before a listing named
+    /// them, and for a replay.
+    pub fn peers(&self) -> Option<std::collections::BTreeSet<String>> {
+        self.live.peers()
+    }
 }
 
 #[cfg(feature = "live")]

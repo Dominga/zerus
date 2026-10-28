@@ -221,6 +221,7 @@ fn the_ini_seed_takes_qt_s_values_once_and_never_writes_qt_s_store() {
     assert_eq!(get("processes/backgroundSeconds"), 5.0);
     assert_eq!(get("processes/loadingSeconds"), 0.0);
     assert_eq!(get("speech/manage_host"), "studio");
+    assert_eq!(get("speech/host"), "studio");
     assert_eq!(get("speech/profile"), "@profile");
     assert_eq!(
         get("speech/machine_id"),
@@ -460,6 +461,35 @@ fn an_unreadable_store_keeps_its_file_and_runs_at_defaults() {
     assert_eq!(fs::read(&path).unwrap(), b"{not json");
 }
 
+/// A write the disk refuses is not flushed: flush_within promises the data
+/// is on disk (speech providers send nothing on a false answer).
+#[cfg(unix)]
+#[test]
+fn flush_within_is_false_after_a_refused_write() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new("refused");
+    let dir = scratch.0.join("data");
+    fs::create_dir_all(&dir).unwrap();
+    let settings = Settings::open(dir.join("settings.json"), None);
+    assert!(settings.set("workspace/theme", json!("dark")).is_ok());
+    assert!(settings.flush_within(FLUSH));
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    // Root ignores the mode; the refusal cannot be shown then.
+    if fs::write(dir.join("probe"), b"").is_ok() {
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+    assert!(settings.set("workspace/theme", json!("light")).is_ok());
+    assert!(!settings.flush_within(FLUSH));
+    assert!(settings
+        .error()
+        .is_some_and(|error| error.starts_with("Settings not saved")));
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    // A later write that succeeds clears the failure.
+    assert!(settings.set("workspace/theme", json!("system")).is_ok());
+    assert!(settings.flush_within(FLUSH));
+}
+
 #[test]
 fn seed_values_take_only_what_qt_stored() {
     let values: BTreeMap<String, QtValue> = [
@@ -468,6 +498,11 @@ fn seed_values_take_only_what_qt_stored() {
         (
             "automaticApprovals/enabled".to_owned(),
             QtValue::Bool(false),
+        ),
+        // SettingsJson stores the unconfirmed provider change as bytes.
+        (
+            "speech/providerOperation".to_owned(),
+            QtValue::Bytes(br#"{"request_id":"r"}"#.to_vec()),
         ),
     ]
     .into_iter()
@@ -478,6 +513,8 @@ fn seed_values_take_only_what_qt_stored() {
             "workspace/theme",
             "workspace/compact",
             "speech/manage_host",
+            "speech/host",
+            "speech/providerOperation",
             QT_AUTOMATIC_APPROVALS,
             "speech/microphone",
         ],
@@ -486,7 +523,12 @@ fn seed_values_take_only_what_qt_stored() {
         seeded,
         [
             (QT_AUTOMATIC_APPROVALS.to_owned(), json!(false)),
+            ("speech/host".to_owned(), json!("old")),
             ("speech/manage_host".to_owned(), json!("old")),
+            (
+                "speech/providerOperation".to_owned(),
+                json!(r#"{"request_id":"r"}"#)
+            ),
             ("workspace/theme".to_owned(), json!("dark")),
         ]
         .into_iter()

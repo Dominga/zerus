@@ -157,6 +157,10 @@ pub const KEYS: &[Key] = &[
     key("speech/preview_before_send", Kind::Flag(false)),
     key("speech/video_mode", Kind::Flag(false)),
     key("speech/manage_host", Kind::Text("")),
+    // The computer Use as default chose on, and a provider change not yet
+    // confirmed (speech_settings), as Qt stores them.
+    key("speech/host", Kind::Text("")),
+    key(crate::speech_settings::PENDING_KEY, Kind::Text("")),
     key("speech/machine_id", Kind::Text("")),
     key("speech/profile", Kind::Text("")),
     key("speech/profile_revision", Kind::Long { default: 0, min: 0 }),
@@ -660,14 +664,14 @@ impl Settings {
         state.unreadable.clone().or_else(|| state.error.clone())
     }
 
-    /// Waits at most `limit` for every change to reach the disk (exit);
-    /// whether it did.
+    /// Waits at most `limit` for every change to reach the disk; whether it
+    /// did: loaded, clean, idle, and the last write succeeded.
     pub fn flush_within(&self, limit: Duration) -> bool {
         let deadline = Instant::now() + limit;
         let mut state = self.shared.lock();
         loop {
             if state.loaded && !state.dirty && !state.writing {
-                return true;
+                return state.error.is_none();
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {

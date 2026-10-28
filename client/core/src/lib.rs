@@ -41,6 +41,7 @@ pub mod send;
 pub mod session_usage;
 pub mod settings;
 pub mod shell;
+pub mod speech_settings;
 pub mod state;
 pub mod stream;
 pub mod task_view;

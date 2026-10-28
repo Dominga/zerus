@@ -45,10 +45,12 @@ pub fn open(app: &AppHandle, dir: &Path) -> Store {
     );
     let handle = app.clone();
     settings.subscribe(Box::new(move |key, value, revision| {
-        if key == ALWAYS_ON_TOP && newer_layer(revision) {
-            if let Some(window) = handle.get_webview_window(crate::MAIN_WINDOW) {
-                apply_window_layer(&window, value.as_bool().unwrap_or(false));
-            }
+        if key == ALWAYS_ON_TOP {
+            apply_newer_layer(revision, || {
+                if let Some(window) = handle.get_webview_window(crate::MAIN_WINDOW) {
+                    apply_window_layer(&window, value.as_bool().unwrap_or(false));
+                }
+            });
         }
         let _ = handle.emit(
             "settings-changed",
@@ -62,17 +64,19 @@ pub fn open(app: &AppHandle, dir: &Path) -> Store {
 static KEEP_ABOVE: OnceLock<bool> = OnceLock::new();
 /// The store revision of the last Keep above applied (0: none yet). Listeners
 /// run after the store's lock is released, so changes can arrive out of
-/// order: only a newer one applies. Never held while calling Tauri.
+/// order: only a newer one applies. Held across the apply, so an older
+/// change cannot follow it; off the main thread, `set_always_on_top` only
+/// posts to the event loop.
 static LAYER: Mutex<u64> = Mutex::new(0);
 
-/// Records `revision` as applied when it is newer than the last one.
-fn newer_layer(revision: u64) -> bool {
+/// Runs `apply` for the change at `revision` when it is newer than the last
+/// one applied.
+fn apply_newer_layer(revision: u64, apply: impl FnOnce()) {
     let mut last = LAYER.lock().unwrap_or_else(PoisonError::into_inner);
-    if revision <= *last {
-        return false;
+    if revision > *last {
+        *last = revision;
+        apply();
     }
-    *last = revision;
-    true
 }
 
 /// Whether a window on `display` can be kept above others. GTK has no
@@ -111,9 +115,11 @@ pub fn apply_stored_window_layer(store: &Store, window: WebviewWindow) {
         .name("window-layer".into())
         .spawn(move || {
             // Waits for the load without the lock; a change applied since
-            // then is newer than the stored value.
+            // then is newer than the stored value, and one arriving now
+            // waits until this apply is done.
             let on = settings.flag(ALWAYS_ON_TOP);
-            if *LAYER.lock().unwrap_or_else(PoisonError::into_inner) == 0 {
+            let applied = LAYER.lock().unwrap_or_else(PoisonError::into_inner);
+            if *applied == 0 {
                 apply_window_layer(&window, on);
             }
         });
@@ -126,6 +132,58 @@ pub fn apply_stored_window_layer(store: &Store, window: WebviewWindow) {
 #[tauri::command]
 pub fn window_layer_supported() -> bool {
     keep_above_supported()
+}
+
+/// `hgs --version` on this computer, for Settings > About
+/// (SettingsPage.h:147-150); `None` when it cannot be read.
+#[tauri::command]
+pub async fn hgs_version() -> Option<String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let local = zerus_client_core::ComputerId::local();
+        zerus_client_core::reads::read(
+            &zerus_client_core::default_hgs(),
+            &local,
+            &zerus_client_core::reads::Read::Version,
+        )
+        .ok()
+        .and_then(|version| version.as_str().map(str::to_owned))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// The repository Settings > About opens (SettingsPage.h:151-154). The
+/// address is fixed here: the webview cannot pass one.
+pub const REPOSITORY: &str = "https://github.com/ufna/zerus";
+
+/// Opens the repository in the default browser.
+#[tauri::command]
+pub fn open_repository() -> Result<(), String> {
+    open_url(REPOSITORY).map_err(|error| format!("Could not open {REPOSITORY}: {error}"))
+}
+
+/// Opens an address the client fixed (never one from the webview) in the
+/// default browser.
+pub fn open_url(url: &str) -> std::io::Result<()> {
+    let program = if cfg!(target_os = "macos") {
+        "/usr/bin/open"
+    } else if cfg!(windows) {
+        "explorer.exe"
+    } else {
+        "xdg-open"
+    };
+    let mut child = std::process::Command::new(program)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    // Reaped off the caller: the opener may stay until the browser starts.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 /// Every setting, as Qt would read it, and the store's revision.

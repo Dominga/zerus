@@ -156,7 +156,8 @@ interface Slot { queued?: { value: SettingValue | null }; running: boolean; wait
 /**
  * A reactive settings store over `backend`, starting from the defaults (and
  * this viewer's hint) until the backend's values arrive. The legacy moves are
- * written first and cleared only once all saved; `remember` keeps the hint.
+ * written first and cleared only once all saved; `remember` keeps the hint,
+ * from confirmed values only and once the backend's values have loaded.
  */
 export function createSettings(backend: SettingsBackend, options: { legacy?: Legacy; hint?: Settings; remember?: (settings: Settings) => void } = {}) {
   const [settings, setSettings] = createStore<Settings>({ ...DEFAULTS, ...options.hint });
@@ -167,9 +168,6 @@ export function createSettings(backend: SettingsBackend, options: { legacy?: Leg
   const revisions = new Map<string, number>();
   const tried = new Set<string>();
   const slots = new Map<string, Slot>();
-  // Bumped on every local change or event, so a load does not undo them.
-  const versions = new Map<string, number>();
-  const bump = (key: string) => versions.set(key, (versions.get(key) ?? 0) + 1);
 
   const show = (key: string, value: SettingValue | null | undefined) => {
     // Undefined removes the key: a shortcut's defaults apply again.
@@ -185,8 +183,16 @@ export function createSettings(backend: SettingsBackend, options: { legacy?: Leg
     if (value === null) delete chosen[key];
     else chosen[key] = value;
   };
-  /** Keeps this viewer's first-paint copy after a hinted key changed. */
-  const remember = (key: string) => { if ((HINTED as readonly string[]).includes(key)) options.remember?.(settings); };
+  // Whether the backend's values loaded: until then (or after a failed
+  // load) the confirmed values are partly defaults, and the hint stays.
+  let complete = false;
+  /**
+   * Keeps this viewer's first-paint copy after a hinted key changed: what the
+   * store confirmed, never a value still being saved.
+   */
+  const remember = (key: string) => {
+    if (complete && (HINTED as readonly string[]).includes(key)) options.remember?.({ ...chosen });
+  };
 
   async function drain(key: string, slot: Slot) {
     slot.running = true;
@@ -227,7 +233,6 @@ export function createSettings(backend: SettingsBackend, options: { legacy?: Leg
       return Promise.resolve(true);
     }
     tried.delete(key);
-    bump(key);
     show(key, value);
     return new Promise((resolve) => {
       let slot = slots.get(key);
@@ -248,7 +253,6 @@ export function createSettings(backend: SettingsBackend, options: { legacy?: Leg
   /** A change made elsewhere: shown unless one of ours is still being saved. */
   const changed = (key: string, change: Saved) => {
     if (!fresh(key, change.revision)) return;
-    bump(key);
     confirm(key, change.value);
     if (!slots.has(key)) { show(key, change.value); remember(key); }
   };
@@ -263,21 +267,23 @@ export function createSettings(backend: SettingsBackend, options: { legacy?: Leg
     const moves = options.legacy?.moves ?? {};
     const results = await Promise.all(Object.entries(moves).map(([key, value]) => set(key, value)));
     if (results.every(Boolean)) options.legacy?.clear();
-    const before = new Map(versions);
     try {
       const { values, revision } = await backend.load();
       for (const [key, value] of Object.entries(values)) {
-        // A change made since the load started is newer than the loaded value.
-        if ((versions.get(key) ?? 0) !== (before.get(key) ?? 0) || slots.has(key)) continue;
+        // A change answered at a newer revision is newer than the loaded
+        // value; an equal one is in it (a fresh store loads at revision 0).
         // Events older than the load can no longer show.
-        if (revision > (revisions.get(key) ?? 0)) revisions.set(key, revision);
+        if (revision < (revisions.get(key) ?? 0)) continue;
+        revisions.set(key, revision);
         confirm(key, value);
-        show(key, value);
+        // A save in flight keeps showing its value until it is answered.
+        if (!slots.has(key)) show(key, value);
       }
+      complete = true;
+      options.remember?.({ ...chosen });
     } catch (error) {
       console.warn(`settings: not loaded: ${String(error)}`);
     }
-    options.remember?.(settings);
     setLoaded(true);
   })();
 

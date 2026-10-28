@@ -27,10 +27,11 @@ function fakeCore(values: Settings = {}) {
   let listener: ((key: string, change: Saved) => void) | undefined;
   let answerLoad: (() => void) | undefined;
   let deferLoad = false;
+  let failLoad = false;
   const store: Settings = { ...DEFAULTS, ...values };
   const backend: SettingsBackend = {
-    load: () => new Promise((resolve) => {
-      const answer = () => resolve({ values: { ...store }, revision });
+    load: () => new Promise((resolve, reject) => {
+      const answer = () => (failLoad ? reject("Settings are not readable") : resolve({ values: { ...store }, revision }));
       if (deferLoad) answerLoad = answer; else answer();
     }),
     save: (key, value) => new Promise((resolve, reject) => {
@@ -58,6 +59,7 @@ function fakeCore(values: Settings = {}) {
     /** An event that arrives late, with an older revision. */
     late: (key: string, value: SettingValue, at: number) => listener?.(key, { value, revision: at }),
     deferLoad: () => { deferLoad = true; },
+    failLoad: () => { failLoad = true; },
     answerLoad: () => answerLoad?.(),
   };
 }
@@ -191,6 +193,30 @@ describe("answers and events in any order", () => {
 });
 
 describe("this window's own saves", () => {
+  it("show the stored value when a save made during the load is refused", async () => {
+    const core = fakeCore({ "workspace/theme": "dark" });
+    core.deferLoad();
+    const store = createSettings(core.backend);
+    await flush();
+    void store.set("workspace/theme", "light");
+    core.answerLoad();
+    await store.ready;
+    expect(store.settings["workspace/theme"]).toBe("light");
+    core.saves[0].answer(true);
+    await flush();
+    expect(store.settings["workspace/theme"]).toBe("dark");
+  });
+
+  it("confirm what a fresh store loads at revision 0", async () => {
+    const core = fakeCore({ "workspace/theme": "dark" });
+    const store = createSettings(core.backend);
+    await store.ready;
+    void store.set("workspace/theme", "light");
+    core.saves[0].answer(true);
+    await flush();
+    expect(store.settings["workspace/theme"]).toBe("dark");
+  });
+
   it("show the value the store put in effect although its event came first", async () => {
     const core = fakeCore();
     const store = createSettings(core.backend);
@@ -295,6 +321,51 @@ describe("the first-paint hint", () => {
     core.saves[0].answer();
     await flush();
     expect(JSON.parse(storage.data[HINT_KEY])["workspace/contentScale"]).toBe(1.25);
+  });
+
+  it("keeps a value still being saved out of it", async () => {
+    const storage = memoryStorage();
+    const core = fakeCore();
+    const store = createSettings(core.backend, { remember: (s) => writeHint(storage, s) });
+    await store.ready;
+    void store.set("workspace/theme", "light");
+    core.elsewhere("workspace/contentScale", 1.25);
+    const hint = JSON.parse(storage.data[HINT_KEY]);
+    expect(hint["workspace/contentScale"]).toBe(1.25);
+    expect(hint["workspace/theme"]).toBe("system");
+    core.saves[0].answer(true);
+    await flush();
+    expect(store.settings["workspace/theme"]).toBe("system");
+    expect(JSON.parse(storage.data[HINT_KEY])["workspace/theme"]).toBe("system");
+  });
+
+  it("stays as it was when the load fails", async () => {
+    const before = JSON.stringify({ "workspace/theme": "dark", "workspace/contentScale": 1.5 });
+    const storage = memoryStorage({ [HINT_KEY]: before });
+    const core = fakeCore();
+    core.failLoad();
+    const store = createSettings(core.backend, { hint: readHint(storage), remember: (s) => writeHint(storage, s) });
+    await store.ready;
+    expect(store.loaded()).toBe(true);
+    core.elsewhere("workspace/language", "ru");
+    core.elsewhere("workspace/contentScale", 1.25);
+    expect(storage.data[HINT_KEY]).toBe(before);
+  });
+
+  it("is not written from defaults before the load", async () => {
+    const before = JSON.stringify({ "workspace/theme": "dark" });
+    const storage = memoryStorage({ [HINT_KEY]: before });
+    const core = fakeCore({ "workspace/theme": "dark" });
+    core.deferLoad();
+    const store = createSettings(core.backend, { hint: readHint(storage), remember: (s) => writeHint(storage, s) });
+    await flush();
+    core.elsewhere("workspace/contentScale", 1.25);
+    expect(storage.data[HINT_KEY]).toBe(before);
+    core.answerLoad();
+    await store.ready;
+    const hint = JSON.parse(storage.data[HINT_KEY]);
+    expect(hint["workspace/theme"]).toBe("dark");
+    expect(hint["workspace/contentScale"]).toBe(1.25);
   });
 });
 

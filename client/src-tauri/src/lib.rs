@@ -34,6 +34,8 @@ pub mod settings;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod signals;
 #[cfg(feature = "live")]
+mod speech_settings;
+#[cfg(feature = "live")]
 mod terminal;
 #[cfg(feature = "media")]
 mod voice;
@@ -262,6 +264,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 let dir = data_dir(app.handle());
                 std::fs::create_dir_all(&dir)?;
                 app.manage(settings::open(app.handle(), &dir));
+                app.manage(speech_settings::SpeechPage::default());
                 // A replay never touches the real read or attention marks.
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
@@ -540,6 +543,10 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         settings::settings_set,
         desk::desk_take_pending,
         settings::window_layer_supported,
+        settings::hgs_version,
+        settings::open_repository,
+        speech_settings::speech_input,
+        speech_settings::open_speech_documentation,
         actions::run_action,
         actions::set_notifications,
         actions::inspect_session,

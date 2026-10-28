@@ -13,6 +13,11 @@ const repo = new URL("../../../../../", import.meta.url);
 const qt = ["tray/src/SettingsPage.h", "tray/src/UiLanguage.h"].map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");
 const source = (file: string) => fs.readFileSync(new URL(file, here), "utf8");
 const layer = fs.readFileSync(new URL("tray/src/WindowLayer.cpp", repo), "utf8");
+const keyboard = fs.readFileSync(new URL("tray/src/KeyboardSettings.cpp", repo), "utf8");
+const shortcuts = fs.readFileSync(new URL("tray/src/Shortcuts.cpp", repo), "utf8");
+const store = fs.readFileSync(new URL("../../../store/shortcuts.ts", here), "utf8");
+const speech = fs.readFileSync(new URL("tray/src/speech/SpeechSettings.cpp", repo), "utf8");
+const speechCore = fs.readFileSync(new URL("client/core/src/speech_settings.rs", repo), "utf8");
 
 const APPEARANCE = [
   "Follow system appearance", "Dark", "Light", "Interface language",
@@ -44,7 +49,104 @@ const SESSIONS = [
   "Closing Zerus keeps agents running. Projects and the arrangement of your workspace are saved on this device.",
 ];
 
+const KEYBOARD = [
+  "Keyboard", "Command", "Shortcut", "Alternate", "Reset", "Reset all", "Restore the default chords of the selected command",
+  "Chords marked ✓ work in Terminal.", "Double-click a shortcut, or press Enter on it, to change it.", "Works in Terminal",
+  "Reset all shortcuts", "Restore the default chords of every command?", "Change shortcut", "Clear", "Shortcut in use",
+];
+const KEYBOARD_FILLED: [string, string][] = [
+  ["Press the new shortcut for %1.", "Press the new shortcut for {title}."],
+  ["Already used by %1. Reassign?", "Already used by ${separatedList("],
+];
+
+const ABOUT_FILLED: [string, string][] = [
+  ["Zerus %1", "`Zerus ${__APP_VERSION__}`"],
+  ["hgs CLI %1", "`hgs CLI ${version}`"],
+];
+const ABOUT = ["About", "hgs CLI version unavailable", "hgs CLI: checking…", "Open Zerus repository on GitHub"];
+
+const VOICE = [
+  "Voice input", "Preview before sending",
+  "Show Stop instead of Send while recording audio or video. Stop retains a preview for review and a separate Send. This preference applies on this device.",
+  "Manage recognition providers on a processing computer. Recording starts on this device; Send voice uses the provider selected beside your recording.",
+  "Configure providers on", "Add", "Edit", "Test", "Remove", "Use as default",
+  "Test sends a short synthetic recording from the selected computer. It may load a prepared model or use the remote API; it does not use your microphone or send anything to an agent.",
+  "Speech provider documentation", "Refresh providers and microphones", "Check operation status", "Microphone on this device",
+  "System default microphone", "Selected microphone (unavailable)",
+  "Provider settings and credentials stay on their processing computer. Recordings are limited to two minutes. Original audio and recognized text remain in conversation history; your typed draft stays separate.",
+  "Remove speech provider?", "Remove provider", "Name", "Profile ID", "Type", "Model", "Language", "Device", "Base URL",
+  "Allow unencrypted HTTP for a local or private server", "API key", "Keep stored API key", "No API key", "Replace API key",
+  "Remove API key", "New API key", "Auto-detect", "e.g. Team transcription server", "e.g. Russian speech",
+  "Unsupported provider type", "HTTP transcription documentation", "Local GigaAM documentation",
+  "This provider type cannot be edited by this version of Zerus. See the provider documentation before changing it.",
+  String.raw`The processing computer sends audio to the server's /audio/transcriptions endpoint. Use the server's model ID and a two-letter language code, or leave language empty.\n\nThe optional API key is saved on the processing computer. Prefer HTTPS; private HTTP requires explicit consent. Saving sends no audio.`,
+  String.raw`Local inference runs on the processing computer named above. Saving creates a profile; it does not install the service or download model weights.\n\nv3_e2e_rnnt is the default for Russian with punctuation; use ru for Russian.\n\nCPU uses the processor. CUDA requires a supported NVIDIA GPU and CUDA-enabled PyTorch. MPS requires a supported Apple GPU/runtime. Use Test to verify the chosen model and device.`,
+];
+// Texts the core's state machine (speech_settings.rs) shows.
+const VOICE_CORE = [
+  "Checking provider configuration…", "Loading this computer's voice statistics…", "Voice statistics unavailable.",
+  "The computer returned an invalid provider configuration. Update hgs and refresh.",
+  "The recognition service is not ready. You can still add and edit providers.",
+  "No providers yet. Add Local GigaAM or an OpenAI-compatible server.",
+  "Provider configuration is ready. Test a saved provider before using it.",
+  "Use as default selects a provider for new recordings. Existing recordings keep their selected provider.",
+  "The selected default provider is unavailable. Choose another explicitly or restore it on this computer.",
+  "The default provider is configured on another computer. Browsing these providers does not change it.",
+  "Working on the provider request. You can keep using Zerus.",
+  "That profile ID already exists. Edit the existing provider or choose another ID.",
+  "Saving on the selected computer. If the result is not confirmed, use Check operation status.",
+  "The operation is not confirmed. Check its status before making another change.",
+  "The saved configuration changed. Your edits are kept here. Close and reopen the provider to review its current values before saving.",
+  "Could not save the operation identity. No provider request was sent.", "The provider request failed.",
+  "Prepare the speech service on this processing computer before testing.", "HTTP server", "Local GigaAM", "Ready", "Not ready",
+  "Add speech provider", "Edit speech provider", "This Mac", "This Windows computer", "This computer (Linux)",
+];
+const VOICE_CORE_FILLED: [string, string][] = [
+  ["Default for new recordings: %1", "Default for new recordings: {}"],
+  ["Processing computer: %1", "Processing computer: {computer}"],
+  ["The provider test on %1 completed successfully.", "The provider test on {computer} completed successfully."],
+  ["Provider configuration saved on %1.", "Provider configuration saved on {computer}."],
+  ["A provider request on %1 is not yet confirmed. Check its status; it will not be sent again automatically.",
+    "A provider request on {} is not yet confirmed. Check its status; it will not be sent again automatically."],
+  ["Recognition service is available on %1. Test the saved profile to verify the selected provider.",
+    "Recognition service is available on {computer}. Test the saved profile to verify the selected provider."],
+  ["Recognition service is not ready on %1. %2", "Recognition service is not ready on {computer}. {}"],
+];
+
 describe("Settings texts", () => {
+  it.each(VOICE)("Voice input shows Qt's %s", (text) => {
+    expect(speech).toContain(`"${text}"`);
+    expect(source("Voice.tsx")).toContain(text);
+  });
+  it.each(VOICE_CORE)("the Voice input core says Qt's %s", (text) => {
+    expect(speech).toContain(`"${text}"`);
+    expect(speechCore).toContain(`"${text}"`);
+  });
+  it.each(VOICE_CORE_FILLED)("the Voice input core fills in Qt's %s", (template, shown) => {
+    expect(speech).toContain(`"${template}"`);
+    expect(speechCore).toContain(shown);
+  });
+  it.each(ABOUT)("About shows Qt's %s", (text) => {
+    expect(qt).toContain(`"${text}"`);
+    expect(source("About.tsx")).toContain(text);
+  });
+  it.each(ABOUT_FILLED)("About fills in Qt's %s", (template, shown) => {
+    expect(qt).toContain(`"${template}"`);
+    expect(source("About.tsx")).toContain(shown);
+  });
+  it.each(KEYBOARD)("Keyboard shows Qt's %s", (text) => {
+    expect(keyboard).toContain(`"${text}"`);
+    expect(source("Keyboard.tsx")).toContain(text);
+  });
+  it.each(KEYBOARD_FILLED)("Keyboard fills in Qt's %s", (template, shown) => {
+    expect(keyboard).toContain(`"${template}"`);
+    expect(source("Keyboard.tsx")).toContain(shown);
+  });
+  it("uses Shortcuts.cpp's titles, groups, reasons and Terminal rules", () => {
+    const qtTexts = [...shortcuts.matchAll(/(?:QT_TRANSLATE_NOOP\("Shortcuts", |translate\("Shortcuts", )"((?:[^"\\]|\\.)+)"/g)].map((m) => m[1]);
+    expect(qtTexts.length).toBeGreaterThan(40);
+    for (const text of qtTexts) expect(store, text).toContain(`"${text}"`);
+  });
   it.each(APPEARANCE)("Appearance shows Qt's %s", (text) => {
     expect(qt).toContain(`"${text}"`);
     expect(source("Appearance.tsx")).toContain(text);

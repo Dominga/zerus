@@ -66,9 +66,9 @@ export function Check(props: { label: JSX.Element; checked: boolean; onChange: (
 
 export interface Option { value: string; label: string }
 
-export function Select(props: { value: string; options: Option[]; onChange: (value: string) => void; label?: string; id?: string }) {
+export function Select(props: { value: string; options: Option[]; onChange: (value: string) => void; label?: string; id?: string; disabled?: boolean }) {
   return (
-    <select id={props.id} class="field set-select" value={props.value} aria-label={props.label}
+    <select id={props.id} class="field set-select" value={props.value} aria-label={props.label} disabled={props.disabled}
       onChange={(e) => props.onChange(e.currentTarget.value)}>
       <For each={props.options}>{(o) => <option value={o.value} selected={o.value === props.value}>{o.label}</option>}</For>
     </select>
@@ -101,4 +101,22 @@ export function Slider(props: {
       </button>
     </div>
   );
+}
+
+/** A status line from the mockup: muted, ok, warn, error, or busy with a spinner. */
+export function Status(props: { kind?: "ok" | "warn" | "error" | "busy" | "muted"; children: JSX.Element }) {
+  return (
+    <div class={`set-status k-${props.kind ?? "muted"}`} role="status">
+      <Show when={props.kind === "busy"}><span class="set-spinner" aria-hidden="true" /></Show>
+      <Show when={props.kind === "ok"}><Icon name="check" size={13} /></Show>
+      <Show when={props.kind === "warn"}><Icon name="triangle-alert" size={13} /></Show>
+      <Show when={props.kind === "error"}><Icon name="circle-alert" size={13} /></Show>
+      <span class="set-status-text">{props.children}</span>
+    </div>
+  );
+}
+
+/** A multi-line plain-text value, as Qt labels with \n show it. */
+export function Lines(props: { text: string; class?: string }) {
+  return <div class={`set-lines ${props.class ?? ""}`}><For each={props.text.split("\n")}>{(line) => <div>{line}</div>}</For></div>;
 }

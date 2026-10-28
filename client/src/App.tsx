@@ -6,6 +6,7 @@ import { SessionList } from "./ui/sessions/SessionList";
 import { SessionDetail } from "./ui/sessions/SessionDetail";
 import { Icon } from "./ui/lib/icons";
 import { PerfHost } from "./ui/PerfHost";
+import { OverviewScreen } from "./ui/screens/Overview";
 import { SettingsScreen } from "./ui/components/SettingsScreen";
 import { applySkin, skin } from "./skin/runtime";
 import { catalog } from "./store/catalog";
@@ -88,6 +89,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
               <SessionDetail />
             </div>
           </Match>
+          <Match when={page() === "dashboard"}><OverviewScreen /></Match>
           <Match when={page() === "settings"}><SettingsScreen /></Match>
           <Match when={page() !== "sessions"}><LaterScreen page={page() as Exclude<Page, "sessions">} /></Match>
         </Switch>

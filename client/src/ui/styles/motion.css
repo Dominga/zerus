@@ -38,6 +38,7 @@
 :root[data-reduce-motion="1"] .typing i,
 :root[data-reduce-motion="1"] .skeleton::before,
 :root[data-reduce-motion="1"] .busy-arc,
+:root[data-reduce-motion="1"] .su-spin,
 :root[data-reduce-motion="1"] .tchip.rec svg,
 :root[data-reduce-motion="1"] .vm-frames { animation: none !important; }
 :root[data-reduce-motion="1"] .mtile.s-connecting .mtile-dot::after { animation: none; opacity: .6; }

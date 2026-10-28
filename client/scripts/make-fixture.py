@@ -183,6 +183,30 @@ def deltas_for(rows):
     return steps
 
 
+METRIC_KEYS = ("cpu_percent", "cpu_count", "cpu_state", "cpu_interval_seconds", "load_1", "load_5", "load_15",
+               "memory_used_bytes", "memory_total_bytes", "memory_available_bytes", "uptime_seconds", "sampled_at")
+
+
+def metrics_for(host):
+    """A synthetic sample with the keys of src/metrics.rs; the peer "mac" is a Mac."""
+    mac = host == "mac"
+    total = (32 if mac else 64) * 1024 ** 3
+    return {"sampled_at": BASE_AT, "platform": "macos" if mac else "linux", "cpu_percent": 31.0 if mac else 12.0,
+            "cpu_interval_seconds": 2.0, "cpu_state": "available", "cpu_count": 10 if mac else 16,
+            "load_1": 2.4 if mac else 1.1, "load_5": 2.0 if mac else 0.9, "load_15": 1.8 if mac else 0.8,
+            "memory_total_bytes": total, "memory_used_bytes": int(total * (0.74 if mac else 0.38)),
+            "memory_available_bytes": int(total * (0.26 if mac else 0.62)), "uptime_seconds": 86400.0}
+
+
+def machine_card(host):
+    """The same sample as the core's MachineMeta projects it, for the browser replay."""
+    metrics = metrics_for(host)
+    return {"host": host, "hgs_version": "1.56.0", "platform": metrics["platform"], "ok": True,
+            "metrics": {key: metrics[key] for key in METRIC_KEYS},
+            "presence": {"idle_seconds": None, "locked": None, "locked_seconds": None},
+            "local_sessions": None, "local_host": None}
+
+
 def stream(host, rows, long_key):
     frames = []
     seq = [0]
@@ -199,7 +223,8 @@ def stream(host, rows, long_key):
     pages = [rows[:half], rows[half:]]
     for page, chunk in enumerate(pages):
         frame("snapshot", topic="catalog", items=[{"key": key_of(r), "row": r} for r in chunk], page=page, last=page == len(pages) - 1, cursor=1)
-    frame("snapshot", topic="catalog.meta", value={"host": host, "ok": True, "projects": {}, "peers": []}, page=0, last=True, cursor=1)
+    frame("snapshot", topic="catalog.meta", value={"host": host, "ok": True, "hgs_version": "1.56.0", "projects": {}, "peers": [],
+                                                   "metrics": metrics_for(host)}, page=0, last=True, cursor=1)
     activity = {}
     for r in rows:
         count = 1100 if key_of(r) == long_key else rng.randint(8, 40)
@@ -224,13 +249,14 @@ def main():
     long_key = key_of(next(r for r in local_rows if r["activity"] == "busy"))
     mac_rows = session_rows(MAC_PROJECTS, 7)
     computers = [("", "workstation", local_rows, long_key), ("mac", "mac", mac_rows, None)]
-    batches = {"interval_ms": INTERVAL_MS, "computers": [], "snapshot": [], "deltas": [], "activity": {}}
+    batches = {"interval_ms": INTERVAL_MS, "computers": [], "machines": [], "snapshot": [], "deltas": [], "activity": {}}
     for computer, host, rows, long in computers:
         frames, activity = stream(host, rows, long)
         name = "replay.ndjson" if computer == "" else f"replay-{computer}.ndjson"
         (ROOT / name).write_text("".join(json.dumps(f, separators=(",", ":")) + "\n" for f in frames), encoding="utf-8")
         machine = host
         batches["computers"].append({"computer": computer, "status": "live", "attempt": 0})
+        batches["machines"].append({"computer": computer, "machine": machine_card(host)})
         batches["snapshot"].append({"computer": computer, "rows": [{"computer": computer, "key": key_of(r), "row": view_row(r, machine)} for r in rows]})
         for n, step in enumerate(deltas_for(rows)):
             if len(batches["deltas"]) <= n:

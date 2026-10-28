@@ -3961,6 +3961,9 @@ folders it follows. It is additive: every command above keeps its output. `hgs -
 A client that does not find the line keeps polling that computer. `@host` runs
 the peer's stream over one SSH connection with `ServerAliveInterval=10` and
 `ServerAliveCountMax=3`. An older peer answers with an error, never a launch.
+From Windows, `hgs.exe @host watch --json` relays its streams to `ssh.exe`
+through overlapped pipes as every remote command does, so control lines and
+frames pass as they are written and the end of its input reaches the peer.
 
 The stream writes one JSON frame per line on stdout and reads one control
 operation per line on stdin. EOF on stdin ends it with exit code 0, so a closed

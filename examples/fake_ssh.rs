@@ -28,6 +28,9 @@
 //!   - `sleep`: write its process ID to `FAKE_SSH_PID` (if set), wait
 //!     `FAKE_SSH_SECONDS` (default 30) seconds, then exit 0.
 //!   - `bundle`: save stdin to `FAKE_SSH_BUNDLE`, print a setup report, exit 0.
+//!   - `stream`: a long-lived stream such as `hgs watch --json`: write
+//!     `{"t":"hello"}` at once, then `{"t":"echo","line":LINE}` for each input
+//!     line as it arrives, and `{"t":"end"}` once input ends; exit 0.
 //!
 //! On Windows it refuses (exit 254) the standard streams Windows OpenSSH fails
 //! on, so hgs must never pass them: a synchronous pipe (it never exits after
@@ -474,6 +477,26 @@ fn main() {
                 .status()
                 .unwrap_or_else(|error| fail(&format!("run hgs: {error}")));
             exit(status.code().unwrap_or(255))
+        }
+        "stream" => {
+            let mut out = io::stdout();
+            let mut emit = |frame: serde_json::Value| {
+                writeln!(out, "{frame}")
+                    .and_then(|()| out.flush())
+                    .unwrap_or_else(|error| fail(&error.to_string()));
+            };
+            emit(serde_json::json!({"t": "hello"}));
+            let mut line = String::new();
+            let mut input = io::stdin().lock();
+            loop {
+                line.clear();
+                match io::BufRead::read_line(&mut input, &mut line) {
+                    Ok(0) => break,
+                    Ok(_) => emit(serde_json::json!({"t": "echo", "line": line.trim_end()})),
+                    Err(error) => fail(&error.to_string()),
+                }
+            }
+            emit(serde_json::json!({"t": "end"}));
         }
         "sleep" => {
             if let Some(path) = variable("FAKE_SSH_PID") {

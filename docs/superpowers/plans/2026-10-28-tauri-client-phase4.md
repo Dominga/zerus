@@ -138,11 +138,18 @@ These surfaces are missing from the core section. This plan does not build them;
 
 ## Decisions
 
+- **Rulings on the plan review (2026-10-28).**
+  - Voice-event posters: `hgs` puts `voice.video.poster_base64` into the voice events it publishes, so the Activity batch carries one small JPEG per video message as JSON. Accepted until the core strips it from batches and offers a poster lookup (request R6, a Part B follow-up). Task 13 never decodes it in the webview; posters are served through `zerus-file`.
+  - On macOS under `com.hgdev.hgs-tray`, Cocoa writes its own keys (for example the file picker's last folder) into `com.hgdev.hgs-tray.plist`, which is Qt's settings file. Qt's own dialogs write the same keys, and no Qt key is changed. Accepted. The switch slice (zerus-5wmh.12.2) checks that Qt's keys stay byte-for-byte unchanged.
+  - The spec's line "a distinct bundle identifier from the Qt app" predates the identity decision of 2026-10-28. It is corrected in the switch slice's PR, not here.
+  - The client's own data (read marks, cache, local settings) moving with the identifier is decided by the Mac switch plan, not by this plan.
+  - Part A lands as five PRs: the Terminal (Tasks 1-2), the composer and send (3a-7), attachments (8-9), Processes (10-11), then the smoke run and docs (12).
+
 Rulings on the open questions; the tasks follow them.
 
 - **One draft store, one exit hook (agreed with the events session, 2026-10-28).** M1c opens the app's one `Arc<DraftStore>` in `setup` and manages it as `pub struct Drafts(pub Arc<DraftStore>)` in `lib.rs`, at `zerus_client_core::drafts::dir(replay)` (`drafts`, or `drafts-replay` in a replay). `Composers::new` takes that store and never opens its own, so each store has one writer. M1c turns `run()` into `.build(...).expect(...).run(...)` with one `fn exit(app)` on `RunEvent::Exit`: `voices.close_all()`, then the organization's `flush()` (the org branch), then `composers.flush()`, then `Drafts.0.flush()`, each through `try_state`. Task 3a works whichever lands first: with M1c on main it uses M1c's `Drafts` and `exit`; without, it adds exactly the same struct, folder names and hook, and M1c rebases onto them. Whoever lands second adds lines, never a second store or hook.
 - **Qt's stores are read, never written (owner decision, 2026-10-28).** The client takes over Qt's identity on the Mac (`com.hgdev.hgs-tray`), and Qt's drafts are kept as they are. Qt's drafts root is read through `read_index`, `read_draft` and `DraftStore::recover` only; recovery copies into the client's store; a Qt root that is, holds or sits inside the client's root is left out. The one-time import of all Qt drafts at the switch (`zerus-5wmh.13`, core section S5) is a copy too.
-- **Saved drafts lists two sources.** The client's own store comes first, under "On this computer"; Qt's read-only store follows under "From the Qt app" (a name that stays right after the client takes over the Zerus name). Each is paged by its own cursor ("Show more"), since the stores cannot share one cursor.
+- **Saved drafts lists two sources.** The client's own store comes first, under "On this computer"; Qt's read-only store follows under "From the previous Zerus app" (it stays right after the client takes over the Zerus name; the owner knows the Qt GUI as Zerus). Each is paged by its own cursor ("Show more"), since the stores cannot share one cursor.
   - A Qt draft is copied into the client's store with `DraftStore::recover` before Restore or Go to session. An existing nonempty draft there is never overwritten (S5's `ALREADY_EXISTS` text).
   - Qt's dialog texts, buttons and the "Replace current draft?" confirmation carry over.
 - **The exit closes the hub before the store flushes.** `Composers::flush` stops new edits, attaches and sends and waits up to 2 s for attach reads under way; `Drafts.0.flush()` then writes everything queued. A send whose "sending" save is still queued never starts and reloads as uncertain.
@@ -6147,7 +6154,7 @@ Register the four commands.
 
 - [ ] **Step 4: Saved drafts.** Write `client/src/ui/sessions/SavedDrafts.tsx`, a dialog titled "Saved drafts".
   - The hint reads "Drafts stay on this desktop, including those from ended or unavailable sessions. Restoring never sends a message.", and "No saved drafts on this desktop." when both sections are empty.
-  - Two sections, "On this computer" and "From the Qt app" (the second only when Qt's store has drafts), each with its rows (title, meta, detail, modified time as "d MMM HH:mm") and "Show more" while `next` is set. Each page is one bounded read of at most 200 drafts; Show more appends the next page on request only, and the dialog drops its rows when it closes, so nothing loads the whole store or grows by itself.
+  - Two sections, "On this computer" and "From the previous Zerus app" (the second only when Qt's store has drafts), each with its rows (title, meta, detail, modified time as "d MMM HH:mm") and "Show more" while `next` is set. Each page is one bounded read of at most 200 drafts; Show more appends the next page on request only, and the dialog drops its rows when it closes, so nothing loads the whole store or grows by itself.
   - A preview pane reads "Loading draft…" while `saved_draft` runs.
   - The buttons are Copy text, Restore in current session, Go to session (disabled with "This session is not in the session list now." when not reachable), Recover (Qt section only) and Close.
   - Restore over a nonempty current draft asks "Replace current draft?" with "Replace the unsent draft in {key with ' / '} with the selected saved draft?", the button "Replace draft", and Cancel as the default.

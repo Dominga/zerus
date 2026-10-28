@@ -181,6 +181,34 @@ impl Fleet {
             .unwrap_or_default()
     }
 
+    /// Follows a project's task list on one computer (see [`crate::tasks`]);
+    /// returns its key, the project ID. A followed project stays followed
+    /// across reconnects until [`Self::unfollow_tasks`] or its end.
+    pub fn follow_tasks(
+        &self,
+        computer: &ComputerId,
+        project: &str,
+    ) -> Result<String, FollowError> {
+        let streams = guard(&self.shared.streams);
+        let handle = streams.get(computer).ok_or(FollowError::UnknownComputer)?;
+        handle.follow_tasks(project)
+    }
+
+    /// Stops following a project's task list; false when it was not followed.
+    pub fn unfollow_tasks(&self, computer: &ComputerId, project: &str) -> bool {
+        guard(&self.shared.streams)
+            .get(computer)
+            .is_some_and(|handle| handle.unfollow_tasks(project))
+    }
+
+    /// The projects whose task lists a computer follows.
+    pub fn followed_tasks(&self, computer: &ComputerId) -> Vec<String> {
+        guard(&self.shared.streams)
+            .get(computer)
+            .map(StreamHandle::followed_tasks)
+            .unwrap_or_default()
+    }
+
     /// Writes a control line (a `ping`, say) to one computer's stream.
     pub fn send(&self, computer: &ComputerId, control: Control) -> bool {
         guard(&self.shared.streams)

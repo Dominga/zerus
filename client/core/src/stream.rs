@@ -14,7 +14,7 @@
 //! stream offers that topic.
 use crate::{state::CatalogState, Change, ComputerId, ComputerStatus};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use zerus_watch_protocol::{
     decode, topic, Body, Control, Frame, FrameError, SessionRef, Subscription,
     ACTIVITY_SUBSCRIPTIONS, ACTIVITY_TAIL, HELP_MARKER, MAX_FRAME_BYTES, PROCESSES_SUBSCRIPTIONS,
-    VERSION,
+    TASKS_SUBSCRIPTIONS, VERSION,
 };
 
 /// Lines and commands a supervisor may have queued; a full queue makes the
@@ -113,10 +113,13 @@ pub enum FollowError {
     /// The key is not the session's catalog key.
     KeyMismatch,
     /// The computer already follows [`ACTIVITY_SUBSCRIPTIONS`] sessions (for
-    /// processes, [`PROCESSES_SUBSCRIPTIONS`] or the stream's lower limit).
+    /// processes [`PROCESSES_SUBSCRIPTIONS`], for tasks [`TASKS_SUBSCRIPTIONS`]
+    /// projects, or the stream's lower limit).
     TooMany,
     /// The stream was stopped.
     Stopped,
+    /// Not a project ID: 1 to 128 bytes without control characters.
+    InvalidProject,
 }
 
 impl std::fmt::Display for FollowError {
@@ -124,8 +127,9 @@ impl std::fmt::Display for FollowError {
         f.write_str(match self {
             Self::UnknownComputer => "unknown computer",
             Self::KeyMismatch => "the key is not the session's catalog key",
-            Self::TooMany => "a computer follows at most 16 sessions",
+            Self::TooMany => "the computer already follows as many as its stream allows",
             Self::Stopped => "the stream was stopped",
+            Self::InvalidProject => "a project ID is 1 to 128 bytes without control characters",
         })
     }
 }
@@ -303,6 +307,8 @@ enum Input {
     Unsubscribe { key: String, session: SessionRef },
     SubscribeProcesses { key: String },
     UnsubscribeProcesses { key: String, session: SessionRef },
+    SubscribeTasks { key: String },
+    UnsubscribeTasks { key: String },
     Control(Control),
     Stop,
 }
@@ -317,6 +323,8 @@ struct Follow {
 type Follows = Arc<Mutex<BTreeMap<String, Follow>>>;
 /// Sessions whose processes are followed, by key.
 type ProcessFollows = Arc<Mutex<BTreeMap<String, SessionRef>>>;
+/// Projects whose task lists are followed.
+type TaskFollows = Arc<Mutex<BTreeSet<String>>>;
 
 fn lock<T>(follows: &Mutex<T>) -> MutexGuard<'_, T> {
     follows
@@ -332,6 +340,9 @@ pub struct StreamHandle {
     processes: ProcessFollows,
     /// The processes follows the latest stream accepts.
     processes_limit: Arc<AtomicUsize>,
+    tasks: TaskFollows,
+    /// The tasks follows the latest stream accepts.
+    tasks_limit: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -445,6 +456,52 @@ impl StreamHandle {
         lock(&self.processes).keys().cloned().collect()
     }
 
+    /// Follows a project's task list on this computer, now and on every later
+    /// stream that offers the topic; returns its key, the project ID. At most
+    /// [`TASKS_SUBSCRIPTIONS`] per computer, or the lower limit of the latest
+    /// stream.
+    pub fn follow_tasks(&self, project: &str) -> Result<String, FollowError> {
+        if self.stopped() {
+            return Err(FollowError::Stopped);
+        }
+        if !crate::tasks::valid_project(project) {
+            return Err(FollowError::InvalidProject);
+        }
+        {
+            let mut follows = lock(&self.tasks);
+            if follows.contains(project) {
+                return Ok(project.to_owned());
+            }
+            if follows.len() >= self.tasks_limit.load(Ordering::Relaxed) {
+                return Err(FollowError::TooMany);
+            }
+            follows.insert(project.to_owned());
+        }
+        self.tx
+            .send(Input::SubscribeTasks {
+                key: project.to_owned(),
+            })
+            .map_err(|_| FollowError::Stopped)?;
+        Ok(project.to_owned())
+    }
+
+    /// Stops following a project's task list and forgets its digest, so a
+    /// later follow delivers the list again; false when it was not followed.
+    pub fn unfollow_tasks(&self, project: &str) -> bool {
+        if !lock(&self.tasks).remove(project) {
+            return false;
+        }
+        let _ = self.tx.send(Input::UnsubscribeTasks {
+            key: project.to_owned(),
+        });
+        true
+    }
+
+    /// The projects whose task lists are followed.
+    pub fn followed_tasks(&self) -> Vec<String> {
+        lock(&self.tasks).iter().cloned().collect()
+    }
+
     /// Ends the stream (EOF on its stdin), reports the computer
     /// [`ComputerStatus::Ended`] with no rows, and waits for the supervisor.
     pub fn stop(mut self) {
@@ -481,6 +538,8 @@ pub fn spawn(
     let follows = Follows::default();
     let processes = ProcessFollows::default();
     let processes_limit = Arc::new(AtomicUsize::new(PROCESSES_SUBSCRIPTIONS));
+    let tasks = TaskFollows::default();
+    let tasks_limit = Arc::new(AtomicUsize::new(TASKS_SUBSCRIPTIONS));
     let stop = Arc::new(AtomicBool::new(false));
     let supervisor = Supervisor {
         hgs: hgs.to_owned(),
@@ -492,6 +551,8 @@ pub fn spawn(
         follows: follows.clone(),
         processes: processes.clone(),
         processes_limit: processes_limit.clone(),
+        tasks: tasks.clone(),
+        tasks_limit: tasks_limit.clone(),
         stop: stop.clone(),
         state: CatalogState::new(),
         generation: 0,
@@ -514,6 +575,8 @@ pub fn spawn(
         follows,
         processes,
         processes_limit,
+        tasks,
+        tasks_limit,
         stop,
         thread: Some(thread),
     }
@@ -535,6 +598,8 @@ struct Supervisor {
     follows: Follows,
     processes: ProcessFollows,
     processes_limit: Arc<AtomicUsize>,
+    tasks: TaskFollows,
+    tasks_limit: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     state: CatalogState,
     generation: u64,
@@ -626,6 +691,8 @@ impl Supervisor {
                 Ok(Input::UnsubscribeProcesses { key, .. }) => {
                     self.state.processes_mut().unfollow(&key)
                 }
+                Ok(Input::SubscribeTasks { key }) => self.state.tasks_mut().follow(&key),
+                Ok(Input::UnsubscribeTasks { key }) => self.state.tasks_mut().unfollow(&key),
                 Ok(_) => {}
                 Err(RecvTimeoutError::Timeout) => return true,
             }
@@ -701,6 +768,11 @@ impl Supervisor {
                     self.state.processes_mut().unfollow(&key);
                     self.unsubscribe_processes(session);
                 }
+                Ok(Input::SubscribeTasks { key }) => self.subscribe_tasks(&key),
+                Ok(Input::UnsubscribeTasks { key }) => {
+                    self.state.tasks_mut().unfollow(&key);
+                    self.unsubscribe_tasks(&key);
+                }
                 Ok(Input::Control(control)) => self.write(&control),
                 Ok(Input::Stop) | Err(RecvTimeoutError::Disconnected) => return Outcome::Stopped,
                 Err(RecvTimeoutError::Timeout) => {}
@@ -730,6 +802,13 @@ impl Supervisor {
                         self.unsubscribe_processes(session);
                     }
                 }
+                Change::Tasks {
+                    key,
+                    update: crate::TasksUpdate::Ended,
+                    ..
+                } => {
+                    lock(&self.tasks).remove(key);
+                }
                 _ => {}
             }
             self.emit(change);
@@ -744,6 +823,11 @@ impl Supervisor {
                         limit.min(PROCESSES_SUBSCRIPTIONS)
                     });
                 self.processes_limit.store(limit, Ordering::Relaxed);
+                let limit = self
+                    .state
+                    .tasks_limit()
+                    .map_or(TASKS_SUBSCRIPTIONS, |limit| limit.min(TASKS_SUBSCRIPTIONS));
+                self.tasks_limit.store(limit, Ordering::Relaxed);
                 let keys: Vec<String> = lock(&self.follows).keys().cloned().collect();
                 for key in keys {
                     self.subscribe(&key);
@@ -751,6 +835,10 @@ impl Supervisor {
                 let keys: Vec<String> = lock(&self.processes).keys().cloned().collect();
                 for key in keys {
                     self.subscribe_processes(&key);
+                }
+                let keys: Vec<String> = lock(&self.tasks).iter().cloned().collect();
+                for key in keys {
+                    self.subscribe_tasks(&key);
                 }
             }
             Body::Snapshot(snapshot)
@@ -820,6 +908,43 @@ impl Supervisor {
             session: Some(session),
             ..Subscription::default()
         }));
+    }
+
+    /// Accepts the project's tasks frames and, on a greeted stream that offers
+    /// the topic, subscribes it; one beyond the stream's limit ends at once.
+    fn subscribe_tasks(&mut self, key: &str) {
+        if !lock(&self.tasks).contains(key) {
+            return;
+        }
+        self.state.tasks_mut().follow(key);
+        if !self.greeted {
+            return;
+        }
+        let Some(limit) = self.state.tasks_limit() else {
+            return;
+        };
+        if self.state.tasks().keys().position(|known| known == key) >= Some(limit) {
+            if let Some(change) = self.state.tasks_mut().end(&self.computer, key) {
+                lock(&self.tasks).remove(key);
+                self.emit(change);
+            }
+            return;
+        }
+        self.write(&Control::Subscribe(Subscription {
+            topic: topic::TASKS.into(),
+            project: Some(key.to_owned()),
+            ..Subscription::default()
+        }));
+    }
+
+    fn unsubscribe_tasks(&mut self, key: &str) {
+        if self.greeted && self.state.tasks_limit().is_some() {
+            self.write(&Control::Unsubscribe(Subscription {
+                topic: topic::TASKS.into(),
+                project: Some(key.to_owned()),
+                ..Subscription::default()
+            }));
+        }
     }
 
     fn unsubscribe_processes(&mut self, session: SessionRef) {

@@ -544,13 +544,48 @@ pub(super) fn terminal_card(record:&Value,cards:&[Value])->Option<Value> {
         .or_else(||if cards.is_empty() {terminal_choice(record,screen.as_deref()?)} else {None})
 }
 
+/// A chooser whose options are not numbered and that Claude closes with Enter
+/// or Esc, such as "Review proposed auto-mode setup" (owner, 2026-10-28). The
+/// options are the rows right above the hint, exactly one marked `❯`; a bar
+/// Claude draws on the left of the panel is not part of the text.
+fn hinted_choice(screen:&str)->Option<Chooser> {
+    let rows:Vec<String>=screen.lines().map(|r|r.trim().trim_start_matches(['│','▌','▎','▍','┃']).trim().to_owned()).collect();
+    let last=rows.iter().rposition(|r|!r.is_empty())?;
+    if rows[last]!="Enter to confirm · Esc to cancel" {return None;}
+    let end=rows[..last].iter().rposition(|r|!r.is_empty())?;
+    let start=rows[..=end].iter().rposition(|r|r.is_empty())?+1;
+    let options=&rows[start..=end];
+    if options.len()<2||options.len()>9||options.iter().filter(|r|r.starts_with('❯')).count()!=1 {return None;}
+    let top=rows[..start].iter().rposition(|r|rule(r,'─'))?;
+    let text=&rows[top+1..start];
+    let title=text.iter().position(|r|!r.is_empty())?;
+    Some((text[title].clone(),text[title+1..].join("\n").trim().to_owned(),
+        options.iter().map(|r|(r.trim_start_matches('❯').trim().to_owned(),String::new())).collect()))
+}
+
+/// A chooser Claude shows after its turn ended, which no hook reports (owner,
+/// 2026-10-28: "Review proposed auto-mode setup" left the session idle in
+/// Zerus). The panels Zerus knows have their own cards; this one is shown
+/// verbatim and answered in Terminal, since it may change saved settings.
+pub(super) fn idle_choice(record:&Value)->Option<Value> {
+    if record["agent"]!="claude"||!["","unknown","idle"].contains(&string(record,"phase"))
+        ||pause_active(record)||!string(record,"error").is_empty()
+        ||record["active_tools"].as_object().is_some_and(|tools|!tools.is_empty()) {return None;}
+    let screen=kimi_tui_choice::identity(record).and_then(|record|kimi_tui_choice::capture(&record)).ok()?;
+    choice_card(record,&screen,hinted_choice(&screen)?)
+}
+
 /// Any other chooser while Claude waits for the user, such as a session paused
 /// after a safeguard stop. No hook describes it, so the card shows the visible
 /// panel verbatim and points to Terminal.
 fn terminal_choice(record:&Value,screen:&str)->Option<Value> {
     if record["agent"]!="claude"||!["input","approval"].contains(&string(record,"phase"))
         ||pause_active(record)||!string(record,"error").is_empty() {return None;}
-    let (title,body,options)=bottom_choice(screen)?;
+    choice_card(record,screen,bottom_choice(screen).or_else(||hinted_choice(screen))?)
+}
+
+fn choice_card(record:&Value,screen:&str,chooser:Chooser)->Option<Value> {
+    let (title,body,options)=chooser;
     let identity=parse(screen).map(|p|json!([identity_body(&p),p.question])).unwrap_or_else(||json!(body));
     let hash=format!("{:x}",Sha256::digest(json!([record["run_id"],record["conversation_id"],record["pane"],record["pid"],
         record["process_start"],title,identity,options]).to_string()));
@@ -1574,5 +1609,31 @@ pub(super) fn reconcile(record:Value)->Value {
         assert_eq!(snapshot(&read,&moved).unwrap().1,1);
         let mut other=read.clone();other["pid"]=json!(2);
         assert_ne!(snapshot(&read,OUTSIDE).unwrap().0,snapshot(&other,OUTSIDE).unwrap().0);
+    }
+}
+
+#[cfg(test)]
+mod hinted_choice_tests {
+    use super::*;
+    // Claude Code's auto-mode setup review (owner's screenshot, 2026-10-28),
+    // abridged: the panel below a rule, its options and the hint.
+    const SETUP: &str = "● Shipped the patch notes.\n\n✻ Worked for 10m 30s · done 5:30 PM · 1 shell still running\n\n────────────────────────────────────────────────────────────\n Review proposed auto-mode setup\n\n Environment\n   Org-wide\n   · **Organization**: None configured\n\n Allow carve-outs\n  none suggested - defaults look like they cover your usage\n\n Notes\n   · Repo has no tracked files.\n\n ❯ Looks good — save it\n   Discard and exit\n\n Enter to confirm · Esc to cancel\n";
+    #[test]
+    fn an_unnumbered_chooser_with_the_hint_is_read_verbatim() {
+        let (title, body, options) = hinted_choice(SETUP).unwrap();
+        assert_eq!(title, "Review proposed auto-mode setup");
+        assert!(body.starts_with("Environment") && body.ends_with("Repo has no tracked files."), "{body}");
+        assert_eq!(options.iter().map(|(label, _)| label.as_str()).collect::<Vec<_>>(), ["Looks good — save it", "Discard and exit"]);
+        // The bar Claude draws on the left of the panel is not part of the text.
+        let barred: String = SETUP.lines().map(|row| if row.starts_with(' ') { format!("│{row}") } else { row.to_owned() }).collect::<Vec<_>>().join("\n");
+        assert_eq!(hinted_choice(&barred).unwrap().0, "Review proposed auto-mode setup");
+    }
+    #[test]
+    fn the_composer_and_incomplete_panels_are_no_chooser() {
+        let composer = "● Done.\n\n────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────\n  ⏵⏵ auto mode on · 1 shell · ↓ to manage\n";
+        assert!(hinted_choice(composer).is_none());
+        assert!(hinted_choice(&SETUP.replace("Enter to confirm · Esc to cancel", "Esc to cancel")).is_none());
+        assert!(hinted_choice(&SETUP.replace("   Discard and exit", " ❯ Discard and exit")).is_none());
+        assert!(hinted_choice(&SETUP.replace("   Discard and exit\n", "")).is_none());
     }
 }

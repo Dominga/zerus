@@ -1090,6 +1090,37 @@ answered; a denial cannot carry an explanation.
   the score and the top penalty; the live count becomes "14/15 without
   problems". Owner: asked for.
 
+- **U41. Safe actions (owner, 2026-10-28; done in 59e2818b).** The lead
+  records the shape of a member's routine request once (`hgs team
+  safe-action add`, `hgs guide team-safe`), in Zerus state, with no build.
+  Zerus allows each later request of that shape itself: one one-time allow
+  per question, reserved in the team's journal first and recorded "by safe
+  action <id>"; a failure leaves it in the lead's inbox. Only the exact
+  command the card carries matches (Claude Bash/PowerShell; DeepSeek shell
+  calls on hosts started by a build with it); typed slots never take a shell
+  metacharacter, an option or `..`, and `{path}` stays in the member's folder.
+  Subagent cards and the lead's own requests stay manual. Later: a desktop
+  list of the team's safe actions with Remove.
+
+- **U42. Bugs seen in phase 40 (2026-10-28).**
+  - A DeepSeek member's queued report (the sandbox route) stored the
+    placeholder "poll" as #512's report and closed the attempt, so the full
+    report was refused ("attempt ... does not run for this member") and the
+    lead had to take it from the member's last message. A queued report must
+    store its whole text or nothing, and a member must be able to replace a
+    placeholder before the lead decides.
+  - After the lead answers a permission with `hgs team answer`, the next
+    question sync records the same question again as answered "by unknown":
+    the answer leaves `pending` set. The answer clears it.
+  - Review #511 of phase 40: C1 the U29 confirmation accepts any sentence
+    containing "add"/"yes"/"добав" (a refusal "не добавляй" confirms); C2
+    check_upload saves DeepSeek bindings without the bindings lock (a resume
+    or rename can be reverted); C3 the owner check on `subagents-confirm` and
+    `session-upload-block set` (still open from #499 C6). Also 11 normal
+    findings (N1 a Zerus build is not Background in the capture gate; N2
+    work-ahead ignores dependencies inside a draft phase; N5 a failed held
+    message is lost silently; ...).
+
 ## Phases 37-40 (replanned 2026-10-27)
 
 Phase 36 closed without its own build: its review findings and the build go to

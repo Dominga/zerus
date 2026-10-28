@@ -1471,6 +1471,11 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
         if member.permission.as_ref().is_some_and(|pending| pending["question_id"] == question.as_str()) {
             member.permission = None;
         }
+        // Answered here: the next question sync must not record it again as
+        // answered by unknown.
+        if member.pending.as_ref().is_some_and(|pending| pending.question_id == question) {
+            member.pending = None;
+        }
         member.permission_answers.push(json!({"question_id":question,"decision":decision,"by":who,"at":now(),"reason":reason,
             "tool":asked_tool,"command":asked_command}));
         let excess = member.permission_answers.len().saturating_sub(20);
@@ -3371,6 +3376,41 @@ mod tests {
             let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
             assert_eq!(saved.task(2).unwrap().assignee, "qa");
             assert_eq!(saved.member("dev").unwrap().state, MemberState::Removed);
+        });
+    }
+
+    /// The owner, 2026-10-28: the lead or the owner records safe actions, a
+    /// member never does, and the team's journal names each change.
+    #[test]
+    fn only_the_lead_or_the_owner_records_safe_actions() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let _worker = hold_worker_lock();
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            for (id, conversation) in [("lead", "conv-lead"), ("dev", "conv-dev")] {
+                let member = team.members.iter_mut().find(|member| member.id == id).unwrap();
+                member.session = Some(SessionRef { name: format!("dsh/x/{id}"), run_id: "r1".into(), conversation_id: conversation.into(), ..Default::default() });
+            }
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            let add = json!({"team":id,"action":"add","role":"Backend","shape":"cargo test --locked --bin hgs {word}","reason":"its own tests"});
+            super::set_test_caller_identities(Some((Some("conv-dev".into()), None, None)));
+            assert!(run("safe-action", &add, false).is_err());
+            super::set_test_caller_identities(Some((Some("conv-lead".into()), None, None)));
+            let listed = run("safe-action", &add, false).unwrap();
+            let action = listed["actions"][0].clone();
+            assert_eq!((action["shape"].as_str(), action["by"].as_str()), (Some("cargo test --locked --bin hgs {word}"), Some("lead")), "{listed}");
+            // A shape that is too short, or starts with a slot, is refused.
+            let mut short = add.clone();
+            short["shape"] = json!("ls {path}");
+            assert!(run("safe-action", &short, false).is_err());
+            super::set_test_caller_identities(Some((None, None, None)));
+            let removed = run("safe-action", &json!({"team":id,"action":"remove","id":action["id"],"by":"human"}), false).unwrap();
+            assert_eq!(removed["actions"], json!([]));
+            let events = Store::open(false).unwrap().events(&id, None, 20).unwrap();
+            let kinds: Vec<&str> = events["items"].as_array().unwrap().iter().filter_map(|event| event["kind"].as_str()).collect();
+            assert!(kinds.contains(&"safe_action_added") && kinds.contains(&"safe_action_removed"), "{kinds:?}");
         });
     }
 

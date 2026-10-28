@@ -11,11 +11,13 @@ sandbox, in the member's own folder, with a bounded time and output:
   qt-test {suite, functions?, shots?}  a test binary from .ci-build/gui,
                              offscreen; shots go to .ci-build/shots
   android-test               mobile/android :app:testDebugUnitTest
+  clean-build {paths}        removes build outputs (.ci-build, build, target)
   git-merge-lead             git merge --no-edit the lead's branch, in your
                              own worktree or clone, never a shared team folder
   git-commit {message, paths?}  Zerus commits your work on your branch
 On Windows the Qt templates load Visual Studio and Qt themselves: never wrap
-them in your own vcvars batch file.
+them in your own vcvars batch file. Shots stay in your folder: name their
+path in the report; the desktop shows them from there.
 Ask for one as the member (identity as report; a sandbox needs no approval):
   {"request_id":"UUID","team":"ID","attempt":"ATTEMPT",
    "template":"cargo-test","args":{"bin":"hgs","filter":"teams"}} | hgs team run --json

@@ -123,6 +123,16 @@ pub(crate) const BUILTIN: &[Template] = &[
         params: &[],
         timeout_secs: 3600,
     },
+    // Owner, 2026-10-28: a stale generated build folder (an AAPT intermediate)
+    // needed a permission to remove; only a build output can go.
+    Template {
+        id: "clean-build",
+        summary: "removes generated build folders in your folder (.ci-build, build, target, .gradle, out)",
+        program: "cmake",
+        args: &["-E", "rm", "-rf"],
+        params: &[param("paths", Kind::Paths)],
+        timeout_secs: 600,
+    },
     Template {
         id: "git-merge-lead",
         summary: "git merge --no-edit the lead's branch into your own folder",
@@ -489,6 +499,22 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
             ensure!(shots == "true" || shots == "false", "The template's \"shots\" is true or false");
         }
     }
+    if template.id == "clean-build" {
+        // Only a generated build output, a real folder (not a link) below the
+        // member's folder, never the folder itself or a source tree.
+        if let Some(Words::Many(paths)) = value_of(template.params, args, "paths", folder)? {
+            for path in &paths {
+                let last = Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or_default();
+                ensure!(
+                    matches!(last, ".ci-build" | "build" | "target" | ".gradle" | "out"),
+                    "clean-build removes only build outputs (.ci-build, build, target, .gradle, out), not {path}"
+                );
+                let meta = std::fs::symlink_metadata(folder.join(path)).context("The build folder is not there")?;
+                ensure!(meta.is_dir() && !meta.file_type().is_symlink(), "clean-build removes a real folder, not {path}");
+            }
+            argv.extend(paths);
+        }
+    }
     if template.id == "android-test" {
         let path = folder.join(&program);
         let path = if cfg!(windows) { folder.join(format!("{program}.bat")) } else { path };
@@ -795,7 +821,7 @@ mod tests {
         }
         // The set the owner asked for, by id.
         let ids: Vec<&str> = BUILTIN.iter().map(|template| template.id).collect();
-        assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "android-test", "git-merge-lead", "git-commit"]);
+        assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "android-test", "clean-build", "git-merge-lead", "git-commit"]);
     }
 
     // Run by hand on a Windows machine with Visual Studio (cargo test -- --ignored).
@@ -805,6 +831,19 @@ mod tests {
     fn the_visual_studio_environment_is_found_here() {
         let env = msvc_environment().expect("vswhere and vcvars64.bat");
         assert!(env.iter().any(|(key, value)| key.eq_ignore_ascii_case("INCLUDE") && !value.is_empty()));
+    }
+
+    #[test]
+    fn clean_build_removes_only_build_outputs() {
+        let dir = temp();
+        std::fs::create_dir_all(dir.path().join("mobile").join("android").join("app").join("build")).unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let planned = plan("clean-build", &json!({"paths":["mobile/android/app/build"]}), dir.path()).unwrap();
+        assert_eq!(planned.argv, ["-E", "rm", "-rf", "mobile/android/app/build"]);
+        let error = plan("clean-build", &json!({"paths":["src"]}), dir.path()).unwrap_err().to_string();
+        assert!(error.contains("only build outputs"), "{error}");
+        assert!(plan("clean-build", &json!({"paths":["../build"]}), dir.path()).is_err());
+        assert!(plan("clean-build", &json!({"paths":["missing/build"]}), dir.path()).is_err());
     }
 
     #[test]

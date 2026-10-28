@@ -217,7 +217,55 @@ fn result(job: &mut Value, response: &Value, failed: bool, at: f64) {
     job["exit_code"] = json!(code);
 }
 
+/// Claude reports the end of a background command only as a
+/// `<task-notification>` in the next prompt (task id, status). Its job was
+/// left `unknown`; the notification now ends the job with that id and status
+/// (owner, 2026-10-28: the background build of the lead's session showed as
+/// nothing running).
+fn finished_by_notification(record: &mut Value, event: &Value) {
+    if string(event, "hook_event_name") != "UserPromptSubmit" {
+        return;
+    }
+    let prompt = string(event, "prompt");
+    if !prompt.contains("<task-notification>") {
+        return;
+    }
+    let mut jobs: Jobs = serde_json::from_value(record["shell_jobs"].clone()).unwrap_or_default();
+    let field = |block: &str, tag: &str| -> String {
+        block
+            .split_once(&format!("<{tag}>"))
+            .and_then(|(_, rest)| rest.split_once(&format!("</{tag}>")))
+            .map(|(value, _)| value.trim().to_owned())
+            .unwrap_or_default()
+    };
+    let mut changed = false;
+    for block in prompt.split("<task-notification>").skip(1).take(32) {
+        let block = block.split("</task-notification>").next().unwrap_or(block);
+        let (task, status) = (field(block, "task-id"), field(block, "status"));
+        if task.is_empty() || !token(&task) {
+            continue;
+        }
+        let Some(job) = jobs.values_mut().find(|job| job["native_id"] == task.as_str()) else {
+            continue;
+        };
+        job["status"] = json!(match status.as_str() {
+            "completed" => "completed",
+            "killed" | "stopped" => "stopped",
+            "timed_out" => "timed_out",
+            _ => "failed",
+        });
+        job["observed"] = json!(true);
+        job["ended_at"] = json!(now());
+        job["updated_at"] = json!(now());
+        changed = true;
+    }
+    if changed {
+        record["shell_jobs"] = json!(jobs);
+    }
+}
+
 pub(super) fn observe(record: &mut Value, event: &Value) {
+    finished_by_notification(record, event);
     let kind = string(event, "hook_event_name");
     let call = call_id(event);
     if call.is_empty() || call.len() > 200 {

@@ -197,6 +197,10 @@ private:
     QHBoxLayout *m_sessionHeader = nullptr, *m_filterRow = nullptr;
     QString m_countFull, m_countShort;
     bool m_focusSearch = false;
+    // WhiteWh fork: the owner opened the finished subagents in the Tasks card.
+    bool m_showFinishedChildren = false;
+    // WhiteWh fork: the selected session's background jobs, at most 64.
+    QJsonArray m_backgroundJobs;
     int m_stripLayout = 0, m_stripReserve = 0;
     QWidget *m_stripSpacer = nullptr;
     QPushButton *m_savedDrafts = nullptr;

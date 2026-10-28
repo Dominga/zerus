@@ -1440,6 +1440,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_children, &QTextBrowser::anchorClicked, this, [this](const QUrl &url) {
         if (url.scheme() == "hgs-agent") openSubagent(url.path(QUrl::FullyDecoded));
         else if (url.scheme() == "hgs-fold") toggleInspectorSection(url.path(QUrl::FullyDecoded));
+        else if (url.scheme() == "hgs-children") { m_showFinishedChildren = true; renderDetails(); }
     });
     m_info = browser(); m_info->setObjectName("sessionInfo"); m_info->setAccessibleName(tr("Session details"));
     connect(m_info, &QTextBrowser::anchorClicked, this, [this](const QUrl &url) {
@@ -4256,6 +4257,14 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
             else (*held)[i] = item;
         }
     }
+    // WhiteWh fork: the Tasks card's background jobs come from the same read,
+    // whether or not the Processes tab is on (it drops the rest).
+    if(data.contains("processes")){
+        QJsonArray jobs;
+        for(const auto &value:data.value("processes").toObject().value("items").toArray())
+            if(value.toObject().value("background").toBool()&&jobs.size()<64)jobs.append(value);
+        m_backgroundJobs=jobs;
+    }else if(!sameRun)m_backgroundJobs={};
     if(!ProcessSettings::enabled())m_details.remove("processes");
     else if(!data.contains("processes") && sameRun && previousProcesses.isObject())m_details["processes"]=previousProcesses;
     else if(!data.contains("processes"))m_processPollAge.invalidate();
@@ -4782,8 +4791,39 @@ void SessionsWindow::renderDetails()
     const auto elide = [&](const QString &text, int width) { return htmlText(metrics.elidedText(text.simplified(), Qt::ElideRight, width)); };
     const bool currentChildren = currentActivity(s, entry->online);
     QString children = QString("<style>body{color:%1;font-size:12px;}p{margin:5px 0 9px;}td{padding:7px 0;}h3{font-size:12px;margin:16px 0 8px;}</style>").arg(m_fg);
-    children += QString("<p><b>%1</b> <span style='color:%2'>%3</span></p><p style='color:%2'>%4</p>")
-        .arg(tr("Main agent"), m_muted, htmlText(state), htmlText(currentAction(s, entry->online)));
+    // Owner, 2026-10-28: the main agent's state word and the tool it runs now;
+    // the latest prompt is not its state.
+    children += QString("<p><b>%1</b> <span style='color:%2'>%3</span></p>").arg(tr("Main agent"), m_muted, htmlText(state));
+    {const QString tool = m_details.value("activity_summary").toString();
+     const QString detail = m_details.value("activity_detail").toString().simplified();
+     if (currentChildren && m_details.value("activity").toString() == "busy" && !tool.isEmpty())
+         children += QString("<p style='color:%1'>%2</p>").arg(m_muted, elide(detail.isEmpty() || detail == tool ? tool : tool + QStringLiteral(": ") + detail, rosterWidth));}
+    // Owner, 2026-10-28: the agent's background commands (a build, a test run)
+    // are its work too: the running ones, newest first. Claude reports a
+    // background command's end only in a later prompt; one with no end seen
+    // in the last three hours shows as not confirmed.
+    {QStringList jobs; int shown = 0;
+     const double nowSeconds = QDateTime::currentSecsSinceEpoch();
+     for (const auto &value : std::as_const(m_backgroundJobs)) {
+         const auto job = value.toObject();
+         if (!job.value("background").toBool() || job.value("source").toString() == "process_tree") continue;
+         const QString status = job.value("status").toString();
+         const double started = job.value("started_at").toDouble();
+         const bool running = status == "running" || status == "starting";
+         if (!running && !(status == "unknown" && started > 0 && nowSeconds - started < 3 * 3600)) continue;
+         if (++shown > 5) continue;
+         QString what = job.value("description").toString();
+         if (what.isEmpty()) what = job.value("command").toString();
+         const int minutes = started > 0 ? int((nowSeconds - started) / 60) : -1;
+         const QString age = minutes < 0 ? QString() : minutes < 60 ? tr("%1 min").arg(minutes) : tr("%1 h %2 min").arg(minutes / 60).arg(minutes % 60);
+         jobs << QString("<tr><td width='%1'><font color='%2'>●</font> %3<br><span style='color:%4;font-size:11px'>%5</span></td><td valign='top' align='right' width='%6' style='color:%2;font-size:11px'>%7</td></tr>")
+                     .arg(nameWidth).arg(tone(running ? "Working" : "Unknown", m_dark).name(), elide(what, nameWidth - 20), m_muted,
+                          htmlText(running ? age : tr("%1 · end not reported").arg(age))).arg(stateWidth).arg(running ? tr("Running") : tr("Unconfirmed"));
+     }
+     if (!jobs.isEmpty()) {
+         children += QString("<h3>%1 <span style='color:%2;font-weight:normal'>%3</span></h3>").arg(tr("Background jobs"), m_muted, QString::number(shown));
+         children += "<table width='100%' cellspacing='0' cellpadding='0'>" + jobs.join(QString()) + "</table>";
+     }}
     if (hasGoal) {
         children += QString("<h3>%1</h3><p style='color:%2'><b>%3</b></p><p>%4</p><p style='color:%5'>%6</p>")
             .arg(tr("Goal"), goalColor, htmlText(SessionGoal::status(goal)), htmlText(goal.value("objective").toString()),
@@ -4839,8 +4879,24 @@ void SessionsWindow::renderDetails()
             tr("No subagent activity has been reported yet.");
         children += QString("<p style='color:%1'>%2</p>").arg(m_muted, emptyHint);
     } else {
-        children += "<table width='100%' cellspacing='0' cellpadding='0'>";
+        // Owner, 2026-10-28: finished children fold into a count, unless
+        // workspace/inspectorFinishedSubagents is set or the owner
+        // opens them here; the list is what works now (a profile's groups
+        // keep their rows).
+        const bool showFinished = m_showFinishedChildren || QSettings().value("workspace/inspectorFinishedSubagents", false).toBool();
+        int finished = 0;
+        QList<QJsonObject> shownRoster;
         for (const auto &child : roster) {
+            const bool working = SessionPresentation::childState(child) == "working" || child.value("active_count").toInt() > 0
+                                 || child.value("display_state").toString() == "approval";
+            if (!showFinished && currentChildren && !working && !child.value("group").toBool()) { ++finished; continue; }
+            shownRoster.append(child);
+        }
+        if (shownRoster.isEmpty()) children += QString("<p style='color:%1'>%2</p>").arg(m_muted, tr("No subagent works now."));
+        if (finished) children += QString("<p style='color:%1'>%2 · <a href='hgs-children:finished' style='color:%3;text-decoration:none'>%4</a></p>")
+                                      .arg(m_muted, finished == 1 ? tr("1 finished") : tr("%1 finished").arg(finished), m_accent, tr("show"));
+        children += "<table width='100%' cellspacing='0' cellpadding='0'>";
+        for (const auto &child : shownRoster) {
             QString name = child.value("label").toString();
             if (name.isEmpty()) name = child.value("name").toString();
             if (name.isEmpty()) name = child.value("id").toString();

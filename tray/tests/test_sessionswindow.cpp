@@ -403,6 +403,7 @@ private slots:
     void sessionContextMenuSavedAndArchive();
     void sessionContextMenuClearsSession();
     void compactMetadataAndSubagentRoster();
+    void tasksCardShowsBackgroundJobsAndFoldsFinishedChildren();
     void nativeSessionUsageStaysWithSelectedConversation();
     void subagentActivityKeepsMainDraftAndRejectsStaleHistory();
     void childTreeKeepsRoutineResultsQuiet();
@@ -9345,8 +9346,51 @@ void TestSessionsWindow::nativeSessionUsageStaysWithSelectedConversation()
     QVERIFY(context->text().contains('%')); QVERIFY(context->icon().isNull());
 }
 
+// Owner, 2026-10-28: the Tasks card shows the agent's background commands
+// (a build, a test run), folds the finished subagents into a count with a
+// link that opens them, and never shows the latest prompt as the state.
+void TestSessionsWindow::tasksCardShowsBackgroundJobsAndFoldsFinishedChildren()
+{
+    QSettings().remove("workspace/inspectorFinishedSubagents");
+    auto state = fleet(); auto box = state.local(); auto &session = box.sessions[0];
+    session.subagentSource = "hooks"; session.subagentCountsComplete = true; session.subagentActiveCount = 1; session.subagentTotalCount = 3;
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program()); window.setFleet(state); window.show(); QTest::qWait(60);
+    QJsonObject children{{"a", QJsonObject{{"label", "Working child"}, {"state", "working"}, {"detail", "Review code"}}},
+                         {"b", QJsonObject{{"label", "Done child one"}, {"state", "finished"}}},
+                         {"c", QJsonObject{{"label", "Done child two"}, {"state", "finished"}}}};
+    const double now = QDateTime::currentSecsSinceEpoch();
+    QJsonArray jobs{QJsonObject{{"background", true}, {"status", "running"}, {"native_id", "b1"}, {"started_at", now - 600}, {"description", "Run phase 41 checks"}},
+                    QJsonObject{{"background", true}, {"status", "completed"}, {"native_id", "b0"}, {"started_at", now - 900}, {"description", "Old build"}},
+                    QJsonObject{{"background", false}, {"status", "starting"}, {"command", "hgs inspect"}}};
+    QJsonObject details{{"tracked", true}, {"conversation_id", "conversation-one"}, {"subagent_source", "hooks"}, {"subagents", children},
+        {"subagent_active_count", 1}, {"subagent_total_count", 3}, {"subagent_counts_complete", true},
+        {"activity", "busy"}, {"activity_summary", "Bash"}, {"activity_detail", "cargo test"},
+        {"last_prompt", "a long prompt that must not be the state"}, {"processes", QJsonObject{{"items", jobs}}}};
+    auto *client = window.findChild<HgsClient *>(); client->inspectionReady({}, session.name, details);
+    auto *roster = window.findChild<QTextBrowser *>("subagents");
+    // Read at once, as the roster test does: the fixture's own inspection
+    // replaces these details on its next poll.
+    const auto text = roster->toPlainText();
+    QVERIFY2(text.contains("Background jobs"), qPrintable(text.left(600)));
+    QVERIFY(text.contains("Run phase 41 checks")); QVERIFY(text.contains("Running"));
+    QVERIFY(!text.contains("Old build")); QVERIFY(!text.contains("hgs inspect"));
+    QVERIFY(text.contains("Working child"));
+    QVERIFY(!text.contains("Done child one")); QVERIFY(text.contains("2 finished"));
+    QVERIFY(!text.contains("must not be the state"));
+    QVERIFY(text.contains("Bash: cargo test"));
+    // "show" opens the finished children.
+    emit roster->anchorClicked(QUrl("hgs-children:finished"));
+    client->inspectionReady({}, session.name, details);
+    QVERIFY(roster->toPlainText().contains("Done child one"));
+}
+
 void TestSessionsWindow::compactMetadataAndSubagentRoster()
 {
+    // The inspector lists finished children here (owner, 2026-10-28: by default
+    // they fold into a count with a link that opens them).
+    QSettings().setValue("workspace/inspectorFinishedSubagents", true);
+    const auto restoreFinished = qScopeGuard([] { QSettings().remove("workspace/inspectorFinishedSubagents"); });
     QSettings().setValue("workspace/showCompletedSubagents", true);
     auto state = fleet(); auto box = state.local(); auto &session = box.sessions[0];
     session.gitBranch = "feat/compact"; session.gitWorktree = true; session.gitWorktreeName = "ui-tree"; session.gitCommonDir = "/work/ui/.git";
@@ -9548,6 +9592,10 @@ void TestSessionsWindow::childTreeKeepsRoutineResultsQuiet()
 
 void TestSessionsWindow::completedSubagentsPreferenceKeepsOpenHistory()
 {
+    // The inspector lists finished children here (owner, 2026-10-28: by default
+    // they fold into a count with a link that opens them).
+    QSettings().setValue("workspace/inspectorFinishedSubagents", true);
+    const auto restoreFinished = qScopeGuard([] { QSettings().remove("workspace/inspectorFinishedSubagents"); });
     FleetState state; auto box = fleet().local(); auto session = box.sessions[0];
     session.conversationId = "conversation-one"; session.runId = "run-one";
     session.subagentSource = "hooks"; session.subagentCountsComplete = true;
@@ -9630,6 +9678,10 @@ void TestSessionsWindow::completedSubagentsPreferenceKeepsOpenHistory()
 
 void TestSessionsWindow::inactiveSubagentsStayInInspectorAndOutOfSessionCounts()
 {
+    // The inspector lists finished children here (owner, 2026-10-28: by default
+    // they fold into a count with a link that opens them).
+    QSettings().setValue("workspace/inspectorFinishedSubagents", true);
+    const auto restoreFinished = qScopeGuard([] { QSettings().remove("workspace/inspectorFinishedSubagents"); });
     FleetState state; auto box = fleet().local(); box.sessions = {box.sessions[0]};
     auto &session = box.sessions[0]; session.conversationId = "conversation-one"; session.runId = "run-one";
     session.subagentSource = "hooks"; session.subagentCountsComplete = true;
@@ -9693,6 +9745,10 @@ void TestSessionsWindow::inactiveSubagentsStayInInspectorAndOutOfSessionCounts()
 
 void TestSessionsWindow::openCodeChildrenStayReadOnlyWithUnknownCounts()
 {
+    // The inspector lists finished children here (owner, 2026-10-28: by default
+    // they fold into a count with a link that opens them).
+    QSettings().setValue("workspace/inspectorFinishedSubagents", true);
+    const auto restoreFinished = qScopeGuard([] { QSettings().remove("workspace/inspectorFinishedSubagents"); });
     // `hgs inspect` shape for an OpenCode parent: one classic child finished,
     // and one whose turn end the API host has not observed.
     FleetState state; auto box = fleet().local(); box.sessions = {box.sessions[1]};

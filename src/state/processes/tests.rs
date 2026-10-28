@@ -218,3 +218,25 @@ fn kimi_native_tasks_are_scoped_and_dead_running_records_stay_unconfirmed() {
     assert!(native::output_path(&r, job).is_err());
     std::fs::remove_dir_all(temp).unwrap();
 }
+
+#[test]
+fn a_task_notification_ends_its_background_job() {
+    // Owner, 2026-10-28: Claude ends a background command only in the next
+    // prompt's <task-notification>; the job took it as `unknown` before.
+    let mut r = record("claude");
+    observe(&mut r, &hook("PreToolUse", "call-b", Value::Null));
+    observe(&mut r, &hook("PostToolUse", "call-b", json!({"backgroundTaskId":"bke1tqtb8"})));
+    assert_eq!(r["shell_jobs"][id(&r, "main", "call-b")]["status"], "running");
+    let prompt = "<task-notification>\n<task-id>bke1tqtb8</task-id>\n<status>completed</status>\n<summary>Background command \"Checks\" completed (exit code 0)</summary>\n</task-notification>";
+    observe(&mut r, &json!({"hook_event_name":"UserPromptSubmit","prompt":prompt}));
+    let job = &r["shell_jobs"][id(&r, "main", "call-b")];
+    assert_eq!(job["status"], "completed");
+    assert!(job["ended_at"].is_number());
+    // A notification for another task leaves the job alone; a failure says so.
+    observe(&mut r, &hook("PreToolUse", "call-c", Value::Null));
+    observe(&mut r, &hook("PostToolUse", "call-c", json!({"backgroundTaskId":"b2"})));
+    observe(&mut r, &json!({"hook_event_name":"UserPromptSubmit","prompt":"<task-notification><task-id>other</task-id><status>completed</status></task-notification>"}));
+    assert_eq!(r["shell_jobs"][id(&r, "main", "call-c")]["status"], "running");
+    observe(&mut r, &json!({"hook_event_name":"UserPromptSubmit","prompt":"<task-notification><task-id>b2</task-id><status>failed</status></task-notification>"}));
+    assert_eq!(r["shell_jobs"][id(&r, "main", "call-c")]["status"], "failed");
+}

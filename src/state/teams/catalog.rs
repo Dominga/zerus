@@ -377,6 +377,14 @@ pub(crate) fn prompt_order_text_snapshot(snapshot: &super::model::PromptSnapshot
     prompt_order_text(&role, member_prompt, task, "")
 }
 
+/// C1: the role's own task block replaces the standard "Task #N" block only
+/// when it is in the order, switched on, and has a template to fill. An empty
+/// template (never typed, or a U25 import without one) keeps the standard
+/// block, so a hand-out never loses its title, description or criteria.
+pub(crate) fn sends_task(order: &[String], off: &[String], template: &str) -> bool {
+    order.iter().any(|key| key == "task") && !off.iter().any(|key| key == "task") && !template.trim().is_empty()
+}
+
 /// U25: the role's prompt blocks in the owner's order, skipping the ones turned
 /// off. None when the role has no order (an old catalog keeps today's text).
 pub(crate) fn prompt_order_text(role: &Role, member_prompt: &str, task: Option<&Task>, project_rules: &str) -> Option<String> {
@@ -392,7 +400,7 @@ pub(crate) fn prompt_order_text(role: &Role, member_prompt: &str, task: Option<&
             "rules" => (!project_rules.trim().is_empty()).then(|| format!("Project rules:\n{}\n", project_rules.trim())),
             "role" => (!member_prompt.trim().is_empty()).then(|| format!("Role: {}\n", member_prompt.trim())),
             "protocol" => (!role.protocol_extra.trim().is_empty()).then(|| format!("Team protocol extra:\n{}\n", role.protocol_extra.trim())),
-            "task" => task.map(|task| {
+            "task" => task.filter(|_| !role.task_template.trim().is_empty()).map(|task| {
                 let criteria = task.criteria.join("; ");
                 let rendered = role
                     .task_template
@@ -556,39 +564,28 @@ fn apply_one(catalog: &mut Catalog, proposal: &Proposal) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The template a goal would use: the first rule whose words all appear.
-/// N2: the prototype's routeMatch: an empty `when` never matches; "everything"
-/// or "*" always matches; otherwise any word of 3+ letters (stop words out)
-/// that appears in the goal matches.
-fn route_match(when: &str, goal_words: &BTreeSet<String>) -> bool {
-    const STOP: [&str; 16] = [
-        "the", "and", "for", "with", "any", "all", "else", "when", "use", "to", "of", "in", "on", "a", "an", "is",
-    ];
-    let lowered = when.to_lowercase();
-    let tokens: Vec<String> = lowered
-        .split(|ch: char| !ch.is_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned)
-        .collect();
-    if tokens.iter().any(|token| token == "everything" || token == "*") {
+/// The template a goal would use: the first rule that matches.
+/// N1: the prototype's routeMatch, as it is: "everything" anywhere in `when`,
+/// or a `when` that is just "*", always matches. Otherwise each run of three or
+/// more ASCII letters or digits in `when` (its stop words out) matches when the
+/// goal contains it, or its singular when it is a plural of five or more
+/// letters. An empty `when` never matches.
+fn route_match(when: &str, goal: &str) -> bool {
+    const STOP: [&str; 9] = ["label", "files", "file", "the", "and", "with", "when", "services", "src"];
+    let when = when.to_lowercase();
+    if when.contains("everything") || when.trim() == "*" {
         return true;
     }
-    tokens
-        .iter()
-        .filter(|token| token.chars().count() >= 3 && !STOP.contains(&token.as_str()))
-        .any(|token| goal_words.contains(token))
+    let goal = goal.to_lowercase();
+    when.split(|ch: char| !(ch.is_ascii_lowercase() || ch.is_ascii_digit()))
+        .filter(|word| word.len() >= 3 && !STOP.contains(word))
+        .any(|word| goal.contains(word) || (word.len() > 4 && word.ends_with('s') && goal.contains(&word[..word.len() - 1])))
 }
 
 pub(crate) fn route(catalog: &Catalog, goal: &str) -> Value {
-    let goal_words: BTreeSet<String> = goal
-        .to_lowercase()
-        .split(|ch: char| !ch.is_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned)
-        .collect();
     let mut added: Vec<String> = Vec::new();
     for rule in &catalog.routing {
-        if !route_match(&rule.when, &goal_words) {
+        if !route_match(&rule.when, goal) {
             continue;
         }
         let use_ = if rule.use_.is_empty() { &rule.template } else { &rule.use_ };
@@ -687,6 +684,10 @@ fn designer_commands(agent: &str, folder: &str, model: &str, effort: &str, brief
         if agent == "claude" {
             args.push("--allowedTools".into());
             args.extend(DESIGNER_CLAUDE_RULES.iter().map(|rule| (*rule).to_owned()));
+            // N19: --allowedTools takes every word up to the next option, so
+            // the brief comes after Claude's own `--`; launch flags (the
+            // account's permission mode, model defaults) go in before it.
+            args.push("--".into());
         }
     }
     args.push(brief.to_owned());
@@ -713,7 +714,8 @@ fn designer(input: &Value) -> anyhow::Result<Value> {
     let launch_id = uuid::Uuid::new_v4().to_string();
     // U16: before the launch, so Claude reads the answer instead of asking.
     if agent == "claude" {
-        trust_designer(agent, &folder, &crate::accounts::claude_account_config()?)?;
+        let config = crate::config::Config::load()?;
+        trust_designer(agent, &folder, &crate::accounts::claude_launch_config(&config)?)?;
     }
     let brief = designer_brief(&load()?, input["goal"].as_str().unwrap_or_default(), project);
     let args = designer_commands(agent, &folder, &model, &effort, &brief, &launch_id);
@@ -881,15 +883,43 @@ mod tests {
     }
 
     #[test]
+    fn route_ports_the_prototypes_match_with_its_stop_words_and_plurals() {
+        let rule = |id: &str, when: &str, use_: &str| Rule { id: id.into(), when: when.into(), template: String::new(), approval: String::new(), use_: use_.into() };
+        let mut catalog = builtin();
+        // N1: the prototype's own rules r1 and r2, then a "*" catch-all.
+        catalog.routing = vec![
+            rule("r1", "label \u{201c}bug\u{201d} \u{b7} \u{2264} 3 files", "bugfix"),
+            rule("r2", "services/payments/** \u{b7} **/auth/**", "+security"),
+            rule("all", "*", "feature"),
+        ];
+        validate(&catalog).unwrap();
+        // "label", "files" and "services" are stop words: they route nothing.
+        let found = route(&catalog, "Tidy the label files of the services");
+        assert_eq!((found["rule"].clone(), found["template"]["id"].clone(), found["added"].clone()), (json!("all"), json!("feature"), json!([])));
+        // A substring and a plural's singular match, as in the prototype.
+        assert_eq!(route(&catalog, "Debug the login")["rule"], "r1");
+        let found = route(&catalog, "Round the payment total (OAuth)");
+        assert_eq!((found["rule"].clone(), found["added"].clone()), (json!("all"), json!(["security"])));
+        // "*" alone always matches, so the router never falls to templates.first().
+        catalog.templates.rotate_left(1);
+        assert_ne!(catalog.templates[0].id, "feature");
+        assert_eq!(route(&catalog, "New checkout")["template"]["id"], "feature");
+        assert!(!route_match("", "anything") && !route_match("  ", "anything"));
+        assert!(route_match(" * ", "anything") && route_match("Everything else", "x"));
+    }
+
+    #[test]
     fn a_claude_designer_is_trusted_for_its_folder_and_gets_the_narrow_rules() {
-        let folder = "C:\\Users\\owner\\.local\\state\\hgs\\sessions\\team-designer";
+        let folder = "C:\\Users\\owner\\.local/state\\hgs/sessions\\team-designer";
+        // N19: Claude files a Windows project under forward slashes.
+        let key = if cfg!(windows) { "C:/Users/owner/.local/state/hgs/sessions/team-designer" } else { folder };
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join(".claude.json");
         fs::write(&config, json!({
             "oauthAccount": {"emailAddress": "owner@example.com"},
             "projects": {
                 "C:\\work\\project": {"hasTrustDialogAccepted": false, "allowedTools": ["Bash(cargo:*)"]},
-                (folder): {"allowedTools": ["Read"]}
+                (key): {"allowedTools": ["Read"]}
             }
         }).to_string()).unwrap();
         // The launch arguments carry the narrow rules after the agent flags.
@@ -899,12 +929,22 @@ mod tests {
             assert_eq!(args[at + 1 + index], *rule, "{args:?}");
         }
         assert_eq!(args.last().unwrap(), "brief");
+        // N19: Claude reads the brief as its prompt, not as an eighth rule:
+        // its own `--` comes right after the rules, and the launch's
+        // permission flags go in before that `--`, never after the brief.
+        assert_eq!(args[at + 1 + DESIGNER_CLAUDE_RULES.len()], "--", "{args:?}");
+        let agent_at = args.iter().position(|arg| arg == "--").unwrap() + 1;
+        let mut argv: Vec<String> = std::iter::once("claude".to_owned()).chain(args[agent_at..].iter().cloned()).collect();
+        crate::accounts::apply_permissions("claude", "bypass", &mut argv);
+        let delimiter = argv.iter().position(|arg| arg == "--").unwrap();
+        assert_eq!(&argv[delimiter..], ["--", "brief"], "{argv:?}");
+        assert!(argv[..delimiter].iter().any(|arg| arg == "--permission-mode"), "{argv:?}");
         assert!(args.iter().any(|arg| arg == "Opus") && args.iter().any(|arg| arg == "high"));
         // Before the launch, exactly the designer's folder is trusted.
         assert!(trust_designer("claude", folder, &config).unwrap());
         let saved: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
-        assert_eq!(saved["projects"][folder]["hasTrustDialogAccepted"], true);
-        assert_eq!(saved["projects"][folder]["allowedTools"], json!(["Read"]), "its tools stay as Claude saved them");
+        assert_eq!(saved["projects"][key]["hasTrustDialogAccepted"], true);
+        assert_eq!(saved["projects"][key]["allowedTools"], json!(["Read"]), "its tools stay as Claude saved them");
         assert_eq!(saved["projects"]["C:\\work\\project"]["hasTrustDialogAccepted"], false, "another folder keeps its answer");
         assert_eq!(saved["projects"].as_object().unwrap().len(), 2, "no other project entry is added");
         assert_eq!(saved["oauthAccount"]["emailAddress"], "owner@example.com");
@@ -1007,6 +1047,24 @@ mod tests {
         assert!(!text.contains("Team protocol extra") && !text.contains("Do #7"), "{text}");
         role.prompt_order.clear();
         assert!(prompt_order_text(&role, &role.prompt, Some(&task), "").is_none());
+    }
+
+    #[test]
+    fn an_ordered_task_block_without_a_template_is_not_sent() {
+        // C1: an order that names "task" with an empty template sends no empty
+        // "Task:" block, and the standard block stays (sends_task is false).
+        let role = Role {
+            id: "dev".into(), name: "Dev".into(), prompt: "Write the code".into(),
+            prompt_order: vec!["role".into(), "task".into()], task_template: " \n ".into(),
+            ..Default::default()
+        };
+        let task = Task { id: 7, title: "API".into(), ..Default::default() };
+        let text = prompt_order_text(&role, &role.prompt, Some(&task), "").unwrap();
+        assert_eq!(text, "Role: Write the code\n");
+        assert!(!sends_task(&role.prompt_order, &role.prompt_off, &role.task_template));
+        assert!(sends_task(&role.prompt_order, &role.prompt_off, "#{id} {title}"));
+        assert!(!sends_task(&role.prompt_order, &["task".into()], "#{id} {title}"));
+        assert!(!sends_task(&["role".into()], &[], "#{id} {title}"));
     }
 
     #[test]

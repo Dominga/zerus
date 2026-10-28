@@ -337,27 +337,32 @@ QString approvalText(const QString &approval)
     return approval == "auto" ? tr("Run when the plan is valid") : tr("Review plan first");
 }
 
-// The prototype's routeMatch, as the server's route_match: an empty rule never
-// matches; "everything" or "*" always does; else any word of three letters or
-// more (stop words out) that appears in the goal.
-bool routeMatch(const QString &when, const QSet<QString> &goal)
+// The prototype's routeMatch, as the server's route_match (N1): "everything"
+// anywhere, or a rule that is just "*", always matches; an empty rule never
+// does; else any run of three or more ASCII letters or digits (stop words out)
+// that the goal contains, or its singular for a plural of five letters or more.
+bool routeMatch(const QString &when, const QString &goal)
 {
-    static const QStringList stop{"the", "and", "for", "with", "any", "all", "else", "when", "use", "to", "of", "in", "on", "a", "an", "is"};
-    const auto tokens = when.toLower().split(QRegularExpression(QStringLiteral("[^\\p{L}\\p{N}]+")), Qt::SkipEmptyParts);
-    if (tokens.contains("everything") || tokens.contains("*")) return true;
-    for (const auto &token : tokens) if (token.size() >= 3 && !stop.contains(token) && goal.contains(token)) return true;
+    static const QStringList stop{"label", "files", "file", "the", "and", "with", "when", "services", "src"};
+    const QString w = when.toLower();
+    if (w.contains("everything") || w.trimmed() == "*") return true;
+    static const QRegularExpression wordRe(QStringLiteral("[a-z0-9]{3,}"));
+    for (auto it = wordRe.globalMatch(w); it.hasNext();) {
+        const QString word = it.next().captured();
+        if (stop.contains(word)) continue;
+        if (goal.contains(word) || (word.size() > 4 && word.endsWith('s') && goal.contains(word.chopped(1)))) return true;
+    }
     return false;
 }
 }
 
 TeamCatalogEditor::Route TeamCatalogEditor::route(const Teams::Catalog &catalog, const QString &goal)
 {
-    const auto words = goal.toLower().split(QRegularExpression(QStringLiteral("[^\\p{L}\\p{N}]+")), Qt::SkipEmptyParts);
-    const QSet<QString> set(words.begin(), words.end());
+    const QString lowered = goal.toLower();
     Route found;
     for (int i = 0; i < catalog.routing.size(); ++i) {
         const auto &rule = catalog.routing[i];
-        if (!routeMatch(rule.when, set)) continue;
+        if (!routeMatch(rule.when, lowered)) continue;
         const QString use = rule.use.isEmpty() ? rule.templateId : rule.use;
         if (use.startsWith('+')) { if (!found.added.contains(use.mid(1))) found.added << use.mid(1); continue; }
         if (const auto *t = catalog.templ(use)) {
@@ -1149,6 +1154,8 @@ QWidget *TeamCatalogEditor::promptOrder(int index)
         auto &role = m_catalog.roles[index]; QStringList next = order;
         apply(role, next);
         role.promptOrder = next;
+        // C1: the task block shows the default template, so the order sends it.
+        if (role.taskTemplate.isEmpty()) role.taskTemplate = defaultTaskTemplate;
         changed(); if (rebuild) rebuildEditor();
     };
     for (int i = 0; i < order.size(); ++i) {
@@ -1196,6 +1203,7 @@ QWidget *TeamCatalogEditor::promptOrder(int index)
             connect(protocol, &QPlainTextEdit::textChanged, this, [this, index, protocol, order] {
                 auto &role = m_catalog.roles[index]; role.protocolExtra = protocol->toPlainText();
                 if (role.promptOrder.isEmpty()) role.promptOrder = order;
+                if (role.taskTemplate.isEmpty()) role.taskTemplate = defaultTaskTemplate;
                 changed();
             });
             bodyLayout->addWidget(protocol);

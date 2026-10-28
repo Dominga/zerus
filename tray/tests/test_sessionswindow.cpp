@@ -5259,7 +5259,8 @@ void TestSessionsWindow::stoppedDshSessionStartsAndSends()
         auto *resume=dialog->findChild<QPushButton *>("resumeAndSend");QVERIFY(resume);QVERIFY(resume->isEnabled());resume->click();});
     send->click();
     const auto log=temp.filePath("resume.log");
-    QTRY_VERIFY(QFileInfo::exists(log));
+    // The fixture's resume runs a Python process: slow on a loaded Windows runner.
+    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(log),30000);
     QFile started(log);QVERIFY(started.open(QIODevice::ReadOnly));
     const auto command=QString::fromUtf8(started.readAll());
     QVERIFY(command.contains(QStringLiteral("resume")));

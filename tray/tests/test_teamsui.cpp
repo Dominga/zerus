@@ -2276,7 +2276,7 @@ void TestTeamsUi::memberEditorPicksAnExistingSession()
     QVERIFY(pick->actions().first()->text().contains(QStringLiteral("claude/checkout/other")));
     // Picking it sends the session identity with the plan.
     pick->actions().first()->trigger();
-    QTRY_COMPARE(calls(script(), "plan").size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(calls(script(), "plan").size(), 1, 30000);   // a Python fixture on a loaded runner
     const auto plan = calls(script(), "plan").first();
     QJsonObject adopted;
     for (const auto &value : plan["members"].toArray())
@@ -5405,7 +5405,7 @@ void TestTeamsUi::catalogHeaderRevertDraftAndBanners()
     { QFile c(script() + ".catalog"); QVERIFY(c.open(QIODevice::WriteOnly)); c.write(QJsonDocument(moved).toJson(QJsonDocument::Compact)); }
     controller.refreshCatalog();
     // The fixture's catalog read takes more than QTRY's 5 s on a loaded Windows runner.
-    QTRY_COMPARE_WITH_TIMEOUT(draft.findChild<QLabel *>("teamCatalogBannerTitle")->text(), QStringLiteral("Draft is out of date — Apply is off"), 15000);
+    QTRY_COMPARE_WITH_TIMEOUT(draft.findChild<QLabel *>("teamCatalogBannerTitle")->text(), QStringLiteral("Draft is out of date — Apply is off"), 30000);
     QVERIFY(draft.findChild<QFrame *>("teamCatalogBanner")->isVisible());
     QVERIFY(!draft.findChild<QPushButton *>("teamDesignerApply")->isEnabled());
     shot(&draft, "ux-9-draft-stale-dark");

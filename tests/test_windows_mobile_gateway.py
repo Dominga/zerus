@@ -355,7 +355,11 @@ commonName=optional
                 any(row["name"] == name for row in snapshot["sessions"]) for snapshot in self.snapshots))
         caps = self.snapshots[-1]["mobile_capabilities"]
         self.assertIn("terminal_snapshot", caps["operations"])
-        for operation in ("voice_submit", "speech_submit", "worktree_create", "file_read", "launch"):
+        # The fork supports phone launches into explicit project working
+        # folders, but still cannot create directories or read arbitrary files.
+        for operation in ("launch", "dirs", "catalog"):
+            self.assertIn(operation, caps["operations"])
+        for operation in ("voice_submit", "speech_submit", "worktree_create", "file_read", "directory_create"):
             self.assertNotIn(operation, caps["operations"])
         identity = {"expected_run_id": detail["run_id"], "expected_conversation_id": detail["conversation_id"]}
         request_id = str(uuid.uuid4())

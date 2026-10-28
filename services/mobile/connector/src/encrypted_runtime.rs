@@ -1494,7 +1494,11 @@ mod tests {
         // loaded Windows runner (219 and 363 ms seen with no sleep at all), so
         // the quarter-second pacing is told apart only off Windows; there, a
         // gap under a second still rules out the retry waits.
-        let prompt = if cfg!(windows) { Duration::from_secs(1) } else { Duration::from_millis(200) };
+        let prompt = if cfg!(windows) {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_millis(200)
+        };
         assert!(gaps.iter().all(|gap| *gap < prompt), "queued reads must claim promptly after a flushed result, without a quarter-second success sleep: {gaps:?}");
         assert!(f.connector.journal.encrypted_pending().unwrap().is_empty());
     }

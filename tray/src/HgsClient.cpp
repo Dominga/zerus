@@ -163,6 +163,7 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.recovery = obj.value("recovery").toObject();
     s.name = obj.value(QStringLiteral("name")).toString();
     s.cmd = obj.value(QStringLiteral("cmd")).toString();
+    s.clientContext = obj.value("client_context").toObject();
     s.project = nullableString(obj.value(QStringLiteral("project")));
     s.tag = nullableString(obj.value(QStringLiteral("tag")));
     s.attached = obj.value(QStringLiteral("attached")).toInt();
@@ -652,11 +653,10 @@ quint64 HgsClient::requestClaudeAppSessions(const QString &host)
     QStringList args;
     if (!host.isEmpty()) args << QLatin1Char('@') + host;
     args << QStringLiteral("claude-app") << QStringLiteral("ls");
-    runHgs(m_hgs, args, 30000, this,
-        [this, request, host](const QByteArray &bytes) {
-            QJsonParseError error; const auto data = QJsonDocument::fromJson(bytes, &error);
-            if (error.error != QJsonParseError::NoError || !data.isObject()) emit claudeAppSessionsFailed(request, host, tr("Invalid Claude app session list"));
-            else emit claudeAppSessionsReady(request, host, data.object());
+    runHgsParsed(m_hgs, args, 30000, this, parseObject,
+        [this, request, host](const ObjectReply &data) {
+            if (!data.ok()) emit claudeAppSessionsFailed(request, host, tr("Invalid Claude app session list"));
+            else emit claudeAppSessionsReady(request, host, data.object);
         }, [this, request, host](const QString &, const QString &error) { emit claudeAppSessionsFailed(request, host, error); });
     return request;
 }
@@ -681,11 +681,10 @@ quint64 HgsClient::requestSocratiCode(const QString &host, const QString &action
     const bool machineWide = action == QLatin1String("install") || action == QLatin1String("install-qdrant");
     if (!machineWide) args << path << QStringLiteral("--qdrant") << QLatin1String(nativeQdrant ? "native" : "docker");
     // Start may first bring up Qdrant and Ollama; installs download.
-    runHgs(m_hgs, args, machineWide ? 300000 : action == QLatin1String("start") ? 120000 : 30000, this,
-        [this, request, host, path, action](const QByteArray &bytes) {
-            QJsonParseError error; const auto data = QJsonDocument::fromJson(bytes, &error);
-            if (error.error != QJsonParseError::NoError || !data.isObject()) emit socratiCodeFailed(request, host, path, action, tr("Invalid SocratiCode response"));
-            else emit socratiCodeReady(request, host, path, action, data.object());
+    runHgsParsed(m_hgs, args, machineWide ? 300000 : action == QLatin1String("start") ? 120000 : 30000, this, parseObject,
+        [this, request, host, path, action](const ObjectReply &data) {
+            if (!data.ok()) emit socratiCodeFailed(request, host, path, action, tr("Invalid SocratiCode response"));
+            else emit socratiCodeReady(request, host, path, action, data.object);
         }, [this, request, host, path, action](const QString &, const QString &error) { emit socratiCodeFailed(request, host, path, action, error); });
     return request;
 }
@@ -762,6 +761,52 @@ quint64 HgsClient::requestMobile(const QString &host, const QStringList &argumen
     return request;
 }
 
+quint64 HgsClient::requestWslFileProof(const QString &alias,const QJsonObject &input)
+{
+    const auto id=++m_wslFileProofRequest;
+    const auto payload=QJsonDocument(input).toJson(QJsonDocument::Compact);
+    if(alias.isEmpty()||payload.size()>64*1024){
+        QTimer::singleShot(0,this,[this,id]{emit wslFileProofFailed(id,tr("Invalid or oversized file mapping request."));});return id;
+    }
+    auto help=processRequest(m_hgs,{"--help"});help.timeoutMs=5000;help.maximumOutputBytes=128*1024;help.input=QByteArray();
+    ProcessRunner::run(std::move(help),this,[this,id,alias,payload](const ProcessRunner::Result &reply){
+        if(reply.outcome!=ProcessRunner::Result::Finished||reply.exitCode||reply.exitStatus!=QProcess::NormalExit
+            ||!reply.standardOutput.contains("wsl-file-proof-v1")){
+            emit wslFileProofFailed(id,tr("Update the matching local CLI to use scoped WSL file mapping."));return;
+        }
+        auto request=processRequest(m_hgs,{"machine","file-proof",alias,"--json"});
+        request.timeoutMs=30000;request.maximumOutputBytes=128*1024;request.input=payload;
+        ProcessRunner::run(std::move(request), this, [](ProcessRunner::Result result) { return parsedResult(std::move(result)); },
+                           [this,id](const ParsedResult &parsed){
+            const auto &reply = parsed.result;
+            if(reply.outcome!=ProcessRunner::Result::Finished||reply.exitCode||reply.exitStatus!=QProcess::NormalExit){
+                const auto why=QString::fromUtf8(reply.standardError).trimmed().left(2000);
+                emit wslFileProofFailed(id,why.isEmpty()?tr("The scoped WSL file proof was unavailable or refused."):why);return;
+            }
+            if(!parsed.reply.ok()){emit wslFileProofFailed(id,tr("Invalid scoped WSL file proof."));return;}
+            emit wslFileProofReady(id,parsed.reply.object);
+        });
+    });
+    return id;
+}
+
+quint64 HgsClient::requestPathRef(const QString &operation, const QJsonObject &input)
+{
+    const quint64 request = ++m_pathRefRequest;
+    const auto bytes = QJsonDocument(input).toJson(QJsonDocument::Compact);
+    if (!QStringList{"describe","validate","map"}.contains(operation) || bytes.size() > 64 * 1024) {
+        QTimer::singleShot(0, this, [this, request] { emit pathRefFailed(request, tr("Invalid or oversized path identity request")); });
+        return request;
+    }
+    runHgsParsed(m_hgs, {"path-ref",operation}, 10000, this,
+        [](const QByteArray &bytes) { return objectReply(bytes, 64 * 1024); },
+        [this, request](const ObjectReply &data) {
+            if (!data.ok()) emit pathRefFailed(request, tr("Invalid path identity response"));
+            else emit pathRefReady(request, data.object);
+        }, [this, request](const QString &, const QString &error) { emit pathRefFailed(request, error); }, bytes);
+    return request;
+}
+
 quint64 HgsClient::requestMachines(const QStringList &arguments)
 {
     const quint64 request = ++m_machineRequest;
@@ -797,11 +842,10 @@ quint64 HgsClient::requestTeam(const QString &host, const QString &operation, co
     QStringList args{QStringLiteral("team")};
     args << operation.split(' ', Qt::SkipEmptyParts) << QStringLiteral("--json");
     if (!host.isEmpty()) args.prepend('@' + host);
-    runHgs(m_hgs, args, host.isEmpty() ? 15000 : 45000, this,
-        [this, request, host, operation](const QByteArray &bytes) {
-            QJsonParseError error; const auto data = QJsonDocument::fromJson(bytes, &error);
-            if (error.error != QJsonParseError::NoError || !data.isObject()) emit teamFailed(request, host, operation, tr("Invalid team response"));
-            else emit teamReady(request, host, operation, data.object());
+    runHgsParsed(m_hgs, args, host.isEmpty() ? 15000 : 45000, this, parseObject,
+        [this, request, host, operation](const ObjectReply &data) {
+            if (!data.ok()) emit teamFailed(request, host, operation, tr("Invalid team response"));
+            else emit teamReady(request, host, operation, data.object);
         }, [this, request, host, operation](const QString &, const QString &error) { emit teamFailed(request, host, operation, error); },
         QJsonDocument(input).toJson(QJsonDocument::Compact));
     return request;
@@ -1643,9 +1687,10 @@ quint64 HgsClient::requestGitDiff(const QString &host, const QString &path)
     const quint64 request = ++m_gitDiffRequest;
     QStringList args{"git-diff", "--path", path, "--json"};
     if (!host.isEmpty()) args.prepend('@' + host);
-    runHgs(m_hgs, args, host.isEmpty() ? 8000 : 15000, this,
-        [this, request](const QByteArray &out) {
-            emit gitDiffReady(request, out.size() <= 512 * 1024 ? QJsonDocument::fromJson(out).object() : QJsonObject(), {});
+    runHgsParsed(m_hgs, args, host.isEmpty() ? 8000 : 15000, this,
+        [](const QByteArray &out) { return out.size() <= 512 * 1024 ? JsonParse::object(out) : QJsonObject(); },
+        [this, request](const QJsonObject &data) {
+            emit gitDiffReady(request, data, {});
         },
         [this, request](const QString &, const QString &error) { emit gitDiffReady(request, {}, error); });
     return request;
@@ -2385,9 +2430,8 @@ quint64 HgsClient::requestCancelHeld(const QString &host, const QString &name, c
     QStringList args{QStringLiteral("send-cancel"), name, QStringLiteral("--json")};
     if (!host.isEmpty()) args.prepend(QLatin1Char('@') + host);
     const auto payload = QJsonDocument(QJsonObject{{"request_id", requestId}}).toJson(QJsonDocument::Compact);
-    runHgs(m_hgs, args, host.isEmpty() ? 15000 : 45000, this,
-        [this, request, host, name, requestId](const QByteArray &bytes) {
-            const auto receipt = QJsonDocument::fromJson(bytes).object();
+    runHgsParsed(m_hgs, args, host.isEmpty() ? 15000 : 45000, this, parseJsonObject,
+        [this, request, host, name, requestId](const QJsonObject &receipt) {
             const bool ok = receipt.value("request_id").toString() == requestId && receipt.value("status").toString() == QLatin1String("cancelled");
             emit heldCancelFinished(request, host, name, ok, receipt, ok ? QString() : tr("The message could not be cancelled."));
         }, [this, request, host, name](const QString &, const QString &error) {

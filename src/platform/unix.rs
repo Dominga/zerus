@@ -1333,9 +1333,20 @@ pub fn run_bounded(
     deadline: Instant,
     cancelled: &dyn Fn() -> bool,
 ) -> std::result::Result<(ExitStatus, Vec<u8>, Vec<u8>), RunError> {
+    run_bounded_stdin(command, Stdio::null(), limits, deadline, cancelled)
+}
+
+/// Bounded execution with explicitly supplied stdin; ownership/deadlines match run_bounded.
+pub fn run_bounded_stdin(
+    command: &mut Command,
+    input: Stdio,
+    limits: [usize; 2],
+    deadline: Instant,
+    cancelled: &dyn Fn() -> bool,
+) -> std::result::Result<(ExitStatus, Vec<u8>, Vec<u8>), RunError> {
     command
         .process_group(0)
-        .stdin(Stdio::null())
+        .stdin(input)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn().map_err(RunError::Spawn)?;
@@ -1972,12 +1983,23 @@ mod tests {
         unsafe { libc::close(fds[1]) };
         assert!(unsafe { libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK) } >= 0);
         let mut byte = [0u8; 1];
-        // EOF (0), not EAGAIN: no write end is left anywhere.
-        let read = unsafe { libc::read(fds[0], byte.as_mut_ptr() as *mut _, 1) };
+        // Another parallel test may be between fork and exec, temporarily
+        // holding even a CLOEXEC descriptor. Wait for that bounded transition;
+        // inheriting it into the long-lived sleep child must still fail.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let (read, error) = loop {
+            let read = unsafe { libc::read(fds[0], byte.as_mut_ptr() as *mut _, 1) };
+            let error = std::io::Error::last_os_error();
+            if read >= 0 || !matches!(error.raw_os_error(), Some(libc::EAGAIN | libc::EINTR))
+                || std::time::Instant::now() >= deadline {
+                break (read, error);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        };
         let _ = child.kill();
         let _ = child.wait();
         unsafe { libc::close(fds[0]) };
-        assert_eq!(read, 0, "{}", std::io::Error::last_os_error());
+        assert_eq!(read, 0, "{error}");
     }
 
     #[test]
@@ -2308,6 +2330,22 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(session, child.id() as i32);
+    }
+
+    #[test]
+    fn bounded_input_handle_preserves_bytes_eof_and_output_limits() {
+        use std::io::{Seek, SeekFrom, Write};
+        let make = || {
+            let mut file = tempfile::tempfile().unwrap();
+            file.write_all(b"literal \x00\xff\n").unwrap();
+            file.seek(SeekFrom::Start(0)).unwrap();
+            Stdio::from(file)
+        };
+        let (status,out,err)=run_bounded_stdin(&mut Command::new("cat"),make(),[64,64],
+            Instant::now()+Duration::from_secs(5),&||false).unwrap();
+        assert!(status.success());assert_eq!(out,b"literal \x00\xff\n");assert!(err.is_empty());
+        assert!(matches!(run_bounded_stdin(&mut Command::new("cat"),make(),[2,64],
+            Instant::now()+Duration::from_secs(5),&||false),Err(RunError::TooLarge)));
     }
 
     #[test]

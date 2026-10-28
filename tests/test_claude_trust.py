@@ -161,7 +161,9 @@ class FolderTrust(unittest.TestCase):
         self.tmux('resize-window','-t','='+self.name+':','-x','120','-y','50')
         prefix='Bitwarden master password:\nunlock: SOPS_AGE_KEY loaded for this session.\nrun_claude: secrets unlocked → launching claude\nUnrelated command output\n'
         self.redraw('prelude',prefix,'Unrelated command output')
-        self.assertNotIn('Unrelated',question_fixtures.terminal_only(self,'Accessing workspace:')['questions'][0]['body'])
+        card=question_fixtures.terminal_only(self,'Accessing workspace:')
+        self.assertNotIn('Unrelated',card['questions'][0]['body'])
+        self.assertEqual(self.inspect()['pending_questions'][0]['question_id'],card['question_id'])
         self.answer(self.payload(),success=False)
         self.assertEqual(self.received(),b'')
 
@@ -215,7 +217,8 @@ class FolderTrust(unittest.TestCase):
     def test_changed_folder_and_run_reject_without_input(self):
         self.answer(self.payload(expected_run_id='other'),success=False)
         self.redraw('folder','/other/folder','/other/folder')
-        question_fixtures.terminal_only(self,'Accessing workspace:')
+        card=question_fixtures.terminal_only(self,'Accessing workspace:')
+        self.assertEqual(self.inspect()['pending_questions'][0]['question_id'],card['question_id'])
         self.answer(self.payload(),success=False)
         self.assertEqual(self.received(),b'')
 

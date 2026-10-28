@@ -16,7 +16,8 @@ pub fn to_phone(text: &str) -> Option<String> {
         return None;
     }
     let rest = &text[2..];
-    if !(rest.is_empty() || rest.starts_with('\\') || rest.starts_with('/')) || rest.contains('\0') {
+    if !(rest.is_empty() || rest.starts_with('\\') || rest.starts_with('/')) || rest.contains('\0')
+    {
         return None;
     }
     let drive = bytes[0].to_ascii_uppercase() as char;
@@ -42,7 +43,15 @@ pub fn to_native(text: &str) -> Option<String> {
 
 /// Payload fields that name a folder.
 const FOLDER_KEYS: &[&str] = &[
-    "directory", "path", "cwd", "parent", "destination", "location", "folder", "add_folder", "root",
+    "directory",
+    "path",
+    "cwd",
+    "parent",
+    "destination",
+    "location",
+    "folder",
+    "add_folder",
+    "root",
 ];
 
 /// Arguments and folder fields of a request, as hgs expects them.
@@ -116,7 +125,11 @@ pub fn add_local_folders(swarm: &mut Value, local: &Value) {
     }
     let machine_name = swarm["machines"]
         .as_array()
-        .and_then(|machines| machines.iter().find(|m| m["id"].as_str() == Some(node.as_str())))
+        .and_then(|machines| {
+            machines
+                .iter()
+                .find(|m| m["id"].as_str() == Some(node.as_str()))
+        })
         .and_then(|m| m["name"].as_str())
         .unwrap_or_default()
         .to_owned();
@@ -130,20 +143,38 @@ pub fn add_local_folders(swarm: &mut Value, local: &Value) {
         if entry["exists"] == Value::Bool(false) || !path.starts_with('/') {
             continue;
         }
-        let Some(project) = projects.iter_mut().find(|p| p["name"].as_str() == Some(name)) else {
+        let Some(project) = projects
+            .iter_mut()
+            .find(|p| p["name"].as_str() == Some(name))
+        else {
             continue;
         };
         if !project["folders"].is_array() {
             project["folders"] = Value::Array(Vec::new());
         }
         let folders = project["folders"].as_array_mut().expect("array");
-        if folders.iter().any(|f| f["machine_id"].as_str() == Some(node.as_str()) && f["path"].as_str() == Some(path)) {
+        if folders.iter().any(|f| {
+            f["machine_id"].as_str() == Some(node.as_str()) && f["path"].as_str() == Some(path)
+        }) {
             continue;
         }
-        let digest = ring::digest::digest(&ring::digest::SHA256, format!("{node}
-{path}").as_bytes());
-        let id: String = digest.as_ref()[..12].iter().map(|b| format!("{b:02x}")).collect();
-        let label = path.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(path);
+        let digest = ring::digest::digest(
+            &ring::digest::SHA256,
+            format!(
+                "{node}
+{path}"
+            )
+            .as_bytes(),
+        );
+        let id: String = digest.as_ref()[..12]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let label = path
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(path);
         folders.push(serde_json::json!({
             "id": format!("{LOCAL_FOLDER_PREFIX}{id}"), "name": label, "path": path,
             "machine_id": node, "machine_name": machine_name,
@@ -158,10 +189,16 @@ mod tests {
 
     #[test]
     fn folders_round_trip_between_the_phone_and_hgs() {
-        assert_eq!(to_phone(r"D:\Work\GIT\roguedod_s1").as_deref(), Some("/D:/Work/GIT/roguedod_s1"));
+        assert_eq!(
+            to_phone(r"D:\Work\GIT\roguedod_s1").as_deref(),
+            Some("/D:/Work/GIT/roguedod_s1")
+        );
         assert_eq!(to_phone(r"c:\").as_deref(), Some("/C:"));
         assert_eq!(to_phone("C:").as_deref(), Some("/C:"));
-        assert_eq!(to_native("/D:/Work/GIT/roguedod_s1").as_deref(), Some(r"D:\Work\GIT\roguedod_s1"));
+        assert_eq!(
+            to_native("/D:/Work/GIT/roguedod_s1").as_deref(),
+            Some(r"D:\Work\GIT\roguedod_s1")
+        );
         assert_eq!(to_native("/d:").as_deref(), Some(r"D:\"));
         assert_eq!(to_native("/D:/").as_deref(), Some(r"D:\"));
         for path in [r"D:\Work\x y", r"C:\Users\example\.codex"] {
@@ -171,7 +208,18 @@ mod tests {
 
     #[test]
     fn only_whole_folders_change() {
-        for text in ["codex/Temp/ImageWorks", "/home/user", "D:", "Dx\\y", "see D:\\Work", "/D", "/D:x", "~", "", "/"] {
+        for text in [
+            "codex/Temp/ImageWorks",
+            "/home/user",
+            "D:",
+            "Dx\\y",
+            "see D:\\Work",
+            "/D",
+            "/D:x",
+            "~",
+            "",
+            "/",
+        ] {
             assert!(to_native(text).is_none(), "{text}");
         }
         assert!(to_phone("D:x").is_none());
@@ -181,7 +229,11 @@ mod tests {
 
     #[test]
     fn requests_and_answers_translate_their_folders() {
-        let mut argv = vec!["claude".to_owned(), "/D:/Work/app".to_owned(), "--new".to_owned()];
+        let mut argv = vec![
+            "claude".to_owned(),
+            "/D:/Work/app".to_owned(),
+            "--new".to_owned(),
+        ];
         native_argv(&mut argv);
         assert_eq!(argv[1], r"D:\Work\app");
         let mut payload = json!({"directory": "/D:/Work/app", "text": "/D:/Work/app", "argv": ["dirs", "/C:/Users"]});
@@ -191,7 +243,10 @@ mod tests {
         assert_eq!(payload["argv"][1], r"C:\Users");
         let mut answer = json!({"path": r"D:\Work", "directories": [{"name": "app", "path": r"D:\Work\app"}], "name": "codex/x"});
         phone_output(&mut answer);
-        assert_eq!(answer, json!({"path": "/D:/Work", "directories": [{"name": "app", "path": "/D:/Work/app"}], "name": "codex/x"}));
+        assert_eq!(
+            answer,
+            json!({"path": "/D:/Work", "directories": [{"name": "app", "path": "/D:/Work/app"}], "name": "codex/x"})
+        );
     }
 
     #[test]
@@ -201,12 +256,20 @@ mod tests {
         let local = json!([{"name": "RogueDod", "dir": "/D:/Work/RogueDOD", "exists": true}, {"name": "Gone", "dir": "/D:/x", "exists": true}]);
         add_local_folders(&mut swarm, &local);
         add_local_folders(&mut swarm, &local);
-        let folders = swarm["organization"]["projects"][0]["folders"].as_array().unwrap();
+        let folders = swarm["organization"]["projects"][0]["folders"]
+            .as_array()
+            .unwrap();
         assert_eq!(folders.len(), 1);
         assert_eq!(folders[0]["path"], "/D:/Work/RogueDOD");
         assert_eq!(folders[0]["machine_id"], "n1");
         assert_eq!(folders[0]["name"], "RogueDOD");
-        assert!(folders[0]["id"].as_str().unwrap().starts_with(LOCAL_FOLDER_PREFIX));
-        assert!(swarm["organization"]["projects"][1]["folders"].as_array().unwrap().is_empty());
+        assert!(folders[0]["id"]
+            .as_str()
+            .unwrap()
+            .starts_with(LOCAL_FOLDER_PREFIX));
+        assert!(swarm["organization"]["projects"][1]["folders"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 }

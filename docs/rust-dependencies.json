@@ -132,6 +132,12 @@
     "repository": "https://github.com/tokio-rs/bytes"
   },
   {
+    "name": "canonicalpath-rust",
+    "version": "2026.5.18-2",
+    "license": "MIT",
+    "repository": "https://github.com/romanilyin/canonicalpath"
+  },
+  {
     "name": "cc",
     "version": "1.6.0",
     "license": "MIT OR Apache-2.0",

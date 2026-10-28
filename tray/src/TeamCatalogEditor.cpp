@@ -1,3 +1,5 @@
+#include "JsonParse.h"
+#include "ProcessRunner.h"
 #include "TeamCatalogEditor.h"
 #include "TeamController.h"
 #include "HgsClient.h"
@@ -502,15 +504,25 @@ TeamCatalogEditor::TeamCatalogEditor(TeamController *teams, QWidget *parent) : Q
     connect(m_import, &QPushButton::clicked, this, [this] {
         const auto path = QFileDialog::getOpenFileName(this, tr("Import team catalog"), {}, tr("JSON (*.json)"));
         if (path.isEmpty()) return;
-        QFile file(path);
-        const auto doc = file.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(file.readAll()) : QJsonDocument();
-        if (!doc.isObject()) { m_meta->setText(tr("⚠ %1 is not a team catalog").arg(path).toHtmlEscaped()); return; }
+        const auto before = m_catalog.json();
         const qint64 version = m_catalog.version;
-        // An export holds the catalog itself; `catalog get` wraps it.
-        m_catalog = parseCatalog(doc.object().contains("catalog") ? doc.object() : QJsonObject{{"catalog", doc.object()}});
-        m_catalog.version = version; m_catalog.proposals.clear();
-        m_readOnly = false;
-        changed(); rebuildLists(); rebuildEditor();
+        ProcessRunner::post(this, [path] {
+            QFile file(path);
+            QString error;
+            if (!file.open(QIODevice::ReadOnly)) return qMakePair(QJsonObject(), false);
+            const auto data = JsonParse::object(file.readAll(), &error);
+            return qMakePair(data, error.isEmpty());
+        }, [this, path, before, version](const QPair<QJsonObject, bool> &parsed) {
+            if (!parsed.second) { m_meta->setText(tr("⚠ %1 is not a team catalog").arg(path).toHtmlEscaped()); return; }
+            if (m_catalog.version != version || m_catalog.json() != before) {
+                m_meta->setText(tr("⚠ The catalog changed while importing; try again.")); return;
+            }
+            // An export holds the catalog itself; `catalog get` wraps it.
+            m_catalog = parseCatalog(parsed.first.contains("catalog") ? parsed.first : QJsonObject{{"catalog", parsed.first}});
+            m_catalog.version = version; m_catalog.proposals.clear();
+            m_readOnly = false;
+            changed(); rebuildLists(); rebuildEditor();
+        });
     });
     connect(m_teams, &TeamController::catalogChanged, this, [this] { if (!m_dirty) load(); else updateHeader(); });
     setDark(true);

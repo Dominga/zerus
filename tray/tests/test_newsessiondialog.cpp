@@ -90,6 +90,7 @@ class TestNewSessionDialog : public QObject {
         QVERIFY(skin.open(QIODevice::WriteOnly|QIODevice::Truncate));
         skin.write(R"({"schema":1,"name":"Classic form","views":{"newSession":"classic"}})");skin.close();
         QSettings().setValue("workspace/skin","classic-form");
+        WorkspaceSkin::preload();
     }
     // Each call the fixture recorded in a file, one JSON line per call.
     QStringList lines(const QString &name) const {
@@ -103,6 +104,7 @@ private slots:
         SessionsWindow::setRowPreparationForTests(SessionsWindow::RowPreparation::Blocking);
         QVERIFY(m_settings.isValid());QCoreApplication::setOrganizationName("hgs-tests");QCoreApplication::setApplicationName("new-session-dialog");
         QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,m_settings.path());
+        WorkspaceSkin::preload();
     }
     void init() {
         QSettings().clear();
@@ -679,12 +681,27 @@ elif a and a[0]=='worktrees':
         QCOMPARE(parsed.view("newSession"),QString("dense"));
         QCOMPARE(WorkspaceSkin::parse(QJsonObject{{"schema",1},{"views",QJsonObject{{"newSession","classic"}}}},"c",{},false).view("newSession"),QString("classic"));
         const auto dir=WorkspaceSkin::directory();QDir(dir).removeRecursively();
+        WorkspaceSkin::preload();
         const auto cleanup=qScopeGuard([dir]{QDir(dir).removeRecursively();});
         QString error;QCOMPARE(WorkspaceSkin::duplicate(skins[1],"My Skin",&error),QString("my-skin"));QVERIFY(error.isEmpty());
         QCOMPARE(WorkspaceSkin::duplicate(skins[1],"My Skin",&error),QString("my-skin-2"));
         const auto again=WorkspaceSkin::available();QCOMPARE(again.size(),4);
         const QStringList copies{again[2].id,again[3].id};QVERIFY(copies.contains("my-skin"));QVERIFY(copies.contains("my-skin-2"));
         QVERIFY(!again[2].builtin);QCOMPARE(again[2].view("newSession"),QString("dense"));QVERIFY(again[2].framelessDialogs());
+    }
+    void customSkinReloadsOffTheGuiThread() {
+        QVERIFY(QDir().mkpath(WorkspaceSkin::directory()));
+        const auto path = QDir(WorkspaceSkin::directory()).filePath("refresh-test.json");
+        const auto cleanup = qScopeGuard([path] { QFile::remove(path); QSettings().remove("workspace/skin"); });
+        const auto write = [path](const QByteArray &data) {
+            QFile file(path); if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+            return file.write(data) == data.size();
+        };
+        QVERIFY(write(R"({"schema":1,"name":"First"})"));
+        QSettings().setValue("workspace/skin", "refresh-test");
+        QTRY_COMPARE_WITH_TIMEOUT(WorkspaceSkin::current().name, QString("First"), 8000);
+        QVERIFY(write(R"({"schema":1,"name":"Second version"})"));
+        QTRY_COMPARE_WITH_TIMEOUT(WorkspaceSkin::active().name, QString("Second version"), 8000);
     }
     // The WhiteWh skin arranges the same form densely; its logic is unchanged.
     void denseViewStartsLikeTheClassicOne() {

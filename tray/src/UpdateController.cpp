@@ -454,7 +454,7 @@ bool UpdateController::startRestartHelper(const QString &bundle,qint64 pid,const
 }
 bool UpdateController::restartRequired() const{return m_restartRequired||ForkUpdater::instance()->ready();}
 void UpdateController::restartIntoInstalledBundle(){
-    if(auto *fork=ForkUpdater::instance();fork->ready()){if(fork->startInstall())QCoreApplication::quit();return;}
+    if(auto *fork=ForkUpdater::instance();fork->ready()){fork->startInstall();return;}
 #ifdef Q_OS_MACOS
     QDir bundle=QFileInfo(m_executable).absoluteDir();if(!bundle.cdUp()||!bundle.cdUp()||!bundle.dirName().endsWith(".app"))return;
     if(startRestartHelper(bundle.absolutePath(),QCoreApplication::applicationPid()))QCoreApplication::quit();

@@ -5835,7 +5835,8 @@ mod tests {
         // from the member's folder; the test points the state at its own file.
         let settings = dir.path().join("templates.json");
         crate::state::teams::templates::settings_override(Some(settings));
-        crate::state::teams::templates::set_additions(&[json!({"id":"say","program":"cmd","args":["/c","echo run-ok"]})]).unwrap();
+        let (program, flag) = if cfg!(windows) { ("cmd", "/c") } else { ("sh", "-c") };
+        crate::state::teams::templates::set_additions(&[json!({"id":"say","program":program,"args":[flag,"echo run-ok"]})]).unwrap();
         let run_id = "77777777-7777-4777-8777-777777777777";
         let request = json!({"op":"run","request_id":run_id,
             "team":t.id,"member":"dev","attempt":"A1","template":"say","args":{},
@@ -5894,7 +5895,8 @@ mod tests {
         store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
         let settings = dir.path().join("templates.json");
         crate::state::teams::templates::settings_override(Some(settings));
-        crate::state::teams::templates::set_additions(&[json!({"id":"say","program":"cmd","args":["/c","echo late-ok"]})]).unwrap();
+        let (program, flag) = if cfg!(windows) { ("cmd", "/c") } else { ("sh", "-c") };
+        crate::state::teams::templates::set_additions(&[json!({"id":"say","program":program,"args":[flag,"echo late-ok"]})]).unwrap();
         let run_id = "77777777-7777-4777-8777-777777777778";
         let request = json!({"op":"run","request_id":run_id,
             "team":t.id,"member":"dev","attempt":"A1","template":"say","args":{},

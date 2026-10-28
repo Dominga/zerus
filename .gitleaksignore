@@ -4,3 +4,8 @@
 # tag and default rule scanned; never replace these with path or rule ignores.
 54ece01be80c6dfb552eb9fc31a6455011fda1a2:mobile/ios/ZerusKit/Tests/ZerusKitTests/TasksPresentationTests.swift:generic-api-key:148
 54ece01be80c6dfb552eb9fc31a6455011fda1a2:mobile/android/app/src/test/java/app/zerus/mobile/TasksPresentationTest.kt:generic-api-key:134
+
+# Reviewed screenshot fixture: cardShot uses a synthetic session name and PNG
+# filename stem, never authentication. The current stem is shortened; retain
+# this exact immutable upstream occurrence without excluding its path or rule.
+ba4192badbff37d33faf8462aa189e82625f332d:tray/tests/test_sessionswindow.cpp:generic-api-key:1715

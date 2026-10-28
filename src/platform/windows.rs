@@ -365,22 +365,69 @@ fn native_program(name: &str) -> Option<PathBuf> {
         })
         .find(|path| path.is_file())
 }
-/// The interactive shell of an `sh` session (spec D8): PowerShell 7 (`pwsh.exe`)
-/// from PATH, else Windows PowerShell without its banner, by absolute path.
-pub fn powershell() -> std::result::Result<Vec<String>, String> {
-    let absolute = |path: PathBuf| canonical(&path).ok().map(|path| path.display().to_string());
-    if let Some(pwsh) = native_program("pwsh").and_then(absolute) {
-        return Ok(vec![pwsh]);
+const POWERSHELL_REQUIRED: &str = "PowerShell 7 or newer (Core) is required. Install PowerShell 7 or set HGS_PWSH to its absolute pwsh.exe path.";
+const POWERSHELL_PROBE: &str = "$ErrorActionPreference='Stop'; if ($PSVersionTable.PSEdition -ne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7) { exit 64 }; [Console]::Out.Write('hgs-pwsh-core-7'); exit 0";
+
+/// Probe the exact executable, without profiles, input, updates or a visible
+/// console. Neither its filename nor a successful process exit proves Core 7.
+fn checked_powershell(path: &Path) -> Option<String> {
+    if !path.is_absolute() || !path.is_file() {
+        return None;
     }
-    let system = env::var_os("SystemRoot")
-        .map(|root| PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
-        .filter(|path| path.is_file());
-    system
-        .or_else(|| native_program("powershell"))
-        .and_then(absolute)
-        .map(|powershell| vec![powershell, "-NoLogo".into()])
-        .ok_or_else(|| "neither pwsh.exe nor powershell.exe was found".into())
+    let path = canonical(path).ok()?;
+    let mut command = Command::new(&path);
+    command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", POWERSHELL_PROBE])
+        .env("POWERSHELL_UPDATECHECK", "Off")
+        .creation_flags(CREATE_NO_WINDOW);
+    let (status, output, _) = run_bounded(
+        &mut command, [128, 4096], Instant::now() + Duration::from_secs(5), &|| false,
+    ).ok()?;
+    (status.success() && output == b"hgs-pwsh-core-7")
+        .then(|| path.to_string_lossy().into_owned())
 }
+
+/// An explicit override is authoritative: an invalid one must not silently
+/// launch another shell. The injected probe also keeps policy tests isolated.
+fn select_powershell(
+    configured: Option<&OsStr>,
+    candidates: &[PathBuf],
+    mut probe: impl FnMut(&Path) -> Option<String>,
+) -> std::result::Result<Vec<String>, String> {
+    if let Some(configured) = configured.filter(|value| !value.is_empty()) {
+        let path = Path::new(configured);
+        if path.is_absolute() {
+            if let Some(program) = probe(path) {
+                return Ok(vec![program]);
+            }
+        }
+        return Err(format!("HGS_PWSH must name an absolute, working PowerShell 7 or newer (Core) executable. {POWERSHELL_REQUIRED}"));
+    }
+    for path in candidates {
+        if path.is_absolute() {
+            if let Some(program) = probe(path) {
+                return Ok(vec![program]);
+            }
+        }
+    }
+    Err(POWERSHELL_REQUIRED.into())
+}
+
+/// Interactive shells and Windows installers use verified PowerShell Core 7+.
+/// Windows PowerShell is never a fallback. Standard installations need not have
+/// added pwsh.exe to the PATH inherited by the running desktop.
+pub fn powershell() -> std::result::Result<Vec<String>, String> {
+    let mut candidates: Vec<PathBuf> = native_program("pwsh").into_iter().collect();
+    for variable in ["ProgramW6432", "ProgramFiles"] {
+        if let Some(folder) = env::var_os(variable).filter(|value| !value.is_empty()) {
+            let path = PathBuf::from(folder).join(r"PowerShell\7\pwsh.exe");
+            if !candidates.contains(&path) {
+                candidates.push(path);
+            }
+        }
+    }
+    select_powershell(env::var_os("HGS_PWSH").as_deref(), &candidates, checked_powershell)
+}
+
 /// The stable CLI `<home>\.local\bin\hgs.exe` (spec D2, D8), the only hgs.exe a
 /// session, hook, recipe or record names, so none of them names a portable
 /// folder that a GUI update replaces. Whichever hgs.exe runs, this is the one
@@ -2382,8 +2429,19 @@ mod process {
         deadline: Instant,
         cancelled: &dyn Fn() -> bool,
     ) -> std::result::Result<(ExitStatus, Vec<u8>, Vec<u8>), RunError> {
+        run_bounded_stdin(command, Stdio::null(), limits, deadline, cancelled)
+    }
+
+    /// Bounded execution with explicitly supplied stdin; ownership/deadlines match run_bounded.
+    pub fn run_bounded_stdin(
+        command: &mut Command,
+        input: Stdio,
+        limits: [usize; 2],
+        deadline: Instant,
+        cancelled: &dyn Fn() -> bool,
+    ) -> std::result::Result<(ExitStatus, Vec<u8>, Vec<u8>), RunError> {
         command
-            .stdin(Stdio::null())
+            .stdin(input)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = spawn_group(command).map_err(RunError::Spawn)?;
@@ -3568,4 +3626,38 @@ mod tests {
         assert!(spawn_group(&mut command).unwrap().wait().unwrap().success());
         assert!(command.status().unwrap().success());
     }
+    #[test]
+    fn powershell_override_is_absolute_and_never_falls_back() {
+        let installed = PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe");
+        let candidates = [installed.clone()];
+        for invalid in ["pwsh.exe", r"C:pwsh.exe", r"C:\missing\pwsh.exe"] {
+            let mut seen = Vec::new();
+            let result = select_powershell(Some(OsStr::new(invalid)), &candidates, |path| {
+                seen.push(path.to_owned());
+                (path == installed).then(|| path.display().to_string())
+            });
+            assert!(result.unwrap_err().contains("HGS_PWSH"));
+            assert!(!seen.contains(&installed));
+        }
+        assert_eq!(select_powershell(Some(installed.as_os_str()), &[], |path| {
+            Some(path.display().to_string())
+        }).unwrap(), vec![installed.display().to_string()]);
+    }
+
+    #[test]
+    fn powershell_skips_unverified_candidates_and_reports_missing_core() {
+        let old = PathBuf::from(r"C:\tools\pwsh.exe");
+        let core = PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe");
+        let candidates = [old.clone(), core.clone()];
+        let mut seen = Vec::new();
+        let selected = select_powershell(None, &candidates, |path| {
+            seen.push(path.to_owned());
+            (path == core).then(|| path.display().to_string())
+        }).unwrap();
+        assert_eq!(selected, vec![core.display().to_string()]);
+        assert_eq!(seen, candidates);
+        assert!(select_powershell(None, &[old], |_| None).unwrap_err().contains("PowerShell 7"));
+        assert!(select_powershell(None, &[], |_| unreachable!()).is_err());
+    }
+
 }

@@ -107,6 +107,11 @@ pub(crate) fn account_models(provider: &str, home: &std::path::Path) -> serde_js
     effort::account_models(provider, home)
 }
 
+/// Explicit native copy snapshot; no session is created or modified.
+pub(crate) fn download_snapshot(path: &str) -> Result<Value> {
+    computer_files::download_snapshot(path)
+}
+
 /// Current bounded native Git evidence for exact project/worktree placement.
 pub(crate) fn worktree_catalog(path: &std::path::Path) -> serde_json::Value {
     if let Err(detail) = local_sessions() {

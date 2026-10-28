@@ -372,12 +372,52 @@ class ResumedClearContext(unittest.TestCase):
  def test_other_starts_still_name_a_different_conversation(self):
   self.resumed();initial=self.record.copy()
   other=self.root/'other.jsonl';other.write_bytes(self.rollout.read_bytes())
-  for patch,source in [({},'startup'),({},'resume'),(dict(restore_archive_id=str(uuid.uuid4())),'clear'),(dict(transcript=str(other)),'clear')]:
+  for patch,source in [({},'startup'),({},''),({},'unknown'),(dict(restore_archive_id=str(uuid.uuid4())),'clear'),(dict(transcript=str(other)),'clear')]:
    with self.subTest(patch=patch,source=source):
     self.record=dict(initial,**patch);self.write_record();self.started(source)
     current=json.loads(self.record_path.read_text())
     self.assertEqual(current['error'],'agent resumed a different conversation')
     self.assertEqual((current['conversation_id'],current['expected_id']),(self.conversation_id,self.conversation_id))
+ def test_native_resume_and_compaction_rebind_without_clearing_or_accepting_stale_sends(self):
+  # H7: the current run's native SessionStart can name its new transcript.
+  # That is a visible rebind, not a clear or permission to send to the old ID.
+  self.resumed();initial=self.record.copy()
+  for source in ['resume','compact']:
+   with self.subTest(source=source):
+    self.record=initial.copy();self.write_record();new=self.started(source)
+    current=json.loads(self.record_path.read_text())
+    self.assertEqual(current['conversation_id'],new);self.assertNotIn('expected_id',current)
+    self.assertFalse(current.get('error'));self.assertFalse(current.get('session_clear'))
+    self.assertEqual((current['run_id'],current['pid'],current['supervisor']),
+                     (self.run_id,initial['pid'],initial['supervisor']))
+    rebound=current['session_rebound']
+    self.assertEqual((rebound['previous_conversation_id'],rebound['conversation_id'],rebound['source']),
+                     (self.conversation_id,new,source))
+    fresh=self.inspect();self.assertFalse(fresh.get('session_clear'))
+    self.assertEqual(sum(e['type']=='SessionRebound' for e in fresh['events']),1)
+    self.hook(dict(hook_event_name='SessionStart',session_id=new,source=source,cwd='/fixture',transcript_path=current['transcript']))
+    self.assertEqual(sum(e['type']=='SessionRebound' for e in self.inspect()['events']),1)
+    refused=test_input.InputTransport.send(self,test_input.InputTransport.payload(self),success=False)
+    self.assertIn('identity changed',refused);self.assertEqual(self.received(),b'')
+ def test_resume_rebind_keeps_run_and_fork_fresh_identity_guards(self):
+  self.resumed();initial=self.record.copy()
+  for source in ['resume','compact']:
+   with self.subTest(source=source):
+    self.record=initial.copy();self.write_record();before=self.record_path.read_bytes()
+    new=str(uuid.uuid4());event=dict(hook_event_name='SessionStart',session_id=new,source=source,cwd='/fixture',
+                                   transcript_path=self.usage_history(new,32,8))
+    result=subprocess.run([str(test_input.HGS),'__state','hook'],
+                          env=dict(self.env,HGS_SESSION=self.name,HGS_RUN_ID=str(uuid.uuid4())),
+                          input=json.dumps(event),text=True,capture_output=True,timeout=12)
+    self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(self.record_path.read_bytes(),before)
+    for patch,error in [(dict(fork_parent_id=new),'provider opened the source conversation instead of a new fork'),
+                        (dict(fresh_from=dict(conversation_id=new)),'provider opened the previous conversation instead of a fresh one')]:
+     with self.subTest(patch=patch):
+      self.record=dict(initial,**patch);self.write_record();self.hook(event)
+      current=json.loads(self.record_path.read_text())
+      self.assertEqual(current['error'],error)
+      self.assertEqual((current['conversation_id'],current['expected_id']),(self.conversation_id,self.conversation_id))
+      self.assertFalse(current.get('session_rebound'));self.assertFalse(current.get('session_clear'))
  def test_draft_and_sent_message_prevent_a_resumed_clear(self):
   self.resumed();initial=self.record.copy()
   self.record['input_pending_at']=time.time();self.write_record()

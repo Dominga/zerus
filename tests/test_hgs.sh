@@ -178,7 +178,12 @@ check "exact resume forwards extra provider options" 0 "/hgs 0 codex resume $con
 check "exact resume keeps explicit session tag" 0 "-s codex/sample-project/review " --dry-run codex sample-project -c "$conversation_id" -n review
 check "legacy -c followed by project stays project selection" 0 "/hgs 3 codex resume --last codex\$" --dry-run codex -c sample-project
 check "exact resume rejects --fresh" 1 "." --dry-run codex sample-project -c "$conversation_id" --fresh
-check "exact resume rejects --new" 1 "." --dry-run codex sample-project -c "$conversation_id" --new
+# WhiteWh deliberately allows a new tracked session for an exact conversation.
+# Keep both the exact native selector and the requested new session name pinned.
+check "new exact resume keeps its new session tag" 0 "-s codex/sample-project/exact-new " --dry-run codex sample-project -c "$conversation_id" --new -n exact-new
+check "new exact resume has no fresh fallback" 0 "/hgs 0 codex resume $conversation_id\$" --dry-run codex sample-project -c "$conversation_id" --new -n exact-new
+check "new ambiguous resume is refused" 1 "." --dry-run codex sample-project -c --new
+check "new session rejects fresh" 1 "." --dry-run codex sample-project --fresh --new
 check "explicit invalid resume ID is rejected" 1 "." --dry-run codex sample-project --resume=not-a-uuid
 check "explicit empty resume ID is rejected" 1 "." --dry-run codex sample-project --resume=
 

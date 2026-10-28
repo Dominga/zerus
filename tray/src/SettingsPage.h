@@ -33,6 +33,9 @@
 #include <QToolButton>
 #include "ProcessSettings.h"
 #include "ForkUpdater.h"
+#include "ChildProcess.h"
+#include "JsonParse.h"
+#include "ProcessRunner.h"
 #include "QuestionNotificationSettings.h"
 #include "UiLanguage.h"
 #include "WorkspaceSkin.h"
@@ -71,12 +74,20 @@ inline void hgsSettingCall(QObject *owner, const QString &executable, const QStr
         if (error == QProcess::FailedToStart) finish({}, QCoreApplication::translate("SettingsPage", "hgs did not start"));
     });
     QObject::connect(process, &QProcess::finished, process, [process, finish](int code, QProcess::ExitStatus status) {
-        const auto document = QJsonDocument::fromJson(process->readAllStandardOutput());
-        if (status == QProcess::NormalExit && code == 0 && document.isObject()) { finish(document.object(), {}); return; }
+        const auto bytes = process->readAllStandardOutput();
         const auto error = QString::fromUtf8(process->readAllStandardError()).trimmed().section(QLatin1Char('\n'), 0, 0).left(300);
-        finish({}, !error.isEmpty() ? error : QCoreApplication::translate("SettingsPage", "hgs exited with code %1").arg(code));
+        if (status != QProcess::NormalExit || code != 0) {
+            finish({}, !error.isEmpty() ? error : QCoreApplication::translate("SettingsPage", "hgs exited with code %1").arg(code));
+            return;
+        }
+        ProcessRunner::post(process, [bytes] { QString error; const auto object = JsonParse::object(bytes, &error); return qMakePair(object, error); },
+            [finish, code, error](const QPair<QJsonObject, QString> &parsed) {
+                if (parsed.second.isEmpty()) finish(parsed.first, {});
+                else finish({}, !error.isEmpty() ? error : QCoreApplication::translate("SettingsPage", "hgs exited with code %1").arg(code));
+            });
     });
     QObject::connect(timer, &QTimer::timeout, process, [finish] { finish({}, QCoreApplication::translate("SettingsPage", "hgs did not answer within 8 seconds")); });
+    ChildProcess::inheritStdioOnly(*process);
     process->start(executable, args);
     if (!input.isEmpty()) process->write(input);
     process->closeWriteChannel();
@@ -195,6 +206,7 @@ public:
             skin->setCurrentIndex(qMax(0,skin->findData(WorkspaceSkin::currentId())));
         };
         fillSkins();
+        connect(WorkspaceSkin::changes(), &QTimer::timeout, this, [this, fillSkins] { fillSkins(); if (appearanceChanged) appearanceChanged(); });
         auto *duplicateSkin=new QPushButton(tr("Duplicate…"));duplicateSkin->setObjectName("duplicateWorkspaceSkin");duplicateSkin->setAutoDefault(false);
         auto *skinFolder=new QPushButton(tr("Open skins folder"));skinFolder->setObjectName("openWorkspaceSkins");skinFolder->setAutoDefault(false);
         auto *skinRow=new QHBoxLayout;skinRow->setSpacing(8);skinRow->addWidget(skin,1);skinRow->addWidget(duplicateSkin);skinRow->addWidget(skinFolder);
@@ -312,8 +324,7 @@ public:
         repository->setIcon(workspaceIcon("github",palette().color(QPalette::WindowText)));repository->setIconSize(QSize(20,20));repository->setAutoDefault(false);
         repository->setCursor(Qt::PointingHandCursor);repository->setToolTip(QStringLiteral("https://github.com/ufna/zerus"));repository->setAccessibleName(tr("Open Zerus repository on GitHub"));
         connect(repository,&QPushButton::clicked,this,[]{QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/ufna/zerus")));});
-        // WhiteWh fork: this build is the fork; its repository is the active
-        // one, and its releases are where this build updates from.
+        // WhiteWh fork: this build is the fork and its releases are the update source.
         auto *fork=new QPushButton(QStringLiteral("WhiteWh/zerus"));fork->setObjectName("aboutForkRepository");fork->setProperty("glyph","github");
         fork->setIcon(workspaceIcon("github",palette().color(QPalette::WindowText)));fork->setIconSize(QSize(20,20));fork->setAutoDefault(false);fork->setCheckable(true);fork->setChecked(true);
         fork->setCursor(Qt::PointingHandCursor);fork->setToolTip(tr("Active: this build is the WhiteWh fork · https://github.com/WhiteWh/zerus"));fork->setAccessibleName(tr("Open the WhiteWh fork on GitHub (the active repository)"));
@@ -324,7 +335,7 @@ public:
         forkStatus=new QLabel;forkStatus->setObjectName("aboutForkStatus");forkStatus->setWordWrap(true);
         forkUpdate=new QPushButton;forkUpdate->setObjectName("aboutForkUpdate");forkUpdate->setAutoDefault(false);
         connect(forkUpdate,&QPushButton::clicked,this,[updater]{
-            if(updater->ready()){if(updater->startInstall())QCoreApplication::quit();return;}
+            if(updater->ready()){updater->startInstall();return;}
             updater->checkNow();
         });
         auto *updateRow=new QHBoxLayout;updateRow->setSpacing(10);updateRow->addWidget(forkUpdate);updateRow->addWidget(forkStatus,1);

@@ -412,13 +412,18 @@ TrayAgent::~TrayAgent()
 
 QStringList TrayAgent::jsonSettings()
 {
-    return {QStringLiteral("attention/observed"), QStringLiteral("attention/readReplies"), QStringLiteral("attention/sessionMarks"),
+    QStringList keys{QStringLiteral("attention/observed"), QStringLiteral("attention/readReplies"), QStringLiteral("attention/sessionMarks"),
             QStringLiteral("attention/pendingReads"), QStringLiteral("attention/sharedReadMigrated"), QStringLiteral("attention/linuxTokens"),
             QStringLiteral("workspace/organization"), QStringLiteral("workspace/pendingLaunches"), QStringLiteral("workspace/launchAccounts"),
+            QStringLiteral("workspace/cacheKeepWarm"), QStringLiteral("workspace/ironRules"), QStringLiteral("workspace/sessionLeads"),
             QStringLiteral("workspace/worktreeSnapshots"), QStringLiteral("workspace/repositoryClone/*/pending"),
             QStringLiteral("swarm/observedOrganization"), QStringLiteral("swarm/observedVersions"),
             QStringLiteral("recovery/sharedPolicy"), QStringLiteral("speech/providerOperation"),
             QStringLiteral("tasks/pendingExecutorLaunches"), QStringLiteral("tasks/newCard/*/request")};
+    // Mapping identities are direct children, rather than per-child groups.
+    QSettings settings; settings.beginGroup(QStringLiteral("pathMappings"));
+    for (const auto &key : settings.childKeys()) keys << QStringLiteral("pathMappings/") + key;
+    return keys;
 }
 
 TrayAgent::ReadState TrayAgent::storedReadState()

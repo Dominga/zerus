@@ -36,6 +36,7 @@ public:
     // Read a retained draft in the background without navigating to its session.
     void ensureDraftLoaded(const QString &key);
     void setAvailability(bool available, const QString &reason = {});
+    void setCooperativeInbox(bool enabled);
     // Session feedback uses the existing action row and never replaces a draft.
     // html: the same status with emphasis, shown while nothing else takes its place.
     void setSessionStatus(const QString &text, bool error = false, bool blockInput = false, const QString &html = {});
@@ -223,6 +224,7 @@ private:
     QString m_key, m_unavailableReason;
     QString m_sessionStatus, m_sessionStatusHtml;
     bool m_sessionStatusError = false, m_sessionStatusBlocksInput = false;
+    bool m_cooperativeInbox = false;
     bool m_available = false, m_loading = false, m_dark = true, m_recording = false, m_attachmentsAvailable = true;
     QString m_attachmentsReason;
     QString m_referenceKey, m_referenceHost, m_referenceMachine, m_referenceContext;

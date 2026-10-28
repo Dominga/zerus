@@ -7,6 +7,7 @@
 #include "AccountFilter.h"
 #include "ArchiveBrowser.h"
 #include "CacheKeepalive.h"
+#include "ConversationSource.h"
 #include "GitStatusBadge.h"
 #include "JsonParse.h"
 #include "MachineAppearance.h"
@@ -235,9 +236,9 @@ QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e, const RowIn
     // what the owner needs to see.
     const bool uploadWarning = !s.uploadNote.isEmpty();
     if (uploadWarning) desc = s.uploadNote;
-    roles.insert(SessionRoles::Model, s.model.isEmpty() ? (s.cmd == "sh" ? QString() : tr("Model unknown")) : s.model);
+    roles.insert(SessionRoles::Model, s.model.isEmpty() ? (s.cmd == "sh" || s.cmd == "external" ? QString() : tr("Model unknown")) : s.model);
     roles.insert(SessionRoles::Effort, s.effort.isEmpty() ? QStringLiteral("—") : s.effort);
-    roles.insert(SessionRoles::Title, sessionLabel(s)); roles.insert(SessionRoles::Agent, s.cmd);
+    roles.insert(SessionRoles::Title, sessionLabel(s)); roles.insert(SessionRoles::Agent, ConversationSource::badge(s.cmd, s.clientContext));
     // F4: the Team designer keeps its fixed name, whatever hgs called the session.
     const bool designer = Teams::isDesignerSession(e.host, s.name);
     if (designer) roles.insert(SessionRoles::Title, Teams::designerTitle());
@@ -252,6 +253,8 @@ QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e, const RowIn
         break;
     }
     QString meta = SessionPresentation::checkoutLine(s);
+    const auto sourceLabel = ConversationSource::label(s.cmd, s.clientContext);
+    if (!sourceLabel.isEmpty()) meta = sourceLabel + (meta.isEmpty() ? QString() : QStringLiteral(" | ") + meta);
     roles.insert(SessionRoles::MetaIcon, SessionPresentation::checkoutIcon(s));
     if (s.state == "archived" && s.archivedAt > 0) {
         if (!meta.isEmpty()) meta += QStringLiteral(" / ");
@@ -263,7 +266,7 @@ QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e, const RowIn
     const auto git = SessionPresentation::gitStatus(s, inputs.gitStatus.value(e.host + '\n' + gitPath), e.online);
     roles.insert(SessionRoles::GitHost, e.host); roles.insert(SessionRoles::GitPath, gitPath);
     roles.insert(SessionRoles::GitStatus, git);
-    roles.insert(Qt::AccessibleDescriptionRole, GitStatusBadge::tooltip(git));
+    roles.insert(Qt::AccessibleDescriptionRole, (sourceLabel.isEmpty() ? QString() : sourceLabel + QStringLiteral(". ")) + GitStatusBadge::tooltip(git));
     roles.insert(SessionRoles::Attention, !ending && (s.reviewLater || (e.online && !s.attentionAcknowledged
         && (s.needsAction() || SessionRows::childNeedsAction(e, inputs.selection)))));
     roles.insert(SessionRoles::ReviewLater, s.reviewLater);

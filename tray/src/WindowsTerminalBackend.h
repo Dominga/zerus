@@ -48,10 +48,10 @@ public:
     static QStringList shellArguments(OpenMode mode, const QString &directory, const QStringList &shell);
     static QString title(const QStringList &arguments);
     static QString locateWindowsTerminal();
-    // The PowerShell of a folder shell, program first: PowerShell 7 (pwsh) when
-    // installed, otherwise Windows PowerShell without its banner.
+    // Build the argv of a previously verified PowerShell Core 7+; empty when
+    // unavailable. locateShell verifies the executable and reports how to fix it.
     static QStringList shell(const QString &pwsh);
-    static QStringList locateShell();
+    static QStringList locateShell(QString *error = nullptr);
 
 private:
     // Starts Windows Terminal unless the mode is console; otherwise, or when it

@@ -1114,6 +1114,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertEqual(fingerprints, [
             "54ece01be80c6dfb552eb9fc31a6455011fda1a2:mobile/ios/ZerusKit/Tests/ZerusKitTests/TasksPresentationTests.swift:generic-api-key:148",
             "54ece01be80c6dfb552eb9fc31a6455011fda1a2:mobile/android/app/src/test/java/app/zerus/mobile/TasksPresentationTest.kt:generic-api-key:134",
+            "ba4192badbff37d33faf8462aa189e82625f332d:tray/tests/test_sessionswindow.cpp:generic-api-key:1715",
         ])
 
     def test_cache_directories_stay_outside_uploaded_paths(self):

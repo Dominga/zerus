@@ -310,6 +310,22 @@ void TeamWorkspace::render()
         m_leftHost->addWidget(left); left->show(); m_left = left;
         // Members keep their scroll position.
         const int scroll = m_members->verticalScrollBar()->value();
+        // A poll may rebuild Members just after Answer focused Allow. Keep a
+        // decision button focused only for the exact same pending question;
+        // Enter must never transfer to another member or a newer request.
+        QString focusTeam, focusMember, focusQuestion, focusHash, focusControl;
+        if (const auto *focused = QApplication::focusWidget(); focused && m_members->isAncestorOf(focused)
+            && (focused->objectName() == "teamMemberPermissionAllow" || focused->objectName() == "teamMemberPermissionDeny")) {
+            for (auto *box = focused->parentWidget(); box; box = box->parentWidget()) {
+                if (box->objectName() != "teamMemberPermission") continue;
+                focusTeam = box->property("team").toString();
+                focusMember = box->property("member").toString();
+                focusQuestion = box->property("question").toString();
+                focusHash = box->property("questionHash").toString();
+                focusControl = focused->objectName();
+                break;
+            }
+        }
         auto *list = new QWidget; list->setObjectName("teamWorkspaceSide");
         {auto *sv = new QVBoxLayout(list); sv->setContentsMargins(0, 0, 0, 0); sv->setSpacing(0);
          if (auto *lists = sideLists(*team, status)) sv->addWidget(lists);
@@ -317,6 +333,15 @@ void TeamWorkspace::render()
         retire(m_members->takeWidget());
         m_members->setWidget(list); m_membersContent = list;
         m_members->verticalScrollBar()->setValue(scroll);
+        if (!focusControl.isEmpty() && focusTeam == team->id && !focusQuestion.isEmpty() && !focusHash.isEmpty()) {
+            for (auto *box : list->findChildren<QFrame *>("teamMemberPermission")) {
+                if (box->property("member").toString() != focusMember || box->property("question").toString() != focusQuestion
+                    || box->property("questionHash").toString() != focusHash) continue;
+                if (auto *control = box->findChild<QPushButton *>(focusControl); control && control->isEnabled() && control->isVisible())
+                    control->setFocus(Qt::OtherFocusReason);
+                break;
+            }
+        }
         renderCoordinator(*team);
     }
     if (m_top) { m_topHost->removeWidget(m_top); retire(m_top); }
@@ -1042,6 +1067,18 @@ protected:
     void resizeEvent(QResizeEvent *event) override { QWidget::resizeEvent(event); refit(); }
     void showEvent(QShowEvent *event) override { QWidget::showEvent(event); refit(); }
 private:
+    void fitCompactSpacing()
+    {
+        auto *row = qobject_cast<QHBoxLayout *>(layout());
+        if (!row) return;
+        row->setSpacing(2); row->setContentsMargins(4, 8, 4, 6);
+        // Style-dependent group frames and switch hints can leave the icon-only
+        // row a few pixels too wide. Use its remaining whitespace before any
+        // control is clipped, keeping each button's full click target.
+        if (sizeHint().width() > width()) {
+            row->setSpacing(0); row->setContentsMargins(0, 8, 0, 6);
+        }
+    }
     // Two steps: first the switch labels go (their switches keep them as
     // tooltips), then the buttons' words.
     void refit()
@@ -1054,7 +1091,7 @@ private:
                 if (l->property("compactHide").toBool() && !l->isHidden()) m_labels += l->sizeHint().width() + spacing;
         }
         const int level = width() >= m_full ? 0 : width() >= m_full - m_labels ? 1 : 2;
-        if (level == m_level) return;
+        if (level == m_level) { if (level == 2) fitCompactSpacing(); return; }
         m_level = level;
         const bool compact = level == 2;
         for (auto *l : findChildren<QLabel *>()) if (l->property("compactHide").toBool()) l->setVisible(level == 0);
@@ -1076,6 +1113,7 @@ private:
             const QIcon icon = b->property("compactIcon").value<QIcon>();
             if (!icon.isNull()) b->setIcon(compact ? icon : QIcon());
         }
+        if (compact) fitCompactSpacing();
     }
     int m_level = 0, m_full = 0, m_labels = 0;
 };
@@ -2651,6 +2689,7 @@ QWidget *TeamWorkspace::members(const Team &team)
         // native answers array; a deny's reason travels as the answer text.
         if (m.permission.permission()) {
             auto *box = new QFrame; box->setObjectName("teamMemberPermission"); box->setProperty("member", m.id);
+            box->setProperty("team", team.id); box->setProperty("question", m.permission.id); box->setProperty("questionHash", m.permission.hash);
             box->setStyleSheet(QStringLiteral("QFrame#teamMemberPermission{background:%1;border:1px solid %2;border-radius:7px;}")
                                    .arg(alpha(c.warn, .10).name(QColor::HexArgb), alpha(c.warn, .40).name(QColor::HexArgb)));
             auto *pv = new QVBoxLayout(box); pv->setContentsMargins(8, 5, 8, 6); pv->setSpacing(3);

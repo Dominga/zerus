@@ -504,6 +504,7 @@ args = []
     /// U11: the exact command line Claude Code on Windows ran for the
     /// reviewer's socraticode server (from the enabled plugin, not from any
     /// `.mcp.json` or settings), seen on 17a8db61 as 30 minutes of Background.
+    #[cfg(windows)]
     const WINDOWS_SOCRATICODE: &str = r"C:\WINDOWS\system32\cmd.exe /d /s /c npx ^-y^ ^--prefer-online^ ^socraticode@latest^";
 
     /// A managed Claude profile (its `CLAUDE_CONFIG_DIR`) with the socraticode
@@ -583,6 +584,7 @@ args = []
         assert_eq!(default, vec!["default-only".to_owned()]);
     }
 
+    #[cfg(windows)] // Native process paths use the host's basename semantics.
     #[test]
     fn the_windows_npx_wrapper_of_a_plugin_server_is_a_service() {
         let profile = plugin_profile(true);

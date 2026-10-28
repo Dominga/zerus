@@ -585,6 +585,10 @@ fn terminal_choice(record:&Value,screen:&str)->Option<Value> {
 }
 
 fn choice_card(record:&Value,screen:&str,chooser:Chooser)->Option<Value> {
+    // Before the first conversation, an unreviewed chooser belongs to the
+    // startup fallback, even when it has the same hint as a post-turn panel.
+    // Preserve that read-only card's source and identity across phase changes.
+    if startup_choice::eligible(record) {return None;}
     let (title,body,options)=chooser;
     let identity=parse(screen).map(|p|json!([identity_body(&p),p.question])).unwrap_or_else(||json!(body));
     let hash=format!("{:x}",Sha256::digest(json!([record["run_id"],record["conversation_id"],record["pane"],record["pid"],
@@ -1627,6 +1631,25 @@ mod hinted_choice_tests {
         // The bar Claude draws on the left of the panel is not part of the text.
         let barred: String = SETUP.lines().map(|row| if row.starts_with(' ') { format!("│{row}") } else { row.to_owned() }).collect::<Vec<_>>().join("\n");
         assert_eq!(hinted_choice(&barred).unwrap().0, "Review proposed auto-mode setup");
+    }
+    #[test]
+    fn generic_choices_preserve_supervised_startup_fallbacks() {
+        let mut startup = json!({"agent":"claude","run_identity_version":1,"supervisor":{},
+            "run_id":"startup-run","conversation_id":null,"last_event_at":0,"phase":"unknown"});
+        assert!(startup_choice::eligible(&startup));
+        // idle_choice and terminal_choice share this generic-card constructor.
+        assert!(choice_card(&startup, SETUP, hinted_choice(SETUP).unwrap()).is_none());
+        startup["phase"] = json!("input");
+        assert!(terminal_choice(&startup, SETUP).is_none());
+        // A completed turn's chooser retains its new read-only Terminal card.
+        startup["conversation_id"] = json!("established-conversation");
+        startup["last_event_at"] = json!(20);
+        startup["phase"] = json!("idle");
+        let idle = choice_card(&startup, SETUP, hinted_choice(SETUP).unwrap()).unwrap();
+        assert_eq!((idle["source"].clone(), idle["can_answer"].clone()),
+            (json!("claude_terminal_choice"), json!(false)));
+        startup["phase"] = json!("input");
+        assert_eq!(terminal_choice(&startup, SETUP).unwrap()["question_hash"], idle["question_hash"]);
     }
     #[test]
     fn the_composer_and_incomplete_panels_are_no_chooser() {

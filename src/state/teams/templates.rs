@@ -597,7 +597,7 @@ fn qt_bin(folder: &Path) -> Option<PathBuf> {
 /// 2026-10-28): the Visual Studio tools for the Qt configure and build on
 /// Windows, Qt's DLLs and the fonts for a Qt test, Gradle's home in the folder.
 fn template_environment(plan: &Plan, folder: &Path) -> Vec<(String, String)> {
-    let mut env = Vec::new();
+    let mut env: Vec<(String, String)> = Vec::new();
     #[cfg(windows)]
     if matches!(plan.template.as_str(), "qt-configure" | "qt-build" | "qt-test") {
         if let Some(msvc) = msvc_environment() {
@@ -1012,18 +1012,23 @@ mod tests {
         assert!(plan("git-commit", &json!({"message":"m","paths":["inside.txt"]}), dir.path()).is_ok());
     }
 
+    fn shell_plan(windows: &str, unix: &str) -> Plan {
+        let (program, flag, command) = if cfg!(windows) { ("cmd", "/c", windows) } else { ("sh", "-c", unix) };
+        Plan { template: "test".into(), program: program.into(), argv: vec![flag.into(), command.into()], commit: None }
+    }
+
     #[test]
     fn a_run_in_a_temp_folder_reports_its_exit_and_output() {
         let dir = temp();
-        let echo = Plan { template: "test".into(), program: "cmd".into(), argv: vec!["/c".into(), "echo hello".into()], commit: None };
+        let echo = shell_plan("echo hello", "echo hello");
         let outcome = execute(&echo, dir.path(), Duration::from_secs(30), &[]);
         assert_eq!(outcome.exit, Some(0), "{outcome:?}");
         assert!(outcome.tail.contains("hello"), "{}", outcome.tail);
         assert!(!outcome.timed_out);
-        let failed = Plan { template: "test".into(), program: "cmd".into(), argv: vec!["/c".into(), "exit 7".into()], commit: None };
+        let failed = shell_plan("exit 7", "exit 7");
         assert_eq!(execute(&failed, dir.path(), Duration::from_secs(30), &[]).exit, Some(7));
         // The template runs in the member's folder with TEMP inside it.
-        let folder = Plan { template: "test".into(), program: "cmd".into(), argv: vec!["/c".into(), "echo %TEMP%".into()], commit: None };
+        let folder = shell_plan("echo %TEMP%", "echo \"$TEMP\"");
         let outcome = execute(&folder, dir.path(), Duration::from_secs(30), &[]);
         assert!(outcome.tail.contains(".zerus-team"), "{}", outcome.tail);
     }
@@ -1032,13 +1037,13 @@ mod tests {
     fn a_run_is_bounded_in_time_and_keeps_only_its_tail() {
         let dir = temp();
         // A program that never finishes within the timeout.
-        let plan = Plan { template: "test".into(), program: "cmd".into(), argv: vec!["/c".into(), "ping -n 30 127.0.0.1".into()], commit: None };
+        let plan = shell_plan("ping -n 30 127.0.0.1", "sleep 30");
         let outcome = execute(&plan, dir.path(), Duration::from_secs(1), &[]);
         assert!(outcome.timed_out, "{outcome:?}");
         assert!(outcome.exit.is_none());
         assert!(outcome.error.contains("did not finish"));
         // A big output keeps its last 4000 characters.
-        let plan = Plan { template: "test".into(), program: "cmd".into(), argv: vec!["/c".into(), "type big.txt".into()], commit: None };
+        let plan = shell_plan("type big.txt", "cat big.txt");
         std::fs::write(dir.path().join("big.txt"), "x".repeat(200_000) + "\nEND").unwrap();
         let outcome = execute(&plan, dir.path(), Duration::from_secs(30), &[]);
         assert_eq!(outcome.exit, Some(0));
@@ -1103,9 +1108,10 @@ mod tests {
     fn an_owner_added_template_runs_its_fixed_argv() {
         let dir = temp();
         settings_override(Some(dir.path().join("templates.json")));
-        set_additions(&[json!({"id":"say","program":"cmd","args":["/c","echo hello"]})]).unwrap();
+        let (program, flag) = if cfg!(windows) { ("cmd", "/c") } else { ("sh", "-c") };
+        set_additions(&[json!({"id":"say","program":program,"args":[flag,"echo hello"]})]).unwrap();
         let built = plan("say", &json!({}), dir.path()).unwrap();
-        assert_eq!((built.program.as_str(), built.argv.as_slice()), ("cmd", ["/c".to_owned(), "echo hello".to_owned()].as_slice()));
+        assert_eq!((built.program.as_str(), built.argv.as_slice()), (program, [flag.to_owned(), "echo hello".to_owned()].as_slice()));
         let outcome = execute(&built, dir.path(), Duration::from_secs(30), &[]);
         assert_eq!(outcome.exit, Some(0));
         assert_eq!(outcome.tail.trim(), "hello");

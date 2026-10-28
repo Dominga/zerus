@@ -16,6 +16,8 @@ use std::time::Duration;
 pub mod linux;
 #[cfg(all(target_os = "macos", feature = "video"))]
 pub mod macos;
+#[cfg(all(windows, feature = "video"))]
+pub mod windows;
 
 /// The largest video file.
 pub const MAX_BYTES: u64 = 10 * 1024 * 1024;
@@ -223,17 +225,127 @@ pub fn poster_from_rgb(rgb: &[u8]) -> Option<Vec<u8>> {
     )
 }
 
+/// Device audio as 16-bit mono at a rate an AAC encoder takes: the device's
+/// own when it is 44.1 or 48 kHz, otherwise 48 kHz by linear
+/// interpolation, which carries over between chunks.
+pub struct MonoPcm {
+    format: zerus_client_core::voice::InputFormat,
+    rate: u32,
+    partial: Vec<u8>,
+    /// Input frames consumed, and where the next output falls between the
+    /// last input frame and the next.
+    previous: f32,
+    position: f64,
+}
+
+impl MonoPcm {
+    pub fn new(format: zerus_client_core::voice::InputFormat) -> MonoPcm {
+        let rate = if matches!(format.sample_rate, 44_100 | 48_000) {
+            format.sample_rate
+        } else {
+            48_000
+        };
+        MonoPcm {
+            format,
+            rate,
+            partial: Vec::new(),
+            previous: 0.0,
+            position: 0.0,
+        }
+    }
+
+    /// The output rate.
+    pub fn rate(&self) -> u32 {
+        self.rate
+    }
+
+    fn frames(&mut self, bytes: &[u8]) -> Vec<f32> {
+        use zerus_client_core::voice::SampleFormat;
+        let width = match self.format.sample_format {
+            SampleFormat::U8 => 1,
+            SampleFormat::I16 => 2,
+            SampleFormat::I32 | SampleFormat::F32 => 4,
+        };
+        let channels = usize::from(self.format.channels.max(1));
+        self.partial.extend_from_slice(bytes);
+        let whole = self.partial.len() / (width * channels) * (width * channels);
+        let frames = self.partial[..whole]
+            .chunks_exact(width * channels)
+            .map(|frame| {
+                let sum: f32 = frame
+                    .chunks_exact(width)
+                    .map(|sample| match self.format.sample_format {
+                        SampleFormat::U8 => (f32::from(sample[0]) - 128.0) / 128.0,
+                        SampleFormat::I16 => {
+                            f32::from(i16::from_ne_bytes([sample[0], sample[1]])) / 32768.0
+                        }
+                        SampleFormat::I32 => {
+                            i32::from_ne_bytes([sample[0], sample[1], sample[2], sample[3]]) as f32
+                                / 2_147_483_648.0
+                        }
+                        SampleFormat::F32 => {
+                            let value =
+                                f32::from_ne_bytes([sample[0], sample[1], sample[2], sample[3]]);
+                            if value.is_finite() {
+                                value
+                            } else {
+                                0.0
+                            }
+                        }
+                    })
+                    .sum();
+                (sum / channels as f32).clamp(-1.0, 1.0)
+            })
+            .collect();
+        self.partial.drain(..whole);
+        frames
+    }
+
+    /// The next device chunk as little-endian 16-bit mono samples.
+    pub fn push(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let frames = self.frames(bytes);
+        let to_i16 = |value: f32| ((value * 32767.0).round() as i16).to_le_bytes();
+        if self.rate == self.format.sample_rate {
+            return frames.into_iter().flat_map(to_i16).collect();
+        }
+        let step = f64::from(self.format.sample_rate) / f64::from(self.rate);
+        let mut out = Vec::new();
+        // `position` runs from the previous chunk's last frame (index -1).
+        while self.position < frames.len() as f64 - 1.0 {
+            let at = self.position;
+            let index = at.floor();
+            let fraction = (at - index) as f32;
+            let before = if index < 0.0 {
+                self.previous
+            } else {
+                frames[index as usize]
+            };
+            let after = frames[(index + 1.0) as usize];
+            out.extend(to_i16(before + (after - before) * fraction));
+            self.position += step;
+        }
+        if let Some(last) = frames.last() {
+            self.previous = *last;
+            self.position -= frames.len() as f64;
+        }
+        out
+    }
+}
+
 /// Why this build cannot record video, None when it can.
 pub fn video_reason() -> Option<String> {
     #[cfg(all(target_os = "linux", feature = "video"))]
     {
         linux::missing()
     }
-    #[cfg(all(target_os = "macos", feature = "video"))]
+    #[cfg(all(any(target_os = "macos", windows), feature = "video"))]
     {
         None
     }
-    #[cfg(not(all(any(target_os = "linux", target_os = "macos"), feature = "video")))]
+    #[cfg(not(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "video"
+    )))]
     {
         Some(UNAVAILABLE.into())
     }

@@ -22,6 +22,8 @@ enum Active {
     Video(crate::video::linux::VideoRecorder),
     #[cfg(all(target_os = "macos", feature = "video"))]
     Video(crate::video::macos::VideoRecorder),
+    #[cfg(all(windows, feature = "video"))]
+    Video(crate::video::windows::VideoRecorder),
 }
 
 /// The voice driver's capture: cpal for voice, the platform recorder for
@@ -71,7 +73,17 @@ impl Capture for MediaCapture {
                     move |event| events(driver_event(event)),
                 )));
             }
-            #[cfg(not(all(any(target_os = "linux", target_os = "macos"), feature = "video")))]
+            #[cfg(all(windows, feature = "video"))]
+            {
+                self.active = Some(Active::Video(crate::video::windows::VideoRecorder::start(
+                    microphone,
+                    move |event| events(driver_event(event)),
+                )));
+            }
+            #[cfg(not(all(
+                any(target_os = "linux", target_os = "macos", windows),
+                feature = "video"
+            )))]
             {
                 let reason = video_reason().unwrap_or_else(|| VIDEO_UNAVAILABLE.to_owned());
                 events(RecorderEvent::VideoFailed(reason));
@@ -92,7 +104,10 @@ impl Capture for MediaCapture {
     fn stop(&mut self, _video: bool) {
         match &self.active {
             Some(Active::Voice(recorder)) => recorder.stop(),
-            #[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "video"))]
+            #[cfg(all(
+                any(target_os = "linux", target_os = "macos", windows),
+                feature = "video"
+            ))]
             Some(Active::Video(recorder)) => recorder.stop(),
             None => {}
         }

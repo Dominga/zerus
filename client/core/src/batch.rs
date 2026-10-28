@@ -5,7 +5,8 @@
 //! of deltas costs one batch with the latest row per key, and its memory stays
 //! bounded by the number of distinct keys.
 use crate::{
-    ActivityUpdate, Change, ComputerId, ComputerStatus, ProcessesUpdate, TasksUpdate, ViewRow,
+    ActivityUpdate, Change, ComputerId, ComputerStatus, MachineMeta, ProcessesUpdate, TasksUpdate,
+    ViewRow,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -84,9 +85,17 @@ pub struct TasksOut {
     pub payload: Value,
 }
 
+/// A computer's latest card data from its `catalog.meta`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MachineOut {
+    pub computer: ComputerId,
+    pub machine: MachineMeta,
+}
+
 /// Everything that changed since the previous batch. The view applies, in
-/// order: `computers`, `replaces`, `removes`, `upserts`, `activity`,
-/// `processes`, then `tasks`. Row changes of a computer with a replacement are
+/// order: `computers`, `machines`, `replaces`, `removes`, `upserts`,
+/// `activity`, `processes`, then `tasks`. `machines` holds at most one entry
+/// per computer and none for a computer whose status became `ended`. Row changes of a computer with a replacement are
 /// already part of it; otherwise a key is in at most one of `removes` and
 /// `upserts`. `processes` and `tasks` hold at most one entry per key and are
 /// left out when empty.
@@ -96,6 +105,8 @@ pub struct Batch {
     pub removes: Vec<KeyOut>,
     pub replaces: Vec<ReplaceOut>,
     pub computers: Vec<ComputerOut>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub machines: Vec<MachineOut>,
     pub activity: Vec<ActivityOut>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub processes: Vec<ProcessesOut>,
@@ -109,6 +120,7 @@ impl Batch {
             && self.removes.is_empty()
             && self.replaces.is_empty()
             && self.computers.is_empty()
+            && self.machines.is_empty()
             && self.activity.is_empty()
             && self.processes.is_empty()
             && self.tasks.is_empty()
@@ -131,7 +143,8 @@ type SessionKey = (ComputerId, String);
 ///   pending upsert and an upsert a pending removal;
 /// - a replacement drops the computer's pending row changes, and later row
 ///   changes of that computer fold into it;
-/// - the latest status of a computer wins;
+/// - the latest status of a computer wins, and so does its latest card data;
+///   an `ended` status drops pending card data;
 /// - Activity updates of a key keep their order: consecutive events merge
 ///   (into a pending window replacement too), a replacement drops the events
 ///   before it, the latest summary and the highest `rev` of an event id win,
@@ -144,6 +157,7 @@ type SessionKey = (ComputerId, String);
 #[derive(Debug, Default)]
 pub struct Coalescer {
     computers: BTreeMap<ComputerId, ComputerStatus>,
+    machines: BTreeMap<ComputerId, MachineMeta>,
     replaces: BTreeMap<ComputerId, BTreeMap<String, ViewRow>>,
     rows: BTreeMap<SessionKey, RowChange>,
     activity: BTreeMap<SessionKey, Vec<ActivityUpdate>>,
@@ -193,7 +207,13 @@ impl Coalescer {
                 self.replaces.insert(computer, rows.into_iter().collect());
             }
             Change::Computer { computer, status } => {
+                if status == ComputerStatus::Ended {
+                    self.machines.remove(&computer);
+                }
                 self.computers.insert(computer, status);
+            }
+            Change::Machine { computer, machine } => {
+                self.machines.insert(computer, machine);
             }
             Change::Activity {
                 computer,
@@ -245,6 +265,9 @@ impl Coalescer {
                 status: status.name().to_owned(),
                 attempt: status.attempt(),
             });
+        }
+        for (computer, machine) in std::mem::take(&mut self.machines) {
+            batch.machines.push(MachineOut { computer, machine });
         }
         for (computer, rows) in std::mem::take(&mut self.replaces) {
             let rows = rows
@@ -327,9 +350,9 @@ impl Coalescer {
         batch
     }
 
-    /// Pending entries: rows (a replacement counts each row), computers,
-    /// Activity updates, with events counted one by one, and processes and
-    /// tasks changes.
+    /// Pending entries: rows (a replacement counts each row), computers and
+    /// their card data, Activity updates, with events counted one by one, and
+    /// processes and tasks changes.
     pub fn pending(&self) -> usize {
         let replaced: usize = self.replaces.values().map(|rows| rows.len().max(1)).sum();
         let activity: usize =
@@ -343,6 +366,7 @@ impl Coalescer {
                 })
                 .sum();
         self.computers.len()
+            + self.machines.len()
             + replaced
             + self.rows.len()
             + activity
@@ -352,6 +376,7 @@ impl Coalescer {
 
     pub fn is_empty(&self) -> bool {
         self.computers.is_empty()
+            && self.machines.is_empty()
             && self.replaces.is_empty()
             && self.rows.is_empty()
             && self.activity.is_empty()
@@ -942,6 +967,47 @@ mod tests {
             .unwrap()
             .get("tasks")
             .is_none());
+    }
+
+    #[test]
+    fn the_latest_card_data_of_a_computer_wins_and_an_end_drops_it() {
+        let studio = ComputerId::from("studio");
+        let card = |cpu: f64| MachineMeta {
+            host: Some("workstation".into()),
+            metrics: crate::machine::Metrics {
+                cpu_percent: Some(cpu),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut coalescer = Coalescer::new();
+        for cpu in [1.0, 2.0, 3.0] {
+            coalescer.push(Change::Machine {
+                computer: local(),
+                machine: card(cpu),
+            });
+        }
+        coalescer.push(Change::Machine {
+            computer: studio.clone(),
+            machine: card(9.0),
+        });
+        coalescer.push(Change::Computer {
+            computer: studio.clone(),
+            status: ComputerStatus::Ended,
+        });
+        assert_eq!(coalescer.pending(), 2);
+        let batch = coalescer.take();
+        assert_eq!(batch.machines.len(), 1);
+        assert_eq!(batch.machines[0].computer, local());
+        assert_eq!(batch.machines[0].machine.metrics.cpu_percent, Some(3.0));
+        let value = serde_json::to_value(&batch).unwrap();
+        assert_eq!(value["machines"][0]["machine"]["host"], "workstation");
+        assert_eq!(value["computers"][0]["status"], "ended");
+        assert!(serde_json::to_value(Batch::default())
+            .unwrap()
+            .get("machines")
+            .is_none());
+        assert!(coalescer.is_empty());
     }
 
     #[test]

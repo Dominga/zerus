@@ -1679,6 +1679,36 @@ fn current_view(team: &Team, member: &str) -> anyhow::Result<Value> {
         .filter_map(|task| task.open_attempt().map(|attempt| (task, attempt)))
         .find(|(_, attempt)| attempt.member == member)
     else {
+        // U36: a stage member's current attempt is the open stage run given to
+        // it; its answer is a verdict, not a report.
+        if let Some((task, run)) = team.tasks.iter().rev().find_map(|task| {
+            task.pipeline_run
+                .as_ref()
+                .and_then(PipelineRun::open_run)
+                .filter(|run| run.member == member)
+                .map(|run| (task, run))
+        }) {
+            return Ok(json!({
+                "team": team.id,
+                "task": task.id,
+                "title": task.title,
+                "attempt": run.id,
+                "n": run.attempt,
+                "stage": run.kind,
+                "round": run.round,
+                "phase": if run.kind == "test" { "in_test" } else { "in_review" },
+                "open_questions": [],
+                "report": {
+                    "request_id": uuid::Uuid::new_v4().to_string(),
+                    "team": team.id,
+                    "task": task.id,
+                    "attempt": run.id,
+                    "verdict": "pass|return",
+                    "findings": [],
+                    "text": "..."
+                }
+            }));
+        }
         bail!("{}", no_attempt_text(team, member));
     };
     let phase = ops::attempt_phase(task, false).unwrap_or("unconfirmed");
@@ -1779,6 +1809,15 @@ fn current(input: &Value) -> anyhow::Result<Value> {
                 .flat_map(|task| &task.attempts)
                 .find(|found| found.id == attempt)
                 .map(|found| (team, found.member.clone()))
+                .or_else(|| {
+                    // U36: a stage run id names its member the same way.
+                    team.tasks
+                        .iter()
+                        .filter_map(|task| task.pipeline_run.as_ref())
+                        .flat_map(|run| &run.runs)
+                        .find(|run| run.id == attempt && !run.member.is_empty())
+                        .map(|run| (team, run.member.clone()))
+                })
         });
         let (team, member) = found.with_context(|| format!("No attempt {attempt} runs in a team"))?;
         return current_view(team, &member);
@@ -5380,6 +5419,56 @@ mod tests {
     }
 
     #[test]
+    fn current_names_a_stage_members_run_and_its_verdict_route() {
+        // U36: a stage member's current attempt is the open stage run given to
+        // it; the answer it fills in is a verdict, not a report.
+        let mut team = running_team();
+        {
+            let task = team.task_mut(1).unwrap();
+            task.attempts[0].state = AttemptState::Reported;
+            task.attempts[0].report = Some(Report { text: "Done".into(), at: 12.0, ..Default::default() });
+            task.status = TaskStatus::InReview;
+            task.pipeline_run = Some(PipelineRun {
+                id: "code".into(),
+                name: "Code: review, test, lead".into(),
+                stages: vec![PipelineStage { kind: "review".into(), role: "Tester".into(), ..Default::default() }],
+                max_rounds: 3,
+                folder: "hold".into(),
+                accept: "lead".into(),
+                round: 1,
+                runs: vec![StageRun {
+                    id: "stage-run-1".into(),
+                    stage: 0,
+                    kind: "review".into(),
+                    round: 1,
+                    attempt: 1,
+                    member: "qa".into(),
+                    state: StageState::Delivered,
+                    ..Default::default()
+                }],
+            });
+        }
+        let value = current_view(&team, "qa").unwrap();
+        assert_eq!(
+            (value["team"].as_str(), value["task"].as_u64(), value["attempt"].as_str()),
+            (Some("t"), Some(1), Some("stage-run-1"))
+        );
+        assert_eq!(
+            (value["stage"].as_str(), value["round"].as_u64(), value["phase"].as_str()),
+            (Some("review"), Some(1), Some("in_review"))
+        );
+        let report = &value["report"];
+        assert_eq!(
+            (report["attempt"].as_str(), report["verdict"].as_str()),
+            (Some("stage-run-1"), Some("pass|return"))
+        );
+        assert_eq!(report["findings"], json!([]));
+        assert!(canonical_uuid(report["request_id"].as_str().unwrap()));
+        // The implementer's own attempt is not the stage member's current one.
+        assert_eq!(current_view(&team, "dev").unwrap_err().to_string(), "#1 has a report in its review stage");
+    }
+
+    #[test]
     fn current_refuses_a_member_without_an_open_attempt() {
         let mut team = running_team();
         {
@@ -5411,6 +5500,13 @@ mod tests {
         assert_eq!(attempt_member(&team, &id).as_deref(), Some("dev"));
         assert_eq!(attempt_member(&team, "unknown"), None);
         assert_eq!(attempt_member(&team, ""), None);
+        // U36: a stage run id names its member the same way.
+        let mut staged = team.clone();
+        staged.task_mut(1).unwrap().pipeline_run = Some(PipelineRun {
+            runs: vec![StageRun { id: "stage-run-1".into(), member: "qa".into(), ..Default::default() }],
+            ..Default::default()
+        });
+        assert_eq!(attempt_member(&staged, "stage-run-1").as_deref(), Some("qa"));
     }
 
     #[test]

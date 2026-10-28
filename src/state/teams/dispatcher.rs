@@ -1266,6 +1266,93 @@ pub(crate) fn hand_off_text_with(
     text
 }
 
+/// U36/#536: the hand-off to a stage member (review or test), sent when the
+/// stage delivery (#532) gives the open stage run `run` to its member. It says
+/// what to read (the attempt's change), where (the task's own folder), what a
+/// verdict must contain (`pass` or `return` with findings) and that a stage
+/// never edits the task's files.
+#[cfg_attr(not(test), allow(dead_code))] // the stage delivery (#532) sends it
+pub(crate) fn stage_hand_off_text(team: &Team, task: &Task, run: &StageRun) -> String {
+    let implementer = team.member(&task.assignee);
+    let checked = task.attempts.iter().find(|attempt| attempt.n == run.attempt);
+    // The change is in the folder of the member that made the attempt, which
+    // may differ from the task's assignee after a reassignment.
+    let author = checked.and_then(|attempt| team.member(&attempt.member)).or(implementer);
+    let implementer_role = author.map(|member| member.role.clone()).unwrap_or_default();
+    let commits: Vec<&str> = checked.map(|attempt| attempt.commits.iter().map(|commit| commit.sha.as_str()).collect()).unwrap_or_default();
+    let reported: String = checked
+        .and_then(|attempt| attempt.report.as_ref())
+        .map(|report| report.text.trim().chars().take(700).collect())
+        .unwrap_or_default();
+    let max_rounds = task.pipeline_run.as_ref().map(|pipeline| pipeline.max_rounds).filter(|rounds| *rounds > 0).unwrap_or(3);
+    let folder = author
+        .map(|member| if member.directory.is_empty() { team.folder.clone() } else { member.directory.clone() })
+        .filter(|folder| !folder.is_empty())
+        .unwrap_or_else(|| "(the implementer's folder)".to_owned());
+    let shared = author.is_some_and(|member| member.folder == MemberFolder::Shared);
+    let mut text = format!(
+        "[Zerus team \u{b7} from: Lead \u{b7} task: #{} \u{b7} stage: {} \u{b7} round {} of {}]\nTeam: {}. Your role: {}.\n",
+        task.id, run.kind, run.round, max_rounds, team.name, team.role_of(&run.member)
+    );
+    if !team.goal.is_empty() {
+        text += &format!("Team goal: {}\n", team.goal);
+    }
+    text += &format!("\nTask #{}: {}\n", task.id, task.title);
+    if !task.description.is_empty() {
+        text += &format!("{}\n", task.description);
+    }
+    if !task.criteria.is_empty() {
+        text += "\nAcceptance criteria:\n";
+        for criterion in &task.criteria {
+            text += &format!("- {criterion}\n");
+        }
+    }
+    if reported.is_empty() {
+        text += &format!("\nThe implementer ({implementer_role}) reported attempt {} without a text.\n", run.attempt);
+    } else {
+        text += &format!("\nThe implementer ({implementer_role}) reported attempt {}:\n{reported}\n", run.attempt);
+    }
+    // U36: what changed comes from the attempt - its commits in a Git checkout,
+    // otherwise the report's changed files; both are read in the task's folder.
+    text += &format!("\nRead attempt {}'s change in the task's own folder: {folder}\n", run.attempt);
+    if commits.is_empty() {
+        text += "- No commits were recorded: the report names the changed files; read them in that folder as they are now.\n";
+    } else {
+        text += &format!(
+            "- Its commits: {}. Read what each changed with `git show <sha>` (and `git log -p`) in that folder.\n",
+            commits.join(", ")
+        );
+    }
+    if shared {
+        text += "- This is the team's shared folder: only the files the report names are this task's; the other members keep working in it.\n";
+    }
+    if run.kind == "test" {
+        text += "\nThis is a test stage: run only the suites of the files this change touched and take the criteria's shots; \
+                 never the full suites - the lead runs them once at integration. While the task is in its test stage its folder \
+                 is held: the implementer's next task in that folder waits.\n";
+    } else {
+        text += "\nThis is a review stage: read the change against the criteria and name what is wrong by file and line.\n";
+    }
+    text += "Change nothing in the task's files: a stage reads, builds and tests only, writes only build output and its own \
+             temporary folder, and never edits, commits or reverts the task's files.\n";
+    let verdict = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":run.id,
+        "verdict":"pass|return","findings":["file:line - what is wrong"],"text":"..."});
+    text += &format!(
+        "\nReport a verdict, not a progress line, with hgs team report --json, JSON on stdin:\n  {}\n\
+         pass moves the task to its next stage; return sends your findings to the implementer as a new attempt, without the lead. \
+         Round {} of {}: after {} returned rounds the lead decides with every round's findings.\n\
+         Questions for the lead: {} | hgs team ask --json\n\
+         Your stage again: {} | hgs team current --json\n",
+        verdict,
+        run.round,
+        max_rounds,
+        max_rounds,
+        json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":run.id,"text":"..."}),
+        json!({"attempt":run.id})
+    );
+    text
+}
+
 /// H6: what a swapped member's new session needs from the old attempt.
 fn continuation_extra(task: &Task) -> String {
     let Some(continuation) = task.continuation.as_ref() else { return String::new() };
@@ -4499,6 +4586,89 @@ mod tests {
         t.members.iter_mut().find(|member| member.id == "dev").unwrap().prompt_snapshot = None;
         let text = hand_off_text(&t, &task, &attempt, "", "");
         assert!(!text.contains("SNAPSHOT EXTRA"), "{text}");
+    }
+
+    #[test]
+    fn a_stage_hand_off_names_the_change_the_folder_and_the_verdict() {
+        // U36/#536: a review or test hand-off says what to read, where, what a
+        // verdict contains and that a stage never edits the task's files.
+        let mut t = team();
+        {
+            let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            dev.directory = "/work/checkout-dev".into();
+            dev.folder = MemberFolder::Worktree;
+        }
+        {
+            let task = t.tasks.iter_mut().find(|task| task.id == 1).unwrap();
+            task.description = "Build the cards API".into();
+            task.criteria = vec!["Paged list".into(), "No N+1".into()];
+            let mut attempt = Attempt { n: 1, id: "a1".into(), member: "dev".into(), state: AttemptState::Reported, ..Default::default() };
+            attempt.commits.push(CommitRef { sha: "abc1234".into(), files: 2, ..Default::default() });
+            attempt.report = Some(Report { text: "Changed src/cards.rs and src/db.rs".into(), at: 1.0, ..Default::default() });
+            task.attempts.push(attempt);
+            task.pipeline_run = Some(PipelineRun {
+                id: "code".into(),
+                name: "Code: review, test, lead".into(),
+                max_rounds: 3,
+                round: 1,
+                folder: "hold".into(),
+                accept: "lead".into(),
+                ..Default::default()
+            });
+        }
+        let task = t.task(1).unwrap().clone();
+        let review = StageRun {
+            id: "stage-run-1".into(),
+            stage: 0,
+            kind: "review".into(),
+            round: 1,
+            attempt: 1,
+            member: "qa".into(),
+            state: StageState::Delivered,
+            ..Default::default()
+        };
+        let text = stage_hand_off_text(&t, &task, &review);
+        for part in [
+            "from: Lead",
+            "task: #1",
+            "stage: review",
+            "round 1 of 3",
+            "Your role: Tester",
+            "Build the cards API",
+            "Acceptance criteria:",
+            "Paged list",
+            "No N+1",
+            "Changed src/cards.rs and src/db.rs",
+            "/work/checkout-dev",
+            "abc1234",
+            "git show",
+            "review stage",
+            "Change nothing in the task's files",
+            "\"verdict\":\"pass|return\"",
+            "\"attempt\":\"stage-run-1\"",
+            "return sends your findings to the implementer",
+            "hgs team report --json",
+            "hgs team ask --json",
+            "hgs team current --json",
+        ] {
+            assert!(text.contains(part), "{part} missing in\n{text}");
+        }
+        assert!(!text.contains("shared folder"), "{text}");
+        // A test stage says what to run and that the folder is held.
+        let test = StageRun { kind: "test".into(), ..review.clone() };
+        let text = stage_hand_off_text(&t, &task, &test);
+        for part in ["stage: test", "only the suites of the files", "take the criteria's shots", "folder is held"] {
+            assert!(text.contains(part), "{part} missing in\n{text}");
+        }
+        // A shared folder says which files are the task's, and no commits names
+        // the report's changed-file list instead.
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().folder = MemberFolder::Shared;
+        let text = stage_hand_off_text(&t, &t.task(1).unwrap().clone(), &review);
+        assert!(text.contains("shared folder") && text.contains("only the files the report names"), "{text}");
+        let mut without = t.clone();
+        without.tasks.iter_mut().find(|task| task.id == 1).unwrap().attempts[0].commits.clear();
+        let text = stage_hand_off_text(&without, &without.task(1).unwrap().clone(), &review);
+        assert!(text.contains("No commits were recorded"), "{text}");
     }
 
     #[test]

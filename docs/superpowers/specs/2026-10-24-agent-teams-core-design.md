@@ -59,8 +59,10 @@ removed`), `launch_id` (recorded before the dispatcher starts the session), `err
 ### Task
 
 `id` (integer, 1-based, stable), `title`, `description`, `criteria[]`, `deps[{ task, kind: hard|soft }]`,
-`assignee` (member id), `status` (`draft | pending | assigned | in_progress | submitted | accepted | rejected |
-cancelled`), `attempts[]`, `decided_by` (`lead | human`), `report`.
+`assignee` (member id), `status` (`draft | pending | assigned | in_progress | submitted | in_review | in_test |
+accepted | rejected | cancelled`), `attempts[]`, `decided_by` (`lead | human`), `report`. U36 adds
+`pipeline` (the task's preset choice) and `pipeline_run` (its snapshot and stage runs); see the delivery
+spec's "Task pipelines" section.
 
 ### Attempt
 
@@ -101,6 +103,11 @@ revoked | reported | rejected`), `sent_at`, `delivered_at`, `turn_ended_at`, `no
   sends the lead a `[Zerus team · from: <role> · task: #N · attempt: n]` report message.
 - `accept` / `reject` (with a `reason`) by the lead from its session or by a human (`"by":"human"`, the GUI). A human decision is final: a later lead decision on the same attempt is refused.
   Reject → the task returns to `pending` for a new attempt (or `rejected` when `--final`).
+- **Pipeline (U36):** a task may pass review and test stages before the lead. Its report then enters the
+  pipeline's first stage (the task is `in_review` or `in_test`) instead of `submitted`; a stage member's
+  verdict (`pass` or `return` with findings) moves it on or sends it back without the lead, and after the
+  preset's rounds the lead decides with every round's findings. See the delivery spec's "Task pipelines"
+  section for the statuses, presets, folder rules and the lead's overrides.
 - **No report:** when a delivered attempt's session has been idle for `report_timeout_seconds` (default 120) after its
   turn ended, the member shows No report; `use-last-reply` turns the member's last reply into the report.
 

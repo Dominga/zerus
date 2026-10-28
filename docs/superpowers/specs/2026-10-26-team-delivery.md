@@ -148,6 +148,9 @@ A progress line is not a report; a question is not a report.
 The lead's brief names `hgs team reply`, `hold`/`release` and
 `hgs guide team-lead`.
 
+A stage hand-off (U36) instead ends with the verdict route, the stage run id as
+"your stage again" and the question route; see section 13.
+
 ## 9. Existing sessions as members, members left running (F7, F8)
 
 - `plan` and `add-member` accept `"session":{"name","run_id","conversation_id","host"?}`
@@ -223,3 +226,71 @@ New events: `started`, `start_late`, `question_asked`, `question_answered`,
 `start_timeout_seconds` (default 180, 30..3600). Bounds: 20 questions per
 attempt, 3 open, 4000 characters each; 3 replaced reports; queue 5 rows in
 the GUI.
+
+## 13. Task pipelines: review and test before the lead (U36)
+
+A task may pass a pipeline after its implementer's report: an ordered list of
+`review` and `test` stages, then the final acceptance. A team or task without a
+pipeline keeps today's flow (Submitted, then the lead).
+
+Statuses. While a stage runs the task is `in_review` or `in_test`, between
+`submitted` and `accepted`; `task.status.reported()` is true for all three, and
+the stage member is the task's current attempt for `hgs team current` and the
+feed. A stage that returns the task leaves it `pending` for a new attempt.
+
+Presets. The team catalog keeps named pipelines: id, name, stages (each a
+`review` or `test` with a role or a pinned member), `max_rounds` (0 reads as 3),
+`folder` (`hold` by default, or `checkout`) and `accept` (`lead`, `sub_lead` or
+`auto`). The built-in presets are `code` (review by the reviewer, test by the
+tester, lead), `docs` (review, auto) and `check` (no stages, lead). A template
+or a role may name a default preset; a task names its own with
+`"pipeline":"<id>"`, `"none"` (opt out) or nothing (the default). The choice is
+checked when the plan, `extend` or `edit-draft` names it, and the task keeps a
+snapshot of the preset taken at its first hand-out, so a catalog edit never
+changes a running task. A check task, the lead's own task and a sub-team's task
+never take a pipeline.
+
+Verdicts. The stage member reports with `hgs team report --json`, naming the
+stage's attempt id (the stage run id) in `attempt`. `"verdict":"pass"` closes
+the stage and enters the next one (or the final acceptance); `"verdict":
+"return"` closes it as returned and sends the task back to the implementer as a
+new attempt with the verdict's `findings` (at most 50, each at most 2000
+characters) and `text`, without the lead. Each returned round counts; after
+`max_rounds` the task goes to the lead (Submitted) with every round's findings
+in the feed (`round_limit`) and in the next hand-out. A report without a
+verdict is an ordinary report; a verdict for an attempt that is not an open
+stage run is refused as stale.
+
+Overrides. The lead and the owner keep the decision at any stage:
+`hgs team skip-stage {"task":7,"reason":"..."}` passes the open stage over,
+`hgs team send-back {"task":7,"reason":"..."}` returns the task to its
+implementer from any stage or from the final acceptance, and `accept`/`reject`
+work after the stages; each names a reason and the feed names who did it. A
+skipped stage is not a round. `final` acceptance is the lead's, the sub-lead's
+(spec 5.6) or automatic per the preset; an automatic acceptance files the
+report's findings like the lead's accept.
+
+Folder. A stage works in the task's own folder: the implementer's worktree or
+clone, or the shared folder. Review reads the attempt's change against the
+task's criteria; test runs only the suites of the files the change touched
+(U28 rule 18) and takes the criteria's shots. Neither edits the task's files: a
+stage writes only build output and its own temporary folder. What changed is
+the attempt's commits (B4) in a Git checkout, otherwise the changed files its
+report names. A `hold` preset holds the folder while the task is in its test
+stage (the implementer's next task there waits, its card says "folder held by
+the test of #N"); a `checkout` preset tests a detached checkout of the attempt's
+commits and frees the folder.
+
+Hand-off. The stage hand-off (`stage_hand_off_text` in the dispatcher) says the
+stage and round, the task, its criteria and the implementer's report; what to
+read (the attempt's commits, or the report's changed files) and the task's
+folder; that a stage never edits the task's files and that a test runs only the
+changed files' suites; the verdict JSON with the stage run id, `pass|return`
+and findings; the round limit; and the question and current routes.
+
+Commands and bounds: `report` with `verdict`/`findings`, `skip-stage`,
+`send-back`; statuses `in_review`/`in_test`. Events: `stage_started`,
+`stage_passed`, `stage_returned`, `stage_skipped`, `stages_passed`,
+`sent_back`, `round_limit`. At most 64 stage runs stay on a task (the oldest
+leave first).
+

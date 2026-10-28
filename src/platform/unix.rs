@@ -484,6 +484,12 @@ pub fn process_identity(_: u32) -> Option<ProcessIdentity> {
     None
 }
 
+/// `process_identity` for a process of a listed table. Reading one process
+/// here is cheap, so the table's parent and time are not needed.
+pub fn listed_identity(pid: u32, _parent: u32, _listed_at: f64) -> Option<ProcessIdentity> {
+    process_identity(pid)
+}
+
 // Read executable/argv from the kernel, not newline-delimited `ps` command text.
 // A command containing newlines must not spoof a different process row or helper.
 #[cfg(target_os = "linux")]

@@ -1947,6 +1947,30 @@ mod process {
             started: unix_seconds(created),
         })
     }
+    /// `process_identity` for a process of a table taken at `listed_at` (Unix
+    /// seconds, read before the snapshot) that listed `parent` as its parent.
+    /// A process created before that snapshot and alive now is the one it
+    /// listed, so its parent comes from the table instead of a snapshot of
+    /// every process per ID; one created after it reuses a listed ID and is
+    /// refused. A listing took a snapshot per descendant of every agent: 6 s
+    /// of kernel time, run by `hgs watch` every 5 s (owner, 2026-10-28).
+    pub fn listed_identity(pid: u32, parent: u32, listed_at: f64) -> Option<ProcessIdentity> {
+        let process =
+            open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE).ok()?;
+        if exited(process.0) || token_user(process.0).as_deref() != current_user() {
+            return None;
+        }
+        let created = creation_ticks(process.0)?;
+        if unix_seconds(created) > listed_at {
+            return None;
+        }
+        Some(ProcessIdentity {
+            parent: verified_parent(parent, created),
+            group: None,
+            birth: created.to_string(),
+            started: unix_seconds(created),
+        })
+    }
     pub fn describe(pid: u32) -> Option<ProcessImage> {
         let process = open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION).ok()?;
         let mut path = vec![0u16; 32_768];
@@ -3072,6 +3096,12 @@ mod tests {
             .unwrap()
             .as_secs_f64();
         assert!(identity.started > now - 86_400. && identity.started <= now + 1.);
+        // From a table: its parent without a snapshot per ID, and nothing for
+        // a process created after the table (a reused ID).
+        let listed = process_table().unwrap()[&own].parent;
+        let from_table = listed_identity(own, listed, now).unwrap();
+        assert_eq!((from_table.parent, from_table.birth.as_str()), (identity.parent, start.as_str()));
+        assert!(listed_identity(own, listed, identity.started - 1.).is_none());
         assert_eq!(process_table().unwrap()[&own].group, None);
         let image = describe(own).unwrap();
         assert_eq!(

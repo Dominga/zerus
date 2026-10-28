@@ -12,6 +12,8 @@ struct Process {
     started: f64,
     command: String,
     executable: String,
+    /// When the table that listed it was read, in Unix seconds.
+    listed: f64,
 }
 
 /// Shells an agent starts for its commands, by `platform::program_name`.
@@ -39,6 +41,8 @@ fn descendant(pid: u32, root: u32, rows: &BTreeMap<u32, Process>) -> bool {
     false
 }
 fn process_table() -> Result<BTreeMap<u32, Process>> {
+    // Read before the snapshot: a process created after it is not the one listed.
+    let listed = now();
     Ok(crate::platform::process_table()?
         .into_values()
         .map(|row| {
@@ -52,6 +56,7 @@ fn process_table() -> Result<BTreeMap<u32, Process>> {
                     started: 0.,
                     command: String::new(),
                     executable: String::new(),
+                    listed,
                 },
             )
         })
@@ -69,7 +74,7 @@ fn verified_table(record: &Value, mut rows: BTreeMap<u32, Process>) -> Result<BT
         .collect();
     rows.retain(|pid, _| eligible.contains(pid));
     rows.retain(|pid, p| {
-        if let Some(identity) = crate::platform::process_identity(*pid) {
+        if let Some(identity) = crate::platform::listed_identity(*pid, p.parent, p.listed) {
             if identity.parent == p.parent && identity.group == p.group {
                 p.birth = identity.birth;
                 p.started = identity.started;
@@ -315,6 +320,7 @@ mod tests {
             started: 1.,
             command: "spoofed\n999 1 999 sh".into(),
             executable: exe.into(),
+            listed: 0.,
         };
         let rows: BTreeMap<_, _> = [
             make(10, 1, 10, "/bin/agent"),
@@ -366,6 +372,7 @@ mod tests {
             started: f64::from(pid),
             command: command.into(),
             executable: exe.into(),
+            listed: 0.,
         };
         let cmd = r"C:\WINDOWS\system32\cmd.exe";
         let rows: BTreeMap<_, _> = [

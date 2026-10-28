@@ -78,6 +78,8 @@ pub(crate) struct Seen {
     pub notify_revision: Option<u64>,
     /// H1: its session stopped by a usage limit.
     pub limited: Option<SeenLimit>,
+    /// When its session last reported any event.
+    pub last_event_at: Option<f64>,
 }
 
 /// The newest Background job of a session (C12).
@@ -187,6 +189,7 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 work,
                 services,
                 asking: live && matches!(field("phase"), "question" | "input" | "approval"),
+                last_event_at: record["last_event_at"].as_f64(),
                 live,
                 cwd: field("cwd").to_owned(),
                 muted: record["notification_preferences"]["muted"] == true,
@@ -244,6 +247,10 @@ pub(crate) enum Step {
     BudgetRed { member: String },
     /// Background work without a budget passed the default red time (C12).
     BackgroundRed { member: String, command: String, since: f64 },
+    /// The owner, 2026-10-28: a member in its turn with no event for a long
+    /// time and no question Zerus can see (the reviewer's hidden subagent
+    /// prompts held it 74 minutes): the lead hears once per attempt.
+    Silent { task: u32, minutes: u64 },
     /// The MCP servers and services the member's session runs changed (G7).
     Services { member: String, services: Vec<SeenService> },
     /// H1: the member's session was stopped by a usage limit, or recovered
@@ -628,6 +635,21 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             }
         }
     }
+    // A member in its turn that has said nothing for SILENT_MINUTES, with no
+    // question or Background work Zerus sees: something on its screen may
+    // hold it, and only an interrupt frees it.
+    for task in &team.tasks {
+        let Some(attempt) = task.open_attempt() else { continue };
+        if attempt.member == team.lead || attempt.told_lead.iter().any(|kind| kind == "silent") {
+            continue;
+        }
+        let Some(found) = team.member(&attempt.member).and_then(|member| session_of(member, seen)) else { continue };
+        let Some(last) = found.last_event_at else { continue };
+        let quiet = now - last;
+        if found.live && found.activity == "busy" && !found.asking && !found.background && quiet >= SILENT_MINUTES * 60.0 {
+            steps.push(Step::Silent { task: task.id, minutes: (quiet / 60.0).round() as u64 });
+        }
+    }
     // A member's native question or permission request goes to the mailbox,
     // not to a message of its own (C2); one already answered is cleared.
     for member in &team.members {
@@ -974,6 +996,7 @@ fn coalesce_lead(steps: Vec<Step>) -> Vec<Step> {
                 | Step::PlanStarved { .. }
                 | Step::BudgetRed { .. }
                 | Step::BackgroundRed { .. }
+                | Step::Silent { .. }
                 | Step::TellStartLate { .. }
                 | Step::BlockedLate { .. }
                 | Step::Rebalanced { .. }
@@ -2693,6 +2716,41 @@ fn tell_sub_inbox(store: &mut Store, team: &Team, member: &str) -> anyhow::Resul
 }
 
 /// Reminds the free lead once that a report still waits for a decision (C4).
+/// How long a member in its turn may say nothing before the lead hears.
+const SILENT_MINUTES: f64 = 20.0;
+
+fn tell_lead_silent(store: &mut Store, team: &Team, task_id: u32, minutes: u64) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let attempt = task.open_attempt().context("no open attempt")?.clone();
+    let member = team.member(&attempt.member).context("unknown member")?;
+    let session = member.session.as_ref().map(|session| session.name.clone()).unwrap_or_default();
+    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+    let text = format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} silent {minutes} min]\n\
+         {} is in its turn on #{} {} but has reported nothing for {minutes} min, and Zerus sees no question or \
+         Background work. A prompt Zerus cannot read (a permission of a subagent call, a dialog) may hold it: look at \
+         its terminal, or interrupt the turn with the owner's word (hgs interrupt {session} --json) and tell it how to go on.",
+        task.id,
+        team.role_of(&attempt.member),
+        task.id,
+        task.title,
+    );
+    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &text);
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    let attempt_id = attempt.id.clone();
+    change(store, &team.id, |team, events| {
+        if let Some(found) = team.task_mut(task_id).and_then(|task| task.attempts.iter_mut().find(|found| found.id == attempt_id)) {
+            if !found.told_lead.iter().any(|kind| kind == "silent") {
+                found.told_lead.push("silent".into());
+            }
+        }
+        events.push(Event::new("member_silent", json!({"task":task_id,"minutes":minutes})));
+        Ok(())
+    })
+}
+
 fn remind_report(store: &mut Store, team: &Team, task_id: u32) -> anyhow::Result<()> {
     let task = team.task(task_id).context("unknown task")?;
     let attempt = task
@@ -3312,6 +3370,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         }),
         Step::BudgetRed { member } => tell_lead_budget_red(store, team, member, false, String::new(), 0.0),
         Step::BackgroundRed { member, command, since } => tell_lead_budget_red(store, team, member, true, command.clone(), *since),
+        Step::Silent { task, minutes } => tell_lead_silent(store, team, *task, *minutes),
         Step::Quiet { member, session, muted, revision } => {
             if !*muted {
                 let input = json!({"run_id":session.run_id,"conversation_id":session.conversation_id,"muted":true,"expected_revision":revision});
@@ -5905,6 +5964,39 @@ mod tests {
         assert!(dev.pending.is_none());
         assert!(dev.permission.is_none(), "the closed question still shows");
         assert_eq!(dev.permission_answers.last().unwrap()["decision"], "unknown");
+    }
+
+    #[test]
+    fn a_member_silent_in_its_turn_is_told_to_the_lead_once() {
+        // The owner, 2026-10-28: the reviewer sat 74 minutes in a turn with no
+        // event and no question Zerus could see; nobody heard of it.
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        {
+            let task = t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+            task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered,
+                sent_at: 10.0, delivered_at: Some(10.0), started_at: Some(11.0), ..Default::default() });
+            task.status = TaskStatus::InProgress;
+        }
+        let id = t.tasks.iter().find(|task| task.assignee == "dev").unwrap().id;
+        let lead = session("claude/x/lead", "r0", true);
+        let at = 10_000.0;
+        let mut dev = session("codex/x/dev", "r1", false);
+        dev.activity = "busy".into();
+        dev.phase = "tool".into();
+        dev.last_event_at = Some(at - 25.0 * 60.0);
+        let found = steps(&t, &[lead.clone(), dev.clone()], at);
+        assert!(found.iter().any(|step| matches!(step, Step::Silent { task, minutes: 25 } if *task == id)), "{found:?}");
+        // A question on its screen, or recent events, is not silence.
+        let mut asking = dev.clone();
+        asking.asking = true;
+        assert!(!steps(&t, &[lead.clone(), asking], at).iter().any(|step| matches!(step, Step::Silent { .. })));
+        let mut talking = dev.clone();
+        talking.last_event_at = Some(at - 60.0);
+        assert!(!steps(&t, &[lead.clone(), talking], at).iter().any(|step| matches!(step, Step::Silent { .. })));
+        // Once told, the lead is not told again for the attempt.
+        t.tasks.iter_mut().find(|task| task.id == id).unwrap().attempts[0].told_lead.push("silent".into());
+        assert!(!steps(&t, &[lead, dev], at).iter().any(|step| matches!(step, Step::Silent { .. })));
     }
 
     /// N6: one NoReport step with a given `hgs inspect` record.

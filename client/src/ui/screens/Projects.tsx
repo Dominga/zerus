@@ -1,10 +1,12 @@
-import { For, Show, createMemo, createSignal, onCleanup } from "solid-js";
+import { For, Show, createMemo, createResource, createSignal, onCleanup } from "solid-js";
 import { Icon } from "../lib/icons";
 import { MachineLabel } from "../components/MachineLabel";
-import type { Project } from "../../types";
+import type { Folder, Project } from "../../types";
 import { projectsPage } from "../../store/projects";
 import { setMenu, type MenuEntry } from "../../store/ui";
-import { NEW_SESSION, PROJECT_EDITING, WORKTREE_FLOWS } from "./reasons";
+import { PROJECT_EDITING, WORKTREE_FLOWS } from "./reasons";
+import { folderExists, folderLaunch } from "../../store/newSession";
+import { folderButton, folderMenuEntry, newSessionInFolder } from "../sessions/newsession-view";
 import { copy } from "../../store/actions";
 import { nextSort, projectColor, shownProjects, sortFolders, type Sort, type SortColumn } from "./projects-ui";
 
@@ -29,6 +31,8 @@ const [selectedFolder, setSelectedFolder] = createSignal(0);
 const [allSwarm, setAllSwarm] = createSignal(false);
 
 const disabled = (label: string, icon: string, hint: string): MenuEntry => ({ label, icon, disabled: true, hint });
+/** No folder selected: Qt's selectedFolder() is an empty folder. */
+const NO_FOLDER: Folder = { id: "", name: "", path: "", computer: "", machine: "" };
 
 export function ProjectsScreen() {
   const view = projectsPage;
@@ -38,13 +42,23 @@ export function ProjectsScreen() {
   const folders = createMemo(() => sortFolders(project()?.folders ?? [], sort()));
   onCleanup(() => setMenu(undefined));
   const choose = (p: Project) => { setSelectedProject(p.id); setSelectedFolder(0); };
+  // ProjectsDialog.cpp:520-522: the Folders button's New session… follows the selected folder.
+  const launchFolder = () => project()?.folders[selectedFolder()] ?? NO_FOLDER;
+  const [launchExists] = createResource(launchFolder, folderExists);
+  const launchButton = () => folderButton(folderLaunch(launchFolder(), launchExists.state === "ready" ? launchExists() : undefined), launchFolder().machine);
+  const launchSelected = () => { const p = project(), f = p?.folders[selectedFolder()]; if (p && f) void newSessionInFolder(p.id, f); };
 
-  const folderMenu = (e: MouseEvent, index: number) => {
+  const folderMenu = async (e: MouseEvent, index: number) => {
     e.preventDefault();
     setSelectedFolder(index);
+    const { clientX: x, clientY: y } = e;
+    const current = project();
+    const folder = current?.folders[index] ?? NO_FOLDER;
+    // ProjectsDialog.cpp:556-558, checked as the menu opens: this computer's folder must exist.
+    const launch = folderMenuEntry(folderLaunch(folder, await folderExists(folder)));
     const others = projects().filter((p) => p.accessible && p.id !== project()?.id);
-    setMenu({ x: e.clientX, y: e.clientY, items: [
-      disabled("New session…", "plus", NEW_SESSION),
+    setMenu({ x, y, items: [
+      { label: "New session…", icon: "plus", ...launch, action: () => { if (current) void newSessionInFolder(current.id, folder); } },
       disabled("Open folder", "folder-open", PROJECT_EDITING),
       // ProjectsDialog.cpp:565-566: always enabled, copies the path the row shows.
       { label: "Copy folder path", icon: "copy", hint: project()?.folders[index]?.path, action: () => { const path = project()?.folders[index]?.path; if (path) void copy(path); } },
@@ -160,7 +174,7 @@ export function ProjectsScreen() {
                   <h2 class="section-title">Folders</h2>
                   <span class="grow" />
                   <button class="btn small" disabled title={PROJECT_EDITING}><Icon name="download" size={12} />Clone repository…</button>
-                  <button class="btn small" disabled title={NEW_SESSION}><Icon name="plus" size={12} />New session…</button>
+                  <button class="btn small" disabled={launchButton().disabled} title={launchButton().tip} onClick={launchSelected}><Icon name="plus" size={12} />New session…</button>
                 </div>
                 <div class="su-tablewrap">
                   <table class="su-table proj-table">

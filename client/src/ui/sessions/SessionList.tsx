@@ -9,6 +9,7 @@ import {
 import { catalog, computerOffline } from "../../store/catalog";
 import { detailsFor, followedFor } from "../../store/actions";
 import { actionEntries, copyEntries } from "./ActionDialogs";
+import { newSessionForProject, newSessionFromPanel } from "./newsession-view";
 import {
   selectedKey, setSelectedKey, collapsed, setCollapsed, setExpandedChildren, expandedChildren,
   setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
@@ -138,7 +139,7 @@ function moveProject(project: string, step: -1 | 1) {
 function headerMenu(project: string): MenuEntry[] {
   const at = projectOrder().indexOf(project);
   return [
-    { label: "New session…", icon: "plus", disabled: LATER },
+    { label: "New session…", icon: "plus", action: () => newSessionForProject(project) },
     { separator: true },
     { label: "Filter this project", icon: "funnel", action: () => setProjectFilter([project]) },
     { separator: true },
@@ -395,7 +396,7 @@ export function SessionList() {
         <header class="sp-head">
           <h1>{stateFilter() === "archived" ? "Archive" : "Sessions"}</h1>
           <span class="grow" />
-          <button class="icon-btn hd" data-tip="New session (Ctrl+N)" disabled><Icon name="add" size={18} /></button>
+          <button class="icon-btn hd" data-tip="New session (Ctrl+N)" aria-label="New session" onClick={newSessionFromPanel}><Icon name="add" size={18} /></button>
           <button class="icon-btn hd" data-tip={toggleCaption()} onClick={toggleDock}><Icon name={toggleGlyph()} size={18} /></button>
           <button class="icon-btn hd" data-tip="Session and machine actions" onClick={(e) => openMenu(e, batchMenu())}><Icon name="more" size={18} /></button>
         </header>

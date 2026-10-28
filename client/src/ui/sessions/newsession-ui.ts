@@ -1,5 +1,5 @@
 import type { Account, Folder, MachineMeta, PathStyle, Profile, Project, Usage } from "../../types";
-import { current, fromProjected, period, providerName, severest, windowsAt, type Tone } from "../lib/usage";
+import { current, fromProjected, period, providerName, severest, windowsAt, type Tone, type UsageWindow } from "../lib/usage";
 import { absolute, clean, leaf, native, same } from "./paths";
 
 // The New session dialog's rows, as Qt keeps them in its views
@@ -19,7 +19,12 @@ export interface Fleet {
   online(computer: string): boolean;
 }
 
-export interface ComputerRow { label: string; target: string }
+export interface ComputerRow {
+  label: string;
+  target: string;
+  /** Its card is ok: the label reads " (offline)" otherwise (the OS tile's state dot shows the same). */
+  online: boolean;
+}
 
 /** This computer's host name, "" before it reports one. */
 export const localHost = (fleet: Fleet) => fleet.local?.host ?? "";
@@ -46,7 +51,8 @@ export function computerRows(fleet: Fleet, previous: string, project: Project | 
   for (const machine of machines) {
     if (!machine || (!local && machine === host)) continue;
     const target = machine === host ? "" : machine;
-    rows.push({ label: machine + (fleet.online(target) ? "" : " (offline)"), target });
+    const online = fleet.online(target);
+    rows.push({ label: machine + (online ? "" : " (offline)"), target, online });
   }
   return rows;
 }
@@ -159,16 +165,25 @@ export interface AccountRow {
 
 const UNNAMED = new Set(["", "Default account", "Native account"]);
 
+/**
+ * AccountUsage::launchMeterData: the current windows with a value, used
+ * clamped to 0..100; a window with a length shows only its duration. The
+ * account row draws them as compact meters, or its summary without any.
+ */
+export function launchWindows(usage: Usage | undefined, now: number): UsageWindow[] {
+  const windows: UsageWindow[] = [];
+  for (const projected of usage?.windows ?? []) {
+    const window = fromProjected(projected, now);
+    if (!current(window) || !Number.isFinite(window.used)) continue;
+    windows.push({ ...window, used: Math.max(0, Math.min(100, window.used)), label: window.minutes && window.minutes > 0 ? undefined : window.label });
+  }
+  return windows;
+}
+
 /** AccountUsage::launchSummary: each current window "{period} {n}% used", then balances, joined by two spaces; else "limits n/a". */
 export function launchSummary(usage: Usage, now: number): string {
   const limits: string[] = [];
-  for (const projected of usage.windows) {
-    const window = fromProjected(projected, now);
-    if (!current(window) || !Number.isFinite(window.used)) continue;
-    // A window with a length shows only its duration (launchMeterData).
-    const shown = { ...window, label: window.minutes && window.minutes > 0 ? "" : window.label };
-    limits.push(`${period(shown)} ${Math.round(Math.max(0, Math.min(100, window.used)))}% used`);
-  }
+  for (const window of launchWindows(usage, now)) limits.push(`${period(window)} ${Math.round(window.used)}% used`);
   for (const balance of usage.balances) {
     const amount = balance.balance;
     if (/^\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?\s*$/.test(amount) && Number.isFinite(Number(amount))) limits.push(`Balance: ${amount} ${balance.currency}`.trim());

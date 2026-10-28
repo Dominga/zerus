@@ -2,6 +2,8 @@ import { For, Match, Show, Switch, createEffect, createMemo, onCleanup, onMount 
 import { Rail } from "./ui/components/Rail";
 import { MenuLayer, Toasts } from "./ui/components/Overlays";
 import { ActionDialogs, ActionNotices } from "./ui/sessions/ActionDialogs";
+import { NewSessionDialog } from "./ui/sessions/NewSessionDialog";
+import { windowKey } from "./ui/sessions/newsession-view";
 import { SessionList } from "./ui/sessions/SessionList";
 import { SessionDetail } from "./ui/sessions/SessionDetail";
 import { PerfHost } from "./ui/PerfHost";
@@ -53,6 +55,8 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
   const keys = (e: KeyboardEvent) => {
     const mod = e.ctrlKey || e.metaKey;
     if (!mod) return;
+    // session.new (Shortcuts.cpp:29, 58): a Window shortcut, on every page.
+    if (windowKey(e)) return;
     if (/^[1-5]$/.test(e.key)) { e.preventDefault(); setPage((["dashboard", "sessions", "projects", "machines", "accounts"] as const)[Number(e.key) - 1]); }
     else if (e.key === ",") { e.preventDefault(); setPage("settings"); }
     else if (e.key === "=" || e.key === "+") { e.preventDefault(); setContentScale(Math.min(2, +(contentScale() + 0.1).toFixed(2))); toast("Content scale", `${Math.round(contentScale() * 100)}%`); }
@@ -83,6 +87,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <MenuLayer />
       <Toasts />
       <ActionDialogs />
+      <NewSessionDialog />
       <ActionNotices />
       <PerfHost />
     </div>

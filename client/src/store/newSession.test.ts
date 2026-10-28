@@ -699,3 +699,68 @@ describe("reads only (Review Focus 1 and 2)", () => {
     expect(input.verified).toMatchObject({ selected_root: "/workspace/example-work-one" });
   });
 });
+
+describe("what the dialog view reads (Task 3)", () => {
+  // updateForm 667: the New project row stays while the repository's New project… is remembered.
+  it("keeps the New project row after leaving the repository source", async () => {
+    const t = setup((w) => { w.projects = [project("ungrouped", "Inbox", [], { is_default: true }), project("existing", "Existing")]; });
+    await t.open({ agent: "codex", project: "existing" });
+    expect(t.state().newProjectRow).toBe(false);
+    t.act.setSource(true);
+    t.act.setUrl("git@example.invalid:team/fresh.git");
+    await settle();
+    t.act.chooseProject(t.state().projects.length - 1);
+    await settle();
+    expect(t.state()).toMatchObject({ newProjectVisible: true, newProjectRow: true });
+    t.act.setSource(false);
+    await settle();
+    expect(t.state()).toMatchObject({ newProjectVisible: false, newProjectRow: true });
+    // An explicit project in folder mode forgets the repository's choice (295).
+    t.act.chooseProject(t.state().projects.findIndex((p) => p.id === "existing"));
+    await settle();
+    expect(t.state().newProjectRow).toBe(false);
+  });
+
+  // The repository's Browse on this computer (constructor 312-316): the parent folder, then its name below the choice.
+  it("browses the clone's parent folder on this computer only", async () => {
+    const t = setup((w) => { w.picked = "/workspace/parent"; });
+    await t.open({ agent: "codex" });
+    t.act.setSource(true);
+    t.act.setUrl("git@example.invalid:team/fresh.git");
+    await settle();
+    expect(t.state().repositoryParent).toBe("~");
+    await t.act.browseRepositoryLocal();
+    await settle();
+    expect(t.world.of("pickLocalFolder").map((c) => c.args)).toEqual([["~"]]);
+    expect(t.state()).toMatchObject({ destination: "/workspace/parent/fresh", repositoryParent: "/workspace/parent" });
+    t.act.chooseComputer(t.state().computers.findIndex((c) => c.target === "mac"));
+    await settle();
+    await t.act.browseRepositoryLocal();
+    expect(t.world.count("pickLocalFolder")).toBe(1);
+    expect(t.world.creating()).toEqual([]);
+  });
+
+  it("gives each computer row its online state", async () => {
+    const t = setup((w) => { w.online.mac = false; });
+    await t.open();
+    expect(t.state().computers.map((c) => [c.target, c.online, c.label])).toEqual([["", true, "pc"], ["mac", false, "mac (offline)"]]);
+  });
+
+  // ProjectsDialog.cpp 515-532, 552-560: the entries' state without opening anything.
+  it("tells the Projects entries why a folder cannot start a session, and its path", async () => {
+    const f1 = folder("f1", "pc", "/srv/a"), remote = folder("f2", "mac", "/srv/b");
+    const t = setup((w) => { w.projects = [project("work", "Work", [f1, remote], { is_default: true })]; });
+    expect(t.store.folderLaunch(f1)).toEqual({ problem: "", shown: "/srv/a", local: true });
+    expect(t.store.folderLaunch(f1, false)).toEqual({ problem: "This folder is unavailable on this computer.", shown: "/srv/a", local: true });
+    expect(t.store.folderLaunch(remote)).toEqual({ problem: "", shown: "/srv/b", local: false });
+    t.world.online.mac = false;
+    expect(t.store.folderLaunch(remote).problem).toBe("Reconnect mac to start a session in this folder.");
+    // Only this computer's folder is read; reading opens nothing.
+    expect(await t.store.folderExists(remote)).toBeUndefined();
+    t.world.localExists = false;
+    expect(await t.store.folderExists(f1)).toBe(false);
+    expect(t.world.of("localFolderExists").map((c) => c.args)).toEqual([["/srv/a"]]);
+    expect(t.store.newSession()).toBeUndefined();
+    expect(t.world.creating()).toEqual([]);
+  });
+});

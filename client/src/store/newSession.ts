@@ -86,6 +86,8 @@ export interface NewSessionState extends OpenCodeView {
   project: number;
   /** The New project name field shows (a repository going to New project…). */
   newProjectVisible: boolean;
+  /** Its row stays, empty, while folder mode remembers the repository's New project… (667). */
+  newProjectRow: boolean;
   newProjectName: string;
   computers: ComputerRow[];
   computer: number;
@@ -97,6 +99,8 @@ export interface NewSessionState extends OpenCodeView {
   url: string;
   /** The Clone to field. */
   destination: string;
+  /** The clone's parent folder: where its Browse… starts. */
+  repositoryParent: string;
   /** Counts each time the URL field should take the focus (606). */
   focusUrl: number;
   folders: FolderRow[];
@@ -145,6 +149,8 @@ export interface NewSessionActions {
   setDestination(text: string): void;
   /** Browse… for the clone's parent folder chose `path`. */
   setRepositoryParent(path: string): void;
+  /** The clone's Browse… on this computer: the system folder dialog from its parent folder. */
+  browseRepositoryLocal(): Promise<void>;
   setNewProjectName(text: string): void;
   setAuto(on: boolean): void;
   chooseAccount(index: number): void;
@@ -178,7 +184,7 @@ export interface NewSessionActions {
 /** Every control, checked complete by its type. */
 const ACTION_KEYS: Record<keyof NewSessionActions, true> = {
   chooseProject: true, chooseComputer: true, chooseFolder: true, selectPath: true, setSource: true, setUrl: true,
-  setDestination: true, setRepositoryParent: true, setNewProjectName: true, setAuto: true, chooseAccount: true, selectAccount: true,
+  setDestination: true, setRepositoryParent: true, browseRepositoryLocal: true, setNewProjectName: true, setAuto: true, chooseAccount: true, selectAccount: true,
   refreshAccounts: true, setName: true, setOpenTerminal: true, chooseModel: true, chooseEffort: true, openModelPicker: true,
   closeModelPicker: true, useNativeModel: true, pickerClick: true, pickerSelect: true, pickerToggleAll: true, pickerSearch: true,
   startOpenCode: true, browseLocal: true, applyBrowsedFolder: true, chooseExistingWorktree: true, worktreeCreated: true, manageFolders: true,
@@ -914,9 +920,10 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     const notice = formView?.shown.notice ?? null;
     const project = projectRow();
     return {
-      projects: projectList, project: projectIndex, newProjectVisible: repositorySource && !!project?.newProject, newProjectName,
+      projects: projectList, project: projectIndex, newProjectVisible: repositorySource && !!project?.newProject,
+      newProjectRow: (repositorySource && !!project?.newProject) || (!repositorySource && repositoryNewProject), newProjectName,
       computers: machines, computer: machineIndex, host: host(), noMachine: machines.length === 0,
-      repository: repositorySource, url, destination: field, focusUrl,
+      repository: repositorySource, url, destination: field, repositoryParent: repository?.fields?.parent ?? "", focusUrl,
       folders, folder: folderIndex, folderPath: native(path(), style(host())), autoPreferred,
       worktrees: { catalog: worktreeCatalog, chooseVisible: array(worktreeCatalog.worktrees).length > 0, createVisible: worktreeCatalog.state === "ok" },
       accounts: rows, account: accountIndex, accountStatus, refreshEnabled: machines.length > 0 && !accountRequest,
@@ -981,6 +988,16 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
       applyBrowsedFolder(target, project, chosen);
       emit();
     },
+    async browseRepositoryLocal() {
+      // Qt's repository Browse… (312-316): DirectoryDialog is this computer's own dialog only here.
+      if (host() !== "" || !repository) return;
+      const record = repository;
+      let chosen: string | null = null;
+      try { chosen = await b.pickLocalFolder(record.fields?.parent ?? ""); } catch { chosen = null; }
+      if (closed || !chosen || repository !== record) return;
+      setRepositoryParent(chosen);
+      emit();
+    },
     applyBrowsedFolder: (target, project, chosen) => { applyBrowsedFolder(target, project, chosen); emit(); },
     chooseExistingWorktree: (target, project, chosen) => { chooseExistingWorktree(target, project, chosen); emit(); },
     worktreeCreated: (target, project, created, catalog) => worktreeCreated(target, project, created, catalog),
@@ -1004,7 +1021,9 @@ export function createNewSessionStore(deps: NewSessionDeps) {
   const [version, setVersion] = createSignal(0);
   let dialog: Dialog | undefined;
   let opening = false;
-  let buildStyle: PathStyle | undefined;
+  // The platform this client was built for: this computer's folder style before it reports one.
+  const [buildStyle, setBuildStyle] = createSignal<PathStyle>();
+  let styleAsked = false;
   const admittedListeners = new Set<(id: string, plan: LaunchPlan) => void>();
   const emit = () => setVersion((v) => v + 1);
   const view = createRoot(() => createMemo(() => { version(); return dialog && !dialog.closed() ? dialog.state() : undefined; }));
@@ -1041,7 +1060,7 @@ export function createNewSessionStore(deps: NewSessionDeps) {
       const context = generic ? selection : undefined;
       const computer = context ? context.row.computer : options.computer ?? selectedHostTarget();
       const started = await deps.bridge.newSessionContext();
-      buildStyle = started.build_style;
+      setBuildStyle(started.build_style);
       const open = createDialog(deps, started, { host: computer, agent: options.agent ?? "", project: launchProject }, emit, {
         folders: (project) => { closeNewSession(); deps.openProjects(project); },
         machines: () => { closeNewSession(); deps.openMachines(); },
@@ -1075,24 +1094,45 @@ export function createNewSessionStore(deps: NewSessionDeps) {
     }
   }
 
+  /** The build style, asked once when this computer has not reported its platform. */
+  async function ensureBuildStyle() {
+    if (deps.cards()[""]?.platform || buildStyle() !== undefined || styleAsked) return;
+    styleAsked = true;
+    try { setBuildStyle((await deps.bridge.newSessionContext()).build_style); } catch { setBuildStyle("posix"); }
+  }
+
+  /**
+   * The Projects entries' state for a folder (ProjectsDialog.cpp 515-532,
+   * 552-560): why it cannot start a session, "" when it can; its path in its
+   * computer's form; whether it is this computer's. `exists` is whether this
+   * computer's folder exists, left out while unread. Reactive; reads nothing.
+   */
+  function folderLaunch(folder: Folder, exists?: boolean): { problem: string; shown: string; local: boolean } {
+    const local = deps.cards()[""];
+    const localHost = local?.host ?? "";
+    if (!local?.platform && buildStyle() === undefined) void ensureBuildStyle();
+    const style = (machine: string) => of(local?.platform, !!machine && machine === localHost, buildStyle() ?? "posix");
+    const env = { localHost, online: deps.online, style };
+    return { problem: folderLaunchProblem(folder, env, exists), shown: native(folder.path, style(folder.machine)), local: !!localHost && folder.machine === localHost };
+  }
+
+  /** Whether this computer's folder exists (`local_folder_exists`, a read); undefined for another computer's. */
+  async function folderExists(folder: Folder): Promise<boolean | undefined> {
+    await ensureBuildStyle();
+    if (!folderLaunch(folder).local) return undefined;
+    try { return await deps.bridge.localFolderExists(folder.path); } catch { return false; }
+  }
+
   /** ProjectsDialog::newFolderSession (533-541): "" when the dialog opens, else why it cannot. */
   async function openFolderSession(projectId: string, folder: Folder): Promise<string> {
     const project = deps.projects().projects.find((p) => p.id === projectId);
     const present = !!project?.folders.some((f) => f.id === folder.id && f.machine === folder.machine && f.path === folder.path);
     if (!present) return FOLDER_CHANGED;
-    const local = deps.cards()[""];
-    const localHost = local?.host ?? "";
-    if (!local?.platform && buildStyle === undefined) {
-      try { buildStyle = (await deps.bridge.newSessionContext()).build_style; } catch { buildStyle = "posix"; }
-    }
-    const env = { localHost, online: deps.online, style: (machine: string) => of(local?.platform, !!machine && machine === localHost, buildStyle ?? "posix") };
-    let problem = folderLaunchProblem(folder, env, undefined);
-    if (!problem && folder.machine === localHost) {
-      let exists = false;
-      try { exists = await deps.bridge.localFolderExists(folder.path); } catch { exists = false; }
-      problem = folderLaunchProblem(folder, env, exists);
-    }
+    await ensureBuildStyle();
+    const first = folderLaunch(folder);
+    const problem = !first.problem && first.local ? folderLaunch(folder, await folderExists(folder)).problem : first.problem;
     if (problem) return problem;
+    const localHost = deps.cards()[""]?.host ?? "";
     await openNewSession({ project: projectId, computer: folder.machine === localHost ? "" : folder.machine, folder: folder.id });
     return "";
   }
@@ -1121,7 +1161,7 @@ export function createNewSessionStore(deps: NewSessionDeps) {
   }])) as unknown as NewSessionActions;
 
   return {
-    newSession: view, actions, openNewSession, openFolderSession, selectedHostTarget, closeNewSession, startNewSession, onCreationAdmitted,
+    newSession: view, actions, openNewSession, openFolderSession, folderLaunch, folderExists, selectedHostTarget, closeNewSession, startNewSession, onCreationAdmitted,
     /** Machine cards or peers changed (the app calls this from its fleet effect). */
     fleetChanged: () => { if (dialog) untrack(() => dialog?.fleetChanged()); },
   };
@@ -1183,6 +1223,10 @@ export const newSession: () => NewSessionState | undefined = app.newSession;
 export const newSessionActions: NewSessionActions = app.actions;
 export const openNewSession = (options?: NewSessionOptions): Promise<void> => app.openNewSession(options);
 export const openFolderSession = (project: string, folder: Folder): Promise<string> => app.openFolderSession(project, folder);
+/** The Projects entries' state for a folder: its problem ("" when it can start a session) and its path as shown. */
+export const folderLaunch = (folder: Folder, exists?: boolean) => app.folderLaunch(folder, exists);
+/** Whether this computer's folder exists; undefined for another computer's (no read). */
+export const folderExists = (folder: Folder): Promise<boolean | undefined> => app.folderExists(folder);
 export const selectedHostTarget = (): string => app.selectedHostTarget();
 /** Cancel, Escape and the close button (`reject`, 476): with no foreground work, closing is always allowed. */
 export const closeNewSession = (): void => app.closeNewSession();

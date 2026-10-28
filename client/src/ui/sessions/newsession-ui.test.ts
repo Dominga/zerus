@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { machineMeta, NOW, usageOf } from "../../store/testing";
 import type { Account, Folder, Profile, Project, ProjectedWindow, Usage } from "../../types";
 import {
-  accountRows, computerChoice, computerRows, folderLaunchProblem, folderRows, launchSummary, projectChoice, projectRows, type AccountChoice, type Fleet,
+  accountRows, computerChoice, computerRows, folderLaunchProblem, folderRows, launchSummary, launchWindows, projectChoice, projectRows, type AccountChoice, type Fleet,
 } from "./newsession-ui";
 
 // The New session dialog's view rules (tray/src/NewSessionDialog.cpp:
@@ -211,6 +211,21 @@ describe("launchSummary (AccountUsage.h 130-142)", () => {
     expect(launchSummary(usageOf({ balances: [{ kind: "", balance: "12.50", currency: "USD" }, { kind: "", balance: "n/a", currency: "USD" }] }), NOW)).toBe("Balance: 12.50 USD");
     expect(launchSummary(usageOf({ balances: [{ kind: "", balance: "3", currency: "" }] }), NOW)).toBe("Balance: 3");
     expect(launchSummary(usageOf(), NOW)).toBe("limits n/a");
+  });
+});
+
+describe("launchWindows (AccountUsage.h 117-129)", () => {
+  // The account row's compact meters: current windows with a value, clamped, a sized window without its name.
+  it("keeps the current windows the row draws as meters", () => {
+    const usage = usageOf({ windows: [window(17.4, 300, { label: "Sonnet" }), window(120, 10080), window(50, 300, { resets_at: NOW - 60 }), window(Number.NaN, 300), window(40, null, { label: "Monthly", resets_at: null })] });
+    expect(launchWindows(usage, NOW)).toEqual([
+      { minutes: 300, used: 17.4, label: undefined, resetsIn: 60 },
+      { minutes: 10080, used: 100, label: undefined, resetsIn: 60 },
+      { minutes: null, used: 40, label: "Monthly", resetsIn: null },
+    ]);
+    // Without one the row shows its summary text instead.
+    expect(launchWindows(usageOf(), NOW)).toEqual([]);
+    expect(launchWindows(undefined, NOW)).toEqual([]);
   });
 });
 

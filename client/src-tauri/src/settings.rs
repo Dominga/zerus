@@ -45,10 +45,12 @@ pub fn open(app: &AppHandle, dir: &Path) -> Store {
     );
     let handle = app.clone();
     settings.subscribe(Box::new(move |key, value, revision| {
-        if key == ALWAYS_ON_TOP && newer_layer(revision) {
-            if let Some(window) = handle.get_webview_window(crate::MAIN_WINDOW) {
-                apply_window_layer(&window, value.as_bool().unwrap_or(false));
-            }
+        if key == ALWAYS_ON_TOP {
+            apply_newer_layer(revision, || {
+                if let Some(window) = handle.get_webview_window(crate::MAIN_WINDOW) {
+                    apply_window_layer(&window, value.as_bool().unwrap_or(false));
+                }
+            });
         }
         let _ = handle.emit(
             "settings-changed",
@@ -62,17 +64,19 @@ pub fn open(app: &AppHandle, dir: &Path) -> Store {
 static KEEP_ABOVE: OnceLock<bool> = OnceLock::new();
 /// The store revision of the last Keep above applied (0: none yet). Listeners
 /// run after the store's lock is released, so changes can arrive out of
-/// order: only a newer one applies. Never held while calling Tauri.
+/// order: only a newer one applies. Held across the apply, so an older
+/// change cannot follow it; off the main thread, `set_always_on_top` only
+/// posts to the event loop.
 static LAYER: Mutex<u64> = Mutex::new(0);
 
-/// Records `revision` as applied when it is newer than the last one.
-fn newer_layer(revision: u64) -> bool {
+/// Runs `apply` for the change at `revision` when it is newer than the last
+/// one applied.
+fn apply_newer_layer(revision: u64, apply: impl FnOnce()) {
     let mut last = LAYER.lock().unwrap_or_else(PoisonError::into_inner);
-    if revision <= *last {
-        return false;
+    if revision > *last {
+        *last = revision;
+        apply();
     }
-    *last = revision;
-    true
 }
 
 /// Whether a window on `display` can be kept above others. GTK has no
@@ -111,9 +115,11 @@ pub fn apply_stored_window_layer(store: &Store, window: WebviewWindow) {
         .name("window-layer".into())
         .spawn(move || {
             // Waits for the load without the lock; a change applied since
-            // then is newer than the stored value.
+            // then is newer than the stored value, and one arriving now
+            // waits until this apply is done.
             let on = settings.flag(ALWAYS_ON_TOP);
-            if *LAYER.lock().unwrap_or_else(PoisonError::into_inner) == 0 {
+            let applied = LAYER.lock().unwrap_or_else(PoisonError::into_inner);
+            if *applied == 0 {
                 apply_window_layer(&window, on);
             }
         });

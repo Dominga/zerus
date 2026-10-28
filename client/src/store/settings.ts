@@ -156,7 +156,8 @@ interface Slot { queued?: { value: SettingValue | null }; running: boolean; wait
 /**
  * A reactive settings store over `backend`, starting from the defaults (and
  * this viewer's hint) until the backend's values arrive. The legacy moves are
- * written first and cleared only once all saved; `remember` keeps the hint.
+ * written first and cleared only once all saved; `remember` keeps the hint,
+ * from confirmed values only and once the backend's values have loaded.
  */
 export function createSettings(backend: SettingsBackend, options: { legacy?: Legacy; hint?: Settings; remember?: (settings: Settings) => void } = {}) {
   const [settings, setSettings] = createStore<Settings>({ ...DEFAULTS, ...options.hint });
@@ -185,8 +186,16 @@ export function createSettings(backend: SettingsBackend, options: { legacy?: Leg
     if (value === null) delete chosen[key];
     else chosen[key] = value;
   };
-  /** Keeps this viewer's first-paint copy after a hinted key changed. */
-  const remember = (key: string) => { if ((HINTED as readonly string[]).includes(key)) options.remember?.(settings); };
+  // Whether the backend's values loaded: until then (or after a failed
+  // load) the confirmed values are partly defaults, and the hint stays.
+  let complete = false;
+  /**
+   * Keeps this viewer's first-paint copy after a hinted key changed: what the
+   * store confirmed, never a value still being saved.
+   */
+  const remember = (key: string) => {
+    if (complete && (HINTED as readonly string[]).includes(key)) options.remember?.({ ...chosen });
+  };
 
   async function drain(key: string, slot: Slot) {
     slot.running = true;
@@ -274,10 +283,11 @@ export function createSettings(backend: SettingsBackend, options: { legacy?: Leg
         confirm(key, value);
         show(key, value);
       }
+      complete = true;
+      options.remember?.({ ...chosen });
     } catch (error) {
       console.warn(`settings: not loaded: ${String(error)}`);
     }
-    options.remember?.(settings);
     setLoaded(true);
   })();
 

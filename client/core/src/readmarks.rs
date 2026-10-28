@@ -4,6 +4,7 @@ use crate::view::ViewRow;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReadMark {
@@ -67,21 +68,26 @@ impl ReadMarks {
         self.marks.values().cloned().collect()
     }
 
-    /// Drops the mark the row already shows (equal read_reply_id or
-    /// read_attention_signature, or another run or conversation); returns true
-    /// when it changed anything (then saves).
+    /// Drops a mark that is finished (`settled()` in `tray/src/FleetState.cpp`):
+    /// the row names another run or conversation (or none), or every part is
+    /// either empty, no longer the row's current value, or already shown as
+    /// read by the host. Returns true when it changed anything (then saves).
     pub fn settle(&mut self, computer: &str, row: &ViewRow) -> bool {
         let key = (computer.to_owned(), row.name.clone());
         let Some(mark) = self.marks.get(&key) else {
             return false;
         };
-        let other =
-            |mine: &str, theirs: &Option<String>| theirs.as_deref().is_some_and(|t| t != mine);
-        let shown = |mark: &Option<String>, read: &Option<String>| mark.is_some() && mark == read;
-        let settled = other(&mark.run_id, &row.run_id)
-            || other(&mark.conversation_id, &row.conversation_id)
-            || shown(&mark.reply_id, &row.read_reply_id)
-            || shown(&mark.attention_signature, &row.read_attention_signature);
+        let part = |mine: &Option<String>, current: &Option<String>, read: &Option<String>| {
+            mine.as_deref().is_none_or(str::is_empty) || mine != current || read == mine
+        };
+        let settled = row.run_id.as_deref() != Some(mark.run_id.as_str())
+            || row.conversation_id.as_deref() != Some(mark.conversation_id.as_str())
+            || (part(&mark.reply_id, &row.reply_id, &row.read_reply_id)
+                && part(
+                    &mark.attention_signature,
+                    &row.attention_signature,
+                    &row.read_attention_signature,
+                ));
         if settled {
             self.marks.remove(&key);
             self.save();
@@ -96,8 +102,13 @@ impl ReadMarks {
         let Ok(bytes) = serde_json::to_vec(&list) else {
             return;
         };
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let mut temporary = self.path.clone().into_os_string();
-        temporary.push(".tmp");
+        temporary.push(format!(
+            ".{}-{}.tmp",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         let temporary = PathBuf::from(temporary);
         if let Some(folder) = self.path.parent().filter(|f| !f.as_os_str().is_empty()) {
             let _ = std::fs::create_dir_all(folder);
@@ -128,9 +139,15 @@ mod tests {
     impl Drop for Temp {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
-            let mut tmp = self.0.clone().into_os_string();
-            tmp.push(".tmp");
-            let _ = std::fs::remove_file(tmp);
+            let prefix = format!("{}.", self.0.file_name().unwrap().to_string_lossy());
+            for entry in std::fs::read_dir(self.0.parent().unwrap())
+                .unwrap()
+                .flatten()
+            {
+                if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
         }
     }
 
@@ -145,13 +162,17 @@ mod tests {
         }
     }
 
-    fn row(run: &str, reply: Option<&str>, signature: Option<&str>) -> ViewRow {
+    /// A row whose current reply is `r1` and signature `s1`, showing the
+    /// given read parts.
+    fn row(run: &str, read_reply: Option<&str>, read_signature: Option<&str>) -> ViewRow {
         ViewRow {
             name: "claude/sample-project/review".into(),
             run_id: Some(run.into()),
             conversation_id: Some("conv-1".into()),
-            read_reply_id: reply.map(Into::into),
-            read_attention_signature: signature.map(Into::into),
+            reply_id: Some("r1".into()),
+            attention_signature: Some("s1".into()),
+            read_reply_id: read_reply.map(Into::into),
+            read_attention_signature: read_signature.map(Into::into),
             ..ViewRow::default()
         }
     }
@@ -197,6 +218,51 @@ mod tests {
         marks.add(mark("run-1", Some("r1"), None));
         assert!(marks.settle("mac", &row("run-2", None, None)));
         assert!(marks.pending().is_empty());
+    }
+
+    #[test]
+    fn a_mark_with_two_parts_waits_for_both() {
+        let temp = Temp::new("both");
+        let mut marks = ReadMarks::load(temp.0.clone());
+        marks.add(mark("run-1", Some("r1"), Some("s1")));
+        assert!(!marks.settle("mac", &row("run-1", Some("r1"), None)));
+        assert!(!marks.settle("mac", &row("run-1", None, Some("s1"))));
+        assert_eq!(marks.pending().len(), 1);
+        assert!(marks.settle("mac", &row("run-1", Some("r1"), Some("s1"))));
+        assert!(marks.pending().is_empty());
+    }
+
+    #[test]
+    fn a_part_no_longer_current_counts_as_settled() {
+        let temp = Temp::new("stale");
+        let mut marks = ReadMarks::load(temp.0.clone());
+        marks.add(mark("run-1", Some("r0"), Some("s1")));
+        // The reply moved on (row.reply_id is r1), so only the signature is left.
+        assert!(!marks.settle("mac", &row("run-1", None, None)));
+        assert!(marks.settle("mac", &row("run-1", None, Some("s1"))));
+    }
+
+    #[test]
+    fn a_row_without_run_or_conversation_settles() {
+        let temp = Temp::new("ids");
+        let mut marks = ReadMarks::load(temp.0.clone());
+        marks.add(mark("run-1", Some("r1"), None));
+        let mut bare = row("run-1", None, None);
+        bare.run_id = None;
+        assert!(marks.settle("mac", &bare));
+        marks.add(mark("run-1", Some("r1"), None));
+        let mut other = row("run-1", None, None);
+        other.conversation_id = Some("conv-2".into());
+        assert!(marks.settle("mac", &other));
+    }
+
+    #[test]
+    fn an_empty_part_is_satisfied() {
+        let temp = Temp::new("empty");
+        let mut marks = ReadMarks::load(temp.0.clone());
+        marks.add(mark("run-1", Some("r1"), None));
+        assert!(!marks.settle("mac", &row("run-1", None, None)));
+        assert!(marks.settle("mac", &row("run-1", Some("r1"), None)));
     }
 
     #[test]

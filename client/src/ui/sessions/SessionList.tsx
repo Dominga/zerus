@@ -7,7 +7,10 @@ import {
   emphasis, childStatus, gitTooltip, paletteIndex, folderOf,
 } from "./SessionCard";
 import { catalog, computerOffline } from "../../store/catalog";
-import { detailsFor, followedFor } from "../../store/actions";
+import { detailsFor, followedFor, updating } from "../../store/actions";
+import { applies, run, running } from "../../store/batch";
+import { selectionSnapshot, type SelectionAction, type SelectionRow } from "./selection";
+import { barTools, countable, selectionMenu, splitTools, toolEntry } from "./selection-ui";
 import { actionEntries, copyEntries, freshActionEntry, muteEntry } from "./ActionDialogs";
 import { markAllEntry, markAllTip, markEntry, runMarkAll } from "./mark-entries";
 import {
@@ -237,19 +240,43 @@ function FilterChips() {
   );
 }
 
+/** The selected catalog rows and their per-action counts (Qt's selectionEntries and selectionActionApplies). */
+const selectedRows = (): Session[] => Object.keys(multi).filter((k) => multi[k]).map((k) => catalog.rows[k]).filter((s): s is Session => !!s);
+const selectionCount = (rows: SelectionRow[]) => (a: SelectionAction) =>
+  rows.filter((s) => countable(s, a, a === "move" || applies(s, a, !computerOffline(s.computer), updating(s.computer, s.name)))).length;
+const runSelection = (rows: SelectionRow[], a: SelectionAction) => { void run(a, rows.map(selectionSnapshot)); };
+/** The context menu of a row inside a multi-selection (Qt populateSelectionMenu). */
+const selectionContextMenu = (): MenuEntry[] => {
+  const rows = selectedRows().map(selectionSnapshot);
+  return selectionMenu(selectionCount(rows), rows.length, running(), (a) => runSelection(rows, a), clearMulti);
+};
+
+const TOOL_WIDTH = 34;
+
 function SelectionBar() {
+  const [width, setWidth] = createSignal(0);
+  const observe = (el: HTMLElement) => {
+    const ro = new ResizeObserver(() => setWidth(el.clientWidth));
+    ro.observe(el);
+    onCleanup(() => ro.disconnect());
+  };
+  const rows = createMemo(selectedRows);
+  const tools = createMemo(() => barTools(selectionCount(rows()), rows().length, running()));
+  const split = createMemo(() => splitTools(tools(), Math.max(1, Math.floor(width() / TOOL_WIDTH))));
   return (
     <Show when={multiCount() > 1}>
       <div class="selection-bar" role="toolbar" aria-label="Selected sessions">
-        <div class="row"><b>{multiCount()} selected</b><span class="grow" /><button class="icon-btn small" title="Deselect all (Esc)" onClick={clearMulti}><Icon name="x" size={14} /></button></div>
-        <div class="row sel-actions">
-          <button class="icon-btn" title={`Mark as read (${multiCount()})`} disabled><Icon name="read-all" size={18} /></button>
-          <button class="icon-btn" title="Pause" disabled><Icon name="pause" size={18} /></button>
-          <button class="icon-btn" title="Compact session rows" onClick={() => Object.keys(multi).forEach((k) => multi[k] && setCompactRows(k, true))}><Icon name="compact-row" size={18} /></button>
-          <button class="icon-btn" title="Move to project" disabled><Icon name="folder" size={18} /></button>
-          <button class="icon-btn" title="Move to archive" disabled><Icon name="archive" size={18} /></button>
-          <button class="icon-btn danger" title={`Terminate (${multiCount()})`} disabled><Icon name="circle-stop" size={18} /></button>
-          <button class="icon-btn" title="More actions for selected sessions" disabled><Icon name="chevron-down" size={18} /></button>
+        <div class="row"><b>{multiCount()} selected</b><span class="grow" /><button class="icon-btn small" title="Deselect all" aria-label="Deselect all" onClick={clearMulti}><Icon name="x" size={14} /></button></div>
+        <div class="row sel-actions" ref={observe}>
+          <For each={split().shown}>
+            {(t) => (
+              <button class="icon-btn" classList={{ danger: t.danger }} title={t.hint} aria-label={t.hint} disabled={!t.enabled} data-text={t.text} onClick={() => runSelection(rows(), t.action)}><Icon name={t.icon} size={18} /></button>
+            )}
+          </For>
+          <Show when={split().more.length}>
+            <button class="icon-btn" title="More actions for selected sessions" aria-label="More actions for selected sessions" aria-haspopup="menu"
+              onClick={(e) => openMenu(e, split().more.map((t) => toolEntry(t, (a) => runSelection(rows(), a))))}><Icon name="more" size={18} /></button>
+          </Show>
         </div>
       </div>
     </Show>
@@ -538,6 +565,7 @@ function ListRow(props: { id: string; list: RowSource }) {
             onContextMenu={(e) => {
               // macOS turns Control-click into a context click; Control keeps its selection meaning here.
               if (e.ctrlKey && e.button === 0 && IS_MAC) { e.preventDefault(); selectSession(v().session.key, e); return; }
+              if (multi[v().session.key] && multiCount() > 1) { openMenu(e, selectionContextMenu()); return; }
               if (!multi[v().session.key]) selectSession(v().session.key); openMenu(e, sessionMenu(v().session));
             }}
             onDblClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) setRowCompact(v().session.key, !compactRows[v().session.key]); }}>

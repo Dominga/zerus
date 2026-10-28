@@ -108,6 +108,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs swarm session-project --json  read an exact session's logical project choices
        hgs swarm assign-session --json   move only the exact session's project grouping
        hgs presence set --json        desktop idle/lock time from JSON stdin (written by the tray)
+       hgs subagents-confirm get|set --json   ask before an agent starts subagents on this computer (JSON stdin for set)
+       hgs session-upload-block get|set --json   block DeepSeek's session-log upload on this computer (JSON stdin for set)
        hgs swarm preference get --json   shared phone notification timing
        hgs swarm preference set mobile_delivery VALUE --json   immediate|away|away_5|away_10|away_15|away_30
        hgs machine check <alias> | ssh <alias> [--directory PATH] | setup <alias> [--source <checkout>]
@@ -234,6 +236,25 @@ fn state_command(verb: &str, args: &[String]) -> Result<i32> {
     let mut command = vec![verb.to_owned()];
     command.extend_from_slice(args);
     state::dispatch(&command).map_err(|e| Error::new(1, e))
+}
+
+/// WhiteWh fork: settings hgs keeps for this computer (U19, U22). They live in
+/// its state, where the hooks that follow them run, so they need no local
+/// sessions; they are never an agent launch.
+fn kept_setting(command: &str) -> bool {
+    matches!(command, "subagents-confirm" | "session-upload-block")
+}
+
+/// A `kept_setting` command. Only this computer's: its owner gate trusts a set
+/// from a process outside every agent session, which an SSH hop cannot prove.
+fn setting_command(local: bool, command: &str, args: &[String], dry: bool) -> Result<i32> {
+    if !local {
+        return Err(Error::new(1, format!("hgs {command} changes the computer it runs on; run it on that computer")));
+    }
+    if dry {
+        return Err(Error::new(1, format!("hgs {command} does not support --dry-run")));
+    }
+    state_command(command, args)
 }
 fn has(args: &[String], arg: &str) -> bool {
     args.iter().any(|a| a == arg)
@@ -592,6 +613,9 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             }
             local_sessions()?;
             return crate::session_reference::current(&config, args);
+        }
+        setting if kept_setting(setting) => {
+            return setting_command(target.is_empty() || config.is_self(&target), setting, args, dry);
         }
         _ => {}
     }
@@ -2586,6 +2610,33 @@ mod tests {
             "archive", "terminate", "dirs", "worktrees", "git-status", "__state", "__host",
             "repository-git-worker", "Repository", "repository-extra", ""] {
             assert!(needs_local_sessions(command), "{command}");
+        }
+    }
+
+    /// Settings > Sessions runs `hgs subagents-confirm` and `hgs
+    /// session-upload-block`: settings this computer keeps, read from its hgs
+    /// state like `hgs __state`, never an agent launch, and never sent to a peer.
+    #[test]
+    fn kept_settings_reach_hgs_state_instead_of_a_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        state::with_test_state_root(dir.path(), || {
+            let get = ["get", "--json"].map(String::from);
+            for command in ["subagents-confirm", "session-upload-block"] {
+                assert!(kept_setting(command), "{command}");
+                assert!(usage_text(cfg!(unix)).contains(&format!("\n       hgs {command} get|set --json   ")), "{command}");
+                assert_eq!(setting_command(true, command, &get, false).unwrap(), 0, "{command}");
+                // A malformed request gets the setting's own usage, not the
+                // launch's "unknown option --json".
+                let error = setting_command(true, command, &get[..1], false).unwrap_err();
+                assert_eq!(error.message, format!("usage: hgs {command} get|set --json"));
+                let error = setting_command(false, command, &get, false).unwrap_err();
+                assert_eq!(error.message, format!("hgs {command} changes the computer it runs on; run it on that computer"));
+                let error = setting_command(true, command, &get, true).unwrap_err();
+                assert_eq!(error.message, format!("hgs {command} does not support --dry-run"));
+            }
+        });
+        for command in ["claude", "sh", "subagents", "session-upload", "__state"] {
+            assert!(!kept_setting(command), "{command}");
         }
     }
 

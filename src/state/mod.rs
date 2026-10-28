@@ -834,6 +834,10 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if args.first().map(String::as_str)==Some("repository-git-worker") { return repositories::git_worker(&args[1..]); }
     #[cfg(unix)]
     if args.first().map(String::as_str)==Some("worktree-request-worker") { return worktree_requests::worker(&args[1..]); }
+    // Settings this computer keeps for its hooks (U19, U22): a control console
+    // reads and changes them too.
+    if args.first().map(String::as_str)==Some("subagents-confirm") { return subagents_confirm::dispatch(&args[1..]); }
+    if args.first().map(String::as_str)==Some("session-upload-block") { return session_upload::dispatch(&args[1..]); }
     session_operations()?;
     let Some((command, args)) = args.split_first() else {
         return Err("missing state operation".into());
@@ -880,12 +884,6 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     }
     if command == "hook" {
         return hooks::hook();
-    }
-    if command == "subagents-confirm" {
-        return subagents_confirm::dispatch(args);
-    }
-    if command == "session-upload-block" {
-        return session_upload::dispatch(args);
     }
     if command == "answer-channel" {
         return answer_channel::run();

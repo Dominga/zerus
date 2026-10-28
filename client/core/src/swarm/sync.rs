@@ -1,1 +1,1310 @@
-//! Task 4.
+//! The write side of the organization, a port of tray/src/SwarmController.cpp:
+//! one `hgs swarm apply {base, desired, versions}` at a time, base and
+//! versions from one observed state, edits flushed 120 ms after the last
+//! one, and only acknowledged fields advanced. Pure: the hub runs the
+//! invocations and passes the clock in (milliseconds).
+//!
+//! A failed or timed-out apply keeps its edits, and the next tick sends the
+//! same base, desired state and versions again, as Qt's `refresh` does
+//! (67-73, 96-110). `swarm apply` is a declarative three-way merge guarded by
+//! versions: a resend of a diff that already landed adds a head with the same
+//! value, which is no conflict, and a stale base surfaces as a conflict
+//! (src/swarm/model.rs:126-201, 298-312; coordinator ruling, 2026-10-28).
+//!
+//! Pending edits survive a restart as Qt's do: [`Controller::take_draft`]
+//! gives the draft file's next content ([`super::draft`]), and
+//! [`Controller::restore`] takes it back at start. Nothing is sent before the
+//! first state, and the draft then goes out from its saved base and versions
+//! (SwarmController.cpp:76-89, 191-206).
+//!
+//! One rule differs from Qt on purpose. Qt initializes an empty local catalog
+//! with its own cache (81-88). This client has none, and an initialize from it
+//! would mark the catalog imported and skip the Qt GUI's one-time import
+//! (src/swarm/mod.rs:212-215): edits wait until the catalog reports
+//! `initialized`.
+//!
+//! Edits are refused while the controller is not ready, renames included: a
+//! rename the list saw before the first state stays with the hub, which hands
+//! it over once [`Controller::ready`] holds. `Intent::Renamed` changes nothing
+//! when its old name is no member any more, so a late or repeated one is safe.
+use super::draft::{Draft, DraftWrite};
+use super::edit::{self, Intent};
+use super::grouping::SyncView;
+use super::members;
+use crate::reads::{failure_text, ReadError, NOT_TAKEN};
+use crate::views::projects::status_of;
+use crate::{Exit, Invocation};
+use serde::Serialize;
+use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+pub use super::STARTING;
+
+/// SwarmController's flush delay (SwarmController.cpp:64).
+pub const FLUSH_MS: u64 = 120;
+/// SwarmController's poll interval (SwarmController.cpp:55): the tick that
+/// sends pending edits again after a failed apply.
+pub const REFRESH_MS: u64 = 5_000;
+/// How long a state without this client's last write counts as older.
+pub const GUARD_MS: u64 = 10_000;
+/// HgsClient::requestSwarm's timeout for local catalog commands (HgsClient.cpp:711).
+pub const APPLY_TIMEOUT: Duration = Duration::from_secs(10);
+pub const NOT_SET_UP: &str =
+    "Project sync is not set up on this computer yet. Start Zerus here once to import its projects.";
+/// The organization topic ended, or the hub's worker is gone.
+pub const STOPPED: &str = "Project sync stopped.";
+/// SwarmController.cpp:195.
+pub const OUTDATED: &str = "Project sync needs an updated HGS installation.";
+/// HgsClient.cpp:713.
+pub const INVALID: &str = "Invalid project catalog response";
+/// How much of a failed apply's standard error its status keeps (HgsClient.cpp:475).
+const MESSAGE_CHARS: usize = 4000;
+
+/// SwarmController.cpp:69.
+pub fn unavailable(detail: &str) -> String {
+    format!("Project sync unavailable: {detail}")
+}
+
+/// One observed catalog: the `swarm get` object without `versions`, its
+/// digest, the versions observed with it and its membership.
+#[derive(Clone, Debug)]
+pub struct Observation {
+    pub digest: String,
+    pub value: Arc<Value>,
+    pub versions: Value,
+    pub membership: Arc<BTreeMap<String, String>>,
+}
+
+impl Observation {
+    /// A `swarm get` or `swarm apply` reply, with its versions taken out.
+    pub fn from_reply(mut reply: Value) -> Option<Self> {
+        if reply["schema"] != 1 || !reply["organization"].is_object() {
+            return None;
+        }
+        let object = reply.as_object_mut()?;
+        let versions = object.remove("versions").unwrap_or_else(|| json!({}));
+        object.remove("written");
+        let digest = reply["digest"].as_str().unwrap_or("").to_owned();
+        let membership = Arc::new(members(&reply["organization"]));
+        Some(Self {
+            digest,
+            value: Arc::new(reply),
+            versions,
+            membership,
+        })
+    }
+}
+
+pub type Ticket = u64;
+
+/// How an edit ended, for the webview: the outcome of the first apply that carried it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum EditOutcome {
+    /// Saved; `conflicts` counts the conflicts on the fields it wrote.
+    Done { conflicts: usize },
+    /// The apply failed or timed out. The edit stays pending, the list keeps
+    /// showing it, and the next tick sends it again. `detail` is Qt's status
+    /// line: "Project sync unavailable: …" or the schema text.
+    Kept { detail: String },
+    /// Not queued: the catalog is not ready, or the edit cannot be made.
+    Refused { detail: String },
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Due {
+    Nothing,
+    Apply(Invocation),
+    /// Edits that changed nothing shared: done without a call.
+    Settled(Vec<(Ticket, EditOutcome)>),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Reply {
+    Done(Value),
+    /// A reply of another schema (SwarmController.cpp:194-196).
+    Outdated,
+    /// Qt's `swarmFailed` (HgsClient.cpp:713-715), with the error.
+    Failed(String),
+}
+
+/// How an apply ended, read as Qt reads it: a JSON object, else "Invalid
+/// project catalog response" (HgsClient.cpp:711-715), then the schema check
+/// (SwarmController.cpp:194). Every failure is sent again, so whether a
+/// failed apply landed does not change what happens next. The failure texts
+/// are the reads' ([`crate::reads`]).
+pub fn classify(exit: Exit) -> Reply {
+    match exit {
+        Exit::Code {
+            code: 0, stdout, ..
+        } => match serde_json::from_slice::<Value>(&stdout) {
+            Ok(reply) if reply["schema"] == 1 && reply["organization"].is_object() => {
+                Reply::Done(reply)
+            }
+            Ok(reply) if reply.is_object() => Reply::Outdated,
+            _ => Reply::Failed(INVALID.into()),
+        },
+        Exit::Code { code, stderr, .. } => {
+            Reply::Failed(failure_text(Some(code), &stderr, MESSAGE_CHARS))
+        }
+        Exit::StartFailed(error) => Reply::Failed(error),
+        Exit::TimedOut => Reply::Failed(ReadError::TimedOut.to_string()),
+        Exit::Abnormal { stderr } => Reply::Failed(failure_text(None, &stderr, MESSAGE_CHARS)),
+        Exit::WriteFailed => Reply::Failed(NOT_TAKEN.into()),
+    }
+}
+
+/// `hgs swarm apply` with compact JSON input, this computer only (HgsClient.cpp:706-719).
+pub fn invocation(input: &Value) -> Invocation {
+    Invocation {
+        args: vec!["swarm".into(), "apply".into()],
+        stdin: Some(serde_json::to_vec(input).expect("the request serializes")),
+        timeout: APPLY_TIMEOUT,
+        request_id: None,
+    }
+}
+
+fn saved(tickets: Vec<Ticket>) -> Vec<(Ticket, EditOutcome)> {
+    tickets
+        .into_iter()
+        .map(|ticket| (ticket, EditOutcome::Done { conflicts: 0 }))
+        .collect()
+}
+
+#[derive(Debug)]
+struct Sent {
+    desired: Value,
+    /// The edits this apply carries; each is answered by it.
+    tickets: Vec<Ticket>,
+}
+
+/// SwarmController's state (SwarmController.h:37-46).
+#[derive(Debug, Default)]
+pub struct Controller {
+    /// m_base: the organization the edits start from.
+    base: Option<Value>,
+    value: Option<Arc<Value>>,
+    membership: Arc<BTreeMap<String, String>>,
+    /// m_versions.
+    versions: Map<String, Value>,
+    digest: String,
+    /// m_desired, when it differs from the base.
+    desired: Option<Value>,
+    desired_membership: Option<Arc<BTreeMap<String, String>>>,
+    /// Edits no apply has carried yet.
+    queued: Vec<Ticket>,
+    /// m_sent and the request (busy while Some).
+    sent: Option<Sent>,
+    /// m_flush (SwarmController.cpp:64-65).
+    flush_at: Option<u64>,
+    /// The next `refresh` that sends `apply` (m_poll, 55, 96-101); a failure arms it.
+    refresh_at: Option<u64>,
+    /// m_ready: an initialized catalog was observed. Once set, it stays.
+    ready: bool,
+    /// The organization topic ended: new edits wait for its next state.
+    ended: bool,
+    /// A draft of the last run waits for the first state (Qt's `start`, 76-89).
+    restored: bool,
+    /// Pending edits changed since the draft file was last given out.
+    draft_changed: bool,
+    /// The operations the last acknowledged write made, per token, until a state shows them.
+    guard: BTreeMap<String, Value>,
+    guard_until: u64,
+    status: Option<(String, bool)>,
+    conflicts: usize,
+    source_error: Option<String>,
+    revision: u64,
+    tickets: Ticket,
+}
+
+impl Controller {
+    /// Whether edits are accepted.
+    pub fn ready(&self) -> bool {
+        self.ready && !self.ended
+    }
+
+    pub fn busy(&self) -> bool {
+        self.sent.is_some()
+    }
+
+    pub fn pending(&self) -> bool {
+        self.desired.is_some()
+    }
+
+    /// Changes whenever the presented organization does.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    /// When `due` next has something to do: the flush or the tick.
+    pub fn next_due(&self) -> Option<u64> {
+        match (self.flush_at, self.refresh_at) {
+            (Some(flush), Some(refresh)) => Some(flush.min(refresh)),
+            (flush, refresh) => flush.or(refresh),
+        }
+    }
+
+    /// What the list shows: the desired organization while edits are
+    /// pending (Qt shows its m_organization), else the base.
+    pub fn presented(&self) -> Option<(&Value, Arc<BTreeMap<String, String>>)> {
+        match (&self.desired, &self.base) {
+            (Some(desired), _) => {
+                Some((desired, self.desired_membership.clone().unwrap_or_default()))
+            }
+            (None, Some(base)) => Some((base, Arc::clone(&self.membership))),
+            (None, None) => None,
+        }
+    }
+
+    /// The `swarm get` object of what the list shows, for the Projects
+    /// screen. While edits are pending it carries the desired organization,
+    /// whose `project_order` is the one the apply writes (`edit::shared`):
+    /// the edits order `projects` only, and the screen follows
+    /// `project_order` first, so a pending create, delete or reorder shows
+    /// where hgs will place it.
+    pub fn presented_value(&self) -> Option<Arc<Value>> {
+        let value = self.value.as_ref()?;
+        let Some(desired) = &self.desired else {
+            return Some(Arc::clone(value));
+        };
+        let mut organization = desired.clone();
+        if let Some(object) = organization.as_object_mut() {
+            object.insert("project_order".into(), edit::project_order(desired));
+        }
+        let mut copy = (**value).clone();
+        copy["organization"] = organization;
+        Some(Arc::new(copy))
+    }
+
+    fn reason(&self) -> String {
+        if let (None, Some(error)) = (&self.base, &self.source_error) {
+            return unavailable(error);
+        }
+        match &self.value {
+            Some(value) if value["initialized"] != true => NOT_SET_UP.into(),
+            Some(_) if self.ended => STOPPED.into(),
+            _ => STARTING.into(),
+        }
+    }
+
+    pub fn view(&self) -> SyncView {
+        let (status, status_error) = self.status.clone().unwrap_or_default();
+        SyncView {
+            ready: self.ready(),
+            reason: (!self.ready()).then(|| self.reason()),
+            busy: self.busy(),
+            status,
+            status_error,
+            conflicts: self.conflicts,
+        }
+    }
+
+    fn adopt(&mut self, observation: Observation) {
+        self.status = Some(status_of(&observation.value));
+        self.conflicts = observation.value["conflicts"]
+            .as_array()
+            .map_or(0, Vec::len);
+        self.ready |= observation.value["initialized"] == true;
+        self.base = Some(observation.value["organization"].clone());
+        self.versions = observation
+            .versions
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        self.digest = observation.digest;
+        self.membership = observation.membership;
+        self.value = Some(observation.value);
+        self.desired = None;
+        self.desired_membership = None;
+        self.source_error = None;
+        self.revision += 1;
+    }
+
+    /// A state from the source (the topic, or the core's `swarm get` poll).
+    /// Not adopted while an apply runs or edits are pending
+    /// (SwarmController.cpp:204-206), or while it lacks this client's last
+    /// write. After a failed apply it is the tick that sends it again, where
+    /// Qt's `refresh` would send `apply` instead of reading (96-101).
+    pub fn observe(&mut self, observation: Observation, now: u64) -> bool {
+        self.ended = false;
+        if self.busy() {
+            return false;
+        }
+        if self.pending() {
+            if self.restored {
+                // Qt's first reply after a start with a draft: ready (197), the
+                // base kept since it was a read (203), and the flush sends the
+                // draft from the saved base and versions (204-205).
+                self.ready |= observation.value["initialized"] == true;
+                if self.ready {
+                    self.restored = false;
+                    self.flush_at = Some(now + FLUSH_MS);
+                }
+            } else if self.refresh_at.is_some() {
+                self.refresh_at = Some(now);
+            }
+            return false;
+        }
+        if now < self.guard_until {
+            let shows = |token: &String, ops: &Value| {
+                let heads = observation.versions.get(token).and_then(Value::as_array);
+                ops.as_array()
+                    .into_iter()
+                    .flatten()
+                    .all(|op| heads.is_some_and(|heads| heads.contains(op)))
+            };
+            if !self.guard.iter().all(|(token, ops)| shows(token, ops)) {
+                return false;
+            }
+        }
+        self.guard.clear();
+        self.adopt(observation);
+        true
+    }
+
+    pub fn source_failed(&mut self, message: &str) {
+        self.source_error = Some(message.to_owned());
+        self.status = Some((unavailable(message), true));
+    }
+
+    /// The topic ended (`OrganizationUpdate::Ended`). New edits wait for its
+    /// next state; pending ones are still sent, since applies are local.
+    pub fn source_ended(&mut self) {
+        self.ended = true;
+    }
+
+    /// An edit (Qt's `edit`, SwarmController.cpp:90-95) on what the list shows.
+    pub fn edit(&mut self, intent: &Intent, now: u64) -> Result<Ticket, String> {
+        if !self.ready() {
+            return Err(self.reason());
+        }
+        let current = self
+            .desired
+            .as_ref()
+            .or(self.base.as_ref())
+            .ok_or_else(|| self.reason())?;
+        let next = edit::apply(current, intent)?;
+        self.desired_membership = Some(Arc::new(members(&next)));
+        self.desired = Some(next);
+        self.draft_changed = true;
+        self.revision += 1;
+        self.tickets += 1;
+        self.queued.push(self.tickets);
+        if !self.busy() {
+            // Restarted by each edit while idle (94), also after a failure.
+            self.flush_at = Some(now + FLUSH_MS);
+        }
+        Ok(self.tickets)
+    }
+
+    /// The flush (SwarmController.cpp:65) or the tick (`refresh`, 96-101).
+    pub fn due(&mut self, now: u64) -> Due {
+        let reached = |at: Option<u64>| at.is_some_and(|at| now >= at);
+        if self.busy() || !self.ready || !(reached(self.flush_at) || reached(self.refresh_at)) {
+            return Due::Nothing;
+        }
+        self.flush_at = None;
+        self.refresh_at = None;
+        let tickets = std::mem::take(&mut self.queued);
+        let (Some(base), Some(desired)) = (&self.base, &self.desired) else {
+            return Due::Settled(saved(tickets));
+        };
+        if !edit::changes_shared(base, desired) {
+            // m_base == m_desired: nothing to send (65, 100). The list shows
+            // the base again, which differs at most in the local order.
+            self.desired = None;
+            self.desired_membership = None;
+            self.draft_changed = true;
+            self.revision += 1;
+            return Due::Settled(saved(tickets));
+        }
+        // send (102-110): the held base, desired and versions. After a
+        // failure they are unchanged, so the resend is the same request.
+        let input = json!({"base": edit::shared(base), "desired": edit::shared(desired),
+                           "versions": Value::Object(self.versions.clone())});
+        self.sent = Some(Sent {
+            desired: desired.clone(),
+            tickets,
+        });
+        Due::Apply(invocation(&input))
+    }
+
+    /// The apply's exit (Qt's `received` and `swarmFailed`, SwarmController.cpp:191-219, 67-73):
+    /// the answers of the edits it carried.
+    pub fn finish(&mut self, exit: Exit, now: u64) -> Vec<(Ticket, EditOutcome)> {
+        let Some(sent) = self.sent.take() else {
+            return Vec::new();
+        };
+        match classify(exit) {
+            Reply::Done(reply) => self.acknowledged(sent, reply, now),
+            Reply::Outdated => self.kept(sent, OUTDATED.into(), now),
+            Reply::Failed(error) => self.kept(sent, unavailable(&error), now),
+        }
+    }
+
+    fn acknowledged(&mut self, sent: Sent, reply: Value, now: u64) -> Vec<(Ticket, EditOutcome)> {
+        self.refresh_at = None;
+        // A new base and versions for the edits made meanwhile, or none left (persist, 205, 209).
+        self.draft_changed = true;
+        let written = reply["written"].as_object().cloned().unwrap_or_default();
+        for (token, ops) in &written {
+            self.versions.insert(token.clone(), ops.clone());
+            self.guard.insert(token.clone(), ops.clone());
+        }
+        if !written.is_empty() {
+            self.guard_until = now + GUARD_MS;
+        }
+        let conflicts = reply["conflicts"].as_array().map_or(0, |list| {
+            list.iter()
+                .filter(|conflict| {
+                    conflict["key"]
+                        .as_str()
+                        .is_some_and(|key| written.contains_key(key))
+                })
+                .count()
+        });
+        let outcome = EditOutcome::Done { conflicts };
+        let settled = sent
+            .tickets
+            .iter()
+            .map(|ticket| (*ticket, outcome.clone()))
+            .collect();
+        if self.desired.as_ref() == Some(&sent.desired) {
+            self.desired = None;
+            self.desired_membership = None;
+        }
+        if self.desired.is_some() {
+            // Edits made meanwhile go next, from what was sent (203-205).
+            self.base = Some(sent.desired);
+            self.flush_at = Some(now + FLUSH_MS);
+        } else if let Some(observation) = Observation::from_reply(reply) {
+            let guard = std::mem::take(&mut self.guard);
+            self.adopt(observation);
+            self.guard = guard;
+        } else {
+            self.base = Some(sent.desired);
+        }
+        settled
+    }
+
+    /// Qt's failure path (67-73) and schema check (194-196): only the status
+    /// changes. Base, desired and versions stay, so the next tick sends the
+    /// same apply (refresh, 96-101), and edits queued meanwhile ride on it.
+    fn kept(&mut self, sent: Sent, status: String, now: u64) -> Vec<(Ticket, EditOutcome)> {
+        self.status = Some((status.clone(), true));
+        self.refresh_at = Some(now + REFRESH_MS);
+        sent.tickets
+            .into_iter()
+            .map(|ticket| {
+                (
+                    ticket,
+                    EditOutcome::Kept {
+                        detail: status.clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// The draft of the last run (Qt's `start`, SwarmController.cpp:76-89):
+    /// the saved base, desired state and versions. The list shows the draft at
+    /// once. The controller stays not ready, so nothing is sent and no edit is
+    /// taken before the first state (`observe`). Ignored once a base is held.
+    pub fn restore(&mut self, draft: Draft) {
+        if self.base.is_some() {
+            return;
+        }
+        self.membership = Arc::new(members(&draft.base));
+        self.desired_membership = Some(Arc::new(members(&draft.desired)));
+        self.base = Some(draft.base);
+        self.desired = Some(draft.desired);
+        self.versions = draft.versions;
+        self.restored = true;
+        self.revision += 1;
+    }
+
+    /// The draft file's next content, once after pending edits changed: the
+    /// base, desired state and versions while edits are pending, else its
+    /// removal. Qt saves its draft with every change (SessionsWindow.cpp:2496)
+    /// and its base and versions with `persist` (SwarmController.cpp:111-130).
+    pub fn take_draft(&mut self) -> Option<DraftWrite> {
+        if !std::mem::take(&mut self.draft_changed) {
+            return None;
+        }
+        Some(match (&self.base, &self.desired) {
+            (Some(base), Some(desired)) => DraftWrite::Save(
+                Draft::new(base.clone(), desired.clone(), self.versions.clone()).to_json(),
+            ),
+            _ => DraftWrite::Remove,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::swarm::edit::Intent;
+    use serde_json::json;
+
+    const R: &str = "workstation\nclaude/sample-project/review";
+    const LOCAL: &str = "Local catalog. Connect another computer to sync projects.";
+
+    fn review() -> String {
+        json!({"kind": "session", "machine": "m-1", "session": "claude/sample-project/review"})
+            .to_string()
+    }
+
+    fn alpha_name() -> String {
+        json!({"kind": "project", "id": "alpha", "field": "name"}).to_string()
+    }
+
+    /// `swarm get` with the review session in `project` and its heads; alpha's name has heads `op-a1`.
+    fn state(digest: &str, project: &str, heads: &[&str]) -> Value {
+        let list = |id: &str| if id == project { json!([R]) } else { json!([]) };
+        let mut versions = Map::new();
+        versions.insert(review(), json!(heads));
+        versions.insert(alpha_name(), json!(["op-a1"]));
+        json!({"schema": 1, "node_id": "node-1", "digest": digest, "initialized": true, "machines": [], "peers": {}, "conflicts": [],
+               "organization": {"version": 2, "default_project": "ungrouped", "projects": [
+                   {"id": "alpha", "name": "Alpha", "color": "#3fb950", "accessible": true, "folders": [], "sessions": list("alpha")},
+                   {"id": "beta", "name": "Beta", "color": "#64b5f6", "accessible": true, "folders": [], "sessions": list("beta")},
+                   {"id": "ungrouped", "name": "Inbox", "color": "#8d9baa", "accessible": true, "folders": [], "sessions": list("ungrouped")}]},
+               "versions": versions})
+    }
+
+    fn observation(value: Value) -> Observation {
+        Observation::from_reply(value).unwrap()
+    }
+
+    fn to(project: &str) -> Intent {
+        Intent::Move {
+            members: vec![R.into()],
+            project: project.into(),
+            before: None,
+        }
+    }
+
+    fn ready() -> Controller {
+        let mut sync = Controller::default();
+        assert!(sync.observe(observation(state("d1", "alpha", &["op-1"])), 0));
+        sync
+    }
+
+    fn input(due: Due) -> Value {
+        match due {
+            Due::Apply(invocation) => {
+                assert_eq!(invocation.args, ["swarm", "apply"]);
+                assert_eq!(invocation.timeout, APPLY_TIMEOUT);
+                serde_json::from_slice(invocation.stdin.as_ref().unwrap()).unwrap()
+            }
+            _ => panic!("no apply"),
+        }
+    }
+
+    fn reply(mut value: Value, written: &[&str]) -> Exit {
+        let mut map = Map::new();
+        if !written.is_empty() {
+            map.insert(review(), json!(written));
+        }
+        value["written"] = Value::Object(map);
+        Exit::Code {
+            code: 0,
+            stdout: serde_json::to_vec(&value).unwrap(),
+            stderr: String::new(),
+        }
+    }
+
+    fn place(sync: &Controller) -> String {
+        crate::swarm::members(sync.presented().unwrap().0)[R].clone()
+    }
+
+    #[test]
+    fn edits_wait_for_an_initialized_catalog_and_nothing_initializes_it() {
+        let mut sync = Controller::default();
+        assert_eq!(sync.edit(&to("beta"), 0), Err(STARTING.into()));
+        let mut fresh = state("d0", "alpha", &["op-1"]);
+        fresh["initialized"] = json!(false);
+        assert!(sync.observe(observation(fresh), 0));
+        assert_eq!(sync.edit(&to("beta"), 0), Err(NOT_SET_UP.into()));
+        assert!(matches!(sync.due(10_000), Due::Nothing));
+        assert_eq!(sync.view().reason.as_deref(), Some(NOT_SET_UP));
+        assert!(sync.presented().is_some(), "the list still groups by it");
+    }
+
+    #[test]
+    fn edits_flush_together_120_ms_after_the_last_one() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        sync.edit(
+            &Intent::Rename {
+                project: "beta".into(),
+                name: "Beta two".into(),
+            },
+            100,
+        )
+        .unwrap();
+        assert!(matches!(sync.due(219), Due::Nothing));
+        let sent = input(sync.due(220));
+        let seen = state("d1", "alpha", &["op-1"]);
+        assert_eq!(
+            sent["base"],
+            crate::swarm::edit::shared(&seen["organization"])
+        );
+        assert_eq!(sent["versions"], seen["versions"]);
+        assert_eq!(crate::swarm::members(&sent["desired"])[R], "beta");
+        assert_eq!(
+            crate::swarm::projects(&sent["desired"])[1]["name"],
+            "Beta two"
+        );
+        assert!(sync.busy() && sync.view().busy);
+        assert!(
+            matches!(sync.due(10_000), Due::Nothing),
+            "one apply at a time"
+        );
+    }
+
+    #[test]
+    fn edits_during_an_apply_follow_from_what_was_sent_with_only_written_fields_advanced() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let first = input(sync.due(120));
+        let second_ticket = sync.edit(&to("ungrouped"), 500).unwrap();
+        assert_eq!(sync.next_due(), None, "no timer while busy");
+        // Another writer renamed alpha meanwhile: the reply shows it; the user has not seen it.
+        let mut answer = state("d2", "beta", &["op-2"]);
+        answer["versions"][alpha_name().as_str()] = json!(["op-a2"]);
+        assert_eq!(
+            sync.finish(reply(answer, &["op-2"]), 900),
+            [(1, EditOutcome::Done { conflicts: 0 })]
+        );
+        assert_eq!(sync.next_due(), Some(1020));
+        assert_eq!(
+            place(&sync),
+            "ungrouped",
+            "the list keeps showing the pending edit"
+        );
+        let second = input(sync.due(1020));
+        assert_eq!(second["base"], first["desired"]);
+        assert_eq!(second["versions"][review().as_str()], json!(["op-2"]));
+        assert_eq!(
+            second["versions"][alpha_name().as_str()],
+            json!(["op-a1"]),
+            "an unseen field keeps the version the user saw"
+        );
+        let settled = sync.finish(reply(state("d3", "ungrouped", &["op-4"]), &["op-4"]), 1500);
+        assert_eq!(
+            settled,
+            [(second_ticket, EditOutcome::Done { conflicts: 0 })]
+        );
+        assert_eq!(
+            sync.digest(),
+            "d3",
+            "nothing pending: the reply is the base"
+        );
+    }
+
+    #[test]
+    fn states_wait_for_pending_edits_and_the_reply_is_adopted() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        assert!(
+            !sync.observe(observation(state("d2", "ungrouped", &["op-9"])), 50),
+            "never merged under an edit"
+        );
+        assert_eq!(place(&sync), "beta");
+        let _ = input(sync.due(120));
+        assert!(!sync.observe(observation(state("d2", "ungrouped", &["op-9"])), 200));
+        sync.finish(reply(state("d3", "beta", &["op-2"]), &["op-2"]), 300);
+        assert_eq!(sync.digest(), "d3");
+        assert_eq!(place(&sync), "beta");
+    }
+
+    #[test]
+    fn a_state_without_our_write_is_older_and_waits_for_one_that_shows_it() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let _ = input(sync.due(120));
+        sync.finish(reply(state("d3", "beta", &["op-2"]), &["op-2"]), 300);
+        assert!(
+            !sync.observe(observation(state("d1", "alpha", &["op-1"])), 400),
+            "read before the write"
+        );
+        assert!(
+            !sync.observe(observation(state("d2", "ungrouped", &["op-9"])), 500),
+            "another writer's state without it"
+        );
+        assert_eq!(sync.digest(), "d3");
+        assert!(sync.observe(observation(state("d4", "beta", &["op-2"])), 600));
+        assert!(
+            sync.observe(observation(state("d5", "alpha", &["op-5"])), 700),
+            "the guard ended with the state that showed the write"
+        );
+    }
+
+    #[test]
+    fn the_guard_ends_after_ten_seconds() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let _ = input(sync.due(120));
+        sync.finish(reply(state("d3", "beta", &["op-2"]), &["op-2"]), 300);
+        assert!(!sync.observe(
+            observation(state("d6", "alpha", &["op-6"])),
+            300 + GUARD_MS - 1
+        ));
+        assert!(
+            sync.observe(observation(state("d6", "alpha", &["op-6"])), 300 + GUARD_MS),
+            "a later writer superseded ours"
+        );
+    }
+
+    // SwarmController.cpp:67-73 (failure), 96-101 (refresh), 102-110 (send).
+    #[test]
+    fn a_failed_apply_keeps_its_edits_and_the_next_tick_sends_them_again() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let first = input(sync.due(120));
+        let queued = sync.edit(&to("ungrouped"), 130).unwrap();
+        let exit = Exit::Code {
+            code: 1,
+            stdout: vec![],
+            stderr: " hgs: session belongs to more than one project \n".into(),
+        };
+        let status = "Project sync unavailable: hgs: session belongs to more than one project";
+        assert_eq!(
+            sync.finish(exit, 200),
+            [(
+                1,
+                EditOutcome::Kept {
+                    detail: status.into()
+                }
+            )],
+            "the queued edit rides on the resend"
+        );
+        assert!(
+            sync.pending() && sync.ready(),
+            "nothing was dropped and the base stays valid"
+        );
+        assert_eq!(
+            place(&sync),
+            "ungrouped",
+            "the list keeps showing the edits"
+        );
+        let view = sync.view();
+        assert_eq!((view.status.as_str(), view.status_error), (status, true));
+        let tick = 200 + REFRESH_MS;
+        assert_eq!(sync.next_due(), Some(tick));
+        for now in (200..tick).step_by(100) {
+            assert!(
+                matches!(sync.due(now), Due::Nothing),
+                "nothing before the tick, at {now}"
+            );
+        }
+        let again = input(sync.due(tick));
+        assert_eq!(
+            again["base"], first["base"],
+            "the base the edits started from"
+        );
+        assert_eq!(
+            again["versions"], first["versions"],
+            "a failure advances no version"
+        );
+        assert_eq!(
+            crate::swarm::members(&again["desired"])[R],
+            "ungrouped",
+            "the desired state now"
+        );
+        assert!(
+            matches!(sync.due(tick + 100), Due::Nothing),
+            "one apply at a time"
+        );
+        let settled = sync.finish(
+            reply(state("d3", "ungrouped", &["op-3"]), &["op-3"]),
+            tick + 200,
+        );
+        assert_eq!(settled, [(queued, EditOutcome::Done { conflicts: 0 })]);
+        assert!(!sync.pending());
+        assert_eq!(sync.next_due(), None, "the tick has nothing left to send");
+        assert_eq!(sync.view().status, LOCAL);
+    }
+
+    // SwarmController.cpp:90-95: an edit restarts the flush, also after a failure.
+    #[test]
+    fn an_edit_after_a_failure_flushes_120_ms_later_from_the_same_base() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let first = input(sync.due(120));
+        sync.finish(Exit::TimedOut, 10_120);
+        let ticket = sync
+            .edit(
+                &Intent::Rename {
+                    project: "beta".into(),
+                    name: "Beta two".into(),
+                },
+                10_200,
+            )
+            .unwrap();
+        assert!(matches!(sync.due(10_319), Due::Nothing));
+        let again = input(sync.due(10_320));
+        assert_eq!(
+            (&again["base"], &again["versions"]),
+            (&first["base"], &first["versions"])
+        );
+        assert_eq!(
+            crate::swarm::members(&again["desired"])[R],
+            "beta",
+            "the kept edit"
+        );
+        assert_eq!(
+            crate::swarm::projects(&again["desired"])[1]["name"],
+            "Beta two",
+            "and the new one"
+        );
+        let settled = sync.finish(reply(state("d2", "beta", &["op-2"]), &["op-2"]), 10_500);
+        assert_eq!(settled, [(ticket, EditOutcome::Done { conflicts: 0 })]);
+    }
+
+    // The topic's state is this client's read tick, where Qt's refresh would send the apply.
+    #[test]
+    fn a_state_after_a_failed_apply_is_the_tick_that_sends_it_again() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let first = input(sync.due(120));
+        sync.finish(Exit::TimedOut, 10_120);
+        // The topic shows that the first apply landed; it is not adopted under the pending edit.
+        assert!(!sync.observe(observation(state("d2", "beta", &["op-2"])), 10_300));
+        assert_eq!(
+            input(sync.due(10_300)),
+            first,
+            "sent again at once, unchanged"
+        );
+        assert!(
+            !sync.observe(observation(state("d2", "beta", &["op-2"])), 10_400),
+            "nothing while it runs"
+        );
+        assert!(matches!(sync.due(10_400), Due::Nothing));
+        // hgs adds a head with the same value: no conflict (src/swarm/model.rs:298-312).
+        let settled = sync.finish(
+            reply(state("d3", "beta", &["op-2", "op-3"]), &["op-3"]),
+            10_600,
+        );
+        assert!(
+            settled.is_empty(),
+            "the edit was answered by the first apply"
+        );
+        assert_eq!((sync.digest(), sync.view().conflicts), ("d3", 0));
+    }
+
+    // SwarmController.cpp:194-196.
+    #[test]
+    fn an_outdated_reply_keeps_the_edits_with_qt_s_schema_text() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let _ = input(sync.due(120));
+        let exit = Exit::Code {
+            code: 0,
+            stdout: br#"{"schema":2}"#.to_vec(),
+            stderr: String::new(),
+        };
+        assert_eq!(
+            sync.finish(exit, 300),
+            [(
+                1,
+                EditOutcome::Kept {
+                    detail: OUTDATED.into()
+                }
+            )]
+        );
+        let view = sync.view();
+        assert_eq!(
+            (view.status.as_str(), view.status_error),
+            ("Project sync needs an updated HGS installation.", true)
+        );
+        assert!(sync.pending());
+        assert_eq!(sync.next_due(), Some(300 + REFRESH_MS));
+    }
+
+    // Qt's m_base == m_desired (SwarmController.cpp:65, 100): nothing is left to send.
+    #[test]
+    fn an_edit_back_to_the_base_after_a_failure_ends_the_resend() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let _ = input(sync.due(120));
+        sync.finish(Exit::TimedOut, 10_120);
+        let back = sync.edit(&to("alpha"), 10_200).unwrap();
+        match sync.due(10_320) {
+            Due::Settled(settled) => {
+                assert_eq!(settled, [(back, EditOutcome::Done { conflicts: 0 })])
+            }
+            _ => panic!("nothing left to send"),
+        }
+        assert!(!sync.pending());
+        assert_eq!(sync.next_due(), None);
+        assert!(
+            sync.observe(observation(state("d2", "alpha", &["op-1"])), 10_400),
+            "states are adopted again"
+        );
+    }
+
+    #[test]
+    fn the_end_of_the_source_refuses_new_edits_and_still_sends_pending_ones() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        sync.source_ended();
+        assert_eq!(sync.edit(&to("ungrouped"), 50), Err(STOPPED.into()));
+        assert_eq!(sync.view().reason.as_deref(), Some(STOPPED));
+        let _ = input(sync.due(120));
+        sync.finish(reply(state("d2", "beta", &["op-2"]), &["op-2"]), 300);
+        assert_eq!(place(&sync), "beta");
+        assert!(
+            sync.observe(observation(state("d3", "beta", &["op-2"])), 400),
+            "a state: the source is back"
+        );
+        assert!(sync.ready());
+    }
+
+    // Qt saves its draft with every change (SessionsWindow.cpp:2496) and its base
+    // and versions with persist (SwarmController.cpp:111-130, called at 205 and 209).
+    #[test]
+    fn the_draft_follows_pending_edits_and_is_removed_when_they_settle() {
+        let saved = |change: Option<DraftWrite>| match change {
+            Some(DraftWrite::Save(bytes)) => Draft::from_json(&bytes).unwrap(),
+            other => panic!("no draft saved: {other:?}"),
+        };
+        let mut sync = ready();
+        assert_eq!(sync.take_draft(), None, "nothing pending");
+        sync.edit(&to("beta"), 0).unwrap();
+        let seen = state("d1", "alpha", &["op-1"]);
+        let draft = saved(sync.take_draft());
+        assert_eq!(
+            draft.base, seen["organization"],
+            "the base the edit started from"
+        );
+        assert_eq!(Value::Object(draft.versions), seen["versions"]);
+        assert_eq!(crate::swarm::members(&draft.desired)[R], "beta");
+        assert_eq!(sync.take_draft(), None, "written once");
+        let _ = input(sync.due(120));
+        sync.edit(&to("ungrouped"), 200).unwrap();
+        assert_eq!(
+            crate::swarm::members(&saved(sync.take_draft()).desired)[R],
+            "ungrouped",
+            "an edit during the apply"
+        );
+        sync.finish(reply(state("d2", "beta", &["op-2"]), &["op-2"]), 300);
+        let draft = saved(sync.take_draft());
+        assert_eq!(
+            crate::swarm::members(&draft.base)[R],
+            "beta",
+            "the acknowledged write is the new base"
+        );
+        assert_eq!(
+            draft.versions[review().as_str()],
+            json!(["op-2"]),
+            "with its written version"
+        );
+        let _ = input(sync.due(420));
+        sync.finish(Exit::TimedOut, 10_420);
+        assert_eq!(sync.take_draft(), None, "a failure changes nothing pending");
+        let _ = input(sync.due(10_420 + REFRESH_MS));
+        sync.finish(
+            reply(state("d3", "ungrouped", &["op-3"]), &["op-3"]),
+            15_600,
+        );
+        assert_eq!(sync.take_draft(), Some(DraftWrite::Remove), "settled");
+    }
+
+    // Qt's start with a saved draft (SwarmController.cpp:76-89) and its first reply (191-206).
+    #[test]
+    fn a_restored_draft_is_shown_and_waits_for_the_first_state() {
+        let seen = state("d1", "alpha", &["op-1"]);
+        let mut desired = seen["organization"].clone();
+        desired["projects"][0]["sessions"] = json!([]);
+        desired["projects"][1]["sessions"] = json!([R]);
+        let versions = seen["versions"].as_object().unwrap().clone();
+        let mut sync = Controller::default();
+        sync.restore(Draft::new(seen["organization"].clone(), desired, versions));
+        assert_eq!(place(&sync), "beta", "the list shows the draft");
+        assert_eq!(sync.edit(&to("ungrouped"), 0), Err(STARTING.into()));
+        for now in (0..30_000).step_by(500) {
+            assert!(
+                matches!(sync.due(now), Due::Nothing),
+                "nothing before the first state, at {now}"
+            );
+        }
+        assert_eq!(sync.take_draft(), None, "the file already holds it");
+        assert!(
+            !sync.observe(observation(state("d2", "alpha", &["op-1"])), 30_000),
+            "not adopted under the draft"
+        );
+        assert!(sync.ready() && sync.pending());
+        assert_eq!(sync.next_due(), Some(30_000 + FLUSH_MS));
+        let sent = input(sync.due(30_000 + FLUSH_MS));
+        assert_eq!(
+            sent["base"],
+            crate::swarm::edit::shared(&seen["organization"])
+        );
+        assert_eq!(sent["versions"], seen["versions"]);
+        assert_eq!(crate::swarm::members(&sent["desired"])[R], "beta");
+    }
+
+    #[test]
+    fn conflicts_on_written_fields_are_the_outcome_and_the_status_follows_qt() {
+        let mut sync = ready();
+        sync.edit(&to("beta"), 0).unwrap();
+        let _ = input(sync.due(120));
+        let mut answer = state("d3", "beta", &["op-2", "op-3"]);
+        answer["conflicts"] = json!([
+            {"key": review(), "field": {"kind": "session"}, "selected": "op-3", "variants": []},
+            {"key": alpha_name(), "field": {"kind": "project"}, "selected": null, "variants": []}]);
+        assert_eq!(
+            sync.finish(reply(answer, &["op-3"]), 300),
+            [(1, EditOutcome::Done { conflicts: 1 })]
+        );
+        let view = sync.view();
+        assert_eq!(
+            (view.status.as_str(), view.status_error, view.conflicts),
+            ("2 project conflict(s) need review in Swarm.", true, 2)
+        );
+    }
+
+    #[test]
+    fn an_edit_that_changes_nothing_shared_sends_nothing() {
+        let mut sync = ready();
+        let ticket = sync
+            .edit(
+                &Intent::Move {
+                    members: vec![R.into()],
+                    project: "alpha".into(),
+                    before: None,
+                },
+                0,
+            )
+            .unwrap();
+        match sync.due(120) {
+            Due::Settled(settled) => {
+                assert_eq!(settled, [(ticket, EditOutcome::Done { conflicts: 0 })])
+            }
+            _ => panic!("nothing to send"),
+        }
+        assert!(!sync.busy());
+    }
+
+    #[test]
+    fn a_source_failure_keeps_the_base_and_shows_qt_s_text() {
+        let mut sync = ready();
+        sync.source_failed("catalog unreadable");
+        assert_eq!(
+            sync.view().status,
+            "Project sync unavailable: catalog unreadable"
+        );
+        assert!(sync.ready());
+    }
+
+    #[test]
+    fn exits_classify_as_qt_s_reply_schema_check_or_failure() {
+        let code = |code: i32, stdout: &[u8], stderr: &str| Exit::Code {
+            code,
+            stdout: stdout.to_vec(),
+            stderr: stderr.into(),
+        };
+        assert!(matches!(
+            classify(code(0, br#"{"schema":1,"organization":{}}"#, "")),
+            Reply::Done(_)
+        ));
+        assert_eq!(classify(code(0, br#"{"schema":2}"#, "")), Reply::Outdated);
+        assert_eq!(classify(code(0, br#"{"schema":1}"#, "")), Reply::Outdated);
+        assert_eq!(classify(code(0, b"", "")), Reply::Failed(INVALID.into()));
+        assert_eq!(classify(code(0, b"[]", "")), Reply::Failed(INVALID.into()));
+        assert_eq!(
+            classify(code(3, b"", "")),
+            Reply::Failed("hgs exited with code 3".into())
+        );
+        assert_eq!(
+            classify(Exit::StartFailed("No such file or directory".into())),
+            Reply::Failed("No such file or directory".into())
+        );
+        assert_eq!(
+            classify(Exit::TimedOut),
+            Reply::Failed("hgs did not answer in time".into())
+        );
+        assert_eq!(
+            classify(Exit::Abnormal {
+                stderr: String::new()
+            }),
+            Reply::Failed("hgs ended abnormally".into())
+        );
+        assert_eq!(
+            classify(Exit::WriteFailed),
+            Reply::Failed("hgs did not take the request".into())
+        );
+    }
+
+    // Qt's failure detail keeps 4000 characters of standard error (HgsClient.cpp:475).
+    #[test]
+    fn a_failure_keeps_4000_trimmed_characters_of_standard_error() {
+        let long = format!("  {}  ", "e".repeat(5000));
+        assert_eq!(
+            classify(Exit::Code {
+                code: 1,
+                stdout: vec![],
+                stderr: long.clone()
+            }),
+            Reply::Failed("e".repeat(4000))
+        );
+        assert_eq!(
+            classify(Exit::Abnormal { stderr: long }),
+            Reply::Failed("e".repeat(4000))
+        );
+    }
+
+    // Ruling F12: the Projects screen orders by `project_order` first, so the
+    // presented value's order is the desired one while edits are pending.
+    #[test]
+    fn the_presented_value_orders_projects_as_the_pending_edits_do() {
+        let mut seen = state("d1", "alpha", &["op-1"]);
+        seen["organization"]["project_order"] = json!(["alpha", "beta", "ungrouped"]);
+        let mut sync = Controller::default();
+        assert!(sync.observe(observation(seen.clone()), 0));
+        assert_eq!(
+            sync.presented_value().unwrap()["organization"],
+            seen["organization"],
+            "nothing pending: the state as observed"
+        );
+        sync.edit(
+            &Intent::Create {
+                id: "gamma".into(),
+                name: "Gamma".into(),
+                members: vec![],
+            },
+            0,
+        )
+        .unwrap();
+        sync.edit(
+            &Intent::Delete {
+                project: "beta".into(),
+                destination: "ungrouped".into(),
+                members: vec![],
+            },
+            10,
+        )
+        .unwrap();
+        sync.edit(
+            &Intent::Reorder {
+                project: "alpha".into(),
+                before: None,
+            },
+            20,
+        )
+        .unwrap();
+        let presented = sync.presented_value().unwrap();
+        let organization = &presented["organization"];
+        let ids: Vec<&str> = crate::swarm::projects(organization)
+            .iter()
+            .map(crate::swarm::project_id)
+            .collect();
+        assert_eq!(
+            ids,
+            ["gamma", "ungrouped", "alpha"],
+            "created before the Inbox, beta gone, alpha last"
+        );
+        assert_eq!(
+            organization["project_order"],
+            json!(ids),
+            "the order the apply will write"
+        );
+        assert_eq!(
+            presented["digest"], "d1",
+            "the rest of the state is the observed one"
+        );
+        // The Projects screen shows that order.
+        let mut screen = crate::views::projects::SwarmState::default();
+        screen.finish(Ok((*presented).clone()));
+        let shown: Vec<String> = screen
+            .view(&[])
+            .projects
+            .into_iter()
+            .map(|project| project.id)
+            .collect();
+        assert_eq!(shown, ["gamma", "ungrouped", "alpha"]);
+        let sent = input(sync.due(140));
+        assert_eq!(
+            sent["desired"]["project_order"],
+            organization["project_order"]
+        );
+    }
+
+    // The hub hands the list's renames over while the controller is ready
+    // (plan Task 6); before the first state it refuses them like any edit and
+    // keeps nothing, so a rename seen then waits with the hub. Handed over
+    // later, it migrates the member; once more, it changes nothing.
+    #[test]
+    fn a_rename_refused_before_the_first_state_migrates_when_handed_over_after_it() {
+        const R2: &str = "workstation\nclaude/sample-project/review-2";
+        let renamed = Intent::Renamed {
+            from: R.into(),
+            to: R2.into(),
+        };
+        let mut sync = Controller::default();
+        assert_eq!(sync.edit(&renamed, 0), Err(STARTING.into()));
+        assert!(
+            !sync.pending() && sync.take_draft().is_none(),
+            "nothing kept"
+        );
+        assert!(sync.observe(observation(state("d1", "alpha", &["op-1"])), 100));
+        let ticket = sync.edit(&renamed, 100).unwrap();
+        let sent = input(sync.due(220));
+        assert_eq!(
+            crate::swarm::members(&sent["desired"]),
+            BTreeMap::from([(R2.to_owned(), "alpha".to_owned())])
+        );
+        let mut landed = state("d2", "alpha", &["op-2"]);
+        landed["organization"]["projects"][0]["sessions"] = json!([R2]);
+        assert_eq!(
+            sync.finish(reply(landed, &["op-2"]), 300),
+            [(ticket, EditOutcome::Done { conflicts: 0 })]
+        );
+        let again = sync.edit(&renamed, 400).unwrap();
+        match sync.due(520) {
+            Due::Settled(settled) => {
+                assert_eq!(settled, [(again, EditOutcome::Done { conflicts: 0 })])
+            }
+            _ => panic!("the old name is no member any more: nothing to send"),
+        }
+    }
+
+    // The same with a restored draft: the rename waits for the first state,
+    // then migrates the member in the draft, which goes out with it.
+    #[test]
+    fn a_rename_during_a_restored_draft_waits_for_the_first_state_and_rides_on_the_draft() {
+        const R2: &str = "workstation\nclaude/sample-project/review-2";
+        let renamed = Intent::Renamed {
+            from: R.into(),
+            to: R2.into(),
+        };
+        let seen = state("d1", "alpha", &["op-1"]);
+        let mut desired = seen["organization"].clone();
+        desired["projects"][0]["sessions"] = json!([]);
+        desired["projects"][1]["sessions"] = json!([R]);
+        let versions = seen["versions"].as_object().unwrap().clone();
+        let mut sync = Controller::default();
+        sync.restore(Draft::new(seen["organization"].clone(), desired, versions));
+        assert_eq!(sync.edit(&renamed, 0), Err(STARTING.into()));
+        assert!(!sync.observe(observation(state("d2", "alpha", &["op-1"])), 1_000));
+        sync.edit(&renamed, 1_000).unwrap();
+        let sent = input(sync.due(1_000 + FLUSH_MS));
+        assert_eq!(
+            sent["base"],
+            crate::swarm::edit::shared(&seen["organization"]),
+            "still the saved base"
+        );
+        assert_eq!(
+            crate::swarm::members(&sent["desired"]),
+            BTreeMap::from([(R2.to_owned(), "beta".to_owned())])
+        );
+    }
+}

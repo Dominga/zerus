@@ -4,6 +4,7 @@
 //! notice (ProjectsDialog.cpp:251-263).
 use super::schedule::{Poll, SWARM_INTERVAL};
 use super::{items, text};
+use crate::swarm::sync::{unavailable, OUTDATED};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -75,7 +76,9 @@ pub fn leaf(path: &str) -> String {
         .to_owned()
 }
 
-fn status_of(snapshot: &Value) -> (String, bool) {
+/// SwarmController's status line for a catalog (SwarmController.cpp:212-218),
+/// shared with the write controller ([`crate::swarm::sync`]).
+pub(crate) fn status_of(snapshot: &Value) -> (String, bool) {
     let conflicts = items(snapshot, "conflicts").len();
     let peers = snapshot.get("peers").and_then(Value::as_object);
     let total = peers.map_or(0, |peers| peers.len());
@@ -128,15 +131,12 @@ impl SwarmState {
     pub fn finish(&mut self, reply: Result<Value, String>) {
         self.poll.finish();
         match reply {
-            Err(error) => self.status = Some((format!("Project sync unavailable: {error}"), true)),
+            Err(error) => self.status = Some((unavailable(&error), true)),
             Ok(value)
                 if value.get("schema").and_then(Value::as_i64) != Some(1)
                     || !value.get("organization").is_some_and(Value::is_object) =>
             {
-                self.status = Some((
-                    "Project sync needs an updated HGS installation.".into(),
-                    true,
-                ));
+                self.status = Some((OUTDATED.into(), true));
             }
             Ok(value) => {
                 self.status = Some(status_of(&value));

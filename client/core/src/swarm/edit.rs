@@ -234,13 +234,20 @@ pub fn shared(organization: &Value) -> Value {
             }
         }
         object.insert("session_assignments_explicit".into(), json!(true));
-        let order: Vec<Value> = projects(organization)
-            .iter()
-            .map(|p| json!(project_id(p)))
-            .collect();
-        object.insert("project_order".into(), Value::Array(order));
+        object.insert("project_order".into(), project_order(organization));
     }
     out
+}
+
+/// The shared project order of an organization: its projects' IDs in the
+/// listed order (sharedOrganization, SwarmController.cpp:45-49).
+pub(crate) fn project_order(organization: &Value) -> Value {
+    Value::Array(
+        projects(organization)
+            .iter()
+            .map(|p| json!(project_id(p)))
+            .collect(),
+    )
 }
 
 type Shape = (Vec<(String, Value, Value, Value)>, BTreeMap<String, String>);

@@ -111,6 +111,20 @@ commands through the one dispatcher (`actions::dispatch`) and its lanes.
   `NewSessionDialog.cpp` as a pure form model: what Start does, its button text
   ("Start session", "Clone and start", "Use checkout and start", "Creating
   worktree…", "Checking folder…", "Cloning…", "Checking…") and its reasons.
+- [ ] The launch options `AGENTS.md` keeps, with Qt's texts:
+  - the direct-folder launch, "Start directly in the working folder."
+    (`NewSessionDialog.cpp` 207-208);
+  - the explicit Worktree options, custom or existing (210-216);
+  - "This folder is outside the project.\nStarting here will add it to this
+    project." (683);
+  - "New branch: {branch}\nStart from: HEAD" (704);
+  - "Project changed. Select the checkout again before starting." (737);
+  - "This computer is unavailable. Choose another folder or reconnect it."
+    (719).
+- [ ] Opening the dialog or inspecting the form never creates a worktree; the
+  generated worktree is created only after Start session, and only for a
+  verified Git folder. Ordinary non-Git folders are supported, and the client
+  never runs `git init`. The core tests pin each of these.
 - [ ] The project-worktree recognition rule (verified catalog containing both
   the folder and a saved project folder on that machine; warnings for unrelated
   folders).
@@ -123,12 +137,34 @@ commands through the one dispatcher (`actions::dispatch`) and its lanes.
   a peer, replies at most 2 MiB; the verified catalog for creation
   (`--creation --path P --refresh --json`, 15 s, expected machine) with Qt's
   "Invalid verified worktree catalog." and "Invalid worktree catalog response".
-- [ ] The 30 s catalog cache with in-flight sharing and generation-based
-  invalidation (a removed worktree invalidates its repository; a host change
-  invalidates the host), as `requestWorktrees` keeps it.
-- [ ] `worktrees create --path --common-dir --branch --start ... ` with its
-  receipt check and Qt's failure text ("Check {destination} before retrying.
-  Any created worktree is kept.").
+- [ ] The catalog cache, as `requestWorktrees` keeps it:
+  - a snapshot is fresh while `sampled_at` is under 30 s old and not `stale`;
+  - in-flight reads of the same folder share one call;
+  - generations invalidate it: a removed or created worktree invalidates its
+    repository, a host change the host; a generation mismatch reports
+    "Folder changed. Refresh its catalog.";
+  - snapshots persist across restarts (Qt's `workspace/worktreeSnapshots`):
+    at most 64 entries and 8 MiB, the oldest `sampled_at` evicted first, keyed
+    with the hgs executable. The client keeps them in its own private settings
+    file, never Qt's.
+- [ ] Creation, `HgsClient::createWorktree` (about 1565):
+  `hgs [@host] worktrees create --path P --common-dir C --branch B --base BASE
+  --destination D --request-id ID --json [--receipt]`, 330 s, with the
+  expected-machine guard.
+  - Success needs the reply's `request_id` to equal the token, `status`
+    `created`, the same `branch` and `common_dir`, and an absolute `path`.
+  - Texts: "Worktree creation is not confirmed. Check its original result."
+    (receipt mode, the reply's `detail` first); "Creation could not be
+    confirmed. Refresh the catalog and check the destination before
+    retrying."; on failure, the error then "\nCheck {destination} before
+    retrying. Any created worktree is kept.".
+  - The cache is invalidated on both outcomes.
+- [ ] The receipt read, `worktreeReceipt` (about 1592): `hgs [@host] worktrees
+  ACTION --request-id ID --json`, 15 s, valid only with `schema` 1, the same
+  `request_id` and a string `status`; otherwise "Invalid worktree receipt.".
+- [ ] An older hgs that prints the catalog usage for review or remove gives
+  "Update Zerus on this computer to clean up worktrees." or "Update Zerus on
+  {host} to clean up worktrees." (`cleanupError`).
 
 ## Task W2 (core): worktree review and Settings > Worktrees
 
@@ -139,26 +175,62 @@ commands through the one dispatcher (`actions::dispatch`) and its lanes.
   actions only, removed/kept/unknown outcomes, and manual review for anything
   uncertain.
 - [ ] Settings > Worktrees (`WorktreeSettings.h`): the per-computer policy is
-  stored by `hgs`; an incomplete or malformed policy fails closed.
+  stored by `hgs`; an incomplete or malformed policy fails closed and never
+  re-enables default cleanup. Age and naming never authorize removal;
+  branches and ignored data are kept; queue reads are bounded and indexed.
+- [ ] The manual acceptance of unreadable process paths: it lasts five minutes,
+  applies to the exact checkout review only and tolerates unrelated process
+  churn; fresh known-use, session, ownership and file protections still apply,
+  and automatic cleanup never uses it (`AGENTS.md`).
 
 ## Task W3 (core): Remove worktree after Terminate
 
-**Files:** `client/core/src/worktrees.rs`, `client/core/src/actions.rs` (an
-option on Terminate).
+**Files:** `client/core/src/worktrees.rs`, `client/core/src/actions.rs` (the
+removal call).
 
-- [ ] Phase 2 parses and shows the automatic `ZERUS_WORKTREE_CLEANUP` outcome.
-  Phase 5 adds the explicit Remove worktree choice: removal only after its
-  confirmation and the exact successful termination, bound to the checkout
-  ownership recorded at launch and its nonce; background cleanup reporting
-  removed, kept and unknown, with review actions; an unknown outcome is never
-  replayed, and only a verified refusal before deletion may be checked again.
-  Follow the rules in `AGENTS.md` word for word.
+Phase 2 parses and shows the automatic `ZERUS_WORKTREE_CLEANUP` outcome of
+Archive and Terminate. Phase 5 adds the explicit choice, from
+`SessionsWindow.cpp` (about 5778-5840) and `HgsClient::removeWorktree` (about
+1742):
+
+- [ ] `removal_offered(row, inspection)`: the checkbox appears only when the
+  session is live, keeps its archive (a tracked codex, claude or kimi
+  session), and has a linked worktree (the row's `git_worktree`, or
+  `git_worktree` in an inspection of the exact run).
+- [ ] The texts the dialog shows: the label "Remove the working folder after
+  stopping"; the tooltip "Cleanup runs in the background. Unsaved work,
+  unknown local files and folders in use are kept for review."; the
+  informative text "Computer: {machine}\nThe conversation and branch are kept.
+  Folders that need review stay on disk."; the confirm button "Stop and remove
+  folder" or "Stop and archive" with the checkbox; Cancel is the default.
+- [ ] The preference `remove_worktree_after_termination` defaults to off and
+  persists (Qt's `workspace/removeWorktreeAfterTermination`).
+- [ ] After the dialog the session is checked again: "The session state
+  changed. Open its actions again.".
+- [ ] The removal is bound to the inspection of the exact run:
+  `worktree_owner_id`, the run, and `git_root` or `git_common_dir`. It runs
+  only after the termination succeeded exactly, in the background after the
+  original confirmation.
+- [ ] The call: `hgs [@host] worktrees remove --path P --common-dir C
+  --fingerprint F --request-id ID --json [--delete-branch]
+  [--ignored-fingerprint I] [--discard-fingerprint D] [--process-fingerprint
+  R] [--preserve-archive-restore]`, 330 s, output at most 64 KiB. Its identity
+  is the request ID and path; `removed` or `forgotten` succeed.
+- [ ] Outcomes are removed, kept or unknown, each with review actions. An
+  unknown outcome is never replayed; only a verified refusal before deletion
+  may be checked again. Missing or replaced ownership, unknown local data,
+  source changes, other occupants and uncertain process use go to manual
+  review. The core tests pin each rule of `AGENTS.md`.
+- [ ] The multi-selection Terminate (`SessionSelection.cpp` 257-309) offers the
+  same option. It belongs to the session-menu parity batch task
+  (`zerus-5wmh.20`); the core gives it the same rules and call.
 
 ## Task F1 (core): Fork session
 
 - [ ] `hgs [@host] fork NAME -n TAG -d [--archive A] [--expected-run-id R]
-  [--expected-conversation-id C]` as an `Action::Fork`, with the tag rule of
-  `tag_problem` and Qt's dialog reasons.
+  [--expected-conversation-id C]` as an `Action::Fork`, 60 s here and 90 s on
+  a peer (`runWrite`), with the tag rule of `tag_problem` and Qt's dialog
+  reasons.
 
 ## Task C1 (core): Clear session and Compact context
 
@@ -171,10 +243,20 @@ option on Terminate).
   `context_action_reason`.
 - [ ] Compact-to-send (S3, phase 4) uses the same `CompactContext` action.
 
+## Views and the session menu
+
+The views are the web client's: the Tasks board and inspector, the New session
+dialog, the Projects > Worktrees panel, the Settings > Worktrees page, the
+Terminate dialog's Remove worktree choice and its outcome review, the Fork
+dialog, and the Clear and Compact dialogs (built on S2's `ColdPrompt`). Fork,
+Clear and Compact also appear in the session menu: whoever builds those views
+checks the session-menu parity plan (`a56256ac`) so nothing is built twice.
+
 ## Order and collisions
 
 K1, N1, W1, F1 and C1 are new modules or additive `Action` variants; K2, W2
 and W3 build on them. C1's `CompactContext` is needed by S3 in phase 4, so it
 may move earlier. Each task is one PR, its surface reviewed by the web client
-session and merged on a green CI gate. Beads children are filed when this
-section is folded into the phase 5 plan.
+session and merged on a green CI gate. Beads children: `zerus-5wmh.10.1` K1, `.10.2` K2, `.10.3` N1,
+`.10.4` W1, `.10.5` W2, `.10.6` W3, `.10.7` F1; C1 moved to phase 4 as
+`zerus-5wmh.9.18`.

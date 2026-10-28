@@ -761,14 +761,15 @@ fn listen(listener: UnixListener, deliver: impl Fn(Activation) + Send + 'static)
                 let deadline = Instant::now() + LINE_WAIT;
                 let mut line = Vec::new();
                 let mut byte = [0u8; 1];
+                let _ = stream.set_read_timeout(Some(LINE_WAIT));
                 let complete = loop {
                     let left = deadline.saturating_duration_since(Instant::now());
-                    if line.len() >= 64
-                        || left.is_zero()
-                        || stream.set_read_timeout(Some(left)).is_err()
-                    {
+                    if line.len() >= 64 || left.is_zero() {
                         break false;
                     }
+                    // macOS refuses the option once the peer has closed; the
+                    // remaining bytes then read without waiting.
+                    let _ = stream.set_read_timeout(Some(left));
                     match stream.read(&mut byte) {
                         Ok(1) if byte[0] == b'\n' => break true,
                         Ok(1) => line.push(byte[0]),

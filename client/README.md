@@ -236,9 +236,10 @@ core's timeouts and output limits (`core/src/reads.rs`); when each read is
 due is decided in `core/src/views/schedule.rs`, and the core projects every
 reply into a view model (`core/src/views`). A changed view emits
 `screens-changed` with the screen's name, and the frontend pulls it again.
-In replay mode the reads refuse unless `ZERUS_CLIENT_HGS` is set ("Reads in
-replay mode need ZERUS_CLIENT_HGS."). Peers without the event stream get no
-polling fallback yet (see the phase table).
+In replay mode the screens that read refuse unless `ZERUS_CLIENT_HGS` is set
+("Reads in replay mode need ZERUS_CLIENT_HGS."); Projects keeps the project
+sync status line. Peers without the event stream get no polling fallback yet
+(see the phase table).
 
 ### Screens smoke run
 

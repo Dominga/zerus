@@ -441,12 +441,9 @@ impl Screens {
             .iter()
             .filter_map(|entry| entry.computer.alias().map(str::to_owned))
             .collect();
-        let mut view = hub.swarm.view(&peers);
-        if !self.0.allowed {
-            view.status = REPLAY_NEEDS_HGS.into();
-            view.status_error = true;
-        }
-        view
+        // A blocked replay keeps the controller's line: Projects reads
+        // nothing, and the organization's own `ready` blocks its edits.
+        hub.swarm.view(&peers)
     }
 
     /// A screen shown or hidden. Showing Machines reads the list; Overview
@@ -830,6 +827,13 @@ mod tests {
         "account inspect native-codex --refresh",
     ];
 
+    /// The core's `swarm get` fixture (`core/tests/fixtures/views/swarm.json`).
+    fn swarm_fixture() -> Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../core/tests/fixtures/views/swarm.json");
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
     fn local_accounts() -> Value {
         json!({
             "account ls": {"file": "accounts-local.json"},
@@ -858,9 +862,7 @@ mod tests {
             "the organization topic feeds Projects"
         );
         assert!(!h.screens.projects().loaded);
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../core/tests/fixtures/views/swarm.json");
-        let swarm: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let swarm = swarm_fixture();
         let failed = "Project sync unavailable: hgs did not answer in time";
         // Showing Projects published its empty view; only the call's event counts.
         h.events();
@@ -1124,10 +1126,22 @@ mod tests {
         assert!(h.fake.calls().is_empty());
         assert_eq!(accounts.notices, [REPLAY_NEEDS_HGS]);
         assert!(accounts.snapshot && accounts.pending == 0 && !accounts.busy);
+        assert!(!projects.loaded && projects.status.is_empty());
+        // Projects reads nothing, so it keeps the project sync line it is
+        // handed; the fixture's own line names a conflict.
+        let line = "Local catalog. Connect another computer to sync projects.";
+        h.screens.organization(
+            Arc::new(swarm_fixture()),
+            "sample".into(),
+            (line.into(), false),
+        );
+        let projects = h.screens.projects();
+        assert!(projects.loaded);
         assert_eq!(
             (projects.status.as_str(), projects.status_error),
-            (REPLAY_NEEDS_HGS, true)
+            (line, false)
         );
+        assert!(h.fake.calls().is_empty(), "and still reads nothing");
     }
 
     fn eventually(what: &str, done: impl Fn() -> bool) {

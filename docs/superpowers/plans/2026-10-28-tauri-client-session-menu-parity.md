@@ -587,6 +587,7 @@ Rules (`SessionsWindow.cpp:2844-2893`, `HgsClient.cpp:1326-1343`):
 - **Each row:** `state == "archived"`, a non-empty name, `archive_id` a lowercase hyphenated UUID, and `archived_at` a number in `[from, until)`; else "Invalid archived session identity. Refresh the archive.".
 - **The reply:** rows projected with `view::row` (with `archived_at`), plus `next_cursor`, `previous_cursor`, `total` and `position`.
 - **Cancellation:** a newer request for the same computer cancels the older one; its answer is dropped (`cancelArchivePages`).
+- **Cancel all:** leaving the filter, a hosts change, a query change and Refresh cancel every archive read (`cancel_archive_pages`, Qt `cancelArchivePages`).
 
 - [ ] Tests for each check through `decode` and one fake `hgs` page. Commit `feat(client): archive page read`.
 
@@ -641,7 +642,8 @@ Rules:
   - The change entry of an archived row is enabled when available, `resumable`, `archiveId` is set, no live row on the same computer has the name (`archiveNameOccupied`), and `allowed("restore")`.
   - A restore of the same session already pending, or 64 restores pending, gives the sticky "Finish or refresh the earlier restores before restoring another session.".
 - **After a successful restore** (1958-1969, 3281-3336):
-  - The archive refreshes.
+  - The archive refreshes (Forget keeps its refresh too). A successful rename or Move to archive also refreshes the archive (`SessionsWindow.cpp:1917`).
+  - The batch's Compact/Expand and E's archived calls find loaded archived rows (the store's `archive.row(key)`), not only catalog rows.
   - When the restored row is still selected under the Archive filter, the filter becomes All; other scopes stay.
   - When the live row of that name appears with the restored conversation, the selection follows it.
   - When it appears with another conversation, the selection clears with the sticky "The restored conversation could not be verified." Qt adds "Your archived draft remains in Saved drafts."; the client has no saved drafts before phase 4 (`zerus-5wmh.9`), which restores the full text.
@@ -718,6 +720,18 @@ Controller rulings during Piece F:
 - The batch Terminate omits Qt's worktree checkbox and "Stop {n} sessions" labels until `zerus-5wmh.10`.
 - Task F4 added the README part and the smoke steps for PR 4.
 
+Controller rulings during Piece D:
+- Pages are kept on leaving the Archive filter and the default range is All dates, both as Qt (the first draft of D2 said otherwise).
+- Archived rows are flat cards until `zerus-5wmh.40` (Qt groups them by project).
+- The archived Activity pane waits for `zerus-5wmh.42`.
+- The paging-computer scan reads catalog rows while some live computer has no rows (Qt rebuilds its hosts on every refresh).
+- Task D4 added the README part and the smoke steps for PR 5.
+
 Deviations from Qt, both from owner rules:
 - Attention marks and read replies are capped at 20 000 entries per map (bounded caches); Qt keeps them without a bound.
 - "Deselect all (Esc)" is "Deselect all" (no obvious keyboard hints).
+
+Deviations from Qt after Piece D (task-D2-report.md, "Fix round 1" and item 6):
+- The date inputs show the browser's empty date field instead of "Any date" (`ArchiveDatePicker.cpp`); the hint says "All archived dates (no date limits)".
+- An empty Archive list, loading or not, shows the client's "No matching sessions" card with its "Show all sessions" button. Qt shows an empty list and says "No matching sessions" only in the footer count (`SessionsWindowRows.cpp:473`). With no live row at all the client footer is empty, where Qt's reads the same text. Both sit in `SessionList.tsx` outside the agreed ArchiveBar line, so they stay.
+- `cancel_archive_pages` is a sync command while `archive_page` registers its flag when its body runs, so a read invoked just before a cancel can escape it and run to its 30 s timeout when its computer is never read again; the store discards its answer. Qt deletes the helper at once (`cancelArchivePages`).

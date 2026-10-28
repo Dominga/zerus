@@ -83,6 +83,7 @@ the child's own environment: the agent attribution (`HGS_SESSION`,
 | Terminate any other live session | `kill NAME` | none | 5 s, 15 s |
 | Forget saved session | `kill NAME` | none | 5 s, 15 s |
 | Forget the OpenCode binding | `session-action NAME --json` | JSON: `request_id`, `action` (`forget`), `expected_run_id`, `expected_conversation_id` | 15 s, 45 s |
+| Archive page (a read) | `archives --json` | JSON: `from`, `until`, `limit` (50), `cursor`, `query` | 30 s, 30 s |
 
 Outcome rules:
 
@@ -341,6 +342,45 @@ clipboard. They are not writes: they need no row lock and show no "Updating…".
   longer available. Open its actions again."; otherwise the current name,
   archive id, folder and run are copied.
 
+### Archive
+
+The state filter Archive lists archived sessions page by page, as Qt's
+`ArchiveBrowser` does. The rows are loaded on demand and are never part of the
+live catalog.
+
+- Each live computer inside the machine filter has one page of at most 50 rows.
+  Older and Newer replace the page (a history never grows), and Refresh archive
+  drops the pages and loads the first. Pages load only while the Archive filter
+  shows the Sessions list and are kept when it is left, as Qt keeps them.
+  Leaving the filter, a change of the computers or their names, a change of
+  the search text and Refresh archive cancel the reads that are running; an
+  answer that arrives afterwards is dropped.
+- The search text is the archive query, applied 300 ms after the last change.
+  It does not filter the loaded rows.
+- The date picker offers All dates (the default), Today, Last 7 days, Last 30
+  days and a custom range, which starts at the last 30 days. A range whose
+  start is not before its end loads nothing.
+- The status line reads "Loading archive…" while a page loads, then
+  "{a}–{b} of {total}" or "{shown} shown of {total}" for a single computer
+  with a window, "{shown} loaded of {total}" once every total is known and
+  "{shown} loaded" before. Each computer's window is in its tooltip. An
+  error reads "{machine}: {error}" (240 characters shown, the full text in
+  the tooltip). Older and Newer lose their text below 310 px. The count chip
+  of the filter shows "…" until a total is known and a "+" while more can be
+  loaded; its tooltip says how many are loaded.
+- The list shows the loaded archived rows as flat cards, newest archived first
+  (Qt groups them by project: `zerus-5wmh.40`). Selecting one shows its header
+  and its details, read with `inspect --archive ID`; its Activity pane stays
+  empty (`zerus-5wmh.42`). Copy restore command, Copy session reference,
+  Copy session name and Rename work on a loaded archived row. Restore, Forget
+  archived session and Clear archive arrive with a later change.
+- The page is checked as Qt checks it. An invalid reply shows one of three
+  texts: "Invalid archive page. Update the computer CLI and refresh." (version,
+  shape, cursors, total or echo of the query), "Invalid archive window. Refresh
+  the archive." (position or previous cursor) and "Invalid archived session
+  identity. Refresh the archive." (state, name, lowercase hyphenated UUID or
+  `archived_at` outside the range).
+
 ### Actions smoke run
 
 `ZERUS_CLIENT_QUERY=actions-smoke=1` (hook in `src/ui/PerfHost.tsx`, beside the
@@ -371,7 +411,14 @@ env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=
 cat $S/log.ndjson
 ```
 
-The hook selects `claude/sample-project/review` (its details come from the
+For the Archive step add `{"match":["archives"],"exit":0,"stdout":{"version":1,"from":0,"until":253402300800,"query":"","next_cursor":"","previous_cursor":"","total":1,"position":0,"sessions":[{"name":"claude/sample-project/archived","state":"archived","archive_id":"00000000-0000-4000-8000-000000000001","archived_at":1700000000}]}}` to `replies` (the page echoes the All dates range and an empty query).
+
+The hook first switches to the Archive filter, waits for the page and logs
+`actions-smoke archive-page: <status text> (<row count> rows)`, selects the archived row
+and logs `actions-smoke archive-inspect: selected <archive id>`; the fake's
+`log.ndjson` then holds `archives --json` (with the page query on standard
+input) and an `inspect NAME ... --archive ID` call. It returns to the All
+filter and the replay session. The hook selects `claude/sample-project/review` (its details come from the
 replay's Activity state value or, as here, one `inspect` of the fake), first
 marks it as read, marks all as read (logging `actions-smoke mark-all-as-read:
 N marked`) and marks it as needing attention, through the marks store the menus

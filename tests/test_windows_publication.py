@@ -464,14 +464,6 @@ class PackageTests(unittest.TestCase):
         (self.rust / "serde-1.0.0").mkdir(parents=True)
         (self.rust / "serde-1.0.0" / "LICENSE-MIT").write_text("MIT\n")
         (self.rust / "inventory.json").write_text(json.dumps({"target": "x86_64-pc-windows-msvc", "packages": [{}]}))
-        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-        fork = (ROOT / "FORK_VERSION").read_text().strip()
-        self.cli_identity = {"schema_version":1,"product":"hgs","version":CLI_VERSION,
-            "distribution":"romanilyin/zerus","fork_version":fork,"channel":"candidate",
-            "source_commit":head,"source_dirty":False,"os":"windows","architecture":"x86_64",
-            "wsl_receiver_abi":"wsl-local-v1","path_ref_schema":1,"opencode_binding_abi":"opencode-bind-existing-v1"}
-        self.gui_identity = {"version":VERSION,"distribution":"romanilyin/zerus","forkVersion":fork,
-            "forkChannel":"candidate","sourceCommit":head,"sourceDirty":False,"forkUpdatesEnabled":False}
         (base / "hgs.exe").write_bytes(b"tested cli")
         (base / "hgs-tray.exe").write_bytes(b"tested gui")
         (base / "zerus-mobile-connector.exe").write_bytes(b"tested connector")
@@ -486,29 +478,7 @@ class PackageTests(unittest.TestCase):
 
     def run_script(self, name, *arguments, **options):
         """`python scripts/<name> ARGUMENTS` with the synthetic pair pinned."""
-        bootstrap = WITH_PIN
-        if name == "package-windows.py":
-            # POSIX fixtures cannot execute the placeholder Windows bytes. Inject
-            # only their read-only build-info replies into this test process;
-            # the production packer still validates them and offers no bypass.
-            replies = {"hgs.exe": self.cli_identity, "hgs-tray.exe": self.gui_identity}
-            intercept = "\n".join([
-                "import subprocess, pathlib",
-                "original_output = subprocess.check_output",
-                "replies = " + repr(replies),
-                "def fixture_output(command, *args, **kwargs):",
-                "    executable = pathlib.Path(command[0])",
-                "    tail = list(command[1:])",
-                "    expected = {'hgs.exe': ['version', '--json'], 'hgs-tray.exe': ['--build-info']}",
-                "    if executable.name in replies and tail == expected[executable.name]:",
-                "        assert executable.read_bytes() == (b'tested cli' if executable.name == 'hgs.exe' else b'tested gui')",
-                "        return json.dumps(replies[executable.name]).encode()",
-                "    return original_output(command, *args, **kwargs)",
-                "subprocess.check_output = fixture_output",
-                "runpy.run_path(sys.argv[0], run_name='__main__')",
-            ])
-            bootstrap = bootstrap.replace("runpy.run_path(sys.argv[0], run_name='__main__')", intercept)
-        command = [sys.executable, "-c", bootstrap, json.dumps(self.pin), str(ROOT / "scripts" / name), *arguments]
+        command = [sys.executable, "-c", WITH_PIN, json.dumps(self.pin), str(ROOT / "scripts" / name), *arguments]
         return subprocess.run(command, capture_output=True, text=True, **options)
 
     def package(self, output, **overrides):
@@ -539,9 +509,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
         info = portable.inspect(output)
-        self.assertEqual(info, {**manifest(), "source_commit": head, "mobile_connector_bundled": True,
-                              "distribution": "romanilyin/zerus", "fork_version": self.cli_identity["fork_version"],
-                              "fork_channel": "candidate", "cli_build": self.cli_identity, "gui_build": self.gui_identity})
+        self.assertEqual(info, {**manifest(), "source_commit": head, "mobile_connector_bundled": True})
         arguments = json.loads((self.directory / "arguments.json").read_text())
         self.assertEqual(arguments[:-1], ["--release", "--no-compiler-runtime", "--no-opengl-sw",
                                           "--no-system-d3d-compiler", "--no-system-dxc-compiler",
@@ -611,20 +579,6 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(report.returncode, 1)
         self.assertIn("conpty.dll is not the pinned Microsoft.Windows.Console.ConPTY 1.25.260930003 build",
                       report.stderr)
-
-    def test_dirty_or_foreign_staged_binary_identity_leaves_no_bundle(self):
-        output = self.directory / "unverified.zip"
-        self.cli_identity["source_dirty"] = True
-        result = self.package(output)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("CLI is dirty", result.stderr)
-        self.assertFalse(output.exists())
-        self.cli_identity["source_dirty"] = False
-        self.gui_identity["sourceCommit"] = "b" * 40
-        result = self.package(output)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Desktop is dirty or belongs to another source", result.stderr)
-        self.assertFalse(output.exists())
 
     def test_a_conpty_pair_other_than_the_pinned_one_leaves_no_bundle(self):
         output = self.directory / "zerus-windows-x86_64.zip"

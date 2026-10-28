@@ -1,6 +1,6 @@
 # External coding workstreams: ChatGPT Chat, Work and Codex Chat
 
-This fork supports a cooperative workstream around a browser conversation. It is
+Zerus supports a cooperative workstream around a browser conversation. It is
 not a consumer ChatGPT messaging API. A workstream records an explicitly selected
 source, conversation URL, local workspace, bounded checkpoints and a durable inbox.
 Native Codex and OpenCode sessions keep their existing transports and controls.
@@ -54,11 +54,10 @@ Command: `hgs external register --json`. Keep the returned `run_id` and
 for another registration. The local store assigns a separate durable workstream
 identity. Ordinary `hgs ls --local --json` includes its bounded projection.
 
-The optional script in `romanilyin/DesktopCommanderMCP`,
-`local/zerus-workstream.mjs`, validates the selected clean HGS build and invokes
-this contract with literal argv and JSON stdin. It can be called by the existing
-`start_process` tool without restarting the Desktop Commander server. See that
-repository's `local/zerus-workstreams.md`. Keep machine profiles and tokens local.
+An optional local adapter can invoke this contract with literal argv and JSON
+stdin through an existing process tool. It must select the intended HGS profile
+and preserve the returned run and conversation identities. Keep machine profiles
+and tokens local.
 
 ## Checkpoint and cooperative inbox
 
@@ -139,7 +138,6 @@ A Linux connector can expose the same local workstream. Use a direct connector
 for the environment that owns the state. Do not register the same state under
 multiple computer credentials or copy its database across machines.
 
-The Android fork is a separate package (`app.zerus.mobile.romanilyin`) and starts
-with no default public relay. It displays the source and external-inbox warning.
+The Android client displays the source and external-inbox warning.
 Native OpenCode in WSL should use its own outbound Linux connector, not the
 Windows gateway's unsupported one-hop OpenCode route.

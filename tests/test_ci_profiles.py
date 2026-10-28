@@ -87,24 +87,6 @@ class Coverage(unittest.TestCase):
         with self.assertRaises(ValueError):
             coverage.select({**env, 'EVENT_NAME': 'push'})
 
-    def test_fork_push_always_qualifies_windows_without_enabling_publish_permissions(self):
-        workflow=(ROOT/'.github/workflows/ci.yml').read_text()
-        review=job(workflow,'review')
-        expression=next(line.split('run_windows:',1)[1].strip() for line in review.splitlines() if 'run_windows:' in line)
-        self.assertTrue(expression.startswith('${{') and expression.endswith('}}'))
-        expression=expression[3:-2].replace('||',' or ').replace('&&',' and ').strip()
-        for repository in ['romanilyin/zerus','ufna/zerus','example/zerus']:
-            for event in ['push','pull_request','workflow_dispatch','schedule']:
-                for explicit in [False,True]:
-                    with self.subTest(repository=repository,event=event,explicit=explicit):
-                        selected=bool(eval(expression,{'__builtins__':{}},{
-                            'inputs':SimpleNamespace(run_windows=explicit),
-                            'github':SimpleNamespace(repository=repository,event_name=event)}))
-                        self.assertEqual(selected,explicit or (repository=='romanilyin/zerus' and event=='push'))
-        self.assertEqual(field(review,'cache-mode'),'read')
-        self.assertNotIn('secrets:',review)
-        self.assertEqual(field(review,'uses'),'./.github/workflows/checks.yml')
-
     def test_dev_full_and_manual_coverage_do_not_override_each_other(self):
         common = dict(RUN_LINUX='true', RUN_ARCH='true', RUN_MACOS='true', FILTER_PR_PLATFORMS='false')
         dev = coverage.select({**common, 'RUN_WINDOWS': 'false', 'RUN_IOS': 'false'})

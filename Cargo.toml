@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.99"
 description = "Persistent local and remote agent sessions for Zerus"
 license = "MIT"
-repository = "https://github.com/romanilyin/zerus"
+repository = "https://github.com/ufna/zerus"
 
 [[bin]]
 name = "hgs"

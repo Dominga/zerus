@@ -211,7 +211,7 @@ class MainActivity : ComponentActivity() {
     if (settings) AppSettingsScreen(model, updater) { settings = false }
     LaunchedEffect(tab, model.selected) { if (model.selected == null) AppTelemetry.screen(when (tab) { 0 -> TelemetryScreen.Sessions; 1 -> TelemetryScreen.Projects; 2 -> TelemetryScreen.Drafts; 4 -> TelemetryScreen.Accounts; else -> TelemetryScreen.Machines }) }
     var pairing by rememberSaveable { mutableStateOf(false) }
-    var server by rememberSaveable { mutableStateOf(BuildConfig.DEFAULT_RELAY_URL) }
+    var server by rememberSaveable { mutableStateOf("https://relay.zerus.dev") }
     var code by remember { mutableStateOf("") }
     var disconnect by remember { mutableStateOf<Connection?>(null) }
     var review by remember { mutableStateOf<Draft?>(null) }

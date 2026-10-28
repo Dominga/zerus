@@ -16928,6 +16928,12 @@ void TestSessionsWindow::rowPreparationDropsStaleResults()
     // Hold the preparation thread so that two preparations wait behind it.
     QSemaphore gate; QObject holder; bool held = false;
     ProcessRunner::post(&holder, [&gate] { gate.acquire(); return true; }, [&held](bool) { held = true; });
+    // An early assertion must release and drain the preparation worker before
+    // the stack semaphore and its owner disappear.
+    const auto unblock = qScopeGuard([&gate] {
+        gate.release();
+        ProcessRunner::prepareAndWait([] {});
+    });
     const auto listing = [&](const QString &name) {
         auto state = rowFleet(now); auto local = state.local(); local.sessions.append(rowSession(name, "codex"));
         state.setLocal(local, QDateTime::currentMSecsSinceEpoch()); return state;
@@ -16967,6 +16973,12 @@ void TestSessionsWindow::rowPreparationsNeverQueueBehindEachOther()
     // Hold the preparation thread, as a slow preparation would.
     QSemaphore gate; QObject holder; bool held = false;
     ProcessRunner::post(&holder, [&gate] { gate.acquire(); return true; }, [&held](bool) { held = true; });
+    // An early assertion must release and drain the preparation worker before
+    // the stack semaphore and its owner disappear.
+    const auto unblock = qScopeGuard([&gate] {
+        gate.release();
+        ProcessRunner::prepareAndWait([] {});
+    });
     const auto posted = window.postedRowPreparationsForTests();
     for (int i = 0; i < 10; ++i) {
         auto state = rowFleet(now); auto local = state.local(); local.sessions.append(rowSession(QString("codex/hgs/burst-%1").arg(i), "codex"));

@@ -324,15 +324,12 @@ public:
         repository->setIcon(workspaceIcon("github",palette().color(QPalette::WindowText)));repository->setIconSize(QSize(20,20));repository->setAutoDefault(false);
         repository->setCursor(Qt::PointingHandCursor);repository->setToolTip(QStringLiteral("https://github.com/ufna/zerus"));repository->setAccessibleName(tr("Open Zerus repository on GitHub"));
         connect(repository,&QPushButton::clicked,this,[]{QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/ufna/zerus")));});
-        auto *whitewh=new QPushButton(QStringLiteral("WhiteWh/zerus"));whitewh->setObjectName("aboutWhiteWhRepository");whitewh->setProperty("glyph","github");
-        whitewh->setIcon(workspaceIcon("github",palette().color(QPalette::WindowText)));whitewh->setIconSize(QSize(20,20));whitewh->setAutoDefault(false);
-        whitewh->setCursor(Qt::PointingHandCursor);whitewh->setToolTip(tr("Source fork: https://github.com/WhiteWh/zerus"));
-        connect(whitewh,&QPushButton::clicked,this,[]{QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/WhiteWh/zerus")));});
-        auto *fork=new QPushButton(QStringLiteral("romanilyin/zerus"));fork->setObjectName("aboutForkRepository");fork->setProperty("glyph","github");
+        // WhiteWh fork: this build is the fork and its releases are the update source.
+        auto *fork=new QPushButton(QStringLiteral("WhiteWh/zerus"));fork->setObjectName("aboutForkRepository");fork->setProperty("glyph","github");
         fork->setIcon(workspaceIcon("github",palette().color(QPalette::WindowText)));fork->setIconSize(QSize(20,20));fork->setAutoDefault(false);fork->setCheckable(true);fork->setChecked(true);
-        fork->setCursor(Qt::PointingHandCursor);fork->setToolTip(tr("Active repository: https://github.com/romanilyin/zerus"));fork->setAccessibleName(tr("Open the active repository on GitHub"));
-        connect(fork,&QPushButton::clicked,this,[fork]{fork->setChecked(true);QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/romanilyin/zerus")));});
-        auto *repositories=new QHBoxLayout;repositories->setSpacing(8);repositories->addWidget(repository);repositories->addWidget(whitewh);repositories->addWidget(fork);repositories->addStretch();
+        fork->setCursor(Qt::PointingHandCursor);fork->setToolTip(tr("Active: this build is the WhiteWh fork · https://github.com/WhiteWh/zerus"));fork->setAccessibleName(tr("Open the WhiteWh fork on GitHub (the active repository)"));
+        connect(fork,&QPushButton::clicked,this,[fork]{fork->setChecked(true);QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/WhiteWh/zerus")));});
+        auto *repositories=new QHBoxLayout;repositories->setSpacing(8);repositories->addWidget(repository);repositories->addWidget(fork);repositories->addStretch();
         about->addLayout(repositories);
         auto *updater=ForkUpdater::instance();
         forkStatus=new QLabel;forkStatus->setObjectName("aboutForkStatus");forkStatus->setWordWrap(true);
@@ -353,9 +350,9 @@ public:
     void refreshForkUpdate(){
         auto *updater=ForkUpdater::instance();
         const bool ready=updater->ready();
-        forkUpdate->setText(ready?tr("Restart to install fork build %1").arg(updater->readyBuild()):tr("Check for fork updates"));
+        forkUpdate->setText(ready?tr("Restart to install fork build %1").arg(updater->readyBuild()):tr("Check for updates from WhiteWh/zerus"));
         forkUpdate->setEnabled(updater->manualAvailable());
-        forkUpdate->setToolTip(updater->manualAvailable()?QString():tr("No fork update channel is configured"));
+        forkUpdate->setToolTip(updater->manualAvailable()?QString():tr("Updates from the fork run in its portable Windows build"));
         forkStatus->setText(updater->status());
     }
     void setPeers(const QStringList &peers){sync->setPeers(peers);speech->setPeers(peers);analytics->setPeers(peers);worktrees->setPeers(peers);}

@@ -31,13 +31,3 @@ if(NOT ZERUS_DEV_BUILD_NUMBER STREQUAL "")
         ZERUS_DEV_BASE_VERSION="${ZERUS_DEV_BASE_VERSION}"
         ZERUS_DEV_BUILD_NUMBER=${ZERUS_DEV_BUILD_NUMBER})
 endif()
-
-# Fork candidates have a separate identity; upstream semantic versions and
-# saved application/session identifiers remain unchanged. No publisher is enabled.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../FORK_VERSION")
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../FORK_VERSION" ZERUS_FORK_VERSION)
-string(STRIP "${ZERUS_FORK_VERSION}" ZERUS_FORK_VERSION)
-if(NOT ZERUS_FORK_VERSION MATCHES "^[0-9][0-9][0-9][0-9][.][0-9]+[.][0-9]+-[1-9][0-9]*$")
-    message(FATAL_ERROR "FORK_VERSION must be YYYY.M.D-N")
-endif()
-target_compile_definitions(hgs-updates PRIVATE ZERUS_FORK_VERSION="${ZERUS_FORK_VERSION}")

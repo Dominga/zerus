@@ -61,7 +61,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] ls                 sessions here and on peers
        hgs ls --json --local          this box as JSON (for the tray; no ssh)
        hgs [@host] status [--json] [--local]   version, sessions and background services here and on peers
-       hgs [@host] version [--json]   CLI version or exact fork build identity (also --version)
+       hgs [@host] version            this hgs version (also --version)
        hgs [@host] hooks <session> --json   read scoped hook health (hooks-health-v1)
        hgs [@host] hooks --account ID [--repair] --json   inspect or explicitly repair handlers
        hgs [@host] inspect <session> [--archive <id>] [--after <cursor>]   activity as JSON

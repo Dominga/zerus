@@ -8,7 +8,6 @@ copied next to them. Nothing is compiled here: the executables are the exact
 files the Windows CI job has just tested.
 """
 import argparse
-import fork_identity
 import datetime
 import json
 import os
@@ -219,25 +218,6 @@ def main():
         require(not re.search(r"@[A-Z_]+@", readme), "Unreplaced placeholder in the Windows README.")
         # Notepad and other Windows tools expect CRLF in a plain-text README.
         (stage / "README.txt").write_bytes(readme.replace("\n", "\r\n").encode("utf-8"))
-        # Query the exact staged executables, not metadata from an earlier build.
-        # Use a disposable profile even though version/build-info have no agent I/O.
-        identity_home = Path(temporary) / "identity-home"
-        identity_home.mkdir()
-        identity_env = {key: value for key, value in os.environ.items() if not key.upper().startswith("HGS_")}
-        identity_env.update(HOME=str(identity_home), USERPROFILE=str(identity_home),
-                            HGS_CONFIG_DIR=str(identity_home / "config"), HGS_STATE_DIR=str(identity_home / "state"))
-        def identity(program, arguments):
-            return json.loads(subprocess.check_output([str(program), *arguments], cwd=identity_home,
-                              env=identity_env, timeout=30).decode("utf-8"))
-        fork = (ROOT / "FORK_VERSION").read_text(encoding="utf-8").strip()
-        cli_build = fork_identity.cli_identity(identity(stage / "hgs.exe", ["version", "--json"]),
-                                              manifest["source_commit"], fork, "windows")
-        gui_build = fork_identity.gui_identity(identity(stage / "hgs-tray.exe", ["--build-info"]),
-                                              manifest["source_commit"], fork)
-        require(cli_build["version"] == cli_version and gui_build["version"] == version,
-                "Staged binary base versions differ from this source")
-        manifest.update(distribution=fork_identity.DISTRIBUTION, fork_version=fork,
-                        fork_channel="candidate", cli_build=cli_build, gui_build=gui_build)
         (stage / "build-info.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         partial = output.with_name(output.name + ".partial")
         partial.unlink(missing_ok=True)

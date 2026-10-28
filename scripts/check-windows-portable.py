@@ -95,11 +95,6 @@ def main():
             for program, expected in ((hgs, f"hgs {cli_version}"), (tray, f"Zerus {version}")):
                 reported = run(program, ["--version"], environment, base)
                 require(reported == expected, f"{program.name} --version: {reported!r}, expected {expected!r}.")
-            if manifest.get("distribution"):
-                cli_build = json.loads(run(hgs, ["version", "--json"], environment, base))
-                gui_build = json.loads(run(tray, ["--build-info"], environment, base))
-                require(cli_build == manifest["cli_build"] and gui_build == manifest["gui_build"],
-                        "Executed portable binaries do not match their fork provenance")
             if manifest.get("mobile_connector_bundled"):
                 connector_version = run(bundle / "zerus-mobile-connector.exe", ["--version"], environment, base)
                 require(connector_version.startswith("zerus-mobile-connector "), "Bundled connector does not start.")

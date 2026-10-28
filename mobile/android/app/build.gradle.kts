@@ -1,4 +1,3 @@
-import java.time.LocalDate
 import java.util.Properties
 import java.util.zip.ZipFile
 import java.io.File
@@ -37,18 +36,6 @@ if (firebaseEnabled) {
     apply(plugin = "com.google.gms.google-services")
     apply(plugin = "com.google.firebase.crashlytics")
 }
-// Explicit side-by-side build: it does not replace the upstream application.
-val forkBuild = providers.gradleProperty("zerusFork").orNull == "true"
-val forkVersion = rootProject.file("../../FORK_VERSION").readText().trim()
-val forkVersionCode = if(forkBuild) {
-    val pieces = Regex("""(\d{4})\.(\d{1,2})\.(\d{1,2})-([1-9]\d*)""").matchEntire(forkVersion)
-        ?: error("Invalid FORK_VERSION")
-    val date=LocalDate.of(pieces.groupValues[1].toInt(),pieces.groupValues[2].toInt(),pieces.groupValues[3].toInt())
-    val iteration=pieces.groupValues[4].toInt()
-    require(iteration in 1..99) { "Android fork date iteration must be 1..99 or use an explicit reviewed scheme" }
-    (date.year.toLong()*1000000+date.monthValue*10000+date.dayOfMonth*100+iteration).also { require(it<=Int.MAX_VALUE) }.toInt()
-} else 1
-
 // The task replica: zerus-replica through UniFFI (crates/replica-ffi), built with the
 // pinned CI toolchain. The host library gives the Kotlin bindings and is what the JVM
 // unit tests load; cargo-ndk builds the library of each packaged ABI.
@@ -104,18 +91,12 @@ android {
     compileSdk = 36
     ndkVersion = "28.2.13676358"
     defaultConfig {
-        applicationId = if(forkBuild) "app.zerus.mobile.romanilyin" else "app.zerus.mobile"
+        applicationId = "app.zerus.mobile"
         minSdk = 26
         targetSdk = 36
         versionCode = updateVersionCode ?: stableVersionCode
         versionName = previewVersionName ?: (devBuildNumber?.let { "$devBaseVersion-dev.$it" } ?: stableVersionName)
         buildConfigField("boolean", "FIREBASE_ENABLED", firebaseEnabled.toString())
-        buildConfigField("boolean", "FORK_BUILD", forkBuild.toString())
-        buildConfigField("String", "DEFAULT_RELAY_URL", if(forkBuild) "\"\"" else "\"https://relay.zerus.dev\"")
-        manifestPlaceholders["appLabel"] = if(forkBuild) "Zerus Fork" else "Zerus"
-        if(forkBuild) { versionName = "$forkVersion-fork"; versionCode = updateVersionCode ?: forkVersionCode }
-
-
         buildConfigField("boolean", "READ_TIMING_ENABLED", readTimingEnabled.toString())
         testInstrumentationRunner = providers.gradleProperty("zerusInstrumentationRunner").orNull ?: "androidx.test.runner.AndroidJUnitRunner"
         // The ABIs the task replica's library is built for (crates/replica-ffi). JNA's own

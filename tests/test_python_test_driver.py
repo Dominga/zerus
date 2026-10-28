@@ -20,7 +20,7 @@ scope_spec.loader.exec_module(scope)
 
 class HostedMacAdmission(unittest.TestCase):
     def test_only_authorized_repositories_on_hosted_macos_are_admitted(self):
-        for repository in ('ufna/zerus', 'romanilyin/zerus'):
+        for repository in ('ufna/zerus', 'WhiteWh/zerus', 'romanilyin/zerus'):
             with self.subTest(repository=repository):
                 admitted = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted', GITHUB_REPOSITORY=repository)
                 self.assertIsNone(scope.admit(admitted, 'Darwin'))
@@ -40,7 +40,7 @@ class HostedMacAdmission(unittest.TestCase):
                         allocate.assert_not_called()
 
     def test_admitted_runner_still_rejects_a_mismatched_checkout_before_allocation(self):
-        for repository in ('ufna/zerus', 'romanilyin/zerus'):
+        for repository in ('ufna/zerus', 'WhiteWh/zerus', 'romanilyin/zerus'):
             environment = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted',
                                GITHUB_REPOSITORY=repository, SOURCE_COMMIT='a' * 40)
             with self.subTest(repository=repository), patch.dict(os.environ, environment, clear=True), \

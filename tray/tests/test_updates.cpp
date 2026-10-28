@@ -147,27 +147,6 @@ class TestUpdates : public QObject {
     }
     void tool(const QString &path,const QByteArray &script){QFile file(path);QVERIFY(file.open(QIODevice::WriteOnly));file.write(script);file.close();QVERIFY(file.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));}
 private slots:
-    void forkCandidateDoesNotAdoptUpstreamCatalogOrStartNetworkChecks(){
-        QTemporaryDir settings;QVERIFY(settings.isValid());
-        const auto oldFormat=QSettings::defaultFormat();
-        const auto oldIniFile=QSettings(QSettings::IniFormat,QSettings::UserScope,"hgs-fork-probe","probe").fileName();
-        const auto oldIniRoot=QDir(QFileInfo(oldIniFile).absolutePath()).absoluteFilePath("..");
-        QSettings::setDefaultFormat(QSettings::IniFormat);
-        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,settings.path());
-        const auto restore=qScopeGuard([&]{QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,oldIniRoot);QSettings::setDefaultFormat(oldFormat);});
-        QSettings saved;saved.setValue("updates/channel","stable");
-        saved.setValue("updates/catalog/stable",QJsonDocument(raw()).toJson());
-        saved.setValue("updates/lastSuccess/stable",QDateTime::currentSecsSinceEpoch());
-        UpdateController controller(nullptr,settings.filePath("hgs-tray"));
-        QSignalSpy requests(&controller,&UpdateController::requestStarted);
-        controller.check();QTest::qWait(30);
-        QCOMPARE(requests.size(),0);QVERIFY(!controller.feed().valid);QVERIFY(!controller.busy());
-        const auto identity=UpdateController::buildInfo();
-        QCOMPARE(identity["distribution"].toString(),QString("romanilyin/zerus"));
-        QCOMPARE(identity["forkChannel"].toString(),QString("candidate"));
-        QVERIFY(!identity["forkUpdatesEnabled"].toBool(true));
-        QVERIFY(UpdateController::installedVersion().contains("candidate"));
-    }
     void forkLayoutOfAPlainFolderKeepsItsSiblingStage(){
         QTemporaryDir root;QVERIFY(root.isValid());
         const QString build=root.filePath("zerus");QVERIFY(QDir().mkpath(build));
@@ -795,24 +774,22 @@ private slots:
     }
     void verifiedCatalogSurvivesRestartAndRejectsCorruption(){
         QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);QSettings().setValue("updates/channel","stable");QSettings().setValue("updates/catalog/stable",QJsonDocument(raw()).toJson());QSettings().setValue("updates/lastSuccess/stable",QDateTime::currentSecsSinceEpoch()-30);
-
         // The saved catalog is parsed off the GUI thread after startup (every suite fails on a GUI-thread parse).
-        UpdateController restored(nullptr,dir.path()+"/missing",[](const QNetworkRequest &){return new FixtureReply;});QSignalSpy changed(&restored,&UpdateController::changed);
+        UpdateController restored(nullptr,dir.path()+"/missing");QSignalSpy changed(&restored,&UpdateController::changed);
         QTRY_VERIFY(restored.feed().valid);QVERIFY(restored.message().contains("cached"));QVERIFY(!changed.isEmpty());QCOMPARE(restored.feed().version,QString("0.37.0"));
         restored.setChannel("nightly");QVERIFY(!restored.feed().valid);preparationBarrier();QVERIFY(!restored.feed().valid);
         restored.setChannel("stable");QTRY_VERIFY(restored.feed().valid);QVERIFY(restored.message().contains("cached"));
         // A channel change before the restore applies drops it.
-        UpdateController switched(nullptr,dir.path()+"/missing",[](const QNetworkRequest &){return new FixtureReply;});switched.setChannel("nightly");preparationBarrier();QVERIFY(!switched.feed().valid);switched.setChannel("stable");
-        QSettings().setValue("updates/catalog/stable",QByteArray("malformed"));UpdateController corrupt(nullptr,dir.path()+"/missing",[](const QNetworkRequest &){return new FixtureReply;});preparationBarrier();QVERIFY(!corrupt.feed().valid);
-
+        UpdateController switched(nullptr,dir.path()+"/missing");switched.setChannel("nightly");preparationBarrier();QVERIFY(!switched.feed().valid);switched.setChannel("stable");
+        QSettings().setValue("updates/catalog/stable",QByteArray("malformed"));UpdateController corrupt(nullptr,dir.path()+"/missing");preparationBarrier();QVERIFY(!corrupt.feed().valid);
     }
     void archVersionComparisonUsesEpochAndPackageRelease(){
 #ifdef Q_OS_LINUX
         if(QStandardPaths::findExecutable("vercmp").isEmpty())QSKIP("Arch vercmp is unavailable");
         QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/channel","stable");auto value=raw();value["packages"]=QJsonObject{{"zerus-ade-bin","0.37.0-10"}};QSettings().setValue("updates/catalog/stable",QJsonDocument(value).toJson());QSettings().setValue("updates/lastSuccess/stable",QDateTime::currentSecsSinceEpoch()-30);
         auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);tool(dir.path()+"/pacman","#!/usr/bin/python3\nimport os,sys\nprint('zerus-ade-bin' if sys.argv[1]=='-Qqo' else 'zerus-ade-bin '+os.environ['ZERUS_TEST_VERSION'])\n");QFile executable(dir.path()+"/gui");QVERIFY(executable.open(QIODevice::WriteOnly));executable.close();
-        qputenv("ZERUS_TEST_VERSION","0.37.0-2");{UpdateController controller(nullptr,executable.fileName(),[](const QNetworkRequest &){return new FixtureReply;});QTRY_VERIFY_WITH_TIMEOUT(controller.message().contains("Update available"),2000);}
-        qputenv("ZERUS_TEST_VERSION","1:0.37.0-2");{UpdateController controller(nullptr,executable.fileName(),[](const QNetworkRequest &){return new FixtureReply;});QTRY_VERIFY_WITH_TIMEOUT(controller.message().contains("at least"),2000);}
+        qputenv("ZERUS_TEST_VERSION","0.37.0-2");{UpdateController controller(nullptr,executable.fileName());QTRY_VERIFY_WITH_TIMEOUT(controller.message().contains("Update available"),2000);}
+        qputenv("ZERUS_TEST_VERSION","1:0.37.0-2");{UpdateController controller(nullptr,executable.fileName());QTRY_VERIFY_WITH_TIMEOUT(controller.message().contains("at least"),2000);}
         qputenv("PATH",oldPath);qunsetenv("ZERUS_TEST_VERSION");
 #endif
     }

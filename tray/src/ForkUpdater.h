@@ -44,9 +44,10 @@ public:
     static qint64 installedBuild();
     // Built with a feed and running from a portable folder.
     bool enabled() const { return m_enabled; }
-    // Manual checks are available only when a verified feed is configured.
-    bool manualAvailable() const { return m_enabled; }
-    // Check the configured feed now.
+    // A portable Windows build can check WhiteWh releases by hand even when
+    // built locally without an automatic feed.
+    bool manualAvailable() const { return m_portable; }
+    // Check the configured or latest WhiteWh feed now.
     void checkNow();
     // A verified newer build waits next to the installation.
     bool ready() const { return m_readyBuild > 0; }

@@ -64,11 +64,12 @@ fn write(actions: &[Value]) -> anyhow::Result<()> {
 const SLOTS: &[&str] = &["{path}", "{word}", "{words}", "{guid}", "{number}"];
 
 /// A slot's regex. A name starts with a letter, digit or `_`, so it is never
-/// an option (`-x`) or `..`; a path never starts with `-`. Only `{path}`
+/// an option (`-x`) or `..`; a path never starts with `-` or shell-expanded `~`
+/// and never contains cmd's caret escape. Only `{path}`
 /// captures, so the captures are the paths to check.
 fn slot(slot: &str) -> &'static str {
     match slot {
-        "{path}" => r#"((?:[A-Za-z]:[\\/]|[^\s\-;|&<>$(){}`"'@%!*?])[^\s;|&<>$(){}`"'@%!*?]*)"#,
+        "{path}" => r#"((?:[A-Za-z]:[\\/]|[^\s\-~^;|&<>$(){}`"'@%!*?])[^\s^;|&<>$(){}`"'@%!*?]*)"#,
         "{word}" => r"[A-Za-z0-9_][A-Za-z0-9_.\-]*",
         "{words}" => r"'?[A-Za-z0-9_][A-Za-z0-9_.\-]*(?:[ ,']+[A-Za-z0-9_][A-Za-z0-9_.\-]*)*'?",
         "{guid}" => r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}",
@@ -108,6 +109,12 @@ fn compile(shape: &str) -> anyhow::Result<Regex> {
 /// path still inside once links are resolved.
 fn inside(path: &str, folder: &Path) -> bool {
     if path.is_empty() || !folder.is_absolute() {
+        return false;
+    }
+    // Slots are unquoted shell text: a leading tilde names a home directory,
+    // while cmd removes carets before interpreting paths such as `^..\other`.
+    // Neither spelling can be authorized by checking its literal filesystem path.
+    if path.starts_with('~') || path.contains('^') {
         return false;
     }
     // These slots are unquoted shell text. On Unix a backslash can disguise
@@ -293,6 +300,31 @@ mod tests {
         assert!(!inside("dangling/output", &folder));
         std::os::unix::fs::symlink(&folder, folder.join("internal")).unwrap();
         assert!(inside("internal/new-output", &folder));
+    }
+
+    #[test]
+    fn unquoted_paths_cannot_expand_or_unescape_outside_the_members_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("team-qa");
+        std::fs::create_dir(&folder).unwrap();
+        let team = Team { id: "t1".into(), lead: "lead".into(), ..Default::default() };
+        let member = Member { id: "qa".into(), role: "QA tester".into(), ..Default::default() };
+        let action = json!({"team":"t1","member":"qa","shape":"cmake --build {path} --target {word}"});
+        let shape = compile(action["shape"].as_str().unwrap()).unwrap();
+        for path in ["~", "~/outside", "~fixture/outside", "~+", "~-", r"~\outside",
+            "^../outside", ".^./outside", r"^..\outside", r".^.\outside", "^~", "build^output"] {
+            let command = format!("cmake --build {path} --target tests");
+            assert!(!shape.is_match(&command), "shell spelling reached a path slot: {path}");
+            assert!(!inside(path, &folder), "shell spelling passed containment: {path}");
+            assert!(!allows(&action, &team, &member, "shell", &command, &folder), "authorized: {path}");
+        }
+        // A literal tilde within a filename has no leading-tilde expansion.
+        // Existing paths and new build outputs remain supported.
+        std::fs::create_dir(folder.join("build~backup")).unwrap();
+        for path in ["build~backup", "build~backup/new-output", "new-output"] {
+            let command = format!("cmake --build {path} --target tests");
+            assert!(allows(&action, &team, &member, "shell", &command, &folder), "refused: {path}");
+        }
     }
 
     #[test]

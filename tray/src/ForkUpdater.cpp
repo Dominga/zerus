@@ -2,7 +2,6 @@
 #include "ChildProcess.h"
 #include "JsonParse.h"
 #include "ProcessRunner.h"
-#include "PowerShell7.h"
 #ifdef Q_OS_WIN
 #include "RelayConfiguration.h"
 #include "WindowsMobileServices.h"
@@ -29,6 +28,8 @@ const char *feedUrl = "";
 #endif
 // Every build comes from this fork's own releases.
 const char *releasePrefix = "https://github.com/WhiteWh/zerus/releases/";
+// A local portable build can check the latest WhiteWh release on request.
+const char *latestFeed = "https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json";
 // The folder at the top of the portable zip (scripts/windows_portable.py).
 const char *top = "zerus-windows-x86_64";
 constexpr qint64 feedLimit = 64 * 1024;
@@ -307,12 +308,10 @@ ForkUpdater::ForkUpdater(QObject *parent) : QObject(parent)
 #ifdef Q_OS_WIN
     // Only the portable zip carries build-info.json next to hgs-tray.exe.
     m_portable = !m_install.isEmpty() && QFileInfo::exists(m_install + QStringLiteral("/build-info.json")) && !m_layout.superseded;
-#ifndef ZERUS_FORK_VERSION
     m_enabled = m_portable && *feedUrl && QString::fromLatin1(feedUrl).startsWith(QLatin1String(releasePrefix));
 #endif
-#endif
     m_status = m_enabled ? tr("Fork updates have not been checked.")
-             : m_portable ? tr("This fork has no configured update channel.") : QString();
+             : m_portable ? tr("This build was made locally: it checks the fork's releases only when you ask.") : QString();
     if (!m_enabled) return;
     m_network = new QNetworkAccessManager(this);
     QTimer::singleShot(firstCheckMs, this, &ForkUpdater::check);
@@ -342,7 +341,8 @@ void ForkUpdater::check()
 
 void ForkUpdater::checkNow()
 {
-    if (!m_enabled) return;
+    if (!m_portable) return;
+    if (!m_network) m_network = new QNetworkAccessManager(this);
     fetch();
 }
 
@@ -352,7 +352,7 @@ void ForkUpdater::fetch()
     m_busy = true;
     m_status = tr("Checking the fork's releases…");
     emit changed();
-    const QString feed = QString::fromLatin1(feedUrl);
+    const QString feed = m_enabled ? QString::fromLatin1(feedUrl) : QString::fromLatin1(latestFeed);
     QNetworkRequest request{QUrl(feed)};
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     request.setTransferTimeout(30000);
@@ -490,12 +490,6 @@ QString ForkUpdater::readyStatus() const
 bool ForkUpdater::startInstall()
 {
     if (m_installing || !ready() || !QFileInfo::exists(unpacked())) return false;
-    QString shellError;
-    const QString shell = PowerShell7::locate(&shellError);
-    if (shell.isEmpty()) {
-        finish(shellError);
-        return false;
-    }
     const QString script = QDir::temp().filePath(QStringLiteral("zerus-fork-install-%1.ps1").arg(m_readyBuild));
     QFile file(script);
     const QByteArray text = m_layout.versioned ? QByteArray(versionedHead) + bannerScript + versionedBody
@@ -503,7 +497,7 @@ bool ForkUpdater::startInstall()
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) || file.write(text) != text.size()) return false;
     file.close();
     const auto native = [](const QString &path) { return QDir::toNativeSeparators(path); };
-    QStringList args{QStringLiteral("-NoLogo"), QStringLiteral("-NoProfile"), QStringLiteral("-STA"), QStringLiteral("-NonInteractive"), QStringLiteral("-ExecutionPolicy"), QStringLiteral("Bypass"),
+    QStringList args{QStringLiteral("-NoProfile"), QStringLiteral("-NonInteractive"), QStringLiteral("-ExecutionPolicy"), QStringLiteral("Bypass"),
                           QStringLiteral("-WindowStyle"), QStringLiteral("Hidden"), QStringLiteral("-File"), native(script),
                           QStringLiteral("-ParentPid"), QString::number(QCoreApplication::applicationPid()),
                           QStringLiteral("-New"), native(unpacked()), QStringLiteral("-Stage"), native(m_stage),
@@ -515,7 +509,7 @@ bool ForkUpdater::startInstall()
         args << QStringLiteral("-Install") << native(m_install)
                   << QStringLiteral("-Previous") << native(m_install + QStringLiteral(".previous"));
     QProcess process;
-    process.setProgram(shell);
+    process.setProgram(QDir(qEnvironmentVariable("SystemRoot", QStringLiteral("C:\\Windows"))).filePath(QStringLiteral("System32/WindowsPowerShell/v1.0/powershell.exe")));
     process.setArguments(args);
     // Never inside the folder it moves: a current directory there keeps it in use.
     process.setWorkingDirectory(QDir::tempPath());

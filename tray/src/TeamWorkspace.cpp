@@ -1042,6 +1042,18 @@ protected:
     void resizeEvent(QResizeEvent *event) override { QWidget::resizeEvent(event); refit(); }
     void showEvent(QShowEvent *event) override { QWidget::showEvent(event); refit(); }
 private:
+    void fitCompactSpacing()
+    {
+        auto *row = qobject_cast<QHBoxLayout *>(layout());
+        if (!row) return;
+        row->setSpacing(2); row->setContentsMargins(4, 8, 4, 6);
+        // Style-dependent group frames and switch hints can leave the icon-only
+        // row a few pixels too wide. Use its remaining whitespace before any
+        // control is clipped, keeping each button's full click target.
+        if (sizeHint().width() > width()) {
+            row->setSpacing(0); row->setContentsMargins(0, 8, 0, 6);
+        }
+    }
     // Two steps: first the switch labels go (their switches keep them as
     // tooltips), then the buttons' words.
     void refit()
@@ -1054,7 +1066,7 @@ private:
                 if (l->property("compactHide").toBool() && !l->isHidden()) m_labels += l->sizeHint().width() + spacing;
         }
         const int level = width() >= m_full ? 0 : width() >= m_full - m_labels ? 1 : 2;
-        if (level == m_level) return;
+        if (level == m_level) { if (level == 2) fitCompactSpacing(); return; }
         m_level = level;
         const bool compact = level == 2;
         for (auto *l : findChildren<QLabel *>()) if (l->property("compactHide").toBool()) l->setVisible(level == 0);
@@ -1076,6 +1088,7 @@ private:
             const QIcon icon = b->property("compactIcon").value<QIcon>();
             if (!icon.isNull()) b->setIcon(compact ? icon : QIcon());
         }
+        if (compact) fitCompactSpacing();
     }
     int m_level = 0, m_full = 0, m_labels = 0;
 };

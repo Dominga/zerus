@@ -4940,19 +4940,16 @@ void TestTeamsUi::aboutNamesTheForkAndItsUpdate()
     SettingsPage page(FakeCli::program(script()));
     auto *upstream = page.findChild<QPushButton *>("aboutRepository");
     auto *fork = page.findChild<QPushButton *>("aboutForkRepository");
-    auto *whitewh = page.findChild<QPushButton *>("aboutWhiteWhRepository");
-    QVERIFY(upstream && whitewh && fork);
+    QVERIFY(upstream && fork);
     QCOMPARE(upstream->text(), QStringLiteral("ufna/zerus"));
-    QCOMPARE(whitewh->text(), QStringLiteral("WhiteWh/zerus"));
-    QCOMPARE(fork->text(), QStringLiteral("romanilyin/zerus"));
+    QCOMPARE(fork->text(), QStringLiteral("WhiteWh/zerus"));
     QVERIFY(fork->isChecked());
-    QVERIFY(fork->toolTip().contains(QStringLiteral("https://github.com/romanilyin/zerus")));
+    QVERIFY(fork->toolTip().contains(QStringLiteral("https://github.com/WhiteWh/zerus")));
     auto *update = page.findChild<QPushButton *>("aboutForkUpdate");
     QVERIFY(update);
-    QCOMPARE(update->text(), QStringLiteral("Check for fork updates"));
-    QVERIFY(!ForkUpdater::instance()->manualAvailable());
-    QVERIFY(!update->isEnabled());
-    QVERIFY(update->toolTip().contains(QStringLiteral("No fork update channel")));
+    QCOMPARE(update->text(), QStringLiteral("Check for updates from WhiteWh/zerus"));
+    QCOMPARE(update->isEnabled(), ForkUpdater::instance()->manualAvailable());
+    if (!update->isEnabled()) QVERIFY(update->toolTip().contains(QStringLiteral("portable Windows build")));
     QVERIFY(page.findChild<QLabel *>("aboutForkStatus"));
 }
 
@@ -7238,12 +7235,16 @@ void TestTeamsUi::leadHeaderFollowsTheTeamState()
         setTeam(clean);
         QPushButton *approve = nullptr;
         QTRY_VERIFY(([&] { controller.refresh(); approve = workspace.findChild<QPushButton *>("teamWorkspaceApprove"); return approve && approve->isEnabled(); })());
-        QString asked;
+        QString asked, dialogName, dialogTitle, confirmAction;
+        bool cancelIsDefault = false;
         QTimer watch; watch.setInterval(10);
         QObject::connect(&watch, &QTimer::timeout, &panel, [&] {
             auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
             if (!box || !asked.isEmpty()) return;
-            asked = box->windowTitle() + QLatin1Char('|') + box->text();
+            asked = box->text(); dialogName = box->objectName(); dialogTitle = box->windowTitle();
+            cancelIsDefault = box->defaultButton() == box->button(QMessageBox::Cancel);
+            for (auto *button : box->buttons())
+                if (box->buttonRole(button) == QMessageBox::DestructiveRole) confirmAction = button->text();
             box->button(QMessageBox::Cancel)->click();
         });
         watch.start();
@@ -7251,7 +7252,14 @@ void TestTeamsUi::leadHeaderFollowsTheTeamState()
         QTRY_VERIFY(!asked.isEmpty());
         watch.stop();
         QTest::qWait(50); QCOMPARE(calls(script(), "approve").size(), 0);
-        QVERIFY2(asked.startsWith(QStringLiteral("Approve plan and run?|")), qPrintable(asked));
+        QCOMPARE(dialogName, QStringLiteral("teamApproveConfirm"));
+        // Native macOS message boxes omit the window title. The body and the
+        // destructive action carry the approval there as on other platforms.
+#ifndef Q_OS_MACOS
+        QCOMPARE(dialogTitle, QStringLiteral("Approve plan and run?"));
+#endif
+        QVERIFY2(asked.startsWith(QStringLiteral("Approve the plan of Checkout redesign and run it?")), qPrintable(asked));
+        QCOMPARE(confirmAction, QStringLiteral("Approve and run")); QVERIFY(cancelIsDefault);
         QVERIFY2(asked.contains(QStringLiteral("It starts 2 member sessions: Backend (codex), Tester (kimi on msi-old).")), qPrintable(asked));
         armConfirm(&panel, false);
         workspace.findChild<QPushButton *>("teamWorkspaceApprove")->click();

@@ -9,6 +9,11 @@ vi.mock("../bridge", async (importOriginal) => ({
   onDeskNotice: vi.fn(() => () => {}),
   deskTakePending: vi.fn(async () => ({ open: null, notices: [] })),
 }));
+// One catalog row, in a project the list shows collapsed.
+vi.mock("./catalog", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./catalog")>()),
+  catalog: { rows: { "mac\nrun:folded": { project: "sample-project" } }, order: [] },
+}));
 // store/ui reads the page URL when it loads; the wiring needs only its setters.
 vi.mock("./ui", () => ({
   setPage: vi.fn(),
@@ -19,7 +24,7 @@ vi.mock("./ui", () => ({
   setProjectFilter: vi.fn(),
   setSearch: vi.fn(),
   setCollapsed: vi.fn(),
-  collapsed: {},
+  collapsed: { "sample-project": true } as Record<string, boolean>,
   revealRow: vi.fn(),
   toast: vi.fn(),
 }));
@@ -57,6 +62,21 @@ describe("desk wiring", () => {
     expect(shown.setProjectFilter).toHaveBeenCalledWith([]);
     expect(shown.setSearch).toHaveBeenCalledWith("");
     expect(shown.setSubagentOpen).toHaveBeenCalledWith(undefined);
+  });
+
+  it("expands the collapsed project of the session it opens", () => {
+    let open: ((target: bridge.OpenSession) => void) | undefined;
+    mocked.onOpenSession.mockImplementation((listener) => {
+      open = listener;
+      return () => {};
+    });
+    startDesk();
+    open!({ computer: "mac", key: "run:folded" });
+    expect(shown.setCollapsed).toHaveBeenCalledWith("sample-project", false);
+    expect(shown.setSelectedKey).toHaveBeenCalledWith("mac\nrun:folded");
+    vi.clearAllMocks();
+    open!({ computer: "mac", key: "run:elsewhere" });
+    expect(shown.setCollapsed).not.toHaveBeenCalled();
   });
 
   it("applies what arrived before the page loaded", async () => {

@@ -352,6 +352,9 @@ fn collect(record: &Value, deadline: Option<std::time::Instant>) -> Result<Optio
         cards.push(terminal);
     }
     if cards.is_empty() {
+        cards.extend(claude_approval::idle_choice(record));
+    }
+    if cards.is_empty() {
         cards.extend(startup_choice::current(record));
     }
     cards.sort_by(|a, b| {

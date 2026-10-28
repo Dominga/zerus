@@ -706,6 +706,7 @@ private slots:
     void draftIsDecidedWithoutADesignerSession();
     void designerQuestionIsAnsweredInTheWindow();
     void coordinatorQueuesASecondMessageWithCancel();
+    void coordinatorTakesPastedImagesAndFiles();
     void catalogEditorMarksManualEdits();
     void boardScrollsInsteadOfSqueezingColumns();
     void planningBoardScrollsInsteadOfSqueezingColumns();
@@ -5421,7 +5422,8 @@ void TestTeamsUi::catalogHeaderRevertDraftAndBanners()
     auto moved = catalog(); auto inner = moved["catalog"].toObject(); inner["version"] = 4; moved["catalog"] = inner;
     { QFile c(script() + ".catalog"); QVERIFY(c.open(QIODevice::WriteOnly)); c.write(QJsonDocument(moved).toJson(QJsonDocument::Compact)); }
     controller.refreshCatalog();
-    QTRY_COMPARE(draft.findChild<QLabel *>("teamCatalogBannerTitle")->text(), QStringLiteral("Draft is out of date — Apply is off"));
+    // The fixture's catalog read takes more than QTRY's 5 s on a loaded Windows runner.
+    QTRY_COMPARE_WITH_TIMEOUT(draft.findChild<QLabel *>("teamCatalogBannerTitle")->text(), QStringLiteral("Draft is out of date — Apply is off"), 15000);
     QVERIFY(draft.findChild<QFrame *>("teamCatalogBanner")->isVisible());
     QVERIFY(!draft.findChild<QPushButton *>("teamDesignerApply")->isEnabled());
     shot(&draft, "ux-9-draft-stale-dark");
@@ -5841,6 +5843,60 @@ void TestTeamsUi::planningRulesAreEditedSavedResetAndProposed()
 // until the lead takes your previous message" with Cancel; Cancel sends
 // send-cancel with its request ID and returns the text; once hgs delivers it,
 // the line goes. A dialog in the lead's terminal is refused with Open terminal.
+// Owner, 2026-10-28: only Activity took files; in the lead's conversation a
+// pasted image became "[Image #1]" text and the file was lost. Every
+// conversation has Attach, and a pasted image is an attachment sent with it.
+void TestTeamsUi::coordinatorTakesPastedImagesAndFiles()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString program = dir.filePath("hgs");
+    QVERIFY(FakeCli::install(program, R"PY(#!/usr/bin/env python3
+import json,os,sys
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a=a[1:]
+here=__file__
+if a[:1]==['inspect']:
+ print(json.dumps({'name':a[1],'run_id':'run-1','conversation_id':'conv-1','runtime_state':'live','process_state':'running',
+  'activity':'idle','phase':'idle','cursor':0,'events':[]}))
+elif a[:1]==['send']:
+ body=json.load(sys.stdin)
+ open(here+'.sends','a').write(json.dumps(body)+'\n')
+ print(json.dumps({'request_id':body['request_id'],'name':a[1],'run_id':'run-1','conversation_id':'conv-1','first_message':False,
+  'status':'submitted','text':body['text']}))
+else:print('{}')
+)PY"));
+    TeamConversation::setPollInterval(100);
+    const auto restore = qScopeGuard([] { TeamConversation::setPollInterval(2000); });
+    HgsClient client(FakeCli::program(program));
+    TeamConversation conversation(&client);
+    conversation.setSession({}, "claude/checkout/lead");
+    conversation.resize(560, 420); conversation.show();
+    auto *attach = conversation.findChild<QPushButton *>("teamConversationAttach");
+    QVERIFY(attach); QTRY_VERIFY(attach->isVisible()); QVERIFY(attach->isEnabled());
+    auto *input = conversation.findChild<QPlainTextEdit *>("teamConversationInput");
+    auto *sendButton = conversation.findChild<QPushButton *>("teamConversationSend");
+    QTRY_VERIFY(sendButton->isEnabled());
+    QTest::qWait(300);   // the first read of the session
+    QImage image(8, 8, QImage::Format_ARGB32); image.fill(Qt::red);
+    QGuiApplication::clipboard()->setImage(image);
+    input->setFocus(); input->insertPlainText("Look at "); input->paste();
+    QCOMPARE(input->toPlainText(), QString("Look at [Image #1] "));
+    auto *files = conversation.findChild<QWidget *>("teamConversationFiles"); QVERIFY(files); QVERIFY(files->isVisible());
+    sendButton->click();
+    const auto sends = [&] {
+        QList<QJsonObject> found; QFile file(program + ".sends");
+        if (file.open(QIODevice::ReadOnly)) for (const auto &line : file.readAll().split('\n')) if (!line.isEmpty()) found << QJsonDocument::fromJson(line).object();
+        return found;
+    };
+    QTRY_COMPARE(sends().size(), 1);
+    const auto attachments = sends().first()["attachments"].toArray();
+    QCOMPARE(attachments.size(), 1);
+    QCOMPARE(attachments[0].toObject()["mime"].toString(), QString("image/png"));
+    QVERIFY(sends().first()["text"].toString().contains("[Image #1]"));
+    // Sent: the field and the files clear.
+    QTRY_VERIFY(input->toPlainText().isEmpty()); QTRY_VERIFY(!files->isVisible());
+}
+
 void TestTeamsUi::coordinatorQueuesASecondMessageWithCancel()
 {
     QTemporaryDir dir; QVERIFY(dir.isValid());

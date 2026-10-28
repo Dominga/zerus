@@ -70,6 +70,7 @@
 #include <utility>
 #include "SessionsWindow.h"
 #include "Extensions.h"
+#include "InspectorCards.h"
 #include "JsonParse.h"
 #include "OffGuiThread.h"
 #include "QuestionReply.h"
@@ -651,6 +652,8 @@ private slots:
     void rowPreparationNeverRunsOnTheGuiThread();
     void rowPreparationDropsStaleResults();
     void rowPreparationsNeverQueueBehindEachOther();
+    void aConfirmingCreationReadsItsComputerUntilListed();
+    void tasksCardReadsBackgroundJobsWithTheProcessesTabOff();
     void rowPreparationKeepsItemsSelectionAndScroll();
     void rowPreparationRevealsSessionsAfterFilterChanges();
 private:
@@ -17014,6 +17017,67 @@ void TestSessionsWindow::rowPreparationDropsStaleResults()
 // queued its own row preparation on the one preparation thread, stale ones
 // included, and the selected session's inspection reply waited behind them.
 // Rebuilds while a preparation runs fold into one more.
+// User report 2026-10-28: a new session on a peer stayed "Confirming session"
+// for a minute: peers are listed once a minute (or only through their event
+// stream), and the one refresh after the launch came before the session was
+// listed. Its computer is read every 2 s until the session is placed.
+// Owner, 2026-10-28: with the Processes tab off (the default) the Tasks card
+// never showed the agent's background jobs, since no read included them. While
+// the card is on screen the reads include them, at the background interval.
+void TestSessionsWindow::tasksCardReadsBackgroundJobsWithTheProcessesTabOff()
+{
+    QTemporaryDir temp; const auto program = temp.filePath("hgs"); QFile fixture(program); QVERIFY(fixture.open(QIODevice::WriteOnly));
+    fixture.write(R"PY(#!/usr/bin/env python3
+import sys,json,pathlib,time
+root=pathlib.Path(__file__).parent
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a=a[1:]
+if a and a[0]=='inspect':
+ with (root/'inspections.jsonl').open('a') as f:f.write(json.dumps(a)+'\n')
+ value=dict(tracked=True,run_id='run',conversation_id='conversation',activity='busy',phase='working',events=[],cursor=0)
+ if '--skip-processes' not in a:value['processes']=dict(items=[dict(id='job',background=True,status='running',description='Wait for the fork build',started_at=time.time()-120)])
+ print(json.dumps(value))
+else:print('{}')
+)PY");
+    fixture.close(); QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
+    QVERIFY(!ProcessSettings::enabled());
+    SessionsWindow window(FakeCli::program(program)); window.resize(1440, 900); window.setFleet(fleet()); window.show();
+    window.showSession({}, "codex/hgs/dashboard");
+    window.findChild<QPushButton *>("toggleInspector")->setChecked(true);
+    auto *inspector = static_cast<InspectorCards *>(window.findChild<QScrollArea *>("sessionInspector")); QVERIFY(inspector);
+    inspector->open(InspectorCards::Tasks); QTRY_VERIFY(inspector->isOpen(InspectorCards::Tasks));
+    const auto log = [&] { QStringList result; QFile file(temp.filePath("inspections.jsonl")); if (file.open(QIODevice::ReadOnly)) while (!file.atEnd()) result << QString::fromUtf8(file.readLine()); return result; };
+    const auto readsProcesses = [&] { const auto calls = log(); return std::any_of(calls.cbegin(), calls.cend(), [](const QString &call) { return !call.contains("--skip-processes"); }); };
+    QTRY_VERIFY_WITH_TIMEOUT(readsProcesses(), 15000);
+    auto *roster = window.findChild<QTextBrowser *>("subagents");
+    QTRY_VERIFY_WITH_TIMEOUT(roster->toPlainText().contains("Wait for the fork build"), 15000);
+    QVERIFY(roster->toPlainText().contains("Background jobs"));
+}
+
+void TestSessionsWindow::aConfirmingCreationReadsItsComputerUntilListed()
+{
+    const auto id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QJsonObject operation{{"id", id}, {"launch_id", id}, {"creation_schema", 1}, {"state", "confirming"},
+        {"created", QDateTime::currentSecsSinceEpoch()}, {"launch_dispatched", true}, {"host", "peer"}, {"cmd", "claude"},
+        {"tag", "confirm-me"}, {"target", "/work/confirm"}, {"group", ""}};
+    { QFile file(QSettings().fileName() + ".creations.json"); QVERIFY(file.open(QIODevice::WriteOnly));
+      file.write(QJsonDocument(QJsonObject{{"schema", 1}, {"operations", QJsonObject{{id, operation}}}}).toJson(QJsonDocument::Compact)); }
+    SessionsWindow window(program()); keepDetailsPollsOut(window);
+    QSignalSpy reads(&window, &SessionsWindow::hostRefreshRequested);
+    window.setFleet(fleet()); window.show();
+    QTRY_VERIFY_WITH_TIMEOUT(reads.size() >= 2, 7000);
+    for (const auto &read : reads) QCOMPARE(read.at(0).toString(), QString("peer"));
+    // Listed: the creation is placed and the reads stop.
+    auto state = fleet(); BoxState peer; peer.host = "peer"; peer.ok = true;
+    auto listed = state.local().sessions.first(); listed.name = "claude/project/confirm-me"; listed.cmd = "claude"; listed.launchId = id;
+    listed.state = "running"; listed.tag = "confirm-me"; listed.project = "project";
+    peer.sessions.append(listed); state.setPeer(peer, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    QTRY_VERIFY(!window.findChild<SessionCreationController *>()->owns(id)
+                || window.findChild<SessionCreationController *>()->operation(id).value("state") == "bound");
+    QTest::qWait(2500); const auto settled = reads.size(); QTest::qWait(2500);
+    QCOMPARE(reads.size(), settled);
+}
+
 void TestSessionsWindow::rowPreparationsNeverQueueBehindEachOther()
 {
     AsyncRows async;

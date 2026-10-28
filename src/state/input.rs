@@ -293,6 +293,10 @@ fn checked_input(
     if claude_trust::current(&record).is_some() {
         return Err("Claude is waiting for folder trust approval. Choose an option in Activity or Terminal before sending a message.".into());
     }
+    // A message typed now would go into the chooser.
+    if claude_approval::idle_choice(&record).is_some() {
+        return Err("Claude is waiting for a choice in Terminal. Answer it there before sending a message.".into());
+    }
     if codex_trust::current(&record).is_some() {
         return Err("Codex is waiting for folder trust approval. Choose an option in Activity or Terminal before sending a message.".into());
     }

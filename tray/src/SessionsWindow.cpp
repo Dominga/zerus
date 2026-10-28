@@ -318,6 +318,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_organization = SessionOrganization(savedProjects);
     m_pendingLaunches = SettingsJson::object("workspace/pendingLaunches");
     m_creations=new SessionCreationController(m_client.executable(),this);
+    m_confirmPoll=new QTimer(this);m_confirmPoll->setInterval(2000);connect(m_confirmPoll,&QTimer::timeout,this,&SessionsWindow::pollConfirmingCreations);
     if (!settings.value("sessions/geometry").toByteArray().isEmpty()) restoreGeometry(settings.value("sessions/geometry").toByteArray());
     // WhiteWh fork: a skin may put its own title bar above the rail and the pages.
     auto *frame = new QVBoxLayout(this); frame->setContentsMargins(0, 0, 0, 0); frame->setSpacing(0);
@@ -1941,6 +1942,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_creations,&SessionCreationController::changed,this,[this](const QString &id,const QJsonObject &operation){
         if(operation["state"]=="bound")m_pendingLaunches.remove(id);
         else m_pendingLaunches[id]=operation;
+        // A launched session waits to be listed; its computer is read until then.
+        if((operation["state"]=="confirming"||operation["state"]=="recover")&&!m_confirmPoll->isActive()){m_confirmPollAge.start();m_confirmPoll->start();}
         if(!operation["show_pending"].toBool()){
             if(m_revealCreation==id)m_revealCreation.clear();
             if(m_selectedCreation==id)m_selectedCreation.clear();
@@ -3602,6 +3605,25 @@ void SessionsWindow::newSessionLaunchFailed(const QString &launchId, const QStri
         : tr("Could not start session %1: %2").arg(name, error), true);
 }
 
+// A created session is confirmed when its computer's listing shows it. Peers
+// are listed once a minute, or only through their event stream, so a session
+// not listed yet at the one refresh after its launch waited up to a minute
+// (user report 2026-10-28): its computer is read every 2 s until the session
+// is placed, for at most 3 minutes.
+void SessionsWindow::pollConfirmingCreations()
+{
+    QSet<QString> hosts;
+    for (auto it = m_pendingLaunches.constBegin(); it != m_pendingLaunches.constEnd(); ++it) {
+        const auto launch = it.value().toObject();
+        const auto state = launch.value("state").toString();
+        // "recover": one restored after a restart, which the listing also places.
+        if (launch.value("creation_schema").toInt() == 1 && (state == QLatin1String("confirming") || state == QLatin1String("recover")))
+            hosts.insert(launch.value("host").toString());
+    }
+    if (hosts.isEmpty() || m_confirmPollAge.elapsed() > 180000) { m_confirmPoll->stop(); return; }
+    for (const auto &host : std::as_const(hosts)) emit hostRefreshRequested(host);
+}
+
 void SessionsWindow::placeLaunchedSessions()
 {
     bool changed = false;
@@ -4059,8 +4081,13 @@ void SessionsWindow::inspect()
     const auto *entry = selected();
     if(isVisible() && m_pages->currentIndex()==3)updateDashboardAccounts(true);
     if (!isVisible() || m_pages->currentIndex() != 0 || !entry || !entry->online) return;
+    // WhiteWh fork: the Tasks card lists the agent's background jobs from this
+    // read, so it is made while the card is on screen even with the Processes
+    // tab off, at the background interval (owner, 2026-10-28: with the tab off,
+    // which is the default, the card never showed them).
+    const bool tasksCard=m_inspector&&m_inspector->isVisible()&&m_inspector->isOpen(InspectorCards::Tasks);
     const int processInterval=m_detailTabs->currentWidget()==m_processes?ProcessSettings::activeMs():ProcessSettings::backgroundMs();
-    const bool processes=ProcessSettings::enabled() && (!m_processPollAge.isValid() || m_processPollAge.elapsed()>=processInterval);
+    const bool processes=(ProcessSettings::enabled()||tasksCard) && (!m_processPollAge.isValid() || m_processPollAge.elapsed()>=processInterval);
     // A live event stream brings Activity as it happens (EventStream.h); only
     // the process section is still polled, at its own interval.
     auto *streams = EventStreams::instance();

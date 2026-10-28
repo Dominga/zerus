@@ -67,16 +67,14 @@ pub struct Drafts(pub std::sync::Arc<zerus_client_core::drafts::DraftStore>);
 /// The label of the one window this phase opens.
 pub const MAIN_WINDOW: &str = "main";
 
-/// The root of the client's disposable files, the attachment cache:
-/// Tauri's `app_cache_dir`, which follows the identifier. As with
-/// `data_dir`, nothing else asks Tauri for it, so the Mac switch build can
-/// replace this body to follow the running bundle's identity.
+/// The root of the client's disposable files, the attachment cache: Tauri's
+/// `app_cache_dir` formula with the running bundle's identifier, as
+/// [`data_dir`]. Tauri's own names the compile-time identifier, which a
+/// switch build promotes at signing, so the client never calls it.
 #[cfg(feature = "live")]
 pub(crate) fn cache_dir(app: &AppHandle) -> std::path::PathBuf {
     use tauri::Manager;
-    app.path()
-        .app_cache_dir()
-        .expect("the platform has an app cache directory")
+    app.state::<identity::Identity>().cache_dir_now()
 }
 
 /// The client's attachment cache under its cache folder: `attachments`, or
@@ -662,6 +660,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::display_hz,
         commands::exit_app,
         commands::perf_away,
+        commands::build_info,
         renderer::renderer_frame,
         settings::settings_get,
         settings::settings_set,
@@ -777,6 +776,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::display_hz,
         commands::exit_app,
         commands::perf_away,
+        commands::build_info,
         renderer::renderer_frame,
         clipboard::copy_text,
         desk_take_pending,

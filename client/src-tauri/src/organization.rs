@@ -443,8 +443,8 @@ impl Organization {
             Due::Apply(invocation) => {
                 // The list shows the apply running while `hgs` runs without
                 // the hub's lock, and `flush` may write meanwhile. The
-                // writer's lock goes first, so `flush` never waits behind the
-                // Projects call (ruling N1).
+                // writer's lock goes first, so `flush`, which the main thread
+                // runs as the app quits, never waits behind the Projects call.
                 self.publish(&mut hub);
                 drop(writer);
                 self.release(hub);
@@ -1286,7 +1286,7 @@ mod tests {
         fake.finish(organization);
     }
 
-    // Review fix round 1: a layout kept from a failed write is older than one
+    // A layout kept from a failed write is older than one
     // taken later, and never overwrites it.
     #[test]
     fn a_layout_that_could_not_be_saved_never_overwrites_a_newer_one() {
@@ -1319,7 +1319,7 @@ mod tests {
         fake.finish(organization);
     }
 
-    // Review fix round 1: quitting writes what the worker could not yet. An
+    // Quitting writes what the worker could not yet. An
     // edit made while an apply runs is on disk after `flush`, which runs no hgs.
     #[test]
     fn flush_writes_an_edit_made_while_an_apply_runs() {
@@ -1362,7 +1362,7 @@ mod tests {
         fake.finish(organization);
     }
 
-    // Review fix round 1: a worker that stopped shows in the list before
+    // A worker that stopped shows in the list before
     // anyone tries an edit, and edits answer Kept.
     #[test]
     fn a_stopped_worker_shows_in_the_list_before_any_edit() {
@@ -1389,7 +1389,7 @@ mod tests {
         fake.finish(organization);
     }
 
-    // Review fix round 1: a panic in the Projects callback is logged, and the
+    // A panic in the Projects callback is logged, and the
     // worker goes on to the next edit.
     #[test]
     fn a_panicking_projects_callback_leaves_the_worker_running() {
@@ -1467,7 +1467,7 @@ mod tests {
         applies
     }
 
-    // Ruling N1 (Task 6's review): the main thread runs `flush` as the app
+    // The main thread runs `flush` as the app
     // quits, and it never waits behind the Projects call at the start of an
     // apply, which runs after the writer's lock is dropped.
     #[test]
@@ -1489,7 +1489,7 @@ mod tests {
         );
     }
 
-    // The grouping keeps a rename it saw before the first state (Task 3);
+    // The grouping keeps a rename it saw before the first state;
     // the worker hands it over only once edits are accepted (sync.rs).
     #[test]
     fn a_rename_seen_before_the_first_state_is_sent_once_edits_are_accepted() {

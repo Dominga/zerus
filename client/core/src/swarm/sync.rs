@@ -9,7 +9,8 @@
 //! (67-73, 96-110). `swarm apply` is a declarative three-way merge guarded by
 //! versions: a resend of a diff that already landed adds a head with the same
 //! value, which is no conflict, and a stale base surfaces as a conflict
-//! (src/swarm/model.rs:126-201, 298-312; coordinator ruling, 2026-10-28).
+//! (src/swarm/model.rs:126-201, 298-312; the Decisions of
+//! docs/superpowers/plans/2026-10-28-tauri-client-organization.md).
 //!
 //! Pending edits survive a restart as Qt's do: [`Controller::take_draft`]
 //! gives the draft file's next content ([`super::draft`]) until
@@ -1322,7 +1323,7 @@ mod tests {
         );
     }
 
-    // Ruling F12: the Projects screen orders by `project_order` first, so the
+    // The Projects screen orders by `project_order` first, so the
     // presented value's order is the desired one while edits are pending.
     #[test]
     fn the_presented_value_orders_projects_as_the_pending_edits_do() {
@@ -1398,8 +1399,8 @@ mod tests {
         );
     }
 
-    // The hub hands the list's renames over while the controller is ready
-    // (plan Task 6); before the first state it refuses them like any edit and
+    // The hub hands the list's renames over while the controller is ready;
+    // before the first state it refuses them like any edit and
     // keeps nothing, so a rename seen then waits with the hub. Handed over
     // later, it migrates the member; once more, it changes nothing.
     #[test]
@@ -1482,7 +1483,7 @@ mod tests {
             .to_owned()
     }
 
-    // Review I1 (fix round 1): the source sends a state only when the catalog
+    // The source sends a state only when the catalog
     // changes, so one refused under the edits must be taken when they settle
     // without a call, where Qt's next tick reads (SwarmController.cpp:100).
     #[test]
@@ -1611,7 +1612,7 @@ mod tests {
         assert_eq!((sync.digest(), place(&sync).as_str()), ("d2", "beta"));
     }
 
-    // Fix round 2, decision (a): the source does not send a state again, so
+    // The source does not send a state again, so
     // one the guard held back is adopted when the guard ends.
     #[test]
     fn a_state_the_guard_held_back_is_adopted_when_it_ends() {
@@ -1661,7 +1662,7 @@ mod tests {
         assert_eq!((sync.digest(), place(&sync).as_str()), ("d3", "ungrouped"));
     }
 
-    // Review I3 (fix round 1): Qt's persist remembers only checkpoints that
+    // Qt's persist remembers only checkpoints that
     // were saved (SwarmController.cpp:116-129).
     #[test]
     fn a_draft_whose_write_failed_is_given_again_until_one_succeeds() {
@@ -1694,7 +1695,7 @@ mod tests {
         assert_eq!(sync.take_draft(), None);
     }
 
-    // Review minor 1 (fix round 2): a confirmation covers only the change it
+    // A confirmation covers only the change it
     // names, so a stale one never hides a newer draft.
     #[test]
     fn a_confirmation_of_an_older_draft_leaves_the_newer_one_given() {
@@ -1723,7 +1724,7 @@ mod tests {
         );
     }
 
-    // Review M2 (fix round 1): Qt resends at most once per 5 s tick.
+    // Qt resends at most once per 5 s tick.
     #[test]
     fn a_burst_of_states_after_a_failure_moves_the_tick_once_per_streak() {
         let mut sync = ready();
@@ -1755,7 +1756,7 @@ mod tests {
         assert!(matches!(sync.due(tick + 500), Due::Apply(_)));
     }
 
-    // Review minor 4 (fix round 2): edits that settle end the failure streak
+    // Edits that settle end the failure streak
     // too, so the next failure's first state moves the tick again.
     #[test]
     fn edits_that_settle_end_the_failure_streak() {
@@ -1789,7 +1790,7 @@ mod tests {
         value
     }
 
-    // Fix round 3 (i): the source read a state held when the apply went out
+    // The source read a state held when the apply went out
     // before hgs took the apply's lock, so the reply is newer and the state
     // goes with it, even when the source then ends.
     #[test]
@@ -1812,7 +1813,7 @@ mod tests {
         assert_eq!((sync.digest(), place(&sync).as_str()), ("d2", "beta"));
     }
 
-    // Fix round 3 (i): a state seen during the first apply, with edits made
+    // A state seen during the first apply, with edits made
     // meanwhile, goes with the second apply, whose reply is newer.
     #[test]
     fn a_state_seen_during_an_apply_gives_way_to_the_next_apply_s_reply() {
@@ -1833,7 +1834,7 @@ mod tests {
         assert_eq!((sync.digest(), place(&sync).as_str()), ("d4", "alpha"));
     }
 
-    // Fix round 3 (ii): without a write there is no guard; a state seen while
+    // Without a write there is no guard; a state seen while
     // the apply ran may be newer (another writer saved after hgs released the
     // lock), and the source does not send it again, so it is adopted, where
     // Qt's next `get` would read it (SwarmController.cpp:96-101).
@@ -1850,9 +1851,9 @@ mod tests {
         assert_eq!(sync.next_due(), None);
     }
 
-    // Fix round 3: a failed apply gives back the state held when it went
-    // out, so edits that settle afterwards still take it (review I1); one
-    // seen while the failed apply ran is newer and stays instead.
+    // A failed apply gives back the state held when it went out, so edits
+    // that settle afterwards still take it (the source sends no state
+    // again); one seen while the failed apply ran is newer and stays instead.
     #[test]
     fn a_failed_apply_gives_back_the_state_it_took() {
         let mut sync = ready();

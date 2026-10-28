@@ -338,7 +338,8 @@ mod tests {
         );
     }
 
-    // Review I2 (fix round 1): a draft is applied without the user seeing it again.
+    // A draft is applied without the user seeing it again, so one that would
+    // empty a listed catalog is never applied.
     #[test]
     fn a_draft_without_projects_against_a_listed_base_is_dropped_and_set_aside() {
         let dir = scratch("empty");

@@ -850,7 +850,7 @@ mod tests {
         })
     }
 
-    // Review Focus 5 of phase 3a, now "never" (the organization plan, Task 9).
+    // Projects never reads the catalog: the organization hub hands it over.
     #[test]
     fn projects_show_the_organization_they_are_handed_and_never_read_it() {
         let h = harness(json!({"swarm get": {"file": "swarm.json"}}), true);

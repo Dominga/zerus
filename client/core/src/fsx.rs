@@ -124,8 +124,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // Review minor 2 (fix round 2): a random name in the target's folder,
-    // and a file that happens to have such a name is never touched.
+    // A random name in the target's folder, and a file that happens to have
+    // such a name is never touched.
     #[test]
     fn temporary_names_are_random_beside_the_target_and_other_files_stay() {
         let dir = scratch("names");
@@ -145,8 +145,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // Controller ruling, fix round 1 (2026-10-28): read marks and drafts hold
-    // session and project names, so only this user may read them.
+    // Read marks and drafts hold session and project names, so only this
+    // user may read them.
     #[cfg(unix)]
     #[test]
     fn the_file_is_this_user_s_alone_also_when_it_replaces_a_readable_one() {

@@ -191,7 +191,8 @@ fn restarted(path: &Path) -> Controller {
     sync
 }
 
-// Review Focus 1 (coordinator ruling, 2026-10-28).
+// The base and versions are the state the user saw: another writer's change
+// after that read surfaces as a conflict, never as an overwrite.
 #[test]
 fn a_second_writer_between_read_and_apply_gives_a_conflict_not_an_overwrite() {
     let seen = snapshot("d1", "alpha", &["op-1"], json!([]), &[]);
@@ -256,7 +257,8 @@ fn a_second_writer_between_read_and_apply_gives_a_conflict_not_an_overwrite() {
     assert_eq!(fake.calls(), ["get", "get", "apply", "get", "apply"]);
 }
 
-// Review Focus 2 (coordinator ruling, 2026-10-28): SwarmController.cpp:67-73, 96-110.
+// A failed apply keeps its edits, and the next tick sends the same request
+// again (SwarmController.cpp:67-73, 96-110).
 #[test]
 fn a_timed_out_apply_stays_pending_and_the_next_tick_sends_it_once_more() {
     let seen = snapshot("d1", "alpha", &["op-1"], json!([]), &[]);
@@ -459,7 +461,7 @@ fn a_rename_the_other_writer_migrates_between_read_and_apply_merges_cleanly() {
     assert_eq!(fake.calls(), ["get", "get", "apply"]);
 }
 
-// Review Focus 10 (coordinator ruling, 2026-10-28). Qt saves its draft
+// Pending edits survive a restart. Qt saves its draft
 // (SessionsWindow.cpp:2496) and, after a restart, sends it once its first read
 // answered (SwarmController.cpp:76-89, 191-206).
 #[test]

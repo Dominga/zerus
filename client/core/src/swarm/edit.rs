@@ -28,8 +28,8 @@ pub enum Intent {
     /// into `project` as explicit members (moveSession, 187-201). `before`
     /// places them in the local order only: `before` is not used for the
     /// shared side, because the order inside a project is device-local and
-    /// the layout (Task 2) applies it, so a stale anchor still moves the
-    /// members.
+    /// the layout (`super::layout`) applies it, so a stale anchor still
+    /// moves the members.
     Move {
         members: Vec<String>,
         project: String,

@@ -231,7 +231,7 @@ impl Grouping {
             // Before the first catalog the row is only recorded: no placement,
             // no rank, no group. A rename above has already moved the layout's
             // place, but cannot move membership (none is known yet); the hub's
-            // Renamed intent settles it (Task 6).
+            // Renamed intent settles it once edits are accepted.
             self.rows.insert(
                 at,
                 Slot {
@@ -1020,7 +1020,8 @@ mod tests {
         assert_eq!(by_name(rows), ["m1", "m0", "m2", "m3"]);
     }
 
-    // Review Focus 5.
+    // Session counts reach tens of thousands: one pass groups them, and a
+    // move sends only the row it moved.
     #[test]
     fn twenty_thousand_sessions_group_in_one_pass_and_a_move_sends_one_row() {
         let names: Vec<String> = (0..20_000)

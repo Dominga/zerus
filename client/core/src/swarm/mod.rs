@@ -33,7 +33,7 @@ pub const INBOX_NAME: &str = "General";
 pub const INBOX_COLOR: &str = "#8d9baa";
 /// The most projects the list shows (phase 3a's bound).
 pub const MAX_PROJECTS: usize = 500;
-/// Shown while project sync has not read the catalog yet (plan Task 4).
+/// Shown while project sync has not read the catalog yet.
 pub const STARTING: &str = "Project sync is starting.";
 
 /// A session as `organization.projects[].sessions[]` names it: the machine

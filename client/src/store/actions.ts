@@ -3,7 +3,7 @@ import { createStore } from "solid-js/store";
 import * as bridge from "../bridge";
 import { catalog as appCatalog, computerOffline, type CatalogState } from "./catalog";
 import { marks as appMarks, type Marks } from "./marks";
-import { copyState, detailsFromInspection, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type PendingNotifications } from "../ui/sessions/actions-ui";
+import { copyState, detailsFromInspection, MUTE_PENDING, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type PendingNotifications } from "../ui/sessions/actions-ui";
 import type { Action, Details, Outcome, Target } from "../types";
 
 // Guarded session actions. Every action is one call to the Rust side; a call
@@ -27,7 +27,7 @@ const INFO_MS = 6000;
 const CHANGED = "This session changed. Open its actions again.";
 const STATE_CHANGED = "The session state changed. Open its actions again.";
 const MUTE_CHANGED = "The shared notification setting changed while this request was pending. Refresh the session.";
-const GONE = "This session is no longer available. Open its actions again.";
+export const GONE = "This session is no longer available. Open its actions again.";
 const ALREADY_STOPPED = ["hgs: This turn is no longer working", "This turn is no longer working"];
 
 const sessionId = (computer: string, name: string) => `${computer}\n${name}`;
@@ -51,7 +51,7 @@ export function createActions(
   catalog: Pick<CatalogState, "rows">,
   online: (computer: string) => boolean = () => true,
   selection: () => Selection = () => ({}),
-  notificationMarks: Pick<Marks, "currentNotificationRow" | "applyNotifications"> = appMarks,
+  notificationMarks: Pick<Marks, "currentNotificationRow" | "applyNotifications" | "notificationRevisionOf"> = appMarks,
 ) {
   /** The write in flight per session (its kind), and whether an interrupt is. */
   const [writes, setWrites] = createStore<Record<string, Action["kind"] | undefined>>({});
@@ -173,6 +173,22 @@ export function createActions(
   });
 
   /**
+   * Qt's click-time recheck (runSessionMenuAction), run first by every action
+   * a menu entry starts: the row is looked up again by key; one that is gone,
+   * whose `created` changed (when it had one) or whose conversation changed
+   * raises the sticky notice and returns undefined, so nothing else happens.
+   * Otherwise the live row.
+   */
+  function stillListed(row: ActionRow): ActionRow | undefined {
+    const live = catalog.rows[row.key];
+    if (!live || ((row.created ?? 0) > 0 && live.created !== row.created) || (live.conversationId ?? "") !== (row.conversationId ?? "")) {
+      notify("info", GONE, true);
+      return undefined;
+    }
+    return live;
+  }
+
+  /**
    * Mute or Unmute (SessionsWindow runSessionMenuAction ToggleMute and the
    * notificationsFinished result). The same checks run again on the live row,
    * and the preferences must be unchanged since the menu opened; otherwise
@@ -180,18 +196,19 @@ export function createActions(
    * is no longer the same run, conversation and `created` is dropped.
    */
   async function toggleMute(row: ActionRow): Promise<void> {
-    const live = catalog.rows[row.key];
+    const live = stillListed(row);
     if (!live) return;
     const original = snapshotOf(live);
     if (!notificationsStillAllowed(original, row, online(live.computer), untrack(() => pendingNotifications(live.computer, live.conversationId)))) return;
-    const expected = original.notificationRevision;
+    // The row's revision, or a higher confirmed override's (an Unmute before the next listing).
+    const expected = notificationMarks.notificationRevisionOf(original);
     if (expected === undefined) return;
     const target: Target = { computer: original.computer, name: original.name, run_id: original.runId ?? "", conversation_id: original.conversationId ?? "" };
     const entry = { id: nextChange++, computer: original.computer, conversation: original.conversationId ?? "" };
     setChanging((all) => [...all, entry]);
     let preferences: Record<string, unknown> | undefined;
     let detail = "";
-    try { preferences = await bridge.setNotifications(target, !original.muted, expected); } catch (error) { detail = errorText(error); } finally {
+    try { preferences = await bridge.setNotifications(target, !original.muted, expected); } catch (error) { detail = errorText(error); if (detail === "busy") detail = MUTE_PENDING; } finally {
       setChanging((all) => all.filter((p) => p.id !== entry.id));
     }
     if (!notificationMarks.currentNotificationRow(original)) return;
@@ -262,19 +279,10 @@ export function createActions(
     }
   }
 
-  /**
-   * Qt's click-time recheck (runSessionMenuAction): the row is looked up again
-   * by key; one that is gone, or whose conversation changed, copies nothing
-   * and raises a sticky notice. `created` joins the comparison when the row
-   * carries it. Otherwise the copy reads the live row.
-   */
+  /** The live row for a copy, after the click-time recheck (`stillListed`). */
   function current(row: ActionRow): ActionRow | undefined {
-    const live = catalog.rows[row.key];
-    if (!live || (live.conversationId ?? "") !== (row.conversationId ?? "")) {
-      notify("info", GONE, true);
-      return undefined;
-    }
-    return snapshotOf(live);
+    const live = stillListed(row);
+    return live ? snapshotOf(live) : undefined;
   }
 
   /** The details of the live row while it is the selected one with no subagent open (Qt's m_details). */
@@ -331,7 +339,7 @@ export function createActions(
     return out;
   }
 
-  return { perform, end, toggleMute, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify };
+  return { perform, end, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify };
 }
 
 type FollowSource = { target(): { id: string } | undefined; summary(): Record<string, unknown> | undefined; loaded(): boolean; ended(): boolean; error(): unknown };
@@ -352,4 +360,4 @@ let selection: () => Selection = () => ({});
 export function bindSelection(source: () => Selection) { selection = source; }
 
 const app = createActions(appCatalog, (computer) => !computerOffline(computer), () => selection());
-export const { perform, end, toggleMute, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify } = app;
+export const { perform, end, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify } = app;

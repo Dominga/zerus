@@ -525,6 +525,18 @@ describe("copy click-time recheck", () => {
     });
   });
 
+  it("copies nothing when created changed", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut({ created: 1_790_000_000 }));
+      const old = session({ created: 1_790_000_000 });
+      a.applyBatch(batchOf({ upserts: [rowOut({ created: 1_790_000_001 })] }));
+      await a.copyName(old);
+      expect(mocked.copyText).not.toHaveBeenCalled();
+      expect(a.notices()).toEqual([expect.objectContaining({ text: gone, sticky: true })]);
+      dispose();
+    });
+  });
+
   it("copies the current name and folder of a renamed row", async () => {
     await createRoot(async (dispose) => {
       const a = setup();
@@ -687,6 +699,47 @@ describe("toggleMute", () => {
       slow.reject("boom");
       await call;
       expect(a.notices()).toEqual([]);
+      dispose();
+    });
+  });
+
+  it("raises the gone notice and calls nothing for a changed conversation, a changed created or a gone row", async () => {
+    const gone = "This session is no longer available. Open its actions again.";
+    await createRoot(async (dispose) => {
+      for (const change of [{ conversation_id: "conv-2" }, { created: 1_790_000_001 }, "gone"] as const) {
+        const a = await setupMute();
+        const shown = a.snap();
+        if (change === "gone") a.receive(batchOf({ removes: [{ computer: "", key: "run:a" }] }));
+        else a.receive(batchOf({ upserts: [shared(change)] }));
+        await a.toggleMute(shown);
+        expect(a.notices()).toEqual([expect.objectContaining({ text: gone, sticky: true })]);
+      }
+      expect(mocked.setNotifications).not.toHaveBeenCalled();
+      dispose();
+    });
+  });
+
+  it("sends the confirmed override's revision when it is higher than the row's", async () => {
+    await createRoot(async (dispose) => {
+      const a = await setupMute();
+      mocked.setNotifications.mockResolvedValueOnce(prefs(true, 4)).mockResolvedValueOnce(prefs(false, 5));
+      await a.toggleMute(a.snap());
+      expect(a.row()).toMatchObject({ muted: true, notificationRevision: 3 });
+      await a.toggleMute(a.snap());
+      expect(mocked.setNotifications.mock.calls[1].slice(1)).toEqual([false, 4]);
+      dispose();
+    });
+  });
+
+  it("shows the pending reason when the host lane answers busy", async () => {
+    await createRoot(async (dispose) => {
+      const a = await setupMute();
+      const lane = pending<Record<string, unknown>>();
+      mocked.setNotifications.mockReturnValueOnce(lane.promise);
+      const call = a.toggleMute(a.snap());
+      lane.reject("busy");
+      await call;
+      expect(a.notices()).toEqual([expect.objectContaining({ text: "A shared notification change is pending. Wait for its result." })]);
       dispose();
     });
   });

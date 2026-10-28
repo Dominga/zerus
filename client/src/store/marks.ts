@@ -1,4 +1,4 @@
-import { batch } from "solid-js";
+import { batch, createSignal } from "solid-js";
 import * as bridge from "../bridge";
 import type { AttentionSnapshot, Mark } from "../bridge";
 import type { Batch, ReadMark, ViewRow } from "../types";
@@ -295,6 +295,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
 
   /** Applies the overlay again to the rows that match (after a confirmed notification override). */
   function reapply(match: (s: Session) => boolean) {
+    bump();
     if (!target) return;
     const rows = target.rows();
     batch(() => { for (const id in rows) if (match(rows[id])) target!.patch(id, overlay(rows[id])); });
@@ -312,6 +313,12 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
       }
     });
   }
+
+  // The read state lives in plain maps and the catalog is read unwrapped, so
+  // Solid tracks nothing there: readers of `unreadReplies` track this version,
+  // which every change, load, observed batch and pending-mark reload bumps.
+  const [version, setVersion] = createSignal(0);
+  const bump = () => { setVersion((v) => v + 1); };
 
   /** Every listed row, or the rows of some computers. */
   function listed(computers?: Set<string>): Session[] {
@@ -357,6 +364,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     for (const [key, m] of next) if (!sameMark(pending.get(key), m)) c.names.add(pair(m.computer, m.name));
     for (const [key, m] of pending) if (!next.has(key)) c.names.add(pair(m.computer, m.name));
     pending = next;
+    bump();
     refresh(c);
   }
 
@@ -398,6 +406,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
   }
 
   function commit(c: Change, fresh: ReadMark[] = []) {
+    bump();
     save(c);
     send(fresh);
     refresh(c);
@@ -618,6 +627,18 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
   }
 
   /**
+   * The revision to send as `expected_revision`: the row's, or the confirmed
+   * override's when that is higher (an Unmute before the next listing).
+   */
+  function notificationRevisionOf(row: ActionRow): number | undefined {
+    const s = currentNotificationRow(row);
+    const kept = s?.conversationId ? overrides.get(overrideKey(s)) : undefined;
+    const own = row.notificationRevision;
+    if (kept === undefined) return own;
+    return own === undefined ? kept.revision : Math.max(own, kept.revision);
+  }
+
+  /**
    * FleetState::applyNotificationPreferences: keeps the host's confirmed
    * preferences as an override. Refused (false) for a row that no longer shares
    * notifications, an invalid reply, a lower revision than the row shows, or
@@ -642,6 +663,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
 
   /** FleetState::unreadReplies: every unread reply, hidden rows included, except rows marked for review. */
   function unreadReplies(): Map<string, string> {
+    version();
     const out = new Map<string, string>();
     for (const s of listed()) {
       const r = readState(s);
@@ -684,6 +706,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     unreadReplies,
     markAllRead,
     currentNotificationRow,
+    notificationRevisionOf,
     applyNotifications,
     /** The confirmed overrides held (tests, diagnostics). */
     overrideCount: () => overrides.size,

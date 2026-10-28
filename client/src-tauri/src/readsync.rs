@@ -316,6 +316,32 @@ mod tests {
         assert_eq!(f.actions.pending_marks().len(), 1);
     }
 
+    /// The JSON the frontend's `markAllRead` passes to `queue_read_marks` (the
+    /// payload asserted in `client/src/store/marks.test.ts`) is queued as
+    /// `queue_read_marks` does and delivered through `read NAME --json`.
+    #[test]
+    fn the_frontends_queue_payload_is_delivered_through_read() {
+        let f = Fixture::new("frontend-payload", |_| exit(0, applied(true, false)));
+        let marks: Vec<ReadMark> = serde_json::from_value(json!([{
+            "computer": "mac", "name": "claude/sample-project/a", "run_id": "run-1",
+            "conversation_id": "conv-1", "reply_id": "r1", "attention_signature": null
+        }]))
+        .unwrap();
+        assert_eq!(f.actions.queue_marks(marks).len(), 1);
+        assert_eq!(f.pump(), 1);
+        let calls = f.calls();
+        assert_eq!(
+            calls[0].args,
+            ["@mac", "read", "claude/sample-project/a", "--json"]
+        );
+        let input: Value = serde_json::from_slice(calls[0].stdin.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            input,
+            json!({"run_id": "run-1", "conversation_id": "conv-1",
+                   "reply_id": "r1", "attention_signature": null})
+        );
+    }
+
     #[test]
     fn an_empty_part_is_sent_as_null() {
         let f = Fixture::new("null", |_| exit(0, applied(false, true)));

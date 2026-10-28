@@ -7,13 +7,13 @@ const m = vi.hoisted(() => {
   vi.stubGlobal("localStorage", { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v); }, removeItem: (k: string) => { store.delete(k); } });
   return {
   markRead: vi.fn(() => true), markNeedsAttention: vi.fn(() => true), markAllRead: vi.fn(() => 0), unreadReplies: vi.fn(() => new Map<string, string>()),
-  notify: vi.fn(),
+  notify: vi.fn(), stillListed: vi.fn((row: unknown) => row),
   };
 });
 vi.mock("../../store/marks", async (orig) => ({ ...(await orig<object>()), markRead: m.markRead, markNeedsAttention: m.markNeedsAttention, markAllRead: m.markAllRead, unreadReplies: m.unreadReplies }));
-vi.mock("../../store/actions", async (orig) => ({ ...(await orig<object>()), notify: m.notify }));
+vi.mock("../../store/actions", async (orig) => ({ ...(await orig<object>()), notify: m.notify, stillListed: m.stillListed }));
 
-import { markAllEntry, markAllLabel, markEntry, markReadChip } from "./mark-entries";
+import { markAllEntry, markAllLabel, markAllTip, markEntry, markReadChip } from "./mark-entries";
 import type { Session } from "./types";
 
 const session = (extra: Record<string, unknown> = {}, reviewLater = false) => ({
@@ -21,7 +21,7 @@ const session = (extra: Record<string, unknown> = {}, reviewLater = false) => ({
 }) as unknown as Session;
 const unread = { unread: true };
 
-beforeEach(() => { vi.clearAllMocks(); m.markRead.mockReturnValue(true); m.markNeedsAttention.mockReturnValue(true); });
+beforeEach(() => { vi.clearAllMocks(); m.markRead.mockReturnValue(true); m.markNeedsAttention.mockReturnValue(true); m.stillListed.mockImplementation((row: unknown) => row); });
 
 describe("markReadChip", () => {
   it("is active for a live row that needs attention", () => {
@@ -64,6 +64,18 @@ describe("markEntry", () => {
   });
 });
 
+describe("the click-time recheck", () => {
+  it("runs first: a vanished or changed row calls no mark and the notice comes from the recheck", () => {
+    m.stillListed.mockReturnValue(undefined);
+    markEntry(session({}, true))!.action!();
+    markEntry(session())!.action!();
+    expect(m.stillListed).toHaveBeenCalledTimes(2);
+    expect(m.markRead).not.toHaveBeenCalled();
+    expect(m.markNeedsAttention).not.toHaveBeenCalled();
+    expect(m.notify).not.toHaveBeenCalled();
+  });
+});
+
 describe("markAllEntry", () => {
   it("counts the unread replies and is off at zero", () => {
     expect(markAllLabel(0)).toBe("Mark all as read");
@@ -71,6 +83,7 @@ describe("markAllEntry", () => {
     m.unreadReplies.mockReturnValue(new Map([["a", "1"], ["b", "2"]]));
     const e = markAllEntry();
     expect(e).toMatchObject({ label: "Mark all as read (2)", disabled: false });
+    expect(markAllTip(e)).toBe(`Mark all as read (2)\n${e.hint}`);
     expect(e.hint).toMatch(/^Mark current replies across all machines as read, including hidden sessions\./);
   });
   it("marks them and counts them in a notice", () => {

@@ -608,12 +608,6 @@ impl<'a> Session<'a> {
             .filter(|preferences| notifications::valid(preferences, self.conversation_id))
     }
 
-    fn muted(&self) -> bool {
-        self.notifications().is_some_and(|preferences| {
-            preferences.get("muted").and_then(Value::as_bool) == Some(true)
-        })
-    }
-
     /// `attentionFingerprint` of the Qt client.
     fn attention_fingerprint(&self) -> String {
         let mut children = Map::new();
@@ -753,7 +747,7 @@ mod notifications {
     /// `valid(preferences, conversation_id)`.
     pub fn valid(value: &Map<String, Value>, conversation: &str) -> bool {
         // The host applies this ASCII-escaped budget before persisting unmute.
-        let json = Value::Object(value.clone()).to_string();
+        let json = serde_json::to_string(value).unwrap_or_default();
         let mut bytes = 0;
         for unit in json.encode_utf16() {
             bytes += if unit < 128 { 1 } else { 6 };
@@ -876,7 +870,9 @@ pub fn row(value: &Value) -> ViewRow {
         phase: some(session.phase),
         attention,
         unread: session.unread_reply() && !session.reply_in_progress(),
-        muted: session.muted(),
+        muted: notifications.is_some_and(|preferences| {
+            preferences.get("muted").and_then(Value::as_bool) == Some(true)
+        }),
         shared_notifications: notifications.is_some(),
         notification_revision: notifications
             .and_then(|preferences| notifications::revision(preferences.get("revision"))),

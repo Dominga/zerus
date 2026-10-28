@@ -317,6 +317,28 @@ describe("unreadReplies and markAllRead", () => {
     expect(a.marks.markAllRead()).toBe(0);
   });
 
+  it("queues exactly the ReadMark fields the Rust worker reads", async () => {
+    const a = await setup([rowOut({}, "run:a")]);
+    a.marks.markAllRead();
+    expect(JSON.stringify(a.port.queueReadMarks.mock.calls[0][0])).toBe(
+      '[{"computer":"","name":"claude/sample-project/a","run_id":"run-1","conversation_id":"conv-1","reply_id":"r1","attention_signature":null}]',
+    );
+  });
+
+  it("makes the footer state follow a batch and Mark all as read", async () => {
+    await createRoot(async (dispose) => {
+      const a = await setup([rowOut({}, "run:a")]);
+      const seen: number[] = [];
+      createComputed(() => { seen.push(a.marks.unreadReplies().size); });
+      expect(seen).toEqual([1]);
+      a.receive(batchOf({ upserts: [rowOut({ name: "claude/sample-project/b", run_id: "run-2", conversation_id: "conv-2", reply_id: "rb" }, "run:b")] }));
+      expect(seen.at(-1)).toBe(2);
+      a.marks.markAllRead();
+      expect(seen.at(-1)).toBe(0);
+      dispose();
+    });
+  });
+
   it("keeps the reply of a row marked for review after the snapshot unread", async () => {
     const a = await setup(rows(), review());
     const snapshot = a.marks.unreadReplies();

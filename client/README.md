@@ -144,11 +144,6 @@ Outcome rules:
   have loaded) and queue read marks for hosts with shared read state
   (`queue_read_marks`). A host that starts sharing read state gets this
   device's older marks for its current replies and attention queued once.
-- The menu's Mark as read still sends the reply and attention it showed with
-  one `hgs read` call; if a newer reply or question arrived meanwhile, nothing
-  runs and the notice says "A new reply or question arrived. Open the menu
-  again to mark it as read." The call saves its mark among the pending ones
-  first. A host without shared read state keeps the entry disabled.
 - Pending read marks are kept in `read-marks.json` in the app data directory
   (`app_data_dir`, e.g. `~/.local/share/<bundle id>/` on Linux; a replay uses
   `read-marks-replay.json`), so a restart keeps them. A mark is settled, and
@@ -182,19 +177,6 @@ Outcome rules:
   order, so the window never waits for the disk. The computers whose older
   marks were queued are remembered in the webview's local storage. Outside the
   app (a browser) there is no pending list, and the window keeps its own.
-
-- Mark as read, Mark needs attention and Mark all as read are local first:
-  they change this device's attention marks and read replies at once
-  (`attention-marks.json`, or `attention-marks-replay.json` in a replay; at
-  most 20 000 entries per map, the oldest written dropped first, where Qt keeps
-  them unbounded). A host that shares read state also gets a queued read mark
-  (`read-marks.json`), which the Rust worker delivers with Qt's ReadMarkSync
-  rules: at most 4 calls at once, the computer with the fewest first, backoff
-  from 10 s to 300 s, a resend after 120 s and, while only part of a mark is
-  applied, up to 960 s. Marks for computers no longer configured are dropped,
-  and a delivery shows no notice. In the overlay a pending mark counts as read
-  for the same run and conversation, so the row changes before the host
-  answers; a newer reply or question shows again.
 
 Forgetting and restoring arrive in later phases; their entries are disabled
 with a reason. Sending, the Mark read chip of the composer toolbar and the

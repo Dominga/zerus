@@ -695,6 +695,10 @@ Controller rulings during Piece B:
 - Mark all as read is also wired to the existing list footer button and the rail menu, as Qt has both.
 - The Mark read chip waits for phase 4's composer toolbar; only its state exists now.
 - The muted override guards only this client's own confirmed changes; Qt also guards every row against stale polls.
+- A same-revision change of other notification preferences is compared on the revision and `muted` only; the row carries no preferences digest.
+- The overlay ignores Qt's offline case of `visibleUnreadReply(online)`: an offline row's reply in progress does not show unread.
+- The attention and reply keys use the view agent (dsh keyed as `deepseek`) rather than Qt's raw `cmd`.
+- `set_notifications` answering "busy" (its lane is taken) is shown as the pending reason "A shared notification change is pending. Wait for its result."
 
 Deviations from Qt, both from owner rules:
 - Attention marks and read replies are capped at 20 000 entries per map (bounded caches); Qt keeps them without a bound.

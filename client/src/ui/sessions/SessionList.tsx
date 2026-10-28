@@ -9,7 +9,7 @@ import {
 import { catalog, computerOffline } from "../../store/catalog";
 import { detailsFor, followedFor } from "../../store/actions";
 import { actionEntries, copyEntries, muteEntry } from "./ActionDialogs";
-import { markAllEntry, markEntry, runMarkAll } from "./mark-entries";
+import { markAllEntry, markAllTip, markEntry, runMarkAll } from "./mark-entries";
 import {
   selectedKey, setSelectedKey, collapsed, setCollapsed, setExpandedChildren, expandedChildren,
   setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
@@ -441,7 +441,7 @@ export function SessionList() {
           <span class="tabular ell">{shownSummary().shown ? `${shownSummary().shown} shown, ${shownSummary().working} working, ${shownSummary().attention} attention` : catalog.order.length ? "No matching sessions" : ""}</span>
           <span class="grow" />
           <button class="icon-btn small" data-tip="Session creation status" disabled><Icon name="clock" size={16} /></button>
-          <button class="icon-btn small" data-tip="Mark all as read: current replies on every machine" disabled={markAllEntry().disabled} onClick={() => runMarkAll()}><Icon name="read-all" size={16} /></button>
+          <button class="icon-btn small" title={markAllTip(markAllEntry())} disabled={markAllEntry().disabled} onClick={() => runMarkAll()}><Icon name="read-all" size={16} /></button>
           <button class="icon-btn small" data-tip="Saved drafts: recover local drafts, including those from ended sessions" disabled><Icon name="drafts" size={16} /></button>
         </footer>
       </div>

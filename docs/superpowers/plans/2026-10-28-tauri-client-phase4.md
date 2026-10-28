@@ -345,7 +345,9 @@ mod tests {
             lock(&self.seen).0.push(bytes);
         }
         fn message(&self, json: String) {
-            lock(&self.seen).1.push(serde_json::from_str(&json).unwrap());
+            lock(&self.seen)
+                .1
+                .push(serde_json::from_str(&json).unwrap());
         }
     }
 
@@ -391,23 +393,45 @@ mod tests {
         }
     }
 
+    /// Waits for the fake's hello line: input written before it is flushed
+    /// when the fake switches the terminal to raw mode.
+    fn hello(t: &Terminals, generation: u64, sink: &Collect) {
+        until(t, generation, sink, |s| s.text().contains("\"COLORTERM\""));
+        until(t, generation, sink, |s| s.text().ends_with("\r\n"));
+    }
+
     #[test]
     fn connect_runs_qts_attach_call() {
         let _tree = crate::PROCESS_TREE.read().unwrap();
         let t = terminals();
         let sink = Arc::new(Collect::default());
-        let c = t.connect("main", target("run-1"), 90, 30, sink.clone()).unwrap();
+        let c = t
+            .connect("main", target("run-1"), 90, 30, sink.clone())
+            .unwrap();
         assert_eq!(c.status, "Connected: claude/sample-project/review");
         assert!(!c.reused);
         until(&t, c.generation, &sink, |s| s.text().contains("\r\n"));
         let hello: Value = serde_json::from_str(sink.text().split("\r\n").next().unwrap()).unwrap();
         assert_eq!(
             hello["argv"],
-            json!(["@mac", "a", "claude/sample-project/review", "--existing", "--run-id", "run-1"])
+            json!([
+                "@mac",
+                "a",
+                "claude/sample-project/review",
+                "--existing",
+                "--run-id",
+                "run-1"
+            ])
         );
-        assert_eq!((hello["cols"].as_u64(), hello["rows"].as_u64()), (Some(90), Some(30)));
+        assert_eq!(
+            (hello["cols"].as_u64(), hello["rows"].as_u64()),
+            (Some(90), Some(30))
+        );
         assert_eq!(hello["env"]["HGS_TAB"], "0");
-        assert_eq!(t.disconnect("main").as_deref(), Some("Disconnected — the session continues on studio"));
+        assert_eq!(
+            t.disconnect("main").as_deref(),
+            Some("Disconnected — the session continues on studio")
+        );
     }
 
     #[test]
@@ -415,14 +439,23 @@ mod tests {
         let _tree = crate::PROCESS_TREE.read().unwrap();
         let t = terminals();
         let first = Arc::new(Collect::default());
-        let c = t.connect("main", target("run-1"), 80, 24, first.clone()).unwrap();
+        let c = t
+            .connect("main", target("run-1"), 80, 24, first.clone())
+            .unwrap();
+        hello(&t, c.generation, &first);
         t.write("main", c.generation, b"echo one\r").unwrap();
         until(&t, c.generation, &first, |s| s.text().contains("echo one"));
         let second = Arc::new(Collect::default());
-        let again = t.connect("main", target("run-1"), 80, 24, second.clone()).unwrap();
+        let again = t
+            .connect("main", target("run-1"), 80, 24, second.clone())
+            .unwrap();
         assert!(again.reused);
         assert_eq!(again.generation, c.generation);
-        assert_eq!(second.text(), first.text(), "the redraw is exactly what was delivered");
+        assert_eq!(
+            second.text(),
+            first.text(),
+            "the redraw is exactly what was delivered"
+        );
         let before = first.outputs();
         t.write("main", c.generation, b"echo two\r").unwrap();
         until(&t, c.generation, &second, |s| s.text().contains("echo two"));
@@ -436,17 +469,32 @@ mod tests {
         let _tree = crate::PROCESS_TREE.read().unwrap();
         let t = terminals();
         let sink = Arc::new(Collect::default());
-        assert!(t.retarget("main", &target("run-1")), "a first target is new");
-        let c = t.connect("main", target("run-1"), 80, 24, sink.clone()).unwrap();
+        assert!(
+            t.retarget("main", &target("run-1")),
+            "a first target is new"
+        );
+        let c = t
+            .connect("main", target("run-1"), 80, 24, sink.clone())
+            .unwrap();
         until(&t, c.generation, &sink, |s| s.text().contains("\r\n"));
         let mut renamed = target("run-1");
         renamed.name = "claude/sample-project/review-2".into();
-        assert!(!t.retarget("main", &renamed), "a rename of the same run keeps the attach");
+        assert!(
+            !t.retarget("main", &renamed),
+            "a rename of the same run keeps the attach"
+        );
         let mut omitted = renamed.clone();
         omitted.run_id.clear();
-        assert!(!t.retarget("main", &omitted), "an inspection without the run keeps it");
+        assert!(
+            !t.retarget("main", &omitted),
+            "an inspection without the run keeps it"
+        );
         assert!(t.retarget("main", &target("run-2")));
-        assert_eq!(t.disconnect("main"), None, "the changed target already stopped it");
+        assert_eq!(
+            t.disconnect("main"),
+            None,
+            "the changed target already stopped it"
+        );
     }
 
     #[test]
@@ -454,7 +502,9 @@ mod tests {
         let _tree = crate::PROCESS_TREE.read().unwrap();
         let t = terminals();
         let sink = Arc::new(Collect::default());
-        let c = t.connect("main", target("run-1"), 80, 24, sink.clone()).unwrap();
+        let c = t
+            .connect("main", target("run-1"), 80, 24, sink.clone())
+            .unwrap();
         for _ in 0..50 {
             t.resize("main", c.generation, 80, 24);
         }
@@ -464,8 +514,11 @@ mod tests {
         assert_eq!(t.resizes("main"), 1);
         t.resize("main", c.generation + 1, 120, 40);
         assert_eq!(t.resizes("main"), 1, "a stale generation changes nothing");
+        hello(&t, c.generation, &sink);
         t.write("main", c.generation, b"size\r").unwrap();
-        until(&t, c.generation, &sink, |s| s.text().contains("size 100 30"));
+        until(&t, c.generation, &sink, |s| {
+            s.text().contains("size 100 30")
+        });
         t.disconnect("main");
     }
 
@@ -474,11 +527,14 @@ mod tests {
         let _tree = crate::PROCESS_TREE.read().unwrap();
         let t = terminals();
         let sink = Arc::new(Collect::default());
-        let c = t.connect("main", target("run-1"), 80, 24, sink.clone()).unwrap();
+        let c = t
+            .connect("main", target("run-1"), 80, 24, sink.clone())
+            .unwrap();
         assert_eq!(
             t.write("main", c.generation, &vec![b'x'; 5 << 20]),
             Err("Terminal input queue is full; wait before pasting more text.".into())
         );
+        hello(&t, c.generation, &sink);
         t.write("main", c.generation, b"echo ok\r").unwrap();
         until(&t, c.generation, &sink, |s| s.text().contains("echo ok"));
         t.disconnect("main");
@@ -489,14 +545,28 @@ mod tests {
         let _tree = crate::PROCESS_TREE.read().unwrap();
         let t = terminals();
         let sink = Arc::new(Collect::default());
-        let c = t.connect("main", target("run-1"), 80, 24, sink.clone()).unwrap();
-        until(&t, c.generation, &sink, |s| s.text().contains("\r\n"));
+        let c = t
+            .connect("main", target("run-1"), 80, 24, sink.clone())
+            .unwrap();
+        hello(&t, c.generation, &sink);
+        std::thread::sleep(Duration::from_millis(50));
+        ack_all(&t, c.generation, &sink);
         let start = sink.outputs();
         t.write("main", c.generation, b"flood 3000000\r").unwrap();
         std::thread::sleep(Duration::from_millis(300));
-        assert!(sink.outputs() - start <= IN_FLIGHT, "unacknowledged output waits");
+        assert_eq!(
+            sink.outputs() - start,
+            2,
+            "exactly two unacknowledged messages, then the drain waits"
+        );
         until(&t, c.generation, &sink, |s| s.text().contains("done"));
-        assert_eq!(sink.text().matches('x').count(), 3_000_000);
+        let text = sink.text();
+        let flood = text.split_once("}}\r\n").unwrap().1;
+        assert_eq!(
+            flood.matches('x').count(),
+            3_000_000,
+            "the hello line holds two x of its own"
+        );
         t.disconnect("main");
     }
 
@@ -505,7 +575,10 @@ mod tests {
         let _tree = crate::PROCESS_TREE.read().unwrap();
         let t = terminals();
         let sink = Arc::new(Collect::default());
-        let c = t.connect("main", target("run-1"), 80, 24, sink.clone()).unwrap();
+        let c = t
+            .connect("main", target("run-1"), 80, 24, sink.clone())
+            .unwrap();
+        hello(&t, c.generation, &sink);
         t.write("main", c.generation, b"exit 2\r").unwrap();
         until(&t, c.generation, &sink, |s| !s.messages().is_empty());
         assert_eq!(
@@ -515,10 +588,214 @@ mod tests {
         );
         let deadline = Instant::now() + Duration::from_secs(5);
         while lock(&t.0.views).contains_key("main") {
-            assert!(Instant::now() < deadline, "the finished attach is forgotten");
+            assert!(
+                Instant::now() < deadline,
+                "the finished attach is forgotten"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(t.disconnect("main"), None);
+    }
+
+    fn ack_all(t: &Terminals, generation: u64, sink: &Collect) {
+        for _ in 0..sink.outputs() {
+            t.ack("main", generation);
+        }
+    }
+
+    /// Connects, acknowledges the hello and starts a 3 MB flood, holding every
+    /// acknowledgement once two messages arrived.
+    fn held_flood(t: &Terminals, sink: &Arc<Collect>) -> (u64, usize) {
+        let c = t
+            .connect("main", target("run-1"), 80, 24, sink.clone())
+            .unwrap();
+        hello(t, c.generation, sink);
+        std::thread::sleep(Duration::from_millis(50));
+        ack_all(t, c.generation, sink);
+        let start = sink.outputs();
+        t.write("main", c.generation, b"flood 3000000\r").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while sink.outputs() < start + 2 {
+            assert!(Instant::now() < deadline, "the flood starts");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Let the core's bounded channel fill behind the held messages.
+        std::thread::sleep(Duration::from_millis(300));
+        (c.generation, start)
+    }
+
+    #[test]
+    fn a_remount_during_a_held_flood_loses_and_doubles_nothing() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let first = Arc::new(Collect::default());
+        let (g, _) = held_flood(&t, &first);
+        let delivered: Vec<u8> = lock(&first.seen).0.concat();
+        let second = Arc::new(Collect::default());
+        let again = t
+            .connect("main", target("run-1"), 80, 24, second.clone())
+            .unwrap();
+        assert!(again.reused);
+        let replay = lock(&second.seen).0[0].clone();
+        assert!(
+            delivered.ends_with(&replay),
+            "the redraw is a suffix of what the first view received"
+        );
+        until(&t, g, &second, |s| s.text().contains("done"));
+        let mut all = delivered[..delivered.len() - replay.len()].to_vec();
+        all.extend(lock(&second.seen).0.concat());
+        let text = String::from_utf8_lossy(&all).into_owned();
+        let flood = text.split_once("}}\r\n").unwrap().1;
+        assert_eq!(
+            flood.matches('x').count(),
+            3_000_000,
+            "none twice, none missing"
+        );
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn nothing_reaches_a_view_after_its_disconnect() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let sink = Arc::new(Collect::default());
+        let _ = held_flood(&t, &sink);
+        let at = sink.outputs();
+        let started = Instant::now();
+        assert!(t.disconnect("main").is_some());
+        assert!(
+            started.elapsed() < Duration::from_millis(900),
+            "no wait for acknowledgements"
+        );
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(sink.outputs(), at, "no output after the disconnect");
+        assert!(sink.messages().is_empty(), "and no finish");
+    }
+
+    #[test]
+    fn a_reconnect_on_the_same_sink_never_hears_the_old_attach() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let sink = Arc::new(Collect::default());
+        let _ = held_flood(&t, &sink);
+        t.disconnect("main");
+        let at = sink.outputs();
+        let c = t
+            .connect("main", target("run-1"), 80, 24, sink.clone())
+            .unwrap();
+        assert!(!c.reused);
+        std::thread::sleep(Duration::from_millis(2500));
+        let after = lock(&sink.seen).0[at..].to_vec();
+        assert!(
+            after.iter().all(|m| !m.iter().all(|&b| b == b'x')),
+            "no message of the old attach follows"
+        );
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn a_reused_connect_applies_its_size() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let first = Arc::new(Collect::default());
+        let c = t
+            .connect("main", target("run-1"), 80, 24, first.clone())
+            .unwrap();
+        hello(&t, c.generation, &first);
+        let second = Arc::new(Collect::default());
+        let again = t
+            .connect("main", target("run-1"), 100, 30, second.clone())
+            .unwrap();
+        assert!(again.reused);
+        assert_eq!(t.resizes("main"), 1);
+        t.connect("main", target("run-1"), 100, 30, second.clone())
+            .unwrap();
+        assert_eq!(t.resizes("main"), 1, "the same size is not applied twice");
+        t.write("main", c.generation, b"size\r").unwrap();
+        until(&t, c.generation, &second, |s| {
+            s.text().contains("size 100 30")
+        });
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn an_unacknowledged_view_gets_the_next_message_after_about_a_second() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let sink = Arc::new(Collect::default());
+        let c = t
+            .connect("main", target("run-1"), 80, 24, sink.clone())
+            .unwrap();
+        hello(&t, c.generation, &sink);
+        std::thread::sleep(Duration::from_millis(50));
+        ack_all(&t, c.generation, &sink);
+        let start = sink.outputs();
+        t.write("main", c.generation, b"flood 3000000\r").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while sink.outputs() < start + 2 {
+            assert!(Instant::now() < deadline, "the flood starts");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let held = Instant::now();
+        while sink.outputs() < start + 3 {
+            assert!(
+                held.elapsed() < Duration::from_secs(4),
+                "the fallback delivers"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let waited = held.elapsed();
+        assert!(waited >= Duration::from_millis(900), "waited {waited:?}");
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn a_message_is_at_most_one_mib_and_no_byte_is_lost() {
+        let pipe = Arc::new(Pipe {
+            delivery: Mutex::new(Delivery {
+                sink: Arc::new(Collect::default()),
+                delivered: VecDeque::new(),
+                unacked: 0,
+                closed: false,
+            }),
+            acked: Condvar::new(),
+        });
+        let sink = Arc::new(Collect::default());
+        lock(&pipe.delivery).sink = sink.clone();
+        let (sender, events) = std::sync::mpsc::sync_channel(64);
+        for i in 0..5u8 {
+            sender
+                .send(AttachEvent::Output {
+                    data: vec![i; 250_000],
+                })
+                .unwrap();
+        }
+        sender.send(AttachEvent::Finished { code: 3 }).unwrap();
+        let acker = {
+            let pipe = Arc::clone(&pipe);
+            std::thread::spawn(move || {
+                let stop = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < stop {
+                    lock(&pipe.delivery).unacked = 0;
+                    pipe.acked.notify_all();
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            })
+        };
+        assert_eq!(pump(&events, &pipe), Some(3));
+        let seen = lock(&sink.seen).0.clone();
+        assert!(
+            seen.iter().all(|m| m.len() <= 1 << 20),
+            "sizes {:?}",
+            seen.iter().map(Vec::len).collect::<Vec<_>>()
+        );
+        let all = seen.concat();
+        assert_eq!(all.len(), 1_250_000);
+        assert!(all
+            .chunks(250_000)
+            .enumerate()
+            .all(|(i, c)| c.iter().all(|&b| b == i as u8)));
+        drop(acker);
     }
 
     #[test]
@@ -534,7 +811,11 @@ mod tests {
     #[test]
     fn status_follows_terminal_available() {
         let input = |cmd: &str, state: &str, online: bool| StatusInput {
-            facts: TerminalFacts { cmd: cmd.into(), terminal_supported: cmd != "dsh", ..TerminalFacts::default() },
+            facts: TerminalFacts {
+                cmd: cmd.into(),
+                terminal_supported: cmd != "dsh",
+                ..TerminalFacts::default()
+            },
             details: json!({}),
             state: state.into(),
             online,
@@ -545,14 +826,29 @@ mod tests {
         let ready = status(input("claude", "running", true));
         assert!(ready.supported && ready.available && ready.reason.is_empty());
         assert_eq!(ready.idle, "Connect to use the session's live terminal");
-        assert_eq!(ready.connecting, "Connecting to claude/sample-project/review…");
-        assert_eq!(ready.disconnected, "Disconnected — the session keeps running");
+        assert_eq!(
+            ready.connecting,
+            "Connecting to claude/sample-project/review…"
+        );
+        assert_eq!(
+            ready.disconnected,
+            "Disconnected — the session keeps running"
+        );
         let paused = status(input("claude", "paused", true));
-        assert_eq!(paused.reason, "Resume this session before opening its terminal.");
+        assert_eq!(
+            paused.reason,
+            "Resume this session before opening its terminal."
+        );
         let deepseek = status(input("dsh", "running", true));
         assert!(!deepseek.supported);
-        assert_eq!(deepseek.reason, "This native adapter does not provide Terminal.");
-        assert_eq!(status(input("claude", "running", false)).reason, "Machine unavailable. Reconnect when it is online.");
+        assert_eq!(
+            deepseek.reason,
+            "This native adapter does not provide Terminal."
+        );
+        assert_eq!(
+            status(input("claude", "running", false)).reason,
+            "Machine unavailable. Reconnect when it is online."
+        );
     }
 }
 ```
@@ -590,12 +886,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::ipc::{Channel, InvokeBody, InvokeResponseBody, Request};
 use tauri::State;
-use zerus_client_core::terminal::{self, status as texts, Attach, AttachEvent, Target, TerminalFacts};
+use zerus_client_core::terminal::{
+    self, status as texts, Attach, AttachEvent, Target, TerminalFacts,
+};
 
 /// Delivered output a view shown again redraws from (as the core's replay).
 const REPLAY_BYTES: usize = 1 << 20;
 /// Waiting output joins one message up to this size.
 const MESSAGE_BYTES: usize = 1 << 20;
+/// The most one core read holds (`AttachEvent::Output`).
+const READ_BYTES: usize = 256 << 10;
 /// Messages the webview may hold unacknowledged before delivery waits.
 const IN_FLIGHT: usize = 2;
 /// A webview that stops acknowledging (it reloads, say) holds delivery this long.
@@ -684,6 +984,8 @@ struct Delivery {
     sink: Arc<dyn Sink>,
     delivered: VecDeque<u8>,
     unacked: usize,
+    /// The attach was stopped: nothing more is delivered, nothing is waited for.
+    closed: bool,
 }
 
 struct Pipe {
@@ -759,6 +1061,8 @@ impl Terminals {
     /// Qt's `setSession`: true when the target changed, which stops the
     /// view's attach (the view clears its screen).
     pub fn retarget(&self, view: &str, target: &TerminalTarget) -> bool {
+        // Not while a connect sets the view up.
+        let _one = lock(&self.0.connecting);
         let (changed, kept) = self.remember(view, target);
         if changed {
             self.disconnect(view);
@@ -784,14 +1088,14 @@ impl Terminals {
         let _one = lock(&self.0.connecting);
         let (changed, target) = self.remember(view, &target);
         if !changed {
-            if let Some(connected) = self.rebind(view, &target, &sink) {
+            if let Some(connected) = self.rebind(view, &target, &sink, (cols, rows)) {
                 return Ok(connected);
             }
         }
         // Stopping joins the attach's I/O thread: never under the views lock.
         let old = lock(&self.0.views).remove(view);
         if let Some(mut old) = old {
-            old.attach.stop();
+            old.close();
         }
         let (attach, events) = Attach::start(&self.core(&target), cols, rows)?;
         let generation = self.0.next.fetch_add(1, Ordering::Relaxed) + 1;
@@ -800,22 +1104,47 @@ impl Terminals {
                 sink,
                 delivered: VecDeque::new(),
                 unacked: 0,
+                closed: false,
             }),
             acked: Condvar::new(),
         });
-        self.drain(view.to_owned(), generation, events, Arc::clone(&pipe), target.machine.clone());
+        self.drain(
+            view.to_owned(),
+            generation,
+            events,
+            Arc::clone(&pipe),
+            target.machine.clone(),
+        );
         let status = texts::connected(&target.name);
         lock(&self.0.views).insert(
             view.to_owned(),
-            Open { generation, target, attach, pipe, size: (cols, rows), resizes: 0 },
+            Open {
+                generation,
+                target,
+                attach,
+                pipe,
+                size: (cols, rows),
+                resizes: 0,
+            },
         );
-        Ok(Connected { generation, status, reused: false })
+        Ok(Connected {
+            generation,
+            status,
+            reused: false,
+        })
     }
 
-    fn rebind(&self, view: &str, target: &TerminalTarget, sink: &Arc<dyn Sink>) -> Option<Connected> {
+    fn rebind(
+        &self,
+        view: &str,
+        target: &TerminalTarget,
+        sink: &Arc<dyn Sink>,
+        size: (u16, u16),
+    ) -> Option<Connected> {
         let mut views = lock(&self.0.views);
         let open = views.get_mut(view)?;
         open.target = target.clone();
+        open.set_size(size.0, size.1);
         let mut delivery = lock(&open.pipe.delivery);
         let replay: Vec<u8> = delivery.delivered.iter().copied().collect();
         delivery.unacked = usize::from(!replay.is_empty());
@@ -831,33 +1160,29 @@ impl Terminals {
         })
     }
 
-    fn drain(&self, view: String, generation: u64, events: Receiver<AttachEvent>, pipe: Arc<Pipe>, machine: String) {
+    fn drain(
+        &self,
+        view: String,
+        generation: u64,
+        events: Receiver<AttachEvent>,
+        pipe: Arc<Pipe>,
+        machine: String,
+    ) {
         let inner = Arc::clone(&self.0);
         std::thread::Builder::new()
             .name("zerus-terminal".into())
             .spawn(move || {
-                let mut finished = None;
-                while finished.is_none() {
-                    let Ok(first) = events.recv() else { break };
-                    let mut chunk = Vec::new();
-                    let mut next = Some(first);
-                    while let Some(event) = next.take() {
-                        match event {
-                            AttachEvent::Output { data } => chunk.extend_from_slice(&data),
-                            AttachEvent::Finished { code } => finished = Some(code),
-                        }
-                        if finished.is_none() && chunk.len() < MESSAGE_BYTES {
-                            next = events.try_recv().ok();
-                        }
-                    }
-                    if !chunk.is_empty() {
-                        deliver(&pipe, chunk);
-                    }
-                }
+                let finished = pump(&events, &pipe);
                 // A stop reports nothing; only a finish does.
                 let Some(code) = finished else { return };
                 let message = json!({"kind": "finished", "code": code, "status": texts::finished(code, &machine)});
-                lock(&pipe.delivery).sink.message(message.to_string());
+                {
+                    let delivery = lock(&pipe.delivery);
+                    if delivery.closed {
+                        return;
+                    }
+                    delivery.sink.message(message.to_string());
+                }
                 let ended = {
                     let mut views = lock(&inner.views);
                     match views.get(&view) {
@@ -881,12 +1206,11 @@ impl Terminals {
     /// Applies a new size; an unchanged size never reaches the PTY.
     pub fn resize(&self, view: &str, generation: u64, cols: u16, rows: u16) {
         let mut views = lock(&self.0.views);
-        if let Some(open) = views.get_mut(view).filter(|open| open.generation == generation) {
-            if open.size != (cols, rows) {
-                open.size = (cols, rows);
-                open.resizes += 1;
-                open.attach.resize(cols, rows);
-            }
+        if let Some(open) = views
+            .get_mut(view)
+            .filter(|open| open.generation == generation)
+        {
+            open.set_size(cols, rows);
         }
     }
 
@@ -911,7 +1235,7 @@ impl Terminals {
     pub fn disconnect(&self, view: &str) -> Option<String> {
         let old = lock(&self.0.views).remove(view);
         old.map(|mut open| {
-            open.attach.stop();
+            open.close();
             texts::disconnected(&open.target.machine)
         })
     }
@@ -920,15 +1244,59 @@ impl Terminals {
     pub fn stop_all(&self) {
         let all: Vec<Open> = lock(&self.0.views).drain().map(|(_, open)| open).collect();
         for mut open in all {
-            open.attach.stop();
+            open.close();
         }
     }
 }
 
-fn deliver(pipe: &Pipe, chunk: Vec<u8>) {
+impl Open {
+    /// Applies a new size; an unchanged size never reaches the PTY.
+    fn set_size(&mut self, cols: u16, rows: u16) {
+        if self.size != (cols, rows) {
+            self.size = (cols, rows);
+            self.resizes += 1;
+            self.attach.resize(cols, rows);
+        }
+    }
+
+    /// Hangs up: delivery ends first, so buffered output never reaches the
+    /// view's sink and nothing waits for its acknowledgements.
+    fn close(&mut self) {
+        lock(&self.pipe.delivery).closed = true;
+        self.pipe.acked.notify_all();
+        self.attach.stop();
+    }
+}
+
+/// Joins the core's events into messages of at most `MESSAGE_BYTES` and
+/// delivers them. Returns the exit code of a finish, None after a stop.
+fn pump(events: &Receiver<AttachEvent>, pipe: &Pipe) -> Option<i32> {
+    let mut finished = None;
+    while finished.is_none() {
+        let Ok(first) = events.recv() else { break };
+        let mut chunk = Vec::new();
+        let mut next = Some(first);
+        while let Some(event) = next.take() {
+            match event {
+                AttachEvent::Output { data } => chunk.extend_from_slice(&data),
+                AttachEvent::Finished { code } => finished = Some(code),
+            }
+            if finished.is_none() && chunk.len() + READ_BYTES <= MESSAGE_BYTES {
+                next = events.try_recv().ok();
+            }
+        }
+        if !chunk.is_empty() && !deliver(pipe, chunk) {
+            return None;
+        }
+    }
+    finished
+}
+
+/// False when the attach was stopped: the chunk is dropped.
+fn deliver(pipe: &Pipe, chunk: Vec<u8>) -> bool {
     let deadline = Instant::now() + ACK_WAIT;
     let mut delivery = lock(&pipe.delivery);
-    while delivery.unacked >= IN_FLIGHT {
+    while delivery.unacked >= IN_FLIGHT && !delivery.closed {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break;
@@ -939,14 +1307,20 @@ fn deliver(pipe: &Pipe, chunk: Vec<u8>) {
             .unwrap_or_else(PoisonError::into_inner)
             .0;
     }
+    if delivery.closed {
+        return false;
+    }
     delivery.delivered.extend(chunk.iter().copied());
     let excess = delivery.delivered.len().saturating_sub(REPLAY_BYTES);
     delivery.delivered.drain(..excess);
     delivery.unacked += 1;
     delivery.sink.output(chunk);
+    true
 }
 
-fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> impl std::future::Future<Output = Result<T, String>> {
+fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> impl std::future::Future<Output = Result<T, String>> {
     let task = tauri::async_runtime::spawn_blocking(work);
     async move { task.await.map_err(|error| error.to_string()) }
 }
@@ -961,13 +1335,22 @@ pub async fn terminal_connect(
     on_event: Channel,
 ) -> Result<Connected, String> {
     let terminals = state.inner().clone();
-    blocking(move || terminals.connect(&view, target, cols, rows, Arc::new(ChannelSink(on_event)))).await?
+    blocking(move || terminals.connect(&view, target, cols, rows, Arc::new(ChannelSink(on_event))))
+        .await?
 }
 
 /// Input as a raw body: `x-zerus-view` and `x-zerus-generation` name the attach.
 #[tauri::command]
-pub async fn terminal_write(state: State<'_, Terminals>, request: Request<'_>) -> Result<(), String> {
-    let header = |name: &str| request.headers().get(name).and_then(|value| value.to_str().ok());
+pub async fn terminal_write(
+    state: State<'_, Terminals>,
+    request: Request<'_>,
+) -> Result<(), String> {
+    let header = |name: &str| {
+        request
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+    };
     let view = header("x-zerus-view").ok_or("missing x-zerus-view")?;
     let generation = header("x-zerus-generation")
         .and_then(|value| value.parse().ok())
@@ -979,7 +1362,13 @@ pub async fn terminal_write(state: State<'_, Terminals>, request: Request<'_>) -
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn terminal_resize(state: State<'_, Terminals>, view: String, generation: u64, cols: u16, rows: u16) {
+pub fn terminal_resize(
+    state: State<'_, Terminals>,
+    view: String,
+    generation: u64,
+    cols: u16,
+    rows: u16,
+) {
     state.resize(&view, generation, cols, rows);
 }
 
@@ -989,13 +1378,20 @@ pub fn terminal_ack(state: State<'_, Terminals>, view: String, generation: u64) 
 }
 
 #[tauri::command]
-pub async fn terminal_disconnect(state: State<'_, Terminals>, view: String) -> Result<Option<String>, String> {
+pub async fn terminal_disconnect(
+    state: State<'_, Terminals>,
+    view: String,
+) -> Result<Option<String>, String> {
     let terminals = state.inner().clone();
     blocking(move || terminals.disconnect(&view)).await
 }
 
 #[tauri::command]
-pub async fn terminal_retarget(state: State<'_, Terminals>, view: String, target: TerminalTarget) -> Result<bool, String> {
+pub async fn terminal_retarget(
+    state: State<'_, Terminals>,
+    view: String,
+    target: TerminalTarget,
+) -> Result<bool, String> {
     let terminals = state.inner().clone();
     blocking(move || terminals.retarget(&view, &target)).await
 }
@@ -1029,7 +1425,7 @@ In `client/src-tauri/src/actions.rs`, change `const REPLAY_NEEDS_HGS` to `pub(cr
 - [ ] **Step 5: Run the tests to see them pass**
 
 Run: `cd client && cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml terminal::`
-Expected: PASS, 9 tests. Then `cargo +1.99.1 clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` and `cargo +1.99.1 fmt --check --manifest-path src-tauri/Cargo.toml`: clean.
+Expected: PASS, 15 tests. Then `cargo +1.99.1 clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` and `cargo +1.99.1 fmt --check --manifest-path src-tauri/Cargo.toml`: clean.
 
 - [ ] **Step 6: Commit**
 

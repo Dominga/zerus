@@ -105,50 +105,84 @@ mod tests {
         }
     }
 
+    /// Gives a signal one action for a test and puts the previous one back.
+    struct Saved(libc::c_int, libc::sigaction);
+
+    impl Saved {
+        fn set(signal: libc::c_int, handler: libc::sighandler_t) -> Self {
+            // SAFETY: plain sigaction(2) calls with zeroed, then filled structs.
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = handler;
+                libc::sigemptyset(&mut action.sa_mask);
+                let mut previous: libc::sigaction = std::mem::zeroed();
+                assert_eq!(libc::sigaction(signal, &action, &mut previous), 0);
+                Self(signal, previous)
+            }
+        }
+    }
+
+    impl Drop for Saved {
+        fn drop(&mut self) {
+            // SAFETY: restores the action `set` replaced.
+            unsafe { libc::sigaction(self.0, &self.1, std::ptr::null_mut()) };
+        }
+    }
+
+    /// The action `install_for` gives a signal it takes.
+    fn ours() -> libc::sighandler_t {
+        on_signal as *const () as libc::sighandler_t
+    }
+
+    /// Another program's handler, already set when the client starts.
+    extern "C" fn theirs(_: libc::c_int) {}
+
     #[test]
     fn a_signal_reaches_the_quit_handler() {
         let _turn = turn();
+        // SIGUSR1 at its default action: a handled SIGINT would make the test
+        // process ignore Ctrl-C, and nohup leaves SIGHUP ignored.
+        let _saved = Saved::set(libc::SIGUSR1, libc::SIG_DFL);
         let (sender, receiver) = std::sync::mpsc::channel();
-        // Only SIGHUP: a test process that handled SIGINT would ignore Ctrl-C.
-        let handled = install_for(&[libc::SIGHUP], move |signal| {
+        let handled = install_for(&[libc::SIGUSR1], move |signal| {
             let _ = sender.send(signal);
         })
         .unwrap();
-        if !handled.contains(&libc::SIGHUP) {
-            return; // started under nohup: an ignored signal stays ignored
-        }
-        // SAFETY: raises SIGHUP in this process; the handler above takes it.
-        unsafe { libc::raise(libc::SIGHUP) };
+        assert_eq!(handled, [libc::SIGUSR1]);
+        assert_eq!(action(libc::SIGUSR1).sa_sigaction, ours());
+        // SAFETY: raises SIGUSR1 in this process; the handler above takes it.
+        unsafe { libc::raise(libc::SIGUSR1) };
         assert_eq!(
             receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
-            libc::SIGHUP
+            libc::SIGUSR1
         );
         assert_eq!(
-            action(libc::SIGHUP).sa_sigaction,
+            action(libc::SIGUSR1).sa_sigaction,
             libc::SIG_DFL,
             "a second signal ends an app that cannot finish quitting"
         );
     }
 
     #[test]
+    fn a_handler_set_at_start_is_taken_over() {
+        let _turn = turn();
+        let _saved = Saved::set(libc::SIGUSR1, theirs as *const () as libc::sighandler_t);
+        let handled = install_for(&[libc::SIGUSR1], |_| {}).unwrap();
+        assert_eq!(handled, [libc::SIGUSR1]);
+        assert_eq!(action(libc::SIGUSR1).sa_sigaction, ours());
+    }
+
+    #[test]
     fn a_signal_ignored_at_start_stays_ignored() {
         let _turn = turn();
         // As nohup leaves SIGHUP; SIGUSR2 is one no other test uses.
-        let signal = libc::SIGUSR2;
-        // SAFETY: plain sigaction(2) calls with zeroed, then filled structs.
-        let previous = unsafe {
-            let mut ignore: libc::sigaction = std::mem::zeroed();
-            ignore.sa_sigaction = libc::SIG_IGN;
-            libc::sigemptyset(&mut ignore.sa_mask);
-            let mut previous: libc::sigaction = std::mem::zeroed();
-            assert_eq!(libc::sigaction(signal, &ignore, &mut previous), 0);
-            previous
-        };
-        let handled = install_for(&[signal], |_| {}).unwrap();
-        let after = action(signal);
-        // SAFETY: restores the action this test replaced.
-        unsafe { libc::sigaction(signal, &previous, std::ptr::null_mut()) };
+        let _saved = Saved::set(libc::SIGUSR2, libc::SIG_IGN);
+        let handled = install_for(&[libc::SIGUSR2], |_| {}).unwrap();
         assert!(handled.is_empty(), "an ignored signal is not taken over");
-        assert_eq!(after.sa_sigaction, libc::SIG_IGN, "it stays ignored");
+        assert_eq!(
+            action(libc::SIGUSR2).sa_sigaction,
+            libc::SIG_IGN,
+            "it stays ignored"
+        );
     }
 }

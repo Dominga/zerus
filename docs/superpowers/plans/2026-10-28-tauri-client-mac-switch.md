@@ -8696,6 +8696,31 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    - **Watchdog:** Terminal shows `main-thread watchdog on (30 s)`. Open the menu-bar menu and leave it open for 60 s, then close it: the app keeps running and no `main thread unresponsive` line appears (the heartbeat runs in the common run-loop modes).
    - **Ignored tile test:** if `the_tile_draws_amber_attention_and_the_stale_dot` was ignored over SSH, run it here with `--ignored`.
    Quit the dev app from its menu.
+
+   **Scroll measurement (zerus-5wmh.36), in the same window.** Two instances must never share the client's data folder, so start this only after the dev app has quit.
+
+   Conditions:
+   - AC power;
+   - Low Power Mode off;
+   - a nominal thermal state;
+   - the window fully visible and left untouched.
+
+   Each run ends by itself after about 5 minutes:
+   ```sh
+   B="src-tauri/target/release/bundle/macos/Zerus Next (dev).app/Contents/MacOS/zerus-client"
+   mkdir -p ~/zerus-dev/perf-36
+   ZERUS_CLIENT_PERF=auto ZERUS_CLIENT_PERF_LABEL=mac-switch-live \
+     ZERUS_CLIENT_PERF_OUT=$HOME/zerus-dev/perf-36/live.json "$B"
+   ZERUS_CLIENT_PERF=auto ZERUS_CLIENT_PERF_LABEL=mac-switch-replay \
+     ZERUS_CLIENT_REPLAY="$PWD/fixtures/replay.ndjson" \
+     ZERUS_CLIENT_PERF_OUT=$HOME/zerus-dev/perf-36/replay.json "$B"
+   ```
+   - **The live run** measures `list-scroll` on the real catalog.
+   - **The replay run** measures `activity-scroll` on the fixture's long session. It always scrolls at least 2000 px; see "Activity pass in replay mode" in `client/bench/README.md`.
+   - Each report records whether its Activity was live or replay.
+   - Put both reports on one page with `client/scripts/measure-report.py`.
+
+   If `list-scroll` or `activity-scroll` fails the harness criteria, zerus-5wmh.36 joins the switch bar. Otherwise it stays after the switch (coordinator, 2026-10-28).
 5. **Agree the moment with the owner.** Qt flushes its drafts when it quits, but the owner should not be typing.
 6. **Switch** (Terminal). From the clean checkout, with `ZERUS_DEV_BUILD_NUMBER` still set, run only the GUI installer, not the CLI `install.sh`:
    ```sh

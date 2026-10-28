@@ -231,6 +231,97 @@ inline QString agoText(double then, double now)
     return QCoreApplication::translate("TeamPanel", "%1 d ago").arg(seconds / 86400);
 }
 
+// U37 (owner, 2026-10-28): how long a task has worked, in small text right
+// after its activity label. The views read one clock and tick on one timer,
+// once a minute; a test sets its own clock and ticks by hand.
+inline std::function<double()> &workedClock()
+{
+    static std::function<double()> clock = [] { return double(QDateTime::currentSecsSinceEpoch()); };
+    return clock;
+}
+
+inline QTimer &workedTicker()
+{
+    static QTimer *timer = [] {
+        auto *t = new QTimer(QCoreApplication::instance());
+        t->setObjectName(QStringLiteral("teamWorkedTicker"));
+        t->setInterval(60 * 1000);
+        t->start();
+        return t;
+    }();
+    return *timer;
+}
+
+// "<1m", "12m", "1h 05m".
+inline QString workedText(qint64 seconds)
+{
+    const auto tr = [](const char *text) { return QCoreApplication::translate("TeamPanel", text); };
+    if (seconds < 60) return tr("<1m");
+    const qint64 minutes = seconds / 60;
+    if (minutes < 60) return tr("%1m").arg(minutes);
+    return tr("%1h %2m").arg(minutes / 60).arg(minutes % 60, 2, 10, QLatin1Char('0'));
+}
+
+// The time since the running attempt started, else the sum of the attempts'
+// work; empty while the task never worked.
+inline QString workedLabel(const Task &task, double now)
+{
+    const auto &timing = task.timing;
+    if (timing.runningSince > 0) return workedText(qint64(qMax(0.0, now - timing.runningSince)));
+    return timing.worked > 0 ? workedText(timing.worked) : QString();
+}
+
+// The room a running time keeps: the widest text it grows to, so nothing
+// after it moves when "9m" becomes "10m" or "1h 00m".
+inline int workedRoom(const QFontMetrics &metrics, double runningSince)
+{
+    return runningSince > 0 ? metrics.horizontalAdvance(QStringLiteral("88h 88m")) : 0;
+}
+
+// The tooltip: the total, each attempt's work and waits, the task's waits
+// named separately, and what an older team never recorded.
+inline QString workedTip(const Task &task, double now)
+{
+    const auto &timing = task.timing;
+    if (!timing.known) return {};
+    const auto tr = [](const char *text) { return QCoreApplication::translate("TeamPanel", text); };
+    const auto clock = [](double at) { return QDateTime::fromSecsSinceEpoch(qint64(at)).toString(QStringLiteral("HH:mm")); };
+    const auto waits = [&](qint64 deps, qint64 member, qint64 lead) {
+        QStringList parts;
+        if (deps > 0) parts << tr("%1 for dependencies").arg(workedText(deps));
+        if (member > 0) parts << tr("%1 for a free member").arg(workedText(member));
+        if (lead > 0) parts << tr("%1 for the lead").arg(workedText(lead));
+        return parts.join(QStringLiteral(" · "));
+    };
+    QStringList lines;
+    if (timing.runningSince > 0)
+        lines << tr("Working %1, since %2").arg(workedText(qint64(qMax(0.0, now - timing.runningSince))), clock(timing.runningSince));
+    else if (timing.worked > 0)
+        lines << (timing.attempts.size() > 1 ? tr("Worked %1 in %2 attempts").arg(workedText(timing.worked)).arg(timing.attempts.size())
+                                             : tr("Worked %1").arg(workedText(timing.worked)));
+    // Each attempt once there is more than one; the running one says since when.
+    if (timing.attempts.size() > 1) {
+        for (const auto &span : timing.attempts) {
+            const bool running = timing.runningSince > 0 && span.to <= 0 && span.from == timing.runningSince;
+            QString line = running ? tr("Attempt %1 (%2): working since %3").arg(span.n).arg(span.member, clock(span.from))
+                                   : tr("Attempt %1 (%2, %3): worked %4").arg(span.n).arg(span.member, span.state, workedText(span.worked));
+            const QString waited = waits(0, span.memberWait, span.leadWait);
+            if (!waited.isEmpty()) line += tr(" · waited %1").arg(waited);
+            lines << line;
+        }
+    }
+    const QString waited = waits(timing.deps, timing.member, timing.lead);
+    if (!waited.isEmpty()) lines << tr("Waited %1, not counted").arg(waited);
+    QStringList unknown;
+    for (const auto &kind : timing.unknown)
+        unknown << (kind == QLatin1String("deps") ? tr("the wait for dependencies")
+                    : kind == QLatin1String("member") ? tr("the wait for a member")
+                    : kind == QLatin1String("lead") ? tr("the lead's decision")
+                    : tr("the end of a replaced attempt"));
+    if (!unknown.isEmpty()) lines << tr("Not recorded: %1").arg(unknown.join(QStringLiteral(", ")));
+    return lines.join(QLatin1Char('\n'));
+}
+
 // An attempt phase as the desktop draws it (A1, spec 11): the glyph kind, its
 // tone, and a tooltip naming the state, the time and the next step. `phase` is
 // empty when the task has no attempt.
@@ -601,7 +692,10 @@ public:
         // model tile; a problem text wins over it.
         QString ext, problemText, activity; bool working = false;
         // U29: added to its running phase, outside the original scope.
-        bool late = false; };
+        bool late = false;
+        // U37: the working time after the activity label; a running one
+        // ticks from `runningSince` on the shared minute timer.
+        QString worked; double runningSince = 0; };
     // A phase group as the plan, board and layers show it: the heading is
     // "Phase 2 · QA fixes · 3/5". A finished phase starts collapsed; its tasks
     // are in `tasks` but no node is built, and one summary node stands in.
@@ -626,6 +720,21 @@ public:
         // Spec 1.4: the working dots under a model tile move while animated.
         m_dots.setInterval(AgentWorking::FrameMs);
         QObject::connect(&m_dots, &QTimer::timeout, this, [this] { update(); });
+        // U37: a running time ticks on the shared minute timer: the texts
+        // change and the view repaints once, no node is rebuilt.
+        QObject::connect(&workedTicker(), &QTimer::timeout, this, [this] { tickWorked(); });
+    }
+    void tickWorked()
+    {
+        const double now = workedClock()();
+        bool changed = false;
+        for (auto &n : nodes) {
+            if (n.runningSince <= 0) continue;
+            const QString text = workedText(qint64(qMax(0.0, now - n.runningSince)));
+            changed = changed || text != n.worked;
+            n.worked = text;
+        }
+        if (changed) update();
     }
     // Compatibility with the two-mode form.
     TaskView(const Colors &colors, bool graph, QWidget *parent = nullptr) : TaskView(colors, graph ? Graph : List, parent) {}
@@ -1116,15 +1225,30 @@ protected:
             AgentWorking::paintTile(p, tile, agentLogo(n.agent, m_c.fg), m_c.dark, n.working, AgentWorking::phase());
             right = tile.right() + 6;
         }
+        // U37: the working time after the activity label keeps its room: a
+        // long label is elided first.
+        QFont metaFont = font(); metaFont.setPixelSize(11);
+        const QFontMetrics metaMetrics(metaFont);
+        const double timeRoom = n.worked.isEmpty() ? 0.0 : qMax(metaMetrics.horizontalAdvance(n.worked), workedRoom(metaMetrics, n.runningSince)) + 6;
         if (!n.activity.isEmpty()) {
             // The owner's small activity label: muted text3 at 11 px, right of
             // the role chip and the model tile, and elided before a problem
             // text would lose room to it.
             QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(m_c.text3);
-            const double w = qMax(0.0, r.right() - 8 - right);
+            const double w = qMax(0.0, r.right() - 8 - right - timeRoom);
             const QString shown = QFontMetrics(meta).elidedText(n.activity, Qt::ElideRight, int(w));
             p.drawText(QRectF(right, line2, w, lineH), Qt::AlignLeft | Qt::AlignVCenter, shown);
             right += qMin(w, double(QFontMetrics(meta).horizontalAdvance(shown))) + 6;
+        }
+        if (!n.worked.isEmpty()) {
+            // U37: the working time right after it, in the same color and size;
+            // a running one keeps the room it grows to.
+            QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(m_c.text3);
+            const QFontMetrics metrics(meta);
+            const double w = qMax(0.0, r.right() - 8 - right);
+            const QString shown = metrics.elidedText(n.worked, Qt::ElideRight, int(w));
+            p.drawText(QRectF(right, line2, w, lineH), Qt::AlignLeft | Qt::AlignVCenter, shown);
+            right += qMin(w, double(qMax(metrics.horizontalAdvance(shown), workedRoom(metrics, n.runningSince)))) + 6;
         }
         if (!n.problemText.isEmpty()) {
             QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(n.tone);
@@ -1285,13 +1409,23 @@ protected:
         QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(n.tone);
         const int statusW = qMin(int(width() - 150), QFontMetrics(meta).horizontalAdvance(n.statusText) + 2);
         p.drawText(QRectF(26, r.top() + 19, statusW, 16), Qt::AlignLeft | Qt::AlignVCenter, n.statusText);
+        double left = 26 + statusW + 8;
+        const double timeRoom = n.worked.isEmpty() ? 0.0 : qMax(QFontMetrics(meta).horizontalAdvance(n.worked), workedRoom(QFontMetrics(meta), n.runningSince)) + 6;
         if (!n.activity.isEmpty()) {
-            // The same small activity label as the graph, muted, before the deps.
+            // The same small activity label as the graph, muted, before the deps;
+            // the working time after it keeps its room (U37).
             p.setPen(m_c.text3);
-            const double left = 26 + statusW + 8;
+            const double w = qMax(0.0, width() - 112 - left - timeRoom);
+            const QString shown = QFontMetrics(meta).elidedText(n.activity, Qt::ElideRight, int(w));
+            p.drawText(QRectF(left, r.top() + 19, w, 16), Qt::AlignLeft | Qt::AlignVCenter, shown);
+            left += qMin(w, double(QFontMetrics(meta).horizontalAdvance(shown))) + 6;
+        }
+        if (!n.worked.isEmpty()) {
+            // U37: the working time right after it, as on the graph.
+            p.setPen(m_c.text3);
             const double w = qMax(0.0, width() - 112 - left);
             p.drawText(QRectF(left, r.top() + 19, w, 16), Qt::AlignLeft | Qt::AlignVCenter,
-                       QFontMetrics(meta).elidedText(n.activity, Qt::ElideRight, int(w)));
+                       QFontMetrics(meta).elidedText(n.worked, Qt::ElideRight, int(w)));
         }
         if (!n.deps.isEmpty()) {
             p.setFont(NewSessionDense::mono(10)); p.setPen(m_c.dim);

@@ -521,12 +521,23 @@ fn approve(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Str
     // F13: the plan records who approved it and, for the lead, the owner's
     // exact sentence; the GUI says "Approved by Lead on your word".
     team.approved_by = by.clone();
+    team.approved_at = Some(now());
     team.owner_word = owner_word.clone();
     events.push(Event::new(
         "approved",
         json!({"by":by,"owner_word":owner_word,"plan":true}),
     ));
     Ok(json!({"status":"approved","by":by,"owner_word":owner_word}))
+}
+
+/// U37: the decision's time on the attempt it decides: the last report, else
+/// the last attempt (an owner's decision without a report). A later decision
+/// over the same attempt keeps the first time.
+fn mark_decided(task: &mut Task) {
+    let at = task.attempts.iter().rposition(|attempt| attempt.state == AttemptState::Reported).or(task.attempts.len().checked_sub(1));
+    if let Some(attempt) = at.map(|at| &mut task.attempts[at]) {
+        attempt.decided_at.get_or_insert_with(now);
+    }
 }
 
 /// The approval new phases wait for: their own setting, else the plan's.
@@ -2066,6 +2077,7 @@ fn decide_check(team: &mut Team, id: u32, n: u32, events: &mut Vec<Event>) -> an
         .map(|check| check.exit)
         .context("The check result is missing")?;
     let title = task.title.clone();
+    mark_decided(task);
     if exit == expected.expect_exit {
         revoke(task, "check passed");
         task.status = TaskStatus::Accepted;
@@ -2988,6 +3000,7 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     // N15: the lead's accept filed this report's findings already; the
     // owner's accept over it does not file them again.
     let filed_before = task.status == TaskStatus::Accepted && task.decided_by == Some(Decider::Lead);
+    mark_decided(task);
     if accept {
         revoke(task, "accepted without this attempt");
         task.status = TaskStatus::Accepted;
@@ -4396,6 +4409,8 @@ mod tests {
         assert_eq!((receipt["status"].as_str(), receipt["attempt"].as_u64()), (Some("accepted"), Some(1)));
         let task = team.task(1).unwrap();
         assert_eq!((task.status, task.decided_by), (TaskStatus::Accepted, Some(Decider::Lead)));
+        // U37: the decision's time is on the attempt it decided.
+        assert!(task.attempts[0].decided_at.is_some());
         assert_eq!(task.attempts[0].report.as_ref().unwrap().text, "Reviewed: the plan holds");
         assert_eq!(task.attempts[0].notice, Notice::None);
         let kinds: Vec<&str> = events.iter().map(|event| event.kind).collect();
@@ -4611,6 +4626,7 @@ mod tests {
         .unwrap();
         assert_eq!((approved["status"].as_str(), approved["by"].as_str()), (Some("approved"), Some("Lead")));
         assert_eq!(team.approved_by, "Lead");
+        assert!(team.approved_at.is_some());
         assert_eq!(team.owner_word.as_ref().unwrap().text, "plan approved, go ahead");
         let event = events.iter().rev().find(|event| event.kind == "approved").unwrap();
         assert_eq!(event.payload["by"], "Lead");
@@ -4732,6 +4748,7 @@ mod tests {
         decide(&mut team, &json!({"task":1,"reason":"paginate"}), &Actor::Member("lead".into()), false, &mut events).unwrap();
         let task = team.task(1).unwrap();
         assert_eq!((task.status, task.attempts[0].state), (TaskStatus::Pending, AttemptState::Rejected));
+        assert!(task.attempts[0].decided_at.is_some());
     }
 
     #[test]

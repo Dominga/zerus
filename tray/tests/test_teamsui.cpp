@@ -688,6 +688,7 @@ private slots:
     void graphNodesInTwoLinesWithDraftEdits();
     void workAheadSwitchAndBadge();
     void graphNodesCarryTheActivityLabel();
+    void workingTimeFollowsTheActivityLabel();
     void subLeadsAreATreeInMembersAndTheInspector();
     void aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog();
     void designerPageStartsOrOpensTheDesigner();
@@ -4475,6 +4476,169 @@ void TestTeamsUi::graphNodesCarryTheActivityLabel()
     QCOMPARE(layerLabel(4), QStringLiteral("held"));
 }
 
+// U37: the labels' team with each task's timing as hgs status computes it:
+// #2 runs its second attempt, #3 its first, #8 is done (its decision was not
+// recorded), #9 runs behind a problem, #11's turn ended. The clock is 9000.
+static QJsonObject timingTeam()
+{
+    auto t = labelTeam();
+    const auto span = [](int n, const char *state, double from, double to, int worked, int member, int lead) {
+        return QJsonObject{{"n", n}, {"member", "backend"}, {"state", state}, {"from", from}, {"to", to > 0 ? QJsonValue(to) : QJsonValue()},
+                           {"worked_s", worked}, {"member_s", member}, {"lead_s", lead}};
+    };
+    const auto timing = [](int worked, double since, int deps, int member, int lead, const QJsonArray &attempts, const QJsonArray &unknown = {}) {
+        QJsonObject o{{"worked_s", worked}, {"running_since", since > 0 ? QJsonValue(since) : QJsonValue()},
+                      {"waits", QJsonObject{{"deps_s", deps}, {"member_s", member}, {"lead_s", lead}}}, {"attempts", attempts}};
+        if (!unknown.isEmpty()) o["unknown"] = unknown;
+        return o;
+    };
+    const QHash<int, QJsonObject> timings{
+        {1, timing(600, 0, 0, 60, 300, {span(1, "reported", 1000, 1600, 600, 60, 300)})},
+        {2, timing(5400, 5100, 2400, 180, 600, {span(1, "rejected", 2000, 3500, 1500, 120, 600), span(2, "delivered", 5100, 0, 3900, 60, 0)})},
+        {3, timing(720, 8280, 0, 30, 0, {span(1, "delivered", 8280, 0, 720, 30, 0)})},
+        {4, timing(0, 0, 0, 0, 300, {})},
+        {8, timing(4500, 0, 0, 0, 0, {span(1, "reported", 1000, 5500, 4500, 0, 0)}, {"lead"})},
+        {9, timing(30, 8970, 0, 0, 0, {span(2, "delivered", 8970, 0, 30, 0, 0)})},
+        {11, timing(100, 0, 0, 0, 0, {span(1, "delivered", 1800, 1900, 100, 0, 0)})},
+    };
+    auto tasks = t["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        if (timings.contains(task["id"].toInt())) task["timing"] = timings.value(task["id"].toInt());
+        tasks[i] = task;
+    }
+    t["tasks"] = tasks;
+    return t;
+}
+
+void TestTeamsUi::workingTimeFollowsTheActivityLabel()
+{
+    // The test owns the clock; the minute ticks come by hand.
+    double now = 9000;
+    TeamUi::workedClock() = [&now] { return now; };
+    const auto restore = qScopeGuard([] { TeamUi::workedClock() = [] { return double(QDateTime::currentSecsSinceEpoch()); }; });
+    const auto tick = [] { QVERIFY(QMetaObject::invokeMethod(&TeamUi::workedTicker(), "timeout")); };
+    QCOMPARE(TeamUi::workedTicker().interval(), 60 * 1000);
+    setTeam(timingTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    const LiveLookup live = [](const Member &m) { Live l; l.known = true; if (m.id == "blocked") l.offline = true; l.working = m.id == "backend"; return l; };
+    panel.setLive(live); workspace.setLive(live);
+    darkPalette(); workspace.setTheme(true);
+    // Wide enough that the shots show the done task's layer and column.
+    workspace.resize(1900, 820); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    // The text itself: minutes, then hours with two-digit minutes.
+    QCOMPARE(TeamUi::workedText(0), QStringLiteral("<1m"));
+    QCOMPARE(TeamUi::workedText(12 * 60 + 59), QStringLiteral("12m"));
+    QCOMPARE(TeamUi::workedText(3600 + 5 * 60), QStringLiteral("1h 05m"));
+    QCOMPARE(TeamUi::workedText(26 * 3600 + 40 * 60), QStringLiteral("26h 40m"));
+    const auto graph = [&] { return dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); };
+    QTRY_VERIFY(graph() && graph()->nodeRect(1).width() > 0);
+    const auto node = [&](TeamUi::TaskView *view, int id) { for (const auto &n : view->nodes) if (n.id == id) return n; return TeamUi::TaskView::Node{}; };
+    // Running: since the current attempt started; done: the sum; never
+    // worked: nothing. A problem text keeps the time beside it.
+    QCOMPARE(node(graph(), 2).worked, QStringLiteral("1h 05m"));
+    QCOMPARE(node(graph(), 2).activity, QStringLiteral("attempt 2 · working"));
+    QCOMPARE(node(graph(), 3).worked, QStringLiteral("12m"));
+    QCOMPARE(node(graph(), 1).worked, QStringLiteral("10m"));
+    QCOMPARE(node(graph(), 8).worked, QStringLiteral("1h 15m"));
+    QCOMPARE(node(graph(), 11).worked, QStringLiteral("1m"));
+    QCOMPARE(node(graph(), 9).worked, QStringLiteral("<1m"));
+    QVERIFY(node(graph(), 9).problem);
+    QVERIFY(node(graph(), 4).worked.isEmpty());
+    QVERIFY(node(graph(), 6).worked.isEmpty());
+    QVERIFY(node(graph(), 7).worked.isEmpty());
+    // The tooltip: each attempt with its waits, the task's waits named apart.
+    const QString retried = node(graph(), 2).tooltip;
+    QVERIFY2(retried.contains("Working 1h 05m, since "), qPrintable(retried));
+    QVERIFY2(retried.contains("Attempt 1 (backend, rejected): worked 25m · waited 2m for a free member · 10m for the lead"), qPrintable(retried));
+    QVERIFY2(retried.contains("Attempt 2 (backend): working since "), qPrintable(retried));
+    QVERIFY2(retried.contains("Waited 40m for dependencies · 3m for a free member · 10m for the lead, not counted"), qPrintable(retried));
+    QVERIFY2(node(graph(), 8).tooltip.contains("Worked 1h 15m\n"), qPrintable(node(graph(), 8).tooltip));
+    QVERIFY(node(graph(), 8).tooltip.contains("Not recorded: the lead's decision"));
+    QVERIFY(!node(graph(), 6).tooltip.contains("Worked"));
+    const auto shoot = [&](const QString &name) {
+        shot(&workspace, name + "-dark");
+        lightPalette(); workspace.setTheme(false); workspace.render(); QTest::qWait(200);
+        lightShot(&workspace, name + "-light");
+        darkPalette(); workspace.setTheme(true); workspace.render(); QTest::qWait(150);
+    };
+    shoot("ux-u37-graph");
+    // One tick a minute: the view keeps its nodes and only the running times
+    // change.
+    QPointer<TeamUi::TaskView> ticked = graph();
+    now = 12000;
+    tick();
+    QVERIFY(ticked);
+    QCOMPARE(node(ticked, 3).worked, QStringLiteral("1h 02m"));
+    QCOMPARE(node(ticked, 2).worked, QStringLiteral("1h 55m"));
+    QCOMPARE(node(ticked, 9).worked, QStringLiteral("50m"));
+    QCOMPARE(node(ticked, 8).worked, QStringLiteral("1h 15m"));
+    QCOMPARE(node(ticked, 1).worked, QStringLiteral("10m"));
+    now = 9000; tick();
+    const auto view = [&](const char *segment) {
+        for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
+            if (b->property("segment") == segment) { b->click(); break; }
+    };
+    // The Board card: right after the activity label, in its color and size.
+    view("board");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBoard"));
+    const auto card = [&](int id) -> QFrame * {
+        for (auto *frame : workspace.findChildren<QFrame *>("teamBoardCard")) if (frame->property("task").toInt() == id) return frame;
+        return nullptr;
+    };
+    const auto worked = [&](int id) -> QLabel * { auto *frame = card(id); return frame ? frame->findChild<QLabel *>("teamBoardWorked") : nullptr; };
+    QTRY_VERIFY(worked(3));
+    QCOMPARE(worked(3)->text(), QStringLiteral("12m"));
+    QCOMPARE(worked(2)->text(), QStringLiteral("1h 05m"));
+    QCOMPARE(worked(8)->text(), QStringLiteral("1h 15m"));
+    QVERIFY(!worked(6));
+    auto *activity = card(3)->findChild<QLabel *>("teamBoardActivity");
+    QCOMPARE(activity->text(), QStringLiteral("working"));
+    QCOMPARE(worked(3)->font().pixelSize(), activity->font().pixelSize());
+    QCOMPARE(worked(3)->palette().color(QPalette::WindowText), activity->palette().color(QPalette::WindowText));
+    QVERIFY(worked(3)->geometry().left() > activity->geometry().right());
+    QVERIFY(worked(2)->toolTip().contains("Attempt 1 (backend, rejected): worked 25m"));
+    // A running time keeps the room it grows to: "12m" becoming "1h 02m"
+    // moves nothing after it.
+    QVERIFY(worked(3)->minimumWidth() >= worked(3)->fontMetrics().horizontalAdvance(QStringLiteral("1h 02m")));
+    auto *state = card(3)->findChild<QWidget *>("teamBoardState");
+    TestWait::settle();
+    const int stateLeft = state->geometry().left();
+    QPointer<QLabel> label = worked(3);
+    now = 12000;
+    tick();
+    QVERIFY(label);
+    QCOMPARE(label->text(), QStringLiteral("1h 02m"));
+    QCOMPARE(worked(8)->text(), QStringLiteral("1h 15m"));
+    TestWait::settle();
+    QCOMPARE(state->geometry().left(), stateLeft);
+    now = 9000; tick();
+    shoot("ux-u37-board");
+    // The Layers row: the same text after the activity label.
+    view("layers");
+    TeamUi::TaskView *layers = nullptr;
+    QTRY_VERIFY(([&] { layers = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceLayers")); return layers != nullptr; })());
+    QCOMPARE(node(layers, 2).worked, QStringLiteral("1h 05m"));
+    QCOMPARE(node(layers, 8).worked, QStringLiteral("1h 15m"));
+    QCOMPARE(node(layers, 11).worked, QStringLiteral("1m"));
+    now = 12000; tick();
+    QCOMPARE(node(layers, 3).worked, QStringLiteral("1h 02m"));
+    now = 9000; tick();
+    shoot("ux-u37-layers");
+    // An older hgs sends no timing: nothing is shown.
+    const auto old = parse(labelTeam());
+    QVERIFY(!old.task(2)->timing.known);
+    QVERIFY(TeamUi::workedLabel(*old.task(2), now).isEmpty());
+    QVERIFY(TeamUi::workedTip(*old.task(2), now).isEmpty());
+}
+
 // #380 attempt 2: the member's "…" menu and the swap dialog run their own
 // event loops. A poll that changes the team arrives under each: the menu, the
 // button that opened it and the open dialog stay alive, and the views catch
@@ -5468,8 +5632,9 @@ void TestTeamsUi::planningRulesAreEditedSavedResetAndProposed()
     QVERIFY(!status().contains("unsaved") && !save->isEnabled());
     text = editor.findChild<QPlainTextEdit *>("teamPlanningRules");
     text->setPlainText(rules + "\n(4) QA never implements tasks.");
-    QTRY_VERIFY(!editor.findChild<QPushButton *>("teamPlanningRulesReset") || !editor.findChild<QPushButton *>("teamPlanningRulesReset")->isEnabled()
-                || status().contains("unsaved"));
+    // Unsaved edits disable Reset at once: a click would drop them.
+    QTRY_VERIFY(status().contains("unsaved"));
+    QVERIFY(!editor.findChild<QPushButton *>("teamPlanningRulesReset")->isEnabled());
     save->click();
     QTRY_COMPARE(calls(script(), "catalog set").size(), 1);
     const auto saved = calls(script(), "catalog set").first();

@@ -375,7 +375,11 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
     // derived here without a listing of status's own (L3).
     if let Some(tasks) = value["tasks"].as_array_mut() {
         let ready: BTreeSet<u32> = plan::ready(team).into_iter().collect();
+        let now = super::super::now();
         for (task, value) in team.tasks.iter().zip(tasks) {
+            // U37: the task's working time and its waits, one number for every
+            // client.
+            value["timing"] = super::timing::timing(team, task, now);
             if let Some(phase) = ops::attempt_phase(task, stopped(team, task)) {
                 if let Some(attempt) = value["attempts"].as_array_mut().and_then(|attempts| attempts.last_mut()) {
                     attempt["phase"] = json!(phase);
@@ -5090,6 +5094,9 @@ mod tests {
         assert_eq!(attempt["permissions"].as_array().unwrap().len(), 1, "{attempt}");
         assert_eq!(attempt["permissions"][0]["command"], "rm -rf build");
         assert_eq!(attempt["permissions"][0]["at"], 25.0);
+        // U37: every task carries its timing, computed by status.
+        let timing = &value["tasks"][0]["timing"];
+        assert!(timing["worked_s"].is_i64() && timing["waits"]["member_s"].is_i64(), "{timing}");
         assert!(denies("No") && denies("Deny") && !denies("Allow"));
     }
 

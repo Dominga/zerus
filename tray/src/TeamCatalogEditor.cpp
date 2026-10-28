@@ -640,6 +640,7 @@ int TeamCatalogEditor::unsavedChanges() const
 
 void TeamCatalogEditor::updateHeader()
 {
+    updatePlanningRulesReset();
     const Colors c = colorsFor(m_dark);
     const auto &base = m_teams->catalog();
     const bool draft = draftMode();
@@ -1523,11 +1524,10 @@ QWidget *TeamCatalogEditor::planningRulesEditor()
     auto *reset = button(tr("Reset to built-in"), "teamPlanningRulesReset"); reset->setProperty("ghost", true);
     reset->setIcon(workspaceIcon("reset", c.text2));
     reset->setVisible(!m_readOnly);
-    reset->setEnabled(!m_dirty && base.planningRulesKnown);
-    reset->setToolTip(m_dirty ? tr("Save or revert your edits first") : tr("Replace the rules with Zerus's built-in ones and save the catalog"));
     connect(reset, &QPushButton::clicked, this, [this] { resetPlanningRules(); });
     head->addWidget(reset);
     outer->addLayout(head);
+    updatePlanningRulesReset();
     const Proposal *proposal = nullptr;
     if (draftMode()) for (const auto &p : base.proposals) if (p.kind == "planning_rules") proposal = &p;
     if (proposal) {
@@ -1578,12 +1578,27 @@ QWidget *TeamCatalogEditor::planningRulesEditor()
     return w;
 }
 
+// Reset saves over the catalog as hgs has it: never while edits are unsaved,
+// so the button follows every edit, not only a rebuild.
+bool TeamCatalogEditor::canResetPlanningRules() const
+{
+    return !m_dirty && m_teams->catalog().planningRulesKnown;
+}
+
+void TeamCatalogEditor::updatePlanningRulesReset()
+{
+    auto *reset = findChild<QPushButton *>(QStringLiteral("teamPlanningRulesReset"));
+    if (!reset) return;
+    reset->setEnabled(canResetPlanningRules());
+    reset->setToolTip(m_dirty ? tr("Save or revert your edits first") : tr("Replace the rules with Zerus's built-in ones and save the catalog"));
+}
+
 // U28: the built-in rules come back by saving the catalog without them; hgs
 // fills in its own. Only from a saved catalog, after the owner confirms.
 void TeamCatalogEditor::resetPlanningRules()
 {
     const auto &base = m_teams->catalog();
-    if (m_dirty || !base.planningRulesKnown) return;
+    if (!canResetPlanningRules()) return;
     if (confirm && !confirm(QStringLiteral("teamPlanningRulesResetConfirm"), tr("Reset planning rules"),
                             tr("Replace the planning rules with the built-in ones and save the catalog as v%1?").arg(base.version + 1), tr("Reset"))) return;
     QJsonObject catalog = base.json();

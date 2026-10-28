@@ -13,4 +13,5 @@ pub(crate) mod plan;
 pub(crate) mod safe_actions;
 pub(crate) mod store;
 pub(crate) mod templates;
+pub(crate) mod timing;
 pub(crate) mod waiting;

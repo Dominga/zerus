@@ -15,6 +15,9 @@ use std::collections::HashMap;
 
 /// Rows kept per session; the oldest go first.
 pub const MAX_PER_SESSION: usize = 50;
+/// Sessions with rows. Past it, the least recently touched session without
+/// a row still sending is dropped; a sending row's outcome is still due.
+pub const MAX_SESSIONS: usize = 512;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -100,6 +103,9 @@ pub fn inspect(cmd: &str, terminal: bool, machine: &str) -> Inspect {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LocalMessages {
     rows: HashMap<String, Vec<LocalMessage>>,
+    /// When each session was last changed, by a counter.
+    touched: HashMap<String, u64>,
+    clock: u64,
 }
 
 fn files_value(files: &[StoredFile]) -> Vec<Value> {
@@ -114,12 +120,39 @@ impl LocalMessages {
         self.rows.get(key).map_or(&[], Vec::as_slice)
     }
 
+    fn touch(&mut self, key: &str) {
+        self.clock += 1;
+        self.touched.insert(key.to_owned(), self.clock);
+    }
+
+    fn drop_key(&mut self, key: &str) {
+        self.rows.remove(key);
+        self.touched.remove(key);
+    }
+
+    /// Keeps at most [`MAX_PER_SESSION`] rows in `key`, and at most
+    /// [`MAX_SESSIONS`] sessions, never dropping `key` or a session with a
+    /// row still sending.
     fn trim(&mut self, key: &str) {
         if let Some(rows) = self.rows.get_mut(key) {
             let excess = rows.len().saturating_sub(MAX_PER_SESSION);
             rows.drain(..excess);
             if rows.is_empty() {
-                self.rows.remove(key);
+                self.drop_key(key);
+            }
+        }
+        while self.rows.len() > MAX_SESSIONS {
+            let oldest = self
+                .rows
+                .iter()
+                .filter(|(other, rows)| {
+                    other.as_str() != key && rows.iter().all(|row| row.status != Status::Sending)
+                })
+                .min_by_key(|(other, _)| self.touched.get(other.as_str()).copied().unwrap_or(0))
+                .map(|(other, _)| other.clone());
+            match oldest {
+                Some(oldest) => self.drop_key(&oldest),
+                None => break,
             }
         }
     }
@@ -160,6 +193,7 @@ impl LocalMessages {
             source: None,
             voice: None,
         });
+        self.touch(key);
         self.trim(key);
     }
 
@@ -171,6 +205,9 @@ impl LocalMessages {
             Outcome::Failed { detail } => detail.clone(),
             Outcome::Uncertain { detail } => uncertain_detail(detail),
         };
+        if self.rows.contains_key(key) {
+            self.touch(key);
+        }
         let Some(row) = self
             .rows
             .get_mut(key)
@@ -281,7 +318,7 @@ impl LocalMessages {
             !shown
         });
         if rows.is_empty() {
-            self.rows.remove(key);
+            self.drop_key(key);
         }
         result
     }
@@ -323,7 +360,9 @@ impl LocalMessages {
         rows.retain(|row| !(row.id == id && row.status == Status::Error));
         let removed = rows.len() != before;
         if rows.is_empty() {
-            self.rows.remove(key);
+            self.drop_key(key);
+        } else if removed {
+            self.touch(key);
         }
         removed
     }
@@ -348,6 +387,7 @@ impl LocalMessages {
             source: Some("hgs_voice".into()),
             voice: Some(message.clone()),
         });
+        self.touch(key);
         self.trim(key);
     }
 
@@ -358,13 +398,15 @@ impl LocalMessages {
             return;
         }
         if let Some(rows) = self.rows.remove(old) {
+            self.touched.remove(old);
             self.rows.insert(new.to_owned(), rows);
+            self.touch(new);
         }
     }
 
     /// Drops a session's rows, as when it leaves the catalog.
     pub fn forget(&mut self, key: &str) {
-        self.rows.remove(key);
+        self.drop_key(key);
     }
 }
 
@@ -529,6 +571,52 @@ mod tests {
             .map(|row| row.id.as_str())
             .collect();
         assert_eq!(left, ["5"]);
+    }
+
+    #[test]
+    fn sessions_are_capped_without_dropping_a_send_in_flight() {
+        let mut messages = LocalMessages::default();
+        let key = |index: usize| format!("studio\nclaude/p/s{index}");
+        // The first session still has a send in flight; the second failed.
+        messages.sending(&key(0), "r0", None, "pending", &[], "run", "conv", 1.0);
+        messages.sending(&key(1), "r1", None, "failed", &[], "run", "conv", 1.0);
+        messages.finished(&key(1), "r1", &Outcome::Failed { detail: "x".into() });
+        for index in 2..MAX_SESSIONS {
+            messages.sending(&key(index), "r", None, "old", &[], "run", "conv", 1.0);
+            messages.finished(&key(index), "r", &Outcome::Failed { detail: "x".into() });
+        }
+        // Touching the failed session keeps it newer than the rest.
+        messages.finished(
+            &key(1),
+            "r1",
+            &Outcome::Failed {
+                detail: "again".into(),
+            },
+        );
+        messages.sending(
+            &key(MAX_SESSIONS),
+            "r",
+            None,
+            "new",
+            &[],
+            "run",
+            "conv",
+            1.0,
+        );
+        assert_eq!(messages.rows.len(), MAX_SESSIONS);
+        assert_eq!(messages.touched.len(), MAX_SESSIONS);
+        assert_eq!(messages.rows(&key(0)).len(), 1, "a send in flight stays");
+        assert_eq!(messages.rows(&key(1)).len(), 1, "recently touched stays");
+        assert!(
+            messages.rows(&key(2)).is_empty(),
+            "the least recently touched goes"
+        );
+        assert_eq!(messages.rows(&key(MAX_SESSIONS)).len(), 1);
+        messages.forget(&key(0));
+        assert_eq!(
+            (messages.rows.len(), messages.touched.len()),
+            (MAX_SESSIONS - 1, MAX_SESSIONS - 1)
+        );
     }
 
     #[test]

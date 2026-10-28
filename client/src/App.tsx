@@ -8,6 +8,7 @@ import { Icon } from "./ui/lib/icons";
 import { PerfHost } from "./ui/PerfHost";
 import { OverviewScreen } from "./ui/screens/Overview";
 import { MachinesScreen } from "./ui/screens/Machines";
+import { AccountsScreen } from "./ui/screens/Accounts";
 import { SettingsScreen } from "./ui/components/SettingsScreen";
 import { applySkin, skin } from "./skin/runtime";
 import { catalog } from "./store/catalog";
@@ -92,6 +93,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
           </Match>
           <Match when={page() === "dashboard"}><OverviewScreen /></Match>
           <Match when={page() === "machines"}><MachinesScreen /></Match>
+          <Match when={page() === "accounts"}><AccountsScreen /></Match>
           <Match when={page() === "settings"}><SettingsScreen /></Match>
           <Match when={page() !== "sessions"}><LaterScreen page={page() as Exclude<Page, "sessions">} /></Match>
         </Switch>

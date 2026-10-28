@@ -86,7 +86,13 @@ fn gone(pid: i32) -> bool {
 
 #[test]
 fn the_client_gets_qt_arguments_environment_and_clamped_size() {
+    // A descriptor without close-on-exec, as a library might leave one.
+    // SAFETY: duplicates standard input at 100 or above, closed below.
+    let leaked = unsafe { libc::fcntl(0, libc::F_DUPFD, 100) };
+    assert!(leaked >= 100);
     let (mut attach, events) = Attach::start(&fake(), 1, 9999).unwrap();
+    // SAFETY: closes the duplicate made above.
+    unsafe { libc::close(leaked) };
     let mut seen = Seen::default();
     let hello = hello(&mut seen, &events);
     assert_eq!(
@@ -104,6 +110,10 @@ fn the_client_gets_qt_arguments_environment_and_clamped_size() {
         (hello["cols"].as_u64(), hello["rows"].as_u64()),
         (Some(2), Some(500))
     );
+    if let Some(fds) = hello["fds"].as_array() {
+        assert!(!fds.contains(&serde_json::json!(leaked)), "{fds:?}");
+        assert!(fds.iter().all(|fd| fd.as_i64() < Some(10)), "{fds:?}");
+    }
     assert_eq!(
         hello["env"],
         serde_json::json!({"TMUX": null, "TMUX_PANE": null, "HGS_SESSION": null, "HGS_RUN_ID": null,

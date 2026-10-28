@@ -18,7 +18,8 @@ def say(text):
 # Raw mode: no echo, no line discipline translations of the output.
 tty.setraw(sys.stdin.fileno())
 size = os.get_terminal_size(sys.stdout.fileno())
-say(json.dumps({"argv": sys.argv[1:], "cols": size.columns, "rows": size.lines,
+fds = sorted(int(fd) for fd in os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else None
+say(json.dumps({"argv": sys.argv[1:], "cols": size.columns, "rows": size.lines, "fds": fds,
                 "env": {k: os.environ.get(k) for k in
                         ["TMUX", "TMUX_PANE", "HGS_SESSION", "HGS_RUN_ID", "HGS_TAB", "TERM", "COLORTERM"]}}))
 line = b""

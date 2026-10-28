@@ -165,8 +165,15 @@ impl Pty {
                     libc::signal(signal, libc::SIG_DFL);
                 }
                 libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut());
-                for fd in 3..max_fd {
-                    libc::close(fd);
+                // One call on Linux 5.9 and later; the loop elsewhere.
+                #[cfg(target_os = "linux")]
+                let closed = libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) == 0;
+                #[cfg(not(target_os = "linux"))]
+                let closed = false;
+                if !closed {
+                    for fd in 3..max_fd {
+                        libc::close(fd);
+                    }
                 }
                 libc::execve(argv_ptrs[0], argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
                 const MESSAGE: &[u8] = b"Unable to start the session attach client.\r\n";

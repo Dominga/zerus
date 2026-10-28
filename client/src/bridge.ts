@@ -1,6 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ArchivePage, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type ArchivedActivity } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity } from "./types";
 import type { CreationAdmission, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
@@ -460,4 +460,91 @@ export function onLaunchAccountsChanged(listener: (computer: ComputerId) => void
     stopped = true;
     stop?.();
   };
+}
+
+const DESKTOP_TERMINAL = "Terminal needs the desktop app.";
+
+export async function terminalConnect(view: string, target: TerminalTarget, cols: number, rows: number, onEvent: (m: ArrayBuffer | TerminalFinished) => void): Promise<TerminalConnected> {
+  if (!inTauri()) throw DESKTOP_TERMINAL;
+  const channel = new Channel<ArrayBuffer | TerminalFinished>();
+  channel.onmessage = onEvent;
+  return invoke<TerminalConnected>("terminal_connect", { view, target, cols, rows, on_event: channel });
+}
+export async function terminalWrite(view: string, generation: number, bytes: Uint8Array): Promise<void> {
+  if (!inTauri()) return;
+  await invoke("terminal_write", bytes, { headers: { "x-zerus-view": view, "x-zerus-generation": String(generation) } });
+}
+export async function terminalResize(view: string, generation: number, cols: number, rows: number): Promise<void> {
+  if (inTauri()) await invoke("terminal_resize", { view, generation, cols, rows });
+}
+export function terminalAck(view: string, generation: number): void {
+  if (inTauri()) void invoke("terminal_ack", { view, generation }).catch(() => {});
+}
+export async function terminalDisconnect(view: string): Promise<string | null> {
+  return inTauri() ? invoke<string | null>("terminal_disconnect", { view }) : null;
+}
+export async function terminalRetarget(view: string, target: TerminalTarget): Promise<boolean> {
+  return inTauri() ? invoke<boolean>("terminal_retarget", { view, target }) : true;
+}
+export async function terminalStatus(input: { facts: TerminalFacts; details: unknown; state: string; online: boolean; restored_pending: boolean; name: string; machine: string }): Promise<TerminalStatus> {
+  if (!inTauri()) return { supported: false, available: false, reason: DESKTOP_TERMINAL, idle: "", connecting: "", disconnected: "" };
+  return invoke<TerminalStatus>("terminal_status", { input });
+}
+
+/**
+ * Whether the app window is shown, from src-tauri's `window-visibility` event
+ * (shown and not minimized, as Qt's hideEvent sees it); the webview's own
+ * visibility outside the app.
+ */
+let windowShown = true;
+const windowListeners = new Set<() => void>();
+let windowListening = false;
+export const windowVisibility: PageVisibility = {
+  hidden: () => (inTauri() ? !windowShown : documentVisibility.hidden()),
+  onChange(listener) {
+    if (!inTauri()) return documentVisibility.onChange(listener);
+    windowListeners.add(listener);
+    if (!windowListening) {
+      windowListening = true;
+      void listen<{ visible: boolean }>("window-visibility", (event) => {
+        windowShown = !!event.payload.visible;
+        for (const l of [...windowListeners]) l();
+      });
+    }
+    return () => { windowListeners.delete(listener); };
+  },
+};
+
+/** A session the menu bar or a notification opens: its computer and catalog key. */
+/** `attention`: a clicked notification's session, shown on its Activity tab (Qt's `showAttentionSession`). */
+export type OpenSession = { computer: ComputerId; key: string; attention?: boolean };
+/** A notice for the window. */
+export type DeskNotice = { title: string; text: string };
+export type DeskPending = { open: OpenSession | null; notices: DeskNotice[] };
+
+/** Listens to `name`; resolves with the stop once the listener is registered. */
+function onEvent<T>(name: string, listener: (payload: T) => void): Promise<() => void> {
+  if (!inTauri()) return Promise.resolve(() => {});
+  return listen<T>(name, (event) => listener(event.payload));
+}
+
+/** `open-session`: the menu bar or a notification opens a session; resolves with the stop once listening. */
+export const onOpenSession = (listener: (target: OpenSession) => void) => onEvent<OpenSession>("open-session", listener);
+/** `desk-notice`: a notice for the window; resolves with the stop once listening. */
+export const onDeskNotice = (listener: (notice: DeskNotice) => void) => onEvent<DeskNotice>("desk-notice", listener);
+
+type DeskWindow = { __zerusDeskPage?: number; __zerusDeskPageReady?: (page: number) => void };
+
+/** This page load's number, which the native side tells the page once it has loaded (`desk::page_loaded`). */
+export function deskPage(): Promise<number> {
+  if (!inTauri()) return Promise.resolve(0);
+  const w = window as unknown as DeskWindow;
+  if (typeof w.__zerusDeskPage === "number") return Promise.resolve(w.__zerusDeskPage);
+  return new Promise((resolve) => { w.__zerusDeskPageReady = resolve; });
+}
+
+/** What the menu bar or a notification asked for before this page listened; `page` is `deskPage()`. */
+export async function deskTakePending(page: number): Promise<DeskPending> {
+  if (!inTauri()) return { open: null, notices: [] };
+  return invoke<DeskPending>("desk_take_pending", { page });
 }

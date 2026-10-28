@@ -13,10 +13,10 @@ import { newSessionFromRail } from "../sessions/newsession-view";
 // Sessions is the one live screen of this phase; the others show where they will be.
 
 const ITEMS: { id: Page; icon: string; label: string; tip: string }[] = [
-  { id: "sessions", icon: "sessions", label: "Sessions", tip: "Sessions (Ctrl+2)" },
-  { id: "projects", icon: "projects", label: "Projects", tip: "Projects (Ctrl+3)" },
-  { id: "machines", icon: "machines", label: "Machines", tip: "Machines and connection status (Ctrl+4)" },
-  { id: "accounts", icon: "accounts", label: "Accounts", tip: "Agent accounts (Ctrl+5)" },
+  { id: "sessions", icon: "sessions", label: "Sessions", tip: "Sessions" },
+  { id: "projects", icon: "projects", label: "Projects", tip: "Projects" },
+  { id: "machines", icon: "machines", label: "Machines", tip: "Machines and connection status" },
+  { id: "accounts", icon: "accounts", label: "Accounts", tip: "Agent accounts" },
 ];
 const [pinned, setPinned] = createSignal(false);
 
@@ -27,11 +27,11 @@ export function Rail() {
   const labeled = () => skin().layout.rail === "labeled";
   return (
     <nav class="rail" classList={{ labeled: labeled() }} aria-label="Screens">
-      <button class="rail-brand" classList={{ on: page() === "dashboard" }} data-tip={`Home — Zerus Next ${__APP_VERSION__} (Ctrl+1)`} data-tip-pos="right" onClick={() => setPage("dashboard")}>
+      <button class="rail-brand" classList={{ on: page() === "dashboard" }} data-tip={`Home — Zerus Next ${__APP_VERSION__}`} data-tip-pos="right" onClick={() => setPage("dashboard")}>
         <ZerusLogo attention={counts().attention > 0} motion={logoMotion()} size={28} />
         <Show when={labeled()}><span>Overview</span></Show>
       </button>
-      <button class="rail-new" data-tip="New session (Ctrl+N)" data-tip-pos="right" onClick={newSessionFromRail}>
+      <button class="rail-new" data-tip="New session" data-tip-pos="right" onClick={newSessionFromRail}>
         <Icon name="add" size={24} />
         <Show when={labeled()}><span>New</span></Show>
       </button>
@@ -53,7 +53,7 @@ export function Rail() {
         onClick={() => { setPinned(!pinned()); toast(pinned() ? "Pinned" : "Unpinned", "Keeping the window above others arrives with the platform integrations."); }}>
         <Icon name={pinned() ? "pinned" : "unpinned"} size={24} />
       </button>
-      <button class="rail-btn" classList={{ on: page() === "settings" }} data-tip={labeled() ? undefined : "Settings (Ctrl+,)"} data-tip-pos="right" onClick={() => setPage("settings")}>
+      <button class="rail-btn" classList={{ on: page() === "settings" }} data-tip={labeled() ? undefined : "Settings"} data-tip-pos="right" onClick={() => setPage("settings")}>
         <Icon name="settings" size={24} />
         <Show when={labeled()}><span>Settings</span></Show>
       </button>

@@ -41,44 +41,13 @@ export const folderButton = (state: FolderLaunch, machine: string) =>
 // The shortcut.
 
 /**
- * `session.new` (Shortcuts.cpp:29, 58): a Window shortcut in Settings >
- * Keyboard's Sessions group. Until the client has the shortcut registry, this
- * is its fixed default; the registry takes the id over as it is.
+ * `session.new` (Shortcuts.cpp:29, 58), a Window command of the shortcut
+ * router (store/shortcuts.ts) in Settings > Keyboard's Sessions group, Ctrl+N
+ * by default: App.tsx registers this for it, so it opens New session from any
+ * page (SessionsWindowShortcuts.cpp:222). The router gives no command to a
+ * modal dialog, as a Qt modal dialog blocks the window's shortcuts.
  */
-export const SESSION_NEW = { id: "session.new", group: "Sessions", label: "New session", keys: ["Ctrl+N"], context: "window" } as const;
-
-type Keys = Pick<KeyboardEvent, "key" | "code" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey">;
-
-/**
- * Qt's portable "Ctrl+N": Command+N on macOS, Control+N elsewhere, with no
- * other modifier. On a layout without Latin letters the N key's own letter
- * matches too, as Qt falls back to the Latin key.
- */
-export function isSessionNew(e: Keys, mac: boolean): boolean {
-  const key = e.key.toLowerCase();
-  const n = key === "n" || (e.code === "KeyN" && !/^[a-z]$/.test(key));
-  if (!n || e.altKey || e.shiftKey) return false;
-  return mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
-}
-
-const MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
-
-/** Another modal dialog owns the keyboard, as a Qt modal dialog blocks the window's shortcuts. */
-function modalOpen(): boolean {
-  if (typeof document === "undefined") return false;
-  try { return !!document.querySelector("dialog:modal"); } catch { return !!document.querySelector("dialog[open]"); }
-}
-
-/**
- * The window's key handler for `session.new` (SessionsWindowShortcuts.cpp:222):
- * it opens New session from any page. True when it took the key.
- */
-export function windowKey(e: Keys & Pick<KeyboardEvent, "preventDefault">, at: { mac: boolean; modal: boolean } = { mac: MAC, modal: modalOpen() }): boolean {
-  if (at.modal || !isSessionNew(e, at.mac)) return false;
-  e.preventDefault();
-  void openNewSession({ computer: selectedHostTarget() });
-  return true;
-}
+export const newSessionFromShortcut = () => { void openNewSession({ computer: selectedHostTarget() }); };
 
 // The local Windows-session warning (LocalLaunchWarning.h 18-28).
 

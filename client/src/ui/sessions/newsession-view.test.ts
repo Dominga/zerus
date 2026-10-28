@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createRoot, createSignal, mapArray } from "solid-js";
 import type { Folder } from "../../types";
 import type { AccountRow, ComputerRow } from "./newsession-ui";
+import { command, handlerFor, onCommand, portableDefaults, route, sequenceState, type Platform } from "../../store/shortcuts";
 
 // The New session dialog's entry points and its view logic
 // (tray/src/SessionsWindow.cpp 295-297, 377-378, 2572-2573;
@@ -63,38 +64,47 @@ describe("the entry points (each Qt's showNewSession call)", () => {
 });
 
 describe("session.new (Shortcuts.cpp:29, 58, a Window shortcut)", () => {
+  // The shortcut router (store/shortcuts.ts) owns the binding; App.tsx registers newSessionFromShortcut for it.
+  const runs = (init: Partial<KeyboardEvent>, on: Platform = "linux") =>
+    route(key(init) as unknown as KeyboardEvent, sequenceState(), on).run === "session.new";
+
   it("is Qt's binding under its id", () => {
-    expect(view.SESSION_NEW).toEqual({ id: "session.new", group: "Sessions", label: "New session", keys: ["Ctrl+N"], context: "window" });
+    expect(command("session.new")).toEqual({ id: "session.new", group: "Sessions", title: "New session", scope: "window" });
+    expect(portableDefaults("session.new", "linux")).toEqual(["Ctrl+N"]);
+    expect(portableDefaults("session.new", "macos")).toEqual(["Ctrl+N"]);
   });
 
   it("is Ctrl+N, and Command+N on macOS", () => {
-    expect(view.isSessionNew(key({ ctrlKey: true }), false)).toBe(true);
-    expect(view.isSessionNew(key({ ctrlKey: true, key: "N", shiftKey: true }), false)).toBe(false);
-    expect(view.isSessionNew(key({ ctrlKey: true, altKey: true }), false)).toBe(false);
-    expect(view.isSessionNew(key({ metaKey: true }), false)).toBe(false);
-    expect(view.isSessionNew(key({ ctrlKey: true, metaKey: true }), false)).toBe(false);
-    expect(view.isSessionNew(key({ ctrlKey: true, key: "m", code: "KeyM" }), false)).toBe(false);
+    const off = onCommand("session.new", view.newSessionFromShortcut);
+    expect(runs({ ctrlKey: true })).toBe(true);
+    expect(runs({ ctrlKey: true, key: "N", shiftKey: true })).toBe(false);
+    expect(runs({ ctrlKey: true, altKey: true })).toBe(false);
+    expect(runs({ metaKey: true })).toBe(false);
+    expect(runs({ ctrlKey: true, metaKey: true })).toBe(false);
+    expect(runs({ ctrlKey: true, key: "m", code: "KeyM" })).toBe(false);
     // Another layout's letter on the N key matches, as Qt falls back to the Latin key; a Latin letter there does not.
-    expect(view.isSessionNew(key({ ctrlKey: true, key: "т", code: "KeyN" }), false)).toBe(true);
-    expect(view.isSessionNew(key({ ctrlKey: true, key: "b", code: "KeyN" }), false)).toBe(false);
+    expect(runs({ ctrlKey: true, key: "т", code: "KeyN" })).toBe(true);
+    expect(runs({ ctrlKey: true, key: "b", code: "KeyN" })).toBe(false);
     // Qt's portable "Ctrl" is Command on macOS; physical Control is Meta there.
-    expect(view.isSessionNew(key({ metaKey: true }), true)).toBe(true);
-    expect(view.isSessionNew(key({ ctrlKey: true }), true)).toBe(false);
+    expect(runs({ metaKey: true }, "macos")).toBe(true);
+    expect(runs({ ctrlKey: true }, "macos")).toBe(false);
+    off();
+    expect(store.openNewSession).not.toHaveBeenCalled();
   });
 
-  // App.tsx's window key handler calls it on every page; it takes the key and opens the dialog.
-  it("takes Ctrl+N and opens the dialog with the selected computer filter", () => {
-    const event = key({ ctrlKey: true });
-    expect(view.windowKey(event, { mac: false, modal: false })).toBe(true);
-    expect(event.preventDefault).toHaveBeenCalled();
+  it("opens the dialog with the selected computer filter", () => {
+    const off = onCommand("session.new", view.newSessionFromShortcut);
+    handlerFor("session.new", null)?.();
+    off();
     expect(store.openNewSession.mock.calls).toEqual([[{ computer: "mac" }]]);
   });
 
   it("does nothing under another modal dialog, or for another key", () => {
-    expect(view.windowKey(key({ ctrlKey: true }), { mac: false, modal: true })).toBe(false);
-    const other = key({ ctrlKey: true, key: "1", code: "Digit1" });
-    expect(view.windowKey(other, { mac: false, modal: false })).toBe(false);
-    expect(other.preventDefault).not.toHaveBeenCalled();
+    const off = onCommand("session.new", view.newSessionFromShortcut);
+    const inDialog = { closest: (selector: string) => (selector === "dialog[open]" ? { getAttribute: () => null } : null), matches: () => false };
+    expect(runs({ ctrlKey: true, target: inDialog as unknown as EventTarget })).toBe(false);
+    expect(runs({ ctrlKey: true, key: "1", code: "Digit1" })).toBe(false);
+    off();
     expect(store.openNewSession).not.toHaveBeenCalled();
   });
 });

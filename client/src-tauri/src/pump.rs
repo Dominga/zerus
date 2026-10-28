@@ -3,7 +3,8 @@
 //! up to [`PARK`] while nothing is. A mirror of the last-known rows, statuses,
 //! and machine cards lets a reloaded webview start from the full catalog. The
 //! organization never reaches the webview: [`Grouping`] turns it into each
-//! row's project and the headers (zerus-5wmh.31).
+//! row's project and the headers (zerus-5wmh.31). A [`Tap`] sees every change
+//! as it arrives (the menu bar's desk).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::Receiver;
@@ -22,6 +23,9 @@ use zerus_client_core::{
 /// The longest `next_batch` waits for a change before it returns an empty batch.
 pub const PARK: Duration = Duration::from_millis(250);
 
+/// Receives every change before the coalescer folds it (the desk thread).
+pub type Tap = Box<dyn Fn(&Change) + Send>;
+
 #[derive(Default)]
 struct Inner {
     coalescer: Coalescer,
@@ -29,6 +33,7 @@ struct Inner {
     dirty: bool,
     mirror: Mirror,
     grouping: Grouping,
+    tap: Option<Tap>,
 }
 
 /// Shared by the drain thread and the commands.
@@ -48,6 +53,9 @@ impl Pump {
     /// Queues one change and wakes a parked `take`.
     pub fn push(&self, change: Change) {
         let mut inner = self.lock();
+        if let Some(tap) = &inner.tap {
+            tap(&change);
+        }
         inner.mirror.observe(&change);
         inner.grouping.observe(&change);
         inner.coalescer.push(change);
@@ -59,6 +67,17 @@ impl Pump {
         inner.dirty = true;
         drop(inner);
         self.0 .1.notify_all();
+    }
+
+    /// Wakes a parked `take` without a change: a hub's view changed.
+    pub fn poke(&self) {
+        self.lock().dirty = true;
+        self.0 .1.notify_all();
+    }
+
+    /// Hands every later change to `tap` as well.
+    pub fn tap(&self, tap: Tap) {
+        self.lock().tap = Some(tap);
     }
 
     /// Everything pending, waiting up to `park` while nothing is.
@@ -148,6 +167,15 @@ impl Pump {
         self.wake(inner);
     }
 
+    /// A computer's machine card, once its listing named one.
+    pub fn machine(&self, computer: &ComputerId) -> Option<MachineMeta> {
+        self.lock()
+            .mirror
+            .computers
+            .get(&computer.0)
+            .and_then(|rows| rows.machine.clone())
+    }
+
     /// The fleet as the screens see it: every computer whose status has not
     /// ended, this computer first (the mirror is keyed by the id's string,
     /// and "" sorts first), with its machine card's host, platform and the
@@ -175,6 +203,47 @@ impl Pump {
                 })
             })
             .collect()
+    }
+
+    /// The last-known row of `(computer, catalog key)`.
+    pub fn row(&self, computer: &str, key: &str) -> Option<ViewRow> {
+        self.lock()
+            .mirror
+            .computers
+            .get(computer)?
+            .rows
+            .get(key)
+            .cloned()
+    }
+
+    /// The computer's live row of that name (a session that started a new
+    /// run has a new catalog key). A scan of one computer's rows, only when
+    /// the key is gone.
+    pub fn row_named(&self, computer: &str, name: &str) -> Option<ViewRow> {
+        self.lock()
+            .mirror
+            .computers
+            .get(computer)?
+            .rows
+            .values()
+            .find(|row| row.name == name && row.state != "archived")
+            .cloned()
+    }
+
+    /// Whether the computer counts as online, as the frontend's
+    /// `computerOffline` reads it: neither reconnecting nor ended.
+    pub fn online(&self, computer: &str) -> bool {
+        self.lock()
+            .mirror
+            .computers
+            .get(computer)
+            .and_then(|rows| rows.status)
+            .is_none_or(|status| {
+                !matches!(
+                    status,
+                    ComputerStatus::Reconnecting { .. } | ComputerStatus::Ended
+                )
+            })
     }
 
     /// Drains a change sink on its own thread until every sender is gone,
@@ -316,6 +385,62 @@ mod tests {
     }
 
     #[test]
+    fn the_tap_sees_every_change() {
+        let pump = Pump::default();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        pump.tap(Box::new(move |change: &Change| {
+            let _ = sender.send(change.computer().clone());
+        }));
+        pump.push(Change::Computer {
+            computer: ComputerId::from("mac"),
+            status: ComputerStatus::Live,
+        });
+        assert_eq!(receiver.try_recv(), Ok(ComputerId::from("mac")));
+    }
+
+    #[test]
+    fn rows_are_looked_up_by_key_and_name() {
+        let pump = Pump::default();
+        pump.push(upsert("run:a", "claude/p/a"));
+        pump.push(Change::Computer {
+            computer: ComputerId(String::new()),
+            status: ComputerStatus::Live,
+        });
+        pump.push(Change::Computer {
+            computer: ComputerId("studio".into()),
+            status: ComputerStatus::Reconnecting { attempt: 1 },
+        });
+        let _ = pump.take(PARK);
+        assert_eq!(pump.row("", "run:a").unwrap().name, "claude/p/a");
+        assert_eq!(pump.row_named("", "claude/p/a").unwrap().name, "claude/p/a");
+        assert!(pump.online(""));
+        assert!(!pump.online("studio"));
+        assert!(
+            pump.online("unknown"),
+            "as the frontend reads it: only reconnecting or ended is offline"
+        );
+    }
+
+    #[test]
+    fn a_name_finds_only_a_live_row() {
+        let pump = Pump::default();
+        let mut archived = row("claude/p/a");
+        archived.state = "archived".into();
+        pump.push(Change::Upsert {
+            computer: ComputerId(String::new()),
+            key: "archive:a-1".into(),
+            row: archived,
+        });
+        assert!(pump.row_named("", "claude/p/a").is_none());
+        assert!(pump.row("", "run:gone").is_none() && pump.row("studio", "run:a").is_none());
+        pump.push(Change::Computer {
+            computer: ComputerId(String::new()),
+            status: ComputerStatus::Ended,
+        });
+        assert!(!pump.online(""));
+    }
+
+    #[test]
     fn take_parks_while_nothing_is_pending() {
         let pump = Pump::default();
         let started = Instant::now();
@@ -338,6 +463,20 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2));
         assert_eq!(batch.upserts.len(), 1);
         sender.join().unwrap();
+    }
+
+    #[test]
+    fn a_poke_wakes_a_parked_take() {
+        let pump = Pump::default();
+        let _ = pump.take(Duration::ZERO);
+        let waker = pump.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            waker.poke();
+        });
+        let started = Instant::now();
+        let batch = pump.take(Duration::from_secs(5));
+        assert!(started.elapsed() < Duration::from_secs(2) && batch.is_empty());
     }
 
     #[test]

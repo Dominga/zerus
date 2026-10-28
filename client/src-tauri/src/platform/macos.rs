@@ -497,3 +497,62 @@ pub fn display_link_hz(display: Option<u32>, duration: Duration) -> Option<f64> 
         (elapsed > 0.0).then(|| frames as f64 / elapsed)
     }
 }
+
+/// The running bundle's identifier; None outside a bundle (`cargo run`, tests).
+pub fn bundle_identifier() -> Option<String> {
+    objc2_foundation::NSBundle::mainBundle()
+        .bundleIdentifier()
+        .map(|id| id.to_string())
+}
+
+/// A value Qt's QSettings saved in the running bundle's defaults domain,
+/// which is Qt's own (`com.hgdev.hgs-tray`) only under the switch identity:
+/// `group/key` is stored as `group.key`, a QByteArray as data
+/// (`qsettings_mac.cpp`). Read only, never written (Decision 11). Any thread:
+/// `NSUserDefaults` is thread-safe.
+#[cfg(feature = "live")]
+pub fn qt_default_data(key: &str) -> Option<Vec<u8>> {
+    let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
+    let key = NSString::from_str(key);
+    if let Some(data) = defaults.dataForKey(&key) {
+        return Some(data.to_vec());
+    }
+    defaults
+        .stringForKey(&key)
+        .map(|text| text.to_string().into_bytes())
+}
+
+/// LaunchServices gives an app's main thread this QoS; the LaunchAgent does
+/// not, and its `ProcessType Interactive` only lifts the clamp
+/// (`tray/src/main.cpp:256-263`). Call on the main thread.
+pub fn raise_main_thread_qos() {
+    // SAFETY: changes the calling thread's own QoS class.
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0)
+    };
+}
+
+/// Runs `beat` on the main thread every `every`, in the common run-loop modes,
+/// so an open menu or a modal panel does not stop it, as Qt's `QTimer` does
+/// not stop (the watchdog's heartbeat). The run loop keeps the timer for the
+/// life of the app.
+pub fn heartbeat(_mtm: MainThreadMarker, every: Duration, beat: impl Fn() + 'static) {
+    let block =
+        block2::RcBlock::new(move |_timer: std::ptr::NonNull<objc2_foundation::NSTimer>| beat());
+    // SAFETY: the binding asks for a block that may run on any thread. This one
+    // is made on the main thread (`_mtm`) and only the main run loop, below,
+    // calls it, so what it captures never leaves the main thread. The repeating
+    // timer owns the block.
+    let timer = unsafe {
+        objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(
+            every.as_secs_f64(),
+            true,
+            &block,
+        )
+    };
+    // SAFETY: Foundation's constant mode name; the main run loop, on the main thread.
+    unsafe {
+        objc2_foundation::NSRunLoop::mainRunLoop()
+            .addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes)
+    };
+}

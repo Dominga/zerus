@@ -38,7 +38,39 @@ describe("overview selectors", () => {
       toSession("", "run:4", rowOut("", 4, { status: "ready" }).row),
       toSession("", "run:0", rowOut("", 0, { status: "working", updated_at: 20 }).row),
     ];
-    expect(liveSessions(rows).map((s) => s.catalogKey)).toEqual(["run:2", "run:0", "run:3", "run:1"]);
+    expect(liveSessions(rows, { "": live("") }).map((s) => s.catalogKey)).toEqual(["run:2", "run:0", "run:3", "run:1"]);
+  });
+
+  it("sort by Qt's session.needsAttention(), so an asking subagent does not go first (DashboardPage.cpp:453)", () => {
+    const rows = [
+      toSession("", "run:1", rowOut("", 1, { status: "attention", needs_action: false, needs_attention: false, child_attention: true, updated_at: 30 }).row),
+      toSession("", "run:2", rowOut("", 2, { status: "attention", phase: "approval", needs_action: true, needs_attention: true, updated_at: 5 }).row),
+    ];
+    expect(liveSessions(rows, { "": live("") }).map((s) => s.catalogKey)).toEqual(["run:2", "run:1"]);
+  });
+
+  it("count the total by the window's rule and a machine card by Qt's session rule (DashboardPage.cpp:133, :426)", () => {
+    const asking = (i: number, computer = "") => rowOut(computer, i, { status: "attention", phase: "approval", needs_action: true, needs_attention: true });
+    const rows = [
+      // A subagent asks: the total counts it, its machine card does not.
+      toSession("", "run:1", rowOut("", 1, { status: "attention", needs_attention: false, child_attention: true }).row),
+      toSession("", "run:2", asking(2).row),
+      // An unreachable peer: its card still counts the request, the total only Review later.
+      toSession("studio", "run:3", asking(3, "studio").row),
+      toSession("studio", "run:4", rowOut("studio", 4, { needs_attention: false }).row),
+      // A muted request counts nowhere.
+      toSession("", "run:5", rowOut("", 5, { status: "attention", phase: "approval", needs_action: true, needs_attention: true, muted: true }).row),
+    ];
+    // Review later, as store/marks.ts overlays it.
+    rows[3] = { ...rows[3], reviewLater: true, attentionNeeded: true };
+    const stats = overviewStats(rows, { "": live(""), studio: { id: "studio", status: "reconnecting", attempt: 1 } });
+    expect(stats.attention).toBe(3);
+    expect(stats.per[""]).toEqual({ sessions: 3, attention: 1 });
+    expect(stats.per.studio).toEqual({ sessions: 2, attention: 2 });
+    expect(stats.offline).toBe(2);
+    // An offline peer's request is not a live session; its Review later is.
+    expect(liveSessions(rows, { "": live(""), studio: { id: "studio", status: "reconnecting", attempt: 1 } }).map((s) => s.catalogKey))
+      .toEqual(["run:5", "run:4", "run:2", "run:1"]);
   });
 
   it("update the tiles once per batch for 20,000 rows", () => {

@@ -24,6 +24,7 @@ import {
   setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
   setMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, setPage,
   multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, menu, subagentOpen,
+  revealing, setRevealing,
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
 import type { Session } from "./types";
@@ -315,6 +316,16 @@ function slide(el: HTMLElement | undefined, width: number, opening: boolean, don
 
 export function SessionList() {
   const list = useRows(false);
+  // A row the menu bar or a notification opened (Qt's revealRow): scrolled to
+  // once the list has it; another selection drops the request.
+  createEffect(on([revealing, list.rows, selectedKey], ([id, rows, selected]) => {
+    if (!id) return;
+    if (selected !== id) { setRevealing(undefined); return; }
+    const index = rows.findIndex((r) => r.id === id);
+    if (index < 0) return;
+    setRevealing(undefined);
+    requestAnimationFrame(() => list.virtualizer.scrollToIndex(index, { align: "center" }));
+  }));
   let panel: HTMLDivElement | undefined;
   let section: HTMLElement | undefined;
   const [panelVisible, setPanelVisible] = createSignal(!stripMode());
@@ -401,7 +412,7 @@ export function SessionList() {
         <header class="sp-head">
           <h1>{stateFilter() === "archived" ? "Archive" : "Sessions"}</h1>
           <span class="grow" />
-          <button class="icon-btn hd" data-tip="New session (Ctrl+N)" aria-label="New session" onClick={newSessionFromPanel}><Icon name="add" size={18} /></button>
+          <button class="icon-btn hd" data-tip="New session" aria-label="New session" onClick={newSessionFromPanel}><Icon name="add" size={18} /></button>
           <button class="icon-btn hd" data-tip={toggleCaption()} onClick={toggleDock}><Icon name={toggleGlyph()} size={18} /></button>
           <button class="icon-btn hd" data-tip="Session and machine actions" onClick={(e) => openMenu(e, batchMenu())}><Icon name="more" size={18} /></button>
         </header>

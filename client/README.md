@@ -25,8 +25,14 @@ npm ci
 npm run check                  # TypeScript
 npm test                       # Vitest: stores, transcript, screens
 cargo +1.99.1 test --manifest-path src-tauri/Cargo.toml
+scripts/check-licenses.sh      # a license notice for every shipped crate (Linux, macOS, Windows)
 RUSTUP_TOOLCHAIN=1.99.1 npx tauri dev
 ```
+
+`scripts/check-licenses.sh` needs the crates in Cargo's cache (`cargo +1.99.1 fetch
+--locked --manifest-path src-tauri/Cargo.toml`). When it stops at a crate without a
+notice, add the upstream text under `packaging/rust-licenses` as its README there
+describes.
 
 `npm run dev` alone serves the frontend in a browser; without Tauri it replays
 `fixtures/replay-batches.json`, so the UI works without the app.

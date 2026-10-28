@@ -3,7 +3,7 @@ import { Rail } from "./ui/components/Rail";
 import { MenuLayer, Toasts } from "./ui/components/Overlays";
 import { ActionDialogs, ActionNotices } from "./ui/sessions/ActionDialogs";
 import { NewSessionDialog } from "./ui/sessions/NewSessionDialog";
-import { windowKey } from "./ui/sessions/newsession-view";
+import { newSessionFromShortcut } from "./ui/sessions/newsession-view";
 import { OrganizationDialogs } from "./ui/sessions/OrganizationDialogs";
 import { SessionList } from "./ui/sessions/SessionList";
 import { SessionDetail } from "./ui/sessions/SessionDetail";
@@ -12,10 +12,12 @@ import { OverviewScreen } from "./ui/screens/Overview";
 import { MachinesScreen } from "./ui/screens/Machines";
 import { AccountsScreen } from "./ui/screens/Accounts";
 import { ProjectsScreen } from "./ui/screens/Projects";
-import { SettingsScreen } from "./ui/components/SettingsScreen";
+import { SettingsScreen } from "./ui/screens/Settings";
 import { applySkin, skin } from "./skin/runtime";
 import { catalog } from "./store/catalog";
 import { contentScale, page, setContentScale, setPage, toast } from "./store/ui";
+import { num, setSetting } from "./store/settings";
+import { installShortcutRouter, onCommand } from "./store/shortcuts";
 import type { BridgeMode } from "./bridge";
 
 // The client shell: the rail, the pages and the status bar.
@@ -51,21 +53,38 @@ function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
   );
 }
 
+/** Keyboard zoom changes Settings > Appearance > Content scale (Qt's syncContentScale). */
+function zoom(scale: number) {
+  setContentScale(scale);
+  void setSetting("workspace/contentScale", scale);
+}
+
 export function App(props: { mode: () => BridgeMode | "starting" }) {
   createEffect(() => applySkin(skin()));
-  const keys = (e: KeyboardEvent) => {
-    const mod = e.ctrlKey || e.metaKey;
-    if (!mod) return;
-    // session.new (Shortcuts.cpp:29, 58): a Window shortcut, on every page.
-    if (windowKey(e)) return;
-    if (/^[1-5]$/.test(e.key)) { e.preventDefault(); setPage((["dashboard", "sessions", "projects", "machines", "accounts"] as const)[Number(e.key) - 1]); }
-    else if (e.key === ",") { e.preventDefault(); setPage("settings"); }
-    else if (e.key === "=" || e.key === "+") { e.preventDefault(); setContentScale(Math.min(2, +(contentScale() + 0.1).toFixed(2))); toast("Content scale", `${Math.round(contentScale() * 100)}%`); }
-    else if (e.key === "-") { e.preventDefault(); setContentScale(Math.max(0.75, +(contentScale() - 0.1).toFixed(2))); toast("Content scale", `${Math.round(contentScale() * 100)}%`); }
-    else if (e.key === "0") { e.preventDefault(); setContentScale(1); }
+  createEffect(() => setContentScale(num("workspace/contentScale")));
+  // Window commands through the shortcut router (store/shortcuts.ts), with the
+  // chords of Settings > Keyboard.
+  const zoomBy = (step: number) => {
+    zoom(Math.max(0.75, Math.min(2, +(contentScale() + step).toFixed(2))));
+    toast("Content scale", `${Math.round(contentScale() * 100)}%`);
   };
-  onMount(() => addEventListener("keydown", keys));
-  onCleanup(() => removeEventListener("keydown", keys));
+  const commands: [string, () => void][] = [
+    ["go.overview", () => setPage("dashboard")],
+    ["go.sessions", () => setPage("sessions")],
+    ["go.projects", () => setPage("projects")],
+    ["go.machines", () => setPage("machines")],
+    ["go.accounts", () => setPage("accounts")],
+    ["go.settings", () => setPage("settings")],
+    // session.new (Shortcuts.cpp:29, 58): New session from every page.
+    ["session.new", newSessionFromShortcut],
+    ["zoom.in", () => zoomBy(0.1)],
+    ["zoom.out", () => zoomBy(-0.1)],
+    ["zoom.reset", () => zoom(1)],
+  ];
+  onMount(() => {
+    const off = [installShortcutRouter(), ...commands.map(([id, run]) => onCommand(id, run))];
+    onCleanup(() => off.forEach((undo) => undo()));
+  });
   return (
     <div class="app" classList={{ "rail-labeled": skin().layout.rail === "labeled" }}>
       <Rail />

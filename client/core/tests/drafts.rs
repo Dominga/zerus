@@ -6,8 +6,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 use zerus_client_core::attachments::{Attachment, Draft};
 use zerus_client_core::drafts::{
-    read_draft, read_index, Cursor, DraftStore, IndexPage, Loaded, Page, StoredDraft, Summary,
-    ALREADY_EXISTS, INTERRUPTED, NOT_RESTORED,
+    import_at_start, import_once, import_sources, qt_root, read_draft, read_index, Cursor,
+    DraftStore, ImportConflict, ImportReport, ImportSource, IndexPage, Loaded, Page, StoredDraft,
+    Summary, ALREADY_EXISTS, IMPORT_MARKER, INTERRUPTED, NOT_RESTORED,
 };
 
 struct Scratch(PathBuf);
@@ -422,4 +423,428 @@ fn saved_drafts_pages_stay_stable_while_drafts_are_saved() {
     // Limits are bounded.
     assert_eq!(page(&store, 5000, None).items.len(), 200);
     assert_eq!(page(&store, 0, None).items.len(), 1);
+}
+
+/// Every file under `root` with its bytes and modification time.
+fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let modified = fs::metadata(&path).unwrap().modified().unwrap();
+                files.push((path.clone(), fs::read(&path).unwrap(), modified));
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+fn source(name: &str, root: &Path) -> ImportSource {
+    ImportSource {
+        name: name.into(),
+        root: root.to_path_buf(),
+    }
+}
+
+/// Saves drafts into a store of the client's (and Qt's) format, then closes it.
+fn seed(root: &Path, drafts: &[(&str, StoredDraft)]) {
+    let store = DraftStore::open(root.to_path_buf());
+    for (key, value) in drafts {
+        save(&store, key, value.clone()).unwrap();
+        // Distinct modification times order the copies.
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    store.flush();
+}
+
+#[test]
+fn the_import_copies_every_draft_once_and_never_writes_the_sources() {
+    let scratch = Scratch::new("import");
+    let (qt, dev, here) = (
+        scratch.0.join("qt"),
+        scratch.0.join("dev"),
+        scratch.0.join("here"),
+    );
+    let other = "studio\ncodex/sample-project/plan";
+    seed(
+        &qt,
+        &[
+            (KEY, draft("from Qt", &[("notes.txt", b"qt bytes")])),
+            (other, draft("plan", &[])),
+        ],
+    );
+    seed(&dev, &[(other, draft("plan", &[]))]);
+    let before = (snapshot(&qt), snapshot(&dev));
+    // A source the client cannot write to still imports.
+    #[cfg(unix)]
+    for root in [&qt, &dev] {
+        use std::os::unix::fs::PermissionsExt;
+        for entry in fs::read_dir(root).unwrap().flatten() {
+            fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        fs::set_permissions(root, fs::Permissions::from_mode(0o500)).unwrap();
+    }
+    let report = import_once(&here, &[source("dev", &dev), source("qt", &qt)]);
+    assert_eq!(
+        report,
+        ImportReport {
+            already_done: false,
+            imported: 2,
+            identical: 1,
+            conflicts: vec![],
+            invalid: 0,
+            sources: vec!["dev".into(), "qt".into()],
+            unfinished: vec![],
+        }
+    );
+    #[cfg(unix)]
+    for root in [&qt, &dev] {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+        for entry in fs::read_dir(root).unwrap().flatten() {
+            fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+    assert_eq!(
+        (snapshot(&qt), snapshot(&dev)),
+        before,
+        "the sources stay untouched"
+    );
+    let store = DraftStore::open(here.clone());
+    let imported = load(&store, KEY);
+    assert_eq!(imported.draft.draft.text, "from Qt");
+    assert_eq!(&*imported.draft.draft.attachments[0].bytes, b"qt bytes");
+    assert_eq!(imported.storage_error, None);
+    drop(store);
+    // One time: a second run reads and writes nothing.
+    assert!(here.join(IMPORT_MARKER).exists());
+    let again = import_once(&here, &[source("qt", &qt)]);
+    assert!(again.already_done && again.imported == 0);
+}
+
+#[test]
+fn the_newest_copy_wins_and_a_different_draft_here_is_kept() {
+    let scratch = Scratch::new("import-conflict");
+    let (qt, dev, here) = (
+        scratch.0.join("qt"),
+        scratch.0.join("dev"),
+        scratch.0.join("here"),
+    );
+    let kept = "studio\nclaude/sample-project/kept";
+    seed(&qt, &[(KEY, draft("older in Qt", &[]))]);
+    seed(&dev, &[(KEY, draft("newer in the dev app", &[]))]);
+    seed(&here, &[(kept, draft("typed here", &[]))]);
+    seed(&qt, &[(kept, draft("a Qt copy", &[]))]);
+    let report = import_once(&here, &[source("qt", &qt), source("dev", &dev)]);
+    assert_eq!(report.imported, 1);
+    let mut conflicts = report.conflicts.clone();
+    conflicts.sort();
+    let mut expected = vec![
+        ImportConflict {
+            key: KEY.into(),
+            source: "qt".into(),
+        },
+        ImportConflict {
+            key: kept.into(),
+            source: "qt".into(),
+        },
+    ];
+    expected.sort();
+    assert_eq!(conflicts, expected);
+    // The marker keeps the counts and the conflicts' keys and sources, never
+    // a draft's text.
+    let marker = fs::read_to_string(here.join(IMPORT_MARKER)).unwrap();
+    let recorded: Value = serde_json::from_str(&marker).unwrap();
+    assert_eq!(recorded["report"]["conflicts"][0]["source"], "qt");
+    for text in [
+        "older in Qt",
+        "newer in the dev app",
+        "a Qt copy",
+        "typed here",
+    ] {
+        assert!(!marker.contains(text), "{text} leaked into the marker");
+    }
+    let store = DraftStore::open(here.clone());
+    assert_eq!(load(&store, KEY).draft.draft.text, "newer in the dev app");
+    assert_eq!(load(&store, kept).draft.draft.text, "typed here");
+    // The losing copies stay recoverable in their source.
+    assert_eq!(read_draft(&qt, KEY).draft.draft.text, "older in Qt");
+}
+
+#[test]
+fn damaged_foreign_and_empty_copies_are_not_imported() {
+    let scratch = Scratch::new("import-damaged");
+    let (qt, here) = (scratch.0.join("qt"), scratch.0.join("here"));
+    let empty = "studio\nclaude/sample-project/empty";
+    seed(
+        &qt,
+        &[
+            (KEY, draft("damaged", &[("a.txt", b"bytes")])),
+            (empty, draft("", &[])),
+        ],
+    );
+    // A blob that no longer matches its hash, read twice.
+    let blob = fs::read_dir(folder(&qt, KEY))
+        .unwrap()
+        .flatten()
+        .find(|entry| entry.path().extension().is_some_and(|ext| ext == "bin"))
+        .unwrap()
+        .path();
+    fs::write(&blob, b"other").unwrap();
+    // A folder whose name is not its key's hash.
+    let foreign = qt.join("0".repeat(64));
+    fs::create_dir_all(&foreign).unwrap();
+    fs::write(
+        foreign.join("draft.json"),
+        json!({"version": 1, "key": "studio\nx", "text": "stray"}).to_string(),
+    )
+    .unwrap();
+    // A folder without a manifest, one whose manifest is not JSON, and a
+    // plain file, which is not a draft.
+    fs::create_dir_all(qt.join("1".repeat(64))).unwrap();
+    let unparsable = qt.join("2".repeat(64));
+    fs::create_dir_all(&unparsable).unwrap();
+    fs::write(unparsable.join("draft.json"), b"{not json").unwrap();
+    fs::write(qt.join("notes.txt"), b"not a draft").unwrap();
+    let report = import_once(&here, &[source("qt", &qt)]);
+    assert_eq!((report.imported, report.invalid), (0, 4));
+    assert!(report.conflicts.is_empty());
+    // Damaged copies stay in their source; they never stop the marker.
+    assert!(report.unfinished.is_empty());
+    assert!(here.join(IMPORT_MARKER).exists());
+    let store = DraftStore::open(here.clone());
+    assert_eq!(load(&store, KEY).draft, StoredDraft::default());
+    assert_eq!(load(&store, "studio\nx").draft, StoredDraft::default());
+}
+
+#[test]
+fn an_interrupted_send_imports_as_uncertain() {
+    let scratch = Scratch::new("import-sending");
+    let (qt, here) = (scratch.0.join("qt"), scratch.0.join("here"));
+    let mut sending = draft("was being sent", &[]);
+    sending.sending = true;
+    seed(&qt, &[(KEY, sending)]);
+    assert_eq!(import_once(&here, &[source("qt", &qt)]).imported, 1);
+    let store = DraftStore::open(here.clone());
+    let imported = load(&store, KEY);
+    assert!(imported.draft.uncertain);
+    assert_eq!(imported.notice.as_deref(), Some(INTERRUPTED));
+}
+
+#[test]
+fn the_import_runs_on_the_stores_writer() {
+    let scratch = Scratch::new("import-writer");
+    let (qt, here) = (scratch.0.join("qt"), scratch.0.join("here"));
+    seed(&qt, &[(KEY, draft("from Qt", &[]))]);
+    let store = DraftStore::open(here.clone());
+    let report = wait(|done| store.import(vec![source("qt", &qt)], done));
+    assert_eq!(report.imported, 1);
+    assert_eq!(load(&store, KEY).draft.draft.text, "from Qt");
+}
+
+#[test]
+fn the_import_never_reads_the_stores_own_folder() {
+    let scratch = Scratch::new("import-own");
+    let data = scratch.0.join("data");
+    let own = data.join("dev.zerus.next/drafts");
+    let (qt, phase2) = (
+        scratch.0.join("qt"),
+        data.join("dev.zerus.next.phase2/drafts"),
+    );
+    for root in [&own, &qt, &phase2] {
+        fs::create_dir_all(root).unwrap();
+    }
+    let roots = |sources: Vec<ImportSource>| -> Vec<PathBuf> {
+        sources.into_iter().map(|source| source.root).collect()
+    };
+    // The store's folder, a folder inside it and one holding it are never
+    // sources.
+    let dev = vec![own.clone(), own.join("old"), data.clone(), phase2.clone()];
+    assert_eq!(
+        roots(import_sources(&own, Some(qt.clone()), dev)),
+        vec![qt.clone(), phase2.clone()]
+    );
+    // Nor are they under another spelling of the path, even before the
+    // store's folder exists.
+    #[cfg(unix)]
+    {
+        let link = scratch.0.join("link");
+        std::os::unix::fs::symlink(&data, &link).unwrap();
+        let through_link = Some(link.join("dev.zerus.next/drafts"));
+        assert!(roots(import_sources(&own, through_link, vec![])).is_empty());
+        let later = link.join("later/drafts");
+        let inside = vec![data.join("later/drafts/old")];
+        assert!(roots(import_sources(&later, None, inside)).is_empty());
+    }
+}
+
+#[test]
+fn a_read_right_after_import_at_start_sees_the_imported_draft() {
+    const CHILD: &str = "ZERUS_TEST_IMPORT_AT_START";
+    const NAME: &str = "a_read_right_after_import_at_start_sees_the_imported_draft";
+    let other = "studio\nclaude/sample-project/other";
+    if let Some(scratch) = std::env::var_os(CHILD).map(PathBuf::from) {
+        // In the child, Qt's and the dev app's stores are under the scratch
+        // folder, wherever this platform keeps them.
+        seed(&qt_root().unwrap(), &[(KEY, draft("from Qt", &[]))]);
+        let data = if cfg!(windows) {
+            scratch.join("appdata")
+        } else if cfg!(target_os = "macos") {
+            scratch.join("home/Library/Application Support")
+        } else {
+            scratch.join("data")
+        };
+        let dev = data.join("dev.zerus.next/drafts");
+        seed(&dev, &[(other, draft("from the dev app", &[]))]);
+        let store = DraftStore::open(scratch.join("here"));
+        import_at_start(&store);
+        assert_eq!(load(&store, KEY).draft.draft.text, "from Qt");
+        assert_eq!(load(&store, other).draft.draft.text, "from the dev app");
+        return;
+    }
+    let scratch = Scratch::new("import-at-start");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([NAME, "--exact", "--nocapture", "--test-threads=1"])
+        .env(CHILD, &scratch.0)
+        .env("HOME", scratch.0.join("home"))
+        .env("XDG_CONFIG_HOME", scratch.0.join("config"))
+        .env("XDG_DATA_HOME", scratch.0.join("data"))
+        .env("APPDATA", scratch.0.join("appdata"))
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(output.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("1 passed"), "{stdout}");
+    assert!(
+        stderr.contains("drafts import: 2 imported, 0 identical, 0 conflicts, 0 invalid"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn large_attachments_import_one_draft_at_a_time() {
+    // The import holds one copy in memory at a time; this checks that the
+    // result stays right with several drafts near the attachment limits.
+    let scratch = Scratch::new("import-large");
+    let (qt, dev, here) = (
+        scratch.0.join("qt"),
+        scratch.0.join("dev"),
+        scratch.0.join("here"),
+    );
+    let mib = 1024 * 1024;
+    let bytes = |fill: u8| vec![fill; 5 * mib];
+    let keys: Vec<String> = (0..4)
+        .map(|index| format!("studio\nclaude/sample-project/large-{index}"))
+        .collect();
+    let qt_drafts: Vec<(&str, StoredDraft)> = keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| {
+            let first = bytes(index as u8);
+            let second = bytes(index as u8 + 100);
+            let value = draft(
+                &format!("qt {index}"),
+                &[("a.bin", first.as_slice()), ("b.bin", second.as_slice())],
+            );
+            (key.as_str(), value)
+        })
+        .collect();
+    seed(&qt, &qt_drafts);
+    // The dev app holds a newer copy of one draft and the same copy of
+    // another.
+    let newer = bytes(200);
+    seed(
+        &dev,
+        &[
+            (
+                keys[0].as_str(),
+                draft("dev 0", &[("c.bin", newer.as_slice())]),
+            ),
+            (keys[1].as_str(), qt_drafts[1].1.clone()),
+        ],
+    );
+    let report = import_once(&here, &[source("qt", &qt), source("dev", &dev)]);
+    assert_eq!(
+        (report.imported, report.identical, report.invalid),
+        (4, 1, 0)
+    );
+    let mut conflicts = report.conflicts.clone();
+    conflicts.sort();
+    assert_eq!(
+        conflicts,
+        vec![ImportConflict {
+            key: keys[0].clone(),
+            source: "qt".into(),
+        }]
+    );
+    let store = DraftStore::open(here.clone());
+    let first = load(&store, &keys[0]);
+    assert_eq!(first.draft.draft.text, "dev 0");
+    assert_eq!(&*first.draft.draft.attachments[0].bytes, newer.as_slice());
+    for (index, key) in keys.iter().enumerate().skip(1) {
+        let imported = load(&store, key).draft;
+        assert_eq!(imported.draft.text, format!("qt {index}"));
+        assert_eq!(
+            &*imported.draft.attachments[1].bytes,
+            bytes(index as u8 + 100)
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_source_that_cannot_be_listed_runs_the_import_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new("import-unlisted");
+    let (qt, dev, here) = (
+        scratch.0.join("qt"),
+        scratch.0.join("dev"),
+        scratch.0.join("here"),
+    );
+    let other = "studio\nclaude/sample-project/other";
+    seed(&qt, &[(KEY, draft("from Qt", &[]))]);
+    seed(&dev, &[(other, draft("from the dev app", &[]))]);
+    fs::set_permissions(&dev, fs::Permissions::from_mode(0o000)).unwrap();
+    let report = import_once(&here, &[source("qt", &qt), source("dev", &dev)]);
+    fs::set_permissions(&dev, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(report.imported, 1);
+    assert_eq!(report.unfinished.len(), 1);
+    assert!(report.unfinished[0].starts_with("dev not listed"));
+    assert!(!here.join(IMPORT_MARKER).exists(), "no marker yet");
+    // The next start imports the rest; the first draft reads as identical.
+    let again = import_once(&here, &[source("qt", &qt), source("dev", &dev)]);
+    assert_eq!((again.imported, again.identical), (1, 1));
+    assert!(again.unfinished.is_empty());
+    assert!(here.join(IMPORT_MARKER).exists());
+    let store = DraftStore::open(here.clone());
+    assert_eq!(load(&store, other).draft.draft.text, "from the dev app");
+}
+
+#[test]
+fn a_draft_that_cannot_be_saved_runs_the_import_again() {
+    let scratch = Scratch::new("import-unsaved");
+    let (qt, here) = (scratch.0.join("qt"), scratch.0.join("here"));
+    seed(&qt, &[(KEY, draft("from Qt", &[("a.txt", b"bytes")]))]);
+    // A plain file where the draft's folder belongs: the save fails, and
+    // the store can still write its marker.
+    fs::create_dir_all(&here).unwrap();
+    fs::write(folder(&here, KEY), b"in the way").unwrap();
+    let report = import_once(&here, &[source("qt", &qt)]);
+    assert_eq!((report.imported, report.invalid), (0, 1));
+    assert_eq!(report.unfinished, vec!["1 not saved".to_owned()]);
+    assert!(!here.join(IMPORT_MARKER).exists(), "no marker yet");
+    fs::remove_file(folder(&here, KEY)).unwrap();
+    let again = import_once(&here, &[source("qt", &qt)]);
+    assert_eq!((again.imported, again.invalid), (1, 0));
+    assert!(here.join(IMPORT_MARKER).exists());
+    let store = DraftStore::open(here.clone());
+    assert_eq!(load(&store, KEY).draft.draft.text, "from Qt");
 }

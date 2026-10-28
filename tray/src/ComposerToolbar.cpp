@@ -217,10 +217,20 @@ void ToolbarChip::render()
     }
 }
 
+bool ToolbarChip::event(QEvent *event)
+{
+    const bool handled = QPushButton::event(event);
+    if (event->type() == QEvent::ParentChange && parentWidget() && m_active && !m_fitHidden && isHidden()) setVisible(true);
+    return handled;
+}
+
 void ToolbarChip::updateVisibility()
 {
     const bool visible = m_active && !m_fitHidden;
-    if (visible) { setVisible(true); return; }
+    // A chip without a parent yet would show as a window of its own (the task
+    // inspector's executor chip flashed one at every start, user log
+    // 2026-10-28); it shows once it has a parent.
+    if (visible) { if (parentWidget()) setVisible(true); return; }
     QWidget *focus = QApplication::focusWidget();
     const bool heldFocus = focus && (focus == this || (m_popover && (focus == m_popover || m_popover->isAncestorOf(focus))));
     closePopover(); setVisible(false);

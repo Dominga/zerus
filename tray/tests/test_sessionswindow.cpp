@@ -264,6 +264,7 @@ private slots:
     void sessionIdentifiersRemainInDetailsAcrossNavigation();
     void updatesEntryOpensExactSettingsPage();
     void fileCacheSettingsNavigation();
+    void everySettingsPageShowsTheDarkTheme();
     void colorPickerUsesWorkspaceThemeAndCancelsOutside_data();
     void colorPickerUsesWorkspaceThemeAndCancelsOutside();
     void automaticApprovalSettingsNavigation_data();
@@ -645,6 +646,7 @@ private slots:
     void rowPreparationFollowsFiltersDraftsAndPeers();
     void rowPreparationNeverRunsOnTheGuiThread();
     void rowPreparationDropsStaleResults();
+    void rowPreparationsNeverQueueBehindEachOther();
     void rowPreparationKeepsItemsSelectionAndScroll();
     void rowPreparationRevealsSessionsAfterFilterChanges();
 private:
@@ -1448,6 +1450,9 @@ void TestSessionsWindow::inspectorIsAColumnOfCards()
         "elif c=='git-diff':print(" + json(diff) + ")\n";
     const QString fixture = m_dir->filePath("hgs-inspector-" + theme);
     QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answers)));
+    // A fork build turns extensions on by default (ZERUS_FORK_BUILD); the
+    // SocratiCode card is checked on its own below.
+    Extensions::setEnabled(QStringLiteral("socraticode"), false);
     SessionsWindow window(FakeCli::program(fixture)); window.resize(1440, 1000); window.setFleet(fleet()); window.show();
     window.showSession({}, "codex/hgs/dashboard");
     window.findChild<QPushButton *>("toggleInspector")->setChecked(true);
@@ -5088,7 +5093,8 @@ else: print('{}')
         QTRY_VERIFY(issued >= 0 || (client->requestInspection({}, name) && (issued = replies.size(), true)));
         QTRY_VERIFY(std::any_of(replies.cbegin() + issued, replies.cend(), [&](const QList<QVariant> &reply) { return reply.at(1).toString() == name; })); };
     auto *card = window.findChild<QuestionCard *>("questionCard"); auto *send = composer->findChild<QPushButton *>("sendMessage");
-    QSignalSpy inspected(client, &HgsClient::inspectionReady); QTRY_VERIFY(!inspected.isEmpty());
+    // The first fixture inspection takes up to 8 s on a loaded Windows machine.
+    QSignalSpy inspected(client, &HgsClient::inspectionReady); QTRY_VERIFY_WITH_TIMEOUT(!inspected.isEmpty(), 15000);
     QTRY_VERIFY(!composer->isDraftLoading(composer->sessionKey()));
     QTRY_VERIFY(window.findChild<QLabel *>("detailTitle")->text().contains("navigation"));
     // Receive one actual fixture inspection before replacing its details.
@@ -9077,7 +9083,9 @@ else:print('{}')
     send->click();
     const auto resumeLog = [&] { QFile file(temp.filePath("resume.log")); return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString(); };
     const auto sendLog = [&] { QFile file(temp.filePath("send.log")); return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString(); };
-    QTRY_VERIFY2(resumeLog().contains("--with-lost-dialogue"), qPrintable(resumeLog()));
+    // The start choice, a refused resume, the stale choice and the forced
+    // resume take more than QTRY's 5 s on a loaded Windows runner.
+    QTRY_VERIFY2_WITH_TIMEOUT(resumeLog().contains("--with-lost-dialogue"), qPrintable(resumeLog()), 30000);
     // L5: the queued message is sent once the session is ready - and only once.
     QTRY_VERIFY2(resumeLog().contains("--with-lost-dialogue"), qPrintable(resumeLog()));
     // The resumed session is read now that it is live; the queued draft follows.
@@ -15198,6 +15206,33 @@ void TestSessionsWindow::localWindowsSessionExplainsDisabledVoice(){
     QCOMPARE(voice->toolTip(),QString("Voice messages cannot be sent to sessions on this Windows computer yet."));
 }
 
+// User report 2026-10-28: Settings > Worktrees showed a light page in the dark
+// theme. A page in a scroll area paints its own palette unless the theme's
+// transparent rule names it; every page shows the theme's background instead.
+void TestSessionsWindow::everySettingsPageShowsTheDarkTheme(){
+    QSettings().setValue("workspace/theme", "dark");
+    SessionsWindow window(program()); keepDetailsPollsOut(window); window.resize(1280, 900);
+    window.setFleet(fleet()); window.show(); QVERIFY(QTest::qWaitForWindowExposed(&window));
+    window.findChild<QPushButton *>("workspaceSettings")->click();
+    auto *sections = window.findChild<QListWidget *>("settingsSections"); QVERIFY(sections);
+    auto *settings = window.findChild<QWidget *>("settingsPage"); QVERIFY(settings);
+    const QColor background = settings->grab().toImage().pixelColor(4, 4);
+    QVERIFY2(background.lightness() < 80, qPrintable(background.name()));
+    for (int row = 0; row < sections->count(); ++row) {
+        sections->setCurrentRow(row); QTest::qWait(30);
+        auto *stack = settings->findChild<QStackedWidget *>(); QVERIFY(stack);
+        auto *scroll = qobject_cast<QScrollArea *>(stack->currentWidget()); QVERIFY(scroll);
+        auto *page = scroll->widget(); QVERIFY(page);
+        // The bottom right corner of the scroll area is blank on every page;
+        // the settings page is grabbed whole, since a child's grab leaves its
+        // parent's background transparent.
+        const QPoint at = scroll->mapTo(settings, QPoint(scroll->width() - 3, scroll->height() - 3));
+        const QColor corner = settings->grab().toImage().pixelColor(at);
+        QVERIFY2(qAbs(corner.lightness() - background.lightness()) < 24,
+                 qPrintable(QString("%1 (%2): %3 against %4").arg(sections->item(row)->text(), page->objectName(), corner.name(), background.name())));
+    }
+}
+
 void TestSessionsWindow::fileCacheSettingsNavigation(){
     QSettings().setValue("downloads/folder", m_dir->filePath("Zerus Files"));
     SessionsWindow window(program()); window.setFleet(fleet()); window.show(); window.showUpdates();
@@ -16789,6 +16824,43 @@ void TestSessionsWindow::rowPreparationDropsStaleResults()
     QCOMPARE(applied.last()[0].toULongLong(), window.rowGenerationForTests());
     QVERIFY(window.droppedRowPreparationsForTests() > dropped);
     QVERIFY(keys().contains("\ncodex/hgs/second")); QVERIFY(!keys().contains("\ncodex/hgs/first"));
+}
+
+// User report 2026-10-28: switching sessions took up to 40 s. Every rebuild
+// queued its own row preparation on the one preparation thread, stale ones
+// included, and the selected session's inspection reply waited behind them.
+// Rebuilds while a preparation runs fold into one more.
+void TestSessionsWindow::rowPreparationsNeverQueueBehindEachOther()
+{
+    AsyncRows async;
+    SessionsWindow window(program()); keepDetailsPollsOut(window); window.resize(1100, 760);
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    window.setFleet(rowFleet(now)); window.show(); settleRows(window);
+    auto *list = window.findChild<SessionList *>("sessionList");
+    const auto keys = [list] { QStringList result; for (int i = 0; i < list->count(); ++i) result << list->item(i)->data(SessionRoles::Key).toString(); return result; };
+    // Hold the preparation thread, as a slow preparation would.
+    QSemaphore gate; QObject holder; bool held = false;
+    ProcessRunner::post(&holder, [&gate] { gate.acquire(); return true; }, [&held](bool) { held = true; });
+    const auto posted = window.postedRowPreparationsForTests();
+    for (int i = 0; i < 10; ++i) {
+        auto state = rowFleet(now); auto local = state.local(); local.sessions.append(rowSession(QString("codex/hgs/burst-%1").arg(i), "codex"));
+        state.setLocal(local, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+        QTest::qWait(5);
+    }
+    // One preparation waits behind the held one; the other nine requests wait for it.
+    QTRY_COMPARE(window.postedRowPreparationsForTests(), posted + 1);
+    QTest::qWait(50);
+    QCOMPARE(window.postedRowPreparationsForTests(), posted + 1);
+    // A reply posted now waits behind at most that one preparation: when it
+    // arrives, no more than the folded follow-up has been posted.
+    QObject reply; int postedAtReply = -1;
+    ProcessRunner::post(&reply, [] { return true; }, [&postedAtReply, &window](bool) { postedAtReply = window.postedRowPreparationsForTests(); });
+    gate.release();
+    QTRY_VERIFY(held); QTRY_VERIFY(postedAtReply >= 0);
+    QVERIFY2(postedAtReply <= posted + 2, qPrintable(QString::number(postedAtReply - posted)));
+    settleRows(window);
+    // The folded requests prepared the last listing.
+    QVERIFY(keys().contains("\ncodex/hgs/burst-9")); QVERIFY(!keys().contains("\ncodex/hgs/burst-8"));
 }
 
 void TestSessionsWindow::rowPreparationKeepsItemsSelectionAndScroll()

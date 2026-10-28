@@ -204,14 +204,22 @@ void SessionsWindow::requestRows()
 
 void SessionsWindow::postRows()
 {
+    // One preparation at a time on the shared preparation thread: requests
+    // while it runs fold into one more after it. Stale preparations queued
+    // one behind another held up the replies that share that thread, such as
+    // the inspection of a newly selected session (user report: up to 40 s).
+    if (m_rowPreparing) { ++m_rowGeneration; m_rowsPending = true; m_rowsAgain = true; return; }
+    m_rowPreparing = true; ++m_postedRowPreparations;
     auto inputs = rowInputs(); inputs.generation = ++m_rowGeneration;
     m_rowsPending = true;
     ProcessRunner::post(this, [inputs = std::move(inputs)] { return prepareRows(inputs); },
         [this](const PreparedRows &prepared) {
+            m_rowPreparing = false;
+            const bool again = m_rowsAgain; m_rowsAgain = false;
             // A newer request supersedes this one; its own result follows.
-            if (prepared.generation != m_rowGeneration) { ++m_droppedRowPreparations; return; }
-            m_rowsPending = false;
-            applyRows(prepared);
+            if (prepared.generation != m_rowGeneration) ++m_droppedRowPreparations;
+            else { m_rowsPending = false; applyRows(prepared); }
+            if (again) postRows();
         });
 }
 

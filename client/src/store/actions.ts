@@ -213,25 +213,25 @@ export function createActions(catalog: Pick<CatalogState, "rows">, online: (comp
   const errorText = (error: unknown) => (typeof error === "string" ? error : error instanceof Error ? error.message : String(error));
 
   /** Copies text; a failure is a sticky notice, a success shows nothing. */
-  async function copy(text: string): Promise<boolean> {
-    try { await bridge.copyText(text); return true; } catch (error) {
+  async function copy(text: string): Promise<Outcome> {
+    try { await bridge.copyText(text); return { outcome: "done", receipt: null, cleanup: null }; } catch (error) {
       notify("error", `Zerus: could not copy\n${errorText(error)}`, true);
-      return false;
+      return failed(errorText(error));
     }
   }
 
   /** Copy connect command or Copy restore command (the archive id only for an archived row). */
-  async function copyCommand(row: ActionRow) {
+  async function copyCommand(row: ActionRow): Promise<Outcome> {
     let command: string;
     try { command = await bridge.copyCommand(row.computer, row.name, row.state === "archived" ? row.archiveId ?? null : null); } catch (error) {
       notify("error", errorText(error), true);
-      return;
+      return failed(errorText(error));
     }
-    await copy(command);
+    return copy(command);
   }
 
   /** Copy session reference: the selected row's details name the run and conversation when present. */
-  async function copyReference(row: ActionRow, details?: Details) {
+  async function copyReference(row: ActionRow, details?: Details): Promise<Outcome> {
     const target: Target = {
       computer: row.computer, name: row.name,
       run_id: details?.run_id || row.runId || "", conversation_id: details?.conversation_id || row.conversationId || "",
@@ -239,9 +239,11 @@ export function createActions(catalog: Pick<CatalogState, "rows">, online: (comp
     let uri: string;
     try { uri = await bridge.sessionReference(target, row.state === "archived" ? row.archiveId ?? null : null); } catch (error) {
       notify("error", errorText(error), true);
-      return;
+      return failed(errorText(error));
     }
-    if (await copy(uri)) notify("info", "Session reference copied");
+    const out = await copy(uri);
+    if (out.outcome === "done") notify("info", "Session reference copied");
+    return out;
   }
 
   // Read-mark retry.

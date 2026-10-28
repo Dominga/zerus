@@ -4,7 +4,7 @@ import { listRows } from "./sessions/model";
 import { orderedRows } from "../store/catalog";
 import { selectedKey, setSelectedKey } from "../store/ui";
 import { activity } from "../store/session";
-import { end, perform } from "../store/actions";
+import { copy, copyCommand, copyReference, end, perform } from "../store/actions";
 import { snapshotOf, terminateCopy, type ActionRow } from "./sessions/actions-ui";
 import type { Action, Outcome } from "../types";
 import { inTauri, metrics, pumpStats } from "../bridge";
@@ -300,6 +300,9 @@ async function actionsSmoke(allowed: boolean) {
     const chosen = terminateCopy(row()).action;
     log(`actions-smoke end call the Terminate dialog picks: ${chosen}`);
     const steps: [string, () => Promise<Outcome>][] = [
+      ["copy session reference", () => copyReference(row())],
+      ["copy connect command", () => copyCommand(row())],
+      ["copy session name", () => copy(row().name)],
       ...([{ kind: "pause" }, { kind: "resume" }, { kind: "rename", new_name: SMOKE_RENAMED, archive_id: null }, { kind: "archive" }] as Action[])
         .map((action): [string, () => Promise<Outcome>] => [action.kind, () => perform(row(), action)]),
       [chosen, () => end(row(), chosen)],

@@ -22,8 +22,9 @@ Piece D) and the phase 2 Activity follow (`client/src/store/activity.ts`).
 - **Merging the reply** (`acceptInspection`, 3587-3660):
   - The reply applies only while the same host, name and archive id are selected.
   - `replace_events` replaces the events.
-  - Otherwise events with `seq <= cursor` or an already-known seq are skipped, and the rest are appended in seq order. The cursor advances to the highest seq.
-  - Another conversation id than the shown one, unless it is listed in `cleared_conversations`, resets the window to the reply's events and the cursor to 0.
+  - Otherwise events with `seq <= cursor` or an already-known seq are skipped (a missing seq reads as 0), and the rest are appended in the reply's (journal) order. The cursor becomes the reply's `cursor`.
+  - Another conversation id than the shown one, unless the shown one is listed in `cleared_conversations`, resets the window to the reply's events and the cursor to 0, and reads again at once (`inspect()`, 3622-3628).
+  - At most 500 events are kept, the oldest removed first (`while (m_events.size() > 500) m_events.removeFirst()`, 3651).
 - **Failures** (1910-1914): the Activity shows "Could not refresh activity: {error}".
 - **The pane** (3783):
   - An archived row counts as `recorded`: no live process count, no live tool line, no Clear session.
@@ -77,14 +78,14 @@ Commit `feat(client): the archived Activity read`.
   - `createArchiveActivity(deps)`, where `deps` is the bridge call, a clock or timer seam, and whether the Sessions page shows. The app instance follows the selected row: active only for an `archive:` key whose loaded archived row has an archive id.
   - It implements `ActivitySource`, an exported interface in `client/src/store/activitySource.ts` that both this store and the live `activity` store implement: `target`, `events`, `summary`, `loaded`, `loadingOlder` (always false here), `olderDone` (always true here), `ended` (false here), `loadOlder` (a no-op here), `error` and `readOnly` (true here). Phase 4 extends only the live store's side. A source that lacks something renders nothing for it.
   - On a new selection it resets the events, summary and cursor and the error, and reads with `after = 0`.
-  - It polls every 2500 ms only while the row stays selected and the page shows, with no overlapping read. A "busy" answer (`ARCHIVED_ACTIVITY_BUSY`) is ignored, as Qt's `return false`.
+  - It polls every 2500 ms only while the row stays selected and the page shows, with no overlapping read: a read starts 2500 ms after the previous one started, once that one ended (Qt's `m_inspectionAge`). A "busy" answer (`ARCHIVED_ACTIVITY_BUSY`) is ignored, as Qt's `return false`: nothing started, so it is tried again at the next tick of Qt's 500 ms timer.
   - A reply for another key than the selected one is dropped.
-  - Leaving the row, or closing the window, stops the timer and drops everything.
-  - `ARCHIVED_EVENTS_MAX = 5000` caps the events, dropping the oldest first. It guards against a runaway poll and has no Qt counterpart: Qt keeps what it loaded, and an archived session does not grow. One test pins the drop.
+  - Leaving the row, or closing the window, stops the timer and drops everything. Another page does the same (one "Sessions page shows" input); Qt keeps the loaded events while another page shows, and here the page returns with one bounded read from cursor 0.
+  - `ARCHIVED_EVENTS_MAX = 500` caps the events, dropping the oldest first, as Qt's `acceptInspection` does (3651, for every inspection, live or archived). One test pins the drop. (The plan first said 5000 with no Qt counterpart; Qt wins.)
   - Replies merge as Qt does:
     - `replace_events` replaces the events;
-    - otherwise new events with a seq above the cursor are appended in seq order;
-    - a conversation change (not in `cleared_conversations`) resets the events to the reply's and the cursor to 0.
+    - otherwise new events with a seq above the cursor and not yet shown are appended in the reply's order, and the cursor becomes the reply's;
+    - a conversation change (the shown conversation not in `cleared_conversations`) resets the events to the reply's and the cursor to 0, and reads again at once.
   - A failure sets `error` to "Could not refresh activity: {detail}"; the next good reply clears it.
 - **`ActivityView`** (`Activity.tsx`), with the read-only branching kept as small as possible:
   - It takes an optional `source` with that surface, defaulting to the live `activity` store.
@@ -92,6 +93,7 @@ Commit `feat(client): the archived Activity read`.
   - It shows `source.error` as a notice when set.
   - The older-page scroll trigger never fires for it (`olderDone` is true).
 - **`SessionDetail.tsx`:** for a selected archived row, pass the archived store as the source. Export `activityReadOnly(key)` (true for `archive:` keys) for the owner session's composer, either from here or from the store. Archived rows show no Terminal tab: Qt has none for them, and `terminal_status` already answers unsupported.
+- **No live follow for archived rows:** `store/session.ts` follows only rows that are not `archive:` keys (before this, selecting an archived row subscribed it on the stream), and `followedFor` in `store/actions.ts` answers an archived key as settled with no value, so its details are inspected at once as before.
 - **Tests:**
   - the store: reset on selection, the poll cadence and no overlap, the merge rules, a conversation change, a dropped late reply, the error text and its clearing, and nothing kept after leaving;
   - `ActivityView` with a fake read-only source: it renders items, and shows none of the live indicators;

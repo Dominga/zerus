@@ -422,15 +422,35 @@ live catalog.
   loaded; its tooltip says how many are loaded.
 - The list shows the loaded archived rows as flat cards, newest archived first
   (Qt groups them by project: `zerus-5wmh.40`). Selecting one shows its header
-  and its details, read with `inspect --archive ID`; its Activity pane stays
-  empty (`zerus-5wmh.42`). Restore session, Forget archived session, the copy
-  entries and Rename work on a loaded archived row (see Actions).
+  and its details, read with `inspect --archive ID`, and its recorded Activity
+  (below). Restore session, Forget archived session, the copy entries and
+  Rename work on a loaded archived row (see Actions).
 - The page is checked as Qt checks it. An invalid reply shows one of three
   texts: "Invalid archive page. Update the computer CLI and refresh." (version,
   shape, cursors, total or echo of the query), "Invalid archive window. Refresh
   the archive." (position or previous cursor) and "Invalid archived session
   identity. Refresh the archive." (state, name, lowercase hyphenated UUID or
   `archived_at` outside the range).
+
+The selected archived row's Activity is read as Qt reads it
+(`SessionsWindow::inspect` and `acceptInspection`), by its own store
+(`src/store/archiveActivity.ts`): an archived row is never streamed, so while
+it is selected and the Sessions page shows in a shown window it is read with
+`inspect NAME --after CURSOR --skip-processes --archive ID` (5 s, 15 s on a
+peer) 2500 ms after the previous read started, one read at a time; a read of
+the same row that is still running answers "busy", which is ignored and tried
+again 500 ms later. A new selection starts at cursor 0. A reply with
+`replace_events` replaces the events; otherwise events at or below the cursor
+or already shown are skipped, the rest are appended in the reply's order and
+the cursor becomes the reply's. A reply for another conversation than the shown
+one (unless its `cleared_conversations` lists the shown one) replaces the
+events and is read again from cursor 0 at once. At most 500 events are kept,
+the oldest dropped first, as Qt keeps them. A failed read shows "Could not
+refresh activity: {error}" until the next answer. Leaving the row, another page
+or a hidden window stops the reads and drops the events. The pane renders
+through the same Activity view, read-only: the transcript without the live
+tool line, the attention, error and offline banners or a composer, and no
+Terminal tab, as Qt shows none for an archived row.
 
 ### Actions smoke run
 
@@ -454,7 +474,7 @@ standard input and fails on writes that have none). The fake logs each call to
 
 ```sh
 S=$(mktemp -d); cp core/tests/support/fake_hgs_actions.py $S/hgs
-echo '{"reply":{"exit":0},"replies":[{"match":["reference"],"exit":0,"stdout":{"uri":"zerus://session?machine=m&name=claude%2Fsample-project%2Freview"}},{"match":["session-action"],"exit":0,"stdout":"echo_session_action","receipt_status":"completed"},{"match":["archives"],"exit":0,"stdout":{"version":1,"from":0,"until":253402300800,"query":"","next_cursor":"","previous_cursor":"","total":1,"position":0,"sessions":[{"name":"claude/sample-project/archived","state":"archived","resumable":true,"archive_id":"00000000-0000-4000-8000-000000000001","archived_at":1700000000}]}},{"match":["inspect","claude/sample-project/archived"],"exit":0,"stdout":{}},{"match":["resume","claude/sample-project/archived"],"exit":0},{"match":["kill","claude/sample-project/archived"],"exit":0}]}' > $S/config.json
+echo '{"reply":{"exit":0},"replies":[{"match":["reference"],"exit":0,"stdout":{"uri":"zerus://session?machine=m&name=claude%2Fsample-project%2Freview"}},{"match":["session-action"],"exit":0,"stdout":"echo_session_action","receipt_status":"completed"},{"match":["archives"],"exit":0,"stdout":{"version":1,"from":0,"until":253402300800,"query":"","next_cursor":"","previous_cursor":"","total":1,"position":0,"sessions":[{"name":"claude/sample-project/archived","state":"archived","resumable":true,"archive_id":"00000000-0000-4000-8000-000000000001","archived_at":1700000000}]}},{"match":["inspect","claude/sample-project/archived"],"exit":0,"stdout":{"events":[{"seq":1,"type":"UserPromptSubmit","source":"claude_hooks","detail":"Summarize the sample notes","at":1700000000},{"seq":2,"type":"Stop","source":"claude_hooks","detail":"The sample notes are summarized.","at":1700000030}],"cursor":2}},{"match":["resume","claude/sample-project/archived"],"exit":0},{"match":["kill","claude/sample-project/archived"],"exit":0}]}' > $S/config.json
 env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=1 \
   WEBKIT_DISABLE_DMABUF_RENDERER=1 ZERUS_CLIENT_REPLAY=$PWD/fixtures/replay.ndjson \
   ZERUS_CLIENT_HGS=$S/hgs ZERUS_CLIENT_QUERY=actions-smoke=1 ZERUS_CLIENT_PERF=smoke \
@@ -464,9 +484,10 @@ cat $S/log.ndjson
 
 The `archives` entry answers the Archive step with one archived row (the page
 echoes the All dates range and an empty query); the `inspect` entry for that
-row answers its details (an object with no run or conversation, as the row has
-none). The `resume` and `kill` entries for that row answer the Restore and
-Forget archived steps with a plain success.
+row answers its details and its Activity reads (an object with no run or
+conversation, as the row has none, and two synthetic events). The `resume` and
+`kill` entries for that row answer the Restore and Forget archived steps with a
+plain success.
 
 The hook first switches to the Archive filter, waits for the page and logs
 `actions-smoke archive-page: <status text> (<row count> rows)`. It then opens
@@ -481,8 +502,14 @@ peek and a selection stay), leaving the list with the panel open keeps the peek
 closes the peek. It selects the archived row, waits up to 15 s for its
 details and logs `actions-smoke archive-inspect: done <archive id>` (or
 `failed`); the fake's `log.ndjson` then holds `archives --json` (with the page
-query on standard input) and an `inspect NAME ... --archive ID` call. On the
-same archived row it then runs the Restore session entry's path and logs
+query on standard input) and an `inspect NAME ... --archive ID` call. It then
+waits up to 15 s for the row's Activity to show the fake's events and logs
+`actions-smoke archive-activity: done (N events)`, or `failed (...)` when no
+event shows, the row is followed live or the pane shows a notice or a live line
+(`log.ndjson` holds `inspect NAME --after 0 --skip-processes --archive ID`, and
+after the hook waits one poll the same call with `--after 2`; each later reload
+of the archive reads the row from `--after 0` again). On the same archived row
+it then runs the Restore session entry's path and logs
 `actions-smoke restore: done (state filter now all)` (the Archive filter becomes
 All, as the row is selected and followed; `log.ndjson` holds `resume NAME
 --archive ID -d`), Forget archived session through the dialog's confirmation

@@ -3,6 +3,7 @@ import { createStore } from "solid-js/store";
 import * as bridge from "../bridge";
 import { catalog as appCatalog, computerOffline, type CatalogState } from "./catalog";
 import { marks as appMarks, type Marks } from "./marks";
+import { activityReadOnly } from "./activitySource";
 import { copyState, detailsFromInspection, MUTE_PENDING, STATE_CHANGED, forgetsBindingOnly, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type ForgetScope, type PendingNotifications } from "../ui/sessions/actions-ui";
 import type { Action, Details, Outcome, Target } from "../types";
 import type { Session } from "../ui/sessions/types";
@@ -406,6 +407,8 @@ export function bindActivity(source: FollowSource) { activity = source; }
 
 /** The Activity subscription of a session: its state value while it is the followed one, and whether it has answered. */
 export function followedFor(key: string): Followed {
+  // An archived row has no subscription (it is never streamed): its details are inspected at once.
+  if (activityReadOnly(key)) return { value: undefined, settled: true };
   if (!activity) return { value: undefined, settled: false };
   const mine = activity.target()?.id === key;
   const value = mine ? activity.summary() : undefined;

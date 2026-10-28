@@ -1,0 +1,45 @@
+import type { ActivityEvent } from "../types";
+import type { ActivityStore } from "./activity";
+
+// What the Activity view (ui/sessions/Activity.tsx) reads: the live follow of
+// a session (store/activity.ts) or the recorded Activity of an archived row
+// (store/archiveActivity.ts). A source that lacks something renders nothing
+// for it.
+
+export interface ActivitySource {
+  /** The session shown; `id` is its row id (computer + "\n" + key). */
+  target(): { id: string } | undefined;
+  /** Oldest first. */
+  events(): readonly ActivityEvent[];
+  /** The fields the transcript reads besides the events (a live `state` value, an inspection's other fields). */
+  summary(): Record<string, unknown> | undefined;
+  /** The first answer arrived. */
+  loaded(): boolean;
+  loadingOlder(): boolean;
+  /** No older page to read: the view never asks for one. */
+  olderDone(): boolean;
+  /** The session left the list and its Activity stopped. */
+  ended(): boolean;
+  /** Reads the page before the oldest event. */
+  loadOlder(): void;
+  /** Shown as a notice while set. */
+  error(): string | undefined;
+  /**
+   * Recorded Activity that is only read: no live states, no composer, no send
+   * or interrupt. The live follow leaves it out.
+   */
+  readonly readOnly?: boolean;
+}
+
+type Holds<T extends true> = T;
+/** The live follow is a source as it is: this fails to compile otherwise. */
+export type LiveIsSource = Holds<ActivityStore extends ActivitySource ? true : false>;
+
+/**
+ * True for an archived row (`archive:<archive id>`, as a catalog key or a row
+ * id): its Activity is recorded and read-only, and it is never streamed. The
+ * composer hides itself for it.
+ */
+export function activityReadOnly(key: string): boolean {
+  return key.slice(key.lastIndexOf("\n") + 1).startsWith("archive:");
+}

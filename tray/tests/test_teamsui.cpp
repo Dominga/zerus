@@ -5400,9 +5400,18 @@ void TestTeamsUi::catalogHeaderRevertDraftAndBanners()
     QTRY_COMPARE(calls(script(), "catalog decide").size(), 1);
     QCOMPARE(calls(script(), "catalog decide").first()["proposal"].toString(), QStringLiteral("p1"));
     QCOMPARE(calls(script(), "catalog decide").first()["decision"].toString(), QStringLiteral("keep"));
+    // The fixture logs the decision before it saves the draft. On a loaded
+    // runner that save came after the catalog below and put version 3 back,
+    // so the banner never showed (fork builds 88 and 95): wait for the save.
+    QTRY_VERIFY_WITH_TIMEOUT(([&] {
+        QFile saved(script() + ".catalog");
+        if (!saved.open(QIODevice::ReadOnly)) return false;
+        const auto proposals = QJsonDocument::fromJson(saved.readAll()).object()["draft"].toObject()["proposals"].toArray();
+        return !proposals.isEmpty() && proposals[0].toObject()["state"].toString() == QStringLiteral("kept");
+    })(), 30000);
     // The catalog moved on after the draft: Apply is off; redo or discard.
     auto moved = catalog(); auto inner = moved["catalog"].toObject(); inner["version"] = 4; moved["catalog"] = inner;
-    { QFile c(script() + ".catalog"); QVERIFY(c.open(QIODevice::WriteOnly)); c.write(QJsonDocument(moved).toJson(QJsonDocument::Compact)); }
+    QVERIFY(FakeCli::replace(script() + ".catalog", QJsonDocument(moved).toJson(QJsonDocument::Compact)));
     controller.refreshCatalog();
     // The fixture's catalog read takes more than QTRY's 5 s on a loaded Windows runner.
     QTRY_COMPARE_WITH_TIMEOUT(draft.findChild<QLabel *>("teamCatalogBannerTitle")->text(), QStringLiteral("Draft is out of date — Apply is off"), 30000);

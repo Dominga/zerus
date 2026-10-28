@@ -102,6 +102,13 @@ struct LaunchWatch {
     /// The last good catalog's groups and the folder style they were made
     /// for; later limits refresh them, the next catalog or style regroups.
     groups: Option<(Style, Vec<Account>)>,
+    /// `launch_accounts` calls still waiting for this computer's catalog: they
+    /// ask for its limits themselves once they wake.
+    waiting: usize,
+    /// A reply was filed since the last ask (`launch_start`).
+    answered: bool,
+    /// The last ask was Refresh: the limits are forced.
+    force: bool,
 }
 
 impl LaunchWatch {
@@ -127,18 +134,47 @@ fn style_of(entry: &FleetEntry) -> Style {
     paths::of(entry.platform.as_deref(), entry.computer.is_local())
 }
 
+/// The watched computer's fleet entry. One outside the fleet (its stream
+/// ended, or no computer of the fleet is called so) is a peer whose stream
+/// ended: its folders are POSIX and its limits are not read.
+fn launch_entry(hub: &Hub, computer: &ComputerId) -> FleetEntry {
+    hub.fleet
+        .iter()
+        .find(|entry| entry.computer == *computer)
+        .cloned()
+        .unwrap_or_else(|| FleetEntry {
+            computer: computer.clone(),
+            status: "ended".into(),
+            attempt: 0,
+            local_sessions: true,
+            local_host: false,
+            host: None,
+            platform: None,
+        })
+}
+
+/// The hosts whose account reads the hub keeps: every machine that keeps
+/// accounts, and New session's computer while the dialog watches it, which Qt
+/// reads directly whatever the Accounts page lists (865-874).
+fn hub_hosts(hub: &Hub) -> Vec<ComputerId> {
+    let mut hosts = account_hosts(&hub.fleet);
+    if let Some(watch) = &hub.launch {
+        if !hosts.contains(&watch.computer) {
+            hosts.push(watch.computer.clone());
+        }
+    }
+    hosts
+}
+
 /// The launch profiles of the watched computer's current catalog.
 fn launch_members(hub: &Hub, watch: &LaunchWatch) -> Option<(FleetEntry, Vec<Profile>)> {
-    let entry = hub
-        .fleet
-        .iter()
-        .find(|entry| entry.computer == watch.computer)?;
+    let entry = launch_entry(hub, &watch.computer);
     let data = hub.accounts.catalogs.get(&watch.computer)?.data.as_ref()?;
-    let members = accounts::host_profiles(entry, data, &hub.accounts, &watch.agents())
+    let members = accounts::host_profiles(&entry, data, &hub.accounts, &watch.agents())
         .into_iter()
         .map(|(profile, _)| profile)
         .collect();
-    Some((entry.clone(), members))
+    Some((entry, members))
 }
 
 #[derive(Default)]
@@ -376,7 +412,7 @@ impl Screens {
         }
         hub.stale = false;
         hub.next_due = None;
-        let hosts = account_hosts(&hub.fleet);
+        let hosts = hub_hosts(hub);
         let mut runs: Vec<Run> = hub
             .accounts
             .warm(&hosts, now)
@@ -430,6 +466,7 @@ impl Screens {
         let hgs = &self.0.hgs;
         let local = ComputerId::local();
         let mut heard: Option<ComputerId> = None;
+        let mut limits: Vec<Run> = Vec::new();
         let runs = match job {
             Run::Catalog(host) => {
                 // Qt's requestAccounts texts, for the Accounts page as for New session.
@@ -437,7 +474,7 @@ impl Screens {
                 let failure = reply.as_ref().err().cloned();
                 let now = self.now();
                 let mut hub = self.lock();
-                let hosts = account_hosts(&hub.fleet);
+                let hosts = hub_hosts(&hub);
                 let again = hub.accounts.finish_catalog(&host, reply, now, &hosts);
                 hub.stale = true;
                 hub.dirty.extend(ACCOUNT_SCREENS);
@@ -455,20 +492,30 @@ impl Screens {
                         }),
                         Some(_) => None,
                     };
+                    let mut late: Option<bool> = None;
                     if let Some(watch) = hub.launch.as_mut() {
                         watch.replied = true;
+                        watch.answered = true;
                         match failure {
                             None => {
                                 watch.error = None;
                                 watch.groups = grouped;
+                                // No `launch_accounts` waits for it any more: the
+                                // catalog arrived late, and Qt's accountsReady
+                                // asks for its limits (380-388).
+                                late = (watch.waiting == 0).then_some(watch.force);
                             }
                             Some(detail) => {
                                 watch.error = Some(format!("Could not load accounts: {detail}"));
                             }
                         }
                     }
+                    if let Some(force) = late {
+                        limits = self.launch_limits(&mut hub, &host, force);
+                    }
                 }
                 let mut runs: Vec<Run> = again.then_some(Run::Catalog(host)).into_iter().collect();
+                runs.append(&mut limits);
                 runs.extend(self.accounts_due(&mut hub, now, false));
                 self.0.catalog_done.notify_all();
                 runs
@@ -713,14 +760,22 @@ impl Screens {
     /// New session's computer (`loadAccounts`, 865-874): its `account ls`
     /// starts on every open, computer change and Refresh, sharing one that
     /// runs. Another computer, or a new dialog (not `refresh`), starts with no
-    /// rows until a reply is filed (Qt clears `m_accounts`). A computer that
-    /// keeps no accounts is not read.
+    /// rows until a reply is filed (Qt clears `m_accounts`). A computer the
+    /// Accounts page does not list is read too, as Qt's dialog reads the
+    /// selected computer directly (865-874): a computer that cannot be read
+    /// answers with hgs's error. The caller waits for the catalog until
+    /// [`Self::launch_waited`].
     fn launch_start(&self, computer: &ComputerId, refresh: bool, agent: Option<&str>) -> Vec<Run> {
         let now = self.now();
         let mut hub = self.current();
         let agents = launch_agents(agent);
         match hub.launch.as_mut() {
-            Some(watch) if refresh && watch.computer == *computer => watch.agents = agents,
+            Some(watch) if refresh && watch.computer == *computer => {
+                watch.agents = agents;
+                watch.waiting += 1;
+                watch.answered = false;
+                watch.force = true;
+            }
             _ => {
                 hub.launch = Some(LaunchWatch {
                     computer: computer.clone(),
@@ -728,11 +783,11 @@ impl Screens {
                     replied: false,
                     error: None,
                     groups: None,
+                    waiting: 1,
+                    answered: false,
+                    force: refresh,
                 })
             }
-        }
-        if !account_hosts(&hub.fleet).contains(computer) {
-            return Vec::new();
         }
         if hub.accounts.ensure_catalog(computer, now) {
             hub.dirty.extend(ACCOUNT_SCREENS);
@@ -745,7 +800,28 @@ impl Screens {
     /// The dialog closed: its computer is no longer watched, and its replies
     /// tell nobody.
     pub fn launch_close(&self) {
-        self.lock().launch = None;
+        let mut hub = self.lock();
+        hub.launch = None;
+        // The next step forgets its reads when the Accounts page lists no such computer.
+        hub.stale = true;
+    }
+
+    /// A `launch_accounts` call stopped waiting: once its ask was answered it
+    /// asks for the limits of the catalog (`requestUsage`, forced on Refresh).
+    /// A reply filed after the last caller stopped waiting asks for them itself.
+    fn launch_waited(&self, computer: &ComputerId, force: bool) -> Vec<Run> {
+        let mut hub = self.lock();
+        let answered = match hub.launch.as_mut() {
+            Some(watch) if watch.computer == *computer => {
+                watch.waiting = watch.waiting.saturating_sub(1);
+                watch.answered
+            }
+            _ => return Vec::new(),
+        };
+        if !answered {
+            return Vec::new();
+        }
+        self.launch_limits(&mut hub, computer, force)
     }
 
     /// Waits while the computer's catalog reads, at most [`LAUNCH_WAIT`].
@@ -774,9 +850,15 @@ impl Screens {
     /// The limits of the computer's installed launch profiles
     /// (`requestUsage`): those not checked within five minutes, all on
     /// Refresh. Returns the inspects that start now.
+    #[cfg(test)]
     fn launch_usage(&self, computer: &ComputerId, force: bool) -> Vec<Run> {
-        let now = self.now();
         let mut hub = self.lock();
+        self.launch_limits(&mut hub, computer, force)
+    }
+
+    /// [`Self::launch_usage`] on the locked hub.
+    fn launch_limits(&self, hub: &mut Hub, computer: &ComputerId, force: bool) -> Vec<Run> {
+        let now = self.now();
         let Some(watch) = hub
             .launch
             .as_ref()
@@ -784,7 +866,7 @@ impl Screens {
         else {
             return Vec::new();
         };
-        let Some((entry, members)) = launch_members(&hub, watch) else {
+        let Some((entry, members)) = launch_members(hub, watch) else {
             return Vec::new();
         };
         let reachable = accounts::reachable(&entry);
@@ -879,7 +961,7 @@ impl Screens {
         let runs = self.launch_start(computer, refresh, agent);
         self.run(runs);
         self.launch_wait(computer);
-        let runs = self.launch_usage(computer, refresh);
+        let runs = self.launch_waited(computer, refresh);
         self.run(runs);
         self.publish();
         Ok(self.launch_rows(computer))
@@ -1690,12 +1772,125 @@ mod tests {
         // Rows only read nothing.
         h.screens.launch_rows(&local_id);
         assert_eq!(h.queued(), 0);
-        // A computer that keeps no accounts is not read.
-        assert!(h
+        // A computer the Accounts page does not list is read for the dialog too (865-874).
+        let gone = ComputerId::from("gone");
+        assert_eq!(h.screens.launch_start(&gone, false, None).len(), 1);
+        assert!(
+            !h.screens.launch_rows(&gone).loaded,
+            "until its reply is filed"
+        );
+    }
+
+    // accountsReady (380-388) asks for limits whenever the catalog arrives:
+    // after the waiting `launch_accounts` stopped waiting, the filed reply
+    // asks itself; while one waits, it asks on waking. Either way once.
+    #[test]
+    fn a_catalog_filed_after_the_wait_asks_for_its_limits_once() {
+        let inspects = |h: &Harness| -> Vec<usize> {
+            ["work", "claude", "native-dsh", "native-opencode"]
+                .iter()
+                .map(|id| h.count(&format!("account inspect {id} --refresh")))
+                .collect()
+        };
+        let here = ComputerId::local();
+        // Late: the caller gave up before the reply was filed.
+        let h = harness(launch_replies(false), true);
+        let runs = h.screens.launch_start(&here, false, None);
+        h.screens.run(runs);
+        assert!(
+            h.screens.launch_waited(&here, false).is_empty(),
+            "no catalog yet, no limits"
+        );
+        h.drain();
+        assert_eq!(
+            inspects(&h),
+            [1, 1, 1, 1],
+            "the late catalog asked for its limits"
+        );
+        assert_eq!(h.screens.launch_rows(&here).groups.len(), 4);
+        h.drain();
+        assert_eq!(inspects(&h), [1, 1, 1, 1], "once");
+        // Direct: the reply is filed while the caller waits; it asks on waking.
+        let h = harness(launch_replies(false), true);
+        let runs = h.screens.launch_start(&here, false, None);
+        h.screens.run(runs);
+        h.drain();
+        assert_eq!(
+            inspects(&h),
+            [0, 0, 0, 0],
+            "the waiting caller asks, not the reply"
+        );
+        let runs = h.screens.launch_waited(&here, false);
+        h.screens.run(runs);
+        h.drain();
+        assert_eq!(inspects(&h), [1, 1, 1, 1]);
+        // A late catalog of a Refresh forces its limits.
+        let runs = h.screens.launch_start(&here, true, None);
+        h.screens.run(runs);
+        assert!(
+            h.screens.launch_waited(&here, true).is_empty(),
+            "the earlier catalog is not this ask's answer"
+        );
+        h.drain();
+        assert_eq!(
+            inspects(&h),
+            [2, 2, 2, 2],
+            "the late Refresh catalog forced them, once"
+        );
+    }
+
+    // Qt's dialog reads the selected computer directly (865-874): one the
+    // Accounts page does not list is read, kept while the dialog watches it
+    // and forgotten after; one hgs cannot read answers with its error.
+    #[test]
+    fn a_computer_outside_the_accounts_hosts_is_read_for_the_dialog() {
+        let mut replies = launch_replies(false);
+        replies["@lab account ls"] = reply(&launch_catalog(&[(
+            "lab-claude",
+            "claude",
+            "lab@example.invalid",
+        )]));
+        replies["@gone account ls"] = json!({"stderr": "hgs: Unknown machine gone.\n", "exit": 2});
+        let h = build(replies, true, true);
+        let lab = ComputerId::from("lab");
+        let view = h.screens.launch_accounts(&lab, false, None).unwrap();
+        assert!(view.loaded && view.error.is_none(), "{view:?}");
+        assert_eq!(members(&view), [vec!["lab-claude"]]);
+        h.screens.tick();
+        assert_eq!(
+            members(&h.screens.launch_rows(&lab)),
+            [vec!["lab-claude"]],
+            "the hub's step keeps it while the dialog watches it"
+        );
+        assert_eq!(h.count("@lab account ls"), 1, "no warm-up read of its own");
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            h.fake
+                .calls()
+                .iter()
+                .all(|call| !call.starts_with("@lab account inspect")),
+            "a computer without a live stream reads no limits"
+        );
+        let gone = h
             .screens
-            .launch_start(&ComputerId::from("gone"), false, None)
-            .is_empty());
-        assert!(!h.screens.launch_rows(&ComputerId::from("gone")).loaded);
+            .launch_accounts(&ComputerId::from("gone"), false, None)
+            .unwrap();
+        assert!(gone.loaded && gone.groups.is_empty());
+        assert_eq!(
+            gone.error.as_deref(),
+            Some("Could not load accounts: hgs: Unknown machine gone.")
+        );
+        h.screens.launch_close();
+        h.screens.tick();
+        let hub = h.screens.lock();
+        assert!(
+            !hub.accounts.catalogs.contains_key(&lab)
+                && !hub
+                    .accounts
+                    .catalogs
+                    .contains_key(&ComputerId::from("gone")),
+            "forgotten once the dialog closed"
+        );
     }
 
     // Review: updateAccounts groups only when the catalog arrives (879-883);

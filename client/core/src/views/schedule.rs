@@ -132,8 +132,10 @@ impl AccountsState {
     /// One host's `account ls` for New session, which reads on every open,
     /// computer change and Refresh (`NewSessionDialog::loadAccounts`): it
     /// starts now (marked running) unless one runs, which is shared without a
-    /// follow-up. No other host changes. True when it starts.
+    /// follow-up. No other host changes. True when it starts. A host read
+    /// this way needs no warm-up read of its own.
     pub fn ensure_catalog(&mut self, host: &ComputerId, now: u64) -> bool {
+        self.warmed.insert(host.clone());
         let slot = self.catalogs.entry(host.clone()).or_default();
         if slot.pending {
             return false;
@@ -420,6 +422,16 @@ mod tests {
         let mac = ComputerId::from("mac");
         assert!(s.ensure_catalog(&mac, 0), "never read");
         assert!(s.catalogs.contains_key(&studio), "the others are kept");
+        s.finish_catalog(
+            &mac,
+            Ok(json!({"profiles": []})),
+            1,
+            std::slice::from_ref(&mac),
+        );
+        assert!(
+            s.warm(std::slice::from_ref(&mac), 2).is_empty(),
+            "read for New session: no warm-up read again"
+        );
     }
 
     #[test]

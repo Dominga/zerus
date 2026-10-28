@@ -52,6 +52,8 @@ export class World {
   admission: CreationAdmission | Error = { admitted: "creation-1" };
   /** Computers whose catalog reply is not filed yet: `launch_accounts` answers `loaded: false`. */
   unfiled = new Set<string>();
+  /** Computers hgs cannot read: the core answers with the failure and no rows. */
+  unreadable = new Map<string, string>();
   /** Runs inside each `new_session_start`, with its 1-based number. */
   onStart: ((n: number) => void) | undefined;
   localExists = true;
@@ -216,7 +218,8 @@ export function bridgeOf(world: World): NewSessionBridge {
     launchAccounts: async (computer, refresh, agent = null) => {
       record("launchAccounts", computer, refresh, agent);
       // The core answers without rows while the reply is not filed; a held answer was built at the call.
-      const answer = world.unfiled.has(computer) ? NOT_LOADED : world.accounts(computer);
+      const failure = world.unreadable.get(computer);
+      const answer = failure ? { loaded: true, error: failure, profiles: [], groups: [] } : world.unfiled.has(computer) ? NOT_LOADED : world.accounts(computer);
       await world.wait(`accounts:${computer}`);
       return answer;
     },

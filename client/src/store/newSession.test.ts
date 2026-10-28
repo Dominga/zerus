@@ -218,6 +218,16 @@ describe("accounts (NewSessionDialog.cpp 865-1023)", () => {
     expect(t.world.count("launchAccounts")).toBe(1);
   });
 
+  // loadAccounts reads the selected computer itself (865-874): one hgs cannot read shows its error, never a wait.
+  it("a computer hgs cannot read shows its error and offers the shell", async () => {
+    const t = setup((w) => w.unreadable.set("lab", "Could not load accounts: hgs: Unknown machine lab."));
+    await t.open({ agent: "claude", computer: "lab", path: "/workspace/example" });
+    expect(t.state().computers.find((c) => c.target === "lab")?.label).toBe("lab (offline)");
+    expect(t.state()).toMatchObject({ accountStatus: "Could not load accounts: hgs: Unknown machine lab.", refreshEnabled: true, account: 0 });
+    expect(t.state().accounts.map((r) => r.name)).toEqual(["Run shell"]);
+    expect(t.world.count("launchAccountRows")).toBe(0);
+  });
+
   it("drops a limits answer older than the newest", async () => {
     const t = setup((w) => w.flags.add("missing"));
     await t.open({ agent: "codex" });

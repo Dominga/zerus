@@ -42,7 +42,17 @@ export function TerminalTab() {
     l.measure();
   });
 
+  // Qt's pasteText: the clipboard's text is cleaned by the store and goes
+  // through xterm's own paste; xterm's default handler never sees the event.
+  const onPaste = (event: ClipboardEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    terminal.paste(event.clipboardData?.getData("text/plain") ?? "");
+  };
+
   onMount(async () => {
+    host.addEventListener("paste", onPaste, true);
+    onCleanup(() => host.removeEventListener("paste", onPaste, true));
     const [{ Terminal }, { FitAddon }] = await Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit"), import("@xterm/xterm/css/xterm.css")]);
     if (gone) return;
     const css = getComputedStyle(document.documentElement);
@@ -53,12 +63,12 @@ export function TerminalTab() {
     if (webgl) {
       try {
         const { WebglAddon } = await import("@xterm/addon-webgl");
-        if (gone) { term.dispose(); return; }
         const gl = new WebglAddon();
         gl.onContextLoss(() => gl.dispose());
         term.loadAddon(gl);
       } catch { /* the DOM renderer stays */ }
     }
+    if (gone) { term.dispose(); return; }
     const measure = () => { if (host.clientWidth > 0 && host.clientHeight > 0) fit.fit(); };
     measure();
     term.onData((data) => terminal.input(encoder.encode(data)));
@@ -68,19 +78,22 @@ export function TerminalTab() {
     observer.observe(host);
     teardown = () => { terminal.hide(); observer.disconnect(); term.dispose(); };
     setLive({ term, measure });
-    terminal.show({ write: (bytes, done) => term.write(bytes, done), reset: () => term.reset(), size: () => ({ cols: term.cols, rows: term.rows }) });
+    terminal.show({ write: (bytes, done) => term.write(bytes, done), paste: (text) => term.paste(text), reset: () => term.reset(), size: () => ({ cols: term.cols, rows: term.rows }) });
     term.focus();
   });
 
   const connected = () => terminal.connected();
-  const toggleTip = () => (connected() ? "Disconnect terminal. The session keeps running" : terminal.ready() ? "Connect terminal" : terminal.status());
+  // Qt's updateButtons tooltips; unavailable shows the reason.
+  const reason = () => terminal.texts()?.reason ?? "";
+  const available = () => !!terminal.texts()?.available;
+  const toggleTip = () => (connected() ? "Disconnect terminal. The session keeps running" : available() ? "Connect terminal" : reason());
+  const reconnectTip = () => (available() ? "Reconnect terminal. The session keeps running" : reason());
   return (
     <div class="term-tab">
       <div class="term-bar">
-        <span class="state-dot" classList={{ working: connected() }} />
         <span class="ell" title={terminal.status()}>{terminal.status()}</span>
         <span class="grow" />
-        <button class="icon-btn" data-tip="Reconnect terminal" aria-label="Reconnect terminal" disabled={!terminal.ready()} onClick={() => { void terminal.reconnect(); }}>
+        <button class="icon-btn" data-tip={reconnectTip()} aria-label="Reconnect terminal" disabled={!terminal.ready()} onClick={() => { void terminal.reconnect(); }}>
           <Icon name="refresh-cw" size={15} />
         </button>
         <button class="icon-btn" data-tip={toggleTip()} aria-label={connected() ? "Disconnect terminal" : "Connect terminal"} disabled={!connected() && !terminal.ready()}

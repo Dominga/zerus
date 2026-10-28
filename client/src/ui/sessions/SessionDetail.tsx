@@ -96,14 +96,18 @@ function Header() {
 /** The selected session's terminal status (terminal_status), refreshed when its inputs change. */
 const [terminalTexts, setTerminalTexts] = createSignal<TerminalStatus | undefined>();
 createRoot(() => {
-  createEffect(on(() => {
+  // The inputs of terminal_status as one string: a row change that leaves them alone calls nothing.
+  const inputs = createMemo(() => {
     const s = selected();
     if (!s) return undefined;
     const followed = followedFor(s.key);
     const details = detailsFor(s, !computerOffline(s.computer), followed);
     return JSON.stringify([s.key, s.name, s.runId, s.cmd, s.state, s.terminalSupported, s.terminalReported, s.terminalAttachSupported,
       s.terminalAttachReported, !computerOffline(s.computer), followed.value ?? details ?? null]);
-  }, (input) => {
+  });
+  // Another selection: input stops reaching the previous session before anything is awaited.
+  createEffect(on(() => selected()?.key, () => { terminal.leaveSession(); }, { defer: true }));
+  createEffect(on(inputs, (input) => {
     const s = selected();
     if (!input || !s) { setTerminalTexts(undefined); void terminal.setTarget(undefined, undefined); return; }
     const followed = followedFor(s.key);
@@ -118,8 +122,8 @@ createRoot(() => {
       void terminal.setTarget({ computer: s.computer, name: s.name, run_id: s.runId ?? "", machine: s.machine }, status);
     });
   }));
-  // Leaving the Sessions page disconnects (SessionsWindow.cpp:1637).
-  createEffect(on(page, (p) => { if (p !== "sessions") void terminal.disconnect(); }, { defer: true }));
+  // Leaving the Sessions page disconnects, and coming back does not connect (SessionsWindow.cpp:1637, QStackedWidget::currentChanged).
+  createEffect(on(page, (p) => { if (p !== "sessions") void terminal.leavePage(); }, { defer: true }));
 });
 
 const tabs = () => [
@@ -139,7 +143,7 @@ export function SessionDetail() {
           <div class="work-main">
             <div class="detail-tabs tabs" role="tablist">
               <For each={tabs().filter((t) => t.show)}>{(t) => (
-                <button class="tab" role="tab" classList={{ on: detailTab() === t.id }} aria-selected={detailTab() === t.id} onClick={() => setDetailTab(t.id)}>{t.label}</button>
+                <button class="tab" role="tab" classList={{ on: detailTab() === t.id }} aria-selected={detailTab() === t.id} onClick={() => { if (t.id === "terminal") terminal.opened(); setDetailTab(t.id); }}>{t.label}</button>
               )}</For>
               <span class="grow" />
             </div>

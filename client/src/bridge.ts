@@ -273,3 +273,27 @@ export async function terminalStatus(input: { facts: TerminalFacts; details: unk
   if (!inTauri()) return { supported: false, available: false, reason: DESKTOP_TERMINAL, idle: "", connecting: "", disconnected: "" };
   return invoke<TerminalStatus>("terminal_status", { input });
 }
+
+/**
+ * Whether the app window is shown, from src-tauri's `window-visibility` event
+ * (shown and not minimized, as Qt's hideEvent sees it); the webview's own
+ * visibility outside the app.
+ */
+let windowShown = true;
+const windowListeners = new Set<() => void>();
+let windowListening = false;
+export const windowVisibility: PageVisibility = {
+  hidden: () => (inTauri() ? !windowShown : documentVisibility.hidden()),
+  onChange(listener) {
+    if (!inTauri()) return documentVisibility.onChange(listener);
+    windowListeners.add(listener);
+    if (!windowListening) {
+      windowListening = true;
+      void listen<{ visible: boolean }>("window-visibility", (event) => {
+        windowShown = !!event.payload.visible;
+        for (const l of [...windowListeners]) l();
+      });
+    }
+    return () => { windowListeners.delete(listener); };
+  },
+};

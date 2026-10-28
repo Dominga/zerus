@@ -19,6 +19,7 @@ mod replay;
 mod screens;
 #[cfg(feature = "live")]
 mod terminal;
+mod window_visibility;
 
 use tauri::{AppHandle, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
@@ -36,6 +37,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(commands::AppState::default())
+        .manage(window_visibility::Visibility::default())
         .invoke_handler(handler())
         .setup(|app| {
             #[cfg(feature = "live")]
@@ -72,6 +74,11 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if window.label() == MAIN_WINDOW
+                && matches!(event, tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Focused(_) | tauri::WindowEvent::Moved(_))
+            {
+                window_visibility::sync(window);
+            }
             #[cfg(feature = "live")]
             if window.label() == MAIN_WINDOW && matches!(event, tauri::WindowEvent::Destroyed) {
                 use tauri::Manager;

@@ -144,12 +144,9 @@ pub fn sync_policy(app: &AppHandle) {
 /// first. Qt's bundle starts as a menu-bar app (`LSUIElement`,
 /// `tray/packaging/Info.plist:21`).
 #[cfg(target_os = "macos")]
-pub fn prepare(app: &mut tauri::App, window_at_start: bool) {
-    if app
-        .try_state::<Lifecycle>()
-        .is_some_and(|lifecycle| lifecycle.menu_bar)
-    {
-        app.set_activation_policy(native(policy(window_at_start)));
+pub fn prepare(app: &mut tauri::App, menu_bar: bool, opens_sessions: bool) {
+    if menu_bar {
+        app.set_activation_policy(native(policy(window_at_start(opens_sessions, menu_bar))));
     }
 }
 

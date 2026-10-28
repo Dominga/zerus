@@ -17,9 +17,13 @@ pub struct Options {
 }
 
 impl Options {
-    /// Whether the window opens: the switch bundle follows Qt's
-    /// `AppConfig::opensSessions` on macOS (only `--sessions`); other builds
-    /// keep opening their window unless started with `--background`.
+    /// Whether this start asks for the window. It picks the line a second
+    /// start forwards (`sessions` or `show`) and, in a build with a menu-bar
+    /// item (macOS), whether the window opens at start
+    /// (`lifecycle::window_at_start`); builds without one (Linux, Windows)
+    /// always open it. The switch bundle follows Qt's
+    /// `AppConfig::opensSessions` on macOS (only `--sessions`); other
+    /// identities ask unless started with `--background`.
     pub fn opens_sessions(&self, switch: bool) -> bool {
         self.sessions || (!switch && !self.background)
     }

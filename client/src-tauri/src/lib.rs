@@ -146,7 +146,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
     let builder = builder.activate_ignoring_other_apps(!menu_bar);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let builder = builder.manage(instance::InstanceState(std::sync::Mutex::new(listening)));
-    #[allow(unused_mut)]
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut app = builder
         .invoke_handler(handler())
         .setup(move |app| {
@@ -198,10 +198,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
         .build(context)
         .expect("Zerus Next failed to start");
     #[cfg(target_os = "macos")]
-    lifecycle::prepare(
-        &mut app,
-        lifecycle::window_at_start(opens_sessions, menu_bar),
-    );
+    lifecycle::prepare(&mut app, menu_bar, opens_sessions);
     app.run(|app, event| {
         lifecycle::on_event(app, &event);
     });

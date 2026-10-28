@@ -18,6 +18,7 @@ pub mod drafts;
 pub mod external_file;
 pub mod fleet;
 pub mod legacy;
+pub mod local_messages;
 pub mod machine;
 pub mod organization;
 pub mod process_view;

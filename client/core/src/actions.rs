@@ -619,7 +619,7 @@ const REFERENCE_CHARS: usize = 8192;
 const FAILURE_STDERR_CHARS: usize = 4000;
 
 /// `failureDetail` (`HgsClient.cpp:466`): why a call failed.
-fn failure_detail(exit: Exit) -> String {
+pub(crate) fn failure_detail(exit: Exit) -> String {
     let (stderr, code) = match exit {
         Exit::TimedOut => return "timed out".to_owned(),
         Exit::StartFailed(error) => {

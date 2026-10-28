@@ -17,10 +17,14 @@ pub mod details;
 pub mod drafts;
 pub mod external_file;
 pub mod fleet;
+pub mod launch;
 pub mod legacy;
 pub mod local_messages;
 pub mod machine;
+pub mod machine;
 pub mod organization;
+pub mod organization;
+pub mod paths;
 pub mod process_view;
 pub mod processes;
 #[cfg(unix)]

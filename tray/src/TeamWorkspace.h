@@ -138,7 +138,8 @@ private:
     // a team without phases).
     void graphNodes(TeamUi::TaskView *view, const Teams::Team &team, const QList<int> &order, const QSet<int> &phase);
     // #465 N18: a graph view takes back the owner's half-made link and
-    // selected edge, and reports their changes, per team.
+    // selected edge, and reports their changes, per team; #570: the same for
+    // the task under the resting pointer, so its linked tasks stay lit.
     void keepGraphEdit(TeamUi::TaskView *view, const QString &team);
     // U33: the narrowest readable Board column (two-line cards); wider windows
     // share their room. Five fit the Board of a 1600 px workspace.
@@ -198,6 +199,7 @@ private:
     // #465 N18: per team, the task a click-to-connect started from and the
     // selected edge (dependency, task), across re-renders.
     QHash<QString, std::pair<int, QPair<int, int>>> m_graphEdit;
+    QHash<QString, int> m_graphHover;   // #570: the hovered task per team
     static QString rejectKey(const Teams::Team &team, int phase);
     bool m_showBlockers = false, m_rejectFocus = false, m_zoomManual = false;
     double m_zoom = 1.0;

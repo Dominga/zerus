@@ -1366,6 +1366,18 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
 
 void TeamWorkspace::keepGraphEdit(TaskView *view, const QString &team)
 {
+    // #570: every poll rebuilds the views; the task under the resting pointer
+    // stays lit with its linked tasks until the pointer moves or leaves, or
+    // the task is gone.
+    if (const int hovered = m_graphHover.value(team)) {
+        const auto *current = currentTeam(team);
+        if (current && current->task(hovered)) view->keepHover(hovered);
+        else m_graphHover.remove(team);
+    }
+    view->hoverChanged = [this, team](int from, int to) {
+        if (to) m_graphHover.insert(team, to);
+        else if (m_graphHover.value(team) == from) m_graphHover.remove(team);
+    };
     if (!view->editable && view->editableTasks.isEmpty()) return;
     const auto kept = m_graphEdit.value(team);
     view->keepEdit(kept.first, kept.second);

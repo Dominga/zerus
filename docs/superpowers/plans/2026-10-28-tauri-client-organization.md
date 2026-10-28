@@ -57,7 +57,7 @@
 >   4. Edits made before the first ready catalog are refused, not queued (above).
 >   5. Renames made while the client was closed are not followed yet (Task 10 follow-up).
 >   6. Archived sessions are not placed in projects yet (owner ruling at the merge with the Archive view, 2026-10-28). Qt keys an archived session by its archive identity, `machine\narchive\n<archive id>` (`SessionOrganization.cpp:225`), and matches archived rows to the project filter with `groupFor` of that identity; `zerus-5wmh.40` ports it. Until then:
->      - with an organization loaded, the Archive view and its count ignore the project filter, which holds organization project IDs; they never compare an ID with a session name's project segment (`store/archive.ts` `inScope`);
+>      - the Archive view and its count ignore the project filter, which holds organization project IDs; they never compare an ID with a session name's project segment (`store/archive.ts` `inScope`);
 >      - Clear archive takes no row while a project filter is set, and says why, so it never removes more than Qt's project filter would;
 >      - Move to project is disabled for an archived row ("Archived sessions keep their project until the Archive view groups by project."), and the store refuses one, so the client never writes the live-name member `host\nname` for an archived session.
 

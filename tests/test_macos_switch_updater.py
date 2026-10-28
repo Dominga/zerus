@@ -43,13 +43,13 @@ class MacSwitch(unittest.TestCase):
             patcher = mock.patch.object(updater, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
-        # Stand-ins for everything that would reach launchd or a running GUI.
-        self.calls = []
-        for name, value in {'gui_pids': lambda installed: [100] if installed.exists() else [],
-                            'quit_gui': lambda pid, installed: self.calls.append('quit'),
-                            'start': lambda installed: self.calls.append(('start', self.variant(installed))),
+        # Stand-ins for everything that would reach launchd or a running GUI: a
+        # GUI runs as `pid` while `running`; quitting stops it, a start runs pid 200.
+        self.calls, self.running, self.pid = [], False, 100
+        for name, value in {'gui_pids': lambda installed: [self.pid] if self.running else [],
+                            'quit_gui': self.quit, 'start': self.start,
                             'wait_started': lambda installed, path, old: 200,
-                            'stop_started': lambda installed: self.calls.append('stop'),
+                            'stop_started': self.stop,
                             'socket_path': lambda pid: None, 'native': dict,
                             'running_image_matches': lambda pid, installed: True,
                             'provenance': lambda *args: None}.items():
@@ -57,6 +57,18 @@ class MacSwitch(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.installed = self.root / 'Applications/hgs-tray.app'
+
+    def quit(self, pid, installed):
+        self.calls.append('quit')
+        self.running = False
+
+    def start(self, installed):
+        self.calls.append(('start', self.variant(installed)))
+        self.running, self.pid = True, 200
+
+    def stop(self, installed):
+        self.calls.append('stop')
+        self.running = False
 
     def bundle(self, name, kind, number=1413):
         app = self.root / 'bundles' / name / 'Zerus.app'
@@ -80,6 +92,8 @@ class MacSwitch(unittest.TestCase):
         # Nothing is installed yet, so nothing runs: Qt is installed without a start.
         self.assertEqual(updater.update(self.bundle('qt', 'qt'), self.installed), 0)
         self.assertEqual(self.calls, [])
+        # The owner starts Zerus; every later update replaces a running GUI.
+        self.running = True
         self.assertEqual(updater.update(self.bundle('client-1', 'tauri'), self.installed), 0)
         slot = updater.ROLLBACK / 'hgs-tray.app'
         self.assertEqual((self.variant(self.installed), self.variant(slot)), ('client-1', 'qt'))

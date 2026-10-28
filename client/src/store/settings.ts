@@ -85,7 +85,8 @@ export function storageBackend(storage: SettingsStorage | undefined): SettingsBa
 
 /**
  * The values local storage held before the core store, to move once: the
- * settings object and the Overview width. They are removed after the move.
+ * settings object and the Overview and Activity widths. They are removed
+ * after the move.
  */
 export function takeLegacy(storage: SettingsStorage | undefined): Settings {
   const moved: Settings = {};
@@ -97,8 +98,11 @@ export function takeLegacy(storage: SettingsStorage | undefined): Settings {
     }
     const width = Number(storage?.getItem(OVERVIEW_WIDTH_KEY));
     if (Number.isFinite(width) && width > 0) moved["client/overviewWidth"] = Math.round(width);
+    const column = Number(storage?.getItem(ACTIVITY_WIDTH_KEY));
+    if (Number.isFinite(column) && column > 0) moved["workspace/activityWidth"] = Math.round(column);
     storage?.removeItem(STORAGE_KEY);
     storage?.removeItem(OVERVIEW_WIDTH_KEY);
+    storage?.removeItem(ACTIVITY_WIDTH_KEY);
   } catch {
     /* storage may be unavailable */
   }
@@ -107,6 +111,8 @@ export function takeLegacy(storage: SettingsStorage | undefined): Settings {
 
 /** Overview's column width before the core store (Overview.tsx). */
 export const OVERVIEW_WIDTH_KEY = "zerus-client-overview-width";
+/** Activity's column width before the core store (Activity.tsx). */
+export const ACTIVITY_WIDTH_KEY = "zerus-client-activity-width";
 
 /**
  * A reactive settings store over `backend`, starting from the defaults until

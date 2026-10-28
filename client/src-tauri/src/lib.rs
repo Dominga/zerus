@@ -126,6 +126,12 @@ pub fn run() {
                 std::process::exit(3);
             }
             let window = create_main_window(app.handle())?;
+            #[cfg(feature = "live")]
+            {
+                use tauri::Manager;
+                let store = app.state::<settings::Store>();
+                settings::apply_window_layer(&window, store.0.flag(settings::ALWAYS_ON_TOP));
+            }
             // An unattended measurement needs frames: keep its window in front
             // and focused for the run, which ends by exiting the app.
             if std::env::var("ZERUS_CLIENT_PERF").is_ok_and(|mode| mode == "auto") {
@@ -259,6 +265,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         renderer::renderer_frame,
         settings::settings_get,
         settings::settings_set,
+        settings::window_layer_supported,
         actions::run_action,
         actions::set_notifications,
         actions::inspect_session,

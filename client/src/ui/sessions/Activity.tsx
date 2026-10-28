@@ -4,6 +4,7 @@ import { Icon } from "../lib/icons";
 import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, type MenuEntry } from "../../store/ui";
 import { activity } from "../../store/session";
 import { skin } from "../../skin/runtime";
+import { flag, num, setSetting } from "../../store/settings";
 import { buildTranscript, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { statusOf } from "./SessionCard";
 import type { MediaMessage, TranscriptItem } from "./types";
@@ -16,19 +17,22 @@ import type { MediaMessage, TranscriptItem } from "./types";
 
 export const COLUMN = { min: 480, max: 2400, initial: 900, edge: 10 } as const;
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
-const COLUMN_KEY = "zerus-client-activity-width";
-const savedColumn = (() => { try { return Number(localStorage.getItem(COLUMN_KEY)) || 0; } catch { return 0; } })();
-const [columnWidth, setColumnWidthRaw] = createSignal(savedColumn ? clamp(savedColumn, COLUMN.min, COLUMN.max) : COLUMN.initial);
-const [fullWidth, setFullWidth] = createSignal(skin().layout["activity-column"] === "full");
+// The width is Settings > Appearance > Activity width (workspace/activityWidth,
+// workspace/activityFullWidth): a drag shows it live and stores it once, when
+// the pointer lets go. Choosing a skin applies its activity-column variant.
+const [dragColumn, setDragColumn] = createSignal<number | undefined>();
+const columnWidth = () => dragColumn() ?? clamp(Math.round(num("workspace/activityWidth")), COLUMN.min, COLUMN.max);
+const fullWidth = () => flag("workspace/activityFullWidth");
+const setFullWidth = (full: boolean) => { if (full !== fullWidth()) void setSetting("workspace/activityFullWidth", full); };
 createRoot(() => createEffect(on(() => skin().layout["activity-column"], (v) => setFullWidth(v === "full"), { defer: true })));
 export { columnWidth, fullWidth };
 
-function setColumnWidth(width: number) {
-  setColumnWidthRaw(clamp(Math.round(width), COLUMN.min, COLUMN.max));
-  try { localStorage.setItem(COLUMN_KEY, String(columnWidth())); } catch { /* storage may be unavailable */ }
+function storeColumn(width: number) {
+  setDragColumn(undefined);
+  void setSetting("workspace/activityWidth", clamp(Math.round(width), COLUMN.min, COLUMN.max));
 }
 /** Double-click on an edge or Reset Activity width: the default, centered. */
-export function resetColumn() { setColumnWidth(COLUMN.initial); setFullWidth(false); }
+export function resetColumn() { storeColumn(COLUMN.initial); setFullWidth(false); }
 
 /** CSS variables for everything that shares the column (set on the Activity tab body). */
 export const columnStyle = () => ({
@@ -56,10 +60,7 @@ function ColumnEdge(props: { right?: boolean }) {
     widest = scroller.clientWidth - 2 * COLUMN.edge;
     narrowest = Math.min(widest, COLUMN.min * contentScale());
   };
-  const apply = (distance: number) => {
-    setColumnWidth(clamp(start + 2 * distance, narrowest, widest) / contentScale());
-    setFullWidth(false);
-  };
+  const width = (distance: number) => clamp(start + 2 * distance, narrowest, widest) / contentScale();
   return (
     <div class="col-edge" classList={{ right: props.right, dragging: dragging() }} role="separator" aria-orientation="vertical" tabindex="0"
       aria-label="Activity width" aria-valuemin={COLUMN.min} aria-valuemax={COLUMN.max} aria-valuenow={columnWidth()}
@@ -72,16 +73,23 @@ function ColumnEdge(props: { right?: boolean }) {
         measure(el);
         setDragging(true);
       }}
-      onPointerMove={(e) => { if (dragging()) apply(props.right ? e.clientX - origin : origin - e.clientX); }}
-      onPointerUp={(e) => { setDragging(false); e.currentTarget.releasePointerCapture(e.pointerId); }}
-      onPointerCancel={() => setDragging(false)}
+      onPointerMove={(e) => { if (dragging()) setDragColumn(clamp(Math.round(width(props.right ? e.clientX - origin : origin - e.clientX)), COLUMN.min, COLUMN.max)); }}
+      onPointerUp={(e) => {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+        if (!dragging()) return;
+        setDragging(false);
+        storeColumn(columnWidth());
+        setFullWidth(false);
+      }}
+      onPointerCancel={() => { setDragging(false); setDragColumn(undefined); }}
       onDblClick={resetColumn}
       onKeyDown={(e) => {
         const step = e.key === "ArrowLeft" ? -1 : e.key === "ArrowRight" ? 1 : 0;
         if (!step) return;
         e.preventDefault();
         measure(e.currentTarget);
-        apply((props.right ? step : -step) * 20);
+        storeColumn(width((props.right ? step : -step) * 20));
+        setFullWidth(false);
       }}
       onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setMenu({ x: e.clientX, y: e.clientY, items: columnMenuItems() }); }}
     />

@@ -8,7 +8,7 @@
 use serde_json::{json, Map, Value};
 use std::path::Path;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use zerus_client_core::settings::{QtStore, Settings};
 
 /// The identity that replaces Qt at the switch: only it seeds from Qt's
@@ -28,8 +28,12 @@ pub fn seed_source(identifier: &str) -> Option<QtStore> {
         .flatten()
 }
 
+/// Settings > Appearance > Keep Zerus above other windows (WindowLayer.cpp).
+pub const ALWAYS_ON_TOP: &str = "workspace/alwaysOnTop";
+
 /// Opens the store in `dir`; every change is announced as
-/// `settings-changed` with its key and new value.
+/// `settings-changed` with its key and new value, and Keep Zerus above other
+/// windows applies to the main window at once.
 pub fn open(app: &AppHandle, dir: &Path) -> Store {
     let settings = Settings::open(
         dir.join("settings.json"),
@@ -37,9 +41,42 @@ pub fn open(app: &AppHandle, dir: &Path) -> Store {
     );
     let handle = app.clone();
     settings.subscribe(Box::new(move |key, value| {
+        if key == ALWAYS_ON_TOP {
+            if let Some(window) = handle.get_webview_window(crate::MAIN_WINDOW) {
+                apply_window_layer(&window, value.as_bool().unwrap_or(false));
+            }
+        }
         let _ = handle.emit("settings-changed", json!({ "key": key, "value": value }));
     }));
     Store(settings)
+}
+
+/// Whether the window can be kept above others. GTK has no keep-above on
+/// Wayland, where Qt needs KWin scripting (WindowLayer.cpp); X11, macOS and
+/// Windows keep it.
+pub fn keep_above_supported() -> bool {
+    if !cfg!(target_os = "linux") {
+        return true;
+    }
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|display| !display.is_empty());
+    let backend = std::env::var("GDK_BACKEND").unwrap_or_default();
+    !wayland || backend.starts_with("x11")
+}
+
+/// Keeps `window` above other windows, or not, where the platform can.
+pub fn apply_window_layer(window: &WebviewWindow, on_top: bool) {
+    if !keep_above_supported() {
+        return;
+    }
+    if let Err(error) = window.set_always_on_top(on_top) {
+        eprintln!("zerus-client: Keep Zerus above other windows: {error}");
+    }
+}
+
+/// Whether Keep Zerus above other windows can work in this session.
+#[tauri::command]
+pub fn window_layer_supported() -> bool {
+    keep_above_supported()
 }
 
 /// Every setting, as Qt would read it.

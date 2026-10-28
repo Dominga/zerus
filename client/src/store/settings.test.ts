@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  DEFAULTS, OVERVIEW_WIDTH_KEY, STORAGE_KEY, createSettings, sameType, storageBackend, takeLegacy,
+  ACTIVITY_WIDTH_KEY, DEFAULTS, OVERVIEW_WIDTH_KEY, STORAGE_KEY, createSettings, sameType, storageBackend, takeLegacy,
   type SettingValue, type Settings, type SettingsBackend, type SettingsStorage,
 } from "./settings";
 
@@ -73,12 +73,15 @@ describe("the browser dev mode", () => {
 });
 
 describe("the one-time move from local storage", () => {
-  it("takes the old settings and Overview width once", () => {
+  it("takes the old settings and the Overview and Activity widths once", () => {
     const storage = memoryStorage({
       [STORAGE_KEY]: JSON.stringify({ "workspace/animateActivity": false, "workspace/reduceMotion": true }),
       [OVERVIEW_WIDTH_KEY]: "1480",
+      [ACTIVITY_WIDTH_KEY]: "1100",
     });
-    expect(takeLegacy(storage)).toEqual({ "workspace/animateActivity": false, "workspace/reduceMotion": true, "client/overviewWidth": 1480 });
+    expect(takeLegacy(storage)).toEqual({
+      "workspace/animateActivity": false, "workspace/reduceMotion": true, "client/overviewWidth": 1480, "workspace/activityWidth": 1100,
+    });
     expect(storage.data).toEqual({});
     expect(takeLegacy(storage)).toEqual({});
   });

@@ -1,4 +1,6 @@
-import { For, Show, createMemo, createSignal } from "solid-js";
+import { For, Show, createMemo, createResource, createSignal } from "solid-js";
+import { invoke } from "@tauri-apps/api/core";
+import { inTauri } from "../../../bridge";
 import { Icon } from "../../lib/icons";
 import { toast } from "../../../store/ui";
 import { flag, num, setSetting, text } from "../../../store/settings";
@@ -7,8 +9,12 @@ import type { ResolvedSkin } from "../../../skin/skin";
 import { Group, Row, SectionHead, Select, Slider, Check } from "./ui";
 
 // Settings > Appearance (tray/src/SettingsPage.h:46-95, UiLanguage.h,
-// ContentScale.h), with the client's skins and Overview width from the
-// approved mockup (design/webui/src/screens/settings/Appearance.tsx).
+// ContentScale.h, ActivityWidth.h, WindowLayer.cpp), with the client's skins
+// and Overview width from the approved mockup
+// (design/webui/src/screens/settings/Appearance.tsx).
+
+/** Whether the window can be kept above others here (src-tauri settings.rs). */
+const [layerSupported] = createResource(() => (inTauri() ? invoke<boolean>("window_layer_supported") : Promise.resolve(false)));
 
 /** A token of a skin, following {group.token} references. */
 export function tok(s: ResolvedSkin, group: string, key: string, depth = 0): string {
@@ -115,6 +121,7 @@ export function AppearanceSection() {
   const light = createMemo(() => skinList().filter((s) => s.appearance === "light"));
   const scale = liveSetting("workspace/contentScale");
   const overview = liveSetting("client/overviewWidth");
+  const activity = liveSetting("workspace/activityWidth");
   const appearanceHint = (a: "dark" | "light") =>
     theme() === "system" ? (systemLight() === (a === "light") ? "In use with your system appearance" : `Used when your system appearance is ${a}`)
       : theme() === a ? "In use" : `Used with the ${a === "dark" ? "Dark" : "Light"} theme`;
@@ -160,12 +167,25 @@ export function AppearanceSection() {
           <Slider label="Content scale" resetLabel="Reset to 100%" value={Math.round(scale.value() * 100)} min={75} max={200} step={5} defaultValue={100} format={(v) => `${v}%`}
             onInput={(v) => scale.input(v / 100)} onCommit={(v) => scale.commit(v / 100)} />
         </Row>
+        <Row label="Activity width" wide hint="In a wide window, Activity, questions and the message field stay centered at this width, which grows with content scale. Drag the column edges in Activity to adjust it, or double-click an edge to restore 900 px. Full-width Activity fills the whole pane.">
+          <div class="col" style={{ gap: "8px", "align-items": "stretch" }}>
+            <Slider label="Maximum Activity width" resetLabel="Reset to 900 px" value={activity.value()} min={480} max={2400} step={10} defaultValue={900} format={(v) => `${v} px`}
+              disabled={flag("workspace/activityFullWidth")} onInput={activity.input} onCommit={activity.commit} />
+            <Check label="Full-width Activity" checked={flag("workspace/activityFullWidth")} onChange={(v) => void setSetting("workspace/activityFullWidth", v)} />
+          </div>
+        </Row>
         <Row label="Overview width" wide hint="In a wide window, Overview stays centered at this width. Drag its edges to adjust it; double-click an edge to return to this width. Full-width Overview fills the whole page.">
           <div class="col" style={{ gap: "8px", "align-items": "stretch" }}>
             <Slider label="Default Overview width" resetLabel="Reset to 1200 px" value={overview.value()} min={720} max={2400} step={20} defaultValue={1200} format={(v) => `${v} px`}
               disabled={flag("client/overviewFullWidth")} onInput={overview.input} onCommit={overview.commit} />
             <Check label="Full-width Overview" checked={flag("client/overviewFullWidth")} onChange={(v) => void setSetting("client/overviewFullWidth", v)} />
           </div>
+        </Row>
+        <Row label="Window" hint={layerSupported()
+          ? "Files and terminals opened from Zerus may appear behind it while this is on."
+          : "Keep Above is unavailable in this Zerus session. On Wayland, KDE Plasma 6 with KWin scripting is required. You can use your desktop's window menu or rules."}>
+          <Check label="Keep Zerus above other windows" checked={flag("workspace/alwaysOnTop")} disabled={!layerSupported()}
+            onChange={(v) => void setSetting("workspace/alwaysOnTop", v)} />
         </Row>
       </Group>
       <p class="set-foot">Appearance and session list preferences apply to this Zerus.</p>

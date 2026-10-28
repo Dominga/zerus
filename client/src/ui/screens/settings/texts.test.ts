@@ -12,6 +12,7 @@ const here = new URL("./", import.meta.url);
 const repo = new URL("../../../../../", import.meta.url);
 const qt = ["tray/src/SettingsPage.h", "tray/src/UiLanguage.h"].map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");
 const source = (file: string) => fs.readFileSync(new URL(file, here), "utf8");
+const layer = fs.readFileSync(new URL("tray/src/WindowLayer.cpp", repo), "utf8");
 
 const APPEARANCE = [
   "Follow system appearance", "Dark", "Light", "Interface language",
@@ -22,6 +23,17 @@ const APPEARANCE = [
   "Content scale",
   "Adjusts Activity, the message field and Terminal from 75% to 200%. The session list and the side panel keep their size.",
   "Appearance and session list preferences apply to this Zerus.",
+  "Activity width", "Maximum Activity width", "Full-width Activity", "Keep Zerus above other windows",
+];
+// Qt texts with an argument, as Appearance fills it in.
+const APPEARANCE_FILLED: [string, string][] = [
+  ["Reset to %1 px", "Reset to 900 px"],
+  ["In a wide window, Activity, questions and the message field stay centered at this width, which grows with content scale. Drag the column edges in Activity to adjust it, or double-click an edge to restore %1 px. Full-width Activity fills the whole pane.",
+    "In a wide window, Activity, questions and the message field stay centered at this width, which grows with content scale. Drag the column edges in Activity to adjust it, or double-click an edge to restore 900 px. Full-width Activity fills the whole pane."],
+];
+const WINDOW_LAYER = [
+  "Files and terminals opened from Zerus may appear behind it while this is on.",
+  "Keep Above is unavailable in this Zerus session. On Wayland, KDE Plasma 6 with KWin scripting is required. You can use your desktop's window menu or rules.",
 ];
 const SESSIONS = [
   "Expand the collapsed session list on hover", "Hide projects without active sessions", "Animate working sessions",
@@ -35,6 +47,14 @@ const SESSIONS = [
 describe("Settings texts", () => {
   it.each(APPEARANCE)("Appearance shows Qt's %s", (text) => {
     expect(qt).toContain(`"${text}"`);
+    expect(source("Appearance.tsx")).toContain(text);
+  });
+  it.each(APPEARANCE_FILLED)("Appearance fills in Qt's %s", (template, shown) => {
+    expect(qt).toContain(`"${template}"`);
+    expect(source("Appearance.tsx")).toContain(shown);
+  });
+  it.each(WINDOW_LAYER)("Appearance shows WindowLayer's %s", (text) => {
+    expect(layer).toContain(`"${text}"`);
     expect(source("Appearance.tsx")).toContain(text);
   });
   it.each(SESSIONS)("Sessions shows Qt's %s", (text) => {

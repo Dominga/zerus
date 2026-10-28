@@ -145,7 +145,7 @@ Rules (`SessionCommands.h`, `WindowsCommandLine.h`):
 - `windows_command_line` ports `WindowsCommandLine::build` with an empty program: each argument starts with a space; quotes are escaped with their preceding backslashes doubled; an empty value or one with a space or tab is quoted, with trailing backslashes kept outside the closing quote.
 - `open_arguments`: `@computer` first for a peer; then `a NAME`, or `resume NAME --archive ID` when an archive id is given.
 
-- [ ] **Step 1: Write the failing tests** (in `shell.rs`), with the Qt test cases of `tray/src/tests/` for `SessionCommands` where they exist (`tray/tests/test_terminalbackend.cpp`, `tray/tests/test_windowsdesktop.cpp`), plus:
+- [ ] **Step 1: Write the failing tests** (in `shell.rs`), with the Qt test cases for `SessionCommands` (`tray/tests/test_terminalbackend.cpp`, `tray/tests/test_windowsdesktop.cpp`), plus:
 
 ```rust
 #[test]

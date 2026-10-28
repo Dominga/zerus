@@ -120,6 +120,8 @@ private:
     QPushButton *m_previous, *m_next;
     QToolButton *m_queuePrevious, *m_queueNext;
     QPushButton *m_approve, *m_deny;
+    // U19: a subagent card's "Allow all, don't ask again".
+    QPushButton *m_approveAlways;
     QTimer m_reviewTimer;
     QElapsedTimer m_reviewClock;
     int m_reviewMs = 3000, m_reviewSeconds = 3;

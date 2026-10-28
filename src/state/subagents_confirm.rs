@@ -5,7 +5,10 @@
 //! turns into a card for that exact tool use; a team member's card goes to
 //! its lead like any permission request. The calls one assistant message
 //! makes are one group: the card names every open call, and its answer
-//! decides them all. Automatic tool approvals never answer it.
+//! decides them all. Automatic tool approvals never answer it. "Don't ask
+//! again" lasts for the Zerus session (`allow_session`). Claude's settings
+//! never switch the ask off; only an allow rule saved while a call waits
+//! counts, as the owner's answer in Claude's own panel (`newly_allowed`).
 use super::*;
 use sha2::Digest;
 use std::fs;
@@ -61,12 +64,22 @@ fn definition_model(folder: &str, kind: &str) -> Option<String> {
     definition_field(folder, kind, "model")
 }
 
+/// A file name part for `value`: itself when it is a plain id (Claude's
+/// session id is a UUID), else its digest, so it never leaves the state folder.
+fn file_part(value: &str) -> String {
+    let safe = !value.is_empty() && value.len() <= 128 && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if safe { value.to_owned() } else { format!("{:x}", sha2::Sha256::digest(value.as_bytes())) }
+}
+
 fn group_path(session: &str) -> PathBuf {
-    // Claude's session id is a UUID; anything else is named by its digest so
-    // it can never leave the state folder.
-    let safe = !session.is_empty() && session.len() <= 128 && session.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    let name = if safe { session.to_owned() } else { format!("{:x}", sha2::Sha256::digest(session.as_bytes())) };
-    root().join(format!("subagents-turn-{name}.json"))
+    root().join(format!("subagents-turn-{}.json", file_part(session)))
+}
+
+/// The hook that adds a call, the hook that removes it and an answer that
+/// decides the group change one file; each change is made under this lock so
+/// none of them loses another's.
+fn group_lock() -> Option<Guard> {
+    lock(Some(&root().join("subagents-turn.lock"))).ok()
 }
 
 fn read_group(session: &str) -> Vec<Value> {
@@ -79,6 +92,7 @@ fn read_group(session: &str) -> Vec<Value> {
 /// Adds one unanswered call of this turn and returns the still-unanswered
 /// calls, so the reason names only what this answer decides.
 pub(crate) fn group_add(session: &str, tool_use_id: &str, input: &Value) -> Vec<Value> {
+    let _lock = group_lock();
     let mut group = read_group(session);
     group.push(json!({"id":tool_use_id,"input":input}));
     let _ = atomic(&group_path(session), &serde_json::to_string(&group).unwrap_or_default());
@@ -87,6 +101,7 @@ pub(crate) fn group_add(session: &str, tool_use_id: &str, input: &Value) -> Vec<
 
 /// A call answered or denied no longer belongs to the open group.
 pub(crate) fn group_remove(session: &str, tool_use_id: &str) {
+    let _lock = group_lock();
     let mut group = read_group(session);
     let before = group.len();
     group.retain(|entry| entry["id"].as_str() != Some(tool_use_id));
@@ -97,26 +112,62 @@ pub(crate) fn group_remove(session: &str, tool_use_id: &str) {
 
 /// A new owner prompt, Stop or SessionEnd ends the turn.
 pub(crate) fn group_reset(session: &str) {
+    let _lock = group_lock();
     let _ = fs::remove_file(group_path(session));
 }
 
-/// The calls of the turn nobody decided yet: (tool use id, input).
+/// Whether `tool_use_id` is a call of this turn's group, decided or not.
+pub(crate) fn grouped(session: &str, tool_use_id: &str) -> bool {
+    read_group(session).iter().any(|entry| entry["id"].as_str() == Some(tool_use_id))
+}
+
+/// The calls of the turn nobody decided yet and no hook answered on its own
+/// (a rule saved while it waited): (tool use id, input).
 pub(crate) fn open_calls(session: &str) -> Vec<(String, Value)> {
     read_group(session)
         .into_iter()
-        .filter(|entry| entry["decision"].is_null())
+        .filter(|entry| entry["decision"].is_null() && entry["answered"] != true)
         .map(|entry| (string(&entry, "id").to_owned(), entry["input"].clone()))
         .collect()
 }
 
+/// An answer to a group: allow, or deny with the person's message (none:
+/// Terminal's No, which ends the turn). `remember`: the answer is "don't ask
+/// again"; read back for a call, its hook also hands Claude the rule.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Verdict {
+    pub(crate) allow: bool,
+    pub(crate) message: String,
+    pub(crate) remember: bool,
+}
+
+#[cfg(test)]
+impl Verdict {
+    pub(crate) fn allow() -> Self {
+        Self { allow: true, ..Self::default() }
+    }
+    pub(crate) fn deny() -> Self {
+        Self::default()
+    }
+}
+
 /// U19 (3): one answer decides the whole group it showed: `ids` are allowed
-/// or denied together. Only calls still open take the decision.
-pub(crate) fn decide(session: &str, ids: &[String], allow: bool) {
+/// or denied together. Only calls still open take the decision. `carrier`
+/// is the waiting call whose hook also hands Claude the "don't ask again"
+/// rule: one hook, so Claude adds it once.
+pub(crate) fn decide(session: &str, ids: &[String], verdict: &Verdict, carrier: Option<&str>) {
+    let _lock = group_lock();
     let mut group = read_group(session);
     let mut changed = false;
     for entry in group.iter_mut() {
         if entry["decision"].is_null() && ids.iter().any(|id| entry["id"].as_str() == Some(id.as_str())) {
-            entry["decision"] = json!(if allow { "allow" } else { "deny" });
+            entry["decision"] = json!(if verdict.allow { "allow" } else { "deny" });
+            if !verdict.allow && !verdict.message.is_empty() {
+                entry["message"] = json!(verdict.message);
+            }
+            if verdict.remember && carrier.is_some_and(|carrier| entry["id"].as_str() == Some(carrier)) {
+                entry["remember"] = json!(true);
+            }
             changed = true;
         }
     }
@@ -125,12 +176,212 @@ pub(crate) fn decide(session: &str, ids: &[String], allow: bool) {
     }
 }
 
+/// The answer the group gave every call of `ids` still in it, when they all
+/// got the same one: a hook that cannot tell which of several identical calls
+/// it serves hands Claude only that. `own` is the call the hook stands for;
+/// its entry says whether it carries the rule.
+pub(crate) fn common_verdict(session: &str, ids: &[String], own: &str) -> Option<Verdict> {
+    let group = read_group(session);
+    let mut common: Option<(bool, String)> = None;
+    for entry in group.iter().filter(|entry| ids.iter().any(|id| entry["id"].as_str() == Some(id.as_str()))) {
+        let allow = match entry["decision"].as_str()? {
+            "allow" => true,
+            "deny" => false,
+            _ => return None,
+        };
+        let answer = (allow, string(entry, "message").to_owned());
+        if common.as_ref().is_some_and(|common| *common != answer) {
+            return None;
+        }
+        common = Some(answer);
+    }
+    let (allow, message) = common?;
+    let remember = group.iter().any(|entry| entry["id"].as_str() == Some(own) && entry["remember"] == true);
+    Some(Verdict { allow, message, remember })
+}
+
+/// The group's answer for this call, none yet.
+pub(crate) fn verdict(session: &str, tool_use_id: &str) -> Option<Verdict> {
+    common_verdict(session, &[tool_use_id.to_owned()], tool_use_id)
+}
+
 /// The group's decision for this call: "allow", "deny" or none yet.
+#[cfg(test)]
 pub(crate) fn decided(session: &str, tool_use_id: &str) -> Option<String> {
-    read_group(session)
-        .into_iter()
-        .find(|entry| entry["id"].as_str() == Some(tool_use_id))
-        .and_then(|entry| entry["decision"].as_str().map(str::to_owned))
+    verdict(session, tool_use_id).map(|verdict| if verdict.allow { "allow" } else { "deny" }.to_owned())
+}
+
+/// The waiting hook of `tool_use_id` handed Claude its answer: `hgs answer`
+/// confirms a delivery by this, and a card no longer lists the call.
+pub(crate) fn mark_answered(session: &str, tool_use_id: &str) {
+    let _lock = group_lock();
+    let mut group = read_group(session);
+    if let Some(entry) = group.iter_mut().find(|entry| entry["id"].as_str() == Some(tool_use_id)) {
+        entry["answered"] = json!(true);
+        let _ = atomic(&group_path(session), &serde_json::to_string(&group).unwrap_or_default());
+    }
+}
+
+/// Whether the hook of `tool_use_id` handed Claude its answer.
+pub(crate) fn answered(session: &str, tool_use_id: &str) -> bool {
+    read_group(session).iter().any(|entry| entry["id"].as_str() == Some(tool_use_id) && entry["answered"] == true)
+}
+
+/// "Don't ask again" for one Zerus session. The turn group ends with each
+/// turn, and Claude's conversation id changes with /clear, compaction or a
+/// resume into a new transcript, so neither can hold it. The session's name
+/// and its `created` time can: a resume keeps both (lifecycle copies
+/// `created` from the saved binding), while a fresh start, a fork or a new
+/// session reusing the name gets a new one. One small file per session name,
+/// replaced by the next allowance of that name and removed once its session
+/// is gone (`prune_allowances`).
+fn allowance_dir() -> PathBuf {
+    root().join("subagents-allowed")
+}
+
+fn allowance_path(name: &str) -> PathBuf {
+    allowance_dir().join(format!("{:x}.json", sha2::Sha256::digest(name.as_bytes())))
+}
+
+/// Records the owner's "don't ask again" for the session of `record`.
+pub(crate) fn allow_session(record: &Value) -> Result<()> {
+    let name = string(record, "name");
+    if name.is_empty() || record["created"].is_null() {
+        return Err("the session has no lasting identity".into());
+    }
+    prune_allowances(PRUNE_LIMIT);
+    atomic(&allowance_path(name), &json!({"name":name,"created":record["created"],"at":now()}).to_string())
+}
+
+/// Whether the owner said "don't ask again" for this Zerus session.
+pub(crate) fn session_allowed(record: &Value) -> bool {
+    let name = string(record, "name");
+    if name.is_empty() || record["created"].is_null() {
+        return false;
+    }
+    fs::read_to_string(allowance_path(name))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .is_some_and(|saved| saved["name"] == name && saved["created"] == record["created"])
+}
+
+/// How many allowances one look checks.
+pub(crate) const PRUNE_LIMIT: usize = 256;
+
+/// Removes the allowances of sessions that are gone: no saved binding of that
+/// name (terminated into Archive, or forgotten), or one with another
+/// `created` time (a fresh start or a new session of that name). It runs
+/// when an allowance is recorded and when a permission hook starts, and
+/// checks at most `limit` files.
+pub(crate) fn prune_allowances(limit: usize) {
+    let Ok(entries) = fs::read_dir(allowance_dir()) else { return };
+    for entry in entries.flatten().take(limit) {
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let saved = fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        let live = saved.as_ref().is_some_and(|saved| {
+            let name = string(saved, "name");
+            !name.is_empty()
+                && fs::read_to_string(record_path(name))
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                    .is_some_and(|current| current["name"] == name && current["created"] == saved["created"])
+        });
+        if !live {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+/// The subagent types a permission rule names: `Agent`, `Task`, `Agent(*)`,
+/// `Task(*)` or an empty `Agent()` all (None), `Agent(Explore)` only that
+/// type. Not a subagent rule: nothing. Claude renamed Task to Agent and reads
+/// either name.
+fn subagent_rule(rule: &str) -> Option<Option<&str>> {
+    let rule = rule.trim();
+    let (tool, content) = match rule.split_once('(') {
+        Some((tool, rest)) => (tool.trim(), Some(rest.strip_suffix(')')?.trim())),
+        None => (rule, None),
+    };
+    if !matches!(tool, "Agent" | "Task") {
+        return None;
+    }
+    Some(content.filter(|kind| !kind.is_empty() && *kind != "*"))
+}
+
+/// The subagent rules in Claude's settings for the session: allow rules from
+/// the files Claude's own "don't ask again" writes (the user's and the
+/// folder's local settings), ask and deny rules from those and the folder's
+/// shared settings. A committed project allow rule is no answer of the owner's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SavedRules {
+    allow: Vec<String>,
+    ask: Vec<String>,
+    deny: Vec<String>,
+}
+
+/// The user's settings file: in `CLAUDE_CONFIG_DIR`, which the hook inherits,
+/// else in the account home the record names, else in ~/.claude.
+fn user_settings(record: &Value) -> PathBuf {
+    let account = Some(string(record, "agent_home").to_owned()).filter(|home| !home.is_empty());
+    // Tests name the user folder in the record and never read the real one.
+    #[cfg(test)]
+    let config = account.map_or_else(|| PathBuf::from("/nonexistent-claude-config"), PathBuf::from);
+    #[cfg(not(test))]
+    let config = nonempty_env("CLAUDE_CONFIG_DIR").or(account).map_or_else(|| home().join(".claude"), PathBuf::from);
+    config.join("settings.json")
+}
+
+/// The session's subagent rules now; None when a settings file exists but
+/// cannot be read, so nothing is taken from them. Only waiting subagent hooks
+/// read these few small files, at most once a second.
+pub(crate) fn saved_rules(record: &Value) -> Option<SavedRules> {
+    let mut files = vec![(user_settings(record), true)];
+    let folder = string(record, "cwd");
+    if !folder.is_empty() {
+        let project = Path::new(folder).join(".claude");
+        files.push((project.join("settings.local.json"), true));
+        files.push((project.join("settings.json"), false));
+    }
+    let mut rules = SavedRules::default();
+    for (path, owners) in files {
+        let text = match fs::read(&path) {
+            Ok(bytes) if bytes.len() <= 1024 * 1024 => String::from_utf8(bytes).ok()?,
+            Ok(_) => return None,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        let settings: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
+        for (list, found) in [("allow", &mut rules.allow), ("ask", &mut rules.ask), ("deny", &mut rules.deny)] {
+            let entries = &settings["permissions"][list];
+            if !entries.is_null() && !entries.is_array() {
+                return None;
+            }
+            if list == "allow" && !owners {
+                continue;
+            }
+            found.extend(entries.as_array().into_iter().flatten().filter_map(Value::as_str)
+                .filter(|rule| subagent_rule(rule).is_some()).map(|rule| rule.trim().to_owned()));
+        }
+    }
+    Some(rules)
+}
+
+/// Whether the owner chose "don't ask again" in Claude's own panel while this
+/// call waited: an allow rule naming its subagent type appeared that `before`
+/// (the rules when the call started waiting) did not have, and no ask or deny
+/// rule names it. A rule that already existed never counts. A call without a
+/// type is Claude's general-purpose one.
+pub(crate) fn newly_allowed(before: &SavedRules, now: &SavedRules, input: &Value) -> bool {
+    let kind = match string(input, "subagent_type") {
+        "" => "general-purpose",
+        kind => kind,
+    };
+    let names = |rule: &&String| subagent_rule(rule).is_some_and(|only| only.is_none_or(|only| only == kind));
+    !now.ask.iter().chain(&now.deny).any(|rule| names(&rule))
+        && now.allow.iter().filter(names).any(|rule| !before.allow.contains(rule))
 }
 
 /// The card text and the calls it decides, for the call `tool_use_id`: every
@@ -154,13 +405,20 @@ pub(crate) fn pre_tool(record: &mut Value, event: &Value, session: &str) -> Opti
         return None;
     }
     let tool = ["tool_use_id", "tool_call_id"].iter().map(|key| string(event, key)).find(|id| !id.is_empty()).unwrap_or_default();
-    if let Some(decision) = decided(session, tool) {
-        let allow = decision == "allow";
+    if let Some(verdict) = verdict(session, tool) {
+        let allow = verdict.allow;
         record["subagent_confirm"] = json!(if allow { "allowed with its group" } else { "denied with its group" });
+        let reason = if allow { "Allowed with the other subagents of this message" }
+            else if verdict.message.is_empty() { "Denied with the other subagents of this message" }
+            else { verdict.message.as_str() };
         return Some(json!({"hookSpecificOutput":{"hookEventName":"PreToolUse",
             "permissionDecision":if allow { "allow" } else { "deny" },
-            "permissionDecisionReason":if allow { "Allowed with the other subagents of this message" }
-                else { "Denied with the other subagents of this message" }}}));
+            "permissionDecisionReason":reason}}));
+    }
+    // "Don't ask again" for this Zerus session: Claude's own policy applies,
+    // as without the setting. Claude's settings files never stop the ask.
+    if session_allowed(record) {
+        return None;
     }
     let calls = group_add(session, tool, &event["tool_input"]);
     let folder = string(record, "cwd").to_owned();
@@ -399,7 +657,7 @@ mod tests {
             assert_eq!(text, "Start 2 subagents: Explore (model haiku): Find the callers; general (model inherits claude-opus-4-6): Write the fix");
             // The answer to that card decides both; a later hook for either
             // takes it without asking again.
-            decide("conversation", &calls, false);
+            decide("conversation", &calls, &Verdict::deny(), None);
             let denied = pre_tool(&mut owner, &agent_call("toolu_2", "general", "", "Write the fix"), "conversation").unwrap();
             assert_eq!(denied["hookSpecificOutput"]["permissionDecision"], "deny");
             assert!(card("conversation", "toolu_1", "/work", "m").is_none(), "nothing open is left to show");
@@ -514,5 +772,178 @@ mod tests {
             "Sonnet",
         );
         assert_eq!(text, "Start 1 subagent: reviewer (model Opus 4): Check");
+    }
+
+    /// "Don't ask again" lasts for the Zerus session: across turns (the
+    /// group ends), a new conversation and a resume (same name and created
+    /// time), but not for another session of the same name. Allowed calls get
+    /// no decision, so Claude's own policy applies, and join no group.
+    #[test]
+    fn dont_ask_again_lasts_for_the_zerus_session() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut owner = json!({"agent":"claude","name":"claude/x/owner","run_id":"r1","created":1700000000,"cwd":"/work"});
+            pre_tool(&mut owner, &agent_call("toolu_1", "Explore", "", "Find the callers"), "conversation");
+            assert!(grouped("conversation", "toolu_1"), "asked before the answer");
+            allow_session(&owner).unwrap();
+            group_reset("conversation");
+            let mut resumed = json!({"agent":"claude","name":"claude/x/owner","run_id":"r2","created":1700000000,"cwd":"/work"});
+            for (record, conversation) in [(&mut owner, "conversation"), (&mut resumed, "after-clear")] {
+                let quiet = record.clone();
+                assert!(pre_tool(record, &agent_call("toolu_2", "general", "", "Write the fix"), conversation).is_none());
+                assert!(open_calls(conversation).is_empty() && *record == quiet, "nothing grouped or noted");
+            }
+            // A new session of that name, a fresh start or a record without a
+            // lasting identity is asked again.
+            let mut fresh = json!({"agent":"claude","name":"claude/x/owner","run_id":"r3","created":1700000500,"cwd":"/work"});
+            pre_tool(&mut fresh, &agent_call("toolu_3", "Explore", "", "x"), "fresh");
+            assert!(grouped("fresh", "toolu_3"));
+            let unnamed = json!({"agent":"claude","run_id":"r4"});
+            assert!(allow_session(&unnamed).is_err() && !session_allowed(&unnamed));
+            assert!(!session_allowed(&json!({"name":"claude/x/owner"})), "no created time, no allowance");
+            // A group's denial with the person's message reaches a later hook as its reason.
+            decide("fresh", &["toolu_3".to_owned()], &Verdict { message: "Use the docs instead".into(), ..Verdict::deny() }, None);
+            let denied = pre_tool(&mut fresh, &agent_call("toolu_3", "Explore", "", "x"), "fresh").unwrap();
+            assert_eq!(denied["hookSpecificOutput"]["permissionDecision"], "deny");
+            assert_eq!(denied["hookSpecificOutput"]["permissionDecisionReason"], "Use the docs instead");
+        });
+    }
+
+    /// Claude's settings never switch the ask off: an allow rule a repository
+    /// committed or an agent wrote is no answer of the owner's, so the call is
+    /// still asked. Only an allow rule for the subagent that appears in the
+    /// user's or the folder's local settings while a call waits counts, as the
+    /// owner's "don't ask again" in Claude's own panel; any ask or deny rule
+    /// for it, or a file that cannot be read, means no.
+    #[test]
+    fn a_saved_rule_never_stops_the_ask_and_counts_only_when_new() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let user = dir.path().join("account");
+            let project = dir.path().join("project");
+            fs::create_dir_all(&user).unwrap();
+            fs::create_dir_all(project.join(".claude")).unwrap();
+            let record = json!({"agent":"claude","name":"claude/x/rules","run_id":"r1","created":1,
+                "cwd":project.display().to_string(),"agent_home":user.display().to_string()});
+            let settings = |path: &Path, list: &str, rules: &[&str]| {
+                fs::write(path, json!({"permissions":{list:rules}}).to_string()).unwrap();
+            };
+            let local = project.join(".claude/settings.local.json");
+            let shared = project.join(".claude/settings.json");
+            let user_file = user.join("settings.json");
+            let explore = json!({"subagent_type":"Explore"});
+            let general = json!({"description":"no type: general-purpose"});
+            // Rules that exist before an ask never stop it.
+            settings(&local, "allow", &["Agent"]);
+            settings(&user_file, "allow", &["Task(*)"]);
+            settings(&shared, "allow", &["Agent"]);
+            let mut owner = record.clone();
+            pre_tool(&mut owner, &agent_call("toolu_1", "Explore", "", "x"), "conversation");
+            assert!(grouped("conversation", "toolu_1"), "a saved allow rule is still asked");
+            let before = saved_rules(&record).unwrap();
+            assert!(!newly_allowed(&before, &saved_rules(&record).unwrap(), &explore), "an old rule never counts");
+            for path in [&local, &user_file, &shared] {
+                fs::remove_file(path).unwrap();
+            }
+            let before = saved_rules(&record).unwrap();
+            // A new allow rule in the user's or the local settings counts, for
+            // the subagent types it names.
+            for rule in ["Agent", "Task", "Agent(*)", "Task(*)", " Agent ( * ) ", "Agent()"] {
+                settings(&local, "allow", &[rule]);
+                let now = saved_rules(&record).unwrap();
+                assert!(newly_allowed(&before, &now, &explore) && newly_allowed(&before, &now, &general), "{rule}");
+            }
+            settings(&local, "allow", &["Agent(Explore)", "Bash", "Read(Agent)"]);
+            let now = saved_rules(&record).unwrap();
+            assert!(newly_allowed(&before, &now, &explore) && !newly_allowed(&before, &now, &general));
+            fs::remove_file(&local).unwrap();
+            settings(&user_file, "allow", &["Task(general-purpose)"]);
+            let now = saved_rules(&record).unwrap();
+            assert!(!newly_allowed(&before, &now, &explore) && newly_allowed(&before, &now, &general));
+            // The project's shared settings are no owner's answer.
+            fs::remove_file(&user_file).unwrap();
+            settings(&shared, "allow", &["Agent"]);
+            assert!(!newly_allowed(&before, &saved_rules(&record).unwrap(), &explore));
+            // Any ask or deny rule for the subagent means no, wherever it is.
+            settings(&local, "allow", &["Agent"]);
+            for list in ["ask", "deny"] {
+                for (path, rule) in [(&shared, "Agent(Explore)"), (&user_file, "Task")] {
+                    settings(path, list, &[rule]);
+                    assert!(!newly_allowed(&before, &saved_rules(&record).unwrap(), &explore), "{list} {rule}");
+                    fs::remove_file(path).unwrap();
+                }
+            }
+            assert!(newly_allowed(&before, &saved_rules(&record).unwrap(), &explore));
+            // A file that cannot be read, or a list that is not one, gives nothing.
+            fs::write(&shared, "{").unwrap();
+            assert!(saved_rules(&record).is_none());
+            fs::write(&shared, r#"{"permissions":{"deny":"Agent"}}"#).unwrap();
+            assert!(saved_rules(&record).is_none());
+        });
+    }
+
+    /// An allowance goes with its session: a terminated, forgotten or
+    /// replaced session's file is removed by the next look.
+    #[test]
+    fn allowances_of_sessions_that_are_gone_are_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut kept = json!({"version":1,"agent":"claude","name":"claude/x/kept","run_id":"r1","created":1});
+            let mut replaced = json!({"version":1,"agent":"claude","name":"claude/x/replaced","run_id":"r2","created":2});
+            let gone = json!({"version":1,"agent":"claude","name":"claude/x/gone","run_id":"r3","created":3});
+            super::super::storage::write(&mut kept).unwrap();
+            super::super::storage::write(&mut replaced).unwrap();
+            for record in [&kept, &replaced, &gone] {
+                allow_session(record).unwrap();
+            }
+            replaced["created"] = json!(20);
+            super::super::storage::write(&mut replaced).unwrap();
+            prune_allowances(PRUNE_LIMIT);
+            assert!(session_allowed(&kept));
+            assert!(!allowance_path("claude/x/gone").exists() && !allowance_path("claude/x/replaced").exists());
+            assert_eq!(fs::read_dir(allowance_dir()).unwrap().count(), 1);
+        });
+    }
+
+    #[test]
+    fn only_subagent_rules_name_subagents() {
+        assert_eq!(subagent_rule("Agent"), Some(None));
+        assert_eq!(subagent_rule("Task(*)"), Some(None));
+        assert_eq!(subagent_rule("Agent()"), Some(None));
+        assert_eq!(subagent_rule("Agent(Explore)"), Some(Some("Explore")));
+        for other in ["Bash", "Bash(Agent)", "Agents", "MyAgent", "Agent(Explore", "mcp__x__Agent"] {
+            assert_eq!(subagent_rule(other), None, "{other}");
+        }
+    }
+
+    /// One answer marks every open call it names, once; only the carrier the
+    /// answer names hands Claude the rule, and a later answer changes nothing.
+    /// Identical calls take an answer only when all of them got the same one.
+    #[test]
+    fn a_verdict_decides_each_open_call_once() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            for id in ["t1", "t2", "t3"] {
+                group_add("s", id, &json!({"subagent_type":"Explore"}));
+            }
+            let ids = ["t1".to_owned(), "t2".to_owned()];
+            decide("s", &ids, &Verdict { remember: true, ..Verdict::allow() }, Some("t2"));
+            assert_eq!(verdict("s", "t1"), Some(Verdict::allow()));
+            assert_eq!(verdict("s", "t2"), Some(Verdict { allow: true, message: String::new(), remember: true }));
+            assert_eq!(verdict("s", "t3"), None);
+            decide("s", &ids, &Verdict::deny(), None);
+            assert_eq!(decided("s", "t2").as_deref(), Some("allow"), "decided once");
+            assert!(grouped("s", "t3") && !grouped("s", "t4"));
+            let all = ["t1".to_owned(), "t2".to_owned(), "t3".to_owned()];
+            assert_eq!(common_verdict("s", &ids, "t1"), Some(Verdict::allow()));
+            assert_eq!(common_verdict("s", &all, "t1"), None, "t3 is not decided yet");
+            decide("s", &["t3".to_owned()], &Verdict::deny(), None);
+            assert_eq!(common_verdict("s", &all, "t1"), None, "they were not all given the same");
+            // A call its hook answered on its own leaves the open calls.
+            group_add("s", "t4", &json!({"subagent_type":"Explore"}));
+            assert!(!answered("s", "t4") && open_calls("s").len() == 1);
+            mark_answered("s", "t4");
+            assert!(answered("s", "t4") && open_calls("s").is_empty() && grouped("s", "t4"));
+        });
     }
 }

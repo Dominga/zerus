@@ -35,6 +35,7 @@ pub mod questions;
 pub mod readmarks;
 pub mod reads;
 pub mod readsync;
+pub mod recovery_settings;
 pub mod repository;
 pub mod run;
 pub mod send;

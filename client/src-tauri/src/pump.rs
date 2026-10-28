@@ -86,6 +86,15 @@ impl Pump {
         self.0 .1.notify_all();
     }
 
+    /// A computer's machine card, once its listing named one.
+    pub fn machine(&self, computer: &ComputerId) -> Option<MachineMeta> {
+        self.lock()
+            .mirror
+            .computers
+            .get(&computer.0)
+            .and_then(|rows| rows.machine.clone())
+    }
+
     /// The fleet as the screens see it: every computer whose status has not
     /// ended, this computer first (the mirror is keyed by the id's string,
     /// and "" sorts first), with its machine card's host, platform and the

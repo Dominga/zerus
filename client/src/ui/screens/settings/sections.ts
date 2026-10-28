@@ -4,6 +4,7 @@ import { AppearanceSection } from "./Appearance";
 import { SessionsSection } from "./Sessions";
 import { KeyboardSection } from "./Keyboard";
 import { VoiceSection, refreshVoice } from "./Voice";
+import { RecoverySection, refreshRecovery } from "./Recovery";
 import { AboutSection, refreshAbout } from "./About";
 
 // Settings sections in Qt's order (tray/src/SettingsPage.h:43, Worktrees
@@ -26,7 +27,7 @@ export interface Section {
 export const SECTIONS: readonly Section[] = [
   { id: "appearance", label: "Appearance", icon: "palette", component: AppearanceSection },
   { id: "sessions", label: "Sessions", icon: "rows-3", component: SessionsSection },
-  { id: "recovery", label: "Automatic recovery", icon: "rotate-ccw" },
+  { id: "recovery", label: "Automatic recovery", icon: "rotate-ccw", component: RecoverySection, refresh: refreshRecovery },
   { id: "processes", label: "Processes", icon: "activity" },
   { id: "updates", label: "Updates", icon: "download" },
   { id: "mobile", label: "Mobile connection", icon: "smartphone" },

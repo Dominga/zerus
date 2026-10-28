@@ -239,6 +239,9 @@ fn spawn(app: &AppHandle, inner: &Arc<Inner>, later: Vec<Later>) {
                 });
             }
             Later::Flush => {
+                // The answer belongs to the one change being stored: the core
+                // starts no other while one is stored or under way (busy and
+                // pending refuse it), so no older flush can answer a newer one.
                 std::thread::spawn(move || {
                     let written = speech_settings::pending_written(&app.state::<Store>().0);
                     answer(&app, &inner, |providers| {

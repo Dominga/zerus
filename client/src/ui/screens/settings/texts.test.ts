@@ -113,7 +113,34 @@ const VOICE_CORE_FILLED: [string, string][] = [
   ["Recognition service is not ready on %1. %2", "Recognition service is not ready on {computer}. {}"],
 ];
 
+const recoveryQt = fs.readFileSync(new URL("tray/src/RecoverySettings.h", repo), "utf8");
+const recoveryCore = fs.readFileSync(new URL("client/core/src/recovery_settings.rs", repo), "utf8");
+const RECOVERY = [
+  "Automatic recovery", "Shared by all connected machines. Agents finish their own retries first; recovery continues the same task.",
+  "Recover automatically after temporary failures", "Overload / server unavailable", "Temporary rate limit", "Session usage limit",
+  "Connection / timeout", "Wait for reset", "Retry on a schedule",
+  "Wait until the provider's reset time by default. If no reset time is available, recovery needs your attention. Choose a schedule to retry at your own intervals.",
+  "Retry after (seconds)", "Save recovery settings", "Reload", "Saved.",
+  String.raw`Each positive number is a delay before the next attempt. End with −1 to stop, or 0 to repeat the previous delay forever.\nExample: 300, 0 retries every 5 minutes until stopped.\n\nNew messages and Stop cancel recovery. Sign-in, balance, other quota and context errors require your action.`,
+];
+const RECOVERY_CORE = [
+  "To configure automatic recovery, enable local sessions for this computer in Machines or add a remote machine.",
+  "Add a remote machine in Machines to configure automatic recovery; this computer runs no agents.",
+  "Synchronizing recovery settings…", "Synchronized with 1 machine. Changes from any Zerus are shared.",
+  "Wait for synchronization to finish before saving.", "Settings changed in another Zerus. Reload before saving.",
+  "Connect a remote machine to save recovery settings.", "Update HGS on this machine to synchronize recovery settings.",
+  "this machine", "Use 1–16 values: delays from 1 to 86400 seconds; −1 or 0 may only be last, and 0 needs a preceding delay.",
+];
+
 describe("Settings texts", () => {
+  it.each(RECOVERY)("Automatic recovery shows Qt's %s", (text) => {
+    expect(recoveryQt).toContain(`"${text}"`);
+    expect(source("Recovery.tsx")).toContain(text);
+  });
+  it.each(RECOVERY_CORE)("the recovery core says Qt's %s", (text) => {
+    expect(recoveryQt).toContain(`"${text}"`);
+    expect(recoveryCore).toContain(`"${text}"`);
+  });
   it.each(VOICE)("Voice input shows Qt's %s", (text) => {
     expect(speech).toContain(`"${text}"`);
     expect(source("Voice.tsx")).toContain(text);

@@ -24,6 +24,8 @@ mod platform;
 mod pump;
 #[cfg(feature = "live")]
 mod readsync;
+#[cfg(feature = "live")]
+mod recovery;
 pub mod renderer;
 #[cfg(feature = "live")]
 mod replay;
@@ -267,6 +269,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 std::fs::create_dir_all(&dir)?;
                 app.manage(settings::open(app.handle(), &dir));
                 app.manage(speech_settings::SpeechPage::default());
+                app.manage(recovery::start(app.handle()));
                 // A replay never touches the real read or attention marks.
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
@@ -579,6 +582,10 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         settings::hgs_version,
         settings::open_repository,
         speech_settings::speech_input,
+        recovery::recovery_view,
+        recovery::recovery_load,
+        recovery::recovery_save,
+        recovery::recovery_reload,
         speech_settings::open_speech_documentation,
         actions::run_action,
         actions::set_notifications,

@@ -352,6 +352,42 @@ private slots:
                               .arg(cursor.col)));
     }
   }
+  // Owner, 2026-10-28: the desktop crashed resizing a 261-column terminal. Its
+  // top row continued a line whose head was in the scrollback, and the reflow
+  // copied cells from row -1. Every cell after the resize is the line's own.
+  void reflowFromAContinuedTopRowStaysInsideTheBuffer() {
+    const QList<QSize> targets{{20, 4}, {3, 7}, {10, 5}, {261, 3}};
+    for (const QSize target : targets) {
+      VTerm *terminal = vterm_new(5, 10);
+      auto release = qScopeGuard([terminal] { vterm_free(terminal); });
+      vterm_set_utf8(terminal, 1);
+      VTermScreen *screen = vterm_obtain_screen(terminal);
+      vterm_screen_enable_altscreen(screen, 1);
+      vterm_screen_enable_reflow(screen, true);
+      vterm_screen_reset(screen, 1);
+      // 100 characters wrap over ten rows of a five-row screen: every row
+      // shown, the top one too, continues the line.
+      const QByteArray line(100, 'x');
+      vterm_input_write(terminal, line.constData(), size_t(line.size()));
+      VTermState *state = vterm_obtain_state(terminal);
+      QVERIFY(vterm_state_get_lineinfo(state, 0)->continuation);
+      vterm_set_size(terminal, target.height(), target.width());
+      int rows = 0, columns = 0;
+      vterm_get_size(terminal, &rows, &columns);
+      QCOMPARE(QSize(columns, rows), target);
+      for (int row = 0; row < rows; ++row)
+        for (int column = 0; column < columns; ++column) {
+          VTermScreenCell cell{};
+          QVERIFY(vterm_screen_get_cell(screen, VTermPos{row, column}, &cell));
+          QVERIFY2(cell.chars[0] == 0 || cell.chars[0] == 'x',
+                   qPrintable(QStringLiteral("%1x%2: cell %3,%4 is %5")
+                                  .arg(columns).arg(rows).arg(row).arg(column).arg(cell.chars[0])));
+        }
+      VTermPos cursor{};
+      vterm_state_get_cursorpos(state, &cursor);
+      QVERIFY(cursor.row >= 0 && cursor.row < rows && cursor.col >= 0 && cursor.col < columns);
+    }
+  }
   // U10: a tab switch shows the terminal while it is still narrow. A hidden or
   // tiny viewport keeps the agent's screen size; a normal resize still works.
   void hiddenOrTinyTerminalKeepsItsSize() {

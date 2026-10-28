@@ -112,6 +112,29 @@ describe("OpenCode (NewSessionDialog.cpp 1145-1313)", () => {
     expect(t.choices()).toMatchObject({ model: "folderonly/proj", effort: "" });
   });
 
+  it("openCodeAllModelsSearchesTheFolderCatalog", async () => {
+    const t = setup(opencode);
+    await t.open({ agent: "opencode", path: "/workspace/example" });
+    t.act.openModelPicker();
+    await settle();
+    expect(t.values()).toContain("folderonly/proj");
+    t.act.pickerToggleAll();
+    t.act.pickerSearch("solo");
+    await settle();
+    expect(t.values()).toEqual(["solo/solo-model"]);
+    // The folder catalog is fetched once.
+    expect(t.world.count("openCodeModels")).toBe(1);
+    t.act.pickerSelect("solo/solo-model");
+    expect(t.state()).toMatchObject({ pickerOpen: false, effortVisible: true, model: "solo/solo-model" });
+    expect(t.state().efforts.length).toBe(2);
+    // Reopened, the search the field keeps still narrows the list, and nothing is read again.
+    t.act.openModelPicker();
+    await settle();
+    expect(t.state().picker.query).toBe("solo");
+    expect(t.world.count("openCodeModels")).toBe(1);
+    expect(t.world.creating()).toEqual([]);
+  });
+
   it("openCodeChoicesOutsideTheRowSurviveAnAccountRefresh", async () => {
     const t = setup(opencode);
     await t.open({ agent: "opencode", path: "/workspace/example" });

@@ -19,6 +19,8 @@ describe("folder paths (paths.rs)", () => {
         expect(paths.clean(entry.path, style), `clean ${label}`).toBe(want.clean);
         expect(paths.leaf(entry.path, style), `leaf ${label}`).toBe(want.leaf);
         expect(paths.native(entry.path, style), `native ${label}`).toBe(want.native);
+        expect(paths.split(entry.path, style), `split ${label}`).toEqual(want.split);
+        expect(paths.join(entry.path, "child"), `join ${label}`).toBe(want.join);
       }
     }
   });

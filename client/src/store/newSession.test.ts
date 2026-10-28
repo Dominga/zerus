@@ -826,6 +826,69 @@ describe("reads only (Review Focus 1 and 2)", () => {
   });
 });
 
+// The child dialogs answer with the computer and project they opened with
+// (browseFolder 581-588, chooseWorktree 1114-1124, createWorktree 1125-1143).
+describe("the child dialogs' answers (Task 4)", () => {
+  const world = (w: World) => {
+    w.projects = [
+      project("work", "Work", [folder("f1", "pc", "/srv/work"), folder("f2", "mac", "/srv/peer")], { is_default: true }),
+      project("docs", "Docs", [folder("f3", "pc", "/srv/docs")]),
+    ];
+  };
+
+  it("a browsed folder applies only while its computer and project are the dialog's", async () => {
+    const t = setup(world);
+    await t.open({ project: "work", computer: "mac" });
+    expect(t.state()).toMatchObject({ host: "mac", style: "posix" });
+    t.act.applyBrowsedFolder("mac", "work", "/home/example/notes/");
+    expect(t.state()).toMatchObject({ folderPath: "/home/example/notes", autoPreferred: true });
+    t.act.applyBrowsedFolder("", "work", "/srv/elsewhere");
+    t.act.applyBrowsedFolder("mac", "docs", "/srv/elsewhere");
+    expect(t.state().folderPath).toBe("/home/example/notes");
+    // The clone's parent on a peer: the store builds the Clone to field from it.
+    t.act.setSource(true);
+    t.act.setUrl("https://example.invalid/team/app.git");
+    await settle();
+    t.act.setRepositoryParent("/home/example/src");
+    await settle();
+    expect(t.state().destination).toBe("/home/example/src/app");
+    expect(t.world.creating()).toEqual([]);
+  });
+
+  it("Choose existing… sets None and selects the folder, only in its own context", async () => {
+    const t = setup(world);
+    await t.open({ project: "work", folder: "f1" });
+    expect(t.state().autoPreferred).toBe(true);
+    t.act.chooseExistingWorktree("mac", "work", "/srv/work-fix");
+    t.act.chooseExistingWorktree("", "docs", "/srv/work-fix");
+    expect(t.state()).toMatchObject({ folderPath: "/srv/work", autoPreferred: true });
+    t.act.chooseExistingWorktree("", "work", "/srv/work-fix");
+    expect(t.state()).toMatchObject({ folderPath: "/srv/work-fix", autoPreferred: false });
+    expect(t.world.creating()).toEqual([]);
+  });
+
+  it("a created worktree joins as verified and is selected with None; in another context the error line names it", async () => {
+    const t = setup(world);
+    await t.open({ project: "work", folder: "f1" });
+    const verified = { state: "ok", common_dir: "/srv/work/.git", worktrees: [{ path: "/srv/work-new", kind: "linked", available: true }] };
+    t.act.worktreeCreated("", "work", "/srv/work-new", verified);
+    await settle();
+    expect(t.state()).toMatchObject({ folderPath: "/srv/work-new", autoPreferred: false });
+    // The form reads that catalog as the new folder's verified one (1137-1141).
+    const input = t.world.of("newSessionForm").at(-1)?.args[0] as NewSessionFormInput;
+    expect(input.verified).toEqual(verified);
+    t.act.chooseComputer(t.state().computers.findIndex((c) => c.target === "mac"));
+    await settle();
+    t.act.worktreeCreated("", "work", "/srv/work-other", verified);
+    expect(t.state().error).toBe("Worktree created at /srv/work-other on pc. Select that folder to start a session.");
+    expect(t.state().host).toBe("mac");
+    t.act.worktreeCreated("mac", "docs", "/srv/peer-other", verified);
+    expect(t.state().error).toBe("Worktree created at /srv/peer-other on mac. Select that folder to start a session.");
+    // The store itself never creates: the dialog's own Create worktree did.
+    expect(t.world.creating()).toEqual([]);
+  });
+});
+
 describe("what the dialog view reads (Task 3)", () => {
   // updateForm 667: the New project row stays while the repository's New project… is remembered.
   it("keeps the New project row after leaving the repository source", async () => {

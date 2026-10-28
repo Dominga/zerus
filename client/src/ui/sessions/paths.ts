@@ -3,7 +3,7 @@ import { array, object, string, type Json } from "../lib/json";
 
 // Folder paths in the form of the computer they belong to, and New session's
 // folder helpers: a line-for-line port of client/core/src/paths.rs (`of`,
-// `absolute`, `clean`, `same`, `within`, `leaf`, `native`) and of
+// `absolute`, `clean`, `same`, `within`, `leaf`, `native`, `split`, `join`) and of
 // client/core/src/launch.rs `matching_project_folder`, `prefill_target` and
 // `restored_folder`, with the same names where JavaScript allows.
 //
@@ -157,6 +157,22 @@ export function leaf(path: string, style: Style): string {
 export function native(path: string, style: Style): string {
   return style === "posix" ? path : path.replaceAll("/", "\\");
 }
+
+/**
+ * `QFileInfo(path).path()` and `fileName()`, by the folder's style: the
+ * parent ("/" for "/repo", "C:/" for "C:/repo") and the last name.
+ */
+export function split(path: string, style: Style): [string, string] {
+  const text = style === "posix" ? path : slashes(path);
+  const at = text.lastIndexOf("/");
+  if (at < 0) return [".", text];
+  // The root keeps its separator: "/" and, on Windows, "X:/".
+  const root = at === 0 || (style === "windows" && at === 2 && drive(chars(text)));
+  return [root ? text.slice(0, at + 1) : text.slice(0, at), text.slice(at + 1)];
+}
+
+/** `QDir(parent).filePath(name)`: one '/' between them. */
+export const join = (parent: string, name: string) => (parent.endsWith("/") ? `${parent}${name}` : `${parent}/${name}`);
 
 // launch.rs
 

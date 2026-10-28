@@ -1,8 +1,12 @@
-import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, type JSX } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, type JSX } from "solid-js";
+import * as bridge from "../../bridge";
+import type { PathStyle } from "../../types";
 import { AgentGlyph, Icon } from "../lib/icons";
 import { composing } from "../lib/keys";
 import { MachineTile, type MachineState } from "../components/MachineTile";
 import { UsageMeters } from "../components/UsageMeter";
+import { FolderBrowserDialog } from "../components/FolderBrowser";
+import type { FolderBrowserCalls } from "../components/folder-browser";
 import { closeNewSession, newSession, newSessionActions as act, startNewSession, type NewSessionState } from "../../store/newSession";
 import { machineCards } from "../../store/machines";
 import { catalog, agentKind } from "../../store/catalog";
@@ -11,6 +15,10 @@ import { now } from "../../store/ui";
 import { projectColor } from "./organization-ui";
 import { launchWindows, type AccountRow } from "./newsession-ui";
 import { WARNING_BUTTONS, WARNING_TITLE, accountKey, computerKey, createConfirm, dialogKey, folderKey, projectKey, type KeyControl } from "./newsession-view";
+import { ModelPopover, type ModelPickerActions } from "./ModelPicker";
+import { ChooseWorktreeDialog } from "./WorktreePicker";
+import { NewWorktreeDialog } from "./NewWorktreeDialog";
+import type { PickerSession } from "./worktree-dialogs";
 import type { Json } from "../lib/json";
 import "../styles/newsession.css";
 
@@ -28,8 +36,8 @@ import "../styles/newsession.css";
 export type NewSessionChild =
   | { kind: "browse"; target: string; computer: string; project: string; path: string }
   | { kind: "browse-repository"; target: string; computer: string; parent: string }
-  | { kind: "choose-worktree"; target: string; computer: string; project: string; path: string }
-  | { kind: "create-worktree"; target: string; computer: string; project: string; path: string; catalog: Json; branch: string };
+  | { kind: "choose-worktree"; target: string; computer: string; project: string; path: string; style: PathStyle }
+  | { kind: "create-worktree"; target: string; computer: string; project: string; path: string; catalog: Json; branch: string; style: PathStyle };
 export const [newSessionChild, setNewSessionChild] = createSignal<NewSessionChild>();
 
 const AGENTS = new Set(["codex", "claude", "kimi", "dsh", "opencode"]);
@@ -210,6 +218,12 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
   const computerKeys = createMemo(() => s().computers.map(computerKey), [], { equals: sameKeys });
   const folderKeys = createMemo(() => s().folders.map(folderKey), [], { equals: sameKeys });
   const accountKeys = createMemo(() => s().accounts.map(accountKey), [], { equals: sameKeys });
+  // Each choice's selected key, read by the lists' key and click handlers too: a memo, so no
+  // read outside the view's tracking makes a computation nobody disposes (it would read the
+  // closed dialog's state and stop Escape from closing it).
+  const projectSelected = createMemo(() => { const row = project(); return row ? projectKey(row) : undefined; });
+  const computerSelected = createMemo(() => { const row = computer(); return row ? computerKey(row) : undefined; });
+  const folderSelected = createMemo(() => { const row = folder(); return row ? folderKey(row) : undefined; });
   const projectOf = (key: string) => s().projects.find((row) => projectKey(row) === key);
   const computerOf = (key: string) => s().computers.find((row) => computerKey(row) === key);
   const folderOf = (key: string) => s().folders.find((row) => folderKey(row) === key);
@@ -252,12 +266,12 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
   const chooseExisting = () => {
     if (!form()?.choose_existing_enabled) return;
     props.setPopup(undefined);
-    setNewSessionChild({ kind: "choose-worktree", target: s().host, computer: computerName(), project: project()?.id ?? "", path: folder()?.path ?? "" });
+    setNewSessionChild({ kind: "choose-worktree", target: s().host, computer: computerName(), project: project()?.id ?? "", path: folder()?.path ?? "", style: s().style });
   };
   const createManually = () => {
     if (!form()?.create_manually_enabled) return;
     props.setPopup(undefined);
-    setNewSessionChild({ kind: "create-worktree", target: s().host, computer: computerName(), project: project()?.id ?? "", path: folder()?.path ?? "", catalog: s().worktrees.catalog, branch: s().name });
+    setNewSessionChild({ kind: "create-worktree", target: s().host, computer: computerName(), project: project()?.id ?? "", path: folder()?.path ?? "", catalog: s().worktrees.catalog, branch: s().name, style: s().style });
   };
 
   // The worktree options menu: Escape is the dialog's (it closes the menu first), arrows move.
@@ -346,12 +360,12 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
         <div class="form-row">
           <label for="ns-project">Target</label>
           <div class="ns-target">
-            <Choice id="ns-project" label="Project" keys={projectKeys()} selected={project() ? projectKey(project()!) : undefined} disabled={!fields()}
+            <Choice id="ns-project" label="Project" keys={projectKeys()} selected={projectSelected()} disabled={!fields()}
               open={opened("project")} onOpen={toggle("project")} option={projectOption} class="ns-project" initial
               onPick={(key) => act.chooseProject(s().projects.findIndex((row) => projectKey(row) === key))} />
             <button type="button" class="icon-btn ns-manage" data-keys="button" data-tip="Manage this project's folders" aria-label="Manage this project's folders" disabled={!fields()}
               onClick={() => act.manageFolders()}><Icon name="settings" size={18} /></button>
-            <Choice id="ns-computer" label="Computer" keys={computerKeys()} selected={computer() ? computerKey(computer()!) : undefined} disabled={!fields()}
+            <Choice id="ns-computer" label="Computer" keys={computerKeys()} selected={computerSelected()} disabled={!fields()}
               open={opened("computer")} onOpen={toggle("computer")} option={computerOption} class="ns-computer"
               onPick={(key) => act.chooseComputer(s().computers.findIndex((row) => computerKey(row) === key))} />
           </div>
@@ -391,7 +405,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
                   <input id="ns-destination" class="field mono grow" data-keys="text" maxLength={8192} value={s().destination} disabled={!fields() || !online()}
                     title="The complete new checkout path. Edit its folder name or choose a parent folder with Browse."
                     onInput={(e) => act.setDestination(e.currentTarget.value)} />
-                  <button type="button" class="btn" data-keys="button" disabled={!fields() || !online()} onClick={browseRepository}>Browse…</button>
+                  <button type="button" id="ns-browse-repository" class="btn" data-keys="button" disabled={!fields() || !online()} onClick={browseRepository}>Browse…</button>
                 </div>
               </div>
             </div>
@@ -400,10 +414,10 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
           <div class="form-row">
             <label for="ns-folder">Working folder</label>
             <div class="row">
-              <Choice id="ns-folder" label="Working folder" keys={folderKeys()} selected={folder() ? folderKey(folder()!) : undefined} placeholder="Choose a folder…"
+              <Choice id="ns-folder" label="Working folder" keys={folderKeys()} selected={folderSelected()} placeholder="Choose a folder…"
                 disabled={!fields()} open={opened("folder")} onOpen={toggle("folder")} option={folderOption} tip={(key) => folderOf(key)?.tooltip} class="grow"
                 onPick={(key) => act.chooseFolder(s().folders.findIndex((row) => folderKey(row) === key))} />
-              <button type="button" class="btn" data-keys="button" disabled={!(form()?.browse_enabled ?? false)} onClick={browse}>Browse…</button>
+              <button type="button" id="ns-browse" class="btn" data-keys="button" disabled={!(form()?.browse_enabled ?? false)} onClick={browse}>Browse…</button>
             </div>
           </div>
           <div class="form-row top">
@@ -430,7 +444,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
                 </button>
               </div>
               <div class="ns-menu-anchor">
-                <button type="button" class="icon-btn" data-keys="button" data-tip="Worktree options" aria-label="Worktree options" aria-haspopup="menu" aria-expanded={opened("worktree")}
+                <button type="button" id="ns-worktree-options" class="icon-btn" data-keys="button" data-tip="Worktree options" aria-label="Worktree options" aria-haspopup="menu" aria-expanded={opened("worktree")}
                   disabled={!(form()?.worktree_options_enabled ?? false)} onClick={toggleMenu}>
                   <Icon name="more" size={16} />
                 </button>
@@ -568,8 +582,13 @@ export function NewSessionDialog() {
     <>
       <dialog class="dlg ns-dlg" ref={el} aria-labelledby="ns-title"
         onCancel={(e) => {
-          // Escape closes an open list or menu first, back to its button; the dialog closes only through the store.
+          // Escape closes the model picker, then an open list or menu, back to its button; the dialog closes only through the store.
           e.preventDefault();
+          if (newSession()?.pickerOpen) {
+            act.closeModelPicker();
+            document.getElementById("ns-model")?.focus();
+            return;
+          }
           if (popup()) {
             const owner = el.querySelector<HTMLElement>("[aria-expanded='true']");
             setPopup(undefined);
@@ -581,7 +600,79 @@ export function NewSessionDialog() {
         onClose={() => { if (newSession()) closeNewSession(); }}>
         <Show when={newSession()}>{(state) => <NewSessionForm s={state} popup={popup} setPopup={setPopup} confirm={confirm} />}</Show>
       </dialog>
+      <Show when={newSession()?.pickerOpen}>
+        <ModelPopover view={() => newSession()?.picker ?? EMPTY_PICKER} act={PICKER} anchor={() => document.getElementById("ns-model")} />
+      </Show>
+      <NewSessionChildren />
       <LaunchWarning confirm={confirm} />
     </>
+  );
+}
+
+const EMPTY_PICKER: NewSessionState["picker"] = {
+  groups: [], notice: "", all: { checked: false, enabled: false, tooltip: "" }, selected: undefined, query: "", favoritesAvailable: false,
+};
+
+/** The model popover's clicks, sent to the open dialog's picker. */
+const PICKER: ModelPickerActions = {
+  click: (value, star) => act.pickerClick(value, star),
+  select: (value) => act.pickerSelect(value),
+  toggleAll: () => act.pickerToggleAll(),
+  search: (text) => act.pickerSearch(text),
+  useNative: () => act.useNativeModel(),
+  close: () => act.closeModelPicker(),
+};
+
+/** A peer's folder listings and New folder, bound to it (`list_directories`, `create_directory`). */
+const folderCalls = (target: string): FolderBrowserCalls => ({
+  list: (path, hidden) => bridge.listDirectories(target, path, hidden),
+  create: (path) => bridge.createDirectory(target, path),
+});
+
+/** The control a child dialog gives the focus back to. */
+const OPENER: Record<NewSessionChild["kind"], string> = {
+  browse: "ns-browse", "browse-repository": "ns-browse-repository", "choose-worktree": "ns-worktree-options", "create-worktree": "ns-worktree-options",
+};
+
+/**
+ * The child dialog New session opened (`newSessionChild`), each in its own
+ * modal layer over it. Its answer goes to the store with the computer and
+ * project it opened with; the store applies it only while they are still
+ * the dialog's (585, 1123, 1134). Opening and inspecting them only reads.
+ */
+function NewSessionChildren() {
+  const done = (kind: NewSessionChild["kind"]) => {
+    setNewSessionChild(undefined);
+    queueMicrotask(() => document.getElementById(OPENER[kind])?.focus());
+  };
+  // The computer's listed sessions, for the worktree picker's counts (G1).
+  const sessionsOn = (target: string) => createMemo((): PickerSession[] =>
+    Object.values(catalog.rows).filter((row) => row.computer === target).map((row) => ({ gitRoot: row.gitRoot, cwdCanonical: row.cwdCanonical })));
+  const onlineOf = (target: string) => newSession()?.computers.find((row) => row.target === target)?.online ?? false;
+  return (
+    <Switch>
+      <Match when={(() => { const c = newSessionChild(); return c?.kind === "browse" ? c : undefined; })()} keyed>{(child) => (
+        <FolderBrowserDialog computer={child.computer} start={child.path} calls={folderCalls(child.target)}
+          onChoose={(path) => act.applyBrowsedFolder(child.target, child.project, path)} onClose={() => done(child.kind)} />
+      )}</Match>
+      <Match when={(() => { const c = newSessionChild(); return c?.kind === "browse-repository" ? c : undefined; })()} keyed>{(child) => (
+        <FolderBrowserDialog computer={child.computer} start={child.parent} calls={folderCalls(child.target)}
+          onChoose={(path) => { if (newSession()?.host === child.target) act.setRepositoryParent(path); }} onClose={() => done(child.kind)} />
+      )}</Match>
+      <Match when={(() => { const c = newSessionChild(); return c?.kind === "choose-worktree" ? c : undefined; })()} keyed>{(child) => {
+        const sessions = sessionsOn(child.target);
+        return (
+          <ChooseWorktreeDialog machine={child.computer} path={child.path} online={() => onlineOf(child.target)} style={() => child.style} sessions={sessions}
+            reads={{ snapshot: () => bridge.worktreeSnapshot(child.target, child.path), catalog: (refresh) => bridge.worktreeCatalog(child.target, child.path, refresh) }}
+            onUse={(path) => act.chooseExistingWorktree(child.target, child.project, path)} onClose={() => done(child.kind)} />
+        );
+      }}</Match>
+      <Match when={(() => { const c = newSessionChild(); return c?.kind === "create-worktree" ? c : undefined; })()} keyed>{(child) => (
+        <NewWorktreeDialog target={child.target} machine={child.computer} source={child.path} catalog={child.catalog} branch={child.branch} style={child.style}
+          create={(branch, base, destination) => bridge.createWorktree(child.target, child.path, child.catalog, branch, base, destination)}
+          pickLocal={(start) => bridge.pickLocalFolder(start)} browse={folderCalls(child.target)}
+          onCreated={(created) => act.worktreeCreated(child.target, child.project, created.path, created.catalog)} onClose={() => done(child.kind)} />
+      )}</Match>
+    </Switch>
   );
 }

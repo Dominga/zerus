@@ -257,6 +257,10 @@ export interface PickerView {
   all: { checked: boolean; enabled: boolean; tooltip: string };
   /** The selected row: the current model when it is listed and can be chosen. */
   selected: string | undefined;
+  /** The search text the list follows: the search field keeps it while the popover is closed, as Qt's does. */
+  query: string;
+  /** Stars can change favorites here; otherwise they are drawn disabled, with the reason as their tooltip. */
+  favoritesAvailable: boolean;
 }
 
 interface Rendered { provider: string; label: string; folder: boolean; rows: { model: Model; unavailable: boolean; favorite: boolean }[] }
@@ -462,6 +466,8 @@ export class ModelPicker {
       groups, notice: this.noticeLine,
       all: { checked: this.all, enabled: this.allEnabled, tooltip: this.allTooltip },
       selected: current && !current.unavailable ? this.currentValue : undefined,
+      query: this.query,
+      favoritesAvailable: this.favoritesAvailable,
     };
   }
 

@@ -1,6 +1,6 @@
 //! The shared golden fixture `tests/fixtures/folder-paths.json`: folder paths
 //! in their computer's form (`paths.rs`: `of`, `absolute`, `clean`, `same`,
-//! `within`, `leaf`, `native`) and New session's folder helpers
+//! `within`, `leaf`, `native`, `split`, `join`) and New session's folder helpers
 //! (`launch::matching_project_folder`, `prefill_target`, `restored_folder`).
 //! The desktop client's TypeScript port (`client/src/ui/sessions/paths.ts`)
 //! checks the same answers in `paths.test.ts`, so the two cannot drift.
@@ -46,6 +46,8 @@ fn single(path: &str, style: Style) -> Value {
         "clean": paths::clean(path, style),
         "leaf": paths::leaf(path, style),
         "native": paths::native(path, style),
+        "split": paths::split(path, style),
+        "join": paths::join(path, "child"),
     })
 }
 

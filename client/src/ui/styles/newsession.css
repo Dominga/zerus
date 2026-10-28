@@ -93,4 +93,53 @@
 
   /* The local Windows-session warning. */
   dialog.ns-warning { width: min(480px, calc(100vw - 48px)); }
+
+  /* Choose existing… (WorktreePicker.tsx): Qt's 620 x 420 dialog. */
+  dialog.wt-dlg { width: min(620px, calc(100vw - 48px)); height: min(420px, calc(100vh - 64px)); }
+  .wt-body { display: flex; flex-direction: column; gap: 8px; flex: 1 1 auto; }
+  .wt-status { font-size: var(--fs-sm); color: var(--z-color-muted); white-space: pre-line; overflow-wrap: anywhere; }
+  .wt-tree { flex: 1 1 auto; min-height: 120px; overflow: auto; padding: 4px; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-md); background: var(--z-color-field); }
+  .wt-tree:focus-visible { outline: 2px solid var(--z-color-focus); outline-offset: 1px; }
+  .wt-tree li { display: flex; flex-direction: column; gap: 1px; padding: 5px 8px; border-radius: var(--z-radius-sm); font-size: var(--fs-sm); cursor: default; }
+  .wt-tree li:hover { background: var(--z-color-hover); }
+  .wt-tree li.on { background: var(--z-color-row-selected); }
+  .wt-tree li.off { color: var(--z-color-muted); }
+  .wt-path { font-size: var(--fs-xs); color: var(--z-color-text-3); }
+
+  /* Create manually… (NewWorktreeDialog.tsx): Qt's 640 x 440 dialog, at least 580 wide. */
+  dialog.nw-dlg { width: min(640px, calc(100vw - 48px)); min-width: min(580px, calc(100vw - 48px)); }
+  .nw-body .form-row { grid-template-columns: 110px minmax(0, 1fr); }
+  .nw-context { font-size: var(--fs-sm); color: var(--z-color-muted); white-space: pre-line; overflow-wrap: anywhere; user-select: text; }
+  .nw-help { margin-top: 8px; font-size: var(--fs-sm); color: var(--z-color-text-2); }
+  .nw-error { min-height: 1.4em; margin-top: 6px; font-size: var(--fs-sm); color: var(--z-color-text-2); white-space: pre-line; overflow-wrap: anywhere; }
+  .nw-base { position: relative; display: flex; align-items: center; gap: 4px; min-width: 0; }
+  .nw-base-open { flex: none; width: 28px; height: 28px; }
+  .nw-base-list { top: calc(100% + 4px); }
+
+  /* The model popover (ModelPicker.tsx): at least 440 x 420 under the model button. */
+  dialog.ns-model-pop {
+    position: fixed; inset: auto; margin: 0; padding: 10px; max-width: none; max-height: none; overflow: hidden;
+    display: none; flex-direction: column; gap: 8px;
+    border: 1px solid var(--z-color-border); border-radius: var(--z-radius-lg); background: var(--z-color-raised); color: var(--z-color-text);
+    box-shadow: var(--z-shadow-popover); animation: drop var(--z-motion-fast) var(--ease) both;
+  }
+  dialog.ns-model-pop[open] { display: flex; }
+  dialog.ns-model-pop::backdrop { background: transparent; }
+  .ns-model-native { align-self: flex-start; }
+  .ocm { display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-height: 0; }
+  .ocm-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 2px; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-md); background: var(--z-color-field); }
+  .ocm-list:focus-visible { outline: 2px solid var(--z-color-focus); outline-offset: 1px; }
+  .ocm-group { padding: 6px 8px 2px; font-size: var(--fs-sm); font-weight: 600; color: var(--z-color-text); }
+  .ocm-row { display: flex; align-items: center; gap: 8px; padding: 3px 4px 3px 18px; border-radius: var(--z-radius-sm); font-size: var(--fs-sm); cursor: default; }
+  .ocm-row:hover, .ocm-row.active { background: var(--z-color-hover); }
+  .ocm-row.on { background: var(--z-color-row-selected); }
+  .ocm-row.gone .ocm-name { color: var(--z-color-dim); }
+  .ocm-name { flex: 0 1 auto; }
+  .ocm-marks { flex: none; font-size: var(--fs-xs); color: var(--z-color-muted); }
+  .ocm-star { flex: none; width: 32px; margin-left: auto; text-align: center; color: var(--z-color-muted); cursor: pointer; }
+  .ocm-star.on { color: var(--z-color-accent); }
+  .ocm-star.off { color: var(--z-color-dim); cursor: default; }
+  .ocm-foot { display: flex; align-items: flex-start; gap: 8px; }
+  .ocm-foot .btn.on { background: var(--z-color-segment-on); color: var(--z-color-accent); }
+  .ocm-notice { flex: 1; min-width: 0; font-size: var(--fs-xs); color: var(--z-color-muted); overflow-wrap: anywhere; }
 }

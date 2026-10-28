@@ -96,6 +96,8 @@ export interface NewSessionState extends OpenCodeView {
   computer: number;
   /** The selected computer: "" or the alias. */
   host: string;
+  /** The selected computer's folder style (Qt's folderStyle): the child dialogs check and build its paths. */
+  style: PathStyle;
   noMachine: boolean;
   /** The source is a Git repository. */
   repository: boolean;
@@ -979,7 +981,7 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     return {
       projects: projectList, project: projectIndex, newProjectVisible: repositorySource && !!project?.newProject,
       newProjectRow: (repositorySource && !!project?.newProject) || (!repositorySource && repositoryNewProject), newProjectName,
-      computers: machines, computer: machineIndex, host: host(), noMachine: machines.length === 0,
+      computers: machines, computer: machineIndex, host: host(), style: style(host()), noMachine: machines.length === 0,
       repository: repositorySource, url, destination: field, repositoryParent: repository?.fields?.parent ?? "", focusUrl,
       folders, folder: folderIndex, folderPath: native(path(), style(host())), autoPreferred,
       worktrees: { catalog: worktreeCatalog, chooseVisible: array(worktreeCatalog.worktrees).length > 0, createVisible: worktreeCatalog.state === "ok" },

@@ -22,7 +22,7 @@ pub(crate) enum Actor {
 }
 
 impl Actor {
-    fn label(&self, team: &Team) -> String {
+    pub(crate) fn label(&self, team: &Team) -> String {
         match self {
             Actor::Human => "You".into(),
             Actor::Member(id) => team.role_of(id),
@@ -31,6 +31,9 @@ impl Actor {
     }
     pub(crate) fn is_lead(&self, team: &Team) -> bool {
         matches!(self, Actor::Member(id) if *id == team.lead)
+    }
+    fn is_lead_of(&self, lead: &str) -> bool {
+        matches!(self, Actor::Member(id) if id == lead)
     }
     /// You, the lead, or the sub-lead `member` reports to (spec 5.6): who may
     /// answer, hold, retry and decide that member's work.
@@ -243,7 +246,20 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     task.attempts.clear();
     task.hold = None;
     task.decided_by = None;
+    // U36: the plan names a preset; Zerus snapshots it when the task is
+    // assigned, so a request can never carry its own run.
+    task.pipeline_run = None;
+    check_pipeline(&task.pipeline)?;
     Ok(task)
+}
+
+/// U36: a task's pipeline choice names a preset of the team catalog.
+fn check_pipeline(choice: &str) -> anyhow::Result<()> {
+    if choice.is_empty() || choice == "none" {
+        return Ok(());
+    }
+    let catalog = super::catalog::load().unwrap_or_else(|_| super::catalog::builtin());
+    super::pipeline::check_choice(choice, &catalog)
 }
 
 /// A new team in Planning with its lead.
@@ -1496,6 +1512,16 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
             task.pinned = pinned;
             fields.push("pinned");
         }
+        // U36: the pipeline the task takes when it is assigned.
+        if let Some(value) = value.get("pipeline") {
+            let pipeline = value.as_str().context("pipeline is a preset id, none or empty")?.trim().to_owned();
+            check_pipeline(&pipeline)?;
+            if task.pipeline != pipeline {
+                changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"pipeline","from":task.pipeline,"to":pipeline}));
+            }
+            task.pipeline = pipeline;
+            fields.push("pipeline");
+        }
         // U27: the lead or the owner moves a task to a lane; null takes it out.
         if let Some(value) = value.get("lane") {
             let lane = if value.is_null() {
@@ -1620,6 +1646,8 @@ fn close_questions(task: &mut Task) {
 fn revoke(task: &mut Task, why: &str) -> Option<u32> {
     // The attempt is over: its questions close with it (N5).
     close_questions(task);
+    // U36: so does the stage that was reading its report.
+    super::pipeline::revoke_runs(task, why);
     let attempt = task.open_attempt_mut()?;
     attempt.state = AttemptState::Revoked;
     attempt.error = why.to_owned();
@@ -1939,6 +1967,10 @@ fn checked_finding(team: &Team, finding: &Value) -> anyhow::Result<CheckedFindin
 
 fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
+    // U36: a stage member's verdict names its stage run as the attempt.
+    if let Some(result) = super::pipeline::stage_report(team, input, actor, events)? {
+        return Ok(result);
+    }
     let attempt_id = text(input, "attempt");
     let mut body = clean(text(input, "text").trim(), 64 * 1024, "A report")?;
     // C5: a check task reports its exit code and output tail; its text is
@@ -2016,6 +2048,10 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
             // C5: the check decides, without the lead.
             return decide_check(team, id, n, events);
         }
+        // U36: a task with a pipeline goes to its first stage.
+        if let Some(result) = super::pipeline::on_report(team, id, events)? {
+            return Ok(result);
+        }
         return Ok(json!({"status":"submitted","task":id,"attempt":n}));
     }
     // A6: while the task is Submitted and its report was captured, the member
@@ -2024,7 +2060,7 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     let Some(attempt) = task.attempts.iter_mut().find(|a| a.id == attempt_id) else {
         unreachable!("the attempt was checked above")
     };
-    let replaceable = task.status == TaskStatus::Submitted
+    let replaceable = task.status.reported()
         && attempt.state == AttemptState::Reported
         && (by_member.is_empty() || attempt.member == by_member)
         && attempt.report.as_ref().is_some_and(|report| report.captured);
@@ -2044,8 +2080,9 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         report.at = now();
         report.captured = false;
         attempt.no_report = false;
-        // The lead hears the real report as a report, not as the captured one.
-        if member != team_lead {
+        // The lead hears the real report as a report, not as the captured one;
+        // U36: a stage still reading it tells the lead after the last stage.
+        if member != team_lead && task.status == TaskStatus::Submitted {
             attempt.notice = Notice::Pending;
         }
         let title = task.title.clone();
@@ -2527,7 +2564,7 @@ fn release(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
 }
 
 /// D2: files a report's findings; later ones are deferred at once.
-fn file_findings(team: &mut Team, from: u32, report: &Value, by: &str) -> anyhow::Result<(usize, usize)> {
+pub(crate) fn file_findings(team: &mut Team, from: u32, report: &Value, by: &str) -> anyhow::Result<(usize, usize)> {
     // N13: checked when the report came; one stored before that check is
     // filed without its bad findings rather than blocking the accept.
     let findings: Vec<(CheckedFinding, Option<u32>)> = report["findings"]
@@ -2994,12 +3031,18 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
             "This result worked ahead of phase {ahead_phase}; wait for the owner's approval of that phase"
         );
     }
+    let lead_id = team.lead.clone();
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!(task.decided_by == Some(Decider::Human) && task.status.finished()), "You already decided task #{id}");
     if human {
         ensure!(!matches!(task.status, TaskStatus::Draft | TaskStatus::Cancelled), "Task #{id} cannot be decided now");
     } else {
-        ensure!(task.status == TaskStatus::Submitted, "Task #{id} has no report to decide");
+        // U36: the lead may accept or reject at any stage of the pipeline.
+        ensure!(task.status.reported(), "Task #{id} has no report to decide");
+        ensure!(
+            !accept || actor.is_lead_of(&lead_id) || !super::pipeline::lead_accepts_only(task),
+            "Task #{id}'s pipeline is accepted by the lead"
+        );
     }
     let n = task.attempts.iter().rev().find(|a| a.state == AttemptState::Reported).map(|a| a.n);
     // N15: the lead's accept filed this report's findings already; the
@@ -3242,6 +3285,9 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "accept" => decide(team, input, actor, true, events),
         "reject" => decide(team, input, actor, false, events),
         "reassign" => reassign(team, input, actor, events),
+        // U36: the lead's and the owner's pipeline overrides.
+        "skip-stage" => super::pipeline::skip_stage(team, input, actor, events),
+        "send-back" => super::pipeline::send_back(team, input, actor, events),
         "retry" => retry(team, input, actor, events),
         "take-over" => take_over(team, input, actor, events),
         "cancel" => cancel(team, input, actor, events),

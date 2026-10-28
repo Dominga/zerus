@@ -1154,15 +1154,13 @@ pub(crate) fn hand_off_text_with(
         // N3: a member's own snapshot wins; an old member keeps today's live text.
         let snapshot = team.member(&attempt.member).and_then(|member| member.prompt_snapshot.clone());
         let (ordered, has_task) = if let Some(snapshot) = snapshot {
-            let has_task = snapshot.prompt_order.iter().any(|key| key == "task")
-                && !snapshot.prompt_off.iter().any(|key| key == "task");
+            let has_task = super::catalog::sends_task(&snapshot.prompt_order, &snapshot.prompt_off, &snapshot.task_template);
             (super::catalog::prompt_order_text_snapshot(&snapshot, prompt, Some(task)), has_task)
         } else {
             super::catalog::load().ok().and_then(|catalog| {
                 let role_name = team.role_of(&attempt.member);
                 let role = catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name)?;
-                let has_task = role.prompt_order.iter().any(|key| key == "task")
-                    && !role.prompt_off.iter().any(|key| key == "task");
+                let has_task = super::catalog::sends_task(&role.prompt_order, &role.prompt_off, &role.task_template);
                 Some((super::catalog::prompt_order_text(role, prompt, Some(task), ""), has_task))
             }).unwrap_or((None, false))
         };
@@ -1199,7 +1197,22 @@ pub(crate) fn hand_off_text_with(
     }
     text += &dependencies_text(team, task, report_host);
     if let Some(previous) = task.attempts.iter().rev().find(|a| a.n < attempt.n && a.state == AttemptState::Rejected) {
-        text += &format!("\nAttempt {} was rejected: {}\n", previous.n, task.decision_reason);
+        // U36: a stage returned it (no lead step): its findings, not a decision.
+        let returned = task.pipeline_run.as_ref().and_then(|run| {
+            let stage = run.runs.iter().rev().find(|stage| stage.attempt == previous.n && stage.state != super::model::StageState::Revoked)?;
+            (stage.state == super::model::StageState::Returned).then(|| (stage.clone(), run.max_rounds))
+        });
+        if let Some((stage, max_rounds)) = returned {
+            text += &format!("\nAttempt {} was returned by the {} of {} (round {} of {max_rounds}). Fix these findings:\n", previous.n, stage.kind, stage.by, stage.round);
+            if !stage.text.trim().is_empty() {
+                text += &format!("{}\n", stage.text.trim());
+            }
+            for finding in &stage.findings {
+                text += &format!("- {finding}\n");
+            }
+        } else {
+            text += &format!("\nAttempt {} was rejected: {}\n", previous.n, task.decision_reason);
+        }
     }
     if let Some(check) = task.check.as_ref().filter(|_| task.is_check()) {
         // C5: the member runs the exact command; Zerus decides by its exit code.
@@ -2318,6 +2331,8 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
     let mut git_job: Option<(String, f64)> = None;
     change(store, team_id, |team, events| {
         anyhow::ensure!(team.status == TeamStatus::Running && plan::ready(team).contains(&task_id), "no longer ready");
+        // U36: the task's pipeline as the catalog has it at its first hand-out.
+        super::pipeline::snapshot(team, task_id);
         let session = team.member(member_id).and_then(|m| m.session.clone()).context("no session")?;
         let member_host = team.member(member_id).map(|m| m.computer.clone()).unwrap_or_default();
         let roles = from.map(|from| (team.role_of(from), team.role_of(member_id)));
@@ -3998,7 +4013,10 @@ fn start_run(
         return refuse(format!("the folder belongs to {}", team.role_of(&member.id)));
     }
     let attempt = request["attempt"].as_str().unwrap_or_default();
-    if !team.tasks.iter().any(|task| task.open_attempt().is_some_and(|found| found.id == attempt && found.member == member.id)) {
+    // U36: a test stage builds under its stage run, as an attempt.
+    if !team.tasks.iter().any(|task| task.open_attempt().is_some_and(|found| found.id == attempt && found.member == member.id))
+        && super::pipeline::open_run_task(team, attempt, &member.id).is_none()
+    {
         return refuse(format!("attempt {attempt} does not run for this member"));
     }
     let template = request["template"].as_str().unwrap_or_default();
@@ -4143,10 +4161,13 @@ fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value
     let task = team
         .tasks
         .iter()
-        .find(|task| task.open_attempt().is_some_and(|attempt| attempt.id == attempt_id && attempt.member == member.id));
+        .find(|task| task.open_attempt().is_some_and(|attempt| attempt.id == attempt_id && attempt.member == member.id))
+        .map(|task| task.id)
+        // U36: a stage member in a sandbox queues its verdict the same way.
+        .or_else(|| super::pipeline::open_run_task(team, attempt_id, &member.id));
     let Some(task) = task else { anyhow::bail!("attempt {attempt_id} does not run for this member") };
     if input["task"].as_u64().is_some() {
-        anyhow::ensure!(input["task"] == json!(task.id), "the request names another task");
+        anyhow::ensure!(input["task"] == json!(task), "the request names another task");
     }
     if op == "commit" {
         return super::commands::commit_in_team(team, &member.id, &input);
@@ -4478,6 +4499,34 @@ mod tests {
         t.members.iter_mut().find(|member| member.id == "dev").unwrap().prompt_snapshot = None;
         let text = hand_off_text(&t, &task, &attempt, "", "");
         assert!(!text.contains("SNAPSHOT EXTRA"), "{text}");
+    }
+
+    #[test]
+    fn a_task_block_without_a_template_keeps_the_standard_task_text() {
+        // C1: the owner moved a block, so the order names "task", but the role's
+        // template was never typed (or a U25 import had none).
+        let mut t = team();
+        t.tasks.iter_mut().find(|task| task.id == 1).unwrap().description = "Build the cards API".into();
+        t.tasks.iter_mut().find(|task| task.id == 1).unwrap().criteria = vec!["Paged list".into()];
+        let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.prompt = "Backend prompt".into();
+        dev.prompt_snapshot = Some(crate::state::teams::model::PromptSnapshot {
+            prompt_order: vec!["role".into(), "task".into(), "protocol".into()],
+            task_template: "  ".into(),
+            ..Default::default()
+        });
+        let task = t.task(1).unwrap().clone();
+        let attempt = Attempt { n: 1, id: "a1".into(), member: "dev".into(), ..Default::default() };
+        let text = hand_off_text(&t, &task, &attempt, "", "");
+        assert!(text.contains("\nTask #1: API\nBuild the cards API\n"), "{text}");
+        assert!(text.contains("Acceptance criteria:\n- Paged list\n"), "{text}");
+        assert!(!text.contains("Task:\n"), "no empty task block: {text}");
+        // A typed template still replaces the standard block, once.
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().prompt_snapshot.as_mut().unwrap().task_template =
+            "Do #{id} {title}: {criteria}".into();
+        let text = hand_off_text(&t, &task, &attempt, "", "");
+        assert!(text.contains("Task:\nDo #1 API: Paged list\n"), "{text}");
+        assert!(!text.contains("Task #1: API"), "{text}");
     }
 
     #[test]

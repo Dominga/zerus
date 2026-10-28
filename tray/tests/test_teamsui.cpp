@@ -700,6 +700,7 @@ private slots:
     void boardScrollsInsteadOfSqueezingColumns();
     void planningBoardScrollsInsteadOfSqueezingColumns();
     void catalogRoleEditorEditsEveryField();
+    void aPromptOrderSavesTheTaskTemplateItShows();
     void catalogRoleListGrowsToItsRows();
     void aboutNamesTheForkAndItsUpdate();
     void catalogTemplateEditorRosterSkeletonAndChecks();
@@ -4963,6 +4964,45 @@ void TestTeamsUi::catalogTemplateEditorRosterSkeletonAndChecks()
     QCOMPARE(tasks[3].toObject()["title"].toString(), QStringLiteral("New task"));
 }
 
+// C1 (#543): a role whose task template was never typed shows the default
+// template. Whatever writes its prompt order (a move, or typing in Team
+// protocol) saves that template too, so the server never gets an order with
+// "task" and an empty template.
+void TestTeamsUi::aPromptOrderSavesTheTaskTemplateItShows()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamCatalogEditor editor(&controller);
+    editor.resize(1180, 1500); editor.show();
+    auto *roles = editor.findChild<QListWidget *>("teamCatalogRoles");
+    QTRY_COMPARE(roles->count(), 3);
+    const auto block = [&](const QString &key) -> QFrame * {
+        for (auto *b : editor.findChildren<QFrame *>("teamPromptBlock")) if (b->property("block") == key) return b;
+        return nullptr;
+    };
+    roles->setCurrentRow(1);   // Backend: typing in Team protocol
+    QTRY_COMPARE(editor.findChild<QLineEdit *>("teamRoleName")->text(), QStringLiteral("Backend"));
+    const QString shown = editor.findChild<QPlainTextEdit *>("teamRoleTaskTemplate")->toPlainText();
+    QVERIFY(shown.contains("{title}"));
+    editor.findChild<QPlainTextEdit *>("teamRoleProtocol")->setPlainText("Report each endpoint.");
+    roles->setCurrentRow(2);   // Tester: one move
+    QTRY_COMPARE(editor.findChild<QLineEdit *>("teamRoleName")->text(), QStringLiteral("Tester"));
+    QTRY_VERIFY(block("task"));
+    block("task")->findChild<QToolButton *>("teamPromptUp")->click();
+    QTRY_VERIFY(block("task") && block("task")->findChild<QToolButton *>("teamPromptDown")->isEnabled());   // no longer last
+    editor.findChild<QPushButton *>("teamCatalogSave")->click();
+    QTRY_COMPARE_WITH_TIMEOUT(calls(script(), "catalog set").size(), 1, 20000);
+    const auto saved = calls(script(), "catalog set").first()["catalog"].toObject()["roles"].toArray();
+    for (const int row : {1, 2}) {
+        const auto role = saved[row].toObject();
+        QVERIFY2(role["prompt_order"].toArray().contains("task"), qPrintable(role["id"].toString()));
+        QCOMPARE(role["task_template"].toString(), shown);
+    }
+    QCOMPARE(saved[0].toObject()["task_template"].toString(), QString());   // the untouched Lead keeps none
+}
+
 // U25 part 9 (spec 11.5): routing rules are edited in place - order, words,
 // Use (a template or "+ role"), approval - and Try it names the template, the
 // rule, the added roles, approval and work mode, with the roster as chips.
@@ -4979,10 +5019,22 @@ void TestTeamsUi::catalogRoutingEditsAndTriesAGoal()
     auto found = TeamCatalogEditor::route(c, "Add tests for checkout");
     QCOMPARE(found.rule, 1); QCOMPARE(found.templateId, QStringLiteral("feature"));
     QCOMPARE(found.added, QStringList{"tester"}); QCOMPARE(found.approval, QStringLiteral("auto"));
-    Rule words; words.id = "words"; words.when = "the and for"; words.templateId = "feature";
+    Rule words; words.id = "words"; words.when = "the and with"; words.templateId = "feature";
     c.routing = {words};
-    found = TeamCatalogEditor::route(c, "the and for");
+    found = TeamCatalogEditor::route(c, "the and with");
     QCOMPARE(found.rule, -1); QCOMPARE(found.templateId, QStringLiteral("feature"));   // the first template, no rule
+    // N1: the prototype's own rules r1 and r2 and a "*" catch-all. "label",
+    // "files" and "services" are stop words; a substring and a plural's
+    // singular match; "*" alone always matches.
+    Rule r1; r1.id = "r1"; r1.when = QStringLiteral("label \u201cbug\u201d \u00b7 \u2264 3 files"); r1.templateId = "feature";
+    Rule r2; r2.id = "r2"; r2.when = QStringLiteral("services/payments/** \u00b7 **/auth/**"); r2.use = "+tester";
+    Rule star; star.id = "star"; star.when = " * "; star.templateId = "feature";
+    c.routing = {r1, r2, star};
+    found = TeamCatalogEditor::route(c, "Tidy the label files of the services");
+    QCOMPARE(found.rule, 2); QVERIFY(found.added.isEmpty());
+    QCOMPARE(TeamCatalogEditor::route(c, "Debug the login").rule, 0);
+    found = TeamCatalogEditor::route(c, "Round the payment total (OAuth)");
+    QCOMPARE(found.rule, 2); QCOMPARE(found.added, QStringList{"tester"});
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
     TeamCatalogEditor editor(&controller);

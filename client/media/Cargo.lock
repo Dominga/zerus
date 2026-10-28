@@ -1417,6 +1417,7 @@ dependencies = [
  "objc2-core-video",
  "objc2-foundation",
  "serde_json",
+ "windows",
  "zerus-client-core",
 ]
 

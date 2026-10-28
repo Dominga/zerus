@@ -118,3 +118,68 @@ fn a_bgra_frame_becomes_a_square_jpeg() {
     let poster = poster_from_rgb(&gray).unwrap();
     assert!(poster.starts_with(&[0xff, 0xd8]) && poster.len() <= POSTER_BYTES);
 }
+
+#[test]
+fn device_audio_becomes_mono_16_bit_at_an_aac_rate() {
+    use zerus_client_core::voice::{InputFormat, SampleFormat};
+    // 48 kHz stereo float stays at 48 kHz, mixed to mono.
+    let mut mono = MonoPcm::new(InputFormat {
+        sample_rate: 48_000,
+        channels: 2,
+        sample_format: SampleFormat::F32,
+    });
+    assert_eq!(mono.rate(), 48_000);
+    let mut bytes = Vec::new();
+    for (left, right) in [(0.5f32, 0.5f32), (1.0, -1.0), (-0.25, -0.25)] {
+        bytes.extend(left.to_ne_bytes());
+        bytes.extend(right.to_ne_bytes());
+    }
+    // Split mid-frame: the partial frame waits for the next chunk.
+    let first = mono.push(&bytes[..10]);
+    let rest = mono.push(&bytes[10..]);
+    let samples: Vec<i16> = first
+        .iter()
+        .chain(&rest)
+        .copied()
+        .collect::<Vec<u8>>()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| i16::from_le_bytes(*pair))
+        .collect();
+    assert_eq!(samples, [16384, 0, -8192]);
+    // 16 kHz becomes 48 kHz: three outputs per input frame, interpolated.
+    let mut up = MonoPcm::new(InputFormat {
+        sample_rate: 16_000,
+        channels: 1,
+        sample_format: SampleFormat::I16,
+    });
+    assert_eq!(up.rate(), 48_000);
+    let input: Vec<u8> = [0i16, 3000, 6000, 9000]
+        .iter()
+        .flat_map(|value| value.to_ne_bytes())
+        .collect();
+    let out: Vec<i16> = up
+        .push(&input)
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| i16::from_le_bytes(*pair))
+        .collect();
+    assert_eq!(out.len(), 9);
+    assert!(out.windows(2).all(|pair| pair[0] <= pair[1]), "{out:?}");
+    assert_eq!(out[3], 3000);
+    // The next chunk continues from the last frame.
+    let more: Vec<u8> = [12000i16]
+        .iter()
+        .flat_map(|value| value.to_ne_bytes())
+        .collect();
+    let next: Vec<i16> = up
+        .push(&more)
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| i16::from_le_bytes(*pair))
+        .collect();
+    assert_eq!(next.first(), Some(&9000));
+}

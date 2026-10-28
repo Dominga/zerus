@@ -18,8 +18,7 @@ pub struct Computer {
     pub host: Option<String>,
     /// False for a control-only computer (`local_sessions` in its card).
     pub local_sessions: bool,
-    /// In the order the core delivered them, which the menu keeps.
-    pub rows: Vec<(String, ViewRow)>,
+    pub rows: BTreeMap<String, ViewRow>,
 }
 
 impl Default for Computer {
@@ -29,7 +28,7 @@ impl Default for Computer {
             listed: false,
             host: None,
             local_sessions: true,
-            rows: Vec::new(),
+            rows: BTreeMap::new(),
         }
     }
 }
@@ -45,8 +44,8 @@ impl Computer {
     /// Sessions that are not archived (`visibleSessionCount`, `FleetState.cpp:17-21`).
     pub fn visible(&self) -> usize {
         self.rows
-            .iter()
-            .filter(|(_, row)| row.state != "archived")
+            .values()
+            .filter(|row| row.state != "archived")
             .count()
     }
 }
@@ -191,18 +190,14 @@ impl Desk {
     pub fn observe(&mut self, change: &Change) -> Option<ComputerId> {
         match change {
             Change::Upsert { computer, key, row } => {
-                let rows = &mut self.entry(computer).rows;
-                match rows.iter_mut().find(|(have, _)| have == key) {
-                    Some(slot) => slot.1 = row.clone(),
-                    None => rows.push((key.clone(), row.clone())),
-                }
+                self.entry(computer).rows.insert(key.clone(), row.clone());
             }
             Change::Remove { computer, key, .. } => {
-                self.entry(computer).rows.retain(|(have, _)| have != key);
+                self.entry(computer).rows.remove(key);
             }
             Change::Replace { computer, rows } => {
                 let entry = self.entry(computer);
-                entry.rows.clone_from(rows);
+                entry.rows = rows.iter().cloned().collect();
                 entry.listed = true;
             }
             Change::Computer {
@@ -269,7 +264,7 @@ impl Desk {
                     c.fresh()
                 }
             })
-            .flat_map(|(_, c)| c.rows.iter().map(|(_, row)| row))
+            .flat_map(|(_, c)| c.rows.values())
             .filter(|row| !row.muted && needs_attention(row))
             .count()
     }
@@ -379,7 +374,7 @@ impl Desk {
 
 /// A computer's sessions by name, or "no sessions" (`TrayMenu.cpp:178-195`).
 fn sessions(menu: &mut Vec<Entry>, computer: &ComputerId, state: &Computer) {
-    let rows: Vec<&(String, ViewRow)> = state
+    let mut rows: Vec<(&String, &ViewRow)> = state
         .rows
         .iter()
         .filter(|(_, row)| row.state != "archived")
@@ -388,7 +383,9 @@ fn sessions(menu: &mut Vec<Entry>, computer: &ComputerId, state: &Computer) {
         menu.push(Entry::Label("no sessions".to_owned()));
         return;
     }
-    // Qt keeps the order `hgs` sent.
+    // The core does not carry hgs's listing order (Replace is key-sorted), so sessions
+    // sort by name, then key; a deliberate deviation from Qt's TrayMenu order.
+    rows.sort_by(|a, b| a.1.name.cmp(&b.1.name).then_with(|| a.0.cmp(b.0)));
     for (key, row) in rows {
         menu.push(Entry::Session {
             computer: computer.clone(),
@@ -688,17 +685,17 @@ mod tests {
                 Entry::Label("arch&&co".into()),
                 Entry::Session {
                     computer: local.clone(),
-                    key: "k2".into(),
-                    name: "codex/p/zeta".into(),
-                    text: "codex/p/zeta  (stopped)".into(),
-                    running: false
-                },
-                Entry::Session {
-                    computer: local,
                     key: "k1".into(),
                     name: "claude/R&D/main".into(),
                     text: "\u{25cf} claude/R&&D/main".into(),
                     running: true
+                },
+                Entry::Session {
+                    computer: local,
+                    key: "k2".into(),
+                    name: "codex/p/zeta".into(),
+                    text: "codex/p/zeta  (stopped)".into(),
+                    running: false
                 },
                 Entry::Separator,
                 Entry::Label("mac&&m".into()),
@@ -735,44 +732,6 @@ mod tests {
         });
         status(&mut desk, "", ComputerStatus::Reconnecting { attempt: 1 });
         assert_eq!(desk.attention(), 0);
-    }
-
-    #[test]
-    fn upserts_and_removals_keep_the_delivered_order() {
-        let mut desk = Desk::default();
-        listed(
-            &mut desk,
-            "",
-            vec![
-                ("b", row("z/p/b", "running")),
-                ("a", row("a/p/a", "running")),
-            ],
-        );
-        let id = ComputerId::local();
-        desk.observe(&Change::Upsert {
-            computer: id.clone(),
-            key: "b".into(),
-            row: row("z/p/b2", "running"),
-        });
-        desk.observe(&Change::Upsert {
-            computer: id.clone(),
-            key: "c".into(),
-            row: row("m/p/c", "running"),
-        });
-        desk.observe(&Change::Remove {
-            computer: id,
-            key: "a".into(),
-            reason: None,
-        });
-        let names: Vec<_> = desk
-            .menu(OpenMode::Terminal)
-            .into_iter()
-            .filter_map(|entry| match entry {
-                Entry::Session { name, .. } => Some(name),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(names, ["z/p/b2", "m/p/c"]);
     }
 
     #[test]

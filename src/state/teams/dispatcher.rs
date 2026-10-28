@@ -703,7 +703,9 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // Background work or subagents keep it from being `free`, as long as its
     // turn has ended and it can take a message.
     let lead_ready = lead.is_some_and(can_take_a_message);
-    if lead_ready && team.settings.remind_lead_minutes > 0 {
+    // N4: the sub-lead's reminder does not wait for the lead's turn to end -
+    // only the lead's own reminder needs a lead that can take a message.
+    if team.settings.remind_lead_minutes > 0 {
         let after = team.settings.remind_lead_minutes as f64 * 60.0;
         for task in &team.tasks {
             // Spec 5.6: a sub-lead's reports are its own to decide; it is
@@ -725,16 +727,16 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                     }
                 }
                 // The lead hears after the second interval, once.
-                if !(lead_ready && age >= after * 2.0 && !attempt.told_lead.iter().any(|kind| kind == "sub-remind")) {
-                    continue;
+                if lead_ready && age >= after * 2.0 && !attempt.told_lead.iter().any(|kind| kind == "sub-remind") {
+                    steps.push(Step::RemindReport { task: task.id });
+                    break;
                 }
-            } else if attempt.reminded_at.is_some() {
                 continue;
             }
-            if sub || attempt.report.as_ref().is_some_and(|report| now - report.at >= after) {
-                if !sub && attempt.reminded_at.is_some() {
-                    continue;
-                }
+            if !lead_ready || attempt.reminded_at.is_some() {
+                continue;
+            }
+            if attempt.report.as_ref().is_some_and(|report| now - report.at >= after) {
                 steps.push(Step::RemindReport { task: task.id });
                 break;
             }
@@ -5586,6 +5588,18 @@ mod tests {
         assert!(!found.iter().any(|step| matches!(step, Step::RemindReport { .. })), "{found:?}");
         let found = steps(&t, &seen, report_at + after * 2.0 + 1.0);
         assert!(found.iter().any(|step| matches!(step, Step::RemindReport { .. })), "{found:?}");
+        // N4: a lead in a 40-minute turn does not hold the reviewer's reminder
+        // back; only the lead's own report reminder waits for its turn to end.
+        let mut busy_lead = session("claude/x/lead", "r0", false);
+        busy_lead.live = true;
+        busy_lead.activity = "busy".into();
+        busy_lead.phase = "turn".into();
+        let found = steps(&t, &[busy_lead, session("codex/x/qalead", "r9", true)], report_at + after + 1.0);
+        assert!(
+            found.iter().any(|step| matches!(step, Step::RemindReviewer { member, .. } if member == "qalead")),
+            "{found:?}"
+        );
+        assert!(!found.iter().any(|step| matches!(step, Step::RemindReport { .. })), "{found:?}");
         // N10: a new sub-lead gets its brief once.
         t.members.iter_mut().find(|member| member.id == "qalead").unwrap().sub_brief = true;
         assert!(steps(&t, &seen, 20.0).contains(&Step::SubBrief { member: "qalead".into() }));

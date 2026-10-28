@@ -14,9 +14,10 @@ Change the draft (lead or owner), carrying the revision you read:
    "set":{"name":"...","goal":"...","addendum":"...","settings":{...},
           "members":[...],"tasks":[...]}} | hgs team draft --json
 A field the owner edited after you last read the draft is refused ("Owner
-changed members"): read the draft again, then set it. The owner's update always
-wins and names the field in unseen ("Owner changed: members, goal"); your
-edits wait in unseen until the owner calls seen.
+changed members"): read the draft again. The owner's update marks the field
+owner_edited and drops it from unseen; your get answers the marks it cleared
+in owner_edited, and after that read you may set the field. Your own edits
+wait in unseen until the owner calls seen.
 
 The owner also runs the draft: create (status planning, or running with
 "approve":true; a wider permissions profile needs "confirm_widening":true),

@@ -17,13 +17,14 @@ import { clearArchiveMenuEntry } from "./sessions/selection-live";
 import { computerOffline } from "../store/catalog";
 import { selectionSnapshot } from "./sessions/selection";
 import { snapshotOf, terminateCopy, type ActionRow } from "./sessions/actions-ui";
-import type { Action, Outcome } from "../types";
+import type { Action, EditOutcome, Outcome } from "../types";
 import { inTauri, metrics, pumpStats } from "../bridge";
 import { restoreSettings, setSetting } from "../store/settings";
 import { setPage, type Page } from "../store/ui";
 import { accountsPage } from "../store/accounts";
 import { machinesPage } from "../store/machines";
 import { projectsPage } from "../store/projects";
+import { createProject, deleteProject, grouping, moveProject, moveToProject, renameProject, sortProject } from "../store/organization";
 import type { ScenarioResult } from "../perf/scenarios";
 
 // The measurement panel (src/perf), loaded on demand: `?perf=1` in the window
@@ -627,6 +628,49 @@ async function screensSmoke(allowed: boolean) {
   }
 }
 
+// `?organization-smoke=1` (ZERUS_CLIENT_QUERY=organization-smoke=1, in the
+// environment the actions smoke needs, with ZERUS_CLIENT_HGS a fake hgs that
+// answers `swarm apply` with the replay's organization) runs one edit of each
+// project menu through the store the menus use, once the replay's
+// organization is ready and lists the replay session. Each step names a
+// project of the fixture, which every fake reply lists again. It logs
+// "organization-smoke <step>: <outcome>" and exits 0 when every outcome is
+// done, else 1. Sorting a project whose rows are all listed members changes
+// only this device's layout, so it sends no `swarm apply`.
+async function organizationSmoke(allowed: boolean) {
+  const exit = (code: number) => invoke("exit_app", { code }).catch(() => {});
+  if (!allowed) {
+    log("organization-smoke not started: it needs ZERUS_CLIENT_REPLAY, ZERUS_CLIENT_HGS and ZERUS_CLIENT_PERF");
+    return;
+  }
+  try {
+    const row = () => {
+      const s = orderedRows().find((r) => r.name === SMOKE_SESSION);
+      if (!s) throw new Error("the replay session is gone");
+      return s;
+    };
+    await until(() => grouping().ready && orderedRows().some((s) => s.name === SMOKE_SESSION), 30_000, "the replay organization was not ready in time");
+    const steps: [string, () => Promise<EditOutcome>][] = [
+      ["move-to-project", () => moveToProject([row()], "p-aurora")],
+      ["create-project", () => createProject("Smoke project", [row()])],
+      ["rename-project", () => renameProject("p-docs-site", "Docs renamed")],
+      ["sort-project", () => sortProject("p-sample-project")],
+      ["move-project", () => moveProject("p-orders-api", "p-sample-project")],
+      ["delete-project", () => deleteProject("p-docs-site", "ungrouped")],
+    ];
+    let bad = 0;
+    for (const [step, run] of steps) {
+      const out = await run();
+      log(`organization-smoke ${step}: ${out.outcome}${out.outcome === "done" ? "" : ` (${out.detail})`}`);
+      if (out.outcome !== "done") bad++;
+    }
+    await exit(bad ? 1 : 0);
+  } catch (error) {
+    log(`organization-smoke failed: ${String(error)}`);
+    await exit(1);
+  }
+}
+
 const onScenarioStart = (id: string, index: number, total: number) => log(`scenario ${index + 1}/${total} ${id} start`);
 const onScenarioEnd = (id: string, index: number, total: number, ms: number, result: ScenarioResult) => {
   finished.push(result);
@@ -653,6 +697,7 @@ export function PerfHost() {
     if (smoke === "1" && inTauri()) void actionsSmoke(!!config().actions_smoke);
     if (smoke === "marks" && inTauri()) void marksAfterRestart(!!config().actions_smoke);
     if (new URLSearchParams(location.search).get("screens-smoke") === "1" && inTauri()) void screensSmoke(!!config().actions_smoke);
+    if (new URLSearchParams(location.search).get("organization-smoke") === "1" && inTauri()) void organizationSmoke(!!config().actions_smoke);
     if (config().mode === "auto") {
       setOpen(true);
       void autoRun(config());

@@ -84,6 +84,44 @@ export interface ComputerOut { computer: ComputerId; status: ComputerStatus | st
 export type ActivityKind = "events" | "replace" | "event" | "state" | "ended";
 export interface ActivityOut { computer: ComputerId; key: string; kind: ActivityKind | string; payload: unknown }
 
+// The Sessions list's grouping by the shared project organization
+// (client/core `swarm/grouping.rs`). The Rust side keeps the organization;
+// the webview gets each row's project and rank, and the ordered headers.
+
+/** One row's place: its project and its rank inside it. */
+export interface GroupOut { computer: ComputerId; key: string; group: string; rank: number }
+export interface HeaderOut {
+  id: string;
+  name: string;
+  /** The project's colour; null uses the palette slot. */
+  color: string | null;
+  accessible: boolean;
+  collapsed: boolean;
+  is_default: boolean;
+  palette: number;
+}
+/** The ordered headers and whether edits can run, sent when they change. */
+export interface GroupingOut {
+  /** A catalog is presented; before it, the list shows no headers. */
+  loaded: boolean;
+  default_project: string;
+  headers: HeaderOut[];
+  ready: boolean;
+  /** Why edits cannot run, for the disabled entries. */
+  reason: string | null;
+  busy: boolean;
+  status: string;
+  status_error: boolean;
+  conflicts: number;
+  /** A one-time warning, such as saved project changes that could not be applied; absent when there is none. */
+  notice?: string;
+}
+/** How a project edit ended (client/core `swarm::sync::EditOutcome`). */
+export type EditOutcome =
+  | { outcome: "done"; conflicts: number }
+  | { outcome: "kept"; detail: string }
+  | { outcome: "refused"; detail: string };
+
 export interface Batch {
   upserts: RowOut[];
   removes: KeyOut[];
@@ -91,12 +129,17 @@ export interface Batch {
   computers: ComputerOut[];
   machines?: MachineOut[];
   activity: ActivityOut[];
+  /** Each row's project and rank, for the rows whose grouping changed. */
+  groups?: GroupOut[];
+  /** The headers and the edit state, when they changed. */
+  grouping?: GroupingOut;
 }
 
 export const emptyBatch = (): Batch => ({ upserts: [], removes: [], replaces: [], computers: [], machines: [], activity: [] });
 
 export const isEmptyBatch = (b: Batch) =>
-  !b.upserts.length && !b.removes.length && !b.replaces.length && !b.computers.length && !b.machines?.length && !b.activity.length;
+  !b.upserts.length && !b.removes.length && !b.replaces.length && !b.computers.length && !b.machines?.length && !b.activity.length
+  && !b.groups?.length && !b.grouping;
 
 /** One Activity event as `inspect` returns it; unknown fields are kept. */
 export interface ActivityEvent {
@@ -259,7 +302,7 @@ export interface MachinesView {
 export interface Folder { id: string; name: string; path: string; computer: string; machine: string }
 export interface Project { id: string; name: string; color: string | null; accessible: boolean; is_default: boolean; palette: number; folders: Folder[] }
 export interface ProjectsView {
-  loaded: boolean; refreshing: boolean; status: string; status_error: boolean; conflicts: number;
+  loaded: boolean; status: string; status_error: boolean; conflicts: number;
   unconnected: string[]; notice: string | null; projects: Project[];
 }
 
@@ -270,7 +313,7 @@ export const emptyMachines = (error: string | null = null): MachinesView => ({
   loaded: false, refreshing: false, error, local: "", environment_override: false, machines: [], effective: null, check: null, busy: false,
 });
 export const emptyProjects = (status = ""): ProjectsView => ({
-  loaded: false, refreshing: false, status, status_error: status !== "", conflicts: 0, unconnected: [], notice: null, projects: [],
+  loaded: false, status, status_error: status !== "", conflicts: 0, unconnected: [], notice: null, projects: [],
 });
 
 /** One checked page of a computer's archive (`archive_page`). */

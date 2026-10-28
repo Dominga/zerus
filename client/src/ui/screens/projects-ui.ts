@@ -1,6 +1,8 @@
+import { createEffect, type Accessor } from "solid-js";
 import type { Folder, Project, ProjectsView } from "../../types";
 
-// Pure rules of the Projects screen (ProjectsDialog.cpp).
+// Pure rules of the Projects screen (ProjectsDialog.cpp), and the effect that
+// shows the project Project settings… asks for.
 
 export type SortColumn = "name" | "machine" | "path";
 export interface Sort { column: SortColumn; ascending: boolean }
@@ -25,3 +27,21 @@ export const shownProjects = (view: ProjectsView, all: boolean) => (all ? view.p
 
 /** The project's own colour, else its palette slot (this device's colours arrive with project editing). */
 export const projectColor = (p: Project) => p.color ?? `var(--z-entity-palette-${p.palette})`;
+
+/**
+ * Project settings… in the Sessions list (SessionsWindow.cpp:2589, then
+ * ProjectsDialog::selectProject, 319-322): once the view lists the asked
+ * project, an accessible one is chosen and the request ends; one on a computer
+ * without a configured connection only ends it. Until the view lists it, the
+ * request waits. Runs in the screen's reactive owner.
+ */
+export function showAskedProject(asked: Accessor<string | undefined>, done: () => void, view: Accessor<ProjectsView>, choose: (p: Project) => void): void {
+  createEffect(() => {
+    const id = asked();
+    if (!id) return;
+    const p = view().projects.find((x) => x.id === id);
+    if (!p) return;
+    if (p.accessible) choose(p);
+    done();
+  });
+}

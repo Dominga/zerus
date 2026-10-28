@@ -1,0 +1,151 @@
+{
+  "schema": 1,
+  "node_id": "node-workstation",
+  "swarm_id": "swarm-replay",
+  "digest": "replay-1",
+  "initialized": true,
+  "organization": {
+    "version": 2,
+    "default_project": "ungrouped",
+    "project_order": [
+      "p-sample-project",
+      "p-aurora",
+      "p-orders-api",
+      "p-docs-site",
+      "p-ios-app",
+      "ungrouped"
+    ],
+    "projects": [
+      {
+        "id": "p-sample-project",
+        "name": "sample-project",
+        "color": "#3fb950",
+        "accessible": true,
+        "folders": [],
+        "sessions": [
+          "workstation\nclaude/sample-project/review",
+          "workstation\nclaude/sample-project/api-refactor",
+          "workstation\ncodex/sample-project/pagination",
+          "workstation\nclaude/sample-project/docs-pass",
+          "workstation\nkimi/sample-project/flaky-test",
+          "workstation\ncodex/sample-project/release-notes",
+          "workstation\nopencode/sample-project/i18n",
+          "workstation\ndeepseek/sample-project/perf-budget"
+        ]
+      },
+      {
+        "id": "p-aurora",
+        "name": "aurora",
+        "color": "#64b5f6",
+        "accessible": true,
+        "folders": [],
+        "sessions": [
+          "workstation\nclaude/aurora/checkout-form",
+          "workstation\nclaude/aurora/orders-v3",
+          "workstation\ncodex/aurora/image-runner",
+          "workstation\nclaude/aurora/migrations",
+          "workstation\nkimi/aurora/search-index",
+          "workstation\ncodex/aurora/a11y-audit",
+          "workstation\nopencode/aurora/theme-tokens",
+          "mac\ncodex/aurora/safari-fixes",
+          "mac\nclaude/aurora/keyboard-nav"
+        ]
+      },
+      {
+        "id": "p-orders-api",
+        "name": "orders-api",
+        "color": "#d29922",
+        "accessible": true,
+        "folders": [],
+        "sessions": [
+          "workstation\ndeepseek/orders-api/rate-limits",
+          "workstation\nclaude/orders-api/webhooks",
+          "workstation\nclaude/orders-api/billing-export",
+          "workstation\ncodex/orders-api/retry-queue",
+          "workstation\nclaude/orders-api/openapi"
+        ]
+      },
+      {
+        "id": "p-docs-site",
+        "name": "docs-site",
+        "color": "#bc8cff",
+        "accessible": true,
+        "folders": [],
+        "sessions": [
+          "workstation\nkimi/docs-site/landing",
+          "workstation\ncodex/docs-site/changelog",
+          "workstation\nopencode/docs-site/api-reference",
+          "workstation\ndeepseek/docs-site/examples"
+        ]
+      },
+      {
+        "id": "p-ios-app",
+        "name": "ios-app",
+        "color": "#f778ba",
+        "accessible": true,
+        "folders": [],
+        "sessions": [
+          "mac\ndeepseek/ios-app/widgets",
+          "mac\nclaude/ios-app/push-setup",
+          "mac\nclaude/ios-app/testflight"
+        ]
+      },
+      {
+        "id": "ungrouped",
+        "name": "Inbox",
+        "color": "#8d9baa",
+        "accessible": true,
+        "folders": [],
+        "sessions": []
+      }
+    ]
+  },
+  "versions": {
+    "{\"kind\":\"project\",\"id\":\"p-sample-project\",\"field\":\"name\"}": [
+      "op-p-sample-project-name"
+    ],
+    "{\"kind\":\"project\",\"id\":\"p-aurora\",\"field\":\"name\"}": [
+      "op-p-aurora-name"
+    ],
+    "{\"kind\":\"project\",\"id\":\"p-orders-api\",\"field\":\"name\"}": [
+      "op-p-orders-api-name"
+    ],
+    "{\"kind\":\"project\",\"id\":\"p-docs-site\",\"field\":\"name\"}": [
+      "op-p-docs-site-name"
+    ],
+    "{\"kind\":\"project\",\"id\":\"p-ios-app\",\"field\":\"name\"}": [
+      "op-p-ios-app-name"
+    ],
+    "{\"kind\":\"project\",\"id\":\"ungrouped\",\"field\":\"name\"}": [
+      "op-ungrouped-name"
+    ]
+  },
+  "conflicts": [],
+  "preferences": {
+    "mobile_delivery": "auto"
+  },
+  "machines": [
+    {
+      "id": "node-workstation",
+      "name": "workstation",
+      "connection": null,
+      "local": true
+    },
+    {
+      "id": "node-mac",
+      "name": "mac",
+      "connection": "mac",
+      "local": false
+    }
+  ],
+  "peers": {
+    "mac": {
+      "last_sync": 1793000000.0,
+      "node": "node-mac"
+    }
+  },
+  "worker": {
+    "running": true,
+    "current": true
+  }
+}

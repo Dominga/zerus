@@ -1,10 +1,10 @@
 //! Read marks the host's snapshot does not show yet. Kept in a file so a
 //! restart keeps retrying (`tray/src/ReadMarks.h`).
+use crate::fsx::write_private_atomic;
 use crate::view::ViewRow;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReadMark {
@@ -171,13 +171,15 @@ impl ReadMarks {
         settled
     }
 
-    /// A failure keeps the marks in memory; the next change tries again.
+    /// Replaces the file through a temporary one ([`write_private_atomic`]),
+    /// without a flush to disk. A failure keeps the marks in memory; the next
+    /// change tries again.
     fn save(&mut self) {
         self.unsaved = false;
         let list: Vec<&ReadMark> = self.marks.values().collect();
         let written = serde_json::to_vec(&list)
             .map_err(std::io::Error::from)
-            .and_then(|bytes| write_atomically(&self.path, &bytes));
+            .and_then(|bytes| write_private_atomic(&self.path, &bytes, false));
         if let Err(error) = written {
             eprintln!(
                 "zerus-client: could not save read marks to {}: {error}",
@@ -185,28 +187,6 @@ impl ReadMarks {
             );
         }
     }
-}
-
-/// Writes a temporary file beside `path`, then renames it over it, so a
-/// reader sees the old file or the new one, never a part. Creates the folder.
-pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let mut temporary = path.to_path_buf().into_os_string();
-    temporary.push(format!(
-        ".{}-{}.tmp",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let temporary = PathBuf::from(temporary);
-    if let Some(folder) = path.parent().filter(|f| !f.as_os_str().is_empty()) {
-        std::fs::create_dir_all(folder)?;
-    }
-    let written =
-        std::fs::write(&temporary, bytes).and_then(|()| std::fs::rename(&temporary, path));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    written
 }
 
 #[cfg(test)]

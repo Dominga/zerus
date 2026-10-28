@@ -17,9 +17,6 @@ pub const USAGE_INTERVAL: u64 = 300_000;
 /// Inspects in flight at once (AccountUsageStore::dispatch).
 pub const USAGE_CONCURRENCY: usize = 2;
 
-/// The shared project catalog's poll (SwarmController pollInterval).
-pub const SWARM_INTERVAL: u64 = 5_000;
-
 /// A screen whose reads the hub runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -570,10 +567,9 @@ mod tests {
         assert_eq!(s.next_due(&hosts, &refs), Some(10_000 + USAGE_INTERVAL));
     }
 
-    // Review Focus 5 (the timing half; the hub test in Task 3 covers visibility).
     #[test]
-    fn the_swarm_poll_runs_every_five_seconds_and_never_twice_at_once() {
-        let mut poll = Poll::new(SWARM_INTERVAL);
+    fn a_poll_runs_once_per_interval_and_never_twice_at_once() {
+        let mut poll = Poll::new(5_000);
         assert!(poll.due(0, false));
         assert!(!poll.due(6_000, false), "one runs");
         assert!(

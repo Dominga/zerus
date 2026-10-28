@@ -31,6 +31,8 @@ const VERSION_LIMIT: usize = 128;
 pub const ANALYTICS_MARKER: &str = "hgs [@host] analytics --json";
 /// How much of a failed command's standard error an error keeps.
 const MESSAGE_CHARS: usize = 2000;
+/// A call whose standard input `hgs` did not take.
+pub(crate) const NOT_TAKEN: &str = "hgs did not take the request";
 
 /// One read.
 #[derive(Clone, Debug, PartialEq)]
@@ -414,21 +416,28 @@ fn output(exit: Exit) -> Result<Vec<u8>, ReadError> {
         Exit::Abnormal { stderr } => Err(failed(None, &stderr)),
         Exit::TimedOut => Err(ReadError::TimedOut),
         Exit::StartFailed(message) => Err(ReadError::StartFailed { message }),
-        Exit::WriteFailed => Err(failed(None, "hgs did not take the request")),
+        Exit::WriteFailed => Err(failed(None, NOT_TAKEN)),
+    }
+}
+
+/// The text of a call `hgs` failed: its standard error, trimmed and at most
+/// `limit` characters, else its exit code, else that it ended abnormally.
+pub(crate) fn failure_text(code: Option<i32>, stderr: &str, limit: usize) -> String {
+    let text: String = stderr.trim().chars().take(limit).collect();
+    if !text.is_empty() {
+        return text;
+    }
+    match code {
+        Some(code) => format!("hgs exited with code {code}"),
+        None => "hgs ended abnormally".to_owned(),
     }
 }
 
 fn failed(code: Option<i32>, stderr: &str) -> ReadError {
-    let text: String = stderr.trim().chars().take(MESSAGE_CHARS).collect();
-    let message = if text.is_empty() {
-        match code {
-            Some(code) => format!("hgs exited with code {code}"),
-            None => "hgs ended abnormally".to_owned(),
-        }
-    } else {
-        text
-    };
-    ReadError::Failed { code, message }
+    ReadError::Failed {
+        code,
+        message: failure_text(code, stderr, MESSAGE_CHARS),
+    }
 }
 
 /// The version `hgs --version` prints, `hgs X.Y.Z` with an optional

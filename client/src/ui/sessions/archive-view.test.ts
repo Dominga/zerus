@@ -25,7 +25,7 @@ import * as bridge from "../../bridge";
 import { applyBatch } from "../../store/catalog";
 import { archiveCount, archiveTip } from "../../store/archive";
 import { stillListed } from "../../store/actions";
-import { matchesFilter, selected, setMachineFilter, setSearch, setSelectedKey, setStateFilter } from "../../store/ui";
+import { matchesFilter, selected, setMachineFilter, setProjectFilter, setSearch, setSelectedKey, setStateFilter } from "../../store/ui";
 import { listRows } from "./model";
 import { snapshotOf } from "./actions-ui";
 import { emptyBatch, type ArchivePage, type ViewRow } from "../../types";
@@ -46,7 +46,8 @@ describe("the Archive view in the app", () => {
   it("pages only under the Archive filter, lists archived cards newest first, and finds them for the selection and the actions", async () => {
     applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }], upserts: [{ computer: "", key: "run:run-live", row: live }] });
     expect(mocked.archivePage).not.toHaveBeenCalled();
-    expect(listRows().map((r) => r.type)).toEqual(["header", "card"]);
+    // No organization is presented: one flat list without a project header.
+    expect(listRows().map((r) => r.type)).toEqual(["card"]);
     expect(archiveCount()).toBe("…");
 
     setStateFilter("archived");
@@ -81,6 +82,13 @@ describe("the Archive view in the app", () => {
     await flush();
     expect(listRows()).toHaveLength(1);
 
+    // The project filter holds organization project IDs; archived rows have
+    // none until the Archive view groups by project, so it keeps them.
+    setProjectFilter(["p-aurora"]);
+    expect(listRows()).toHaveLength(1);
+    expect(archiveCount()).toBe("1");
+    setProjectFilter([]);
+
     // A machine outside the filter pages nothing.
     const calls = mocked.archivePage.mock.calls.length;
     setMachineFilter(["build-box"]);
@@ -90,6 +98,6 @@ describe("the Archive view in the app", () => {
     setMachineFilter([]);
 
     setStateFilter("all");
-    expect(listRows().map((r) => r.type)).toEqual(["header", "card"]);
+    expect(listRows().map((r) => r.type)).toEqual(["card"]);
   });
 });

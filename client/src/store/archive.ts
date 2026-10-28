@@ -3,7 +3,7 @@ import * as bridge from "../bridge";
 import { bindArchivedRows as bindActionRows } from "./actions";
 import { catalog, toSession, type ComputerState } from "./catalog";
 import type { RowMarks } from "./marks";
-import { bindArchivedRows as bindSelectedRows, compactRows, machineFilter, page, projectFilter, search, stateFilter } from "./ui";
+import { bindArchivedRows as bindSelectedRows, compactRows, machineFilter, page, search, stateFilter } from "./ui";
 import { initialRange, rangeBounds, type DateRange } from "../ui/sessions/archive-dates";
 import type { ArchivePage, ComputerId, ViewRow } from "../types";
 import type { Row } from "../ui/sessions/model";
@@ -166,18 +166,25 @@ export function pagingComputers(computers: Readonly<Record<string, ComputerState
   return out;
 }
 
-/** What the Archive filter's list and count follow besides the pages. */
+/**
+ * What the Archive filter's list and count follow besides the pages. Qt's
+ * also follow the project filter, matching each archived row by the project
+ * of its archive identity (`groupFor`). The project filter here holds the
+ * organization's project IDs, and archived rows have no organization project
+ * until zerus-5wmh.40 ports Qt's archive identities (`machine\narchive\n<id>`,
+ * SessionOrganization.cpp:225), so the list and its count ignore it rather
+ * than compare an ID with a session name's project segment.
+ */
 export interface ListScope {
   machines: readonly string[];
-  projects: readonly string[];
   /** Inside the date range (ArchiveBrowser::includes). */
   includes(archivedAt: number): boolean;
   compact(key: string): boolean;
 }
 
-/** In the machine and project filters (what Qt's Archive count follows). */
-export const inScope = (s: Pick<Session, "machine" | "project">, scope: Pick<ListScope, "machines" | "projects">) =>
-  (!scope.machines.length || scope.machines.includes(s.machine)) && (!scope.projects.length || scope.projects.includes(s.project));
+/** In the machine filter (what Qt's Archive count follows, without the project filter: see ListScope). */
+export const inScope = (s: Pick<Session, "machine">, scope: Pick<ListScope, "machines">) =>
+  !scope.machines.length || scope.machines.includes(s.machine);
 
 /**
  * The Archive filter's rows (SessionsWindowRows.cpp 270-271): flat cards in
@@ -400,10 +407,10 @@ export const { archive, archiveRows, archiveCount, archiveTip } = createRoot(() 
     computers: () => pagingComputers(catalog.computers, catalogRows(), machineFilter()),
   });
   const archiveRows = createMemo(() => archiveListRows(archive.rows(), {
-    machines: machineFilter(), projects: projectFilter(), includes: archive.includes, compact: (key) => !!compactRows[key],
+    machines: machineFilter(), includes: archive.includes, compact: (key) => !!compactRows[key],
   }));
   const counted = createMemo(() => {
-    const scope = { machines: machineFilter(), projects: projectFilter() };
+    const scope = { machines: machineFilter() };
     return archive.rows().filter((s) => inScope(s, scope)).length;
   });
   return { archive, archiveRows, archiveCount: () => archive.countText(counted()), archiveTip: () => archive.tipText("Archive", counted()) };

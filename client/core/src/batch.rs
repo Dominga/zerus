@@ -4,6 +4,7 @@
 //! requests a [`Coalescer`] folds every [`Change`] so that a burst of thousands
 //! of deltas costs one batch with the latest row per key, and its memory stays
 //! bounded by the number of distinct keys.
+use crate::swarm::grouping::{GroupOut, GroupingOut};
 use crate::{
     ActivityUpdate, Change, ComputerId, ComputerStatus, MachineMeta, OrganizationUpdate,
     ProcessesUpdate, TasksUpdate, ViewRow,
@@ -105,7 +106,9 @@ pub struct MachineOut {
 
 /// Everything that changed since the previous batch. The view applies, in
 /// order: `computers`, `machines`, `replaces`, `removes`, `upserts`,
-/// `activity`, `processes`, `tasks`, then `organizations`. `machines` holds
+/// `activity`, `processes`, `tasks`, `organizations`, then `groups` and `grouping`. A `replaces`
+/// entry keeps the groups of the keys it keeps: grouping does not resend
+/// unchanged rows after a Replace, so the view must not clear them. `machines` holds
 /// at most one entry per computer and none for a computer whose status became
 /// `ended`; `organizations` holds at most one per computer. Row changes of a computer with a replacement are
 /// already part of it; otherwise a key is in at most one of `removes` and
@@ -126,6 +129,14 @@ pub struct Batch {
     pub tasks: Vec<TasksOut>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub organizations: Vec<OrganizationOut>,
+    /// Each row's project and rank in the Sessions list, for the rows whose
+    /// grouping changed. The Coalescer leaves it empty; the Tauri pump fills
+    /// it from `swarm::grouping` (zerus-5wmh.31).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<GroupOut>,
+    /// The ordered project headers and whether edits can run, when they changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grouping: Option<GroupingOut>,
 }
 
 impl Batch {
@@ -139,6 +150,8 @@ impl Batch {
             && self.processes.is_empty()
             && self.tasks.is_empty()
             && self.organizations.is_empty()
+            && self.groups.is_empty()
+            && self.grouping.is_none()
     }
 }
 
@@ -1128,5 +1141,17 @@ mod tests {
         );
         let back: Batch = serde_json::from_value(value).unwrap();
         assert_eq!(back.computers[0].attempt, 3);
+    }
+
+    #[test]
+    fn groups_and_grouping_are_left_out_when_empty() {
+        let value = serde_json::to_value(Batch::default()).unwrap();
+        assert!(value.get("groups").is_none() && value.get("grouping").is_none());
+        assert!(Batch::default().is_empty());
+        let batch = Batch {
+            groups: vec![crate::GroupOut::default()],
+            ..Batch::default()
+        };
+        assert!(!batch.is_empty());
     }
 }

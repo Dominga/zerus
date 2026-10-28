@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::readmarks::write_atomically;
+use crate::fsx::write_private_atomic;
 
 /// At most this many entries per map (owner rule on bounded caches).
 pub const CAP: usize = 20_000;
@@ -114,7 +114,7 @@ impl Contents {
     /// Replaces the file atomically (a temporary file beside it, then a
     /// rename), creating its folder.
     pub fn write(&self) -> io::Result<()> {
-        write_atomically(&self.path, &serde_json::to_vec(&self.file)?)
+        write_private_atomic(&self.path, &serde_json::to_vec(&self.file)?, false)
     }
 
     pub fn path(&self) -> &Path {

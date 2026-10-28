@@ -696,6 +696,35 @@ describe("the organization's projects and folders (SessionsWindow.cpp:2923, NewS
     expect(t.world.notices).toEqual([]);
   });
 
+  // A lost project_folders call is never a project without folders (Task 3's re-review).
+  it("shows a failed folder copy on the error line and reads it again when the project is chosen again", async () => {
+    const t = setup((w) => { world(w); w.failFolders = (id, call) => (id === "work" && call === 1 ? "The app did not answer." : undefined); });
+    await t.open();
+    expect(t.state().error).toBe("The app did not answer.");
+    expect(t.state().folders).toEqual([]);
+    t.act.chooseProject(t.state().projects.findIndex((p) => p.id === "docs"));
+    await settle();
+    t.act.chooseProject(t.state().projects.findIndex((p) => p.id === "work"));
+    await settle();
+    expect(t.world.of("projectFolders").map((c) => c.args)).toEqual([["work"], ["docs"], ["work"]]);
+    expect(t.state().folders.map((f) => f.path)).toEqual(["/srv/work"]);
+    expect(t.state().error).toBe("");
+    expect(t.world.creating()).toEqual([]);
+  });
+
+  it("a folder entry whose copy fails shows the call's text, not a changed folder", async () => {
+    const t = setup((w) => { world(w); w.failFolders = (id, call) => (id === "work" && call === 2 ? "The app did not answer." : undefined); });
+    // Projects' entry checks the folder first (the first call), then the dialog copies it (the second).
+    expect(await t.store.openFolderSession("work", folder("f1", "pc", "/srv/work"))).toBe("");
+    await settle();
+    expect(t.store.newSession()).toBeUndefined();
+    expect(t.world.notices).toEqual([{ tone: "error", text: "The app did not answer.", sticky: true }]);
+    expect(t.world.count("launchAccountsClose")).toBe(1);
+    // A failed first call is the entry's own problem.
+    t.world.failFolders = () => "Lost call";
+    expect(await t.store.openFolderSession("work", folder("f1", "pc", "/srv/work"))).toBe("Lost call");
+  });
+
   // A folder without an id is selected by its key (its computer and path); its id stays empty.
   it("selects a project folder by its key", async () => {
     const t = setup(world);

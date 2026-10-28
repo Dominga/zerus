@@ -238,10 +238,13 @@ export function bridgeOf(world: World): NewSessionBridge {
     launchAccountsClose: async () => { record("launchAccountsClose"); },
     onLaunchAccountsChanged: (listener) => { world.listeners.add(listener); return () => world.listeners.delete(listener); },
     // The organization's copy answers at once, or after its gate; the list is the folders at the call.
+    // `failFolders` names a lost call: the command rejects with its text.
     projectFolders: async (project) => {
       record("projectFolders", project);
+      const failure = world.failFolders?.(project, world.count("projectFolders"));
       const listed = world.projects.find((p) => p.id === project)?.folders.map((f) => ({ ...f })) ?? [];
       await world.wait(`folders:${project}`);
+      if (failure) throw failure;
       return listed;
     },
     creationSubmit: async (plan) => {
@@ -255,7 +258,12 @@ export function bridgeOf(world: World): NewSessionBridge {
 }
 
 // Optional parts of the world a test sets.
-export interface World { context?: NewSessionContext; picked?: string }
+export interface World {
+  context?: NewSessionContext;
+  picked?: string;
+  /** The text a `project_folders` call rejects with, by project and the call's 1-based number; undefined answers. */
+  failFolders?: (project: string, call: number) => string | undefined;
+}
 
 const defaultOf = (world: World) => world.projects.find((p) => p.is_default)?.id ?? "ungrouped";
 

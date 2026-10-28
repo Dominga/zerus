@@ -232,6 +232,19 @@ describe("the dialog's keys (QDialog default button, QComboBox::keyPressEvent)",
     expect(view.dialogKey("choice", press("Escape"))).toBe("native");
   });
 
+  // The Enter that commits an input method's text is the input method's, as in Qt.
+  it("leaves every key of an input method's composition to it", () => {
+    for (const control of ["choice", "button", "text", "check", "select"] as const) {
+      expect(view.dialogKey(control, press("Enter", { isComposing: true })), control).toBe("native");
+      // WebKit reports the committing Enter with keyCode 229 once isComposing is false.
+      expect(view.dialogKey(control, press("Enter", { keyCode: 229 })), control).toBe("native");
+      expect(view.dialogKey(control, press("Enter", { keyCode: 13 })), control).toBe("start");
+    }
+    expect(view.dialogKey("choice", press("ArrowDown", { isComposing: true }))).toBe("native");
+    expect(view.dialogKey("choice", press("Enter", { keyCode: 229 }), true)).toBe("native");
+    expect(view.dialogKey("text", press("Process"))).toBe("native");
+  });
+
   it("moves in an open list and picks its row on Enter or Space", () => {
     expect(view.dialogKey("choice", press("ArrowDown"), true)).toBe("next");
     expect(view.dialogKey("choice", press("ArrowUp"), true)).toBe("previous");

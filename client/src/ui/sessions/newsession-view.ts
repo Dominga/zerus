@@ -1,6 +1,7 @@
 import { createSignal } from "solid-js";
 import { openFolderSession, openNewSession, selectedHostTarget } from "../../store/newSession";
 import { notify } from "../../store/actions";
+import { composing } from "../lib/keys";
 import type { AccountRow, ComputerRow, FolderRow, LaunchFolder, ProjectRow } from "./newsession-ui";
 
 // The New session dialog's entry points and the logic its view keeps
@@ -127,10 +128,12 @@ export type KeyControl =
  */
 export type KeyAction = "start" | "open" | "previous" | "next" | "first" | "last" | "pick" | "close" | "ignore" | "native";
 
-type KeyPress = Pick<KeyboardEvent, "key" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey">;
+type KeyPress = Pick<KeyboardEvent, "key" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey"> & Partial<Pick<KeyboardEvent, "isComposing" | "keyCode">>;
 
 /** The key mapping of the dialog's controls; `open` is whether the choice's list is open. */
 export function dialogKey(control: KeyControl, e: KeyPress, open = false): KeyAction {
+  // An input method's composition keeps its keys: its committing Enter never starts the session.
+  if (composing(e)) return "native";
   const plain = !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey;
   if (control === "choice" && open) {
     if (e.key === "ArrowUp") return "previous";

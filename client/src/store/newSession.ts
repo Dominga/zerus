@@ -253,6 +253,8 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
   let defaultProject = INBOX;
   const projectFolders = new Map<string, FolderOut[]>();
   const folderReads = new Map<string, Promise<void>>();
+  /** Why a project's last copy failed (a lost call); choosing the project again reads it again. */
+  const folderFailures = new Map<string, string>();
   let projectList: ProjectRow[] = [];
   let projectIndex = -1;
   let machines: ComputerRow[] = [];
@@ -406,7 +408,9 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
   /**
    * Copies a project's folders once (`project_folders`). The answer refills
    * the computers and folders while that project is chosen; a late one for
-   * another project is kept and changes nothing.
+   * another project is kept and changes nothing. A failed copy is never taken
+   * for a project without folders: the error line shows the call's detail
+   * while that project is chosen, and choosing it again reads it again.
    */
   function readFolders(id: string): Promise<void> {
     if (!id || projectFolders.has(id)) return Promise.resolve();
@@ -415,9 +419,22 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     const read = b.projectFolders(id).then((list) => {
       folderReads.delete(id);
       if (closed) return;
+      const failed = folderFailures.get(id);
+      folderFailures.delete(id);
       projectFolders.set(id, list.slice(0, FOLDERS));
-      if (projectId() === id) { loadMachines(); loadFolders(); }
-    }, () => { folderReads.delete(id); });
+      if (projectId() !== id) return;
+      if (failed !== undefined && error === failed) error = "";
+      loadMachines();
+      loadFolders();
+    }, (failure) => {
+      folderReads.delete(id);
+      if (closed) return;
+      const text = errorText(failure);
+      folderFailures.set(id, text);
+      if (projectId() !== id) return;
+      setError(text);
+      updateForm();
+    });
     folderReads.set(id, read);
     return read;
   }
@@ -1050,8 +1067,10 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     selectPath: (target: string, automaticWorktree?: boolean) => selectPath(target, automaticWorktree),
     setProjectExplicit: (explicit: boolean) => { projectExplicit = explicit; },
     setSwarm: (id: string) => { swarm = id; },
-    /** Settles once the chosen project's folders are copied. */
+    /** Settles once the chosen project's folders are copied, or their copy failed. */
     foldersRead: () => readFolders(projectId()),
+    /** Why the chosen project's folders could not be copied, "" when they were. */
+    folderFailure: () => folderFailures.get(projectId()) ?? "",
     closed: () => closed,
   };
 }
@@ -1119,8 +1138,10 @@ export function createNewSessionStore(deps: NewSessionDeps) {
         open.prefillSessionFolder(folder, canonical);
       }
       if (options.folder && !open.selectFolder(options.folder)) {
+        // A folder read that failed says why, not that the folder changed.
+        const failure = open.folderFailure();
         open.dispose();
-        deps.notify("error", FOLDER_CHANGED, true);
+        deps.notify("error", failure || FOLDER_CHANGED, true);
         return;
       }
       if (options.path) open.selectPath(options.path, false);

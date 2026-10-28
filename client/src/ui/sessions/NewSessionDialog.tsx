@@ -1,5 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, type JSX } from "solid-js";
 import { AgentGlyph, Icon } from "../lib/icons";
+import { composing } from "../lib/keys";
 import { MachineTile, type MachineState } from "../components/MachineTile";
 import { UsageMeters } from "../components/UsageMeter";
 import { closeNewSession, newSession, newSessionActions as act, startNewSession, type NewSessionState } from "../../store/newSession";
@@ -306,7 +307,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
     else if (e.key === "End") next = count - 1;
     else if (e.key === "PageDown") next = at < 0 ? 0 : Math.min(count - 1, at + 4);
     else if (e.key === "PageUp") next = at < 0 ? 0 : Math.max(0, at - 4);
-    else if (e.key === "Enter") { e.preventDefault(); formEl.requestSubmit(); return; }
+    else if (e.key === "Enter") { e.preventDefault(); if (!composing(e)) formEl.requestSubmit(); return; }
     else return;
     e.preventDefault();
     act.chooseAccount(next);

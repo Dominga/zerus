@@ -246,7 +246,8 @@ pub fn is_stale(
 
 /// None when no process has this PID; its name when the system tells it:
 /// `proc_name` on macOS, the executable's file name on Linux, as QLockFile's
-/// `processNameByPid` reads them.
+/// `processNameByPid` reads them. On Linux a process whose executable link
+/// cannot be read counts as gone, as in Qt.
 pub fn process_name(pid: i64) -> Option<Option<String>> {
     let raw = libc::pid_t::try_from(pid).ok()?;
     // SAFETY: signal 0 only checks that the process exists.
@@ -255,22 +256,34 @@ pub fn process_name(pid: i64) -> Option<Option<String>> {
     {
         return None;
     }
-    #[cfg(target_os = "macos")]
-    let name = {
-        let mut buffer = [0u8; 1024];
-        // SAFETY: the buffer is writable for its length.
-        let length =
-            unsafe { libc::proc_name(raw, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
-        (length > 0).then(|| String::from_utf8_lossy(&buffer[..length as usize]).into_owned())
-    };
-    #[cfg(not(target_os = "macos"))]
-    let name = fs::read_link(format!("/proc/{raw}/exe"))
-        .ok()
-        .and_then(|exe| {
-            exe.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        });
-    Some(name)
+    running_name(raw)
+}
+
+#[cfg(target_os = "macos")]
+fn running_name(pid: libc::pid_t) -> Option<Option<String>> {
+    let mut buffer = [0u8; 1024];
+    // SAFETY: the buffer is writable for its length.
+    let length = unsafe { libc::proc_name(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    Some((length > 0).then(|| String::from_utf8_lossy(&buffer[..length as usize]).into_owned()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn running_name(pid: libc::pid_t) -> Option<Option<String>> {
+    exe_name(fs::read_link(format!("/proc/{pid}/exe")))
+}
+
+/// QLockFile's Linux `processNameByPid`: the file name of `/proc/<pid>/exe`
+/// without the ` (deleted)` that marks a replaced binary. None when the
+/// link cannot be read.
+#[cfg(not(target_os = "macos"))]
+fn exe_name(link: io::Result<PathBuf>) -> Option<Option<String>> {
+    let link = link.ok()?;
+    let text = link.to_string_lossy();
+    let path = Path::new(text.strip_suffix(" (deleted)").unwrap_or(&text));
+    Some(
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned()),
+    )
 }
 
 /// `QSysInfo::machineHostName()`.
@@ -1257,6 +1270,73 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(try_lock(&lock, &own), LockAttempt::Taken(_)));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_linux_holder_is_named_as_qlockfile_names_it() {
+        let info = LockInfo {
+            pid: 42,
+            app: "hgs-tray".into(),
+            host: "arch".into(),
+        };
+        let young = Duration::from_secs(1);
+        let replaced = |_| exe_name(Ok("/opt/zerus/hgs-tray (deleted)".into()));
+        assert_eq!(replaced(0), Some(Some("hgs-tray".to_owned())));
+        assert!(
+            !is_stale(Some(&info), young, "arch", replaced),
+            "a holder whose binary was replaced still runs"
+        );
+        let unreadable = |_| exe_name(Err(io::Error::from(io::ErrorKind::PermissionDenied)));
+        assert!(
+            is_stale(Some(&info), young, "arch", unreadable),
+            "an unreadable executable link counts as gone"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linux_holder_with_a_deleted_binary_runs_and_an_unreadable_one_is_gone() {
+        let dir = scratch("deleted");
+        let holder = dir.join("zci-holder");
+        let mut child = {
+            // No other test forks while the copy is open for writing (ETXTBSY).
+            let _tree = crate::PROCESS_TREE
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            fs::copy("/bin/sleep", &holder).unwrap();
+            Command::new(&holder)
+                .arg("30")
+                .stdin(Stdio::null())
+                .spawn()
+                .unwrap()
+        };
+        fs::remove_file(&holder).unwrap();
+        let pid = i64::from(child.id());
+        let name = process_name(pid);
+        let own = LockInfo::own();
+        let info = LockInfo {
+            pid,
+            app: "zci-holder".into(),
+            host: own.host.clone(),
+        };
+        let stale = is_stale(Some(&info), Duration::from_secs(1), &own.host, process_name);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(
+            name,
+            Some(Some("zci-holder".to_owned())),
+            "the deleted binary keeps its name"
+        );
+        assert!(!stale, "its holder still runs");
+        // SAFETY: geteuid cannot fail.
+        if unsafe { libc::geteuid() } != 0 {
+            assert_eq!(
+                process_name(1),
+                None,
+                "init's executable link is unreadable here"
+            );
+        }
     }
 
     /// A PID whose process has exited and been reaped.

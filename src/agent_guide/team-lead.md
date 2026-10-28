@@ -17,8 +17,8 @@ The approved plan is phase 1; new work goes in a new phase:
   "check":{"command":"cargo test"}} runs in the member's folder; exit decides.
 
 Members:
-- Routine commands run outside the sandbox: hgs team run (hgs guide
-  team-run). Anything else asks you.
+- Routine commands: hgs guide team-run. Anything else asks you; record a
+  routine shape once: hgs guide team-safe.
 - A question (hgs team ask) waits for your reply; it is not a report:
     {"request_id":"UUID","team":"ID","question":"q3","text":"..."} |
     hgs team reply --json

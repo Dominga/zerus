@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|add-to-phase|approve-phase|discard-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|run|templates|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|add-to-phase|approve-phase|discard-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "add-to-phase", "approve-phase", "discard-phase", "reject-phase", "undo-reject-phase",
@@ -2490,6 +2490,37 @@ fn templates_command(input: &Value) -> anyhow::Result<Value> {
     }
 }
 
+/// The owner, 2026-10-28: the shapes of members' requests the lead allows
+/// without being asked again (`safe_actions`). The lead or the owner lists,
+/// adds and removes them; each change is in the team's journal.
+fn safe_action_command(input: &Value) -> anyhow::Result<Value> {
+    let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
+    let by = actor(&team, "safe-action", input)?;
+    ensure!(
+        matches!(&by, Actor::Human) || matches!(&by, Actor::Member(id) if *id == team.lead),
+        "Only the lead or the owner records safe actions"
+    );
+    let who = if matches!(&by, Actor::Human) { "owner" } else { "lead" };
+    let listed = |team: &Team| json!({"actions":super::safe_actions::list().into_iter().filter(|action| action["team"] == team.id.as_str()).collect::<Vec<_>>()});
+    let (event, detail) = match text(input, "action") {
+        "" | "list" => return Ok(listed(&team)),
+        "add" => {
+            let added = super::safe_actions::add(&team, input, who)?;
+            ("safe_action_added", json!({"action":added["id"],"shape":added["shape"],"member":added["member"],"role":added["role"],"by":who}))
+        }
+        "remove" => {
+            super::safe_actions::remove(&team, text(input, "id"))?;
+            ("safe_action_removed", json!({"action":text(input, "id"),"by":who}))
+        }
+        other => bail!("safe-action action is list, add or remove (got {other})"),
+    };
+    Store::open(true)?.mutate(None, &team.id, None, |_, events| {
+        events.push(Event::new(event, detail.clone()));
+        Ok(Value::Null)
+    })?;
+    Ok(listed(&team))
+}
+
 fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     // F5: the draft's read and its start are not mutations.
     if op == "draft" {
@@ -2506,6 +2537,9 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     }
     if op == "templates" {
         return templates_command(input);
+    }
+    if op == "safe-action" {
+        return safe_action_command(input);
     }
     // F8: a decision may create the next team, so it runs with the store.
     if op == "decide-proposal" {

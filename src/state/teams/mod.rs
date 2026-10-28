@@ -10,6 +10,7 @@ pub(crate) mod ops;
 pub(crate) mod outbox;
 pub(crate) mod owner_word;
 pub(crate) mod plan;
+pub(crate) mod safe_actions;
 pub(crate) mod store;
 pub(crate) mod templates;
 pub(crate) mod waiting;

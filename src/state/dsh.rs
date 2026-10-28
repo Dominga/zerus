@@ -1364,8 +1364,15 @@ fn question_cards(record: &Value, inspected: &Value) -> Vec<Value> {
             "allow_other":q["approval"]!=true,"required":true,"options":item["options"].as_array().into_iter().flatten().enumerate().map(|(i,o)|json!({"id":if q["approval"]==true {if i==0 {"allow".to_owned()}else{"deny".to_owned()}}else{i.to_string()},"label":o["label"],"description":o["description"]})).collect::<Vec<_>>()
         })).collect::<Vec<_>>();
         let hash=format!("{:x}",Sha256::digest(json!([inspected["generation"],q]).to_string().as_bytes()));
-        json!({"question_id":q["id"],"question_hash":hash,"tool_call_id":q["id"],"run_id":record["run_id"],"conversation_id":record["conversation_id"],
-            "agent_id":"main","source":"dsh_native","approval":q["approval"]==true,"can_answer":true,"answer_transport":"native_dsh","questions":items})
+        let mut card=json!({"question_id":q["id"],"question_hash":hash,"tool_call_id":q["id"],"run_id":record["run_id"],"conversation_id":record["conversation_id"],
+            "agent_id":"main","source":"dsh_native","approval":q["approval"]==true,"can_answer":true,"answer_transport":"native_dsh","questions":items});
+        // The exact shell command the bridge tied to the approval's call, for a
+        // team's safe actions; a host without it shows no command.
+        if q["approval"]==true {
+            if let Some(command)=q["command"].as_str() {card["tool_input"]=json!({"command":command});}
+            if let Some(tool)=q["tool"].as_str() {card["tool"]=json!(tool);}
+        }
+        card
     }).collect()
 }
 

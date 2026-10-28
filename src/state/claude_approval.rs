@@ -259,6 +259,14 @@ fn build(record:&Value,screen:Option<&str>)->Option<(Value,Option<Panel>)> {
     build_request(record,screen,request(record)?,&record["pending_approval_at"],"")
 }
 
+/// The exact shell command of a Bash or PowerShell request, for a team's safe
+/// actions (the body shows it to people; this keeps it whole for matching).
+fn shell_input(card:&mut Value,request:&Value) {
+    if matches!(string(request,"tool_name"),"Bash"|"PowerShell") {
+        if let Some(command)=request["tool_input"]["command"].as_str() {card["tool_input"]=json!({"command":command});card["tool"]=request["tool_name"].clone();}
+    }
+}
+
 fn build_request(record:&Value,screen:Option<&str>,request:&Value,at:&Value,child_request_id:&str)->Option<(Value,Option<Panel>)> {
     if screen.is_some_and(|screen|!visible(screen)) {return None;}
     let tool=string(request,"tool_name");
@@ -287,7 +295,7 @@ fn build_request(record:&Value,screen:Option<&str>,request:&Value,at:&Value,chil
         "questions":[{"id":"approval","question":question,"header":tool,"body":body,"allow_other":false,"options":options}]}),panel));
     // U19: without the waiting hook the subagent request is still marked, so
     // no automatic approval takes it through the keys either.
-    built.map(|(mut card,panel)|{if let Some((calls,text,details))=&group {subagent_card(&mut card,calls,text,details);}(card,panel)})
+    built.map(|(mut card,panel)|{if let Some((calls,text,details))=&group {subagent_card(&mut card,calls,text,details);}shell_input(&mut card,request);(card,panel)})
 }
 
 fn native_body(panel:&Panel)->String {
@@ -420,6 +428,7 @@ fn channel_card(record:&Value,screen:Option<&str>,identity:&Value)->Option<Value
             "other_label":FEEDBACK,"other_description":"Deny this request with your message; Claude continues without it",
             "options":options}]});
     if let Some((calls,text,details))=&group {subagent_card(&mut card,calls,text,details);}
+    shell_input(&mut card,request);
     Some(card)
 }
 

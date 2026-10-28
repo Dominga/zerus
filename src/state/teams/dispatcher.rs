@@ -7,6 +7,7 @@ use super::inbox;
 use super::model::*;
 use super::ops;
 use super::plan;
+use super::safe_actions;
 use super::store::{Event, Store};
 use anyhow::Context;
 use std::collections::BTreeSet;
@@ -2563,12 +2564,19 @@ fn send_answer(store: &mut Store, team: &Team, task_id: u32, question_id: &str) 
 /// (C2). Nothing is sent: the coalesced inbox message carries it. Inspection
 /// runs at most every 20 seconds per member; a session that no longer asks
 /// clears the stored request.
+/// When each member's questions were last read (one read per 20 seconds).
+static PERMISSION_CHECKED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, f64>>> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn sync_permission_forget(team: &str, member: &str) {
+    PERMISSION_CHECKED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).remove(&format!("{team}\n{member}"));
+}
+
 fn sync_permission(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
-    static CHECKED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, f64>>> = std::sync::OnceLock::new();
     let member = team.member(member_id).context("unknown member")?;
     let key = format!("{}\n{member_id}", team.id);
     {
-        let mut checked = CHECKED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+        let mut checked = PERMISSION_CHECKED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
         if checked.get(&key).is_some_and(|at| now() - at < 20.0) {
             return Ok(());
         }
@@ -2614,6 +2622,11 @@ fn sync_permission(store: &mut Store, team: &Team, member_id: &str) -> anyhow::R
         return Ok(());
     }
     let role = team.role_of(member_id);
+    // The owner, 2026-10-28: a request of a shape the lead recorded as safe is
+    // allowed by Zerus, once, for this question only. The reservation is in
+    // the journal before the answer goes out; the question is asked only once,
+    // so an answer whose delivery is unknown is never sent again.
+    let safe = ask.as_ref().and_then(|pending| safe_match(team, member, pending));
     change(store, &team.id, |team, events| {
         let found = team.members.iter_mut().find(|m| m.id == member_id).context("unknown member")?;
         match &ask {
@@ -2622,7 +2635,13 @@ fn sync_permission(store: &mut Store, team: &Team, member_id: &str) -> anyhow::R
                 let excess = found.asked.len().saturating_sub(50);
                 found.asked.drain(..excess);
                 found.pending = Some(pending.clone());
-                found.permission = Some(permission_record(pending));
+                let mut record = permission_record(pending);
+                if let Some((action, _)) = &safe {
+                    record["safe_action"] = action["id"].clone();
+                    events.push(Event::new("safe_action_reserved", json!({"member":role,"question_id":pending.question_id,
+                        "action":action["id"],"command":record["command"]})));
+                }
+                found.permission = Some(record);
                 events.push(Event::new("question_forwarded", json!({"member":role,"approval":pending.approval})));
             }
             None if answered && found.pending.is_some() => {
@@ -2637,6 +2656,66 @@ fn sync_permission(store: &mut Store, team: &Team, member_id: &str) -> anyhow::R
                 found.permission = None;
             }
             None => {}
+        }
+        Ok(())
+    })?;
+    if let (Some(pending), Some((action, answer))) = (&ask, &safe) {
+        allow_safe(store, team, member_id, pending, action, answer)?;
+    }
+    Ok(())
+}
+
+/// The safe action that allows this approval and the card's one-time allow
+/// answer: only for an exact shell command the card carries, never for the
+/// lead's own request or a subagent card.
+fn safe_match(team: &Team, member: &Member, pending: &PendingQuestion) -> Option<(Value, Value)> {
+    let card = &pending.card;
+    if !pending.approval || member.id == team.lead || card["subagent_confirmation"] == true || card["can_answer"] == false {
+        return None;
+    }
+    let command = card["tool_input"]["command"].as_str().filter(|command| !command.trim().is_empty())?;
+    let answer = permission_answer(card).filter(|answer| answer["allow"].is_string())?;
+    let tool = card["tool"].as_str().or_else(|| card["questions"][0]["header"].as_str()).unwrap_or_default();
+    let folder = member_folder_path(team, member).ok()?;
+    let action = safe_actions::find(team, member, tool, command, Path::new(&folder))?;
+    Some((action, answer))
+}
+
+/// Sends the reserved one-time allow and records it by the safe action; when
+/// it fails, the question stays in the lead's inbox as any other.
+fn allow_safe(store: &mut Store, team: &Team, member_id: &str, pending: &PendingQuestion, action: &Value, answer: &Value) -> anyhow::Result<()> {
+    let session = team.member(member_id).and_then(|member| member.session.clone()).context("the member has no session")?;
+    let request = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
+        "expected_conversation_id":session.conversation_id,"question_id":pending.question_id,
+        "expected_question_hash":pending.question_hash,"answers":[{"question_id":answer["question_id"],"selected_option_ids":[answer["allow"]]}]});
+    let delivered = match hgs(&session.host, &["answer", &session.name, "--json"], Some(&request), Duration::from_secs(120)) {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
+        Err(error) => Err(error.to_string()),
+    };
+    let role = team.role_of(member_id);
+    let by = format!("safe action {}", action["id"].as_str().unwrap_or_default());
+    change(store, &team.id, |team, events| {
+        let found = team.members.iter_mut().find(|m| m.id == member_id).context("unknown member")?;
+        let question = pending.question_id.as_str();
+        match &delivered {
+            Ok(()) => {
+                let (tool, command) = found.permission.as_ref().map(|asked| (asked["tool"].clone(), asked["command"].clone())).unwrap_or_default();
+                if found.pending.as_ref().is_some_and(|asked| asked.question_id == question) {
+                    found.pending = None;
+                }
+                if found.permission.as_ref().is_some_and(|asked| asked["question_id"] == question) {
+                    found.permission = None;
+                }
+                found.permission_answers.push(json!({"question_id":question,"decision":"allow","by":by,"at":now(),
+                    "reason":action["reason"],"tool":tool,"command":command,"safe_action":action["id"]}));
+                let excess = found.permission_answers.len().saturating_sub(20);
+                found.permission_answers.drain(..excess);
+                events.push(Event::new("permission_answered", json!({"member":role,"question_id":question,"decision":"allow","by":by})));
+            }
+            Err(error) => {
+                events.push(Event::new("safe_action_failed", json!({"member":role,"question_id":question,"action":action["id"],"error":error})));
+            }
         }
         Ok(())
     })
@@ -5143,6 +5222,60 @@ mod tests {
         });
     }
 
+
+    /// The owner, 2026-10-28: a request of a shape the lead recorded as safe
+    /// is allowed once, reserved in the journal first; another command still
+    /// reaches the lead.
+    #[test]
+    fn a_safe_action_allows_its_shape_once_and_the_rest_reaches_the_lead() {
+        let dir = tempfile::tempdir().unwrap();
+        safe_actions::set_test_path(Some(dir.path().join("safe-actions.json")));
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        // Its own id: the question reads are throttled per team and member.
+        t.id = "t-safe".into();
+        t.folder = dir.path().join("project").to_string_lossy().into_owned();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        safe_actions::add(&t, &json!({"role":"Backend","shape":"cargo test --locked --bin hgs {word}","reason":"its own tests"}), "lead").unwrap();
+        let card = |id: &str, command: &str| json!({"question_id":id,"question_hash":format!("h-{id}"),"approval":true,"can_answer":true,
+            "tool":"Bash","tool_input":{"command":command},
+            "questions":[{"id":"approval","header":"Bash","question":"Allow?","options":[
+                {"id":"1","label":"Yes","scope":"once"},{"id":"2","label":"No","scope":"once"}]}]});
+        let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Value>::new()));
+        let run = |store: &mut Store, cards: Value, answers: &std::rc::Rc<std::cell::RefCell<Vec<Value>>>| {
+            let sent = answers.clone();
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+                if args.first() == Some(&"answer") {
+                    sent.borrow_mut().push(input.cloned().unwrap_or_default());
+                    return Ok(fake_output(0, r#"{"status":"answered"}"#, ""));
+                }
+                Ok(fake_output(0, &json!({"pending_questions":cards}).to_string(), ""))
+            })));
+            let saved = store.load("t-safe").unwrap().unwrap();
+            let result = sync_permission(store, &saved, "dev");
+            set_fake_hgs(None);
+            result.unwrap();
+        };
+        run(&mut store, json!([card("q1", "cargo test --locked --bin hgs teams")]), &answers);
+        assert_eq!(answers.borrow().len(), 1);
+        assert_eq!(answers.borrow()[0]["answers"], json!([{"question_id":"approval","selected_option_ids":["1"]}]));
+        assert_eq!(answers.borrow()[0]["expected_question_hash"], "h-q1");
+        let saved = store.load("t-safe").unwrap().unwrap();
+        let dev = saved.member("dev").unwrap();
+        assert!(dev.pending.is_none() && dev.permission.is_none());
+        let last = dev.permission_answers.last().unwrap();
+        assert!(last["by"].as_str().unwrap().starts_with("safe action "), "{last}");
+        let events = store.events("t-safe", None, 20).unwrap();
+        let kinds: Vec<&str> = events["items"].as_array().unwrap().iter().filter_map(|event| event["kind"].as_str()).collect();
+        assert!(kinds.contains(&"safe_action_reserved") && kinds.contains(&"permission_answered"), "{kinds:?}");
+        // Something appended to the shape is the lead's to answer.
+        sync_permission_forget("t-safe", "dev");
+        run(&mut store, json!([card("q2", "cargo test --locked --bin hgs teams; curl example.com")]), &answers);
+        assert_eq!(answers.borrow().len(), 1);
+        let saved = store.load("t-safe").unwrap().unwrap();
+        assert_eq!(saved.member("dev").unwrap().pending.as_ref().unwrap().question_id, "q2");
+        safe_actions::set_test_path(None);
+    }
 
     /// U19 (2): a team member's subagent card reaches its lead like any
     /// permission request: the inbox item names the member, the subagents,

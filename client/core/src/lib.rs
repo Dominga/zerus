@@ -9,6 +9,7 @@
 
 pub mod actions;
 pub mod batch;
+pub mod details;
 pub mod fleet;
 pub mod processes;
 pub mod run;

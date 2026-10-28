@@ -181,16 +181,22 @@ pub fn invocation(
             (args, None, 45, 60, None)
         }
     };
-    let peer_call = !target.computer.is_empty();
-    if peer_call {
-        args.insert(0, format!("@{}", target.computer));
-    }
+    let peer_call = prepend_alias(&mut args, &target.computer);
     Ok(Invocation {
         args,
         stdin,
         timeout: Duration::from_secs(if peer_call { peer } else { local }),
         request_id: request,
     })
+}
+
+/// Puts `@alias` first for a peer; true when `computer` is a peer.
+pub(crate) fn prepend_alias(args: &mut Vec<String>, computer: &str) -> bool {
+    let peer = !computer.is_empty();
+    if peer {
+        args.insert(0, format!("@{computer}"));
+    }
+    peer
 }
 
 fn trimmed_stderr(stderr: &str) -> Option<String> {

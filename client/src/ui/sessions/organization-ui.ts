@@ -9,6 +9,14 @@ import type { Session } from "./types";
 // takes the organization store. The components only render them.
 
 export interface Entry { enabled: boolean; reason?: string }
+
+/**
+ * Why an archived row cannot move. Qt keys an archived session by its archive
+ * identity (`machine\narchive\n<id>`, SessionOrganization.cpp:225), which
+ * this client does not port yet (zerus-5wmh.40); its live-name member
+ * (`host\nname`) would move the live session of that name instead.
+ */
+export const ARCHIVED_MOVE = "Archived sessions keep their project until the Archive view groups by project.";
 export interface HeaderMenuState {
   collapse: "Expand project" | "Collapse project";
   edit: Entry;
@@ -189,9 +197,9 @@ export function createOrgDialogs(org: OrgStore) {
     void org.deleteProject(d.project, destination);
   }
 
-  /** The session menu's Move to project entry. */
+  /** The session menu's Move to project entry; an archived row keeps its project (ARCHIVED_MOVE). */
   function moveEntry(s: Session): MenuEntry {
-    const e = editEntry(org.grouping());
+    const e = s.state === "archived" ? { enabled: false, reason: ARCHIVED_MOVE } : editEntry(org.grouping());
     return { label: "Move to project…", icon: "folder", disabled: !e.enabled, hint: e.reason, action: () => openMove([s]) };
   }
 

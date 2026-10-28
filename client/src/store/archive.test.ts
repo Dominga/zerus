@@ -404,17 +404,17 @@ describe("rows", () => {
     expect(s.archivedAt).toBe(50);
   });
 
-  it("list as flat cards inside the date range and the machine and project filters", () => {
+  // The project filter holds organization project IDs, which archived rows do not have yet (ListScope).
+  it("list as flat cards inside the date range and the machine filter", () => {
     const one = archivedSession("", "Local", arow(1, 300));
     const two = archivedSession("box", "box", arow(2, 200, { project: "other" }));
     const old = archivedSession("", "Local", arow(3, 10));
-    const scope = { machines: [] as string[], projects: [] as string[], includes: (at: number) => at >= 100, compact: (key: string) => key === two.key };
+    const scope = { machines: [] as string[], includes: (at: number) => at >= 100, compact: (key: string) => key === two.key };
     expect(archiveListRows([one, two, old], scope)).toEqual([
       { type: "card", id: one.key, session: one, expandable: false, expanded: false, compactRow: false },
       { type: "card", id: two.key, session: two, expandable: false, expanded: false, compactRow: true },
     ]);
     expect(archiveListRows([one, two, old], { ...scope, machines: ["box"] }).map((r) => r.id)).toEqual([two.key]);
-    expect(archiveListRows([one, two, old], { ...scope, projects: ["example"] }).map((r) => r.id)).toEqual([one.key]);
   });
 });
 

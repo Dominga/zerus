@@ -4,6 +4,7 @@ import * as bridge from "../bridge";
 import { rowId } from "./catalog";
 import { clearNotice, notify } from "./actions";
 import type { Batch, EditOutcome, GroupingOut, HeaderOut } from "../types";
+import { ARCHIVED_MOVE } from "../ui/sessions/organization-ui";
 import type { Session } from "../ui/sessions/types";
 
 // The shared project organization in the Sessions list: each row's project
@@ -32,7 +33,7 @@ export const emptyGrouping = (): GroupingOut => ({
 export const memberOf = (s: Pick<Session, "rawMachine" | "name">) => `${s.rawMachine}\n${s.name}`;
 
 type Say = (tone: "error" | "warn" | "info", text: string, sticky?: boolean, key?: string) => void;
-type Row = Pick<Session, "rawMachine" | "name">;
+type Row = Pick<Session, "rawMachine" | "name"> & Partial<Pick<Session, "state">>;
 export type Assignment = { group: string; rank: number };
 
 export function createOrganization(say: Say, unsay: (key: string) => void = () => {}) {
@@ -104,12 +105,16 @@ export function createOrganization(say: Say, unsay: (key: string) => void = () =
     return out;
   }
 
+  /** An archived row's member is its archive identity, not `memberOf` (ARCHIVED_MOVE): it never moves. */
+  const archivedIn = (rows: readonly Row[]) => (rows.some((r) => r.state === "archived") ? ARCHIVED_MOVE : undefined);
+
   /** Move to project: one call for every row, as one `swarm apply` (zerus-5wmh.18, .20). */
   function moveToProject(rows: readonly Row[], projectId: string, before?: Row): Promise<EditOutcome> {
     if (!rows.length) return Promise.resolve({ outcome: "refused", detail: "Choose the sessions to move." });
-    return run(refusal(projectId), () => bridge.moveToProject(rows.map(memberOf), projectId, before ? memberOf(before) : null));
+    return run(archivedIn(rows) ?? refusal(projectId), () => bridge.moveToProject(rows.map(memberOf), projectId, before ? memberOf(before) : null));
   }
-  const createProject = (name: string, rows: readonly Row[] = []) => run(refusal(), () => bridge.createProject(name, rows.map(memberOf)));
+  const createProject = (name: string, rows: readonly Row[] = []) =>
+    run(archivedIn(rows) ?? refusal(), () => bridge.createProject(name, rows.map(memberOf)));
   const renameProject = (projectId: string, name: string) => run(refusal(projectId), () => bridge.renameProject(projectId, name));
   const deleteProject = (projectId: string, destination: string) =>
     run(refusal(projectId, destination), () => bridge.deleteProject(projectId, destination));

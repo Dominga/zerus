@@ -92,6 +92,17 @@ describe("the organization store", () => {
     expect(mocked.moveToProject).toHaveBeenCalledWith(["\nclaude/sample-project/review"], "alpha", "studio\ncodex/aurora/orders-v3");
   });
 
+  it("never writes the live-name member of an archived row", async () => {
+    const { org, say } = setup();
+    const archived = { rawMachine: "workstation", name: "claude/sample-project/review", state: "archived" as const };
+    const why = "Archived sessions keep their project until the Archive view groups by project.";
+    expect(await org.moveToProject([rows[1], archived], "alpha")).toEqual({ outcome: "refused", detail: why });
+    expect(await org.createProject("New", [archived])).toEqual({ outcome: "refused", detail: why });
+    expect(mocked.moveToProject).not.toHaveBeenCalled();
+    expect(mocked.createProject).not.toHaveBeenCalled();
+    expect(say).toHaveBeenCalledWith("info", why);
+  });
+
   it("refuses before the catalog is ready and for a project that is gone, without a call", async () => {
     const { org, say } = setup(ready({ ready: false, reason: "Project sync is starting." }));
     expect(await org.moveToProject(rows, "alpha")).toEqual({ outcome: "refused", detail: "Project sync is starting." });

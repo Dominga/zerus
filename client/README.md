@@ -717,6 +717,14 @@ Deviations from Qt (the plan's Decisions):
 4. Edits made before the first ready catalog are refused, not queued.
 5. Renames made while the client was closed are not followed yet (Qt follows
    them by persisted run tokens).
+6. Archived sessions are not placed in projects yet: Qt keys them by their
+   archive identity, `machine\narchive\n<archive id>`, which `zerus-5wmh.40`
+   ports. Until then, with an organization loaded, the Archive view and its
+   count ignore the project filter (it holds project IDs), Clear archive takes
+   no row while a project filter is set, and Move to project is disabled for an
+   archived row ("Archived sessions keep their project until the Archive view
+   groups by project."), so the client never writes the live-name member
+   `host\nname` for an archived session.
 
 ### Organization smoke run
 

@@ -56,6 +56,10 @@
 >   3. No `swarm initialize` (above).
 >   4. Edits made before the first ready catalog are refused, not queued (above).
 >   5. Renames made while the client was closed are not followed yet (Task 10 follow-up).
+>   6. Archived sessions are not placed in projects yet (owner ruling at the merge with the Archive view, 2026-10-28). Qt keys an archived session by its archive identity, `machine\narchive\n<archive id>` (`SessionOrganization.cpp:225`), and matches archived rows to the project filter with `groupFor` of that identity; `zerus-5wmh.40` ports it. Until then:
+>      - with an organization loaded, the Archive view and its count ignore the project filter, which holds organization project IDs; they never compare an ID with a session name's project segment (`store/archive.ts` `inScope`);
+>      - Clear archive takes no row while a project filter is set, and says why, so it never removes more than Qt's project filter would;
+>      - Move to project is disabled for an archived row ("Archived sessions keep their project until the Archive view groups by project."), and the store refuses one, so the client never writes the live-name member `host\nname` for an archived session.
 
 **Tech Stack:** Rust 1.99.1 (`client/core`, `client/src-tauri`, Tauri 2), SolidJS 1.9 + TypeScript + Vite, vitest, Python 3 stdlib for the fake `hgs`.
 
@@ -119,7 +123,7 @@
   - **The 120 ms debounced flush** (`.cpp:64-65`). Each edit restarts it while idle (94), also after a failure, and a reply with pending edits starts it again (205).
   - **A failure keeps the edits, and the next tick sends them again** (`.cpp:67-73, 96-101, 194-196`):
     - a non-zero exit, a timeout, a signal, an unreadable reply or a reply of another schema changes only the status. Base, desired and versions stay, and so does the presented organization;
-    - the next tick sends one apply from them, exactly as Qt's `refresh` would. The tick is `REFRESH_MS` (5 s, `.cpp:55`) after the failure, or the organization topic's next state, whichever comes first;
+    - the next tick sends one apply from them, exactly as Qt's `refresh` would. The tick is `REFRESH_MS` (5 s, `.cpp:55`) after the failure, or the organization topic's next state, whichever comes first.;
     - edits made during the failed apply ride on that resend. Edits made after it flush 120 ms later, from the same base and versions.
   - **The pending draft persists** (`SessionsWindow.cpp:275-276, 1661, 2496`; `SwarmController.cpp:76-89, 111-130, 191-206`):
     - base, desired and versions are saved in `organization-draft.json` whenever pending edits change, through a temporary file and a rename (`client/core/src/readmarks.rs:117-140`), and removed when they settle;
@@ -5030,7 +5034,7 @@ git commit -m "docs(client): the shared organization in the Sessions list, its s
 |---|---|
 | Batch Move to project from the selection bar and the batch menu | `zerus-5wmh.20` (menu-parity), with `moveToProject` and `openMoveDialog` from this plan |
 | The Projects screen's New project, Delete project, rename, colour, default, reorder and folders; the Swarm dialog and conflict review; the legacy `project ls` import | 3c, `zerus-5wmh.25`; New, Rename, Delete and reorder reuse this plan's commands |
-| Archived identities (`machine\narchive\nID`) and the archive placement after Terminate (`SessionsWindow.cpp:3106-3125`) | the Archive view, `zerus-5wmh.17` |
+| Archived identities (`machine\narchive\nID`), the Archive view grouped by project and the archive placement after Terminate (`SessionsWindow.cpp:3106-3125`) | `zerus-5wmh.40` (deviation 6) |
 | "Hide projects without active sessions" as a setting (default on here) | 3b Settings, `zerus-5wmh.24` |
 | The vivid style and this device's project colours | 3c, `zerus-5wmh.25` |
 | New session… in the header menu | phase 5 |

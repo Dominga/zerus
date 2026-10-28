@@ -25,7 +25,7 @@ import * as bridge from "../../bridge";
 import { applyBatch } from "../../store/catalog";
 import { archiveCount, archiveTip } from "../../store/archive";
 import { stillListed } from "../../store/actions";
-import { matchesFilter, selected, setMachineFilter, setSearch, setSelectedKey, setStateFilter } from "../../store/ui";
+import { matchesFilter, selected, setMachineFilter, setProjectFilter, setSearch, setSelectedKey, setStateFilter } from "../../store/ui";
 import { listRows } from "./model";
 import { snapshotOf } from "./actions-ui";
 import { emptyBatch, type ArchivePage, type ViewRow } from "../../types";
@@ -81,6 +81,13 @@ describe("the Archive view in the app", () => {
     pending.splice(0).forEach((answer) => answer({ rows: [archived(1, 100)], next_cursor: "", previous_cursor: null, total: 1, position: 0 }));
     await flush();
     expect(listRows()).toHaveLength(1);
+
+    // The project filter holds organization project IDs; archived rows have
+    // none until the Archive view groups by project, so it keeps them.
+    setProjectFilter(["p-aurora"]);
+    expect(listRows()).toHaveLength(1);
+    expect(archiveCount()).toBe("1");
+    setProjectFilter([]);
 
     // A machine outside the filter pages nothing.
     const calls = mocked.archivePage.mock.calls.length;

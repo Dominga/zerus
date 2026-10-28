@@ -63,6 +63,15 @@ pub enum Action {
         #[serde(default)]
         dismiss_prompt: bool,
     },
+    /// `hgs fork NAME -n TAG -d [--archive A] [--expected-run-id R]
+    /// [--expected-conversation-id C]` (`forkSession`): an independent
+    /// conversation from this saved context, in the same working folder, named
+    /// with the same agent and project and a new tag.
+    Fork {
+        tag: String,
+        #[serde(default)]
+        archive_id: Option<String>,
+    },
     /// `hgs compact-context NAME --json` (`requestCompactContext`): the
     /// agent's native /compact. Its receipt's `request_id` is the compaction
     /// a waiting message names (compact-to-send).
@@ -165,6 +174,64 @@ pub fn tag_problem(tag: &str) -> Option<&'static str> {
         return Some("Names cannot contain /, : or . or control characters.");
     }
     None
+}
+
+/// What Fork shows: whether it is available and its tooltip (the agent's
+/// reason, or Qt's default). `busy`: a session update, fork, settings change
+/// or send runs, or a restored session awaits its inspection.
+pub fn fork_available(
+    online: bool,
+    terminating: bool,
+    busy: bool,
+    details: &Value,
+) -> (bool, String) {
+    let tooltip = details["fork_reason"]
+        .as_str()
+        .unwrap_or("Create an independent conversation with the same context and working folder")
+        .to_owned();
+    let enabled =
+        online && !terminating && !busy && details["fork_supported"].as_bool() == Some(true);
+    (enabled, tooltip)
+}
+
+/// The fork's suggested tag: `fork`, or the session's tag with `-fork`, then
+/// `-2`, `-3`… while a session on the same computer has that name.
+pub fn fork_tag(tag: &str, occupied: impl Fn(&str) -> bool) -> String {
+    let base = if tag.is_empty() {
+        "fork".to_owned()
+    } else {
+        format!("{tag}-fork")
+    };
+    let mut candidate = base.clone();
+    let mut number = 2;
+    while occupied(&candidate) {
+        candidate = format!("{base}-{number}");
+        number += 1;
+    }
+    candidate
+}
+
+/// Why the fork dialog cannot take this tag, `None` when it can.
+pub fn fork_problem(tag: &str, occupied: impl Fn(&str) -> bool) -> Option<String> {
+    tag_problem(tag)
+        .map(str::to_owned)
+        .or_else(|| occupied(tag).then(|| "This session name is already in use.".to_owned()))
+}
+
+/// The fork dialog's texts.
+pub mod fork_texts {
+    pub const TITLE: &str = "Fork session";
+    pub const BUTTON: &str = "Fork session";
+
+    pub fn description(folder: &str) -> String {
+        format!(
+            "Create an independent conversation from this saved context.\nWorking folder: {folder}"
+        )
+    }
+
+    pub fn forking(machine: &str) -> String {
+        format!("Forking session on {machine}…")
+    }
 }
 
 /// The rename the Qt dialog makes: the agent and project of `old` stay, only
@@ -295,6 +362,31 @@ pub fn invocation(
                 45,
                 Some(request_id.to_owned()),
             )
+        }
+        Action::Fork { tag, archive_id } => {
+            if let Some(problem) = tag_problem(tag) {
+                return Err(problem.into());
+            }
+            let mut args = vec![
+                "fork".to_owned(),
+                name,
+                "-n".to_owned(),
+                tag.clone(),
+                "-d".to_owned(),
+            ];
+            if let Some(archive) = archive_id.as_ref().filter(|id| !id.is_empty()) {
+                args.extend(["--archive".to_owned(), archive.clone()]);
+            }
+            if !target.run_id.is_empty() {
+                args.extend(["--expected-run-id".to_owned(), target.run_id.clone()]);
+            }
+            if !target.conversation_id.is_empty() {
+                args.extend([
+                    "--expected-conversation-id".to_owned(),
+                    target.conversation_id.clone(),
+                ]);
+            }
+            (args, None, 60, 90, None)
         }
         Action::CompactContext => {
             let input = json!({
@@ -1161,6 +1253,89 @@ mod tests {
             &json!({"run_id": "r", "conversation_id": "", "clear_context_supported": true})
         ));
         assert!(!clearable(&json!({"run_id": "r", "conversation_id": "c"})));
+    }
+
+    #[test]
+    fn a_fork_names_its_source_and_a_free_tag() {
+        let action = Action::Fork {
+            tag: "review-fork".into(),
+            archive_id: Some("a-7".into()),
+        };
+        let inv = invocation(&target("mac"), &action, "u").unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "@mac",
+                "fork",
+                "claude/sample-project/review",
+                "-n",
+                "review-fork",
+                "-d",
+                "--archive",
+                "a-7",
+                "--expected-run-id",
+                "run-1",
+                "--expected-conversation-id",
+                "conv-1"
+            ]
+        );
+        assert_eq!(inv.timeout, Duration::from_secs(90));
+        assert_eq!(
+            invocation(&target(""), &action, "u").unwrap().timeout,
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            invocation(
+                &target(""),
+                &Action::Fork {
+                    tag: "a/b".into(),
+                    archive_id: None
+                },
+                "u"
+            )
+            .unwrap_err(),
+            "Names cannot contain /, : or . or control characters."
+        );
+        assert!(matches!(
+            classify(&target(""), &action, &inv, exit(0, b"", "")),
+            Outcome::Done { .. }
+        ));
+        let taken = ["review-fork", "review-fork-2"];
+        assert_eq!(
+            fork_tag("review", |tag| taken.contains(&tag)),
+            "review-fork-3"
+        );
+        assert_eq!(fork_tag("", |_| false), "fork");
+        assert_eq!(
+            fork_problem("review-fork", |tag| taken.contains(&tag)).as_deref(),
+            Some("This session name is already in use.")
+        );
+        assert_eq!(
+            fork_problem("", |_| false).as_deref(),
+            Some("Enter a session name.")
+        );
+        assert_eq!(fork_problem("next", |_| false), None);
+        let (enabled, tooltip) =
+            fork_available(true, false, false, &json!({"fork_supported": true}));
+        assert!(enabled);
+        assert_eq!(
+            tooltip,
+            "Create an independent conversation with the same context and working folder"
+        );
+        let (enabled, tooltip) = fork_available(
+            true,
+            false,
+            false,
+            &json!({"fork_supported": false, "fork_reason": "No saved context yet."}),
+        );
+        assert!(!enabled);
+        assert_eq!(tooltip, "No saved context yet.");
+        assert!(!fork_available(false, false, false, &json!({"fork_supported": true})).0);
+        assert_eq!(
+            fork_texts::description("/home/example/project"),
+            "Create an independent conversation from this saved context.\nWorking folder: /home/example/project"
+        );
+        assert_eq!(fork_texts::forking("studio"), "Forking session on studio…");
     }
 
     #[test]

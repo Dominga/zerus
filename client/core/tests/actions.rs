@@ -378,3 +378,46 @@ fn start_fresh_and_forget_run_their_hgs_arguments() {
         assert_eq!(fake.log()[0]["argv"], argv);
     }
 }
+
+#[test]
+fn an_archive_page_through_the_fake_is_checked_and_typed() {
+    use zerus_client_core::reads::{archive_page, ReadError, ARCHIVE_IDENTITY_INVALID};
+    use zerus_client_core::ComputerId;
+    let id = "00000000-0000-4000-8000-000000000001";
+    let page = |at: f64| {
+        serde_json::json!({"version": 1, "from": 1000, "until": 2000, "query": "",
+            "next_cursor": "after-1", "total": 1, "previous_cursor": "", "position": 0,
+            "sessions": [{"name": "claude/sample-project/review", "state": "archived",
+                "archive_id": id, "archived_at": at}]})
+    };
+    let config = |at: f64| {
+        serde_json::json!({"reply": {"exit": 1}, "replies": [{"match": ["archives", "--json"], "exit": 0, "stdout": page(at)}]}).to_string()
+    };
+    let fake = Fake::new(&config(1500.0));
+    let studio = ComputerId::from("studio");
+    let got = archive_page(&fake.hgs, &studio, 1000.0, 2000.0, "", "").unwrap();
+    assert_eq!(got.rows.len(), 1);
+    assert_eq!(got.rows[0].archive_id.as_deref(), Some(id));
+    assert_eq!(got.rows[0].archived_at, Some(1500.0));
+    assert_eq!(
+        (got.next_cursor.as_str(), got.total, got.position),
+        ("after-1", 1, Some(0))
+    );
+    let log = fake.log();
+    assert_eq!(
+        log[0]["argv"],
+        serde_json::json!(["@studio", "archives", "--json"])
+    );
+    let sent: Value = serde_json::from_str(log[0]["stdin"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        sent,
+        serde_json::json!({"from": 1000, "until": 2000, "limit": 50, "cursor": "", "query": ""})
+    );
+    let out = Fake::new(&config(2000.0));
+    assert_eq!(
+        archive_page(&out.hgs, &studio, 1000.0, 2000.0, "", ""),
+        Err(ReadError::Invalid {
+            message: ARCHIVE_IDENTITY_INVALID.into()
+        })
+    );
+}

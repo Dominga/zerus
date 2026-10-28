@@ -69,6 +69,9 @@ pub struct ViewRow {
     pub summary: String,
     /// The last hook event, seconds since the Unix epoch.
     pub updated_at: Option<f64>,
+    /// When an archived row was archived (epoch seconds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<f64>,
     /// When the current turn, compaction or background job started, for the
     /// Working clock.
     pub turn_started: Option<f64>,
@@ -897,6 +900,7 @@ pub fn row(value: &Value) -> ViewRow {
         effort: some(text(value, "effort")),
         summary: simplified(&session.summary()),
         updated_at: number(value, "last_event_at").filter(|at| *at > 0.0),
+        archived_at: number(value, "archived_at"),
         turn_started: session.turn_started(),
         run_id: some(session.run_id),
         conversation_id: some(session.conversation_id),

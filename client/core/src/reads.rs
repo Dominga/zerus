@@ -32,7 +32,7 @@ pub const ANALYTICS_MARKER: &str = "hgs [@host] analytics --json";
 const MESSAGE_CHARS: usize = 2000;
 
 /// One read.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Read {
     /// `hgs [@host] project ls --json`: the computer's projects, an array.
     Projects,
@@ -60,7 +60,27 @@ pub enum Read {
     /// help lacks [`ANALYTICS_MARKER`] is [`ReadError::Unsupported`]: an
     /// older hgs would take the unknown verb as a session launch.
     Analytics { from: String, through: String },
+    /// `hgs [@host] archives --json` with `{from, until, limit: 50, cursor,
+    /// query}` (epoch seconds; `cursor` is the keyset anchor, empty for the
+    /// first page). The reply is checked as the Qt client checks it
+    /// ([`check_archive_page`]); [`archive_page`] gives it typed.
+    ArchivePage {
+        from: f64,
+        until: f64,
+        cursor: String,
+        query: String,
+    },
 }
+
+/// The rows an archive page asks for (`ArchiveBrowser`).
+pub const ARCHIVE_PAGE_ROWS: usize = 50;
+/// The longest cursor either side of an archive page may carry.
+const ARCHIVE_CURSOR_CHARS: usize = 1024;
+/// Qt's three archive page errors (`HgsClient::requestArchivePage`).
+pub const ARCHIVE_PAGE_INVALID: &str = "Invalid archive page. Update the computer CLI and refresh.";
+pub const ARCHIVE_WINDOW_INVALID: &str = "Invalid archive window. Refresh the archive.";
+pub const ARCHIVE_IDENTITY_INVALID: &str =
+    "Invalid archived session identity. Refresh the archive.";
 
 impl Read {
     /// Whether the read goes to the named computer; the others are this
@@ -73,6 +93,7 @@ impl Read {
                 | Self::AccountUsage { .. }
                 | Self::Recovery
                 | Self::Analytics { .. }
+                | Self::ArchivePage { .. }
         )
     }
 
@@ -250,6 +271,25 @@ pub fn invocation(computer: &ComputerId, read: &Read) -> Result<Invocation, Read
                 timeout(30, 30, computer),
             )
         }
+        Read::ArchivePage {
+            from,
+            until,
+            cursor,
+            query,
+        } => {
+            if !from.is_finite() || !until.is_finite() {
+                return Err(bad("an archive window is two finite times"));
+            }
+            let request = json!({
+                "from": seconds(*from), "until": seconds(*until),
+                "limit": ARCHIVE_PAGE_ROWS, "cursor": cursor, "query": query,
+            });
+            (
+                arguments(computer, &["archives", "--json"]),
+                Some(request.to_string().into_bytes()),
+                timeout(30, 30, computer),
+            )
+        }
     };
     Ok(Invocation {
         args,
@@ -257,6 +297,15 @@ pub fn invocation(computer: &ComputerId, read: &Read) -> Result<Invocation, Read
         timeout,
         request_id: None,
     })
+}
+
+/// A time as a JSON number, an integer when it is whole (as Qt writes it).
+fn seconds(value: f64) -> Value {
+    if value.fract() == 0.0 && value.abs() < 9e15 {
+        json!(value as i64)
+    } else {
+        json!(value)
+    }
 }
 
 /// The failure of an exit that gave no reply, or its standard output.
@@ -325,6 +374,16 @@ pub fn decode(read: &Read, exit: Exit) -> Result<Value, ReadError> {
     }
     let value: Value =
         serde_json::from_slice(&stdout).map_err(|error| invalid(&error.to_string()))?;
+    if let Read::ArchivePage {
+        from,
+        until,
+        cursor,
+        query,
+    } = read
+    {
+        check_archive_page(*from, *until, cursor, query, &value).map_err(invalid_text)?;
+        return Ok(value);
+    }
     if *read == Read::Projects {
         return match value {
             Value::Array(_) => Ok(value),
@@ -353,6 +412,141 @@ pub fn decode(read: &Read, exit: Exit) -> Result<Value, ReadError> {
         return Err(invalid("unknown analytics schema"));
     }
     Ok(value)
+}
+
+/// An archive UUID as Qt keeps it: `QUuid(id).toString(WithoutBraces) == id`,
+/// that is 8-4-4-4-12 lowercase hexadecimal digits.
+fn canonical_uuid(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+        })
+}
+
+fn invalid_text(text: &'static str) -> ReadError {
+    ReadError::Invalid {
+        message: text.into(),
+    }
+}
+
+/// Qt's `requestArchivePage` validation of a reply to the query
+/// (`from`, `until`, `cursor`, `query`); the Err is one of its three texts,
+/// the last failing check winning as in Qt (identity over window over page).
+pub fn check_archive_page(
+    from: f64,
+    until: f64,
+    cursor: &str,
+    query: &str,
+    data: &Value,
+) -> Result<(), &'static str> {
+    let rows: &[Value] = data
+        .get("sessions")
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice);
+    let next = data.get("next_cursor").and_then(Value::as_str);
+    let total = data.get("total").and_then(Value::as_f64);
+    let mut error = None;
+    let page_ok = data.is_object()
+        && data.get("version").and_then(Value::as_f64) == Some(1.0)
+        && data.get("sessions").is_some_and(Value::is_array)
+        && rows.len() <= ARCHIVE_PAGE_ROWS
+        && next.is_some_and(|next| {
+            next.chars().count() <= ARCHIVE_CURSOR_CHARS
+                && !(rows.is_empty() && !next.is_empty())
+                && (cursor.is_empty() || next != cursor)
+        })
+        && total.is_some_and(|total| total >= rows.len() as f64)
+        && data.get("from").and_then(Value::as_f64) == Some(from)
+        && data.get("until").and_then(Value::as_f64) == Some(until)
+        && data.get("query").and_then(Value::as_str) == Some(query);
+    if !page_ok {
+        error = Some(ARCHIVE_PAGE_INVALID);
+    }
+    if data.get("previous_cursor").is_some() || data.get("position").is_some() {
+        let previous = data.get("previous_cursor").and_then(Value::as_str);
+        let position = data.get("position").and_then(Value::as_f64);
+        let window = previous
+            .is_some_and(|previous| previous.chars().count() <= ARCHIVE_CURSOR_CHARS)
+            && position.is_some_and(|position| {
+                position >= 0.0
+                    && position == position.floor()
+                    && position + rows.len() as f64 <= total.unwrap_or(f64::NAN)
+            });
+        if !window {
+            error = Some(ARCHIVE_WINDOW_INVALID);
+        }
+    }
+    for row in rows {
+        let at = row.get("archived_at").and_then(Value::as_f64);
+        let named = row
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| !name.is_empty());
+        let identified = row
+            .get("archive_id")
+            .and_then(Value::as_str)
+            .is_some_and(canonical_uuid);
+        if row.get("state").and_then(Value::as_str) != Some("archived")
+            || !named
+            || !identified
+            || !at.is_some_and(|at| at >= from && at < until)
+        {
+            error = Some(ARCHIVE_IDENTITY_INVALID);
+        }
+    }
+    error.map_or(Ok(()), Err)
+}
+
+/// One checked archive page.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ArchivePage {
+    pub rows: Vec<crate::view::ViewRow>,
+    pub next_cursor: String,
+    pub previous_cursor: Option<String>,
+    pub total: u64,
+    pub position: Option<u64>,
+}
+
+/// Reads and checks one archive page of `computer` (30 s, at most
+/// [`READ_LIMIT`]). A reply that fails Qt's checks is
+/// [`ReadError::Invalid`] whose message is Qt's text, with no rows.
+pub fn archive_page(
+    hgs: &Path,
+    computer: &ComputerId,
+    from: f64,
+    until: f64,
+    cursor: &str,
+    query: &str,
+) -> Result<ArchivePage, ReadError> {
+    let request = Read::ArchivePage {
+        from,
+        until,
+        cursor: cursor.to_owned(),
+        query: query.to_owned(),
+    };
+    let data = read(hgs, computer, &request)?;
+    Ok(page(&data))
+}
+
+/// The typed page of a reply [`check_archive_page`] accepted.
+fn page(data: &Value) -> ArchivePage {
+    let text = |key: &str| data.get(key).and_then(Value::as_str).map(str::to_owned);
+    ArchivePage {
+        rows: data["sessions"]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .map(crate::view::row)
+            .collect(),
+        next_cursor: text("next_cursor").unwrap_or_default(),
+        previous_cursor: text("previous_cursor"),
+        total: data["total"].as_f64().unwrap_or(0.0) as u64,
+        position: data
+            .get("position")
+            .and_then(Value::as_f64)
+            .map(|p| p as u64),
+    }
 }
 
 fn limited(hgs: &Path, invocation: &Invocation, limit: usize) -> Result<Exit, ReadError> {
@@ -647,5 +841,258 @@ mod tests {
             decode(&Read::Version, code("usage")),
             Err(ReadError::Invalid { .. })
         ));
+    }
+
+    const ID: &str = "00000000-0000-4000-8000-000000000001";
+
+    fn archive_read(cursor: &str) -> Read {
+        Read::ArchivePage {
+            from: 1000.0,
+            until: 2000.0,
+            cursor: cursor.into(),
+            query: "q".into(),
+        }
+    }
+
+    fn archived(id: &str, at: f64) -> Value {
+        json!({"name": "alpha", "state": "archived", "archive_id": id, "archived_at": at})
+    }
+
+    fn page_with(change: impl FnOnce(&mut Value)) -> Value {
+        let mut page = json!({"version": 1, "sessions": [archived(ID, 1500.0)],
+            "next_cursor": "n", "total": 3, "from": 1000, "until": 2000, "query": "q"});
+        change(&mut page);
+        page
+    }
+
+    fn verdict(cursor: &str, page: Value) -> Option<String> {
+        match decode(&archive_read(cursor), code(&page.to_string())) {
+            Ok(_) => None,
+            Err(ReadError::Invalid { message }) => Some(message),
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_archive_page_asks_as_qt_does() {
+        let read = Read::ArchivePage {
+            from: 1000.0,
+            until: 2000.5,
+            cursor: "c".into(),
+            query: "q".into(),
+        };
+        let invocation = invocation(&peer(), &read).unwrap();
+        assert_eq!(invocation.args, ["@studio", "archives", "--json"]);
+        assert_eq!(invocation.timeout, Duration::from_secs(30));
+        assert_eq!(read.limit(), READ_LIMIT);
+        let request: Value = serde_json::from_slice(&invocation.stdin.unwrap()).unwrap();
+        assert_eq!(
+            request,
+            json!({"from": 1000, "until": 2000.5, "limit": 50, "cursor": "c", "query": "q"})
+        );
+        let text = String::from_utf8(
+            super::invocation(&ComputerId::local(), &read)
+                .unwrap()
+                .stdin
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(text.contains("\"from\":1000,"), "{text}");
+        assert_eq!(
+            super::invocation(&ComputerId::local(), &read).unwrap().args,
+            ["archives", "--json"]
+        );
+    }
+
+    #[test]
+    fn a_valid_archive_page_passes_and_is_typed() {
+        assert_eq!(verdict("", page_with(|_| {})), None);
+        assert_eq!(verdict("c", page_with(|_| {})), None);
+        let windowed = page_with(|p| {
+            p["previous_cursor"] = json!("p");
+            p["position"] = json!(2);
+        });
+        assert_eq!(verdict("", windowed.clone()), None);
+        let typed = page(&windowed);
+        assert_eq!(typed.total, 3);
+        assert_eq!(typed.position, Some(2));
+        assert_eq!(typed.previous_cursor.as_deref(), Some("p"));
+        assert_eq!(typed.next_cursor, "n");
+        assert_eq!(typed.rows[0].archive_id.as_deref(), Some(ID));
+        assert_eq!(typed.rows[0].archived_at, Some(1500.0));
+        // The last page: no rows, no cursor.
+        let end = page_with(|p| {
+            p["sessions"] = json!([]);
+            p["next_cursor"] = json!("");
+            p["total"] = json!(0);
+        });
+        assert_eq!(verdict("", end), None);
+    }
+
+    #[test]
+    fn archive_page_checks_give_qt_texts() {
+        let page_err = Some(ARCHIVE_PAGE_INVALID.to_owned());
+        let cases: Vec<(&str, Value)> = vec![
+            ("version", page_with(|p| p["version"] = json!(2))),
+            (
+                "no version",
+                page_with(|p| {
+                    p.as_object_mut().unwrap().remove("version");
+                }),
+            ),
+            ("sessions", page_with(|p| p["sessions"] = json!({}))),
+            (
+                "51 rows",
+                page_with(|p| {
+                    p["sessions"] = json!(vec![archived(ID, 1500.0); 51]);
+                    p["total"] = json!(60);
+                }),
+            ),
+            ("cursor type", page_with(|p| p["next_cursor"] = json!(1))),
+            (
+                "cursor long",
+                page_with(|p| p["next_cursor"] = json!("x".repeat(1025))),
+            ),
+            ("total type", page_with(|p| p["total"] = json!("3"))),
+            ("total low", page_with(|p| p["total"] = json!(0))),
+            ("from", page_with(|p| p["from"] = json!(999))),
+            ("until", page_with(|p| p["until"] = json!(2001))),
+            ("query", page_with(|p| p["query"] = json!("other"))),
+            (
+                "cursor without rows",
+                page_with(|p| p["sessions"] = json!([])),
+            ),
+            ("not an object", json!([])),
+        ];
+        for (name, page) in cases {
+            assert_eq!(verdict("", page), page_err, "{name}");
+        }
+        assert_eq!(
+            verdict("n", page_with(|_| {})),
+            page_err,
+            "next_cursor equal to the query cursor"
+        );
+        assert!(matches!(
+            decode(&archive_read(""), code("not json")),
+            Err(ReadError::Invalid { .. })
+        ));
+        assert_eq!(
+            verdict(
+                "",
+                page_with(|p| p["next_cursor"] = json!("x".repeat(1024)))
+            ),
+            None
+        );
+        assert_eq!(
+            verdict(
+                "",
+                page_with(|p| {
+                    p["sessions"] = json!(vec![archived(ID, 1500.0); 50]);
+                    p["total"] = json!(50);
+                    p["next_cursor"] = json!("");
+                })
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn archive_window_checks_give_the_window_text() {
+        let window = Some(ARCHIVE_WINDOW_INVALID.to_owned());
+        let cases: Vec<(&str, Value)> = vec![
+            ("position alone", page_with(|p| p["position"] = json!(0))),
+            (
+                "previous alone",
+                page_with(|p| p["previous_cursor"] = json!("")),
+            ),
+            (
+                "previous type",
+                page_with(|p| {
+                    p["previous_cursor"] = json!(1);
+                    p["position"] = json!(0);
+                }),
+            ),
+            (
+                "previous long",
+                page_with(|p| {
+                    p["previous_cursor"] = json!("x".repeat(1025));
+                    p["position"] = json!(0);
+                }),
+            ),
+            (
+                "position type",
+                page_with(|p| {
+                    p["previous_cursor"] = json!("");
+                    p["position"] = json!("0");
+                }),
+            ),
+            (
+                "position negative",
+                page_with(|p| {
+                    p["previous_cursor"] = json!("");
+                    p["position"] = json!(-1);
+                }),
+            ),
+            (
+                "position fraction",
+                page_with(|p| {
+                    p["previous_cursor"] = json!("");
+                    p["position"] = json!(0.5);
+                }),
+            ),
+            (
+                "position past total",
+                page_with(|p| {
+                    p["previous_cursor"] = json!("");
+                    p["position"] = json!(3);
+                }),
+            ),
+        ];
+        for (name, page) in cases {
+            assert_eq!(verdict("", page), window, "{name}");
+        }
+        let edge = page_with(|p| {
+            p["previous_cursor"] = json!("");
+            p["position"] = json!(2);
+        });
+        assert_eq!(verdict("", edge), None);
+    }
+
+    #[test]
+    fn archive_row_checks_give_the_identity_text() {
+        let identity = Some(ARCHIVE_IDENTITY_INVALID.to_owned());
+        let bad_row = |row: Value| verdict("", page_with(|p| p["sessions"] = json!([row])));
+        let mut live = archived(ID, 1500.0);
+        live["state"] = json!("running");
+        assert_eq!(bad_row(live), identity, "state");
+        let mut unnamed = archived(ID, 1500.0);
+        unnamed["name"] = json!("");
+        assert_eq!(bad_row(unnamed), identity, "name");
+        for id in [
+            "00000000-0000-4000-8000-00000000000A",
+            "{00000000-0000-4000-8000-000000000001}",
+            "00000000000040008000000000000001",
+            "00000000-0000-4000-8000-00000000000g",
+            "",
+            "00000000-0000-4000-8000-0000000000011",
+        ] {
+            assert_eq!(bad_row(archived(id, 1500.0)), identity, "{id}");
+        }
+        let mut no_id = archived(ID, 1500.0);
+        no_id.as_object_mut().unwrap().remove("archive_id");
+        assert_eq!(bad_row(no_id), identity);
+        for at in [999.0, 2000.0, 2500.0] {
+            assert_eq!(bad_row(archived(ID, at)), identity, "{at}");
+        }
+        assert_eq!(bad_row(archived(ID, 1000.0)), None, "from is inclusive");
+        let mut text_at = archived(ID, 1500.0);
+        text_at["archived_at"] = json!("1500");
+        assert_eq!(bad_row(text_at), identity);
+        // The identity error wins over the others, as in Qt.
+        let both = page_with(|p| {
+            p["version"] = json!(2);
+            p["sessions"] = json!([archived("x", 1500.0)]);
+        });
+        assert_eq!(verdict("", both), identity);
     }
 }

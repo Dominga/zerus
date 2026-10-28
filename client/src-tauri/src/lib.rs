@@ -40,6 +40,7 @@ pub fn run() {
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
                 readsync::start(actions.clone());
                 app.manage(actions);
+                app.manage(actions::ArchiveReads::default());
                 app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
             }
             let display = display::display_name();
@@ -86,6 +87,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::update_attention_marks,
         actions::session_reference,
         actions::copy_command,
+        actions::archive_page,
         clipboard::copy_text,
     ]
 }

@@ -22,8 +22,9 @@ use zerus_client_core::actions::{
 use zerus_client_core::details::{details_invocation, parse_details, Details};
 use zerus_client_core::marks::{AttentionMarks, Mark};
 use zerus_client_core::readmarks::{ReadMark, ReadMarks};
+use zerus_client_core::reads::{self, ArchivePage};
 use zerus_client_core::shell::{current_shell, open_command};
-use zerus_client_core::{default_hgs, run, Action, Batch, Outcome, Target};
+use zerus_client_core::{default_hgs, run, Action, Batch, ComputerId, Outcome, ReadError, Target};
 
 /// A session by computer id and session name, and the action's lane.
 type Key = (String, String, Lane);
@@ -540,6 +541,64 @@ pub async fn session_reference(
     parse_reference(exit)
 }
 
+/// Per computer, the number of the latest archive page request: a newer
+/// request makes an older answer stale (`HgsClient::cancelArchivePages`).
+#[derive(Default)]
+pub struct ArchiveReads {
+    latest: Mutex<std::collections::HashMap<String, u64>>,
+}
+
+impl ArchiveReads {
+    /// Starts a request for `computer`; the older ones become stale.
+    fn begin(&self, computer: &str) -> u64 {
+        let mut latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
+        let number = latest.get(computer).map_or(1, |n| n + 1);
+        latest.insert(computer.to_owned(), number);
+        number
+    }
+
+    fn current(&self, computer: &str, number: u64) -> bool {
+        self.latest
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(computer)
+            == Some(&number)
+    }
+}
+
+/// One checked page of the computer's archive (30 s, Qt's validation). A
+/// newer request for the same computer drops this answer as
+/// `Err("superseded")`; the store ignores it. A reply that fails Qt's checks
+/// is `Err` with Qt's text and no rows.
+#[tauri::command]
+pub async fn archive_page(
+    state: State<'_, ArchiveReads>,
+    computer: String,
+    from: f64,
+    until: f64,
+    cursor: String,
+    query: String,
+) -> Result<ArchivePage, String> {
+    if blocked() {
+        return Err(REPLAY_NEEDS_HGS.to_owned());
+    }
+    let number = state.begin(&computer);
+    let hgs = default_hgs();
+    let id = ComputerId::from(computer.as_str());
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        reads::archive_page(&hgs, &id, from, until, &cursor, &query)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    if !state.current(&computer, number) {
+        return Err("superseded".into());
+    }
+    result.map_err(|error| match error {
+        ReadError::Invalid { message } if message.starts_with("Invalid archive") => message,
+        other => other.to_string(),
+    })
+}
+
 /// The command that opens the session in a terminal, written for this
 /// computer's shell (`TrayAgent.cpp:742-745`).
 #[tauri::command]
@@ -599,6 +658,21 @@ pub fn update_attention_marks(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_newer_archive_request_of_a_computer_supersedes_the_older() {
+        let reads = super::ArchiveReads::default();
+        let first = reads.begin("studio");
+        let other = reads.begin("laptop");
+        assert!(reads.current("studio", first));
+        let second = reads.begin("studio");
+        assert!(!reads.current("studio", first));
+        assert!(reads.current("studio", second));
+        assert!(
+            reads.current("laptop", other),
+            "computers do not cancel each other"
+        );
+    }
+
     use super::*;
 
     #[test]

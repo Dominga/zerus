@@ -45,6 +45,8 @@ export interface ViewRow {
   effort?: string | null;
   summary?: string;
   updated_at?: number | null;
+  /** When an archived row was archived (epoch seconds). */
+  archived_at?: number | null;
   /** When the current turn, compaction or background job started (the Working clock). */
   turn_started?: number | null;
   run_id?: string | null;
@@ -169,4 +171,13 @@ export interface ReadMark {
   conversation_id: string;
   reply_id: string | null;
   attention_signature: string | null;
+}
+
+/** One checked page of a computer's archive (`archive_page`). */
+export interface ArchivePage {
+  rows: ViewRow[];
+  next_cursor: string;
+  previous_cursor: string | null;
+  total: number;
+  position: number | null;
 }

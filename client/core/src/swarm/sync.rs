@@ -294,16 +294,10 @@ impl Controller {
     /// where hgs will place it.
     pub fn presented_value(&self) -> Option<Arc<Value>> {
         let value = self.value.as_ref()?;
-        let Some(desired) = &self.desired else {
-            return Some(Arc::clone(value));
-        };
-        let mut organization = desired.clone();
-        if let Some(object) = organization.as_object_mut() {
-            object.insert("project_order".into(), edit::project_order(desired));
+        match &self.desired {
+            Some(desired) => Some(Arc::new(showing(value, desired))),
+            None => Some(Arc::clone(value)),
         }
-        let mut copy = (**value).clone();
-        copy["organization"] = organization;
-        Some(Arc::new(copy))
     }
 
     fn reason(&self) -> String {
@@ -553,7 +547,7 @@ impl Controller {
         }
         if self.desired.is_some() {
             // Edits made meanwhile go next, from what was sent (203-205).
-            self.base = Some(sent.desired);
+            self.written(sent.desired);
             self.flush_at = Some(now + FLUSH_MS);
         } else if let Some(observation) = Observation::from_reply(reply) {
             let guard = std::mem::take(&mut self.guard);
@@ -565,9 +559,22 @@ impl Controller {
                 }
             }
         } else {
-            self.base = Some(sent.desired);
+            self.written(sent.desired);
         }
         settled
+    }
+
+    /// What an acknowledged apply wrote becomes the base (Qt's `m_base =
+    /// m_sent`, 203) without a state adopted. The membership the list places
+    /// rows by, and the catalog Projects shows, follow it: edits that later
+    /// settle without a call show this base, and Delete and Sort read its
+    /// members.
+    fn written(&mut self, desired: Value) {
+        self.membership = Arc::new(members(&desired));
+        if let Some(value) = &self.value {
+            self.value = Some(Arc::new(showing(value, &desired)));
+        }
+        self.base = Some(desired);
     }
 
     /// Qt's failure path (67-73) and schema check (194-196): only the status
@@ -641,6 +648,21 @@ impl Controller {
             self.draft_saved = change;
         }
     }
+}
+
+/// `value`, a `swarm get` object, with `organization` in place of its own,
+/// whose `project_order` is the one an apply of it writes (`edit::shared`):
+/// the edits order `projects` only, and Projects follows `project_order`
+/// first.
+fn showing(value: &Value, organization: &Value) -> Value {
+    let order = edit::project_order(organization);
+    let mut organization = organization.clone();
+    if let Some(object) = organization.as_object_mut() {
+        object.insert("project_order".into(), order);
+    }
+    let mut copy = value.clone();
+    copy["organization"] = organization;
+    copy
 }
 
 /// Whether `observation`'s heads hold every operation of `written`, per token.
@@ -1860,5 +1882,63 @@ mod tests {
         assert!(!sync.pending());
         assert_eq!(sync.next_due(), None, "nothing left to send");
         assert!(matches!(sync.due(20_000), Due::Nothing));
+    }
+
+    const Y: &str = "workstation\nclaude/sample-project/other";
+
+    /// `swarm get` with the review session in `r_in`, and the other session in beta.
+    fn two(digest: &str, r_in: &str) -> Value {
+        let list = |id: &str| -> Value {
+            let mut sessions = vec![];
+            if id == r_in {
+                sessions.push(json!(R));
+            }
+            if id == "beta" {
+                sessions.push(json!(Y));
+            }
+            Value::Array(sessions)
+        };
+        let mut versions = Map::new();
+        versions.insert(review(), json!(["op-1"]));
+        json!({"schema": 1, "node_id": "node-1", "digest": digest, "initialized": true, "machines": [], "peers": {}, "conflicts": [],
+               "organization": {"version": 2, "default_project": "ungrouped", "projects": [
+                   {"id": "alpha", "name": "Alpha", "color": "#3fb950", "accessible": true, "folders": [], "sessions": list("alpha")},
+                   {"id": "beta", "name": "Beta", "color": "#64b5f6", "accessible": true, "folders": [], "sessions": list("beta")},
+                   {"id": "ungrouped", "name": "Inbox", "color": "#8d9baa", "accessible": true, "folders": [], "sessions": []}]},
+               "versions": versions})
+    }
+
+    /// An order-only edit made while an apply runs settles without a call
+    /// once the apply landed: the list then shows what was written, and the
+    /// membership the grouping places rows by agrees with it.
+    #[test]
+    fn an_order_only_follow_up_settles_with_the_membership_of_what_was_written() {
+        let mut sync = Controller::default();
+        assert!(sync.observe(observation(two("d1", "alpha")), 0));
+        sync.edit(&to("beta"), 0).unwrap();
+        let _ = input(sync.due(120));
+        // While the apply runs, the other session moves to the end of its own project.
+        let order = Intent::Move {
+            members: vec![Y.into()],
+            project: "beta".into(),
+            before: None,
+        };
+        sync.edit(&order, 130).unwrap();
+        sync.finish(reply(two("d2", "beta"), &["op-2"]), 200);
+        assert_eq!(place(&sync), "beta", "while pending");
+        assert!(matches!(sync.due(400), Due::Settled(_)));
+        let (organization, membership) = sync.presented().unwrap();
+        assert_eq!(crate::swarm::members(organization)[R], "beta");
+        assert_eq!(
+            membership.get(R).map(String::as_str),
+            Some("beta"),
+            "the membership the grouping uses matches it"
+        );
+        let value = sync.presented_value().unwrap();
+        assert_eq!(
+            crate::swarm::members(&value["organization"])[R],
+            "beta",
+            "Projects shows what was written too"
+        );
     }
 }

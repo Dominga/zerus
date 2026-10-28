@@ -33,7 +33,12 @@ struct Inner {
 
 /// Shared by the drain thread and the commands.
 #[derive(Clone, Default)]
-pub struct Pump(Arc<(Mutex<Inner>, Condvar)>);
+pub struct Pump(
+    Arc<(Mutex<Inner>, Condvar)>,
+    /// Takes about to wait, so a test can order a change after the park.
+    #[cfg(test)]
+    Arc<std::sync::atomic::AtomicUsize>,
+);
 
 impl Pump {
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -59,6 +64,8 @@ impl Pump {
     /// Everything pending, waiting up to `park` while nothing is.
     pub fn take(&self, park: Duration) -> Batch {
         let inner = self.lock();
+        #[cfg(test)]
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let (mut inner, _) = self
             .0
              .1
@@ -86,9 +93,8 @@ impl Pump {
         self.wake(inner);
     }
 
-    // The commands that call the grouping methods below arrive with the next task.
-    #[allow(dead_code)]
     /// The organization the list shows; `revision` changes whenever it does.
+    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
     pub fn present(
         &self,
         organization: &Value,
@@ -102,7 +108,7 @@ impl Pump {
         self.wake(inner);
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
     pub fn set_sync(&self, sync: SyncView) {
         let mut inner = self.lock();
         inner.grouping.set_sync(sync);
@@ -110,44 +116,44 @@ impl Pump {
     }
 
     /// An edit the user made, applied to the list at once.
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
     pub fn edited(&self, intent: &Intent) {
         let mut inner = self.lock();
         inner.grouping.edited(intent);
         self.wake(inner);
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
     pub fn set_collapsed(&self, project: &str, collapsed: bool) {
         let mut inner = self.lock();
         inner.grouping.set_collapsed(project, collapsed);
         self.wake(inner);
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
     pub fn members_of(&self, project: &str) -> Vec<(String, String)> {
         self.lock().grouping.members_of(project)
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
     pub fn default_project(&self) -> String {
         self.lock().grouping.default_project().to_owned()
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
     pub fn take_renames(&self) -> Vec<(String, String)> {
         self.lock().grouping.take_renames()
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
     pub fn take_layout(&self) -> Option<Vec<u8>> {
         self.lock().grouping.take_layout()
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
     pub fn load_layout(&self, bytes: &[u8]) {
         let mut inner = self.lock();
-        inner.grouping = Grouping::new(Layout::from_json(bytes));
+        inner.grouping.replace_layout(Layout::from_json(bytes));
         self.wake(inner);
     }
 
@@ -185,8 +191,8 @@ impl Pump {
         self.drain_with(changes, |_| {});
     }
 
-    #[allow(dead_code)]
     /// Like [`Pump::drain`], running `observe` on each change just before it is queued.
+    #[allow(dead_code, reason = "wired by the organization hub in the next task")]
     pub fn drain_with(
         &self,
         changes: Receiver<Change>,
@@ -564,32 +570,69 @@ mod tests {
         assert!(again.organizations.is_empty());
     }
 
+    /// Parks a `take` on another thread, runs `change` once it is waiting
+    /// (the lock is held until then), and returns the batch it woke with.
+    fn wake_with(pump: &Pump, change: impl FnOnce(&Pump)) -> Batch {
+        let before = pump.1.load(std::sync::atomic::Ordering::SeqCst);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let parked = {
+            let pump = pump.clone();
+            std::thread::spawn(move || tx.send(pump.take(Duration::from_secs(30))).unwrap())
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pump.1.load(std::sync::atomic::Ordering::SeqCst) == before {
+            assert!(Instant::now() < deadline, "the take never parked");
+            std::thread::yield_now();
+        }
+        change(pump);
+        let batch = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the change woke the parked take");
+        parked.join().unwrap();
+        batch
+    }
+
     #[test]
     fn a_collapse_wakes_a_parked_take() {
         let pump = Pump::default();
         pump.push(a_row());
         present(&pump, &organization());
         let _ = pump.take(PARK);
-        let (tx, rx) = std::sync::mpsc::channel();
-        let parked = {
-            let pump = pump.clone();
-            std::thread::spawn(move || {
-                tx.send(pump.take(Duration::from_secs(30))).unwrap();
-            })
-        };
-        // Let the take park; the assertion below does not depend on the timing,
-        // since a collapse before the park is still pending when it starts.
-        std::thread::sleep(Duration::from_millis(50));
-        pump.set_collapsed("alpha", true);
-        let batch = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the collapse woke the parked take");
+        let batch = wake_with(&pump, |pump| pump.set_collapsed("alpha", true));
         assert!(batch.grouping.unwrap().headers[0].collapsed);
-        parked.join().unwrap();
     }
 
     #[test]
-    fn resend_replays_the_grouping_of_the_latest_organization_until_its_computer_ends() {
+    fn presenting_an_organization_wakes_a_parked_take() {
+        let pump = Pump::default();
+        pump.push(a_row());
+        let _ = pump.take(PARK);
+        let batch = wake_with(&pump, |pump| present(pump, &organization()));
+        assert_eq!(batch.groups[0].group, "alpha");
+        assert!(batch.grouping.is_some());
+    }
+
+    #[test]
+    fn a_loaded_layout_keeps_the_observed_rows() {
+        let pump = Pump::default();
+        pump.push(a_row());
+        present(&pump, &organization());
+        let _ = pump.take(PARK);
+        pump.load_layout(br#"{"collapsed":["alpha"]}"#);
+        let batch = pump.take(PARK);
+        assert!(batch.grouping.unwrap().headers[0].collapsed);
+        pump.resend();
+        let again = pump.take(PARK);
+        assert_eq!(
+            again.groups.len(),
+            1,
+            "the observed row survives the layout"
+        );
+        assert_eq!(again.groups[0].group, "alpha");
+    }
+
+    #[test]
+    fn resend_replays_the_grouping_of_the_latest_organization_until_its_rows_are_replaced_empty() {
         let pump = Pump::default();
         pump.push(Change::Computer {
             computer: local(),

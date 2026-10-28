@@ -334,6 +334,32 @@ impl Grouping {
         }
     }
 
+    /// Replaces the saved layout, keeping the observed rows, membership and
+    /// what was sent; the rows are placed again against the new layout.
+    pub fn replace_layout(&mut self, layout: Layout) {
+        self.layout = layout;
+        self.prune_floor = 0;
+        self.headers_dirty = true;
+        if self.loaded {
+            let mut slots: Vec<(u64, At, String, String)> = self
+                .rows
+                .iter()
+                .map(|(at, slot)| {
+                    (
+                        slot.seq,
+                        at.clone(),
+                        slot.member.clone(),
+                        slot.title.clone(),
+                    )
+                })
+                .collect();
+            slots.sort_unstable_by_key(|slot| slot.0);
+            for (seq, at, member, title) in slots {
+                self.place(at, member, title, seq);
+            }
+        }
+    }
+
     pub fn set_sync(&mut self, sync: SyncView) {
         self.sync = sync;
         self.headers_dirty = true;

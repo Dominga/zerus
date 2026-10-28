@@ -16912,6 +16912,15 @@ else:print('{}')
     auto *roster = window.findChild<QTextBrowser *>("subagents");
     QTRY_VERIFY_WITH_TIMEOUT(roster->toPlainText().contains("Wait for the fork build"), 15000);
     QVERIFY(roster->toPlainText().contains("Background jobs"));
+    // Owner, 2026-10-28: switching took about 4 s while the first read of the
+    // new session waited for its processes. That read skips them; the next has them.
+    const auto reads = [&](const QString &name) {
+        QStringList result; for (const auto &call : log()) if (call.contains(name)) result << call; return result; };
+    window.showSession({}, "codex/website/navigation");
+    QTRY_VERIFY_WITH_TIMEOUT(!reads("codex/website/navigation").isEmpty(), 15000);
+    QVERIFY(reads("codex/website/navigation").first().contains("--skip-processes"));
+    QTRY_VERIFY_WITH_TIMEOUT(([&] { const auto calls = reads("codex/website/navigation");
+        return std::any_of(calls.cbegin(), calls.cend(), [](const QString &call) { return !call.contains("--skip-processes"); }); })(), 15000);
 }
 
 void TestSessionsWindow::aConfirmingCreationReadsItsComputerUntilListed()

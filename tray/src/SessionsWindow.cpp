@@ -4073,7 +4073,11 @@ void SessionsWindow::inspect()
     // which is the default, the card never showed them).
     const bool tasksCard=m_inspector&&m_inspector->isVisible()&&m_inspector->isOpen(InspectorCards::Tasks);
     const int processInterval=m_detailTabs->currentWidget()==m_processes?ProcessSettings::activeMs():ProcessSettings::backgroundMs();
-    const bool processes=(ProcessSettings::enabled()||tasksCard) && (!m_processPollAge.isValid() || m_processPollAge.elapsed()>=processInterval);
+    // The first read of a newly selected session skips processes: reading them
+    // takes 1 to 8 s on Windows, and Activity waited for it (owner, 2026-10-28:
+    // switching took about 4 s). The next poll reads them.
+    const bool processes=!m_details.isEmpty() && (ProcessSettings::enabled()||tasksCard)
+        && (!m_processPollAge.isValid() || m_processPollAge.elapsed()>=processInterval);
     // A live event stream brings Activity as it happens (EventStream.h); only
     // the process section is still polled, at its own interval.
     auto *streams = EventStreams::instance();

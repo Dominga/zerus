@@ -163,7 +163,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 let pump = app.state::<commands::AppState>().pump();
                 app.manage(screens::Screens::tauri(app.handle().clone(), pump));
                 if menu_bar {
-                    app.state::<commands::AppState>().start_source()?;
+                    lifecycle::start_fleet(|| app.state::<commands::AppState>().start_source());
                 }
             }
             #[cfg(any(target_os = "linux", target_os = "macos"))]

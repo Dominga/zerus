@@ -44,6 +44,21 @@ pub fn window_at_start(opens_sessions: bool, menu_bar: bool) -> bool {
     opens_sessions || !menu_bar
 }
 
+/// Starts the fleet at launch, before any window loads (menu-bar builds). A
+/// source that fails to start, such as a missing `ZERUS_CLIENT_REPLAY`
+/// fixture, is logged and the app runs on: the webview's own `start` tries
+/// again and reports it when the window opens. Returns whether it started.
+#[cfg_attr(not(feature = "live"), allow(dead_code))]
+pub fn start_fleet(start: impl FnOnce() -> Result<String, String>) -> bool {
+    match start() {
+        Ok(_) => true,
+        Err(error) => {
+            eprintln!("zerus-client: the data source did not start at launch: {error}");
+            false
+        }
+    }
+}
+
 /// Kept in the app state.
 pub struct Lifecycle {
     pub menu_bar: bool,
@@ -198,5 +213,13 @@ mod tests {
         );
         assert!(close_hides(true));
         assert!(!close_hides(false));
+    }
+
+    #[test]
+    fn a_source_that_fails_at_launch_leaves_the_app_running() {
+        assert!(!start_fleet(|| Err(
+            "replay: sample.ndjson: not found".to_owned()
+        )));
+        assert!(start_fleet(|| Ok("live".to_owned())));
     }
 }

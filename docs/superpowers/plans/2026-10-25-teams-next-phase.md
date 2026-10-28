@@ -1066,6 +1066,30 @@ answered; a denial cannot carry an explanation.
     and planning (U28) reads the per-role numbers when it weighs lanes.
   Owner: yes.
 
+- **U39. Bug: Auto-accept drafts approved drafts the owner did not mean
+  (owner, 2026-10-28).** The owner switched Auto-accept drafts on to start
+  phase 42; phases 43 and 44, drafts the owner had not approved, were
+  approved with it and queued. The switch is team-wide and silent about what it
+  starts. Fix: turning it on names the drafts it will approve and asks; an
+  approval for one phase never approves another; the feed records each
+  automatic approval with the switch that did it. Separately, an approved
+  phase behind a running one is held whole (N6 of #499): the owner accepted the
+  idle time this once, and the members were compacted before it.
+
+- **U40. A plan score from 0 to 100 (owner, 2026-10-28).** "Healthy 14/15" in a
+  phase header counts the tasks without a live problem; it says nothing about
+  the plan, so every plan looked ideal. The plan and each phase get a score
+  from 0 to 100 with its named penalties: the weight of each task against its
+  member (size, criteria, files, the agent and model), the expected time from
+  the profile's history (U38) and the critical path against the parallelism,
+  the risk of a task (security, merges and migrations, a weak model on hard
+  work, past rework of the role), the risk of locks and conflicts (tasks of
+  parallel lanes touching the same files, shared folders, a long merge queue),
+  the risk of idle members (queued phases, one-lane fan-ins, review and QA
+  bottlenecks, long test runs) and the planning rules of U28. The header shows
+  the score and the top penalty; the live count becomes "14/15 without
+  problems". Owner: asked for.
+
 ## Phases 37-40 (replanned 2026-10-27)
 
 Phase 36 closed without its own build: its review findings and the build go to

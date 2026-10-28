@@ -15,7 +15,7 @@ vi.mock("../../bridge", () => ({
   queueReadMarks: vi.fn(async () => []),
 }));
 
-import { CLEAR_ARCHIVE_LABEL, clearArchiveEntry, clearArchiveRows } from "./archive-entries";
+import { CLEAR_ARCHIVE_LABEL, CLEAR_NEEDS_ALL_PROJECTS, clearArchiveEntry, clearArchiveRows } from "./archive-entries";
 
 // Qt's Clear archive (SessionSelection.cpp 171-181 and 226-235).
 
@@ -30,12 +30,17 @@ const rows = [
 const all = { machines: [], projects: [] };
 
 describe("clearArchiveRows", () => {
-  it("takes the loaded archived rows in the machine and project filters and the date range", () => {
+  it("takes the loaded archived rows in the machine filter and the date range", () => {
     const everything = () => true;
     expect(clearArchiveRows(rows, { ...all, includes: everything }).map((r) => r.name)).toEqual(["a", "b", "c", "d"]);
     expect(clearArchiveRows(rows, { machines: ["box"], projects: [], includes: everything }).map((r) => r.name)).toEqual(["a", "b", "d"]);
-    expect(clearArchiveRows(rows, { machines: [], projects: ["Inbox"], includes: everything }).map((r) => r.name)).toEqual(["a", "c", "d"]);
-    expect(clearArchiveRows(rows, { machines: ["box"], projects: ["Inbox"], includes: (at) => at < 1000 }).map((r) => r.name)).toEqual(["a"]);
+    expect(clearArchiveRows(rows, { machines: ["box"], projects: [], includes: (at) => at < 1000 }).map((r) => r.name)).toEqual(["a", "b"]);
+  });
+
+  // Archived rows have no organization project yet: with a project filter set
+  // it takes none, never more than Qt's project filter would.
+  it("takes no row while a project filter is set", () => {
+    expect(clearArchiveRows(rows, { machines: [], projects: ["p-inbox"], includes: () => true })).toEqual([]);
   });
 });
 
@@ -48,12 +53,13 @@ describe("clearArchiveEntry", () => {
     e.action?.();
     expect(run).toHaveBeenCalledTimes(1);
   });
-  it("is enabled only when some archived row in the machine and project filters can be forgotten and no batch runs", () => {
+  it("is enabled only when some archived row in the machine filter can be forgotten, no project filter is set and no batch runs", () => {
     expect(clearArchiveEntry(rows, all, () => true, true, run).disabled).toBe(true);
     expect(clearArchiveEntry(rows, all, () => false, false, run).disabled).toBe(true);
     expect(clearArchiveEntry(rows, all, (s) => s.name === "c", false, run).disabled).toBe(false);
     expect(clearArchiveEntry(rows, { machines: ["box"], projects: [] }, (s) => s.name === "c", false, run).disabled).toBe(true);
-    expect(clearArchiveEntry(rows, { machines: [], projects: ["Docs"] }, (s) => s.name === "b", false, run).disabled).toBe(false);
+    const filtered = clearArchiveEntry(rows, { machines: [], projects: ["p-docs"] }, () => true, false, run);
+    expect([filtered.disabled, filtered.hint]).toEqual([true, CLEAR_NEEDS_ALL_PROJECTS]);
     // A live row never counts, and the date range does not limit the count (Qt 171-176).
     expect(clearArchiveEntry(rows, all, (s) => s.name === "live", false, run).disabled).toBe(true);
     expect(clearArchiveEntry([], all, () => true, false, run).disabled).toBe(true);

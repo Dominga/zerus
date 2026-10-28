@@ -3,6 +3,7 @@ import { createStore } from "solid-js/store";
 import * as bridge from "../bridge";
 import { catalog as appCatalog, computerOffline, type CatalogState } from "./catalog";
 import { marks as appMarks, type Marks } from "./marks";
+import { activityReadOnly } from "./activitySource";
 import { copyState, detailsFromInspection, MUTE_PENDING, STATE_CHANGED, forgetsBindingOnly, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type ForgetScope, type PendingNotifications } from "../ui/sessions/actions-ui";
 import type { Action, Details, Outcome, Target } from "../types";
 import type { Session } from "../ui/sessions/types";
@@ -18,7 +19,11 @@ import type { Session } from "../ui/sessions/types";
 // changes are tracked apart too. There is no read lane here: the Rust worker
 // claims the Read lane when it delivers a mark.
 
-export interface Notice { id: number; tone: "error" | "warn" | "info"; text: string; sticky: boolean }
+export interface Notice {
+  id: number; tone: "error" | "warn" | "info"; text: string; sticky: boolean;
+  /** Notices with one key replace each other, as one status line does. */
+  key?: string;
+}
 
 /** The followed session's Activity `state` value, and whether its subscription has answered. */
 export interface Followed { value: Record<string, unknown> | undefined; settled: boolean }
@@ -32,6 +37,8 @@ const ALREADY_STOPPED = ["hgs: This turn is no longer working", "This turn is no
 
 const sessionId = (computer: string, name: string) => `${computer}\n${name}`;
 const failed = (detail: string): Outcome => ({ outcome: "failed", detail });
+/** The text of a rejected call: the string itself, an Error's message, else its String(). */
+export const errorText = (error: unknown) => (typeof error === "string" ? error : error instanceof Error ? error.message : String(error));
 
 /**
  * The target of an action. Interrupt, mark read and terminate act on one
@@ -60,12 +67,18 @@ export function createActions(
   let nextId = 1;
 
   function dismiss(id: number) { setList((all) => all.filter((n) => n.id !== id)); }
+  /** Dismisses the notice with this key, if one shows. */
+  function clearNotice(key: string) { setList((all) => all.filter((n) => n.key !== key)); }
 
-  /** Adds a notice and returns its id; over the cap, the oldest other non-sticky one goes first, then the oldest other; the new one stays. */
-  function notify(tone: Notice["tone"], text: string, sticky = false): number {
+  /**
+   * Adds a notice and returns its id. A notice with a key first takes the
+   * place of the one with that key. Over the cap, the oldest other non-sticky
+   * one goes first, then the oldest other; the new one stays.
+   */
+  function notify(tone: Notice["tone"], text: string, sticky = false, key?: string): number {
     const id = nextId++;
     setList((all) => {
-      const next = [...all, { id, tone, text, sticky }];
+      const next = [...(key === undefined ? all : all.filter((n) => n.key !== key)), { id, tone, text, sticky, key }];
       while (next.length > MAX_NOTICES) {
         // Never the notice being added: it is the last entry.
         const others = next.slice(0, -1);
@@ -322,8 +335,6 @@ export function createActions(
     return matches(value) ? value : undefined;
   }
 
-  const errorText = (error: unknown) => (typeof error === "string" ? error : error instanceof Error ? error.message : String(error));
-
   /** The text the last successful copy put on the clipboard (the actions smoke logs it). */
   let copied = "";
   const lastCopied = () => copied;
@@ -396,7 +407,7 @@ export function createActions(
     return out;
   }
 
-  return { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify };
+  return { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify, clearNotice };
 }
 
 type FollowSource = { target(): { id: string } | undefined; summary(): Record<string, unknown> | undefined; loaded(): boolean; ended(): boolean; error(): unknown };
@@ -406,6 +417,8 @@ export function bindActivity(source: FollowSource) { activity = source; }
 
 /** The Activity subscription of a session: its state value while it is the followed one, and whether it has answered. */
 export function followedFor(key: string): Followed {
+  // An archived row has no subscription (it is never streamed): its details are inspected at once.
+  if (activityReadOnly(key)) return { value: undefined, settled: true };
   if (!activity) return { value: undefined, settled: false };
   const mine = activity.target()?.id === key;
   const value = mine ? activity.summary() : undefined;
@@ -429,4 +442,4 @@ let archivedRow: (key: string) => Session | undefined = () => undefined;
 export function bindArchivedRows(lookup: (key: string) => Session | undefined) { archivedRow = lookup; }
 
 const app = createActions(withArchived(appCatalog, (key) => archivedRow(key)), (computer) => !computerOffline(computer), () => selection());
-export const { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify } = app;
+export const { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify, clearNotice } = app;

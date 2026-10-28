@@ -34,7 +34,6 @@ export type DetailTab = "activity" | "terminal" | "native" | "processes";
 export const [detailTab, setDetailTab] = createSignal<DetailTab>("activity");
 export const [subagentOpen, setSubagentOpen] = createSignal<string | undefined>();
 export const [search, setSearch] = createSignal(params.get("q") ?? "");
-export const [collapsed, setCollapsed] = createStore<Record<string, boolean>>({});
 export const [expandedChildren, setExpandedChildren] = createStore<Record<string, boolean>>({});
 export const [compactRows, setCompactRows] = createStore<Record<string, boolean>>({});
 export const [stripMode, setStripMode] = createSignal(params.get("strip") === "1");
@@ -60,17 +59,6 @@ const syncClock = () => {
 };
 syncClock();
 documentVisibility.onChange(syncClock);
-
-/** Project order set by dragging headers; projects not in it follow in arrival order. */
-const [projectMoves, setProjectMoves] = createSignal<string[]>([]);
-export const projectOrder = createMemo<string[]>(() => {
-  const seen = new Set<string>();
-  const order: string[] = [];
-  for (const p of projectMoves()) if (!seen.has(p)) { seen.add(p); order.push(p); }
-  for (const s of orderedRows()) if (!seen.has(s.project)) { seen.add(s.project); order.push(s.project); }
-  return order;
-});
-export const setProjectOrder = (order: string[]) => setProjectMoves(order);
 
 // Docked session list width (QSplitter default 310, minimum 270), remembered per viewer.
 const SESSIONS_WIDTH_KEY = "zerus-client-sessions-width";

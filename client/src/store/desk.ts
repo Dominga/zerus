@@ -1,8 +1,9 @@
 import { deskPage, deskTakePending, onDeskNotice, onOpenSession, type OpenSession } from "../bridge";
 import { catalog, rowId } from "./catalog";
+import { groupOf, headerOf, setProjectCollapsed } from "./organization";
 import {
-  collapsed, revealRow, setCollapsed, setMachineFilter, setPage, setProjectFilter, setSearch, setSelectedKey,
-  setStateFilter, setSubagentOpen, toast,
+  revealRow, setMachineFilter, setPage, setProjectFilter, setSearch, setSelectedKey, setStateFilter,
+  setSubagentOpen, toast,
 } from "./ui";
 
 // The menu bar and attention notifications open sessions and show notices
@@ -20,8 +21,12 @@ export function openSession(target: OpenSession): void {
   setProjectFilter([]);
   setSearch("");
   setPage("sessions");
-  const project = catalog.rows[id]?.project;
-  if (project !== undefined && collapsed[project]) setCollapsed(project, false);
+  // The project the list groups the row under; this device's layout keeps
+  // the collapse (the Rust side), and the next batch shows it expanded.
+  if (catalog.rows[id] !== undefined) {
+    const project = groupOf(id);
+    if (headerOf(project)?.collapsed) setProjectCollapsed(project, false);
+  }
   setSubagentOpen(undefined);
   setSelectedKey(id);
   revealRow(id);

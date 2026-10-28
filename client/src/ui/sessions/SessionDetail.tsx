@@ -8,6 +8,8 @@ import { ActivityView, columnStyle } from "./Activity";
 import { AgentBadge, MachineBadge, statusOf, folderOf } from "./SessionCard";
 import { detailTab, page, selected, setDetailTab, setMenu, subagentOpen, type MenuEntry } from "../../store/ui";
 import { activity } from "../../store/session";
+import { activityReadOnly, type ActivitySource } from "../../store/activitySource";
+import { archiveActivity } from "../../store/archiveActivity";
 import { computerOffline } from "../../store/catalog";
 import { copyName, detailsFor, followedFor } from "../../store/actions";
 import { headerClearSlot } from "./actions-ui";
@@ -98,6 +100,19 @@ function Header() {
   );
 }
 
+type Tab = { id: string; label: string };
+const TABS: readonly Tab[] = [{ id: "activity", label: "Activity" }, { id: "terminal", label: "Terminal" }];
+
+/** The Activity of a row: an archived row's recorded one, read-only and never streamed, else the live follow. */
+export const activitySourceFor = (key: string): ActivitySource => (activityReadOnly(key) ? archiveActivity : activity);
+
+/** The tabs of a row: an archived row has no Terminal (Qt hides only that one; terminal_status answers unsupported). */
+export function detailTabs(key: string): readonly Tab[];
+export function detailTabs<T extends Tab>(key: string, tabs: readonly T[]): readonly T[];
+export function detailTabs(key: string, tabs: readonly Tab[] = TABS): readonly Tab[] {
+  return activityReadOnly(key) ? tabs.filter((t) => t.id !== "terminal") : tabs;
+}
+
 /** The selected session's terminal status (terminal_status), refreshed when its inputs change. */
 const [terminalTexts, setTerminalTexts] = createSignal<TerminalStatus | undefined>();
 createRoot(() => {
@@ -131,10 +146,14 @@ createRoot(() => {
   createEffect(on(page, (p) => { if (p !== "sessions") void terminal.leavePage(); }, { defer: true }));
 });
 
-const tabs = () => [
-  { id: "activity" as const, label: "Activity", show: true },
-  { id: "terminal" as const, label: "Terminal", show: !!terminalTexts()?.supported && !subagentOpen() },
-];
+const tabs = () => {
+  const all = [
+    { id: "activity" as const, label: "Activity", show: true },
+    { id: "terminal" as const, label: "Terminal", show: !!terminalTexts()?.supported && !subagentOpen() },
+  ];
+  const s = selected();
+  return s ? detailTabs(s.key, all) : all;
+};
 
 // A tab that disappears returns to Activity (SessionsWindow.cpp:4019-4020).
 createRoot(() => createEffect(() => { if (!tabs().find((t) => t.id === detailTab())?.show) setDetailTab("activity"); }));
@@ -154,7 +173,7 @@ export function SessionDetail() {
             </div>
             <div class="tab-body">
               <Switch>
-                <Match when={detailTab() === "activity"}><div class="activity-wrap" style={columnStyle()}><ActivityView /></div></Match>
+                <Match when={detailTab() === "activity"}><div class="activity-wrap" style={columnStyle()}><ActivityView source={activitySourceFor(selected()!.key)} /></div></Match>
                 <Match when={detailTab() === "terminal"}><TerminalTab /></Match>
               </Switch>
             </div>

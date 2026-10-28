@@ -11,24 +11,24 @@ import { archiveCount, archiveTip } from "../../store/archive";
 import { ArchiveBar, datePanelOpen } from "./ArchiveBar";
 import { detailsFor, followedFor, updating } from "../../store/actions";
 import { running } from "../../store/batch";
+import { grouping, headerOf, moveProject, setProjectCollapsed, setProjectToShow, sortProject } from "../../store/organization";
 import { TOOL_WIDTH, clearArchiveMenuEntry, machineMenu, runSelection, selectedRows, selectionContextMenu, selectionCount } from "./selection-live";
 import { barTools, splitTools, toolEntry } from "./selection-ui";
 import { actionEntries, copyEntries, freshActionEntry, muteEntry } from "./ActionDialogs";
 import { markAllEntry, markAllTip, markEntry, runMarkAll } from "./mark-entries";
+import { moveEntry, openDeleteProjectDialog, openRenameProjectDialog } from "./OrganizationDialogs";
+import { chipColor, headerEntries, projectColor, type FilterChip } from "./organization-ui";
 import {
-  selectedKey, setSelectedKey, collapsed, setCollapsed, setExpandedChildren, expandedChildren,
+  selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
   setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
-  setMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter,
-  multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, menu, subagentOpen, projectOrder, setProjectOrder,
+  setMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, setPage,
+  multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, menu, subagentOpen,
   revealing, setRevealing,
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
 import type { Session } from "./types";
 import { motionReduced } from "../motion";
 import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem } from "./organize";
-
-/** The project band's colour: a palette slot per project until the listing carries project colours. */
-const projectColor = (project: string) => `var(--z-entity-palette-${paletteIndex(project)})`;
 
 /** Actions that go through guarded `hgs` calls arrive in phase 2; their menu entries show disabled. */
 const LATER = true;
@@ -124,7 +124,7 @@ export function sessionMenu(s: Session): MenuEntry[] {
     act.rename,
     { label: "Fork session…", icon: "git-fork", disabled: LATER },
     ...(act.archive ? [act.archive] : []),
-    { label: "Move to project…", icon: "folder", disabled: LATER },
+    moveEntry(s),
     { separator: true },
     cp.name,
     cp.reference,
@@ -134,33 +134,17 @@ export function sessionMenu(s: Session): MenuEntry[] {
   ];
 }
 
-/** Moves a project one place up or down in the local list order. */
-function moveProject(project: string, step: -1 | 1) {
-  const order = projectOrder().slice();
-  const i = order.indexOf(project);
-  const j = i + step;
-  if (i < 0 || j < 0 || j >= order.length) return;
-  [order[i], order[j]] = [order[j], order[i]];
-  setProjectOrder(order);
-}
-
+/** The project header's menu (SessionsWindow.cpp:2568-2616); its rules are organization-ui.ts's. */
 function headerMenu(project: string): MenuEntry[] {
-  const at = projectOrder().indexOf(project);
-  return [
-    { label: "New session…", icon: "plus", disabled: LATER },
-    { separator: true },
-    { label: "Filter this project", icon: "funnel", action: () => setProjectFilter([project]) },
-    { separator: true },
-    { label: collapsed[project] ? "Expand project" : "Collapse project", icon: "list-tree", action: () => setCollapsed(project, !collapsed[project]) },
-    { label: "Rename project…", icon: "pencil", disabled: LATER },
-    { label: "Project settings…", icon: "settings", disabled: LATER },
-    { separator: true },
-    { label: "Move project up", icon: "arrow-up", disabled: at <= 0, action: () => moveProject(project, -1) },
-    { label: "Move project down", icon: "arrow-down", disabled: at < 0 || at >= projectOrder().length - 1, action: () => moveProject(project, 1) },
-    { label: "Sort sessions by name", icon: "list-filter", disabled: LATER },
-    { separator: true },
-    { label: "Delete project…", icon: "trash", danger: true, disabled: LATER },
-  ];
+  return headerEntries(grouping(), project, {
+    filter: () => setProjectFilter([project]),
+    collapse: (collapsed) => setProjectCollapsed(project, collapsed),
+    rename: () => openRenameProjectDialog(project),
+    settings: () => { setProjectToShow(project); setPage("projects"); },
+    move: (before) => { void moveProject(project, before); },
+    sort: () => { void sortProject(project); },
+    remove: () => openDeleteProjectDialog(project),
+  });
 }
 
 function batchMenu(): MenuEntry[] {
@@ -174,11 +158,11 @@ function batchMenu(): MenuEntry[] {
 
 /** Project header: 40 px row, 32 px band (radius 6), Qt chevron, icon and counters. */
 function Header(props: { row: Extract<Row, { type: "header" }> }) {
-  const name = () => props.row.project;
-  const open = () => !collapsed[props.row.project];
+  const name = () => props.row.name;
+  const open = () => !props.row.collapsed;
   return (
-    <button class="group-band entity" style={{ "--entity": projectColor(name()) }} draggable="true" onDragStart={(e) => startDrag(e, { kind: "group", id: props.row.project })}
-      aria-expanded={open()} onClick={() => setCollapsed(props.row.project, open())}
+    <button class="group-band entity" style={{ "--entity": projectColor(props.row) }} draggable="true" onDragStart={(e) => startDrag(e, { kind: "group", id: props.row.project })}
+      aria-expanded={open()} onClick={() => setProjectCollapsed(props.row.project, !props.row.collapsed)}
       onContextMenu={(e) => openMenu(e, headerMenu(props.row.project))}
       title={`${name()}: ${props.row.total} shown, ${props.row.attention} need a response, ${props.row.working} working, ${props.row.unread} unread replies. Click to collapse or expand; drag to reorder.`}>
       <svg class="gb-chev" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -225,17 +209,17 @@ function ScopeButton(props: { icon: string; label: string; selected: string[]; s
 }
 
 function FilterChips() {
-  const chips = () => [
+  const chips = (): FilterChip[] => [
     ...machineFilter().map((m) => ({ id: m, label: m, kind: "m" as const })),
-    ...projectFilter().map((p) => ({ id: p, label: p, kind: "p" as const })),
+    ...projectFilter().map((p) => ({ id: p, label: headerOf(p)?.name ?? p, kind: "p" as const })),
   ];
-  const remove = (c: { id: string; kind: "m" | "p" }) =>
+  const remove = (c: FilterChip) =>
     c.kind === "m" ? setMachineFilter(machineFilter().filter((x) => x !== c.id)) : setProjectFilter(projectFilter().filter((x) => x !== c.id));
   return (
     <Show when={chips().length}>
       <div class="filter-chips">
         <For each={chips()}>{(c) => (
-          <button class="fchip-sel entity" style={{ "--entity": `var(--z-entity-palette-${paletteIndex(c.label)})` }} title="Remove filter" onClick={() => remove(c)}>
+          <button class="fchip-sel entity" style={{ "--entity": chipColor(c, headerOf, paletteIndex) }} title="Remove filter" onClick={() => remove(c)}>
             <span class="ell">{c.label}</span><Icon name="x" size={11} />
           </button>
         )}</For>
@@ -682,12 +666,12 @@ function StripRow(props: { id: string; list: RowSource }) {
 
 /** Header band in the strip: one counter (attention > unread > working > total), name in the rest. */
 function StripBand(props: { row: Extract<Row, { type: "header" }> }) {
-  const name = () => props.row.project;
+  const name = () => props.row.name;
   const counter = () => props.row.attention ? { text: `! ${props.row.attention}`, cls: "hot" } : props.row.unread ? { text: `● ${props.row.unread}`, cls: "hot" }
     : props.row.working ? { text: `● ${props.row.working}`, cls: "working" } : { text: String(props.row.total), cls: "total" };
   return (
-    <button class="group-band strip-band entity" style={{ "--entity": projectColor(name()) }} title={name()}
-      onClick={() => setCollapsed(props.row.project, !collapsed[props.row.project])}>
+    <button class="group-band strip-band entity" style={{ "--entity": projectColor(props.row) }} title={name()}
+      onClick={() => setProjectCollapsed(props.row.project, !props.row.collapsed)}>
       <span class="ell">{name()}</span>
       <span class={`gb-count ${counter().cls}`}>{counter().text}</span>
     </button>

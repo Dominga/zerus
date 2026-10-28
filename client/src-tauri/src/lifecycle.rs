@@ -189,8 +189,9 @@ fn exit(app: &AppHandle) {
     }
     #[cfg(all(target_os = "macos", feature = "live"))]
     crate::platform::macos_menubar::clear_badge(app);
-    // Settings, voice, composers and drafts reach the disk while the socket
-    // still stands, as Qt's tray agent flushes before its server goes.
+    // Settings, the organization, voice, composers and drafts reach the disk
+    // while the socket still stands, as Qt's tray agent flushes before its
+    // server goes.
     #[cfg(feature = "live")]
     crate::exit_work(app);
     #[cfg(any(target_os = "linux", target_os = "macos"))]

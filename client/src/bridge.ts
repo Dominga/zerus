@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 
@@ -135,10 +135,13 @@ export function pump(from: Source, onBatch: (b: Batch) => void, host: PumpHost =
   return unsubscribe;
 }
 
-/** Missing arrays default to empty, so a core that omits empty fields still applies. */
+/** Missing arrays default to empty, so a core that omits empty fields still applies. The grouping is kept: a batch of only grouping is content. */
 function normalize(b: Partial<Batch>): Batch {
   const e = emptyBatch();
-  return { upserts: b.upserts ?? e.upserts, removes: b.removes ?? e.removes, replaces: b.replaces ?? e.replaces, computers: b.computers ?? e.computers, machines: b.machines ?? [], activity: b.activity ?? e.activity };
+  return {
+    upserts: b.upserts ?? e.upserts, removes: b.removes ?? e.removes, replaces: b.replaces ?? e.replaces, computers: b.computers ?? e.computers,
+    machines: b.machines ?? [], activity: b.activity ?? e.activity, groups: b.groups ?? [], grouping: b.grouping ?? undefined,
+  };
 }
 
 /** The Activity port of the current source (follow and unfollow). */
@@ -239,6 +242,21 @@ export async function archivePage(computer: string, from: number, until: number,
   return invoke<ArchivePage>("archive_page", { computer, from, until, cursor, query, request });
 }
 
+/** The text of `archivedActivity` rejecting because that row's read is already running. */
+export const ARCHIVED_ACTIVITY_BUSY = "busy";
+
+/**
+ * One read of an archived session's recorded Activity after cursor `after`
+ * (`archived_activity`, `hgs [@alias] inspect NAME --after N --skip-processes
+ * --archive ID`). Rejects with "busy" (`ARCHIVED_ACTIVITY_BUSY`, to ignore)
+ * while a read of the same computer, name and archive id runs, else with Qt's
+ * failure text.
+ */
+export async function archivedActivity(computer: string, name: string, archiveId: string, after: number): Promise<ArchivedActivity> {
+  if (!inTauri()) throw "Archived Activity needs the desktop app.";
+  return invoke<ArchivedActivity>("archived_activity", { computer, name, archiveId, after });
+}
+
 /**
  * Cancels every archive page request numbered `through` or lower (Qt's
  * cancelArchivePages), also one that has not started yet: their `hgs` ends
@@ -257,6 +275,54 @@ export async function copyText(text: string): Promise<void> {
   if (/[\r\n]/.test(text)) throw "the command has a newline in it -- copying that is dangerous: the shell would run it the moment you paste";
   if (!navigator.clipboard) throw "The clipboard is unavailable.";
   await navigator.clipboard.writeText(text);
+}
+
+// Project organization edits (client/src-tauri `organization.rs`). Each is
+// one call, which the Rust side sends as one `hgs swarm apply`; members are
+// "<host>\n<session name>". Outside the app an edit is refused.
+
+const DESKTOP_EDIT = "Project changes need the desktop app.";
+const refusedOutside = (): EditOutcome => ({ outcome: "refused", detail: DESKTOP_EDIT });
+
+/** Move to project: every member in one apply; `before` places them before that member (a drop). */
+export async function moveToProject(members: string[], project: string, before: string | null): Promise<EditOutcome> {
+  if (!inTauri()) return refusedOutside();
+  return invoke<EditOutcome>("move_to_project", { members, project, before });
+}
+
+/** New project…, with the sessions it takes. */
+export async function createProject(name: string, members: string[]): Promise<EditOutcome> {
+  if (!inTauri()) return refusedOutside();
+  return invoke<EditOutcome>("create_project", { name, members });
+}
+
+export async function renameProject(project: string, name: string): Promise<EditOutcome> {
+  if (!inTauri()) return refusedOutside();
+  return invoke<EditOutcome>("rename_project", { project, name });
+}
+
+/** Delete project…: its members go to `destination`. */
+export async function deleteProject(project: string, destination: string): Promise<EditOutcome> {
+  if (!inTauri()) return refusedOutside();
+  return invoke<EditOutcome>("delete_project", { project, destination });
+}
+
+/** Moves a project before another, or to the end. */
+export async function moveProject(project: string, before: string | null): Promise<EditOutcome> {
+  if (!inTauri()) return refusedOutside();
+  return invoke<EditOutcome>("move_project", { project, before });
+}
+
+/** Sort sessions by name. */
+export async function sortProject(project: string): Promise<EditOutcome> {
+  if (!inTauri()) return refusedOutside();
+  return invoke<EditOutcome>("sort_project", { project });
+}
+
+/** Expand or collapse a project: this device's layout, no `hgs`. */
+export async function setProjectCollapsed(project: string, collapsed: boolean): Promise<void> {
+  if (!inTauri()) return;
+  await invoke<void>("set_project_collapsed", { project, collapsed });
 }
 
 /** What the browser build shows instead of the screen reads. */

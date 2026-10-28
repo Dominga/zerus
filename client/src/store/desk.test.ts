@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as bridge from "../bridge";
 import * as ui from "./ui";
+import * as organization from "./organization";
 import { startDesk } from "./desk";
 
 vi.mock("../bridge", async (importOriginal) => ({
@@ -15,6 +16,12 @@ vi.mock("./catalog", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./catalog")>()),
   catalog: { rows: { "mac\nrun:folded": { project: "sample-project" } }, order: [] },
 }));
+// The organization groups that row under a collapsed project; the Rust side keeps the collapse.
+vi.mock("./organization", () => ({
+  groupOf: vi.fn((id: string) => (id === "mac\nrun:folded" ? "folded-project" : "ungrouped")),
+  headerOf: vi.fn((project: string) => (project === "folded-project" ? { id: project, collapsed: true } : undefined)),
+  setProjectCollapsed: vi.fn(),
+}));
 // store/ui reads the page URL when it loads; the wiring needs only its setters.
 vi.mock("./ui", () => ({
   setPage: vi.fn(),
@@ -24,13 +31,12 @@ vi.mock("./ui", () => ({
   setMachineFilter: vi.fn(),
   setProjectFilter: vi.fn(),
   setSearch: vi.fn(),
-  setCollapsed: vi.fn(),
-  collapsed: { "sample-project": true } as Record<string, boolean>,
   revealRow: vi.fn(),
   toast: vi.fn(),
 }));
 const mocked = vi.mocked(bridge);
 const shown = vi.mocked(ui);
+const projects = vi.mocked(organization);
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 /** Starts the wiring and returns the open-session listener it registered. */
@@ -76,11 +82,11 @@ describe("desk wiring", () => {
   it("expands the collapsed project of the session it opens", async () => {
     const open = await opener();
     open({ computer: "mac", key: "run:folded" });
-    expect(shown.setCollapsed).toHaveBeenCalledWith("sample-project", false);
+    expect(projects.setProjectCollapsed).toHaveBeenCalledWith("folded-project", false);
     expect(shown.setSelectedKey).toHaveBeenCalledWith("mac\nrun:folded");
     vi.clearAllMocks();
     open({ computer: "mac", key: "run:elsewhere" });
-    expect(shown.setCollapsed).not.toHaveBeenCalled();
+    expect(projects.setProjectCollapsed).not.toHaveBeenCalled();
   });
 
   it("takes what waited only once both listeners are registered", async () => {

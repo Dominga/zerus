@@ -37,17 +37,24 @@ impl AppState {
     pub fn peers(&self) -> Option<std::collections::BTreeSet<String>> {
         self.live.peers()
     }
+
+    /// The organization hub: `start` gives it the snapshot source and the
+    /// organization updates. Set once, before the webview starts the source.
+    pub fn set_organization(&self, organization: crate::organization::Organization) {
+        let _ = self.live.organization.set(organization);
+    }
 }
 
 #[cfg(feature = "live")]
 mod live {
     use std::collections::BTreeSet;
-    use std::sync::{mpsc, Mutex, PoisonError};
+    use std::sync::{mpsc, Arc, Mutex, OnceLock, PoisonError};
     use std::time::Duration;
 
-    use zerus_client_core::{default_hgs, ComputerId, Fleet};
+    use zerus_client_core::{default_hgs, ComputerId, Fleet, OrganizationSnapshot};
     use zerus_watch_protocol::SessionRef;
 
+    use crate::organization::Organization;
     use crate::pump::Pump;
     use crate::replay::Replay;
 
@@ -60,6 +67,16 @@ mod live {
     pub struct Live {
         pub pump: Pump,
         source: Mutex<Option<Source>>,
+        pub organization: OnceLock<Organization>,
+    }
+
+    /// Follows this computer's organization: the catalog is shared, so its
+    /// copy is the one the hub edits. A Fleet starts once, so this logs at
+    /// most once.
+    fn follow_organization(fleet: &Fleet) {
+        if let Err(error) = fleet.follow_organization(&ComputerId::local()) {
+            eprintln!("zerus-client: project sync cannot follow this computer's catalog: {error}");
+        }
     }
 
     fn replay_interval() -> Duration {
@@ -73,7 +90,16 @@ mod live {
     impl Live {
         /// Starts the data source once; a later call (a reloaded webview)
         /// queues the last-known catalog again. Returns "live" or "replay".
-        pub fn start(&self) -> Result<String, String> {
+        /// This computer's organization goes to the hub, which reads its
+        /// base and versions back through [`Live::organization_snapshot`].
+        /// The hub asks without its own lock held, and its source is set
+        /// here before `source` is taken, so the two locks never nest.
+        pub fn start(self: &Arc<Self>) -> Result<String, String> {
+            let organization = self.organization.get().cloned();
+            if let Some(organization) = &organization {
+                let live = Arc::downgrade(self);
+                organization.set_source(Arc::new(move || live.upgrade()?.organization_snapshot()));
+            }
             let mut source = self.source.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(running) = source.as_ref() {
                 self.pump.resend();
@@ -91,11 +117,34 @@ mod live {
                             .map_err(|error| format!("replay: {error}"))?;
                         (Source::Replay(replay), "replay")
                     }
-                    None => (Source::Fleet(Fleet::start(default_hgs(), sink)), "live"),
+                    None => {
+                        let fleet = Fleet::start(default_hgs(), sink);
+                        if organization.is_some() {
+                            follow_organization(&fleet);
+                        }
+                        (Source::Fleet(fleet), "live")
+                    }
                 };
-            self.pump.drain(changes);
+            self.pump.drain_with(changes, move |change| {
+                if let Some(organization) = &organization {
+                    organization.observe(change);
+                }
+            });
             *source = Some(started);
             Ok(mode.into())
+        }
+
+        /// The base and versions of this computer's latest organization state.
+        fn organization_snapshot(&self) -> Option<OrganizationSnapshot> {
+            match self
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()?
+            {
+                Source::Fleet(fleet) => fleet.organization_snapshot(&ComputerId::local()),
+                Source::Replay(replay) => replay.organization_snapshot(),
+            }
         }
 
         /// The peers this computer's listing names; None before a listing

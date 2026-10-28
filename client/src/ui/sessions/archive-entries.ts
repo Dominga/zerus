@@ -12,15 +12,24 @@ import type { Session } from "./types";
 /** Qt's paged label (`m_archiveBrowser->paged()`). */
 export const CLEAR_ARCHIVE_LABEL = "Remove loaded archived sessions…";
 
-type Archived = Pick<Session, "state" | "machine" | "project"> & { archivedAt: number };
+type Archived = Pick<Session, "state" | "machine"> & { archivedAt: number };
 
 /** The machine and project filters (Qt's host and project filters; the client has no account filter). */
 export interface ClearScope {
   machines: readonly string[];
+  /** The organization's project IDs. */
   projects: readonly string[];
 }
 
-const inFilters = (s: Archived, scope: ClearScope) => s.state === "archived" && inScope(s, scope);
+/** Why Clear archive takes no row while a project filter is set. */
+export const CLEAR_NEEDS_ALL_PROJECTS = "Clear the project filter to remove archived sessions: the Archive view does not group by project yet.";
+
+/**
+ * Qt clears the archived rows of the filtered projects. Archived rows have no
+ * organization project until zerus-5wmh.40 (store/archive.ts `ListScope`), so
+ * with a project filter set this takes none rather than more than Qt would.
+ */
+const inFilters = (s: Archived, scope: ClearScope) => s.state === "archived" && !scope.projects.length && inScope(s, scope);
 
 /**
  * Qt's clearArchive entries: the loaded archived rows in the machine and
@@ -38,5 +47,6 @@ export function clearArchiveRows<T extends Archived>(rows: readonly T[], scope: 
  */
 export function clearArchiveEntry<T extends Archived>(rows: readonly T[], scope: ClearScope, forgettable: (s: T) => boolean, batchRunning: boolean, run: () => void): Extract<MenuEntry, { label: string }> {
   const some = rows.some((s) => inFilters(s, scope) && forgettable(s));
-  return { label: CLEAR_ARCHIVE_LABEL, icon: "trash", danger: true, disabled: !some || batchRunning, action: run };
+  const hint = scope.projects.length ? CLEAR_NEEDS_ALL_PROJECTS : undefined;
+  return { label: CLEAR_ARCHIVE_LABEL, icon: "trash", danger: true, disabled: !some || batchRunning, hint, action: run };
 }

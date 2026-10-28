@@ -19,6 +19,8 @@ mod identity;
 mod instance;
 mod lifecycle;
 mod metrics;
+#[cfg(feature = "live")]
+mod organization;
 mod platform;
 #[cfg(feature = "live")]
 mod pump;
@@ -276,16 +278,41 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 readsync::start(actions.clone());
                 app.manage(actions);
                 app.manage(actions::ArchiveReads::default());
+                app.manage(actions::ActivityReads::default());
                 app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
-                app.manage(screens::Screens::tauri(app.handle().clone(), pump.clone()));
-                app.manage(terminal::Terminals::new(
+                let allowed = actions::actions_allowed(
+                    std::env::var("ZERUS_CLIENT_REPLAY").ok().as_deref(),
+                    std::env::var("ZERUS_CLIENT_HGS").ok().as_deref(),
+                );
+                let draft_path = dir.join(organization::draft_file(replay));
+                if replay {
+                    // A replay starts from the fixture's catalog: no draft of an earlier replay.
+                    let _ = zerus_client_core::swarm::draft::store(
+                        &draft_path,
+                        &zerus_client_core::swarm::draft::DraftWrite::Remove,
+                    );
+                }
+                let organization = organization::Organization::new(
+                    pump.clone(),
                     zerus_client_core::default_hgs(),
-                    actions::actions_allowed(
-                        std::env::var("ZERUS_CLIENT_REPLAY").ok().as_deref(),
-                        std::env::var("ZERUS_CLIENT_HGS").ok().as_deref(),
-                    ),
-                ));
+                    allowed,
+                    dir.join(organization::layout_file(replay)),
+                    draft_path,
+                );
+                // Before any start of the source (the menu bar's below, or the webview's).
+                app.state::<commands::AppState>().set_organization(organization.clone());
+                let screens = screens::Screens::tauri(app.handle().clone(), pump.clone());
+                // Projects shows the organization the Sessions list groups by. The
+                // call only takes the screens hub's lock and emits, so it never
+                // waits for the main thread (organization::Presented).
+                let projects = screens.clone();
+                organization.set_presented(std::sync::Arc::new(move |value, default, status| {
+                    projects.organization(value, default, status)
+                }));
+                app.manage(organization);
+                app.manage(screens);
+                app.manage(terminal::Terminals::new(zerus_client_core::default_hgs(), allowed));
                 // A replay never touches the real drafts either.
                 let drafts = std::sync::Arc::new(zerus_client_core::drafts::DraftStore::open(
                     drafts_root(&dir, replay),
@@ -491,14 +518,18 @@ fn start_watchdog() -> std::io::Result<watchdog::Watchdog> {
     Ok(dog)
 }
 
-/// Before the app quits (`lifecycle::exit`, before the socket goes): recordings under way are cancelled, the hubs take
-/// no more changes, every draft save already queued reaches the disk, and
-/// the last settings change gets a bounded wait.
+/// Before the app quits (`lifecycle::exit`, before the socket goes): the
+/// last settings change gets a bounded wait, pending project edits and the
+/// layout reach the disk, recordings under way are cancelled, the hubs take
+/// no more changes and every draft save already queued reaches the disk.
 #[cfg(feature = "live")]
 pub(crate) fn exit_work(app: &AppHandle) {
     use tauri::Manager;
     if let Some(settings) = app.try_state::<settings::Store>() {
         settings.0.flush_within(settings::EXIT_FLUSH);
+    }
+    if let Some(organization) = app.try_state::<organization::Organization>() {
+        organization.flush();
     }
     #[cfg(feature = "media")]
     if let Some(voices) = app.try_state::<voice::Voices>() {
@@ -611,8 +642,16 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::session_reference,
         actions::copy_command,
         actions::archive_page,
+        actions::archived_activity,
         actions::cancel_archive_pages,
         clipboard::copy_text,
+        organization::move_to_project,
+        organization::create_project,
+        organization::rename_project,
+        organization::delete_project,
+        organization::move_project,
+        organization::sort_project,
+        organization::set_project_collapsed,
         screens::screen_visible,
         screens::accounts_view,
         screens::machines_view,

@@ -4,9 +4,10 @@ import { Icon } from "../lib/icons";
 import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, type MenuEntry } from "../../store/ui";
 import { activity } from "../../store/session";
 import { flag, num, setSetting } from "../../store/settings";
+import type { ActivitySource } from "../../store/activitySource";
 import { buildTranscript, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { statusOf } from "./SessionCard";
-import type { MediaMessage, TranscriptItem } from "./types";
+import type { MediaMessage, Session, TranscriptItem } from "./types";
 
 // ---------------------------------------------------------------------------
 // Reading column (ActivityWidth.h): 900 px at 100% content scale, 480–2400,
@@ -365,13 +366,43 @@ const OLDER_EDGE = 120;
 /** Within this distance of the bottom, new events keep the view at the bottom. */
 const STICK_EDGE = 48;
 
-export function ActivityView() {
+/** The transcript items of a source. */
+export const transcriptOf = (source: ActivitySource) => buildTranscript(source.events(), source.summary());
+
+/** Scrolling near the top reads the previous page, unless one is loading or none is left. */
+export const readsOlder = (source: ActivitySource) => !source.loadingOlder() && !source.olderDone() && source.events().length > 0;
+
+/**
+ * What the pane shows besides the transcript, for its source and the selected
+ * row. A read-only source (an archived row's recorded Activity) shows its
+ * transcript and none of the live states; a source that lacks something shows
+ * nothing for it.
+ */
+export function paneStates(source: ActivitySource, s: Session | undefined) {
+  const live = source.readOnly || !s ? undefined : statusOf(s);
+  return {
+    /** "This conversation is archived." in place of the transcript. */
+    archived: live === "ended",
+    working: live === "working",
+    attention: live === "attention",
+    error: live === "error",
+    offline: live === "offline",
+    /** "This session left the list; its Activity stopped here." */
+    ended: source.ended(),
+    /** Why the last read failed, as a notice: read-only sources only (the live pane never showed its follow error). */
+    failure: source.readOnly ? source.error() ?? "" : "",
+  };
+}
+
+export function ActivityView(props: { source?: ActivitySource }) {
   const s = () => selected();
+  /** The live follow unless the detail passes another source (an archived row's). */
+  const source = (): ActivitySource => props.source ?? activity;
   let scroller!: HTMLDivElement;
   // Items keep their identity while events append: the list reconciles by id,
   // so a growing tool group updates in place and older pages only add nodes.
   const [view, setView] = createStore<{ items: TranscriptItem[] }>({ items: [] });
-  const built = createMemo(() => buildTranscript(activity.events(), activity.summary()));
+  const built = createMemo(() => transcriptOf(source()));
   createEffect(() => setView("items", reconcile(built(), { key: "id" })));
 
   // Stay at the bottom while it is in view; keep the reading position when an older page lands above.
@@ -379,12 +410,12 @@ export function ActivityView() {
   let anchor: { height: number; top: number } | undefined;
   const onScroll = () => {
     atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < STICK_EDGE;
-    if (scroller.scrollTop < OLDER_EDGE && !activity.loadingOlder() && !activity.olderDone() && activity.events().length) {
+    if (scroller.scrollTop < OLDER_EDGE && readsOlder(source())) {
       anchor = { height: scroller.scrollHeight, top: scroller.scrollTop };
-      activity.loadOlder();
+      source().loadOlder();
     }
   };
-  createEffect(on(() => activity.target()?.id, () => { atBottom = true; anchor = undefined; }));
+  createEffect(on(() => source().target()?.id, () => { atBottom = true; anchor = undefined; }));
   createEffect(on(() => view.items.length, () => {
     queueMicrotask(() => {
       if (!scroller) return;
@@ -396,8 +427,9 @@ export function ActivityView() {
     });
   }));
 
-  const summary = () => activity.summary();
+  const summary = () => source().summary();
   const liveTool = () => String(summary()?.current_tool || summary()?.activity_summary || s()?.summary || "");
+  const states = createMemo(() => paneStates(source(), s()));
   return (
     <div class="activity">
       <div class="act-scroll" ref={scroller} onContextMenu={activityMenu} onScroll={onScroll}>
@@ -411,30 +443,33 @@ export function ActivityView() {
             </div>
           </Show>
           <div class="act-label eyebrow">Recorded activity — messages and tool excerpts</div>
-          <Show when={activity.loadingOlder()}><div class="act-older hint">Reading earlier activity…</div></Show>
-          <Show when={activity.olderDone() && activity.events().length > 0 && summary()?.history_truncated === true}>
+          <Show when={source().loadingOlder()}><div class="act-older hint">Reading earlier activity…</div></Show>
+          <Show when={source().olderDone() && source().events().length > 0 && summary()?.history_truncated === true}>
             <div class="act-older hint">Older events have expired from the journal.</div>
           </Show>
-          <Show when={statusOf(s()!) !== "ended"} fallback={<div class="notice"><Icon name="archive" size={14} /><div>This conversation is archived.</div></div>}>
-            <Show when={activity.loaded() || view.items.length} fallback={<div class="act-older hint">Reading activity…</div>}>
+          <Show when={!states().archived} fallback={<div class="notice"><Icon name="archive" size={14} /><div>This conversation is archived.</div></div>}>
+            <Show when={source().loaded() || view.items.length} fallback={<div class="act-older hint">Reading activity…</div>}>
               <Show when={view.items.length} fallback={<div class="act-older hint">No recorded activity yet.</div>}>
                 <For each={view.items}>{(it) => <Item item={it} />}</For>
               </Show>
             </Show>
-            <Show when={statusOf(s()!) === "working" && liveTool()}>
+            <Show when={states().working && liveTool()}>
               <div class="act-live"><span class="typing"><i /><i /><i /></span>Agent is running <b class="mono ell">{liveTool()}</b></div>
             </Show>
-            <Show when={statusOf(s()!) === "attention"}>
+            <Show when={states().attention}>
               <div class="notice warn"><Icon name="circle-alert" size={14} /><div><b>{s()?.caption}.</b> Answer it in the agent's terminal or in the Zerus app; answering here arrives with the session actions.</div></div>
             </Show>
-            <Show when={statusOf(s()!) === "error"}>
+            <Show when={states().error}>
               <div class="notice danger"><Icon name="circle-alert" size={14} /><div><b>{s()?.caption}.</b> {s()?.summary}</div></div>
             </Show>
-            <Show when={statusOf(s()!) === "offline"}>
+            <Show when={states().offline}>
               <div class="notice warn"><Icon name="wifi-off" size={14} /><div><b>{s()?.machine} is offline.</b> This is the last activity received. It updates again when the machine reconnects.</div></div>
             </Show>
-            <Show when={activity.ended()}>
+            <Show when={states().ended}>
               <div class="notice"><Icon name="archive" size={14} /><div>This session left the list; its Activity stopped here.</div></div>
+            </Show>
+            <Show when={states().failure}>
+              <div class="notice danger"><Icon name="circle-alert" size={14} /><div>{states().failure}</div></div>
             </Show>
           </Show>
         </div>

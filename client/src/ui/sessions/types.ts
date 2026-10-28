@@ -36,7 +36,10 @@ export interface Session {
   name: string;
   /** What the card shows as its title. */
   title: string;
+  /** The machine the card shows; "this computer" stands in for a local row without one. */
   machine: string;
+  /** The row's own machine (the host name or alias, "" before this computer's hello): with the name, the project member key. */
+  rawMachine: string;
   project: string;
   agent: AgentKind;
   model: string;

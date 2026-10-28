@@ -26,7 +26,7 @@ export interface ComputerState {
 
 export interface CatalogState {
   rows: Record<string, Session>;
-  /** Display order: arrival order; local drag-and-drop moves change it. */
+  /** Arrival order. The list groups rows by the organization's projects and ranks, ties in this order (ui/sessions/model.ts). */
   order: string[];
   computers: Record<ComputerId, ComputerState>;
 }
@@ -105,6 +105,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     name: text(v.name),
     title: text(v.title) || text(v.name),
     machine: text(v.machine) || computer || "this computer",
+    rawMachine: text(v.machine),
     project: text(v.project) || "Inbox",
     agent: agentKind(v.agent),
     model: text(v.model),
@@ -247,27 +248,16 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
     });
   }
 
-  /** Moves a row before another (or to the end) in the local display order. */
-  function moveRow(id: string, before: string | undefined) {
-    if (id === before || !catalog.rows[id]) return;
-    setCatalog("order", (order) => {
-      const rest = order.filter((x) => x !== id);
-      const at = before ? rest.indexOf(before) : -1;
-      rest.splice(at < 0 ? rest.length : at, 0, id);
-      return rest;
-    });
-  }
-
   function onReplaced(listener: (oldId: string, newId: string) => void) {
     replacedListeners.add(listener);
     return () => replacedListeners.delete(listener);
   }
 
-  return { catalog, applyBatch, moveRow, onReplaced };
+  return { catalog, applyBatch, onReplaced };
 }
 
 /** The app's catalog. Tests build their own with `createCatalog`. */
-export const { catalog, applyBatch, moveRow, onReplaced } = createCatalog(appMarks, applyMachines);
+export const { catalog, applyBatch, onReplaced } = createCatalog(appMarks, applyMachines);
 
 /** Rows in display order. */
 export const orderedRows = () => catalog.order.map((id) => catalog.rows[id]).filter(Boolean);

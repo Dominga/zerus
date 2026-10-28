@@ -216,6 +216,21 @@ describe("perform", () => {
     });
   });
 
+  it("replaces a keyed notice in place of a second one and clears it by its key", () => {
+    createRoot((dispose) => {
+      const a = setup();
+      a.notify("info", "Session updated. Refreshing…");
+      a.notify("error", "Project sync unavailable: hgs did not answer in time", true, "project-sync");
+      a.notify("warn", "2 project conflict(s) need review in Swarm.", true, "project-sync");
+      expect(a.notices().map((n) => n.text)).toEqual(["Session updated. Refreshing…", "2 project conflict(s) need review in Swarm."]);
+      a.clearNotice("project-sync");
+      expect(a.notices().map((n) => n.text)).toEqual(["Session updated. Refreshing…"]);
+      a.clearNotice("project-sync");
+      expect(a.notices()).toHaveLength(1);
+      dispose();
+    });
+  });
+
   it("lets other stores raise notices through notify", async () => {
     await createRoot(async (dispose) => {
       const a = setup();

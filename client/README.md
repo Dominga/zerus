@@ -429,15 +429,40 @@ live catalog.
   loaded; its tooltip says how many are loaded.
 - The list shows the loaded archived rows as flat cards, newest archived first
   (Qt groups them by project: `zerus-5wmh.40`). Selecting one shows its header
-  and its details, read with `inspect --archive ID`; its Activity pane stays
-  empty (`zerus-5wmh.42`). Restore session, Forget archived session, the copy
-  entries and Rename work on a loaded archived row (see Actions).
+  and its details, read with `inspect --archive ID`, and its recorded Activity
+  (below). Restore session, Forget archived session, the copy entries and
+  Rename work on a loaded archived row (see Actions).
 - The page is checked as Qt checks it. An invalid reply shows one of three
   texts: "Invalid archive page. Update the computer CLI and refresh." (version,
   shape, cursors, total or echo of the query), "Invalid archive window. Refresh
   the archive." (position or previous cursor) and "Invalid archived session
   identity. Refresh the archive." (state, name, lowercase hyphenated UUID or
   `archived_at` outside the range).
+
+The selected archived row's Activity is read as Qt reads it
+(`SessionsWindow::inspect` and `acceptInspection`), by its own store
+(`src/store/archiveActivity.ts`): an archived row is never streamed, so while
+it is selected and the Sessions page shows in a shown window it is read with
+`inspect NAME --after CURSOR --skip-processes --archive ID` (5 s, 15 s on a
+peer) 2500 ms after the previous read started, one read at a time; a read of
+the same row that is still running answers "busy", which is ignored and tried
+again 500 ms later. A new selection starts at cursor 0. A reply with
+`replace_events` replaces the events; otherwise events at or below the cursor
+or already shown are skipped, the rest are appended in the reply's order and
+the cursor becomes the reply's. A reply for another conversation than the shown
+one (unless its `cleared_conversations` lists the shown one) replaces the
+events and is read again from cursor 0 at once. At most 500 events are kept,
+the oldest dropped first, as Qt keeps them. A failed read shows "Could not
+refresh activity: {error}" as a notice until the next answer; that notice is
+for read-only sources only, and the live pane shows no follow error. The row of
+a pending restore stays selected and read while the archive reloads, as Qt's
+`selected()` keeps it. While the row's computer is offline nothing is read and
+the events stay, as Qt's `inspect()` waits for it; the reads resume once it is
+back. Leaving the row, another page or a hidden window stops the reads and
+drops the events. The pane renders through the same Activity view, read-only:
+the transcript without the live tool line, the attention, error and offline
+banners or a composer, and no Terminal tab, as Qt shows none for an archived
+row.
 
 ### Actions smoke run
 
@@ -461,7 +486,7 @@ standard input and fails on writes that have none). The fake logs each call to
 
 ```sh
 S=$(mktemp -d); cp core/tests/support/fake_hgs_actions.py $S/hgs
-echo '{"reply":{"exit":0},"replies":[{"match":["reference"],"exit":0,"stdout":{"uri":"zerus://session?machine=m&name=claude%2Fsample-project%2Freview"}},{"match":["session-action"],"exit":0,"stdout":"echo_session_action","receipt_status":"completed"},{"match":["archives"],"exit":0,"stdout":{"version":1,"from":0,"until":253402300800,"query":"","next_cursor":"","previous_cursor":"","total":1,"position":0,"sessions":[{"name":"claude/sample-project/archived","state":"archived","resumable":true,"archive_id":"00000000-0000-4000-8000-000000000001","archived_at":1700000000}]}},{"match":["inspect","claude/sample-project/archived"],"exit":0,"stdout":{}},{"match":["resume","claude/sample-project/archived"],"exit":0},{"match":["kill","claude/sample-project/archived"],"exit":0}]}' > $S/config.json
+echo '{"reply":{"exit":0},"replies":[{"match":["reference"],"exit":0,"stdout":{"uri":"zerus://session?machine=m&name=claude%2Fsample-project%2Freview"}},{"match":["session-action"],"exit":0,"stdout":"echo_session_action","receipt_status":"completed"},{"match":["archives"],"exit":0,"stdout":{"version":1,"from":0,"until":253402300800,"query":"","next_cursor":"","previous_cursor":"","total":1,"position":0,"sessions":[{"name":"claude/sample-project/archived","state":"archived","resumable":true,"archive_id":"00000000-0000-4000-8000-000000000001","archived_at":1700000000}]}},{"match":["inspect","claude/sample-project/archived"],"exit":0,"stdout":{"events":[{"seq":1,"type":"UserPromptSubmit","source":"claude_hooks","detail":"Summarize the sample notes","at":1700000000},{"seq":2,"type":"Stop","source":"claude_hooks","detail":"The sample notes are summarized.","at":1700000030}],"cursor":2}},{"match":["resume","claude/sample-project/archived"],"exit":0},{"match":["kill","claude/sample-project/archived"],"exit":0}]}' > $S/config.json
 env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=1 \
   WEBKIT_DISABLE_DMABUF_RENDERER=1 ZERUS_CLIENT_REPLAY=$PWD/fixtures/replay.ndjson \
   ZERUS_CLIENT_HGS=$S/hgs ZERUS_CLIENT_QUERY=actions-smoke=1 ZERUS_CLIENT_PERF=smoke \
@@ -471,9 +496,10 @@ cat $S/log.ndjson
 
 The `archives` entry answers the Archive step with one archived row (the page
 echoes the All dates range and an empty query); the `inspect` entry for that
-row answers its details (an object with no run or conversation, as the row has
-none). The `resume` and `kill` entries for that row answer the Restore and
-Forget archived steps with a plain success.
+row answers its details and its Activity reads (an object with no run or
+conversation, as the row has none, and two synthetic events). The `resume` and
+`kill` entries for that row answer the Restore and Forget archived steps with a
+plain success.
 
 The hook first switches to the Archive filter, waits for the page and logs
 `actions-smoke archive-page: <status text> (<row count> rows)`. It then opens
@@ -488,24 +514,30 @@ peek and a selection stay), leaving the list with the panel open keeps the peek
 closes the peek. It selects the archived row, waits up to 15 s for its
 details and logs `actions-smoke archive-inspect: done <archive id>` (or
 `failed`); the fake's `log.ndjson` then holds `archives --json` (with the page
-query on standard input) and an `inspect NAME ... --archive ID` call. On the
-same archived row it then runs the Restore session entry's path and logs
-`actions-smoke restore: done (state filter now all)` (the Archive filter becomes
-All, as the row is selected and followed; `log.ndjson` holds `resume NAME
---archive ID -d`), Forget archived session through the dialog's confirmation
-path and logs `actions-smoke forget-archived: done` (`kill NAME --archive ID`),
-and Clear archive: it takes the batch menu's entry, presses the confirmation
-dialog's "Clear archive" button and logs `actions-smoke clear-archive: done
-(...)` with the notices of the batch (a second `kill NAME --archive ID`), or
-`failed (... is disabled)` when the entry is disabled, since the fake's row can
-be forgotten. The fake keeps answering the
-archived row; the hook shows the Archive filter again after the restore, as the
-pages load only there, so each step finds the row after the archive reloads. It
-returns to the All filter and the replay session. The hook selects `claude/sample-project/review` (its details come from the
-replay's Activity state value or, as here, one `inspect` of the fake), first
-marks it as read, marks all as read (logging `actions-smoke mark-all-as-read:
-N marked`) and marks it as needing attention, through the marks store the menus
-use (`actions-smoke mark-as-read: done`, `mark-needs-attention: done`; they run
+query on standard input) and an `inspect NAME ... --archive ID` call. It then
+waits up to 15 s for the row's Activity to show the fake's events and logs
+`actions-smoke archive-activity: done (N events)`, or `failed (...)` when no
+event shows, the row is followed live or the pane shows a notice or a live line
+(`log.ndjson` holds `inspect NAME --after 0 --skip-processes --archive ID` for
+the details and the first Activity read, and after the hook waits one poll the
+same call with `--after 2`). On the same archived row it then runs the Restore
+session entry's path and logs `actions-smoke restore: done (state filter now
+all)` (the Archive filter becomes All, as the row is selected and followed;
+`log.ndjson` holds `resume NAME --archive ID -d`), Forget archived session
+through the dialog's confirmation path and logs `actions-smoke forget-archived:
+done` (`kill NAME --archive ID`), and Clear archive: it takes the batch menu's
+entry, presses the confirmation dialog's "Clear archive" button and logs
+`actions-smoke clear-archive: done (...)` with the notices of the batch (a
+second `kill NAME --archive ID`), or `failed (... is disabled)` when the entry
+is disabled, since the fake's row can be forgotten. The fake keeps answering
+the archived row; the hook shows the Archive filter again after the restore, as
+the pages load only there, so each step finds the row after the archive
+reloads. It returns to the All filter and the replay session. The hook selects
+`claude/sample-project/review` (its details come from the replay's Activity
+state value or, as here, one `inspect` of the fake), first marks it as read,
+marks all as read (logging `actions-smoke mark-all-as-read: N marked`) and
+marks it as needing attention, through the marks store the menus use
+(`actions-smoke mark-as-read: done`, `mark-needs-attention: done`; they run
 no `hgs`), then copies the session reference, the connect command, the session name and the
 folder path through the store the menus use (the first calls `reference`; the
 fake's URI is the clipboard text), logging each as
@@ -559,16 +591,17 @@ worktree flows.", "... the copy actions.").
 | Connection state | `Batch.computers`: only `live` is fresh; `probing` and `reconnecting` connect (amber), `ended` is offline, `unsupported` reads "Update hgs" |
 | Accounts | `hgs [@host] account ls` per host (every 30 s while Overview or Accounts shows, once per new host otherwise) and `account inspect ID --refresh` per installed profile (every 5 min, two at once, offline hosts skipped) |
 | Machines | `hgs machine ls` on show and Refresh, `machine resolve ALIAS` on selection, `machine check ALIAS` only on Test connection |
-| Projects | `hgs swarm get` every 5 s while Projects shows |
+| Projects | No read of its own: the organization the Sessions list groups by (the `organization` topic, or the core's `swarm get` poll for a CLI without it), this device's default project and the project sync status line |
 
 The reads run in `src-tauri/src/screens.rs` on the blocking pool with the
 core's timeouts and output limits (`core/src/reads.rs`); when each read is
 due is decided in `core/src/views/schedule.rs`, and the core projects every
 reply into a view model (`core/src/views`). A changed view emits
 `screens-changed` with the screen's name, and the frontend pulls it again.
-In replay mode the reads refuse unless `ZERUS_CLIENT_HGS` is set ("Reads in
-replay mode need ZERUS_CLIENT_HGS."). Peers without the event stream get no
-polling fallback yet (see the phase table).
+In replay mode the screens that read refuse unless `ZERUS_CLIENT_HGS` is set
+("Reads in replay mode need ZERUS_CLIENT_HGS."); Projects keeps the project
+sync status line. Peers without the event stream get no polling fallback yet
+(see the phase table).
 
 ### Screens smoke run
 
@@ -613,6 +646,185 @@ python3 -c 'import collections, json, sys; print(collections.Counter(" ".join(js
 ```
 
 The screenshots stay in `$S`; they are never committed.
+
+## Projects in the Sessions list
+
+The Sessions list groups sessions by the shared project organization, as the
+Qt GUI does, and its menus edit that organization (plan:
+`docs/superpowers/plans/2026-10-28-tauri-client-organization.md`).
+
+Data path:
+
+- The source is this computer's `organization` topic (`core/src/organization.rs`);
+  a CLI without the topic is polled with `hgs swarm get` every 5 s by the core,
+  with the same states. Only this computer is followed: the catalog is shared.
+- The organization hub (`src-tauri/src/organization.rs`) feeds each state to the
+  write controller (`core/src/swarm/sync.rs`, a port of `SwarmController`) and
+  hands the presented organization to the pump's grouping
+  (`core/src/swarm/grouping.rs`).
+- The pump puts `Batch.groups` (each row's project and rank, only for rows
+  whose project or rank changed) and `Batch.grouping` (the headers and whether
+  edits can run, when they changed) on its batches, and strips
+  `Batch.organizations`: the organization itself never reaches the webview.
+- `src/store/organization.ts` keeps the assignments and headers, and
+  `src/ui/sessions/model.ts` groups rows by their ids and assignments only, so a
+  status update never regroups. The header counts are computed there, beside the
+  webview's state and machine filters.
+
+Qt's grouping rules (`SessionOrganization.cpp`, `SessionsWindowRows.cpp`):
+
+- Projects follow the shared `project_order`. Members are
+  `organization.projects[].sessions[]`, keyed `<host>\n<session name>`, where the
+  host is this computer's host name or the peer's alias (the row's `machine`). A
+  session listed by two projects belongs to the first.
+- A row no project lists belongs to the default project: this device's choice
+  when it is listed, else the catalog's `default_project` when it is listed, else
+  the first project, else the Inbox (`ungrouped`).
+- With one project the list shows no header and nothing collapses. A project
+  without visible members is hidden ("Hide projects without active sessions",
+  on by default). A header's counts cover members the filters hide; muted
+  members never count as attention or unread. Its colour is the project's
+  `color`, else its palette slot.
+
+This device's layout (collapsed projects, the order inside each project and the
+default project) stays local, as in Qt. It lives in `organization-layout.json`
+in the app data directory, remembers at most 100,000 members and is saved at
+most once a second and as the app quits. Pending edits live beside it in
+`organization-draft.json`, written through a temporary file and a rename
+whenever they change, before their apply, and removed once they settle. A
+replay keeps its own `organization-layout-replay.json` and
+`organization-draft-replay.json`, and removes a leftover replay draft at start.
+
+Edit commands (one `swarm apply` each, answered `done` with the conflicts it
+recorded, `kept` with Qt's status text, or `refused` with the reason):
+
+| Command | Menu entry |
+| --- | --- |
+| `move_to_project(members, project, before)` | Move to project, a drop |
+| `create_project(name, members)` | New project… (in the Move to project dialog) |
+| `rename_project(project, name)` | Rename project… |
+| `move_project(project, before)` | Move project up, Move project down |
+| `sort_project(project)` | Sort sessions by name |
+| `delete_project(project, destination)` | Delete project… |
+| `set_project_collapsed(project, collapsed)` | a header click, Collapse project, Expand project (layout only, no `hgs`) |
+
+`move_to_project` takes a set of members, `<host>\n<session name>` from the
+row's own machine (`memberOf`): every member goes into the project as one
+`swarm apply` from one snapshot. The session menu passes one member; the batch
+Move to project (`zerus-5wmh.20`) passes the selection. `before` places them in
+this device's order only. Sort sessions by name makes every listed row an
+explicit member; when they all are already, it changes only the layout and runs
+no `hgs`.
+
+Apply rules (`SwarmController.cpp`, ported in `core/src/swarm/sync.rs`):
+
+- `hgs swarm apply` runs on this computer only, without `@host`, with
+  `{base, desired, versions}` as compact JSON on standard input and a 10 s
+  timeout; one runs at a time. Edits are sent 120 ms after the last one.
+- Base and versions are the state the user saw, from one snapshot. A state is
+  not adopted while edits are pending or an apply runs, and after an
+  acknowledged write a state that does not show it yet is held back for 10 s.
+  Only the fields an apply wrote (`written`) advance their versions, so another
+  writer's change surfaces as a conflict, never as an overwrite.
+- Nothing is sent before the first state. A catalog with `initialized: false`
+  keeps the entries disabled ("Project sync is not set up on this computer yet.
+  Start Zerus here once to import its projects."); this client never runs
+  `swarm initialize`.
+- A failed or timed-out apply keeps its edits: the list keeps showing them, the
+  answer and the status line say "Project sync unavailable: <error>" (or "Project
+  sync needs an updated HGS installation."), and the next tick sends one apply
+  with the same base, desired state and versions. The tick is 5 s after the
+  failure or the topic's next state, whichever comes first. After a resend fails
+  again, only the 5 s tick sends it, so a refused apply goes out at most once per
+  5 s. Edits made meanwhile ride on it.
+- After a restart the saved draft is shown at once and sent once after the first
+  state, from its saved base and versions, so a catalog that changed meanwhile
+  gives a conflict. A draft that cannot be used is moved aside, never applied,
+  and the list says why until the first state.
+- The status line keeps Qt's texts and reaches the Projects screen.
+- In a replay, edits need `ZERUS_CLIENT_HGS` ("Actions in replay mode need
+  ZERUS_CLIENT_HGS."); the browser replay refuses them ("Project changes need
+  the desktop app.").
+
+Deviations from Qt (the plan's Decisions):
+
+1. The layout lives in `organization-layout.json`, not in QSettings
+   (`workspace/organization`).
+2. Sort sessions by name folds case, then compares as written, then by member;
+   Qt uses `localeAwareCompare`.
+3. No `swarm initialize`: a computer without the Qt GUI's import keeps edits
+   disabled.
+4. Edits made before the first ready catalog are refused, not queued.
+5. Renames made while the client was closed are not followed yet (Qt follows
+   them by persisted run tokens).
+6. Archived sessions are not placed in projects yet: Qt keys them by their
+   archive identity, `machine\narchive\n<archive id>`, which `zerus-5wmh.40`
+   ports. Until then, the Archive view and its
+   count ignore the project filter (it holds project IDs), Clear archive takes
+   no row while a project filter is set, and Move to project is disabled for an
+   archived row ("Archived sessions keep their project until the Archive view
+   groups by project."), so the client never writes the live-name member
+   `host\nname` for an archived session.
+
+### Organization smoke run
+
+`ZERUS_CLIENT_QUERY=organization-smoke=1` (hook in `src/ui/PerfHost.tsx`, with
+the actions smoke's environment and guard) waits until the replay's organization
+is ready and lists `claude/sample-project/review`, then runs one edit of each
+menu through the store the menus use: Move to project (`p-aurora`), New project
+("Smoke project", with the session), Rename project (`p-docs-site`), Sort
+sessions by name (`p-sample-project`), Move project (`p-orders-api` before
+`p-sample-project`) and Delete project (`p-docs-site` into the Inbox). It logs
+`organization-smoke <step>: <outcome>` and exits 0 when every outcome is `done`.
+The fake `hgs` answers `swarm get` and `swarm apply` with
+`fixtures/replay-organization.json`, so each step's project is listed again
+after every apply. The sort is layout only, so the log holds five `swarm apply`
+calls and no `swarm get`, each from the fixture's organization (in its shared
+form) and versions, and the layout file holds the sorted project. The screens
+hub's account warm-up (`account ls`) reaches the fake too, which refuses it, so
+the check counts only the `swarm` calls. `XDG_DATA_HOME` keeps the app data
+directory in the scratch folder:
+
+```sh
+S=$(mktemp -d); cp core/tests/support/fake_hgs_swarm.py $S/hgs; chmod +x $S/hgs
+python3 -c 'import json, sys; o = json.load(open(sys.argv[1])); json.dump({"get": [{"stdout": o}], "apply": [{"stdout": o}]}, open(sys.argv[2], "w"))' \
+  fixtures/replay-organization.json $S/config.json
+env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=1 \
+  WEBKIT_DISABLE_DMABUF_RENDERER=1 XDG_DATA_HOME=$S/data \
+  ZERUS_CLIENT_REPLAY="$PWD/fixtures/replay.ndjson:mac=$PWD/fixtures/replay-mac.ndjson" \
+  ZERUS_CLIENT_HGS=$S/hgs ZERUS_CLIENT_QUERY=organization-smoke=1 ZERUS_CLIENT_PERF=smoke \
+  xvfb-run -a -s "-screen 0 1440x900x24" src-tauri/target/release/zerus-client 2> $S/app.log
+echo "exit $?"; grep organization-smoke $S/app.log
+python3 - "$S" fixtures/replay-organization.json <<'EOF'
+import json, sys
+S, fixture = sys.argv[1], json.load(open(sys.argv[2]))
+calls = [c for c in map(json.loads, open(f"{S}/log.ndjson")) if c["argv"][:1] == ["swarm"]]
+assert [c["argv"] for c in calls] == [["swarm", "apply"]] * 5, [c["argv"] for c in calls]
+base = dict(fixture["organization"], session_assignments_explicit=True)
+for call in calls:
+    sent = json.loads(call["stdin"])
+    assert sent["base"] == base and sent["versions"] == fixture["versions"]
+layout = json.load(open(f"{S}/data/dev.zerus.next/organization-layout-replay.json"))
+members = next(p for p in fixture["organization"]["projects"] if p["id"] == "p-sample-project")["sessions"]
+title = lambda member: member.rsplit("/", 1)[-1]
+assert layout["order"]["p-sample-project"] == sorted(members, key=lambda m: (title(m).casefold(), title(m), m))
+print("5 swarm apply calls from the fixture's base and versions; p-sample-project sorted in the layout")
+EOF
+```
+
+### Organization measurement
+
+`src/store/organization.perf.test.ts` measures 20,000 rows: one replace into a
+catalog (phase 2's reconcile), then 20,000 assignments in 50 projects with the
+grouped members and list rows, then 1,000 status upserts, which must not group
+the members again. It is skipped unless `ZERUS_CLIENT_MEASURE=1`:
+
+```sh
+ZERUS_CLIENT_MEASURE=1 NODE_OPTIONS=--expose-gc npx vitest run src/store/organization.perf.test.ts
+```
+
+The Rust grouping's own pass over 20,000 rows has an ignored timing test:
+`cargo +1.99.1 test --manifest-path core/Cargo.toml --lib twenty_thousand_sessions_group_within_five_seconds -- --ignored --nocapture`.
 
 ## Measurement run
 

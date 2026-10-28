@@ -49,6 +49,7 @@ pub mod termination_cleanup;
 pub mod view;
 pub mod views;
 pub mod voice;
+pub mod voice_composer;
 pub mod worktree_review;
 pub mod worktrees;
 

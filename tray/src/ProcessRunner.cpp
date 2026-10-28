@@ -2,6 +2,7 @@
 #include "ChildProcess.h"
 
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QHash>
 #include <QMutex>
 #include <QObject>
@@ -287,6 +288,7 @@ struct Pending {
     QPointer<QObject> owner;
     std::function<void(const Result &)> done;
     QMetaObject::Connection destroyed;
+    QElapsedTimer started;
 };
 
 class Runner {
@@ -301,7 +303,8 @@ public:
     void run(Request request, QObject *owner, std::function<void(const Result &)> done)
     {
         const quint64 id = ++m_next;
-        Pending pending{owner, std::move(done), {}};
+        Pending pending{owner, std::move(done), {}, {}};
+        pending.started.start();
         // Owner destruction kills the child synchronously, as the old per-object
         // QProcess children did, so fixtures and sockets are not used afterwards.
         pending.destroyed = QObject::connect(owner, &QObject::destroyed, &m_front, [this, id] { cancel(id); },
@@ -323,6 +326,12 @@ public:
         m_thread.quit(); m_thread.wait();
     }
     QThread *thread() { return &m_thread; }
+    qint64 oldestPendingMs() const
+    {
+        qint64 oldest = -1;
+        for (const auto &pending : m_pending) oldest = qMax(oldest, pending.started.elapsed());
+        return oldest;
+    }
     void setObserver(std::function<void()> observer) { QMutexLocker lock(&m_observerMutex); m_observer = std::move(observer); }
 
 private:
@@ -493,6 +502,8 @@ const char *launchBackend() { return "QProcess"; }
 #endif
 
 QThread *workerThread() { auto *instance = runner(); return instance ? instance->thread() : nullptr; }
+
+qint64 oldestInFlightMs() { return s_runner ? s_runner->oldestPendingMs() : -1; }
 
 void setLaunchObserver(std::function<void()> observer) { if (auto *instance = runner()) instance->setObserver(std::move(observer)); }
 

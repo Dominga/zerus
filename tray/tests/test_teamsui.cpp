@@ -2,6 +2,7 @@
 // S6, S7, S10, S11): the task card, planning edits, New team, the catalog
 // editor, the Team designer's draft and the team workspace. Each sends one
 // `hgs team` request per change, recorded by a fake CLI.
+#include "Wait.h"
 #include <QPointer>
 #include <QScrollBar>
 #include <QtTest>
@@ -136,16 +137,17 @@ void inspectMemberMenu(QWidget *root, const QString &member, const std::function
     std::function<void(int)> look = [&](int tries) {
         QTimer::singleShot(10, qApp, [&, tries] {
             auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
-            if (!menu) { if (tries > 0) look(tries - 1); return; }
+            if (!menu) { if (tries > 0) look(TestWait::busy() ? tries : tries - 1); return; }
             seen = true;
             inspect(menu);
             menu->hide();
         });
     };
-    // Up to 10 s: under a loaded machine the popup can take seconds to show.
+    // Retries count only while nothing is in flight: under a loaded machine
+    // the popup can take seconds to show.
     look(1000);
     more->click();
-    QTRY_VERIFY_WITH_TIMEOUT(seen, 10000);
+    WAIT_VERIFY(seen);
 }
 
 // U25 part 5 (spec 5.4): the prototype's checkout - phase 1 done, phase 2
@@ -369,7 +371,7 @@ void shot(QWidget *widget, const QString &name)
 {
     const auto dir = qEnvironmentVariable("ZERUS_TEAM_SHOTS");
     if (dir.isEmpty()) return;
-    QTest::qWait(50);
+    TestWait::settle();
     const QString path = QDir(dir).filePath(name + ".png");
     if (!widget->grab().save(path)) qWarning() << "screenshot not saved:" << path;
 }
@@ -431,7 +433,7 @@ bool clickAsks(QWidget *view, const QPoint &point)
     });
     watch.start();
     QTest::mouseClick(view, Qt::LeftButton, {}, point);
-    QTest::qWait(60);
+    TestWait::settle();
     return asked;
 }
 
@@ -440,7 +442,7 @@ void chooseMenuAction(const QString &name, int tries = 300)
 {
     QTimer::singleShot(10, qApp, [name, tries] {
         auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
-        if (!menu) { if (tries > 0) chooseMenuAction(name, tries - 1); return; }
+        if (!menu) { if (tries > 0) chooseMenuAction(name, TestWait::busy() ? tries : tries - 1); return; }
         QAction *found = nullptr;
         for (auto *action : menu->actions()) if (action->objectName() == name) found = action;
         menu->hide();
@@ -485,7 +487,7 @@ void armConfirm(TeamPanel *panel, bool cancel, int tries = 300)
     QTimer::singleShot(0, panel, [panel, cancel, tries] {
         auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
         if (!box) {
-            if (tries > 0) QTimer::singleShot(10, panel, [panel, cancel, tries] { armConfirm(panel, cancel, tries - 1); });
+            if (tries > 0) QTimer::singleShot(10, panel, [panel, cancel, tries] { armConfirm(panel, cancel, TestWait::busy() ? tries : tries - 1); });
             return;
         }
         for (auto *button : box->buttons())
@@ -504,7 +506,7 @@ void armConfirmRecord(TeamPanel *panel, bool cancel, QString *title, QString *te
     QTimer::singleShot(delay, panel, [panel, cancel, title, text, tries] {
         auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
         if (!box) {
-            if (tries > 0) armConfirmRecord(panel, cancel, title, text, 10, tries - 1);
+            if (tries > 0) armConfirmRecord(panel, cancel, title, text, 10, TestWait::busy() ? tries : tries - 1);
             return;
         }
         if (title) *title = box->windowTitle();
@@ -522,7 +524,7 @@ void armConfirmAfter(TeamPanel *panel, std::function<void()> during, int tries =
     QTimer::singleShot(0, panel, [panel, during, tries] {
         auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
         if (!box) {
-            if (tries > 0) QTimer::singleShot(10, panel, [panel, during, tries] { armConfirmAfter(panel, during, tries - 1); });
+            if (tries > 0) QTimer::singleShot(10, panel, [panel, during, tries] { armConfirmAfter(panel, during, TestWait::busy() ? tries : tries - 1); });
             return;
         }
         during();
@@ -572,7 +574,7 @@ bool looksLight(QWidget *widget)
 void lightShot(QWidget *widget, const QString &name)
 {
     lightPalette();
-    QTest::qWait(200);
+    TestWait::settle();
     QVERIFY2(looksLight(widget), qPrintable(QStringLiteral("the light shot is dark: ") + name));
     shot(widget, name);
 }
@@ -619,6 +621,7 @@ class TestTeamsUi : public QObject {
 private slots:
     void initTestCase();
     void init();
+    void cleanup();
     void settingsPageShowsTheSubagentSetting();
     void aSessionRecordShowsTheUnconfirmableSubagentNote();
     void catalogModelAppliesKeptProposals();
@@ -719,11 +722,20 @@ private:
     QString script() const { return m_dir.filePath("hgs"); }
     void setTeam(const QJsonObject &value) { QVERIFY(FakeCli::replace(script() + ".status", QJsonDocument(value).toJson(QJsonDocument::Compact))); }
     QTemporaryDir m_dir;
+    std::unique_ptr<TestWait::ModalGuard> m_modals;
 };
 
 void TestTeamsUi::initTestCase()
 {
     QVERIFY(m_dir.isValid());
+    // #525: a pending Activity render is work in flight for the waits. A hidden
+    // view stays dirty until it is shown, so only a visible one counts.
+    TestWait::addProbe([] {
+        for (auto *widget : QApplication::allWidgets())
+            if (auto *activity = qobject_cast<ActivityView *>(widget); activity && activity->isVisible() && activity->renderPending()) return true;
+        return false;
+    });
+
     TeamController::setPollInterval(60000);
     TeamNewTab::setDraftPollInterval(100);
     darkPalette();
@@ -801,8 +813,17 @@ else:print(json.dumps({'status':'ok','version':4,'request_id':body.get('request_
 )PY"));
 }
 
+// #525: a dialog left open fails the test instead of hanging the suite.
+void TestTeamsUi::cleanup()
+{
+    const QString closed = m_modals ? m_modals->closed() : QString();
+    m_modals.reset();
+    if (!closed.isEmpty()) QFAIL(qPrintable(QStringLiteral("the dialog %1 stayed open unanswered and was closed").arg(closed)));
+}
+
 void TestTeamsUi::init()
 {
+    m_modals = std::make_unique<TestWait::ModalGuard>();
     QFile::remove(script() + ".calls");
     QFile::remove(script() + ".draftrev");
     QFile::remove(script() + ".statushold");
@@ -1115,27 +1136,27 @@ void TestTeamsUi::draftReorderSendsMovePhase()
     workspace.showTeam("team-1");
     // U25: the drafts are scrolls stacked in order, each with its Accept,
     // Reject… and a menu that moves it among the drafts or discards it.
-    QTRY_COMPARE(workspace.findChildren<QFrame *>("teamPhaseScroll").size(), 8);
+    WAIT_COMPARE(workspace.findChildren<QFrame *>("teamPhaseScroll").size(), 8);
     for (int n = 2; n <= 8; ++n) QCOMPARE(phaseScrollOf(&workspace, n)->property("state").toString(), QStringLiteral("draft"));
     QVERIFY(phaseScrollOf(&workspace, 2)->findChild<QLabel *>("teamPhaseTitle")->text().contains(QStringLiteral("QA fixes")));
     const auto fromMenu = [&](int phase, const char *action) {
         chooseMenuAction(action);
         phaseScrollOf(&workspace, phase)->findChild<QToolButton *>("teamPhaseMore")->click();
-        QTest::qWait(100);
+        WAIT_SETTLED();
     };
     // The first draft cannot go up.
     fromMenu(2, "teamPhaseMoveUp");
     QCOMPARE(calls(script(), "move-phase").size(), 0);
     fromMenu(3, "teamPhaseMoveUp");
-    QTRY_COMPARE(calls(script(), "move-phase").size(), 1);
+    WAIT_COMPARE(calls(script(), "move-phase").size(), 1);
     auto moved = calls(script(), "move-phase").first();
     QCOMPARE(moved["team"].toString(), QStringLiteral("team-1"));
     QCOMPARE(moved["phase"].toInt(), 3);
     QCOMPARE(moved["to"].toInt(), 2);
     QCOMPARE(moved["position"].toString(), QStringLiteral("before"));
-    QTRY_VERIFY(phaseScrollOf(&workspace, 2) && phaseScrollOf(&workspace, 2)->findChild<QToolButton *>("teamPhaseMore"));
+    WAIT_VERIFY(phaseScrollOf(&workspace, 2) && phaseScrollOf(&workspace, 2)->findChild<QToolButton *>("teamPhaseMore"));
     fromMenu(2, "teamPhaseMoveDown");
-    QTRY_COMPARE(calls(script(), "move-phase").size(), 2);
+    WAIT_COMPARE(calls(script(), "move-phase").size(), 2);
     moved = calls(script(), "move-phase")[1];
     QCOMPARE(moved["phase"].toInt(), 2);
     QCOMPARE(moved["to"].toInt(), 3);
@@ -1152,7 +1173,7 @@ void TestTeamsUi::draftReorderSendsMovePhase()
         QJsonObject{{"n", 7}, {"title", "Cleanup"}, {"state", "draft"}, {"tasks", QJsonArray{9}}},
         QJsonObject{{"n", 8}, {"title", "Archive"}, {"state", "draft"}, {"tasks", QJsonArray{10}}}};
     setTeam(renumbered);
-    QTRY_VERIFY(([&] {
+    WAIT_VERIFY(([&] {
         controller.refresh();
         auto *second = phaseScrollOf(&workspace, 2);
         return second && second->findChild<QLabel *>("teamPhaseTitle")->text() == QStringLiteral("Phase 2 · Polish")
@@ -1166,7 +1187,7 @@ void TestTeamsUi::draftReorderSendsMovePhase()
     lightPalette();
     workspace.setTheme(false);
     workspace.render();
-    QTest::qWait(250);
+    WAIT_SETTLED();
     shot(&workspace, "phases-7-drafts-light");
     darkPalette();
     workspace.setTheme(true);
@@ -1935,40 +1956,40 @@ void TestTeamsUi::phaseApprovalAndFinishAskTheOwner()
     controller.refresh();
     panel.showTeam("team-1");
     workspace.showTeam("team-1");
-    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
+    WAIT_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
     // The team bar says the phase waits; the draft's band header carries the
     // status chip, progress and health, and the two owner decisions (G9).
-    QTRY_VERIFY(workspace.findChild<QWidget *>("teamBarPendingPhase"));
+    WAIT_VERIFY(workspace.findChild<QWidget *>("teamBarPendingPhase"));
     // U25: the draft's scroll carries its status, progress and the owner's decisions.
-    QTRY_VERIFY(phaseAction(&workspace, 3, "teamPhaseAccept"));
+    WAIT_VERIFY(phaseAction(&workspace, 3, "teamPhaseAccept"));
     QCOMPARE(phaseScrollOf(&workspace, 3)->property("state").toString(), QStringLiteral("draft"));
     workspace.render();
-    QTest::qWait(100);
+    WAIT_SETTLED();
     shot(&workspace, "d3-phases-draft");
     // The draft is ready once `team status` has answered (a list poll carries no validation).
-    QTRY_VERIFY(phaseAction(&workspace, 3, "teamPhaseAccept") && phaseAction(&workspace, 3, "teamPhaseAccept")->isEnabled());
+    WAIT_VERIFY(phaseAction(&workspace, 3, "teamPhaseAccept") && phaseAction(&workspace, 3, "teamPhaseAccept")->isEnabled());
     QVERIFY(phaseAction(&workspace, 3, "teamPhaseReject"));
     QVERIFY(!workspace.findChild<QPushButton *>("teamWorkspaceFinish"));   // tasks are still open
     // The header folds the scroll to its header row; the members column folds independently.
     auto *membersToggle = workspace.findChild<QToolButton *>("teamMembersToggle");
     QVERIFY(membersToggle);
     togglePhase(&workspace, 3);
-    QTRY_VERIFY(phaseScrollOf(&workspace, 3) && !phaseOpen(&workspace, 3));
+    WAIT_VERIFY(phaseScrollOf(&workspace, 3) && !phaseOpen(&workspace, 3));
     shot(&workspace, "d3-phases-folded");
     togglePhase(&workspace, 3);
-    QTRY_VERIFY(phaseOpen(&workspace, 3));
+    WAIT_VERIFY(phaseOpen(&workspace, 3));
     membersToggle = workspace.findChild<QToolButton *>("teamMembersToggle");
     membersToggle->click();
-    QTRY_VERIFY(!workspace.findChild<QFrame *>("teamWorkspaceMember"));
+    WAIT_VERIFY(!workspace.findChild<QFrame *>("teamWorkspaceMember"));
     shot(&workspace, "d3-members-folded");
     workspace.findChild<QToolButton *>("teamMembersToggle")->click();
-    QTRY_VERIFY(workspace.findChild<QFrame *>("teamWorkspaceMember"));
+    WAIT_VERIFY(workspace.findChild<QFrame *>("teamWorkspaceMember"));
     shot(&workspace, "d3-phases-draft-open");
     // The same draft in the light theme.
     lightPalette();
     workspace.setTheme(false);
     workspace.render();
-    QTest::qWait(250);
+    WAIT_SETTLED();
     shot(&workspace, "d3-phases-draft-light");
     darkPalette();
     workspace.setTheme(true);
@@ -1976,30 +1997,30 @@ void TestTeamsUi::phaseApprovalAndFinishAskTheOwner()
     // Accept asks the owner first, then sends once with the phase; a second
     // click before the poll sends nothing. A cancelled confirmation sends
     // nothing and leaves Accept usable.
-    QTRY_VERIFY(phaseAction(&workspace, 3, "teamPhaseAccept"));
+    WAIT_VERIFY(phaseAction(&workspace, 3, "teamPhaseAccept"));
     armConfirm(&panel, true);
     phaseAction(&workspace, 3, "teamPhaseAccept")->click();
-    QTest::qWait(100);
+    WAIT_SETTLED();
     QCOMPARE(calls(script(), "approve-phase").size(), 0);
-    QTRY_VERIFY(phaseAction(&workspace, 3, "teamPhaseAccept") && phaseAction(&workspace, 3, "teamPhaseAccept")->isEnabled());
+    WAIT_VERIFY(phaseAction(&workspace, 3, "teamPhaseAccept") && phaseAction(&workspace, 3, "teamPhaseAccept")->isEnabled());
     armConfirm(&panel, false);
     phaseAction(&workspace, 3, "teamPhaseAccept")->click();
-    QTRY_COMPARE(calls(script(), "approve-phase").size(), 1);
+    WAIT_COMPARE(calls(script(), "approve-phase").size(), 1);
     QCOMPARE(calls(script(), "approve-phase").first()["phase"].toInt(), 3);
     QCOMPARE(calls(script(), "approve-phase").first()["team"].toString(), QStringLiteral("team-1"));
     QCOMPARE(calls(script(), "approve-phase").first()["by"].toString(), QStringLiteral("human"));
     // The sent decision holds until the store's revision moves: neither Accept
     // nor Reject… nor the menu acts again (no double send from a double click
     // or a quick re-render).
-    QTest::qWait(300);
+    WAIT_SETTLED();
     workspace.render();
-    QTest::qWait(100);
-    QTRY_VERIFY(phaseAction(&workspace, 3, "teamPhaseAccept"));
+    WAIT_SETTLED();
+    WAIT_VERIFY(phaseAction(&workspace, 3, "teamPhaseAccept"));
     QVERIFY(!phaseAction(&workspace, 3, "teamPhaseAccept")->isEnabled());
     QVERIFY(!phaseAction(&workspace, 3, "teamPhaseReject")->isEnabled());
     QVERIFY(!phaseScrollOf(&workspace, 3)->findChild<QToolButton *>("teamPhaseMore")->isEnabled());
     phaseAction(&workspace, 3, "teamPhaseAccept")->click();
-    QTest::qWait(80);
+    WAIT_SETTLED();
     QCOMPARE(calls(script(), "approve-phase").size(), 1);
     QCOMPARE(calls(script(), "discard-phase").size(), 0);
     // The store's next revision reopens the header for the same phase; the
@@ -2007,7 +2028,7 @@ void TestTeamsUi::phaseApprovalAndFinishAskTheOwner()
     auto decidedTeam = ready;
     decidedTeam["revision"] = decidedTeam["revision"].toInt(1) + 1;
     setTeam(decidedTeam);
-    QTRY_VERIFY(([&] { controller.refresh(); auto *accept = phaseAction(&workspace, 3, "teamPhaseAccept"); return accept && accept->isEnabled(); })());
+    WAIT_VERIFY(([&] { controller.refresh(); auto *accept = phaseAction(&workspace, 3, "teamPhaseAccept"); return accept && accept->isEnabled(); })());
     // Discard, from the phase's menu, asks to confirm: Cancel sends nothing, the confirmation sends once.
     const auto discardFromMenu = [&] {
         chooseMenuAction("teamPhaseDiscard");
@@ -2015,12 +2036,12 @@ void TestTeamsUi::phaseApprovalAndFinishAskTheOwner()
     };
     armConfirm(&panel, true);
     discardFromMenu();
-    QTest::qWait(200);
+    WAIT_SETTLED();
     QCOMPARE(calls(script(), "discard-phase").size(), 0);
-    QTRY_VERIFY(phaseScrollOf(&workspace, 3) && phaseScrollOf(&workspace, 3)->findChild<QToolButton *>("teamPhaseMore")->isEnabled());
+    WAIT_VERIFY(phaseScrollOf(&workspace, 3) && phaseScrollOf(&workspace, 3)->findChild<QToolButton *>("teamPhaseMore")->isEnabled());
     armConfirm(&panel, false);
     discardFromMenu();
-    QTRY_COMPARE(calls(script(), "discard-phase").size(), 1);
+    WAIT_COMPARE(calls(script(), "discard-phase").size(), 1);
     QCOMPARE(calls(script(), "discard-phase").first()["phase"].toInt(), 3);
     // All tasks decided: the header waits for the lead and Finish asks for a
     // bounded summary.
@@ -2034,39 +2055,39 @@ void TestTeamsUi::phaseApprovalAndFinishAskTheOwner()
     waiting["waiting_for_lead"] = true;
     // A request may already be in flight; keep polling until the new team shows.
     setTeam(waiting);
-    QTRY_VERIFY(([&] { controller.refresh(); return workspace.findChild<QWidget *>("teamBarWaitingForLead") != nullptr; })());
+    WAIT_VERIFY(([&] { controller.refresh(); return workspace.findChild<QWidget *>("teamBarWaitingForLead") != nullptr; })());
     QVERIFY(!workspace.findChild<QWidget *>("teamBarPendingPhase"));
-    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceFinish"));
+    WAIT_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceFinish"));
     shot(&workspace, "d3-phases-waiting");
     workspace.findChild<QPushButton *>("teamWorkspaceFinish")->click();
     auto *dialog = panel.findChild<QDialog *>("teamFinishDialog");
-    QTRY_VERIFY(dialog);
+    WAIT_VERIFY(dialog);
     // Cancelling deletes the dialog instead of leaving it hidden under the panel.
     dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Cancel)->click();
-    QTest::qWait(50);
+    WAIT_SETTLED();
     QCOMPARE(panel.findChildren<QDialog *>("teamFinishDialog").size(), 0);
     workspace.findChild<QPushButton *>("teamWorkspaceFinish")->click();
     dialog = panel.findChild<QDialog *>("teamFinishDialog");
-    QTRY_VERIFY(dialog);
+    WAIT_VERIFY(dialog);
     auto *summary = dialog->findChild<QPlainTextEdit *>("teamFinishSummary");
     auto *finish = dialog->findChild<QPushButton *>("teamFinishConfirm");
     QVERIFY(summary && finish);
     QVERIFY(!finish->isEnabled());   // a summary is required
     summary->setPlainText(QString(4001, QLatin1Char('x')));
-    QTRY_VERIFY(!finish->isEnabled());   // and bounded at 4,000 characters
+    WAIT_VERIFY(!finish->isEnabled());   // and bounded at 4,000 characters
     // Characters, not UTF-16 units: 4,000 emoji are accepted, 4,001 are not.
     const QString emoji = QString(QChar(0xD83D)) + QChar(0xDE00);
     QString many;
     many.reserve(8000);
     for (int i = 0; i < 4000; ++i) many += emoji;
     summary->setPlainText(many);
-    QTRY_VERIFY(finish->isEnabled());
+    WAIT_VERIFY(finish->isEnabled());
     summary->setPlainText(many + emoji);
-    QTRY_VERIFY(!finish->isEnabled());
+    WAIT_VERIFY(!finish->isEnabled());
     summary->setPlainText(QStringLiteral("Phases 1–2 are delivered; the retest is #11."));
-    QTRY_VERIFY(finish->isEnabled());
+    WAIT_VERIFY(finish->isEnabled());
     finish->click();
-    QTRY_COMPARE(calls(script(), "finish").size(), 1);
+    WAIT_COMPARE(calls(script(), "finish").size(), 1);
     QCOMPARE(calls(script(), "finish").first()["summary"].toString(), QStringLiteral("Phases 1–2 are delivered; the retest is #11."));
     QCOMPARE(calls(script(), "finish").first()["team"].toString(), QStringLiteral("team-1"));
 }
@@ -2148,13 +2169,13 @@ void TestTeamsUi::rolePromptFromTheMemberMenuKeepsItsButton()
     panel.resize(420, 1400); panel.show();
     controller.refresh();
     panel.showTeam("team-1");
-    QTRY_VERIFY(panel.findChild<QWidget *>("teamPlanFooter"));
+    WAIT_VERIFY(panel.findChild<QWidget *>("teamPlanFooter"));
     const auto testerMore = [&]() -> QToolButton * {
         for (auto *card : panel.findChildren<QFrame *>("teamCard"))
             if (card->property("teamMember") == "tester") return card->findChild<QToolButton *>("teamMemberMore");
         return nullptr;
     };
-    QTRY_VERIFY(testerMore());
+    WAIT_VERIFY(testerMore());
     QPointer<QToolButton> more = testerMore();
     QPointer<QMenu> menu = more->menu();
     auto changed = team("planning");
@@ -2163,19 +2184,19 @@ void TestTeamsUi::rolePromptFromTheMemberMenuKeepsItsButton()
     std::function<void(int)> lookDialog = [&](int tries) {
         QTimer::singleShot(10, qApp, [&, tries] {
             auto *dialog = qobject_cast<QInputDialog *>(QApplication::activeModalWidget());
-            if (!dialog) { if (tries > 0) lookDialog(tries - 1); return; }
+            if (!dialog) { if (tries > 0) lookDialog(TestWait::busy() ? tries : tries - 1); return; }
             QPointer<QInputDialog> open = dialog;
             // A failed check closes the dialog, so the test ends instead of waiting on it.
             const auto close = qScopeGuard([open] { if (open) open->reject(); });
             // The menu's own release comes due inside the dialog's loop: no render.
-            QTest::qWait(400);
+            WAIT_SETTLED();
             QVERIFY(panel.confirming());
             QVERIFY(more && menu);
             // A poll under the dialog: still no render.
             setTeam(changed);
             controller.refresh();
-            QTRY_COMPARE(controller.team("team-1")->revision, changed["revision"].toInt());
-            QTest::qWait(400);
+            WAIT_COMPARE(controller.team("team-1")->revision, changed["revision"].toInt());
+            WAIT_SETTLED();
             QVERIFY(more && menu);
             QVERIFY(more == testerMore());
             QVERIFY(open && open->isVisible());
@@ -2185,7 +2206,7 @@ void TestTeamsUi::rolePromptFromTheMemberMenuKeepsItsButton()
     std::function<void(int)> lookMenu = [&](int tries) {
         QTimer::singleShot(10, qApp, [&, tries] {
             auto *popup = qobject_cast<QMenu *>(QApplication::activePopupWidget());
-            if (!popup) { if (tries > 0) lookMenu(tries - 1); return; }
+            if (!popup) { if (tries > 0) lookMenu(TestWait::busy() ? tries : tries - 1); return; }
             QAction *prompt = nullptr;
             for (auto *action : popup->actions()) if (action->text().startsWith(QStringLiteral("Role prompt"))) prompt = action;
             QVERIFY(prompt);
@@ -2197,10 +2218,10 @@ void TestTeamsUi::rolePromptFromTheMemberMenuKeepsItsButton()
     };
     lookMenu(300);
     more->click();
-    QTRY_VERIFY(checked);
+    WAIT_VERIFY(checked);
     // Once everything has returned the panel catches up with the poll.
-    QTRY_VERIFY(!panel.confirming());
-    QTRY_VERIFY(testerMore() && testerMore() != more.data());
+    WAIT_VERIFY(!panel.confirming());
+    WAIT_VERIFY(testerMore() && testerMore() != more.data());
     QVERIFY(calls(script(), "plan").isEmpty());
 }
 
@@ -3217,7 +3238,7 @@ void TestTeamsUi::lightThemeShots()
     controller.refresh();
     panel.showTeam("team-1");
     workspace.showTeam("team-1");
-    QTRY_VERIFY(workspace.findChildren<QFrame *>("teamPhaseScroll").size() > 2);
+    WAIT_VERIFY(workspace.findChildren<QFrame *>("teamPhaseScroll").size() > 2);
     // The coordinator's empty Activity text is light-theme text, not a dark
     // document left over from before the theme switch.
     auto *conversation = workspace.findChild<QWidget *>("teamConversationActivity");
@@ -3234,7 +3255,7 @@ void TestTeamsUi::lightThemeShots()
         return color.isValid() && color.lightness() < 150;
     };
     // The Activity loads in the background: a loaded machine needs over 5 s.
-    QTRY_VERIFY_WITH_TIMEOUT(lightText(), 10000);
+    WAIT_VERIFY(lightText());
     shot(&workspace, "d3-phases-draft-light");
     auto waiting = phasedTeam();
     auto tasks = waiting["tasks"].toArray();
@@ -3244,7 +3265,7 @@ void TestTeamsUi::lightThemeShots()
     waiting["pending_phase"] = QJsonValue();
     waiting["waiting_for_lead"] = true;
     setTeam(waiting);
-    QTRY_VERIFY(([&] { controller.refresh(); return workspace.findChild<QPushButton *>("teamWorkspaceFinish") != nullptr; })());
+    WAIT_VERIFY(([&] { controller.refresh(); return workspace.findChild<QPushButton *>("teamWorkspaceFinish") != nullptr; })());
     shot(&workspace, "d3-phases-waiting-light");
     QApplication::setPalette(dark);
 }
@@ -4447,7 +4468,7 @@ void TestTeamsUi::aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog()
     panel.resize(420, 900); panel.show();
     workspace.resize(1300, 820); workspace.show();
     controller.refresh();
-    QTRY_VERIFY(controller.team("team-1"));
+    WAIT_VERIFY(controller.team("team-1"));
     panel.showTeam("team-1");
     workspace.showTeam("team-1");
     const auto visibleMore = [&](const QString &member) -> QToolButton * {
@@ -4455,7 +4476,7 @@ void TestTeamsUi::aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog()
             if (card->property("teamMember") == member && card->isVisibleTo(&workspace)) return card->findChild<QToolButton *>("teamWorkspaceMemberMenu");
         return nullptr;
     };
-    QTRY_VERIFY(controller.watched() && visibleMore("backend"));
+    WAIT_VERIFY(controller.watched() && visibleMore("backend"));
     QPointer<QToolButton> more = visibleMore("backend");
     // The next poll brings a changed team: without the hold it rebuilds the
     // members column and deletes the button under its open menu.
@@ -4470,11 +4491,11 @@ void TestTeamsUi::aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog()
     std::function<void(int)> look = [&](int tries) {
         QTimer::singleShot(10, qApp, [&, tries] {
             auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
-            if (!menu) { if (tries > 0) look(tries - 1); return; }
+            if (!menu) { if (tries > 0) look(TestWait::busy() ? tries : tries - 1); return; }
             open = menu;
             QVERIFY(panel.confirming());
             controller.refresh();
-            QTest::qWait(600);   // the poll lands and a render is asked for
+            WAIT_SETTLED();
             QVERIFY(more);
             QVERIFY(open && open->isVisible());
             QCOMPARE(controller.team("team-1")->revision, 13);
@@ -4486,19 +4507,19 @@ void TestTeamsUi::aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog()
     };
     look(300);
     more->click();
-    QTRY_VERIFY(checked);
+    WAIT_VERIFY(checked);
     QPointer<QDialog> dialog;
-    QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamSwapDialog")) && dialog->isVisible());
+    WAIT_VERIFY((dialog = workspace.findChild<QDialog *>("teamSwapDialog")) && dialog->isVisible());
     // The views catch up once the menu has closed: the column is rebuilt
     // with the new team, so the old button is not the one shown any more.
-    QTRY_VERIFY(!panel.confirming());
-    QTRY_VERIFY(visibleMore("backend") && visibleMore("backend") != more.data());
+    WAIT_VERIFY(!panel.confirming());
+    WAIT_VERIFY(visibleMore("backend") && visibleMore("backend") != more.data());
     // A poll while the swap dialog is open leaves it open.
     changed["revision"] = 14;
     setTeam(changed);
     controller.refresh();
-    QTRY_COMPARE(controller.team("team-1")->revision, 14);
-    QTest::qWait(300);
+    WAIT_COMPARE(controller.team("team-1")->revision, 14);
+    WAIT_SETTLED();
     QVERIFY(dialog && dialog->isVisible());
     dialog->close();
 }
@@ -4524,7 +4545,7 @@ void TestTeamsUi::designerPageStartsOrOpensTheDesigner()
     page.confirm = [](const QString &, const QString &, const QString &, const QString &) { return true; };
     page.setContext("/work/checkout", "checkout");
     page.resize(1440, 900); page.show();
-    QTRY_VERIFY(controller.catalogReady());   // the page reads the catalog while shown
+    WAIT_VERIFY(controller.catalogReady());   // the page reads the catalog while shown
     // Not started: the intro and the composer in the middle, no example chips.
     auto *intro = page.findChild<QWidget *>("teamDesignerEmpty"); QVERIFY(intro && intro->isVisible());
     QVERIFY(page.findChildren<QPushButton *>("teamDesignerExample").isEmpty());
@@ -4538,7 +4559,7 @@ void TestTeamsUi::designerPageStartsOrOpensTheDesigner()
         const int bottom = chat->height() - composer->mapTo(chat, QPoint(0, composer->height())).y();
         return std::pair{top, bottom};
     };
-    QTRY_VERIFY(gaps().first > 100 && qAbs(gaps().first - gaps().second) <= 24);
+    WAIT_VERIFY(gaps().first > 100 && qAbs(gaps().first - gaps().second) <= 24);
     // The session's row: attach, the context and the model with its effort.
     auto *model = page.findChild<QPushButton *>("teamDesignerModel"); QVERIFY(model && model->isVisible());
     QVERIFY2(model->text().startsWith("opus high"), qPrintable(model->text()));
@@ -4550,24 +4571,24 @@ void TestTeamsUi::designerPageStartsOrOpensTheDesigner()
     // The field grows with its text from 2 to 8 lines, then scrolls.
     const int two = input->height();
     input->setPlainText("A security reviewer\nfor payments\nand\na quick team");
-    QTRY_VERIFY(input->height() > two);
+    WAIT_VERIFY(input->height() > two);
     input->setPlainText(QStringLiteral("line\n").repeated(12));
-    QTRY_COMPARE(input->verticalScrollBarPolicy(), Qt::ScrollBarAsNeeded);
+    WAIT_COMPARE(input->verticalScrollBarPolicy(), Qt::ScrollBarAsNeeded);
     const int eight = input->height();
-    input->setPlainText(QStringLiteral("line\n").repeated(20)); QTest::qWait(50);
+    input->setPlainText(QStringLiteral("line\n").repeated(20)); WAIT_SETTLED();
     QCOMPARE(input->height(), eight);
     input->setPlainText("Payments code needs a security look. And I want a quick team for small bugs.");
-    QTRY_VERIFY(send->property("primary").toBool());
-    QTRY_COMPARE(input->height(), two);
+    WAIT_VERIFY(send->property("primary").toBool());
+    WAIT_COMPARE(input->height(), two);
     shot(&page, "ux-9-designer-start-dark");
     page.setDark(false); lightShot(&page, "ux-9-designer-start-light"); darkPalette(); page.setDark(true);
     // Another agent and model from the menu.
     model->click();
     QMenu *menu = nullptr;
-    QTRY_VERIFY((menu = page.findChild<QMenu *>("teamDesignerModelMenu")));
+    WAIT_VERIFY((menu = page.findChild<QMenu *>("teamDesignerModelMenu")));
     for (auto *action : menu->actions()) if (action->text() == "gpt-5.5-codex") { action->trigger(); break; }
     menu->close();
-    QTRY_VERIFY(model->text().startsWith("gpt-5.5-codex high"));
+    WAIT_VERIFY(model->text().startsWith("gpt-5.5-codex high"));
     send->click();
     QCOMPARE(starts, 1);
     QCOMPARE(startedIn, QStringLiteral("/work/checkout"));
@@ -4580,20 +4601,20 @@ void TestTeamsUi::designerPageStartsOrOpensTheDesigner()
     // A failed start keeps the text and says why.
     page.startFailed("codex is not signed in");
     auto *status = page.findChild<QLabel *>("teamConversationStatus");
-    QTRY_VERIFY(status->isVisible()); QVERIFY(status->text().contains("codex is not signed in"));
+    WAIT_VERIFY(status->isVisible()); QVERIFY(status->text().contains("codex is not signed in"));
     QVERIFY(send->isEnabled()); QVERIFY(input->toPlainText().startsWith("Payments code"));
     send->click(); QCOMPARE(starts, 2);   // sent again; the session's arrival clears it
     // Running: its conversation, the proposals and the draft over the catalog.
     running = "claude/checkout/team-designer";
     page.refresh();
-    QTRY_VERIFY(!intro->isVisible());
+    WAIT_VERIFY(!intro->isVisible());
     QCOMPARE(input->toPlainText(), QString());
     QVERIFY(!model->isEnabled());
-    QTRY_COMPARE(page.findChildren<QFrame *>("teamDesignerProposal").size(), 2);
+    WAIT_COMPARE(page.findChildren<QFrame *>("teamDesignerProposal").size(), 2);
     auto *bar = page.findChild<QFrame *>("teamDesignerDraftBar"); QVERIFY(bar->isVisible());
     QVERIFY(page.findChild<QLabel *>("teamDesignerDraftText")->text().contains("based on v3 · 1 of 2 kept · 1 undecided"));
     // The DRAFT bar stands right above the composer.
-    QTRY_VERIFY(bar->mapTo(chat, QPoint(0, bar->height())).y() <= card->mapTo(chat, QPoint(0, 0)).y());
+    WAIT_VERIFY(bar->mapTo(chat, QPoint(0, bar->height())).y() <= card->mapTo(chat, QPoint(0, 0)).y());
     QVERIFY(card->mapTo(chat, QPoint(0, 0)).y() - bar->mapTo(chat, QPoint(0, bar->height())).y() < 40);
     // A short conversation stays centred with the composer; a long one fills
     // the column and the composer keeps to the bottom.
@@ -4609,8 +4630,8 @@ void TestTeamsUi::designerPageStartsOrOpensTheDesigner()
                                                                     {"cursor", count}, {"replace_events", true}}, QString());
     };
     const auto below = [&] { return chat->height() - composer->mapTo(chat, QPoint(0, composer->height())).y(); };
-    QTRY_VERIFY_WITH_TIMEOUT(([&] { feed(2); return below() > 60; })(), 20000);
-    QTRY_VERIFY2_WITH_TIMEOUT(([&] { feed(30); return below() < 12; })(), qPrintable(QStringLiteral("below %1, chat %2, view %3").arg(below()).arg(chat->height()).arg(chat->findChild<QWidget *>("teamConversationActivity")->height())), 20000);
+    WAIT_VERIFY(([&] { feed(2); return below() > 60; })());
+    WAIT_VERIFY2(([&] { feed(30); return below() < 12; })(), qPrintable(QStringLiteral("below %1, chat %2, view %3").arg(below()).arg(chat->height()).arg(chat->findChild<QWidget *>("teamConversationActivity")->height())));
     shot(&page, "ux-9-designer-working-dark");
     QCOMPARE(page.findChild<QLabel *>("teamCatalogTitle")->text(), QStringLiteral("Draft catalog"));
     QVERIFY(page.findChild<QLabel *>("teamCatalogStatus")->text().contains("1 of 2 kept"));
@@ -4626,15 +4647,15 @@ void TestTeamsUi::designerPageStartsOrOpensTheDesigner()
     // A decided card closes and comes back; Apply stands in the DRAFT bar.
     QCOMPARE(page.findChildren<QPushButton *>("teamProposalClose").size(), 1);   // p2 is kept
     page.findChild<QPushButton *>("teamProposalClose")->click();
-    QTRY_COMPARE(page.findChildren<QFrame *>("teamDesignerProposal").size(), 1);
+    WAIT_COMPARE(page.findChildren<QFrame *>("teamDesignerProposal").size(), 1);
     page.findChild<QPushButton *>("teamDesignerShowClosed")->click();
-    QTRY_COMPARE(page.findChildren<QFrame *>("teamDesignerProposal").size(), 2);
+    WAIT_COMPARE(page.findChildren<QFrame *>("teamDesignerProposal").size(), 2);
     auto *apply = page.findChild<QPushButton *>("teamDesignerApplyKept");
     QVERIFY(apply && apply->isVisible() && apply->isEnabled()); QCOMPARE(apply->text(), QStringLiteral("✓ Apply 1 change"));
     apply->click();
-    QTRY_COMPARE(calls(script(), "catalog apply").size(), 1);
+    WAIT_COMPARE(calls(script(), "catalog apply").size(), 1);
     page.findChild<QPushButton *>("teamDesignerDraftDiscard")->click();
-    QTRY_COMPARE(calls(script(), "catalog discard").size(), 1);
+    WAIT_COMPARE(calls(script(), "catalog discard").size(), 1);
 }
 
 // U25 part 9 (spec 11.3): every field of a role is edited in place: name,
@@ -7205,55 +7226,54 @@ void TestTeamsUi::phaseScrollDecisions()
         for (auto *f : workspace.findChildren<QFrame *>("teamPhaseScroll")) if (f->property("phase").toInt() == phase) return f;
         return nullptr;
     };
-    QTRY_VERIFY(scroll(3) && scroll(3)->findChild<QPushButton *>("teamPhaseReject"));
+    WAIT_VERIFY(scroll(3) && scroll(3)->findChild<QPushButton *>("teamPhaseReject"));
     // Reject… opens the form under the note; Cancel closes it and sends nothing.
     scroll(3)->findChild<QPushButton *>("teamPhaseReject")->click();
-    QTRY_VERIFY(scroll(3) && scroll(3)->findChild<QPlainTextEdit *>("teamPhaseRejectText"));
+    WAIT_VERIFY(scroll(3) && scroll(3)->findChild<QPlainTextEdit *>("teamPhaseRejectText"));
     auto *text = scroll(3)->findChild<QPlainTextEdit *>("teamPhaseRejectText");
     QCOMPARE(text->placeholderText(), QStringLiteral("What should Lead change in this phase?"));
     QVERIFY(!scroll(3)->findChild<QPushButton *>("teamPhaseRejectSend")->isEnabled());
     scroll(3)->findChild<QPushButton *>("teamPhaseRejectCancel")->click();
-    QTRY_VERIFY(scroll(3) && !scroll(3)->findChild<QPlainTextEdit *>("teamPhaseRejectText"));
+    WAIT_VERIFY(scroll(3) && !scroll(3)->findChild<QPlainTextEdit *>("teamPhaseRejectText"));
     // The words survive a re-render while typing, then go to the lead.
     scroll(3)->findChild<QPushButton *>("teamPhaseReject")->click();
-    QTRY_VERIFY(scroll(3) && scroll(3)->findChild<QPlainTextEdit *>("teamPhaseRejectText"));
+    WAIT_VERIFY(scroll(3) && scroll(3)->findChild<QPlainTextEdit *>("teamPhaseRejectText"));
     QTest::keyClicks(scroll(3)->findChild<QPlainTextEdit *>("teamPhaseRejectText"), "Run the load test before the rate limits; release notes last.");
-    workspace.render(); QTest::qWait(50);
-    QTRY_COMPARE(scroll(3)->findChild<QPlainTextEdit *>("teamPhaseRejectText")->toPlainText(),
-                 QStringLiteral("Run the load test before the rate limits; release notes last."));
+    workspace.render(); WAIT_SETTLED();
+    WAIT_COMPARE(scroll(3)->findChild<QPlainTextEdit *>("teamPhaseRejectText")->toPlainText(), QStringLiteral("Run the load test before the rate limits; release notes last."));
     shot(&workspace, "ux-4-phase-reject-form-dark");
     scroll(3)->findChild<QPushButton *>("teamPhaseRejectSend")->click();
-    QTRY_COMPARE(calls(script(), "reject-phase").size(), 1);
+    WAIT_COMPARE(calls(script(), "reject-phase").size(), 1);
     QCOMPARE(calls(script(), "reject-phase").first()["phase"].toInt(), 3);
     QCOMPARE(calls(script(), "reject-phase").first()["comment"].toString(), QStringLiteral("Run the load test before the rate limits; release notes last."));
     // Sent back: the warn badge, the owner's words and Undo.
     setTeam(prototypeTeam("rejected"));
-    QTRY_VERIFY(([&] { controller.refresh(); return scroll(3) && scroll(3)->property("state") == "rejected"; })());
-    QTRY_VERIFY(scroll(3)->findChild<QPushButton *>("teamPhaseUndo") && scroll(3)->findChild<QPushButton *>("teamPhaseUndo")->isEnabled());
+    WAIT_VERIFY(([&] { controller.refresh(); return scroll(3) && scroll(3)->property("state") == "rejected"; })());
+    WAIT_VERIFY(scroll(3)->findChild<QPushButton *>("teamPhaseUndo") && scroll(3)->findChild<QPushButton *>("teamPhaseUndo")->isEnabled());
     QVERIFY(scroll(3)->findChild<QLabel *>("teamPhaseSentBack")->text().startsWith(QStringLiteral("Sent back: “Run the load test")));
     QVERIFY(!scroll(3)->findChild<QPushButton *>("teamPhaseAccept"));
     QCOMPARE(workspace.findChild<QPushButton *>("teamWorkspaceDrafts")->property("draftCount").toInt(), 1);
     shot(&workspace, "ux-4-phase-rejected-dark");
     scroll(3)->findChild<QPushButton *>("teamPhaseUndo")->click();
-    QTRY_COMPARE(calls(script(), "undo-reject-phase").size(), 1);
+    WAIT_COMPARE(calls(script(), "undo-reject-phase").size(), 1);
     QCOMPARE(calls(script(), "undo-reject-phase").first()["phase"].toInt(), 3);
     // Queued: accepted, waiting for Build.
     setTeam(prototypeTeam("queued"));
-    QTRY_VERIFY(([&] { controller.refresh(); return scroll(3) && scroll(3)->property("state") == "queued"; })());
+    WAIT_VERIFY(([&] { controller.refresh(); return scroll(3) && scroll(3)->property("state") == "queued"; })());
     QCOMPARE(scroll(3)->findChild<QLabel *>("teamPhaseQueued")->text(), QStringLiteral("Starts after phase 2"));
     QVERIFY(!workspace.findChild<QPushButton *>("teamWorkspaceDrafts"));
     shot(&workspace, "ux-4-phase-queued-dark");
     // A draft again: Accept asks first, then approves; Auto-accept is the team's setting.
     auto again = prototypeTeam(); again["revision"] = 23;
     setTeam(again);
-    QTRY_VERIFY(([&] { controller.refresh(); return scroll(3) && scroll(3)->property("state") == "draft" && scroll(3)->findChild<QPushButton *>("teamPhaseAccept"); })());
-    QTRY_VERIFY(scroll(3)->findChild<QPushButton *>("teamPhaseAccept")->isEnabled());
+    WAIT_VERIFY(([&] { controller.refresh(); return scroll(3) && scroll(3)->property("state") == "draft" && scroll(3)->findChild<QPushButton *>("teamPhaseAccept"); })());
+    WAIT_VERIFY(scroll(3)->findChild<QPushButton *>("teamPhaseAccept")->isEnabled());
     armConfirm(&panel, false);
     scroll(3)->findChild<QPushButton *>("teamPhaseAccept")->click();
-    QTRY_COMPARE(calls(script(), "approve-phase").size(), 1);
+    WAIT_COMPARE(calls(script(), "approve-phase").size(), 1);
     QCOMPARE(calls(script(), "approve-phase").first()["phase"].toInt(), 3);
     workspace.findChild<QAbstractButton *>("teamWorkspaceAutoAccept")->click();
-    QTRY_COMPARE(calls(script(), "settings").size(), 1);
+    WAIT_COMPARE(calls(script(), "settings").size(), 1);
     QVERIFY(calls(script(), "settings").first()["settings"].toObject()["auto_accept"].toBool());
     // N13 (#383): only the switch's field goes; the server merges it, so a
     // lead's newer resume_after_limits or reminder stays.
@@ -7261,21 +7281,21 @@ void TestTeamsUi::phaseScrollDecisions()
     // A stopped team takes no settings: both switches are off limits.
     auto stopped = again; stopped["status"] = "stopped"; stopped["revision"] = 24;
     setTeam(stopped);
-    QTRY_VERIFY(([&] {
+    WAIT_VERIFY(([&] {
         controller.refresh();
         auto *top = workspace.findChild<QAbstractButton *>("teamWorkspaceAutoAccept");
         auto *phase = scroll(3) ? scroll(3)->findChild<QAbstractButton *>("teamPhaseAutoAccept") : nullptr;
         return (!top || !top->isEnabled()) && (!phase || !phase->isEnabled()) && (top || phase);
     })());
     if (auto *top = workspace.findChild<QAbstractButton *>("teamWorkspaceAutoAccept")) top->click();
-    QTest::qWait(100);
+    WAIT_SETTLED();
     QCOMPARE(calls(script(), "settings").size(), 1);
     again["revision"] = 25; setTeam(again);
-    QTRY_VERIFY(([&] { controller.refresh(); auto *top = workspace.findChild<QAbstractButton *>("teamWorkspaceAutoAccept"); return top && top->isEnabled(); })());
+    WAIT_VERIFY(([&] { controller.refresh(); auto *top = workspace.findChild<QAbstractButton *>("teamWorkspaceAutoAccept"); return top && top->isEnabled(); })());
     workspace.setTheme(false);
     if (!qEnvironmentVariable("ZERUS_TEAM_SHOTS").isEmpty()) {
         setTeam(prototypeTeam("rejected"));
-        QTRY_VERIFY(([&] { controller.refresh(); return scroll(3) && scroll(3)->property("state") == "rejected"; })());
+        WAIT_VERIFY(([&] { controller.refresh(); return scroll(3) && scroll(3)->property("state") == "rejected"; })());
         lightShot(&workspace, "ux-4-phase-rejected-light");
     }
     darkPalette();

@@ -1,3 +1,4 @@
+#include "Wait.h"
 #include <QtTest>
 #include <memory>
 #include <QComboBox>
@@ -324,7 +325,7 @@ elif a and a[0]=='worktrees':
         dialog.findChild<QLineEdit *>("launchRepositoryUrl")->setText("git@example.invalid:team/fresh.git");
         dialog.findChild<QLineEdit *>("launchRepositoryDestination")->setText("/workspace/fresh");
         QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
-        auto *start=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());QVERIFY(lines("clone-calls").isEmpty());start->click();QTRY_COMPARE(launched.size(),1);
+        auto *start=dialog.findChild<QPushButton *>("primary");WAIT_VERIFY(start->isEnabled());QVERIFY(lines("clone-calls").isEmpty());start->click();WAIT_COMPARE(launched.size(), 1);
         QCOMPARE(launched[0][0].toString(),host);QCOMPARE(launched[0][5].toString(),expected);QVERIFY(!dialog.implicitInbox());
         if(worktree)QVERIFY(launched[0][2].toString().startsWith("/workspace/fresh-work-"));else QCOMPARE(launched[0][2].toString(),QString("/workspace/fresh"));
         const auto *chosen=projects.group(expected);QVERIFY(chosen);QCOMPARE(chosen->folders.size(),1);
@@ -824,7 +825,7 @@ elif a and a[0]=='worktrees':
         NewSessionDialog dialog(program(),fleet(),{},"codex");dialog.setGroups(projects,"ungrouped");
         dialog.setProjectCatalogSwarm("swarm-fixture");
         dialog.selectPath("/workspace/example",false);QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
-        auto *start=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+        auto *start=dialog.findChild<QPushButton *>("primary");WAIT_VERIFY(start->isEnabled());start->click();WAIT_COMPARE(launched.size(), 1);
         QCOMPARE(launched[0][5].toString(),QString("ungrouped"));
     }
     void anotherOrUnknownSwarmWithTheSameProjectIdDoesNotInferMembership() {
@@ -886,7 +887,7 @@ elif a and a[0]=='worktrees':
         auto *choice=dialog.findChild<QComboBox *>("launchProject");QVERIFY(choice);
         if(explicitChoice==1)QVERIFY(QMetaObject::invokeMethod(choice,"activated",Q_ARG(int,choice->currentIndex())));
         QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);auto *start=dialog.findChild<QPushButton *>("primary");
-        QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+        WAIT_VERIFY(start->isEnabled());start->click();WAIT_COMPARE(launched.size(), 1);
         QCOMPARE(launched[0][5].toString(),inferred?project:explicitChoice==2?other:QString("ungrouped"));
         QCOMPARE(launched[0][2].toString(),canonicalPath);
         if(inferred)QVERIFY(launched[0][7].toString().isEmpty());

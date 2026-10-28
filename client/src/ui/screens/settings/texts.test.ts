@@ -226,6 +226,40 @@ const WORKTREES_CORE = [
   "Computer returned invalid cleanup settings.", "worktree-maintenance-v1",
 ];
 
+const mobileQt = ["tray/src/WorkspaceSettings.h", "tray/src/PhonePairing.cpp", "tray/src/MobileDeliverySettings.h", "tray/src/SettingsPage.h", "tray/src/HgsClient.cpp"]
+  .map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");
+const mobileCore = fs.readFileSync(new URL("client/core/src/mobile.rs", repo), "utf8");
+const MOBILE = [
+  "Mobile connection", "Workspace",
+  "Connect your computers and phones to one workspace. Session content is encrypted between your devices; the relay keeps routing and delivery metadata.",
+  "Workspace: checking…", "Workspace status is unconfirmed", "Change workspace…", "Start connector", "Stop connector",
+  "Refresh status", "Give computer code", "Copy computer code", "Cancel code",
+  "Phones",
+  "Phone", "Platform", "Paired", "Last active", "Added from", "Pair a phone…", "Revoke…", "Refresh", "Checking phones…",
+  "Verified device membership. Private device names are not stored by the relay.",
+  "Paired with an administrator invitation, or before Zerus recorded it",
+  "Phone notifications", "When I'm not at a computer, send notifications to my phone",
+  "Immediately, even if I'm at a computer", "As soon as I'm away", "After 5 minutes away", "After 10 minutes away",
+  "After 15 minutes away", "After 30 minutes away", "Saving…",
+  "Saved. Your other computers and the phone receive it with the next sync.",
+  "You count as away after two minutes without keyboard or mouse input on every computer running Zerus, or while their screens are locked. Your computers and the phone share this choice.",
+];
+const MOBILE_CORE = [
+  "Private session content is encrypted.", "Connector: running", "Connector: draining its current request", "Connector: stopped",
+  "This computer was removed from its workspace.",
+  "The retired connector is draining. You can stop its current generation before changing workspace.",
+  "Choose Change workspace to create a workspace or join with a new invitation. Saved local content stays on this computer.",
+  "Legacy connection: session content is visible to this relay.", "Choose Change workspace to create or join an encrypted workspace.",
+  "Workspace activation is incomplete.", "Check the saved connection before continuing.", "No workspace connected",
+  "Create a workspace or use a computer invitation from an enrolled computer.",
+  "The new encrypted workspace is ready. The old relay has not confirmed retirement. You can explicitly disconnect its local configuration before switching.",
+  "A workspace connection is saved and waiting. Check its result before starting another connection.",
+  "Workspace operation was not confirmed. Refresh status before continuing. Verify that the matching computer connector is installed.",
+  "Open Settings → Mobile connection to create a workspace or join one by code, then start the connector and refresh Phones.",
+  "No computer here has a mobile connection. Set one up in Settings → Mobile connection on a computer with local sessions enabled, then refresh Phones.",
+  "1 phone", "this computer", "Invalid phone management response", "mobile phones|invite|revoke-phone",
+];
+
 describe("Settings texts", () => {
   it.each(ANALYTICS)("Private analytics shows Qt's %s", (text) => {
     expect(analyticsQt).toContain(`"${text}"`);
@@ -263,6 +297,32 @@ describe("Settings texts", () => {
   it.each(WORKTREES_CORE)("the cleanup policy says Qt's %s", (text) => {
     expect(worktreesQt).toContain(`"${text}"`);
     expect(worktreesCore).toContain(`"${text}"`);
+  });
+  it.each(MOBILE)("Mobile connection shows Qt's %s", (text) => {
+    expect(mobileQt).toContain(`"${text}"`);
+    expect(source("Mobile.tsx")).toContain(text);
+  });
+  it.each(MOBILE_CORE)("the mobile core says Qt's %s", (text) => {
+    expect(mobileQt.replaceAll("\\n", "\n")).toContain(text);
+    expect(mobileCore).toContain(text);
+  });
+  it("Mobile connection shows Qt's Phones introduction, which Qt writes in two pieces", () => {
+    expect(mobileQt).toContain('"Phones paired with your computers. A phone can control every computer of its workspace; "\n                                "revoke one you no longer use."');
+    expect(source("Mobile.tsx")).toContain("Phones paired with your computers. A phone can control every computer of its workspace; revoke one you no longer use.");
+  });
+  it("the mobile core fills in Qt's formats", () => {
+    expect(mobileQt).toContain('"Update Zerus on %1 to manage phones from here."');
+    expect(mobileCore).toContain('"Update Zerus on {computer} to manage phones from here."');
+    expect(mobileQt).toContain('"Could not read the machine list: %1"');
+    expect(mobileCore).toContain('"Could not read the machine list: {error}"');
+    expect(mobileQt).toContain('"%1 phones"');
+    expect(mobileCore).toContain('"{count} phones"');
+    expect(mobileQt).toContain('"%1 (via %2)"');
+    expect(source("Mobile.tsx")).toContain("(via ${list.host})");
+    expect(mobileQt).toContain('"Could not save: %1"');
+    expect(source("Mobile.tsx")).toContain("`Could not save: ${");
+    expect(mobileQt).toContain('"Could not read the shared setting: %1"');
+    expect(source("Mobile.tsx")).toContain("`Could not read the shared setting: ${");
   });
   it.each(FILES)("Files shows Qt's %s", (text) => {
     expect(filesQt).toContain(`"${text}"`);

@@ -26,6 +26,8 @@ mod instance;
 mod lifecycle;
 mod metrics;
 #[cfg(feature = "live")]
+mod mobile;
+#[cfg(feature = "live")]
 mod organization;
 mod platform;
 #[cfg(feature = "live")]
@@ -284,6 +286,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(analytics::start(app.handle()));
                 app.manage(approvals::start());
                 app.manage(worktree_policy::start(app.handle()));
+                app.manage(mobile::start());
                 // A replay never touches the real read or attention marks.
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
@@ -661,6 +664,10 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         worktree_policy::worktree_policy_read,
         worktree_policy::worktree_policy_choose,
         worktree_policy::worktree_policy_apply,
+        mobile::mobile_workspace,
+        mobile::mobile_phones,
+        mobile::mobile_delivery,
+        mobile::mobile_delivery_set,
         recovery::recovery_view,
         recovery::recovery_load,
         recovery::recovery_save,

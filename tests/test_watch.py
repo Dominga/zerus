@@ -145,10 +145,11 @@ class WatchStream(unittest.TestCase):
         self.assertEqual((hello['v'], hello['t'], hello['seq']), (1, 'hello', 1))
         self.assertEqual(hello['host'], 'test')
         self.assertEqual((hello['heartbeat_ms'], hello['max_frame_bytes']), (10000, 1048576))
-        self.assertEqual(hello['topics'], ['catalog', 'catalog.meta', 'activity', 'git', 'processes'])
+        self.assertEqual(hello['topics'], ['catalog', 'catalog.meta', 'activity', 'git', 'processes', 'tasks'])
         self.assertEqual(hello['limits']['activity_subscriptions'], 16)
         self.assertEqual(hello['limits']['git_subscriptions'], 64)
         self.assertEqual(hello['limits']['processes_subscriptions'], 16)
+        self.assertEqual(hello['limits']['tasks_subscriptions'], 8)
         uuid.UUID(hello['stream'])
         self.assertEqual([frame['seq'] for frame in stream.seen], list(range(1, len(stream.seen) + 1)))
         self.assertTrue(all(frame['v'] == 1 for frame in stream.seen))
@@ -324,6 +325,55 @@ class WatchStream(unittest.TestCase):
         stream.quiet(lambda f: f['t'] == 'state' and f['topic'] == 'processes', 3)
         self.assertEqual(stream.close(), 0)
 
+    def task(self, *args, text=None):
+        result = subprocess.run([str(HGS), 'task', *args], input=text, env=self.env, text=True,
+                                capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def tasks_snapshot(self, stream, predicate=lambda value: True, timeout=10):
+        """The items and last-page value of the next whole tasks snapshot."""
+        items = []
+        while True:
+            frame = stream.next(lambda f: f['t'] == 'snapshot' and f['topic'] == 'tasks', timeout=timeout)
+            if frame['page'] == 0:
+                items = []
+            items += frame['items']
+            if frame['last'] and predicate(frame['value']):
+                return frame['key'], items, frame['value']
+
+    def test_a_project_task_list_streams_as_whole_snapshots_with_a_digest(self):
+        catalog = {"projects": [{"id": "project-1", "name": "orchard", "color": "#123456", "folders": [], "sessions": []}]}
+        result = subprocess.run([str(HGS), 'swarm', 'initialize'], input=json.dumps(catalog), env=self.env,
+                                text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.task('add', '--project', 'orchard', text='First synthetic task')
+        stream, *_ = self.start()
+        stream.send(op='subscribe', topic='tasks', project='project-1')
+        key, items, value = self.tasks_snapshot(stream)
+        listed = self.task('list', '--project', 'project-1')
+        self.assertEqual(key, 'project-1')
+        self.assertEqual(items, listed['tasks'])
+        self.assertEqual((value['project'], value['damaged']), (listed['project'], listed['damaged']))
+        self.assertRegex(value['digest'], '^[0-9a-f]{64}$')
+        # A new task changes the store: the whole list again, with a new digest.
+        self.task('add', '--project', 'orchard', text='Second synthetic task')
+        _, items, changed = self.tasks_snapshot(stream, lambda v: v['digest'] != value['digest'], timeout=10)
+        self.assertEqual(items, self.task('list', '--project', 'project-1')['tasks'])
+        self.assertEqual(len(items), 2)
+        # An unknown project is a non-fatal error of its key.
+        stream.send(op='subscribe', topic='tasks', project='no-such-project')
+        error = stream.next(lambda f: f['t'] == 'error' and f.get('topic') == 'tasks')
+        self.assertEqual((error['code'], error['key'], error['fatal']), ('tasks_failed', 'no-such-project', False))
+        stream.send(op='subscribe', topic='tasks')
+        self.assertEqual(stream.next(lambda f: f['t'] == 'error' and f['code'] == 'bad_request')['topic'], 'tasks')
+        stream.send(op='unsubscribe', topic='tasks', project='project-1')
+        stream.send(op='ping', id='unsubscribed')
+        stream.next(lambda f: f['t'] == 'pong' and f['id'] == 'unsubscribed')
+        self.task('add', '--project', 'orchard', text='Unwatched task')
+        stream.quiet(lambda f: f['t'] == 'snapshot' and f['topic'] == 'tasks', 3)
+        self.assertEqual(stream.close(), 0)
+
     def test_resume_after_a_cursor_and_gap_below_retention(self):
         rows = [self.journal('Stop', detail=f'reply {n}') for n in range(5)]
         stream, *_ = self.start()
@@ -355,7 +405,7 @@ class WatchStream(unittest.TestCase):
         error = stream.next(lambda f: f['t'] == 'error', timeout=30)
         self.assertEqual((error['code'], error['key'], error['fatal']), ('too_many_subscriptions', 'name:sh/limit-16', False))
         self.assertEqual(sum(1 for f in stream.seen if f['t'] == 'events'), 16)
-        stream.send(op='subscribe', topic='tasks', project='orchard')
+        stream.send(op='subscribe', topic='schedules', session=self.session())
         self.assertEqual(stream.next(lambda f: f['t'] == 'error')['code'], 'unsupported_topic')
         stream.process.stdin.write('{"op":"launch"}\nnot json\n')
         stream.process.stdin.flush()

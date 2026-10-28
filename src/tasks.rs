@@ -378,6 +378,18 @@ fn refusal(message: &str) -> Value {
     refusal
 }
 
+/// `hgs task list --project PROJECT --json`, for `hgs watch`.
+pub(crate) fn listing(config: &Config, project: &str) -> Result<Value> {
+    list(config, &["--project".to_owned(), project.to_owned()])
+}
+
+/// The folder whose files hold a project's tasks: a change below it changes
+/// the project's listing.
+pub(crate) fn store_dir(config: &Config, project_id: &str) -> std::path::PathBuf {
+    use sha2::Digest;
+    config.state.join("replica").join(format!("{:x}", sha2::Sha256::digest(project_id.as_bytes())))
+}
+
 /// Runs one task command and returns its JSON.
 fn execute(config: &Config, args: &[String]) -> Result<Value> {
     let Some((action, args)) = args.split_first() else {

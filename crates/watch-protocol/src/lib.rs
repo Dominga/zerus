@@ -33,6 +33,8 @@ pub const ACTIVITY_SUBSCRIPTIONS: usize = 16;
 pub const GIT_SUBSCRIPTIONS: usize = 64;
 /// Concurrent processes subscriptions (sessions) per stream.
 pub const PROCESSES_SUBSCRIPTIONS: usize = 16;
+/// Concurrent tasks subscriptions (projects) per stream.
+pub const TASKS_SUBSCRIPTIONS: usize = 8;
 /// The most events an Activity tail or tail snapshot carries.
 pub const ACTIVITY_TAIL: usize = 100;
 /// The most journal rows one Activity read returns.
@@ -54,6 +56,9 @@ pub mod topic {
     /// One session's `processes` and `process_work`, as `hgs inspect`
     /// reports them, keyed like Activity.
     pub const PROCESSES: &str = "processes";
+    /// One project's task list as `hgs task list --project ID --json` prints
+    /// it, keyed by the project as subscribed.
+    pub const TASKS: &str = "tasks";
 }
 
 /// Why a catalog key was removed. Clients treat an unknown reason as unknown.
@@ -129,6 +134,9 @@ pub struct Limits {
     /// 0 from a server without the processes topic.
     #[serde(default)]
     pub processes_subscriptions: usize,
+    /// 0 from a server without the tasks topic.
+    #[serde(default)]
+    pub tasks_subscriptions: usize,
 }
 
 impl Default for Limits {
@@ -142,6 +150,7 @@ impl Default for Limits {
             control_line_bytes: CONTROL_LINE_BYTES,
             git_subscriptions: GIT_SUBSCRIPTIONS,
             processes_subscriptions: PROCESSES_SUBSCRIPTIONS,
+            tasks_subscriptions: TASKS_SUBSCRIPTIONS,
         }
     }
 }
@@ -270,7 +279,7 @@ pub enum Control {
 }
 
 /// A topic and its key. Activity and processes take `session`, git takes
-/// `path` (an absolute folder); later topics take `project` (tasks).
+/// `path` (an absolute folder) and tasks takes `project` (its ID).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Subscription {
     pub topic: String,
@@ -652,6 +661,7 @@ mod tests {
         .unwrap();
         assert_eq!(older.git_subscriptions, 0);
         assert_eq!(older.processes_subscriptions, 0);
+        assert_eq!(older.tasks_subscriptions, 0);
         assert_eq!(
             Limits::default().processes_subscriptions,
             PROCESSES_SUBSCRIPTIONS

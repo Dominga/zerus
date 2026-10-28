@@ -305,6 +305,11 @@ on a 250 ms pulse:
   10 s, at most every 2 s per session; `state` only when changed apart from
   sampling times. This replaces the clients' `inspect` poll for the selected
   session's processes (every 30 s on the desktop, through SSH for a peer).
+- **Tasks** (zerus-604d.16): `hgs task list --project ID --json` on a worker
+  thread when a stat of the project's task store (`replica/<sha256 of the ID>`
+  and its `tasks` folder) changes and at least every 30 s, at most once a
+  second; whole-list paged snapshots whose last page carries a digest, as
+  agreed with the web client (no per-task deltas).
 - **Git**: stats of `HEAD`, `index`, the current branch ref, its upstream's
   tracking ref, `packed-refs`, `FETCH_HEAD` and the reftable list in the git
   directory and common directory of each subscribed path, on the pulse.

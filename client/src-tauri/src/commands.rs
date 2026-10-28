@@ -252,6 +252,44 @@ pub fn exit_app(app: tauri::AppHandle, code: i32) -> Result<(), String> {
     Ok(())
 }
 
+/// Takes the window away for a measurement: `how` is `hide` or `minimize`.
+/// After a settling pause it samples the process tree over `window_ms`
+/// (default 10 s), brings the window back and returns `{how, minimized,
+/// sample}`; `minimized` says whether the window manager minimised it (a bare
+/// X server has none). Refused outside a measurement run.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn perf_away(
+    window: tauri::WebviewWindow,
+    how: String,
+    window_ms: Option<u64>,
+) -> Result<Value, String> {
+    if !perf_mode() {
+        return Err("not a measurement run (ZERUS_CLIENT_PERF is not set)".into());
+    }
+    match how.as_str() {
+        "hide" => window.hide(),
+        "minimize" => window.minimize(),
+        _ => return Err(format!("unknown way to take the window away: {how}")),
+    }
+    .map_err(|error| error.to_string())?;
+    // The page sees the change and its last frame ends before the sample starts.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let minimized = window.is_minimized().unwrap_or(false);
+    let ms = window_ms.unwrap_or(10_000).clamp(100, 60_000);
+    let sample = crate::metrics::process_tree_metrics_over(
+        std::process::id(),
+        std::time::Duration::from_millis(ms),
+    );
+    let back = match how.as_str() {
+        "hide" => window.show(),
+        _ => window.unminimize(),
+    };
+    if let Err(error) = back.and_then(|()| window.set_focus()) {
+        eprintln!("zerus-client perf: could not bring the window back: {error}");
+    }
+    Ok(serde_json::json!({ "how": how, "minimized": minimized, "sample": sample }))
+}
+
 /// RSS and CPU of the client's process tree (the app and its webview
 /// processes). Sampling blocks for its 500 ms window, so it runs off the main thread.
 /// `window_ms` sets the window between the two samples (default 500 ms; an idle

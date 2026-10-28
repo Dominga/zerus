@@ -33,6 +33,7 @@ pub fn run() {
             commands::perf_log,
             commands::display_hz,
             commands::exit_app,
+            commands::perf_away,
         ])
         .setup(|app| {
             let display = display::display_name();

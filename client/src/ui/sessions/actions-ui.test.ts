@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { menuState, renameError, terminateCopy } from "./actions-ui";
+import { dialogReducer, menuItemActivates, menuState, renameError, sessionPartRange, terminateCopy } from "./actions-ui";
 import type { Details, RowOut, ViewRow } from "../../types";
 
 const entry = (extra: Partial<ViewRow> = {}): RowOut => ({
@@ -116,5 +116,30 @@ describe("renameError", () => {
   it("accepts a project and a session part", () => expect(renameError("proj/a")).toBeUndefined());
   it("refuses the rest", () => {
     for (const n of ["", "proj", "/a", "proj/", "a b/c", "a/b c", "a=b/c", "#a/b"]) expect(renameError(n)).toMatch(/^Use a name without spaces/);
+  });
+});
+
+describe("dialog helpers", () => {
+  it("selects the session part", () => {
+    expect(sessionPartRange("proj/a")).toEqual([5, 6]);
+    expect(sessionPartRange("claude/proj/a")).toEqual([7, 13]);
+    expect(sessionPartRange("plain")).toEqual([0, 5]);
+  });
+  it("opens one dialog at a time", () => {
+    const a = entry();
+    let state = dialogReducer(undefined, { type: "open", kind: "rename", entry: a });
+    expect(state?.kind).toBe("rename");
+    state = dialogReducer(state, { type: "open", kind: "terminate", entry: a });
+    expect(state).toEqual({ kind: "terminate", entry: a });
+    expect(dialogReducer(state, { type: "close" })).toBeUndefined();
+  });
+  it("ignores disabled menu items", () => {
+    expect(menuItemActivates({ disabled: true })).toBe(false);
+    expect(menuItemActivates({})).toBe(true);
+  });
+  it("uses details-first reasons for archive and needs availability for Mark as read", () => {
+    const m = menuState(entry({ state: "paused", allowed_actions: [], action_reasons: { archive: "row" } }), true, false, details({ allowed_actions: [], action_reasons: { archive: "detail" } }));
+    expect(m.archive.reason).toBe("detail");
+    expect(menuState(entry({ unread: true, shared_read: true }), true, true).markRead.enabled).toBe(false);
   });
 });

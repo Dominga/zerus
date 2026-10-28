@@ -52,7 +52,7 @@ export function menuState(entry: RowOut, online: boolean, updating: boolean, det
     ? { label: "Mark needs attention", enabled: false, reason: MARK_NEEDS_LATER }
     : !row.shared_read
       ? { label: "Mark as read", enabled: false, reason: READ_STATE_HOST }
-      : { label: "Mark as read", enabled: online };
+      : { label: "Mark as read", enabled: available };
 
   return {
     change: {
@@ -64,7 +64,7 @@ export function menuState(entry: RowOut, online: boolean, updating: boolean, det
     archive: {
       visible: row.agent !== "dsh" && (row.state === "paused" || row.state === "stopped"),
       enabled: !updating && allowed(row, "archive", details),
-      reason: row.action_reasons?.archive || details?.action_reasons?.archive,
+      reason: reasonFor(row, "archive", details),
     },
     end,
     stop: !!row.turn_started && allowed(row, "interrupt", details) && available,
@@ -92,3 +92,21 @@ export function renameError(name: string): string | undefined {
   const ok = slash > 0 && slash < name.length - 1 && !name.startsWith("#") && !name.includes("=") && !/\s/.test(name);
   return ok ? undefined : "Use a name without spaces or '=', with a project and a session part.";
 }
+
+/** The part of a name the rename field selects: after the first "/", else all of it. */
+export function sessionPartRange(name: string): [number, number] {
+  const slash = name.indexOf("/");
+  return [slash < 0 ? 0 : slash + 1, name.length];
+}
+
+export type DialogKind = "rename" | "terminate";
+export type DialogState = { kind: DialogKind; entry: RowOut } | undefined;
+export type DialogEvent = { type: "open"; kind: DialogKind; entry: RowOut } | { type: "close" };
+
+/** One dialog at a time: opening replaces whatever is open, closing clears it. */
+export function dialogReducer(_state: DialogState, event: DialogEvent): DialogState {
+  return event.type === "open" ? { kind: event.kind, entry: event.entry } : undefined;
+}
+
+/** A disabled menu item neither closes the menu nor runs its action. */
+export const menuItemActivates = (item: { disabled?: boolean }) => !item.disabled;

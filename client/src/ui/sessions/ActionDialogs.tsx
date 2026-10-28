@@ -5,13 +5,14 @@ import { dismiss, notices, perform, updating } from "../../store/actions";
 import type { MenuEntry } from "../../store/ui";
 import type { Details, RowOut } from "../../types";
 import type { Session } from "./types";
-import { menuState, renameError, terminateCopy } from "./actions-ui";
+import { dialogReducer, menuState, renameError, sessionPartRange, terminateCopy, type DialogEvent } from "./actions-ui";
 
 // The guarded session actions: the entries both menus share, the Rename and
 // Terminate dialogs, and the notices the action store raises.
 
-type Pending = { kind: "rename" | "terminate"; entry: RowOut };
-const [open, setOpen] = createSignal<Pending | undefined>();
+const [open, dispatch] = createSignal<ReturnType<typeof dialogReducer>>(undefined, { equals: false });
+const send = (event: DialogEvent) => dispatch(dialogReducer(open(), event));
+const closeDialog = () => send({ type: "close" });
 
 /** The core's row for a catalog session; undefined until it carries one. */
 export const entryOf = (s: Session): RowOut | undefined => (s.view ? { computer: s.computer, key: s.catalogKey, row: s.view } : undefined);
@@ -45,13 +46,13 @@ export function actionEntries(s: Session, details?: Details): { change: Item; st
       label: m.markRead.label, icon: m.markRead.label === "Mark as read" ? "check-check" : "bell", disabled: !m.markRead.enabled, hint: hint(m.markRead.enabled, m.markRead.reason),
       action: () => { void perform(entry, { kind: "mark_read", reply_id: row.reply_id ?? null, attention_signature: row.attention_signature ?? null }); },
     },
-    rename: { label: "Rename…", icon: "pencil", disabled: !m.rename, action: () => setOpen({ kind: "rename", entry }) },
+    rename: { label: "Rename…", icon: "pencil", disabled: !m.rename, action: () => send({ type: "open", kind: "rename", entry }) },
     archive: m.archive.visible
       ? { label: "Move to archive", icon: "archive", disabled: !m.archive.enabled, hint: hint(m.archive.enabled, m.archive.reason), action: () => { void perform(entry, { kind: "archive" }); } }
       : undefined,
     end: {
       label: m.end.label, icon: m.end.label === "Terminate session…" ? "circle-stop" : "trash", danger: true, disabled: !m.end.enabled, hint: hint(m.end.enabled, m.end.reason),
-      action: () => setOpen({ kind: "terminate", entry }),
+      action: () => send({ type: "open", kind: "terminate", entry }),
     },
   };
 }
@@ -59,13 +60,8 @@ export function actionEntries(s: Session, details?: Details): { change: Item; st
 function RenameDialog(props: { entry: RowOut; close: () => void }) {
   const current = props.entry.row.name;
   const [value, setValue] = createSignal(current);
-  let input: HTMLInputElement | undefined;
   const error = () => renameError(value());
   const unchanged = () => value() === current;
-  createEffect(() => {
-    input?.focus();
-    input?.setSelectionRange(current.indexOf("/") + 1, current.length);
-  });
   const submit = (e?: Event) => {
     e?.preventDefault();
     if (error() || unchanged()) return;
@@ -76,7 +72,7 @@ function RenameDialog(props: { entry: RowOut; close: () => void }) {
     <form onSubmit={submit}>
       <div class="dlg-head"><Icon name="pencil" size={18} class="accent" /><h2 id="action-dlg-title">Rename session</h2></div>
       <div class="dlg-body">
-        <input ref={input} class="dlg-input" aria-label="Session name" value={value()} onInput={(e) => setValue(e.currentTarget.value)} />
+        <input data-initial class="dlg-input" aria-label="Session name" value={value()} onInput={(e) => setValue(e.currentTarget.value)} />
         <Show when={error() && !unchanged()}><div class="dlg-error">{error()}</div></Show>
       </div>
       <div class="dlg-foot">
@@ -94,29 +90,41 @@ function TerminateDialog(props: { entry: RowOut; close: () => void }) {
     <>
       <div class="dlg-head"><Icon name="triangle-alert" size={18} class="accent" /><h2 id="action-dlg-title">{copy.title}</h2></div>
       <div class="dlg-body">
-        <div class="confirm-body">{copy.text}</div>
+        <div class="confirm-body" id="action-dlg-body">{copy.text}</div>
         <div class="dlg-detail">{copy.detail}</div>
       </div>
       <div class="dlg-foot">
         <span class="spacer" />
-        <button type="button" class="btn primary" autofocus onClick={props.close}>Cancel</button>
+        <button type="button" class="btn primary" data-initial autofocus onClick={props.close}>Cancel</button>
         <button type="button" class="btn solid-danger" onClick={() => { props.close(); void perform(props.entry, { kind: "terminate" }); }}>{copy.confirm}</button>
       </div>
     </>
   );
 }
 
-/** One modal host for the two dialogs; Escape cancels through the dialog's own close. */
+/**
+ * One modal host for the two dialogs. In one code path it opens the modal,
+ * then focuses the dialog's initial control (the rename field with the session
+ * part selected, or Cancel). Escape closes through the dialog's own cancel.
+ */
 export function ActionDialogs() {
   let el: HTMLDialogElement | undefined;
   createEffect(() => {
+    const state = open();
     if (!el) return;
-    if (open()) { if (!el.open) el.showModal(); } else if (el.open) el.close();
+    if (!state) { if (el.open) el.close(); return; }
+    if (!el.open) el.showModal();
+    queueMicrotask(() => {
+      const initial = el?.querySelector<HTMLElement>("[data-initial]");
+      initial?.focus();
+      if (state.kind === "rename" && initial instanceof HTMLInputElement) initial.setSelectionRange(...sessionPartRange(initial.value));
+    });
   });
   return (
-    <dialog class="dlg" ref={el} aria-labelledby="action-dlg-title" style={{ width: "460px" }} onClose={() => setOpen(undefined)}>
-      <Show when={open()}>
-        {(p) => (p().kind === "rename" ? <RenameDialog entry={p().entry} close={() => setOpen(undefined)} /> : <TerminateDialog entry={p().entry} close={() => setOpen(undefined)} />)}
+    <dialog class="dlg" ref={el} role={open()?.kind === "terminate" ? "alertdialog" : "dialog"} aria-labelledby="action-dlg-title"
+      aria-describedby={open()?.kind === "terminate" ? "action-dlg-body" : undefined} style={{ width: "460px" }} onClose={closeDialog}>
+      <Show when={open()} keyed>
+        {(p) => (p.kind === "rename" ? <RenameDialog entry={p.entry} close={closeDialog} /> : <TerminateDialog entry={p.entry} close={closeDialog} />)}
       </Show>
     </dialog>
   );

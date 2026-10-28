@@ -1,4 +1,4 @@
-import { For, Show } from "solid-js";
+import { For, Show, createMemo } from "solid-js";
 import { Icon } from "../lib/icons";
 import { ActivityView, columnStyle } from "./Activity";
 import { AgentBadge, MachineBadge, statusOf, folderOf } from "./SessionCard";
@@ -33,10 +33,10 @@ const copy = (text: string, what: string) => {
 function Header() {
   const s = () => selected()!;
   const tone = () => (statusOf(s()) === "attention" ? "attention" : statusOf(s()));
-  const act = () => {
+  const act = createMemo(() => {
     const entry = entryOf(s());
     return actionEntries(s(), entry ? detailsFor(entry) : undefined);
-  };
+  });
   const actions = (): MenuEntry[] => [
     { label: "Open folder", icon: "folder-open", disabled: true },
     { label: "Open shell in session folder", icon: "square-terminal", disabled: true },

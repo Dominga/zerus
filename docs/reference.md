@@ -4055,10 +4055,20 @@ current branch's ref or its upstream's tracking ref changes in the folder's Git
 and common directories; when a session working in the folder (its `cwd`,
 `cwd_canonical` or `git_root`) records a finished `Edit`, `Write`, `MultiEdit`,
 `NotebookEdit`, `apply_patch` or `Bash` call; when its remote check expires; and
-at least every 30 s. Checks of one folder start at least 1 s apart. Subscribing
-a followed folder again sends its state again. A stream follows at most 64
-folders (`limits.git_subscriptions`); more fail with `too_many_subscriptions`,
-and a missing or relative path fails with `bad_request`.
+at least every 30 s. Checks of one folder start at least 1 s apart. Streams
+on one computer share checks: each check is kept in the private `watch-git`
+folder of the state directory, and a stream takes a kept check instead of
+running Git when that check started after the change that made the folder
+due (the journal row's time for a session's call; for the 30 s check, at most
+30 s earlier) and the stat of the folder's Git metadata is unchanged. A stream
+that needs a folder while another stream checks it waits for that check, at
+most 4 s. A stream that took a kept check checks again a second after the
+stream that ran it, so several clients check each folder about as often as
+one. A new subscription takes only a check that started after it.
+Subscribing a followed folder again sends its state again. A stream follows at
+most 64 folders (`limits.git_subscriptions`); more fail with
+`too_many_subscriptions`, and a missing or relative path fails with
+`bad_request`.
 
 The `processes` topic follows one session's processes, subscribed like Activity
 (`{"op":"subscribe","topic":"processes","session":{...}}`) and keyed by its

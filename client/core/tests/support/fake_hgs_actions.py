@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """A fake `hgs` for the client action tests. Reads `config.json` beside itself:
-{"reply": {"exit": 0, "stdout": <object or "echo_interrupt">, "stderr": "", "sleep": 0, "log_env": [], "read_stdin": true, "linger": 0}}
+{"reply": {"exit": 0, "stdout": <object, "echo_interrupt", "echo_send" or "echo_stage">, "stderr": "", "sleep": 0, "log_env": [], "read_stdin": true, "linger": 0}}
 Appends {"argv": [...], "stdin": "...", "env": {...}} to `log.ndjson` beside itself."""
 import json, os, sys, time
 
@@ -19,6 +19,14 @@ if out == "echo_interrupt":
     args = [a for a in sys.argv[1:] if not a.startswith("@")]
     out = {"status": "submitted", "request_id": request["request_id"], "name": args[1],
            "run_id": request["expected_run_id"], "conversation_id": request["expected_conversation_id"]}
+elif out in ("echo_send", "echo_stage"):
+    request = json.loads(data)
+    args = [a for a in sys.argv[1:] if not a.startswith("@")]
+    out = {"status": "submitted" if out == "echo_send" else "staged", "request_id": request["request_id"],
+           "name": args[1], "run_id": request["expected_run_id"],
+           "conversation_id": request["expected_conversation_id"]}
+    if "agent_id" in request:
+        out["agent_id"] = request["agent_id"]
 if out is not None:
     sys.stdout.write(json.dumps(out))
 sys.stderr.write(config.get("stderr", ""))

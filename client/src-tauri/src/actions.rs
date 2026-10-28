@@ -6,29 +6,34 @@
 //! session's actions while one runs (`tray/src/`). An interrupt and a read
 //! mark each have their own lane: Qt guards Stop only by its own request
 //! (`m_interruptRequest`), and a quiet retry never makes a confirmed write
-//! answer busy.
+//! answer busy. A message has its own lane per agent, as Qt's
+//! `m_messagesInFlight` keys it by host, name and agent.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tauri::State;
-use zerus_client_core::actions::{classify, invocation, parse_reference, reference_invocation};
+use zerus_client_core::actions::{
+    classify, invocation, parse_reference, reference_invocation, ALREADY_SENDING,
+};
 use zerus_client_core::details::{details_invocation, parse_details, Details};
 use zerus_client_core::readmarks::{ReadMark, ReadMarks};
 use zerus_client_core::shell::{current_shell, open_command};
 use zerus_client_core::{default_hgs, run, Action, Batch, Outcome, Target};
 
-/// A session by computer id and session name, and the action's lane.
-type Key = (String, String, Lane);
+/// A session by computer id and session name, the action's lane and, for a
+/// message, the agent it goes to ("" for the session's own agent).
+type Key = (String, String, Lane, String);
 
-/// Writes, interrupts and read marks run apart: at most one of each per
-/// session.
+/// Writes, interrupts, read marks and messages run apart: at most one of each
+/// per session (messages: per agent).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Lane {
     Write,
     Interrupt,
     Read,
+    Send,
 }
 
 impl Lane {
@@ -36,8 +41,23 @@ impl Lane {
         match action {
             Action::MarkRead { .. } => Self::Read,
             Action::Interrupt { .. } => Self::Interrupt,
+            Action::Send { .. } => Self::Send,
             _ => Self::Write,
         }
+    }
+
+    /// The in-flight key of `action` on `target`.
+    pub fn key(target: &Target, action: &Action) -> Key {
+        let agent = match action {
+            Action::Send { agent_id, .. } => agent_id.clone().unwrap_or_default(),
+            _ => String::new(),
+        };
+        (
+            target.computer.clone(),
+            target.name.clone(),
+            Self::of(action),
+            agent,
+        )
     }
 }
 
@@ -186,21 +206,24 @@ pub async fn run_action(
     target: Target,
     action: Action,
 ) -> Result<Outcome, String> {
+    dispatch(&state, target, action).await
+}
+
+/// The one dispatcher of session actions, for `run_action` and for commands
+/// that build an action in Rust (a message from the held draft). A message
+/// already in flight to the same agent fails with Qt's text; any other lane
+/// answers `Err("busy")`.
+pub async fn dispatch(state: &Actions, target: Target, action: Action) -> Result<Outcome, String> {
     if blocked() {
         return Ok(failed(REPLAY_NEEDS_HGS));
     }
-    let Some(_claim) = state.flight.claim((
-        target.computer.clone(),
-        target.name.clone(),
-        Lane::of(&action),
-    )) else {
-        return Err("busy".into());
+    let Some(_claim) = state.flight.claim(Lane::key(&target, &action)) else {
+        return match Lane::of(&action) {
+            Lane::Send => Ok(failed(ALREADY_SENDING)),
+            _ => Err("busy".into()),
+        };
     };
     let request_id = uuid::Uuid::new_v4().to_string();
-    let inv = match invocation(&target, &action, &request_id) {
-        Ok(inv) => inv,
-        Err(refusal) => return Ok(failed(refusal)),
-    };
     if let Action::MarkRead {
         reply_id,
         attention_signature,
@@ -220,12 +243,21 @@ pub async fn run_action(
                 attention_signature: attention_signature.clone(),
             });
     }
+    // Building the call may read dropped files, so it runs off the async
+    // workers with the call itself.
     let hgs = default_hgs();
-    let ran = inv.clone();
-    let exit = tauri::async_runtime::spawn_blocking(move || run(&hgs, &ran))
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(classify(&target, &action, &inv, exit))
+    let (call_target, call_action) = (target.clone(), action.clone());
+    let ran = tauri::async_runtime::spawn_blocking(move || {
+        let inv = invocation(&call_target, &call_action, &request_id)?;
+        let exit = run(&hgs, &inv);
+        Ok::<_, String>((inv, exit))
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    match ran {
+        Ok((inv, exit)) => Ok(classify(&target, &action, &inv, exit)),
+        Err(refusal) => Ok(failed(refusal)),
+    }
 }
 
 /// The session's read-only details, None when it cannot be read. Not guarded:
@@ -320,6 +352,7 @@ mod tests {
                 computer.to_owned(),
                 "claude/sample-project/review".to_owned(),
                 lane,
+                String::new(),
             )
         };
         let flight = InFlight::default();
@@ -348,9 +381,44 @@ mod tests {
             Lane::of(&Action::Interrupt { turn_started: 1.0 }),
             Lane::Interrupt
         );
-        for action in [Action::Pause, Action::Terminate, Action::Kill] {
+        for action in [
+            Action::Pause,
+            Action::Terminate,
+            Action::Kill,
+            Action::StageFiles {
+                paths: vec![],
+                expected_created: None,
+            },
+        ] {
             assert_eq!(Lane::of(&action), Lane::Write);
         }
+    }
+
+    #[test]
+    fn a_message_takes_its_own_lane_per_agent() {
+        let target = Target {
+            computer: String::new(),
+            name: "claude/sample-project/review".into(),
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+        };
+        let send = |agent: Option<&str>| Action::Send {
+            text: "hi".into(),
+            attachments: vec![],
+            agent_id: agent.map(str::to_owned),
+            expected_compaction_id: None,
+        };
+        assert_eq!(Lane::of(&send(None)), Lane::Send);
+        let flight = InFlight::default();
+        let main = flight.claim(Lane::key(&target, &send(None))).unwrap();
+        assert!(flight.claim(Lane::key(&target, &send(None))).is_none());
+        // A subagent's message and the session's other lanes stay free.
+        assert!(flight
+            .claim(Lane::key(&target, &send(Some("agent-7"))))
+            .is_some());
+        assert!(flight.claim(Lane::key(&target, &Action::Pause)).is_some());
+        drop(main);
+        assert!(flight.claim(Lane::key(&target, &send(None))).is_some());
     }
 
     #[test]

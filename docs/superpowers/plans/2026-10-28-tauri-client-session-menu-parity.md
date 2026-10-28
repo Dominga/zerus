@@ -726,12 +726,16 @@ Controller rulings during Piece D:
 - The archived Activity pane waits for `zerus-5wmh.42`.
 - The paging-computer scan reads catalog rows while some live computer has no rows (Qt rebuilds its hosts on every refresh).
 - Task D4 added the README part and the smoke steps for PR 5.
+- Archive reads carry the store's request number, counted from the app's start so a reload never reuses one: a read at or below the cancel mark, or older than its computer's current read, starts cancelled and never cancels a newer one (Qt's synchronous `requestArchivePage` and `cancelArchivePages`).
+- The archive read's failure texts are Qt's `failureDetail` ("timed out", "cannot start '{hgs}': {error}", the trimmed standard error up to 4000 characters, or "exit code {n}"); other actions keep the client's shared texts.
+- The date panel renders through a Portal, since a fixed element inside the transformed strip overlay was misplaced. As Qt's popup, it keeps a hover-opened peek open (`SessionPanelDock.h:50-56`), Escape closes it first and Tab wraps inside it.
+- Archived rows show neither Open terminal nor the Mute and Mark group, as Qt's `showSessionMenu`.
+- Parked: numbering from the clock assumes it does not step back across a reload; a child ended by a signal with no standard error reads "hgs ended abnormally" where Qt shows "exit code {n}".
 
 Deviations from Qt, both from owner rules:
 - Attention marks and read replies are capped at 20 000 entries per map (bounded caches); Qt keeps them without a bound.
 - "Deselect all (Esc)" is "Deselect all" (no obvious keyboard hints).
 
-Deviations from Qt after Piece D (task-D2-report.md, "Fix round 1" and item 6):
+Deviations from Qt after Piece D:
 - The date inputs show the browser's empty date field instead of "Any date" (`ArchiveDatePicker.cpp`); the hint says "All archived dates (no date limits)".
 - An empty Archive list, loading or not, shows the client's "No matching sessions" card with its "Show all sessions" button. Qt shows an empty list and says "No matching sessions" only in the footer count (`SessionsWindowRows.cpp:473`). With no live row at all the client footer is empty, where Qt's reads the same text. Both sit in `SessionList.tsx` outside the agreed ArchiveBar line, so they stay.
-- `cancel_archive_pages` is a sync command while `archive_page` registers its flag when its body runs, so a read invoked just before a cancel can escape it and run to its 30 s timeout when its computer is never read again; the store discards its answer. Qt deletes the helper at once (`cancelArchivePages`).

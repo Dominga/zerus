@@ -10,7 +10,7 @@ describe("machine cards", () => {
     createRoot((dispose) => {
       const machines = createMachineCards();
       const seen: string[] = [];
-      const { catalog, applyBatch } = createCatalog((b) => {
+      const { catalog, applyBatch } = createCatalog(undefined, (b) => {
         seen.push(Object.keys(catalog.computers).join(","));
         machines.applyMachines(b);
       });

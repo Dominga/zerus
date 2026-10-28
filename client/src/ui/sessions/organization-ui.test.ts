@@ -144,7 +144,7 @@ describe("the project header menu", () => {
 
   it("never separates values with dots or names a key in its texts", () => {
     const entries = [...headerEntries(g(), "alpha", actions()), ...headerEntries(g({ ready: false, reason: WAITING }), "beta", actions())];
-    for (const e of entries) if ("label" in e) expect(`${e.label} ${e.hint ?? ""}`).not.toMatch(/[·•∙⋅]|Ctrl|Cmd|Shift|Alt\+/);
+    for (const e of entries) if ("label" in e) expect(`${e.label} ${e.hint ?? ""}`).not.toMatch(/[\u00b7\u2022\u2219\u22c5]|Ctrl|Cmd|Shift|Alt\+/);
   });
 });
 

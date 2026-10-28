@@ -584,6 +584,23 @@ impl Composers {
         }));
     }
 
+    /// Qt's `restoreDraft`: a change the composer cannot take now (a rename
+    /// under way, a remove or Undo it refuses) hands its text back under a
+    /// new epoch, so the webview takes the text again and unlocks its editor.
+    fn hand_back(&self, mut hub: MutexGuard<'_, Hub>, handle: u64) {
+        let mut handed_back = false;
+        if !hub.closed {
+            if let Some(composer) = Self::by_handle(&mut hub, handle).filter(|c| c.loaded) {
+                composer.text_epoch += 1;
+                handed_back = true;
+            }
+        }
+        drop(hub);
+        if handed_back {
+            self.changed();
+        }
+    }
+
     /// The editor changed (`MessageComposer.cpp:367-379`). `epoch` is the
     /// `text_epoch` the webview's text is based on; an edit over older text
     /// is ignored, and the webview takes the newer text from the view.
@@ -597,22 +614,8 @@ impl Composers {
         anchor: i64,
     ) {
         let mut hub = self.lock();
-        let closed = hub.closed;
         let Some(composer) = Self::editable(&mut hub, handle) else {
-            // Qt's `restoreDraft`: a locked composer (a rename under way)
-            // hands its text back under a new epoch.
-            let mut handed_back = false;
-            if !closed {
-                if let Some(locked) = Self::by_handle(&mut hub, handle).filter(|c| c.loaded) {
-                    locked.text_epoch += 1;
-                    handed_back = true;
-                }
-            }
-            drop(hub);
-            if handed_back {
-                self.changed();
-            }
-            return;
+            return self.hand_back(hub, handle);
         };
         if epoch != composer.text_epoch || rev <= composer.rev {
             return;
@@ -716,15 +719,17 @@ impl Composers {
         self.changed();
     }
 
-    /// `removeAttachment`: the file and every mention of its reference.
+    /// `removeAttachment`: the file and every mention of its reference. It
+    /// always answers with a new text epoch, so the webview's editor, locked
+    /// for it, unlocks.
     pub fn remove(&self, handle: u64, index: usize) {
         let mut hub = self.lock();
         let Some(composer) = Self::editable(&mut hub, handle) else {
-            return;
+            return self.hand_back(hub, handle);
         };
+        composer.text_epoch += 1;
         if let Some(removed) = composer.draft.remove(index) {
             composer.removed = Some((index, removed));
-            composer.text_epoch += 1;
             composer.attachments_changed();
             self.save(composer);
         }
@@ -733,14 +738,17 @@ impl Composers {
     }
 
     /// Undo in the attachment list (the approved mockup): the file returns
-    /// to its place and its reference to the end of the text.
+    /// to its place and its reference to the end of the text. Like a remove,
+    /// it always answers with a new text epoch.
     pub fn undo_remove(&self, handle: u64) {
         let mut hub = self.lock();
         let Some(composer) = Self::editable(&mut hub, handle) else {
-            return;
+            return self.hand_back(hub, handle);
         };
+        composer.text_epoch += 1;
         let Some((_, removed)) = composer.removed.as_ref() else {
-            return;
+            drop(hub);
+            return self.changed();
         };
         // The file returns only within the message's limits (`addAttachment`);
         // a refused Undo stays available.
@@ -777,7 +785,6 @@ impl Composers {
         }
         let at = index.min(composer.draft.attachments.len());
         composer.draft.attachments.insert(at, attachment);
-        composer.text_epoch += 1;
         composer.attachments_changed();
         self.save(composer);
         drop(hub);
@@ -1775,14 +1782,15 @@ pub(crate) mod tests {
         let view = until(&c, |v| v.attachments.len() == 1 && !v.attaching);
         c.remove(view.handle, 0);
         c.attach_paths(view.handle, files[1..].to_vec(), Selection::default());
-        let view = until(&c, |v| v.attachments.len() == 2 && !v.attaching);
-        c.undo_remove(view.handle);
+        let before = until(&c, |v| v.attachments.len() == 2 && !v.attaching);
+        c.undo_remove(before.handle);
         let view = c.current().unwrap();
         assert_eq!(
             view.attachments.len(),
             2,
             "a third 10 MiB file passes 20 MiB"
         );
+        assert!(view.text_epoch > before.text_epoch, "the text comes back");
         assert_eq!(
             view.status,
             "Attachments: 10 MiB per file, 20 MiB per message."
@@ -1924,6 +1932,26 @@ pub(crate) mod tests {
         assert_eq!(
             read_draft(&root.join("drafts"), RENAMED).draft.draft.text,
             "already here"
+        );
+    }
+
+    #[test]
+    fn a_refused_remove_or_undo_hands_the_text_back() {
+        let root = dir("hand-back");
+        let (c, _) = hub(&root);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.remove(view.handle, 3);
+        let after_remove = c.current().unwrap();
+        assert!(
+            after_remove.text_epoch > view.text_epoch,
+            "no file 3: the text comes back"
+        );
+        c.undo_remove(view.handle);
+        let after_undo = c.current().unwrap();
+        assert!(
+            after_undo.text_epoch > after_remove.text_epoch,
+            "nothing to undo: likewise"
         );
     }
 

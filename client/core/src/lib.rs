@@ -20,6 +20,7 @@ mod pty;
 pub mod readmarks;
 pub mod reads;
 pub mod run;
+pub mod send;
 pub mod shell;
 pub mod state;
 pub mod stream;

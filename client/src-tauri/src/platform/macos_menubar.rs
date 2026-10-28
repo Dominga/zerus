@@ -249,7 +249,8 @@ fn later(app: &AppHandle, task: impl FnOnce(&AppHandle) + Send + 'static) {
             task(&handle);
         }
     });
-    // SAFETY: the block captures only Send state and runs once on the main queue.
+    // SAFETY: the block runs once, on the main queue, and captures only an
+    // AppHandle and a Cell that it takes the task from.
     unsafe { NSOperationQueue::mainQueue().addOperationWithBlock(&block) };
 }
 

@@ -436,27 +436,65 @@ impl Composers {
                     composer.save_failed = false;
                 }
                 hub.stored_keys.retain(|k| k != old);
-                hub.order.retain(|k| k != old);
+                // Qt (`MessageComposer.cpp:803-806`): the composer open at the
+                // old key (a rename back while this one was pending) follows
+                // the draft to the new key. The old key's composer has not
+                // loaded yet (its load waits behind the rename), so it goes,
+                // as Qt drops the old key's entry.
+                if hub.open_key.as_deref() == Some(old) && hub.composers.contains_key(new) {
+                    hub.composers.remove(old);
+                    hub.open_key = Some(new.to_owned());
+                }
+                // A composer still held at the old key keeps its place in the
+                // eviction order, so it stays within the bounds.
+                if !hub.composers.contains_key(old) {
+                    hub.order.retain(|k| k != old);
+                }
             }
             Err(error) => {
                 // Qt (`MessageComposer.cpp:795-798`): the moved draft goes
                 // back to its old key marked with the refusal, and the new
                 // key reloads with no message.
                 if let Some(mut moved) = hub.composers.remove(new) {
-                    // A newer composer of the old key (a rename back) stays:
-                    // the moved draft's saves reached the disk before the
-                    // rename, so dropping it loses nothing.
-                    if !hub.composers.contains_key(old) {
-                        moved.key = old.to_owned();
-                        moved.renaming = false;
-                        moved.storage_error = Some(error);
-                        // Its saves answered under the new key and were
-                        // ignored: save it again. Only a failure replaces the
-                        // refusal; a later save clears it, as in Qt.
-                        self.save_with(&mut moved, true);
-                        hub.composers.insert(old.to_owned(), moved);
-                        hub.order.retain(|k| k != old);
-                        hub.order.push_front(old.to_owned());
+                    match hub.composers.get_mut(old) {
+                        None => {
+                            moved.key = old.to_owned();
+                            moved.renaming = false;
+                            moved.storage_error = Some(error);
+                            // Its saves answered under the new key and were
+                            // ignored: save it again. Only a failure replaces
+                            // the refusal; a later save clears it, as in Qt.
+                            self.save_with(&mut moved, true);
+                            hub.composers.insert(old.to_owned(), moved);
+                            hub.order.retain(|k| k != old);
+                            hub.order.push_front(old.to_owned());
+                        }
+                        // A rename back while this one was pending opened a
+                        // newer composer at the old key. Its load waits
+                        // behind the rename, so it has not loaded: it takes
+                        // the moved draft, whose last save may never have
+                        // reached the disk, and keeps its handle. Its load
+                        // answer comes later and is ignored.
+                        Some(newer) if !newer.loaded => {
+                            newer.draft = moved.draft;
+                            newer.position = moved.position;
+                            newer.anchor = moved.anchor;
+                            newer.label = moved.label;
+                            newer.form_state = moved.form_state;
+                            // An uncertain delivery stays uncertain.
+                            newer.uncertain = moved.uncertain;
+                            newer.error = moved.error;
+                            newer.notice = moved.notice;
+                            newer.removed = moved.removed;
+                            newer.loaded = true;
+                            newer.storage_error = Some(error);
+                            newer.text_epoch = newer.text_epoch.max(moved.text_epoch) + 1;
+                            newer.attachments_changed();
+                            self.save_with(newer, true);
+                        }
+                        // Not reached: a newer composer's load waits behind
+                        // the rename on the in-order writer.
+                        Some(_) => {}
                     }
                 }
                 if hub.open_key.as_deref() == Some(new) {
@@ -1952,6 +1990,166 @@ pub(crate) mod tests {
         assert!(
             after_undo.text_epoch > after_remove.text_epoch,
             "nothing to undo: likewise"
+        );
+    }
+
+    #[test]
+    fn undo_stays_within_eight_files() {
+        let root = dir("undo-count");
+        let files: Vec<PathBuf> = (0..=attachments::MAX_ATTACHMENTS)
+            .map(|n| {
+                let file = root.join(format!("{n}.txt"));
+                std::fs::write(&file, format!("file {n}")).unwrap();
+                file
+            })
+            .collect();
+        let (c, _) = hub(&root);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.attach_paths(view.handle, vec![files[0].clone()], Selection::default());
+        let view = until(&c, |v| v.attachments.len() == 1 && !v.attaching);
+        c.remove(view.handle, 0);
+        c.attach_paths(view.handle, files[1..].to_vec(), Selection::default());
+        let view = until(&c, |v| v.attachments.len() == 8 && !v.attaching);
+        c.undo_remove(view.handle);
+        let view = c.current().unwrap();
+        assert_eq!(view.status, "Attach up to 8 files per message.");
+        assert_eq!(view.attachments.len(), attachments::MAX_ATTACHMENTS);
+        assert_eq!(
+            view.removed.as_deref(),
+            Some("0.txt"),
+            "Undo stays available"
+        );
+    }
+
+    /// Keeps a folder from taking new entries until it drops, a panic
+    /// included, so the test's own folder can still be removed.
+    #[cfg(unix)]
+    struct ReadOnly(PathBuf);
+
+    #[cfg(unix)]
+    impl ReadOnly {
+        fn set(folder: &Path, bits: u32) {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(bits)).unwrap();
+        }
+
+        fn new(folder: PathBuf) -> ReadOnly {
+            Self::set(&folder, 0o500);
+            ReadOnly(folder)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ReadOnly {
+        fn drop(&mut self) {
+            Self::set(&self.0, 0o700);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_rename_gives_a_newer_composer_the_unsaved_draft() {
+        let root = dir("rename-back-refused");
+        let store = drafts(&root);
+        let mut there = StoredDraft::default();
+        there.draft.text = "already here".into();
+        store.save_durable(RENAMED, there, |_| {});
+        let (c, _) = hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        let folder = root.join("drafts");
+        let release = hold(&store);
+        // The edit's save fails: the drafts folder takes no new draft.
+        let read_only = ReadOnly::new(folder.clone());
+        c.edit(
+            view.handle,
+            1,
+            view.text_epoch,
+            "not saved yet".into(),
+            13,
+            13,
+        );
+        // A delivery of it was interrupted: that must survive the move.
+        c.lock().composers.get_mut(KEY).unwrap().uncertain = true;
+        c.open(Some(renamed()));
+        // Renamed back while the first rename, which the store refuses, waits.
+        let back = c.open(Some(session())).unwrap();
+        release.send(()).unwrap();
+        let view = until(&c, |v| v.loaded && v.key == KEY);
+        assert_eq!(
+            view.handle, back.handle,
+            "the newer composer keeps its handle"
+        );
+        assert_eq!(view.text, "not saved yet");
+        assert!(view.text_epoch > back.text_epoch);
+        assert!(view.uncertain && !view.can_send, "still uncertain");
+        drop(read_only);
+        // The failed save is retried and reaches the disk; no load replaced it.
+        let view = until(&c, |v| !v.status_error);
+        assert_eq!(view.text, "not saved yet");
+        store.flush();
+        assert_eq!(read_draft(&folder, KEY).draft.draft.text, "not saved yet");
+        assert_eq!(
+            read_draft(&folder, RENAMED).draft.draft.text,
+            "already here"
+        );
+    }
+
+    #[test]
+    fn a_rename_that_succeeds_while_renamed_back_follows_the_draft() {
+        let root = dir("rename-back-done");
+        let store = drafts(&root);
+        let (c, _) = hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.edit(view.handle, 1, view.text_epoch, "moved".into(), 5, 5);
+        let release = hold(&store);
+        c.open(Some(renamed()));
+        let back = c.open(Some(session())).unwrap();
+        assert_ne!(back.handle, view.handle);
+        release.send(()).unwrap();
+        // Qt (`MessageComposer.cpp:806`): the open composer follows the draft.
+        let view = until(&c, |v| v.loaded && v.key == RENAMED);
+        assert_eq!(view.text, "moved");
+        let hub = c.lock();
+        assert!(!hub.composers.contains_key(KEY) && !hub.order.contains(&KEY.to_owned()));
+        drop(hub);
+        store.flush();
+        assert_eq!(
+            read_draft(&root.join("drafts"), RENAMED).draft.draft.text,
+            "moved"
+        );
+        assert_eq!(read_draft(&root.join("drafts"), KEY).draft.draft.text, "");
+    }
+
+    #[test]
+    fn a_held_composer_at_the_old_key_keeps_its_place_in_the_order() {
+        let root = dir("rename-back-held");
+        let store = drafts(&root);
+        let (c, _) = hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.edit(view.handle, 1, view.text_epoch, "moved".into(), 5, 5);
+        let release = hold(&store);
+        c.open(Some(renamed()));
+        c.open(Some(session()));
+        // Another session opens before the first rename answers.
+        let mut other = session();
+        other.key = "run:run-2".into();
+        other.name = "claude/sample-project/other".into();
+        c.open(Some(other));
+        release.send(()).unwrap();
+        until(&c, |v| v.loaded);
+        store.flush();
+        let hub = c.lock();
+        assert!(
+            hub.composers.contains_key(KEY),
+            "the old key's composer is held"
+        );
+        assert!(
+            hub.order.contains(&KEY.to_owned()),
+            "and can still be trimmed"
         );
     }
 

@@ -662,6 +662,11 @@ void TeamCatalogEditor::updateHeader()
     for (auto *b : {m_import, m_export, m_revert, m_save}) b->setVisible(!draft);
     m_openDesigner->setVisible(m_openDesigner->property("wanted").toBool() && !draft);
     m_revert->setEnabled(m_dirty); m_save->setEnabled(m_dirty);
+    // Reset waits for Save or Revert: an edit after the tab was built disables it too.
+    for (auto *reset : findChildren<QPushButton *>(QStringLiteral("teamPlanningRulesReset"))) {
+        reset->setEnabled(!m_dirty && base.planningRulesKnown);
+        reset->setToolTip(m_dirty ? tr("Save or revert your edits first") : tr("Replace the rules with Zerus's built-in ones and save the catalog"));
+    }
     m_discard->setVisible(draft); m_apply->setVisible(draft);
     m_apply->setText(QStringLiteral("✓ ") + counted(kept, tr("Apply %1 change"), tr("Apply %1 changes")));
     m_apply->setEnabled(draft && kept > 0 && !stale);

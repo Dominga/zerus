@@ -1,13 +1,16 @@
-//! The session Terminal's rules, ported from the Qt client: when a session
-//! has a terminal and why not, when a new target reconnects, how dropped file
-//! paths are pasted, and the status texts. The attach process itself (`hgs
-//! a NAME --existing` in a PTY) follows in this module.
+//! The session Terminal, ported from the Qt client: when a session has a
+//! terminal and why not, when a new target reconnects, how dropped file paths
+//! are pasted, the status texts, and the attach client itself (`hgs a NAME
+//! --existing` in a pseudoterminal).
 //!
 //! Reference: `tray/src/NativeSessionCapabilities.h` (`terminal`,
-//! `terminalReason`), `tray/src/TerminalView.cpp` (`setSession`, statuses),
+//! `terminalReason`), `tray/src/TerminalView.cpp` (`setSession`,
+//! `connectSession`, statuses), `tray/src/PtyProcess.cpp`,
 //! `tray/src/SessionsWindow.cpp` (availability, pasting dropped paths).
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::ffi::OsString;
+use std::sync::mpsc::{sync_channel, Receiver};
 
 /// What a session reports about its terminal: its row's fields, which the
 /// selected session's inspected details override.
@@ -156,6 +159,146 @@ pub fn paste_paths(paths: &[String], windows: bool) -> Result<String, String> {
         });
     }
     Ok(format!("{} ", quoted.join(" ")))
+}
+
+/// Scrollback of the webview terminal, as Qt's `MaxHistoryLines`.
+pub const HISTORY_LINES: usize = 5000;
+/// Output chunks waiting for the consumer before the reader waits: at most
+/// 2 MiB with chunks of up to 256 KiB.
+const PENDING_CHUNKS: usize = 8;
+
+/// What a running attach reports, in order: output, then at most one finish.
+/// Nothing follows a stop.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AttachEvent {
+    /// At most 256 KiB of terminal output.
+    Output { data: Vec<u8> },
+    /// The attach client ended with this code (128 plus the signal for a
+    /// signalled end).
+    Finished { code: i32 },
+}
+
+/// `hgs [@host] a NAME --existing [--run-id RUN]`.
+pub fn attach_args(target: &Target) -> Vec<String> {
+    let mut args = Vec::new();
+    if !target.host.is_empty() {
+        args.push(format!("@{}", target.host));
+    }
+    args.extend(["a".to_owned(), target.name.clone(), "--existing".to_owned()]);
+    if !target.run_id.is_empty() {
+        args.extend(["--run-id".to_owned(), target.run_id.clone()]);
+    }
+    args
+}
+
+/// The attach client's environment: the client's own without tmux's
+/// variables or an agent's attribution, plus `HGS_TAB=0` and a 256-colour,
+/// true-colour terminal.
+pub fn attach_env(
+    base: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<(OsString, OsString)> {
+    const REMOVED: [&str; 7] = [
+        "TMUX",
+        "TMUX_PANE",
+        "HGS_SESSION",
+        "HGS_RUN_ID",
+        "HGS_TAB",
+        "TERM",
+        "COLORTERM",
+    ];
+    let mut env: Vec<(OsString, OsString)> = base
+        .into_iter()
+        .filter(|(key, _)| !REMOVED.iter().any(|removed| key == removed))
+        .collect();
+    env.extend([
+        ("HGS_TAB".into(), "0".into()),
+        ("TERM".into(), "xterm-256color".into()),
+        ("COLORTERM".into(), "truecolor".into()),
+    ]);
+    env
+}
+
+/// A running attach client in its own pseudoterminal. Dropping it stops it.
+pub struct Attach {
+    #[cfg(unix)]
+    pty: crate::pty::Pty,
+}
+
+impl Attach {
+    /// Start the attach client for `target` at `cols` x `rows` (2-1000 by
+    /// 2-500). Its events arrive on the receiver; when it is full the reader
+    /// waits.
+    pub fn start(
+        target: &Target,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(Attach, Receiver<AttachEvent>), String> {
+        let (sender, events) = sync_channel::<AttachEvent>(PENDING_CHUNKS);
+        #[cfg(unix)]
+        {
+            let pty = crate::pty::Pty::start(
+                std::path::Path::new(&target.hgs),
+                &attach_args(target),
+                &attach_env(std::env::vars_os()),
+                cols,
+                rows,
+                sender,
+            )?;
+            Ok((Attach { pty }, events))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (target, cols, rows, sender, events);
+            Err(
+                "Cannot open terminal: Terminal is not available on Windows in this build yet."
+                    .into(),
+            )
+        }
+    }
+
+    /// Queue input; over 4 MiB pending it fails with Qt's text and queues
+    /// nothing. Input after the end is ignored.
+    pub fn write(&self, bytes: &[u8]) -> Result<(), String> {
+        #[cfg(unix)]
+        return self.pty.write(bytes);
+        #[cfg(not(unix))]
+        {
+            let _ = bytes;
+            Ok(())
+        }
+    }
+
+    /// Resize with the same clamps.
+    pub fn resize(&self, cols: u16, rows: u16) {
+        #[cfg(unix)]
+        self.pty.resize(cols, rows);
+        #[cfg(not(unix))]
+        let _ = (cols, rows);
+    }
+
+    /// The last 1 MiB of output, for a view shown again.
+    pub fn replay(&self) -> Vec<u8> {
+        #[cfg(unix)]
+        return self.pty.replay();
+        #[cfg(not(unix))]
+        Vec::new()
+    }
+
+    /// The attach client's process ID while it runs.
+    pub fn process_id(&self) -> Option<u32> {
+        #[cfg(unix)]
+        return self.pty.pid();
+        #[cfg(not(unix))]
+        None
+    }
+
+    /// Hang up the attach client and close its terminal. The session keeps
+    /// running.
+    pub fn stop(&mut self) {
+        #[cfg(unix)]
+        self.pty.stop();
+    }
 }
 
 /// The Terminal's status texts.
@@ -323,6 +466,56 @@ mod tests {
         assert_eq!(
             paste_paths(&["/home/example/a\nb".to_owned()], false).unwrap_err(),
             "File names containing control characters cannot be pasted into Terminal."
+        );
+    }
+
+    #[test]
+    fn the_attach_call_is_qt_s() {
+        let mut target = Target {
+            hgs: "hgs".into(),
+            host: String::new(),
+            name: "claude/sample-project/review".into(),
+            run_id: String::new(),
+        };
+        assert_eq!(
+            attach_args(&target),
+            ["a", "claude/sample-project/review", "--existing"]
+        );
+        target.host = "studio".into();
+        target.run_id = "run-1".into();
+        assert_eq!(
+            attach_args(&target),
+            [
+                "@studio",
+                "a",
+                "claude/sample-project/review",
+                "--existing",
+                "--run-id",
+                "run-1"
+            ]
+        );
+        let env = attach_env([
+            ("PATH".into(), "/usr/bin".into()),
+            ("TMUX".into(), "/tmp/tmux-1000/default,1,0".into()),
+            ("TMUX_PANE".into(), "%1".into()),
+            ("HGS_SESSION".into(), "claude/p/agent".into()),
+            ("HGS_RUN_ID".into(), "run-0".into()),
+            ("TERM".into(), "dumb".into()),
+            ("HGS_TAB".into(), "3".into()),
+        ]);
+        let env: Vec<(String, String)> = env
+            .into_iter()
+            .map(|(k, v)| (k.into_string().unwrap(), v.into_string().unwrap()))
+            .collect();
+        assert_eq!(
+            env,
+            [
+                ("PATH", "/usr/bin"),
+                ("HGS_TAB", "0"),
+                ("TERM", "xterm-256color"),
+                ("COLORTERM", "truecolor")
+            ]
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
         );
     }
 

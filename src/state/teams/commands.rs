@@ -92,9 +92,11 @@ fn actor(team: &Team, op: &str, input: &Value) -> anyhow::Result<Actor> {
 /// conversation, its hgs session and its hgs run. A test driving the real
 /// entry point replaces them, because the test process itself may run inside
 /// a session.
-type Identities = (Option<String>, Option<String>, Option<String>);
+pub(crate) type Identities = (Option<String>, Option<String>, Option<String>);
 
-fn caller_identities() -> Identities {
+/// The ambient session identities this process carries, or the test's stand-in
+/// for them. `crate::state::owner_request` reads the same three.
+pub(crate) fn caller_identities() -> Identities {
     #[cfg(test)]
     if let Some(found) = TEST_CALLER_IDENTITIES.with(|value| value.borrow().clone()) {
         return found;
@@ -815,6 +817,19 @@ fn owner_without_team(input: &Value, record: bool, dsh: bool, env: bool, run: bo
         .context("Only you start a draft team, not an agent session")
 }
 
+/// N4/N3: the catalog's owner paths (set, decide, apply, revert, import,
+/// designer) run only on your word from outside every agent session. The
+/// returned flag is what `catalog::run` takes: false leaves every owner path
+/// refused, true lets that operation check its own contract.
+fn catalog_owner(input: &Value) -> anyhow::Result<bool> {
+    if text(input, "by") != "human" {
+        return Ok(false);
+    }
+    let (dsh, session, run) = caller_identities();
+    owner_caller(input, caller_record().is_some(), dsh.is_some(), session.is_some(), run.is_some())?;
+    Ok(true)
+}
+
 fn draft_start_in(store: &mut Store, request: &str, input: &Value, lead: Value) -> anyhow::Result<Value> {
     if let Some(receipt) = store.receipt(request, input)? {
         return Ok(receipt);
@@ -1216,13 +1231,16 @@ fn parent_create(input: &Value, filled: &mut Value) -> anyhow::Result<Option<(St
         .session
         .clone()
         .with_context(|| format!("{} has no session to lead a sub-team", member.id))?;
+    // N3: the same caller identities every other gate reads (a test replaces
+    // them, so an agent marker in the test process never decides the caller).
+    let (dsh, env, run) = caller_identities();
     parent_caller(
         &parent,
         &member.id,
         caller_record().as_ref(),
-        nonempty_env("DSH_SESSION_ID").as_deref(),
-        nonempty_env("HGS_SESSION").as_deref(),
-        nonempty_env("HGS_RUN_ID").as_deref(),
+        dsh.as_deref(),
+        env.as_deref(),
+        run.as_deref(),
         text(input, "by"),
     )?;
     // The assignee's session becomes the sub-team's lead.
@@ -1308,14 +1326,11 @@ fn create(input: &Value) -> anyhow::Result<Value> {
                 lead["agent"] = json!(record["agent"]);
             }
         } else {
-            owner_caller(
-                input,
-                false,
-                nonempty_env("DSH_SESSION_ID").is_some(),
-                nonempty_env("HGS_SESSION").is_some(),
-                nonempty_env("HGS_RUN_ID").is_some(),
-            )
-            .context("Run this from the lead's session, or add \"by\":\"human\" to act as yourself")?;
+            // C2/N3: only you start a team from outside the lead's session,
+            // through the same gate every owner path uses.
+            let (dsh, session, run) = caller_identities();
+            owner_caller(input, false, dsh.is_some(), session.is_some(), run.is_some())
+                .context("Run this from the lead's session, or add \"by\":\"human\" to act as yourself")?;
         }
     }
     let (team, events) = {
@@ -1405,6 +1420,10 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
     );
     let member_id = text(input, "member").to_owned();
     let member = team.member(&member_id).context("Unknown member")?;
+    // N20: the lead's own permission request goes to the owner, never into the
+    // mailbox the lead answers; a lead that answered itself would also decide
+    // the whole subagent group it was asked to confirm.
+    ensure!(member_id != team.lead, "The lead's own permission request is the owner's to answer");
     let session = member.session.clone().context("The member has no session")?;
     let (question, hash) = (text(input, "question_id").to_owned(), text(input, "expected_question_hash").to_owned());
     ensure!(!question.is_empty() && !hash.is_empty() && input["answers"].is_array(), "question_id, expected_question_hash and answers are required");
@@ -2047,10 +2066,19 @@ fn cascade_status(store: &mut Store, team_id: &str, op: &str, depth: usize) -> a
     Ok(())
 }
 
-/// U26/U32: the rule the owner's sentence must meet for this roster change; an
-/// empty rule when the request changes no roster or cap (so no word is needed).
+/// U26/U32/N15: the rule the owner's sentence must meet for this roster
+/// change; an empty rule when the request changes no roster or cap (so no word
+/// is needed). A roster change names the member by its id or its role, and
+/// says the operation in English or Russian, as an add names its member.
 fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::WordRule {
-    use super::owner_word::{WordRule, ROSTER_PHRASES};
+    use super::owner_word::{WordRule, MAX_VERBS, REMOVE_VERBS, ROSTER_PHRASES, SWAP_VERBS};
+    let names_for = |id: &str| -> Vec<String> {
+        let mut names = vec![id.to_owned()];
+        if let Some(member) = team.member(id) {
+            names.extend(super::owner_word::role_aliases(&member.role).iter().map(|alias| (*alias).to_owned()));
+        }
+        names
+    };
     match op {
         "add-member" => {
             let member = &input["member"];
@@ -2060,7 +2088,7 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
                 // U32: the sentence says to add and names the member's role or
                 // agent/model, never the generated id; that naming and the
                 // count are checked once the sentence is verified.
-                WordRule { phrases: &[], all: Vec::new(), add: true }
+                WordRule { phrases: &[], all: Vec::new(), add: true, ..Default::default() }
             }
         }
         "remove-member" => {
@@ -2068,7 +2096,7 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
             if id.is_empty() {
                 WordRule::default()
             } else {
-                WordRule { phrases: ROSTER_PHRASES, all: vec!["remove".to_owned(), id.to_owned()], add: false }
+                WordRule { phrases: ROSTER_PHRASES, all: Vec::new(), add: false, verbs: REMOVE_VERBS, names: names_for(id) }
             }
         }
         "swap-member" => {
@@ -2076,14 +2104,14 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
             if id.is_empty() {
                 WordRule::default()
             } else {
-                WordRule { phrases: ROSTER_PHRASES, all: vec!["swap".to_owned(), id.to_owned()], add: false }
+                WordRule { phrases: ROSTER_PHRASES, all: Vec::new(), add: false, verbs: SWAP_VERBS, names: names_for(id) }
             }
         }
         "settings" => {
             let cap = input["settings"]["max_members"].as_u64();
             match cap {
                 Some(cap) if cap as usize != team.settings.max_members => {
-                    WordRule { phrases: ROSTER_PHRASES, all: vec!["max".to_owned(), cap.to_string()], add: false }
+                    WordRule { phrases: ROSTER_PHRASES, all: vec![cap.to_string()], add: false, verbs: MAX_VERBS, names: Vec::new() }
                 }
                 _ => WordRule::default(),
             }
@@ -2121,12 +2149,11 @@ fn check_roster_word(
         .context("The lead changes the roster only on your word: pass \"owner_word\" with the owner's sentence")?;
     let word = verify(team, word_input, &rule, super::super::now())
         .context("The lead changes the roster only on your word; without it, propose the change (F8)")?;
-    if let Some(used) = team.owner_word_used(word.event) {
-        bail!("That word was already used for {used}; ask the owner again");
-    }
-    if op == "add-member" {
-        // U32: the sentence names what is added by role or agent/model, in
-        // either language, and how many; the generated id is not needed.
+    // U32/N7: a count word ("add two backends") authorizes that many adds and
+    // the cap grows by one for each; every other word pays for one change.
+    let (allowed, change) = if op == "add-member" {
+        // The sentence names what is added by role or agent/model, in either
+        // language; the generated id is not needed.
         let member = filled["member"].clone();
         let (role, agent, model) =
             (text(&member, "role").to_owned(), text(&member, "agent").to_owned(), text(&member, "model").to_owned());
@@ -2139,11 +2166,16 @@ fn check_roster_word(
             super::owner_word::names_member(&word.text, &role, &agent, &model),
             "The owner's sentence does not name the member to add ({described}); quote a sentence naming its role or agent"
         );
-        filled["owner_word_count"] = json!(super::owner_word::add_count(&word.text));
-        filled["owner_word_change"] = json!(format!("adding {role}"));
+        (super::owner_word::add_count(&word.text), format!("adding {role}"))
     } else {
-        filled["owner_word_change"] = json!("the roster change");
+        (1, "the roster change".to_owned())
+    };
+    if !team.owner_word_allowed_again(word.event, allowed, &change) {
+        let used = team.owner_word_used(word.event).unwrap_or_default();
+        bail!("That word was already used for {used}; ask the owner again");
     }
+    filled["owner_word_count"] = json!(allowed);
+    filled["owner_word_change"] = json!(change);
     filled["owner_word_checked"] = serde_json::to_value(&word)?;
     filled["owner_word_event"] = json!(word.event);
     filled["roster_word"] = Value::Bool(true);
@@ -2479,10 +2511,12 @@ fn templates_command(input: &Value) -> anyhow::Result<Value> {
     match text(input, "action") {
         "" | "get" => Ok(super::templates::listed()),
         "set" => {
-            ensure!(
-                caller_record().is_none() && nonempty_env("DSH_SESSION_ID").is_none(),
-                "Only the owner changes the command templates"
-            );
+            // N3/C6: the same owner gate as every other owner path - no caller
+            // record and no session marker (dsh conversation, hgs session or
+            // hgs run), and the request says it is you. An added template runs
+            // outside the member's sandbox (U21), so an agent never adds one.
+            let (dsh, session, run) = caller_identities();
+            owner_caller(input, caller_record().is_some(), dsh.is_some(), session.is_some(), run.is_some())?;
             if let Some(enabled) = input["enabled"].as_bool() {
                 super::templates::set_enabled(enabled)?;
             }
@@ -2858,20 +2892,8 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
         return Err("A JSON object is required".into());
     }
     let result = if catalog {
-        // N4: the catalog's owner path applies the same agent-session rule.
-        let human = if text(&input, "by") == "human" {
-            owner_caller(
-                &input,
-                caller_record().is_some(),
-                nonempty_env("DSH_SESSION_ID").is_some(),
-                nonempty_env("HGS_SESSION").is_some(),
-                nonempty_env("HGS_RUN_ID").is_some(),
-            )
-            .map_err(|error| error.to_string())?;
-            true
-        } else {
-            false
-        };
+        // N4/N3: the catalog's owner path applies the same agent-session rule.
+        let human = catalog_owner(&input).map_err(|error| error.to_string())?;
         super::catalog::run(&operation, &input, human)
     } else {
         run(&operation, &input, wait)
@@ -3614,6 +3636,39 @@ mod tests {
         });
     }
 
+    /// N20: the lead's own permission card is the owner's to answer. The lead
+    /// answering it would decide the whole subagent group it was asked to
+    /// confirm, so `hgs team answer` refuses it before reading the card.
+    #[test]
+    fn the_lead_never_answers_its_own_permission_card() {
+        use crate::state::teams::model::SessionRef;
+        let (mut team, _, _) = review_team();
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().session =
+            Some(SessionRef { name: "claude/x/dev".into(), run_id: "r1".into(), conversation_id: "c".into(), ..Default::default() });
+        with_review_team(&team, || {
+            let error = as_lead(|| {
+                call("answer", json!({"member":"lead","question_id":"q1","expected_question_hash":"h1","answers":[]}))
+            })
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("owner"), "{error}");
+            // A member's card is still the lead's to answer.
+            super::super::dispatcher::set_fake_hgs(Some(Box::new(|_, args: &[&str], _input: Option<&Value>| {
+                Ok(match args.first().copied() {
+                    Some("inspect") => super::super::dispatcher::fake_output(0, r#"{"pending_questions":[]}"#, ""),
+                    _ => super::super::dispatcher::fake_output(0, r#"{"status":"answered"}"#, ""),
+                })
+            })));
+            let error = as_lead(|| {
+                call("answer", json!({"member":"dev","question_id":"q1","expected_question_hash":"h1","answers":[]}))
+            })
+            .unwrap_err()
+            .to_string();
+            super::super::dispatcher::set_fake_hgs(None);
+            assert!(error.contains("no longer pending"), "{error}");
+        });
+    }
+
     /// U31: the lead's inbox names a report made ahead of its draft phase as
     /// "worked ahead of phase N", through `hgs team inbox`.
     #[test]
@@ -3855,6 +3910,46 @@ mod tests {
         assert_eq!(dev.directory, "/work/other-checkout");
         assert_eq!(dev.folder, MemberFolder::Shared);
         assert_eq!(dev.session.as_ref().unwrap().name, "codex/x/other");
+    }
+
+    /// #432 N9: the swap and the owner's word together, through the command
+    /// entry: the lead swaps on the exact sentence naming the member by its
+    /// role, and that sentence pays for one swap only.
+    #[test]
+    fn a_lead_swaps_a_member_on_the_owners_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = crate::state::now();
+        let said = "замени бэкендера на кими";
+        owner_word_events(dir.path(), &[(now - 60.0, said)]);
+        crate::state::with_test_state_root(dir.path(), || {
+            set_test_caller_identities(Some((Some("c1".into()), None, None)));
+            let mut store = Store::open(true).unwrap();
+            let team = full_team();
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            let swap = |request: &str, member: &str, agent: &str| {
+                run(
+                    "swap-member",
+                    &json!({"request_id":request,"team":id,"member":member,"agent":agent,"owner_word":{"text":said}}),
+                    false,
+                )
+            };
+            // Without the owner's sentence the lead does not swap.
+            let error = run(
+                "swap-member",
+                &json!({"request_id":"22222222-2222-4222-8222-222222222222","team":id,"member":"m1","agent":"kimi"}),
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("your word"), "{error}");
+            let swapped = swap("33333333-3333-4333-8333-333333333333", "m1", "kimi").unwrap();
+            assert_eq!((swapped["status"].as_str(), swapped["agent"].as_str()), (Some("swapped"), Some("kimi")));
+            // The same sentence pays for one swap only.
+            let error = swap("44444444-4444-4444-8444-444444444444", "m2", "kimi").unwrap_err().to_string();
+            assert!(error.contains("already used"), "{error}");
+            assert!(Store::open(false).unwrap().load(&id).unwrap().unwrap().member("m2").unwrap().agent == "dsh");
+        });
     }
 
     #[test]
@@ -4253,6 +4348,7 @@ mod tests {
             (now - super::super::owner_word::FRESH_SECONDS - 60.0, stale),
             (now - 60.0, relayed),
             (now - 60.0, "Please remove the backend from the roster"),
+            (now - 60.0, "Please remove the tester from the roster"),
         ]);
         crate::state::with_test_state_root(dir.path(), || {
             set_test_caller_identities(Some((Some("c1".into()), None, None)));
@@ -4306,27 +4402,127 @@ mod tests {
             let error = add("66666666-6666-4666-8666-666666666666", "backend5", sentence).unwrap_err().to_string();
             assert!(error.contains("already used"), "{error}");
             assert!(Store::open(false).unwrap().load(&id).unwrap().unwrap().member("backend5").is_none());
-            // Remove still needs the member's id in the sentence.
+            // N15: a removal names the member by id or by its role: a sentence
+            // naming another role is refused, the role's own one is the word.
             let error = run(
                 "remove-member",
                 &json!({"request_id":"77777777-7777-4777-8777-777777777777","team":id,"member":"backend4",
-                    "owner_word":{"text":"Please remove the backend from the roster"}}),
+                    "owner_word":{"text":"Please remove the tester from the roster"}}),
                 false,
             )
             .unwrap_err()
             .to_string();
             assert!(error.contains("your word"), "{error}");
+            let removed = run(
+                "remove-member",
+                &json!({"request_id":"88888888-8888-4888-8888-888888888888","team":id,"member":"backend4",
+                    "owner_word":{"text":"Please remove the backend from the roster"}}),
+                false,
+            )
+            .unwrap();
+            assert_eq!((removed["status"].as_str(), removed["member"].as_str()), (Some("removed"), Some("backend4")));
         });
     }
 
+    /// N3/C6: the owner paths that create a team or change the catalog have a
+    /// test through the command entry: an agent session is refused, and you
+    /// (outside every session, saying `"by":"human"`) may still act.
+    #[test]
+    fn the_create_and_catalog_owner_paths_refuse_an_agent_session() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let _ = Store::open(true).unwrap();
+            let request = "11111111-1111-4111-8111-111111111111";
+            let input = json!({"request_id":request,"name":"T","folder":dir.path().join("project").display().to_string(),
+                "lead":{"id":"lead","agent":"claude"},"by":"human"});
+            set_test_caller_identities(Some((Some("conversation".into()), None, None)));
+            let error = format!("{:#}", run("create", &input, false).unwrap_err());
+            assert!(error.contains("An agent session cannot act as the owner"), "{error}");
+            // The catalog's owner path takes the same rule, for every caller.
+            let error = super::catalog_owner(&json!({"by":"human"})).map_err(|error| error.to_string()).unwrap_err();
+            assert!(error.contains("An agent session cannot act as the owner"), "{error}");
+            // An hgs session and a run marker are as much an agent as a dsh one.
+            for identities in [(None, Some("hgs/x/dev".to_owned()), None), (None, None, Some("run-1".to_owned()))] {
+                set_test_caller_identities(Some(identities));
+                let error = format!("{:#}", run("create", &input, false).unwrap_err());
+                assert!(error.contains("An agent session cannot act as the owner"), "{error}");
+            }
+            // Without "by":"human" the catalog command is not the owner's at all.
+            set_test_caller_identities(Some((None, None, None)));
+            assert!(!super::catalog_owner(&json!({})).unwrap());
+            // Outside every session you create the team and reach the owner path.
+            assert!(super::catalog_owner(&json!({"by":"human"})).unwrap());
+            let created = run("create", &input, false).unwrap();
+            assert_eq!(created["team"].as_str().map(str::len), Some(36), "{created}");
+        });
+    }
+
+    /// N7: "add two backends" authorizes two adds, and the full cap grows by
+    /// one for each of them; a third add on the same sentence is refused.
+    #[test]
+    fn a_count_word_authorizes_that_many_adds_and_the_cap_grows_by_one_each() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = crate::state::now();
+        let sentence = "add two deepseek backends to the roster";
+        owner_word_events(dir.path(), &[(now - 60.0, sentence)]);
+        crate::state::with_test_state_root(dir.path(), || {
+            set_test_caller_identities(Some((Some("c1".into()), None, None)));
+            let mut store = Store::open(true).unwrap();
+            let team = full_team();
+            let id = team.id.clone();
+            let cap = team.settings.max_members;
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            let add = |request: &str, member: &str| {
+                run(
+                    "add-member",
+                    &json!({"request_id":request,"team":id,"member":{"id":member,"role":"Backend","agent":"dsh"},
+                        "owner_word":{"text":sentence}}),
+                    false,
+                )
+            };
+            let members = || Store::open(false).unwrap().load(&id).unwrap().unwrap().settings.max_members;
+            assert_eq!(add("22222222-2222-4222-8222-222222222222", "backend4").unwrap()["status"], "added");
+            assert_eq!(members(), cap + 1);
+            assert_eq!(add("33333333-3333-4333-8333-333333333333", "backend5").unwrap()["status"], "added");
+            assert_eq!(members(), cap + 2);
+            let error = add("44444444-4444-4444-8444-444444444444", "backend6").unwrap_err().to_string();
+            assert!(error.contains("already used"), "{error}");
+        });
+    }
+
+    /// #432 N8: a sub-team's create input cannot set an owner-only setting,
+    /// through the command entry itself - the stored child keeps its defaults.
     #[test]
     fn a_subteam_create_input_cannot_set_owner_settings() {
-        let mut settings = json!({"auto_accept":true,"max_members":99,"tree_depth":8,"subteam_approval":"owner","report_timeout_seconds":90});
-        super::strip_subteam_owner_settings(&mut settings);
-        for key in ["auto_accept", "max_members", "tree_depth", "subteam_approval"] {
-            assert!(settings.get(key).is_none(), "{key} survived");
-        }
-        assert_eq!(settings["report_timeout_seconds"], 90);
+        use crate::state::teams::model::Settings;
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open(true).unwrap();
+            let parent = running_team();
+            let parent_id = parent.id.clone();
+            let subteam_approval = parent.settings.subteam_approval;
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), parent, vec![]).unwrap();
+            let created = run(
+                "create",
+                &json!({"request_id":"22222222-2222-4222-8222-222222222222","name":"Sub","by":"human",
+                    "parent":{"team":parent_id,"task":1},
+                    "settings":{"auto_accept":true,"max_members":99,"tree_depth":8,"subteam_approval":"owner",
+                        "report_timeout_seconds":90}}),
+                false,
+            )
+            .unwrap();
+            let child = Store::open(false).unwrap().load(created["team"].as_str().unwrap()).unwrap().unwrap();
+            let defaults = Settings::default();
+            assert_eq!(child.settings.max_members, defaults.max_members);
+            assert_eq!(child.settings.tree_depth, defaults.tree_depth);
+            assert!(!child.settings.auto_accept);
+            // The parent's approval rule is inherited and the plan stays review.
+            assert_eq!(child.settings.subteam_approval, subteam_approval);
+            assert_eq!(child.settings.approval, Approval::Review);
+            assert_eq!(child.settings.phase_approval, Some(Approval::Review));
+            // The rest of the input is the owner's still.
+            assert_eq!(child.settings.report_timeout_seconds, 90);
+        });
     }
 
     #[test]

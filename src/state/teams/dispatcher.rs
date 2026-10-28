@@ -1610,7 +1610,9 @@ pub(crate) fn hgs(host: &str, args: &[&str], input: Option<&Value>, timeout: Dur
         command.arg(format!("@{host}"));
     }
     command.args(args);
-    for name in ["TMUX", "HGS_HOST_PANE", "HGS_SESSION", "HGS_RUN_ID"] {
+    // N10: Zerus' own children are no session's own - the worker, its runner
+    // and the hgs calls it makes must carry no agent marker at all.
+    for name in ["TMUX", "HGS_HOST_PANE", "HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID"] {
         command.env_remove(name);
     }
     match input {
@@ -4030,7 +4032,9 @@ fn spawn_runner(folder: &Path, request: &Value) -> anyhow::Result<()> {
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    for name in ["TMUX", "HGS_HOST_PANE", "HGS_SESSION", "HGS_RUN_ID"] {
+    // N10: Zerus' own children are no session's own - the worker, its runner
+    // and the hgs calls it makes must carry no agent marker at all.
+    for name in ["TMUX", "HGS_HOST_PANE", "HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID"] {
         command.env_remove(name);
     }
     let mut child = crate::platform::spawn_detached(&mut command)?;
@@ -4059,17 +4063,39 @@ fn settle_stale_runs(folder: &Path, team: &Team) {
     }
 }
 
+/// N10: the detached runner is the worker's own child. An agent marker (a dsh
+/// conversation, an `HGS_SESSION` or an `HGS_RUN_ID`) or a caller record means
+/// a session started this CLI itself, and the claim the worker writes before
+/// the spawn must name this exact request. Without both, an unsandboxed member
+/// could cd into another member's folder and pipe a request in, then commit as
+/// that member and record a forged run on its attempt.
+fn ensure_the_workers_run(folder: &Path, request_id: &str, caller: bool, markers: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !caller && !markers,
+        "hgs team worker --run starts only from the team worker, not from an agent session"
+    );
+    let claimed = super::outbox::running(folder, request_id)
+        .is_some_and(|marker| marker["request_id"].as_str() == Some(request_id));
+    anyhow::ensure!(claimed, "This run has no claim: the team worker starts it, never a session");
+    Ok(())
+}
+
 /// C1: the detached runner for one claimed request, read from its standard
 /// input: execute it, record it and leave the outcome where the member polls.
 pub(crate) fn worker_run() -> Result<i32> {
     use std::io::Read;
     let folder = std::env::current_dir().map_err(|error| error.to_string())?;
+    let caller = super::super::session_graph::caller_record().is_some();
+    let markers = ["DSH_SESSION_ID", "HGS_SESSION", "HGS_RUN_ID"].iter().any(|name| nonempty_env(name).is_some());
     let mut bytes = Vec::new();
     std::io::stdin().take(super::outbox::REQUEST_BYTES + 1).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
     let request: Value = match serde_json::from_slice(crate::state::without_bom(&bytes)) {
         Ok(value) => value,
         Err(error) => return Err(format!("The run request is not JSON: {error}")),
     };
+    // N10: checked before the store is opened, so a piped request leaves nothing.
+    ensure_the_workers_run(&folder, request["request_id"].as_str().unwrap_or_default(), caller, markers)
+        .map_err(|error| format!("{error:#}"))?;
     let mut store = match Store::open(true) {
         Ok(store) => store,
         Err(error) => {
@@ -4421,7 +4447,9 @@ fn ensure_worker_now() -> anyhow::Result<()> {
     }
     let mut command = Command::new(std::env::current_exe()?);
     command.args(["team", "worker"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    for name in ["TMUX", "HGS_HOST_PANE", "HGS_SESSION", "HGS_RUN_ID"] {
+    // N10: Zerus' own children are no session's own - the worker, its runner
+    // and the hgs calls it makes must carry no agent marker at all.
+    for name in ["TMUX", "HGS_HOST_PANE", "HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID"] {
         command.env_remove(name);
     }
     crate::platform::spawn_detached(&mut command)?;
@@ -5756,6 +5784,31 @@ mod tests {
         assert_eq!(result["status"], "refused");
         assert!(result["error"].as_str().unwrap_or_default().contains("stopped without a result"), "{result}");
         assert!(super::super::outbox::running(&folder, run_id).is_none());
+    }
+
+    /// N10: the runner takes only the worker's own claim, from a process with
+    /// no agent marker. Before this gate an unsandboxed member could cd into a
+    /// colleague's folder, pipe a request in and have it run and recorded there.
+    #[test]
+    fn the_runner_takes_only_the_workers_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path();
+        let id = "11111111-1111-4111-8111-111111111111";
+        // No claim at all: a session that piped the request in.
+        let error = ensure_the_workers_run(folder, id, false, false).unwrap_err().to_string();
+        assert!(error.contains("no claim"), "{error}");
+        // A claim naming another request is not this one's.
+        super::super::outbox::write_running(folder, "22222222-2222-4222-8222-222222222222", &json!({"request_id":"22222222-2222-4222-8222-222222222222"})).unwrap();
+        let error = ensure_the_workers_run(folder, id, false, false).unwrap_err().to_string();
+        assert!(error.contains("no claim"), "{error}");
+        // The worker's claim for this request passes...
+        super::super::outbox::write_running(folder, id, &json!({"request_id":id,"started":1.0})).unwrap();
+        ensure_the_workers_run(folder, id, false, false).unwrap();
+        // ...but never from an agent session, whatever the claim says.
+        let error = ensure_the_workers_run(folder, id, true, false).unwrap_err().to_string();
+        assert!(error.contains("not from an agent session"), "{error}");
+        let error = ensure_the_workers_run(folder, id, false, true).unwrap_err().to_string();
+        assert!(error.contains("not from an agent session"), "{error}");
     }
 
     #[test]

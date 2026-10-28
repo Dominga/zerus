@@ -3394,6 +3394,8 @@ elif a[:2]==['session-upload-block','set']:
     QVERIFY(calls.open(QIODevice::ReadOnly));
     const auto sent = QJsonDocument::fromJson(calls.readAll().trimmed()).object();
     QCOMPARE(sent.value("confirm").toBool(), true);
+    // C6: the set names the owner, or the CLI refuses it as an agent session.
+    QCOMPARE(sent.value("by").toString(), QStringLiteral("human"));
     const auto id = sent.value("request_id").toString();
     QVERIFY2(!QUuid(id).isNull() && QUuid(id).toString(QUuid::WithoutBraces) == id, qPrintable(id));
     // The same page carries the DeepSeek upload block from #481, on by default.
@@ -3410,6 +3412,7 @@ elif a[:2]==['session-upload-block','set']:
         QVERIFY(wrote.open(QIODevice::ReadOnly));
         const auto sent = QJsonDocument::fromJson(wrote.readAll().trimmed()).object();
         QCOMPARE(sent.value("block").toBool(true), false);
+        QCOMPARE(sent.value("by").toString(), QStringLiteral("human"));
         const auto id = sent.value("request_id").toString();
         QVERIFY2(!QUuid(id).isNull() && QUuid(id).toString(QUuid::WithoutBraces) == id, qPrintable(id));
     }

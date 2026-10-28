@@ -47,7 +47,13 @@ corpus is `tests/fixtures/command-guard.json`.
 Zerus asks the owner before an agent starts subagents. The global setting is on
 by default for every computer and account, including existing installs, and is
 kept by hgs: `hgs subagents-confirm get --json` and a bounded set request
-`{"request_id":"UUID","confirm":false} | hgs subagents-confirm set --json`.
+`{"request_id":"UUID","confirm":false,"by":"human"} | hgs subagents-confirm set --json`.
+Only the owner changes it: a set from an agent session (a caller record, a dsh
+conversation, an `HGS_SESSION` or an `HGS_RUN_ID`) is refused, so a member whose
+own subagent call was denied cannot turn the ask off for every later session.
+The same gate guards `hgs session-upload-block set --json`
+(`{"request_id":"UUID","block":false,"by":"human"}`), which turns DeepSeek's own
+session-log upload off for every later dsh host.
 When it is on, Claude's `PreToolUse` hook answers an `Agent`/`Task` call with
 `permissionDecision: "ask"` and a reason naming the subagent type, its model
 (the tool input, else the definition in `.claude/agents/<type>.md`, else

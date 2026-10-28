@@ -173,7 +173,7 @@ public:
         subagents->setChecked(current.value("confirm").toBool(true));sessions->addWidget(subagents);
         auto *subagentsHint=new QLabel(tr("Zerus asks you before a session starts subagents, with how many, which type and model."));subagentsHint->setWordWrap(true);sessions->addWidget(subagentsHint);
         connect(subagents,&QCheckBox::toggled,this,[executable](bool on){
-            const QJsonObject input{{"request_id",QUuid::createUuid().toString(QUuid::WithoutBraces)},{"confirm",on}};
+            const QJsonObject input{{"request_id",QUuid::createUuid().toString(QUuid::WithoutBraces)},{"confirm",on},{"by",QStringLiteral("human")}};
             subagentSetting(executable,{QStringLiteral("subagents-confirm"),QStringLiteral("set"),QStringLiteral("--json")},
                 QJsonDocument(input).toJson(QJsonDocument::Compact));
         });
@@ -183,7 +183,7 @@ public:
         upload->setChecked(uploadCurrent.value("block").toBool(true));sessions->addWidget(upload);
         auto *uploadHint=new QLabel(tr("On by default. Zerus starts and resumes every DeepSeek session with the official session-log upload off, without editing your dsh configuration. Off restores dsh's own behaviour."));uploadHint->setWordWrap(true);sessions->addWidget(uploadHint);
         connect(upload,&QCheckBox::toggled,this,[executable](bool on){
-            const QJsonObject input{{"request_id",QUuid::createUuid().toString(QUuid::WithoutBraces)},{"block",on}};
+            const QJsonObject input{{"request_id",QUuid::createUuid().toString(QUuid::WithoutBraces)},{"block",on},{"by",QStringLiteral("human")}};
             subagentSetting(executable,{QStringLiteral("session-upload-block"),QStringLiteral("set"),QStringLiteral("--json")},
                 QJsonDocument(input).toJson(QJsonDocument::Compact));
         });

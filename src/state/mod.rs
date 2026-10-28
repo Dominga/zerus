@@ -285,6 +285,22 @@ pub(super) fn nonempty_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
+/// C6: a global setting only you change, from a process outside every agent
+/// session. It is the gate the team owner paths use: no caller record, no dsh
+/// conversation, no hgs session or run marker, and the request says it is you
+/// (`"by":"human"`). An agent that runs `hgs subagents-confirm set` or
+/// `hgs session-upload-block set` therefore changes nothing, whatever it pipes.
+pub(crate) fn owner_request(input: &Value, what: &str) -> Result<()> {
+    let (dsh, session, run) = teams::commands::caller_identities();
+    if session_graph::caller_record().is_some() || dsh.is_some() || session.is_some() || run.is_some() {
+        return Err(format!("An agent session cannot change {what}"));
+    }
+    if string(input, "by") != "human" {
+        return Err("Add \"by\":\"human\" to act as yourself".into());
+    }
+    Ok(())
+}
+
 pub(super) fn home() -> PathBuf {
     crate::platform::home_dir().unwrap_or_else(|| "/".into())
 }

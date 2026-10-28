@@ -277,18 +277,23 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     }
     match args[0].as_str() {
         "get" => println!("{}", json!({"confirm":confirm()})),
-        "set" => {
-            let input: Value = stdin_json()?;
-            if !super::teams::store::canonical_uuid(string(&input, "request_id")) {
-                return Err("A canonical request_id is required".into());
-            }
-            let value = input["confirm"].as_bool().ok_or("confirm is true or false")?;
-            write(value)?;
-            println!("{}", json!({"confirm":value}));
-        }
+        "set" => println!("{}", set(&stdin_json()?)?),
         other => return Err(format!("Unknown subagents-confirm operation {other}")),
     }
     Ok(0)
+}
+
+/// C6: the setting changes only on your own command, with `"by":"human"`, from
+/// a process outside every agent session (the gate the team owner paths use).
+/// The file lives in Zerus state, never in a member's folder.
+fn set(input: &Value) -> Result<Value> {
+    owner_request(input, "the subagent confirmation setting")?;
+    if !super::teams::store::canonical_uuid(string(input, "request_id")) {
+        return Err("A canonical request_id is required".into());
+    }
+    let value = input["confirm"].as_bool().ok_or("confirm is true or false")?;
+    write(value)?;
+    Ok(json!({"confirm":value}))
 }
 
 #[cfg(test)]
@@ -434,6 +439,38 @@ mod tests {
             let mut child = agent_call("toolu_6", "Explore", "", "x");
             child["agent_id"] = json!("child-1");
             assert!(pre_tool(&mut owner, &child, "conversation").is_none());
+        });
+    }
+
+    /// C6: only the owner changes the setting. An agent session - proven by a
+    /// dsh conversation, an hgs session or a run marker - is refused, so a
+    /// member whose own subagent call was denied cannot turn the ask off for
+    /// every later session; the stored value never moves.
+    #[test]
+    fn only_the_owner_changes_the_subagent_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let request = "11111111-1111-4111-8111-111111111111";
+            for identities in [
+                (Some("conversation".to_owned()), None, None),
+                (None, Some("hgs/x/dev".to_owned()), None),
+                (None, None, Some("run-1".to_owned())),
+                (Some("conversation".to_owned()), Some("hgs/x/dev".to_owned()), Some("run-1".to_owned())),
+            ] {
+                crate::state::teams::commands::set_test_caller_identities(Some(identities));
+                let error = set(&json!({"request_id":request,"confirm":false,"by":"human"})).unwrap_err();
+                assert!(error.contains("An agent session cannot change"), "{error}");
+                assert!(confirm(), "a refused change wrote nothing");
+            }
+            // Outside every session the owner still says who it is...
+            crate::state::teams::commands::set_test_caller_identities(Some((None, None, None)));
+            let error = set(&json!({"request_id":request,"confirm":false})).unwrap_err();
+            assert!(error.contains("by"), "{error}");
+            // ...and changes it with "by":"human".
+            assert_eq!(set(&json!({"request_id":request,"confirm":false,"by":"human"})).unwrap(), json!({"confirm":false}));
+            assert!(!confirm());
+            assert_eq!(set(&json!({"request_id":request,"confirm":true,"by":"human"})).unwrap(), json!({"confirm":true}));
+            assert!(confirm());
         });
     }
 

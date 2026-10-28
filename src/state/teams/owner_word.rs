@@ -24,20 +24,39 @@ pub(crate) const ROSTER_PHRASES: &[&str] = &[
     "roster", "team change", "member", "members", "участник", "состав",
 ];
 
+/// N15: the verbs an owner may say to remove a member, English and Russian.
+/// An English verb is a whole word; a Russian one matches at a word start, so
+/// "убери" covers "уберите" and "замени" covers "замените".
+pub(crate) const REMOVE_VERBS: &[&str] = &[
+    "remove", "removed", "removing", "delete", "deleted", "drop", "убери", "уберите", "убрать", "удали", "удалите", "удалить",
+];
+
+/// N15: the verbs an owner may say to swap a member, English and Russian; the
+/// U26 example "put frontend on Opus" says "put".
+pub(crate) const SWAP_VERBS: &[&str] = &[
+    "swap", "swapped", "replace", "replaced", "switch", "put", "change", "move", "замени", "замените", "заменить",
+    "смени", "смените", "поменяй", "поменяйте", "переведи", "перевести", "переключи",
+];
+
+/// N15: what the owner says when raising the member cap, English and Russian.
+pub(crate) const MAX_VERBS: &[&str] = &["max", "maximum", "limit", "cap", "лимит", "максимум", "макс", "предел"];
+
 /// U32: what the owner's sentence must contain for one roster change: one of
-/// `phrases` (for an add, the verb "add"/"добав" instead), and every token in
-/// `all` (the operation and the member or cap it names).
+/// `phrases` (for an add, the verb "add"/"добав" instead), every token in
+/// `all` (a number), one of `verbs`, and one of `names` (the member).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct WordRule {
     pub phrases: &'static [&'static str],
     pub all: Vec<String>,
     pub add: bool,
+    pub verbs: &'static [&'static str],
+    pub names: Vec<String>,
 }
 
 impl WordRule {
     /// Whether this change needs the owner's word at all.
     pub(crate) fn needed(&self) -> bool {
-        self.add || !self.all.is_empty()
+        self.add || !self.all.is_empty() || !self.verbs.is_empty() || !self.names.is_empty()
     }
 }
 
@@ -66,43 +85,75 @@ const AGENT_ALIASES: &[(&[&str], &[&str])] = &[
     (&["kimi"], &["kimi", "кими"]),
 ];
 
-/// U32: how many members the owner's sentence asks to add; a number it does not
-/// say is one. Bounded to the roster's own limit.
+/// U32/N7: how many members the owner's sentence asks to add. The number is the
+/// one said next to the add verb ("add two backends", "добавь двух бэкендеров"),
+/// never one elsewhere in the sentence ("добавь бэкенда для фазы 3" is one);
+/// a sentence that says no number is one. Bounded to the roster's own limit.
 pub(crate) fn add_count(text: &str) -> usize {
     let lowered = text.to_lowercase();
-    let mut found = None;
-    for token in lowered.split(|ch: char| !ch.is_alphanumeric() && ch != '_') {
-        let number = if token.chars().all(|ch| ch.is_ascii_digit()) {
-            token.parse::<usize>().ok()
+    let words: Vec<&str> = lowered.split(|ch: char| !ch.is_alphanumeric() && ch != '_').filter(|word| !word.is_empty()).collect();
+    let number = |word: &str| -> Option<usize> {
+        if word.chars().all(|ch| ch.is_ascii_digit()) {
+            word.parse::<usize>().ok()
         } else {
-            NUMBER_WORDS.iter().find(|(word, _)| *word == token).map(|(_, number)| *number)
-        };
-        if number.is_some() {
-            found = number;
-            break;
+            NUMBER_WORDS.iter().find(|(written, _)| *written == word).map(|(_, number)| *number)
+        }
+    };
+    for (index, word) in words.iter().enumerate() {
+        if !(has_token(word, "add") || word.starts_with("добав")) {
+            continue;
+        }
+        // The count sits right after the verb ("add two", "добавь ещё двух") or
+        // right before it ("two more backends to add").
+        for offset in [1usize, 2] {
+            if let Some(found) = words.get(index + offset).and_then(|word| number(word)) {
+                return found.clamp(1, 32);
+            }
+        }
+        for offset in [1usize, 2] {
+            if let Some(found) = index.checked_sub(offset).and_then(|at| words.get(at)).and_then(|word| number(word)) {
+                return found.clamp(1, 32);
+            }
         }
     }
-    found.unwrap_or(1).clamp(1, 32)
+    1
 }
 
-/// U32: whether the owner's sentence names the member being added by its role
-/// or its agent/model, as the owner says them (never by the generated id).
+/// U32/N8: whether the owner's sentence names the member being added, by its
+/// role or its agent/model, as the owner says them (never by the generated id).
+/// A sentence that names a role names *this* member's role: "a DeepSeek
+/// frontender" is not a Backend. An agent or model word alone is enough only
+/// when no other role is named.
 pub(crate) fn names_member(text: &str, role: &str, agent: &str, model: &str) -> bool {
     let lowered = text.to_lowercase();
-    let mut aliases: Vec<&'static str> = Vec::new();
-    aliases.extend(role_aliases(role));
-    aliases.extend(agent_aliases(agent));
-    aliases.extend(model_aliases(model));
-    aliases.into_iter().any(|alias| alias_in(&lowered, alias))
+    let named: Vec<usize> = ROLE_ALIASES
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, aliases))| aliases.iter().any(|alias| alias_in(&lowered, alias)))
+        .map(|(index, _)| index)
+        .collect();
+    let mine = role_group(role);
+    if !named.is_empty() && !mine.is_some_and(|mine| named.contains(&mine)) {
+        return false;
+    }
+    let role_named = mine.is_some_and(|mine| named.contains(&mine));
+    let agent_named = agent_aliases(agent)
+        .iter()
+        .chain(model_aliases(model).iter())
+        .any(|alias| alias_in(&lowered, alias));
+    role_named || agent_named
 }
 
-fn role_aliases(role: &str) -> &'static [&'static str] {
+/// Which role group a role name belongs to, if it is one the owner knows.
+fn role_group(role: &str) -> Option<usize> {
     let role = role.to_lowercase();
-    ROLE_ALIASES
-        .iter()
-        .find(|(keys, _)| keys.iter().any(|key| role.contains(key)))
-        .map(|(_, aliases)| *aliases)
-        .unwrap_or(&[])
+    ROLE_ALIASES.iter().position(|(keys, _)| keys.iter().any(|key| role.contains(key)))
+}
+
+/// U32/N15: the aliases the owner may say for a member's role, so a roster
+/// change can name the member by role instead of its generated id.
+pub(crate) fn role_aliases(role: &str) -> &'static [&'static str] {
+    role_group(role).map(|index| ROLE_ALIASES[index].1).unwrap_or(&[])
 }
 
 fn agent_aliases(agent: &str) -> &'static [&'static str] {
@@ -131,10 +182,33 @@ fn model_aliases(model: &str) -> &'static [&'static str] {
     }
 }
 
-/// U32: an English alias is a whole token ("qa" is not in "squad"); a Russian
-/// one is matched inside its inflections ("бэкенд" in "бэкендера").
+/// N8: an alias matches only at a word start, never inside another word
+/// ("кими" is not "такими"); what follows is its inflection or plural
+/// ("бэкендера", "backends").
 fn alias_in(lowered: &str, alias: &str) -> bool {
-    if alias.is_ascii() { has_token(lowered, alias) } else { lowered.contains(alias) }
+    if alias.is_empty() {
+        return true;
+    }
+    let mut from = 0;
+    while let Some(at) = lowered[from..].find(alias) {
+        let start = from + at;
+        let before = lowered[..start].chars().next_back();
+        if before.is_none_or(|ch| !ch.is_alphanumeric() && ch != '-' && ch != '_') {
+            return true;
+        }
+        from = start + alias.len();
+    }
+    false
+}
+
+/// N15: a verb is said whole in English and at a word start in Russian, so
+/// "remove" is not "removed" but "убери" is "уберите".
+fn verb_in(lowered: &str, verb: &str) -> bool {
+    if verb.is_ascii() {
+        has_token(lowered, verb)
+    } else {
+        alias_in(lowered, verb)
+    }
 }
 
 /// U26/N10: a whole token, not a substring ("add" does not match "address").
@@ -158,8 +232,8 @@ fn has_token(haystack: &str, token: &str) -> bool {
 }
 
 /// Verifies the owner's word for a roster change, requiring the sentence to
-/// meet `rule`: the roster phrase (or, for an add, the add verb) and every
-/// value it names.
+/// meet `rule`: the roster phrase (or, for an add, the add verb), the
+/// operation's own verb and the member it names.
 pub(crate) fn verify_roster(team: &Team, input: &Value, rule: &WordRule, now: f64) -> anyhow::Result<OwnerWord> {
     let text = input["text"]
         .as_str()
@@ -179,7 +253,7 @@ pub(crate) fn verify_roster_in(db: &Connection, name: &str, conversation: &str, 
 }
 
 fn rule_scan(rule: &WordRule, exact: bool) -> ScanOptions<'_> {
-    ScanOptions { phrases: rule.phrases, needed: &rule.all, exact, add: rule.add, accept: None, after: 0.0 }
+    ScanOptions { phrases: rule.phrases, needed: &rule.all, exact, add: rule.add, verbs: rule.verbs, names: &rule.names, accept: None, after: 0.0 }
 }
 
 /// Checks the lead's `owner_word` request against the lead session's events
@@ -199,7 +273,7 @@ pub(crate) fn verify(team: &Team, input: &Value, now: f64) -> anyhow::Result<Own
 /// The verification against one events database, so it is tested with a
 /// fixture instead of the live state.
 pub(crate) fn verify_in(db: &Connection, name: &str, conversation: &str, text: &str, now: f64) -> anyhow::Result<OwnerWord> {
-    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: KEY_PHRASES, needed: &[], exact: false, add: false, accept: None, after: 0.0 })
+    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: KEY_PHRASES, needed: &[], exact: false, add: false, verbs: &[], names: &[], accept: None, after: 0.0 })
 }
 
 /// U29: the owner asks to add a task to a running phase, naming it by number
@@ -268,7 +342,7 @@ pub(crate) fn verify_phase_in(
         PhaseWord::Request => asks_to_add(lowered, phase),
         PhaseWord::Confirm => confirms(lowered, phase),
     };
-    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: &[], needed: &[], exact: false, add: false, accept: Some(&accept), after })
+    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: &[], needed: &[], exact: false, add: false, verbs: &[], names: &[], accept: Some(&accept), after })
         .with_context(|| match kind {
             PhaseWord::Request => format!("The owner has not asked to add a task to phase {phase} (name the phase or say the current phase)"),
             PhaseWord::Confirm => format!("The owner has not confirmed the addition to phase {phase} after the warning"),
@@ -281,6 +355,10 @@ struct ScanOptions<'a> {
     exact: bool,
     /// U32: an add request, which says "add"/"добав" instead of a roster phrase.
     add: bool,
+    /// N15: one of these verbs must be said (English whole, Russian at a start).
+    verbs: &'a [&'a str],
+    /// N15: one of these must name the member (its id or a role alias).
+    names: &'a [String],
     /// U29: a check of the lowered sentence instead of the phrases.
     accept: Option<&'a dyn Fn(&str) -> bool>,
     /// U29: the sentence must be newer than this time.
@@ -340,7 +418,18 @@ fn verify_scan(
             // a whole token, so "address" is not an add.
             has_token(&lowered, "add") || lowered.contains("добав")
         } else {
-            options.phrases.iter().any(|phrase| lowered.contains(phrase))
+            // N15: the operation's verb in either language, one name of the
+            // member the change is about, and - when the rule has no verb of
+            // its own - the roster phrase. A verb alone is a roster change, as
+            // "add"/"добав" alone is for an add.
+            let phrase = !options.verbs.is_empty() || options.phrases.iter().any(|phrase| lowered.contains(phrase));
+            let verb = options.verbs.is_empty() || options.verbs.iter().any(|verb| verb_in(&lowered, verb));
+            let named = options.names.is_empty()
+                || options.names.iter().any(|name| {
+                    let name = name.to_lowercase();
+                    if name.is_ascii() { has_token(&lowered, &name) } else { alias_in(&lowered, &name) }
+                });
+            phrase && verb && named
         };
         if !said {
             continue;
@@ -431,11 +520,24 @@ mod tests {
     }
 
     fn roster_rule(all: &[&str]) -> WordRule {
-        WordRule { phrases: ROSTER_PHRASES, all: all.iter().map(|value| (*value).to_owned()).collect(), add: false }
+        WordRule { phrases: ROSTER_PHRASES, all: all.iter().map(|value| (*value).to_owned()).collect(), add: false, ..Default::default() }
     }
 
     fn add_rule() -> WordRule {
-        WordRule { phrases: &[], all: Vec::new(), add: true }
+        WordRule { phrases: &[], all: Vec::new(), add: true, ..Default::default() }
+    }
+
+    /// N15: a removal or a swap the way the owner says it: the verb in either
+    /// language, and the member by its id or its role.
+    fn member_rule(verbs: &'static [&'static str], id: &str, role: &str) -> WordRule {
+        let mut names = vec![id.to_owned()];
+        names.extend(role_aliases(role).iter().map(|alias| (*alias).to_owned()));
+        WordRule { phrases: ROSTER_PHRASES, all: Vec::new(), add: false, verbs, names }
+    }
+
+    /// N15: the cap change, naming the number the owner said.
+    fn max_rule(cap: u64) -> WordRule {
+        WordRule { phrases: ROSTER_PHRASES, all: vec![cap.to_string()], add: false, verbs: MAX_VERBS, names: Vec::new() }
     }
 
     #[test]
@@ -502,6 +604,54 @@ mod tests {
         assert!(verify_roster_in(&db, "claude/x/lead", "c1", "Please add bob to the roster", &needed, 2000.0 + FRESH_SECONDS + 1.0).is_err());
     }
 
+    /// N15: the owner's own words for remove, swap and the cap authorize them,
+    /// in English and Russian, naming the member by its id or its role.
+    #[test]
+    fn a_roster_word_speaks_both_languages_and_names_the_member_by_role() {
+        let db = database();
+        for (at, said) in [
+            (2000.0, "убери dev из состава"),
+            (2010.0, "замени dev на кими"),
+            (2020.0, "put frontend on Opus"),
+            (2030.0, "raise the limit to 8"),
+            (2040.0, "уберите тестера из состава"),
+        ] {
+            add(&db, "claude/x/lead", "c1", prompt(at, said));
+        }
+        // "убери dev из состава": the Russian verb and the literal id.
+        verify_roster_in(&db, "claude/x/lead", "c1", "убери dev из состава", &member_rule(REMOVE_VERBS, "dev", "Backend"), 2100.0).unwrap();
+        // "уберите тестера из состава": the verb's plural and the role alias.
+        verify_roster_in(&db, "claude/x/lead", "c1", "уберите тестера из состава", &member_rule(REMOVE_VERBS, "qa", "Tester"), 2100.0).unwrap();
+        // "замени dev на кими" and the U26 "put frontend on Opus" are swaps.
+        verify_roster_in(&db, "claude/x/lead", "c1", "замени dev на кими", &member_rule(SWAP_VERBS, "dev", "Backend"), 2100.0).unwrap();
+        verify_roster_in(&db, "claude/x/lead", "c1", "put frontend on Opus", &member_rule(SWAP_VERBS, "frontend", "Frontend"), 2100.0).unwrap();
+        // "raise the limit to 8" raises the cap the owner named.
+        verify_roster_in(&db, "claude/x/lead", "c1", "raise the limit to 8", &max_rule(8), 2100.0).unwrap();
+        assert!(verify_roster_in(&db, "claude/x/lead", "c1", "raise the limit to 8", &max_rule(9), 2100.0).is_err());
+        // A removal that names another member or the wrong verb is not this change.
+        assert!(verify_roster_in(&db, "claude/x/lead", "c1", "убери dev из состава", &member_rule(REMOVE_VERBS, "qa", "Tester"), 2100.0).is_err());
+        assert!(verify_roster_in(&db, "claude/x/lead", "c1", "убери dev из состава", &member_rule(SWAP_VERBS, "dev", "Backend"), 2100.0).is_err());
+    }
+
+    /// N8: a sentence that names a role names this member's role; an agent or
+    /// model word cannot stand for another role. Aliases match at a word start,
+    /// so "кими" is not "такими", and English plurals count ("backends").
+    #[test]
+    fn an_add_word_names_this_members_role_and_no_fragment_of_another_word() {
+        // "add one more DeepSeek frontender" is not a Backend, whatever its agent.
+        assert!(!names_member("добавь ещё одного дипсик фронтендера", "Backend", "dsh", ""));
+        assert!(!names_member("add one more DeepSeek frontender", "Backend", "dsh", ""));
+        // "с такими же правами" contains "кими", but not at a word start.
+        assert!(!names_member("добавь ещё одного бэкендера с такими же правами", "Ops", "kimi", ""));
+        assert!(!names_member("add a member with the same rights", "Ops", "kimi", ""));
+        // A plural names the role.
+        assert!(names_member("add two backends", "Backend", "dsh", ""));
+        assert!(names_member("add three testers", "Tester", "kimi", ""));
+        assert!(names_member("add another opus please", "Backend", "claude", "Opus"));
+        // The role's own alias still matches its inflections.
+        assert!(names_member("добавь ещё одного бэкендера", "Backend", "dsh", ""));
+    }
+
     #[test]
     fn an_add_word_names_the_member_by_role_or_agent_and_its_count() {
         let sentence = "может еще одного дипсик бэкендера добавим?";
@@ -513,12 +663,17 @@ mod tests {
         // A sentence naming another role is not this member.
         assert!(!names_member("может еще одного фронтендера добавим?", "Backend", "dsh", ""));
         assert!(!names_member("add one more tester", "Backend", "dsh", ""));
-        // The count is one unless a number is said; "one more" is one.
+        // The count is the number next to the add verb, never one elsewhere in
+        // the sentence; "one more" is one.
         assert_eq!(add_count(sentence), 1);
         assert_eq!(add_count("add a backend"), 1);
         assert_eq!(add_count("add two backends"), 2);
         assert_eq!(add_count("add 3 testers"), 3);
         assert_eq!(add_count("добавь двух бэкендеров"), 2);
         assert_eq!(add_count("добавь 5 тестеров"), 5);
+        assert_eq!(add_count("добавь еще двух бэкендеров"), 2);
+        // "добавь бэкенда для фазы 3" is one add: 3 is the phase, not a count.
+        assert_eq!(add_count("добавь бэкенда для фазы 3"), 1);
+        assert_eq!(add_count("add a backend for phase 3"), 1);
     }
 }

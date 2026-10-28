@@ -656,6 +656,13 @@ pub(super) fn answer_lock(run_id: &str) -> Result<PathBuf> {
         .join(format!("{:x}.lock", Sha256::digest(run_id.as_bytes()))))
 }
 
+/// N20: the caller's own session never answers its own card: the caller record
+/// names it (a subagent or background job runs inside that session's process
+/// tree), or the session marker the caller inherited does.
+fn own_question(name: &str, record: Option<&Value>, session: Option<&str>) -> bool {
+    record.is_some_and(|record| string(record, "name") == name) || session.is_some_and(|session| session == name)
+}
+
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if args.len() != 2 || args[1] != "--json" {
         return Err("usage: hgs answer <session> --json (JSON from stdin)".into());
@@ -685,6 +692,13 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         .join("question_receipts")
         .join(format!("{request_id}.json"));
     let name = &args[0];
+    // N20: a session never answers its own question. A subagent or background
+    // job of the lead runs inside the lead's own session, so its caller record
+    // (or the session marker it inherited) names the very session it would
+    // answer - and that card, the "Subagents" one, is the owner's to decide.
+    if own_question(name, crate::state::session_graph::caller_record().as_ref(), super::nonempty_env("HGS_SESSION").as_deref()) {
+        return Err("A session cannot answer its own question; the owner or the desktop answers it".into());
+    }
     // Serialize all answers to this run, including requests arriving through
     // different hosts or carrying different UUIDs. Provider hooks never take
     // this lock, and must remain free to acknowledge completion.
@@ -922,6 +936,19 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// N20: the caller's own card is never answered by its own session, so a
+    /// subagent or background job of the lead cannot decide the lead's
+    /// "Subagents" card while the owner has it.
+    #[test]
+    fn a_session_never_answers_its_own_question() {
+        let record = json!({"name":"claude/x/lead","run_id":"r1"});
+        assert!(own_question("claude/x/lead", Some(&record), None));
+        assert!(!own_question("claude/x/dev", Some(&record), None));
+        assert!(!own_question("claude/x/lead", None, None), "the owner's CLI carries no session");
+        assert!(own_question("claude/x/lead", None, Some("claude/x/lead")));
+        assert!(!own_question("claude/x/lead", None, Some("claude/x/dev")));
+    }
 
     #[test]
     fn answer_text_matches_response_format() {

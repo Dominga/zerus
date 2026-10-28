@@ -288,3 +288,66 @@ fn an_unconfirmed_reply_reports_stderr_and_a_huge_help_is_refused() {
         .unwrap_err()
         .starts_with("Update the configured local hgs"));
 }
+
+#[test]
+fn a_forget_binding_through_the_fake_sends_one_request_and_reads_the_receipt() {
+    for (status, error, done) in [
+        ("completed", None, true),
+        ("failed", Some("busy"), false),
+        ("uncertain", None, false),
+    ] {
+        let mut reply = serde_json::json!({"exit": 0, "stdout": "echo_session_action", "receipt_status": status});
+        if let Some(error) = error {
+            reply["receipt_error"] = error.into();
+        }
+        let fake = Fake::new(&serde_json::json!({ "reply": reply }).to_string());
+        let t = target();
+        let a = Action::ForgetBinding;
+        let inv = invocation(&t, &a, "req-7").unwrap();
+        let outcome = classify(&t, &a, &inv, run(&fake.hgs, &inv));
+        assert_eq!(
+            matches!(outcome, Outcome::Done { .. }),
+            done,
+            "{status}: {outcome:?}"
+        );
+        let log = fake.log();
+        assert_eq!(log.len(), 1);
+        assert_eq!(
+            log[0]["argv"],
+            serde_json::json!(["session-action", "claude/sample-project/review", "--json"])
+        );
+        let stdin: Value = serde_json::from_str(log[0]["stdin"].as_str().unwrap()).unwrap();
+        assert_eq!(stdin["action"], "forget");
+        assert_eq!(stdin["request_id"], "req-7");
+    }
+}
+
+#[test]
+fn start_fresh_and_forget_run_their_hgs_arguments() {
+    for (action, argv) in [
+        (
+            Action::StartFresh,
+            serde_json::json!([
+                "resume",
+                "claude/sample-project/review",
+                "--fresh",
+                "--expected-run-id",
+                "run-1",
+                "-d"
+            ]),
+        ),
+        (
+            Action::Forget,
+            serde_json::json!(["kill", "claude/sample-project/review"]),
+        ),
+    ] {
+        let fake = Fake::new(r#"{"reply":{"exit":0}}"#);
+        let t = target();
+        let inv = invocation(&t, &action, "r").unwrap();
+        assert!(matches!(
+            classify(&t, &action, &inv, run(&fake.hgs, &inv)),
+            Outcome::Done { .. }
+        ));
+        assert_eq!(fake.log()[0]["argv"], argv);
+    }
+}

@@ -124,7 +124,10 @@ export type Action =
   | { kind: "rename"; new_name: string; archive_id: string | null }
   | { kind: "archive" }
   | { kind: "terminate" }
-  | { kind: "kill" };
+  | { kind: "kill" }
+  | { kind: "start_fresh" }
+  | { kind: "forget" }
+  | { kind: "forget_binding" };
 
 export interface WorktreeCleanup { status: string; path: string; common_dir: string; reason?: string | null }
 

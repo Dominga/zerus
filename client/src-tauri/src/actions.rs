@@ -859,7 +859,14 @@ mod tests {
             Lane::of(&Action::Interrupt { turn_started: 1.0 }),
             Lane::Interrupt
         );
-        for action in [Action::Pause, Action::Terminate, Action::Kill] {
+        for action in [
+            Action::Pause,
+            Action::Terminate,
+            Action::Kill,
+            Action::StartFresh,
+            Action::Forget,
+            Action::ForgetBinding,
+        ] {
             assert_eq!(Lane::of(&action), Lane::Write);
         }
     }

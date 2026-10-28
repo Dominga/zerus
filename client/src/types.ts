@@ -277,7 +277,7 @@ export interface MachinesView {
 export interface Folder { id: string; name: string; path: string; computer: string; machine: string }
 export interface Project { id: string; name: string; color: string | null; accessible: boolean; is_default: boolean; palette: number; folders: Folder[] }
 export interface ProjectsView {
-  loaded: boolean; refreshing: boolean; status: string; status_error: boolean; conflicts: number;
+  loaded: boolean; status: string; status_error: boolean; conflicts: number;
   unconnected: string[]; notice: string | null; projects: Project[];
 }
 
@@ -288,5 +288,5 @@ export const emptyMachines = (error: string | null = null): MachinesView => ({
   loaded: false, refreshing: false, error, local: "", environment_override: false, machines: [], effective: null, check: null, busy: false,
 });
 export const emptyProjects = (status = ""): ProjectsView => ({
-  loaded: false, refreshing: false, status, status_error: status !== "", conflicts: 0, unconnected: [], notice: null, projects: [],
+  loaded: false, status, status_error: status !== "", conflicts: 0, unconnected: [], notice: null, projects: [],
 });

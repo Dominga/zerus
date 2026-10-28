@@ -4,7 +4,6 @@
 //! notice (ProjectsDialog.cpp:251-263). The app hands it the organization the
 //! Sessions list groups by, this device's default project and the write
 //! controller's status line (src-tauri's `Screens::organization`).
-use super::schedule::{Poll, SWARM_INTERVAL};
 use super::{items, text};
 use crate::swarm::sync::{unavailable, OUTDATED};
 use serde::Serialize;
@@ -43,7 +42,6 @@ pub struct Project {
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct ProjectsView {
     pub loaded: bool,
-    pub refreshing: bool,
     pub status: String,
     pub status_error: bool,
     pub conflicts: usize,
@@ -52,25 +50,13 @@ pub struct ProjectsView {
     pub projects: Vec<Project>,
 }
 
-/// The shared catalog's reads so far.
-#[derive(Clone, Debug)]
+/// The shared catalog as the app last handed it over.
+#[derive(Clone, Debug, Default)]
 pub struct SwarmState {
-    pub poll: Poll,
     valid: Option<Value>,
     status: Option<(String, bool)>,
     /// This device's default project, marked when the catalog lists it.
     default: Option<String>,
-}
-
-impl Default for SwarmState {
-    fn default() -> Self {
-        Self {
-            poll: Poll::new(SWARM_INTERVAL),
-            valid: None,
-            status: None,
-            default: None,
-        }
-    }
 }
 
 /// The last part of a path, with either separator.
@@ -134,7 +120,6 @@ fn folder(value: &Value) -> Folder {
 impl SwarmState {
     /// Files a `swarm get` reply; anything but a schema 1 catalog keeps the last good one.
     pub fn finish(&mut self, reply: Result<Value, String>) {
-        self.poll.finish();
         match reply {
             Err(error) => self.status = Some((unavailable(&error), true)),
             Ok(value)
@@ -168,7 +153,6 @@ impl SwarmState {
         let (status, status_error) = self.status.clone().unwrap_or_default();
         let Some(snapshot) = &self.valid else {
             return ProjectsView {
-                refreshing: self.poll.pending(),
                 status,
                 status_error,
                 ..ProjectsView::default()
@@ -239,7 +223,6 @@ impl SwarmState {
         });
         ProjectsView {
             loaded: true,
-            refreshing: self.poll.pending(),
             status,
             status_error,
             conflicts: items(snapshot, "conflicts").len(),

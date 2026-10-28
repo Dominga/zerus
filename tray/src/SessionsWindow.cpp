@@ -5790,6 +5790,15 @@ void SessionsWindow::continueAfterStart(const QString &host, const QString &name
         || m_terminating.contains(m_startSend.key)
         || (!data.value("expected_id").toString().isEmpty() && !data.value("resume_message_can_send").toBool())
         || (conversation.isEmpty() && !data.value("first_message_can_send").toBool())) return;
+    // A ready inspection can precede the catalog's paused -> running update.
+    // Keep the continuation queued until both name the new incarnation;
+    // otherwise the async send guard correctly rejects the still-paused row
+    // after we have already discarded the continuation.
+    const auto current = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &entry) {
+        return entry.key == m_startSend.key && entry.host == host && entry.session.name == name;
+    });
+    if (current == m_entries.cend() || !current->online || current->session.state != "running"
+        || current->session.runId != run || current->session.conversationId != conversation) return;
     const auto pending = m_startSend;
     if (pending.compact && (conversation.isEmpty() || !data.value("compact_context_supported").toBool())) return;
     m_startSend = {};

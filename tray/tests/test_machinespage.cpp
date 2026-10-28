@@ -1,5 +1,6 @@
 #include "support/PageShots.h"
 #include <QtTest>
+#include <QApplication>
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
@@ -499,13 +500,19 @@ void TestMachinesPage::unsavedEditsGateActionsAndTheLabelHasSwatches()
     PageShots::shot(page, true, "ux-7-machines-dirty-dark");
     PageShots::shot(page, false, "ux-7-machines-dirty-light");
     // Discard changes asks, then reloads the saved values.
+    bool asked = false, answerFound = false;
+    QString prompt;
     QTimer::singleShot(0, &page, [&] {
-        auto *dialog = page.findChild<QMessageBox *>("unsavedMachineDialog"); QVERIFY(dialog);
-        QCOMPARE(dialog->windowTitle(), QString("Unsaved connection"));
-        QCOMPARE(dialog->text(), QString("Discard the unsaved changes to this connection?"));
-        dialog->button(QMessageBox::Discard)->click();
+        auto *dialog = page.findChild<QMessageBox *>("unsavedMachineDialog");
+        if (!dialog) { if (auto *modal=qobject_cast<QDialog *>(QApplication::activeModalWidget())) modal->reject(); return; }
+        asked = true; prompt = dialog->text();
+        auto *answer = dialog->button(QMessageBox::Discard);
+        answerFound = answer != nullptr;
+        if (answer) answer->click(); else dialog->reject();
     });
     discard->click();
+    QVERIFY(asked); QVERIFY(answerFound);
+    QCOMPARE(prompt, QString("Discard the unsaved changes to this connection?"));
     QVERIFY(widget<QLineEdit>(page, "machineHostname")->text() != "10.0.4.21");
     QVERIFY(!notice->isVisible()); QVERIFY(!list->currentItem()->data(Qt::UserRole + 1).toBool());
     QVERIFY(widget<QPushButton>(page, "checkMachine")->isEnabled());

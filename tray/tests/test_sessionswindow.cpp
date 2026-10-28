@@ -9045,10 +9045,11 @@ else:print('{}')
     { QFile details(temp.filePath("details.json")); QVERIFY(details.open(QIODevice::WriteOnly));
       details.write(QJsonDocument(QJsonObject{{"tracked", true}, {"run_id", "run-l5"}, {"conversation_id", "conversation-l5"},
           {"runtime_state", "saved"}, {"process_state", "exited"}, {"resumable", true}}).toJson()); }
+    const QJsonObject readyDetails{{"tracked", true}, {"run_id", "run-l5b"}, {"conversation_id", "conversation-l5"},
+        {"runtime_state", "live"}, {"process_state", "running"}, {"phase", "idle"}, {"activity", "idle"}};
     { QFile ready(temp.filePath("ready.json")); QVERIFY(ready.open(QIODevice::WriteOnly));
       // A resume starts a new run in the same conversation.
-      ready.write(QJsonDocument(QJsonObject{{"tracked", true}, {"run_id", "run-l5b"}, {"conversation_id", "conversation-l5"},
-          {"runtime_state", "live"}, {"process_state", "running"}, {"phase", "idle"}, {"activity", "idle"}}).toJson()); }
+      ready.write(QJsonDocument(readyDetails).toJson()); }
     auto state = fleet(); auto box = state.local();
     for (auto &session : box.sessions) if (session.name == "codex/hgs/dashboard") { session.state = "paused"; session.runId = "run-l5"; session.conversationId = "conversation-l5"; }
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
@@ -9057,6 +9058,8 @@ else:print('{}')
     int row = -1; for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(SessionRoles::Key).toString().endsWith("codex/hgs/dashboard")) row = i;
     QVERIFY(row >= 0); list->setCurrentRow(row);
     auto *composer = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(composer);
+    auto *client = window.findChild<HgsClient *>(); QVERIFY(client);
+    QSignalSpy writes(client, &HgsClient::writeDone);
     QTRY_VERIFY(composer->sessionKey().endsWith("codex/hgs/dashboard"));
     setComposerText(composer, QStringLiteral("carry on"));
     auto *send = composer->findChild<QPushButton *>("sendMessage"); QVERIFY(send);
@@ -9082,7 +9085,15 @@ else:print('{}')
     const auto sendLog = [&] { QFile file(temp.filePath("send.log")); return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString(); };
     QTRY_VERIFY2(resumeLog().contains("--with-lost-dialogue"), qPrintable(resumeLog()));
     // L5: the queued message is sent once the session is ready - and only once.
-    QTRY_VERIFY2(resumeLog().contains("--with-lost-dialogue"), qPrintable(resumeLog()));
+    QTRY_VERIFY(std::any_of(writes.cbegin(), writes.cend(), [](const QList<QVariant> &write) {
+        return write[0].toString() == QStringLiteral("resume codex/hgs/dashboard") && write[1].toBool();
+    }));
+    // Deterministically deliver the new inspection before the listing catches
+    // up. It must retain the queued draft instead of attempting a send against
+    // the old paused row and cancelling its continuation.
+    client->inspectionReady({}, QStringLiteral("codex/hgs/dashboard"), readyDetails);
+    QTRY_VERIFY(composer->isWaitingToSend(composer->sessionKey()));
+    QVERIFY(sendLog().isEmpty());
     // The resumed session is read now that it is live; the queued draft follows.
     for (auto &session : box.sessions) if (session.name == "codex/hgs/dashboard") {
         session.state = "running"; session.runId = "run-l5b"; session.conversationId = "conversation-l5";
@@ -9090,11 +9101,9 @@ else:print('{}')
     }
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     window.showSession({}, QStringLiteral("codex/hgs/dashboard"));
-    QTest::qWait(2500);
-    window.showSession({}, QStringLiteral("codex/hgs/dashboard"));
-    QTest::qWait(1500);
+    client->inspectionReady({}, QStringLiteral("codex/hgs/dashboard"), readyDetails);
     auto *status = composer->findChild<QLabel *>("messageStatus");
-    QVERIFY2(sendLog().contains("carry on"), qPrintable(status ? status->text() + QStringLiteral(" | ") + sendLog() : sendLog()));
+    QTRY_VERIFY2(sendLog().contains("carry on"), qPrintable(status ? status->text() + QStringLiteral(" | ") + sendLog() : sendLog()));
     QCOMPARE(sendLog().count(QStringLiteral("carry on")), 1);
 }
 

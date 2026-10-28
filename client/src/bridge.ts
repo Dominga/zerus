@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type Outcome, type ReadMark, type Target } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ArchivePage, type Batch, type ComputerId, type Details, type Outcome, type ReadMark, type Target } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 
@@ -159,16 +159,61 @@ export async function runAction(target: Target, action: Action): Promise<Outcome
   return invoke<Outcome>("run_action", { target, action });
 }
 
+/**
+ * Changes the shared notification preferences of a session; resolves with the
+ * host's confirmed `preferences`. A rejection carries the reason.
+ */
+export async function setNotifications(target: Target, muted: boolean, expectedRevision: number | null): Promise<Record<string, unknown>> {
+  if (!inTauri()) throw new Error("Actions need the desktop app.");
+  return invoke<Record<string, unknown>>("set_notifications", { target, muted, expectedRevision });
+}
+
 /** The inspect fields of a session; null when they are unavailable. */
 export async function inspectSession(target: Target, archiveId: string | null): Promise<Details | null> {
   if (!inTauri()) return null;
   return (await invoke<Details | null>("inspect_session", { target, archiveId })) ?? null;
 }
 
-/** Read marks whose delivery has not been confirmed yet. */
-export async function pendingReadMarks(): Promise<ReadMark[]> {
-  if (!inTauri()) return [];
+/** Read marks whose delivery has not been confirmed yet; undefined outside the app, which keeps no list. */
+export async function pendingReadMarks(): Promise<ReadMark[] | undefined> {
+  if (!inTauri()) return undefined;
   return invoke<ReadMark[]>("pending_read_marks");
+}
+
+/** One attention mark of this device (client/core `marks.rs`); a missing field reads as false or "". */
+export interface Mark { review: boolean; acknowledged: string }
+/**
+ * This device's attention marks and the replies it read on hosts without
+ * shared read state, by key, and each map's keys oldest written first (a
+ * JSON object's key order is the key order, not the write order).
+ */
+export interface AttentionSnapshot {
+  marks: Record<string, Mark>;
+  replies: Record<string, string>;
+  order?: { marks: string[]; replies: string[] };
+}
+
+// The commands below exist only in the live app. Outside Tauri there are no
+// marks, an update does nothing and there is no pending list, so the marks
+// store keeps its own; a build without the live feature rejects them, and the
+// store falls back the same way.
+
+/** The stored marks; the store awaits them before its first update. */
+export async function attentionMarks(): Promise<AttentionSnapshot> {
+  if (!inTauri()) return { marks: {}, replies: {}, order: { marks: [], replies: [] } };
+  return invoke<AttentionSnapshot>("attention_marks");
+}
+
+/** Writes or removes (null) only the changed entries; both maps are always sent. */
+export async function updateAttentionMarks(marks: Record<string, Mark | null>, replies: Record<string, string | null>): Promise<void> {
+  if (!inTauri()) return;
+  await invoke<null>("update_attention_marks", { marks, replies });
+}
+
+/** Merges read marks into the pending ones and wakes the Rust delivery worker; answers every pending mark (undefined outside the app). */
+export async function queueReadMarks(marks: ReadMark[]): Promise<ReadMark[] | undefined> {
+  if (!inTauri()) return undefined;
+  return invoke<ReadMark[]>("queue_read_marks", { marks });
 }
 
 /** `hgs reference` for a session: its `zerus://session?...` URI. */
@@ -181,6 +226,28 @@ export async function sessionReference(target: Target, archiveId: string | null)
 export async function copyCommand(computer: string, name: string, archiveId: string | null): Promise<string> {
   if (!inTauri()) throw "Actions need the desktop app.";
   return invoke<string>("copy_command", { computer, name, archiveId });
+}
+
+/**
+ * One checked page of a computer's archive (`archive_page`, `hgs [@alias] archives --json`);
+ * `request` is the archive store's request number. Rejects with Qt's text for
+ * an invalid page, "superseded" when a newer request of that computer or a
+ * cancel replaced it, or the hgs failure.
+ */
+export async function archivePage(computer: string, from: number, until: number, cursor: string, query: string, request: number): Promise<ArchivePage> {
+  if (!inTauri()) throw "Archive pages need the desktop app.";
+  return invoke<ArchivePage>("archive_page", { computer, from, until, cursor, query, request });
+}
+
+/**
+ * Cancels every archive page request numbered `through` or lower (Qt's
+ * cancelArchivePages), also one that has not started yet: their `hgs` ends
+ * and they answer "superseded". Outside the app, and in a build without
+ * archive reads, there is nothing to cancel.
+ */
+export async function cancelArchivePages(through: number): Promise<void> {
+  if (!inTauri()) return;
+  await invoke<null>("cancel_archive_pages", { through }).catch(() => {});
 }
 
 /** Puts text on the clipboard: from Rust in the app, the page's clipboard in a browser. */

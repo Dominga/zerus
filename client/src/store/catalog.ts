@@ -1,8 +1,9 @@
 import { batch } from "solid-js";
 import { applyMachines } from "./machines";
-import { createStore, produce, reconcile } from "solid-js/store";
+import { createStore, produce, reconcile, unwrap } from "solid-js/store";
 import type { Batch, ComputerId, RowOut, ViewRow } from "../types";
 import type { AgentKind, Session, Status } from "../ui/sessions/types";
+import { marks as appMarks, type RowMarks } from "./marks";
 
 // The catalog: every live session row of every computer, keyed by
 // computer + "\n" + catalog key. A batch is one reactive transaction. An
@@ -85,13 +86,19 @@ export function captionOf(status: Status, v: ViewRow): string {
 const text = (value: unknown) => (typeof value === "string" ? value : "");
 const optional = (value: unknown) => (typeof value === "string" && value ? value : undefined);
 
-/** One catalog row from a view row. Pure; every field is always present so reconcile compares like with like. */
-export function toSession(computer: ComputerId, key: string, v: ViewRow): Session {
+/**
+ * One catalog row from a view row, with this device's marks applied (store/marks.ts).
+ * Every field is always present so reconcile compares like with like.
+ */
+export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: Pick<RowMarks, "overlay"> = appMarks): Session {
   const status = statusOf(v);
   const phase = (v.phase ?? "").toLowerCase();
   const known = KINDS.has((v.status ?? "").toLowerCase() as Status) || !v.status;
   const reason = typeof v.attention === "string" ? v.attention : phase === "approval" ? "approval" : phase === "input" ? "question" : "";
-  return {
+  // The core words the caption as Qt does; a status that is not a kind is a caption too.
+  const caption = text(v.caption) || (known ? captionOf(status, v) : text(v.status));
+  const attention: Session["attention"] = status === "attention" ? (reason === "approval" ? "approval" : reason === "question" ? "question" : "reply") : undefined;
+  const base: Session = {
     key: rowId(computer, key),
     catalogKey: key,
     computer,
@@ -107,14 +114,13 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow): Sessio
     worktree: undefined,
     git: undefined,
     status,
-    // The core words the caption as Qt does; a status that is not a kind is a caption too.
-    caption: text(v.caption) || (known ? captionOf(status, v) : text(v.status)),
+    caption,
     phase: phase || undefined,
     summary: text(v.summary),
     unread: !!v.unread,
     draft: false,
     muted: !!v.muted,
-    attention: status === "attention" ? (reason === "approval" ? "approval" : reason === "question" ? "question" : "reply") : undefined,
+    attention,
     scheduleNext: undefined,
     backgroundJobs: undefined,
     subagents: undefined,
@@ -138,19 +144,44 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow): Sessio
     allowed: Array.isArray(v.allowed_actions) ? v.allowed_actions.join(" ") : undefined,
     archiveReason: optional(v.action_reasons?.archive),
     terminateReason: optional(v.action_reasons?.terminate),
+    forgetReason: optional(v.action_reasons?.forget),
     cwdPath: text(v.cwd),
     terminalSupported: v.terminal_supported ?? !["deepseek", "dsh", "opencode"].includes(text(v.agent)),
     terminalReported: !!v.terminal_reported,
     terminalAttachSupported: !!v.terminal_attach_supported,
     terminalAttachReported: !!v.terminal_attach_reported,
+    bulkLifecycle: v.bulk_lifecycle_supported ?? text(v.agent) !== "opencode",
+    // The host's values the marks overlay reads.
+    created: typeof v.created === "number" ? Math.trunc(v.created) : 0,
+    fingerprint: text(v.attention_fingerprint),
+    needsAction: !!v.needs_action,
+    ackStatus: v.acknowledged_status ? statusOf({ name: "", status: v.acknowledged_status }) : status,
+    ackCaption: text(v.acknowledged_caption) || caption,
+    unreadCandidate: typeof v.unread_candidate === "boolean" ? v.unread_candidate : undefined,
+    baseStatus: status,
+    baseCaption: caption,
+    baseAttention: attention,
+    baseUnread: !!v.unread,
+    baseSummary: text(v.summary),
+    baseMuted: !!v.muted,
+    readReplyId: optional(v.read_reply_id),
+    readAttentionSignature: optional(v.read_attention_signature),
+    sharedNotifications: !!v.shared_notifications,
+    notificationRevision: typeof v.notification_revision === "number" ? v.notification_revision : undefined,
   };
+  return Object.assign(base, marks.overlay(base));
 }
 
 /** How long a `replaced` removal waits for the new run of the same name. */
 const REPLACED_MS = 10_000;
 
-export function createCatalog(onMachines?: (b: Batch) => void) {
+/** `marks` given: the catalog applies them and they refresh it. Without, rows get the app's overlay and nothing is attached. */
+export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void) {
+  const marks = given ?? appMarks;
   const [catalog, setCatalog] = createStore<CatalogState>({ rows: {}, order: [], computers: {} });
+  // A marks change applies the overlay again to the rows it touched, in place.
+  // The marks only read the rows, so they scan the plain objects (no proxy reads).
+  given?.attach({ rows: () => unwrap(catalog.rows), patch: (id, fields) => setCatalog("rows", id, fields) });
   // `replaced` removals by computer + name, so the next run of that name can
   // inherit selection and drafts (the remove and its upsert may land in
   // different batches).
@@ -184,7 +215,7 @@ export function createCatalog(onMachines?: (b: Batch) => void) {
         for (const row of r.rows) {
           const id = rowId(r.computer, row.key);
           keep.add(id);
-          put(id, toSession(r.computer, row.key, row.row), fresh);
+          put(id, toSession(r.computer, row.key, row.row, marks), fresh);
         }
         for (const id of catalog.order) if (computerOf(id) === r.computer && !keep.has(id)) gone.add(id);
       }
@@ -198,7 +229,7 @@ export function createCatalog(onMachines?: (b: Batch) => void) {
       const upserted: Session[] = [];
       for (const u of b.upserts) {
         const id = rowId(u.computer, u.key);
-        const next = toSession(u.computer, u.key, u.row);
+        const next = toSession(u.computer, u.key, u.row, marks);
         gone.delete(id);
         put(id, next, fresh);
         upserted.push(next);
@@ -236,7 +267,7 @@ export function createCatalog(onMachines?: (b: Batch) => void) {
 }
 
 /** The app's catalog. Tests build their own with `createCatalog`. */
-export const { catalog, applyBatch, moveRow, onReplaced } = createCatalog(applyMachines);
+export const { catalog, applyBatch, moveRow, onReplaced } = createCatalog(appMarks, applyMachines);
 
 /** Rows in display order. */
 export const orderedRows = () => catalog.order.map((id) => catalog.rows[id]).filter(Boolean);

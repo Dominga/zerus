@@ -35,6 +35,8 @@ struct Shared {
     /// Whether the peers the local listing names get streams.
     peers: bool,
     streams: Mutex<BTreeMap<ComputerId, StreamHandle>>,
+    /// The peers the local listing last named; None until one names them.
+    listed: Mutex<Option<BTreeSet<String>>>,
     /// None once the fleet stops: no stream starts after that.
     events: Mutex<Option<Sender<StreamEvent>>>,
 }
@@ -106,6 +108,7 @@ impl Fleet {
             timing,
             peers,
             streams: Mutex::new(BTreeMap::new()),
+            listed: Mutex::new(None),
             events: Mutex::new(Some(tx)),
         });
         {
@@ -243,6 +246,13 @@ impl Fleet {
             .is_some_and(|handle| handle.send(control))
     }
 
+    /// The peers this computer's listing names (valid aliases only), whether
+    /// or not they get streams; None until a listing with a `peers` array has
+    /// arrived. An older host's listing without one keeps the previous peers.
+    pub fn peers(&self) -> Option<BTreeSet<String>> {
+        guard(&self.shared.listed).clone()
+    }
+
     /// The computers with a stream, this computer first.
     pub fn computers(&self) -> Vec<ComputerId> {
         guard(&self.shared.streams).keys().cloned().collect()
@@ -298,14 +308,15 @@ fn route(shared: &Shared, rx: Receiver<StreamEvent>, sink: Sender<Change>) {
                 computer,
                 peers: listed,
             } => {
-                if !computer.is_local() || !shared.peers {
+                if !computer.is_local() {
                     continue;
                 }
                 let wanted: BTreeSet<String> = listed
                     .into_iter()
                     .filter(|alias| valid_alias(alias))
                     .collect();
-                if peers.as_ref() != Some(&wanted) {
+                *guard(&shared.listed) = Some(wanted.clone());
+                if shared.peers && peers.as_ref() != Some(&wanted) {
                     shared.set_peers(&wanted);
                     peers = Some(wanted);
                 }

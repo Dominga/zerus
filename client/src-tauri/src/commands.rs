@@ -28,6 +28,7 @@ impl AppState {
 
 #[cfg(feature = "live")]
 mod live {
+    use std::collections::BTreeSet;
     use std::sync::{mpsc, Mutex, PoisonError};
     use std::time::Duration;
 
@@ -82,6 +83,20 @@ mod live {
             self.pump.drain(changes);
             *source = Some(started);
             Ok(mode.into())
+        }
+
+        /// The peers this computer's listing names; None before a listing
+        /// named them, and for a replay.
+        pub fn peers(&self) -> Option<BTreeSet<String>> {
+            match self
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                Some(Source::Fleet(fleet)) => fleet.peers(),
+                _ => None,
+            }
         }
 
         pub fn follow(
@@ -179,6 +194,9 @@ pub async fn next_batch(
         // The host's rows settle pending read marks, whether they arrive as
         // single upserts or inside a computer's snapshot.
         actions.observe(&batch);
+        // Marks for computers the local listing no longer names can never be
+        // written (Qt's `publishReadMarks`).
+        actions.drop_orphans(|| live.peers());
         serde_json::to_vec(&batch).map_err(|error| error.to_string())
     })
     .await?;
@@ -270,6 +288,8 @@ pub fn perf_config() -> Value {
         "display": crate::display::display_name(),
         // The actions smoke runs only on a replay with an explicit fake hgs.
         "actions_smoke": actions_smoke_allowed(),
+        // The Linux WebKit renderer decision (renderer, reason, nvidia, wayland, marker_state).
+        "renderer": crate::renderer::diagnostics(),
     })
 }
 

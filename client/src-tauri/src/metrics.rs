@@ -148,6 +148,7 @@ pub fn role(root: u32, process: &ProcSample) -> &'static str {
 }
 
 /// `root` and every process whose parent chain reaches it.
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 pub fn descendants(root: u32, parents: &BTreeMap<u32, u32>) -> BTreeSet<u32> {
     let mut children: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     for (&pid, &ppid) in parents {
@@ -353,6 +354,13 @@ pub mod macos {
     }
 
     /// Whether the responsible-process lookup is available (for diagnostics).
+    #[cfg_attr(
+        target_os = "macos",
+        allow(
+            dead_code,
+            reason = "used by client/perf-probe-mac, which includes this file by path"
+        )
+    )]
     pub fn responsible_lookup_available() -> bool {
         responsible_fn().is_some()
     }

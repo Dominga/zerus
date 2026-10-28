@@ -74,6 +74,18 @@ describe("screens wiring", () => {
     }
   });
 
+  it("keeps sending visibility changes after one call rejected", async () => {
+    mocked.screenVisible.mockRejectedValueOnce(new Error("hub gone"));
+    const [page, setPage] = createSignal<Page>("sessions");
+    const stop = startScreens(page, { hidden: () => false, onChange: () => () => {} });
+    setPage("projects");
+    await settle();
+    setPage("machines");
+    await settle();
+    expect(mocked.screenVisible.mock.calls).toEqual([["projects", true], ["machines", true], ["projects", false]]);
+    stop();
+  });
+
   it("re-pulls the visible screen on screens-changed", async () => {
     let fire: (screen: "projects" | "accounts") => void = () => {};
     mocked.onScreensChanged.mockImplementation((listener) => { fire = listener; return () => {}; });

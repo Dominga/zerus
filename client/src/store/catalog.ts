@@ -17,7 +17,7 @@ const computerOf = (id: string) => id.slice(0, id.indexOf("\n"));
 
 export interface ComputerState {
   id: ComputerId;
-  /** probing, unsupported, live, reconnecting or ended. */
+  /** probing, unsupported, live, polled, reconnecting or ended. */
   status: string;
   /** Restart attempt while reconnecting. */
   attempt: number;

@@ -62,7 +62,7 @@ export interface ViewRow {
 export interface RowOut { computer: ComputerId; key: string; row: ViewRow }
 export interface KeyOut { computer: ComputerId; key: string; reason?: string | null }
 export interface ReplaceOut { computer: ComputerId; rows: RowOut[] }
-export type ComputerStatus = "probing" | "unsupported" | "live" | "reconnecting" | "ended";
+export type ComputerStatus = "probing" | "unsupported" | "live" | "polled" | "reconnecting" | "ended";
 export interface ComputerOut { computer: ComputerId; status: ComputerStatus | string; attempt: number }
 export type ActivityKind = "events" | "replace" | "event" | "state" | "ended";
 export interface ActivityOut { computer: ComputerId; key: string; kind: ActivityKind | string; payload: unknown }

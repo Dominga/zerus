@@ -33,7 +33,7 @@ export function startScreens(page: Accessor<Page>, visibility: PageVisibility): 
     });
     // Visibility changes reach the hub one at a time, in the order sent.
     let sent: Promise<void> = Promise.resolve();
-    const send = (screen: Screen, visible: boolean) => (sent = sent.then(() => screenVisible(screen, visible)));
+    const send = (screen: Screen, visible: boolean) => (sent = sent.then(() => screenVisible(screen, visible)).catch(() => {}));
     createEffect(on(() => screenOf(page(), hidden()), (next, previous) => {
       // The new screen shows before the old one hides: between Overview and
       // Accounts the hub always has an account screen and keeps its queued inspects.

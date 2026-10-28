@@ -9,8 +9,9 @@ const live = (id: string) => ({ id, status: "live", attempt: 0 });
 
 describe("overview selectors", () => {
   it("map the stream states as the rulings say", () => {
-    expect(["live", "probing", "reconnecting", "unsupported", "ended", undefined].map((s) => connectionOf(s))).toEqual([
+    expect(["live", "polled", "probing", "reconnecting", "unsupported", "ended", undefined].map((s) => connectionOf(s))).toEqual([
       { tile: "online", text: "Connected", fresh: true },
+      { tile: "online", text: "Update hgs", fresh: true },
       { tile: "connecting", text: "Connecting", fresh: false },
       { tile: "connecting", text: "Reconnecting", fresh: false },
       { tile: "offline", text: "Update hgs", fresh: false },

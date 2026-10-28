@@ -21,6 +21,10 @@ export function createMachineCards() {
 
 export const { cards: machineCards, applyMachines } = createMachineCards();
 
+/** A machine another screen asks Machines to select (an alias, "" for this computer); Machines takes it once. */
+export const [requestedMachine, setRequestedMachine] = createSignal<string | undefined>();
+export const requestMachine = (alias: string) => setRequestedMachine(alias);
+
 export const [machinesPage, setMachinesPage] = createSignal<MachinesView>(emptyMachines());
 const pull = latest(setMachinesPage);
 export const loadMachines = (force = false) => pull(() => machinesView(force));

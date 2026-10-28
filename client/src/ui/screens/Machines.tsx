@@ -7,7 +7,7 @@ import { Actions, Lines, Spinner, Status } from "../components/Status";
 import { paletteIndex } from "../sessions/SessionCard";
 import type { MachineMeta, MachineRow } from "../../types";
 import { catalog } from "../../store/catalog";
-import { loadMachines, machineCards, machinesPage, resolveMachine, testConnection } from "../../store/machines";
+import { loadMachines, machineCards, machinesPage, requestedMachine, resolveMachine, setRequestedMachine, testConnection } from "../../store/machines";
 import { setAccountMachine } from "../../store/accounts";
 import { connectionOf, osOf } from "../../store/overview";
 import { setMachineFilter, setPage } from "../../store/ui";
@@ -178,6 +178,13 @@ export function MachinesScreen() {
   });
   const local = () => localState(machineCards[""], view().local);
   const peers = createMemo(() => view().machines.map((row) => ({ row, state: peerState(row, catalog.computers[row.alias], sessions()[row.alias] ?? 0) })));
+  // Another screen asked for a machine (Overview's Machine settings).
+  createEffect(() => {
+    const alias = requestedMachine();
+    if (alias === undefined) return;
+    setSelected(alias);
+    setRequestedMachine(undefined);
+  });
   // A selection that left the list falls back to this computer (loadSelection).
   createEffect(() => {
     if (view().loaded && selected() !== LOCAL && !view().machines.some((m) => m.alias === selected())) setSelected(LOCAL);
@@ -195,7 +202,7 @@ export function MachinesScreen() {
           <span class="grow" />
           <button class="btn primary" disabled title={MACHINE_EDITING}><Icon name="plus" size={14} />Add machine</button>
         </header>
-        <p class="muted mach-summary">{summary({ console: local().console, live: catalog.computers[""]?.status === "live" }, peers().map((p) => p.state))}</p>
+        <p class="muted mach-summary">{summary({ console: local().console, live: ["live", "polled"].includes(catalog.computers[""]?.status ?? "") }, peers().map((p) => p.state))}</p>
         <Show when={view().error}>{(error) => <Status kind="error"><Lines text={error()} /></Status>}</Show>
         <div class="mach-body">
           <div class="mach-list" role="list" aria-label="Machines">

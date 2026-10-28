@@ -20,14 +20,16 @@ import type { BridgeMode } from "./bridge";
 const STATE_TEXT: Record<string, string> = {
   probing: "checking",
   unsupported: "no event stream (update hgs)",
+  polled: "polled every 60 s (update hgs for live updates)",
   reconnecting: "reconnecting",
   ended: "stream ended",
 };
 
 function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
   const computers = createMemo(() => Object.values(catalog.computers));
-  const live = () => computers().filter((c) => c.status === "live").length;
-  const problems = () => computers().filter((c) => c.status !== "live");
+  const connected = (status: string) => status === "live" || status === "polled";
+  const live = () => computers().filter((c) => connected(c.status)).length;
+  const problems = () => computers().filter((c) => !connected(c.status));
   const label = (id: string) => id || "this computer";
   return (
     <footer class="statusbar">

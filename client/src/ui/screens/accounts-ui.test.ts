@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { creditsText, loginLabel, memberOf, panelWindow, summaryLine, visibleAccounts, visibleMembers } from "./accounts-ui";
+import { creditsText, loginLabel, memberStateText, memberOf, panelWindow, summaryLine, visibleAccounts, visibleMembers } from "./accounts-ui";
 import { NOW, projected, usageOf } from "../../store/testing";
 import { dayTime } from "../lib/usage";
 import { emptyAccounts, type Account, type Profile } from "../../types";
@@ -16,6 +16,12 @@ const account = (members: Profile[], key = "a"): Account => ({
 });
 
 describe("accounts page", () => {
+  it("words every member state for the more list", () => {
+    const states = ["ready", "offline", "not-installed", "apikey", "signed-out", "keychain", "desktop", "unavailable", "expired", "checking", "unknown"] as const;
+    expect(states.map(memberStateText)).toEqual(["", "Offline", "Not installed", "API key", "Sign-in needed", "Keychain locked", "Desktop sign-in unavailable", "Sign-in unusable", "Sign-in expired", "Checking…", "Unknown"]);
+    expect(memberStateText("bogus" as never)).toBe("Unknown");
+  });
+
   it("labels the sign-in button as Qt does", () => {
     expect(loginLabel(member())).toBe("Sign in again on workstation…");
     expect(loginLabel(member({ signed_in: false }))).toBe("Sign in on workstation…");

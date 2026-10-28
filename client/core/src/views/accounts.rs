@@ -765,6 +765,12 @@ pub fn project(
         })
         .count();
     pending += all.iter().filter(|p| resolving(p)).count();
+    // This computer's card has not arrived: it is a host still to come, so the
+    // first snapshot waits and the screen does not claim there are no hosts.
+    let awaiting_card = fleet
+        .iter()
+        .any(|entry| entry.computer.is_local() && entry.host.is_none());
+    pending += usize::from(awaiting_card);
     // Identities appear as they become known, without flashing unresolved
     // duplicates while another machine is still being inspected.
     let shown: Vec<Profile> = all
@@ -779,7 +785,7 @@ pub fn project(
             }
         })
         .collect();
-    if !shown.is_empty() || pending == 0 {
+    if !awaiting_card && (!shown.is_empty() || pending == 0) {
         display.snapshot = true;
     }
     display.held = shown.iter().map(|p| (p.key.clone(), p.clone())).collect();
@@ -806,7 +812,7 @@ pub fn project(
     let can_enable = console.is_some_and(|l| {
         !l.local_sessions && l.local_host && l.platform.as_deref() == Some("windows")
     });
-    let no_hosts = hosts.is_empty().then(|| {
+    let no_hosts = (hosts.is_empty() && !awaiting_card).then(|| {
         if can_enable {
             "To manage agent accounts, enable local sessions for this computer in Machines or add a remote machine."
         } else {
@@ -1085,6 +1091,7 @@ mod tests {
             ("reconnecting", 0, true),
             ("probing", 0, true),
             ("unsupported", 0, true),
+            ("polled", 0, true),
             ("live", 0, true),
             ("reconnecting", 2, false),
             ("ended", 0, false),
@@ -1304,6 +1311,31 @@ mod tests {
         assert!(refs(std::slice::from_ref(&local), &loaded()).is_empty());
         local.host = Some("workstation".into());
         assert_eq!(hosts(std::slice::from_ref(&local)).len(), 1);
+    }
+
+    #[test]
+    fn no_snapshot_before_this_computers_card() {
+        let mut local = entry("", "live", 0);
+        local.host = None;
+        let mut display = AccountsDisplay::default();
+        let early = project(
+            std::slice::from_ref(&local),
+            &AccountsState::default(),
+            &mut display,
+        );
+        assert!(!early.snapshot && early.pending >= 1 && early.no_hosts.is_none());
+        local.host = Some("workstation".into());
+        let mut state = AccountsState::default();
+        state.catalogs.insert(
+            ComputerId::local(),
+            CatalogSlot {
+                requested: Some(0),
+                data: Some(fixture("accounts-local.json")),
+                ..CatalogSlot::default()
+            },
+        );
+        let late = project(std::slice::from_ref(&local), &state, &mut display);
+        assert!(late.snapshot && late.no_hosts.is_none() && !late.accounts.is_empty());
     }
 
     #[test]

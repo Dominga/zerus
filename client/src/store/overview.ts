@@ -17,6 +17,7 @@ export interface Connection { tile: MachineState; text: string; fresh: boolean }
 export function connectionOf(status: string | undefined): Connection {
   switch (status) {
     case "live": return { tile: "online", text: "Connected", fresh: true };
+    case "polled": return { tile: "online", text: "Update hgs", fresh: true };
     case "probing": return { tile: "connecting", text: "Connecting", fresh: false };
     case "reconnecting": return { tile: "connecting", text: "Reconnecting", fresh: false };
     case "unsupported": return { tile: "offline", text: "Update hgs", fresh: false };
@@ -72,7 +73,7 @@ export function overviewStats(rows: readonly Session[], computers: Record<Comput
     per.sessions++;
     if (!s.muted && needsAttention(s)) { stats.attention++; per.attention++; }
     if (isActive(s)) stats.active++;
-    if (computers[s.computer]?.status !== "live") stats.offline++;
+    if (computers[s.computer]?.status !== "live" && computers[s.computer]?.status !== "polled") stats.offline++;
   }
   return stats;
 }

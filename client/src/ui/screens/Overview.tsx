@@ -8,7 +8,7 @@ import { AgentBadge, MachineBadge, SessionCard } from "../sessions/SessionCard";
 import type { Session } from "../sessions/types";
 import type { Account } from "../../types";
 import { agentKind, catalog, orderedRows } from "../../store/catalog";
-import { machineCards } from "../../store/machines";
+import { machineCards, requestMachine } from "../../store/machines";
 import { accountsPage, loadAccounts, setAccountMachine, setRequestedProfile } from "../../store/accounts";
 import { createOverview, type MachineCardModel, type OverviewStats } from "../../store/overview";
 import { setMachineFilter, setPage, setProjectFilter, setSelectedKey, setStateFilter, type StateFilter } from "../../store/ui";
@@ -47,7 +47,7 @@ function MachineCard(props: { m: MachineCardModel; stats: OverviewStats; now: nu
         <MachineBadge alias={props.m.name} computer={props.m.computer} />
         <span class="ov-mos ell"><Show when={props.m.local}><b>This machine</b></Show></span>
         <span class="ov-mstatus" classList={{ online: c().fresh }}>{c().text}</span>
-        <button class="icon-btn small" data-tip="Machine settings" aria-label="Machine settings" onClick={() => setPage("machines")}><Icon name="settings" size={14} /></button>
+        <button class="icon-btn small" data-tip="Machine settings" aria-label="Machine settings" onClick={() => { requestMachine(props.m.computer); setPage("machines"); }}><Icon name="settings" size={14} /></button>
       </header>
       <div class="ov-mmeters">
         <div class="ov-mm" title={cpu().tip}>
@@ -246,7 +246,7 @@ export function OverviewScreen() {
         </div>
         <Show when={ov.stats().offline > 0}>
           <div class="notice warn ov-note"><Icon name="wifi-off" size={14} />
-            <span>{ov.stats().offline} sessions are on offline or stale machines. Their last known status is shown on the machine cards.</span>
+            <span>{ov.stats().offline === 1 ? "1 session is on an offline or stale machine." : `${ov.stats().offline} sessions are on offline or stale machines.`} Their last known status is shown on the machine cards.</span>
           </div>
         </Show>
         <Show when={ov.live().length} fallback={<p class="ov-empty">No sessions are working, need attention or have drafts.</p>}>

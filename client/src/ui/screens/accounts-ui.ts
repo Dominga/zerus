@@ -7,6 +7,23 @@ import { current, dayTime, forecast, fromProjected, pace, period, thresholdTone,
 export const tone = (s: MemberState): "ok" | "busy" | "muted" | "warn" =>
   s === "ready" || s === "apikey" ? "ok" : s === "checking" ? "busy" : s === "offline" ? "muted" : "warn";
 
+/** A member's state as the "+N more" list shows it; none for a ready member. */
+export function memberStateText(s: MemberState): string {
+  switch (s) {
+    case "ready": return "";
+    case "offline": return "Offline";
+    case "not-installed": return "Not installed";
+    case "apikey": return "API key";
+    case "signed-out": return "Sign-in needed";
+    case "keychain": return "Keychain locked";
+    case "desktop": return "Desktop sign-in unavailable";
+    case "unavailable": return "Sign-in unusable";
+    case "expired": return "Sign-in expired";
+    case "checking": return "Checking…";
+    default: return "Unknown";
+  }
+}
+
 /** The sign-in button (AccountsPage.cpp:639-641); none for OpenCode or an agent that is not installed. */
 export function loginLabel(p: Profile): string | undefined {
   if (p.provider === "opencode" || !p.installed) return undefined;

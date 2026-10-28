@@ -13,7 +13,7 @@ import { useNow } from "../../store/latest";
 import { setPage } from "../../store/ui";
 import { clock, providerName, stateText } from "../lib/usage";
 import { ACCOUNT_MANAGEMENT } from "./reasons";
-import { creditsText, loginLabel, memberOf, panelWindow, summaryLine, tone, visibleAccounts, visibleMembers } from "./accounts-ui";
+import { creditsText, loginLabel, memberStateText, memberOf, panelWindow, summaryLine, tone, visibleAccounts, visibleMembers } from "./accounts-ui";
 
 // Agent accounts (AccountsPage.cpp), ported from design/webui/src/screens/Accounts.tsx:
 // profiles grouped by provider identity across machines; choosing a machine
@@ -147,7 +147,7 @@ function Detail(props: { a: Account }) {
                           <MachineLabel alias={x.machine} />
                           <span class="grow" />
                           <Show when={x.is_default}><span class="acct-default">Default</span></Show>
-                          <span class="dim">{x.state === "ready" ? "" : x.state === "signed-out" ? "Sign-in needed" : x.state}</span>
+                          <span class="dim">{memberStateText(x.state)}</span>
                         </button>
                       )}
                     </For>
@@ -256,7 +256,7 @@ export function AccountsScreen() {
           }>
             <div class="mach-body acct-body">
               <div class="mach-list acct-list" role="list" aria-label="Agent accounts">
-                <Show when={visible().length} fallback={<p class="muted acct-none">No accounts on {filterName()}.</p>}>
+                <Show when={visible().length} fallback={<p class="muted acct-none">{accountMachine() === "*" ? "No accounts." : `No accounts on ${filterName()}.`}</p>}>
                   <Index each={visible()}>{(a) => <AccountRow a={a()} />}</Index>
                 </Show>
                 <Show when={view().truncated > 0}><p class="dim acct-none">{view().truncated} more accounts are not shown.</p></Show>

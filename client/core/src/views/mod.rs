@@ -18,7 +18,7 @@ pub mod usage;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FleetEntry {
     pub computer: ComputerId,
-    /// `probing`, `unsupported`, `live` or `reconnecting`.
+    /// `probing`, `unsupported`, `live`, `polled` or `reconnecting`.
     pub status: String,
     pub attempt: u32,
     /// False only on a control console (`catalog.meta.local_sessions`).

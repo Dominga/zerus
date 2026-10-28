@@ -12,6 +12,13 @@
 
 ## Decisions
 
+- **Controller rulings on the plan review (2026-10-28).**
+  - Watchdog scope: it runs in the switch bundle, which launchd restarts, and elsewhere only with `ZERUS_CLIENT_WATCHDOG=1`. Accepted, so dev runs on shared machines are never aborted.
+  - Client private paths: every path comes from the bundle identity helper (Task 2). The phase 4 plan's Global Constraints now say so, so Task 3's draft store and every later path use the helper.
+  - macOS `-D warnings`: zerus-5wmh.51 (PR #426) lands before Task 4 starts. Until then the Mac check expects only main's 20 known warnings.
+  - `mac-install.sh` cannot make numbered or preview builds, so on a numbered Dev Mac it updates the CLI and refuses the GUI. Accepted, as AGENTS.md states; numbered switch builds go through `tray/install.sh` from a clean clone.
+  - Task 7 stays one commit.
+
 - **Controller rulings on the open questions (2026-10-28).**
   - The primary click shows and raises the window, as Qt does (`TrayAgent::showSessions`). Bead .44's "shows or hides" was wrong.
   - The notification rules apply the host-confirmed session Mute and Qt's optional-question banner setting (`notifications/optionalQuestions`, off by default). There is no "Reduce" notification setting in Qt. Bead .43's wording was wrong.

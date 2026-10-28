@@ -1,0 +1,79 @@
+{
+  "drm_devices": 1,
+  "nodes": [
+    {
+      "node": "/dev/dri/card1",
+      "connectors": [
+        {
+          "name": "DP-2",
+          "connected": true,
+          "encoder_id": 836,
+          "modes": 25,
+          "size_mm": [
+            600,
+            340
+          ],
+          "webkit_candidate": true,
+          "crtc_index": 0,
+          "crtc_mode": "2560x1440",
+          "crtc_hz": 144.0,
+          "atomic": {
+            "crtc_id": 205,
+            "crtc_index": 0,
+            "active": 1
+          }
+        },
+        {
+          "name": "DP-3",
+          "connected": true,
+          "encoder_id": 840,
+          "modes": 38,
+          "size_mm": [
+            800,
+            330
+          ],
+          "webkit_candidate": true,
+          "crtc_index": 1,
+          "crtc_mode": "3440x1440",
+          "crtc_hz": 144.0,
+          "atomic": {
+            "crtc_id": 397,
+            "crtc_index": 1,
+            "active": 1
+          }
+        }
+      ],
+      "error": null,
+      "crtc_count": 4
+    }
+  ],
+  "compositor": {
+    "source": "kscreen-doctor --json",
+    "outputs": [
+      {
+        "name": "DP-3",
+        "mode": "3440x1440",
+        "refresh_hz": 144,
+        "size_mm": [
+          797,
+          334
+        ],
+        "rotation": 1,
+        "webkit_size_match": [],
+        "webkit_lookup": "fails: no connector of the same size (kernel DP-3: 800x330 mm)"
+      },
+      {
+        "name": "DP-2",
+        "mode": "2560x1440",
+        "refresh_hz": 144,
+        "size_mm": [
+          597,
+          336
+        ],
+        "rotation": 1,
+        "webkit_size_match": [],
+        "webkit_lookup": "fails: no connector of the same size (kernel DP-2: 600x340 mm)"
+      }
+    ]
+  }
+}

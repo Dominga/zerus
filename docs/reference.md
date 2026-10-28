@@ -228,6 +228,21 @@ which then names the new conversation instead of the restored one. A sent first
 message or an archive restore still waits for that confirmation.
 Unknown flags or noninteractive modes such as `codex exec` are not guessed.
 The original positional prompt is never replayed during resume.
+For Kimi Code whose help advertises a non-interactive `--prompt`, Zerus removes
+the initial message from native arguments and the saved resume recipe, then
+submits it through the ordinary guarded send path for the exact launched run.
+Folder trust and setup remain manual. `inspect` includes `launch_prompt` with
+a preview of at most 200 characters plus an ellipsis, request ID and status.
+The full text stays only in the launching supervisor until ordinary guarded
+submission stores its input receipt. Errors are limited to 512 characters plus
+an ellipsis. An undelivered message is cancelled when its child exits or shuts
+down. After an attempted submission there is no automatic retry, including on
+refusal or an uncertain delivery. Review
+the preview and ordinary input receipt before sending it manually.
+Capability detection and native spawn use the same resolved executable after
+account environment setup. A custom `run_kimi.sh` keeps its own argument
+contract and is never invoked a second time for help; `--bare` selects the
+native Kimi launch behavior described here.
 
 A launch interrupted before conversation confirmation is not a Saved session.
 Repeat the same command without `--fresh`; the diagnostic attempt is preserved in
@@ -4094,6 +4109,31 @@ project is read again when a stat of its task store changes and at least every
 changed. A list that cannot be read, such as an unknown project, sends a
 non-fatal `tasks_failed`. A stream follows at most 8 projects
 (`limits.tasks_subscriptions`).
+
+The `organization` topic follows the shared project catalog as `hgs swarm get`
+prints it: `{"op":"subscribe","topic":"organization"}`, one per stream. A
+worker thread reads the stored catalog without its lock, never saving it and
+never restarting the catalog worker. It reads again when a stat of the
+catalog, its member lists or the worker's marker changes and at least every
+30 s, at most once a second. The catalog travels as keyed rows that a client
+applies like the catalog topic's:
+
+- `organization` is the snapshot without `versions`, `written` and the
+  projects' contents. Its `organization.projects` lists the project IDs in
+  order, and it carries `digest` and `worker`.
+- `project:<id>` is a project without `sessions`, with `session_chunks`, the
+  number of its member rows.
+- `members:<id>:<n>` is `{sessions}`, at most 1000 sessions in order.
+- `version:<token>` is one `versions` entry.
+
+The first rows go out as a paged `snapshot`. A later change sends one `delta`
+with only the changed rows and removed keys, or a new snapshot when that would
+not fit one frame, so every frame leaves a client consistent. Rebuilding the
+rows gives `swarm get`'s object without `written`. An unreadable catalog sends
+a non-fatal `organization_failed`. The topic reports `worker.current` but never
+supervises the worker; a client that sees `false` runs one `hgs swarm get`,
+which restarts an outdated worker as before. Writes, including the first
+`swarm initialize`, stay with `hgs swarm`.
 
 The stream checks its sources every 250 ms. It stats the bindings, read marks,
 notification preferences, waits, launches, renames, name routes, the archive

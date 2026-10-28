@@ -21,6 +21,9 @@ steps of its run (the n-th invocation plays run n, the last run repeats):
 
 When the steps run out the process exits 0 (EOF on stdout). Every invocation,
 control line and EOF is appended to `log.ndjson` with its time.
+
+`hgs [@alias] swarm get` prints `swarm-get.json` beside this script, which a
+test may rewrite; without it the call exits 2.
 """
 import json
 import os
@@ -146,6 +149,13 @@ def main():
         return 0
     if args == ["watch", "--json"]:
         return watch(host, spec, config)
+    if args == ["swarm", "get"]:
+        path = os.path.join(HERE, "swarm-get.json")
+        if not os.path.exists(path):
+            return 2
+        with open(path, encoding="utf-8") as handle:
+            sys.stdout.write(handle.read())
+        return 0
     return 2
 
 

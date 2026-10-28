@@ -4,8 +4,10 @@
 //! snapshot pages are staged until the page with `last` and then replace the
 //! rows at once, so a `gap` never empties the list; a delta gives one upsert or
 //! removal per item; Activity frames of followed sessions become
-//! [`Change::Activity`], processes frames [`Change::Processes`] and tasks frames
-//! [`Change::Tasks`]. Frame types and topics it does not know change nothing.
+//! [`Change::Activity`], processes frames [`Change::Processes`], tasks frames
+//! [`Change::Tasks`], a changed `catalog.meta` [`Change::Machine`] and the
+//! organization's frames [`Change::Organization`]. Frame types and topics it
+//! does not know change nothing.
 use crate::{
     view, ActivityUpdate, Change, ComputerId, ComputerStatus, ProcessesState, TasksState, ViewRow,
 };
@@ -135,9 +137,12 @@ pub struct CatalogState {
     rows: BTreeMap<String, ViewRow>,
     staged: Option<BTreeMap<String, ViewRow>>,
     meta: Option<Value>,
+    /// The card data last sent for this computer.
+    machine: Option<crate::MachineMeta>,
     activity: HashMap<String, ActivityState>,
     processes: ProcessesState,
     tasks: TasksState,
+    organization: crate::OrganizationState,
     live: bool,
     failed: bool,
     failures: u32,
@@ -199,6 +204,16 @@ impl CatalogState {
             Body::Snapshot(snapshot) if snapshot.topic == topic::CATALOG_META => {
                 if snapshot.last {
                     self.meta = snapshot.value.clone();
+                    if let Some(meta) = &self.meta {
+                        let machine = crate::MachineMeta::project(meta);
+                        if self.machine.as_ref() != Some(&machine) {
+                            self.machine = Some(machine.clone());
+                            changes.push(Change::Machine {
+                                computer: computer.clone(),
+                                machine,
+                            });
+                        }
+                    }
                 }
             }
             Body::Snapshot(snapshot) if snapshot.topic == topic::ACTIVITY => {
@@ -300,6 +315,15 @@ impl CatalogState {
                         .state(computer, &state.key, &state.value, state.rev),
                 );
             }
+            Body::Snapshot(snapshot) if snapshot.topic == topic::ORGANIZATION => {
+                changes.extend(self.organization.snapshot_page(computer, snapshot));
+            }
+            Body::Delta(delta) if delta.topic == topic::ORGANIZATION => {
+                changes.extend(self.organization.delta(computer, delta));
+            }
+            Body::Error(error) if error.topic.as_deref() == Some(topic::ORGANIZATION) => {
+                changes.extend(self.organization.error(computer, error));
+            }
             Body::Snapshot(snapshot) if snapshot.topic == topic::TASKS => {
                 changes.extend(self.tasks.snapshot(computer, snapshot));
             }
@@ -362,6 +386,7 @@ impl CatalogState {
             activity.staged = None;
         }
         self.tasks.begin();
+        self.organization.begin();
     }
 
     /// The stream ended, failed or stayed silent: the computer reconnects and
@@ -461,6 +486,22 @@ impl CatalogState {
             .iter()
             .any(|name| name == topic::PROCESSES)
             .then_some(hello.limits.processes_subscriptions)
+    }
+
+    /// The followed organization; see [`crate::organization`].
+    pub fn organization(&self) -> &crate::OrganizationState {
+        &self.organization
+    }
+
+    pub fn organization_mut(&mut self) -> &mut crate::OrganizationState {
+        &mut self.organization
+    }
+
+    /// Whether the latest `hello` offers the organization topic.
+    pub fn organization_offered(&self) -> bool {
+        self.hello
+            .as_ref()
+            .is_some_and(|hello| hello.topics.iter().any(|name| name == topic::ORGANIZATION))
     }
 
     /// The followed task lists; see [`crate::tasks`].
@@ -916,6 +957,45 @@ mod tests {
             None,
             "the fixture's hello lacks the topic"
         );
+    }
+
+    #[test]
+    fn a_changed_catalog_meta_gives_the_computer_card_once() {
+        let frames = fixture("basic.ndjson");
+        let local = ComputerId::local();
+        let mut state = CatalogState::new();
+        let machines = |changes: Vec<Change>| -> Vec<crate::MachineMeta> {
+            changes
+                .into_iter()
+                .filter_map(|change| match change {
+                    Change::Machine { computer, machine } => {
+                        assert!(computer.is_local());
+                        Some(machine)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let first = machines(apply_all(&mut state, &local, &frames[..5]));
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].host.as_deref(), Some("workstation"));
+        // The same meta again, as after a reconnect, sends nothing; a new
+        // sample does.
+        assert!(machines(apply_all(&mut state, &local, &frames[4..5])).is_empty());
+        let sampled = frame(
+            json!({"v":1,"seq":50,"t":"snapshot","topic":"catalog.meta","page":0,"last":true,"cursor":1,
+                   "value":{"host":"workstation","ok":true,"metrics":{"cpu_percent":42.0,"sampled_at":1787840100.0}}}),
+        );
+        let next = machines(state.apply(&local, &sampled));
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].metrics.cpu_percent, Some(42.0));
+        assert_eq!(next[0].metrics.sampled_at, Some(1787840100.0));
+        // A page before the last changes nothing.
+        let partial = frame(
+            json!({"v":1,"seq":51,"t":"snapshot","topic":"catalog.meta","page":0,"last":false,"cursor":1,
+                   "value":{"host":"elsewhere"}}),
+        );
+        assert!(machines(state.apply(&local, &partial)).is_empty());
     }
 
     #[test]

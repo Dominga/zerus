@@ -12,6 +12,7 @@ mod catalog;
 mod git;
 mod processes;
 mod stamps;
+mod organization;
 mod tasks;
 mod writer;
 
@@ -79,6 +80,8 @@ enum Input {
     Processes(processes::Done),
     /// A task list read finished on a worker.
     Tasks(tasks::Done),
+    /// An organization read finished on its worker.
+    Organization(organization::Done),
     End,
 }
 
@@ -141,6 +144,7 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             Ok(Input::Git(done)) => watch.git_done(done),
             Ok(Input::Processes(done)) => watch.processes_done(done),
             Ok(Input::Tasks(done)) => watch.tasks_done(done),
+            Ok(Input::Organization(done)) => watch.organization_done(done),
             Ok(Input::End) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
@@ -163,6 +167,7 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         watch.flush_git();
         watch.flush_processes();
         watch.flush_tasks();
+        watch.flush_organization();
     }
 }
 
@@ -339,6 +344,8 @@ struct Watch<'a> {
     processes_pool: Option<processes::Pool>,
     tasks: tasks::Tasks,
     tasks_pool: Option<tasks::Pool>,
+    organization: organization::Organization,
+    organization_pool: Option<organization::Pool>,
     writers: Writers,
 }
 
@@ -385,6 +392,8 @@ impl<'a> Watch<'a> {
             processes_pool: None,
             tasks: tasks::Tasks::new(),
             tasks_pool: None,
+            organization: organization::Organization::new(),
+            organization_pool: None,
             writers: Writers::None,
         }
     }
@@ -397,7 +406,9 @@ impl<'a> Watch<'a> {
             stream: uuid::Uuid::new_v4().to_string(),
             heartbeat_ms: protocol::HEARTBEAT_MS,
             max_frame_bytes: protocol::MAX_FRAME_BYTES,
-            topics: [topic::CATALOG, topic::CATALOG_META, topic::ACTIVITY, topic::GIT, topic::PROCESSES, topic::TASKS].map(str::to_owned).to_vec(),
+            topics: [topic::CATALOG, topic::CATALOG_META, topic::ACTIVITY, topic::GIT, topic::PROCESSES, topic::TASKS, topic::ORGANIZATION]
+                .map(str::to_owned)
+                .to_vec(),
             limits: protocol::Limits::default(),
         };
         self.out.put(&Body::Hello(hello));
@@ -833,6 +844,9 @@ impl<'a> Watch<'a> {
         if !self.tasks.is_empty() {
             let jobs = self.tasks.pulse(now, stamps::files);
             self.run_tasks(jobs);
+        }
+        if let Some(job) = self.organization.pulse(now, stamps::files) {
+            self.run_organization(job);
         }
     }
 
@@ -1308,6 +1322,70 @@ impl<'a> Watch<'a> {
         });
     }
 
+    // ---- Organization ------------------------------------------------------
+
+    fn subscribe_organization(&mut self) {
+        let files = crate::swarm::organization_files(self.config);
+        let stamp = stamps::files(&files);
+        let job = self.organization.subscribe(files, stamp, Instant::now());
+        self.run_organization(job);
+    }
+
+    /// Hands a read to the organization worker, started with the first one.
+    fn run_organization(&mut self, job: organization::Job) {
+        let pool = self.organization_pool.get_or_insert_with(|| {
+            let results = self.git_results.clone();
+            organization::Pool::spawn(move |done| {
+                let _ = results.send(Input::Organization(done));
+            })
+        });
+        pool.run(job);
+    }
+
+    fn organization_done(&mut self, done: organization::Done) {
+        if let Some(error) = self.organization.done(done) {
+            self.out.failure("organization_failed", &error, Some(topic::ORGANIZATION), None);
+        }
+    }
+
+    /// Sends the organization's changed rows unless the client is behind:
+    /// the first rows as a paged snapshot, later ones as one delta.
+    fn flush_organization(&mut self) {
+        if self.out.writer.backlog() > DEFER_BYTES {
+            return;
+        }
+        let Some(plan) = self.organization.plan(PAGE_LIMIT) else { return };
+        let cursor = self.organization.next_rev();
+        let item = |(key, row): (String, Value)| json!({"key": key, "row": row});
+        let delivered = match plan {
+            organization::Plan::Snapshot(pages) => {
+                let count = pages.len();
+                pages.into_iter().enumerate().all(|(page, rows)| {
+                    self.out.put(&Body::Snapshot(protocol::Snapshot {
+                        topic: topic::ORGANIZATION.into(),
+                        key: None,
+                        items: Some(rows.into_iter().map(item).collect()),
+                        value: None,
+                        page: page as u32,
+                        last: page + 1 == count,
+                        cursor,
+                    }))
+                })
+            }
+            organization::Plan::Delta { upsert, remove } => self.out.put(&Body::Delta(protocol::Delta {
+                topic: topic::ORGANIZATION.into(),
+                upsert: upsert.into_iter().map(|(key, row)| protocol::CatalogItem { key, row }).collect(),
+                remove: remove.into_iter().map(|key| protocol::Removal { key, reason: None }).collect(),
+                cursor,
+            })),
+        };
+        if delivered {
+            self.organization.sent();
+        } else {
+            self.organization.resend();
+        }
+    }
+
     // ---- Control -----------------------------------------------------------
 
     fn control(&mut self, text: &str) {
@@ -1335,6 +1413,8 @@ impl<'a> Watch<'a> {
                     if let Some(project) = &subscription.project {
                         self.tasks.unsubscribe(project);
                     }
+                } else if subscription.topic == topic::ORGANIZATION {
+                    self.organization.unsubscribe();
                 } else if let Some(session) = subscription.session.as_ref().filter(|_| subscription.topic == topic::PROCESSES) {
                     self.processes.unsubscribe(&session.key());
                 } else if let Some(session) = subscription.session.filter(|_| subscription.topic == topic::ACTIVITY) {
@@ -1351,6 +1431,7 @@ impl<'a> Watch<'a> {
             topic::GIT => return self.subscribe_git(request.path.as_deref()),
             topic::PROCESSES => return self.subscribe_processes(request.session),
             topic::TASKS => return self.subscribe_tasks(request.project.as_deref()),
+            topic::ORGANIZATION => return self.subscribe_organization(),
             topic::ACTIVITY => {}
             other => {
                 self.out.error(
@@ -1552,6 +1633,7 @@ mod tests {
                 Input::Git(done) => format!("<git {}>", done.path),
                 Input::Processes(done) => format!("<processes {}>", done.key),
                 Input::Tasks(done) => format!("<tasks {}>", done.key),
+                Input::Organization(_) => "<organization>".into(),
                 Input::End => "<end>".into(),
             })
             .collect()

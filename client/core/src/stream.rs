@@ -11,7 +11,9 @@
 //! follows after 5 s, 15 s, 60 s, then every 5 minutes (failures more than ten
 //! minutes apart start over). Followed sessions are subscribed again on every
 //! new stream, after their last cursor, and so are followed processes when the
-//! stream offers that topic.
+//! stream offers that topic. A followed organization comes from a stream that
+//! offers its topic; while none does, this computer's is polled with
+//! `hgs swarm get` every 5 s.
 use crate::{state::CatalogState, Change, ComputerId, ComputerStatus};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -50,6 +52,9 @@ pub struct Timing {
     pub peer_probe_timeout: Duration,
     /// How long a stream may take to exit after EOF on its stdin.
     pub stop_grace: Duration,
+    /// How often a followed organization without a stream offering it is
+    /// polled with `hgs swarm get`.
+    pub organization_poll: Duration,
 }
 
 impl Default for Timing {
@@ -61,17 +66,20 @@ impl Default for Timing {
             probe_timeout: Duration::from_secs(5),
             peer_probe_timeout: Duration::from_secs(15),
             stop_grace: Duration::from_secs(1),
+            organization_poll: crate::organization::POLL,
         }
     }
 }
 
 impl Timing {
-    /// The default timing with restart and re-probe delays times `factor`.
+    /// The default timing with restart, re-probe and organization poll
+    /// delays times `factor`.
     pub fn scaled(factor: f64) -> Self {
         let default = Self::default();
         Self {
             restart: default.restart.map(|delay| delay.mul_f64(factor)),
             reprobe: default.reprobe.mul_f64(factor),
+            organization_poll: default.organization_poll.mul_f64(factor),
             ..default
         }
     }
@@ -301,16 +309,53 @@ pub(crate) fn read_line(
 }
 
 enum Input {
-    Line { generation: u64, line: String },
-    Closed { generation: u64 },
-    Subscribe { key: String },
-    Unsubscribe { key: String, session: SessionRef },
-    SubscribeProcesses { key: String },
-    UnsubscribeProcesses { key: String, session: SessionRef },
-    SubscribeTasks { key: String },
-    UnsubscribeTasks { key: String },
+    Line {
+        generation: u64,
+        line: String,
+    },
+    Closed {
+        generation: u64,
+    },
+    Subscribe {
+        key: String,
+    },
+    Unsubscribe {
+        key: String,
+        session: SessionRef,
+    },
+    SubscribeProcesses {
+        key: String,
+    },
+    UnsubscribeProcesses {
+        key: String,
+        session: SessionRef,
+    },
+    SubscribeTasks {
+        key: String,
+    },
+    UnsubscribeTasks {
+        key: String,
+    },
+    SubscribeOrganization,
+    UnsubscribeOrganization,
+    /// A `swarm get` of the organization poll.
+    OrganizationPolled(Result<Value, crate::ReadError>),
     Control(Control),
     Stop,
+}
+
+/// The organization edit snapshot the supervisor keeps current.
+type OrganizationShared = Arc<Mutex<Option<crate::OrganizationSnapshot>>>;
+
+/// Polls `hgs swarm get` on its own thread until dropped.
+struct Poller {
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for Poller {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -343,6 +388,8 @@ pub struct StreamHandle {
     tasks: TaskFollows,
     /// The tasks follows the latest stream accepts.
     tasks_limit: Arc<AtomicUsize>,
+    organization: Arc<AtomicBool>,
+    organization_snapshot: OrganizationShared,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -502,6 +549,38 @@ impl StreamHandle {
         lock(&self.tasks).iter().cloned().collect()
     }
 
+    /// Follows this computer's organization (see [`crate::organization`]):
+    /// from a stream that offers the topic, otherwise by polling
+    /// `hgs swarm get` every 5 s when the computer is this one.
+    pub fn follow_organization(&self) -> Result<(), FollowError> {
+        if self.stopped() {
+            return Err(FollowError::Stopped);
+        }
+        if !self.organization.swap(true, Ordering::Relaxed) {
+            self.tx
+                .send(Input::SubscribeOrganization)
+                .map_err(|_| FollowError::Stopped)?;
+        }
+        Ok(())
+    }
+
+    /// Stops following the organization and drops it without an update;
+    /// false when it was not followed.
+    pub fn unfollow_organization(&self) -> bool {
+        if !self.organization.swap(false, Ordering::Relaxed) {
+            return false;
+        }
+        *lock(&self.organization_snapshot) = None;
+        let _ = self.tx.send(Input::UnsubscribeOrganization);
+        true
+    }
+
+    /// The organization the view shows and the versions observed with it,
+    /// for an edit; None before the first state.
+    pub fn organization_snapshot(&self) -> Option<crate::OrganizationSnapshot> {
+        lock(&self.organization_snapshot).clone()
+    }
+
     /// Ends the stream (EOF on its stdin), reports the computer
     /// [`ComputerStatus::Ended`] with no rows, and waits for the supervisor.
     pub fn stop(mut self) {
@@ -540,6 +619,8 @@ pub fn spawn(
     let processes_limit = Arc::new(AtomicUsize::new(PROCESSES_SUBSCRIPTIONS));
     let tasks = TaskFollows::default();
     let tasks_limit = Arc::new(AtomicUsize::new(TASKS_SUBSCRIPTIONS));
+    let organization = Arc::new(AtomicBool::new(false));
+    let organization_snapshot = OrganizationShared::default();
     let stop = Arc::new(AtomicBool::new(false));
     let supervisor = Supervisor {
         hgs: hgs.to_owned(),
@@ -553,6 +634,9 @@ pub fn spawn(
         processes_limit: processes_limit.clone(),
         tasks: tasks.clone(),
         tasks_limit: tasks_limit.clone(),
+        organization_snapshot: organization_snapshot.clone(),
+        poller: None,
+        worker_fixed: None,
         stop: stop.clone(),
         state: CatalogState::new(),
         generation: 0,
@@ -577,6 +661,8 @@ pub fn spawn(
         processes_limit,
         tasks,
         tasks_limit,
+        organization,
+        organization_snapshot,
         stop,
         thread: Some(thread),
     }
@@ -600,6 +686,11 @@ struct Supervisor {
     processes_limit: Arc<AtomicUsize>,
     tasks: TaskFollows,
     tasks_limit: Arc<AtomicUsize>,
+    organization_snapshot: OrganizationShared,
+    /// Polls `swarm get` while no stream offers the organization.
+    poller: Option<Poller>,
+    /// When an outdated catalog worker last got its `swarm get`.
+    worker_fixed: Option<Instant>,
     stop: Arc<AtomicBool>,
     state: CatalogState,
     generation: u64,
@@ -648,6 +739,11 @@ impl Supervisor {
             }
         }
         self.close();
+        self.poller = None;
+        if let Some(change) = self.state.organization_mut().end(&self.computer) {
+            *lock(&self.organization_snapshot) = None;
+            self.emit(change);
+        }
         self.emit(Change::Replace {
             computer: self.computer.clone(),
             rows: Vec::new(),
@@ -677,6 +773,8 @@ impl Supervisor {
 
     /// Waits without a stream, keeping follows current; false on stop.
     fn wait(&mut self, time: Duration) -> bool {
+        // No stream: a followed organization is polled meanwhile.
+        self.sync_poller();
         let deadline = Instant::now() + time;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -693,6 +791,9 @@ impl Supervisor {
                 }
                 Ok(Input::SubscribeTasks { key }) => self.state.tasks_mut().follow(&key),
                 Ok(Input::UnsubscribeTasks { key }) => self.state.tasks_mut().unfollow(&key),
+                Ok(Input::SubscribeOrganization) => self.subscribe_organization(),
+                Ok(Input::UnsubscribeOrganization) => self.unsubscribe_organization(),
+                Ok(Input::OrganizationPolled(result)) => self.organization_polled(result),
                 Ok(_) => {}
                 Err(RecvTimeoutError::Timeout) => return true,
             }
@@ -768,6 +869,9 @@ impl Supervisor {
                     self.state.processes_mut().unfollow(&key);
                     self.unsubscribe_processes(session);
                 }
+                Ok(Input::SubscribeOrganization) => self.subscribe_organization(),
+                Ok(Input::UnsubscribeOrganization) => self.unsubscribe_organization(),
+                Ok(Input::OrganizationPolled(result)) => self.organization_polled(result),
                 Ok(Input::SubscribeTasks { key }) => self.subscribe_tasks(&key),
                 Ok(Input::UnsubscribeTasks { key }) => {
                     self.state.tasks_mut().unfollow(&key);
@@ -783,6 +887,9 @@ impl Supervisor {
     fn handle(&mut self, frame: &Frame) {
         let changes = self.state.apply(&self.computer, frame);
         for change in changes {
+            if matches!(change, Change::Organization { .. }) {
+                self.organization_changed();
+            }
             match &change {
                 Change::Activity {
                     key,
@@ -839,6 +946,9 @@ impl Supervisor {
                 let keys: Vec<String> = lock(&self.tasks).iter().cloned().collect();
                 for key in keys {
                     self.subscribe_tasks(&key);
+                }
+                if self.state.organization().is_followed() {
+                    self.subscribe_organization();
                 }
             }
             Body::Snapshot(snapshot)
@@ -910,6 +1020,115 @@ impl Supervisor {
         }));
     }
 
+    /// Whether the running stream delivers the organization.
+    fn streams_organization(&self) -> bool {
+        self.greeted && self.state.organization_offered()
+    }
+
+    /// Polls this computer's `swarm get` while a followed organization has no
+    /// stream that offers it, and stops otherwise.
+    fn sync_poller(&mut self) {
+        let wanted = self.state.organization().is_followed()
+            && !self.streams_organization()
+            && self.computer.is_local()
+            && !self.stop.load(Ordering::Relaxed);
+        if !wanted {
+            self.poller = None;
+            return;
+        }
+        if self.poller.is_some() {
+            return;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let (hgs, tx, flag) = (self.hgs.clone(), self.tx.clone(), stop.clone());
+        let every = self.timing.organization_poll;
+        let spawned = thread::Builder::new()
+            .name("hgs-swarm-poll".into())
+            .spawn(move || {
+                while !flag.load(Ordering::Relaxed) {
+                    let reply = crate::reads::read(&hgs, &ComputerId::local(), &crate::Read::Swarm);
+                    if flag.load(Ordering::Relaxed)
+                        || tx.send(Input::OrganizationPolled(reply)).is_err()
+                    {
+                        return;
+                    }
+                    let until = Instant::now() + every;
+                    while Instant::now() < until && !flag.load(Ordering::Relaxed) {
+                        thread::sleep(every.min(Duration::from_millis(50)));
+                    }
+                }
+            });
+        if spawned.is_ok() {
+            self.poller = Some(Poller { stop });
+        }
+    }
+
+    /// Follows the organization from the running stream when it offers the
+    /// topic, otherwise by polling.
+    fn subscribe_organization(&mut self) {
+        self.state.organization_mut().follow();
+        if self.streams_organization() {
+            self.write(&Control::Subscribe(Subscription {
+                topic: topic::ORGANIZATION.into(),
+                ..Subscription::default()
+            }));
+        }
+        self.sync_poller();
+    }
+
+    fn unsubscribe_organization(&mut self) {
+        if self.streams_organization() {
+            self.write(&Control::Unsubscribe(Subscription {
+                topic: topic::ORGANIZATION.into(),
+                ..Subscription::default()
+            }));
+        }
+        self.state.organization_mut().unfollow();
+        *lock(&self.organization_snapshot) = None;
+        self.sync_poller();
+    }
+
+    /// A poll's reply; one that arrives after the stream took over is late.
+    fn organization_polled(&mut self, reply: Result<Value, crate::ReadError>) {
+        if self.streams_organization() {
+            return;
+        }
+        let computer = self.computer.clone();
+        let organization = self.state.organization_mut();
+        let change = match reply {
+            Ok(value) => organization.polled(&computer, value),
+            Err(error) => {
+                let code = serde_json::to_value(&error)
+                    .ok()
+                    .and_then(|value| value["error"].as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "failed".into());
+                organization.failed(&computer, &code, &error.to_string())
+            }
+        };
+        if let Some(change) = change {
+            self.organization_changed();
+            self.emit(change);
+        }
+    }
+
+    /// Keeps the edit snapshot current and gives an outdated catalog worker
+    /// one `swarm get`, which restarts it as before (at most every 10 min).
+    fn organization_changed(&mut self) {
+        *lock(&self.organization_snapshot) = self.state.organization().snapshot();
+        let due = self
+            .worker_fixed
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(600));
+        if self.computer.is_local() && due && self.state.organization().worker_outdated() {
+            self.worker_fixed = Some(Instant::now());
+            let hgs = self.hgs.clone();
+            let _ = thread::Builder::new()
+                .name("hgs-swarm-worker".into())
+                .spawn(move || {
+                    let _ = crate::reads::read(&hgs, &ComputerId::local(), &crate::Read::Swarm);
+                });
+        }
+    }
+
     /// Accepts the project's tasks frames and, on a greeted stream that offers
     /// the topic, subscribes it; one beyond the stream's limit ends at once.
     fn subscribe_tasks(&mut self, key: &str) {
@@ -975,6 +1194,7 @@ impl Supervisor {
     fn close(&mut self) {
         self.stdin = None;
         self.greeted = false;
+        self.sync_poller();
         let Some(mut child) = self.child.take() else {
             return;
         };
@@ -1033,6 +1253,7 @@ mod tests {
         assert_eq!(scaled.restart_delay(1), Duration::from_millis(5));
         assert_eq!(scaled.restart_delay(4), Duration::from_millis(300));
         assert_eq!(scaled.reprobe, Duration::from_millis(600));
+        assert_eq!(scaled.organization_poll, Duration::from_millis(5));
         assert_eq!(scaled.silence, Duration::from_secs(30));
     }
 

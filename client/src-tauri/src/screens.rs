@@ -1596,6 +1596,60 @@ mod tests {
     }
 
     #[test]
+    fn a_catalog_panic_wakes_new_session_and_notifies_without_replaying_the_read() {
+        let h = harness(launch_replies(false), true);
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let heard_by_callback = Arc::clone(&heard);
+        h.screens.on_launch_change(Arc::new(move |computer| {
+            heard_by_callback.lock().unwrap().push(computer.clone());
+        }));
+        let here = ComputerId::local();
+        let runs = h.screens.launch_start(&here, false, None);
+        h.screens.run(runs);
+        let waiting = h.screens.clone();
+        let (ready, started) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let hub = waiting.lock();
+            assert!(!hub.launch.as_ref().unwrap().answered);
+            ready.send(()).unwrap();
+            let (hub, timeout) = waiting
+                .0
+                .catalog_done
+                .wait_timeout_while(hub, Duration::from_secs(2), |hub| {
+                    !hub.launch.as_ref().unwrap().answered
+                })
+                .unwrap();
+            assert!(
+                !timeout.timed_out(),
+                "the catalog completion must wake the waiter"
+            );
+            assert!(hub.launch.as_ref().unwrap().answered);
+        });
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        h.screens.0.panic_read.store(true, Ordering::Relaxed);
+        h.run(0);
+        waiter.join().unwrap();
+        let view = h.screens.launch_rows(&here);
+        assert!(view.loaded);
+        assert_eq!(
+            view.error.as_deref(),
+            Some("Could not load accounts: Could not refresh this screen.")
+        );
+        assert_eq!(*heard.lock().unwrap(), [here.clone()]);
+        assert_eq!(
+            h.count("account ls"),
+            0,
+            "panic recovery must not replay the CLI read"
+        );
+        assert!(!h.screens.lock().accounts.reading());
+        let runs = h.screens.launch_waited(&here);
+        assert!(runs.is_empty());
+        launch_ask(&h, &here, true);
+        assert!(h.screens.launch_rows(&here).error.is_none());
+        assert_eq!(h.count("account ls"), 1, "only the explicit Refresh reads");
+    }
+
+    #[test]
     fn panicking_catalog_and_usage_jobs_release_their_slots_and_allow_refresh() {
         let h = harness(local_accounts(), true);
         h.screens.set_visible(Screen::Accounts, true);

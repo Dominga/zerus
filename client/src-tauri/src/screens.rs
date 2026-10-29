@@ -1612,18 +1612,22 @@ mod tests {
             let hub = waiting.lock();
             assert!(!hub.launch.as_ref().unwrap().answered);
             ready.send(()).unwrap();
-            let (hub, timeout) = waiting
-                .0
-                .catalog_done
-                .wait_timeout_while(hub, Duration::from_secs(2), |hub| {
-                    !hub.launch.as_ref().unwrap().answered
-                })
-                .unwrap();
-            assert!(
-                !timeout.timed_out(),
-                "the catalog completion must wake the waiter"
-            );
-            assert!(hub.launch.as_ref().unwrap().answered);
+            let mut hub = hub;
+            loop {
+                let (next, timeout) = waiting
+                    .0
+                    .catalog_done
+                    .wait_timeout(hub, Duration::from_secs(2))
+                    .unwrap();
+                hub = next;
+                assert!(
+                    !timeout.timed_out(),
+                    "the catalog completion must wake the waiter"
+                );
+                if hub.launch.as_ref().unwrap().answered {
+                    break;
+                }
+            }
         });
         started.recv_timeout(Duration::from_secs(2)).unwrap();
         h.screens.0.panic_read.store(true, Ordering::Relaxed);

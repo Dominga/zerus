@@ -60,6 +60,15 @@ only check: it reads the feed of the fork's latest release,
 with the same rules, and never checks by itself. Outside a portable folder the
 button stays off.
 
+The feed's `commit` is compared with the running build's `build-info.json`
+`source_commit` first: the build of the running commit is never offered. A
+build without a fork build number (made locally, or an experimental
+`whitewh-exp-*` zip) cannot tell whether the feed's build is newer, so it never
+downloads it by itself: the status names both commits and the button becomes
+**Replace this build with fork build N...**, which asks for confirmation before
+the download. Restart then installs it as an ordinary update, keeping the
+running build as the rollback copy.
+
 A portable Windows build of the fork never takes an upstream zip: the upstream
 catalog check (`UpdateController`) does not offer the Windows portable build of
 `ufna/zerus` over it, since installing that would replace the fork.

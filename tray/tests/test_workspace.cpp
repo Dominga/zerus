@@ -898,7 +898,9 @@ void TestWorkspace::shortIdentityLabelsFitWithoutElision()
 
 void TestWorkspace::elapsedWorkTimeKeepsUpdatingWithoutAnimation()
 {
-    QCOMPARE(SessionElapsed::working(100, 1176), QString("Working (17m 56s)"));
+    // U42 (#590): the badge form, as the handoff's "Working 53s".
+    QCOMPARE(SessionElapsed::working(100, 1176), QString("Working 17m 56s"));
+    QCOMPARE(SessionElapsed::badge("Working", 1123, 1176), QString("Working 53s"));
     QCOMPARE(SessionElapsed::text(100, 118), QString("18s"));
     QCOMPARE(SessionElapsed::text(100, 3760), QString("1h 01m"));
     QCOMPARE(SessionElapsed::text(100, 176500), QString("2d 1h"));

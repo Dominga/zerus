@@ -695,8 +695,10 @@ SessionsWindow::PreparedRows SessionsWindow::prepareRows(const RowInputs &in)
             const int optionalQuestions = roles.value(SessionRoles::OptionalQuestions).toInt();
             if (optionalQuestions > 0) accessibleFields << SessionPresentation::optionalQuestionsLabel(optionalQuestions);
             if (s.reviewLater) accessibleFields << tr("Marked needs attention: review later");
-            // N36 of #499: the team default lives in this desktop only; hgs
-            // keeps the session unmuted for Android and the other desktops.
+            // U43: hgs applies a team member's default mute itself, so the
+            // shared preference reads muted at revision 0 and says "on all
+            // devices". The local fallback remains only for a host whose hgs
+            // predates the shared team default.
             if (s.muted && s.teamMuted) accessibleFields << tr("Muted on this computer: team members are muted by default");
             else if (s.muted) accessibleFields << (s.sharedNotifications && e.online ? tr("Muted on all devices") : tr("Muted on all devices (last confirmed)"));
             accessibleFields << desc;

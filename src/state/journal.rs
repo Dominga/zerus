@@ -912,6 +912,9 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     // this hgs holds them for a client that asks (`queue_when_unconfirmed`).
     output["input_hold_supported"] = json!(true);
     output["held_inputs"] = input_hold::inspection(string(&record, "name"));
+    // #511 N5: the latest held messages that were not delivered (failed or
+    // uncertain), so the composer that sent one restores its text.
+    output["held_settled"] = input_hold::settled(string(&record, "name"));
     output["voice_messages"] = conversation_history::inspected_voice_messages(&record, &output, None);
     // The lock was released after `snapshot`, so a rename may have landed since.
     // The pane folders go by the session IDs, which a rename keeps, to the name

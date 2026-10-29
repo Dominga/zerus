@@ -1170,7 +1170,7 @@ QWidget *TeamPanel::tasks(const Team &team, bool narrow)
     for (int id : order) {
         const auto *task = team.task(id);
         const auto status = taskStatus(*task);
-        const QString role = task->assignee.isEmpty() ? (planningNow ? tr("No assignee") : tr("You")) : team.roleOf(task->assignee);
+        const QString role = team.assigneeRole(*task, planningNow ? tr("No assignee") : tr("You"));
         TaskView::Node node;
         node.id = id; node.phase = task->phase; node.layer = grouped ? localLayer.value(id) : team.layers.value(id);
         node.title = task->title; node.role = role;
@@ -1184,7 +1184,7 @@ QWidget *TeamPanel::tasks(const Team &team, bool narrow)
         QStringList deps;
         for (const auto &dep : task->deps) deps << QStringLiteral("#%1").arg(dep.task);
         node.deps = deps.isEmpty() ? QString() : QStringLiteral("← ") + deps.join(' ');
-        const bool active = QStringList{"assigned", "in_progress", "submitted"}.contains(task->status);
+        const bool active = QStringList{"assigned", "in_progress", "submitted", "in_review", "in_test"}.contains(task->status);
         node.match = m_filter == "all" || (m_filter == "active" && active) || (m_filter == "problems" && node.problem);
         view->nodes.append(node);
     }

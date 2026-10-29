@@ -43,6 +43,7 @@
 #include "TeamCatalogEditor.h"
 #include "TeamWorkspace.h"
 #include "TeamDesignerPage.h"
+#include "TeamWaitingPage.h"
 #include "TeamNewTab.h"
 #include <memory>
 #include "Extensions.h"
@@ -352,7 +353,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // WhiteWh fork: agent teams. The Team designer mode: the universal catalog.
     m_teamDesignerNav = iconButton("team", tr("Team designer"), "railButton"); m_teamDesignerNav->setProperty("teamDesignerNav", true); m_teamDesignerNav->setCheckable(true);
     connect(m_teamDesignerNav, &QPushButton::clicked, this, [this] { showTeamDesigner(); });
-    for (auto *button : {m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav, m_teamDesignerNav}) { button->setFixedSize(42, 44); button->setIconSize(QSize(24, 24)); side->addWidget(button); }
+    // U50: what waits for you across every team, beside the Team designer.
+    m_teamWaitingNav = iconButton("inbox", tr("Waiting for you"), "railButton"); m_teamWaitingNav->setProperty("teamWaitingNav", true); m_teamWaitingNav->setCheckable(true);
+    connect(m_teamWaitingNav, &QPushButton::clicked, this, [this] { showTeamWaiting(); });
+    for (auto *button : {m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav, m_teamDesignerNav, m_teamWaitingNav}) { button->setFixedSize(42, 44); button->setIconSize(QSize(24, 24)); side->addWidget(button); }
     m_attentionBadge = new QLabel(m_sessionsNav); m_attentionBadge->setObjectName("railAttentionBadge");
     m_attentionBadge->setAlignment(Qt::AlignCenter); m_attentionBadge->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_attentionBadge->setGeometry(24, 3, 17, 16); m_attentionBadge->hide();
@@ -2167,6 +2171,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_pages,&QStackedWidget::currentChanged,this,[this](int index) {
         m_sessionsNav->setChecked(index==0); m_projectsNav->setChecked(index==1); m_machinesNav->setChecked(index==2); m_brand->setChecked(index==3); m_accountsNav->setChecked(index==4); m_settingsNav->setChecked(index==5);
         if (m_teamDesignerNav) m_teamDesignerNav->setChecked(index==m_teamDesignerPageIndex);
+        if (m_teamWaitingNav) m_teamWaitingNav->setChecked(index==m_teamWaitingPageIndex);
         // WhiteWh fork: the catalog's Computer and Account dropdowns, fresh on each visit.
         if (index==5 && m_teamCatalog) m_teamCatalog->setSources(&m_client, teamComputers());
         if (index==m_teamDesignerPageIndex && m_teamDesignerPage) m_teamDesignerPage->editor()->setSources(&m_client, teamComputers());
@@ -2792,6 +2797,7 @@ void SessionsWindow::applyTheme()
     if (m_teamCatalog) m_teamCatalog->setDark(m_dark);
     if (m_teamWorkspace) m_teamWorkspace->setTheme(m_dark);
     if (m_teamDesignerPage) m_teamDesignerPage->setDark(m_dark);
+    if (m_teamWaitingPage) m_teamWaitingPage->setDark(m_dark);
     if (m_teamNewForm) m_teamNewForm->setDark(m_dark);
     m_processes->setTheme(m_dark);
     m_tasks->setTheme(m_dark); m_taskInspector->setTheme(m_dark);
@@ -4269,6 +4275,14 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
             item["reads"] = item.value("reads").toInt() + 1;
             if (listed.contains(item.value("request_id").toString()) || item.value("reads").toInt() >= 2) held->removeAt(i);
             else (*held)[i] = item;
+        }
+    }
+    // #511 N5: a held message hgs could not deliver comes back to this
+    // session's composer with why; an uncertain one says Delivery unconfirmed.
+    if (auto sent = m_sentHeld.find(entry->key); sent != m_sentHeld.end() && entry->key == m_selectedKey) {
+        for (const auto &lost : sent->take(data.value("held_settled").toArray())) {
+            m_composer->editor()->setPlainText(HeldSent::restored(m_composer->editor()->toPlainText(), lost.text));
+            showNotice(HeldSent::notice(lost), true);
         }
     }
     // WhiteWh fork: the Tasks card's background jobs come from the same read,
@@ -6027,9 +6041,12 @@ void SessionsWindow::finishMessage(quint64 request, bool ok, const QJsonObject &
     auto &messages = m_localMessages[pending.key];
     // U35: a held message shows in the queued line, not as a sent card.
     if (ok && receipt.value("status") == "queued") {
+        // #511 N5: the text the owner wrote, without the iron rules sent ahead of it.
+        QString written;
         for (qsizetype i = 0; i < messages.size(); ++i)
-            if (messages.at(i).toObject().value("id").toString() == QString::number(request)) { messages.removeAt(i); break; }
+            if (messages.at(i).toObject().value("id").toString() == QString::number(request)) { written = messages.at(i).toObject().value("text").toString(); messages.removeAt(i); break; }
         m_justHeld[pending.key].append(QJsonObject{{"request_id", receipt.value("request_id")}, {"text", receipt.value("text")}});
+        m_sentHeld[pending.key].add(receipt.value("request_id").toString(), written.isEmpty() ? receipt.value("text").toString() : written);
         if (pending.key == m_selectedKey) { renderHeld(); renderDetails(); inspect(); }
         emit refreshRequested();
         return;
@@ -6987,7 +7004,7 @@ void SessionsWindow::placeRailControls(bool inTitle)
     // the controls once the window is complete.
     if (inTitle == m_railInTitle || !m_railLayout || !m_statusLayout || !m_titleBar) return;
     m_railInTitle = inTitle;
-    const QList<QPushButton *> leading{m_railSessionsToggle, m_railNewSession, m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav, m_teamDesignerNav};
+    const QList<QPushButton *> leading{m_railSessionsToggle, m_railNewSession, m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav, m_teamDesignerNav, m_teamWaitingNav};
     const QList<QPushButton *> trailing{m_windowPin, m_settingsNav};
     QList<QPushButton *> all{m_brand}; all << leading << trailing;
     // Moving a widget hides it; each keeps whether it was shown.
@@ -7518,6 +7535,26 @@ void SessionsWindow::showTeamDesigner()
     m_teamDesignerPage->setContext(m_teamDesignerFolder,m_teamDesignerProject);
     m_pages->setCurrentWidget(m_teamDesignerPage);
     m_teamDesignerPage->refresh();
+}
+// U50: the waiting list of every team; a row opens its team's Team tab, a
+// draft phase unfolded.
+void SessionsWindow::showTeamWaiting()
+{
+    if(!m_teams)return;
+    if(!m_teamWaitingPage){
+        m_teamWaitingPage=new TeamWaitingPage(m_teams);m_teamWaitingPage->setDark(m_dark);
+        m_teamWaitingPage->openTeam=[this](const TeamWaitingPage::Item &item){
+            m_pages->setCurrentIndex(0);showTeam(item.team);
+            if(m_teamPanel&&m_teamPanel->openWorkspace)m_teamPanel->openWorkspace();
+            if(item.phase>0&&item.kind=="phase_draft"&&m_teamWorkspace)m_teamWorkspace->showPhase(item.phase);
+        };
+        m_teamWaitingPage->countChanged=[this](int total){
+            m_teamWaitingNav->setToolTip(total>0?tr("Waiting for you: %1").arg(total):tr("Waiting for you"));
+        };
+        m_teamWaitingPageIndex=m_pages->addWidget(m_teamWaitingPage);
+    }
+    m_pages->setCurrentWidget(m_teamWaitingPage);
+    m_teamWaitingNav->setChecked(true);
 }
 void SessionsWindow::startTeamDesigner(const QString &folder,const QString &goal,const QJsonObject &agent)
 {

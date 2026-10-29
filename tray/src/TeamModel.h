@@ -30,6 +30,17 @@ inline QStringList knownModels(const QString &agent)
     return known.value(agent);
 }
 
+// U45: a model a role's or member's session may switch to before a task, with
+// its effort (empty: the model's own). Written as {model, effort}.
+struct ModelChoice {
+    QString model, effort;
+    bool operator==(const ModelChoice &other) const { return model == other.model && effort == other.effort; }
+    bool operator!=(const ModelChoice &other) const { return !(*this == other); }
+    QString text() const { return effort.isEmpty() ? model : model + QLatin1Char('@') + effort; }
+};
+QList<ModelChoice> parseModelChoices(const QJsonValue &value);
+QJsonArray modelChoicesJson(const QList<ModelChoice> &choices);
+
 // A member's question to the lead (A3), open until the lead answers it. B1/C4:
 // a permission request carries the exact command, its source ("tool_input",
 // "process" or "unknown"), the agent's reason and the question hash hgs team
@@ -82,6 +93,11 @@ struct Member {
     // hgs gets the same list derived from the tasks.
     QList<int> queue;
     bool queueKnown = false;   // `queue` was in the JSON, even when empty
+    // U36 (#532): the stage it has (delivered) first, then the waiting stages
+    // it may take; derived from the tasks when hgs sends none.
+    struct StageEntry { int task = 0, round = 0; QString stage, state; double since = 0; };
+    QList<StageEntry> stageQueue;
+    bool stageQueueKnown = false;
     // G7: the MCP servers and services this member's session runs; they outlive
     // the session and are not Background work.
     struct Service { QString name, command; double since = 0; };
@@ -102,6 +118,13 @@ struct Member {
     // it is a sub-lead, which hands out, reviews and accepts its reports' tasks.
     QString parent;
     bool sub = false;
+    // U45/U46: the models it may switch between (empty: its launch model) and
+    // what Zerus does to its context before a task ("": its role's, none,
+    // compact or clear); sent back only when set.
+    QList<ModelChoice> models;
+    QString contextBeforeTask;
+    // U49: it finishes its open work, takes nothing new and then leaves.
+    bool draining = false;
     QJsonObject json() const;
 };
 
@@ -183,6 +206,34 @@ struct Attempt {
 
 struct Dep { int task = 0; bool soft = false; };
 
+// U36: a task's pipeline as hgs snapshots it at the first hand-out
+// (`pipeline_run`): its stages after the implementer's report, the returned
+// rounds before the lead decides, where a test works (`hold` the task's folder
+// or a detached `checkout`), the final acceptance (lead, sub_lead or auto) and
+// every stage run, oldest first. A run checks one attempt (`attempt` is its n)
+// and is waiting (for a member), delivered, passed, returned, skipped or
+// revoked; #532 adds its folder, checkout, hold and what changed.
+struct StageSpec { QString kind, role, member; };
+struct StageRun {
+    QString id, kind, member, state, by, text, folder, checkout;
+    int stage = 0, round = 0, attempt = 0;
+    double at = 0, deliveredAt = 0, endedAt = 0;
+    QStringList findings;
+    bool holds = false;
+    QJsonArray changed;   // {commit, files} or {path, size, deleted}
+    bool open() const { return state == QLatin1String("waiting") || state == QLatin1String("delivered"); }
+};
+struct PipelineRun {
+    QString id, name, folder, accept;
+    int maxRounds = 0, round = 0;
+    QList<StageSpec> stages;
+    QList<StageRun> runs;
+    bool known = false;
+    int rounds() const { return maxRounds > 0 ? maxRounds : 3; }
+    const StageRun *openRun() const;
+    int returned() const;   // the stage returns so far (the rounds used)
+};
+
 // G1: the sub-team a task was delegated to (status children[] and
 // tasks[].subteam), and the parent task a team came from.
 struct Subteam {
@@ -211,12 +262,30 @@ struct Lane {
     bool known() const { return n > 0; }
 };
 
+// U37: the task's working time as hgs status computes it (tasks[].timing):
+// the worked seconds (a running attempt up to the status time), when the
+// running attempt started (0 while none runs), the waits for dependencies,
+// a free member and the lead, each attempt's span, and the waits an older
+// team never recorded.
+struct Timing {
+    struct Span { int n = 0; QString member, state; double from = 0, to = 0; qint64 worked = 0, memberWait = 0, leadWait = 0; };
+    qint64 worked = 0, deps = 0, member = 0, lead = 0;
+    double runningSince = 0;
+    QList<Span> attempts;
+    QStringList unknown;
+    bool known = false;
+};
+
 struct Task {
     int id = 0;
     int phase = 1;             // the approved initial plan is phase 1
     bool pinned = false;       // stays with its assignee
     QString title, description, status, assignee, decidedBy, reason;
     QString kind;              // C5: "check" for a check task
+    // U45: the models allowed for it (`model` or `model@effort`; empty: any of
+    // its member's) and the role it is for when it has no assignee.
+    QStringList models;
+    QString role;
     QStringList criteria;
     QList<Dep> deps;
     QList<Attempt> attempts;   // oldest first
@@ -238,6 +307,14 @@ struct Task {
     // twice: who added it, when, and the owner's two sentences.
     struct AddedLate { QString by, request, confirm; double at = 0; bool known = false; };
     AddedLate addedLate;
+    Timing timing;
+    // U36: the pipeline the plan chose ("" the default, "none", or a preset
+    // id), its snapshot once handed out, and the members that may take its
+    // open stage.
+    QString pipeline;
+    PipelineRun pipelineRun;
+    QStringList stageCandidates;
+    bool inStage() const { return status == QLatin1String("in_review") || status == QLatin1String("in_test"); }
     bool isCheck() const { return kind == "check" || !check.command.isEmpty(); }
     const Attempt *last() const { return attempts.isEmpty() ? nullptr : &attempts.last(); }
     bool workedAhead() const { const auto *a = last(); return a && a->workedAhead; }
@@ -402,6 +479,10 @@ struct Team {
     QList<int> stuckScope;
     // The settings as stored, so a change sends them back whole.
     QJsonObject settingsJson;
+    // U51: the owner's intake keys for urgent tasks (the key itself is shown
+    // only once, when it is created).
+    struct Intake { QString id, label; double created = 0; };
+    QList<Intake> intakes;
     // F8: the lead's membership proposals, decided by the owner. `member` is
     // the proposed member (add), its id (remove) or the swap fields (swap).
     struct Proposal {
@@ -436,6 +517,9 @@ struct Team {
     const Phase *phase(int n) const;
     const LeftRunning *leftOf(const QString &member) const;
     QString roleOf(const QString &member) const;
+    // Who a task goes to: its assignee's role, "Any free <role>" for a task
+    // for a role (U45), otherwise `none`.
+    QString assigneeRole(const Task &task, const QString &none) const;
     // Only a team with a phase record groups its plan by phase.
     bool phased() const { return !phases.isEmpty(); }
     QString effectivePhaseApproval() const { return phaseApproval.isEmpty() ? approval : phaseApproval; }
@@ -601,6 +685,15 @@ const Question *question(const Task &task, const QString &id);
 // The member queue (A5): its open task, then the tasks returned to it
 // (pending, with attempts). Nothing else.
 QList<int> memberQueue(const Team &team, const QString &member);
+// U36: who implemented the attempt a stage run checks (its assignee when the
+// attempt is unknown); the task whose test holds `member`'s folder (0: none),
+// as hgs's stages::held; a member's stage queue; a waiting stage's place among
+// the waiting stages (1 first, 0 when it does not wait); "Review" or "Test".
+QString implementerOf(const Task &task, const StageRun &run);
+int folderHeldBy(const Team &team, const QString &member);
+QList<Member::StageEntry> stageQueue(const Team &team, const QString &member);
+int stageQueuePlace(const Team &team, int task);
+QString stageName(const QString &kind);
 
 // The team catalog (`hgs team catalog get`): roles, templates, routing rules
 // and the designer's draft of proposed changes.
@@ -622,6 +715,14 @@ struct Role {
     QStringList machines, messageTo, promptOrder, promptOff;
     QJsonObject danger;
     QMap<QString, QString> notes;
+    // U45/U46: the models a member of this role may switch between, and its
+    // context before a task (none, compact or clear); both copied into a
+    // member when it joins.
+    QList<ModelChoice> models;
+    QString contextBeforeTask;
+    // U36: the pipeline this role's tasks use unless the plan names one;
+    // empty falls back to the template's.
+    QString pipeline;
     QJsonObject raw;
     QJsonObject json() const;
 };
@@ -635,6 +736,7 @@ struct Template {
     int maxMembers = 6;
     QString work;      // U25: worktree, clone, same or cloud ("" = worktree)
     QString phases;    // U25: same, owner or lead (new phases)
+    QString pipeline;  // U36: the default pipeline of its tasks ("" = none, today's flow)
     QJsonObject raw;
     QJsonObject json() const;
 };
@@ -643,6 +745,36 @@ struct Template {
 struct Rule { QString id, when, templateId, approval; QJsonObject raw; QString use; QJsonObject json() const; };
 // U28: a proposal on the planning rules ("planning_rules") carries its text
 // in `text`; the others carry an object in `value`.
+// U36: one stage of a pipeline preset after the implementer's report: review
+// or test by a role (its first free member) or a pinned member; U47/U48: a
+// command or land stage Zerus runs itself, with no role or member: its
+// command, expected exit and time limit, and a land stage's exit codes mapped
+// to accepted, returned or held (empty: 0 accepted, any other held).
+struct PipelineStage {
+    QString kind, role, member;
+    bool hasCommand = false;
+    QString command;
+    int expectExit = 0, timeoutMinutes = 30;
+    QMap<QString, QString> exits;
+    QJsonObject raw;
+    bool runByZerus() const { return kind == QLatin1String("command") || kind == QLatin1String("land"); }
+    QJsonObject json() const;
+};
+// U36: a named preset ("Code: review, test, lead"): its stages, the returned
+// rounds before the lead decides (0 reads as 3), where a test works (hold the
+// task's folder or a detached checkout) and the final acceptance (lead,
+// sub_lead or auto; empty is lead).
+struct Pipeline {
+    QString id, name;
+    QList<PipelineStage> stages;
+    int maxRounds = 0;
+    QString folder, accept;
+    QJsonObject raw;
+    int rounds() const { return maxRounds > 0 ? maxRounds : 3; }
+    QJsonObject json() const;
+};
+PipelineStage parsePipelineStage(const QJsonObject &value);
+Pipeline parsePipeline(const QJsonObject &value);
 struct Proposal { QString id, kind, action, target, title, reason, state; QJsonObject value; double at = 0; QString text; };
 struct Catalog {
     qint64 version = 0;
@@ -654,12 +786,17 @@ struct Catalog {
     // when hgs sent them: a catalog saved without them gets the built-in ones.
     QString planningRules;
     bool planningRulesKnown = false;
+    // U36: the pipeline presets; an older hgs sends none and a save then
+    // writes none.
+    QList<Pipeline> pipelines;
+    bool pipelinesKnown = false;
     qint64 draftBase = 0;
     QList<Proposal> proposals;
     const Role *role(const QString &id) const;
     // A role by id or by its name, as members name it.
     const Role *roleNamed(const QString &name) const;
     const Template *templ(const QString &id) const;
+    const Pipeline *pipeline(const QString &id) const;
     QJsonObject json() const;
 };
 Role parseRole(const QJsonObject &value);

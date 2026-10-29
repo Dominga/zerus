@@ -139,6 +139,21 @@ Receipt:
 - Effect: the phase's tasks are removed from `tasks`; the record stays with `state: discarded` (its ids stay used).
   Event `phase_discarded`. If every remaining task is decided, the team becomes waiting for the lead again.
 
+### `hgs team return-to-draft --json` (owner, or the lead on the owner's word; U42, #587)
+
+`{"request_id":"UUID","team":"ID","phase":3}` → `{"status":"phase_returned_to_draft","phase":4,"from_phase":3,"tasks":[21],"renumbered":{...}}`
+
+- An approved or queued phase whose work has not started (every task Pending or Draft with no attempt beyond a
+  revoked or refused one) goes back to a draft that waits for approval again; a done phase and started work are
+  refused and named. Refused while `auto_accept` is on, which would accept it again at once.
+- The lead passes `owner_word` with the owner's sentence from its own session (under 30 minutes) naming the phase
+  and the draft ("return phase 3 to draft", "верни фазу 3 в черновик"); `discard-phase` of an accepted phase takes
+  the lead's word the same way, naming the phase and the discard. A word is spent on that one change.
+- Effect: the phase's Pending tasks become Draft, `decided_*` and `owner_word` clear, and the drafts are numbered after
+  the accepted phases again (F285). Event `phase_returned_to_draft` `{by, phase, title, tasks, from, owner_word}`.
+- A `plan` edit while planning keeps each phase it already had: its order (a move stays), `added_by` and `added_at`;
+  a new phase goes after them by number.
+
 ### `hgs team finish --json` (lead or owner)
 
 `{"request_id":"UUID","team":"ID","summary":"..."}` → `{"status":"finished"}`

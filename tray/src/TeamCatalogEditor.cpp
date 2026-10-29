@@ -19,6 +19,9 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPlainTextEdit>
+#include <QRadioButton>
+#include <QRegularExpressionValidator>
+#include <QSpinBox>
 #include <QAbstractTextDocumentLayout>
 #include <QRegularExpression>
 #include <QScrollBar>
@@ -47,7 +50,7 @@ const QList<std::pair<QString, const char *>> dangers{{"push", QT_TRANSLATE_NOOP
                                                       {"net", QT_TRANSLATE_NOOP("TeamCatalogEditor", "Network access beyond the provider")}};
 const QStringList fixedBlocks{"rules", "role", "protocol", "task"};
 const QString defaultTaskTemplate = QStringLiteral("#{id} {title}\n{description}\nAcceptance:\n{criteria}\nReport with: hgs team report --task {id}");
-constexpr int listWidth = 230, labelWidth = 120, rowHeight = 30, templateRowHeight = 48;
+constexpr int listWidth = 230, labelWidth = 120, rowHeight = 30, templateRowHeight = 48, pipelineRowHeight = 72;
 
 QString tr(const char *text) { return QCoreApplication::translate("TeamCatalogEditor", text); }
 
@@ -356,6 +359,113 @@ bool routeMatch(const QString &when, const QString &goal)
     }
     return false;
 }
+
+// U36: a stage's kind and a preset's final acceptance are named by
+// Teams::stageName, as the desktop's chips name them; colored here as the
+// mock-up colors them.
+QColor stageColor(const QString &kind, const Colors &c)
+{
+    if (kind == "review") return c.violet;
+    if (kind == "test") return c.folder;
+    if (kind == "command") return c.warn;
+    if (kind == "implement") return c.text2;
+    return c.accent;   // land and the acceptances
+}
+
+QString acceptKind(const Teams::Pipeline &p) { return p.accept.isEmpty() ? QStringLiteral("lead") : p.accept; }
+QString folderName(const QString &folder) { return folder == "checkout" ? tr("Detached checkout") : tr("Task's folder · holds it"); }
+QString outcomeName(const QString &outcome)
+{
+    if (outcome == "accepted") return tr("Accepted");
+    if (outcome == "returned") return tr("Returned to the implementer");
+    return tr("Held for the lead");
+}
+
+// The role a new review or test stage gets: the reviewer or tester when the
+// catalog has one, else the first role that is not the lead.
+QString defaultStageRole(const Teams::Catalog &catalog, const QString &kind)
+{
+    const QString wanted = kind == "test" ? QStringLiteral("tester") : QStringLiteral("reviewer");
+    if (catalog.role(wanted)) return wanted;
+    for (const auto &r : catalog.roles) if (r.id != "lead") return r.id;
+    return {};
+}
+
+// The prototype's stage icons in a 10-12 px box: the role icons for review,
+// test, implement and the leads; a bolt, a terminal and an arrow onto a line.
+void drawStageIcon(QPainter &p, const QRectF &box, const QColor &color, const QString &kind)
+{
+    if (kind == "review") return drawRoleIcon(p, box, color, "reviewer");
+    if (kind == "test") return drawRoleIcon(p, box, color, "tester");
+    if (kind == "implement") return drawRoleIcon(p, box, color, "secretary");
+    if (kind == "lead" || kind == "sub_lead") return drawRoleIcon(p, box, color, "lead");
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing);
+    QPen pen(color, 1.2); pen.setCapStyle(Qt::RoundCap); pen.setJoinStyle(Qt::RoundJoin); p.setPen(pen); p.setBrush(Qt::NoBrush);
+    const double x = box.x(), y = box.y(), w = box.width(), h = box.height();
+    const auto at = [&](double fx, double fy) { return QPointF(x + fx * w, y + fy * h); };
+    QPainterPath path;
+    if (kind == "auto") {
+        path.moveTo(at(.58, .06)); path.lineTo(at(.2, .56)); path.lineTo(at(.5, .56)); path.lineTo(at(.42, .94)); path.lineTo(at(.8, .44)); path.lineTo(at(.5, .44));
+        path.closeSubpath();
+    } else if (kind == "command") {
+        p.drawRoundedRect(QRectF(at(.06, .14), at(.94, .86)), 1.5, 1.5);
+        path.moveTo(at(.24, .36)); path.lineTo(at(.42, .5)); path.lineTo(at(.24, .64)); p.drawLine(at(.5, .66), at(.74, .66));
+    } else {   // land: an arrow down onto a line
+        path.moveTo(at(.5, .08)); path.lineTo(at(.5, .64)); path.moveTo(at(.28, .42)); path.lineTo(at(.5, .64)); path.lineTo(at(.72, .42));
+        p.drawLine(at(.14, .88), at(.86, .88));
+    }
+    p.drawPath(path);
+    p.restore();
+}
+
+// A stage chip: the kind's icon and name on its tint; with no text, the round
+// marker of a Try it step.
+class StageChip : public QWidget {
+public:
+    StageChip(const QString &kind, const QString &text, const QColor &color) : m_kind(kind), m_text(text), m_color(color)
+    {
+        QFont f = font(); f.setPixelSize(11); f.setWeight(QFont::DemiBold); setFont(f);
+        setObjectName(text.isEmpty() ? "teamPipelineStepMark" : "teamPipelineStageChip"); setProperty("kind", kind);
+        if (!text.isEmpty()) setToolTip(text);
+        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    }
+    QSize sizeHint() const override { return m_text.isEmpty() ? QSize(26, 26) : QSize(fontMetrics().horizontalAdvance(m_text) + 28, 20); }
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
+        if (m_text.isEmpty()) {
+            p.setPen(QPen(alpha(m_color, .45), 1)); p.setBrush(alpha(m_color, .12)); p.drawEllipse(QRectF(rect()).adjusted(1, 1, -1, -1));
+            drawStageIcon(p, QRectF(7, 7, 12, 12), m_color, m_kind);
+            return;
+        }
+        const QRectF r = QRectF(rect()).adjusted(.5, 1.5, -.5, -1.5);
+        p.setPen(Qt::NoPen); p.setBrush(alpha(m_color, .14)); p.drawRoundedRect(r, 5, 5);
+        drawStageIcon(p, QRectF(6, (height() - 10) / 2.0, 10, 10), m_color, m_kind);
+        p.setPen(m_color);
+        p.drawText(QRect(20, 0, width() - 24, height()), Qt::AlignVCenter | Qt::AlignLeft, m_text);
+    }
+private:
+    QString m_kind, m_text; QColor m_color;
+};
+
+// A preset's flow: its stages, then its final acceptance (none after a land
+// stage, which decides itself); past `most` chips the rest is "+N".
+QWidget *stageFlow(const Teams::Pipeline &p, const Colors &c, int most)
+{
+    auto *w = new QWidget; w->setObjectName("teamPipelineFlow");
+    auto *h = new QHBoxLayout(w); h->setContentsMargins(0, 2, 0, 0); h->setSpacing(3);
+    QStringList kinds; for (const auto &s : p.stages) kinds << s.kind;
+    if (kinds.isEmpty() || kinds.last() != "land") kinds << acceptKind(p);
+    for (int i = 0; i < kinds.size(); ++i) {
+        if (i == most) { h->addWidget(label(QStringLiteral("+%1").arg(kinds.size() - most), c.muted, 11)); break; }
+        if (i) h->addWidget(label(QStringLiteral("›"), c.dim, 11));
+        h->addWidget(new StageChip(kinds[i], stageName(kinds[i]), stageColor(kinds[i], c)));
+    }
+    h->addStretch();
+    return w;
+}
 }
 
 TeamCatalogEditor::Route TeamCatalogEditor::route(const Teams::Catalog &catalog, const QString &goal)
@@ -426,8 +536,10 @@ TeamCatalogEditor::TeamCatalogEditor(TeamController *teams, QWidget *parent) : Q
     outer->addWidget(m_banner);
     // Segments with the diff legend on the right.
     auto *tabsRow = new QHBoxLayout;
-    m_tabs = segmented({{"roles", tr("Roles")}, {"templates", tr("Templates")}, {"routing", tr("Routing")}, {"rules", tr("Planning rules")}}, "roles", "teamCatalogTabs",
-                       [this](const QString &v) { setTab(v == "roles" ? Tab::Roles : v == "templates" ? Tab::Templates : v == "routing" ? Tab::Routing : Tab::Rules); });
+    m_tabs = segmented({{"roles", tr("Roles")}, {"templates", tr("Templates")}, {"routing", tr("Routing")}, {"pipelines", tr("Pipelines")}, {"rules", tr("Planning rules")}},
+                       "roles", "teamCatalogTabs", [this](const QString &v) {
+                           setTab(v == "roles" ? Tab::Roles : v == "templates" ? Tab::Templates : v == "routing" ? Tab::Routing : v == "pipelines" ? Tab::Pipelines : Tab::Rules);
+                       });
     m_legend = new QLabel; m_legend->setObjectName("teamCatalogLegend"); m_legend->setTextFormat(Qt::RichText);
     tabsRow->addWidget(m_tabs); tabsRow->addStretch(); tabsRow->addWidget(m_legend);
     outer->addLayout(tabsRow);
@@ -447,15 +559,25 @@ TeamCatalogEditor::TeamCatalogEditor(TeamController *teams, QWidget *parent) : Q
         connect(list, &QListWidget::currentRowChanged, this, [this] { rebuildEditor(); });
         return list;
     };
-    m_roles = makeList("teamCatalogRoles"); m_templates = makeList("teamCatalogTemplates");
+    m_roles = makeList("teamCatalogRoles"); m_templates = makeList("teamCatalogTemplates"); m_pipelines = makeList("teamCatalogPipelines");
     m_add = button(tr("+ Role"), "teamCatalogAdd"); m_add->setProperty("ghost", true);
-    lv->addWidget(m_roles, 1); lv->addWidget(m_templates, 1); lv->addWidget(m_add, 0, Qt::AlignLeft); lv->addStretch();
+    lv->addWidget(m_roles, 1); lv->addWidget(m_templates, 1); lv->addWidget(m_pipelines, 1); lv->addWidget(m_add, 0, Qt::AlignLeft); lv->addStretch();
     connect(m_add, &QPushButton::clicked, this, [this] {
         if (m_tab == Tab::Roles) {
             Role r; r.name = tr("New role"); r.id = slug(r.name);
             for (int n = 2; m_catalog.role(r.id); ++n) r.id = slug(r.name) + QStringLiteral("-%1").arg(n);
             r.agent = "claude"; r.folder = "worktree"; r.canMessage = "lead"; r.color = swatches[m_catalog.roles.size() % swatches.size()];
             m_catalog.roles.append(r); changed(); rebuildLists(); m_roles->setCurrentRow(m_catalog.roles.size() - 1);
+        } else if (m_tab == Tab::Pipelines) {
+            // U36: a new preset starts with a review by the reviewer (or the
+            // first role that is not the lead); the lead accepts.
+            Pipeline p; p.name = tr("New pipeline"); p.id = slug(p.name);
+            for (int n = 2; m_catalog.pipeline(p.id); ++n) p.id = slug(p.name) + QStringLiteral("-%1").arg(n);
+            p.maxRounds = 3; p.folder = "hold"; p.accept = "lead";
+            QString role = m_catalog.role("reviewer") ? QStringLiteral("reviewer") : QString();
+            for (const auto &r : m_catalog.roles) if (role.isEmpty() && r.id != "lead") role = r.id;
+            if (!role.isEmpty()) { PipelineStage stage; stage.kind = "review"; stage.role = role; p.stages.append(stage); }
+            m_catalog.pipelines.append(p); changed(); rebuildLists(); m_pipelines->setCurrentRow(m_catalog.pipelines.size() - 1);
         } else {
             Template t; t.name = tr("New template"); t.id = slug(t.name);
             for (int n = 2; m_catalog.templ(t.id); ++n) t.id = slug(t.name) + QStringLiteral("-%1").arg(n);
@@ -539,10 +661,12 @@ void TeamCatalogEditor::setDark(bool dark)
         "QScrollArea#teamCatalogEditorArea,QWidget#teamCatalogBody{background:transparent;}"
         "QLabel#teamCatalogTitle{color:%1;font-size:15px;font-weight:600;}"
         "QWidget#teamCatalogListColumn{border-right:1px solid %6;}"
-        "QListWidget#teamCatalogRoles,QListWidget#teamCatalogTemplates{background:transparent;border:none;outline:none;}"
-        "QListWidget#teamCatalogRoles::item,QListWidget#teamCatalogTemplates::item{border:1px solid transparent;border-radius:8px;margin-right:8px;}"
-        "QListWidget#teamCatalogRoles::item:selected,QListWidget#teamCatalogTemplates::item:selected{background:%2;border-color:%3;}"
-        "QListWidget#teamCatalogRoles::item:hover,QListWidget#teamCatalogTemplates::item:hover{background:%4;}"
+        "QListWidget#teamCatalogRoles,QListWidget#teamCatalogTemplates,QListWidget#teamCatalogPipelines{background:transparent;border:none;outline:none;}"
+        "QListWidget#teamCatalogRoles::item,QListWidget#teamCatalogTemplates::item,QListWidget#teamCatalogPipelines::item{border:1px solid transparent;border-radius:8px;margin-right:8px;}"
+        "QListWidget#teamCatalogRoles::item:selected,QListWidget#teamCatalogTemplates::item:selected,QListWidget#teamCatalogPipelines::item:selected{background:%2;border-color:%3;}"
+        "QListWidget#teamCatalogRoles::item:hover,QListWidget#teamCatalogTemplates::item:hover,QListWidget#teamCatalogPipelines::item:hover{background:%4;}"
+        "QFrame#teamPipelineStageDetails{background:transparent;border:1px solid %6;border-radius:9px;}"
+        "QFrame#teamPipelineTryBox{background:transparent;border:1px dashed %6;border-radius:10px;}"
         "QFrame#teamCatalogCard{background:%5;border:1px solid %6;border-radius:10px;}"
         "QFrame#teamProposalPlate{background:%7;border:1px dashed %8;border-radius:8px;}"
         "QFrame#teamPromptOrder{border:1px solid %6;border-radius:8px;background:transparent;}"
@@ -590,6 +714,7 @@ void TeamCatalogEditor::load()
                     if (p.kind == "role" && !m_catalog.role(p.target)) m_catalog.roles.append(parseRole(p.value));
                     else if (p.kind == "template" && !m_catalog.templ(p.target)) m_catalog.templates.append(parseTemplate(p.value));
                     else if (p.kind == "rule") m_catalog.routing.append(parseRule(p.value));
+                    else if (p.kind == "pipeline" && !m_catalog.pipeline(p.target)) m_catalog.pipelines.append(parsePipeline(p.value));
                 }
                 continue;
             }
@@ -600,6 +725,7 @@ void TeamCatalogEditor::load()
             if (p.kind == "role") put(m_catalog.roles, parseRole(p.value));
             else if (p.kind == "template") put(m_catalog.templates, parseTemplate(p.value));
             else if (p.kind == "rule") put(m_catalog.routing, parseRule(p.value));
+            else if (p.kind == "pipeline") put(m_catalog.pipelines, parsePipeline(p.value));
             else if (p.kind == "planning_rules") m_catalog.planningRules = p.text;
         }
     }
@@ -644,6 +770,8 @@ int TeamCatalogEditor::unsavedChanges() const
     for (const auto &t : base.templates) theirs.insert("t" + t.id, t.json());
     for (const auto &r : m_catalog.routing) mine.insert("u" + r.id, r.json());
     for (const auto &r : base.routing) theirs.insert("u" + r.id, r.json());
+    for (const auto &p : m_catalog.pipelines) mine.insert("p" + p.id, p.json());
+    for (const auto &p : base.pipelines) theirs.insert("p" + p.id, p.json());
     count(mine, theirs);
     // A new order of the same rules is one change too.
     QStringList order, baseOrder;
@@ -657,6 +785,7 @@ int TeamCatalogEditor::unsavedChanges() const
 
 void TeamCatalogEditor::updateHeader()
 {
+    updatePlanningRulesReset();
     const Colors c = colorsFor(m_dark);
     const auto &base = m_teams->catalog();
     const bool draft = draftMode();
@@ -685,8 +814,8 @@ void TeamCatalogEditor::updateHeader()
     m_apply->setToolTip(stale ? tr("The catalog changed after this draft; applying would overwrite those edits.")
                               : undecided ? tr("Undecided changes stay in the draft") : QString());
     // Counters per tab while a draft shows.
-    const QStringList kinds{"role", "template", "rule", "planning_rules"};
-    const QStringList names{tr("Roles"), tr("Templates"), tr("Routing"), tr("Planning rules")};
+    const QStringList kinds{"role", "template", "rule", "pipeline", "planning_rules"};
+    const QStringList names{tr("Roles"), tr("Templates"), tr("Routing"), tr("Pipelines"), tr("Planning rules")};
     const auto buttons = m_tabs->findChildren<QPushButton *>();
     for (int i = 0; i < buttons.size() && i < kinds.size(); ++i)
         buttons[i]->setText(draft && perKind.value(kinds[i]) ? QStringLiteral("%1   %2").arg(names[i]).arg(perKind.value(kinds[i])) : names[i]);
@@ -729,7 +858,7 @@ void TeamCatalogEditor::setTab(Tab tab)
     for (auto *b : m_tabs->findChildren<QPushButton *>()) {
         const auto v = b->property("segment").toString();
         b->setChecked((v == "roles" && tab == Tab::Roles) || (v == "templates" && tab == Tab::Templates) || (v == "routing" && tab == Tab::Routing)
-                      || (v == "rules" && tab == Tab::Rules));
+                      || (v == "pipelines" && tab == Tab::Pipelines) || (v == "rules" && tab == Tab::Rules));
     }
     rebuildLists(); rebuildEditor();
 }
@@ -757,6 +886,32 @@ QWidget *TeamCatalogEditor::listRow(const QString &kind, int index, const Propos
         if (dirty) h->addWidget(label(QStringLiteral("●"), c.warn, 9));
         auto *tile = new QLabel; tile->setPixmap(agentLogo(r.agent.isEmpty() ? QStringLiteral("claude") : r.agent, c.fg).pixmap(14, 14));
         tile->setToolTip(agentNames.value(r.agent, r.agent)); h->addWidget(tile);
+    } else if (kind == "pipeline") {
+        // U36: name, rounds, folder and whose default it is, then its flow.
+        auto *v = new QVBoxLayout; v->setSpacing(2);
+        if (index < 0) {
+            w->setProperty("catalogItem", QStringLiteral("none"));
+            auto *name = ellipsis(tr("None"), c.fg, 13); QFont f = name->font(); f.setWeight(QFont::Medium); name->setFont(f);
+            v->addWidget(name); v->addWidget(ellipsis(tr("no stages: the lead decides, as today"), c.muted, 11));
+            h->addLayout(v, 1);
+            return w;
+        }
+        const Pipeline &p = m_catalog.pipelines[index];
+        w->setProperty("catalogItem", p.id);
+        auto *name = ellipsis(p.name, c.fg, 13); QFont f = name->font(); f.setWeight(QFont::Medium); name->setFont(f);
+        QStringList meta;
+        meta << (p.stages.isEmpty() ? tr("today's flow") : counted(p.rounds(), tr("%1 round"), tr("%1 rounds")));
+        bool tests = false; for (const auto &s : p.stages) tests = tests || s.kind == "test";
+        if (tests) meta << (p.folder == "checkout" ? tr("detached checkout") : tr("task's folder"));
+        if (const auto users = pipelineUsers(p.id); !users.isEmpty())
+            meta << (users.size() <= 2 ? tr("default of %1").arg(users.join(", ")) : tr("default of %1 templates and roles").arg(users.size()));
+        auto *metaLine = ellipsis(meta.join(QStringLiteral(" · ")), c.muted, 11); metaLine->setObjectName("teamPipelineMeta");
+        auto *nameRow = row(6); nameRow->addWidget(name, 1);
+        if (proposal) nameRow->addWidget(mark(*proposal, c));
+        if (dirty) nameRow->addWidget(label(QStringLiteral("●"), c.warn, 9));
+        v->addLayout(nameRow); v->addWidget(metaLine);
+        v->addWidget(stageFlow(p, c, p.stages.size() + 1 > 3 ? 2 : 3));
+        h->addLayout(v, 1);
     } else {
         const Template &t = m_catalog.templates[index];
         w->setProperty("catalogItem", t.id);
@@ -807,20 +962,50 @@ void TeamCatalogEditor::rebuildLists()
         if (auto *rows = dynamic_cast<RowsList *>(list)) { rows->rowsHeight = qMax(rowHeight, height + 2); rows->updateGeometry(); }
     };
     fill(m_roles, "role"); fill(m_templates, "template");
-    m_roles->setVisible(m_tab == Tab::Roles); m_templates->setVisible(m_tab == Tab::Templates);
-    m_left->setVisible(m_tab == Tab::Roles || m_tab == Tab::Templates);
-    m_add->setText(m_tab == Tab::Roles ? tr("+ Role") : tr("+ Template"));
+    // U36: the presets, then None (a task without a pipeline).
+    {
+        // None alone (before the catalog loads) is no choice: the first preset is.
+        const QString current = m_pipelines->count() > 1 && m_pipelines->currentItem() ? m_pipelines->currentItem()->data(Qt::UserRole).toString() : QString();
+        const QSignalBlocker block(m_pipelines);
+        m_pipelines->clear();
+        for (int i = 0; i <= m_catalog.pipelines.size(); ++i) {
+            const bool none = i == m_catalog.pipelines.size();
+            const QString id = none ? QStringLiteral("none") : m_catalog.pipelines[i].id;
+            bool dirty = false;
+            if (!none && !m_readOnly) { const auto *saved = base.pipeline(id); dirty = !saved || saved->json() != m_catalog.pipelines[i].json(); }
+            auto *item = new QListWidgetItem; item->setData(Qt::UserRole, id);
+            item->setSizeHint(QSize(listWidth - 12, none ? templateRowHeight : pipelineRowHeight));
+            m_pipelines->addItem(item);
+            m_pipelines->setItemWidget(item, listRow(QStringLiteral("pipeline"), none ? -1 : i, none ? nullptr : proposalOf("pipeline", id), dirty));
+        }
+        int row = 0, height = 2 * m_pipelines->frameWidth();
+        for (int i = 0; i < m_pipelines->count(); ++i) {
+            if (m_pipelines->item(i)->data(Qt::UserRole).toString() == current) row = i;
+            height += m_pipelines->item(i)->sizeHint().height() + 2 * m_pipelines->spacing();
+        }
+        m_pipelines->setCurrentRow(row);
+        m_pipelines->setMaximumHeight(qMax(rowHeight, height + 2));
+        if (auto *rows = dynamic_cast<RowsList *>(m_pipelines)) { rows->rowsHeight = qMax(rowHeight, height + 2); rows->updateGeometry(); }
+    }
+    m_roles->setVisible(m_tab == Tab::Roles); m_templates->setVisible(m_tab == Tab::Templates); m_pipelines->setVisible(m_tab == Tab::Pipelines);
+    m_left->setVisible(m_tab == Tab::Roles || m_tab == Tab::Templates || m_tab == Tab::Pipelines);
+    m_add->setText(m_tab == Tab::Roles ? tr("+ Role") : m_tab == Tab::Pipelines ? tr("+ Pipeline") : tr("+ Template"));
+    m_add->setEnabled(m_tab != Tab::Pipelines || m_catalog.pipelines.size() < 20);
     m_add->setVisible(!m_readOnly);
 }
 
 void TeamCatalogEditor::rebuildEditor()
 {
     QWidget *editor = nullptr;
-    auto *list = m_tab == Tab::Roles ? m_roles : m_tab == Tab::Templates ? m_templates : nullptr;
+    auto *list = m_tab == Tab::Roles ? m_roles : m_tab == Tab::Templates ? m_templates : m_tab == Tab::Pipelines ? m_pipelines : nullptr;
     const QString id = list && list->currentItem() ? list->currentItem()->data(Qt::UserRole).toString() : QString();
     if (m_tab == Tab::Roles) { for (int i = 0; i < m_catalog.roles.size(); ++i) if (m_catalog.roles[i].id == id) editor = roleEditor(i); }
     else if (m_tab == Tab::Templates) { for (int i = 0; i < m_catalog.templates.size(); ++i) if (m_catalog.templates[i].id == id) editor = templateEditor(i); }
     else if (m_tab == Tab::Rules) editor = planningRulesEditor();
+    else if (m_tab == Tab::Pipelines) {
+        if (id == "none") editor = pipelineEditor(-1);
+        for (int i = 0; i < m_catalog.pipelines.size(); ++i) if (m_catalog.pipelines[i].id == id) editor = pipelineEditor(i);
+    }
     else editor = routingEditor();
     if (!editor) editor = label(tr("Nothing selected"), colorsFor(m_dark).muted, 12);
     const int scroll = m_body->verticalScrollBar() ? m_body->verticalScrollBar()->value() : 0;
@@ -985,6 +1170,57 @@ QWidget *TeamCatalogEditor::roleEditor(int index)
     connect(model, &QComboBox::activated, this, modelChanged);
     connect(effort, &QComboBox::activated, this, set([this, index, effort] { m_catalog.roles[index].effort = effort->currentData().toString(); }));
     add(tr("Default agent"), orig && (r.agent != orig->agent || r.account != orig->account || r.model != orig->model || r.effort != orig->effort), box(agentRow));
+    // U45: the models a member of this role may switch to before a task.
+    auto *modelsBox = new QVBoxLayout; modelsBox->setSpacing(4);
+    auto *choicesBox = new QWidget; auto *choices = new FlowLayout(6); choicesBox->setLayout(choices);
+    for (int i = 0; i < r.models.size(); ++i) {
+        auto *chip = button(r.models[i].text() + QStringLiteral("  ×"), "teamRoleModelChoice"); chip->setProperty("chip", true);
+        chip->setToolTip(tr("Remove %1").arg(r.models[i].text()));
+        connect(chip, &QPushButton::clicked, this, [this, index, i] { m_catalog.roles[index].models.removeAt(i); changed(); rebuildEditor(); });
+        choices->addWidget(chip);
+    }
+    auto *choiceModel = new QComboBox; choiceModel->setObjectName("teamRoleModelsAdd"); choiceModel->setEditable(true); choiceModel->setInsertPolicy(QComboBox::NoInsert);
+    for (int i = 0; i < model->count(); ++i) if (!model->itemText(i).isEmpty()) choiceModel->addItem(model->itemText(i));
+    choiceModel->setCurrentIndex(-1); choiceModel->lineEdit()->setPlaceholderText(tr("+ model")); choiceModel->setMinimumWidth(150);
+    auto *choiceEffort = choice({{"", "—"}, {"low", "low"}, {"medium", "medium"}, {"high", "high"}, {"xhigh", "xhigh"}}, QString(), "teamRoleModelsEffort");
+    auto *addChoice = button(tr("Add"), "teamRoleModelsAddButton"); addChoice->setProperty("ghost", true);
+    const auto addModel = [this, index, choiceModel, choiceEffort] {
+        const Teams::ModelChoice next{choiceModel->currentText().trimmed(), choiceEffort->currentData().toString()};
+        auto &list = m_catalog.roles[index].models;
+        if (next.model.isEmpty() || list.contains(next) || list.size() >= 20) return;
+        list.append(next); changed(); rebuildEditor();
+    };
+    connect(addChoice, &QPushButton::clicked, this, addModel);
+    connect(choiceModel->lineEdit(), &QLineEdit::returnPressed, this, addModel);
+    auto *addRow = row(6); addRow->addWidget(choiceModel); addRow->addWidget(choiceEffort); addRow->addWidget(addChoice); addRow->addStretch();
+    modelsBox->addWidget(choicesBox);
+    modelsBox->addLayout(addRow);
+    auto *modelsHint = hint(r.models.isEmpty() ? tr("Only the default model. A task that names other models goes to a member that allows one")
+                                               : tr("Before a task that names one of these, Zerus switches the member to it and waits for the switch"), c.muted);
+    modelsHint->setObjectName("teamRoleModelsHint");
+    modelsBox->addWidget(modelsHint);
+    choicesBox->setVisible(!r.models.isEmpty());
+    add(tr("Models"), edited(r.models, orig ? orig->models : QList<Teams::ModelChoice>()), box(modelsBox));
+    // U46: what Zerus does to the member's context before each task.
+    auto *contextBox = new QVBoxLayout; contextBox->setSpacing(4);
+    auto *contextRow = row(0);
+    const QString context = r.contextBeforeTask.isEmpty() ? QStringLiteral("none") : r.contextBeforeTask;
+    contextRow->addWidget(segmented({{"none", tr("Keep")}, {"compact", tr("Compact")}, {"clear", tr("Clear")}}, context, "teamRoleContext",
+                                    [this, index](const QString &value) {
+                                        auto &role = m_catalog.roles[index];
+                                        // The default stays unwritten unless the role already had the field.
+                                        const QString next = value == "none" && !role.raw.contains(QLatin1String("context_before_task")) ? QString() : value;
+                                        if (next == role.contextBeforeTask) return;
+                                        role.contextBeforeTask = next; changed(); rebuildEditor();
+                                    }));
+    contextRow->addStretch();
+    contextBox->addLayout(contextRow);
+    auto *contextHint = hint(context == "compact" ? tr("Before each task the conversation is compacted; the task goes once that is confirmed")
+                             : context == "clear" ? tr("Before each task the conversation is cleared; the task text names everything it needs")
+                                                  : tr("Each task continues the member's conversation"), c.muted);
+    contextHint->setObjectName("teamRoleContextHint");
+    contextBox->addWidget(contextHint);
+    add(tr("Context before task"), edited(r.contextBeforeTask, orig ? orig->contextBeforeTask : QString()), box(contextBox));
     // Computer: chips with ×, "Any computer" when none; "+ computer" adds one.
     auto *computerBox = new QVBoxLayout; computerBox->setSpacing(4);
     auto *chips = new QWidget; auto *flow = new FlowLayout(6); chips->setLayout(flow);
@@ -1152,6 +1388,9 @@ QWidget *TeamCatalogEditor::roleEditor(int index)
         }
         m_catalog.routing.erase(std::remove_if(m_catalog.routing.begin(), m_catalog.routing.end(), [&](const Rule &rule) { return rule.use == "+" + id; }), m_catalog.routing.end());
         for (auto &other : m_catalog.roles) other.messageTo.removeAll(id);
+        // U36: a preset's stages taken by the role go with it.
+        for (auto &p : m_catalog.pipelines)
+            p.stages.erase(std::remove_if(p.stages.begin(), p.stages.end(), [&](const PipelineStage &s) { return s.role == id; }), p.stages.end());
         m_catalog.roles.removeAt(index); changed(); rebuildLists(); rebuildEditor();
     });
     return w;
@@ -1551,11 +1790,10 @@ QWidget *TeamCatalogEditor::planningRulesEditor()
     auto *reset = button(tr("Reset to built-in"), "teamPlanningRulesReset"); reset->setProperty("ghost", true);
     reset->setIcon(workspaceIcon("reset", c.text2));
     reset->setVisible(!m_readOnly);
-    reset->setEnabled(!m_dirty && base.planningRulesKnown);
-    reset->setToolTip(m_dirty ? tr("Save or revert your edits first") : tr("Replace the rules with Zerus's built-in ones and save the catalog"));
     connect(reset, &QPushButton::clicked, this, [this] { resetPlanningRules(); });
     head->addWidget(reset);
     outer->addLayout(head);
+    updatePlanningRulesReset();
     const Proposal *proposal = nullptr;
     if (draftMode()) for (const auto &p : base.proposals) if (p.kind == "planning_rules") proposal = &p;
     if (proposal) {
@@ -1606,12 +1844,27 @@ QWidget *TeamCatalogEditor::planningRulesEditor()
     return w;
 }
 
+// Reset saves over the catalog as hgs has it: never while edits are unsaved,
+// so the button follows every edit, not only a rebuild.
+bool TeamCatalogEditor::canResetPlanningRules() const
+{
+    return !m_dirty && m_teams->catalog().planningRulesKnown;
+}
+
+void TeamCatalogEditor::updatePlanningRulesReset()
+{
+    auto *reset = findChild<QPushButton *>(QStringLiteral("teamPlanningRulesReset"));
+    if (!reset) return;
+    reset->setEnabled(canResetPlanningRules());
+    reset->setToolTip(m_dirty ? tr("Save or revert your edits first") : tr("Replace the rules with Zerus's built-in ones and save the catalog"));
+}
+
 // U28: the built-in rules come back by saving the catalog without them; hgs
 // fills in its own. Only from a saved catalog, after the owner confirms.
 void TeamCatalogEditor::resetPlanningRules()
 {
     const auto &base = m_teams->catalog();
-    if (m_dirty || !base.planningRulesKnown) return;
+    if (!canResetPlanningRules()) return;
     if (confirm && !confirm(QStringLiteral("teamPlanningRulesResetConfirm"), tr("Reset planning rules"),
                             tr("Replace the planning rules with the built-in ones and save the catalog as v%1?").arg(base.version + 1), tr("Reset"))) return;
     QJsonObject catalog = base.json();
@@ -1720,8 +1973,9 @@ QWidget *TeamCatalogEditor::routingEditor()
 void TeamCatalogEditor::showProposal(const QString &proposal)
 {
     for (const auto &p : m_teams->catalog().proposals) if (p.id == proposal) {
-        setTab(p.kind == "role" ? Tab::Roles : p.kind == "template" ? Tab::Templates : p.kind == "planning_rules" ? Tab::Rules : Tab::Routing);
-        auto *list = p.kind == "role" ? m_roles : m_templates;
+        setTab(p.kind == "role" ? Tab::Roles : p.kind == "template" ? Tab::Templates : p.kind == "planning_rules" ? Tab::Rules
+               : p.kind == "pipeline" ? Tab::Pipelines : Tab::Routing);
+        auto *list = p.kind == "role" ? m_roles : p.kind == "pipeline" ? m_pipelines : m_templates;
         if (p.kind != "rule") for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(Qt::UserRole).toString() == p.target) list->setCurrentRow(i);
         return;
     }
@@ -1823,4 +2077,655 @@ void TeamCatalogEditor::requestModels(const Teams::Role &role)
     m_modelPending.insert(key);
     const quint64 request = m_client->requestAccounts(role.computer, {"model-settings", account, "--json"});
     m_modelRequests.insert(request, key);
+}
+
+// U36: the templates and roles that name the preset as their default.
+QStringList TeamCatalogEditor::pipelineUsers(const QString &id) const
+{
+    QStringList users;
+    for (const auto &t : m_catalog.templates) if (t.pipeline == id) users << t.name;
+    for (const auto &r : m_catalog.roles) if (r.pipeline == id) users << r.name;
+    return users;
+}
+
+// U36 (mock-up #530): a preset's name, its stages after the implementer's
+// report (kind, who takes it, where it works), the final acceptance and the
+// rounds, then the defaults per template and role and Try it. -1 is None.
+QWidget *TeamCatalogEditor::pipelineEditor(int index)
+{
+    const Colors c = colorsFor(m_dark);
+    auto *w = new QFrame; w->setObjectName("teamCatalogCard");
+    auto *outer = new QVBoxLayout(w); outer->setContentsMargins(16, 14, 16, 16); outer->setSpacing(12);
+    if (index < 0) {
+        outer->addWidget(label(tr("None"), c.fg, 15, true, "teamPipelineTitle"));
+        outer->addWidget(hint(tr("A task without a pipeline goes from its report to the lead (or the member's sub-lead), as today. A template or role "
+                                 "without a default gives its tasks none; the plan and edit-draft can choose None for a single task."), c.text2));
+        outer->addStretch();
+        return w;
+    }
+    Pipeline &p = m_catalog.pipelines[index];
+    const Pipeline *orig = m_readOnly ? nullptr : m_teams->catalog().pipeline(p.id);
+    const QString id = p.id;
+    const auto at = [this, id]() -> Pipeline * {
+        for (auto &x : m_catalog.pipelines) if (x.id == id) return &x;
+        return nullptr;
+    };
+    // Header: name, whose default it is, Duplicate, Delete.
+    auto *head = row(8);
+    head->addWidget(label(p.name, c.fg, 15, true, "teamPipelineTitle"));
+    const QStringList users = pipelineUsers(p.id);
+    auto *usedBy = ellipsis(users.isEmpty() ? tr("· no template or role names it") : tr("· default of %1").arg(users.join(", ")), c.muted, 13);
+    usedBy->setObjectName("teamPipelineUsedBy");
+    head->addWidget(usedBy, 1);
+    auto *duplicate = button(tr("Duplicate"), "teamPipelineDuplicate"); duplicate->setProperty("ghost", true); duplicate->setIcon(workspaceIcon("copy", c.text2));
+    auto *remove = button(tr("Delete"), "teamPipelineDelete"); remove->setProperty("danger", true); remove->setIcon(workspaceIcon("trash", c.danger));
+    duplicate->setEnabled(!m_readOnly && m_catalog.pipelines.size() < 20); remove->setEnabled(!m_readOnly);
+    head->addWidget(duplicate); head->addWidget(remove);
+    outer->addLayout(head);
+    connect(duplicate, &QPushButton::clicked, this, [this, index] {
+        Pipeline copy = m_catalog.pipelines[index]; copy.name += tr(" copy"); copy.id = slug(copy.name); copy.raw.remove("id");
+        for (int n = 2; m_catalog.pipeline(copy.id); ++n) copy.id = slug(copy.name) + QStringLiteral("-%1").arg(n);
+        m_catalog.pipelines.insert(index + 1, copy); changed(); rebuildLists(); m_pipelines->setCurrentRow(index + 1);
+    });
+    connect(remove, &QPushButton::clicked, this, [this, index] {
+        const auto &doomed = m_catalog.pipelines[index];
+        const QStringList losing = pipelineUsers(doomed.id);
+        const QString text = losing.isEmpty() ? tr("Delete the pipeline %1? Running tasks keep their snapshot.").arg(doomed.name)
+                                              : tr("Delete the pipeline %1? These lose it as their default: %2. Running tasks keep their snapshot.").arg(doomed.name, losing.join(", "));
+        if (confirm && !confirm(QStringLiteral("teamPipelineDeleteConfirm"), tr("Delete pipeline"), text, tr("Delete"))) return;
+        const QString gone = doomed.id;
+        for (auto &t : m_catalog.templates) if (t.pipeline == gone) t.pipeline.clear();
+        for (auto &r : m_catalog.roles) if (r.pipeline == gone) r.pipeline.clear();
+        m_catalog.pipelines.removeAt(index); changed(); rebuildLists(); rebuildEditor();
+    });
+    if (const auto *proposal = proposalOf("pipeline", p.id)) {
+        outer->addWidget(proposalPlate(*proposal));
+        if (auto *diff = pipelineDiff(p, *proposal)) outer->addWidget(diff);
+    }
+    auto *form = new QWidget; form->setObjectName("teamPipelineEditor");
+    auto *grid = new QGridLayout(form); grid->setContentsMargins(0, 0, 0, 0); grid->setHorizontalSpacing(14); grid->setVerticalSpacing(10);
+    grid->setColumnMinimumWidth(0, labelWidth); grid->setColumnStretch(1, 1);
+    int line = 0;
+    const auto add = [&](const QString &text, bool edited, QWidget *field) {
+        grid->addWidget(fieldLabel(text, edited, c), line, 0, Qt::AlignTop | Qt::AlignRight); grid->addWidget(field, line++, 1);
+    };
+    auto *name = new QLineEdit(p.name); name->setObjectName("teamPipelineName"); name->setReadOnly(m_readOnly); name->setMaxLength(80);
+    connect(name, &QLineEdit::editingFinished, this, [this, at, name] {
+        auto *x = at(); const auto text = name->text().trimmed();
+        if (!x || text.isEmpty() || text == x->name) return;
+        x->name = text; changed(); rebuildEditor();
+    });
+    add(tr("Name"), orig && orig->name != p.name, name);
+    // Stages: the implementer first, then each stage.
+    auto *stagesBox = new QWidget; stagesBox->setObjectName("teamPipelineStages");
+    auto *stages = new QGridLayout(stagesBox); stages->setContentsMargins(0, 0, 0, 0); stages->setHorizontalSpacing(10); stages->setVerticalSpacing(8);
+    int column = 1;
+    for (const auto &text : {QStringLiteral("#"), tr("Kind"), tr("Who takes it"), tr("Works in")}) stages->addWidget(label(text, c.muted, 12), 0, column++);
+    stages->addWidget(label(QStringLiteral("0"), c.muted, 13), 1, 1);
+    stages->addWidget(new StageChip("implement", stageName("implement"), stageColor("implement", c)), 1, 2, Qt::AlignLeft);
+    stages->addWidget(label(tr("the task's assignee"), c.muted, 12), 1, 3);
+    stages->addWidget(label(tr("its own folder"), c.muted, 12), 1, 4);
+    int open = m_openStage.value(p.id, -1);
+    if (!m_openStage.contains(p.id))
+        for (int i = 0; i < p.stages.size() && open < 0; ++i) if (p.stages[i].kind != "review") open = i;
+    QStringList problems;
+    int gridRow = 2;
+    QList<std::pair<QString, QString>> roleItems;
+    for (const auto &r : m_catalog.roles) if (r.id != "lead") roleItems.append({QStringLiteral("role:") + r.id, tr("first free %1").arg(r.name)});
+    for (int i = 0; i < p.stages.size(); ++i) {
+        const PipelineStage &s = p.stages[i];
+        const bool land = s.kind == "land";
+        const bool nextIsLand = i + 1 < p.stages.size() && p.stages[i + 1].kind == "land";
+        auto *moves = new QVBoxLayout; moves->setSpacing(0);
+        auto *up = iconButton(turned("chevron-down", c.text2, 180), tr("Move up"), "teamPipelineStageUp"); up->setEnabled(!m_readOnly && i > 0 && !land);
+        auto *down = iconButton(turned("chevron-down", c.text2, 0), tr("Move down"), "teamPipelineStageDown");
+        down->setEnabled(!m_readOnly && i + 1 < p.stages.size() && !nextIsLand);
+        for (auto *b : {up, down}) { b->setFixedSize(20, 15); b->setIconSize(QSize(11, 11)); }
+        moves->addWidget(up); moves->addWidget(down);
+        connect(up, &QToolButton::clicked, this, [this, at, i] { if (auto *x = at()) { x->stages.swapItemsAt(i, i - 1); m_openStage[x->id] = i - 1; changed(); rebuildEditor(); } });
+        connect(down, &QToolButton::clicked, this, [this, at, i] { if (auto *x = at()) { x->stages.swapItemsAt(i, i + 1); m_openStage[x->id] = i + 1; changed(); rebuildEditor(); } });
+        // The number opens the stage's details.
+        auto *number = button(QString::number(i + 1), "teamPipelineStageOpen"); number->setProperty("ghost", true);
+        number->setCheckable(true); number->setChecked(open == i); number->setFixedWidth(30);
+        number->setToolTip(open == i ? tr("Hide the stage's details") : tr("Show the stage's details"));
+        number->setStyleSheet(QStringLiteral("QPushButton{color:%1;font-size:13px;padding:2px 0;}").arg((open == i ? c.accent : c.muted).name()));
+        connect(number, &QPushButton::clicked, this, [this, id, i, open] { m_openStage[id] = open == i ? -1 : i; rebuildEditor(); });
+        auto *kind = segmented({{"review", tr("Review")}, {"test", tr("Test")}, {"command", tr("Command")}, {"land", tr("Land")}}, s.kind, "teamPipelineStageKind",
+                               [this, at, i](const QString &value) {
+            auto *x = at(); if (!x || x->stages[i].kind == value) return;
+            auto &stage = x->stages[i];
+            stage.kind = value;
+            if (stage.runByZerus()) { stage.role.clear(); stage.member.clear(); stage.hasCommand = true; }
+            else if (stage.role.isEmpty() && stage.member.isEmpty()) stage.role = defaultStageRole(m_catalog, value);
+            if (value != "land") stage.exits.clear();
+            m_openStage[x->id] = i;
+            changed(); rebuildEditor();
+        });
+        // A land stage is the last one, and only one.
+        bool otherLand = false;
+        for (int j = 0; j < p.stages.size(); ++j) otherLand = otherLand || (j != i && p.stages[j].kind == "land");
+        for (auto *b : kind->findChildren<QPushButton *>()) {
+            if (b->property("segment") == "land" && !land && (i + 1 != p.stages.size() || otherLand)) {
+                b->setEnabled(false); b->setToolTip(tr("A land stage is the pipeline's last stage"));
+            }
+            if (b->property("segment") == "command" || b->property("segment") == "land") b->setToolTip(b->isEnabled() ? tr("A stage Zerus runs itself, with no model") : b->toolTip());
+        }
+        kind->setEnabled(!m_readOnly);
+        QWidget *who = nullptr;
+        if (s.runByZerus()) {
+            who = label(tr("Zerus runs it, with no model"), c.muted, 12, false, "teamPipelineStageZerus");
+            if (s.command.trimmed().isEmpty()) problems << tr("Stage %1: a %2 stage needs its command").arg(i + 1).arg(stageName(s.kind).toLower());
+        } else {
+            auto items = roleItems;
+            if (!s.member.isEmpty()) items.append({QStringLiteral("member"), tr("pinned %1").arg(s.member)});
+            else items.append({QStringLiteral("member"), tr("Pinned member…")});
+            const QString current = s.member.isEmpty() && !s.role.isEmpty() ? QStringLiteral("role:") + s.role : QStringLiteral("member");
+            auto *roleBox = choice(items, current, "teamPipelineStageRole");
+            for (int k = 0; k < roleBox->count(); ++k) {
+                const QString data = roleBox->itemData(k).toString();
+                if (const Role *r = data.startsWith("role:") ? m_catalog.role(data.mid(5)) : nullptr) roleBox->setItemIcon(k, roleIcon(iconOf(*r), colorOf(*r, m_dark)));
+            }
+            roleBox->setEnabled(!m_readOnly);
+            roleBox->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); roleBox->setMinimumContentsLength(8);
+            connect(roleBox, &QComboBox::activated, this, [this, at, i, roleBox] {
+                auto *x = at(); if (!x) return;
+                auto &stage = x->stages[i];
+                const QString value = roleBox->currentData().toString();
+                if (value == "member") { stage.role.clear(); m_openStage[x->id] = i; }
+                else { stage.role = value.mid(5); stage.member.clear(); }
+                changed(); rebuildEditor();
+            });
+            who = roleBox;
+            if (s.role.isEmpty() && s.member.isEmpty()) problems << tr("Stage %1: name the member who takes it, or choose a role").arg(i + 1);
+        }
+        QWidget *where = nullptr;
+        if (s.kind == "test") {
+            auto *folder = choice({{"hold", folderName("hold")}, {"checkout", folderName("checkout")}}, p.folder.isEmpty() ? QStringLiteral("hold") : p.folder, "teamPipelineStageFolder");
+            folder->setEnabled(!m_readOnly);
+            folder->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); folder->setMinimumContentsLength(10);
+            connect(folder, &QComboBox::activated, this, [this, at, folder] { if (auto *x = at()) { x->folder = folder->currentData().toString(); changed(); rebuildEditor(); } });
+            where = folder;
+        } else {
+            where = label(s.kind == "review" ? tr("Task's folder · reads") : s.kind == "land" ? tr("Task's folder · lands") : tr("Task's folder · runs"), c.text2, 12);
+        }
+        auto *del = iconButton(workspaceIcon("trash", c.muted), tr("Delete stage"), "teamPipelineStageDelete"); del->setEnabled(!m_readOnly);
+        connect(del, &QToolButton::clicked, this, [this, at, i] { if (auto *x = at()) { x->stages.removeAt(i); m_openStage[x->id] = -1; changed(); rebuildEditor(); } });
+        stages->addLayout(moves, gridRow, 0); stages->addWidget(number, gridRow, 1); stages->addWidget(kind, gridRow, 2, Qt::AlignLeft);
+        stages->addWidget(who, gridRow, 3); stages->addWidget(where, gridRow, 4); stages->addWidget(del, gridRow, 5);
+        ++gridRow;
+        if (open == i) stages->addWidget(pipelineStageDetails(index, i), gridRow++, 2, 1, 4);
+    }
+    stages->setColumnStretch(3, 3); stages->setColumnStretch(4, 2);
+    auto *stageColumn = new QVBoxLayout; stageColumn->setSpacing(8);
+    stageColumn->addWidget(stagesBox);
+    auto *addRow = row(10);
+    auto *addStage = button(tr("+ Stage"), "teamPipelineAddStage"); addStage->setProperty("ghost", true);
+    addStage->setEnabled(!m_readOnly && p.stages.size() < 8);
+    addStage->setToolTip(p.stages.size() < 8 ? QString() : tr("A pipeline has at most 8 stages"));
+    connect(addStage, &QPushButton::clicked, this, [this, at] {
+        auto *x = at(); if (!x) return;
+        PipelineStage stage; stage.kind = "review"; stage.role = defaultStageRole(m_catalog, "review");
+        // Before a land stage, which stays last.
+        int place = x->stages.size();
+        if (place > 0 && x->stages.last().kind == "land") --place;
+        x->stages.insert(place, stage); m_openStage[x->id] = place;
+        changed(); rebuildEditor();
+    });
+    addRow->addWidget(addStage);
+    addRow->addWidget(hint(tr("Review reads the attempt's change against the task's criteria; Test runs the suites of the files the task changed and takes the criteria's shots. "
+                              "Command and Land are stages Zerus runs itself."), c.muted), 1);
+    stageColumn->addLayout(addRow);
+    for (const auto &problem : problems) stageColumn->addWidget(warningLine(problem, c.warn, "teamPipelineProblem"));
+    bool stagesEdited = false;
+    if (orig) {
+        QJsonArray a, b;
+        for (const auto &s : p.stages) a.append(s.json());
+        for (const auto &s : orig->stages) b.append(s.json());
+        stagesEdited = a != b || orig->folder != p.folder;
+    }
+    add(tr("Stages"), stagesEdited, box(stageColumn));
+    // Final acceptance and the rounds.
+    auto *acceptRow = row(10);
+    auto *accept = segmented({{"lead", tr("Lead")}, {"sub_lead", tr("Sub-lead")}, {"auto", tr("Auto")}}, acceptKind(p), "teamPipelineAccept", [this, at](const QString &value) {
+        auto *x = at(); if (!x || acceptKind(*x) == value) return;
+        x->accept = value; changed(); rebuildEditor();
+    });
+    accept->setEnabled(!m_readOnly);
+    acceptRow->addWidget(accept);
+    const bool endsInLand = !p.stages.isEmpty() && p.stages.last().kind == "land";
+    acceptRow->addWidget(hint(endsInLand ? tr("The land stage decides itself: its exit codes accept the task, return it or hold it for the lead.")
+                                         : tr("Sub-lead: the member's reviewer_of lead. Auto accepts once the last stage passes."), c.muted), 1);
+    add(tr("Final acceptance"), orig && acceptKind(*orig) != acceptKind(p), box(acceptRow));
+    auto *roundsRow = row(8);
+    roundsRow->addWidget(label(tr("A stage that returns the task"), c.text2, 12));
+    auto *rounds = new Stepper(p.rounds(), 1, 10, "teamPipelineRounds", [this, at](int value) { if (auto *x = at()) { x->maxRounds = value; changed(); } });
+    rounds->setEnabled(!m_readOnly);
+    roundsRow->addWidget(rounds);
+    roundsRow->addWidget(hint(tr("times sends it to the lead with every round's findings."), c.text2), 1);
+    add(tr("After the rounds"), orig && orig->rounds() != p.rounds(), box(roundsRow));
+    outer->addWidget(form);
+    outer->addWidget(label(tr("DEFAULTS"), c.muted, 11, true, "teamPipelineDefaultsTitle"));
+    outer->addWidget(pipelineDefaults(p));
+    outer->addWidget(pipelineTry(p));
+    return w;
+}
+
+// The open stage's details: where a test works and who takes a stage, or
+// what Zerus runs for a command or land stage and a land stage's exit codes.
+QWidget *TeamCatalogEditor::pipelineStageDetails(int index, int stage)
+{
+    const Colors c = colorsFor(m_dark);
+    const QString id = m_catalog.pipelines[index].id;
+    const Pipeline &p = m_catalog.pipelines[index];
+    const PipelineStage &s = p.stages[stage];
+    const auto at = [this, id, stage]() -> PipelineStage * {
+        for (auto &x : m_catalog.pipelines) if (x.id == id && stage < x.stages.size()) return &x.stages[stage];
+        return nullptr;
+    };
+    auto *frame = new QFrame; frame->setObjectName("teamPipelineStageDetails"); frame->setProperty("stage", stage);
+    auto *v = new QVBoxLayout(frame); v->setContentsMargins(14, 10, 14, 12); v->setSpacing(6);
+    const auto heading = [&](const QString &text) { v->addWidget(label(text, c.muted, 11, true)); };
+    if (s.kind == "test") {
+        heading(tr("WHERE THE TEST WORKS"));
+        const QString folder = p.folder.isEmpty() ? QStringLiteral("hold") : p.folder;
+        const QList<std::tuple<QString, QString, QString, const char *>> options{
+            {"hold", tr("The task's folder"),
+             tr("The implementer's worktree or clone, or the shared folder when the team works in one. The stage reads and builds there and writes only build output "
+                "and its own temporary folder. While it runs the folder is held: the implementer's next task there waits, and its card says “folder held by the "
+                "test of #N”. In a shared folder the others keep working; the hand-off names the task's files."), "teamPipelineFolderHold"},
+            {"checkout", tr("A detached checkout of the attempt's commits"),
+             tr("Frees the implementer at once and costs one build. Needs a Git checkout; for a non-Git folder the stage uses the task's folder."), "teamPipelineFolderCheckout"}};
+        for (const auto &[value, title, text, name] : options) {
+            auto *radio = new QRadioButton(title); radio->setObjectName(name); radio->setChecked(folder == value); radio->setEnabled(!m_readOnly);
+            QFont f = radio->font(); f.setWeight(QFont::DemiBold); radio->setFont(f);
+            radio->setStyleSheet(QStringLiteral("QRadioButton{color:%1;font-size:13px;}"
+                                                "QRadioButton::indicator{width:10px;height:10px;border-radius:7px;border:2px solid %2;background:transparent;}"
+                                                "QRadioButton::indicator:checked{border:4px solid %3;width:6px;height:6px;background:%4;}")
+                                     .arg(c.fg.name(), c.muted.name(), c.accent.name(), c.cardFill.name()));
+            connect(radio, &QRadioButton::clicked, this, [this, id, value = value] {
+                for (auto &x : m_catalog.pipelines) if (x.id == id && x.folder != value) { x.folder = value; changed(); rebuildEditor(); }
+            });
+            v->addWidget(radio);
+            auto *about = hint(text, c.text2); about->setContentsMargins(24, 0, 0, 4); v->addWidget(about);
+        }
+    }
+    if (!s.runByZerus()) {
+        auto *whoRow = row(10);
+        whoRow->addWidget(label(tr("Who takes it"), c.text2, 12));
+        const bool pinned = s.role.isEmpty();
+        auto *who = segmented({{"role", tr("Role")}, {"member", tr("Pinned member")}}, pinned ? QStringLiteral("member") : QStringLiteral("role"), "teamPipelineStageWho",
+                              [this, at](const QString &value) {
+            auto *x = at(); if (!x || (value == "member") == x->role.isEmpty()) return;
+            if (value == "member") x->role.clear();
+            else { x->member.clear(); x->role = defaultStageRole(m_catalog, x->kind); }
+            changed(); rebuildEditor();
+        });
+        who->setEnabled(!m_readOnly);
+        whoRow->addWidget(who);
+        if (pinned) {
+            auto *member = new QLineEdit(s.member); member->setObjectName("teamPipelineStageMember"); member->setReadOnly(m_readOnly);
+            member->setPlaceholderText(tr("member id, such as backend2")); member->setMaxLength(40);
+            static const QRegularExpression shape(QStringLiteral("[A-Za-z0-9_-]{0,40}"));
+            member->setValidator(new QRegularExpressionValidator(shape, member));
+            connect(member, &QLineEdit::editingFinished, this, [this, at, member] {
+                auto *x = at(); if (!x || member->text().trimmed() == x->member) return;
+                x->member = member->text().trimmed(); changed(); rebuildEditor();
+            });
+            whoRow->addWidget(member, 1);
+        } else whoRow->addStretch();
+        v->addLayout(whoRow);
+        v->addWidget(hint(pinned ? tr("Only this member takes the stage; it waits while the member is busy. The implementer never takes its own task's stage.")
+                                 : tr("A second member with the role takes waiting stages. The implementer never takes its own task's stage."), c.muted));
+        return frame;
+    }
+    // U47/U48: the command Zerus runs, its expected exit and time limit.
+    heading(s.kind == "land" ? tr("WHAT ZERUS RUNS TO LAND THE TASK") : tr("WHAT ZERUS RUNS"));
+    auto *command = new QLineEdit(s.command); command->setObjectName("teamPipelineStageCommand"); command->setReadOnly(m_readOnly);
+    command->setFont(NewSessionDense::mono(12)); command->setMaxLength(2000);
+    command->setPlaceholderText(s.kind == "land" ? tr("such as scripts/land.sh --squash") : tr("such as cargo test --locked"));
+    connect(command, &QLineEdit::editingFinished, this, [this, at, command] {
+        auto *x = at(); if (!x || command->text().trimmed() == x->command) return;
+        x->command = command->text().trimmed(); x->hasCommand = true; changed(); rebuildEditor();
+    });
+    v->addWidget(command);
+    auto *limits = row(8);
+    if (s.kind == "command") {
+        limits->addWidget(label(tr("Passes on exit"), c.text2, 12));
+        auto *expect = new QSpinBox; expect->setObjectName("teamPipelineStageExpect"); expect->setRange(-255, 255); expect->setValue(s.expectExit);
+        expect->setEnabled(!m_readOnly);
+        connect(expect, &QSpinBox::editingFinished, this, [this, at, expect] {
+            auto *x = at(); if (!x || expect->value() == x->expectExit) return;
+            x->expectExit = expect->value(); x->hasCommand = true; changed();
+        });
+        limits->addWidget(expect); limits->addSpacing(12);
+    }
+    limits->addWidget(label(tr("Time limit"), c.text2, 12));
+    auto *timeout = new QSpinBox; timeout->setObjectName("teamPipelineStageTimeout"); timeout->setRange(1, 240); timeout->setValue(qBound(1, s.timeoutMinutes, 240));
+    timeout->setSuffix(tr(" min")); timeout->setEnabled(!m_readOnly);
+    connect(timeout, &QSpinBox::editingFinished, this, [this, at, timeout] {
+        auto *x = at(); if (!x || timeout->value() == x->timeoutMinutes) return;
+        x->timeoutMinutes = timeout->value(); x->hasCommand = true; changed();
+    });
+    limits->addWidget(timeout); limits->addStretch();
+    v->addLayout(limits);
+    v->addWidget(hint(s.kind == "land"
+                          ? tr("Zerus runs it in the task's folder once the earlier stages pass, as a detached run with no model. Only the owner's catalog names the command; a plan chooses the preset, never the command.")
+                          : tr("Zerus runs it in the task's folder as a detached run (hgs run), with no model: the exit code is the verdict, and a return gives the implementer the output's tail as the finding. Only the owner's catalog names the command."),
+                      c.muted));
+    if (s.kind != "land") return frame;
+    heading(tr("EXIT CODES"));
+    int k = 0;
+    for (auto it = s.exits.cbegin(); it != s.exits.cend(); ++it, ++k) {
+        auto *exitRow = row(8);
+        exitRow->addWidget(label(tr("Exit"), c.text2, 12));
+        auto *code = new QSpinBox; code->setObjectName("teamPipelineExitCode"); code->setRange(-255, 255); code->setValue(it.key().toInt()); code->setEnabled(!m_readOnly);
+        auto *outcome = choice({{"accepted", outcomeName("accepted")}, {"returned", outcomeName("returned")}, {"held", outcomeName("held")}}, it.value(), "teamPipelineExitOutcome");
+        outcome->setEnabled(!m_readOnly);
+        auto *drop = iconButton(workspaceIcon("trash", c.muted), tr("Remove this exit code"), "teamPipelineExitDelete"); drop->setEnabled(!m_readOnly);
+        const QString key = it.key();
+        connect(code, &QSpinBox::editingFinished, this, [this, at, code, key] {
+            auto *x = at(); const QString next = QString::number(code->value());
+            if (!x || next == key || x->exits.contains(next)) { if (x && next != key) code->setValue(key.toInt()); return; }
+            x->exits.insert(next, x->exits.take(key)); changed(); rebuildEditor();
+        });
+        connect(outcome, &QComboBox::activated, this, [this, at, outcome, key] { if (auto *x = at()) { x->exits[key] = outcome->currentData().toString(); changed(); } });
+        connect(drop, &QToolButton::clicked, this, [this, at, key] { if (auto *x = at()) { x->exits.remove(key); changed(); rebuildEditor(); } });
+        exitRow->addWidget(code); exitRow->addWidget(outcome, 1); exitRow->addWidget(drop);
+        v->addLayout(exitRow);
+    }
+    auto *addExit = button(tr("+ Exit code"), "teamPipelineAddExit"); addExit->setProperty("ghost", true); addExit->setEnabled(!m_readOnly);
+    connect(addExit, &QPushButton::clicked, this, [this, at] {
+        auto *x = at(); if (!x) return;
+        int code = x->exits.isEmpty() ? 0 : 1;
+        while (x->exits.contains(QString::number(code))) ++code;
+        x->exits.insert(QString::number(code), code == 0 ? QStringLiteral("accepted") : QStringLiteral("returned"));
+        changed(); rebuildEditor();
+    });
+    auto *exitsRow = row(10);
+    exitsRow->addWidget(addExit);
+    exitsRow->addWidget(hint(s.exits.isEmpty() ? tr("None named: exit 0 accepts the task and any other exit holds it for the lead.")
+                                               : tr("Any other exit holds the task for the lead."), c.muted), 1);
+    v->addLayout(exitsRow);
+    // U48: the owner's land_allowed gates it.
+    v->addWidget(warningLine(tr("A land stage runs only in a team whose owner turned on land_allowed in its settings. Without it the plan refuses this preset, "
+                                "and a land stage reached anyway is held for the lead, never run."), c.warn, "teamPipelineLandRule"));
+    return frame;
+}
+
+// Below the editor: the default pipeline per template and per role (a role's
+// wins). Each is an edit of that template or role, saved with the catalog.
+QWidget *TeamCatalogEditor::pipelineDefaults(const Teams::Pipeline &pipeline)
+{
+    const Colors c = colorsFor(m_dark);
+    auto *w = new QWidget; w->setObjectName("teamPipelineDefaults");
+    auto *h = new QHBoxLayout(w); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(18);
+    QList<std::pair<QString, QString>> presets;
+    for (const auto &p : m_catalog.pipelines) presets.append({p.id, p.name});
+    const Catalog &base = m_teams->catalog();
+    auto *templates = new QGridLayout; templates->setHorizontalSpacing(10); templates->setVerticalSpacing(6);
+    templates->addWidget(label(tr("Template"), c.muted, 12), 0, 0); templates->addWidget(label(tr("Pipeline"), c.muted, 12), 0, 1);
+    for (int i = 0; i < m_catalog.templates.size(); ++i) {
+        const Template &t = m_catalog.templates[i];
+        const Template *saved = m_readOnly ? nullptr : base.templ(t.id);
+        auto items = presets; items.prepend({QString(), tr("None (today's flow)")});
+        auto *picker = choice(items, t.pipeline, "teamPipelineTemplateDefault"); picker->setProperty("template", t.id); picker->setEnabled(!m_readOnly);
+        connect(picker, &QComboBox::activated, this, [this, i, picker] {
+            if (m_catalog.templates[i].pipeline == picker->currentData().toString()) return;
+            m_catalog.templates[i].pipeline = picker->currentData().toString(); changed(); rebuildEditor();
+        });
+        auto *nameRow = row(4); nameRow->addWidget(ellipsis(t.name, c.fg, 13), 1);
+        if (saved && saved->pipeline != t.pipeline) nameRow->addWidget(label(QStringLiteral("●"), c.warn, 9));
+        templates->addWidget(box(nameRow), i + 1, 0); templates->addWidget(picker, i + 1, 1);
+    }
+    templates->setColumnStretch(0, 1); templates->setColumnStretch(1, 1);
+    auto *roles = new QGridLayout; roles->setHorizontalSpacing(10); roles->setVerticalSpacing(6);
+    roles->addWidget(label(tr("Role with its own"), c.muted, 12), 0, 0); roles->addWidget(label(tr("Pipeline"), c.muted, 12), 0, 1);
+    int at = 1;
+    QList<std::pair<QString, QString>> without;
+    for (int i = 0; i < m_catalog.roles.size(); ++i) {
+        const Role &r = m_catalog.roles[i];
+        if (r.pipeline.isEmpty()) { without.append({r.id, r.name}); continue; }
+        auto items = presets; items.prepend({QString(), tr("The template's default")}); items.append({QStringLiteral("none"), tr("None (today's flow)")});
+        auto *picker = choice(items, r.pipeline, "teamPipelineRoleDefault"); picker->setProperty("role", r.id); picker->setEnabled(!m_readOnly);
+        connect(picker, &QComboBox::activated, this, [this, i, picker] {
+            if (m_catalog.roles[i].pipeline == picker->currentData().toString()) return;
+            m_catalog.roles[i].pipeline = picker->currentData().toString(); changed(); rebuildEditor();
+        });
+        auto *chipBox = row(4); chipBox->addWidget(chipOf(r, m_dark));
+        if (const Role *saved = m_readOnly ? nullptr : base.role(r.id); saved && saved->pipeline != r.pipeline) chipBox->addWidget(label(QStringLiteral("●"), c.warn, 9));
+        chipBox->addStretch();
+        roles->addWidget(box(chipBox), at, 0); roles->addWidget(picker, at++, 1);
+    }
+    // + Role: the role then uses this preset.
+    without.prepend({QString(), tr("+ Role")});
+    auto *addRole = choice(without, QString(), "teamPipelineAddRole");
+    addRole->setEnabled(!m_readOnly && without.size() > 1);
+    addRole->setToolTip(tr("Give a role its own pipeline: %1").arg(pipeline.name));
+    connect(addRole, &QComboBox::activated, this, [this, addRole, id = pipeline.id] {
+        const QString role = addRole->currentData().toString();
+        for (auto &r : m_catalog.roles) if (r.id == role && !role.isEmpty()) { r.pipeline = id; changed(); rebuildEditor(); return; }
+    });
+    roles->addWidget(addRole, at++, 0, Qt::AlignLeft);
+    roles->addWidget(hint(tr("A role's pipeline wins over its template's. The plan and edit-draft can set any task's; a task keeps a snapshot from its "
+                             "assignment, so later edits here do not change a running task."), c.muted), at, 0, 1, 2);
+    roles->setColumnStretch(0, 1); roles->setColumnStretch(1, 1); roles->setRowStretch(at + 1, 1);
+    h->addLayout(templates, 1); h->addLayout(roles, 1);
+    return w;
+}
+
+// A designer's change to a preset: each field it changes, old → new.
+QWidget *TeamCatalogEditor::pipelineDiff(const Teams::Pipeline &mine, const Teams::Proposal &proposal)
+{
+    const Pipeline *saved = m_teams->catalog().pipeline(proposal.target);
+    if (!saved || proposal.action != "change") return nullptr;
+    const Colors c = colorsFor(m_dark);
+    const auto flow = [this](const Pipeline &p) {
+        QStringList parts;
+        for (const auto &s : p.stages) {
+            const Role *r = m_catalog.role(s.role);
+            parts << (s.runByZerus() ? stageName(s.kind) : tr("%1 by %2").arg(stageName(s.kind), !s.member.isEmpty() ? s.member : r ? r->name : s.role));
+        }
+        return parts.isEmpty() ? tr("no stages") : parts.join(QStringLiteral(" › "));
+    };
+    QList<std::tuple<QString, QString, QString>> fields{
+        {tr("Name"), saved->name, mine.name}, {tr("Stages"), flow(*saved), flow(mine)},
+        {tr("Test works in"), folderName(saved->folder), folderName(mine.folder)},
+        {tr("Final acceptance"), stageName(acceptKind(*saved)), stageName(acceptKind(mine))},
+        {tr("Rounds"), QString::number(saved->rounds()), QString::number(mine.rounds())}};
+    auto *diff = new QFrame; diff->setObjectName("teamPipelineDiff");
+    auto *v = new QVBoxLayout(diff); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(3);
+    const bool rejected = proposal.state == "rejected";
+    for (const auto &[name, before, after] : fields) {
+        if (before == after) continue;
+        auto *l = new QLabel(QStringLiteral("<span style='color:%1;'>%2:</span> <s style='color:%3;'>%4</s> <span style='color:%1;'>→</span> <span style='color:%5;'>%6</span>")
+                                 .arg(c.muted.name(), name.toHtmlEscaped(), (rejected ? c.dim : c.danger).name(), before.toHtmlEscaped(),
+                                      (rejected ? c.dim : c.accent).name(), after.toHtmlEscaped()));
+        l->setObjectName("teamPipelineDiffLine"); l->setTextFormat(Qt::RichText); l->setWordWrap(true);
+        l->setStyleSheet(QStringLiteral("font-size:12px;"));
+        v->addWidget(l);
+    }
+    if (v->count()) return diff;
+    delete diff;
+    return nullptr;
+}
+
+// Try it: a task of a running team (or a sample team of one member per role)
+// walked through the preset; nothing is sent.
+QWidget *TeamCatalogEditor::pipelineTry(const Teams::Pipeline &pipeline)
+{
+    const Colors c = colorsFor(m_dark);
+    auto *frame = new QFrame; frame->setObjectName("teamPipelineTryBox");
+    auto *v = new QVBoxLayout(frame); v->setContentsMargins(14, 12, 14, 14); v->setSpacing(10);
+    auto *head = row(8);
+    auto *icon = new QLabel; icon->setPixmap(workspaceIcon("check-circle", c.accent).pixmap(15, 15)); icon->setFixedSize(16, 16);
+    auto *title = new QLabel(QStringLiteral("<b>%1</b> <span style='color:%2;'>%3</span>").arg(tr("Try it").toHtmlEscaped(), c.muted.name(), tr("on a sample task — nothing is sent").toHtmlEscaped()));
+    title->setTextFormat(Qt::RichText); title->setStyleSheet(QStringLiteral("color:%1;font-size:13px;").arg(c.fg.name()));
+    head->addWidget(icon); head->addWidget(title);
+    auto *sample = new QComboBox; sample->setObjectName("teamPipelineTrySample");
+    sample->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); sample->setMinimumContentsLength(18);
+    int shown = 0;
+    for (const auto &team : m_teams->teams()) {
+        for (const auto &task : team.tasks) {
+            if (shown >= 40 || task.status == "draft" || task.status == "cancelled") continue;
+            const Member *m = nullptr; for (const auto &x : team.members) if (x.id == task.assignee) m = &x;
+            const QString role = m ? (m->role.isEmpty() ? m->id : m->role) : task.role;
+            sample->addItem(QStringLiteral("#%1 %2 · %3 · %4").arg(task.id).arg(task.title, role, team.name), QStringLiteral("%1/%2").arg(team.id).arg(task.id));
+            ++shown;
+        }
+    }
+    if (!sample->count()) sample->addItem(tr("A sample task, one member per role"), QStringLiteral("sample"));
+    if (const int found = sample->findData(property("pipelineTry").toString()); found >= 0) sample->setCurrentIndex(found);
+    auto *go = button(tr("Try"), "teamPipelineTry", true);
+    head->addWidget(sample, 1); head->addWidget(go);
+    v->addLayout(head);
+    auto *result = new QWidget; result->setObjectName("teamPipelineTryResult");
+    auto *rv = new QVBoxLayout(result); rv->setContentsMargins(0, 0, 0, 0); rv->setSpacing(8);
+    v->addWidget(result);
+    const auto show = [this, rv, c, pipeline](const QString &key) {
+        while (auto *item = rv->takeAt(0)) { if (auto *w = item->widget()) retire(w); delete item; }
+        // The team and task the key names, or one member per role.
+        Team team; Task task;
+        bool found = false;
+        for (const auto &t : m_teams->teams())
+            for (const auto &x : t.tasks) if (QStringLiteral("%1/%2").arg(t.id).arg(x.id) == key) { team = t; task = x; found = true; }
+        if (!found) {
+            team.name = tr("Sample team");
+            for (const auto &r : m_catalog.roles) {
+                Member m; m.id = r.id; m.role = r.name; m.agent = r.agent; m.model = r.model; m.lead = r.id == "lead";
+                team.members.append(m);
+            }
+            task.id = 1; task.title = tr("Sample task");
+            QStringList staged; for (const auto &s : pipeline.stages) staged << s.role;
+            for (const auto &m : team.members) if (!m.lead && task.assignee.isEmpty() && !staged.contains(m.id)) task.assignee = m.id;
+            for (const auto &m : team.members) if (!m.lead && task.assignee.isEmpty()) task.assignee = m.id;
+        }
+        const Walk walked = walk(m_catalog, pipeline, team, task);
+        for (int i = 0; i < walked.steps.size(); ++i) {
+            const Step &step = walked.steps[i];
+            auto *stepRow = new QWidget; stepRow->setObjectName("teamPipelineTryStep"); stepRow->setProperty("kind", step.kind); stepRow->setProperty("member", step.member);
+            auto *h = new QHBoxLayout(stepRow); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(10);
+            h->addWidget(new StageChip(step.kind, QString(), stageColor(step.kind, c)), 0, Qt::AlignTop);
+            auto *text = new QVBoxLayout; text->setSpacing(2);
+            auto *first = row(6);
+            first->addWidget(label(step.title, c.fg, 13, true));
+            if (const Role *r = m_catalog.roleNamed(step.role)) first->addWidget(chipOf(*r, m_dark));
+            else if (!step.role.isEmpty()) first->addWidget(label(step.role, c.text2, 12));
+            if (!step.agent.isEmpty()) { auto *logo = new QLabel; logo->setPixmap(agentLogo(step.agent, c.fg).pixmap(14, 14)); logo->setToolTip(agentNames.value(step.agent, step.agent)); first->addWidget(logo); }
+            if (!step.detail.isEmpty()) first->addWidget(ellipsis(step.detail, c.muted, 12), 1); else first->addStretch();
+            text->addLayout(first);
+            if (!step.where.isEmpty()) text->addWidget(hint(step.where, c.text2));
+            h->addLayout(text, 1);
+            rv->addWidget(stepRow);
+        }
+        for (const auto &warning : walked.warnings) rv->addWidget(warningLine(warning, c.warn, "teamPipelineTryWarning"));
+    };
+    connect(go, &QPushButton::clicked, this, [this, sample, show] { setProperty("pipelineTry", sample->currentData().toString()); show(sample->currentData().toString()); });
+    // After an edit the walk follows the preset as it is now.
+    if (!property("pipelineTry").toString().isEmpty()) show(sample->currentData().toString());
+    return frame;
+}
+
+TeamCatalogEditor::Walk TeamCatalogEditor::walk(const Teams::Catalog &catalog, const Teams::Pipeline &pipeline, const Teams::Team &team, const Teams::Task &task)
+{
+    Walk out;
+    const auto roleName = [&](const QString &role) { const Role *r = catalog.roleNamed(role); return r ? r->name : role; };
+    const auto hasRole = [&](const Member &m, const QString &role) {
+        const Role *r = catalog.roleNamed(m.role);
+        return m.role.compare(role, Qt::CaseInsensitive) == 0 || (r && r->id == role);
+    };
+    const Member *implementer = nullptr, *lead = nullptr;
+    for (const auto &m : team.members) { if (m.id == task.assignee) implementer = &m; if (m.lead && !lead) lead = &m; }
+    if (!implementer && !task.role.isEmpty()) for (const auto &m : team.members) if (!implementer && !m.lead && hasRole(m, task.role)) implementer = &m;
+    const QString folder = implementer && !implementer->directory.isEmpty() ? implementer->directory : team.folder;
+    const QString where = folder.isEmpty() ? tr("the task's folder") : folder;
+    const QString who = implementer ? roleName(implementer->role.isEmpty() ? implementer->id : implementer->role) : tr("The implementer");
+    const auto describe = [&](const Member &m) {
+        QStringList parts;
+        if (!m.model.isEmpty()) parts << m.model;
+        if (!m.computer.isEmpty()) parts << m.computer;
+        const auto queue = memberQueue(team, m.id);
+        parts << (queue.isEmpty() ? tr("free now") : queue.size() == 1 ? tr("busy with #%1").arg(queue.first())
+                                                   : tr("busy with #%1, %2 waiting").arg(queue.first()).arg(queue.size() - 1));
+        return parts.join(QStringLiteral(" · "));
+    };
+    Step implement{QStringLiteral("implement"), tr("Implement"), implementer ? implementer->role : task.role, implementer ? implementer->id : QString(),
+                   implementer ? implementer->agent : QString(), implementer ? describe(*implementer) : tr("no member yet"),
+                   folder.isEmpty() ? tr("In its own folder; reports with its commits.") : tr("In its folder %1; reports with its commits.").arg(folder)};
+    out.steps << implement;
+    const int retry = int(qMax<qsizetype>(1, task.attempts.size())) + 1;
+    const QString rounds = tr("up to %1 rounds").arg(pipeline.rounds());
+    bool landed = false;
+    for (int i = 0; i < pipeline.stages.size(); ++i) {
+        const PipelineStage &s = pipeline.stages[i];
+        Step step; step.kind = s.kind;
+        if (s.runByZerus()) {
+            step.role = tr("Zerus");
+            step.detail = s.command.trimmed().isEmpty() ? tr("no command yet") : s.command.trimmed();
+            if (s.command.trimmed().isEmpty()) out.warnings << tr("Stage %1 has no command yet: the catalog cannot be saved without one.").arg(i + 1);
+            if (s.kind == "command") {
+                step.title = tr("Command, %1").arg(rounds);
+                step.where = tr("Zerus runs it in %1 with no model: exit %2 within %3 min passes, any other exit returns the task to %4 with the output's tail.")
+                                 .arg(where).arg(s.expectExit).arg(s.timeoutMinutes).arg(who);
+            } else {
+                landed = true;
+                step.title = tr("Land");
+                QStringList codes;
+                for (auto it = s.exits.cbegin(); it != s.exits.cend(); ++it) codes << tr("exit %1: %2").arg(it.key(), outcomeName(it.value()).toLower());
+                step.where = tr("Zerus runs it in %1 once the earlier stages pass; %2.")
+                                 .arg(where, codes.isEmpty() ? tr("exit 0 accepts the task, any other holds it for the lead") : codes.join(QStringLiteral(", ")) + tr(", any other exit holds it for the lead"));
+                if (!team.settingsJson.value("land_allowed").toBool())
+                    out.warnings << tr("This team does not allow landing (land_allowed is off): the plan refuses this preset, and a land stage reached anyway is held for the lead.");
+            }
+            out.steps << step;
+            continue;
+        }
+        step.title = tr("%1, %2").arg(stageName(s.kind), rounds);
+        QList<const Member *> candidates;
+        bool own = false;
+        for (const auto &m : team.members) {
+            const bool takes = s.member.isEmpty() ? !m.draining && hasRole(m, s.role) : m.id == s.member;
+            if (!takes) continue;
+            if (&m == implementer) own = true; else candidates << &m;
+        }
+        step.role = s.member.isEmpty() ? s.role : s.member;
+        // The first free one, else the one with the shortest queue.
+        const Member *pick = nullptr;
+        qsizetype least = 0;
+        for (const auto *m : candidates) {
+            const qsizetype load = memberQueue(team, m->id).size();
+            if (!pick || load < least) { pick = m; least = load; }
+        }
+        if (pick) { step.member = pick->id; step.agent = pick->agent; step.detail = describe(*pick); }
+        else if (!s.member.isEmpty()) {
+            step.detail = own ? tr("the implementer: it never takes its own task's stage") : tr("not in this team");
+            out.warnings << (own ? tr("Stage %1 is pinned to %2, the implementer of this task: it waits for the lead.").arg(i + 1).arg(s.member)
+                                 : tr("Stage %1 is pinned to %2, who is not in this team: it waits.").arg(i + 1).arg(s.member));
+        } else {
+            step.detail = tr("no other %1 in this team").arg(roleName(s.role));
+            out.warnings << tr("No %1 besides the implementer: stage %2 waits until one joins.").arg(roleName(s.role)).arg(i + 1);
+        }
+        if (s.kind == "review") step.where = tr("Reads %1 at the attempt's commits. Return → %2 gets the findings as attempt %3.").arg(where, who).arg(retry);
+        else if (pipeline.folder == "checkout") step.where = tr("Builds a detached checkout of the attempt's commits and runs the suites of the files the task changed; %1 is free while it runs.").arg(who);
+        else step.where = tr("Builds in %1 and runs the suites of the files the task changed. Holds the folder: %2's next task there waits.").arg(where, who);
+        if (s.kind == "test" && s.member.isEmpty() && candidates.size() == 1)
+            out.warnings << (pipeline.folder == "checkout"
+                                 ? tr("One %1 in this team: test stages queue behind it. A second %1 shortens the wait.").arg(roleName(s.role))
+                                 : tr("One %1 in this team: test stages queue behind it. A second %1, or a detached checkout, shortens the hold on %2.").arg(roleName(s.role), who));
+        out.steps << step;
+    }
+    if (!landed) {
+        Step accept; accept.kind = acceptKind(pipeline);
+        if (accept.kind == "auto") { accept.title = tr("Zerus accepts"); accept.where = tr("Once the last stage passes, with no lead."); }
+        else if (accept.kind == "sub_lead") { accept.title = tr("Sub-lead accepts"); accept.where = tr("The implementer's reviewer_of lead decides; without one, the lead."); }
+        else {
+            accept.title = tr("Lead accepts");
+            if (lead) { accept.role = lead->role.isEmpty() ? QStringLiteral("lead") : lead->role; accept.member = lead->id; accept.agent = lead->agent; }
+        }
+        if (!pipeline.stages.isEmpty())
+            accept.where = (accept.where.isEmpty() ? QString() : accept.where + QLatin1Char(' '))
+                           + tr("After %1 returned rounds in one stage the task goes to the lead with every round's findings.").arg(pipeline.rounds());
+        out.steps << accept;
+    }
+    out.warnings.removeDuplicates();
+    return out;
 }

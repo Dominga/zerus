@@ -56,10 +56,70 @@ pub fn run_limited(
     parent_env: &[(&str, &str)],
     stdout_cap: usize,
 ) -> Result<Exit, TooLarge> {
+    match run_inner(hgs, inv, parent_env, &[], stdout_cap, None) {
+        Ok(exit) => Ok(exit),
+        Err(Stopped::TooLarge(too_large)) => Err(too_large),
+        // Nothing sets a flag when there is none.
+        Err(Stopped::Cancelled) => Ok(Exit::Abnormal {
+            stderr: "cancelled".into(),
+        }),
+    }
+}
+
+/// Why a [`run_cancellable`] call gave no exit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Stopped {
+    TooLarge(TooLarge),
+    /// The cancel flag was set: the child was killed and waited for.
+    Cancelled,
+}
+
+/// [`run_limited`] that ends the child, within one poll (20 ms), once
+/// `cancel` is set, and reports [`Stopped::Cancelled`].
+pub fn run_cancellable(
+    hgs: &Path,
+    inv: &Invocation,
+    parent_env: &[(&str, &str)],
+    stdout_cap: usize,
+    cancel: &AtomicBool,
+) -> Result<Exit, Stopped> {
+    run_inner(hgs, inv, parent_env, &[], stdout_cap, Some(cancel))
+}
+
+/// [`run_limited`] of another program (a connector) that also leaves out
+/// the variables in `remove`, such as the terminal's, even when
+/// `parent_env` sets them.
+pub fn run_without(
+    program: &Path,
+    inv: &Invocation,
+    parent_env: &[(&str, &str)],
+    remove: &[&str],
+    stdout_cap: usize,
+) -> Result<Exit, TooLarge> {
+    match run_inner(program, inv, parent_env, remove, stdout_cap, None) {
+        Ok(exit) => Ok(exit),
+        Err(Stopped::TooLarge(too_large)) => Err(too_large),
+        Err(Stopped::Cancelled) => Ok(Exit::Abnormal {
+            stderr: "cancelled".into(),
+        }),
+    }
+}
+
+fn run_inner(
+    hgs: &Path,
+    inv: &Invocation,
+    parent_env: &[(&str, &str)],
+    remove: &[&str],
+    stdout_cap: usize,
+    cancel: Option<&AtomicBool>,
+) -> Result<Exit, Stopped> {
     let mut command = Command::new(hgs);
     command.args(&inv.args);
     for (key, value) in parent_env {
         command.env(key, value);
+    }
+    for key in remove {
+        command.env_remove(key);
     }
     command
         .env_remove("HGS_SESSION")
@@ -95,9 +155,11 @@ pub fn run_limited(
         limit,
     );
     let err = reader(child.stderr.take(), STDERR_CAP, done_tx, None);
-    let too_large = |err: &Shared| TooLarge {
-        cap: stdout_cap,
-        stderr: String::from_utf8_lossy(&take(err)).into_owned(),
+    let too_large = |err: &Shared| {
+        Stopped::TooLarge(TooLarge {
+            cap: stdout_cap,
+            stderr: String::from_utf8_lossy(&take(err)).into_owned(),
+        })
     };
 
     let mut written = false;
@@ -113,6 +175,11 @@ pub fn run_limited(
                 }
                 Err(TryRecvError::Empty) => {}
             }
+        }
+        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            let _ = stop(child, Exit::TimedOut);
+            drain(&done_rx);
+            return Err(Stopped::Cancelled);
         }
         if over.load(Ordering::Relaxed) {
             // Ended for its output: the exit that gives is not reported.

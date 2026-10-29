@@ -249,5 +249,20 @@ class Signing(unittest.TestCase):
                          ["--key", str(key), "--key-id", "ABC123DEF4"])
 
 
+    def test_a_tauri_switch_bundle_signs_with_the_hardened_runtime_and_app_entitlements(self):
+        app = Path(self.temporary.name) / "Tauri/Zerus.app"
+        (app / "Contents/MacOS").mkdir(parents=True)
+        (app / "Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable": "hgs-tray", "ZerusGUI": "tauri"}))
+        (app / "Contents/MacOS/hgs-tray").write_bytes(MACH_O)
+        (app / "Contents/Resources/setup").mkdir(parents=True)
+        (app / "Contents/Resources/setup/com.hgdev.hgs-tray.plist").write_text("<plist/>")
+        self.assertEqual(sign.signing_order(app), [app], "one executable: the app is the only code object")
+        command = sign.codesign_command(app, "-", sign.entitlements_for(app, app))
+        self.assertEqual(command[command.index("--options") + 1], "runtime")
+        entitlements = plistlib.loads(sign.APP_ENTITLEMENTS.read_bytes())
+        self.assertTrue(entitlements["com.apple.security.device.audio-input"])
+        self.assertTrue(entitlements["com.apple.security.automation.apple-events"])
+        self.assertNotIn("com.apple.security.cs.allow-jit", entitlements, "WKWebView runs JavaScript out of process")
+
 if __name__ == "__main__":
     unittest.main()

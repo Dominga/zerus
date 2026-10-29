@@ -99,25 +99,7 @@ pub fn rebuild(rows: &BTreeMap<String, Value>) -> Option<Value> {
 
 /// The project ID of every member of `swarm get`'s object.
 pub fn membership(value: &Value) -> BTreeMap<String, String> {
-    let mut members = BTreeMap::new();
-    for project in value["organization"]["projects"]
-        .as_array()
-        .into_iter()
-        .flatten()
-    {
-        let Some(id) = project["id"].as_str() else {
-            continue;
-        };
-        for member in project["sessions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-        {
-            members.insert(member.to_owned(), id.to_owned());
-        }
-    }
-    members
+    crate::swarm::members(&value["organization"])
 }
 
 fn change(computer: &ComputerId, update: OrganizationUpdate) -> Change {
@@ -281,6 +263,14 @@ mod tests {
     use super::*;
     use serde_json::json;
     use zerus_watch_protocol::{CatalogItem, Removal};
+
+    #[test]
+    fn a_session_listed_by_two_projects_maps_to_the_first() {
+        // Qt's indexSessions keeps the first (tray/src/SessionOrganization.cpp:46-48).
+        let value = json!({"organization": {"projects": [
+            {"id": "alpha", "sessions": ["h\ns"]}, {"id": "beta", "sessions": ["h\ns"]}]}});
+        assert_eq!(membership(&value)["h\ns"], "alpha");
+    }
 
     fn full(sessions: &[&str], digest: &str) -> Value {
         json!({

@@ -57,7 +57,9 @@ inline const char *prototypeIconPath(const QString &name)
         {"message", "M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9l-4 3.5V6a1 1 0 0 1 1-1z"},
         {"eye", "M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12zM9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"},
         {"pencil", "M4 20l1-4L16 5l3 3L8 19zM14 7l3 3"},
-        {"warning", "M12 4l9 16H3zM12 10v4M12 17v.5"}};
+        {"warning", "M12 4l9 16H3zM12 10v4M12 17v.5"},
+        // U50: the rail's Waiting for you page, an inbox tray.
+        {"inbox", "M4 13l2.5-7.5A1.5 1.5 0 0 1 7.9 4.5h8.2a1.5 1.5 0 0 1 1.4 1L20 13v5.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5zM4 13h4.5l1.5 2.5h4l1.5-2.5H20"}};
     return paths.value(name);
 }
 

@@ -17,7 +17,8 @@ const SUMMARY_CHARS: usize = 300;
 /// message never names it twice.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Item {
-    /// `report`, `question`, `permission`, `lead_task`, `stalled` or `budget`.
+    /// `report`, `question`, `permission`, `lead_task`, `stalled`, `budget`
+    /// or `task_waits` (spec 0: U45, U46, U48).
     pub kind: &'static str,
     pub key: String,
     pub task: Option<u32>,
@@ -157,6 +158,29 @@ fn all_items(team: &Team) -> Vec<Item> {
             detail: member.error.clone(),
         });
     }
+    // Spec 0: a task that waits for a step Zerus could not take (U45 model,
+    // U46 context, U48 branch) is one item for the lead, with the reason and
+    // the retry that starts the step again. A context action that still runs
+    // waits for nobody.
+    for task in team.tasks.iter().filter(|_| active).filter(|task| task.status == TaskStatus::Pending) {
+        let Some(wait) = task.waits.as_ref().filter(|wait| !wait.running()) else { continue };
+        let attempt = task.attempts.iter().rev().find(|attempt| wait.attempt > 0 && attempt.n == wait.attempt);
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "task_waits",
+            key: format!("task_waits:{}:{}", task.id, wait.at),
+            task: Some(task.id),
+            member: match attempt {
+                Some(attempt) => team.role_of(&attempt.member),
+                None if task.assignee.is_empty() => task.role.clone(),
+                None => team.role_of(&task.assignee),
+            },
+            since: wait.at,
+            summary: summary(&format!("#{} {} waits: {}", task.id, task.title, wait.reason)),
+            command: format!("{} | hgs team retry --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})),
+            detail: wait.reason.clone(),
+        });
+    }
     // U52: a member whose session crashed too often this hour stays stopped
     // until the owner or the lead starts it again.
     for member in team.members.iter().filter(|member| member.id != team.lead && member.crash_told).filter(|_| active) {
@@ -256,12 +280,21 @@ fn all_items(team: &Team) -> Vec<Item> {
                         },
                         command: decide_command(team, task, true),
                         // A7: a captured reply may be only an acknowledgement;
-                        // its member waits for this decision.
-                        detail: if report.captured && attempt.member != team.lead {
-                            captured_hold_note(team, &attempt.member)
-                        } else {
-                            String::new()
-                        },
+                        // its member waits for this decision. U36: after the
+                        // round limit the lead reads every round's findings
+                        // with the report.
+                        detail: [
+                            if report.captured && attempt.member != team.lead {
+                                captured_hold_note(team, &attempt.member)
+                            } else {
+                                String::new()
+                            },
+                            super::pipeline::rounds_text(task),
+                        ]
+                        .into_iter()
+                        .filter(|part| !part.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                     });
                 }
             }
@@ -527,10 +560,35 @@ pub(crate) fn waits(team: &Team, task: &Task, ready: bool) -> Option<Value> {
     if let Some(hold) = &task.hold {
         return Some(json!({"for":"hold","on":[hold.by],"unblock":format!("release #{}", task.id)}));
     }
+    // Spec 0: a step before the hand-out was refused or never confirmed; U46:
+    // while Zerus still prepares the context it waits for nobody.
+    if let Some(wait) = task.waits.as_ref().filter(|_| task.status == TaskStatus::Pending) {
+        if wait.state == "waiting" {
+            return Some(json!({"for":wait.waits_for,"on":wait.on,"reason":"Zerus is preparing the context","unblock":"wait"}));
+        }
+        return Some(json!({"for":wait.waits_for,"on":wait.on,"reason":wait.reason,"unblock":format!("retry or reassign #{}", task.id)}));
+    }
+    // U36: a test holds the assignee's folder; its next task waits for it.
+    if matches!(task.status, TaskStatus::Pending) {
+        if let Some(held) = super::stages::held(team, &task.assignee).filter(|held| *held != task.id) {
+            return Some(json!({"for":"folder","on":[format!("#{held}")],"unblock":format!("folder held by the test of #{held}")}));
+        }
+    }
     if task.status == TaskStatus::Submitted {
         return Some(json!({
             "for":"lead","on":[team.role_of(&team.lead)],"unblock":format!("accept #{}", task.id)
         }));
+    }
+    // U36: a stage waits for its member (or for one with its role).
+    if let Some(run) = task.pipeline_run.as_ref().filter(|_| task.status.in_stage()) {
+        let open = run.open_run();
+        let who = match open {
+            Some(stage) if !stage.member.is_empty() => team.role_of(&stage.member),
+            Some(stage) => run.stages.get(stage.stage).map(|spec| spec.role.clone()).unwrap_or_default(),
+            None => String::new(),
+        };
+        let kind = open.map(|stage| stage.kind.clone()).unwrap_or_default();
+        return Some(json!({"for":"stage","on":[who],"unblock":format!("the {kind} of #{} by {who}", task.id)}));
     }
     if let Some(attempt) = task.open_attempt() {
         let role = team.role_of(&attempt.member);

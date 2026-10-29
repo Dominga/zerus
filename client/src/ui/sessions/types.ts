@@ -36,7 +36,10 @@ export interface Session {
   name: string;
   /** What the card shows as its title. */
   title: string;
+  /** The machine the card shows; "this computer" stands in for a local row without one. */
   machine: string;
+  /** The row's own machine (the host name or alias, "" before this computer's hello): with the name, the project member key. */
+  rawMachine: string;
   project: string;
   agent: AgentKind;
   model: string;
@@ -54,11 +57,27 @@ export interface Session {
   unread: boolean;
   draft: boolean;
   muted?: boolean;
+  /** The host's preferences conflict with the confirmed override (Qt's notificationPreferencesError). */
+  notificationConflict?: boolean;
   attention?: "question" | "approval" | "reply";
   scheduleNext?: string;
   backgroundJobs?: number;
   subagents?: Subagent[];
   reviewLater?: boolean;
+  /**
+   * Qt's SessionInfo::needsAttention with this device's marks: a request not
+   * acknowledged, an unread reply or Review later (no children). Undefined for
+   * a projection without `needs_attention`.
+   */
+  attentionNeeded?: boolean;
+  /**
+   * Qt's `needsAction() && !attentionAcknowledged` with this device's marks:
+   * what a project header counts as needing a response, beside Review later
+   * and children. Undefined for a projection without `needs_attention`.
+   */
+  actionNeeded?: boolean;
+  /** A subagent asks while the session runs and the attention is not acknowledged. */
+  childAttention?: boolean;
   optionalQuestions?: number;
   /** Seconds since the Unix epoch of the row's last change, when known. */
   updatedAt?: number;
@@ -88,6 +107,7 @@ export interface Session {
   /** The host's reasons for a disallowed archive or terminate. */
   archiveReason?: string;
   terminateReason?: string;
+  forgetReason?: string;
   /** The raw working directory (`cwd` is the folder name). */
   cwdPath: string;
   /** The row's terminal support, and whether the host reported it (NativeSessionCapabilities::terminal). */
@@ -95,6 +115,38 @@ export interface Session {
   terminalReported: boolean;
   terminalAttachSupported: boolean;
   terminalAttachReported: boolean;
+  /** Pause all and Resume all include the row (false for OpenCode). */
+  bulkLifecycle: boolean;
+  // The row as the host lists it, before this device's marks: store/marks.ts
+  // derives status, caption, attention, unread, reviewLater, summary and muted
+  // from these (Qt's FleetState::updateUnread).
+  /** `created`, whole seconds since the Unix epoch (0 when unknown). */
+  created: number;
+  /** What a local attention mark acknowledges (Qt's `attentionFingerprint`); "" when not reported. */
+  fingerprint: string;
+  needsAction: boolean;
+  /** Status and caption with the attention acknowledged. */
+  ackStatus: Status;
+  ackCaption: string;
+  /** A finished reply of a live conversation; undefined for a projection without it. */
+  unreadCandidate?: boolean;
+  /** The listing's `needs_attention`; undefined for a projection without it. */
+  baseAttentionNeeded?: boolean;
+  baseChildAttention: boolean;
+  /** The core kept the confirmed preferences over a conflicting listing. */
+  baseNotificationError: boolean;
+  baseStatus: Status;
+  baseCaption: string;
+  baseAttention?: "question" | "approval" | "reply";
+  baseUnread: boolean;
+  baseSummary: string;
+  baseMuted: boolean;
+  /** The host's read mark of this conversation. */
+  readReplyId?: string;
+  readAttentionSignature?: string;
+  /** The notification preferences pass Qt's validation, and their revision. */
+  sharedNotifications: boolean;
+  notificationRevision?: number;
 }
 
 export interface ActivityItem {

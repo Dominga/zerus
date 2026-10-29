@@ -58,6 +58,8 @@ public:
     void call(const QString &operation, QJsonObject input, const Reply &done, bool change = true);
     // The catalog, read on request and again after each change through call().
     const Teams::Catalog &catalog() const { return m_catalog; }
+    // U36: the catalog's pipeline presets as hgs sends them ({id, name,
+    // stages, max_rounds, folder, accept}); the plan editor's picker lists them.
     bool catalogReady() const { return m_catalogReady; }
     void refreshCatalog();
     // The catalog is read with every poll while its draft is on screen.

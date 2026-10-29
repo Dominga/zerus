@@ -102,7 +102,9 @@ class AndroidUpdateTest {
         val server=MockWebServer();server.start()
         val partial=File.createTempFile("zerus-update-test",".part")
         try {
-            server.enqueue(MockResponse().setBody(okio.Buffer().write(data)).throttleBody(1,5,TimeUnit.SECONDS))
+            // 1900 bytes at one per 200 ms never finish before the cancel, and the server's writer
+            // notices the closed socket well inside shutdown()'s five-second wait.
+            server.enqueue(MockResponse().setBody(okio.Buffer().write(data)).throttleBody(1,200,TimeUnit.MILLISECONDS))
             val client=OkHttpClient.Builder().addInterceptor { chain -> chain.proceed(chain.request().newBuilder().url(server.url("/apk")).build()) }.build()
             val downloader=UpdateDownload(client)
             val job=launch(Dispatchers.IO) { downloader.apk(UpdatePolicy.parse(feed().toString()),partial) {} }

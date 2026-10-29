@@ -8,22 +8,66 @@
 //! and the "Event stream" section of `docs/reference.md`.
 
 pub mod actions;
+pub mod analytics;
+pub mod approvals;
+pub mod attachments;
+pub mod attention;
 pub mod batch;
+pub mod cache;
+#[cfg(windows)]
+mod conpty;
+pub mod creation;
 pub mod details;
+pub mod download_cache;
+pub mod drafts;
+pub mod external_file;
 pub mod fleet;
+pub mod fsx;
+pub mod input_queue;
+pub mod launch;
 pub mod legacy;
+pub mod local_messages;
 pub mod machine;
+pub mod marks;
+pub mod menubar;
+pub mod mobile;
 pub mod organization;
+pub mod paths;
+pub mod process_view;
 pub mod processes;
+#[cfg(unix)]
+mod pty;
+pub mod qt_lock;
+pub mod questions;
 pub mod readmarks;
 pub mod reads;
+pub mod readsync;
+pub mod recovery_settings;
+pub mod repository;
 pub mod run;
+pub mod send;
+pub mod session_usage;
+pub mod settings;
 pub mod shell;
+pub mod speech_settings;
 pub mod state;
 pub mod stream;
+pub mod swarm;
+pub mod task_view;
 pub mod tasks;
+pub mod tasks_write;
+pub mod terminal;
+pub mod terminal_launch;
+pub mod termination_cleanup;
+pub mod trayicon;
 pub mod view;
 pub mod views;
+pub mod voice;
+pub mod voice_composer;
+pub mod voice_driver;
+pub mod worktree_policy;
+pub mod worktree_review;
+pub mod worktrees;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -40,9 +84,10 @@ pub use machine::{LocalHost, MachineMeta};
 pub use organization::{OrganizationSnapshot, OrganizationState, OrganizationUpdate};
 pub use processes::{ProcessesState, ProcessesUpdate};
 pub use reads::{Read, ReadError};
-pub use run::{run, run_limited, run_with_env, TooLarge};
+pub use run::{run, run_cancellable, run_limited, run_with_env, Stopped, TooLarge};
 pub use state::{ActivityState, CatalogState};
 pub use stream::{StreamEvent, StreamHandle, Timing};
+pub use swarm::grouping::{GroupOut, GroupingOut, HeaderOut, SyncView};
 pub use tasks::{TasksState, TasksUpdate};
 pub use view::ViewRow;
 pub use zerus_watch_protocol::SessionRef;
@@ -246,13 +291,30 @@ fn find_hgs(path: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) 
 #[cfg(test)]
 mod hgs_tests {
     use super::*;
+    use std::path::Path;
 
-    fn folder(name: &str) -> PathBuf {
+    /// A scratch folder, removed again when the test ends.
+    struct Folder(PathBuf);
+
+    impl std::ops::Deref for Folder {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn folder(name: &str) -> Folder {
         let dir =
             std::env::temp_dir().join(format!("zerus-client-core-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        Folder(dir)
     }
 
     #[test]
@@ -262,9 +324,9 @@ mod hgs_tests {
         std::fs::create_dir_all(home.join(".local/bin")).unwrap();
         std::fs::write(home.join(".local/bin").join(HGS), b"").unwrap();
         std::fs::write(bin.join(HGS), b"").unwrap();
-        let path = std::env::join_paths([bin.clone()]).unwrap();
+        let path = std::env::join_paths([bin.to_path_buf()]).unwrap();
         assert_eq!(
-            find_hgs(Some(path), Some(home.clone().into())),
+            find_hgs(Some(path), Some(home.to_path_buf().into())),
             Some(bin.join(HGS))
         );
     }
@@ -275,9 +337,9 @@ mod hgs_tests {
         std::fs::create_dir_all(home.join(".local/bin")).unwrap();
         std::fs::write(home.join(".local/bin").join(HGS), b"").unwrap();
         let empty = folder("finder-path");
-        let path = std::env::join_paths([empty]).unwrap();
+        let path = std::env::join_paths([empty.to_path_buf()]).unwrap();
         assert_eq!(
-            find_hgs(Some(path), Some(home.clone().into())),
+            find_hgs(Some(path), Some(home.to_path_buf().into())),
             Some(home.join(".local/bin").join(HGS))
         );
     }
@@ -286,7 +348,7 @@ mod hgs_tests {
     fn a_folder_named_hgs_is_not_a_program() {
         let bin = folder("dir-bin");
         std::fs::create_dir_all(bin.join(HGS)).unwrap();
-        let path = std::env::join_paths([bin]).unwrap();
+        let path = std::env::join_paths([bin.to_path_buf()]).unwrap();
         let found = find_hgs(Some(path), None);
         assert!(found.is_none_or(|found| found.is_file()));
     }

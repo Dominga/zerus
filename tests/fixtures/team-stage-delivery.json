@@ -1,0 +1,90 @@
+{
+  "members": [
+    {
+      "id": "lead",
+      "role": "Lead",
+      "stage_queue": []
+    },
+    {
+      "id": "dev",
+      "role": "Backend",
+      "stage_queue": []
+    },
+    {
+      "id": "qa",
+      "role": "Tester",
+      "stage_queue": [
+        {
+          "round": 1,
+          "since": 1800000000.0,
+          "stage": "test",
+          "state": "delivered",
+          "task": 1
+        }
+      ]
+    },
+    {
+      "id": "rev",
+      "role": "Reviewer",
+      "stage_queue": []
+    }
+  ],
+  "tasks": [
+    {
+      "assignee": "dev",
+      "id": 1,
+      "pipeline": "code",
+      "pipeline_run": {
+        "accept": "lead",
+        "folder": "hold",
+        "id": "code",
+        "max_rounds": 3,
+        "name": "Code: review, test, lead",
+        "round": 1,
+        "runs": [
+          {
+            "at": 1800000000.0,
+            "attempt": 1,
+            "by": "Reviewer",
+            "delivered_at": 1800000000.0,
+            "ended_at": 1800000000.0,
+            "folder": "/srv/example/proj",
+            "id": "stage-run",
+            "kind": "review",
+            "member": "rev",
+            "round": 1,
+            "stage": 0,
+            "state": "passed",
+            "text": "Read it"
+          },
+          {
+            "at": 1800000000.0,
+            "attempt": 1,
+            "delivered_at": 1800000000.0,
+            "folder": "/srv/example/proj",
+            "holds": true,
+            "id": "stage-run",
+            "kind": "test",
+            "member": "qa",
+            "round": 1,
+            "stage": 1,
+            "state": "delivered",
+            "temp": "/srv/example/stage-temp"
+          }
+        ],
+        "stages": [
+          {
+            "kind": "review",
+            "role": "reviewer"
+          },
+          {
+            "kind": "test",
+            "role": "tester"
+          }
+        ]
+      },
+      "status": "in_test",
+      "title": "API"
+    }
+  ]
+}

@@ -41,6 +41,9 @@ pub(crate) const SWAP_VERBS: &[&str] = &[
 /// N15: what the owner says when raising the member cap, English and Russian.
 pub(crate) const MAX_VERBS: &[&str] = &["max", "maximum", "limit", "cap", "лимит", "максимум", "макс", "предел"];
 
+/// U49: the words that ask a member to drain, English and Russian.
+pub(crate) const DRAIN_PHRASES: &[&str] = &["drain", "remove", "вывед", "убери", "убрать"];
+
 /// U32: what the owner's sentence must contain for one roster change: one of
 /// `phrases` (for an add, the verb "add"/"добав" instead), every token in
 /// `all` (a number), one of `verbs`, and one of `names` (the member).
@@ -72,7 +75,7 @@ const NUMBER_WORDS: &[(&str, usize)] = &[
 const ROLE_ALIASES: &[(&[&str], &[&str])] = &[
     (&["backend", "бэкенд"], &["backend", "бэкенд", "бэкендер"]),
     (&["frontend", "фронт"], &["frontend", "фронт", "фронтенд"]),
-    (&["qa", "tester", "test", "тестер", "тестировщик"], &["qa", "test", "тест", "тестер"]),
+    (&["qa", "tester", "test", "тестер", "тестировщик"], &["qa", "test", "тест", "тестер", "tester"]),
     (&["reviewer", "review", "ревью"], &["reviewer", "review", "ревью", "ревьюер"]),
     (&["expert", "эксперт"], &["expert", "эксперт"]),
 ];
@@ -211,6 +214,17 @@ fn verb_in(lowered: &str, verb: &str) -> bool {
     }
 }
 
+/// U49: a value the sentence must name; a count may be said as a number word
+/// ("add two backends" names 2, as "add 2 backends" does).
+fn needed_in(lowered: &str, value: &str) -> bool {
+    let value = value.to_lowercase();
+    if has_token(lowered, &value) {
+        return true;
+    }
+    let Ok(number) = value.parse::<usize>() else { return false };
+    NUMBER_WORDS.iter().any(|(word, n)| *n == number && has_token(lowered, word))
+}
+
 /// U26/N10: a whole token, not a substring ("add" does not match "address").
 fn has_token(haystack: &str, token: &str) -> bool {
     if token.is_empty() {
@@ -295,6 +309,11 @@ fn named_phases(lowered: &str) -> Vec<u32> {
 }
 
 fn asks_to_add(lowered: &str, phase: u32) -> bool {
+    // C1: a refusal never asks: "не добавляй задачу в текущую фазу" is not the
+    // owner asking for an addition.
+    if negated(lowered) {
+        return false;
+    }
     let adds = has_token(lowered, "add") || lowered.contains("добав");
     let task = lowered.contains("task") || lowered.contains("задач");
     let current = ["current phase", "running phase", "this phase", "текущ", "идущ", "эту фаз", "этой фаз"]
@@ -304,12 +323,63 @@ fn asks_to_add(lowered: &str, phase: u32) -> bool {
     adds && task && (names.contains(&phase) || (names.is_empty() && current))
 }
 
+/// C1: a confirmation is a short affirmative sentence, never a refusal and
+/// never an unrelated sentence that happens to say "ok". The longest one may
+/// be; a paragraph is not an answer to the warning.
+const CONFIRM_CHARS: usize = 160;
+
+/// C1: words that make a sentence a refusal in either language.
+fn negated(lowered: &str) -> bool {
+    const NEGATIONS: &[&str] = &[
+        "no", "not", "never", "dont", "doesnt", "didnt", "wont", "wouldnt", "cant", "cannot", "couldnt", "shouldnt",
+        "stop", "cancel", "не", "нет", "ни", "нельзя", "никогда", "отмена", "отмени", "хватит", "стоп",
+    ];
+    let words: Vec<&str> = lowered.split(|ch: char| !ch.is_alphanumeric()).filter(|word| !word.is_empty()).collect();
+    if words.iter().any(|word| NEGATIONS.contains(word)) {
+        return true;
+    }
+    // The tokenizer splits an apostrophe off ("don't" is "don" and "t").
+    ["don't", "doesn't", "didn't", "won't", "wouldn't", "can't", "couldn't", "shouldn't"]
+        .iter()
+        .any(|form| lowered.contains(form))
+}
+
+/// C1: whether this sentence is a whole-sentence answer to the warning.
+fn starts_with(text: &str, word: &str) -> bool {
+    text.strip_prefix(word)
+        .is_some_and(|rest| rest.chars().next().is_none_or(|ch| !ch.is_alphanumeric()))
+}
+
+/// C1: a confirmation is a bare yes/да/ok/confirm/add, or a short sentence that
+/// starts with one. "No, don't add it" and "не добавляй" are refusals, and
+/// "ok, what's the status?" is not an answer to the warning.
 fn confirms(lowered: &str, phase: u32) -> bool {
-    let yes = ["add", "confirm", "confirmed", "yes", "ok", "okay", "да"].iter().any(|token| has_token(lowered, token))
-        || lowered.contains("подтвер")
-        || lowered.contains("добав");
+    let text = lowered.trim().trim_matches(|ch: char| ch.is_whitespace() || ".,!?;:\"'()[]{}…".contains(ch));
+    if text.is_empty() || text.chars().count() > CONFIRM_CHARS || negated(text) {
+        return false;
+    }
     // A confirmation naming another phase is not this one's.
-    yes && named_phases(lowered).iter().all(|n| *n == phase)
+    if named_phases(text).iter().any(|n| *n != phase) {
+        return false;
+    }
+    let add = has_token(text, "add") || text.contains("добав");
+    let confirm = has_token(text, "confirm") || has_token(text, "confirmed") || text.contains("подтвер");
+    let bare = matches!(
+        text,
+        "yes" | "да" | "ok" | "okay" | "ок" | "окей" | "sure" | "confirm" | "confirmed" | "add" | "add it" | "добавь"
+            | "подтверждаю"
+    );
+    bare
+        || starts_with(text, "yes")
+        || starts_with(text, "да")
+        || starts_with(text, "sure")
+        || starts_with(text, "confirm")
+        || starts_with(text, "confirmed")
+        || starts_with(text, "подтверждаю")
+        || starts_with(text, "add")
+        || starts_with(text, "добавь")
+        || ((starts_with(text, "ok") || starts_with(text, "okay") || starts_with(text, "ок") || starts_with(text, "окей"))
+            && (add || confirm))
 }
 
 /// U29: verifies the owner's request (or confirmation) for an addition to
@@ -342,10 +412,60 @@ pub(crate) fn verify_phase_in(
         PhaseWord::Request => asks_to_add(lowered, phase),
         PhaseWord::Confirm => confirms(lowered, phase),
     };
-    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: &[], needed: &[], exact: false, add: false, verbs: &[], names: &[], accept: Some(&accept), after })
+    // C1: a confirmation is the owner's whole sentence, never a fragment of a
+    // longer one; a request may be quoted from a sentence that also explains it.
+    let exact = matches!(kind, PhaseWord::Confirm);
+    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: &[], needed: &[], exact, add: false, verbs: &[], names: &[], accept: Some(&accept), after })
         .with_context(|| match kind {
             PhaseWord::Request => format!("The owner has not asked to add a task to phase {phase} (name the phase or say the current phase)"),
             PhaseWord::Confirm => format!("The owner has not confirmed the addition to phase {phase} after the warning"),
+        })
+}
+
+/// U39/U42: what the owner says to change an accepted phase on the lead's
+/// request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PhaseChange {
+    Discard,
+    ToDraft,
+}
+
+/// The verbs of a discard, English whole and Russian at a word start.
+const DISCARD_VERBS: &[&str] = &["discard", "drop", "remove", "delete", "scrap", "cancel", "отмен", "удали", "убери", "выброс", "выкин"];
+/// The words of a return to a draft.
+const DRAFT_WORDS: &[&str] = &["draft", "drafts", "redraft", "черновик"];
+
+/// The owner's sentence names phase `phase` and the change.
+fn asks_phase_change(lowered: &str, phase: u32, change: PhaseChange) -> bool {
+    let words = match change {
+        PhaseChange::Discard => DISCARD_VERBS,
+        PhaseChange::ToDraft => DRAFT_WORDS,
+    };
+    named_phases(lowered).contains(&phase) && words.iter().any(|word| verb_in(lowered, word))
+}
+
+/// U39/U42: verifies the owner's word for discarding phase `phase`, or for
+/// returning it to a draft: a fresh sentence of the lead's own session that
+/// names the phase and the change.
+pub(crate) fn verify_phase_change(team: &Team, input: &Value, phase: u32, change: PhaseChange, now: f64) -> anyhow::Result<OwnerWord> {
+    let text = input["text"]
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .context("owner_word.text is required: quote the owner's sentence")?;
+    let lead = team.member(&team.lead).context("The team has no lead")?;
+    let session = lead.session.as_ref().context("The lead has no session to check the owner's word in")?;
+    let db = super::super::journal::event_db().map_err(|error| anyhow::anyhow!("The session events are unavailable: {error}"))?;
+    verify_phase_change_in(&db, &session.name, &session.conversation_id, text, phase, change, now)
+}
+
+/// The fixture-testable phase change check.
+pub(crate) fn verify_phase_change_in(db: &Connection, name: &str, conversation: &str, text: &str, phase: u32, change: PhaseChange, now: f64) -> anyhow::Result<OwnerWord> {
+    let accept = move |lowered: &str| asks_phase_change(lowered, phase, change);
+    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: &[], needed: &[], exact: false, add: false, verbs: &[], names: &[], accept: Some(&accept), after: 0.0 })
+        .with_context(|| match change {
+            PhaseChange::Discard => format!("The owner has not asked to discard phase {phase} (the sentence names the phase and the discard)"),
+            PhaseChange::ToDraft => format!("The owner has not asked to return phase {phase} to a draft (the sentence names the phase and the draft)"),
         })
 }
 
@@ -437,7 +557,7 @@ fn verify_scan(
         if if options.exact { detail.trim() != text.trim() } else { !detail.contains(text) } {
             continue;
         }
-        if !options.needed.iter().all(|value| has_token(&lowered, &value.to_lowercase())) {
+        if !options.needed.iter().all(|value| needed_in(&lowered, value)) {
             continue;
         }
         return Ok(OwnerWord { text: detail.to_owned(), at, event: seq });
@@ -592,6 +712,52 @@ mod tests {
         assert!(request("Address the task in phase 3", 3).is_err());
     }
 
+    /// C1 (#511): a refusal never confirms or asks, an unrelated sentence with
+    /// "ok" is not the answer to the warning, and the quote is the whole
+    /// sentence, never a fragment of it.
+    #[test]
+    fn a_refusal_never_confirms_a_phase_addition() {
+        let db = database();
+        for (at, said) in [
+            (2000.0, "Please add a task to phase 3: the hotfix"),
+            (2010.0, "Yes, add it"),
+            (2020.0, "Confirmed, add it now"),
+            (2030.0, "да, добавь"),
+            (2040.0, "подтверждаю"),
+            (2045.0, "ок, добавь"),
+            (2050.0, "No, don't add it"),
+            (2060.0, "не добавляй"),
+            (2070.0, "ok, what's the status"),
+            (2080.0, "No, don't add a task to phase 3"),
+            (2090.0, "не добавляй задачу в текущую фазу"),
+        ] {
+            add(&db, "claude/x/lead", "c1", prompt(at, said));
+        }
+        let request = |text: &str| verify_phase_in(&db, "claude/x/lead", "c1", text, 3, PhaseWord::Request, 0.0, 2100.0);
+        let confirm = |text: &str| verify_phase_in(&db, "claude/x/lead", "c1", text, 3, PhaseWord::Confirm, 1990.0, 2100.0);
+        // The real confirmations, in both languages, still work.
+        for said in ["Yes, add it", "Confirmed, add it now", "да, добавь", "подтверждаю", "ок, добавь"] {
+            confirm(said).unwrap_or_else(|error| panic!("{said}: {error}"));
+        }
+        // A refusal never confirms.
+        for said in ["No, don't add it", "не добавляй"] {
+            let error = confirm(said).unwrap_err().to_string();
+            assert!(error.contains("has not confirmed"), "{said}: {error}");
+        }
+        // An unrelated sentence with "ok" in it is not the answer.
+        let error = confirm("ok, what's the status").unwrap_err().to_string();
+        assert!(error.contains("has not confirmed"), "{error}");
+        // The quote is the whole sentence: a fragment is not the owner's word.
+        assert!(confirm("add it").is_err());
+        assert!(confirm("Yes, add it to phase 3").is_err());
+        // A request is never a refusal.
+        request("Please add a task to phase 3").unwrap();
+        for said in ["No, don't add a task to phase 3", "не добавляй задачу в текущую фазу"] {
+            let error = request(said).unwrap_err().to_string();
+            assert!(error.contains("has not asked"), "{said}: {error}");
+        }
+    }
+
     #[test]
     fn a_roster_word_must_name_the_change() {
         let db = database();
@@ -675,5 +841,24 @@ mod tests {
         // "добавь бэкенда для фазы 3" is one add: 3 is the phase, not a count.
         assert_eq!(add_count("добавь бэкенда для фазы 3"), 1);
         assert_eq!(add_count("add a backend for phase 3"), 1);
+        // U49: a scale names the role in the plural too.
+        assert!(names_member("add two backends", "Backend", "codex", ""));
+        assert!(names_member("add two testers", "Tester", "claude", ""));
+    }
+
+    #[test]
+    fn a_count_may_be_said_as_a_number_word() {
+        // U49: the word rule asks for the count; "two" names 2 as "2" does.
+        let rule = WordRule { phrases: &[], all: vec!["2".into()], add: true, ..Default::default() };
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "Please add two backend members to the roster"));
+        verify_roster_in(&db, "claude/x/lead", "c1", "Please add two backend members to the roster", &rule, 2010.0).unwrap();
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "Please add three backend members to the roster"));
+        assert!(verify_roster_in(&db, "claude/x/lead", "c1", "Please add three backend members to the roster", &rule, 2010.0).is_err());
+        // A count written as a word does not authorize another count.
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "Please add 2 backend members to the roster"));
+        verify_roster_in(&db, "claude/x/lead", "c1", "Please add 2 backend members to the roster", &rule, 2010.0).unwrap();
     }
 }

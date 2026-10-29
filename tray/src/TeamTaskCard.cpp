@@ -1,4 +1,5 @@
 #include "TeamTaskCard.h"
+#include "TeamStages.h"
 #include "TeamWidgets.h"
 #include <QCheckBox>
 #include <QCursor>
@@ -118,11 +119,17 @@ void TeamTaskCard::rebuild()
                                  0, Qt::AlignLeft, nullptr, phase.tooltip);
     state->setObjectName("teamTaskState");
     meta->addWidget(state);
+    // U36: the open stage's round.
+    if (const auto *stage = task->inStage() ? task->pipelineRun.openRun() : nullptr)
+        meta->addWidget(label(tr("round %1 of %2").arg(stage->round).arg(task->pipelineRun.rounds()), toneColor(c, status.tone), 11, false, "teamTaskStageRound"));
     if (task->last()) meta->addWidget(label(tr("Attempt %1").arg(task->last()->n), c.muted, 11));
-    const QString role = task->assignee.isEmpty() ? tr("You") : m_team.roleOf(task->assignee);
+    const QString role = m_team.assigneeRole(*task, tr("You"));
     meta->addWidget(new Pill(role, roleColor(role, m_dark)));
     meta->addStretch();
     v->addLayout(meta);
+    // U36: the pipeline: its flow, where the open stage works, what it holds
+    // and every round with its verdict and findings.
+    if (auto *pipeline = pipelineSection(m_team, *task, c, m_dark)) v->addWidget(pipeline);
     // G1: the sub-team delegated from this task, or the action that makes one.
     if (task->subteam.known && !task->subteam.team.isEmpty()) {
         auto *box = new QWidget; box->setObjectName("teamTaskSubteam");
@@ -541,8 +548,70 @@ void TeamTaskCard::rebuild()
     if (!task->reason.isEmpty() && task->status == "accepted") {
         auto *reason = label(tr("Decision: %1").arg(task->reason), c.muted, 11); reason->setWordWrap(true); v->addWidget(reason);
     }
+    // U36: an override of the pipeline asks first, names what it does and
+    // needs a reason; the feed records who did it and why.
+    const auto *openStage = task->inStage() ? task->pipelineRun.openRun() : nullptr;
+    const QString stageLabel = openStage ? stageName(openStage->kind) : QString();
+    const QString implementer = m_team.roleOf(task->last() ? task->last()->member : task->assignee);
+    const bool overrideForm = m_form == "accept-now" || m_form == "skip" || m_form == "send-back";
+    if (overrideForm) {
+        QString heading, what, placeholder, submit;
+        const QString ref = QStringLiteral("#%1 %2").arg(task->id).arg(task->title);
+        if (m_form == "accept-now") {
+            QStringList rest;
+            if (openStage) for (int i = openStage->stage; i < task->pipelineRun.stages.size(); ++i) rest << stageName(task->pipelineRun.stages[i].kind);
+            heading = tr("Accept %1 now?").arg(ref);
+            what = rest.isEmpty() ? tr("Accepts the report; the feed records that you accepted it and why.")
+                 : rest.size() == 1 ? tr("Ends the pipeline here; the %1 stage does not run. The feed records that you accepted it and why.").arg(rest.first())
+                                    : tr("Ends the pipeline here; the %1 stages do not run. The feed records that you accepted it and why.").arg(rest.join(tr(" and ")));
+            placeholder = tr("Why accept it now?"); submit = tr("Accept now");
+        } else if (m_form == "skip") {
+            const int next = openStage ? openStage->stage + 1 : 0;
+            const QString then = next < task->pipelineRun.stages.size() ? tr("moves to %1").arg(stageName(task->pipelineRun.stages[next].kind))
+                               : task->pipelineRun.accept == "auto" ? tr("is accepted by the pipeline") : tr("goes to %1 to accept").arg(stageName(task->pipelineRun.accept == "sub_lead" ? QStringLiteral("sub_lead") : QStringLiteral("lead")));
+            const QString who = openStage && !openStage->member.isEmpty() ? m_team.roleOf(openStage->member) : tr("The stage");
+            heading = tr("Skip %1 on %2?").arg(stageLabel, ref);
+            what = tr("%1 stops; #%2 %3. The feed records that you skipped it and why.").arg(who).arg(task->id).arg(then);
+            placeholder = tr("Why skip the %1?").arg(stageLabel.toLower()); submit = tr("Skip %1").arg(stageLabel);
+        } else {
+            heading = tr("Send %1 back to %2?").arg(ref, implementer);
+            what = openStage ? tr("The %1 stops; %2 gets a new attempt with your reason. It does not count as a round.").arg(stageLabel.toLower(), implementer)
+                             : tr("%1 gets a new attempt with your reason. It does not count as a round.").arg(implementer);
+            placeholder = tr("What must change?"); submit = tr("Send back");
+        }
+        auto *box = card(c, m_form == "send-back" ? c.warn : c.accent);
+        box->setObjectName("teamStageOverrideForm"); box->setProperty("form", m_form);
+        auto *b = new QVBoxLayout(box); b->setContentsMargins(10, 8, 10, 8); b->setSpacing(6);
+        auto *top = row(6);
+        auto *icon = new QLabel; icon->setPixmap(glyphPixmap(c.fg, m_form == "skip" ? QStringLiteral("stage_skip") : m_form == "send-back" ? QStringLiteral("rejected") : QStringLiteral("accepted"), 14));
+        top->addWidget(icon);
+        auto *head = label(heading, c.fg, 12, true, "teamStageOverrideTitle"); head->setWordWrap(true); top->addWidget(head, 1);
+        b->addLayout(top);
+        auto *explain = label(what, c.muted, 11, false, "teamStageOverrideText"); explain->setWordWrap(true); b->addWidget(explain);
+        auto *edit = new QPlainTextEdit; edit->setObjectName("teamTaskFormText"); edit->setFixedHeight(66);
+        edit->setPlaceholderText(placeholder);
+        b->addWidget(edit);
+        auto *buttons = row(6);
+        auto *cancel = button(tr("Cancel"), "teamTaskFormCancel");
+        auto *ok = button(submit, "teamTaskFormSubmit", true);
+        // A reason first: the button waits for one.
+        ok->setEnabled(false);
+        QObject::connect(edit, &QPlainTextEdit::textChanged, ok, [ok, edit] { ok->setEnabled(!edit->toPlainText().trimmed().isEmpty()); });
+        QObject::connect(cancel, &QPushButton::clicked, this, [this] { m_form.clear(); rebuild(); });
+        QObject::connect(ok, &QPushButton::clicked, this, [this, edit, id = task->id] {
+            const auto reason = edit->toPlainText().trimmed();
+            if (reason.isEmpty()) { edit->setFocus(); return; }
+            const QString operation = m_form == "accept-now" ? QStringLiteral("accept") : m_form == "skip" ? QStringLiteral("skip-stage") : QStringLiteral("send-back");
+            if (act) act(operation, {{"task", id}, {"reason", reason}});
+            m_form.clear(); rebuild();
+        });
+        buttons->addStretch(); buttons->addWidget(cancel); buttons->addWidget(ok);
+        b->addLayout(buttons);
+        v->addWidget(box);
+        QTimer::singleShot(0, edit, [edit] { edit->setFocus(); });
+    }
     // Inline forms: reject, hold or a manual done.
-    if (!m_form.isEmpty()) {
+    if (!m_form.isEmpty() && !overrideForm) {
         const bool reject = m_form == "reject", hold = m_form == "hold";
         auto *box = card(c, reject ? c.danger : hold ? c.muted : c.accent);
         box->setObjectName(reject ? "teamRejectForm" : hold ? "teamHoldForm" : "teamDoneForm");
@@ -623,9 +692,19 @@ void TeamTaskCard::rebuild()
     };
     const auto holdForm = [this] { m_form = "hold"; rebuild(); };
     const auto releaseNow = [this, id] { if (act) act("release", {{"task", id}}); };
-    if (submitted) {
+    const auto form = [this](const char *name) { return [this, name] { m_form = QString::fromLatin1(name); rebuild(); }; };
+    if (task->inStage()) {
+        // U36: a task in a stage; each override asks with its reason.
+        add(tr("Accept now…"), "teamTaskAcceptNow", true, form("accept-now"));
+        if (openStage) add(tr("Skip %1…").arg(stageLabel.toLower()), "teamTaskSkipStage", false, form("skip"));
+        add(tr("Send back…"), "teamTaskSendBack", false, form("send-back"));
+        auto *reject = add(tr("Reject…"), "teamTaskReject", false, rejectForm);
+        reject->setStyleSheet(QStringLiteral("color:%1;").arg(c.danger.name()));
+    } else if (submitted) {
         add(tr("Accept"), "teamTaskAccept", true, accept);
         add(tr("Reject with comment…"), "teamTaskReject", false, rejectForm);
+        // U36: the final acceptance can still send the task back.
+        if (task->pipelineRun.known) add(tr("Send back…"), "teamTaskSendBack", false, form("send-back"));
         add(tr("Reassign…"), "teamTaskReassign", false, reassignNow);
     } else if (open) {
         // A5: a held task waits for this button; a pending one can be parked.
@@ -651,11 +730,11 @@ void TeamTaskCard::rebuild()
     item(tr("Hold…"), !decided && task->status == "pending" && !task->held,
          task->held ? tr("Already held") : decided ? decidedWhy : tr("Only a pending task can be held"), holdForm);
     item(tr("Release"), task->held, task->held ? QString() : tr("Not held"), releaseNow);
-    if (!submitted) {
+    if (!submitted && !task->inStage()) {
         item(tr("Accept"), false, decided ? decidedWhy : tr("Nothing to accept yet: no report"), accept);
         item(tr("Reject with comment…"), false, decided ? decidedWhy : tr("Nothing to reject yet: no report"), rejectForm);
     }
-    if (submitted || decided) {
+    if (submitted || decided || task->inStage()) {
         item(tr("Reassign…"), open, decidedWhy, reassignNow);
         item(tr("Take over"), open, decidedWhy, takeOver);
         item(tr("Cancel task…"), open, decidedWhy, cancelTask);

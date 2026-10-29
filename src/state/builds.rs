@@ -128,6 +128,55 @@ fn start(input: &Value, wait: bool) -> Result<Value> {
     Ok(if wait { wait_for(&id) } else { running_note(&claim) })
 }
 
+/// U47/U48: Zerus starts a pipeline's command or land stage itself, with no
+/// model, as a detached run in the stage's folder: the stage's session (the
+/// implementer whose folder it is) shows Building while it runs, and the run
+/// log keeps its outcome. The dispatcher reads it back with `record`.
+pub(crate) fn start_for(id: &str, label: &str, command: &str, cwd: &Path, session: Value, minutes: u32) -> Result<()> {
+    if !canonical_uuid(id) {
+        return Err("A stage run needs a canonical id".into());
+    }
+    if read(&result_path(id)).is_some() || read(&running_path(id)).is_some() {
+        return Err(format!("stage run {id} already started"));
+    }
+    let command = command.trim();
+    if command.is_empty() || command.len() > COMMAND_BYTES || command.contains('\0') {
+        return Err(format!("a stage's command is at most {COMMAND_BYTES} bytes"));
+    }
+    if !cwd.is_absolute() || !cwd.is_dir() {
+        return Err(format!("the stage's folder is not an existing absolute folder: {}", cwd.display()));
+    }
+    let minutes = u64::from(minutes).clamp(1, MAX_MINUTES);
+    let label: String = label.chars().filter(|ch| !ch.is_control()).take(LABEL_CHARS).collect();
+    private_dir(&dir())?;
+    prune();
+    let claim = json!({"request_id":id,"label":label,"command":command,"cwd":cwd.display().to_string(),
+        "session":session,"started":now(),"timeout_secs":minutes * 60,"source":"team_stage"});
+    storage::atomic(&running_path(id), &claim.to_string())?;
+    if let Err(error) = spawn(id) {
+        let _ = fs::remove_file(running_path(id));
+        return Err(format!("the runner did not start: {error}"));
+    }
+    Ok(())
+}
+
+/// U47/U48: a run's record: its outcome once it ended (`status` ran or
+/// refused), `running` while its runner lives, and a refused one when its claim
+/// was left without a runner. None when nothing of it is kept.
+pub(crate) fn record(id: &str, at: f64) -> Option<Value> {
+    if let Some(done) = read(&result_path(id)) {
+        return Some(done);
+    }
+    let mut claim = read(&running_path(id))?;
+    if live(&claim, at) {
+        claim["status"] = json!("running");
+    } else {
+        claim["status"] = json!("refused");
+        claim["error"] = json!("the run stopped without a result (the runner ended or this computer restarted)");
+    }
+    Some(claim)
+}
+
 fn running_note(claim: &Value) -> Value {
     json!({"status":"running","request_id":claim["request_id"],"label":claim["label"],"started":claim["started"],
         "note":"Zerus runs it and shows the session as Building; ask again with the same request_id (or --wait) to read the exit code."})
@@ -148,7 +197,17 @@ fn wait_for(id: &str) -> Value {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test's runner runs on this thread at once: the test binary is not hgs.
+    pub(crate) static INLINE_RUNNER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn spawn(id: &str) -> std::io::Result<()> {
+    #[cfg(test)]
+    if INLINE_RUNNER.with(std::cell::Cell::get) {
+        return worker(id).map(drop).map_err(|error| std::io::Error::other(error.to_string()));
+    }
     let mut command = Command::new(std::env::current_exe()?);
     command.args(["run", "--worker", id]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     // The runner is Zerus' own, not a part of the agent's pane or turn.

@@ -232,7 +232,7 @@ public:
         // U25 (spec 2.3): a muted session's edge turns grey; its status badge
         // keeps its colour.
         if (s.muted && (s.emphasis == IdentityBadges::Attention || s.emphasis == IdentityBadges::Unread)) s.emphasis = IdentityBadges::Muted;
-        s.caption = s.working ? SessionElapsed::status(s.state == "Compacting" ? tr("Compacting") : s.state == "Background" ? tr("Background") : tr("Working"), index.data(SessionRoles::WorkingSince).toDouble()) : s.draft ? tr("Draft") : s.unread && !s.attention ? tr("New reply")
+        s.caption = s.working ? SessionElapsed::badge(s.state == "Compacting" ? tr("Compacting") : s.state == "Background" ? tr("Background") : tr("Working"), index.data(SessionRoles::WorkingSince).toDouble()) : s.draft ? tr("Draft") : s.unread && !s.attention ? tr("New reply")
             : s.state == "Not tracked" ? tr("Untracked") : s.state;
         if (s.kind == SessionStatusBadge::Waiting) {
             const auto items=index.data(SessionRoles::CoordinationWait).toJsonObject().value("items").toArray();
@@ -253,6 +253,16 @@ public:
         }
         s.additionalUnread = s.unread && (s.working || s.attention || s.draft);
         return s;
+    }
+    // U30 §5: the dot at the agent's tile. Working accent, user warn (a reply
+    // to read is the user state too, #590), deps / build / cooling / cold their
+    // tokens; none for a calm card.
+    static QColor avatarDot(const CardStatus &state, bool dark) {
+        if (state.kind == SessionStatusBadge::Deps || state.kind == SessionStatusBadge::Cooling || state.kind == SessionStatusBadge::Cold
+            || state.kind == SessionStatusBadge::Build) return SessionStatusBadge::stateTone(state.kind, dark);
+        if (state.attention || state.kind == SessionStatusBadge::Attention || state.kind == SessionStatusBadge::Unread) return QColor("#e8a75a");
+        if (state.working) return QColor("#7dd3b0");
+        return state.unread ? QColor("#7fb6e0") : QColor();
     }
     // Selecting a list inspection row does not open its composer. Keep
     // its draft badge until the ordinary Sessions editor actually owns it.
@@ -653,12 +663,7 @@ private:
                 mark.setFamilies({QStringLiteral("JetBrains Mono"), QStringLiteral("Cascadia Mono"), QStringLiteral("Consolas"), mark.family()});
                 p->setFont(mark); p->setPen(color); p->drawText(tile, Qt::AlignCenter, initials);
             }
-            const auto state = statusForView(option, index);
-            // U30 §5: working accent, user warn, deps / cooling / cold their tokens.
-            QColor dot = state.attention || state.kind == SessionStatusBadge::Attention ? QColor("#e8a75a") : state.working ? QColor("#7dd3b0")
-                       : state.unread ? QColor("#7fb6e0") : QColor();
-            if (state.kind == SessionStatusBadge::Deps || state.kind == SessionStatusBadge::Cooling || state.kind == SessionStatusBadge::Cold
-                || state.kind == SessionStatusBadge::Build) dot = SessionStatusBadge::stateTone(state.kind, dark);
+            const QColor dot = avatarDot(statusForView(option, index), dark);
             if (dot.isValid()) {
                 p->setPen(QPen(option.widget && option.widget->property("cardSurface").isValid() ? option.widget->property("cardSurface").value<QColor>() : QColor(dark ? "#181c22" : "#ffffff"), 2));
                 p->setBrush(dot); p->drawEllipse(QRectF(tile.right() - 7, tile.bottom() - 7, 10, 10));

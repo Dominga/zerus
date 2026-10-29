@@ -129,10 +129,28 @@ pub(crate) struct Settings {
     /// phase; the result waits for that phase's approval.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub work_ahead: bool,
+    /// U48: the owner allows a pipeline's land stage, which may push; without
+    /// it a land stage holds the task for the lead.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub land_allowed: bool,
+    /// U48: each hand-out starts the task's own branch in the member's folder;
+    /// absent keeps one branch per member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_per_task: Option<BranchPerTask>,
+    /// U48: the branch a task's branch starts from; empty is the lead's branch.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub base_branch: String,
     /// U52: a member session that exits on its own is launched again into its
     /// conversation, at most three times an hour; off by default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub restart_crashed: bool,
+}
+
+/// U48: the name of a task's branch: `{id}`, `{member}` and `{team8}` are
+/// filled in, and the result is a valid Git branch name.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct BranchPerTask {
+    pub template: String,
 }
 
 fn default_max_members() -> usize {
@@ -209,6 +227,9 @@ impl Default for Settings {
             subteam_approval: SubteamApproval::default(),
             auto_accept: false,
             work_ahead: false,
+            land_allowed: false,
+            branch_per_task: None,
+            base_branch: String::new(),
             restart_crashed: false,
         }
     }
@@ -261,6 +282,10 @@ pub(crate) struct PromptSnapshot {
     pub task_template: String,
     #[serde(default)]
     pub notes: std::collections::BTreeMap<String, String>,
+    /// U46: the role's `context_before_task` when the member joined, so a later
+    /// catalog edit changes no running team.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub context_before_task: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -273,6 +298,14 @@ pub(crate) struct Member {
     /// catalog edit never changes a running team mid-phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_snapshot: Option<PromptSnapshot>,
+    /// U46: compact or clear the agent's context before each hand-out. Empty
+    /// inherits the role's setting; "none" overrides it with none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub context_before_task: String,
+    /// U46: the member already got the feed note that its agent has no native
+    /// context action; it is written once per member.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub context_noted: bool,
     pub agent: String,
     #[serde(default)]
     pub account: String,
@@ -308,6 +341,11 @@ pub(crate) struct Member {
     pub added: Option<Value>,
     #[serde(default)]
     pub state: MemberState,
+    /// U49: the member finishes its open attempt and stage run, takes nothing
+    /// new, then its session is paused and the member leaves the roster. Absent
+    /// on every team stored before this field, which keeps today's behaviour.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draining: bool,
     /// Recorded before the dispatcher starts the member's session, which
     /// `hgs ls` then shows under the same id.
     #[serde(default)]
@@ -323,6 +361,11 @@ pub(crate) struct Member {
     /// dispatcher does not try again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub settings_applied: bool,
+    /// U45: the models this member may switch between before a task; empty
+    /// means only its launch `model` and `effort`. Copied from the catalog
+    /// role when it joins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ModelChoice>,
     /// The member's questions already given to the lead, as question id and
     /// hash; the most recent ones only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -411,6 +454,71 @@ pub(crate) struct Member {
     pub crash_told: bool,
 }
 
+/// U45: a model a member may run a task on, with its effort (empty: the
+/// model's own).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ModelChoice {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub effort: String,
+}
+
+/// Spec 0: what a ready task waits for that Zerus could not do on its own (a
+/// refused or unconfirmed step before the hand-out: `{for:"zerus", on,
+/// reason, at}`); the lead or the owner retries or reassigns it. U46: while a
+/// context action runs, `state` is `waiting` and the request fields let a
+/// later tick (or a restarted worker) read the same request instead of
+/// running the action again.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct TaskWait {
+    #[serde(rename = "for")]
+    pub waits_for: String,
+    #[serde(default)]
+    pub on: Vec<String>,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub at: f64,
+    /// `waiting` (U46: the context action runs), `refused` or `uncertain`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub state: String,
+    /// U46: the attempt whose preparation failed (0 while it waits).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub attempt: u32,
+    /// U46: compact or clear, while it waits.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub action: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub run_id: String,
+    /// U46: the conversation before the action: a clear shows a new one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub conversation: String,
+    /// U46: when the action started; the 60 s confirmation bound counts from here.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub started_at: f64,
+}
+
+impl TaskWait {
+    /// Spec 0: a step Zerus could not take; the lead or the owner retries it.
+    pub(crate) fn zerus(on: &str, state: &str, reason: &str, at: f64) -> Self {
+        TaskWait {
+            waits_for: "zerus".into(),
+            on: vec![on.to_owned()],
+            reason: reason.chars().take(4000).collect(),
+            at,
+            state: state.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// U46: the context action still runs; nobody has to act yet.
+    pub(crate) fn running(&self) -> bool {
+        self.state == "waiting"
+    }
+}
+
 /// U21: one built-in command template Zerus ran for this attempt, outside the
 /// member's sandbox.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -471,6 +579,14 @@ fn is_zero(value: &i64) -> bool {
 
 fn is_zero_u64(value: &u64) -> bool {
     *value == 0
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+fn is_zero_f64(value: &f64) -> bool {
+    *value == 0.0
 }
 
 /// An MCP server or service a member's session runs (G7): shown on the member
@@ -678,6 +794,10 @@ pub(crate) enum TaskStatus {
     Assigned,
     InProgress,
     Submitted,
+    /// U36: a review stage of the task's pipeline reads the report.
+    InReview,
+    /// U36: a test stage of the task's pipeline runs its checks.
+    InTest,
     Accepted,
     Rejected,
     Cancelled,
@@ -687,6 +807,14 @@ impl TaskStatus {
     pub(crate) fn finished(self) -> bool {
         matches!(self, Self::Accepted | Self::Rejected | Self::Cancelled)
     }
+    /// U36: reported and in one of its pipeline's stages.
+    pub(crate) fn in_stage(self) -> bool {
+        matches!(self, Self::InReview | Self::InTest)
+    }
+    /// Reported and not decided: Submitted, or in a stage of its pipeline.
+    pub(crate) fn reported(self) -> bool {
+        self == Self::Submitted || self.in_stage()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -694,6 +822,8 @@ impl TaskStatus {
 pub(crate) enum Decider {
     Lead,
     Human,
+    /// U48: a pipeline's land stage accepted the task.
+    Zerus,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -870,6 +1000,27 @@ pub(crate) struct Hold {
     pub reason: String,
 }
 
+/// Spec 1: one step Zerus runs for a member before a hand-out (model,
+/// context, branch). `result` is `done`, `skipped`, `refused` or `uncertain`
+/// (U45: `pending` while a model switch waits for its confirmation); `reason`
+/// names the refusal or why the step was skipped. `member` names whom a step
+/// still on the task is for; the attempt's own steps leave it empty.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PrepareStep {
+    pub step: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub member: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub to: String,
+    #[serde(default)]
+    pub at: f64,
+    pub result: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Attempt {
     pub n: u32,
@@ -878,6 +1029,11 @@ pub(crate) struct Attempt {
     pub member: String,
     #[serde(default)]
     pub state: AttemptState,
+    /// U46: what Zerus did to the member before this hand-out - the context
+    /// action today - and whether it finished, was skipped, refused or stayed
+    /// unconfirmed (spec 1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prepare: Vec<PrepareStep>,
     /// U31: this attempt worked a task of a draft phase before its approval.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub worked_ahead: bool,
@@ -910,10 +1066,20 @@ pub(crate) struct Attempt {
     /// The member's turn ended long enough ago without a report.
     #[serde(default)]
     pub no_report: bool,
+    /// The newest session event the dispatcher read for this attempt when the
+    /// listing's `last_event_at` did not advance (a DeepSeek session's native
+    /// tool events, #628). It keeps the silent check from reading the session
+    /// on every tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_at: Option<f64>,
     /// The lead was reminded once that this report still waits for a decision
     /// (C4); absent until it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reminded_at: Option<f64>,
+    /// U37: when the lead or the owner accepted or rejected this attempt;
+    /// absent on an old record and while undecided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<f64>,
     /// The check this attempt ran, when its task is a check task (C5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<CheckResult>,
@@ -1012,6 +1178,191 @@ pub(crate) struct Task {
     /// word twice; outside the phase's original scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_late: Option<AddedLate>,
+    /// U36: the pipeline preset the plan chose: empty takes the role's or the
+    /// template's default, "none" takes none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pipeline: String,
+    /// U36: the preset as it was when the task was assigned, with its rounds
+    /// and stage runs; a later catalog edit does not change it. None keeps
+    /// today's flow (an old team, "none", a check or the lead's own task).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_run: Option<PipelineRun>,
+    /// U45: the models allowed for this task (`model` or `model@effort`);
+    /// empty: any model of its member.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+    /// U45: a task for a role: with an empty assignee it goes to a free
+    /// member of this role whose models allow the task's.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
+    /// Spec 0: a step before the hand-out was refused or never confirmed (U45
+    /// model, U46 context, U48 branch), or U46's context action still runs;
+    /// the dispatcher hands it out again only after a retry or a reassignment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waits: Option<TaskWait>,
+    /// Spec 1: the steps taken for the next hand-out, newest last, at most 20;
+    /// they move to the attempt that hands it out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prepare: Vec<PrepareStep>,
+}
+
+/// U36: one stage of a task's pipeline snapshot.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PipelineStage {
+    /// review, test, command (U47) or land (U48).
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
+    /// A pinned member; otherwise the first free member with `role`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub member: String,
+    /// U47/U48: what a command or land stage runs, from the owner's catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Check>,
+    /// U48: a land stage's exit codes and their outcomes (accepted, returned,
+    /// held); empty reads as 0 accepted, any other held.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub exits: std::collections::BTreeMap<String, String>,
+}
+
+impl PipelineStage {
+    /// U47/U48: Zerus runs this stage itself, with no member.
+    pub(crate) fn runs_command(&self) -> bool {
+        matches!(self.kind.as_str(), "command" | "land")
+    }
+}
+
+/// U36: what became of one stage run.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StageState {
+    /// Waits for a stage member (stage delivery gives it out).
+    #[default]
+    Waiting,
+    /// Given to its member, who reports a verdict.
+    Delivered,
+    Passed,
+    Returned,
+    /// The lead or the owner skipped it.
+    Skipped,
+    /// Ended without a verdict: the task was accepted, rejected or sent back.
+    Revoked,
+}
+
+impl StageState {
+    pub(crate) fn open(self) -> bool {
+        matches!(self, Self::Waiting | Self::Delivered)
+    }
+}
+
+/// U36: one stage of one round: who did it, when, and its verdict. Its span
+/// (`delivered_at` or `at` to `ended_at`) joins the task's working time (U37).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct StageRun {
+    /// The request id its member reports with, as an attempt id.
+    pub id: String,
+    /// Index into the pipeline's stages.
+    pub stage: usize,
+    pub kind: String,
+    pub round: u32,
+    /// The implementer's attempt this run checks.
+    pub attempt: u32,
+    /// Empty until stage delivery gives it to a member.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub member: String,
+    #[serde(default)]
+    pub state: StageState,
+    /// When the stage began waiting for its member.
+    #[serde(default)]
+    pub at: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<f64>,
+    /// The stage member's report, or the lead's or owner's reason.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    /// A return's findings, one per line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<String>,
+    /// Who ended it: the stage's role, Lead, You, Pipeline or Zerus.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub by: String,
+    /// #532: the folder the stage works in: the task's own folder, or its
+    /// detached checkout.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub folder: String,
+    /// A detached checkout Zerus made for this test, removed after it, and the
+    /// repository it belongs to.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub checkout: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub checkout_repo: String,
+    /// This test holds the task's folder until it ends.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub holds: bool,
+    /// What changed: the attempt's commits, or its reported files with their
+    /// size and hash when the stage began.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed: Vec<serde_json::Value>,
+    /// A test's own temporary folder, removed after the stage.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub temp: String,
+    /// The command templates the stage ran, newest last, at most 20.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<RunRecord>,
+    /// U47: a command stage's exit code and output tail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<CheckResult>,
+    /// U47: the folder's commit the command ran on.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub commit: String,
+    /// U47: the same tail on the same commit as the stage's previous run: it
+    /// went to the lead instead of the implementer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub flaky: bool,
+    /// U48: what a land stage's exit code meant (accepted, returned, held).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub outcome: String,
+}
+
+/// U36: a task's pipeline snapshot and progress.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PipelineRun {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub stages: Vec<PipelineStage>,
+    pub max_rounds: u32,
+    /// hold or checkout.
+    pub folder: String,
+    /// lead, sub_lead or auto.
+    pub accept: String,
+    /// The round of the report being checked: 1 for the first report, one
+    /// more after each return or send-back.
+    #[serde(default = "first_round")]
+    pub round: u32,
+    /// Every stage run, oldest first, at most 64.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<StageRun>,
+}
+
+fn first_round() -> u32 {
+    1
+}
+
+impl PipelineRun {
+    /// The open stage run, if the task is in a stage.
+    pub(crate) fn open_run(&self) -> Option<&StageRun> {
+        self.runs.iter().rev().find(|run| run.state.open())
+    }
+    pub(crate) fn open_run_mut(&mut self) -> Option<&mut StageRun> {
+        self.runs.iter_mut().rev().find(|run| run.state.open())
+    }
+    /// The rounds stage members returned; the round limit counts these.
+    pub(crate) fn returned(&self) -> u32 {
+        self.runs.iter().filter(|run| run.state == StageState::Returned).count() as u32
+    }
 }
 
 /// U29: who added a task to a running phase, when, and the owner's two
@@ -1263,6 +1614,10 @@ pub(crate) struct Team {
     /// Who approved the plan: "You", or "Lead" on the owner's word (F13).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub approved_by: String,
+    /// U37: when the plan was approved: phase 1 opens here. Absent on an old
+    /// team.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_at: Option<f64>,
     /// The owner's sentence the lead approved the plan on (F13).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_word: Option<OwnerWord>,
@@ -1291,6 +1646,10 @@ pub(crate) struct Team {
     /// U29: additions to running phases waiting for the owner's confirmation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_additions: Vec<PendingAddition>,
+    /// #511 N3: members to tell that their worked-ahead attempt was revoked
+    /// with its phase, newest last, at most 20.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stops: Vec<StopNotice>,
     /// U51: the owner's intake keys; the key itself is never stored, only its
     /// hash, and the key is shown once when it is created.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1299,6 +1658,31 @@ pub(crate) struct Team {
     /// revocation.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub intakes_seq: u64,
+}
+
+/// #511 N3: a revoked worked-ahead attempt whose member must stop. The
+/// dispatcher sends it once under `id`; an uncertain send is never repeated.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct StopNotice {
+    /// The send's request id.
+    pub id: String,
+    pub task: u32,
+    #[serde(default)]
+    pub title: String,
+    pub member: String,
+    /// The revoked attempt's number.
+    pub attempt: u32,
+    #[serde(default)]
+    pub phase: u32,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub at: f64,
+    #[serde(default)]
+    pub notice: Notice,
+    /// Refused sends so far; after ten it is left unconfirmed for the lead.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub refused: u32,
 }
 
 impl Team {
@@ -1590,7 +1974,7 @@ mod tests {
         assert_eq!(team.settings.background_red_minutes, 30);
         assert!(team.inbox.told.is_empty() && team.inbox.told_at == 0.0);
         assert!(team.members.iter().all(|member| member.pending.is_none()));
-        assert!(team.approved_by.is_empty() && team.owner_word.is_none());
+        assert!(team.approved_by.is_empty() && team.owner_word.is_none() && team.approved_at.is_none());
         let attempt = &team.tasks[0].attempts[0];
         assert_eq!((attempt.started_at, attempt.start_warned), (None, false));
         assert!(attempt.reminded_at.is_none());
@@ -1614,7 +1998,8 @@ mod tests {
         assert!(value.get("approved_by").is_none() && value.get("owner_word").is_none());
         assert!(value["tasks"][0].get("kind").is_none() && value["tasks"][0].get("check").is_none());
         let attempt = &value["tasks"][0]["attempts"][0];
-        for key in ["started_at", "start_warned", "turn_reply", "questions", "reminded_at"] {
+        assert!(value.get("approved_at").is_none());
+        for key in ["started_at", "start_warned", "turn_reply", "questions", "reminded_at", "decided_at"] {
             assert!(attempt.get(key).is_none(), "{key} should be skipped when empty");
         }
         assert!(value["members"][1].get("pending").is_none());

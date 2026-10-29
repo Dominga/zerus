@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Zerus",
+  "mainBinaryName": "hgs-tray",
+  "identifier": "com.hgdev.hgs-tray.local",
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "resources": {
+      "../../tray/packaging/com.hgdev.hgs-tray.plist": "setup/com.hgdev.hgs-tray.plist"
+    },
+    "macOS": {
+      "minimumSystemVersion": "14.0",
+      "infoPlist": "Info.switch.plist",
+      "files": {
+        "Resources/en.lproj/InfoPlist.strings": "../../tray/packaging/en.lproj/InfoPlist.strings",
+        "Resources/hgs-zerus-swarm.icns": "../../tray/resources/icons/hgs-zerus-swarm.icns",
+        "Resources/Assets.car": "../../tray/resources/icons/macos/Assets.car"
+      }
+    }
+  }
+}

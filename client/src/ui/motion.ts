@@ -1,5 +1,5 @@
 import { createRenderEffect, createRoot, createSignal } from "solid-js";
-import { settings } from "../store/settings";
+import { flag } from "../store/settings";
 import { pageHidden } from "../store/visibility";
 
 // The motion settings on the document root, where styles/motion.css stops or
@@ -48,14 +48,14 @@ const [systemReduced, setSystemReduced] = createSignal(query?.matches ?? false);
 query?.addEventListener("change", (e) => setSystemReduced(e.matches));
 
 /** Reactive: motion is reduced (the setting or the system), for motion driven from script. */
-export const motionReduced = () => settings.reduceMotion || systemReduced();
+export const motionReduced = () => flag("workspace/reduceMotion") || systemReduced();
 
 /** Keeps the root's motion attributes in step with the settings, the system and the window. */
 export function startMotion(root: HTMLElement = document.documentElement) {
   createRoot(() => {
     createRenderEffect(() => applyMotionAttributes(root.dataset, motionAttributes({
-      animateActivity: settings.animateActivity,
-      reduceMotion: settings.reduceMotion,
+      animateActivity: flag("workspace/animateActivity"),
+      reduceMotion: flag("workspace/reduceMotion"),
       systemReduced: systemReduced(),
       hidden: pageHidden(),
     })));

@@ -4,7 +4,13 @@
 // Windows they use INI files, here in a directory of their own. Tests that set a
 // path themselves still do so later, in initTestCase(). The program also names
 // the fixture worker pool its fake executables share (support/fixture-worker.py).
+// Its temporary files live beside the test programs, not in %TEMP%: every fake
+// hgs is a copy of the small unsigned test helper, and Windows Defender's
+// machine-learning check flagged hundreds of such copies in %TEMP% as
+// Trojan:Win32/Bearfoos.A!ml (owner, 2026-10-29). ZERUS_TEST_SYSTEM_TEMP=1 keeps
+// %TEMP%.
 #include <QCoreApplication>
+#include <QFileInfo>
 #include <QDir>
 #include <QSettings>
 #include <QStandardPaths>
@@ -19,8 +25,19 @@ struct SettingsDirectory {
     ~SettingsDirectory() { if (!path.isEmpty()) QDir(path).removeRecursively(); }
 };
 
+void moveTemporaryFiles()
+{
+    if (qgetenv("ZERUS_TEST_SYSTEM_TEMP") == "1") return;
+    const QString dir = QFileInfo(QStringLiteral(ZERUS_TEST_HELPER)).absolutePath() + QStringLiteral("/tmp");
+    if (!QDir().mkpath(dir)) return;
+    const QByteArray native = QDir::toNativeSeparators(dir).toLocal8Bit();
+    qputenv("TEMP", native);
+    qputenv("TMP", native);
+}
+
 void isolateSettings()
 {
+    moveTemporaryFiles();
     static SettingsDirectory directory;
     directory.path = QDir::tempPath() + '/' + QCoreApplication::applicationName() + '-'
         + QString::number(QCoreApplication::applicationPid()) + '-' + QUuid::createUuid().toString(QUuid::Id128).left(8);

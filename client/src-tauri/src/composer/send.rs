@@ -99,7 +99,7 @@ pub(crate) struct SessionView {
 }
 
 /// What Qt's session hint reads (`SessionsWindow.cpp:3913-3922, 3955-3958`).
-/// A2 fills `question_error` (`pending_questions_error`); Piece E fills
+/// `question_error` is `pending_questions_error` (A2-1); Piece E fills
 /// `restore_error` (`last_restore_error`) and `occupied` (another session
 /// uses this archived session's name).
 #[derive(Default)]
@@ -422,6 +422,7 @@ impl Composers {
             self.changed();
         }
         self.tick_continuations(now);
+        self.retry_answer_saves();
     }
 
     /// Ticks once a second while a composer is open, until the app quits.
@@ -501,6 +502,11 @@ pub(crate) fn session_view(composers: &Composers, hub: &Hub, composer: &Composer
                 .inspect_error
                 .then_some(hub.followed.inspect_error.as_deref())
                 .flatten(),
+            // Qt shows `pending_questions_error` only here (3913-3918, 3984-3986).
+            question_error: details
+                .get("pending_questions_error")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
             ..HintFacts::default()
         },
         reason.is_some(),

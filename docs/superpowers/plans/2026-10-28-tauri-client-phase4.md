@@ -202,7 +202,7 @@ Rulings on the open questions; the tasks follow them.
   - **The review delay** (3 s) runs in the webview store, which knows the card's visibility and the window's focus. The card's view says which buttons it gates. Rust does not time it: Qt's gate is the button state too.
   - **Question drafts** use the app's one draft store with Qt's keys (`question\n…`) and `form_state`, so Saved drafts and the switch's import see them.
   - **Later notices.** Rust's notices that arrive after the call (push endings, send-now results, answer follow-ups) and the Terminal tab a Codex update opens reach the webview as `composer_events` in the envelope, at most 16 per batch.
-  - **The question read error.** The client has no session hint banner yet: Qt's "Could not load agent questions: … Check Terminal." shows at the top of the composer column.
+  - **The question read error.** Qt builds "Could not load agent questions: … Check Terminal." into the session hint (`SessionsWindow.cpp:3913-3918`), hides the hint banner (`m_hint->hide()`, 3953) and shows the hint only as the composer's session status (3984-3986). The client has that one path: `send::HintFacts.question_error` puts it into `session_status`, in the error tone and locking input while a block reason stands (A2-1 ruling, 2026-10-29).
   - **Naming.** Task 4b's "questions" are the hub's own dialogs (cold cache, start). The agent's requests are "question cards" (`questions.rs`, `QuestionReply`).
 - **The push envelope.** `next_batch` serializes `{...batch, composer?, processes_view?, draft_keys?}`. Only the open composer and the followed processes are projected; `draft_keys` lists the sessions with a nonempty draft among the 200 newest drafts plus the composers in memory, so the cards' draft marks stay bounded. Part A2 adds `composer_events?`, and the composer view carries the question card, the queue panel and the inbox state.
 - **Editing protocol.**
@@ -7845,6 +7845,17 @@ They share `composer/mod.rs`, `Composer.tsx` and `SessionDetail.tsx` only additi
 
 ### Task A2-1: Question cards in the composer hub: drafts, the shown card and its view
 
+**As built** (this task's commit and its review rounds). Where the steps below differ, the code and this list win (Qt wins over the brief):
+- **The question read error** shows only as the composer's session status, as in Qt (`SessionsWindow.cpp:3913-3918`, `m_hint->hide()` 3953, `setSessionStatus` 3984-3986). `send::session_view` fills `HintFacts.question_error` from `pending_questions_error`, so `session_status` reads "Could not load agent questions: {error}. Check Terminal." in the error tone and locks input while a block reason stands. There is no `ComposerView.questions_error`, and `question_part` returns `(Option<QuestionView>, bool)` (ruling, 2026-10-29). Its test is `a_failed_question_read_is_the_session_status`.
+- **Revision and epoch** (the composer's text epoch rules, ruling 2026-10-29):
+  - `QuestionView.revision` bumps only on Qt's `changed` in `setQuestion` (`QuestionCard.cpp:387`): a new card, a changed form or a restored answer. The webview restarts the review delay and resets its fields.
+  - `QuestionView.epoch` (`Answers.epoch`) bumps with every change of the answers that comes from Rust: every revision, a draft load of the shown card (Qt's load rebuilds the form without restarting the review, 289-301), seeded OpenCode defaults, and a refused edit. The webview takes the fields' values again whenever it grows.
+  - `question_edit(card, epoch, edit)` applies only an edit of the current epoch. A stale one is dropped and Rust's answers stand. One the card refuses (loading, locked, an unchecked radio, a text over its bound) bumps the epoch and so hands Rust's answers back.
+  - `question_page`, `question_navigate` and `question_allow_retry` take no epoch: Qt applies them at once.
+  - Tests: `a_rebuild_bumps_the_revision_and_the_epoch`, `a_stale_edit_after_a_draft_load_leaves_rusts_answers`, `a_refused_edit_hands_the_answers_back`.
+- **Commands** use `rename_all = "snake_case"` like the composer's and sit in the live handler only (the composer is `live`-only). `question_allow_retry` does nothing once the hub has closed.
+- **Later tasks bind to this:** A2-2's tests take the card and its epoch from `tests::shown(&c)`. A2-3 calls `question_edit` with `{ card, epoch, edit }`, and its `QuestionView` has `epoch: number`.
+
 **Depends on:**
 - R7 (`questions::{pending, questions_error, select, Selection, AnswerFacts, unavailable, store_key, label, AnswerDraft, Edit, CardContext, CardView, card, same_form}`);
 - Tasks 3a, 4a and 4b (`Context`, `after_observe`, `tick`, and the test helpers `send_hub`, `send_hub_on`, `opened`, `ready`, `state`, `Fake`).
@@ -9227,13 +9238,14 @@ export interface QueueNav { previous: boolean; next: boolean; previous_tip: stri
 export interface CardView { heading: string; progress: string; pending: string; pending_tip: string; nav: QueueNav | null; tabs_visible: boolean;
   page: number; forms: FormView[]; status: string; status_error: boolean; available: boolean; locked: boolean; review: boolean; created_at: number;
   submit: ButtonView; approve: ButtonView; deny: ButtonView; skip: ButtonView; previous: ButtonView; next: ButtonView; retry: boolean; skip_tip: string; retry_tip: string }
-export interface QuestionView { card: string; revision: number; asked: string; asked_tip: string; terminal_label: string; view: CardView }
+export interface QuestionView { card: string; revision: number; epoch: number; asked: string; asked_tip: string; terminal_label: string; view: CardView }
 export type QuestionEdit = { kind: "option"; item: string; option: string; checked: boolean } | { kind: "other"; item: string; checked: boolean } | { kind: "text"; item: string; text: string };
 export interface ColdAnswer { title: string; text: string; proceed: string }
 export type QuestionReply = { kind: "sending" } | { kind: "busy" } | { kind: "cold"; token: number; prompt: ColdAnswer } | { kind: "notice"; text: string };
 export type ComposerEvent = { kind: "notice"; text: string; error: boolean; transient: boolean } | { kind: "open_terminal"; key: string };
 export interface Reply { question: string; answer: string }
-// ComposerView gains: question: QuestionView | null; input_visible: boolean; questions_error: string | null
+// ComposerView gains: question: QuestionView | null; input_visible: boolean
+// (a failed question read is the composer's session_status, A2-1 As built)
 // Batch gains: composer_events?: ComposerEvent[]
 // store/questions.ts
 export const REVIEW_MS = 3000;
@@ -9543,7 +9555,7 @@ export const questions = createRoot(() => createQuestions({
 The bridge, in `client/src/bridge.ts`. Outside Tauri each wrapper rejects with "Actions need the desktop app.", as the composer's do:
 
 ```ts
-export const questionEdit = (card: string, edit: QuestionEdit) => desktop<void>("question_edit", { card, edit });
+export const questionEdit = (card: string, epoch: number, edit: QuestionEdit) => desktop<void>("question_edit", { card, epoch, edit });
 export const questionPage = (card: string, page: number) => desktop<void>("question_page", { card, page });
 export const questionNavigate = (direction: number) => desktop<void>("question_navigate", { direction });
 export const questionAllowRetry = (card: string) => desktop<void>("question_allow_retry", { card });
@@ -9574,7 +9586,7 @@ function composerEvent(e: ComposerEvent) {
 
 In `receive`: `if (b.composer) questions.apply(b.composer.question);` after `composer.apply(...)`, then `for (const e of b.composer_events ?? []) composerEvent(e);`. The selection effect calls `questions.apply(undefined)` when no session is selected.
 
-Task 6's `view()` fixture in `store/composer.test.ts` gains `question: null, input_visible: true, questions_error: null`, so the type check passes.
+Task 6's `view()` fixture in `store/composer.test.ts` gains `question: null, input_visible: true`, so the type check passes. A failed question read needs nothing here: it is the composer's `session_status`, which Task 6 shows.
 
 - [ ] **Step 6: The transcript.** In `client/src/ui/sessions/types.ts`, `TranscriptItem` gains `replies?: Reply[]`, and `ActivityEvent` gains `question_replies?: Reply[]`. In `transcript.ts`:
   - A user item's label is "You (answer)" when `e.type === "QuestionAnswered"` or `e.question_replies?.length`, and it carries `replies: e.question_replies`.
@@ -9775,7 +9787,6 @@ function ColdAnswerDialog() {
 
 ```tsx
 <div class="cmp-col">
-  <Show when={composer.view()?.questions_error}>{(e) => <p class="qcard-error">{e()}</p>}</Show>
   <QuestionCard />
   <Composer />
 </div>

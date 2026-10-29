@@ -24,6 +24,7 @@
 //! dropped on its own writer thread would wait for itself.
 
 pub mod files;
+pub mod questions;
 pub mod send;
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -178,6 +179,11 @@ pub struct ComposerView {
     pub compacting: bool,
     /// Clear session and the cache popover's Clear context (`clearContext`).
     pub clear: send::ClearControl,
+    /// The agent's question card shown in the composer (A2-1).
+    pub question: Option<questions::QuestionView>,
+    /// The editor and the action row show: false while a required card
+    /// stands in for them (`MessageComposer::setInputVisible`).
+    pub input_visible: bool,
 }
 
 /// One composer's draft and state (`MessageComposer::Draft` plus its sets).
@@ -376,6 +382,8 @@ pub(crate) struct Hub {
     /// The draft key whose context reset runs: one at a time across all
     /// sessions (Qt's `m_clearKey` while `m_clearRequest`).
     pub(crate) clearing: Option<String>,
+    /// The agent's question cards: their answer drafts and the shown card.
+    pub(crate) answers: questions::Answers,
 }
 
 impl Hub {
@@ -557,6 +565,7 @@ impl Composers {
         self.trim(&mut hub);
         let view = self.view_of(&hub, &key);
         drop(hub);
+        self.sync_questions();
         self.changed();
         view
     }
@@ -1237,12 +1246,14 @@ impl Composers {
     }
 
     /// What a change of the followed session's Activity sets off: the
-    /// local rows it shows go (`reconcileMessages`), and a continuation
+    /// local rows it shows go (`reconcileMessages`), a continuation
     /// waiting for the open session reads the new details (Qt's
-    /// `continueAfterCompact` and `continueAfterStart`, 3607).
+    /// `continueAfterCompact` and `continueAfterStart`, 3607), and the
+    /// question cards follow (`renderQuestion`).
     fn after_observe(&self) {
         self.reconcile();
         self.continue_open();
+        self.sync_questions();
         self.changed();
     }
 
@@ -1277,6 +1288,7 @@ impl Composers {
     pub(crate) fn view_of(&self, hub: &Hub, key: &str) -> Option<ComposerView> {
         let composer = hub.composers.get(key)?;
         let session = send::session_view(self, hub, composer);
+        let (question, input_visible) = self.question_part(hub);
         let attachments_blocked =
             !composer.draft.attachments.is_empty() && !session.attachments_available;
         let too_long = composer.draft.text.len() > MAX_TEXT_BYTES;
@@ -1382,6 +1394,8 @@ impl Composers {
                 || hub.start.as_ref().is_some_and(|(p, _)| p.key == key),
             compacting: hub.compacts.contains_key(key),
             clear: session.clear,
+            question,
+            input_visible,
         })
     }
 }

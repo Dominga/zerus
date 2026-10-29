@@ -884,10 +884,27 @@ const PENDING_ADDITIONS: usize = 8;
 const ADDED_TASKS: usize = 20;
 
 /// U29: what the lead shows the owner (and the desktop asks) before a task
-/// joins a running phase.
-pub(crate) fn addition_warning(phase: u32) -> String {
+/// joins a running phase. #511 C1: it names the queued task titles, so the
+/// owner confirms what joins, not a blind "add"; titles are cut and the text
+/// stays bounded.
+pub(crate) fn addition_warning(phase: u32, titles: &[String]) -> String {
+    let listed: Vec<String> = titles
+        .iter()
+        .map(|title| {
+            let mut short: String = title.chars().take(100).collect();
+            if short.chars().count() < title.chars().count() {
+                short.push('…');
+            }
+            format!("\"{short}\"")
+        })
+        .collect();
+    let what = if listed.len() == 1 {
+        format!("the task {}", listed.first().map(String::as_str).unwrap_or_default())
+    } else {
+        format!("{} tasks {}", listed.len(), listed.join(", "))
+    };
     format!(
-        "Adding tasks to running phase {phase} changes its scope after you approved it. The load balance of the lanes \
+        "Adding {what} to running phase {phase} changes its scope after you approved it. The load balance of the lanes \
          shifts and members may sit idle: members do not work ahead and later phases are not approved. \
          Confirm in a new message to add them (type \"add\" or \"{phase}\" on the desktop)."
     )
@@ -942,10 +959,13 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
         team.pending_additions.retain(|pending| pending.phase != n);
         ensure!(team.pending_additions.len() < PENDING_ADDITIONS, "{PENDING_ADDITIONS} additions already wait for your confirmation");
         let ids: Vec<u32> = tasks.iter().map(|task| task.id).collect();
+        // #511 C1: the warning names what will join, so the owner confirms the
+        // titles, not a blind "add".
+        let titles: Vec<String> = tasks.iter().map(|task| task.title.clone()).collect();
         let id = uuid::Uuid::new_v4().to_string();
         team.pending_additions.push(PendingAddition { id: id.clone(), phase: n, tasks, by: by.clone(), request: quote.clone(), warned_at: at });
         events.push(Event::new("phase_addition_warned", json!({"by":by,"phase":n,"tasks":ids,"request":quote})));
-        return Ok(json!({"status":"warning","phase":n,"pending":id,"tasks":ids,"warning":addition_warning(n),
+        return Ok(json!({"status":"warning","phase":n,"pending":id,"tasks":ids,"warning":addition_warning(n, &titles),
             "expires_at":at + PENDING_ADDITION_SECONDS}));
     };
     let found = team.pending_additions.iter().position(|pending| pending.id == confirm).context("That addition is unknown or expired; ask again")?;

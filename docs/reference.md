@@ -365,10 +365,12 @@ held message, draft or build Zerus runs for it. A busy session, another agent's
 account, a signed-out account or a missing conversation file is refused with its
 reason and nothing changes.
 
-Otherwise Zerus copies the conversation into the target account's own native
-store (Claude's `projects/<project>/<conversation>.jsonl` and its folder, Codex's
-session file), stops the idle agent gracefully as **pause** does, and launches it
-resumed into the same conversation, folder and session name with the new account.
+Otherwise Zerus stops the idle agent gracefully as **pause** does, so the old
+account's store is final, copies the conversation into the target account's own
+native store (Claude's `projects/<project>/<conversation>.jsonl` and its folder,
+Codex's session file; the copy holds every record the agent wrote while
+stopping), and launches it resumed into the same conversation, folder and session
+name with the new account.
 The JSON receipt's status is `switched` once the resumed conversation is
 confirmed. A launch that fails puts the old account back and relaunches there
 (`rolled_back`); one that cannot be confirmed is reported `uncertain` and is

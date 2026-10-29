@@ -1,10 +1,10 @@
 //! U53: the owner moves one running session to another account of the same
-//! agent. Nothing changes until the owner names the account; the conversation
-//! is copied into the target's native store first, the idle agent is stopped,
-//! and it is launched resumed into the same conversation, folder and name with
-//! the new account. A failed launch returns to the old account; an unconfirmed
-//! one is reported uncertain and never retried. The copy is kept and nothing is
-//! deleted from the old account.
+//! agent. Nothing changes until the owner names the account; the idle agent is
+//! stopped (so the old store is final), the conversation is copied into the
+//! target's native store, and it is launched resumed into the same
+//! conversation, folder and name with the new account. A failed launch returns
+//! to the old account; an unconfirmed one is reported uncertain and never
+//! retried. The copy is kept and nothing is deleted from the old account.
 use super::*;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -132,10 +132,25 @@ fn switch(config: &crate::config::Config, name: &str, account: &str, request: &s
         return Err(format!("{name}: the session's account folder is missing; nothing was changed"));
     }
     // Everything that can fail is checked before the agent is stopped.
-    let (copies, transcript) = plan_copies(&record, &old_home, &home, &conversation)?;
-    write_copies(&copies)?;
+    plan_copies(&record, &old_home, &home, &conversation)?;
     let old = json!({"account_id":record["account_id"],"agent_home":record["agent_home"],"transcript":record["transcript"]});
+    // Stop first: the old account's native store is final only after the agent's
+    // own exit (Claude writes a cost-state row while stopping), so the copy is
+    // taken afterwards and holds every record the old conversation has.
     lifecycle::pause_one_quiet(&record, None, true)?;
+    let stopped = read(name)?;
+    let (copies, transcript) = match plan_copies(&stopped, &old_home, &home, &conversation)
+        .and_then(|planned| write_copies(&planned.0).map(|()| planned))
+    {
+        Ok(planned) => planned,
+        Err(error) => {
+            // The agent is stopped and must not be left that way: relaunch the
+            // old account and report why the switch did not happen.
+            let run_id = uuid::Uuid::new_v4().to_string();
+            return Ok(rollback(config, name, &old, &conversation, request, &run_id, &error));
+        }
+    };
+    let _ = copies;
     // A binding that changed under the stop stays on its old account.
     move_binding(name, &record, account, &home, &transcript)
         .map_err(|error| format!("{error}; the session was stopped on its old account"))?;
@@ -156,14 +171,7 @@ fn switch(config: &crate::config::Config, name: &str, account: &str, request: &s
     let run_id = uuid::Uuid::new_v4().to_string();
     match launch(name, &run_id) {
         Ok(()) => match confirm(name, &run_id, &conversation, Instant::now() + bounds().0, bounds().1) {
-            Confirmation::Confirmed => {
-                // U53: the switch confirms the resume itself. Codex defers its
-                // own SessionStart until the first turn, so its supervisor's
-                // expected id would outlive the switch; a confirmed binding
-                // names the conversation with no expected id.
-                clear_expected(name, &run_id);
-                Ok(receipt("switched", &run_id, Value::Null))
-            }
+            Confirmation::Confirmed => Ok(receipt("switched", &run_id, Value::Null)),
             Confirmation::Unconfirmed => Ok(receipt("uncertain", &run_id, json!({"note":"the resumed conversation did not confirm; it is never retried on its own"}))),
             Confirmation::Failed(reason) => Ok(rollback(config, name, &old, &conversation, request, &run_id, &reason)),
         },
@@ -184,18 +192,6 @@ fn bounds() -> (Duration, Duration) {
         return (confirm, settle);
     }
     (CONFIRM, SETTLE)
-}
-
-/// Clears the resume's expected conversation id once the switch confirmed it,
-/// changing nothing else and only for the run it confirmed.
-fn clear_expected(name: &str, run_id: &str) {
-    let Ok(_guard) = lock(None) else { return };
-    let Ok(mut current) = read(name) else { return };
-    if string(&current, "run_id") != run_id || string(&current, "expected_id").is_empty() {
-        return;
-    }
-    current["expected_id"] = json!("");
-    let _ = write(&mut current);
 }
 
 /// Writes the new account into the saved binding, keeping the conversation.
@@ -523,6 +519,9 @@ mod switch_tests {
         /// A resumed Codex supervisor keeps its expected id until the first
         /// turn (its SessionStart is deferred).
         static EXPECTED_STAYS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        /// The fake agent writes one more record to its transcript while it is
+        /// being stopped (as Claude does while pausing).
+        static STOP_APPENDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
     struct Backend;
@@ -544,6 +543,18 @@ mod switch_tests {
         fn request_exit(&self, _pane: &str, _pid: u32) -> Result<()> {
             if let Some(world) = WORLD.with(|world| *world.borrow()) {
                 world.lock().unwrap().dead = true;
+            }
+            if STOP_APPENDS.with(|cell| cell.get()) {
+                // A stopping Claude appends its cost-state row after the old
+                // order would have copied the file.
+                use std::io::Write;
+                let record = read("claude/project/account")?;
+                let transcript = PathBuf::from(string(&record, "transcript"));
+                let mut file = fs::OpenOptions::new()
+                    .append(true)
+                    .open(transcript)
+                    .map_err(|error| error.to_string())?;
+                writeln!(file, "{{\"type\":\"cost-state\"}}").map_err(|error| error.to_string())?;
             }
             Ok(())
         }
@@ -803,17 +814,20 @@ mod switch_tests {
         });
     }
 
-    /// U53: a resumed Codex keeps its expected id until its first turn; the
-    /// switch confirms the resume and leaves the binding without that id.
+    /// U53: a resumed Codex is a deferred resume until its first turn; the
+    /// switch leaves that binding as Codex's own supervisor wrote it, because
+    /// `resume_input::pending` (expected id = the conversation) is what lets the
+    /// first message in.
     #[test]
-    fn a_codex_switch_leaves_a_confirmed_resume_without_an_expected_id() {
+    fn a_codex_switch_leaves_the_deferred_resume_binding() {
         EXPECTED_STAYS.with(|cell| cell.set(true));
         run_test("codex", false, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", |config, record| {
             let receipt = switch(config, "claude/project/account", "second", &request(), false).unwrap();
             assert_eq!(receipt["status"], json!("switched"), "{receipt}");
             let saved = read("claude/project/account").unwrap();
             assert_eq!(saved["run_id"], receipt["run_id"]);
-            assert_eq!(saved["expected_id"], json!(""));
+            assert_eq!(saved["expected_id"], record["conversation_id"]);
+            assert_eq!(saved["startup_kind"], json!("resume"));
             assert_eq!(saved["conversation_id"], record["conversation_id"]);
             assert_eq!(saved["account_id"], json!("second"));
         });
@@ -845,6 +859,25 @@ mod switch_tests {
             assert!(target.join(record["conversation_id"].as_str().unwrap()).join("workflows/wf/agent-worker.jsonl").is_file());
             assert!(folder.join(format!("{}.jsonl", record["conversation_id"].as_str().unwrap())).is_file());
         });
+    }
+
+    /// The old account's native store is final only after the agent stops:
+    /// Claude writes a cost-state row while stopping. The switch stops first,
+    /// so the copy holds that row too.
+    #[test]
+    fn a_switch_stops_the_agent_before_it_copies_the_conversation() {
+        STOP_APPENDS.with(|cell| cell.set(true));
+        run_test("claude", false, "55555555-5555-4555-8555-555555555555", |config, record| {
+            let source = PathBuf::from(record["transcript"].as_str().unwrap());
+            let receipt = switch(config, "claude/project/account", "second", &request(), false).unwrap();
+            assert_eq!(receipt["status"], json!("switched"), "{receipt}");
+            let relative = source.strip_prefix(home(config, "work")).unwrap().to_path_buf();
+            let old = fs::read_to_string(&source).unwrap();
+            let copy = fs::read_to_string(home(config, "second").join(relative)).unwrap();
+            assert!(old.contains("cost-state"), "the stop's row is not in the old file: {old:?}");
+            assert_eq!(copy, old, "the copy missed the record the agent wrote while stopping");
+        });
+        STOP_APPENDS.with(|cell| cell.set(false));
     }
 
     #[test]

@@ -670,7 +670,15 @@ class NativeAgent:
                           switched["account_id"], switched["agent_home"]),
                          (name, str(self.project), conversation, "second", str(folder)))
         self.assertNotEqual(switched["run_id"], before["run_id"])
-        self.assertFalse(switched.get("expected_id"), switched.get("expected_id"))
+        # A resumed Codex is a deferred resume until its first turn: its own
+        # supervisor keeps the expected id equal to the conversation. Claude's
+        # SessionStart confirms the resume and clears it. Neither may name
+        # another conversation.
+        expected = switched.get("expected_id")
+        if self.AGENT == "codex":
+            self.assertIn(expected, (None, "", conversation), expected)
+        else:
+            self.assertFalse(expected, expected)
         # The copy is in the new account's store and starts with the conversation's
         # records: the resumed agent may append to it. The old account keeps its own
         # file unchanged.

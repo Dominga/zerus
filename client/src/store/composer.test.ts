@@ -9,7 +9,7 @@ const KEY = "studio\nclaude/sample-project/review";
 const SESSION: SessionRef = { computer: "studio", key: "run:run-1", name: "claude/sample-project/review", archive_id: null };
 
 const view = (extra: Partial<ComposerView> = {}): ComposerView => ({
-  handle: 1, key: KEY, loaded: true, rev: 0, text_epoch: 1, text: "", position: 0, anchor: 0,
+  handle: 1, key: KEY, loaded: true, rev: 0, text_epoch: 1, text: "", position: 0, anchor: 0, question: null, input_visible: true,
   attachments: [], removed: null, attaching: false, sending: false, waiting: null, uncertain: false, status: "", status_error: false,
   can_send: true, send_label: "Send", available: true, unavailable_reason: "", block_reason: null, attachments_available: true,
   attachments_reason: "", session_status: "", session_status_error: false, session_blocks_input: false, inspect_error: false,
@@ -145,6 +145,23 @@ describe("composer store", () => {
       expect(c.text()).toBe("typing");
       c.apply(view({ text: "loaded [File #1] ", text_epoch: 3, rev: 1 }));
       expect(c.text()).toBe("loaded [File #1] ");
+    });
+  });
+
+  it("a required card disables Send and ignores a toolbar chord without a hint", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view({ input_visible: false, text: "draft", status: "Answer the question to continue." }));
+      expect(c.sendEnabled()).toBe(false);
+      await c.send();
+      expect(f.calls).toEqual([]);
+      expect(c.hint()).toBeUndefined();
+      expect(c.text()).toBe("draft");
+      c.apply(view({ text: "draft" }));
+      expect(c.sendEnabled()).toBe(true);
+      await c.send();
+      expect(f.calls.filter((call) => call.startsWith("send "))).toHaveLength(1);
     });
   });
 
@@ -748,6 +765,10 @@ describe("the batch envelope", () => {
     expect(isEmptyBatch(normalize({}))).toBe(true);
     expect(isEmptyBatch(normalize({ composer: view() }))).toBe(false);
     expect(isEmptyBatch(normalize({ draft_keys: [] }))).toBe(false);
+    // Notices and Terminal requests that arrive after their call are content too (A2).
+    const events = [{ kind: "notice" as const, text: "Response recorded.", error: false, transient: false }];
+    expect(isEmptyBatch(normalize({ composer_events: events }))).toBe(false);
+    expect(normalize({ composer_events: events }).composer_events).toEqual(events);
     expect(normalize({ draft_keys: [KEY] }).draft_keys).toEqual([KEY]);
   });
 

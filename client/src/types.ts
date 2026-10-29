@@ -145,6 +145,8 @@ export interface Batch {
   draft_keys?: string[];
   /** The Processes tab's view (src-tauri processes.rs), when it changed. */
   processes_view?: ProcessesView;
+  /** Notices and Terminal requests that arrived after their call, at most 16. */
+  composer_events?: ComposerEvent[];
 }
 
 /** A row of the Processes tab (processes.rs `RowView`). */
@@ -201,7 +203,7 @@ export const emptyBatch = (): Batch => ({ upserts: [], removes: [], replaces: []
 /** A batch with nothing to apply. A composer view or a draft key set is content: Rust sends each once. */
 export const isEmptyBatch = (b: Batch) =>
   !b.upserts.length && !b.removes.length && !b.replaces.length && !b.computers.length && !b.machines?.length && !b.activity.length
-  && !b.groups?.length && !b.grouping && !b.processes_view && !b.composer && !b.draft_keys;
+  && !b.groups?.length && !b.grouping && !b.processes_view && !b.composer && !b.draft_keys && !b.composer_events?.length;
 
 /** One Activity event as `inspect` returns it; unknown fields are kept. */
 export interface ActivityEvent {
@@ -219,6 +221,8 @@ export interface ActivityEvent {
   message_id?: string;
   attachments?: EventAttachment[];
   voice?: Record<string, unknown>;
+  /** Codex's question replies of a user event, parsed in Rust (R7's annotate_replies). */
+  question_replies?: Reply[];
   [field: string]: unknown;
 }
 
@@ -450,7 +454,36 @@ export interface ComposerView {
   inspect_error: boolean;
   cache: Chip; cache_warning: string; cache_details: string; context: ContextChip; local: LocalMessage[];
   cancel_send: boolean; compacting: boolean; clear: ClearControl;
+  /** The agent's question card shown in the composer (A2). */
+  question: QuestionView | null;
+  /** False while a required card stands in for the editor and the action row (Qt's setInputVisible). */
+  input_visible: boolean;
 }
+
+// The question card (src-tauri composer/questions.rs, core questions.rs).
+export interface ButtonView { visible: boolean; enabled: boolean; label: string; review_label: string | null }
+export interface OptionView { id: string; label: string; description: string; markdown: boolean; checked: boolean; enabled: boolean; visible: boolean }
+export interface TextView { visible: boolean; enabled: boolean; value: string; placeholder: string; accessible_name: string; max_units: number; max_chars: number }
+export interface FormView { id: string; tab: string; prompt: string; body: string; markdown: boolean; monospace_body: boolean; multi: boolean;
+  mode: string; mode_visible: boolean; options: OptionView[]; other: OptionView | null; text: TextView | null }
+export interface QueueNav { previous: boolean; next: boolean; previous_tip: string; next_tip: string }
+export interface CardView { heading: string; progress: string; pending: string; pending_tip: string; nav: QueueNav | null; tabs_visible: boolean;
+  page: number; forms: FormView[]; status: string; status_error: boolean; available: boolean; locked: boolean; review: boolean; created_at: number;
+  submit: ButtonView; approve: ButtonView; deny: ButtonView; skip: ButtonView; previous: ButtonView; next: ButtonView; retry: boolean; skip_tip: string; retry_tip: string }
+/**
+ * `revision` grows when the card is built again (a new card, a changed form,
+ * a restored answer): the review starts again and the fields reset. `epoch`
+ * grows with every change of the answers from Rust, each revision's included:
+ * the fields take Rust's values again, and an edit names the epoch it is based on.
+ */
+export interface QuestionView { card: string; revision: number; epoch: number; asked: string; asked_tip: string; terminal_label: string; view: CardView }
+export type QuestionEdit = { kind: "option"; item: string; option: string; checked: boolean } | { kind: "other"; item: string; checked: boolean } | { kind: "text"; item: string; text: string };
+export interface ColdAnswer { title: string; text: string; proceed: string }
+export type QuestionReply = { kind: "sending" } | { kind: "busy" } | { kind: "cold"; token: number; prompt: ColdAnswer } | { kind: "notice"; text: string };
+/** Notices and Terminal requests that arrive after their call (`next_batch`'s `composer_events`). */
+export type ComposerEvent = { kind: "notice"; text: string; error: boolean; transient: boolean } | { kind: "open_terminal"; key: string };
+/** A Codex question reply, parsed in Rust (`question_replies`, `prompt_replies`). */
+export interface Reply { question: string; answer: string }
 export type ColdAction = "send" | "compact" | "clear";
 export interface ColdChoice { action: ColdAction; label: string; enabled: boolean; tooltip: string }
 export interface ColdPrompt { title: string; text: string; informative: string; choices: ColdChoice[] }

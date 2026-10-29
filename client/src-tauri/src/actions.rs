@@ -1135,11 +1135,24 @@ pub async fn archived_activity(
     let hgs = default_hgs();
     let id = ComputerId::from(computer.as_str());
     tauri::async_runtime::spawn_blocking(move || {
-        reads::archived_activity(&hgs, &id, &name, &archive_id, after)
+        reads::archived_activity(&hgs, &id, &name, &archive_id, after).map(|mut activity| {
+            annotate_events(&mut activity.events);
+            activity
+        })
     })
     .await
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())
+}
+
+/// Codex's question replies of recorded events become `question_replies`
+/// (R7's `annotate_replies`), as `next_batch` does for live ones.
+fn annotate_events(events: &mut Vec<serde_json::Value>) {
+    let mut payload = serde_json::json!({ "events": std::mem::take(events) });
+    zerus_client_core::questions::annotate_replies(&mut payload);
+    if let serde_json::Value::Array(list) = payload["events"].take() {
+        *events = list;
+    }
 }
 
 /// Cancels every archive page request numbered `through` or lower, where Qt
@@ -1210,6 +1223,18 @@ pub fn update_attention_marks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorded_question_replies_are_annotated() {
+        let detail = "<send_user_message_question_reply>{\"questionItemId\":\"q1\",\"question\":\"Which checks?\",\"answer\":\"Unit\"}</send_user_message_question_reply>";
+        let mut events =
+            vec![serde_json::json!({"seq": 1, "type": "UserPromptSubmit", "detail": detail})];
+        annotate_events(&mut events);
+        assert_eq!(
+            events[0]["question_replies"],
+            serde_json::json!([{"question": "Which checks?", "answer": "Unit"}])
+        );
+    }
 
     #[test]
     fn a_running_write_reports_its_kind() {

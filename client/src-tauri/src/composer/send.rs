@@ -888,6 +888,11 @@ impl Composers {
         {
             return SendReply::Busy;
         }
+        // A required question card stands in for the editor and Send (Qt's
+        // setInputVisible): nothing is sent while it shows.
+        if !self.question_part(hub).1 {
+            return SendReply::Busy;
+        }
         // A stopped session asks how to start before its block reason
         // (`sendMessage` 4809, `startToSend` 4707), while Qt's Send is
         // enabled (`updateControls`, `MessageComposer.cpp:1185`).

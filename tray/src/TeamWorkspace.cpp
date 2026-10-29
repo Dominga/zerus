@@ -935,7 +935,7 @@ void TeamWorkspace::attentionRows(const Team &team, QVBoxLayout *v)
     if (team.attention.size() > shown) v->addWidget(label(tr("+%1 more").arg(team.attention.size() - shown), c.muted, 10));
 }
 
-void TeamWorkspace::answerAttention(const QString &teamId, const QString &member, const QString &command)
+void TeamWorkspace::answerAttention(const QString &teamId, const QString &member, const QString &command, int attempts)
 {
     // Read the team again: a poll may have rebuilt everything since the click.
     const auto *team = m_teams->team(teamId);
@@ -944,7 +944,16 @@ void TeamWorkspace::answerAttention(const QString &teamId, const QString &member
     for (const auto &m : team->members)
         if (m.id == member || team->roleOf(m.id) == member) { id = m.id; break; }
     for (auto *box : findChildren<QFrame *>("teamMemberPermission")) {
-        if (box->property("member").toString() != id || !box->isVisible()) continue;
+        if (box->property("member").toString() != id) continue;
+        // Built but not shown yet (a rebuild in progress on a loaded
+        // computer): look again shortly instead of falling back to the command.
+        if (!box->isVisible()) {
+            if (attempts > 0) {
+                QTimer::singleShot(100, this, [this, teamId, member, command, attempts] { answerAttention(teamId, member, command, attempts - 1); });
+                return;
+            }
+            continue;
+        }
         m_members->ensureWidgetVisible(box, 0, 24);
         auto *allow = box->findChild<QPushButton *>("teamMemberPermissionAllow");
         if (allow && allow->isEnabled()) {

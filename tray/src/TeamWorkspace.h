@@ -96,7 +96,8 @@ private:
     void attentionRows(const Teams::Team &team, QVBoxLayout *into);
     // N7: Answer on a permission item: the member's Allow / Deny box, or its
     // command on the clipboard when this hgs sends no box.
-    void answerAttention(const QString &teamId, const QString &member, const QString &command);
+    // attempts: a member's box not shown yet is looked for again (fork CI).
+    void answerAttention(const QString &teamId, const QString &member, const QString &command, int attempts = 10);
     // A planning, running or paused team takes a settings change (ops.rs settings).
     static bool settingsOpen(const Teams::Team &team)
     {

@@ -3389,7 +3389,8 @@ void TestTeamsUi::boardColumnsKeepTheirScroll()
     controller.refresh();
     panel.showTeam("team-1");
     workspace.showTeam("team-1");
-    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
+    // The first team read took 6.6 s on a loaded computer.
+    QTRY_VERIFY_WITH_TIMEOUT(workspace.findChild<QWidget *>("teamWorkspaceView"), 30000);
     const auto showBoard = [&workspace] {
         for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>()) if (b->property("segment") == "board") { b->click(); break; }
     };
@@ -8174,6 +8175,7 @@ void TestTeamsUi::leadAnswersAMembersSubagentRequest()
     auto *allow = workspace.findChild<QPushButton *>("teamMemberPermissionAllow");
     QCOMPARE(allow->text(), QStringLiteral("Allow all"));
     QVERIFY(allow->isEnabled());
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamMemberPermissionAllow")->isVisible());
     // The attention strip's Answer brings the lead to the same box.
     workspace.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&workspace));
     workspace.findChild<QPushButton *>("teamAttentionAnswer")->click();

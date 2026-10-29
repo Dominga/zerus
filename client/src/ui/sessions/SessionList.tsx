@@ -19,7 +19,7 @@ import { markAllEntry, markAllTip, markEntry, runMarkAll } from "./mark-entries"
 import { moveEntry, openDeleteProjectDialog, openRenameProjectDialog } from "./OrganizationDialogs";
 import { chipColor, headerEntries, projectColor, type FilterChip } from "./organization-ui";
 import { newSessionForProject, newSessionFromPanel } from "./newsession-view";
-import { CreationCard } from "./CreationCard";
+import { CreationCard, CreationTile } from "./CreationCard";
 import { creationFooter, creationStatusMenu } from "../../store/creations";
 import {
   selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
@@ -665,6 +665,7 @@ function StripRow(props: { id: string; list: RowSource }) {
         )}
       </Show>
       <Show when={row()?.type === "card" ? (row() as Extract<Row, { type: "card" }>) : undefined}>{(v) => <StripTile row={v()} />}</Show>
+      <Show when={row()?.type === "creation" ? (row() as Extract<Row, { type: "creation" }>) : undefined}>{(v) => <CreationTile card={v().creation} />}</Show>
     </div>
   );
 }

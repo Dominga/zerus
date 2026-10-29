@@ -50,3 +50,28 @@ export function CreationCard(props: { card: Card }) {
     </div>
   );
 }
+
+/**
+ * A creation row in the collapsed strip, a tile like a session's
+ * (SessionCardDelegate.h paintStripCard): the neutral status mark and the
+ * agent's badge, the tag on up to two lines, the caption. The tooltip names
+ * them as StripTile does for a session (SessionList.cpp 267-286). A click
+ * selects the card, as on the full list.
+ */
+export function CreationTile(props: { card: Card }) {
+  const c = () => props.card;
+  const tip = () => [`${c().tag}: ${c().caption}`, rowDetail(c()), `${c().target} on ${computerOf(c())}`].filter(Boolean).join("\n");
+  return (
+    <button class="strip-tile" classList={{ selected: selectedKey() === creationRowId(c().id) }} data-frame="neutral" title={tip()} aria-label={accessibleText(c())}
+      onClick={() => choose(c().id)} onContextMenu={(e) => menu(e, c().id)}>
+      <span class="st-block">
+        <span class="st-top">
+          <span class="st-status"><StatusBadge kind="neutral" caption="" iconOnly /></span>
+          <span class="st-provider"><AgentBadge agent={agentKind(c().cmd)} narrow /></span>
+        </span>
+        <span class="st-name">{c().tag}</span>
+        <span class="st-state" data-tone="neutral">{c().caption}</span>
+      </span>
+    </button>
+  );
+}

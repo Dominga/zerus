@@ -1,0 +1,54 @@
+/* Endless motion and what stops it. ui/motion.ts keeps three attributes on the
+   root in step with the settings (store/settings.ts), the system and the window:
+
+   data-animate-activity="0"  Animate working sessions (workspace/animateActivity)
+                              is off: indicators of working sessions rest, as the
+                              Qt session list stops its working pulse.
+   data-reduce-motion="1"     Reduce motion (workspace/reduceMotion) is on, or the
+                              system asks for reduced motion (prefers-reduced-motion,
+                              read in ui/motion.ts, so these rules are its only
+                              place): no endless motion at all, and entrances are
+                              instant. In Qt the setting stops only the Zerus
+                              mark; here it covers all endless motion.
+   data-page-hidden="1"       The window is hidden or minimised: everything pauses
+                              where it is, as the Qt widgets stop their timers in
+                              hideEvent.
+
+   Every endless animation is listed below; a new one joins these lists. Each
+   animates only transform (or translate, scale, rotate) and opacity, so the
+   compositor runs it without repainting. These rules are outside the cascade
+   layers, so they win over the component styles. */
+
+/* Working sessions: the list's halo (cards, compact rows, strip tiles), the
+   project header's working count, status dots and the typing dots of "Agent is
+   running" in Activity. */
+:root[data-animate-activity="0"] .sbadge.k-working .sb-mark::after,
+:root[data-animate-activity="0"] .gb-count.working,
+:root[data-animate-activity="0"] .status.working .dot,
+:root[data-animate-activity="0"] .state-dot.working,
+:root[data-animate-activity="0"] .typing i { animation: none; }
+
+/* Reduce motion: the working indicators above, the Zerus mark, the loading
+   shimmer and spinner, the connecting machine's ring, the recording chip and
+   the playing video note. */
+:root[data-reduce-motion="1"] .sbadge.k-working .sb-mark::after,
+:root[data-reduce-motion="1"] .gb-count.working,
+:root[data-reduce-motion="1"] .status.working .dot,
+:root[data-reduce-motion="1"] .state-dot.working,
+:root[data-reduce-motion="1"] .typing i,
+:root[data-reduce-motion="1"] .skeleton::before,
+:root[data-reduce-motion="1"] .busy-arc,
+:root[data-reduce-motion="1"] .tchip.rec svg,
+:root[data-reduce-motion="1"] .vm-frames { animation: none !important; }
+:root[data-reduce-motion="1"] .mtile.s-connecting .mtile-dot::after { animation: none; opacity: .6; }
+:root[data-reduce-motion="1"] .zlogo, :root[data-reduce-motion="1"] .zlogo * { animation: none !important; transition: none; }
+/* Entrances and a few transitions, as the mockup's media query has them. */
+:root[data-reduce-motion="1"] .menu, :root[data-reduce-motion="1"] dialog.dlg[open],
+:root[data-reduce-motion="1"] .toast, :root[data-reduce-motion="1"] .tab.on::after { animation-duration: 1ms; }
+:root[data-reduce-motion="1"] .inspector, :root[data-reduce-motion="1"] .icard,
+:root[data-reduce-motion="1"] .icard-body, :root[data-reduce-motion="1"] .vm-text { animation: none !important; }
+:root[data-reduce-motion="1"] .icard-chev, :root[data-reduce-motion="1"] .col-edge::before,
+:root[data-reduce-motion="1"] .insp-resize > i, :root[data-reduce-motion="1"] .sp-resize > i { transition: none; }
+
+/* Hidden or minimised: nothing moves, and each animation resumes from where it stopped. */
+:root[data-page-hidden="1"] *, :root[data-page-hidden="1"] *::before, :root[data-page-hidden="1"] *::after { animation-play-state: paused !important; }

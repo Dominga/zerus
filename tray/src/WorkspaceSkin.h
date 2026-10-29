@@ -1,7 +1,13 @@
 #pragma once
+#include "JsonParse.h"
+#include "ProcessRunner.h"
+#include <QCoreApplication>
+#include <QPointer>
+#include <QTimer>
 #include <QColor>
 #include <QDateTime>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
@@ -11,6 +17,7 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QString>
+#include <algorithm>
 #include <tuple>
 #include <utility>
 
@@ -134,10 +141,10 @@ inline const char *whiteWhJson()
 "stylesheet":"QWidget#socratiCodePanel{background:rgba(199,162,240,.08);border:1px solid rgba(199,162,240,.38);border-radius:10px}QLabel#inspectorPanelTitle{font-weight:600}QWidget#socratiCodePanel QLabel#inspectorPanelTitle{color:#b48ee6}QFrame#composerCard{background:rgba(128,138,150,.07);border:1px solid rgba(128,138,150,.30);border-radius:12px}QFrame#composerCard QPlainTextEdit#messageInput{border:0;background:transparent;padding:0}QFrame#composerCard QPlainTextEdit#messageInput:focus{border:0}QFrame#composerCard QPushButton#attachMessageFile{border:0;background:transparent;border-radius:9px}QFrame#composerCard QPushButton#sendMessage{border-radius:9px;padding:0}QPushButton#sessionModelSettings{border:1px solid transparent;background:transparent}"})";
 }
 
-inline QList<Skin> builtins()
+inline QList<Skin> loadBuiltins()
 {
     Skin base{"zerus", "Zerus", {}, {}, true, zerus(true), zerus(false), {}, QStringLiteral("native")};
-    return {base, parse(QJsonDocument::fromJson(whiteWhJson()).object(), "whitewh", {}, true)};
+    return {base, parse(JsonParse::object(QByteArray(whiteWhJson())), "whitewh", {}, true)};
 }
 
 // U25: the design tokens of the owner's prototype (Zerus-prototype.html,
@@ -202,23 +209,106 @@ inline QString directory()
     return QFileInfo(QSettings().fileName()).absolutePath() + QStringLiteral("/skins");
 }
 
-inline QList<Skin> available()
+// Enumerate at most 200 files on the preparation thread.
+inline QFileInfoList skinFiles(const QString &folder) {
+    QFileInfoList files;
+    QDirIterator it(folder, {QStringLiteral("*.json")}, QDir::Files | QDir::NoDotAndDotDot);
+    while (files.size() < 200 && it.hasNext()) { it.next(); files << it.fileInfo(); }
+    std::sort(files.begin(), files.end(), [](const QFileInfo &a, const QFileInfo &b) { return a.fileName() < b.fileName(); });
+    return files;
+}
+inline QList<Skin> loadAvailable(const QString &folder)
 {
-    auto result = builtins();
+    auto result = loadBuiltins();
     QStringList ids;
     for (const auto &skin : result) ids << skin.id;
-    const auto files = QDir(directory()).entryInfoList({QStringLiteral("*.json")}, QDir::Files, QDir::Name);
+    const auto files = skinFiles(folder);
     for (const auto &file : files.mid(0, 200)) {
         const auto id = file.completeBaseName().toLower();
         static const QRegularExpression valid(QStringLiteral("\\A[a-z0-9][a-z0-9_-]{0,63}\\z"));
         if (ids.contains(id) || !valid.match(id).hasMatch() || file.size() > 512 * 1024) continue;
         QFile input(file.absoluteFilePath());
         if (!input.open(QIODevice::ReadOnly)) continue;
-        const auto document = QJsonDocument::fromJson(input.readAll());
+        const auto document = JsonParse::parse(input.readAll());
         if (!document.isObject() || document.object()["schema"].toInt() != 1) continue;
         result << parse(document.object(), id, file.absoluteFilePath(), false);
         ids << id;
     }
+    return result;
+}
+
+// Startup calls preload before constructing any windows. Later file changes are
+// prepared asynchronously; readers keep the last complete set while it loads.
+struct SkinCache {
+    QList<Skin> values;
+    QString folder, fingerprint;
+    bool loading = false;
+    quint64 generation = 0;
+    QPointer<QTimer> notifier, poller;
+    quint64 revision = 0;
+};
+inline SkinCache &cache() { static SkinCache value; return value; }
+inline QTimer *changes() {
+    auto &c = cache();
+    if (!c.notifier) c.notifier = new QTimer(QCoreApplication::instance());
+    return c.notifier;
+}
+inline QString fingerprint(const QString &folder) {
+    QString result = folder;
+    const auto files = skinFiles(folder);
+    for (const auto &file : files.mid(0, 200))
+        result += QLatin1Char('\n') + file.fileName() + QLatin1Char(':') + QString::number(file.size())
+                + QLatin1Char(':') + QString::number(file.lastModified().toMSecsSinceEpoch());
+    return result;
+}
+struct Scan { QList<Skin> values; QString stamp; bool consistent = false; };
+inline Scan scan(const QString &folder, const QString &knownStamp = {}) {
+    Scan result; result.stamp = fingerprint(folder);
+    if (result.stamp == knownStamp && !knownStamp.isEmpty()) { result.consistent = true; return result; }
+    result.values = loadAvailable(folder);
+    result.consistent = result.stamp == fingerprint(folder);
+    return result;
+}
+inline void requestScan() {
+    auto &c = cache();
+    if (c.loading) return;
+    c.loading = true;
+    const auto folder = directory(); const auto revision = c.revision;
+    const auto knownStamp = c.folder == folder ? c.fingerprint : QString();
+    ProcessRunner::post(changes(), [folder, knownStamp] { return scan(folder, knownStamp); }, [folder, revision](const Scan &result) {
+        auto &state = cache(); state.loading = false;
+        if (state.revision != revision || directory() != folder || !result.consistent) return;
+        if (state.folder == folder && state.fingerprint == result.stamp && !state.values.isEmpty()) return;
+        state.values = result.values; state.folder = folder; state.fingerprint = result.stamp; ++state.generation;
+        QMetaObject::invokeMethod(changes(), "timeout", Qt::QueuedConnection);
+    });
+}
+inline void startPolling() {
+    auto &c = cache();
+    if (c.poller) return;
+    c.poller = new QTimer(QCoreApplication::instance());
+    c.poller->setInterval(2000);
+    QObject::connect(c.poller, &QTimer::timeout, changes(), [] { requestScan(); });
+    c.poller->start();
+}
+inline void preload() {
+    auto &c = cache(); const auto folder = directory();
+    Scan result;
+    ProcessRunner::prepareAndWait([&] { result = scan(folder); });
+    ++c.revision;
+    if (result.consistent) { c.values = result.values; c.folder = folder; c.fingerprint = result.stamp; ++c.generation; }
+    startPolling();
+}
+inline QList<Skin> available() {
+    auto &c = cache();
+    startPolling();
+    if (c.values.isEmpty()) requestScan();
+    if (!c.values.isEmpty()) return c.values;
+    return {Skin{"zerus", "Zerus", {}, {}, true, zerus(true), zerus(false), {}, QStringLiteral("native")}};
+}
+inline QList<Skin> builtins() {
+    QList<Skin> result;
+    for (const auto &skin : available()) if (skin.builtin) result << skin;
     return result;
 }
 
@@ -237,12 +327,12 @@ inline const Skin &active()
 {
     static Skin cached;
     static QString cachedId;
-    static QDateTime cachedStamp;
     static bool valid = false;
+    static quint64 generation = 0;
     const QString id = currentId();
-    const auto stamp = [] (const Skin &skin) { return skin.path.isEmpty() ? QDateTime() : QFileInfo(skin.path).lastModified(); };
-    if (!valid || id != cachedId || stamp(cached) != cachedStamp) {
-        cached = current(); cachedId = id; cachedStamp = stamp(cached); valid = true;
+    available();
+    if (!valid || id != cachedId || generation != cache().generation) {
+        cached = current(); cachedId = id; generation = cache().generation; valid = true;
     }
     return cached;
 }
@@ -275,6 +365,13 @@ inline QString duplicate(const Skin &skin, const QString &name, QString *error)
     if (!output.open(QIODevice::NewOnly | QIODevice::WriteOnly) || output.write(QJsonDocument(data).toJson()) < 0) {
         if (error) *error = QObject::tr("Could not write %1.").arg(QDir::toNativeSeparators(output.fileName()));
         return {};
+    }
+    auto &state = cache();
+    if (state.folder == directory()) {
+        state.values << parse(data, id, output.fileName(), false);
+        state.fingerprint.clear();
+        ++state.revision;
+        ++state.generation;
     }
     return id;
 }

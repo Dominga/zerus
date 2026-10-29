@@ -109,19 +109,36 @@ pub(super) fn inspect(config: &Config, id: &str) -> Result<Value> {
     let bytes = read(config)?;
     let catalog = decode(&bytes)?;
     let (profile, home, _) = lookup(config, id)?;
-    if !supported(&profile.provider) {
+    if !supported(&profile.provider) && profile.provider != "dsh" {
         return Err(Error::new(
             1,
             "This agent manages model defaults in its native settings.",
         ));
     }
-    let mut result = crate::state::account_models(&profile.provider, &home);
+    let mut result = if profile.provider == "dsh" {
+        let mut result = crate::state::dsh::account_models(&home);
+        if result["models"].as_array().is_some_and(|models| models.is_empty()) {
+            let fallback = inspection::dsh(&home);
+            if fallback["models"].as_array().is_some_and(|models| !models.is_empty()) {
+                result["models"] = fallback["models"].clone();
+                result["truncated"] = json!(false);
+                result.as_object_mut().unwrap().remove("reason");
+            }
+        }
+        result
+    } else {
+        crate::state::account_models(&profile.provider, &home)
+    };
     result["account_id"] = json!(id);
     result["provider"] = json!(profile.provider);
     result["revision"] = json!(revision(&bytes));
     result["defaults"] = json!(catalog.model_defaults.get(id).cloned().unwrap_or_default());
-    result["provider_defaults"] = json!(native(&profile.provider, &home));
-    result["effort_supported"] = json!(["codex", "claude"].contains(&profile.provider.as_str()));
+    result["provider_defaults"] = json!(if profile.provider == "dsh" {
+        Defaults::default()
+    } else {
+        native(&profile.provider, &home)
+    });
+    result["effort_supported"] = json!(["codex", "claude", "dsh"].contains(&profile.provider.as_str()));
     Ok(result)
 }
 pub(super) fn set(config: &Config, args: &[String], dry: bool) -> Result<Value> {

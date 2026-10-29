@@ -340,6 +340,8 @@ object NativeParser {
     }
     fun messageBlockReason(raw: JSONObject?): String {
         if (raw == null) return "Refresh to verify the session before sending."
+        if(raw.opt("agent") == "external") return if(ConversationSource.cooperative(raw)) "" else "Refresh the exact external inbox identity before queueing an instruction."
+
         if(raw.string("agent_id").isNotBlank() && raw.string("agent_id") != "main") return if(raw.optBoolean("can_send")) "" else raw.string("send_reason","can_send_reason").ifBlank { "This child conversation is read-only." }
         if (!raw.optBoolean("tracked")) return "This session has no native tracking."
         if (raw.string("run_id").isBlank()) return "Waiting for the agent to finish starting."

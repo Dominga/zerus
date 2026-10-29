@@ -346,6 +346,8 @@ GUI keeps following its live sessions meanwhile, and the owner may be using it.
 | `results/arch-qt-2026-10-28.json` | Qt harness on Xvfb (not representative) and the running GUI on arch, 60 s |
 | `results/arch-webkitgtk-harness-2026-10-28.json` | client scenarios on the synthetic harness, WebKitGTK 2.54.1 on Xvfb (not representative) |
 | `results/arch-kde-display-2026-10-28.json` | arch display modes (two 144 Hz outputs at scale 1); real-display runs refused while the session was locked |
+| `results/arch-kde-client-main-2026-10-28.json` | the client built from main with PR #385 on the real arch display (144 Hz, unlocked): pacing, session open, and the idle windows as displayed, with Animate working sessions off, with Reduce motion, hidden and minimised |
+| `results/arch-kde-webkitgtk-vblank-2026-10-28/` | the real-display WebKitGTK experiment (`zerus-5wmh.14`): one harness run per configuration (default, debug log, near-60 off, mm shim, shim with near-60 off, XWayland, forced timer) and the DRM probe |
 | `results/mac-qt-2026-10-28.json` | Qt harness on the ProMotion Mac (Cocoa, 120 Hz) and the running GUI, 60 s |
 | `results/mac-display-2026-10-28.json` | WebKit preference, `NSScreen.maximumFramesPerSecond` and display-link rate on the Mac |
 | `results/mac-webkit-probe-2026-10-28.txt` | text output of the window-less probe |

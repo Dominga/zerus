@@ -156,7 +156,7 @@ fn driven(name: &str) -> bool {
     !matches!(lock_until(&native_input(name), std::time::Instant::now()), Ok(Some(_)))
 }
 
-fn eligible(record: &Value) -> bool {
+pub(super) fn eligible(record: &Value) -> bool {
     AGENTS.contains(&string(record, "agent"))
         && record["run_identity_version"] == 1
         && record["supervisor"].is_object()

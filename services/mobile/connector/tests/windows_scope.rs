@@ -83,15 +83,13 @@ fn windows_advertisement_rejects_unix_and_unsupported_provider_features() {
         );
     }
     // The phone does not create folders on a Windows gateway.
-    for operation in ["directory_create"] {
-        assert!(
-            !offered["operations"]
-                .as_array()
-                .unwrap()
-                .contains(&json!(operation)),
-            "{operation}"
-        );
-    }
+    assert!(
+        !offered["operations"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("directory_create")),
+        "directory_create"
+    );
 }
 #[tokio::test(flavor = "current_thread")]
 async fn media_and_path_refusals_are_durable_and_cannot_replay_after_scope_changes() {

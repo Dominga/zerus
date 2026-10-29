@@ -203,7 +203,9 @@ fn index(parent: &Value, r: &Request) -> Result<(Connection, Guard)> {
 /// Opens, creating or migrating, the private history index of `parent` in `directory`.
 fn index_in(directory: &Path, parent: &Value, r: &Request) -> Result<(Connection, Guard)> {
     private_dir(directory)?;
-    if !crate::platform::verify_private(directory, crate::platform::Private::Directory)
+    // #569: an index only too open is made private again; one that stays
+    // refused is reported with its fix.
+    if !crate::private_stores::ensure(directory, crate::platform::Private::Directory)
         .map_err(|e| e.to_string())?
     {
         return Err("Public history index directory must be private".into());
@@ -216,7 +218,7 @@ fn index_in(directory: &Path, parent: &Value, r: &Request) -> Result<(Connection
     ))
     .open(&path)
     .map_err(|e| e.to_string())?;
-    if !crate::platform::verify_private_file(&file).map_err(|e| e.to_string())? {
+    if !crate::private_stores::ensure_file(&path, &file).map_err(|e| e.to_string())? {
         return Err("Public history index file must be private".into());
     }
     drop(file);

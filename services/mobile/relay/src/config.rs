@@ -328,7 +328,14 @@ pub fn sqlite_file(path: &Path) -> Result<File> {
     if !parent.exists() {
         std::fs::DirBuilder::new().recursive(true).create(parent)?;
     }
-    let file = no_follow(OpenOptions::new().read(true).write(true).create(true).truncate(false)).open(path)?;
+    let file = no_follow(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+    )
+    .open(path)?;
     if !plain_file(&file.metadata()?) {
         return Err(Error::BAD);
     }
@@ -337,7 +344,14 @@ pub fn sqlite_file(path: &Path) -> Result<File> {
     // SQLite out, so one process at a time holds a lock file beside it.
     let mut name = path.as_os_str().to_owned();
     name.push(".lock");
-    let lock = no_follow(OpenOptions::new().read(true).write(true).create(true).truncate(false)).open(Path::new(&name))?;
+    let lock = no_follow(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+    )
+    .open(Path::new(&name))?;
     if !plain_file(&lock.metadata()?) {
         return Err(Error::BAD);
     }

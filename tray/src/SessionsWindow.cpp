@@ -1,3 +1,5 @@
+#include "ConversationSource.h"
+#include "WslFileOpenDialog.h"
 #include "SettingsJson.h"
 #include "ArchiveBrowser.h"
 #include "NativeSessionCapabilities.h"
@@ -51,6 +53,7 @@
 #include "SessionLeads.h"
 #include "WorkingLine.h"
 #include "HeldInputBar.h"
+#include "TerminalDraftBar.h"
 #include "MediaViewer.h"
 #include "NewSessionDialog.h"
 #include "SessionCreationController.h"
@@ -164,7 +167,9 @@ QString fileReferenceContext(const SessionInfo &session, const QJsonObject &deta
 QJsonObject sendEvidence(const QJsonObject &data)
 {
     QJsonObject result;
-    for (const auto *field : {"run_id", "conversation_id", "runtime_state", "process_state", "pending_questions", "cache_hint"})
+    for (const auto *field : {"run_id", "conversation_id", "runtime_state", "process_state", "pending_questions", "cache_hint",
+            "agent", "backend", "external_protocol", "send_delivery", "external_cloud_control", "client_context",
+            "tracked", "send_available", "send_supported"})
         result.insert(QString::fromLatin1(field), data.value(QString::fromLatin1(field)));
     result.insert("session_usage", QJsonObject{{"prompt_cache", data.value("session_usage").toObject().value("prompt_cache")}});
     return result;
@@ -190,6 +195,15 @@ public:
         const auto insets = contentsMargins();
         return {fontMetrics().horizontalAdvance(text()) + insets.left() + insets.right() + 2 * margin(),
                 fontMetrics().height() + insets.top() + insets.bottom() + 2 * margin()};
+    }
+protected:
+    // #542: on a line too short for the whole ID, its middle elides instead
+    // of the end being clipped; selection works on the whole ID again once it fits.
+    void paintEvent(QPaintEvent *event) override {
+        const auto area = contentsRect().adjusted(margin(), margin(), -margin(), -margin());
+        if (fontMetrics().horizontalAdvance(text()) <= area.width()) { QLabel::paintEvent(event); return; }
+        QPainter painter(this); painter.setPen(palette().color(foregroundRole())); painter.setFont(font());
+        painter.drawText(area, Qt::AlignLeft | Qt::AlignVCenter, fontMetrics().elidedText(text(), Qt::ElideMiddle, area.width()));
     }
 };
 
@@ -305,6 +319,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_organization = SessionOrganization(savedProjects);
     m_pendingLaunches = SettingsJson::object("workspace/pendingLaunches");
     m_creations=new SessionCreationController(m_client.executable(),this);
+    m_confirmPoll=new QTimer(this);m_confirmPoll->setInterval(2000);connect(m_confirmPoll,&QTimer::timeout,this,&SessionsWindow::pollConfirmingCreations);
     if (!settings.value("sessions/geometry").toByteArray().isEmpty()) restoreGeometry(settings.value("sessions/geometry").toByteArray());
     // WhiteWh fork: a skin may put its own title bar above the rail and the pages.
     auto *frame = new QVBoxLayout(this); frame->setContentsMargins(0, 0, 0, 0); frame->setSpacing(0);
@@ -610,6 +625,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         emit notificationPreferencesChanged(original.host, original.session.name, original.session.runId,
                                             original.session.conversationId, preferences);
         if (!thenUnmute) return;
+        // The signal's receiver (TrayAgent) calls setFleet at once, which
+        // replaces m_fleet and frees the box read above: read it again.
+        box = original.host.isEmpty() ? &m_fleet.local() : m_fleet.peer(original.host);
+        if (!box) return;
         for (const auto &s : box->sessions) if (s.name == original.session.name && s.runId == original.session.runId
                                                 && s.conversationId == original.session.conversationId && s.state != "archived") {
             Entry next = original; next.session = s;
@@ -857,6 +876,21 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             download->setAutoDefault(false); open->setAutoDefault(false); showFile->setAutoDefault(false);
             const QString remotePath = path.isEmpty() && target.path.startsWith("~/") ? target.path : path;
             const bool downloadable = online && !remotePath.isEmpty();
+#ifdef Q_OS_WIN
+            // Keep the source conversation immutable across the nested modal.
+            // Native proof, not a lexical mapping, authorizes each read.
+            QJsonObject scope{{"session",entry->session.name},{"run_id",entry->session.runId},
+                {"conversation_id",entry->session.conversationId},{"path",remotePath}};
+            if(!entry->session.archiveId.isEmpty())scope["archive_id"]=entry->session.archiveId;
+            if(!m_subagentId.isEmpty())scope["agent_id"]=m_subagentId;
+            auto *mapped=new QPushButton(tr("Open mapped Windows original…"));mapped->setObjectName("openMappedSessionFile");mapped->setAutoDefault(false);
+            mapped->setEnabled(downloadable&&!entry->session.runId.isEmpty()&&!entry->session.conversationId.isEmpty()&&remotePath.startsWith('/'));
+            layout->insertWidget(layout->count()-1,mapped);
+            connect(mapped,&QPushButton::clicked,&dialog,[this,host,scope,&dialog]{
+                WslFileOpenDialog original(m_client.executable(),host,scope,&dialog);
+                if(original.exec()==QDialog::Accepted)showNotice(original.outcomeNotice());
+            });
+#endif
             download->setEnabled(downloadable); open->setEnabled(downloadable);
             if (!online) hint->setText(tr("%1 is offline. Connect to this machine to download its files.").arg(machine));
             else if (remotePath.isEmpty()) hint->setText(tr("The session folder is unknown. Copy the path or use the SSH terminal to locate the file."));
@@ -1116,6 +1150,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_workingLine = new WorkingLine; inputColumn->addWidget(m_workingLine);
     // U35: messages hgs holds until the agent takes the previous one, above the field.
     m_heldBar = new HeldInputBar; m_heldBar->setObjectName("sessionHeldInputs"); inputColumn->addWidget(m_heldBar);
+    // Text left in the agent's Terminal input holds every send: show it here.
+    m_terminalDraft = new TerminalDraftBar(&m_client); m_terminalDraft->setObjectName("sessionTerminalDraft"); inputColumn->addWidget(m_terminalDraft);
+    m_terminalDraft->openTerminal = [this] { if (const auto *entry = selected()) openSessionTerminal(entry->host, entry->session.name); };
+    m_terminalDraft->submitted = [this] { inspect(); };
     m_heldBar->cancel = [this](const QString &id, const QString &text) {
         const auto *entry = selected(); if (!entry) return;
         m_heldCancels.insert(m_client.requestCancelHeld(entry->host, entry->session.name, id), {entry->key, text});
@@ -1486,9 +1524,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // machine, folder, branch, model, last event and Keep cache warm.
     auto *environment=m_inspector->body(InspectorCards::Environment);
     const auto envIcon=[](const char *glyph){auto *icon=new QLabel;icon->setObjectName("inspectorEnvIcon");icon->setProperty("glyph",QString::fromLatin1(glyph));icon->setFixedSize(14,14);return icon;};
-    auto *identity = new QWidget; identity->setObjectName("detailsIdentity");
-    auto *identityRow = new QHBoxLayout(identity); identityRow->setContentsMargins(0,0,0,0); identityRow->setSpacing(9);
-    m_detailsIdTitle = label(tr("Session ID"), "detailsIdentityTitle"); m_detailsIdTitle->hide();
+    m_detailsIdTitle = label(tr("Session ID"), "detailsIdentityTitle");
     m_detailsIdValue = new SessionIdentityLabel(tr("Not confirmed"));
     m_detailsIdValue->setObjectName("detailsIdentityValue"); m_detailsIdValue->setTextFormat(Qt::PlainText);
     m_detailsIdValue->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); m_detailsIdValue->setMinimumWidth(0);
@@ -1498,7 +1534,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_copySessionId->setProperty("sessionHeaderAction", true);
     configureWorkspaceIconButton(m_copySessionId, "copy", tr("Copy session ID"), m_dark);
     connect(m_copySessionId, &QPushButton::clicked, this, &SessionsWindow::copySessionIdentity);
-    identityRow->addWidget(envIcon("key")); identityRow->addWidget(m_detailsIdTitle); identityRow->addWidget(m_detailsIdValue,1); identityRow->addWidget(m_copySessionId);
+    auto *identity = new InspectorIdentityRow(envIcon("key"), m_detailsIdTitle, m_detailsIdValue, m_copySessionId);
+    identity->setObjectName("detailsIdentity");
     environment->addWidget(identity);
     for(const auto &[glyph,name,mode]:{std::tuple{"monitor","machine",Qt::ElideRight},std::tuple{"folder","folder",Qt::ElideRight},
             std::tuple{"git-branch","branch",Qt::ElideMiddle},std::tuple{"asterisk","model",Qt::ElideRight},std::tuple{"clock","last event",Qt::ElideRight}}) {
@@ -1698,6 +1735,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             for(const auto &member:team.members)if(!member.lead&&member.id!=team.lead&&!member.session.isEmpty())members.insert(member.host+'\n'+member.session);
         if(members!=m_teamMembers){m_teamMembers=members;m_fleet.setTeamMembers(members);emit teamMembersChanged(members);}
         rebuild();updateTeamPanel();
+        if(!m_pendingTeamAttention.isEmpty()&&m_teams->team(TeamAttentionNotices::teamOf(m_pendingTeamAttention)))showTeamAttention(m_pendingTeamAttention);
         const auto changes=m_teamNotices->observe(m_teams->teams());
         if(changes.raised.isEmpty()&&changes.cleared.isEmpty())return;
         QSettings().setValue("teams/attentionNotified",m_teamNotices->known());
@@ -1909,6 +1947,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_creations,&SessionCreationController::changed,this,[this](const QString &id,const QJsonObject &operation){
         if(operation["state"]=="bound")m_pendingLaunches.remove(id);
         else m_pendingLaunches[id]=operation;
+        // A launched session waits to be listed; its computer is read until then.
+        if((operation["state"]=="confirming"||operation["state"]=="recover")&&!m_confirmPoll->isActive()){m_confirmPollAge.start();m_confirmPoll->start();}
         if(!operation["show_pending"].toBool()){
             if(m_revealCreation==id)m_revealCreation.clear();
             if(m_selectedCreation==id)m_selectedCreation.clear();
@@ -2517,10 +2557,26 @@ void SessionsWindow::applyTheme()
     const QString bg = colors.background;
     const QString hover = colors.hover;
     const QString selected = colors.selected;
-    // Placeholder text is painted from the palette, not from the stylesheet:
-    // in a dark theme a light system palette would leave it near-black.
+    // The whole window follows the theme, not only what the stylesheet names:
+    // a widget it does not cover paints the palette, and a light Windows
+    // palette under the dark theme left pages and views light (Settings >
+    // Worktrees and Keyboard, user report 2026-10-28). Placeholder text is
+    // painted from the palette too.
     QPalette themedPalette = palette();
-    themedPalette.setColor(QPalette::PlaceholderText, QColor(colors.muted));
+    const QColor window(bg), text(colors.foreground), base(colors.surface), muted(colors.muted);
+    for (const auto group : {QPalette::Active, QPalette::Inactive, QPalette::Disabled}) {
+        const QColor foreground = group == QPalette::Disabled ? muted : text;
+        themedPalette.setColor(group, QPalette::Window, window);
+        themedPalette.setColor(group, QPalette::AlternateBase, window);
+        themedPalette.setColor(group, QPalette::Base, base);
+        themedPalette.setColor(group, QPalette::Button, base);
+        themedPalette.setColor(group, QPalette::ToolTipBase, base);
+        themedPalette.setColor(group, QPalette::WindowText, foreground);
+        themedPalette.setColor(group, QPalette::Text, foreground);
+        themedPalette.setColor(group, QPalette::ButtonText, foreground);
+        themedPalette.setColor(group, QPalette::ToolTipText, text);
+        themedPalette.setColor(group, QPalette::PlaceholderText, muted);
+    }
     setPalette(themedPalette);
     // WhiteWh fork: selected text needs a colour apart from the canvas. A skin whose
     // selected rows are a faint tint of it (Compact) selects text in its accent instead.
@@ -3554,6 +3610,25 @@ void SessionsWindow::newSessionLaunchFailed(const QString &launchId, const QStri
         : tr("Could not start session %1: %2").arg(name, error), true);
 }
 
+// A created session is confirmed when its computer's listing shows it. Peers
+// are listed once a minute, or only through their event stream, so a session
+// not listed yet at the one refresh after its launch waited up to a minute
+// (user report 2026-10-28): its computer is read every 2 s until the session
+// is placed, for at most 3 minutes.
+void SessionsWindow::pollConfirmingCreations()
+{
+    QSet<QString> hosts;
+    for (auto it = m_pendingLaunches.constBegin(); it != m_pendingLaunches.constEnd(); ++it) {
+        const auto launch = it.value().toObject();
+        const auto state = launch.value("state").toString();
+        // "recover": one restored after a restart, which the listing also places.
+        if (launch.value("creation_schema").toInt() == 1 && (state == QLatin1String("confirming") || state == QLatin1String("recover")))
+            hosts.insert(launch.value("host").toString());
+    }
+    if (hosts.isEmpty() || m_confirmPollAge.elapsed() > 180000) { m_confirmPoll->stop(); return; }
+    for (const auto &host : std::as_const(hosts)) emit hostRefreshRequested(host);
+}
+
 void SessionsWindow::placeLaunchedSessions()
 {
     bool changed = false;
@@ -3799,7 +3874,7 @@ void SessionsWindow::rebuild()
         m_sessionsStale = true; m_rebuilding = false;
         // Rows requested or still being prepared for the list are dropped:
         // showing the page rebuilds it.
-        m_rowRequestQueued = false;
+        m_rowRequestQueued = false; m_rowsAgain = false;
         if (m_rowsPending) { ++m_rowGeneration; m_rowsPending = false; }
         return;
     }
@@ -4011,12 +4086,23 @@ void SessionsWindow::inspect()
     const auto *entry = selected();
     if(isVisible() && m_pages->currentIndex()==3)updateDashboardAccounts(true);
     if (!isVisible() || m_pages->currentIndex() != 0 || !entry || !entry->online) return;
+    // WhiteWh fork: the Tasks card lists the agent's background jobs from this
+    // read, so it is made while the card is on screen even with the Processes
+    // tab off, at the background interval (owner, 2026-10-28: with the tab off,
+    // which is the default, the card never showed them).
+    const bool tasksCard=m_inspector&&m_inspector->isVisible()&&m_inspector->isOpen(InspectorCards::Tasks);
     const int processInterval=m_detailTabs->currentWidget()==m_processes?ProcessSettings::activeMs():ProcessSettings::backgroundMs();
-    const bool processes=ProcessSettings::enabled() && (!m_processPollAge.isValid() || m_processPollAge.elapsed()>=processInterval);
+    // The first read of a newly selected session skips processes: reading them
+    // takes 1 to 8 s on Windows, and Activity waited for it (owner, 2026-10-28:
+    // switching took about 4 s). The next poll reads them.
+    const bool processes=!m_details.isEmpty() && (ProcessSettings::enabled()||tasksCard)
+        && (!m_processPollAge.isValid() || m_processPollAge.elapsed()>=processInterval);
     // A live event stream brings Activity as it happens (EventStream.h); only
     // the process section is still polled, at its own interval.
     auto *streams = EventStreams::instance();
-    const bool streamed = streams && streams->live(entry->host) && entry->session.archiveId.isEmpty()
+    // External workstreams expose a cooperative inbox, outside watch-v1's
+    // native Activity journal. Keep their scoped inspection on the poll path.
+    const bool streamed = entry->session.cmd != "external" && streams && streams->live(entry->host) && entry->session.archiveId.isEmpty()
         && !m_streamEnded.contains(entry->host + '\n' + entry->session.name + '\n' + entry->session.runId);
     if (streams) {
         if (streamed) streams->follow(entry->host, entry->session.name, entry->session.runId, entry->session.conversationId, m_cursor);
@@ -4314,6 +4400,11 @@ void SessionsWindow::renderHeld()
             if (!listed.contains(value.toObject().value("request_id").toString())) held.append(value);
     m_heldBar->setColors(QColor(m_fg), QColor(m_muted), QColor(m_border), QColor(m_surface));
     m_heldBar->setHeld(held, entry ? IdentityBadges::providerName(entry->session.cmd) : QString());
+    // Messages waiting for an agent that is not working: a Terminal draft may hold them.
+    m_terminalDraft->setColors(QColor(m_fg), QColor(m_muted), QColor(m_border), QColor(m_surface));
+    m_terminalDraft->setSession(entry ? entry->host : QString(), entry ? entry->session.name : QString(),
+                                entry ? m_details.value("run_id").toString() : QString(), entry ? m_details.value("conversation_id").toString() : QString());
+    if (!held.isEmpty() && m_details.value("activity").toString() != QLatin1String("busy")) m_terminalDraft->check(true);
 }
 
 void SessionsWindow::openSessionTerminal(const QString &host, const QString &name)
@@ -4486,6 +4577,7 @@ void SessionsWindow::renderDetails()
         m_copySessionId->setEnabled(false); m_copyHeaderId->setEnabled(false);
         m_question->setQuestion({}, {}); m_question->hide();
         m_terminal->setAvailable(false, tr("Select a running session."));
+        m_composer->setCooperativeInbox(false);
         m_composer->setAvailability(false, tr("Select a session.")); return;
     }
     m_composer->setFileReferenceTarget(m_subagentId.isEmpty() ? entry->key : QString(), entry->host, entry->machine,
@@ -4493,6 +4585,7 @@ void SessionsWindow::renderDetails()
     // U25: the composer row's Copy session reference, as the session menu offers it.
     m_composer->setSessionReferenceAvailable(entry->online && !m_details.value("run_id").toString(entry->session.runId).isEmpty());
     auto s = entry->session;
+    m_composer->setCooperativeInbox(s.cmd=="external");
     if (m_details.value("tracked").toBool() && m_details.value("last_event_at").toDouble() >= s.lastEventAt
         && m_details.value("provider_status_at").toDouble() >= s.providerStatusAt) {
         s.phase = m_details.value("phase").toString(s.phase); s.activity = m_details.value("activity").toString(s.activity);
@@ -4627,9 +4720,10 @@ void SessionsWindow::renderDetails()
     const bool updating = terminating || m_pending || m_settingsRequest || !m_renameKey.isEmpty() || m_composer->isSending(m_selectedKey) || answering || restoredPending;
     const bool occupied = archived && archiveNameOccupied(*entry);
     const bool terminalAvailable=NativeSessionCapabilities::terminal(s,m_details);
-    m_openAction->setVisible(!archived && (s.cmd=="dsh"||terminalAvailable));
-    const QString openCaption = s.cmd == "dsh" ? tr("Open native DeepSeek UI in browser") : m_clipboard ? tr("Copy connect command") : tr("Open externally");
-    m_openAction->setText(openCaption); m_openAction->setEnabled(entry->online && !updating && !archived && (s.cmd=="dsh"||terminalAvailable));
+    const bool externalLink=s.cmd=="external"&&!ConversationSource::chatUrl(m_details.value("external_url").toString()).isEmpty();
+    m_openAction->setVisible(!archived && (s.cmd=="dsh"||terminalAvailable||externalLink));
+    const QString openCaption = externalLink?tr("Open originating chat"):s.cmd == "dsh" ? tr("Open native DeepSeek UI in browser") : m_clipboard ? tr("Copy connect command") : tr("Open externally");
+    m_openAction->setText(openCaption); m_openAction->setEnabled(entry->online && !updating && !archived && (s.cmd=="dsh"||terminalAvailable||externalLink));
     const QString pauseCaption = updating ? tr("Updating…") : archived ? tr("Restore session") : s.state == "running" ? tr("Pause session") : tr("Resume session");
     m_changeAction->setText(pauseCaption);
     // Codex defers SessionStart after resume; its verified restored conversation can pause too.
@@ -4655,7 +4749,6 @@ void SessionsWindow::renderDetails()
     else if (archived && !m_details.value("last_restore_error").toString().isEmpty())
         hint = tr("Last restore failed: %1").arg(m_details.value("last_restore_error").toString());
     else if (!m_inspectError.isEmpty()) hint = m_inspectError;
-    else if (!s.subagentConfirm.isEmpty()) hint = s.subagentConfirm;
     else if (!questionError.isEmpty()) hint = tr("Could not load agent questions: %1. Check Terminal.").arg(questionError);
     else if (archived && occupied) hint = tr("Another active or saved session uses this name. Restore becomes available when that name is free.");
     else if (archived && !s.resumable) hint = tr("This session is archived. Its conversation history is currently unavailable, so it cannot be restored.");
@@ -4665,6 +4758,10 @@ void SessionsWindow::renderDetails()
     else if (s.state == "stopped") hint = tr("Agent stopped. Its saved conversation can be resumed.");
     else if (s.processState == "exited") hint = tr("The agent process exited, but its terminal session still exists. Open the terminal to inspect it.");
     else if (s.conversationState == "ended" && s.activity != "idle") hint = tr("The last conversation ended, but the agent process is still running. Its current activity is unconfirmed; open the terminal to check.");
+    // U19: the record keeps its last subagent note for good; it says something
+    // only while that ask waits, and only when someone else answers it.
+    else if (state == "Needs approval" && s.subagentConfirm == QLatin1String("asked; the team's lead answers"))
+        hint = tr("The agent asks to start subagents. Its team's lead answers.");
     else if (state == "Needs approval" || state == "Needs input") hint = tr("Your agent needs you. Open its terminal to respond.");
     else if (s.activity == "busy") hint = tr("Agent is active. Pause becomes available after the response and subagents finish.");
     else if (SessionPresentation::backgroundIdle(s)) hint = (s.backgroundProcesses == 1
@@ -5277,6 +5374,12 @@ QString SessionsWindow::messageBlockReason(const Entry &entry) const
     if (!entry.online) return tr("Machine unavailable. Your draft stays here.");
     if (entry.session.state != "running") return tr("Resume the session to send a message.");
     if (m_pending || !m_renameKey.isEmpty()) return tr("Wait for the session update to finish.");
+    if(entry.session.cmd=="external") {
+        if(!m_inspectError.isEmpty()||m_details.isEmpty())return tr("Refresh the external inbox before queueing an instruction.");
+        if(!ConversationSource::cooperative(m_details)||m_details["run_id"].toString()!=entry.session.runId||m_details["conversation_id"].toString()!=entry.session.conversationId)
+            return tr("The external inbox identity or supported protocol is not verified.");
+        return {};
+    }
     if (!QStringList{"codex", "claude", "kimi", "dsh", "opencode"}.contains(entry.session.cmd)) return tr("Use the Terminal tab to type into this session.");
     if (!m_inspectError.isEmpty()) return tr("Refresh the session before sending.");
     if (m_details.isEmpty()) return tr("Checking the session…");
@@ -5744,6 +5847,15 @@ void SessionsWindow::continueAfterStart(const QString &host, const QString &name
         || m_terminating.contains(m_startSend.key)
         || (!data.value("expected_id").toString().isEmpty() && !data.value("resume_message_can_send").toBool())
         || (conversation.isEmpty() && !data.value("first_message_can_send").toBool())) return;
+    // A ready inspection can precede the catalog's paused -> running update.
+    // Keep the continuation queued until both name the new incarnation;
+    // otherwise the async send guard correctly rejects the still-paused row
+    // after we have already discarded the continuation.
+    const auto current = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &entry) {
+        return entry.key == m_startSend.key && entry.host == host && entry.session.name == name;
+    });
+    if (current == m_entries.cend() || !current->online || current->session.state != "running"
+        || current->session.runId != run || current->session.conversationId != conversation) return;
     const auto pending = m_startSend;
     if (pending.compact && (conversation.isEmpty() || !data.value("compact_context_supported").toBool())) return;
     m_startSend = {};
@@ -5854,7 +5966,8 @@ void SessionsWindow::deliverMessage(const QString &key, const QString &host, con
                 || !current->online || isTerminating(*current)) return false;
             if (!evidence.isEmpty() && (evidence.value("run_id").toString() != runId
                 || evidence.value("conversation_id").toString() != conversationId
-                || evidence.value("runtime_state") != "live" || evidence.value("process_state") != "running")) return false;
+                || (target.session.cmd=="external" ? !ConversationSource::cooperative(evidence)
+                    : evidence.value("runtime_state") != "live" || evidence.value("process_state") != "running"))) return false;
             if (m_pending || !m_renameKey.isEmpty() || (key == m_clearKey && m_clearRequest)
                 || (key == m_settingsKey && m_settingsRequest)) return false;
             if (!retryId.isEmpty()) {
@@ -5910,6 +6023,7 @@ void SessionsWindow::finishMessage(quint64 request, bool ok, const QJsonObject &
     const QString detail = uncertain ? tr("Delivery is not confirmed. Check Terminal before retrying. %1").arg(error) : error;
     m_composer->deliveryFinished(pending.key, ok, detail, uncertain);
     pushSendFinished(request, ok, uncertain);
+    if (!ok && !uncertain && pending.key == m_selectedKey && error.contains(QStringLiteral("has a draft"))) m_terminalDraft->check();
     auto &messages = m_localMessages[pending.key];
     // U35: a held message shows in the queued line, not as a sent card.
     if (ok && receipt.value("status") == "queued") {
@@ -6513,6 +6627,12 @@ void SessionsWindow::copySessionIdentity()
 void SessionsWindow::openSession()
 {
     const auto *e = selected(); if (!e || !e->online || !m_openAction->isEnabled() || e->session.state == "archived" || awaitingRestoredInspection(*e)) return;
+    if(e->session.cmd=="external") {
+        const auto url=ConversationSource::chatUrl(m_details.value("external_url").toString());
+        if(url.isEmpty()||m_details.value("run_id").toString()!=e->session.runId||m_details.value("conversation_id").toString()!=e->session.conversationId){showNotice(tr("Refresh the exact external conversation before opening it."),true);return;}
+        if(!QDesktopServices::openUrl(url))showNotice(tr("Could not open the conversation in the default browser."),true);
+        return;
+    }
     if (e->session.cmd == "dsh") { m_client.openNativeUi(e->host,e->session.name); return; }
     // `hgs a` resumes a saved session; a copied command starts nothing.
     if (!m_clipboard && e->session.state != "running") {
@@ -6523,8 +6643,10 @@ void SessionsWindow::openSession()
         e->host.isEmpty() && e->session.attached && !e->session.clients.isEmpty() ? e->session.clients.first() : QString());
 }
 
-bool SessionsWindow::confirmLocalStart(const Entry &original)
+bool SessionsWindow::confirmLocalStart(Entry original)
 {
+    // The modal loop may rebuild m_entries. Keep the confirmed identity by
+    // value, so the comparison below never reads a retired or replaced row.
     if (!LocalSessionHost::confirmLaunch(this, m_fleet.local(), original.host)) return false;
     const auto *e = selected();
     if (e && e->key == original.key && e->session.state == original.session.state && e->session.runId == original.session.runId
@@ -7339,7 +7461,11 @@ void SessionsWindow::openTeamTask(int task)
 void SessionsWindow::showTeamAttention(const QString &token)
 {
     const auto team=TeamAttentionNotices::teamOf(token);
-    if(team.isEmpty()||!m_teams||!m_teams->team(team))return;
+    m_pendingTeamAttention.clear();
+    if(team.isEmpty()||!m_teams)return;
+    // N32: a notification raised before this window existed can be clicked
+    // before its first team list: open the team once it is read.
+    if(!m_teams->team(team)){m_pendingTeamAttention=token;return;}
     showTeam(team);
     if(m_teamPanel&&m_teamPanel->openWorkspace)m_teamPanel->openWorkspace();
 }

@@ -9,9 +9,22 @@
   .act-tools.warn .act-tools-head b { color: var(--z-color-warn); }
   .act-live b { min-width: 0; }
   .later-screen { flex: 1; align-self: center; }
-  /* Reduce motion (the setting, root data-reduce-motion) stops the remaining endless motion as the media query does. */
-  :root[data-reduce-motion="1"] .typing i, :root[data-reduce-motion="1"] .state-dot.working, :root[data-reduce-motion="1"] .status.working .dot,
-  :root[data-reduce-motion="1"] .busy-arc, :root[data-reduce-motion="1"] .skeleton, :root[data-reduce-motion="1"] .mtile.s-connecting .mtile-dot::after { animation: none; }
+  /* Settings so far (ui/components/SettingsScreen.tsx): the mockup's rows (design/webui styles/settings.css). */
+  .set-scroll { flex: 1; min-width: 0; overflow-y: auto; overflow-x: hidden; }
+  .set-content { max-width: 850px; padding: 22px 28px 48px; display: flex; flex-direction: column; gap: 14px; }
+  .set-head { display: flex; flex-direction: column; gap: 6px; margin-bottom: 2px; }
+  .set-head h2 { font-size: var(--fs-2xl); font-weight: 600; letter-spacing: -.01em; }
+  .set-intro { color: var(--z-color-muted); font-size: var(--fs-sm); max-width: 680px; line-height: 1.5; }
+  .set-foot { color: var(--z-color-dim); font-size: var(--fs-sm); line-height: 1.5; padding: 0 2px; }
+  .set-group { display: flex; flex-direction: column; padding: 4px 16px; background: var(--z-color-card); border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-xl); }
+  .set-group-head { display: flex; align-items: center; gap: 8px; padding: 12px 0 2px; }
+  .set-group-head h3 { font-size: var(--fs-md); font-weight: 600; }
+  .set-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 20px; align-items: center; padding: 12px 0; }
+  .set-group > .set-row + .set-row { border-top: 1px solid var(--z-color-divider); }
+  .set-row-text { min-width: 0; }
+  .set-label { display: block; font-size: var(--fs-md); color: var(--z-color-text); font-weight: 500; }
+  .set-hint { margin-top: 3px; color: var(--z-color-dim); font-size: var(--fs-sm); line-height: 1.45; max-width: 600px; }
+  .set-row-control { justify-self: end; display: flex; align-items: center; gap: 8px; min-width: 0; }
   /* The measurement panel floats over the right edge, clear of the list and the Activity column. */
   .perf-host { position: fixed; z-index: 90; right: 12px; bottom: 40px; width: min(620px, 60vw); max-height: 78vh; overflow: auto; padding: 10px 12px; border-radius: var(--z-radius-lg); border: 1px solid var(--z-color-border); background: var(--z-color-raised); box-shadow: var(--z-shadow-popover); font-size: var(--fs-xs); }
 }

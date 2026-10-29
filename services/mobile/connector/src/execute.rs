@@ -301,12 +301,15 @@ impl<N: Native + 'static> Connector<N> {
                     "native history projection ABI is unavailable",
                 ));
             }
-            if self.flags.get().windows_gateway
-                && !validated.session.is_empty()
-                && !validated
-                    .payload
-                    .as_ref()
-                    .is_some_and(|p| p.get("archive_id").is_some())
+            // External workstreams have no native lifecycle on any platform.
+            // Refuse unsupported commands before native delivery can become uncertain.
+            if validated.session.starts_with("external/")
+                || (self.flags.get().windows_gateway
+                    && !validated.session.is_empty()
+                    && !validated
+                        .payload
+                        .as_ref()
+                        .is_some_and(|p| p.get("archive_id").is_some()))
             {
                 self.windows_target(&validated).await?;
             }
@@ -431,10 +434,19 @@ impl<N: Native + 'static> Connector<N> {
             ]))
             .await?;
         if detail["name"].as_str() != Some(&validated.session)
-            || !crate::capabilities::windows_provider(&detail["agent"])
+            || !crate::capabilities::windows_session(&detail)
             || detail.as_object().is_none_or(is_archived)
         {
             return Err(Failure::text(crate::capabilities::WINDOWS_PROVIDER_REFUSAL));
+        }
+        if crate::capabilities::external_workstream(&detail)
+            && (!crate::capabilities::external_operation_allowed(&validated.operation)
+                || validated
+                    .payload
+                    .as_ref()
+                    .is_some_and(|p| p.get("archive_id").is_some() || p.get("agent_id").is_some()))
+        {
+            return Err(Failure::text("External chats support checkpoint inspection/history and cooperative inbox submission only; native controls cannot be forwarded"));
         }
         if let Some(payload) = &validated.payload {
             for (expected, field) in [
@@ -828,7 +840,11 @@ impl<N: Native + 'static> Connector<N> {
                 // WhiteWh fork: a Windows gateway shows the phone only its
                 // projects' working folders, each without its subfolders.
                 if self.flags.get().windows_gateway {
-                    let folder = kept.get("path").and_then(Value::as_str).unwrap_or_default().to_owned();
+                    let folder = kept
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
                     if !self.project_folder(&folder).await? {
                         return Err(Failure::text(crate::windows_paths::PROJECT_FOLDERS_ONLY));
                     }
@@ -898,9 +914,7 @@ impl<N: Native + 'static> Connector<N> {
             argv.extend(["--after".into(), int_literal(after).unwrap_or_default()]);
         }
         let mut result = self.call(Call::new(argv)).await?;
-        if self.flags.get().windows_gateway
-            && !crate::capabilities::windows_provider(&result["agent"])
-        {
+        if self.flags.get().windows_gateway && !crate::capabilities::windows_session(&result) {
             return Err(Failure::text(crate::capabilities::WINDOWS_PROVIDER_REFUSAL));
         }
         let object = result.as_object();

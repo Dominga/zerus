@@ -1,3 +1,4 @@
+#include "ConversationSource.h"
 #include "MessageComposer.h"
 #include "OpenCodeEffort.h"
 #include "OpenCodeModelPicker.h"
@@ -581,7 +582,8 @@ QString MessageComposer::suggestion() const { return isWaitingToSend(m_key) ? QS
 void MessageComposer::updatePlaceholder()
 {
     const QString text = suggestion();
-    m_editor->setPlaceholderText(!text.isEmpty() ? text : !m_placeholder.isEmpty() ? m_placeholder : tr("Message this agent…"));
+    m_editor->setPlaceholderText(m_cooperativeInbox ? tr("Queue an instruction; the external agent must read it…")
+        : !text.isEmpty() ? text : !m_placeholder.isEmpty() ? m_placeholder : tr("Message this agent…"));
 }
 
 void MessageComposer::setTaskMode(bool taskMode)
@@ -636,6 +638,15 @@ void MessageComposer::trimDraftCache() {
 void MessageComposer::setAttachmentAvailability(bool available, const QString &reason)
 {
     m_attachmentsAvailable=available;m_attachmentsReason=reason;updateControls();
+}
+
+void MessageComposer::setCooperativeInbox(bool enabled)
+{
+    if(m_cooperativeInbox==enabled)return;
+    m_cooperativeInbox=enabled;
+    m_editor->setAccessibleName(enabled?tr("Instruction for external agent inbox"):tr("Message to selected agent"));
+    updatePlaceholder();
+    updateControls();
 }
 
 void MessageComposer::setAvailability(bool available, const QString &reason)
@@ -1200,14 +1211,15 @@ void MessageComposer::updateControls()
     m_send->setEnabled(!m_key.isEmpty() && m_available && hasContent && (draft.attachments.isEmpty()||m_attachmentsAvailable) && !tooLong && !locked && !draft.uncertain);
     m_attach->setVisible(true);
     const bool iconOnly = property("sendIconOnly").toBool();
-    const QString idleText = m_taskMode ? m_sendLabel : tr("Send");
-    const QString sendText = draft.sending ? (m_taskMode ? tr("Saving…") : tr("Sending…")) : waiting ? tr("Waiting to send…") : idleText;
+    const QString idleText = m_taskMode ? m_sendLabel : m_cooperativeInbox ? tr("Queue") : tr("Send");
+    const QString sendText = draft.sending ? (m_taskMode ? tr("Saving…") : m_cooperativeInbox ? tr("Queueing…") : tr("Sending…")) : waiting ? tr("Waiting to send…") : idleText;
     m_send->setIconSize(iconOnly ? QSize(20, 20) : QSize(14, 14));
     // WhiteWh fork: the compact card's Send is a pill that says Send; other states keep only the icon.
     m_send->setText((iconOnly && sendText == idleText) || (m_compact && sendText != idleText) ? QString() : sendText);
     m_send->setAccessibleName(m_taskMode ? m_sendLabel : sendText);
     m_send->setToolTip(waiting ? m_waitingSends.value(m_key) : m_taskMode ? tr("%1: Enter; new line: Shift+Enter").arg(m_sendLabel)
         : m_compact ? sendText + " · " + tr("Enter; new line: Shift+Enter") : tr("Send: Enter; new line: Shift+Enter"));
+    if (m_cooperativeInbox && !m_taskMode) m_send->setToolTip(ConversationSource::queueWarning());
     m_retry->setVisible(draft.uncertain && !operationLocked);
     m_refreshStatus->setVisible(!m_sessionStatus.isEmpty() && m_sessionStatusError);
     m_refreshStatus->setEnabled(!operationLocked);
@@ -1220,6 +1232,7 @@ void MessageComposer::updateControls()
     const bool ownError = (!waiting && draft.error) || tooLong || !draft.storageError.isEmpty();
     if (status.isEmpty() && !draft.attachments.isEmpty() && !m_attachmentsAvailable) status=m_attachmentsReason;
     if (status.isEmpty()) status = tooLong ? tr("Message exceeds 64 KiB.") : !m_sessionStatus.isEmpty() ? m_sessionStatus : m_unavailableReason;
+    if(status.isEmpty()&&m_cooperativeInbox)status=ConversationSource::queueWarning();
     const auto detail = !m_sessionStatus.isEmpty() && m_sessionStatus != status ? status + '\n' + m_sessionStatus : status;
     const bool rich = status == m_sessionStatus && !m_sessionStatusHtml.isEmpty();
     m_status->setTextFormat(rich ? Qt::RichText : Qt::PlainText); m_status->setText(rich ? m_sessionStatusHtml : status);

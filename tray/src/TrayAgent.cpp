@@ -5,6 +5,7 @@
 #include "QuestionNotificationSettings.h"
 #include "AutomaticApprovals.h"
 #include "CacheKeepalive.h"
+#include "TeamAttentionWatch.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -203,6 +204,12 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
             QTimer::singleShot(16000, this, [this, token] { if (m_pendingAttention == token) resolveAttentionClick(true); });
         });
     });
+    // N32 of #499: Zerus started in the tray still learns of a stuck team
+    // permission; the window's own team poll replaces this one (showSessions).
+    m_teamWatch = new TeamAttentionWatch(&m_client, this);
+    connect(m_teamWatch, &TeamAttentionWatch::raised, this, [this](const QString &token, const QString &title, const QString &body) { m_notifier->post(token, title, body); });
+    connect(m_teamWatch, &TeamAttentionWatch::cleared, this, [this](const QString &token) { m_notifier->withdraw(token); });
+    m_teamWatch->setActive(true);
     connect(m_notifier.get(), &AttentionNotifier::failed, this, [this](const QString &token, const QString &detail) {
         qWarning().noquote() << "Zerus: notification:" << detail;
         if(UpdateController::isUpdateToken(token)||token.startsWith(QLatin1String("zerus-fork-update:"))||token.startsWith(QLatin1String("zerus-team-attention:")))return;
@@ -405,13 +412,18 @@ TrayAgent::~TrayAgent()
 
 QStringList TrayAgent::jsonSettings()
 {
-    return {QStringLiteral("attention/observed"), QStringLiteral("attention/readReplies"), QStringLiteral("attention/sessionMarks"),
+    QStringList keys{QStringLiteral("attention/observed"), QStringLiteral("attention/readReplies"), QStringLiteral("attention/sessionMarks"),
             QStringLiteral("attention/pendingReads"), QStringLiteral("attention/sharedReadMigrated"), QStringLiteral("attention/linuxTokens"),
             QStringLiteral("workspace/organization"), QStringLiteral("workspace/pendingLaunches"), QStringLiteral("workspace/launchAccounts"),
+            QStringLiteral("workspace/cacheKeepWarm"), QStringLiteral("workspace/ironRules"), QStringLiteral("workspace/sessionLeads"),
             QStringLiteral("workspace/worktreeSnapshots"), QStringLiteral("workspace/repositoryClone/*/pending"),
             QStringLiteral("swarm/observedOrganization"), QStringLiteral("swarm/observedVersions"),
             QStringLiteral("recovery/sharedPolicy"), QStringLiteral("speech/providerOperation"),
             QStringLiteral("tasks/pendingExecutorLaunches"), QStringLiteral("tasks/newCard/*/request")};
+    // Mapping identities are direct children, rather than per-child groups.
+    QSettings settings; settings.beginGroup(QStringLiteral("pathMappings"));
+    for (const auto &key : settings.childKeys()) keys << QStringLiteral("pathMappings/") + key;
+    return keys;
 }
 
 TrayAgent::ReadState TrayAgent::storedReadState()
@@ -470,12 +482,14 @@ void TrayAgent::onLocalReady(const BoxState &box)
     migrateReadMarks({}); publishReadMarks(); warmCaches({}, m_state.local());
     for (const auto &peer : previousPeers) if (!m_state.peerNames().contains(peer)) {
         BoxState removed; removed.host = peer; removed.ok = true; observeAttention(peer, removed);
+        m_privateStores.forget(peer);
     }
     for (const auto &peer : m_state.peerNames())
         if (!previousPeers.contains(peer)) m_client.requestPeer(peer);
     if (m_streams && previousPeers != m_state.peerNames()) m_streams->setHosts(QStringList{QString()} + m_state.peerNames());
     updateLocalPoll(box);
     observeAttention({}, m_state.local());
+    observePrivateStores({}, m_state.local());
     if (m_sessionsWindow) { m_sessionsWindow->setConnectionError(m_localReadError); m_sessionsWindow->setFleet(m_state); m_sessionsWindow->setPollingHosts(m_client.pollingHosts()); }
     refreshIcon();
     // Тик раз в 2с не должен перестраивать меню, пока оно открыто под курсором --
@@ -505,6 +519,7 @@ void TrayAgent::onPeerReady(const BoxState &box)
     m_automaticApprovals->setFleet(m_state);
     migrateReadMarks(box.host); publishReadMarks(); warmCaches(box.host, *m_state.peer(box.host));
     observeAttention(box.host, *m_state.peer(box.host));
+    observePrivateStores(box.host, *m_state.peer(box.host));
     if (m_sessionsWindow) m_sessionsWindow->setFleet(m_state);
     refreshIcon();
     // В отличие от локального тика (каждые 2с) ответы пиров редки -- минутный фон или
@@ -557,6 +572,15 @@ void TrayAgent::refreshIcon()
     }
     m_tray->setIcon(m_icons.forCounts(m_state.totalSessions(), attention, m_state.isStale(now)));
     m_tray->setToolTip(m_state.tooltip(now));
+}
+
+void TrayAgent::observePrivateStores(const QString &host, const BoxState &box)
+{
+    // The listing digest covers "private_stores": an unchanged listing changes none.
+    const auto before = m_privateStores.known();
+    for (const auto &notice : m_privateStores.observe(host, host.isEmpty() ? box.host : host, box.ok, box.privateStores))
+        notify(notice.title, notice.body, QSystemTrayIcon::Warning, 20000);
+    if (m_privateStores.known() != before) QSettings().setValue(QStringLiteral("privateStores/notified"), m_privateStores.known());
 }
 
 void TrayAgent::observeAttention(const QString &host, const BoxState &box)
@@ -715,6 +739,8 @@ void TrayAgent::launchSession(const QString &host, const QString &cmd, const QSt
 void TrayAgent::showSessions()
 {
     if (!m_sessionsWindow) {
+        // The window reads the known team items the watch stored and polls from now on.
+        if (m_teamWatch) m_teamWatch->setActive(false);
         m_sessionsWindow = new SessionsWindow(m_cfg.hgsPath);
         const auto publishReadState = [this]() {
             SettingsJson::store(QStringLiteral("attention/readReplies"), QJsonDocument(m_state.readReplies()));
@@ -809,6 +835,11 @@ void TrayAgent::showSessions()
         });
         connect(m_sessionsWindow, &SessionsWindow::refreshRequested, this, [this]() {
             pollLocal(m_client); pollAllKnownPeers(m_client, m_state);
+        });
+        // A created session being confirmed: read its computer now, even one
+        // with a live event stream, which would otherwise not be polled.
+        connect(m_sessionsWindow, &SessionsWindow::hostRefreshRequested, this, [this](const QString &host) {
+            if (host.isEmpty()) m_client.requestLocal(); else m_client.requestPeer(host);
         });
     }
     m_sessionsWindow->setFleet(m_state);

@@ -141,7 +141,7 @@ public:
         const int left = card.left() + 12, right = expand.left() - 6;
         const int muteWidth = index.data(SessionRoles::Muted).toBool() ? 20 : 0;
         const QString agent = index.data(SessionRoles::Agent).toString();
-        const int naturalProvider = agent.isEmpty() ? 0 : IdentityBadges::width(IdentityBadges::Provider, agent, option.font, 95);
+        const int naturalProvider = agent.isEmpty() ? 0 : IdentityBadges::width(IdentityBadges::Provider, agent, option.font, agent=="codex_chat"?130:95);
         const int naturalStatus = SessionStatusBadge::width(status.caption, status.kind, option.font);
         const int room = qMax(0, right - left - muteWidth);
         // Provider glyphs alone do not distinguish every agent (Codex/Shell).
@@ -752,6 +752,8 @@ private:
         // deps its reason (in its tone), a build what runs, Cooling the warmth
         // left, Cold how long the cache has been cold, Stopped how to go on.
         QString lineIcon; QColor lineInk = state == "Offline" ? muted : foreground;
+        // U22/N17: the DeepSeek upload warning is line three in a warning tone.
+        if (index.data(SessionRoles::UploadWarning).toBool()) lineInk = QColor(dark ? "#f0c77b" : "#885400");
         const bool stateLine = SessionStatusBadge::isState(kind) || (status.shown.key == "user" && caption == tr("Needs you"));
         if (stateLine && !status.shown.line.isEmpty()) {
             detail = status.shown.line; lineIcon = status.shown.icon;

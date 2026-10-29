@@ -310,6 +310,22 @@ void TeamWorkspace::render()
         m_leftHost->addWidget(left); left->show(); m_left = left;
         // Members keep their scroll position.
         const int scroll = m_members->verticalScrollBar()->value();
+        // A poll may rebuild Members just after Answer focused Allow. Keep a
+        // decision button focused only for the exact same pending question;
+        // Enter must never transfer to another member or a newer request.
+        QString focusTeam, focusMember, focusQuestion, focusHash, focusControl;
+        if (const auto *focused = QApplication::focusWidget(); focused && m_members->isAncestorOf(focused)
+            && (focused->objectName() == "teamMemberPermissionAllow" || focused->objectName() == "teamMemberPermissionDeny")) {
+            for (auto *box = focused->parentWidget(); box; box = box->parentWidget()) {
+                if (box->objectName() != "teamMemberPermission") continue;
+                focusTeam = box->property("team").toString();
+                focusMember = box->property("member").toString();
+                focusQuestion = box->property("question").toString();
+                focusHash = box->property("questionHash").toString();
+                focusControl = focused->objectName();
+                break;
+            }
+        }
         auto *list = new QWidget; list->setObjectName("teamWorkspaceSide");
         {auto *sv = new QVBoxLayout(list); sv->setContentsMargins(0, 0, 0, 0); sv->setSpacing(0);
          if (auto *lists = sideLists(*team, status)) sv->addWidget(lists);
@@ -317,6 +333,22 @@ void TeamWorkspace::render()
         retire(m_members->takeWidget());
         m_members->setWidget(list); m_membersContent = list;
         m_members->verticalScrollBar()->setValue(scroll);
+        // Answer was clicked a moment ago and the focus has already gone (a
+        // rebuild before this one, or the window briefly inactive): focus the
+        // same question's Allow again (fork CI, leadAnswersAMembersSubagentRequest).
+        if (focusControl.isEmpty() && m_answerAt.isValid() && m_answerAt.elapsed() < 3000 && m_answerTeam == team->id) {
+            focusMember = m_answerMember; focusQuestion = m_answerQuestion; focusHash = m_answerHash;
+            focusTeam = m_answerTeam; focusControl = QStringLiteral("teamMemberPermissionAllow");
+        }
+        if (!focusControl.isEmpty() && focusTeam == team->id && !focusQuestion.isEmpty() && !focusHash.isEmpty()) {
+            for (auto *box : list->findChildren<QFrame *>("teamMemberPermission")) {
+                if (box->property("member").toString() != focusMember || box->property("question").toString() != focusQuestion
+                    || box->property("questionHash").toString() != focusHash) continue;
+                if (auto *control = box->findChild<QPushButton *>(focusControl); control && control->isEnabled() && control->isVisible())
+                    control->setFocus(Qt::OtherFocusReason);
+                break;
+            }
+        }
         renderCoordinator(*team);
     }
     if (m_top) { m_topHost->removeWidget(m_top); retire(m_top); }
@@ -597,10 +629,10 @@ QWidget *TeamWorkspace::headerActionsContent(const Team &team)
         limits->setToolTip(team.resumeAfterLimits
             ? tr("On: a member stopped by a usage limit with a known reset time continues after the reset")
             : tr("Off: a member stopped by a usage limit waits for you or the lead"));
-        QObject::connect(limits, &QPushButton::clicked, this, [this, settings = team.settingsJson](bool on) {
-            QJsonObject changed = settings;
-            changed.insert("resume_after_limits", on);
-            m_panel->act("settings", {{"settings", changed}});
+        // N33 (#548): only the switch's own field, as N13 for the others; the
+        // server merges it, so a lead's newer settings stay.
+        QObject::connect(limits, &QPushButton::clicked, this, [this](bool on) {
+            m_panel->act("settings", {{"settings", QJsonObject{{"resume_after_limits", on}}}});
         });
         h->addWidget(limits);
     }
@@ -762,10 +794,16 @@ bool TeamWorkspace::approvePhase(const QString &id, int phase)
     // F12/N40: a draft approved while an earlier phase runs runs alongside it;
     // the owner is warned of what that costs before anything is sent.
     const int alongside = alongsidePhase(*team, phase);
+    bool barrier = false;
+    for (const auto &group : phaseGroups(*team)) if (group.n == phase) barrier = group.barrier;
     if (alongside) {
+        // N6: a barrier phase's tasks wait for the earlier phase however it is
+        // approved, so its confirmation says that instead of promising them now.
         if (!m_panel->confirm("teamApproveAlongsideConfirm", tr("Approve phase %1 now?").arg(phase),
-                              tr("If you approve phase %1 now, the lead can send members to its tasks while phase %2 still runs, "
-                                 "but can no longer edit this phase. Are you sure?").arg(phase).arg(alongside),
+                              barrier ? tr("Phase %1 is a barrier: its tasks start only when phase %2 is finished, so approving it "
+                                           "now just locks the plan. Are you sure?").arg(phase).arg(alongside)
+                                      : tr("If you approve phase %1 now, the lead can send members to its tasks while phase %2 still runs, "
+                                           "but can no longer edit this phase. Are you sure?").arg(phase).arg(alongside),
                               tr("Approve now")))
             return false;
     } else if (!m_panel->confirm("teamApprovePhaseConfirm", tr("Approve phase?"),
@@ -776,7 +814,11 @@ bool TeamWorkspace::approvePhase(const QString &id, int phase)
     team = currentTeam(id);
     if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
     const QString key = markPhaseDecided(*team, phase);
-    m_panel->act("approve-phase", {{"team", id}, {"phase", phase}}, [this, key](bool ok, const QString &message) { phaseSent(key, ok, message); });
+    // N6: the confirmed alongside approval really hands the tasks out; a
+    // barrier phase keeps its U25 queue because its barrier holds it anyway.
+    QJsonObject request{{"team", id}, {"phase", phase}};
+    if (alongside && !barrier) request["alongside"] = true;
+    m_panel->act("approve-phase", request, [this, key](bool ok, const QString &message) { phaseSent(key, ok, message); });
     return true;
 }
 
@@ -893,7 +935,7 @@ void TeamWorkspace::attentionRows(const Team &team, QVBoxLayout *v)
     if (team.attention.size() > shown) v->addWidget(label(tr("+%1 more").arg(team.attention.size() - shown), c.muted, 10));
 }
 
-void TeamWorkspace::answerAttention(const QString &teamId, const QString &member, const QString &command)
+void TeamWorkspace::answerAttention(const QString &teamId, const QString &member, const QString &command, int attempts)
 {
     // Read the team again: a poll may have rebuilt everything since the click.
     const auto *team = m_teams->team(teamId);
@@ -902,10 +944,24 @@ void TeamWorkspace::answerAttention(const QString &teamId, const QString &member
     for (const auto &m : team->members)
         if (m.id == member || team->roleOf(m.id) == member) { id = m.id; break; }
     for (auto *box : findChildren<QFrame *>("teamMemberPermission")) {
-        if (box->property("member").toString() != id || !box->isVisible()) continue;
+        if (box->property("member").toString() != id) continue;
+        // Built but not shown yet (a rebuild in progress on a loaded
+        // computer): look again shortly instead of falling back to the command.
+        if (!box->isVisible()) {
+            if (attempts > 0) {
+                QTimer::singleShot(100, this, [this, teamId, member, command, attempts] { answerAttention(teamId, member, command, attempts - 1); });
+                return;
+            }
+            continue;
+        }
         m_members->ensureWidgetVisible(box, 0, 24);
         auto *allow = box->findChild<QPushButton *>("teamMemberPermissionAllow");
-        if (allow && allow->isEnabled()) allow->setFocus(Qt::OtherFocusReason);
+        if (allow && allow->isEnabled()) {
+            allow->setFocus(Qt::OtherFocusReason);
+            m_answerTeam = teamId; m_answerMember = box->property("member").toString();
+            m_answerQuestion = box->property("question").toString(); m_answerHash = box->property("questionHash").toString();
+            m_answerAt.start();
+        }
         else if (auto *reason = box->findChild<QLineEdit *>("teamMemberPermissionDenyReason")) reason->setFocus(Qt::OtherFocusReason);
         return;
     }
@@ -935,6 +991,16 @@ const Teams::Team *TeamWorkspace::currentTeam(const QString &id) const
 {
     if (const auto *watched = m_teams->watched(); watched && watched->id == id) return watched;
     return m_teams->team(id);
+}
+
+const Teams::Team *TeamWorkspace::planTeam(const QString &id)
+{
+    const auto *team = currentTeam(id);
+    if (team && team->full) return team;
+    m_error = tr("Loading the plan; try again in a moment.");
+    m_teams->watch(id);
+    scheduleRender();
+    return nullptr;
 }
 
 // Owner, 2026-10-28: a sideways bar must not come and go. An as-needed bar
@@ -976,6 +1042,40 @@ private:
     bool m_pending = false;
 };
 
+// QA #500, finding 1 (SPEC 5.3): the Board scrolls every phase sideways as
+// one page (U33), but a phase's header stays in the visible part: at most as
+// wide as the viewport, and moved along with the sideways scroll, so its
+// actions never leave the view; its info row yields first (FitRow).
+class PinnedPhaseHeaders : public QObject {
+public:
+    PinnedPhaseHeaders(QScrollArea *area, QWidget *content) : QObject(area), m_area(area), m_content(content)
+    {
+        area->viewport()->installEventFilter(this);
+        QObject::connect(area->horizontalScrollBar(), &QScrollBar::valueChanged, this, [this] { pin(); });
+        pin();
+    }
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() == QEvent::Resize) pin();
+        return QObject::eventFilter(watched, event);
+    }
+private:
+    void pin()
+    {
+        if (!m_content) return;
+        const int offset = qMax(0, m_area->horizontalScrollBar()->value());
+        for (auto *holder : m_content->findChildren<QWidget *>(QStringLiteral("teamPhaseHeaderPin"))) {
+            // The same margin on the right as the phase frame has on the left.
+            const int left = holder->mapTo(m_content, QPoint(0, 0)).x();
+            const int room = qMax(240, m_area->viewport()->width() - 2 * left);
+            if (auto *layout = holder->layout(); layout && layout->contentsMargins().left() != offset) layout->setContentsMargins(offset, 0, 0, 0);
+            if (auto *head = holder->findChild<QWidget *>(QStringLiteral("teamPhaseHeader")); head && head->maximumWidth() != room) head->setMaximumWidth(room);
+        }
+    }
+    QScrollArea *m_area;
+    QPointer<QWidget> m_content;
+};
+
 // Owner, 2026-10-28: on a narrow window the workspace toolbar keeps its icons
 // and drops their words. A button marked "compactText" shows its text only
 // while the whole row fits, its "compactIcon" only while it does not, and a
@@ -988,6 +1088,18 @@ protected:
     void resizeEvent(QResizeEvent *event) override { QWidget::resizeEvent(event); refit(); }
     void showEvent(QShowEvent *event) override { QWidget::showEvent(event); refit(); }
 private:
+    void fitCompactSpacing()
+    {
+        auto *row = qobject_cast<QHBoxLayout *>(layout());
+        if (!row) return;
+        row->setSpacing(2); row->setContentsMargins(4, 8, 4, 6);
+        // Style-dependent group frames and switch hints can leave the icon-only
+        // row a few pixels too wide. Use its remaining whitespace before any
+        // control is clipped, keeping each button's full click target.
+        if (sizeHint().width() > width()) {
+            row->setSpacing(0); row->setContentsMargins(0, 8, 0, 6);
+        }
+    }
     // Two steps: first the switch labels go (their switches keep them as
     // tooltips), then the buttons' words.
     void refit()
@@ -1000,7 +1112,7 @@ private:
                 if (l->property("compactHide").toBool() && !l->isHidden()) m_labels += l->sizeHint().width() + spacing;
         }
         const int level = width() >= m_full ? 0 : width() >= m_full - m_labels ? 1 : 2;
-        if (level == m_level) return;
+        if (level == m_level) { if (level == 2) fitCompactSpacing(); return; }
         m_level = level;
         const bool compact = level == 2;
         for (auto *l : findChildren<QLabel *>()) if (l->property("compactHide").toBool()) l->setVisible(level == 0);
@@ -1022,6 +1134,7 @@ private:
             const QIcon icon = b->property("compactIcon").value<QIcon>();
             if (!icon.isNull()) b->setIcon(compact ? icon : QIcon());
         }
+        if (compact) fitCompactSpacing();
     }
     int m_level = 0, m_full = 0, m_labels = 0;
 };
@@ -1044,7 +1157,7 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
     const bool planning = team.status == "planning";
     if (planning) {
         auto *task = button(tr("+ Task"), "teamWorkspaceAddTask");
-        QObject::connect(task, &QPushButton::clicked, this, [this] { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, 0); });
+        QObject::connect(task, &QPushButton::clicked, this, [this] { if (const auto *t = planTeam(m_team)) m_panel->editTask(*t, 0); });
         h->addWidget(task);
         if (m_view == "graph") {
             auto *hint = elided(tr("Drag from a node's right edge onto a task to connect them"), c.dim, 11);
@@ -1177,9 +1290,9 @@ QWidget *TeamWorkspace::canvas(const Team &team)
     // a drag from a node's handle adds a dependency, a selected edge goes.
     if (team.status == "planning") {
         view->editable = true;
-        view->clicked = [this](int id, const QPoint &) { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, id); };
-        view->linked = [this](int dependency, int task) { if (const auto *t = currentTeam(m_team)) m_panel->link(*t, dependency, task, true); };
-        view->unlinked = [this](int dependency, int task) { if (const auto *t = currentTeam(m_team)) m_panel->link(*t, dependency, task, false); };
+        view->clicked = [this](int id, const QPoint &) { if (const auto *t = planTeam(m_team)) m_panel->editTask(*t, id); };
+        view->linked = [this](int dependency, int task) { if (const auto *t = planTeam(m_team)) m_panel->link(*t, dependency, task, true); };
+        view->unlinked = [this](int dependency, int task) { if (const auto *t = planTeam(m_team)) m_panel->link(*t, dependency, task, false); };
     }
     if (team.status != "planning") view->clicked = [this](int id, const QPoint &) {
         const auto *team = currentTeam(m_team);
@@ -1312,6 +1425,18 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
 
 void TeamWorkspace::keepGraphEdit(TaskView *view, const QString &team)
 {
+    // #570: every poll rebuilds the views; the task under the resting pointer
+    // stays lit with its linked tasks until the pointer moves or leaves, or
+    // the task is gone.
+    if (const int hovered = m_graphHover.value(team)) {
+        const auto *current = currentTeam(team);
+        if (current && current->task(hovered)) view->keepHover(hovered);
+        else m_graphHover.remove(team);
+    }
+    view->hoverChanged = [this, team](int from, int to) {
+        if (to) m_graphHover.insert(team, to);
+        else if (m_graphHover.value(team) == from) m_graphHover.remove(team);
+    };
     if (!view->editable && view->editableTasks.isEmpty()) return;
     const auto kept = m_graphEdit.value(team);
     view->keepEdit(kept.first, kept.second);
@@ -1484,7 +1609,9 @@ QWidget *TeamWorkspace::board(const Team &team)
             const auto *record = team.phase(group.n);
             const bool blocked = !approveBlocked(team, group.n).isEmpty() || (!alongside && record && !record->waiting.text.isEmpty());
             approve->setEnabled(!blocked);
-            approve->setToolTip(alongside ? tr("Approve runs phase %1 now, alongside phase %2").arg(group.n).arg(alongside)
+            approve->setToolTip(alongside ? (group.barrier ? tr("Approve phase %1 now; its tasks start when phase %2 is finished")
+                                                           : tr("Approve runs phase %1 now, alongside phase %2"))
+                                            .arg(group.n).arg(alongside)
                                           : approveBlocked(team, group.n));
             QObject::connect(approve, &QPushButton::clicked, this, [this, id = team.id, phase = group.n] {
                 approvePhase(id, phase);
@@ -1607,7 +1734,7 @@ QWidget *TeamWorkspace::phaseColumn(const Team &team)
     for (const auto &group : groups) v->addWidget(phaseScroll(team, group));
     v->addStretch();
     area->setWidget(content);
-    if (boardView) new SideBarFit(area, content);
+    if (boardView) { new SideBarFit(area, content); new PinnedPhaseHeaders(area, content); }
     keepScroll(area, QStringLiteral("phases/") + m_view);
     return area;
 }
@@ -1743,9 +1870,18 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
                               : !errors.isEmpty() ? tr("Fix the plan errors first:\n%1").arg(errors.join(QLatin1Char('\n'))) : acceptBlocked(team, group.n);
         accept->setEnabled(blocked.isEmpty() && !decided);
         const int alongside = alongsidePhase(team, group.n);
-        accept->setToolTip(blocked.isEmpty() ? (alongside ? tr("Hand the phase's tasks out now, alongside phase %1").arg(alongside)
-                                                          : tr("Hand the phase's tasks out (it waits if an earlier phase is still running)"))
-                                              : blocked);
+        QString acceptTip = blocked;
+        if (blocked.isEmpty()) {
+            if (!alongside) {
+                acceptTip = tr("Hand the phase's tasks out (it waits if an earlier phase is still running)");
+            } else if (group.barrier) {
+                // N6: the tasks wait for the earlier phase even when it is approved now.
+                acceptTip = tr("Approve phase %1 now; its tasks start when phase %2 is finished").arg(group.n).arg(alongside);
+            } else {
+                acceptTip = tr("Hand the phase's tasks out now, alongside phase %1").arg(alongside);
+            }
+        }
+        accept->setToolTip(acceptTip);
         QObject::connect(accept, &QPushButton::clicked, this, [this, id = team.id, phase = group.n] { approvePhase(id, phase); });
         h->addWidget(accept);
         // F10 and G9: the order among the drafts and the owner's discard, in a menu.
@@ -1821,7 +1957,17 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         });
         h->addWidget(more);
     }
-    fv->addWidget(head);
+    if (m_view == "board") {
+        // Pinned to the visible part of the sideways page (PinnedPhaseHeaders).
+        auto *pin = new QWidget; pin->setObjectName("teamPhaseHeaderPin");
+        auto *ph = new QHBoxLayout(pin); ph->setContentsMargins(0, 0, 0, 0); ph->setSpacing(0);
+        ph->addWidget(head, 1);
+        ph->addStretch(0);
+        frame->header = pin;
+        fv->addWidget(pin);
+    } else {
+        fv->addWidget(head);
+    }
     if (!open) return frame;
     // The lead's note, then the send-back form, then the body.
     const QString note = record ? record->note : QString();
@@ -2042,16 +2188,18 @@ QWidget *TeamWorkspace::phaseGraph(const Team &team, const PhaseGroup &group, co
     // Planning edits the plan with `plan`; a running team's draft phase edits
     // its tasks' dependencies with edit-draft (the server takes `plan` only
     // in Planning).
+    // C4 (#548): every edit is built from the full copy (planTeam), never the
+    // `team list` summary, which has no dependencies or descriptions.
     if (team.status == "planning") {
         view->editable = true;
-        view->linked = [this](int dependency, int task) { if (const auto *t = currentTeam(m_team)) m_panel->link(*t, dependency, task, true); };
-        view->unlinked = [this](int dependency, int task) { if (const auto *t = currentTeam(m_team)) m_panel->link(*t, dependency, task, false); };
+        view->linked = [this](int dependency, int task) { if (const auto *t = planTeam(m_team)) m_panel->link(*t, dependency, task, true); };
+        view->unlinked = [this](int dependency, int task) { if (const auto *t = planTeam(m_team)) m_panel->link(*t, dependency, task, false); };
     } else if (ownerPhaseState(team, group) == "draft") {
         for (int id : group.tasks) if (const auto *task = team.task(id); task && task->status == "draft") view->editableTasks.insert(id);
-        view->linked = [this, id = team.id](int dependency, int task) { if (const auto *t = currentTeam(id)) linkDraft(*t, dependency, task, true); };
-        view->unlinked = [this, id = team.id](int dependency, int task) { if (const auto *t = currentTeam(id)) linkDraft(*t, dependency, task, false); };
+        view->linked = [this, id = team.id](int dependency, int task) { if (const auto *t = planTeam(id)) linkDraft(*t, dependency, task, true); };
+        view->unlinked = [this, id = team.id](int dependency, int task) { if (const auto *t = planTeam(id)) linkDraft(*t, dependency, task, false); };
     }
-    if (team.status == "planning") view->clicked = [this](int id, const QPoint &) { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, id); };
+    if (team.status == "planning") view->clicked = [this](int id, const QPoint &) { if (const auto *t = planTeam(m_team)) m_panel->editTask(*t, id); };
     else view->clicked = [this](int id, const QPoint &) {
         const auto *t = currentTeam(m_team);
         if (t) if (const auto *task = t->task(id); task && task->subteam.known && !task->subteam.team.isEmpty()) {
@@ -2562,6 +2710,7 @@ QWidget *TeamWorkspace::members(const Team &team)
         // native answers array; a deny's reason travels as the answer text.
         if (m.permission.permission()) {
             auto *box = new QFrame; box->setObjectName("teamMemberPermission"); box->setProperty("member", m.id);
+            box->setProperty("team", team.id); box->setProperty("question", m.permission.id); box->setProperty("questionHash", m.permission.hash);
             box->setStyleSheet(QStringLiteral("QFrame#teamMemberPermission{background:%1;border:1px solid %2;border-radius:7px;}")
                                    .arg(alpha(c.warn, .10).name(QColor::HexArgb), alpha(c.warn, .40).name(QColor::HexArgb)));
             auto *pv = new QVBoxLayout(box); pv->setContentsMargins(8, 5, 8, 6); pv->setSpacing(3);

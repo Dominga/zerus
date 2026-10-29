@@ -7,20 +7,43 @@
 //! `docs/superpowers/plans/2026-10-28-tauri-client-phase1.md` (Tasks 3 and 4)
 //! and the "Event stream" section of `docs/reference.md`.
 
+pub mod actions;
 pub mod batch;
+pub mod details;
 pub mod fleet;
+pub mod legacy;
+pub mod machine;
+pub mod organization;
+pub mod processes;
+pub mod readmarks;
+pub mod reads;
+pub mod run;
+pub mod shell;
 pub mod state;
 pub mod stream;
+pub mod tasks;
 pub mod view;
+pub mod views;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 
+pub use actions::{Action, Exit, Invocation, Outcome, Target, WorktreeCleanup};
+pub use batch::MachineOut;
+pub use batch::OrganizationOut;
+pub use batch::ProcessesOut;
+pub use batch::TasksOut;
 pub use batch::{ActivityOut, Batch, Coalescer, ComputerOut, KeyOut, ReplaceOut, RowOut};
 pub use fleet::{Fleet, FollowError};
+pub use machine::{LocalHost, MachineMeta};
+pub use organization::{OrganizationSnapshot, OrganizationState, OrganizationUpdate};
+pub use processes::{ProcessesState, ProcessesUpdate};
+pub use reads::{Read, ReadError};
+pub use run::{run, run_limited, run_with_env, TooLarge};
 pub use state::{ActivityState, CatalogState};
 pub use stream::{StreamEvent, StreamHandle, Timing};
+pub use tasks::{TasksState, TasksUpdate};
 pub use view::ViewRow;
 pub use zerus_watch_protocol::SessionRef;
 
@@ -58,7 +81,13 @@ pub enum ComputerStatus {
     /// Checking `hgs [@host] -h` for the watch-v1 marker before the first stream.
     Probing,
     /// Its CLI lacks the marker: no stream runs; it is probed again every 10 min.
+    /// Until a listing of it succeeds it has no rows.
     Unsupported,
+    /// Its CLI lacks the marker, and it is polled as the Qt client does: its
+    /// listing every 60 s and followed sessions every few seconds (see
+    /// [`legacy`]). A failed listing makes it `Reconnecting` with its rows
+    /// kept; the next listing is the retry.
+    Polled,
     /// A stream delivered its catalog snapshot.
     Live,
     /// The stream ended, failed or stayed silent; `attempt` counts the failures
@@ -75,6 +104,7 @@ impl ComputerStatus {
         match self {
             Self::Probing => "probing",
             Self::Unsupported => "unsupported",
+            Self::Polled => "polled",
             Self::Live => "live",
             Self::Reconnecting { .. } => "reconnecting",
             Self::Ended => "ended",
@@ -139,6 +169,29 @@ pub enum Change {
         key: String,
         update: ActivityUpdate,
     },
+    /// A followed session's processes; see [`processes`].
+    Processes {
+        computer: ComputerId,
+        key: String,
+        update: ProcessesUpdate,
+    },
+    /// A followed project's task list, keyed by its project ID; see [`tasks`].
+    Tasks {
+        computer: ComputerId,
+        key: String,
+        update: TasksUpdate,
+    },
+    /// The computer's card data from its `catalog.meta`, sent when it changed;
+    /// see [`machine`].
+    Machine {
+        computer: ComputerId,
+        machine: MachineMeta,
+    },
+    /// The followed shared project catalog; see [`organization`].
+    Organization {
+        computer: ComputerId,
+        update: OrganizationUpdate,
+    },
 }
 
 impl Change {
@@ -148,7 +201,11 @@ impl Change {
             | Self::Remove { computer, .. }
             | Self::Replace { computer, .. }
             | Self::Computer { computer, .. }
-            | Self::Activity { computer, .. } => computer,
+            | Self::Activity { computer, .. }
+            | Self::Processes { computer, .. }
+            | Self::Tasks { computer, .. }
+            | Self::Machine { computer, .. }
+            | Self::Organization { computer, .. } => computer,
         }
     }
 }

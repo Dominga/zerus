@@ -117,9 +117,10 @@ async fn run(cli: Cli) -> Result<()> {
                 tokio::spawn(async move {
                     #[cfg(unix)]
                     {
-                        let mut term =
-                            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                                .expect("signal handler");
+                        let mut term = tokio::signal::unix::signal(
+                            tokio::signal::unix::SignalKind::terminate(),
+                        )
+                        .expect("signal handler");
                         tokio::select! {_=tokio::signal::ctrl_c()=>{},_=term.recv()=>{}}
                     }
                     // WhiteWh fork: Windows stops on Ctrl+C or Ctrl+Break.

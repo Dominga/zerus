@@ -1,4 +1,5 @@
 #pragma once
+#include "SettingsJson.h"
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -22,7 +23,7 @@ inline QString closing() { return QStringLiteral("[/Iron rules]"); }
 inline QStringList rules(const QString &project)
 {
     if (project.isEmpty()) return {};
-    const auto all = QJsonDocument::fromJson(QSettings().value(QStringLiteral("workspace/ironRules")).toByteArray()).object();
+    const auto all = SettingsJson::object(QStringLiteral("workspace/ironRules"));
     QStringList result;
     for (const auto &value : all.value(project).toArray()) {
         const auto rule = value.toString().simplified().left(MaxLength);
@@ -35,14 +36,14 @@ inline void setRules(const QString &project, const QStringList &rules)
 {
     if (project.isEmpty()) return;
     QSettings settings;
-    auto all = QJsonDocument::fromJson(settings.value(QStringLiteral("workspace/ironRules")).toByteArray()).object();
+    auto all = SettingsJson::object(QStringLiteral("workspace/ironRules"));
     QJsonArray list;
     for (const auto &rule : rules) {
         const auto text = rule.simplified().left(MaxLength);
         if (!text.isEmpty() && list.size() < MaxRules) list.append(text);
     }
     if (list.isEmpty()) all.remove(project); else all[project] = list;
-    settings.setValue(QStringLiteral("workspace/ironRules"), QJsonDocument(all).toJson(QJsonDocument::Compact));
+    SettingsJson::store(settings, QStringLiteral("workspace/ironRules"), QJsonDocument(all));
 }
 
 // The message an agent receives: the rules first, then the user's text.

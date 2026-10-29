@@ -16,11 +16,17 @@
 // Statuses here never change a session's own status; they are a layer on top.
 namespace Teams {
 
-// Model suggestions per agent; a model field still takes any name the
-// agent's command line knows. DeepSeek runs its own model.
+// Fallback model suggestions per agent; the role editor replaces them with
+// the selected account's native catalog. A model field still takes any name
+// the agent's command line knows.
 inline QStringList knownModels(const QString &agent)
 {
-    static const QMap<QString, QStringList> known{{"claude", {"opus", "sonnet", "haiku"}}, {"codex", {"gpt-5.5-codex", "gpt-5.5"}}, {"kimi", {"kimi-k2"}}};
+    static const QMap<QString, QStringList> known{
+        {"claude", {"opus", "sonnet", "haiku"}},
+        {"codex", {"gpt-5.5-codex", "gpt-5.5"}},
+        {"kimi", {"kimi-code/kimi-for-coding", "kimi-code/kimi-for-coding-highspeed", "kimi-code/k3",
+                  "kimi-code/k3-256k", "kimi-code/k3.1-pro", "kimi-code/k3.1-pro-highspeed"}}
+    };
     return known.value(agent);
 }
 

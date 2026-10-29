@@ -377,6 +377,10 @@ mod windows {
         let _lock = match endpoint::lock(&state) {
             Ok(lock) => {
                 let _ = log::open(&state, true);
+                // #569: the known private stores, before the first write: a
+                // store another tool widened is made private again (noted in
+                // this log), one that stays refused is reported.
+                crate::private_stores::check_known();
                 lock
             }
             Err(LockError::Held) => {

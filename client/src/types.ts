@@ -35,6 +35,28 @@ export interface ViewRow {
   turn_started?: number | null;
   run_id?: string | null;
   conversation_id?: string | null;
+  /** The raw `state` (`running`, `paused`, `stopped`, `archived`, ...). */
+  state?: string;
+  tracked?: boolean;
+  resumable?: boolean;
+  activity?: string;
+  process_state?: string;
+  archive_id?: string | null;
+  /** The latest reply and the attention it raised, for marking them read. */
+  reply_id?: string | null;
+  attention_signature?: string | null;
+  shared_read?: boolean;
+  read_reply_id?: string | null;
+  read_attention_signature?: string | null;
+  /** The operations the computer reports as allowed; null when it reports none. */
+  allowed_actions?: string[] | null;
+  action_reasons?: Record<string, string>;
+  /** The raw working directory (`folder` is the name people know the checkout by). */
+  cwd?: string;
+  terminal_supported?: boolean;
+  terminal_reported?: boolean;
+  terminal_attach_supported?: boolean;
+  terminal_attach_reported?: boolean;
 }
 
 export interface RowOut { computer: ComputerId; key: string; row: ViewRow }
@@ -75,4 +97,55 @@ export interface ActivityEvent {
   attachments?: { name?: string; path?: string; size?: number; kind?: string; mime?: string }[];
   voice?: Record<string, unknown>;
   [field: string]: unknown;
+}
+
+/** The session an action applies to (client/core `actions.rs`). */
+export interface Target { computer: ComputerId; name: string; run_id: string; conversation_id: string }
+
+export type Action =
+  | { kind: "interrupt"; turn_started: number }
+  | { kind: "mark_read"; reply_id: string | null; attention_signature: string | null }
+  | { kind: "pause" }
+  | { kind: "resume" }
+  | { kind: "rename"; new_name: string; archive_id: string | null }
+  | { kind: "archive" }
+  | { kind: "terminate" }
+  | { kind: "kill" };
+
+export interface WorktreeCleanup { status: string; path: string; common_dir: string; reason?: string | null }
+
+export type Outcome =
+  | { outcome: "done"; receipt: unknown; cleanup: WorktreeCleanup | null }
+  | { outcome: "failed"; detail: string };
+
+/** The inspect fields that enable header actions (client/core `details.rs`). */
+export interface Details {
+  run_id: string;
+  conversation_id: string;
+  auth_required: boolean;
+  expected_id: string;
+  resume_message_can_send: boolean;
+  allowed_actions: string[] | null;
+  action_reasons: Record<string, string>;
+  /** The host can interrupt this turn (Stop). */
+  interrupt_supported: boolean;
+  /** The turn an interrupt is pinned to. */
+  turn_started: number;
+  /** The inspected phase ("" when not reported). */
+  phase: string;
+  /** The session's working directory; null when the inspection does not report one (an empty string stays empty). */
+  cwd?: string | null;
+  /** Null when the inspection does not report it. */
+  terminal_supported?: boolean | null;
+  terminal_attach_supported?: boolean | null;
+}
+
+/** A read mark whose delivery is still pending (client/core `readmarks.rs`). */
+export interface ReadMark {
+  computer: ComputerId;
+  name: string;
+  run_id: string;
+  conversation_id: string;
+  reply_id: string | null;
+  attention_signature: string | null;
 }

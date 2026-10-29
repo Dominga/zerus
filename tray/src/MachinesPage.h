@@ -52,6 +52,9 @@ private:
     QPushButton *m_styleSoft, *m_styleBright;
     bool m_dark = false;
     QLineEdit *m_alias, *m_hostname, *m_user, *m_key;
+    QLineEdit *m_wslDistribution, *m_wslUser, *m_wslHgs;
+    QComboBox *m_transport;
+    QWidget *m_keyRow;
     QSpinBox *m_port;
     QCheckBox *m_enabled;
     QFormLayout *m_form;

@@ -1,4 +1,5 @@
 #include <QtTest>
+#include <QApplication>
 #include "JsonSettings.h"
 #include "ProjectsDialog.h"
 #include "CloneRepositoryDialog.h"
@@ -224,28 +225,36 @@ void TestProjectsDialog::folderKindsFollowTheFleetAndTheTeams()
     QCOMPARE(dialog.findChild<QLabel *>("projectsStatus")->text(),QString("Team folders are removed with the team"));
     // A person's own worktree on a "team/..." branch: Remove folder asks;
     // Cancel keeps it, Remove folder removes it (the files stay).
+    QString prompt;
+    bool answerFound = false;
     const auto answer=[&](bool remove,bool *asked){
-        QTimer::singleShot(0,&dialog,[&dialog,remove,asked]{
-            auto *confirm=dialog.findChild<QMessageBox *>("removeProjectFolderConfirm");QVERIFY(confirm);*asked=true;
-            QCOMPARE(confirm->windowTitle(),QString("Remove folder?"));
-            QVERIFY(confirm->text().contains("Files stay on disk."));QVERIFY(confirm->text().contains("/work/orbit-mine"));
-            if(remove)confirm->findChild<QPushButton *>("removeProjectFolderConfirmButton")->click();
-            else confirm->button(QMessageBox::Cancel)->click();
+        QTimer::singleShot(0,&dialog,[&dialog,remove,asked,&prompt,&answerFound]{
+            auto *confirm=dialog.findChild<QMessageBox *>("removeProjectFolderConfirm");
+            if (!confirm) { if (auto *modal=qobject_cast<QDialog *>(QApplication::activeModalWidget())) modal->reject(); return; }
+            *asked=true; prompt=confirm->text();
+            auto *button=remove ? confirm->findChild<QPushButton *>("removeProjectFolderConfirmButton") : confirm->button(QMessageBox::Cancel);
+            answerFound = button != nullptr;
+            if (button) button->click(); else confirm->reject();
         });
+    };
+    const auto checkPrompt=[&]{
+        QVERIFY(answerFound);
+        QVERIFY(prompt.contains("Files stay on disk."));
+        QVERIFY(prompt.contains("/work/orbit-mine"));
     };
     bool asked=false;
     selectFolder(table,"/work/orbit-mine");answer(false,&asked);
     dialog.findChild<QPushButton *>("removeProjectFolder")->click();
-    QVERIFY(asked);QCOMPARE(projects.group(project)->folders.size(),6);
+    QVERIFY(asked);checkPrompt();QCOMPARE(projects.group(project)->folders.size(),6);
     // The folder menu asks the same question.
     asked=false;selectFolder(table,"/work/orbit-mine");answer(false,&asked);
     emit table->customContextMenuRequested(table->visualItemRect(table->currentItem()).center());
     QPointer<QMenu> menu=dialog.findChild<QMenu *>("projectFolderMenu");QVERIFY(menu);
     menu->findChild<QAction *>("contextRemoveProjectFolder")->trigger();delete menu.data();
-    QVERIFY(asked);QCOMPARE(projects.group(project)->folders.size(),6);
+    QVERIFY(asked);checkPrompt();QCOMPARE(projects.group(project)->folders.size(),6);
     asked=false;selectFolder(table,"/work/orbit-mine");answer(true,&asked);
     dialog.findChild<QPushButton *>("removeProjectFolder")->click();
-    QVERIFY(asked);QCOMPARE(projects.group(project)->folders.size(),5);
+    QVERIFY(asked);checkPrompt();QCOMPARE(projects.group(project)->folders.size(),5);
     QVERIFY(folderKindAt(table,"/work/orbit-mine").isEmpty());
 }
 

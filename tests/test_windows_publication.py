@@ -109,6 +109,7 @@ class InspectTests(unittest.TestCase):
         unsafe = [raw(f"{portable.TOP}/../outside"), raw("/absolute"), raw(f"{portable.TOP}\\windows"),
                   raw(f"{portable.TOP}/C:drive"), raw(f"{portable.TOP}/stream:data"), raw("other/file"),
                   raw(f"{portable.TOP}/nul.txt"), raw(f"{portable.TOP}/trailing."), raw(f"{portable.TOP}//empty"),
+                  raw(f"{portable.TOP}/nul-byte\x00suffix"),
                   raw(f"{portable.TOP}/HGS.EXE"), raw(f"{portable.TOP}/folder/", stat.S_IFDIR | 0o755),
                   raw(f"{portable.TOP}/link", stat.S_IFLNK | 0o777)]
         for index, entry in enumerate(unsafe):

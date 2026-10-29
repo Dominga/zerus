@@ -108,7 +108,9 @@ fn answers(question: &Value) -> Option<Value> {
 fn open(root: &Path) -> Result<Connection> {
     // #526: made owner-only here, never trusted to inherit it.
     platform::owner_only_dir(root)?;
-    if !platform::verify_private(root, platform::Private::Directory)? {
+    // #569: a store only too open is made private again; one that stays
+    // refused is reported with its fix.
+    if !crate::private_stores::ensure(root, platform::Private::Directory)? {
         return Err(bad("The approval journal folder must be private"));
     }
     let path = root.join("journal.sqlite3");
@@ -120,7 +122,7 @@ fn open(root: &Path) -> Result<Connection> {
             .write(true),
     ))
     .open(&path)?;
-    if !platform::verify_private_file(&file)? {
+    if !crate::private_stores::ensure_file(&path, &file)? {
         return Err(bad("The approval journal must be a private regular file"));
     }
     let db = Connection::open(path).map_err(bad)?;
@@ -487,6 +489,14 @@ mod tests {
         let mut agent = card(false);
         agent["questions"][0]["header"] = json!("Agent");
         assert!(answers(&agent).is_none(), "an Agent request without the mark is refused as well");
+        // Nor its "don't ask again" choice, which outlives the request.
+        let mut always = card(true);
+        always["questions"][0]["options"] = json!([{"id":"1","label":"Yes","scope":"once"},
+            {"id":"3","label":"Yes, and don't ask again for subagents","scope":"broader"},{"id":"2","label":"No","scope":"once"}]);
+        assert!(answers(&always).is_none());
+        always.as_object_mut().unwrap().remove("subagent_confirmation");
+        always["questions"][0]["header"] = json!("Bash");
+        assert_eq!(answers(&always).unwrap()[0]["selected_option_ids"], json!(["1"]), "only ever the one-time Yes");
     }
 
     #[test]

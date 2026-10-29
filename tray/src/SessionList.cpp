@@ -261,7 +261,7 @@ bool SessionList::viewportEvent(QEvent *event)
             // U25 (spec 2.3): why this session is muted.
             if (const auto mute = SessionDelegate::muteRect(animationOption(index), index); mute.adjusted(-2, -2, 2, 2).contains(help->pos())) {
                 QToolTip::showText(help->globalPos(), index.data(SessionRoles::TeamMuted).toBool()
-                    ? tr("Notifications muted — team members are muted by default; the lead reports for them. Right-click to unmute.")
+                    ? tr("Muted on this computer: team members are muted by default; the lead reports for them. Right-click to unmute.")
                     : tr("Notifications muted. Right-click to unmute."), viewport(), mute);
                 return true;
             }

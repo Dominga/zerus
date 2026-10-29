@@ -534,7 +534,10 @@ static void resize_buffer(VTermScreen *screen, int bufidx, int new_rows, int new
   while(old_row >= 0) {
     int old_row_end = old_row;
     /* TODO: Stop if dwl or dhl */
-    while(REFLOW && old_lineinfo && old_row >= 0 && old_lineinfo[old_row].continuation)
+    /* Zerus local patch (UPSTREAM.md): a continuation on the top row starts
+     * its line here; its head is in the scrollback. Upstream walked to row -1
+     * and copied cells from before the buffer. */
+    while(REFLOW && old_lineinfo && old_row > 0 && old_lineinfo[old_row].continuation)
       old_row--;
     int old_row_start = old_row;
 
@@ -660,10 +663,15 @@ static void resize_buffer(VTermScreen *screen, int bufidx, int new_rows, int new
       new_cursor.col = new_cols-1;
   }
 
-  /* We really expect the cursor position to be set by now */
+  /* We really expect the cursor position to be set by now. Zerus local patch
+   * (UPSTREAM.md): never abort the desktop over it; keep the cursor inside. */
   if(active && (new_cursor.row == -1 || new_cursor.col == -1)) {
-    fprintf(stderr, "screen_resize failed to update cursor position\n");
-    abort();
+    if(new_cursor.row == -1)
+      new_cursor.row = 0;
+    if(new_cursor.col == -1)
+      new_cursor.col = old_cursor.col < new_cols ? old_cursor.col : new_cols - 1;
+    if(new_cursor.col < 0)
+      new_cursor.col = 0;
   }
 
   if(old_row >= 0 && bufidx == BUFIDX_PRIMARY) {

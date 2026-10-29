@@ -105,9 +105,14 @@ TeamDesignerPage::TeamDesignerPage(TeamController *teams, QWidget *parent) : QWi
     m_editor->setShowDraft(true);
     m_editor->confirm = [this](const QString &name, const QString &title, const QString &text, const QString &action) { return confirm ? confirm(name, title, text, action) : true; };
     m_editor->askRedo = [this](qint64 version) {
-        // The designer redoes its draft in its own conversation.
-        m_chat->send(tr("The catalog changed to v%1 after your draft. Discard your proposals and propose again on v%1.").arg(version));
+        // The designer redoes its draft in its own conversation; its next
+        // proposals replace the out-of-date draft (N38, #548).
+        if (!designerSession || designerSession().isEmpty()) return;
+        m_chat->send(tr("The catalog changed to v%1 after your draft. Propose your changes again on v%1; your new proposals replace the old draft.").arg(version));
     };
+    // N38 (#548): only a running designer is asked; with none, the click would
+    // start a new designer session, and the owner discards the draft instead.
+    m_editor->canRedo = [this] { return designerSession && !designerSession().isEmpty(); };
     kv->addWidget(m_editor);
     m_split->addWidget(catalog);
     m_split->setStretchFactor(0, 0); m_split->setStretchFactor(1, 1);
@@ -189,6 +194,8 @@ void TeamDesignerPage::refresh()
     const auto &catalog = m_teams->catalog();
     const QString session = designerSession ? designerSession() : QString();
     const Teams::Live live = session.isEmpty() || !designerLive ? Teams::Live{} : designerLive();
+    // N38 (#548): the redo offer follows whether a designer runs now.
+    m_editor->refreshBanner();
     int undecided = 0; for (const auto &p : catalog.proposals) undecided += p.state == "proposed";
     const bool stale = !catalog.proposals.isEmpty() && catalog.draftBase != catalog.version;
     QString status; QColor tone = c.muted;

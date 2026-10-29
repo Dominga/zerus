@@ -440,15 +440,26 @@ pub struct CreatedWorktree {
 
 /// The choices the next dialog starts with (`workspace/launchAgent`,
 /// `workspace/launchAccounts` as `{host: {agent: account}}` and
-/// `workspace/launchOpenTerminal`). Empty until the events stream's settings
-/// store reaches this branch: Qt's defaults apply then (agent `codex`, no
-/// account, Open terminal off), and nothing is written anywhere else.
+/// `workspace/launchOpenTerminal`), read from the client's settings store.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Remembered {
     /// Empty for none.
     pub agent: String,
     pub accounts: Value,
     pub open_terminal: bool,
+}
+
+/// Reading invalid account JSON gives Qt's empty object without rewriting
+/// the stored text. Only a later durable creation remembers new choices.
+pub fn remembered(settings: &zerus_client_core::settings::Settings) -> Remembered {
+    Remembered {
+        agent: settings.text("workspace/launchAgent"),
+        accounts: serde_json::from_str::<Value>(&settings.text("workspace/launchAccounts"))
+            .ok()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({})),
+        open_terminal: settings.flag("workspace/launchOpenTerminal"),
+    }
 }
 
 /// What a new dialog starts with.
@@ -666,7 +677,12 @@ pub fn new_session_context(app: AppHandle) -> Context {
         .try_state::<crate::organization::Organization>()
         .map(|organization| organization.swarm_id())
         .unwrap_or_default();
-    Context { swarm, ..context() }
+    let remembered = remembered(&app.state::<crate::settings::Store>().0);
+    Context {
+        swarm,
+        remembered,
+        ..context()
+    }
 }
 
 #[tauri::command(async)]
@@ -858,6 +874,37 @@ pub async fn opencode_start(
 mod tests {
     use super::*;
     use zerus_client_core::machine::LocalHost;
+
+    #[test]
+    fn reading_malformed_remembered_accounts_does_not_rewrite_the_store() {
+        let dir =
+            std::env::temp_dir().join(format!("zerus-launch-settings-{}", uuid::Uuid::new_v4()));
+        let settings = zerus_client_core::settings::Settings::open(dir.join("settings.json"), None);
+        settings
+            .set("workspace/launchAgent", json!("claude"))
+            .unwrap();
+        settings
+            .set("workspace/launchOpenTerminal", json!(true))
+            .unwrap();
+        for accounts in ["malformed", "[]"] {
+            settings
+                .set("workspace/launchAccounts", json!(accounts))
+                .unwrap();
+            let read = remembered(&settings);
+            assert_eq!(
+                read,
+                Remembered {
+                    agent: "claude".into(),
+                    accounts: json!({}),
+                    open_terminal: true
+                }
+            );
+            assert_eq!(settings.text("workspace/launchAccounts"), accounts);
+        }
+        assert!(settings.flush_within(std::time::Duration::from_secs(2)));
+        drop(settings);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     fn windows(state: &str, session: Option<u64>) -> MachineMeta {
         MachineMeta {

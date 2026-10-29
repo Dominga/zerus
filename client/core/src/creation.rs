@@ -559,11 +559,13 @@ pub struct Placed {
 
 /// Places a creation against the current project catalog and makes the
 /// edits [`place`] asks for; Err is the failure text, and the operation
-/// fails with it. Called inside [`Creations::answered`], it may block for
-/// one catalog edit, so `Creations` runs on its own worker. Continue setup
+/// fails with it. Called inside [`Creations::answered`], it records the
+/// edits in the organization Controller and returns without waiting for
+/// their swarm apply, as Qt's local organization does. Continue setup
 /// places the same plan again, so the edits must be idempotent: creating
 /// the project by its reserved ID, and adding a folder by project, computer
-/// and path. An edit whose outcome is unknown is Err.
+/// and path. An edit refused by the Controller is Err; later sync failures
+/// belong to the organization's status line.
 pub trait Placement {
     fn resolve(&mut self, plan: &mut Value, evidence: &Value) -> Result<(), String>;
 }
@@ -684,6 +686,103 @@ pub fn creation_directory(exit: Exit, verified: bool) -> Result<Value, String> {
         return Err("Invalid creation directory identity.".into());
     }
     Ok(data)
+}
+
+/// The fields Qt's placeLaunchedSessions compares (SessionsWindow.cpp:3034-3036).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BindingSession {
+    pub launch_id: String,
+    pub cmd: String,
+    pub name: String,
+    pub state: String,
+}
+
+/// A launch that ended before it acquired a listed session (HgsClient.cpp:279).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EndedLaunch {
+    pub launch_id: String,
+    pub name: String,
+    pub code: Option<i64>,
+    pub output: String,
+}
+
+/// One bounded binding read; an absent row proves nothing about a launch.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BindingListing {
+    pub online: bool,
+    pub sessions: Vec<BindingSession>,
+    pub ended_launches: Vec<EndedLaunch>,
+}
+
+/// The live listing Qt reads while a creation awaits its session (HgsClient.cpp:816, 847).
+pub fn binding_invocation(computer: &ComputerId) -> Invocation {
+    let mut args: Vec<String> = computer
+        .alias()
+        .map(|alias| format!("@{alias}"))
+        .into_iter()
+        .collect();
+    args.extend(["ls".into(), "--json".into()]);
+    if computer.is_local() {
+        args.push("--local".into());
+    }
+    args.push("--no-archives".into());
+    Invocation {
+        args,
+        stdin: None,
+        timeout: Duration::from_secs(15),
+        request_id: None,
+    }
+}
+
+/// Parse no more than the ordinary read limit, retaining only binding fields
+/// and the newest 32 ended launches (src/state/launches.rs).
+pub fn binding_listing(exit: Exit) -> Result<BindingListing, String> {
+    let Exit::Code {
+        code: 0, stdout, ..
+    } = exit
+    else {
+        return Err(crate::actions::failure_detail(exit));
+    };
+    let invalid = || "Invalid session response".to_owned();
+    if stdout.len() > crate::reads::READ_LIMIT {
+        return Err(invalid());
+    }
+    let value: Value = serde_json::from_slice(&stdout).map_err(|_| invalid())?;
+    let sessions = value
+        .get("sessions")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid)?;
+    Ok(BindingListing {
+        online: flag(&value, "ok"),
+        sessions: sessions
+            .iter()
+            .filter(|row| row.is_object())
+            .map(|row| BindingSession {
+                launch_id: text(row, "launch_id").into(),
+                cmd: text(row, "cmd").into(),
+                name: text(row, "name").into(),
+                state: row
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .unwrap_or("running")
+                    .into(),
+            })
+            .collect(),
+        ended_launches: value
+            .get("ended_launches")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|row| row.is_object())
+            .take(32)
+            .map(|row| EndedLaunch {
+                launch_id: text(row, "launch_id").into(),
+                name: text(row, "name").into(),
+                code: row.get("code").and_then(Value::as_i64),
+                output: text(row, "output").into(),
+            })
+            .collect(),
+    })
 }
 
 fn help(hgs: &Path, computer: &ComputerId) -> Result<String, String> {
@@ -1995,6 +2094,19 @@ impl Creations {
         self.effects.push(Effect::Changed { id: id.to_owned() });
         self.persist(id, After::Nothing);
         self.finish()
+    }
+
+    /// The session appeared: the operation is bound to it.
+    /// The host also keeps the exact session name for its bound card
+    /// (SessionsWindow.cpp:3038, 3253-3255).
+    pub fn complete_session(&mut self, id: &str, name: &str) -> Vec<Effect> {
+        if let Some(value) = self.operations.get_mut(id) {
+            if text(value, "state") == "bound" {
+                return Vec::new();
+            }
+            value["bound_session"] = Value::from(name);
+        }
+        self.complete(id)
     }
 
     /// The session appeared: the operation is bound to it.

@@ -248,6 +248,13 @@ impl Pump {
 
     /// Drains a change sink on its own thread until every sender is gone,
     /// running `observe` on each change just before it is queued.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained for observers that need only the pre-push callback"
+        )
+    )]
     pub fn drain_with(
         &self,
         changes: Receiver<Change>,
@@ -260,6 +267,29 @@ impl Pump {
                 for change in changes {
                     observe(&change);
                     pump.push(change);
+                }
+            })
+            .expect("the pump thread starts");
+    }
+    /// Runs the existing observer before queuing, then signals an interested
+    /// consumer after the mirror is current. Neither callback holds the pump
+    /// lock, and the change is moved without copying its rows.
+    pub fn drain_with_after(
+        &self,
+        changes: Receiver<Change>,
+        before: impl Fn(&Change) -> bool + Send + 'static,
+        after: impl Fn() + Send + 'static,
+    ) {
+        let pump = self.clone();
+        std::thread::Builder::new()
+            .name("zerus-client-pump".into())
+            .spawn(move || {
+                for change in changes {
+                    let interested = before(&change);
+                    pump.push(change);
+                    if interested {
+                        after();
+                    }
                 }
             })
             .expect("the pump thread starts");
@@ -418,6 +448,62 @@ mod tests {
         assert!(
             pump.online("unknown"),
             "as the frontend reads it: only reconnecting or ended is offline"
+        );
+    }
+
+    #[test]
+    fn a_consumed_after_wake_reads_the_applied_mirror() {
+        let pump = Pump::default();
+        let reader = pump.clone();
+        let (changes, input) = std::sync::mpsc::channel();
+        let (wake, wakes) = std::sync::mpsc::sync_channel(1);
+        let (consumed, consumes) = std::sync::mpsc::sync_channel(1);
+        let (seen, snapshots) = std::sync::mpsc::channel();
+        let consumer = std::thread::spawn(move || {
+            while wakes.recv().is_ok() {
+                seen.send(reader.row("", "run:a")).unwrap();
+                consumed.send(()).unwrap();
+            }
+        });
+        pump.drain_with_after(
+            input,
+            |change| matches!(change, Change::Upsert { .. } | Change::Remove { .. }),
+            move || {
+                wake.send(()).unwrap();
+                // Only this test callback waits: force consumption before the
+                // drain proceeds, so an early wake fails deterministically.
+                consumes.recv_timeout(Duration::from_secs(2)).unwrap();
+            },
+        );
+        changes
+            .send(Change::Upsert {
+                computer: ComputerId::local(),
+                key: "run:a".into(),
+                row: row("codex/p/a"),
+            })
+            .unwrap();
+        changes
+            .send(Change::Machine {
+                computer: ComputerId::local(),
+                machine: MachineMeta::default(),
+            })
+            .unwrap();
+        changes
+            .send(Change::Remove {
+                computer: ComputerId::local(),
+                key: "run:a".into(),
+                reason: None,
+            })
+            .unwrap();
+        let first = snapshots.recv_timeout(Duration::from_secs(2)).unwrap();
+        let second = snapshots.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(changes);
+        consumer.join().unwrap();
+        assert_eq!(first.unwrap().name, "codex/p/a");
+        assert!(second.is_none(), "the remove is current too");
+        assert!(
+            snapshots.try_recv().is_err(),
+            "uninterested changes do not wake"
         );
     }
 

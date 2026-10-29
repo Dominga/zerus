@@ -4,6 +4,7 @@ import * as ui from "./ui";
 import * as organization from "./organization";
 import * as settingsSections from "../ui/screens/settings/sections";
 import { openSession, startDesk } from "./desk";
+import { listedSessionIgnoringCollapse } from "../ui/sessions/model";
 
 vi.mock("../ui/screens/settings/sections", () => ({ openSettings: vi.fn() }));
 vi.mock("../bridge", async (importOriginal) => ({
@@ -17,16 +18,25 @@ vi.mock("../bridge", async (importOriginal) => ({
 // One catalog row, in a project the list shows collapsed.
 vi.mock("./catalog", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./catalog")>()),
-  catalog: { rows: { "mac\nrun:folded": { project: "sample-project" } }, order: [] },
+  catalog: { rows: { "mac\nrun:folded": { project: "sample-project" } }, order: [], computers: {} },
 }));
 // The organization groups that row under a collapsed project; the Rust side keeps the collapse.
-vi.mock("./organization", () => ({
+vi.mock("./organization", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./organization")>()),
   groupOf: vi.fn((id: string) => (id === "mac\nrun:folded" ? "folded-project" : "ungrouped")),
+  groups: { "mac\nrun:folded": { group: "folded-project", rank: 0 } },
+  defaultProject: vi.fn(() => "ungrouped"),
+  grouping: vi.fn(() => ({ loaded: true, headers: [{ id: "folded-project", collapsed: true }] })),
   headerOf: vi.fn((project: string) => (project === "folded-project" ? { id: project, collapsed: true } : undefined)),
   setProjectCollapsed: vi.fn(),
 }));
 // store/ui reads the page URL when it loads; the wiring needs only its setters.
-vi.mock("./ui", () => ({
+vi.hoisted(() => { vi.stubGlobal("location", new URL("http://localhost/")); });
+vi.mock("./ui", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./ui")>()),
+  stateFilter: vi.fn(() => "all"),
+  machineFilter: vi.fn(() => []),
+  projectFilter: vi.fn(() => ["folded-project"]),
   search: vi.fn(() => ""),
   setPage: vi.fn(),
   setSelectedKey: vi.fn(),
@@ -59,6 +69,7 @@ describe("desk wiring", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(ui.search).mockReturnValue("");
+    vi.mocked(ui.projectFilter).mockReturnValue(["folded-project"]);
   });
 
   it("opens the session the menu bar or a notification names", async () => {
@@ -99,19 +110,24 @@ describe("desk wiring", () => {
     expect(shown.setSubagentOpen).toHaveBeenCalledWith(undefined);
   });
 
-  it("reveals first and preserves filters only for an empty-search listed owner", () => {
-    const keepFiltersIf = vi.fn((id: string) => {
-      expect(id).toBe("mac\nrun:folded");
-      expect(projects.setProjectCollapsed).toHaveBeenCalledWith("folded-project", false);
-      return true;
-    });
-    openSession({ computer: "mac", key: "run:folded", preserveFilters: true }, { keepFiltersIf });
+  it("keeps an active filter while revealing an owner in its collapsed project", () => {
+    expect(listedSessionIgnoringCollapse("mac\nrun:folded")).toBe(true);
+    openSession(
+      { computer: "mac", key: "run:folded", preserveFilters: true },
+      { keepFiltersIf: listedSessionIgnoringCollapse },
+    );
+    expect(projects.setProjectCollapsed).toHaveBeenCalledWith("folded-project", false);
     expect(shown.setStateFilter).not.toHaveBeenCalled();
     expect(shown.setMachineFilter).not.toHaveBeenCalled();
     expect(shown.setProjectFilter).not.toHaveBeenCalled();
     expect(shown.setSearch).not.toHaveBeenCalled();
     vi.clearAllMocks();
-    openSession({ computer: "mac", key: "run:folded", preserveFilters: true }, { keepFiltersIf: () => false });
+    vi.mocked(ui.projectFilter).mockReturnValue(["another-project"]);
+    expect(listedSessionIgnoringCollapse("mac\nrun:folded")).toBe(false);
+    openSession(
+      { computer: "mac", key: "run:folded", preserveFilters: true },
+      { keepFiltersIf: listedSessionIgnoringCollapse },
+    );
     expect(shown.setStateFilter).toHaveBeenCalledWith("all");
     expect(shown.setMachineFilter).toHaveBeenCalledWith([]);
     expect(shown.setProjectFilter).toHaveBeenCalledWith([]);

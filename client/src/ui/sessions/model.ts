@@ -63,12 +63,24 @@ const online = (s: Session) => computerFresh(s.computer);
 /** The list's rows by project, from the row ids and the assignments only. */
 export const membersByGroup = createMemo(() => groupMembers(catalog.order, catalog.rows, groups, defaultProject()));
 
+const matchesLiveFilters = (s: Session, f: Parameters<typeof matchesFilter>[1], hosts: readonly string[], q: string) =>
+  matchesFilter(s, f) && (!hosts.length || hosts.includes(s.machine)) && sessionMatchesSearch(s, q);
+
+/** Whether the filters list an owner once its collapsed project is revealed. */
+export function listedSessionIgnoringCollapse(id: string): boolean {
+  if (stateFilter() === "archived") return false;
+  const s = catalog.rows[id];
+  if (!s || !matchesLiveFilters(s, stateFilter(), machineFilter(), search().trim())) return false;
+  const projects = projectFilter();
+  return !projects.length || projects.includes(groups[id]?.group ?? defaultProject());
+}
+
 export const listRows = createMemo<Row[]>(() => {
   if (stateFilter() === "archived") return archiveRows();
   const f = stateFilter();
   const q = search().trim();
   const hosts = machineFilter();
-  const visible = (s: Session) => matchesFilter(s, f) && (!hosts.length || hosts.includes(s.machine)) && sessionMatchesSearch(s, q);
+  const visible = (s: Session) => matchesLiveFilters(s, f, hosts, q);
   const scope = {
     grouping: grouping(), members: membersByGroup(), visible, online, projects: projectFilter(),
     expanded: (k: string) => !!expandedChildren[k], compact: (k: string) => !!compactRows[k], filter: f, hosts, query: q,

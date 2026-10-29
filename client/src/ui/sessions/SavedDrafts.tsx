@@ -6,7 +6,7 @@ import { orderedRows } from "../../store/catalog";
 import { openSession } from "../../store/desk";
 import { setSubagentOpen, toast } from "../../store/ui";
 import { AgentBadge, MachineBadge } from "./SessionCard";
-import { listRows } from "./model";
+import { listedSessionIgnoringCollapse } from "./model";
 import {
   createSavedDrafts, draftOwnerRow, draftPresentation, draftSubagent, focusMessageEditor, listStep, modifiedText, replaceText, SECTIONS, TEXTS,
   type RestoreTarget, type SavedDrafts,
@@ -175,7 +175,7 @@ export function SavedDraftsDialog() {
     savedDrafts.close();
     openSession(
       { computer: row.computer, key: row.catalogKey, preserveFilters: true },
-      { keepFiltersIf: (id) => listRows().some((entry) => entry.type === "card" && entry.id === id) },
+      { keepFiltersIf: listedSessionIgnoringCollapse },
     );
     if (item.kind === "subagent") {
       const child = draftSubagent(item, row);

@@ -15,6 +15,7 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QPlainTextEdit>
+#include <QRegularExpression>
 #include <QScrollArea>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -228,11 +229,23 @@ void TeamPanel::editTask(const Team &team, int taskId)
     auto *assignee = new QComboBox; assignee->setObjectName("teamTaskEditAssignee");
     assignee->addItem(tr("No assignee"), QString());
     for (const auto &m : team.members) assignee->addItem(QStringLiteral("%1 · %2").arg(team.roleOf(m.id), agentLabel(m.agent)), m.id);
-    assignee->setCurrentIndex(qMax(0, assignee->findData(task.assignee)));
+    // U45: a task for a role goes to a free member of it; the data is "role:<role>".
+    QStringList roles;
+    for (const auto &m : team.members) if (!m.lead && !m.role.isEmpty() && !roles.contains(m.role)) roles << m.role;
+    if (!task.role.isEmpty() && !roles.contains(task.role)) roles << task.role;
+    if (!roles.isEmpty()) assignee->insertSeparator(assignee->count());
+    for (const auto &role : roles) assignee->addItem(tr("Any free %1").arg(role), QStringLiteral("role:") + role);
+    assignee->setCurrentIndex(qMax(0, assignee->findData(task.assignee.isEmpty() && !task.role.isEmpty() ? QStringLiteral("role:") + task.role : task.assignee)));
+    // U45: the models allowed for the task; empty: any model of its member.
+    auto *models = new QLineEdit(task.models.join(QStringLiteral(", "))); models->setObjectName("teamTaskEditModels");
+    models->setPlaceholderText(tr("Any model of its member"));
+    models->setToolTip(tr("Models the task may run on, separated by commas: a model, or model@effort. "
+                          "Zerus switches the member to one of them before the task, and waits while it cannot"));
     form->addRow(tr("Title"), title);
     form->addRow(tr("Description"), description);
     form->addRow(tr("Acceptance criteria"), criteria);
     form->addRow(tr("Assignee"), assignee);
+    form->addRow(tr("Models"), models);
     // Dependencies: each other task, hard or soft.
     auto *depsBox = new QWidget; auto *deps = new QVBoxLayout(depsBox); deps->setContentsMargins(0, 0, 0, 0); deps->setSpacing(2);
     QList<std::tuple<int, QCheckBox *, QCheckBox *>> depRows;
@@ -276,7 +289,14 @@ void TeamPanel::editTask(const Team &team, int taskId)
     task.description = description->toPlainText().trimmed();
     task.criteria.clear();
     for (const auto &line : criteria->toPlainText().split('\n')) if (!line.trimmed().isEmpty()) task.criteria << line.trimmed();
-    task.assignee = assignee->currentData().toString();
+    const QString chosen = assignee->currentData().toString();
+    task.role = chosen.startsWith(QLatin1String("role:")) ? chosen.mid(5) : QString();
+    task.assignee = task.role.isEmpty() ? chosen : QString();
+    // A task for a role is never pinned to a member.
+    if (!task.role.isEmpty()) task.pinned = false;
+    task.models.clear();
+    for (const auto &model : models->text().split(QRegularExpression(QStringLiteral("[,\\s]+")), Qt::SkipEmptyParts))
+        if (!task.models.contains(model) && task.models.size() < 20) task.models << model;
     task.deps.clear();
     for (const auto &[id, on, soft] : depRows) if (on->isChecked()) task.deps.append({id, soft->isChecked()});
     bool replaced = false;

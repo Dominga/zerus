@@ -93,6 +93,8 @@ private:
     QWidget *swappedList(const Teams::Team &team);
     // F7/F8: opens another team in this workspace (previous, next, a new one).
     void openOtherTeam(const QString &team);
+    void teamSettings(const Teams::Team &team);
+    void scaleRole(const Teams::Team &team, const Teams::Member &member);
     void attentionRows(const Teams::Team &team, QVBoxLayout *into);
     // N7: Answer on a permission item: the member's Allow / Deny box, or its
     // command on the clipboard when this hgs sends no box.

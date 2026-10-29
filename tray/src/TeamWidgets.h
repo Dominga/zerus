@@ -248,7 +248,7 @@ inline PhaseMark phaseMark(const Team &team, const Task &task, double now = 0)
     const auto tr = [](const char *text) { return QCoreApplication::translate("TeamPanel", text); };
     if (now <= 0) now = double(QDateTime::currentSecsSinceEpoch());
     const auto *attempt = task.last();
-    const QString role = task.assignee.isEmpty() ? tr("You") : team.roleOf(task.assignee);
+    const QString role = team.assigneeRole(task, tr("You"));
     const double delivered = attempt ? (attempt->deliveredAt > 0 ? attempt->deliveredAt : attempt->sentAt) : 0;
     if (mark.phase == "sent") {
         mark.tone = Tone::Assigned; mark.tooltip = tr("Sending to %1").arg(role);

@@ -1166,7 +1166,7 @@ QWidget *TeamPanel::tasks(const Team &team, bool narrow)
     for (int id : order) {
         const auto *task = team.task(id);
         const auto status = taskStatus(*task);
-        const QString role = task->assignee.isEmpty() ? (planningNow ? tr("No assignee") : tr("You")) : team.roleOf(task->assignee);
+        const QString role = team.assigneeRole(*task, planningNow ? tr("No assignee") : tr("You"));
         TaskView::Node node;
         node.id = id; node.phase = task->phase; node.layer = grouped ? localLayer.value(id) : team.layers.value(id);
         node.title = task->title; node.role = role;

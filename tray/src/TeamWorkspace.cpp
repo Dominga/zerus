@@ -7,6 +7,7 @@
 #include "TeamController.h"
 #include "TeamConversation.h"
 #include "TeamPanel.h"
+#include "TeamSettingsDialog.h"
 #include "TeamTaskCard.h"
 #include "TeamTreeIndent.h"
 #include "TeamWidgets.h"
@@ -635,6 +636,15 @@ QWidget *TeamWorkspace::headerActionsContent(const Team &team)
             m_panel->act("settings", {{"settings", QJsonObject{{"resume_after_limits", on}}}});
         });
         h->addWidget(limits);
+        // U48, U51, U52: branches, crashed members and intake keys, in one dialog.
+        auto *settings = new QToolButton; settings->setObjectName("teamWorkspaceSettings"); settings->setAutoRaise(true);
+        settings->setIcon(workspaceIcon("settings", c.text2)); settings->setToolTip(tr("Team settings…")); settings->setAccessibleName(tr("Team settings"));
+        // The dialog runs its own event loop: it opens from the workspace, never
+        // from this button, which a poll may rebuild meanwhile.
+        QObject::connect(settings, &QToolButton::clicked, this, [this, id = team.id] {
+            QTimer::singleShot(0, this, [this, id] { if (const auto *current = currentTeam(id)) teamSettings(*current); });
+        });
+        h->addWidget(settings);
     }
     // F7: a Done team takes the next goal with the same people.
     if (team.status == "done" && team.next.isEmpty())
@@ -1371,7 +1381,7 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
         TaskView::Node node;
         node.id = id; node.phase = task->phase; node.layer = team.layers.value(id);
         node.title = task->title;
-        node.role = task->assignee.isEmpty() ? tr("You") : team.roleOf(task->assignee);
+        node.role = team.assigneeRole(*task, tr("You"));
         node.problem = problemTone.contains(id);
         node.tone = toneColor(c, node.problem ? problemTone.value(id, Tone::Danger) : status.tone);
         node.kind = kindOfTask(*task, status); node.statusText = status.text; node.roleTone = roleColor(node.role, m_dark);
@@ -1481,7 +1491,7 @@ QWidget *TeamWorkspace::board(const Team &team)
             // Role, agent, state and dependencies share a line while the column
             // is wide enough and wrap when it is not.
             auto *r = new FlowLayout(6);
-            const QString role = task.assignee.isEmpty() ? tr("You") : team.roleOf(task.assignee);
+            const QString role = team.assigneeRole(task, tr("You"));
             auto *pill = new Pill(role, roleColor(role, m_dark)); pill->setObjectName("teamBoardRole"); r->addWidget(pill);
             if (const auto *m = team.member(task.assignee)) { auto *i = new QLabel; i->setPixmap(agentLogo(m->agent, c.text3).pixmap(14, 14)); r->addWidget(i); }
             // The same small activity label as the graph (a problem text wins).
@@ -2286,7 +2296,7 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
             r1->addWidget(name, 1);
             b->addLayout(r1);
             auto *r2 = row(6);
-            const QString role = task->assignee.isEmpty() ? tr("You") : team.roleOf(task->assignee);
+            const QString role = team.assigneeRole(*task, tr("You"));
             auto *pill = new Pill(role, roleColor(role, m_dark)); pill->setObjectName("teamBoardRole"); r2->addWidget(pill);
             if (const auto *m = team.member(task->assignee)) { auto *i = new QLabel; i->setPixmap(agentLogo(m->agent, c.text3).pixmap(14, 14)); r2->addWidget(i); }
             r2->addStretch(1);
@@ -2359,7 +2369,7 @@ QWidget *TeamWorkspace::layerRows(const Team &team, const QList<int> &ids)
         if (!deps.isEmpty()) h->addWidget(label(QStringLiteral("←") + deps.join(QStringLiteral(" ")), c.folder, 11));
         auto *name = elided(task->title, c.text2, 13); name->setObjectName("teamLayerTitle"); h->addWidget(name, 3);
         if (problem) { auto *why = elided(problemText(team, id), toneColor(c, problemsByTask.value(id)), 11); why->setObjectName("teamLayerProblem"); h->addWidget(why, 1); }
-        const QString role = task->assignee.isEmpty() ? tr("You") : team.roleOf(task->assignee);
+        const QString role = team.assigneeRole(*task, tr("You"));
         h->addWidget(new Pill(role, roleColor(role, m_dark)));
         auto *logo = new QLabel; logo->setFixedWidth(16);
         if (const auto *m = team.member(task->assignee)) logo->setPixmap(agentLogo(m->agent, c.text3).pixmap(14, 14));
@@ -2647,8 +2657,15 @@ QWidget *TeamWorkspace::members(const Team &team)
         // G7: the MCP servers and services its session runs, as an icon with a
         // tooltip - they outlive the session and are not Background work.
         // C12: the declared time budget of its background job.
-        if (!m.services.isEmpty() || m.budget.known || m.limited.known || m.hostShared) {
+        if (!m.services.isEmpty() || m.budget.known || m.limited.known || m.hostShared || m.draining) {
             auto *extra = row(6);
+            // U49: it finishes its open work, takes nothing new, then leaves.
+            if (m.draining) {
+                auto *draining = new StatusMark(tr("Draining"), c.warn, "paused", 0, Qt::AlignLeft, nullptr,
+                                                tr("Finishes its open work, gets nothing new, then its session is paused and it leaves the team. Cancel drain in its menu."));
+                draining->setObjectName("teamWorkspaceMemberDraining");
+                extra->addWidget(draining);
+            }
             // H1: stopped at a usage limit, with the reset time when known.
             if (m.limited.known) {
                 const QString reset = resetText(m.limited.resetsAt);
@@ -2857,6 +2874,36 @@ void TeamWorkspace::memberMenu(const Team &team, const Member &member, const QPo
         const bool failed = member.session.isEmpty() && !member.error.isEmpty();
         relaunch->setEnabled(failed);
         if (!failed) relaunch->setToolTip(tr("Starts automatically with its first task"));
+        // U49: more members of this role at once, and a drain: the member
+        // finishes its open work, takes nothing new and then leaves.
+        if (team.status == "planning" || team.status == "running" || team.status == "paused") {
+            int seats = 0; for (const auto &m : team.members) seats += !m.lead;
+            const int room = team.maxMembers > 0 ? team.maxMembers - seats : 10;
+            auto *scale = menu.addAction(tr("Add more %1…").arg(role), this, [this, teamId = team.id, id = member.id] {
+                QTimer::singleShot(0, this, [this, teamId, id] {
+                    const auto *current = currentTeam(teamId);
+                    if (const auto *found = current ? current->member(id) : nullptr) scaleRole(*current, *found);
+                });
+            });
+            scale->setObjectName("teamWorkspaceMemberScale");
+            scale->setEnabled(room > 0);
+            scale->setToolTip(room > 0 ? tr("Adds members like this one: the same role, agent and model")
+                                       : tr("The team has its %1 members; raise its limit first").arg(team.maxMembers));
+            if (member.draining) {
+                auto *cancel = menu.addAction(tr("Cancel drain"), this, [this, id = member.id] { m_panel->act("drain", {{"member", id}, {"draining", false}}); });
+                cancel->setObjectName("teamWorkspaceMemberUndrain");
+                cancel->setToolTip(tr("It takes tasks again"));
+            } else {
+                auto *drain = menu.addAction(tr("Drain…"), this, [this, id = member.id, role] {
+                    if (m_panel->confirm("teamDrainMemberConfirm", tr("Drain member?"),
+                                         tr("%1 finishes its current task and review, gets nothing new, then its session is paused and it leaves the team.").arg(role),
+                                         tr("Drain")))
+                        m_panel->act("drain", {{"member", id}});
+                });
+                drain->setObjectName("teamWorkspaceMemberDrain");
+                drain->setToolTip(tr("Finish the open work, then leave"));
+            }
+        }
         QStringList open;
         for (const auto &t : team.tasks) if (t.assignee == member.id && !t.finished()) open << QStringLiteral("#%1").arg(t.id);
         auto *remove = menu.addAction(tr("Remove from team…"), this, [this, id = member.id, role, name = team.name] {
@@ -2912,6 +2959,36 @@ void TeamWorkspace::memberMenu(const Team &team, const Member &member, const QPo
     // members column and delete the "…" button whose click opened it.
     TeamPanel::RenderHold hold(m_panel);
     menu.exec(global);
+}
+
+void TeamWorkspace::scaleRole(const Team &team, const Member &member)
+{
+    int seats = 0; for (const auto &m : team.members) seats += !m.lead;
+    const int room = team.maxMembers > 0 ? team.maxMembers - seats : 10;
+    if (room < 1) return;
+    const QString role = team.roleOf(member.id);
+    bool ok = false;
+    int count = 0;
+    {
+        TeamPanel::RenderHold hold(m_panel);
+        const QString agent = agentNames.value(member.agent, member.agent);
+        const QString text = tr("How many more %1 members, each on %2?").arg(role, member.model.isEmpty() ? agent : agent + QLatin1Char(' ') + member.model);
+        count = QInputDialog::getInt(this, tr("Add more %1").arg(role), text, 1, 1, room, 1, &ok);
+    }
+    if (!ok || count < 1) return;
+    QJsonObject input{{"role", member.role}, {"agent", member.agent}, {"count", count}};
+    if (!member.model.isEmpty()) input.insert("model", member.model);
+    if (!member.effort.isEmpty()) input.insert("effort", member.effort);
+    if (!member.account.isEmpty()) input.insert("account", member.account);
+    m_panel->act("scale", input);
+}
+
+void TeamWorkspace::teamSettings(const Team &team)
+{
+    // The watched copy (`team status`) carries the intake keys a list poll lacks.
+    TeamSettingsDialog dialog(m_teams, team, m_dark, this);
+    TeamPanel::RenderHold hold(m_panel);
+    if (dialog.exec() == QDialog::Accepted) m_teams->refresh();
 }
 
 void TeamWorkspace::openOtherTeam(const QString &team)

@@ -45,6 +45,7 @@
 #include "SettingsPage.h"
 #include "ForkUpdater.h"
 #include "TeamCatalogEditor.h"
+#include "TeamSettingsDialog.h"
 #include "TeamAttentionNotices.h"
 #include "TeamAttentionWatch.h"
 #include <QClipboard>
@@ -710,6 +711,11 @@ private slots:
     void coordinatorTakesPastedImagesAndFiles();
     void terminalDraftIsShownAndSentFromTheConversation();
     void catalogEditorMarksManualEdits();
+    void teamCustomizationIsOptIn();
+    void catalogRoleModelsAndContextAreSaved();
+    void planTaskTakesModelsAndARole();
+    void teamSettingsSendOnlyWhatChanged();
+    void memberMenuScalesAndDrains();
     void boardScrollsInsteadOfSqueezingColumns();
     void planningBoardScrollsInsteadOfSqueezingColumns();
     void catalogRoleEditorEditsEveryField();
@@ -808,6 +814,10 @@ elif a[:3]==['team','catalog','decide'] or a[:3]==['team','catalog','apply']:
  print(json.dumps(out))
 elif a[:2]==['team','approve-phase'] and body.get('phase')==9:
  print('hgs: Phase 9 is not waiting for approval',file=sys.stderr);sys.exit(1)
+elif a[:2]==['team','intake-key']:
+ # U51: a new key is in the receipt once; a revoke names the id.
+ if body.get('revoke'):print(json.dumps({'status':'revoked','id':body['revoke']}))
+ else:print(json.dumps({'status':'created','id':'i2','label':body.get('label'),'key':'zik_0123456789abcdef'}))
 elif a[:2]==['team','create']:print(json.dumps({'status':'created','team':'team-new','request_id':body.get('request_id')}))
 elif a[:2]==['team','next-goal']:print(json.dumps({'status':'planned','team':'team-2','previous':body.get('team')}))
 elif a[:2]==['team','draft']:
@@ -6118,6 +6128,337 @@ else:print('{}')
     shot(&conversation, "u35-coordinator-refused" + suffix + "-dark");
     open->click();
     QCOMPARE(opened, QStringLiteral("|claude/checkout/lead"));
+}
+
+// U45-U52 (spec 0): a team, a role and a task that set none of the new fields
+// look and send exactly as before: no new key in a plan or a catalog, nothing
+// to save in the team settings, the task editor keeps today's fields.
+void TestTeamsUi::teamCustomizationIsOptIn()
+{
+    const Team planned = parse(team("planning"));
+    const auto plan = planInput(planned);
+    for (const auto &value : plan["tasks"].toArray())
+        QCOMPARE(value.toObject().keys(), (QStringList{"assignee", "criteria", "deps", "description", "id", "phase", "title"}));
+    for (const auto &value : plan["members"].toArray())
+        QCOMPARE(value.toObject().keys(), (QStringList{"account", "agent", "computer", "directory", "effort", "id", "model", "permissions", "prompt", "role"}));
+    QCOMPARE(planned.assigneeRole(*planned.task(6), QStringLiteral("No assignee")), QStringLiteral("No assignee"));
+    for (const auto &role : parseCatalog(catalog()).roles)
+        QVERIFY2(!role.json().contains("models") && !role.json().contains("context_before_task"), qPrintable(role.id));
+    // Team settings: nothing set, nothing to save, no intake keys.
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    {
+        TeamSettingsDialog dialog(&controller, parse(team()), true);
+        QVERIFY(!dialog.findChild<QCheckBox *>("teamSettingsBranchPerTask")->isChecked());
+        QVERIFY(!dialog.findChild<QCheckBox *>("teamSettingsRestartCrashed")->isChecked());
+        QVERIFY(dialog.findChild<QLabel *>("teamSettingsNoIntakes"));
+        QVERIFY(dialog.changes().isEmpty());
+        QVERIFY(!dialog.findChild<QPushButton *>("teamSettingsSave")->isEnabled());
+    }
+    // The task editor saved unchanged sends the task as before.
+    setTeam(team("planning"));
+    TeamPanel panel(&controller);
+    panel.resize(420, 1200); panel.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    QTRY_VERIFY(controller.watched() && controller.watched()->full);
+    bool saved = false;
+    std::function<void(int)> look = [&](int tries) {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        if (!dialog || dialog->objectName() != "teamTaskEditor") { if (tries > 0) QTimer::singleShot(10, &panel, [&look, tries] { look(tries - 1); }); return; }
+        QCOMPARE(dialog->findChild<QComboBox *>("teamTaskEditAssignee")->currentData().toString(), QStringLiteral("backend"));
+        QCOMPARE(dialog->findChild<QLineEdit *>("teamTaskEditModels")->text(), QString());
+        for (auto *b : dialog->findChildren<QPushButton *>()) if (b->text() == QStringLiteral("Save")) { saved = true; b->click(); return; }
+        dialog->reject();
+    };
+    QTimer::singleShot(0, &panel, [&look] { look(300); });
+    panel.editTask(*controller.watched(), 2);
+    QVERIFY(saved);
+    QTRY_COMPARE(calls(script(), "plan").size(), 1);
+    for (const auto &value : calls(script(), "plan").first()["tasks"].toArray()) {
+        const auto task = value.toObject();
+        QVERIFY2(!task.contains("models") && !task.contains("role"), qPrintable(QString::number(task["id"].toInt())));
+        if (task["id"].toInt() == 2) QCOMPARE(task["assignee"].toString(), QStringLiteral("backend"));
+    }
+}
+
+// U45/U46: a role's models (model and effort) and its context before a task
+// are edited in the catalog and saved with the role; the other roles gain nothing.
+void TestTeamsUi::catalogRoleModelsAndContextAreSaved()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamCatalogEditor editor(&controller);
+    editor.resize(1000, 900); editor.show();
+    auto *roles = editor.findChild<QListWidget *>("teamCatalogRoles");
+    QTRY_COMPARE(roles->count(), 3);
+    roles->setCurrentRow(1);
+    QTRY_COMPARE(editor.findChild<QLineEdit *>("teamRoleName")->text(), QStringLiteral("Backend"));
+    QCOMPARE(editor.findChildren<QPushButton *>("teamRoleModelChoice").size(), 0);
+    QVERIFY(editor.findChild<QLabel *>("teamRoleModelsHint")->text().startsWith("Only the default model"));
+    const auto addModel = [&](const QString &model, const QString &effort) {
+        auto *name = editor.findChild<QComboBox *>("teamRoleModelsAdd"); QVERIFY(name);
+        name->lineEdit()->setText(model);
+        auto *level = editor.findChild<QComboBox *>("teamRoleModelsEffort");
+        level->setCurrentIndex(level->findData(effort));
+        editor.findChild<QPushButton *>("teamRoleModelsAddButton")->click();
+    };
+    addModel("gpt-5.5-codex", "high");
+    QTRY_COMPARE(editor.findChildren<QPushButton *>("teamRoleModelChoice").size(), 1);
+    addModel("gpt-5.5", QString());
+    QTRY_COMPARE(editor.findChildren<QPushButton *>("teamRoleModelChoice").size(), 2);
+    addModel("gpt-5.5", QString());   // a model is listed once
+    addModel("o-mini", "low");
+    QTRY_COMPARE(editor.findChildren<QPushButton *>("teamRoleModelChoice").size(), 3);
+    // × removes one.
+    for (auto *chip : editor.findChildren<QPushButton *>("teamRoleModelChoice")) if (chip->text().startsWith("o-mini")) { chip->click(); break; }
+    QTRY_COMPARE(editor.findChildren<QPushButton *>("teamRoleModelChoice").size(), 2);
+    QCOMPARE(editor.findChildren<QPushButton *>("teamRoleModelChoice").first()->text(), QStringLiteral("gpt-5.5-codex@high  ×"));
+    QVERIFY(editor.findChild<QLabel *>("teamRoleModelsHint")->text().startsWith("Before a task"));
+    // Context before task: Clear.
+    auto *context = editor.findChild<QWidget *>("teamRoleContext"); QVERIFY(context);
+    for (auto *b : context->findChildren<QPushButton *>()) if (b->property("segment").toString() == "clear") b->click();
+    QTRY_VERIFY(editor.findChild<QLabel *>("teamRoleContextHint")->text().contains("cleared"));
+    shot(&editor, "u45-catalog-role-models-dark");
+    lightPalette(); editor.setDark(false); lightShot(&editor, "u45-catalog-role-models-light"); darkPalette(); editor.setDark(true);
+    auto *save = editor.findChild<QPushButton *>("teamCatalogSave"); QTRY_VERIFY(save->isEnabled());
+    save->click();
+    QTRY_COMPARE(calls(script(), "catalog set").size(), 1);
+    const auto sent = calls(script(), "catalog set").first()["catalog"].toObject()["roles"].toArray();
+    const auto backend = sent[1].toObject();
+    QCOMPARE(backend["models"].toArray(), (QJsonArray{QJsonObject{{"model", "gpt-5.5-codex"}, {"effort", "high"}}, QJsonObject{{"model", "gpt-5.5"}}}));
+    QCOMPARE(backend["context_before_task"].toString(), QStringLiteral("clear"));
+    for (int i : {0, 2}) QVERIFY(!sent[i].toObject().contains("models") && !sent[i].toObject().contains("context_before_task"));
+}
+
+// U45: the plan editor gives a task models and a role instead of an assignee;
+// a task for a role reads "Any free <role>" and opens with its choice.
+void TestTeamsUi::planTaskTakesModelsAndARole()
+{
+    setTeam(team("planning"));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    panel.resize(420, 1200); panel.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    QTRY_VERIFY(controller.watched() && controller.watched()->full);
+    bool saved = false;
+    std::function<void(QDialog *)> with;
+    std::function<void(int)> look = [&](int tries) {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        if (!dialog || dialog->objectName() != "teamTaskEditor") { if (tries > 0) QTimer::singleShot(10, &panel, [&look, tries] { look(tries - 1); }); return; }
+        with(dialog);
+        for (auto *b : dialog->findChildren<QPushButton *>()) if (b->text() == QStringLiteral("Save")) { saved = true; b->click(); return; }
+        dialog->reject();
+    };
+    with = [&](QDialog *dialog) {
+        auto *assignee = dialog->findChild<QComboBox *>("teamTaskEditAssignee");
+        QVERIFY(assignee->findData("role:Backend") > 0 && assignee->findData("role:Tester") > 0);
+        QCOMPARE(assignee->findData("role:Architect"), -1);   // never the lead's role
+        assignee->setCurrentIndex(assignee->findData("role:Backend"));
+        dialog->findChild<QLineEdit *>("teamTaskEditModels")->setText("gpt-5.5-codex@high, gpt-5.5 gpt-5.5");
+        shot(dialog, "u45-task-models-role-dark");
+        lightPalette(); lightShot(dialog, "u45-task-models-role-light"); darkPalette();
+    };
+    QTimer::singleShot(0, &panel, [&look] { look(300); });
+    panel.editTask(*controller.watched(), 6);
+    QVERIFY(saved);
+    QTRY_COMPARE(calls(script(), "plan").size(), 1);
+    QJsonObject six;
+    for (const auto &value : calls(script(), "plan").first()["tasks"].toArray()) {
+        const auto task = value.toObject();
+        if (task["id"].toInt() == 6) six = task;
+        else QVERIFY(!task.contains("models") && !task.contains("role"));
+    }
+    QCOMPARE(six["role"].toString(), QStringLiteral("Backend"));
+    QCOMPARE(six["assignee"].toString(), QString());
+    QCOMPARE(six["models"].toArray(), (QJsonArray{"gpt-5.5-codex@high", "gpt-5.5"}));
+    // Read back: the task for a role shows it and the editor opens with it.
+    auto planned = team("planning");
+    auto tasks = planned["tasks"].toArray();
+    auto task = tasks.last().toObject(); task["role"] = "Backend"; task["models"] = QJsonArray{"gpt-5.5"}; tasks[tasks.size() - 1] = task;
+    planned["tasks"] = tasks;
+    const Team read = parse(planned);
+    QCOMPARE(read.assigneeRole(*read.task(6), QStringLiteral("You")), QStringLiteral("Any free Backend"));
+    QCOMPARE(read.task(6)->models, QStringList{"gpt-5.5"});
+    saved = false;
+    with = [&](QDialog *dialog) {
+        auto *assignee = dialog->findChild<QComboBox *>("teamTaskEditAssignee");
+        QCOMPARE(assignee->currentData().toString(), QStringLiteral("role:Backend"));
+        QCOMPARE(dialog->findChild<QLineEdit *>("teamTaskEditModels")->text(), QStringLiteral("gpt-5.5"));
+        assignee->setCurrentIndex(assignee->findData("tester"));   // back to a member
+        dialog->findChild<QLineEdit *>("teamTaskEditModels")->clear();
+    };
+    QTimer::singleShot(0, &panel, [&look] { look(300); });
+    panel.editTask(read, 6);
+    QVERIFY(saved);
+    QTRY_COMPARE(calls(script(), "plan").size(), 2);
+    for (const auto &value : calls(script(), "plan").last()["tasks"].toArray())
+        if (value.toObject()["id"].toInt() == 6) {
+            QCOMPARE(value.toObject()["assignee"].toString(), QStringLiteral("tester"));
+            QVERIFY(!value.toObject().contains("role") && !value.toObject().contains("models"));
+        }
+}
+
+// U48/U51/U52: the team settings send only what changed (a branch per task
+// switched off is null), refuse a branch name without {id}, and keep the
+// intake keys: a new key is shown once, a revoke asks first.
+void TestTeamsUi::teamSettingsSendOnlyWhatChanged()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    {
+        TeamSettingsDialog dialog(&controller, parse(team()), true);
+        dialog.show();
+        auto *save = dialog.findChild<QPushButton *>("teamSettingsSave");
+        dialog.findChild<QCheckBox *>("teamSettingsBranchPerTask")->setChecked(true);
+        auto *name = dialog.findChild<QLineEdit *>("teamSettingsBranchTemplate");
+        QCOMPARE(name->text(), QStringLiteral("task/{id}"));
+        name->setText("task/{member}");
+        QVERIFY(!save->isEnabled());
+        QVERIFY(dialog.findChild<QLabel *>("teamSettingsProblem")->text().contains("{id}"));
+        name->setText("task/{id}");
+        dialog.findChild<QLineEdit *>("teamSettingsBaseBranch")->setText("main");
+        dialog.findChild<QCheckBox *>("teamSettingsRestartCrashed")->setChecked(true);
+        QVERIFY(save->isEnabled());
+        shot(&dialog, "u48-team-settings-dark");
+        save->click();
+        QTRY_COMPARE(calls(script(), "settings").size(), 1);
+        QTRY_COMPARE(dialog.result(), int(QDialog::Accepted));
+        QCOMPARE(calls(script(), "settings").first()["settings"].toObject(),
+                 (QJsonObject{{"branch_per_task", QJsonObject{{"template", "task/{id}"}}}, {"base_branch", "main"}, {"restart_crashed", true}}));
+    }
+    auto set = team();
+    set["settings"] = QJsonObject{{"branch_per_task", QJsonObject{{"template", "task/{id}"}}}, {"restart_crashed", true}};
+    set["intakes"] = QJsonArray{QJsonObject{{"id", "i1"}, {"label", "health watch"}, {"hash", "x"}, {"created", 1793170000.0}}};
+    lightPalette();
+    TeamSettingsDialog dialog(&controller, parse(set), false);
+    dialog.show();
+    const auto close = qScopeGuard([&] { dialog.reject(); darkPalette(); });
+    QVERIFY(dialog.findChild<QCheckBox *>("teamSettingsBranchPerTask")->isChecked());
+    QVERIFY(dialog.findChild<QCheckBox *>("teamSettingsRestartCrashed")->isChecked());
+    const auto rows = [&] {
+        QStringList ids;
+        for (auto *row : dialog.findChildren<QWidget *>("teamSettingsIntake")) if (row->isVisibleTo(&dialog)) ids << row->property("intake").toString();
+        return ids;
+    };
+    QCOMPARE(rows(), QStringList{"i1"});
+    // A key: created once, shown once.
+    dialog.findChild<QLineEdit *>("teamSettingsIntakeLabel")->setText("deploy bot");
+    dialog.findChild<QPushButton *>("teamSettingsIntakeCreate")->click();
+    QTRY_COMPARE(calls(script(), "intake-key").size(), 1);
+    QCOMPARE(calls(script(), "intake-key").first()["label"].toString(), QStringLiteral("deploy bot"));
+    QCOMPARE(calls(script(), "intake-key").first()["team"].toString(), QStringLiteral("team-1"));
+    QTRY_VERIFY(dialog.findChild<QWidget *>("teamSettingsIntakeKeyBox")->isVisible());
+    QCOMPARE(dialog.findChild<QLineEdit *>("teamSettingsIntakeKey")->text(), QStringLiteral("zik_0123456789abcdef"));
+    QTRY_COMPARE(rows(), (QStringList{"i1", "i2"}));
+    lightShot(&dialog, "u51-team-settings-light");
+    // Revoke asks; Cancel sends nothing, Revoke sends the id.
+    std::function<void(bool, int)> answer = [&answer](bool revoke, int tries) {
+        auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+        if (!box) { if (tries > 0) QTimer::singleShot(10, qApp, [&answer, revoke, tries] { answer(revoke, tries - 1); }); return; }
+        for (auto *b : box->buttons()) if ((box->buttonRole(b) == QMessageBox::DestructiveRole) == revoke) { b->click(); return; }
+    };
+    const auto revokeOne = [&] {
+        for (auto *row : dialog.findChildren<QWidget *>("teamSettingsIntake"))
+            if (row->isVisibleTo(&dialog) && row->property("intake") == "i1") return row->findChild<QPushButton *>("teamSettingsIntakeRevoke");
+        return static_cast<QPushButton *>(nullptr);
+    };
+    QTimer::singleShot(0, qApp, [&answer] { answer(false, 300); });
+    revokeOne()->click();
+    QCOMPARE(calls(script(), "intake-key").size(), 1);
+    QTimer::singleShot(0, qApp, [&answer] { answer(true, 300); });
+    revokeOne()->click();
+    QTRY_COMPARE(calls(script(), "intake-key").size(), 2);
+    QCOMPARE(calls(script(), "intake-key").last()["revoke"].toString(), QStringLiteral("i1"));
+    QTRY_COMPARE(rows(), QStringList{"i2"});
+    // Off: the branch setting goes as null, the untouched restart stays out.
+    dialog.findChild<QCheckBox *>("teamSettingsBranchPerTask")->setChecked(false);
+    QCOMPARE(dialog.changes(), (QJsonObject{{"branch_per_task", QJsonValue(QJsonValue::Null)}}));
+}
+
+// U49: the member menu adds more members of a role (scale) and drains one;
+// a draining member is marked and its drain can be cancelled.
+void TestTeamsUi::memberMenuScalesAndDrains()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    panel.resize(420, 900); panel.show();
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    darkPalette(); workspace.setTheme(true); panel.setTheme(true);
+    const auto draining = [&] {
+        for (auto *mark : workspace.findChildren<QWidget *>("teamWorkspaceMemberDraining")) if (mark->isVisibleTo(&workspace)) return true;
+        return false;
+    };
+    QTRY_VERIFY(!workspace.findChildren<QFrame *>("teamWorkspaceMember").isEmpty());
+    QVERIFY(!draining());
+    // Scale: "Add more Backend…" asks how many and sends the member's agent and model.
+    bool asked = false;
+    std::function<void(int)> lookCount = [&](int tries) {
+        QTimer::singleShot(10, qApp, [&, tries] {
+            auto *input = qobject_cast<QInputDialog *>(QApplication::activeModalWidget());
+            if (!input) { if (tries > 0) lookCount(TestWait::busy() ? tries : tries - 1); return; }
+            asked = true;
+            QVERIFY(input->labelText().contains("Backend"));
+            input->setIntValue(2); input->accept();
+        });
+    };
+    lookCount(1000);
+    inspectMemberMenu(&workspace, "backend", [](QMenu *menu) {
+        QStringList names; for (auto *action : menu->actions()) names << action->objectName();
+        QVERIFY(names.contains("teamWorkspaceMemberDrain") && !names.contains("teamWorkspaceMemberUndrain"));
+        for (auto *action : menu->actions())
+            if (action->objectName() == "teamWorkspaceMemberScale") { QCOMPARE(action->text(), QStringLiteral("Add more Backend…")); action->trigger(); }
+    });
+    QTRY_VERIFY(asked);
+    QTRY_COMPARE(calls(script(), "scale").size(), 1);
+    QCOMPARE(calls(script(), "scale").first()["role"].toString(), QStringLiteral("Backend"));
+    QCOMPARE(calls(script(), "scale").first()["agent"].toString(), QStringLiteral("codex"));
+    QCOMPARE(calls(script(), "scale").first()["model"].toString(), QStringLiteral("gpt-5.5-codex"));
+    QCOMPARE(calls(script(), "scale").first()["count"].toInt(), 2);
+    // Drain asks first.
+    armConfirm(&panel, false);
+    inspectMemberMenu(&workspace, "backend", [](QMenu *menu) {
+        for (auto *action : menu->actions()) if (action->objectName() == "teamWorkspaceMemberDrain") action->trigger();
+    });
+    QTRY_COMPARE(calls(script(), "drain").size(), 1);
+    QCOMPARE(calls(script(), "drain").first()["member"].toString(), QStringLiteral("backend"));
+    QVERIFY(!calls(script(), "drain").first().contains("draining"));
+    // Draining: the card says so, and Cancel drain sends draining false.
+    auto drained = team();
+    auto members = drained["members"].toArray();
+    auto backend = members[1].toObject(); backend["draining"] = true; members[1] = backend;
+    drained["members"] = members;
+    drained["revision"] = 13;
+    setTeam(drained);
+    QTRY_VERIFY(([&] { controller.refresh(); const auto *t = controller.watched(); return t && t->revision == 13 && t->member("backend")->draining; })());
+    QTRY_VERIFY(draining());
+    shot(&workspace, "u49-member-draining-dark");
+    lightPalette(); workspace.setTheme(false); panel.setTheme(false);
+    lightShot(&workspace, "u49-member-draining-light");
+    darkPalette(); workspace.setTheme(true); panel.setTheme(true);
+    inspectMemberMenu(&workspace, "backend", [](QMenu *menu) {
+        for (auto *action : menu->actions()) if (action->objectName() == "teamWorkspaceMemberUndrain") action->trigger();
+    });
+    QTRY_COMPARE(calls(script(), "drain").size(), 2);
+    QCOMPARE(calls(script(), "drain").last()["draining"].toBool(true), false);
+    // A full team cannot scale.
+    auto full = drained; full["settings"] = QJsonObject{{"max_members", 2}}; full["revision"] = 14;
+    setTeam(full);
+    QTRY_VERIFY(([&] { controller.refresh(); const auto *t = controller.watched(); return t && t->revision == 14 && t->maxMembers == 2; })());
+    inspectMemberMenu(&workspace, "tester", [](QMenu *menu) {
+        for (auto *action : menu->actions())
+            if (action->objectName() == "teamWorkspaceMemberScale") { QVERIFY(!action->isEnabled()); QVERIFY(action->toolTip().contains("2 members")); }
+    });
 }
 
 void TestTeamsUi::catalogEditorMarksManualEdits()

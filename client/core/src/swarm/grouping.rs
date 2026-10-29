@@ -6,6 +6,7 @@
 //! and 114-131 (orderedMembers).
 use super::edit::Intent;
 use super::layout::Layout;
+use super::runs::Runs;
 use super::{
     default_project, project_id, projects, sessions, INBOX, INBOX_COLOR, INBOX_NAME, MAX_PROJECTS,
 };
@@ -97,6 +98,7 @@ type At = (ComputerId, String);
 #[derive(Debug)]
 pub struct Grouping {
     pub(crate) layout: Layout,
+    runs: Runs,
     loaded: bool,
     revision: Option<u64>,
     /// id, name, colour, accessible.
@@ -136,6 +138,7 @@ impl Grouping {
     pub fn new(layout: Layout) -> Self {
         Self {
             layout,
+            runs: Runs::default(),
             loaded: false,
             revision: None,
             projects: Vec::new(),
@@ -187,39 +190,15 @@ impl Grouping {
         let at = (computer.clone(), key.to_owned());
         let member = super::member(machine, name);
         let mut seq = None;
-        if let Some((old, kept)) = self
-            .rows
-            .get(&at)
-            .map(|slot| (slot.member.clone(), slot.seq))
-        {
-            seq = Some(kept);
-            // The catalog keys a run by its ID: the same key under a new name is a rename.
-            if old != member
-                && key.starts_with("run:")
-                && !machine.is_empty()
-                && !old.starts_with('\n')
-            {
-                self.layout.rename(&old, &member);
-                let explicit = self.membership.contains_key(&old);
-                if explicit {
-                    // The new name stays in the old one's project until the catalog follows.
-                    let membership = Arc::make_mut(&mut self.membership);
-                    if let Some(project) = membership.remove(&old) {
-                        // Like Layout::rename and Renamed: the old name's project wins.
-                        membership.insert(member.clone(), project);
-                    }
-                }
-                // Only an explicit member's rename changes the catalog; a
-                // fallback row's is a no-op, as Qt's renameSession of an
-                // unknown id. Before the first catalog none is known, so the
-                // hub checks each one.
-                if explicit || !self.loaded {
-                    if self.renames.len() >= MAX_RENAMES {
-                        self.renames.pop_front();
-                    }
-                    self.renames.push_back((old, member.clone()));
-                }
-            }
+        if let Some(slot) = self.rows.get(&at) {
+            seq = Some(slot.seq);
+        }
+        let remembered = key
+            .strip_prefix("run:")
+            .and_then(|run| self.runs.observe(machine, run, name));
+        // A live upsert and a restart use the same machine-scoped token.
+        if let Some(old) = remembered {
+            self.renamed(old, &member);
         }
         let seq = seq.unwrap_or_else(|| {
             self.next_seq += 1;
@@ -243,6 +222,58 @@ impl Grouping {
                 },
             );
         }
+    }
+
+    fn renamed(&mut self, old: String, member: &str) {
+        self.layout.rename(&old, member);
+        self.runs.rename(&old, member);
+        let explicit = self.membership.contains_key(&old);
+        if explicit {
+            let membership = Arc::make_mut(&mut self.membership);
+            if let Some(project) = membership.remove(&old) {
+                membership.insert(member.to_owned(), project);
+            }
+        }
+        // Only the hub can prove that the absence of an old member is
+        // authoritative rather than the effect of its own unsaved draft.
+        // Even fallback renames wait for that check before tokens advance.
+        if self.renames.len() >= MAX_RENAMES {
+            self.renames.pop_front();
+        }
+        self.renames.push_back((old, member.to_owned()));
+    }
+
+    /// Startup runs off the main thread and may follow the first row batch.
+    pub fn replace_runs(&mut self, mut runs: Runs) {
+        runs.merge_missing(&self.runs);
+        self.runs = runs;
+        let mut slots: Vec<_> = self
+            .rows
+            .iter()
+            .map(|(at, slot)| {
+                (
+                    slot.seq,
+                    at.clone(),
+                    slot.member.clone(),
+                    slot.title.clone(),
+                )
+            })
+            .collect();
+        slots.sort_unstable_by_key(|slot| slot.0);
+        for (_, at, member, title) in slots {
+            if let Some((machine, name)) = member.split_once('\n') {
+                self.upsert(&at.0, &at.1, machine, name, &title);
+            }
+        }
+    }
+
+    pub fn take_runs(&mut self) -> Option<super::runs::Snapshot> {
+        self.runs.take_dirty()
+    }
+
+    /// A rename is recoverable (durable draft), or its old member was absent.
+    pub fn acknowledge_rename(&mut self, from: &str, to: &str) {
+        self.runs.acknowledge_rename(from, to);
     }
 
     /// A row change from the pump.
@@ -329,9 +360,22 @@ impl Grouping {
             self.default = self.projects[0].0.clone();
         }
         self.membership = membership;
+        // Startup tokens may reveal a rename before any organization was
+        // presented. Keep its project/rank while the hub writes that intent;
+        // a second writer that already removed the old member stays untouched.
+        if !self.renames.is_empty() {
+            let membership = Arc::make_mut(&mut self.membership);
+            for (old, new) in &self.renames {
+                if let Some(project) = membership.remove(old) {
+                    membership.insert(new.clone(), project);
+                }
+            }
+        }
         for project in &listed_projects {
             for member in sessions(project) {
-                self.layout.rank(project_id(project), member);
+                if self.membership.contains_key(member) {
+                    self.layout.rank(project_id(project), member);
+                }
             }
         }
         if self.layout.len() > super::layout::MAX_MEMBERS {
@@ -694,6 +738,123 @@ mod tests {
         assert_eq!(out.default_project, "ungrouped");
     }
 
+    // SessionOrganization::observe, 223-231: a run last seen before exit is
+    // still the same session after an unseen rename.
+    #[test]
+    fn a_persisted_run_follows_an_unseen_rename_once_and_keeps_its_rank() {
+        let old = "workstation\nclaude/p/old";
+        let new = "workstation\nclaude/p/new";
+        let org = organization(&["workstation\nclaude/p/first", old], &[]);
+        let mut first = Grouping::default();
+        present(&mut first, &org, 1);
+        first.observe(&upsert("run:one", "workstation", "claude/p/old"));
+        let rank = first.layout.rank("alpha", old);
+        let layout = first.take_layout().unwrap();
+        let runs = first
+            .take_runs()
+            .expect("a live run is remembered separately")
+            .to_json();
+        assert!(first.take_runs().is_none(), "only a change needs saving");
+
+        for rows_first in [false, true] {
+            let mut next = Grouping::new(Layout::from_json(&layout));
+            if rows_first {
+                next.observe(&upsert("run:one", "workstation", "claude/p/new"));
+            }
+            next.replace_runs(super::super::runs::Runs::from_json(&runs).unwrap());
+            present(&mut next, &org, 1);
+            next.observe(&upsert("run:one", "workstation", "claude/p/new"));
+            assert_eq!(next.take_renames(), [(old.to_owned(), new.to_owned())]);
+            assert!(next.take_renames().is_empty());
+            let (groups, _) = next.take();
+            assert_eq!(groups[0].group, "alpha");
+            assert_eq!(groups[0].rank, rank);
+            next.observe(&upsert("run:one", "workstation", "claude/p/new"));
+            assert!(
+                next.take_renames().is_empty(),
+                "never migrate the same token twice"
+            );
+        }
+    }
+
+    #[test]
+    fn presenting_a_pending_rename_does_not_reintroduce_the_old_rank() {
+        let old = "workstation\nclaude/p/old";
+        let new = "workstation\nclaude/p/new";
+        let mut grouping = Grouping::default();
+        grouping.observe(&upsert("run:one", "workstation", "claude/p/old"));
+        grouping.observe(&upsert("run:two", "workstation", "claude/p/old"));
+        let org = organization(&[old], &[]);
+        present(&mut grouping, &org, 1);
+        grouping.observe(&upsert("run:one", "workstation", "claude/p/new"));
+        // A historical token must not leave an old-name live row that later
+        // moves the mistakenly recreated rank into the fallback project.
+        grouping.observe(&Change::Remove {
+            computer: ComputerId::local(),
+            key: "run:two".into(),
+            reason: None,
+        });
+        present(&mut grouping, &org, 2);
+        let saved: Value = serde_json::from_slice(&grouping.take_layout().unwrap()).unwrap();
+        assert_eq!(saved["order"]["alpha"], serde_json::json!([new]));
+        assert_eq!(grouping.take_renames(), [(old.to_owned(), new.to_owned())]);
+        // Qt moves every historical run of the old member. The grouping's
+        // runs.rename call must also suppress an intent from the second run.
+        grouping.observe(&upsert("run:two", "workstation", "claude/p/new"));
+        assert!(grouping.take_renames().is_empty());
+        grouping.acknowledge_rename(old, new);
+        let mut loaded =
+            super::super::runs::Runs::from_json(&grouping.take_runs().unwrap().to_json()).unwrap();
+        assert_eq!(
+            loaded.observe("workstation", "two", "later"),
+            Some(new.into())
+        );
+    }
+
+    #[test]
+    fn persisted_runs_exclude_archives_empty_identities_and_other_machines() {
+        let mut first = Grouping::default();
+        for (key, machine, name) in [
+            ("archive:one", "workstation", "archived"),
+            ("run:", "workstation", "empty-run"),
+            ("run:unknown", "", "unknown-machine"),
+            ("run:empty-name", "workstation", ""),
+            ("name:plain", "workstation", "plain"),
+        ] {
+            first.observe(&upsert(key, machine, name));
+        }
+        assert!(
+            first.take_runs().is_none(),
+            "only named live runs belong here"
+        );
+        first.observe(&upsert("run:one", "workstation", "claude/p/old"));
+        let bytes = first.take_runs().unwrap().to_json();
+        let mut next = Grouping::default();
+        next.replace_runs(super::super::runs::Runs::from_json(&bytes).unwrap());
+        present(&mut next, &organization(&[], &[]), 1);
+        next.observe(&upsert("run:one", "studio", "claude/p/new"));
+        next.observe(&upsert("archive:one", "workstation", "claude/p/new"));
+        assert!(
+            next.take_renames().is_empty(),
+            "tokens are machine scoped and live only"
+        );
+    }
+
+    #[test]
+    fn a_layout_toggle_never_dirties_the_run_tokens() {
+        let mut grouping = Grouping::default();
+        present(&mut grouping, &organization(&[], &[]), 1);
+        grouping.observe(&upsert("run:one", "workstation", "claude/p/old"));
+        assert!(grouping.take_runs().is_some());
+        grouping.take_layout();
+        grouping.set_collapsed("alpha", true);
+        grouping
+            .layout
+            .place("alpha", &["workstation\nclaude/p/old".into()], None);
+        assert!(grouping.take_layout().is_some());
+        assert!(grouping.take_runs().is_none());
+    }
+
     #[test]
     fn a_rename_under_the_same_run_is_reported_once_and_keeps_its_place() {
         let mut grouping = Grouping::new(Layout::default());
@@ -713,9 +874,13 @@ mod tests {
         grouping.observe(&upsert("name:x", "workstation", "sh/p"));
         grouping.observe(&upsert("run:1", "workstation", "claude/p/new"));
         grouping.observe(&upsert("name:x", "workstation", "sh/q"));
-        assert!(
-            grouping.take_renames().is_empty(),
-            "a fallback row's rename changes nothing shared: none for the hub"
+        assert_eq!(
+            grouping.take_renames(),
+            [(
+                "workstation\nclaude/p/old".into(),
+                "workstation\nclaude/p/new".into()
+            )],
+            "the hub checks that the fallback needs no edit before acknowledging"
         );
         let (after, _) = grouping.take();
         assert_eq!(
@@ -745,7 +910,7 @@ mod tests {
     }
 
     #[test]
-    fn renames_for_the_hub_are_explicit_members_or_unknown_yet_and_bounded() {
+    fn renames_for_the_hub_include_fallbacks_for_the_authoritative_check() {
         let mut grouping = Grouping::new(Layout::default());
         // Before the first catalog no member is known: each rename waits for the hub.
         grouping.observe(&upsert("run:1", "workstation", "claude/p/a"));
@@ -768,11 +933,17 @@ mod tests {
         grouping.observe(&upsert("run:3", "workstation", "claude/p/c2"));
         assert_eq!(
             grouping.take_renames(),
-            [(
-                "workstation\nclaude/p/b".to_owned(),
-                "workstation\nclaude/p/b2".to_owned()
-            )],
-            "only the explicit member's rename"
+            [
+                (
+                    "workstation\nclaude/p/b".to_owned(),
+                    "workstation\nclaude/p/b2".to_owned()
+                ),
+                (
+                    "workstation\nclaude/p/c".to_owned(),
+                    "workstation\nclaude/p/c2".to_owned()
+                )
+            ],
+            "the hub decides which rename needs an edit"
         );
     }
 

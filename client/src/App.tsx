@@ -5,7 +5,6 @@ import { ActionDialogs, ActionNotices } from "./ui/sessions/ActionDialogs";
 import { OrganizationDialogs } from "./ui/sessions/OrganizationDialogs";
 import { SessionList } from "./ui/sessions/SessionList";
 import { SessionDetail } from "./ui/sessions/SessionDetail";
-import { PerfHost } from "./ui/PerfHost";
 import { OverviewScreen } from "./ui/screens/Overview";
 import { MachinesScreen } from "./ui/screens/Machines";
 import { AccountsScreen } from "./ui/screens/Accounts";
@@ -22,6 +21,7 @@ import type { BridgeMode } from "./bridge";
 // Settings and its sections load the first time Settings opens; their
 // state lives in their modules, so it stays once loaded.
 const SettingsScreen = lazy(() => import("./ui/screens/Settings").then((m) => ({ default: m.SettingsScreen })));
+const PerfHost = lazy(() => import("./ui/PerfHost").then((m) => ({ default: m.PerfHost })));
 
 const STATE_TEXT: Record<string, string> = {
   probing: "checking",
@@ -108,7 +108,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <ActionDialogs />
       <OrganizationDialogs />
       <ActionNotices />
-      <PerfHost />
+      <Suspense><PerfHost /></Suspense>
     </div>
   );
 }

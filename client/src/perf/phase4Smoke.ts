@@ -115,6 +115,17 @@ async function terminalStep() {
   setDetailTab("activity");
 }
 
+async function savedDraftsDialogStep() {
+  const opener = document.querySelector<HTMLButtonElement>('button[aria-label="Saved drafts"]');
+  if (!opener) throw new Error("the Saved drafts button is missing");
+  opener.click();
+  const dialog = () => document.querySelector<HTMLDialogElement>("dialog.saved-drafts");
+  await until(() => dialog()?.open === true, 10_000, "Saved drafts did not open");
+  await until(() => document.activeElement === dialog()?.querySelector("[data-initial]"), 1000, "Saved drafts did not focus Close");
+  button("Close", dialog()!).click();
+  await until(() => dialog()?.open === false && document.activeElement === opener, 1000, "Saved drafts did not return focus");
+}
+
 async function draftsStep() {
   await select(API);
   type("phase 4 smoke");
@@ -303,6 +314,7 @@ export async function phase4Smoke(allowed: boolean, smokeFile?: string) {
   }
   const steps: [string, () => Promise<void>][] = [
     ["terminal", terminalStep],
+    ["saved-drafts-dialog", savedDraftsDialogStep],
     ["drafts", draftsStep],
     ["attach", () => attachStep(smokeFile!)],
     ["send", () => sendStep(smokeFile!)],

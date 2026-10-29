@@ -751,8 +751,9 @@ setup, never against a real `hgs` directory. The same guard pins the composer
 clock to fixture time, so the deterministic warm cache has not expired;
 production always uses the real clock.
 
-The Part A steps are Terminal output, draft navigation, attach, one Send,
-cold-cache full-context Send, Resume and send, process groups and output, and
+The Part A steps are Terminal output, Saved drafts first-open focus and focus
+return, draft navigation, attach, one Send, cold-cache full-context Send,
+Resume and send, process groups and output, and
 attachment fetch plus a decoded `convertFileSrc` thumbnail. The A2 steps answer
 the question, Approve once after its review delay and Send now, checking exact
 ids and receipts in `log.ndjson`. Additional WebKitGTK checks paste a PNG and

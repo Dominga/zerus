@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createEffect, createSignal, on, onCleanup } from "solid-js";
+import { For, Show, Suspense, createMemo, createEffect, createSignal, lazy, on, onCleanup } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
 import { listRows, rowHeight, shownSummary, machineChoices, projectChoices, type Row } from "./model";
@@ -32,8 +32,9 @@ import {
 import type { Session } from "./types";
 import { motionReduced } from "../motion";
 import { composer } from "../../store/composer";
-import { SavedDraftsDialog, openSavedDrafts } from "./SavedDrafts";
 import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem } from "./organize";
+
+const SavedDraftsDialog = lazy(() => import("./SavedDrafts").then((m) => ({ default: m.SavedDraftsDialog })));
 
 /** Actions that go through guarded `hgs` calls arrive in phase 2; their menu entries show disabled. */
 const LATER = true;
@@ -352,6 +353,13 @@ export function SessionList() {
   let section: HTMLElement | undefined;
   const [panelVisible, setPanelVisible] = createSignal(!stripMode());
   const [searchFocused, setSearchFocused] = createSignal(false);
+  const [savedOpen, setSavedOpen] = createSignal(false);
+  const showSavedDrafts = async (from: HTMLElement) => {
+    const handle = subagentOpen() ? undefined : composer.view()?.handle;
+    setSavedOpen(true);
+    const { openSavedDrafts } = await import("./SavedDrafts");
+    openSavedDrafts(from, handle);
+  };
 
   // Docked <-> strip: the conversation resizes once; the panel animates above it.
   const toggleDock = () => {
@@ -479,11 +487,11 @@ export function SessionList() {
           <button class="icon-btn small" title={markAllTip(markAllEntry())} disabled={markAllEntry().disabled} onClick={() => runMarkAll()}><Icon name="read-all" size={16} /></button>
           {/* The open composer is the dialog's target, none while a subagent shows (SessionsWindow.cpp:485-489). */}
           <button class="icon-btn small" data-tip="Saved drafts: recover local drafts, including those from ended sessions" aria-label="Saved drafts"
-            onClick={(e) => openSavedDrafts(e.currentTarget, subagentOpen() ? undefined : composer.view()?.handle)}><Icon name="drafts" size={16} /></button>
+            onClick={(e) => { void showSavedDrafts(e.currentTarget); }}><Icon name="drafts" size={16} /></button>
         </footer>
       </div>
       <Show when={!stripMode()}><ResizeHandle /></Show>
-      <SavedDraftsDialog />
+      <Show when={savedOpen()}><Suspense><SavedDraftsDialog /></Suspense></Show>
     </section>
   );
 }

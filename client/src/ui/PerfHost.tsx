@@ -26,7 +26,6 @@ import { machinesPage } from "../store/machines";
 import { projectsPage } from "../store/projects";
 import { createProject, deleteProject, grouping, moveProject, moveToProject, renameProject, sortProject } from "../store/organization";
 import { activityCandidates, activitySource, type ScenarioResult } from "../perf/scenarios";
-import { phase4Smoke } from "../perf/phase4Smoke";
 
 // The measurement panel (src/perf), loaded on demand: `?perf=1` in the window
 // URL (ZERUS_CLIENT_QUERY=perf=1) or Ctrl+Shift+D. It drives the live session
@@ -707,7 +706,10 @@ export function PerfHost() {
     if (smoke === "marks" && inTauri()) void marksAfterRestart(!!config().actions_smoke);
     if (new URLSearchParams(location.search).get("screens-smoke") === "1" && inTauri()) void screensSmoke(!!config().actions_smoke);
     if (new URLSearchParams(location.search).get("organization-smoke") === "1" && inTauri()) void organizationSmoke(!!config().actions_smoke);
-    if (new URLSearchParams(location.search).get("phase4-smoke") === "1" && inTauri()) void phase4Smoke(!!config().actions_smoke, config().smoke_file ?? undefined);
+    if (new URLSearchParams(location.search).get("phase4-smoke") === "1" && inTauri()) {
+      const { phase4Smoke } = await import("../perf/phase4Smoke");
+      void phase4Smoke(!!config().actions_smoke, config().smoke_file ?? undefined);
+    }
     if (config().mode === "auto") {
       setOpen(true);
       void autoRun(config());

@@ -626,11 +626,21 @@ pub fn perf_log(line: String) {
     eprintln!("zerus-client perf: {line}");
 }
 
+#[cfg(feature = "live")]
+fn smoke_origin(label: &str) -> Result<(), String> {
+    if label == crate::MAIN_WINDOW {
+        Ok(())
+    } else {
+        Err("not the main webview".into())
+    }
+}
+
 /// The fake `hgs` call log beside `ZERUS_CLIENT_HGS`, for the phase 4 smoke.
 /// Refused outside a smoke run, so a real `hgs` folder is never read.
 #[cfg(feature = "live")]
 #[tauri::command]
-pub async fn smoke_log() -> Result<Vec<serde_json::Value>, String> {
+pub async fn smoke_log(window: tauri::WebviewWindow) -> Result<Vec<serde_json::Value>, String> {
+    smoke_origin(window.label())?;
     if !crate::actions::smoke_env_allowed() {
         return Err("not a smoke run".into());
     }
@@ -652,7 +662,12 @@ pub async fn smoke_log() -> Result<Vec<serde_json::Value>, String> {
 /// Advances the replay after the fake's Resume, only in the phase 4 smoke.
 #[cfg(feature = "live")]
 #[tauri::command]
-pub async fn smoke_resume(state: State<'_, AppState>, key: String) -> Result<(), String> {
+pub async fn smoke_resume(
+    state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
+    key: String,
+) -> Result<(), String> {
+    smoke_origin(window.label())?;
     if !crate::actions::smoke_env_allowed() {
         return Err("not a smoke run".into());
     }
@@ -750,6 +765,13 @@ mod tests {
         let info = super::build_info();
         assert_eq!(info, crate::cli::build_info(&crate::cli::BUILD));
         assert_eq!(info["version"], env!("ZERUS_VERSION"));
+    }
+
+    #[cfg(feature = "live")]
+    #[test]
+    fn smoke_commands_answer_only_the_main_webview() {
+        assert_eq!(super::smoke_origin("main"), Ok(()));
+        assert!(super::smoke_origin("native-ui").is_err());
     }
 
     #[cfg(feature = "live")]

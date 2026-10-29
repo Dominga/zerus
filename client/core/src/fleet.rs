@@ -86,6 +86,14 @@ pub struct Fleet {
 }
 
 impl Fleet {
+    /// Bypasses one offline source's retry delay. Repeated pending requests,
+    /// online computers and computers without a source do nothing.
+    pub fn reconnect(&self, computer: &ComputerId) -> bool {
+        guard(&self.shared.streams)
+            .get(computer)
+            .is_some_and(StreamHandle::reconnect)
+    }
+
     /// Follows this computer and the peers it lists through `hgs` (a path or
     /// a name on `PATH`, see [`crate::default_hgs`]); changes go to `sink`.
     pub fn start(hgs: PathBuf, sink: Sender<Change>) -> Self {

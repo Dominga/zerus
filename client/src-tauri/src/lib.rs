@@ -427,6 +427,12 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                                 })
                             })
                         },
+                        reconnect: {
+                            let app = app.handle().clone();
+                            std::sync::Arc::new(move |computer| {
+                                app.state::<commands::AppState>().reconnect(computer);
+                            })
+                        },
                         inspect: {
                             // A replay without an explicit ZERUS_CLIENT_HGS never reaches the real CLI.
                             let allowed = actions::actions_allowed(
@@ -1106,6 +1112,7 @@ mod tests {
                 clock: Arc::new(|| 1_793_000_100.0),
                 rows: Arc::new(|_, _, _| None),
                 facts: Arc::new(|_, _| None),
+                reconnect: std::sync::Arc::new(|_| {}),
                 inspect: Arc::new(|_, _| Err("timed out".into())),
                 dispatch: Arc::new(|_, _, _| Err("no call in these tests".into())),
             },

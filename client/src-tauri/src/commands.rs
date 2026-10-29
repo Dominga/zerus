@@ -22,6 +22,12 @@ pub struct AppState {
 
 #[cfg(feature = "live")]
 impl AppState {
+    /// A manual offline Refresh nudges only its existing source; never starts
+    /// another fleet or changes an online source.
+    pub fn reconnect(&self, computer: &str) -> bool {
+        self.live.reconnect(computer)
+    }
+
     /// The change pump, whose mirror is the screens hub's view of the fleet.
     pub fn pump(&self) -> crate::pump::Pump {
         self.live.pump.clone()
@@ -132,6 +138,18 @@ mod live {
     }
 
     impl Live {
+        pub fn reconnect(&self, computer: &str) -> bool {
+            match self
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                Some(Source::Fleet(fleet)) => fleet.reconnect(&ComputerId::from(computer)),
+                Some(Source::Replay(_)) | None => false,
+            }
+        }
+
         /// Starts the data source once; a later call (a reloaded webview)
         /// queues the last-known catalog again. Returns "live" or "replay".
         /// This computer's organization goes to the hub, which reads its

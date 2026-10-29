@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type AttachmentRef, type Fetched } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 
@@ -463,4 +463,31 @@ export function deskPage(): Promise<number> {
 export async function deskTakePending(page: number): Promise<DeskPending> {
   if (!inTauri()) return { open: null, notices: [] };
   return invoke<DeskPending>("desk_take_pending", { page });
+}
+
+/** Reads an Activity attachment into the private cache, after the reads ahead of it (composer/fetch.rs). */
+export async function attachmentFetch(computer: string, file: AttachmentRef): Promise<Fetched> {
+  if (!inTauri()) throw "Attachments need the desktop app.";
+  return invoke<Fetched>("attachment_fetch", { computer, file });
+}
+
+/** A view shows the cached copy at `path`: the cache bound keeps it until it is unpinned. */
+export function attachmentPin(path: string) {
+  if (inTauri()) void invoke("attachment_pin", { path }).catch(() => {});
+}
+
+export function attachmentUnpin(path: string) {
+  if (inTauri()) void invoke("attachment_unpin", { path }).catch(() => {});
+}
+
+/** Opens an Activity attachment: null when it opened, a notice when the file manager shows it instead; rejects with why not. */
+export async function attachmentOpen(computer: string, file: AttachmentRef): Promise<string | null> {
+  if (!inTauri()) throw "Opening attachments needs the desktop app.";
+  return invoke<string | null>("attachment_open", { computer, file });
+}
+
+/** Opens the composer attachment the view lists at `path` (`draft/{handle}/{list}/{index}`), as `attachmentOpen` answers. */
+export async function attachmentOpenDraft(path: string): Promise<string | null> {
+  if (!inTauri()) throw "Opening attachments needs the desktop app.";
+  return invoke<string | null>("attachment_open_draft", { path });
 }

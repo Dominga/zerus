@@ -88,6 +88,16 @@ describe("archived Activity (Qt inspect 3467-3492, acceptInspection 3587-3660)",
     t.dispose();
   });
 
+  it("reads its attachments in the archived row's conversation, as the last read named it", async () => {
+    const t = setup();
+    expect(t.store.attachmentScope()).toBeUndefined();
+    t.store.follow(target(1, "box"));
+    expect(t.store.attachmentScope()).toEqual({ computer: "box", name: "codex/example/a1", conversation_id: "", archive_id: uuid(1) });
+    await t.answer(reply([ev(1)]));
+    expect(t.store.attachmentScope()?.conversation_id).toBe("conv-1");
+    t.dispose();
+  });
+
   it("polls every 2500 ms from the start of the previous read, never two at a time", async () => {
     const t = setup();
     t.store.follow(target(1));

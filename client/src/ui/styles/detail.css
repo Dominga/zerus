@@ -83,9 +83,15 @@
   .md-list { padding-left: 20px !important; list-style: disc !important; }
   .md-list li { margin: 2px 0; }
   .act-code { margin: 8px 0 0; padding: 9px 12px; border-radius: var(--z-radius-md); background: var(--z-color-code-bg); border: 1px solid var(--z-color-divider); font-size: calc(var(--fs-base) * .9); line-height: 1.45; overflow-x: auto; white-space: pre; }
-  .act-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-  .att-chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: var(--z-radius-md); border: 1px solid var(--z-color-border); background: var(--z-color-surface); font-size: var(--fs-xs); }
-  .att-chip:hover { border-color: var(--z-color-accent-muted); }
+  .act-attachments { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 8px; }
+  /* Qt's attachment card (ActivityView.cpp:779): one bordered row, an image's thumbnail in a fixed 96x64 cell. */
+  .att-card { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; padding: 8px; border-radius: var(--z-radius-md); border: 1px solid var(--z-color-border); background: var(--z-color-surface); font: inherit; font-size: var(--fs-xs); color: var(--z-color-text); text-align: left; }
+  button.att-card { cursor: pointer; }
+  button.att-card:hover { border-color: var(--z-color-accent-muted); }
+  .att-thumb { flex: none; width: 96px; height: 64px; display: grid; place-items: center; overflow: hidden; }
+  .att-thumb img { max-width: 96px; max-height: 64px; object-fit: contain; }
+  .att-caption { color: var(--z-color-accent); overflow-wrap: anywhere; }
+  .att-open { flex: none; color: var(--z-color-muted); }
   .act-tools { border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-lg); padding: 6px 10px; font-size: var(--fs-sm); animation: rise var(--z-motion-slow) var(--ease) both; }
   .act-tools-head { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; }
   .act-tools-head .chev { transition: rotate var(--z-motion-base) var(--ease); color: var(--z-color-dim); }

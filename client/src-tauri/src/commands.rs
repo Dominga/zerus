@@ -261,6 +261,8 @@ pub async fn start(
 ) -> Result<String, String> {
     let live = Arc::clone(&state.live);
     composers.resend();
+    // A reloaded webview shows no attachment yet.
+    composers.cache().clear_pins();
     blocking(move || live.start()).await
 }
 

@@ -169,6 +169,11 @@ export function createArchiveActivity(deps: ArchiveActivityDeps) {
 
   const source = {
     target, events, summary, loaded, error,
+    /** The archived row's conversation, as its last read named it. */
+    attachmentScope: () => {
+      const t = target();
+      return t ? { computer: t.computer, name: t.name, conversation_id: conversation ?? "", archive_id: t.archiveId } : undefined;
+    },
     loadingOlder: () => false,
     olderDone: () => true,
     ended: () => false,

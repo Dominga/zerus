@@ -1,13 +1,17 @@
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
+import { attachmentOpen } from "../../bridge";
+import { notify } from "../../store/actions";
+import { previews } from "../../store/attachments";
+import { cardTarget, createOpen } from "./attachment-card";
 import { createStore, reconcile } from "solid-js/store";
 import { Icon } from "../lib/icons";
 import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, type MenuEntry } from "../../store/ui";
 import { activity } from "../../store/session";
 import { flag, num, setSetting } from "../../store/settings";
-import type { ActivitySource } from "../../store/activitySource";
+import type { ActivitySource, AttachmentScope } from "../../store/activitySource";
 import { buildTranscript, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { statusOf } from "./SessionCard";
-import type { MediaMessage, Session, TranscriptItem } from "./types";
+import type { ItemAttachment, MediaMessage, Session, TranscriptItem } from "./types";
 
 // ---------------------------------------------------------------------------
 // Reading column (ActivityWidth.h): 900 px at 100% content scale, 480–2400,
@@ -305,7 +309,51 @@ function MediaCard(props: { item: MediaMessage }) {
   );
 }
 
-function Item(props: { item: TranscriptItem }) {
+const openAttachment = createOpen({
+  open: (computer, file) => attachmentOpen(computer, file),
+  notify: (tone, text, sticky, key) => { notify(tone, text, sticky, key); },
+});
+
+/**
+ * A message's file as Qt's card shows it (ActivityView.cpp:759-782): an
+ * image's thumbnail, the caption, its size and Open →. A file the message
+ * saved no reference to only names itself.
+ */
+function AttachmentCard(props: { file: ItemAttachment; scope?: AttachmentScope }) {
+  const target = createMemo(() => cardTarget(props.file, props.scope), undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
+  // An image's thumbnail reads its file while the card shows (ActivityView.cpp:2126-2131).
+  createEffect(on(target, (now) => {
+    if (!now || !props.file.image) return;
+    previews.show(now.computer, now.ref);
+    onCleanup(() => previews.hide(now.computer, now.ref));
+  }));
+  const thumbnail = () => {
+    const now = target();
+    if (!now || !props.file.image) return undefined;
+    const state = previews.state(now.computer, now.ref);
+    return state.kind === "ready" ? state.url : undefined;
+  };
+  return (
+    <Show when={target()} fallback={<span class="att-card">Attachment: {props.file.name}</span>}>
+      {(now) => (
+        <button class="att-card" title={props.file.caption} onClick={() => void openAttachment(now().computer, now().ref)}>
+          <Show when={props.file.image}>
+            <span class="att-thumb">
+              <Show when={thumbnail()}>
+                {(url) => <img src={url()} alt="" onError={() => previews.failed(now().computer, now().ref)} />}
+              </Show>
+            </span>
+          </Show>
+          <span class="att-caption">{props.file.caption}</span>
+          <span class="dim">{props.file.meta}</span>
+          <span class="att-open">Open →</span>
+        </button>
+      )}
+    </Show>
+  );
+}
+
+function Item(props: { item: TranscriptItem; scope?: AttachmentScope }) {
   const [open, setOpen] = createSignal(false);
   const it = props.item;
   if (it.kind === "media") return <MediaCard item={it} />;
@@ -347,12 +395,7 @@ function Item(props: { item: TranscriptItem }) {
           <Show when={it.code}><pre class="act-code mono">{it.code}</pre></Show>
           <Show when={it.attachments}>
             <div class="act-attachments">
-              <For each={it.attachments}>{(a) => (
-                <span class="att-chip" title={a.name}>
-                  <Icon name={a.kind === "image" ? "image" : "file-text"} size={14} />
-                  <span>{a.name}</span><span class="dim">{a.size}</span>
-                </span>
-              )}</For>
+              <For each={it.attachments}>{(a) => <AttachmentCard file={a} scope={props.scope} />}</For>
             </div>
           </Show>
         </div>
@@ -428,6 +471,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
   }));
 
   const summary = () => source().summary();
+  const scope = createMemo(() => source().attachmentScope?.(), undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
   const liveTool = () => String(summary()?.current_tool || summary()?.activity_summary || s()?.summary || "");
   const states = createMemo(() => paneStates(source(), s()));
   return (
@@ -450,7 +494,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
           <Show when={!states().archived} fallback={<div class="notice"><Icon name="archive" size={14} /><div>This conversation is archived.</div></div>}>
             <Show when={source().loaded() || view.items.length} fallback={<div class="act-older hint">Reading activity…</div>}>
               <Show when={view.items.length} fallback={<div class="act-older hint">No recorded activity yet.</div>}>
-                <For each={view.items}>{(it) => <Item item={it} />}</For>
+                <For each={view.items}>{(it) => <Item item={it} scope={scope()} />}</For>
               </Show>
             </Show>
             <Show when={states().working && liveTool()}>

@@ -964,6 +964,12 @@ pub(crate) struct Attempt {
     /// The member's turn ended long enough ago without a report.
     #[serde(default)]
     pub no_report: bool,
+    /// The newest session event the dispatcher read for this attempt when the
+    /// listing's `last_event_at` did not advance (a DeepSeek session's native
+    /// tool events, #628). It keeps the silent check from reading the session
+    /// on every tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_at: Option<f64>,
     /// The lead was reminded once that this report still waits for a decision
     /// (C4); absent until it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]

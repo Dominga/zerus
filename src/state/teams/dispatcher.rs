@@ -81,6 +81,9 @@ pub(crate) struct Seen {
     pub limited: Option<SeenLimit>,
     /// When its session last reported any event.
     pub last_event_at: Option<f64>,
+    /// Its agent (claude, codex, dsh, ...): a DeepSeek session's listing
+    /// `last_event_at` does not advance with its native tool events (#628).
+    pub agent: String,
 }
 
 /// The newest Background job of a session (C12).
@@ -191,6 +194,7 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 services,
                 asking: live && matches!(field("phase"), "question" | "input" | "approval"),
                 last_event_at: record["last_event_at"].as_f64(),
+                agent: field("agent").to_owned(),
                 live,
                 cwd: field("cwd").to_owned(),
                 muted: record["notification_preferences"]["muted"] == true,
@@ -232,6 +236,10 @@ pub(crate) enum Step {
     /// Reminds a sub-lead once that its report waits for a decision (N9).
     RemindReviewer { task: u32, member: String },
     RemindReport { task: u32 },
+    /// #628: a DeepSeek member's listing `last_event_at` is older than its
+    /// native tool events; the worker reads the session once before it calls
+    /// the member silent.
+    CheckSilent { task: u32, last: f64 },
     /// The member is idle without a ready task while tasks are open (C7).
     Starving { member: String },
     /// The member got work again or nothing is open: the episode ends (C7).
@@ -654,9 +662,22 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             continue;
         }
         let Some(found) = team.member(&attempt.member).and_then(|member| session_of(member, seen)) else { continue };
-        let Some(last) = found.last_event_at else { continue };
+        // #628: a DeepSeek session's listing `last_event_at` does not advance
+        // with its dsh_native tool events. The newest event the worker has read
+        // for this attempt counts too, so a working member is not silent.
+        let last = match (found.last_event_at, attempt.activity_at) {
+            (Some(listed), Some(read)) => Some(listed.max(read)),
+            (listed, read) => listed.or(read),
+        };
+        let Some(last) = last else { continue };
         let quiet = now - last;
-        if found.live && found.activity == "busy" && !found.asking && !found.background && quiet >= SILENT_MINUTES * 60.0 {
+        if !(found.live && found.activity == "busy" && !found.asking && !found.background && quiet >= SILENT_MINUTES * 60.0) {
+            continue;
+        }
+        if found.agent == "dsh" {
+            // Read the native events once; the next tick counts what it found.
+            steps.push(Step::CheckSilent { task: task.id, last });
+        } else {
             steps.push(Step::Silent { task: task.id, minutes: (quiet / 60.0).round() as u64 });
         }
     }
@@ -3375,6 +3396,50 @@ fn tell_sub_inbox(store: &mut Store, team: &Team, member: &str) -> anyhow::Resul
 /// How long a member in its turn may say nothing before the lead hears.
 const SILENT_MINUTES: f64 = 20.0;
 
+/// #628: a DeepSeek member's listing `last_event_at` does not advance with its
+/// dsh_native PreToolUse/PostToolUse events. Read the session's newest event
+/// once, record it on the attempt so later ticks count it, and call the member
+/// silent only when that is stale too.
+fn check_dsh_silent(store: &mut Store, team: &Team, task_id: u32, listing_last: f64) -> anyhow::Result<()> {
+    let Some(task) = team.task(task_id) else { return Ok(()) };
+    let Some(attempt) = task.open_attempt() else { return Ok(()) };
+    let Some(member) = team.member(&attempt.member) else { return Ok(()) };
+    let Some(session) = member.session.clone() else { return Ok(()) };
+    // A record from another run is not this member's activity.
+    let newest = inspect_reply(&session)
+        .ok()
+        .filter(|record| record["run_id"].as_str().unwrap_or_default() == session.run_id)
+        .and_then(|record| newest_event(&record));
+    let last = listing_last.max(newest.unwrap_or(0.0));
+    let quiet = now() - last;
+    let attempt_id = attempt.id.clone();
+    change(store, &team.id, |team, _| {
+        if let Some(found) = team.task_mut(task_id).and_then(|task| task.attempts.iter_mut().find(|found| found.id == attempt_id)) {
+            if let Some(newest) = newest {
+                if found.activity_at.is_none_or(|at| newest > at) {
+                    found.activity_at = Some(newest);
+                }
+            }
+        }
+        Ok(())
+    })?;
+    if quiet >= SILENT_MINUTES * 60.0 {
+        tell_lead_silent(store, team, task_id, (quiet / 60.0).round().max(1.0) as u64)?;
+    }
+    Ok(())
+}
+
+/// The newest `at` of a session record's events, in seconds; a native DeepSeek
+/// session's dsh_native tool events are such entries (#628).
+fn newest_event(record: &Value) -> Option<f64> {
+    record["events"]
+        .as_array()?
+        .iter()
+        .filter_map(|event| event["at"].as_f64())
+        .filter(|at| *at > 0.0)
+        .max_by(f64::total_cmp)
+}
+
 fn tell_lead_silent(store: &mut Store, team: &Team, task_id: u32, minutes: u64) -> anyhow::Result<()> {
     let task = team.task(task_id).context("unknown task")?;
     let attempt = task.open_attempt().context("no open attempt")?.clone();
@@ -4074,6 +4139,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         }),
         Step::BudgetRed { member } => tell_lead_budget_red(store, team, member, false, String::new(), 0.0),
         Step::BackgroundRed { member, command, since } => tell_lead_budget_red(store, team, member, true, command.clone(), *since),
+        Step::CheckSilent { task, last } => check_dsh_silent(store, team, *task, *last),
         Step::Silent { task, minutes } => tell_lead_silent(store, team, *task, *minutes),
         Step::Quiet { member, session, muted, revision } => {
             if !*muted {
@@ -7317,6 +7383,98 @@ mod tests {
         // Once told, the lead is not told again for the attempt.
         t.tasks.iter_mut().find(|task| task.id == id).unwrap().attempts[0].told_lead.push("silent".into());
         assert!(!steps(&t, &[lead, dev], at).iter().any(|step| matches!(step, Step::Silent { .. })));
+    }
+
+    /// #628: a DeepSeek session's listing `last_event_at` does not advance with
+    /// its dsh_native tool events; the newest event in the session decides,
+    /// and a working member is not called silent.
+    #[test]
+    fn a_dsh_member_with_fresh_native_tool_events_is_not_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        {
+            let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            dev.agent = "dsh".into();
+            dev.session = Some(SessionRef { name: "dsh/x/dev".into(), run_id: "r1".into(), conversation_id: "c".into(), ..Default::default() });
+        }
+        {
+            let task = t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+            task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered,
+                sent_at: 10.0, delivered_at: Some(10.0), started_at: Some(11.0), ..Default::default() });
+            task.status = TaskStatus::InProgress;
+        }
+        let id = t.tasks.iter().find(|task| task.assignee == "dev").unwrap().id;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let at = crate::state::now();
+        let lead = session("claude/x/lead", "r0", true);
+        let mut dev = session("dsh/x/dev", "r1", false);
+        dev.agent = "dsh".into();
+        dev.activity = "busy".into();
+        dev.phase = "tool".into();
+        dev.last_event_at = Some(at - 25.0 * 60.0);
+        let found = steps(&t, &[lead.clone(), dev.clone()], at);
+        assert!(found.iter().any(|step| matches!(step, Step::CheckSilent { task, .. } if *task == id)), "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::Silent { .. })), "a dsh member is read before it is called silent");
+        // The native tool events are seconds old: the member is working.
+        let newest = at - 5.0;
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], _| match args.first().copied() {
+            Some("inspect") => Ok(fake_output(0, &json!({"run_id":"r1","conversation_id":"c","activity":"busy","phase":"tool",
+                "events":[{"type":"PreToolUse","at":newest - 25.0},{"type":"PostToolUse","at":newest}]}).to_string(), "")),
+            other => panic!("a working dsh member sends nothing: {other:?}"),
+        })));
+        run_step(&mut store, &t, &Step::CheckSilent { task: id, last: at - 25.0 * 60.0 }, "").unwrap();
+        set_fake_hgs(None);
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert_eq!(saved.task(id).unwrap().attempts.last().unwrap().activity_at, Some(newest));
+        assert!(saved.task(id).unwrap().attempts.last().unwrap().told_lead.is_empty());
+        let after = steps(&saved, &[lead, dev], at);
+        assert!(!after.iter().any(|step| matches!(step, Step::Silent { .. } | Step::CheckSilent { .. })), "{after:?}");
+    }
+
+    /// #628: a DeepSeek member whose newest native event is 25 minutes old is
+    /// still silent, and the lead hears it once.
+    #[test]
+    fn a_dsh_member_with_no_native_event_for_twenty_minutes_is_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        {
+            let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            dev.agent = "dsh".into();
+            dev.session = Some(SessionRef { name: "dsh/x/dev".into(), run_id: "r1".into(), conversation_id: "c".into(), ..Default::default() });
+        }
+        {
+            let task = t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+            task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered,
+                sent_at: 10.0, delivered_at: Some(10.0), started_at: Some(11.0), ..Default::default() });
+            task.status = TaskStatus::InProgress;
+        }
+        let id = t.tasks.iter().find(|task| task.assignee == "dev").unwrap().id;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let at = crate::state::now();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let record = sent.clone();
+        let quiet_at = at - 25.0 * 60.0;
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| match args.first().copied() {
+            Some("inspect") => Ok(fake_output(0, &json!({"run_id":"r1","conversation_id":"c","activity":"busy","phase":"tool",
+                "events":[{"type":"PreToolUse","at":quiet_at - 100.0},{"type":"PostToolUse","at":quiet_at}]}).to_string(), "")),
+            Some("send") => {
+                *record.borrow_mut() = input.unwrap()["text"].as_str().unwrap_or_default().to_owned();
+                Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
+            }
+            other => panic!("unexpected hgs {other:?}"),
+        })));
+        run_step(&mut store, &t, &Step::CheckSilent { task: id, last: quiet_at }, "").unwrap();
+        set_fake_hgs(None);
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let attempt = saved.task(id).unwrap().attempts.last().unwrap();
+        assert!(attempt.told_lead.iter().any(|kind| kind == "silent"), "{attempt:?}");
+        assert!(sent.borrow().contains("silent 25 min"), "{}", sent.borrow());
+        let page = store.events(&t.id, None, 50).unwrap();
+        assert!(page["items"].as_array().unwrap().iter().any(|event| event["kind"] == "member_silent"), "{page}");
     }
 
     /// N6: one NoReport step with a given `hgs inspect` record.

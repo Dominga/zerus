@@ -160,6 +160,7 @@ TeamConversation::TeamConversation(HgsClient *client, QWidget *parent) : QWidget
         // Held by hgs: its line shows at once, then as the next reads list it.
         if (receipt.value("status") == "queued") {
             m_justHeld.append(QJsonObject{{"request_id", receipt.value("request_id")}, {"text", receipt.value("text")}});
+            m_sentHeld.add(receipt.value("request_id").toString(), m_pendingText.isEmpty() ? receipt.value("text").toString() : m_pendingText);
             renderHeld();
         }
         if (sent) sent({});
@@ -223,7 +224,7 @@ void TeamConversation::setSession(const QString &host, const QString &name)
         if (m_intro) m_intro->setVisible(name.isEmpty());
         updateSend(); fitDesigner();
     }
-    m_justHeld = {}; renderHeld();
+    m_justHeld = {}; m_sentHeld.clear(); renderHeld();
     if (isVisible()) poll();
 }
 
@@ -509,6 +510,14 @@ void TeamConversation::received(const QString &host, const QString &name, const 
         else m_justHeld[i] = item;
     }
     renderHeld();
+    // #511 N5: a held message hgs could not deliver comes back to the composer
+    // with why; an uncertain one says Delivery unconfirmed.
+    for (const auto &lost : m_sentHeld.take(m_details.value("held_settled").toArray())) {
+        m_input->setPlainText(HeldSent::restored(m_input->toPlainText(), lost.text));
+        m_status->setText(HeldSent::notice(lost));
+        m_status->setStyleSheet(QStringLiteral("color:%1;").arg(colorsFor(m_dark).danger.name()));
+        m_status->show();
+    }
 }
 
 void TeamConversation::send(const QString &raw)

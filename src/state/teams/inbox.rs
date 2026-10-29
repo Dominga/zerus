@@ -158,15 +158,23 @@ fn all_items(team: &Team) -> Vec<Item> {
             detail: member.error.clone(),
         });
     }
-    // Spec 0 (U45): a task that waits for a step Zerus could not take.
+    // Spec 0: a task that waits for a step Zerus could not take (U45 model,
+    // U46 context, U48 branch) is one item for the lead, with the reason and
+    // the retry that starts the step again. A context action that still runs
+    // waits for nobody.
     for task in team.tasks.iter().filter(|_| active).filter(|task| task.status == TaskStatus::Pending) {
-        let Some(wait) = &task.waits else { continue };
+        let Some(wait) = task.waits.as_ref().filter(|wait| !wait.running()) else { continue };
+        let attempt = task.attempts.iter().rev().find(|attempt| wait.attempt > 0 && attempt.n == wait.attempt);
         items.push(Item {
             subagents: Value::Null,
             kind: "task_waits",
             key: format!("task_waits:{}:{}", task.id, wait.at),
             task: Some(task.id),
-            member: if task.assignee.is_empty() { task.role.clone() } else { team.role_of(&task.assignee) },
+            member: match attempt {
+                Some(attempt) => team.role_of(&attempt.member),
+                None if task.assignee.is_empty() => task.role.clone(),
+                None => team.role_of(&task.assignee),
+            },
             since: wait.at,
             summary: summary(&format!("#{} {} waits: {}", task.id, task.title, wait.reason)),
             command: format!("{} | hgs team retry --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})),
@@ -338,29 +346,6 @@ fn all_items(team: &Team) -> Vec<Item> {
                 detail: String::new(),
             });
         }
-    }
-    // U46: a hand-out Zerus could not prepare is one item for the lead, with
-    // the reason and the retry that starts the preparation again.
-    for task in &team.tasks {
-        let Some(wait) = &task.prepare_wait else { continue };
-        if wait.state == "waiting" {
-            continue;
-        }
-        let attempt = task.attempts.iter().rev().find(|attempt| attempt.n == wait.attempt);
-        items.push(Item {
-            subagents: Value::Null,
-            kind: "prepare_failed",
-            key: format!("prepare_failed:{}:{}", task.id, wait.attempt),
-            task: Some(task.id),
-            member: attempt.map(|attempt| team.role_of(&attempt.member)).unwrap_or_default(),
-            since: wait.at,
-            summary: summary(&format!("Zerus could not prepare #{} {}: {}", task.id, task.title, wait.reason)),
-            command: format!(
-                "{} | hgs team retry --json",
-                json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})
-            ),
-            detail: wait.reason.clone(),
-        });
     }
     // The permission requests the dispatcher read from the members' sessions
     // (C2): each is answerable by its own question id and hash.

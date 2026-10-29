@@ -1,14 +1,19 @@
 // Account limit windows and their pace, ported from tray/src/AccountUsage.h.
 // Pace compares used quota with the share of the window that has passed:
 // spending faster than that share exhausts the limit before it resets.
+// The core projects resets as Unix seconds; `fromProjected` turns them into
+// minutes from `now` on each 15 s render, so nothing else runs on a timer.
+import type { ProjectedWindow, Usage } from "../../types";
 
 export interface UsageWindow {
-  /** Window length in minutes (300 = 5 h, 10080 = 7 d). */
-  minutes: number;
+  /** Window length in minutes (300 = 5 h, 10080 = 7 d); null when the provider reports none. */
+  minutes: number | null;
   /** Used share, 0..100. */
   used: number;
-  /** Minutes until reset; not positive when the window already ended. */
-  resetsIn: number;
+  /** Minutes until reset; null when unknown (it counts as current, as in Qt); not positive once ended. */
+  resetsIn: number | null;
+  /** The provider's name for the window ("Sonnet", "Monthly"). */
+  label?: string;
 }
 
 export type Tone = "normal" | "warning" | "critical";
@@ -29,14 +34,22 @@ export interface Pace {
   tone: Tone;
 }
 
-const thresholdTone = (used: number): Tone => (used >= 90 ? "critical" : used >= 70 ? "warning" : "normal");
+/** A projected window at `now` (Unix seconds). */
+export const fromProjected = (w: ProjectedWindow, now: number): UsageWindow => ({
+  minutes: w.minutes, used: w.used, label: w.label, resetsIn: w.resets_at === null ? null : (w.resets_at - now) / 60,
+});
 
-export const current = (w: UsageWindow) => w.resetsIn > 0;
+export const windowsAt = (windows: readonly ProjectedWindow[], now: number) => windows.map((w) => fromProjected(w, now));
+
+export const thresholdTone = (used: number): Tone => (used >= 90 ? "critical" : used >= 70 ? "warning" : "normal");
+
+/** AccountUsage::current: a reset that is unknown or still ahead. */
+export const current = (w: UsageWindow) => w.resetsIn === null || w.resetsIn > 0;
 
 export function pace(w: UsageWindow): Pace {
   const used = Math.max(0, Math.min(100, w.used));
   const result: Pace = { known: false, early: false, used, elapsed: 0, minutesLeft: -1, runsOutIn: -1, projected: -1, tone: thresholdTone(used) };
-  if (w.minutes <= 0 || w.resetsIn <= 0) return result;
+  if (!w.minutes || w.minutes <= 0 || w.resetsIn === null || w.resetsIn <= 0) return result;
   result.known = true;
   result.minutesLeft = w.resetsIn;
   const passed = Math.max(0, w.minutes - w.resetsIn);
@@ -51,10 +64,16 @@ export function pace(w: UsageWindow): Pace {
   return result;
 }
 
-export const period = (w: UsageWindow) =>
-  w.minutes === 10080 ? "7d" : w.minutes % 1440 === 0 ? `${w.minutes / 1440}d` : w.minutes % 60 === 0 ? `${w.minutes / 60}h` : `${w.minutes}m`;
+/** AccountUsage::period: the duration after the provider's name; "Usage" when neither is known. */
+export function period(w: UsageWindow) {
+  const m = w.minutes ?? 0;
+  const duration = m === 10080 ? "7d" : m && m % 1440 === 0 ? `${m / 1440}d` : m && m % 60 === 0 ? `${m / 60}h` : m ? `${m}m` : "";
+  const name = w.label ?? "";
+  return name ? (duration ? `${name} ${duration}` : name) : duration || "Usage";
+}
 
-export function remaining(minutes: number) {
+export function remaining(minutes: number | null) {
+  if (minutes === null) return "reset unknown";
   const m = Math.max(0, Math.ceil(minutes));
   if (!m) return "refresh needed";
   if (m >= 1440) return `${Math.floor(m / 1440)}d ${Math.floor((m % 1440) / 60)}h`;
@@ -88,15 +107,90 @@ export function forecast(w: UsageWindow) {
     : `At the current pace, about ${Math.round(p.projected)}% by reset`;
 }
 
-/** AccountUsage::tooltip: provider, account, each window with its reset and forecast. */
-export function usageTooltip(provider: string, label: string, windows: UsageWindow[], updated?: string) {
-  const lines = [provider, label];
+const TONES: Tone[] = ["normal", "warning", "critical"];
+
+/** AccountUsage::severest: the most urgent pace tone of the current windows; undefined when none reports usage. */
+export function severest(windows: readonly UsageWindow[]): Tone | undefined {
+  let tone: Tone | undefined;
   for (const w of windows) {
+    if (!current(w)) continue;
+    const next = pace(w).tone;
+    if (!tone || TONES.indexOf(next) > TONES.indexOf(tone)) tone = next;
+  }
+  return tone;
+}
+
+const PROVIDERS: Record<string, string> = { claude: "Claude", codex: "Codex", kimi: "Kimi", opencode: "OpenCode", dsh: "DeepSeek", deepseek: "DeepSeek", sh: "Shell" };
+/** IdentityBadges::providerName. */
+export const providerName = (provider: string) => PROVIDERS[provider] ?? provider;
+
+/** No window to draw yet: the meters show their placeholders. */
+export const usageLoading = (u: Usage) => u.status === "loading" && !u.windows.length;
+
+/** What replaces the meters without windows (AccountUsage::Button::summaryText). */
+export function summaryText(u: Usage) {
+  const b = u.balances[0];
+  if (b) return `${b.balance} ${b.currency}`;
+  if (u.status === "configured") return u.provider === "opencode" ? "Configured" : "API key";
+  if (u.status === "signed_out") return "Sign in required";
+  if (u.status === "expired") return "Sign-in expired";
+  return "Unavailable";
+}
+
+/** AccountUsage::state: what the usage panel says without windows or balances. */
+export function stateText(u: Usage) {
+  const s = u.status;
+  if (!s || s === "loading") return "Loading account details…";
+  if (s === "configured" && u.provider === "opencode") return "OpenCode uses its native provider configuration. Usage is not available here.";
+  if (s === "configured") return "API key configured. Usage is available in the DeepSeek console.";
+  if (u.offline || s === "offline") return "Machine is offline. Showing the last available account data.";
+  if (s === "expired") return "Native sign-in has expired. Open the agent or sign in again, then refresh usage.";
+  if (s === "signed_out" && u.provider === "dsh") return "DeepSeek account is signed out. API-key connections are configured separately in the native settings.";
+  if (s === "signed_out") return "No native subscription sign-in found. API-key sessions may still work.";
+  if (s === "credentials_locked") return "Saved sign-in is in the locked macOS Keychain. Unlock it in Keychain Access, then refresh.";
+  if (s === "desktop_session_unavailable") return "Saved sign-in requires the Mac desktop session. Log in to macOS and check the HGS installation, then refresh.";
+  if (s === "credentials_unavailable") return "The saved Keychain sign-in could not be used. Check account access or sign in again.";
+  return "Usage is unavailable from this provider. Open its native account page or refresh after signing in.";
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const two = (n: number) => String(n).padStart(2, "0");
+
+/** Qt's "d MMM HH:mm" in local time. */
+export function dayTime(seconds: number) {
+  const d = new Date(seconds * 1000);
+  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${two(d.getHours())}:${two(d.getMinutes())}`;
+}
+
+/** Qt's "HH:mm" in local time. */
+export function clock(seconds: number) {
+  const d = new Date(seconds * 1000);
+  return `${two(d.getHours())}:${two(d.getMinutes())}`;
+}
+
+/** AccountUsage::tooltip (AccountUsage.h:197-219). */
+export function accountTooltip(u: Usage, now: number) {
+  const lines: string[] = [];
+  const provider = providerName(u.provider);
+  if (provider) lines.push(provider);
+  if (u.label && u.label !== provider) lines.push(u.label);
+  for (const value of [u.identity.name, u.identity.email, u.identity.plan, u.identity.organization]) if (value) lines.push(value);
+  for (const p of u.windows) {
+    const w = fromProjected(p, now);
     lines.push(`${period(w)}: ${Math.round(w.used)}% used`);
-    if (current(w)) lines.push(`Resets in ${remaining(w.resetsIn)}`);
+    if (p.resets_at !== null) lines.push(`Resets ${dayTime(p.resets_at)}${current(w) ? ` (in ${remaining(w.resetsIn)})` : ""}`);
     const f = forecast(w);
     if (f) lines.push(f);
   }
-  if (updated) lines.push(`Updated ${updated}`);
+  for (const b of u.balances) lines.push(`${b.kind}: ${b.balance} ${b.currency}`);
+  if (u.checked_at !== null) {
+    if (u.seeded) lines.unshift(`Checked ${clock(u.checked_at)}`);
+    else lines.push(`Updated ${clock(u.checked_at)}`);
+  }
+  if (u.refreshing) lines.push("Updating… Previous values remain visible.");
+  else if (u.refresh_error) lines.push("Update failed. Showing the last available values.");
+  if (u.offline) lines.push("Machine is offline.");
+  if (!u.windows.length && !u.balances.length) lines.push(stateText(u));
+  lines.push("Updates every 5 minutes. Open account details.");
   return lines.join("\n");
 }

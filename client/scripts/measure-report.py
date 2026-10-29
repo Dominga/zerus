@@ -319,6 +319,19 @@ def setting(value):
     return str(value)
 
 
+def activity_source(value):
+    """One line on where the Activity scenario's session came from; empty for older files."""
+    if not isinstance(value, dict):
+        return ""
+    where = "воспроизведение" if value.get("replay") else "живой список"
+    px = value.get("scroll_px")
+    scroll = f"{px}{NBSP}px" if finite(px) else "н/д"
+    return (
+        f"Источник Activity: {where}, событий {esc(value.get('events', 'н/д'))}, прокрутка {scroll}, "
+        f"прочитано страниц {esc(value.get('older_pages', 'н/д'))}"
+    )
+
+
 def details_section(reports):
     out = []
     for report in reports:
@@ -352,6 +365,9 @@ def details_section(reports):
             rows.append(
                 f"<li>{esc(p.get('role'))} {esc(p.get('name'))}: CPU {num(p.get('cpu_percent'), 2, '%')}, RSS {mib(p.get('rss_bytes'))}, PSS {mib(p.get('pss_bytes'))}</li>"
             )
+        source = activity_source(report.get("activity_source"))
+        if source:
+            rows.append(f"<li>{source}</li>")
         settings = report.get("settings") or {}
         meta = ", ".join(f"{esc(k)} {esc(setting(v))}" for k, v in settings.items())
         out.append(

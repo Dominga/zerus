@@ -849,7 +849,7 @@ mod tests {
     #[test]
     fn a_count_may_be_said_as_a_number_word() {
         // U49: the word rule asks for the count; "two" names 2 as "2" does.
-        let rule = WordRule { phrases: &[], all: vec!["2".into()], add: true };
+        let rule = WordRule { phrases: &[], all: vec!["2".into()], add: true, ..Default::default() };
         let db = database();
         add(&db, "claude/x/lead", "c1", prompt(2000.0, "Please add two backend members to the roster"));
         verify_roster_in(&db, "claude/x/lead", "c1", "Please add two backend members to the roster", &rule, 2010.0).unwrap();

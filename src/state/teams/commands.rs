@@ -1720,7 +1720,15 @@ pub(crate) fn commit_in_team(team: &Team, member_id: &str, input: &Value) -> any
     ensure!(!message.is_empty() && message.chars().count() <= 4000, "A commit message is required (at most 4000 characters)");
     let folder = super::dispatcher::member_folder_path(team, member)?;
     ensure!(!folder.is_empty() && folder != team.folder, "Zerus commits in the member's own folder, not the team's");
-    let branch = format!("team/{}/{}", &team.id[..8.min(team.id.len())], super::dispatcher::tag(&member.id));
+    // U48: with a branch per task, the member's open task's branch is its team
+    // branch while that attempt is open.
+    let attempt_id = text(input, "attempt");
+    let open_task = team.tasks.iter().find(|task| {
+        task.open_attempt().is_some_and(|attempt| attempt.member == member_id && (attempt_id.is_empty() || attempt.id == attempt_id))
+    });
+    let branch = open_task
+        .and_then(|task| super::dispatcher::task_branch(team, task.id, member_id))
+        .unwrap_or_else(|| format!("team/{}/{}", &team.id[..8.min(team.id.len())], super::dispatcher::tag(&member.id)));
     let paths: Vec<String> = input["paths"].as_array().into_iter().flatten().filter_map(|path| path.as_str()).map(str::to_owned).collect();
     for path in &paths {
         ensure!(!path.is_empty() && !path.starts_with('/') && !path.split(['/', '\\']).any(|part| part == ".."), "A commit path must stay inside the member's folder");
@@ -2364,7 +2372,7 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
             // the role it names is checked once the sentence is verified.
             match input["count"].as_u64() {
                 Some(count) if (1..=32).contains(&count) && !text(input, "role").trim().is_empty() => {
-                    WordRule { phrases: &[], all: vec![count.to_string()], add: true }
+                    WordRule { phrases: &[], all: vec![count.to_string()], add: true, ..Default::default() }
                 }
                 _ => WordRule::default(),
             }
@@ -2375,7 +2383,7 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
             if id.is_empty() || input["draining"].as_bool() == Some(false) {
                 WordRule::default()
             } else {
-                WordRule { phrases: super::owner_word::DRAIN_PHRASES, all: vec![id.to_owned()], add: false }
+                WordRule { phrases: super::owner_word::DRAIN_PHRASES, all: vec![id.to_owned()], add: false, ..Default::default() }
             }
         }
         "swap-member" => {

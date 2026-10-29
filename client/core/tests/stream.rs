@@ -280,3 +280,37 @@ fn probes_read_the_marker_of_the_selected_computer() {
     ));
     assert_eq!(fake.runs("studio", &["-h"]).len(), 1);
 }
+
+#[test]
+fn confirmed_notification_preferences_reach_the_row_before_the_next_listing() {
+    let preferences = |muted: bool, revision: i64| {
+        json!({"conversation_id": "conversation", "muted": muted, "revision": revision, "suppressed": {
+            "reply_id": null, "attention_signature": null, "optional_question_ids": [],
+            "main_attention": null, "child_attention": {}}})
+    };
+    let row = json!({"name": "codex/project/session", "cmd": "codex", "run_id": "run",
+        "conversation_id": "conversation", "tracked": true, "phase": "idle", "activity": "idle",
+        "notification_preferences": preferences(false, 2)});
+    let catalog = json!({"t": "snapshot", "topic": "catalog", "items": [{"key": "run:run", "row": row}],
+        "page": 0, "last": true, "cursor": 1});
+    let fake = FakeHgs::new(
+        "notifications_apply",
+        json!({"": {"runs": [[{"lines": [hello("workstation"), catalog]}, {"serve": true}]]}}),
+    );
+    let (tx, rx) = channel();
+    let mut seen = Seen::new(rx);
+    let handle = stream::spawn(&fake.path(), &ComputerId::local(), quick(), tx);
+    seen.until("live", live);
+    let target = zerus_client_core::Target {
+        computer: String::new(),
+        name: "codex/project/session".into(),
+        run_id: "run".into(),
+        conversation_id: "conversation".into(),
+    };
+    assert!(handle.apply_notifications(target, preferences(true, 3)));
+    seen.until("the muted row", |event| {
+        matches!(change_of(event), Some(Change::Upsert { key, row, .. })
+            if key == "run:run" && row.muted && row.notification_revision == Some(3))
+    });
+    handle.stop();
+}

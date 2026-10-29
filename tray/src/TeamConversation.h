@@ -5,6 +5,7 @@
 #include <QPointer>
 #include <QTextDocument>
 #include <QTimer>
+#include "HeldInputBar.h"
 #include "HgsClient.h"
 #include <QWidget>
 #include <functional>
@@ -109,6 +110,8 @@ private:
     HeldInputBar *m_held = nullptr;
     TerminalDraftBar *m_terminalDraft = nullptr;
     QJsonArray m_justHeld;
+    // #511 N5: the held messages this composer queued, until hgs settles them.
+    HeldSent m_sentHeld;
     QString m_agentName;
     QPushButton *m_openTerminal = nullptr;
     QHash<quint64, QString> m_cancels;

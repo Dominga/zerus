@@ -188,6 +188,75 @@ def bundle_findings(bundle, version, release=None):
     return findings
 
 
+# The Tauri switch bundle: one executable, Qt's names and keys, the LaunchAgent template.
+TAURI_EXECUTABLE = "Contents/MacOS/hgs-tray"
+TAURI_REQUIRED = [
+    "Contents/Info.plist", TAURI_EXECUTABLE,
+    "Contents/Resources/setup/com.hgdev.hgs-tray.plist",
+    "Contents/Resources/en.lproj/InfoPlist.strings",
+    "Contents/Resources/hgs-zerus-swarm.icns",
+    "Contents/Resources/Assets.car",
+]
+
+
+def tauri_plist_findings(plist, version):
+    expected = {"CFBundleExecutable": "hgs-tray", "CFBundleName": "Zerus", "CFBundleDisplayName": "hgs-tray",
+                "LSHasLocalizedDisplayName": True, "LSUIElement": True, "CFBundleShortVersionString": version,
+                "LSMinimumSystemVersion": MINIMUM_SYSTEM, "CFBundleIconName": "hgs-zerus-swarm", "ZerusGUI": "tauri"}
+    findings = [f"Info.plist {key} is {plist.get(key)!r}, expected {value!r}"
+                for key, value in expected.items() if plist.get(key) != value]
+    # The raw build keeps the local identifier; tray/sign-local-macos.py promotes its signed copy.
+    if plist.get("CFBundleIdentifier") not in (BUNDLE_ID, BUNDLE_ID + ".local"):
+        findings.append(f"Info.plist CFBundleIdentifier is {plist.get('CFBundleIdentifier')!r}, "
+                        f"expected {BUNDLE_ID!r} or {BUNDLE_ID + '.local'!r}")
+    for key in ("NSMicrophoneUsageDescription", "NSAppleEventsUsageDescription"):
+        if not str(plist.get(key, "")).strip():
+            findings.append(f"Info.plist lacks {key}")
+    return findings
+
+
+def tauri_bundle_findings(bundle, version):
+    findings = tauri_plist_findings(plistlib.loads((bundle / "Contents/Info.plist").read_bytes()), version)
+    findings += [f"missing {name}" for name in TAURI_REQUIRED if not (bundle / name).is_file()]
+    main = bundle / TAURI_EXECUTABLE
+    if main.is_file() and not os.access(main, os.X_OK):
+        findings.append(f"not executable: {TAURI_EXECUTABLE}")
+    for directory, names, files in os.walk(bundle):
+        for name in sorted(names + files):
+            path = Path(directory) / name
+            label = str(path.relative_to(bundle))
+            # tray/sign-local-macos.py refuses links and nested code.
+            if path.is_symlink():
+                findings.append(f"{label}: symbolic link")
+                continue
+            if name not in files or not is_mach_o(path):
+                continue
+            if path != main:
+                findings.append(f"{label}: nested code; the switch bundle has one executable")
+                continue
+            architectures = subprocess.check_output(["lipo", "-archs", str(path)], text=True).split()
+            if architectures != ["arm64"]:
+                findings.append(f"{label}: architectures {' '.join(architectures)}, expected arm64 only")
+            findings += reference_findings(label, load_commands(subprocess.check_output(["otool", "-l", str(path)], text=True)))
+    return findings
+
+
+def tauri_selftest(bundle, version, release=None, commit=None):
+    """`--version` and `--build-info` in an empty home: the bundle starts nothing else."""
+    with tempfile.TemporaryDirectory(prefix="zerus-bundle-home-") as scratch:
+        environment = {"HOME": scratch, "PATH": "/usr/bin:/bin", "TMPDIR": scratch}
+        executable = str(bundle / TAURI_EXECUTABLE)
+        result = subprocess.run([executable, "--version"], env=environment, capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            return [f"--version failed: {result.stderr.strip() or result.stdout.strip()}"]
+        result = subprocess.run([executable, "--build-info"], env=environment, capture_output=True, text=True, timeout=60)
+        try:
+            info = json.loads(result.stdout) if result.returncode == 0 else None
+        except ValueError:
+            info = None
+        return build_identity_findings(info, version, release, commit)
+
+
 def build_identity_findings(info, version, release, commit=None):
     expected = re.fullmatch(r'\d+\.\d+\.\d+-dev\.([1-9]\d*)', release or '')
     number = int(expected[1]) if expected else 0
@@ -255,12 +324,19 @@ def main():
     parser.add_argument("--version", required=True)
     parser.add_argument("--release", help="stable, nightly or Dev release version (default: --version)")
     parser.add_argument("--source-commit", help="require this clean GUI source identity during self-test")
-    parser.add_argument("--selftest", action="store_true", help="also run the bundled CLI and GUI self-tests")
+    parser.add_argument("--selftest", action="store_true", help="also run the self-tests: the bundled CLI and GUI ones (qt), "
+                        "or --version and --build-info (tauri)")
     parser.add_argument("--team-id", help="require a notarized Developer ID signature from this team")
+    parser.add_argument("--gui", choices=("qt", "tauri"), default="qt", help="the Qt release bundle or the Tauri switch bundle")
     args = parser.parse_args()
-    findings = bundle_findings(args.bundle, args.version, args.release)
-    if not findings and args.selftest:
-        findings = run_selftest(args.bundle, args.version, args.release, args.source_commit)
+    if args.gui == "tauri":
+        findings = tauri_bundle_findings(args.bundle, args.version)
+        if not findings and args.selftest:
+            findings = tauri_selftest(args.bundle, args.version, args.release, args.source_commit)
+    else:
+        findings = bundle_findings(args.bundle, args.version, args.release)
+        if not findings and args.selftest:
+            findings = run_selftest(args.bundle, args.version, args.release, args.source_commit)
     if not findings and args.team_id:
         findings = signature_findings(args.bundle, args.team_id)
     for finding in findings:

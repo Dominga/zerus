@@ -1306,6 +1306,15 @@ pub(super) fn reconcile(record:Value)->Value {
             let screen=card(&r,AGENT_PANEL);
             assert_eq!((screen["tool_call_id"].clone(),screen["subagent_confirmation"].clone()),(json!("toolu_one"),json!(true)));
             assert_eq!(screen["subagent_calls"],json!(["toolu_one","toolu_two"]));
+            // #511 N4: the screen card's hash covers the calls its answer
+            // decides: a call that joins the group is a new review, so an
+            // answer to the old card cannot start it unseen.
+            let mut joined=r.clone();
+            joined["active_tools"]["toolu_three"]=json!({"name":"Agent"});
+            subagents_confirm::group_add("conversation","toolu_three",&json!({"subagent_type":"test","description":"Run the suite"}));
+            let grown=card(&joined,AGENT_PANEL);
+            assert_eq!(grown["subagent_calls"],json!(["toolu_one","toolu_two","toolu_three"]));
+            assert_ne!(grown["question_hash"],screen["question_hash"]);
             // Two identical calls stay unbound: no group is decided for them.
             r["claude_tool_uses"]["toolu_two"]["input"]=r["claude_tool_uses"]["toolu_one"]["input"].clone();
             assert!(card(&r,AGENT_PANEL).get("subagent_confirmation").is_none());

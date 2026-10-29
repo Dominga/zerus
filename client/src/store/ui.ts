@@ -1,8 +1,10 @@
 import { createMemo, createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
-import { catalog, orderedRows } from "./catalog";
+import { catalog, computerFresh, orderedRows } from "./catalog";
 import { documentVisibility } from "./visibility";
+import { isActive, isWorking, needsAttention } from "./attention";
 import type { Session, Status } from "../ui/sessions/types";
+export { isActive, needsAttention };
 
 // Interface state of the first screen: page, selection, filters, list layout,
 // menus and toasts. Data lives in store/catalog.ts and store/activity.ts.
@@ -28,15 +30,19 @@ export const [machineFilter, setMachineFilter] = createSignal<string[]>([]);
 export const [projectFilter, setProjectFilter] = createSignal<string[]>([]);
 export const [multi, setMulti] = createStore<Record<string, boolean>>({});
 export const [peek, setPeek] = createSignal(false);
+export type DetailTab = "activity" | "terminal" | "native" | "processes";
+export const [detailTab, setDetailTab] = createSignal<DetailTab>("activity");
 export const [subagentOpen, setSubagentOpen] = createSignal<string | undefined>();
 export const [search, setSearch] = createSignal(params.get("q") ?? "");
-export const [collapsed, setCollapsed] = createStore<Record<string, boolean>>({});
 export const [expandedChildren, setExpandedChildren] = createStore<Record<string, boolean>>({});
 export const [compactRows, setCompactRows] = createStore<Record<string, boolean>>({});
 export const [stripMode, setStripMode] = createSignal(params.get("strip") === "1");
 export const [menu, setMenu] = createSignal<{ x: number; y: number; items: MenuEntry[] } | undefined>();
 export const [contentScale, setContentScale] = createSignal(1);
 export const [toasts, setToasts] = createStore<{ items: { id: number; title: string; text: string }[] }>({ items: [] });
+/** A row the session list scrolls to once it lists it (Qt's `revealRow`); a new selection drops it. */
+export const [revealing, setRevealing] = createSignal<string | undefined>();
+export const revealRow = (id: string) => setRevealing(id);
 export const logoMotion = (): LogoMotion => "spin";
 
 /**
@@ -54,17 +60,6 @@ const syncClock = () => {
 syncClock();
 documentVisibility.onChange(syncClock);
 
-/** Project order set by dragging headers; projects not in it follow in arrival order. */
-const [projectMoves, setProjectMoves] = createSignal<string[]>([]);
-export const projectOrder = createMemo<string[]>(() => {
-  const seen = new Set<string>();
-  const order: string[] = [];
-  for (const p of projectMoves()) if (!seen.has(p)) { seen.add(p); order.push(p); }
-  for (const s of orderedRows()) if (!seen.has(s.project)) { seen.add(s.project); order.push(s.project); }
-  return order;
-});
-export const setProjectOrder = (order: string[]) => setProjectMoves(order);
-
 // Docked session list width (QSplitter default 310, minimum 270), remembered per viewer.
 const SESSIONS_WIDTH_KEY = "zerus-client-sessions-width";
 const savedWidth = (() => { try { return Number(localStorage.getItem(SESSIONS_WIDTH_KEY)) || 0; } catch { return 0; } })();
@@ -81,25 +76,25 @@ export function toast(title: string, text: string) {
   setTimeout(() => setToasts("items", (items) => items.filter((t) => t.id !== id)), 4200);
 }
 
+let archivedRow: (key: string) => Session | undefined = () => undefined;
+/** Hands the selection the loaded archived rows (store/archive.ts), which this module cannot import: archive.ts reads the filters here. */
+export function bindArchivedRows(lookup: (key: string) => Session | undefined) { archivedRow = lookup; }
+
 export const selected = createMemo<Session | undefined>(() => {
   const key = selectedKey();
-  return key ? catalog.rows[key] : undefined;
+  return key ? catalog.rows[key] ?? archivedRow(key) : undefined;
 });
 
-/** Needs attention: actionable, unread reply or review later (muted rows are listed, not counted). */
-export const needsAttention = (s: Session) => s.status === "attention" || (s.unread && s.status !== "offline") || !!s.reviewLater;
-
-/** Active = current work OR Scheduled OR Needs attention OR a local draft. */
-export const isActive = (s: Session) =>
-  s.status === "working" || s.status === "background" || s.status === "scheduled" || s.status === "waiting" || needsAttention(s) || s.draft;
+/** The window's online state of a row: its computer's rows are current (Qt's `entry.online`). */
+const online = (s: Session) => computerFresh(s.computer);
 
 export function matchesFilter(s: Session, f: StateFilter): boolean {
   switch (f) {
     case "all": return true;
-    case "attention": return needsAttention(s);
-    case "active": return isActive(s);
+    case "attention": return needsAttention(s, online(s));
+    case "active": return isActive(s, online(s));
     case "paused": return s.status === "paused";
-    case "archived": return false;
+    case "archived": return s.state === "archived";
   }
 }
 
@@ -107,9 +102,10 @@ export const counts = createMemo(() => {
   let all = 0, active = 0, attention = 0, working = 0, paused = 0;
   for (const s of orderedRows()) {
     all++;
-    if (isActive(s)) active++;
-    if (needsAttention(s) && !s.muted) attention++;
-    if (s.status === "working" || s.status === "background") working++;
+    const up = online(s);
+    if (isActive(s, up)) active++;
+    if (needsAttention(s, up) && !s.muted) attention++;
+    if (isWorking(s, up)) working++;
     if (s.status === "paused") paused++;
   }
   return { all, active, attention, working, paused };

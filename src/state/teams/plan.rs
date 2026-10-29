@@ -232,9 +232,10 @@ pub(crate) fn ready(team: &Team) -> Vec<u32> {
         .filter(|task| task.status == TaskStatus::Pending && !cycles.contains(&task.id))
         // A held task is Pending but never ready: the lead returns it later (A5).
         .filter(|task| task.hold.is_none())
-        // U46: a hand-out whose preparation failed waits for Zerus until the
-        // lead or the owner retries or reassigns it; never retried in a tick.
-        .filter(|task| task.prepare_wait.is_none())
+        // Spec 0: a task Zerus could not prepare (U45 model, U46 context, U48
+        // branch), or whose context action still runs, waits for a retry or a
+        // reassignment, never for the next tick.
+        .filter(|task| task.waits.is_none())
         .filter(|task| task.deps.iter().all(|dep| satisfied(team, dep.task, dep.kind)))
         .filter(|task| !barrier_holds(team, task))
         .map(|task| task.id)

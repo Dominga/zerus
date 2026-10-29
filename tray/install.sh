@@ -53,28 +53,62 @@ bundle_cdhash() {
     codesign -d --verbose=4 "$1" 2>&1 | sed -n 's/^CDHash=//p'
 }
 
+# --- 0. which GUI -------------------------------------------------------------
+# The kind already installed stays (update-installed.py --installed-gui) unless
+# HGS_MAC_GUI chooses: qt for the Qt GUI, client for the Tauri client
+# (docs/macos-distribution.md#tauri-client-switch). A Mac without Zerus gets Qt.
+GUI="${HGS_MAC_GUI:-}"
+if [ -z "${GUI}" ]; then
+    GUI=qt
+    if [ -f "${SCRIPT_DIR}/update-installed.py" ] \
+        && [ "$(python3 "${SCRIPT_DIR}/update-installed.py" --installed-gui "${APP_DEST}" 2>/dev/null)" = "tauri" ]; then
+        GUI=client
+    fi
+fi
+case "${GUI}" in qt|client) ;; *) echo "HGS_MAC_GUI must be qt or client" >&2; exit 1 ;; esac
+
 # --- 1. build -----------------------------------------------------------------
 echo "[1/4] Building..."
-CMAKE="$(find_tool cmake)" || { echo "hgs-tray: cmake not found (brew install cmake)" >&2; exit 1; }
-BREW="$(find_tool brew)"   || { echo "hgs-tray: brew not found -- Qt6 comes from it" >&2; exit 1; }
-# An Xcode or Command Line Tools update removes the SDK a cached configuration
-# names, and Qt's imported targets then fail to configure. Start from a clean
-# cache when any cached SDK is gone; sources and build outputs stay.
-stale_sdk() {
-    local sdk
-    [ -f "$1" ] || return 1
-    while IFS= read -r sdk; do
-        [ -d "${sdk}" ] || return 0
-    done < <(grep -o '/[^][;:"=]*\.sdk' "$1" | sort -u)
-    return 1
-}
-if stale_sdk "${SCRIPT_DIR}/build/CMakeCache.txt"; then
-    echo "      Cached macOS SDK is gone (Xcode or Command Line Tools updated); reconfiguring."
-    rm -rf "${SCRIPT_DIR}/build/CMakeCache.txt" "${SCRIPT_DIR}/build/CMakeFiles"
+if [ "${GUI}" = "client" ]; then
+    CLIENT_DIR="$(cd "${SCRIPT_DIR}/../client" && pwd)"
+    NPM="$(find_tool npm)" || { echo "hgs-tray: npm not found (brew install node)" >&2; exit 1; }
+    export PATH="${HOME}/.cargo/bin:$(dirname "${NPM}"):${PATH}"
+    export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.99.1}"
+    # The bundle is taken from client/src-tauri/target below, whatever the caller's
+    # CARGO_TARGET_DIR; one JOBS bounds this build and the Qt one alike.
+    export CARGO_TARGET_DIR="${CLIENT_DIR}/src-tauri/target"
+    export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-${JOBS}}"
+    (cd "${CLIENT_DIR}" && "${NPM}" ci --no-audit --no-fund)
+    SWITCH_CONFIG="${CLIENT_DIR}/src-tauri/target/switch.conf.json"
+    python3 "${CLIENT_DIR}/scripts/switch-config.py" "${SWITCH_CONFIG}"
+    # Voice capture (events M1c) ships whenever the client has its feature.
+    FEATURES=()
+    if grep -q '^media = ' "${CLIENT_DIR}/src-tauri/Cargo.toml" 2>/dev/null; then FEATURES=(--features media); fi
+    # ZERUS_DEV_BUILD_NUMBER reaches the client's build.rs through the environment.
+    (cd "${CLIENT_DIR}" && "${NPM}" exec -- tauri build --config "${SWITCH_CONFIG}" --bundles app ${FEATURES[@]+"${FEATURES[@]}"})
+    BUILD_APP="${CLIENT_DIR}/src-tauri/target/release/bundle/macos/Zerus.app"
+else
+    CMAKE="$(find_tool cmake)" || { echo "hgs-tray: cmake not found (brew install cmake)" >&2; exit 1; }
+    BREW="$(find_tool brew)"   || { echo "hgs-tray: brew not found -- Qt6 comes from it" >&2; exit 1; }
+    # An Xcode or Command Line Tools update removes the SDK a cached configuration
+    # names, and Qt's imported targets then fail to configure. Start from a clean
+    # cache when any cached SDK is gone; sources and build outputs stay.
+    stale_sdk() {
+        local sdk
+        [ -f "$1" ] || return 1
+        while IFS= read -r sdk; do
+            [ -d "${sdk}" ] || return 0
+        done < <(grep -o '/[^][;:"=]*\.sdk' "$1" | sort -u)
+        return 1
+    }
+    if stale_sdk "${SCRIPT_DIR}/build/CMakeCache.txt"; then
+        echo "      Cached macOS SDK is gone (Xcode or Command Line Tools updated); reconfiguring."
+        rm -rf "${SCRIPT_DIR}/build/CMakeCache.txt" "${SCRIPT_DIR}/build/CMakeFiles"
+    fi
+    "${CMAKE}" -B "${SCRIPT_DIR}/build" -S "${SCRIPT_DIR}" \
+        -DCMAKE_PREFIX_PATH="$("${BREW}" --prefix qt)" -DCMAKE_BUILD_TYPE=Release
+    "${CMAKE}" --build "${SCRIPT_DIR}/build" -j"${JOBS}"
 fi
-"${CMAKE}" -B "${SCRIPT_DIR}/build" -S "${SCRIPT_DIR}" \
-    -DCMAKE_PREFIX_PATH="$("${BREW}" --prefix qt)" -DCMAKE_BUILD_TYPE=Release
-"${CMAKE}" --build "${SCRIPT_DIR}/build" -j"${JOBS}"
 
 # --- 2. .app bundle -------------------------------------------------------------
 echo "[2/4] Installing the .app bundle to ~/Applications..."
@@ -85,6 +119,13 @@ trap 'rm -rf "${LOCAL_STAGE}"' EXIT
 ditto "${BUILD_APP}" "${LOCAL_STAGE}/hgs-tray.app"
 BUILD_APP="${LOCAL_STAGE}/hgs-tray.app"
 python3 "${SCRIPT_DIR}/sign-local-macos.py" "${BUILD_APP}" "${APP_DEST}"
+# The numbered Dev guard before anything is replaced (docs/reference.md); without
+# the live update, also no switch between Qt and the client.
+if [ "${RESTART_RUNNING}" = "1" ]; then
+    python3 "${SCRIPT_DIR}/update-installed.py" --check "${BUILD_APP}" "${APP_DEST}" --live
+else
+    python3 "${SCRIPT_DIR}/update-installed.py" --check "${BUILD_APP}" "${APP_DEST}"
+fi
 mkdir -p "${HOME}/Applications"
 if [ "$(bundle_cdhash "${BUILD_APP}")" != "$(bundle_cdhash "${APP_DEST}")" ]; then
     if [ "${RESTART_RUNNING}" = "1" ]; then
@@ -152,7 +193,11 @@ fi
 # Живой агент, у которого ничего не поменялось, не трогается вовсе -- ровно как
 # `systemctl --user enable --now` на активном юните в linux-ветке.
 
-HINT_SELFTEST="Check without the menu bar:  ${APP_DEST}/Contents/MacOS/hgs-tray --selftest --hgs ${HGS_BIN}"
+if [ "${GUI}" = "client" ]; then
+    HINT_SELFTEST="Check without the menu bar:  ${APP_DEST}/Contents/MacOS/hgs-tray --build-info"
+else
+    HINT_SELFTEST="Check without the menu bar:  ${APP_DEST}/Contents/MacOS/hgs-tray --selftest --hgs ${HGS_BIN}"
+fi
 HINT_STATUS="Agent status:                launchctl list | grep ${LABEL}"
 HINT_LOG="Agent stderr:                ${LOG_FILE}"
 
@@ -167,6 +212,8 @@ cmake --build "${SCRIPT_DIR}/build" -j"${JOBS}"
 # --- 2. binary ------------------------------------------------------------------
 echo "[2/4] Installing binary to ~/.local/bin..."
 BIN_DEST="${HOME}/.local/bin/hgs-tray"
+# The numbered Dev guard before anything is replaced (docs/reference.md).
+python3 "${SCRIPT_DIR}/update-installed.py" --check "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}" --live
 RELOAD=0
 mkdir -p "${HOME}/.local/bin"
 if ! cmp -s "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}" 2>/dev/null; then

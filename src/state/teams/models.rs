@@ -170,18 +170,18 @@ pub(crate) fn no_fit_reason(team: &Team, task: &Task) -> String {
 }
 
 /// The task's switch that still waits for its confirmation.
-pub(crate) fn pending(task: &Task) -> Option<&Prepare> {
+pub(crate) fn pending(task: &Task) -> Option<&PrepareStep> {
     task.prepare.iter().rev().find(|step| step.step == "model" && step.result == "pending")
 }
 
 /// The session record shows the model a pending switch asked for.
-pub(crate) fn confirmed(step: &Prepare, model: &str, effort: &str) -> bool {
+pub(crate) fn confirmed(step: &PrepareStep, model: &str, effort: &str) -> bool {
     let (want, want_effort) = split(&step.to);
     same(want, model) && (want_effort.is_empty() || want_effort.eq_ignore_ascii_case(effort))
 }
 
 /// Records a step for the next hand-out, keeping the last `LIST_LIMIT`.
-pub(crate) fn record(task: &mut Task, step: Prepare) {
+pub(crate) fn record(task: &mut Task, step: PrepareStep) {
     task.prepare.push(step);
     let extra = task.prepare.len().saturating_sub(LIST_LIMIT);
     task.prepare.drain(..extra);
@@ -189,11 +189,11 @@ pub(crate) fn record(task: &mut Task, step: Prepare) {
 
 /// Spec 0: the task waits for the lead or the owner with its reason.
 pub(crate) fn wait(task: &mut Task, on: &str, reason: &str, at: f64) {
-    task.waits = Some(TaskWait { waits_for: "zerus".into(), on: vec![on.to_owned()], reason: reason.chars().take(4000).collect(), at });
+    task.waits = Some(TaskWait::zerus(on, "", reason, at));
 }
 
 /// The hand-out takes the prepared steps: a confirmed switch is done.
-pub(crate) fn take_for_attempt(task: &mut Task, member: &str) -> Vec<Prepare> {
+pub(crate) fn take_for_attempt(task: &mut Task, member: &str) -> Vec<PrepareStep> {
     let mut steps = std::mem::take(&mut task.prepare);
     for step in &mut steps {
         if step.result == "pending" && step.member == member {
@@ -266,10 +266,10 @@ mod tests {
     fn prepared_steps_keep_the_last_twenty_and_the_hand_out_takes_them() {
         let mut t = task(&["opus"]);
         for n in 0..25 {
-            record(&mut t, Prepare { step: "model".into(), member: "dev".into(), to: "opus".into(), at: n as f64, result: "refused".into(), ..Default::default() });
+            record(&mut t, PrepareStep { step: "model".into(), member: "dev".into(), to: "opus".into(), at: n as f64, result: "refused".into(), ..Default::default() });
         }
         assert_eq!((t.prepare.len(), t.prepare[0].at), (LIST_LIMIT, 5.0));
-        record(&mut t, Prepare { step: "model".into(), member: "dev".into(), to: "opus@max".into(), result: "pending".into(), ..Default::default() });
+        record(&mut t, PrepareStep { step: "model".into(), member: "dev".into(), to: "opus@max".into(), result: "pending".into(), ..Default::default() });
         let step = pending(&t).unwrap().clone();
         assert!(confirmed(&step, "opus", "max") && !confirmed(&step, "opus", "high") && !confirmed(&step, "sonnet", "max"));
         let taken = take_for_attempt(&mut t, "dev");

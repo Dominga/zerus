@@ -406,6 +406,7 @@ private slots:
     void coldCacheConfirmationPreservesDraftAndPinsConversation();
     void coldCacheDialogRefreshedIdentityStillSends();
     void heldMessagesShowTheTerminalDraftThatHoldsThem();
+    void aHeldMessageThatFailsComesBackToTheComposer();
     void stoppedDshSessionStartsAndSends();
     void nativeColdCacheChoiceKeepsExactAnswer_data();
     void nativeColdCacheChoiceKeepsExactAnswer();
@@ -5337,6 +5338,57 @@ void TestSessionsWindow::coldCacheDialogRefreshedIdentityStillSends()
 // Owner, 2026-10-28: text in the agent's Terminal input held every message
 // sent from Activity. While messages wait for an agent that is not working,
 // Activity shows that draft with Send it (Enter in Terminal for exactly it).
+void TestSessionsWindow::aHeldMessageThatFailsComesBackToTheComposer()
+{
+    // #511 N5: the message hgs held, then could not deliver, comes back to the
+    // session's composer with why.
+    QTemporaryDir temp; const auto program = temp.filePath("hgs");
+    QFile fixture(program); QVERIFY(fixture.open(QIODevice::WriteOnly));
+    fixture.write(R"PY(#!/usr/bin/env python3
+import json,os,pathlib,sys
+a=sys.argv[1:]
+if a[0].startswith('@'):a=a[1:]
+here=pathlib.Path(__file__).parent
+held=json.loads((here/'held.json').read_text()) if (here/'held.json').exists() else []
+settled=json.loads((here/'settled.json').read_text()) if (here/'settled.json').exists() else []
+if a[0]=='inspect':
+ print(json.dumps({'tracked':True,'run_id':'run-one','conversation_id':'conv-one','runtime_state':'live','process_state':'running',
+  'activity':'idle','phase':'idle','input_hold_supported':True,'held_inputs':held,'held_settled':settled}))
+elif a[0]=='send':
+ body=json.load(sys.stdin)
+ with open(here/'sends.jsonl','a') as f:f.write(json.dumps(body)+'\n')
+ held.append({'request_id':body['request_id'],'text':body['text'],'queued_at':1.0});(here/'held.json').write_text(json.dumps(held))
+ print(json.dumps({'request_id':body['request_id'],'name':a[1],'run_id':'run-one','conversation_id':'conv-one','first_message':False,
+  'status':'queued','text':body['text']}))
+else:print('{}')
+)PY"); fixture.close(); QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
+    SessionsWindow window(FakeCli::program(program)); window.setFleet(fleet());
+    window.setDetailsPollForTests(300, 24 * 60 * 60 * 1000); window.show(); window.showSession({}, "codex/hgs/dashboard");
+    auto *composer = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(composer);
+    auto *send = composer->findChild<QPushButton *>("sendMessage"); QVERIFY(send);
+    QVERIFY(window.findChild<QFrame *>("sessionHeldInputs"));
+    // The first read must show input_hold_supported before the send.
+    QTest::qWait(700);
+    setComposerText(composer, "Also run the tests");
+    QTRY_VERIFY_WITH_TIMEOUT(send->isEnabled(), 15000);
+    send->click();
+    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(temp.filePath("sends.jsonl")), 15000);
+    QFile log(temp.filePath("sends.jsonl")); QVERIFY(log.open(QIODevice::ReadOnly));
+    const auto body = QJsonDocument::fromJson(log.readAll().split('\n').first()).object(); log.close();
+    QVERIFY(body["queue_when_unconfirmed"].toBool());
+    QTRY_VERIFY_WITH_TIMEOUT(composer->editor()->toPlainText().isEmpty(), 15000);
+    QVERIFY(FakeCli::replace(temp.filePath("held.json"), "[]"));
+    QVERIFY(FakeCli::replace(temp.filePath("settled.json"), QJsonDocument(QJsonArray{QJsonObject{{"request_id", body["request_id"]},
+        {"text", body["text"]}, {"status", "failed"}, {"error", "session identity changed; nothing was sent"}}}).toJson()));
+    QTRY_COMPARE_WITH_TIMEOUT(composer->editor()->toPlainText(), QStringLiteral("Also run the tests"), 15000);
+    QTRY_VERIFY(window.findChild<QLabel *>("notice")->text().contains(QStringLiteral("Not delivered: session identity changed")));
+    QVERIFY(window.findChild<QLabel *>("notice")->property("error").toBool());
+    // Only once: a new draft stays as it is on the next reads.
+    setComposerText(composer, "Something else");
+    QTest::qWait(1000);
+    QCOMPARE(composer->editor()->toPlainText(), QStringLiteral("Something else"));
+}
+
 void TestSessionsWindow::heldMessagesShowTheTerminalDraftThatHoldsThem()
 {
     QTemporaryDir temp; const auto program = temp.filePath("hgs");

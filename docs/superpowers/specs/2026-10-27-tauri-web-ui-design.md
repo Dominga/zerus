@@ -447,3 +447,21 @@ Owner decisions, 2026-10-28:
   at the Mac and is not used for the verdict. Real-display runs now start only in
   a window the owner gives (Mac), or on arch when the session is unlocked, a
   screen is on and the desktop has had no input for 2 minutes; input stops them.
+
+Mac switch, 2026-10-28 (plan `docs/superpowers/plans/2026-10-28-tauri-client-mac-switch.md`):
+
+- The client replaces Qt on the Mac as Zerus with Qt's identity
+  (`com.hgdev.hgs-tray`, executable `hgs-tray`, `~/Applications/hgs-tray.app`).
+  This supersedes, for the Mac, "A distinct bundle identifier from the Qt app"
+  and the rule that binary names and paths must not collide with `hgs-tray`.
+- Single instance follows Qt's protocol (lock, socket `hgs-tray`, `show` and
+  `sessions` lines) instead of `tauri-plugin-single-instance` (row 298): the
+  maintained updater waits on Qt's socket path and would roll back otherwise.
+- The menu keeps Qt's entries except Refresh (every computer streams) and the
+  update entries (no update controller yet, row 300); update notices follow in
+  `zerus-5wmh.12.4`. The main-thread watchdog (row 297) is Qt's, and the status
+  item is never updated while its menu is open.
+- The client's data directory follows the running bundle's identifier. At the
+  switch its settings are seeded once, read-only, from Qt's (except the client's
+  own `client/` settings, the microphone and automatic approvals, which stay
+  off), and read marks start fresh.

@@ -33,6 +33,7 @@ type Job = Box<dyn FnOnce() + Send>;
 type JournalWriter = Arc<dyn Fn(&Path, &[u8]) -> bool + Send + Sync>;
 type LaunchSession = Arc<dyn Fn(&Value) -> Result<(), String> + Send + Sync>;
 type ReadBinding = Arc<dyn Fn(&ComputerId) -> Result<BindingListing, String> + Send + Sync>;
+type WatchBinding = Arc<dyn Fn(&ComputerId, &[String]) -> Option<BindingListing> + Send + Sync>;
 type Resolve = Arc<dyn Fn(&mut Value, &Value) -> Result<(), String> + Send + Sync>;
 type Bind =
     Arc<dyn Fn(&Value, &BindingSession, &mut BoundEdits) -> Result<bool, String> + Send + Sync>;
@@ -151,6 +152,7 @@ struct Services {
     call: Arc<dyn Fn(&creation::Call) -> creation::Answer + Send + Sync>,
     launch: LaunchSession,
     binding: ReadBinding,
+    watch: WatchBinding,
     online: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     resolve: Resolve,
     bind: Bind,
@@ -293,7 +295,7 @@ impl CreationHost {
                         // bounded by the 128-operation queue, never the full fleet.
                         let changed = worker.catalog.swap(false, Ordering::AcqRel);
                         worker.reconcile_pending(changed);
-                        worker.poll();
+                        worker.poll(changed);
                     }
                 }
             })
@@ -422,6 +424,7 @@ fn load(path: &Path) -> Journal {
 
 #[derive(Default)]
 struct Poll {
+    watched: bool,
     running: bool,
     force: bool,
     last: Option<Instant>,
@@ -643,7 +646,14 @@ impl Worker {
                 if let Some(poll) = self.polls.get_mut(&host) {
                     poll.running = false;
                 }
-                if let Ok(listing) = result {
+                // A read begun before capability discovery must not replace
+                // the newer live stream's exact launch identities.
+                let watched =
+                    (self.services.watch)(&ComputerId(host.clone()), &self.launch_ids(&host));
+                if let Some(poll) = self.polls.get_mut(&host) {
+                    poll.watched = watched.is_some();
+                }
+                if let Some(listing) = watched.or_else(|| result.ok()) {
                     self.reconcile(&host, listing);
                 }
                 Vec::new()
@@ -665,7 +675,20 @@ impl Worker {
             .collect()
     }
 
-    fn poll(&mut self) {
+    fn launch_ids(&self, host: &str) -> Vec<String> {
+        self.queue
+            .operations()
+            .values()
+            .filter(|operation| {
+                text(operation, "host") == host
+                    && text(operation, "state") != "bound"
+                    && flag(operation, "launch_dispatched")
+            })
+            .map(|operation| text(operation, "launch_id").to_owned())
+            .collect()
+    }
+
+    fn poll(&mut self, catalog_changed: bool) {
         if !self.services.allowed {
             return;
         }
@@ -673,9 +696,32 @@ impl Worker {
         self.polls
             .retain(|host, poll| waiting.contains(host) || poll.force || poll.running);
         for host in &waiting {
-            self.polls.entry(host.clone()).or_default();
+            self.polls.entry(host.clone()).or_insert_with(|| Poll {
+                force: true,
+                ..Default::default()
+            });
+        }
+        // Query only after a coalesced catalog wake, a newly waiting launch,
+        // launch completion or Check. An idle actor pass copies no snapshot.
+        let hosts: Vec<_> = self
+            .polls
+            .iter()
+            .filter(|(_, poll)| catalog_changed || poll.force)
+            .map(|(host, _)| host.clone())
+            .collect();
+        for host in hosts {
+            let listing = (self.services.watch)(&ComputerId(host.clone()), &self.launch_ids(&host));
+            let poll = self.polls.get_mut(&host).unwrap();
+            poll.watched = listing.is_some();
+            if let Some(listing) = listing {
+                poll.force = false;
+                self.reconcile(&host, listing);
+            }
         }
         for (host, poll) in &mut self.polls {
+            if poll.watched {
+                continue;
+            }
             let gap = Duration::from_secs(if host.is_empty() { 2 } else { 60 });
             if poll.running || (!poll.force && poll.last.is_some_and(|last| last.elapsed() < gap)) {
                 continue;
@@ -811,6 +857,15 @@ impl Worker {
     }
 }
 
+/// Read the current watch snapshot for only this host's pending launch IDs.
+fn watched(
+    pump: &crate::pump::Pump,
+    computer: &ComputerId,
+    launches: &[String],
+) -> Option<BindingListing> {
+    pump.launch_bindings(&computer.0, launches)
+}
+
 /// Qt's project catalog, with this computer's name mapped to the empty alias
 /// expected by launch::ProjectFolder (SessionsWindow.cpp:1539-1569).
 fn projects(organization: &crate::organization::Organization, local: &str) -> Vec<Project> {
@@ -877,7 +932,15 @@ fn bind(
             Ok(true)
         };
     }
-    let Some(row) = pump.row_named(host, &session.name) else {
+    let row = pump.row_for_launch(host, &session.launch_id).or_else(|| {
+        // Older peers may lack the projected launch ID. A capable live stream
+        // must confirm the exact launch before placement uses its member.
+        pump.launch_bindings(host, &[])
+            .is_none()
+            .then(|| pump.row_named(host, &session.name))
+            .flatten()
+    });
+    let Some(row) = row else {
         return Ok(false);
     };
     let local = pump
@@ -1015,6 +1078,7 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
     let placement_pump = pump.clone();
     let remembered = app.state::<crate::settings::Store>().0.clone();
     let online_pump = pump.clone();
+    let watch_pump = pump.clone();
     let emit = app.clone();
     let terminal_dir = dir.to_path_buf();
     let launcher = Arc::new(Mutex::new(
@@ -1045,6 +1109,7 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
                     .map_err(|error| format!("{error:?}"))?,
                 )
             }),
+            watch: Arc::new(move |computer, launches| watched(&watch_pump, computer, launches)),
             online: Arc::new(move |host| online_pump.online(host)),
             resolve: Arc::new(move |plan, evidence| {
                 let local = placement_pump
@@ -1183,6 +1248,7 @@ mod tests {
     #[derive(Default)]
     struct Probe {
         listing: Mutex<BindingListing>,
+        watched: Mutex<Option<BindingListing>>,
         events: Mutex<Vec<Value>>,
         remembered: Mutex<Vec<Remember>>,
         placements: Mutex<Vec<creation::Placed>>,
@@ -1190,6 +1256,7 @@ mod tests {
         bound: Mutex<Vec<String>>,
         jobs: Mutex<Vec<std::thread::JoinHandle<()>>>,
         reads: AtomicUsize,
+        watch_reads: AtomicUsize,
     }
 
     struct Fake {
@@ -1270,6 +1337,7 @@ mod tests {
             let launch = self.hgs.clone();
             let p = Arc::clone(&self.probe);
             let binding = Arc::clone(&p);
+            let watch = Arc::clone(&p);
             let remember = Arc::clone(&p);
             let resolve = Arc::clone(&p);
             let bind = Arc::clone(&p);
@@ -1292,6 +1360,10 @@ mod tests {
                 binding: Arc::new(move |_| {
                     binding.reads.fetch_add(1, Ordering::SeqCst);
                     Ok(lock(&binding.listing).clone())
+                }),
+                watch: Arc::new(move |_, _| {
+                    watch.watch_reads.fetch_add(1, Ordering::SeqCst);
+                    lock(&watch.watched).clone()
                 }),
                 online: Arc::new(|_| true),
                 resolve: Arc::new(move |operation, evidence| {
@@ -1885,6 +1957,266 @@ mod tests {
             json!({"studio": {"codex": "remote"}, "": {"claude": "local"}})
         );
         assert!(settings.flush_within(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn a_capable_watch_completes_the_creation_without_a_binding_cli_read() {
+        let fake = Fake::new();
+        *lock(&fake.probe.watched) = Some(BindingListing {
+            online: true,
+            ..Default::default()
+        });
+        let host = fake.host();
+        let id = admitted(&host, plan());
+        state(&host, &id, "confirming");
+        assert_eq!(
+            fake.probe.reads.load(Ordering::SeqCst),
+            0,
+            "Some([]) is supported"
+        );
+        let launch = text(&operation(&host, &id), "launch_id").to_owned();
+        lock(&fake.probe.watched)
+            .as_mut()
+            .unwrap()
+            .sessions
+            .push(session(&launch));
+        host.observe(&Change::Machine {
+            computer: ComputerId::local(),
+            machine: Default::default(),
+        });
+        state(&host, &id, "bound");
+        assert_eq!(fake.probe.reads.load(Ordering::SeqCst), 0);
+        fake.stop(host);
+    }
+
+    #[test]
+    fn an_idle_creation_worker_does_not_copy_the_watch_snapshot() {
+        let fake = Fake::new();
+        *lock(&fake.probe.watched) = Some(BindingListing {
+            online: true,
+            ..Default::default()
+        });
+        let host = fake.host();
+        let id = admitted(&host, plan());
+        state(&host, &id, "confirming");
+        for job in std::mem::take(&mut *lock(&fake.probe.jobs)) {
+            job.join().unwrap();
+        }
+        assert!(host.flush_journal_for_test());
+        assert!(host.flush_journal_for_test());
+        let reads = fake.probe.watch_reads.load(Ordering::SeqCst);
+        for _ in 0..4 {
+            assert!(host.flush_journal_for_test());
+        }
+        assert_eq!(fake.probe.watch_reads.load(Ordering::SeqCst), reads);
+        assert_eq!(fake.probe.reads.load(Ordering::SeqCst), 0);
+        host.action(id, CreationAction::Check).unwrap();
+        assert!(host.flush_journal_for_test());
+        assert!(fake.probe.watch_reads.load(Ordering::SeqCst) > reads);
+        fake.stop(host);
+    }
+
+    #[test]
+    fn a_downgraded_peer_resumes_the_binding_poll() {
+        let fake = Fake::new();
+        *lock(&fake.probe.watched) = Some(BindingListing {
+            online: true,
+            ..Default::default()
+        });
+        let host = fake.host();
+        let id = admitted(&host, plan());
+        state(&host, &id, "confirming");
+        assert_eq!(fake.probe.reads.load(Ordering::SeqCst), 0);
+        *lock(&fake.probe.watched) = None;
+        host.observe(&Change::Machine {
+            computer: ComputerId::local(),
+            machine: Default::default(),
+        });
+        wait("the older peer's binding poll", || {
+            fake.probe.reads.load(Ordering::SeqCst) > 0
+        });
+        fake.stop(host);
+    }
+
+    #[test]
+    fn a_late_cli_listing_yields_to_the_capable_watch_snapshot() {
+        let fake = Fake::new();
+        let held = Arc::new((Mutex::new(false), Condvar::new()));
+        let gate = Arc::clone(&held);
+        let entered = Arc::new(AtomicBool::new(false));
+        let reading = Arc::clone(&entered);
+        let mut services = fake.services();
+        let binding = services.binding.clone();
+        services.binding = Arc::new(move |computer| {
+            reading.store(true, Ordering::Release);
+            let (gate, wake) = &*gate;
+            let _guard = wake.wait_while(lock(gate), |released| !*released).unwrap();
+            binding(computer)
+        });
+        let host = CreationHost::new(fake.dir.join("creations.json"), services);
+        let id = admitted(&host, plan());
+        state(&host, &id, "confirming");
+        wait("the old binding read", || entered.load(Ordering::Acquire));
+        let launch = text(&operation(&host, &id), "launch_id").to_owned();
+        *lock(&fake.probe.listing) = BindingListing {
+            online: true,
+            sessions: vec![session(&launch)],
+            ..Default::default()
+        };
+        *lock(&fake.probe.watched) = Some(BindingListing {
+            online: true,
+            ..Default::default()
+        });
+        host.catalog_changed();
+        assert!(host.flush_journal_for_test());
+        *lock(&held.0) = true;
+        held.1.notify_all();
+        for job in std::mem::take(&mut *lock(&fake.probe.jobs)) {
+            job.join().unwrap();
+        }
+        assert!(host.flush_journal_for_test());
+        assert!(host.flush_journal_for_test());
+        assert_eq!(text(&operation(&host, &id), "state"), "confirming");
+        assert_eq!(fake.probe.reads.load(Ordering::SeqCst), 1);
+        lock(&fake.probe.watched)
+            .as_mut()
+            .unwrap()
+            .sessions
+            .push(session(&launch));
+        host.catalog_changed();
+        state(&host, &id, "bound");
+        fake.stop(host);
+    }
+
+    #[test]
+    fn a_capable_binding_requires_the_exact_launch_row_before_moving_it() {
+        let fake = Fake::new();
+        let pump = crate::pump::Pump::default();
+        let organization = organization_fixture(&fake, &pump, true);
+        ready_organization(&organization);
+        pump.push(Change::Computer {
+            computer: ComputerId::local(),
+            status: zerus_client_core::ComputerStatus::Live,
+        });
+        pump.push(Change::Machine {
+            computer: ComputerId::local(),
+            machine: zerus_client_core::MachineMeta::project(
+                &json!({"ok": true, "ended_launches": []}),
+            ),
+        });
+        let mut change = row_for_binding(&pump);
+        let mut edits = BoundEdits {
+            folder_id: "folder".into(),
+            ..Default::default()
+        };
+        assert!(!bind(
+            &organization,
+            &pump,
+            &plan(),
+            &session("launch"),
+            &mut edits
+        )
+        .unwrap());
+        if let Change::Upsert { row, .. } = &mut change {
+            row.launch_id = Some("another-launch".into());
+        }
+        pump.push(change.clone());
+        assert!(!bind(
+            &organization,
+            &pump,
+            &plan(),
+            &session("launch"),
+            &mut edits
+        )
+        .unwrap());
+        if let Change::Upsert { row, .. } = &mut change {
+            row.launch_id = Some("launch".into());
+        }
+        pump.push(change);
+        assert!(bind(
+            &organization,
+            &pump,
+            &plan(),
+            &session("launch"),
+            &mut edits
+        )
+        .unwrap());
+        assert!(pump
+            .members_of("p")
+            .iter()
+            .any(|(member, _)| member == "workstation\ncodex/repo/created"));
+    }
+
+    #[test]
+    fn launch_bindings_use_only_live_watch_data_and_requested_launches() {
+        let pump = crate::pump::Pump::default();
+        let computer = ComputerId::local();
+        pump.push(Change::Machine {
+            computer: computer.clone(),
+            machine: zerus_client_core::MachineMeta::project(
+                &json!({"ok": true, "ended_launches": []}),
+            ),
+        });
+        for status in [
+            zerus_client_core::ComputerStatus::Polled,
+            zerus_client_core::ComputerStatus::Reconnecting { attempt: 1 },
+        ] {
+            pump.push(Change::Computer {
+                computer: computer.clone(),
+                status,
+            });
+            assert!(watched(&pump, &computer, &[]).is_none());
+        }
+        pump.push(Change::Computer {
+            computer: computer.clone(),
+            status: zerus_client_core::ComputerStatus::Live,
+        });
+        for (key, launch) in [("run:a", "a"), ("run:b", "b")] {
+            pump.push(Change::Upsert {
+                computer: computer.clone(),
+                key: key.into(),
+                row: zerus_client_core::ViewRow {
+                    launch_id: Some(launch.into()),
+                    notify: zerus_client_core::view::NotifyFacts {
+                        cmd: "codex".into(),
+                        ..Default::default()
+                    },
+                    name: format!("codex/p/{launch}"),
+                    state: "running".into(),
+                    ..Default::default()
+                },
+            });
+        }
+        let listing = watched(&pump, &computer, &["b".into()]).unwrap();
+        assert!(listing.online && listing.ended_launches.is_empty());
+        assert_eq!(
+            listing.sessions,
+            [BindingSession {
+                launch_id: "b".into(),
+                cmd: "codex".into(),
+                name: "codex/p/b".into(),
+                state: "running".into()
+            }]
+        );
+        pump.push(Change::Upsert {
+            computer: computer.clone(),
+            key: "run:alias".into(),
+            row: zerus_client_core::view::row(
+                &json!({"name": "dsh/p/tag", "cmd": "dsh", "launch_id": "alias"}),
+            ),
+        });
+        assert_eq!(
+            watched(&pump, &computer, &["alias".into()])
+                .unwrap()
+                .sessions[0]
+                .cmd,
+            "dsh"
+        );
+        pump.push(Change::Machine {
+            computer: computer.clone(),
+            machine: Default::default(),
+        });
+        assert!(watched(&pump, &computer, &[]).is_none());
     }
 
     #[test]

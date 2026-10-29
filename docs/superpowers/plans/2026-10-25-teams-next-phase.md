@@ -1218,6 +1218,26 @@ sets them in the catalog, the team settings or the plan; members never do.
   name; a failed launch returns to the old account, an unconfirmed one is
   reported uncertain and never retried. Nothing changes until the owner
   chooses; a team member's account changes only through swap-member.
+- **U58. Changing a plan on the go costs less than the work (owner, 2026-10-30).**
+  From team 6d0aabee (RogueDOD QA bot): a task was cancelled and copied under
+  a new id three times to start it earlier, fully cancelled phases stayed on
+  the dashboard as approved, and a queued phase could not be edited.
+  - `move-task {task, phase}` moves a task that has not started (no delivered
+    attempt) to another phase, keeping its id, its deps checked against the
+    target phase; `reassign` keeps the id for a member change, as today.
+  - A queued or approved phase with no delivered attempt is edited like a
+    draft (extend, edit-draft, remove tasks) by the lead; the scope the owner
+    approved is the work, not its numbering.
+  - A phase whose tasks are all cancelled reads `cancelled`; status and the
+    dashboard hide cancelled tasks and phases by default, with a toggle.
+  - The owner's word by text (the CLI fallback of U57) is not spent when its
+    change fails, and one sentence naming a member and its tasks applies both,
+    the member first.
+  - A reply that only says it waits (a build lock, a queue) is a status, never
+    a captured report.
+  - Role and task text normalises CRLF to LF; a refused control character
+    names the field and its position.
+  - Work ahead (U31) stays an owner setting, off by default.
 - **U57. The owner confirms a lead's change in the chat, not by a phrase (owner,
   2026-10-30).** Today the lead asks the owner to type an exact sentence
   ("add a member", "план принят") and the change is refused when the words
